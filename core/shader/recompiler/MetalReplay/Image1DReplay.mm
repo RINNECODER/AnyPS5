@@ -205,6 +205,120 @@ struct InstructionClampReplay {
     }
 };
 
+struct DynamicImageReplay {
+    static constexpr std::uint32_t Threads = 32, Layers = 3, LayerWords = 1984;
+    static constexpr std::uint64_t Base = 0xc00000;
+    std::array<std::uint32_t, 27> code{
+        0xf4080100, 0xfa000000, 0xf4080200, 0xfa000010, 0xf4080300, 0xfa000020, 0xf4080700, 0xfa000030,
+        0x7e200500, 0x93109010, 0xf4200406, 0x20000004, 0x8f108510, 0xf42c0502, 0x20000000,
+        0x34140082, 0x7e0802ff, 0x3f000000, 0x7e0a02ff, 0x3f000000, 0x7e0c0280,
+        0xf09c0f18, 0x00450004, 0xbf8c3f70, 0xe0701000, 0x8007000a, 0xbf810000,
+    };
+    std::array<std::array<std::uint32_t, GuardWords + Layers * LayerWords + GuardWords>, 2> textures;
+    std::array<std::uint32_t, GuardWords + 16 + GuardWords> heap, srt;
+    std::array<std::uint32_t, GuardWords + 12 + GuardWords> materials;
+    std::array<std::uint32_t, GuardWords + Threads + GuardWords> output;
+    std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> header{};
+    std::vector<std::uint32_t> commands;
+    Packet packet{};
+
+    DynamicImageReplay() {
+        constexpr std::array<std::uint32_t, 5> mipOffsets{3840, 1792, 768, 256, 0};
+        heap.fill(Sentinel);
+        materials.fill(Sentinel);
+        srt.fill(Sentinel);
+        output.fill(Sentinel);
+        for (std::uint32_t image = 0; image < textures.size(); ++image) {
+            textures[image].fill(Sentinel);
+            for (std::uint32_t layer = 0; layer < Layers; ++layer)
+                for (std::uint32_t mip = 0; mip < mipOffsets.size(); ++mip)
+                    for (std::uint32_t y = 0; y < (16u >> mip); ++y)
+                        std::fill_n(textures[image].begin() + GuardWords + layer * LayerWords + mipOffsets[mip] / 4u + y * 64u,
+                            16u >> mip, std::bit_cast<std::uint32_t>(float(image * 256u + layer * 64u + mip * 16u)));
+            const std::array<std::uint32_t, 8> descriptor{
+                static_cast<std::uint32_t>((Base + image * 0x10000u + 0x100u) >> 8u),
+                (22u << 20u) | (3u << 30u),
+                3u | (15u << 14u), 0xfacu | (1u << 12u) | (4u << 16u) | (13u << 28u),
+                2u | ((image + 1u) << 16u), 4u << 4u, 0, 0};
+            std::copy(descriptor.begin(), descriptor.end(), heap.begin() + GuardWords + image * 8u);
+        }
+        for (std::uint32_t record = 0; record < 3; ++record) {
+            auto start = materials.begin() + GuardWords + record * 4u;
+            std::fill_n(start, 4, 0u);
+            start[1] = record == 2 ? 1u : 0u;
+        }
+        const std::array<std::uint32_t, 16> table{
+            static_cast<std::uint32_t>(Base + 0x20100u), 32u << 16u, 2, 0xfac,
+            0x92, (4u * 256u) << 12u, (1u << 22u) | (2u << 26u), 0,
+            static_cast<std::uint32_t>(Base + 0x21100u), 16u << 16u, 3, 0xfac,
+            static_cast<std::uint32_t>(Base + 0x30100u), 0, Threads * 4u, 0xfac};
+        std::copy(table.begin(), table.end(), srt.begin() + GuardWords);
+        Shader shader{};
+        shader.file_header = 0x34333231;
+        shader.version = 0x18;
+        shader.code = reinterpret_cast<const volatile void*>(Base + 0x40000u);
+        shader.user_data = reinterpret_cast<ShaderUserData*>(Base + 0x50000u + sizeof(Shader));
+        shader.header_size = static_cast<std::uint32_t>(header.size());
+        shader.shader_size = static_cast<std::uint32_t>(code.size() * 4u);
+        shader.type = 0;
+        std::memcpy(header.data(), &shader, sizeof(shader));
+        const std::array<std::uint32_t, 2> users{static_cast<std::uint32_t>(Base + 0x22100u), 0};
+        const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+        const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>((Base + 0x40000u) >> 8u), 0};
+        const std::array<std::uint32_t, 1> resources{static_cast<std::uint32_t>(users.size()) << 1u};
+        RegisterPacket(commands, 0x207, threads);
+        RegisterPacket(commands, 0x20c, program);
+        RegisterPacket(commands, 0x213, resources);
+        RegisterPacket(commands, 0x240, users);
+        commands.insert(commands.end(), {0xc0031500u, 1, 1, 1, 0x8041});
+        packet = {reinterpret_cast<std::uint32_t*>(Base + 0x60000u), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    }
+
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+        for (std::uint32_t image = 0; image < textures.size(); ++image)
+            ranges.push_back({Base + image * 0x10000u, std::as_writable_bytes(std::span(textures[image])), false});
+        ranges.push_back({Base + 0x20000u, std::as_writable_bytes(std::span(heap)), false});
+        ranges.push_back({Base + 0x21000u, std::as_writable_bytes(std::span(materials)), false});
+        ranges.push_back({Base + 0x22000u, std::as_writable_bytes(std::span(srt)), false});
+        ranges.push_back({Base + 0x30000u, std::as_writable_bytes(std::span(output)), true});
+        ranges.push_back({Base + 0x40000u, std::as_writable_bytes(std::span(code)), false});
+        ranges.push_back({Base + 0x50000u, header, false});
+        ranges.push_back({Base + 0x60000u, std::as_writable_bytes(std::span(commands)), false});
+        ranges.push_back({Base + 0x70000u, std::as_writable_bytes(std::span(&packet, 1)), false});
+    }
+
+    void Run() {
+        const auto originalTextures = textures;
+        const auto originalHeap = heap, originalSrt = srt;
+        const auto originalCode = code;
+        const auto originalHeader = header;
+        const auto originalCommands = commands;
+        const auto originalPacket = packet;
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(Base + 0x50000u));
+        for (std::uint32_t key = 0; key < 2; ++key) {
+            materials[GuardWords + 1u] = key;
+            const auto originalMaterials = materials;
+            output.fill(Sentinel);
+            auto expected = output;
+            std::fill_n(expected.begin() + GuardWords, Threads, std::bit_cast<std::uint32_t>(key == 0 ? 80.0f : 400.0f));
+            AgcDriver::Submit(reinterpret_cast<const Packet*>(Base + 0x70000u), 0x20);
+            AgcDriverWaitIdle_nid_postfix();
+            for (std::size_t word = 0; word < output.size(); ++word)
+                Require(output[word] == expected[word], "Public original RDNA dynamic sampled image key=" + std::to_string(key) +
+                    " word=" + std::to_string(word) + " actual=" + std::to_string(output[word]) +
+                    " expected=" + std::to_string(expected[word]));
+            Require(textures == originalTextures && heap == originalHeap && materials == originalMaterials && srt == originalSrt,
+                "Public dynamic sampled image changed read-only texels, layers, mip padding, table descriptors or keys");
+            Require(code == originalCode && header == originalHeader && commands == originalCommands &&
+                std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
+                "Public dynamic sampled image changed shader, header or PM4 bytes");
+            std::cout << "Public original RDNA dynamic sampled image key=" << key
+                      << ": baseMip1, baseArray" << key + 1u
+                      << ", all 32 lane outputs, inputs, padding and guards passed\n";
+        }
+    }
+};
+
 struct SamplerBankReplay {
     static constexpr std::uint32_t Threads = 32, Samplers = 32;
     static constexpr std::uint64_t Base = 0x400000;
@@ -310,12 +424,14 @@ int main(int argc, char** argv) {
             const auto originalTexture = texture;
             Replay wave32(32, 0x200000), wave64(64, 0x300000);
             SamplerBankReplay samplerBank;
+            DynamicImageReplay dynamicImages;
             InstructionClampReplay instructionClamp;
             std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
                 {TextureAddress - 256, std::as_writable_bytes(std::span(texture)), false}};
             wave32.AddRanges(ranges);
             wave64.AddRanges(ranges);
             samplerBank.AddRanges(ranges);
+            dynamicImages.AddRanges(ranges);
             instructionClamp.AddRanges(ranges);
             AgcDriver::Metal::MetalDriver::Get().Configure((__bridge void*)device, (__bridge void*)library, ranges);
             AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(wave32.base + 0x10000));
@@ -329,6 +445,7 @@ int main(int argc, char** argv) {
             }
             instructionClamp.Run();
             samplerBank.Run();
+            dynamicImages.Run();
             Require(texture == originalTexture, "Public sampler bank changed another borrowed 1D texture");
             AgcDriver::Metal::MetalDriver::Get().Shutdown();
             return 0;

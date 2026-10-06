@@ -22,6 +22,8 @@ public:
         std::span<const NativeGuestMemory::BorrowedRange> ranges, EopInterrupt eopInterrupt = {},
         std::uint64_t initialGeneration = 0);
     void ReplaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation);
+    void MutateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation,
+        std::function<void()> mutateCpu, std::shared_ptr<const void> previousOwner, std::shared_ptr<const void> nextOwner);
     void Submit(const Packet* packet, std::uint32_t queue);
     void WaitIdle();
     void Shutdown();
@@ -35,6 +37,8 @@ public:
     void ReportFailure(std::exception_ptr error);
 
 private:
+    void replaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation,
+        const std::function<void()>& mutateCpu, std::shared_ptr<const void> previousOwner, std::shared_ptr<const void> nextOwner);
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

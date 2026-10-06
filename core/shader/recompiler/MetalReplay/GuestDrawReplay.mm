@@ -18,6 +18,7 @@
 #include <iostream>
 #include <future>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -1045,6 +1046,263 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         computeStorage = originalComputeStorage;
         output.fill(0xdeadbeef);
         std::cout << "Actual PM4 borrow replacement: old EOP drain, same-VA new storage, invalid publication atomicity, add-only shader capture, allocation identity and read-only writes passed\n";
+    }
+    struct TransactionStorage {
+        std::array<std::uint32_t, 64 * 4> input;
+        std::array<std::uint32_t, 64 * 4> output;
+        std::array<std::uint32_t, 8 + 64 + 9> code;
+    };
+    const auto transactionStorage = [&] {
+        auto storage = std::make_shared<TransactionStorage>();
+        storage->input = originalInput;
+        storage->output.fill(0xdeadbeef);
+        storage->code = originalComputeStorage;
+        return storage;
+    };
+    const auto transactionRanges = [&](const auto& storage, std::uint64_t identity) {
+        auto mapped = ranges;
+        for (auto& range : mapped) {
+            if (range.guestAddress == ComputeInputAddress) range.host = std::as_writable_bytes(std::span(storage->input));
+            if (range.guestAddress == ComputeOutputAddress) range.host = std::as_writable_bytes(std::span(storage->output));
+            if (range.guestAddress == ComputeCodeAddress) range.host = std::as_writable_bytes(std::span(storage->code).first(8));
+            if (range.guestAddress == ComputeCodeAddress + 8 * sizeof(std::uint32_t))
+                range.host = std::as_writable_bytes(std::span(storage->code).subspan(72));
+            if (range.guestAddress == ComputeInputAddress || range.guestAddress == ComputeOutputAddress ||
+                range.guestAddress == ComputeCodeAddress || range.guestAddress == ComputeCodeAddress + 8 * sizeof(std::uint32_t))
+                range.identity = identity;
+        }
+        return mapped;
+    };
+    const auto checkTransactionOutput = [&](const TransactionStorage& storage, std::uint32_t increment) {
+        for (std::uint32_t i = 0; i < storage.output.size(); ++i) {
+            const auto expected = i % 4 == 0 ? storage.input[i] + increment : 0xdeadbeefu;
+            Require(storage.output[i] == expected, "CPU mapping transaction produced incorrect RDNA output or padding at word " +
+                std::to_string(i) + ", actual=" + std::to_string(storage.output[i]) + ", expected=" + std::to_string(expected));
+        }
+    };
+    {
+        auto previousOwner = transactionStorage(), nextOwner = transactionStorage();
+        std::weak_ptr<TransactionStorage> previousWeak = previousOwner, nextWeak = nextOwner;
+        const auto mapped = transactionRanges(previousOwner, 1);
+        auto replacement = transactionRanges(nextOwner, 2);
+        std::atomic<std::uint32_t> transactionInterrupts{0}, mutations{0};
+        std::mutex transactionMutex;
+        std::condition_variable transactionChanged;
+        bool oldEopEntered = false, oldEopReleased = false, mutationEntered = false, mutationReleased = false;
+        AgcDriver::Metal::MetalDriver transactionDriver;
+        transactionDriver.Configure((__bridge void*)device, (__bridge void*)library, mapped,
+            [&](std::uint32_t queue) {
+                Require(queue == 0x20, "CPU mapping transaction EOP arrived from the wrong queue");
+                const bool first = transactionInterrupts.load() == 0;
+                const auto storage = first ? previousWeak.lock() : nextWeak.lock();
+                Require(storage != nullptr, "CPU mapping transaction released active GPU storage before EOP");
+                checkTransactionOutput(*storage, first ? 1 : 3);
+                transactionInterrupts.fetch_add(1);
+                if (first) {
+                    std::unique_lock lock(transactionMutex);
+                    oldEopEntered = true;
+                    transactionChanged.notify_all();
+                    transactionChanged.wait(lock, [&] { return oldEopReleased; });
+                }
+            }, 0);
+        transactionDriver.RegisterShader(reinterpret_cast<const Shader*>(0x720000));
+        const auto releaseTransaction = [&] {
+            {
+                std::lock_guard lock(transactionMutex);
+                oldEopReleased = true;
+                mutationReleased = true;
+            }
+            transactionChanged.notify_all();
+        };
+        std::future<void> transaction, submitting, registering, suspending;
+        try {
+            auto invalid = replacement;
+            invalid.push_back({ComputeInputAddress + 4, std::as_writable_bytes(std::span(nextOwner->input).first(4)), false});
+            for (const auto& preparation : {std::pair{&invalid, 1ull}, std::pair{&replacement, 0ull}}) {
+                bool rejected = false;
+                try {
+                    transactionDriver.MutateBorrowedRanges(*preparation.first, preparation.second,
+                        [&] { mutations.fetch_add(1); }, previousOwner, nextOwner);
+                } catch (const std::exception&) { rejected = true; }
+                Require(rejected && mutations.load() == 0, "Invalid CPU mapping preparation ran the mutation callback");
+            }
+            transactionDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+            {
+                std::unique_lock lock(transactionMutex);
+                Require(transactionChanged.wait_for(lock, std::chrono::seconds(10), [&] { return oldEopEntered; }),
+                    "CPU mapping transaction did not reach the old completed EOP");
+            }
+            std::promise<void> transactionStarted;
+            auto started = transactionStarted.get_future();
+            transaction = std::async(std::launch::async, [&] {
+                transactionStarted.set_value();
+                transactionDriver.MutateBorrowedRanges(replacement, 1, [&] {
+                    mutations.fetch_add(1);
+                    nextOwner->input.fill(0xb5b5b5b5);
+                    for (std::uint32_t i = 0; i < 64; ++i) nextOwner->input[i * 4] = i * 5 + 47;
+                    nextOwner->code[7] = 0x4a080883;
+                    std::unique_lock lock(transactionMutex);
+                    mutationEntered = true;
+                    transactionChanged.notify_all();
+                    transactionChanged.wait(lock, [&] { return mutationReleased; });
+                }, previousOwner, nextOwner);
+            });
+            started.wait();
+            const bool retainedOldEop = transaction.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            {
+                std::lock_guard lock(transactionMutex);
+                Require(!mutationEntered && mutations.load() == 0, "CPU mutation ran while the old EOP still retained its mapping");
+                oldEopReleased = true;
+            }
+            transactionChanged.notify_all();
+            {
+                std::unique_lock lock(transactionMutex);
+                Require(transactionChanged.wait_for(lock, std::chrono::seconds(10), [&] { return mutationEntered; }),
+                    "CPU mapping transaction did not enter its mutation callback after EOP drain");
+            }
+            Require(retainedOldEop, "CPU mapping transaction returned before old EOP drain");
+            std::promise<void> submitStarted, registerStarted, suspendStarted;
+            auto beganSubmit = submitStarted.get_future(), beganRegister = registerStarted.get_future(), beganSuspend = suspendStarted.get_future();
+            submitting = std::async(std::launch::async, [&] {
+                submitStarted.set_value();
+                transactionDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+            });
+            registering = std::async(std::launch::async, [&] {
+                registerStarted.set_value();
+                transactionDriver.RegisterShader(reinterpret_cast<const Shader*>(0x700000));
+            });
+            suspending = std::async(std::launch::async, [&] {
+                suspendStarted.set_value();
+                transactionDriver.SuspendPoint();
+            });
+            beganSubmit.wait();
+            beganRegister.wait();
+            beganSuspend.wait();
+            const bool submitBlocked = submitting.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            const bool registerBlocked = registering.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            const bool suspendBlocked = suspending.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            releaseTransaction();
+            transaction.get();
+            submitting.get();
+            registering.get();
+            suspending.get();
+            transactionDriver.WaitIdle();
+            Require(submitBlocked && registerBlocked && suspendBlocked,
+                "Public GPU admission returned while the CPU mapping mutation was still active");
+            Require(transactionInterrupts.load() == 2 && mutations.load() == 1,
+                "CPU mapping transaction did not produce exactly one mutation and two completed EOPs");
+            checkTransactionOutput(*previousOwner, 1);
+            checkTransactionOutput(*nextOwner, 3);
+            auto expectedInput = originalInput;
+            expectedInput.fill(0xb5b5b5b5);
+            for (std::uint32_t i = 0; i < 64; ++i) expectedInput[i * 4] = i * 5 + 47;
+            auto expectedCode = originalComputeStorage;
+            expectedCode[7] = 0x4a080883;
+            Require(previousOwner->input == originalInput && previousOwner->code == originalComputeStorage &&
+                nextOwner->input == expectedInput && nextOwner->code == expectedCode,
+                "CPU mapping transaction GPU execution modified read-only input/code or storage guards");
+            previousOwner.reset();
+            nextOwner.reset();
+            Require(previousWeak.expired() && !nextWeak.expired(),
+                "Successful CPU mapping transaction retained the retired owner or dropped the published owner");
+            transactionDriver.Shutdown();
+            Require(nextWeak.expired(), "CPU mapping transaction retained its published host owner after shutdown");
+        } catch (...) {
+            const auto error = std::current_exception();
+            releaseTransaction();
+            for (auto* pending : {&transaction, &submitting, &registering, &suspending})
+                if (pending->valid()) try { pending->get(); } catch (...) {}
+            try { transactionDriver.Shutdown(); } catch (...) {}
+            std::rethrow_exception(error);
+        }
+        std::cout << "Actual CPU mapping transaction: invalid preparation, EOP drain, admission closure, new RDNA storage and owning lease retirement passed\n";
+    }
+    {
+        auto previousOwner = transactionStorage(), nextOwner = transactionStorage();
+        std::weak_ptr<TransactionStorage> previousWeak = previousOwner, nextWeak = nextOwner;
+        const auto mapped = transactionRanges(previousOwner, 1), replacement = transactionRanges(nextOwner, 2);
+        std::atomic<std::uint32_t> failedInterrupts{0};
+        std::mutex failedMutex;
+        std::condition_variable failedChanged;
+        bool failedMutationEntered = false, failedMutationReleased = false;
+        const auto marker = std::make_exception_ptr(std::runtime_error("CPU mapping mutation partial failure"));
+        AgcDriver::Metal::MetalDriver failedTransaction;
+        failedTransaction.Configure((__bridge void*)device, (__bridge void*)library, mapped,
+            [&](std::uint32_t) { failedInterrupts.fetch_add(1); });
+        const auto releaseFailedMutation = [&] {
+            {
+                std::lock_guard lock(failedMutex);
+                failedMutationReleased = true;
+            }
+            failedChanged.notify_all();
+        };
+        std::future<void> mutation, pendingSubmit, pendingMutation;
+        try {
+            mutation = std::async(std::launch::async, [&] {
+                failedTransaction.MutateBorrowedRanges(replacement, 1, [&] {
+                    nextOwner->input[0] = 97;
+                    std::unique_lock lock(failedMutex);
+                    failedMutationEntered = true;
+                    failedChanged.notify_all();
+                    failedChanged.wait(lock, [&] { return failedMutationReleased; });
+                    std::rethrow_exception(marker);
+                }, previousOwner, nextOwner);
+            });
+            {
+                std::unique_lock lock(failedMutex);
+                Require(failedChanged.wait_for(lock, std::chrono::seconds(10), [&] { return failedMutationEntered; }),
+                    "Failing CPU mapping transaction did not enter its mutation callback");
+            }
+            std::promise<void> pendingStarted;
+            auto started = pendingStarted.get_future();
+            pendingSubmit = std::async(std::launch::async, [&] {
+                pendingStarted.set_value();
+                failedTransaction.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+            });
+            started.wait();
+            const bool admissionBlocked = pendingSubmit.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            std::promise<void> nextMutationStarted;
+            auto nextStarted = nextMutationStarted.get_future();
+            pendingMutation = std::async(std::launch::async, [&] {
+                nextMutationStarted.set_value();
+                failedTransaction.MutateBorrowedRanges(replacement, 2, [&] {
+                    nextOwner->input[4] = 123;
+                }, previousOwner, nextOwner);
+            });
+            nextStarted.wait();
+            const bool mutationBlocked = pendingMutation.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            releaseFailedMutation();
+            std::exception_ptr mutationError, admissionError, nextMutationError;
+            try { mutation.get(); } catch (...) { mutationError = std::current_exception(); }
+            try { pendingSubmit.get(); } catch (...) { admissionError = std::current_exception(); }
+            try { pendingMutation.get(); } catch (...) { nextMutationError = std::current_exception(); }
+            Require(admissionBlocked && mutationBlocked && mutationError == marker && admissionError == marker &&
+                nextMutationError == marker && failedInterrupts.load() == 0,
+                "CPU mutation failure did not wake blocked admission and mutation with the original terminal failure");
+            for (const auto word : previousOwner->output) Require(word == 0xdeadbeef, "Failed transaction changed old output or guards");
+            for (const auto word : nextOwner->output) Require(word == 0xdeadbeef, "Failed transaction changed new output or guards");
+            auto partiallyMutatedInput = originalInput;
+            partiallyMutatedInput[0] = 97;
+            Require(previousOwner->input == originalInput && previousOwner->code == originalComputeStorage &&
+                nextOwner->input == partiallyMutatedInput && nextOwner->code == originalComputeStorage,
+                "Failed CPU transaction changed read-only storage beyond its partial CPU mutation");
+            previousOwner.reset();
+            nextOwner.reset();
+            Require(!previousWeak.expired() && !nextWeak.expired(),
+                "Failed CPU mutation released old or new actual host storage before shutdown");
+            std::exception_ptr shutdownError;
+            try { failedTransaction.Shutdown(); } catch (...) { shutdownError = std::current_exception(); }
+            Require(shutdownError == marker && previousWeak.expired() && nextWeak.expired(),
+                "Failed CPU mutation did not preserve its failure and release both host owners at shutdown");
+        } catch (...) {
+            const auto error = std::current_exception();
+            releaseFailedMutation();
+            for (auto* pending : {&mutation, &pendingSubmit, &pendingMutation})
+                if (pending->valid()) try { pending->get(); } catch (...) {}
+            try { failedTransaction.Shutdown(); } catch (...) {}
+            std::rethrow_exception(error);
+        }
+        std::cout << "Actual CPU mutation failure: blocked admission wakes, no GPU/EOP writes and both actual host leases survive until shutdown passed\n";
     }
     std::mutex callbackMutex;
     std::condition_variable callbackChanged;
