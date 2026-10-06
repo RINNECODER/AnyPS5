@@ -428,7 +428,7 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
         const auto [found, inserted] = attributesById.emplace(id, attributes);
         if (!inserted && found->second != attributes) fail("conflicting imported library attributes for id " + std::to_string(id));
         image.ImportLibraryAttributes.push_back({id, attributes});
-        if (inserted && attributes) block("imported library attributes are unsupported for execution: id=" +
+        if (inserted && (attributes & ~0x9ull)) block("imported library attributes are unsupported for execution: id=" +
             std::to_string(id) + " value=" + std::to_string(attributes));
     }
     std::map<std::uint16_t, std::uint64_t> exportAttributesById;
@@ -439,7 +439,7 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
         const auto [found, inserted] = exportAttributesById.emplace(id, attributes);
         if (!inserted && found->second != attributes) fail("conflicting exported library attributes for id " + std::to_string(id));
         image.ExportLibraryAttributes.push_back({id, attributes});
-        if (inserted && attributes) block("exported library attributes are unsupported for execution: id=" +
+        if (inserted && (attributes & ~0x1ull)) block("exported library attributes are unsupported for execution: id=" +
             std::to_string(id) + " value=" + std::to_string(attributes));
     }
     for (const auto value : filenames) {
