@@ -209,6 +209,7 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
             {
                 std::lock_guard lock(impl->mutex);
                 if (!impl->failure) impl->failure = error;
+                impl->mappingUpdateThread = {};
             }
             mappingLock.unlock();
             impl->ReportFailure(error);
