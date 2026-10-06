@@ -12,6 +12,7 @@ namespace Cpu {
 namespace {
 constexpr std::uint64_t PageSize = 4096;
 constexpr std::uint64_t ReturnGate = 0x7ffdf7000000;
+constexpr std::uint64_t TerminationGate = ReturnGate + 16;
 constexpr unsigned GraphRequirements = static_cast<unsigned>(SceRequirement::Dependencies) |
     static_cast<unsigned>(SceRequirement::Initializers) | static_cast<unsigned>(SceRequirement::TypedImports) |
     static_cast<unsigned>(SceRequirement::ImportedTls) | static_cast<unsigned>(SceRequirement::Symbolic) |
@@ -81,6 +82,9 @@ struct SceModules::Impl {
     SceLoadedImage main;
     enum class Phase { Loaded, Initializing, Initialized, Finalizing, Finalized, Failed };
     Phase phase = Phase::Loaded;
+    bool mainStarted = false;
+    bool mainRunning = false;
+    bool terminationRequested = false;
 
     Impl(Machine& guest, const SceModuleFile& executable, std::span<const SceModuleFile> dependencies,
          std::span<const SceHostModule> hostModules, const SceModuleResolver& resolver) : machine(guest), hosts(hostModules.begin(), hostModules.end()) {
@@ -93,7 +97,6 @@ struct SceModules::Impl {
             RequireSceProfile(parsed, GraphRequirements);
             ValidateSceMapping(parsed, file.LoadBias);
             const auto& data = *parsed.Data;
-            if (isMain && data.Fini) fail("main executable DT_FINI lifecycle is unsupported by the dependency finalizer");
             modules.push_back({std::move(parsed), file.LoadBias, 0,
                 data.Init ? SceAddress(file.LoadBias, data.Init) : 0,
                 data.Fini ? SceAddress(file.LoadBias, data.Fini) : 0});
@@ -227,6 +230,12 @@ struct SceModules::Impl {
         main = {image.Image.Path, SceAddress(image.LoadBias, image.Image.Entry), image.LoadBias, 0, 0,
             image.Image.Imports, image.Image.NeededModules, image.Image.ProcParam, tls};
         if (main.ProcParam) main.ProcParam->Address = SceAddress(image.LoadBias, main.ProcParam->Address);
+        std::array<std::byte, PageSize> bytes{};
+        bytes.fill(std::byte{0xcc});
+        bytes[0] = bytes[16] = std::byte{0xc3};
+        machine.Map(ReturnGate, bytes.size(), Permission::Read | Permission::Write);
+        machine.Write(ReturnGate, bytes);
+        machine.Protect(ReturnGate, bytes.size(), Permission::Read | Permission::Execute);
     }
 
     void invoke(std::uint64_t entry, std::uint64_t args, std::uint64_t argp, std::uint64_t param, std::uint64_t budget) {
@@ -235,7 +244,9 @@ struct SceModules::Impl {
             Register::R14, Register::R15, Register::Rip, Register::Rflags};
         std::array<std::uint64_t, savedRegisters.size()> saved{};
         for (std::size_t index = 0; index < saved.size(); ++index) saved[index] = machine.Get(savedRegisters[index]);
-        const auto stack = ((main.StackPointer - 256) & ~15ull) + 8;
+        const auto callerStack = machine.Get(Register::Rsp);
+        if (callerStack < 512) fail("module initializer/finalizer guest stack underflows");
+        const auto stack = ((callerStack - 256) & ~15ull) + 8;
         machine.CheckAccess(stack - 128, 136, Permission::Write);
         writeWord(machine, stack, ReturnGate);
         machine.Set(Register::Rsp, stack);
@@ -256,12 +267,6 @@ struct SceModules::Impl {
     void initialize(std::uint64_t args, std::uint64_t argp, std::uint64_t param, std::uint64_t budget) {
         if (phase != Phase::Loaded) fail("dependency initialization requires a freshly loaded graph");
         if (!main.StackPointer || !budget) fail("dependency initialization requires configured main entry arguments and a nonzero budget");
-        std::array<std::byte, PageSize> bytes{};
-        bytes.fill(std::byte{0xcc});
-        bytes[0] = std::byte{0xc3};
-        machine.Map(ReturnGate, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(ReturnGate, bytes);
-        machine.Protect(ReturnGate, bytes.size(), Permission::Read | Permission::Execute);
         phase = Phase::Initializing;
         try {
             for (const auto index : order) if (index != 0 && modules[index].Init) invoke(modules[index].Init, args, argp, param, budget);
@@ -278,15 +283,67 @@ struct SceModules::Impl {
             phase = Phase::Finalized;
         } catch (...) { phase = Phase::Failed; throw; }
     }
+
+    void requestTermination() {
+        if (!mainRunning || phase != Phase::Initialized || terminationRequested)
+            fail("entry termination callback requires an active initialized main image and may execute only once");
+        terminationRequested = true;
+        machine.RequestStop();
+    }
+
+    StopReason runMain(std::uint64_t entryBudget, std::uint64_t finalizerBudget) {
+        if (mainStarted || phase != Phase::Initialized || !main.StackPointer || !entryBudget || !finalizerBudget)
+            fail("main execution requires a fresh initialized graph, configured stack, and nonzero phase budgets");
+        mainStarted = mainRunning = true;
+        struct Reset { bool& running; ~Reset() { running = false; } } reset{mainRunning};
+        try {
+            auto reason = machine.Run(main.Entry, 0, entryBudget);
+            if (terminationRequested) {
+                if (reason != StopReason::Requested || machine.Get(Register::Rip) != TerminationGate)
+                    fail("entry termination callback did not pause at its exact guest gate");
+                const auto stack = machine.Get(Register::Rsp);
+                if (stack > UINT64_MAX - 8) fail("entry termination callback return stack overflows");
+                machine.CheckAccess(stack, 8, Permission::Read);
+                std::uint64_t destination = 0;
+                machine.Read(stack, std::as_writable_bytes(std::span(&destination, 1)));
+                machine.CheckAccess(destination, 1, Permission::Execute);
+                finalize(0, 0, 0, finalizerBudget);
+                machine.CheckAccess(stack, 8, Permission::Read);
+                std::uint64_t retainedDestination = 0;
+                machine.Read(stack, std::as_writable_bytes(std::span(&retainedDestination, 1)));
+                if (machine.Get(Register::Rsp) != stack || retainedDestination != destination)
+                    fail("entry termination callback return frame changed during dependency finalization");
+                machine.CheckAccess(destination, 1, Permission::Execute);
+                machine.Set(Register::Rsp, stack + 8);
+                machine.Set(Register::Rip, destination);
+                terminationRequested = false;
+                reason = machine.Run(destination, 0, entryBudget);
+            }
+            if (reason == StopReason::Exit) {
+                if (phase == Phase::Initialized) finalize(0, 0, 0, finalizerBudget);
+            } else phase = Phase::Failed;
+            return reason;
+        } catch (...) { phase = Phase::Failed; throw; }
+    }
 };
 
 SceModules::SceModules(Machine& machine, const SceModuleFile& main, std::span<const SceModuleFile> dependencies,
                      std::span<const SceHostModule> hosts, const SceModuleResolver& resolver)
-    : impl(std::make_unique<Impl>(machine, main, dependencies, hosts, resolver)) {}
+    : impl(std::make_shared<Impl>(machine, main, dependencies, hosts, resolver)) {
+    machine.AddHostCall(TerminationGate, [state = std::weak_ptr<Impl>(impl)](Machine&) {
+        const auto context = state.lock();
+        if (!context) fail("entry termination callback graph has expired");
+        context->requestTermination();
+    });
+}
 SceModules::~SceModules() = default;
 SceLoadedImage& SceModules::Main() { return impl->main; }
 std::span<const SceModuleRecord> SceModules::Modules() const { return impl->modules; }
 std::shared_ptr<SceTls> SceModules::Tls() const { return impl->tls; }
+std::uint64_t SceModules::EntryTerminationGate() const { return TerminationGate; }
+StopReason SceModules::RunMain(std::uint64_t entryBudget, std::uint64_t finalizerBudget) {
+    return impl->runMain(entryBudget, finalizerBudget);
+}
 void SceModules::InitializeDependencies(std::uint64_t args, std::uint64_t argp, std::uint64_t param, std::uint64_t budget) {
     impl->initialize(args, argp, param, budget);
 }

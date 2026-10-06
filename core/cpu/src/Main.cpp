@@ -5,6 +5,7 @@
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
+#include <cpu/SceLifecycleImports.hpp>
 #include <cpu/SceModules.hpp>
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceSystemImports.hpp>
@@ -90,6 +91,7 @@ void Capabilities() {
         << "\"sce_imports\":{\"module\":\"libc\",\"module_version\":\"1.1\",\"library\":\"libc\",\"library_version\":1,"
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
         << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
+        << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
         << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
         << "\"sce_system_imports\":{\"module\":\"libSceSystemService\",\"module_version\":\"1.1\",\"library_version\":1,"
@@ -97,7 +99,7 @@ void Capabilities() {
         << "\"recognized_unavailable\":[\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceLaunchPlayerDialog\"],"
         << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
-        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes and shared permission pages unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback unsupported\"],"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes and shared permission pages unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
         << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\"],"
@@ -331,6 +333,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
         std::unique_ptr<Cpu::SceAudioOut2Imports> audioRuntime;
         std::unique_ptr<Cpu::SceLibcBootstrapImports> bootstrapRuntime;
+        std::unique_ptr<Cpu::SceLifecycleImports> lifecycleRuntime;
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
@@ -338,12 +341,14 @@ int main(int argc, char** argv) {
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
             if (sce) {
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
+                lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
                 audioRuntime = std::make_unique<Cpu::SceAudioOut2Imports>(machine);
                 bootstrapRuntime = std::make_unique<Cpu::SceLibcBootstrapImports>(machine, std::filesystem::path(executable).filename().string());
                 const auto resolve = [&](const auto& import) {
+                    if (const auto gate = lifecycleRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
@@ -374,7 +379,7 @@ int main(int argc, char** argv) {
                     kernelRuntime->SetTls(modules->Tls());
                     bootstrapRuntime->SetProcessParameters(modules->Main().ProcParam ? modules->Main().ProcParam->Address : 0,
                         modules->Main().ProcParam ? modules->Main().ProcParam->FileSize : 0);
-                    Cpu::SetupSceEntry(machine, modules->Main(), arguments, sceRuntime->ExitGate());
+                    Cpu::SetupSceEntry(machine, modules->Main(), arguments, modules->EntryTerminationGate());
                     try { modules->InitializeDependencies(); }
                     catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
                     entry = modules->Main().Entry;
@@ -402,7 +407,7 @@ int main(int argc, char** argv) {
                 << " guest=x86_64 entry=0x" << std::hex << entry << std::dec << '\n';
         }
         Cpu::StopReason reason;
-        try { reason = machine.Run(entry, 0, 100000000); }
+        try { reason = modules ? modules->RunMain() : machine.Run(entry, 0, 100000000); }
         catch (const std::exception& error) {
             code = ExecutionCode(error.what());
             throw;
@@ -412,10 +417,6 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Guest did not exit: CPU execution budget or stop reached");
         }
         const auto exitCode = machine.ExitCode();
-        if (modules) {
-            try { modules->FinalizeDependencies(); }
-            catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
-        }
         if (diagnostics)
             std::cerr << "{\"schema_version\":1,\"event\":\"guest_exit\",\"exit_code\":" << exitCode << "}\n";
         else std::cerr << "guest_exit=" << exitCode << '\n';
