@@ -383,20 +383,33 @@ void MetalDriver::WithValidatedReadableRanges(std::span<const ReadableGuestRange
 }
 
 void MetalDriver::Submit(const Packet* packet, std::uint32_t queue) {
+    submit({}, queue, reinterpret_cast<std::uintptr_t>(packet));
+}
+
+void MetalDriver::SubmitCommandBuffer(std::uint64_t commandAddress, std::uint32_t wordCount,
+    std::uint8_t flags, std::uint32_t queue) {
+    submit({commandAddress, wordCount, flags}, queue, std::nullopt);
+}
+
+void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue,
+    std::optional<std::uint64_t> guestPacketAddress) {
     impl->CheckFailureAndStopping();
     require(queue == 0 || (queue >= 0x20 && queue < 0x58), "unsupported compute queue");
     Impl::Submission submission{};
     submission.queue = queue;
-    Packet descriptor{};
     std::uint64_t generation = 0;
     {
         auto gpuLock = impl->LockForGuestCapture();
         generation = impl->rangeGeneration;
         NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
-        GuestMemory::Read(reinterpret_cast<std::uintptr_t>(packet), std::as_writable_bytes(std::span(&descriptor, 1)), alignof(Packet));
+        if (guestPacketAddress) {
+            Packet guestDescriptor{};
+            GuestMemory::Read(*guestPacketAddress, std::as_writable_bytes(std::span(&guestDescriptor, 1)), alignof(Packet));
+            descriptor = {reinterpret_cast<std::uintptr_t>(guestDescriptor.addr), guestDescriptor.dw_num, guestDescriptor.flags};
+        }
         require(descriptor.flags == 0, "nonzero submission flags are not implemented");
-        if (descriptor.dw_num != 0) CaptureSubmissionCommands(submission, reinterpret_cast<std::uintptr_t>(descriptor.addr), descriptor.dw_num);
-        ValidateSubmission(submission, reinterpret_cast<std::uintptr_t>(descriptor.addr));
+        if (descriptor.words != 0) CaptureSubmissionCommands(submission, descriptor.address, descriptor.words);
+        ValidateSubmission(submission, descriptor.address);
     }
     impl->WaitForFlipRoom(submission);
     {
