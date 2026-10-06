@@ -5,6 +5,9 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
+#include <cpu/SceNpLocalImports.hpp>
+#include <cpu/SceNetAddressImports.hpp>
+#include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
 #include <cpu/SceLifecycleImports.hpp>
 #include <cpu/SceMemoryImports.hpp>
@@ -103,6 +106,9 @@ void Capabilities() {
         << "\"functions\":[\"sceSystemServiceParamGetInt\",\"sceSystemServiceParamGetString\",\"sceSystemServiceHideSplashScreen\"],"
         << "\"recognized_unavailable\":[\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceLaunchPlayerDialog\"],"
         << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
+        << "\"sce_common_dialog_imports\":{\"module\":\"libSceCommonDialog\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceCommonDialogInitialize\"],\"constraints\":\"session initializer only; repeated initialization returns signed 0x80b80002; dialog operations unsupported\"},"
+        << "\"sce_np_local_imports\":{\"module\":\"libSceNpManager\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNpGetState\"],\"constraints\":\"session-local user and offline state only; no network account or authentication services\"},"
+        << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes and shared permission pages unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
@@ -165,7 +171,10 @@ std::vector<Cpu::SceHostModule> HostModules(const std::vector<Cpu::SceModuleFile
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
         {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
         {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}}},
-        {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}}};
+        {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}},
+        {"libSceNpManager.prx", {"libSceNpManager", 0, 1, 1}, {{"libSceNpManager", 0, 1}}},
+        {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
+        {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}}};
     for (const auto& file : files) {
         const auto image = Cpu::ParseSce(file.Path);
         std::erase_if(hosts, [&](const auto& host) {
@@ -336,6 +345,9 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
+        std::unique_ptr<Cpu::SceNpLocalImports> npRuntime;
+        std::unique_ptr<Cpu::SceNetAddressImports> netAddressRuntime;
+        std::unique_ptr<Cpu::SceCommonDialogImports> commonDialogRuntime;
         std::unique_ptr<Cpu::SceModules> modules;
         std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
         std::unique_ptr<Cpu::SceAudioOut2Imports> audioRuntime;
@@ -353,12 +365,18 @@ int main(int argc, char** argv) {
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
+                npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine);
+                netAddressRuntime = std::make_unique<Cpu::SceNetAddressImports>(machine);
+                commonDialogRuntime = std::make_unique<Cpu::SceCommonDialogImports>(machine, 0x7ffdf2000000);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
                 audioRuntime = std::make_unique<Cpu::SceAudioOut2Imports>(machine);
                 bootstrapRuntime = std::make_unique<Cpu::SceLibcBootstrapImports>(machine, std::filesystem::path(executable).filename().string());
                 const auto resolve = [&](const auto& import) {
                     if (const auto gate = lifecycleRuntime->Resolve(import)) return *gate;
                     if (const auto gate = memoryImports->Resolve(import)) return *gate;
+                    if (const auto gate = commonDialogRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = npRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = netAddressRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
