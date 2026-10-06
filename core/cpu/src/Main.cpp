@@ -4,6 +4,7 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
+#include <cpu/SceModules.hpp>
 #include <cpu/SceUserImports.hpp>
 #include <cpu/Self.hpp>
 #include <array>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -87,7 +89,7 @@ void Capabilities() {
         << "\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
         << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
-        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"main-module TLS only; zero alignment remainder\",\"read-only /app0 resources; regular files only\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes and shared permission pages unsupported\",\"dependency CRT initializers/finalizers only; main owns its initializer\",\"host imports require typed function gates; no host data or TLS imports\",\"entry termination callback unsupported\"],"
 #if ANYPS5_CPU_MODERN_TCG
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
         << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\"],"
@@ -95,6 +97,57 @@ void Capabilities() {
 #else
         << "\"unsupported_instruction_families\":[\"AVX\",\"AVX2\",\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
 #endif
+}
+
+std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
+                                             const std::vector<std::filesystem::path>& paths) {
+    constexpr std::uint64_t ceiling = 0x7ffdf0000000;
+    std::uint64_t next = 0x1000000;
+    const auto extent = [&](const Cpu::SceParsedImage& image, std::uint64_t bias) {
+        auto end = bias;
+        for (const auto& segment : image.Segments) {
+            if ((segment.Type != 1 && segment.Type != 0x61000010) || !segment.MemorySize) continue;
+            if (segment.Address >= ceiling || segment.MemorySize > ceiling - segment.Address ||
+                bias > ceiling - segment.Address - segment.MemorySize)
+                throw std::runtime_error("SCE module placement exceeds the supported guest address range");
+            end = std::max(end, bias + segment.Address + segment.MemorySize);
+        }
+        return end;
+    };
+    next = extent(Cpu::ParseSce(main), next);
+    std::vector<Cpu::SceModuleFile> files;
+    for (const auto& path : paths) {
+        const auto image = Cpu::ParseSce(path);
+        std::uint64_t alignment = 4096;
+        for (const auto& segment : image.Segments) {
+            if ((segment.Type != 1 && segment.Type != 0x61000010) || !segment.MemorySize) continue;
+            if (segment.Alignment > 1 && (segment.Alignment & (segment.Alignment - 1)))
+                throw std::runtime_error("SCE module placement requires power-of-two segment alignment");
+            alignment = std::max(alignment, segment.Alignment);
+        }
+        if (alignment >= ceiling || next > ceiling - alignment)
+            throw std::runtime_error("SCE module placement alignment exceeds the supported guest address range");
+        const auto bias = (next + alignment - 1) & ~(alignment - 1);
+        files.push_back({path, bias});
+        next = extent(image, bias);
+    }
+    return files;
+}
+
+std::vector<Cpu::SceHostModule> HostModules(const std::vector<Cpu::SceModuleFile>& files) {
+    std::vector<Cpu::SceHostModule> hosts{
+        {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
+        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
+        {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}}};
+    for (const auto& file : files) {
+        const auto image = Cpu::ParseSce(file.Path);
+        std::erase_if(hosts, [&](const auto& host) {
+            return std::any_of(image.ExportModules.begin(), image.ExportModules.end(), [&](const auto& module) {
+                return host.Module.Name == module.Name && host.Module.Major == module.Major && host.Module.Minor == module.Minor;
+            });
+        });
+    }
+    return hosts;
 }
 
 bool SceExecutable(const std::string& path) {
@@ -206,6 +259,7 @@ int main(int argc, char** argv) {
         int first = 1;
         bool inspect = false;
         std::filesystem::path resourceRoot;
+        std::vector<std::filesystem::path> modulePaths;
         if (argc > 1 && std::string_view(argv[1]) == "--capabilities-json") {
             if (argc != 2) throw std::runtime_error("--capabilities-json does not accept executable arguments");
             Capabilities();
@@ -220,6 +274,11 @@ int main(int argc, char** argv) {
                 diagnostics = true;
                 inspect = true;
                 ++first;
+            } else if (option == "--sce-module") {
+                if (argc <= first + 1 || std::string_view(argv[first + 1]).empty() || std::string_view(argv[first + 1]).starts_with('-'))
+                    throw std::runtime_error("--sce-module requires a module path");
+                modulePaths.emplace_back(argv[first + 1]);
+                first += 2;
             } else if (option == "--resource-root") {
                 if (argc <= first + 1 || std::string_view(argv[first + 1]).empty() || std::string_view(argv[first + 1]).starts_with('-'))
                     throw std::runtime_error("--resource-root requires a directory path");
@@ -234,6 +293,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Unsupported CLI option: " + std::string(argv[first]));
         executable = argv[first];
         if (inspect) {
+            if (!modulePaths.empty()) throw std::runtime_error("--sce-module cannot be combined with --inspect-sce-json");
             if (argc != first + 1) throw std::runtime_error("--inspect-sce-json accepts exactly one executable");
             try { InspectSce(Cpu::ParseSce(executable)); }
             catch (const std::exception& error) { code = LoaderCode(error.what()); throw; }
@@ -247,6 +307,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
+        std::unique_ptr<Cpu::SceModules> modules;
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
@@ -256,22 +317,42 @@ int main(int argc, char** argv) {
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
-                auto image = Cpu::LoadSce(machine, executable, 0x1000000, [&](const auto& import) {
+                const auto resolve = [&](const auto& import) {
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
                     if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
                     return sceRuntime->Resolve(import);
-                });
-                kernelRuntime->SetTls(image.Tls);
-                Cpu::SetupSceEntry(machine, image, arguments, sceRuntime->ExitGate());
-                entry = image.Entry;
+                };
+                if (modulePaths.empty()) {
+                    auto image = Cpu::LoadSce(machine, executable, 0x1000000, resolve);
+                    kernelRuntime->SetTls(image.Tls);
+                    Cpu::SetupSceEntry(machine, image, arguments, sceRuntime->ExitGate());
+                    entry = image.Entry;
+                } else {
+                    const auto files = ModuleFiles(executable, modulePaths);
+                    const auto hosts = HostModules(files);
+                    modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
+                        [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                            if (type != 2) return std::nullopt;
+                            return Cpu::SceResolvedImport{resolve(import), 2};
+                        });
+                    kernelRuntime->SetTls(modules->Tls());
+                    Cpu::SetupSceEntry(machine, modules->Main(), arguments, sceRuntime->ExitGate());
+                    try { modules->InitializeDependencies(); }
+                    catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
+                    entry = modules->Main().Entry;
+                }
             } else {
+                if (!modulePaths.empty()) {
+                    code = ErrorCode::InvalidArguments;
+                    throw std::runtime_error("--sce-module requires an SCE executable");
+                }
                 linuxRuntime = std::make_unique<Cpu::LinuxRuntime>(machine);
                 auto image = Cpu::Load(machine, executable);
                 Cpu::SetupStack(machine, image, arguments);
                 entry = image.Entry;
             }
         } catch (const std::exception& error) {
-            code = LoaderCode(error.what());
+            if (code == ErrorCode::HostFailure) code = LoaderCode(error.what());
             throw;
         }
         if (diagnostics) {
@@ -292,10 +373,15 @@ int main(int argc, char** argv) {
             code = reason == Cpu::StopReason::InstructionLimit ? ErrorCode::ExecutionLimit : ErrorCode::ExecutionFailure;
             throw std::runtime_error("Guest did not exit: CPU execution budget or stop reached");
         }
+        const auto exitCode = machine.ExitCode();
+        if (modules) {
+            try { modules->FinalizeDependencies(); }
+            catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
+        }
         if (diagnostics)
-            std::cerr << "{\"schema_version\":1,\"event\":\"guest_exit\",\"exit_code\":" << machine.ExitCode() << "}\n";
-        else std::cerr << "guest_exit=" << machine.ExitCode() << '\n';
-        return machine.ExitCode();
+            std::cerr << "{\"schema_version\":1,\"event\":\"guest_exit\",\"exit_code\":" << exitCode << "}\n";
+        else std::cerr << "guest_exit=" << exitCode << '\n';
+        return exitCode;
     } catch (const std::exception& error) {
         if (diagnostics) {
             std::cerr << "{\"schema_version\":1,\"event\":\"error\",\"code\":" << Json(Code(code))

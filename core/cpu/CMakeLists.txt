@@ -62,7 +62,7 @@ elseif(NOT ANYPS5_CPU_BACKEND STREQUAL "UNICORN")
     message(FATAL_ERROR "ANYPS5_CPU_BACKEND must be TCG or UNICORN")
 endif()
 
-add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.cpp src/SystemMachine.cpp src/SceImports.cpp src/SceElf.cpp src/Self.cpp src/SceTls.cpp src/GuestFiles.cpp src/SceKernelImports.cpp src/SceUserImports.cpp
+add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.cpp src/SystemMachine.cpp src/SceImports.cpp src/SceElf.cpp src/SceModules.cpp src/Self.cpp src/SceTls.cpp src/GuestFiles.cpp src/SceKernelImports.cpp src/SceUserImports.cpp
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/NidCompute.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
@@ -111,6 +111,25 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildSceFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/sce-homebrew-linked.elf" "${sceFixture}"
         DEPENDS fixtures/SceHomebrew.c fixtures/SceStart.S tests/BuildSceFixture.py VERBATIM)
     add_custom_target(anyps5_sce_fixture ALL DEPENDS "${sceFixture}")
+    set(sceModuleGuest "${CMAKE_CURRENT_BINARY_DIR}/SceModuleGuest.prx")
+    set(sceModuleMain "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main.elf")
+    add_custom_command(OUTPUT "${sceModuleGuest}" "${sceModuleMain}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceModuleGuest.c" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-module-guest.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceModuleGuest.S" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-module-guest-start.o"
+        COMMAND "${guestLinker}" -shared -soname SceModuleGuest.prx -init SceModuleInit -fini SceModuleFini -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/sce-module-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-guest.o" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-guest-start.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceModuleMain.c" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceModuleMain.S" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main-start.o"
+        COMMAND "${guestLinker}" -shared -e _start -init SceModuleMainInit -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main.o" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main-start.o" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-guest-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildSceModulesFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main-linked.elf" "${sceModuleGuest}" "${sceModuleMain}"
+        DEPENDS fixtures/SceModuleGuest.c fixtures/SceModuleGuest.S fixtures/SceModuleMain.c fixtures/SceModuleMain.S tests/BuildSceModulesFixture.py VERBATIM)
+    add_custom_target(anyps5_sce_module_fixture ALL DEPENDS "${sceModuleGuest}" "${sceModuleMain}")
+    add_test_executable(anyps5_sce_modules_tests tests/SceModulesTests.cpp)
+    target_link_libraries(anyps5_sce_modules_tests PRIVATE anyps5_cpu)
+    add_dependencies(anyps5_sce_modules_tests anyps5_sce_module_fixture)
+    add_test(NAME anyps5_sce_modules COMMAND anyps5_sce_modules_tests "${sceModuleMain}" "${sceModuleGuest}")
+    set_tests_properties(anyps5_sce_modules PROPERTIES TIMEOUT 60)
+    add_test(NAME anyps5_sce_module_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceModuleCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main.elf" "${CMAKE_CURRENT_BINARY_DIR}/SceModuleGuest.prx" "${guestFixture}")
+    set_tests_properties(anyps5_sce_module_cli PROPERTIES TIMEOUT 60)
     add_test_executable(anyps5_cpu_tests tests/CpuTests.cpp)
     target_link_libraries(anyps5_cpu_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_cpu_instructions COMMAND anyps5_cpu_tests)
