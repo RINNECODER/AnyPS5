@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceVideoOut/include/BufferMetadata.hpp"
 #include "prx/libSceVideoOut/include/VideoOutState.hpp"
+#include "prx/libSceVideoOut/include/NativeHostWindow.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include <algorithm>
 #include <future>
@@ -371,6 +372,238 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
     std::cout << "PASS: public PM4 original VideoOut reservation, immutable metadata, sync readiness, paced actual drawable pixels, completion callbacks, global queue room and captured ticket retirement\n";
 }
 
+void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& driver) {
+    using namespace AnyPS5::Host;
+    using namespace std::chrono_literals;
+    auto host = NativeHostWindow::CreateMainThread({"AnyPS5 native host event replay", 160, 100});
+    id<MTLCommandBuffer> gpuWork = nil;
+    try {
+        NSWindow* window = nil;
+        for (NSWindow* candidate in NSApp.windows)
+            if ([candidate.title isEqualToString:@"AnyPS5 native host event replay"]) window = candidate;
+        Require(window != nil, "Native host did not own an actual AppKit window");
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (!host->Snapshot().focused && std::chrono::steady_clock::now() < deadline)
+            host->PumpMainThread(10ms);
+        {
+            auto notifications = std::make_shared<std::array<bool, 3>>();
+            struct Notifications {
+                id resize = nil, minimize = nil, restore = nil;
+                ~Notifications() {
+                    if (resize) [NSNotificationCenter.defaultCenter removeObserver:resize];
+                    if (minimize) [NSNotificationCenter.defaultCenter removeObserver:minimize];
+                    if (restore) [NSNotificationCenter.defaultCenter removeObserver:restore];
+                }
+            } notices;
+            notices.resize = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidResizeNotification
+                object:window queue:nil usingBlock:^(NSNotification*) { (*notifications)[0] = true; }];
+            notices.minimize = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidMiniaturizeNotification
+                object:window queue:nil usingBlock:^(NSNotification*) { (*notifications)[1] = true; }];
+            notices.restore = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidDeminiaturizeNotification
+                object:window queue:nil usingBlock:^(NSNotification*) { (*notifications)[2] = true; }];
+            auto pumpUntil = [&](auto completed, const std::string& operation) {
+                const auto end = std::chrono::steady_clock::now() + 2s;
+                while (!completed() && std::chrono::steady_clock::now() < end) host->PumpMainThread(10ms);
+                Require(completed(), "Actual AppKit " + operation + " did not complete before its deadline");
+            };
+            auto extent = [&](NSSize points, bool zero, const std::string& operation) {
+                const auto backing = [window.contentView convertRectToBacking:NSMakeRect(0, 0, points.width, points.height)];
+                Require(NSEqualSizes(window.contentView.bounds.size, points) &&
+                        backing.size.width == points.width * window.backingScaleFactor &&
+                        backing.size.height == points.height * window.backingScaleFactor,
+                        "Actual AppKit " + operation + " content/backing geometry differs");
+                const auto width = zero ? 0u : static_cast<std::uint32_t>(backing.size.width);
+                const auto height = zero ? 0u : static_cast<std::uint32_t>(backing.size.height);
+                const auto observed = std::async(std::launch::async, [&] {
+                    const auto snapshot = host->Snapshot();
+                    const auto presentation = host->Presentation(SourceWidth, SourceHeight);
+                    std::uint32_t callbackWidth = 0, callbackHeight = 0;
+                    presentation.getDrawableSize(presentation.context, &callbackWidth, &callbackHeight);
+                    return std::array<std::uint32_t, 4>{snapshot.drawableWidth, snapshot.drawableHeight,
+                        callbackWidth, callbackHeight};
+                }).get();
+                Require(observed == std::array<std::uint32_t, 4>{width, height, width, height},
+                        "Native host worker Snapshot/presentation stale after actual AppKit " + operation);
+            };
+            const auto originalSize = window.contentView.bounds.size;
+            const auto changedSize = NSMakeSize(213, 117);
+            [window setContentSize:changedSize];
+            pumpUntil([&] { return (*notifications)[0]; }, "resize");
+            extent(changedSize, false, "resize");
+            [window miniaturize:nil];
+            pumpUntil([&] { return (*notifications)[1] && window.miniaturized; }, "minimize");
+            extent(changedSize, true, "minimize");
+            [window deminiaturize:nil];
+            pumpUntil([&] { return (*notifications)[2] && !window.miniaturized; }, "restore");
+            extent(changedSize, false, "restore");
+            (*notifications)[0] = false;
+            [window setContentSize:originalSize];
+            pumpUntil([&] { return (*notifications)[0]; }, "original extent restore");
+            extent(originalSize, false, "original extent restore");
+            [window makeKeyAndOrderFront:nil];
+            pumpUntil([&] { return window.keyWindow && NSApp.keyWindow == window; }, "key-window restore");
+            std::cout << "PASS: actual native resize, minimize and restore publish independent backing extents to worker snapshots and presentation callbacks\n";
+        }
+        host->PumpMainThread(0ms);
+        auto initial = host->DrainEvents().after;
+        Require(initial.open && initial.focused && initial.window.id != 0 && initial.window.generation != 0 &&
+                initial.sources.keyboard == SourceAvailability::WindowEvents &&
+                initial.sources.mouse == SourceAvailability::WindowEvents &&
+                initial.sources.controller == SourceAvailability::Unsupported,
+                "Native host activation or input-source availability differs");
+        bool secondRejected = false;
+        try { auto second = NativeHostWindow::CreateMainThread({"Unexpected second native host", 80, 60}); }
+        catch (const std::logic_error&) { secondRejected = true; }
+        Require(secondRejected, "Native host admitted a second live window");
+        std::uint64_t sequence = initial.lastSequence;
+        auto capturedAt = std::chrono::steady_clock::time_point{};
+        auto drain = [&](std::size_t count) {
+            auto batch = host->DrainEvents();
+            Require(batch.events.size() == count && batch.after.window == initial.window,
+                    "Native host drain lost or duplicated its event prefix");
+            for (const auto& event : batch.events) {
+                Require(event.window == initial.window && event.sequence == ++sequence &&
+                        event.capturedAt >= capturedAt && event.capturedAt <= std::chrono::steady_clock::now(),
+                        "Native host event identity, ordering or capture time differs");
+                capturedAt = event.capturedAt;
+            }
+            Require(batch.after.lastSequence == sequence, "Native host snapshot crossed its drained event cutoff");
+            return batch;
+        };
+        auto key = [&](bool pressed, bool repeat = false) {
+            return [NSEvent keyEventWithType:pressed ? NSEventTypeKeyDown : NSEventTypeKeyUp
+                location:NSMakePoint(8, 8) modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
+                windowNumber:window.windowNumber context:nil characters:@"a" charactersIgnoringModifiers:@"a"
+                isARepeat:repeat keyCode:0];
+        };
+        auto mouse = [&](bool pressed) {
+            const auto location = [window.contentView convertPoint:NSMakePoint(NSMidX(window.contentView.bounds), NSMidY(window.contentView.bounds)) toView:nil];
+            return [NSEvent mouseEventWithType:pressed ? NSEventTypeLeftMouseDown : NSEventTypeLeftMouseUp
+                location:location modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
+                windowNumber:window.windowNumber context:nil eventNumber:1 clickCount:1 pressure:pressed ? 1 : 0];
+        };
+        auto post = [&](NSArray<NSEvent*>* events) {
+            for (NSEvent* event in events.reverseObjectEnumerator) [NSApp postEvent:event atStart:YES];
+            host->PumpMainThread(0ms, events.count);
+        };
+        post(@[key(true), key(true, true), mouse(true), key(false)]);
+        auto first = drain(3);
+        const auto& down = std::get<KeyboardInputEvent>(first.events[0].payload);
+        const auto& button = std::get<MouseInputEvent>(first.events[1].payload);
+        const auto& up = std::get<KeyboardInputEvent>(first.events[2].payload);
+        Require(down.keyCode == 4 && down.pressed && button.button == 1 && button.pressed &&
+                up.keyCode == 4 && !up.pressed && !first.after.heldKeys[4] && first.after.heldMouseButtons == 1,
+                "Actual AppKit key/repeat/mouse routing or first snapshot differs");
+        Require(drain(0).after.heldMouseButtons == 1, "Empty drain changed the previous event cutoff state");
+        post(@[mouse(false), mouse(true), key(true)]);
+        auto otherConsumer = std::async(std::launch::async, [&] {
+            try { static_cast<void>(host->DrainEvents()); }
+            catch (const std::logic_error&) { return true; }
+            return false;
+        });
+        Require(otherConsumer.get(), "Native host allowed a second event consumer");
+        auto next = drain(3);
+        Require(!std::get<MouseInputEvent>(next.events[0].payload).pressed &&
+                std::get<MouseInputEvent>(next.events[1].payload).pressed &&
+                std::get<KeyboardInputEvent>(next.events[2].payload).pressed &&
+                next.after.heldKeys[4] && next.after.heldMouseButtons == 1 && !first.after.heldKeys[4],
+                "Native host later prefix changed an earlier cutoff snapshot");
+        NSWindow* focusTarget = nil;
+        for (NSWindow* candidate in NSApp.windows)
+            if ([candidate.title isEqualToString:@"AnyPS5 Metal presentation replay"]) focusTarget = candidate;
+        Require(focusTarget != nil && focusTarget != window, "Native host focus replay lacks its existing presentation window");
+        [focusTarget makeKeyAndOrderFront:nil];
+        auto lost = drain(3);
+        Require(std::get<KeyboardInputEvent>(lost.events[0].payload).resetKeys &&
+                std::get<MouseInputEvent>(lost.events[1].payload).resetButtons &&
+                !std::get<FocusChanged>(lost.events[2].payload).focused && !lost.after.focused &&
+                std::none_of(lost.after.heldKeys.begin(), lost.after.heldKeys.end(), [](bool held) { return held; }) &&
+                lost.after.heldMouseButtons == 0,
+                "Actual AppKit focus loss did not reset held input before its focus event");
+        [window makeKeyAndOrderFront:nil];
+        auto gained = drain(3);
+        Require(std::get<KeyboardInputEvent>(gained.events[0].payload).connectionChange &&
+                std::get<KeyboardInputEvent>(gained.events[0].payload).connected &&
+                std::get<MouseInputEvent>(gained.events[1].payload).connectionChange &&
+                std::get<MouseInputEvent>(gained.events[1].payload).connected &&
+                std::get<FocusChanged>(gained.events[2].payload).focused && gained.after.focused,
+                "Actual AppKit focus gain did not reconnect window input in order");
+        post(@[key(true), mouse(true)]);
+        auto held = drain(2);
+        Require(held.after.heldKeys[4] && held.after.heldMouseButtons == 1, "Native host did not retain input before close");
+        const auto presentation = host->Presentation(SourceWidth, SourceHeight);
+        unsigned ready = 0;
+        AgcDriverPresentClear_nid_postfix(presentation, true, +[](void* context) {
+            ++*static_cast<unsigned*>(context);
+        }, &ready);
+        Require(ready == 1, "Native host presentation did not complete its real window clear");
+        auto layer = (__bridge CAMetalLayer*)presentation.metalLayer(presentation.context);
+        layer.framebufferOnly = NO;
+        id<CAMetalDrawable> drawable = [layer nextDrawable];
+        Require(drawable != nil && drawable.texture.device == device &&
+                drawable.texture.width == gained.after.drawableWidth && drawable.texture.height == gained.after.drawableHeight,
+                "Native host presentation callbacks did not provide an actual drawable with the backing extent");
+        auto queue = [device newCommandQueue];
+        auto bytes = [device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        Require(queue != nil && bytes != nil, "Native host drawable readback allocation failed");
+        std::memset(bytes.contents, 0x35, bytes.length);
+        gpuWork = [queue commandBuffer];
+        auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = drawable.texture;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 1, 0, 1);
+        auto encoder = [gpuWork renderCommandEncoderWithDescriptor:pass];
+        Require(encoder != nil, "Native host drawable render encoding failed");
+        [encoder endEncoding];
+        auto blit = [gpuWork blitCommandEncoder];
+        [blit copyFromTexture:drawable.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+            sourceSize:MTLSizeMake(1, 1, 1) toBuffer:bytes destinationOffset:0 destinationBytesPerRow:256 destinationBytesPerImage:256];
+        [blit endEncoding];
+        [window performClose:nil];
+        auto closing = drain(5);
+        Require(std::get<KeyboardInputEvent>(closing.events[0].payload).resetKeys &&
+                std::get<MouseInputEvent>(closing.events[1].payload).resetButtons &&
+                std::get<KeyboardInputEvent>(closing.events[2].payload).connectionChange &&
+                !std::get<KeyboardInputEvent>(closing.events[2].payload).connected &&
+                std::get<MouseInputEvent>(closing.events[3].payload).connectionChange &&
+                !std::get<MouseInputEvent>(closing.events[3].payload).connected &&
+                std::holds_alternative<CloseRequested>(closing.events[4].payload) &&
+                closing.after.open && closing.after.closeRequested && !closing.after.focused && window.visible &&
+                closing.after.heldMouseButtons == 0 &&
+                std::none_of(closing.after.heldKeys.begin(), closing.after.heldKeys.end(), [](bool held) { return held; }) &&
+                presentation.metalLayer(presentation.context) == (__bridge void*)layer,
+                "Actual AppKit close destroyed presentation before CPU/GPU drain or lost its ordered input reset");
+        [gpuWork commit];
+        [gpuWork waitUntilCompleted];
+        Require(gpuWork.status == MTLCommandBufferStatusCompleted, "Deferred-close native drawable did not complete on the GPU");
+        const Pixel green{0, 255, 0, 255};
+        Require(std::memcmp(bytes.contents, green.data(), green.size()) == 0 &&
+                std::all_of(static_cast<const std::byte*>(bytes.contents) + 4,
+                    static_cast<const std::byte*>(bytes.contents) + bytes.length, [](auto byte) { return byte == std::byte{0x35}; }),
+                "Deferred-close actual drawable pixels or readback guards differ");
+        drawable = nil;
+        driver.WaitIdle();
+        host->CloseAfterGpuDrainMainThread();
+        auto closed = drain(1);
+        Require(std::holds_alternative<WindowClosed>(closed.events[0].payload) && !closed.after.open &&
+                closed.after.sources.keyboard == SourceAvailability::Unavailable &&
+                closed.after.sources.mouse == SourceAvailability::Unavailable &&
+                closed.after.drawableWidth == 0 && closed.after.drawableHeight == 0 && !window.visible,
+                "Ordered native host close did not retire its window, source availability and drawable extent");
+        host = NativeHostWindow::CreateMainThread({"AnyPS5 replacement native host", 80, 60});
+        Require(host->Snapshot().window != initial.window, "Native host reused a closed window identity");
+        host->RequestCloseMainThread();
+        host->CloseAfterGpuDrainMainThread();
+    } catch (...) {
+        if (gpuWork.status >= MTLCommandBufferStatusCommitted) [gpuWork waitUntilCompleted];
+        try { host->RequestCloseMainThread(); } catch (...) {}
+        host->CloseAfterGpuDrainMainThread();
+        throw;
+    }
+    std::cout << "PASS: real AppKit pump, ordered single-consumer event cutoffs, focus resets and deferred native drawable close\n";
+}
+
 void Run(id<MTLDevice> device, id<MTLLibrary> library) {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -455,6 +688,7 @@ void Run(id<MTLDevice> device, id<MTLLibrary> library) {
     Require(minimized.calls == 1 && context.layer.acquisitionCount == acquisitions,
             "Minimized original presentation read an unborrowed display or acquired a drawable");
     ReplayOriginalFlipState(driver, context, presentation, queue, linear[0]);
+    ReplayNativeHost(device, driver);
     AgcDriverReleaseWindow_nid_postfix(&context);
     driver.Shutdown();
     [window orderOut:nil];
