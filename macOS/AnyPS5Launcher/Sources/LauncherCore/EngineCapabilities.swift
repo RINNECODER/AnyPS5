@@ -14,6 +14,7 @@ public struct EngineCapabilities: Decodable, Sendable {
     public let supportedContainers: [String]?
     public let unsupportedInstructionFamilies: [String]?
     public let resourceRootArgument: String?
+    public let sceModuleArgument: String?
     public let runtimeABI: String
     public let runtimeABIs: [String]?
     public let sceConstraints: [String]?
@@ -24,6 +25,7 @@ public struct EngineCapabilities: Decodable, Sendable {
         case guestArchitecture = "guest_architecture", supportedFormats = "supported_formats"
         case supportedContainers = "supported_containers", unsupportedInstructionFamilies = "unsupported_instruction_families"
         case resourceRootArgument = "resource_root_argument"
+        case sceModuleArgument = "sce_module_argument"
         case runtimeABI = "runtime_abi", ps5GameRuntimeReady = "ps5_game_runtime_ready"
         case runtimeABIs = "runtime_abis", sceConstraints = "sce_constraints"
         case backend

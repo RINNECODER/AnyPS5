@@ -90,7 +90,8 @@ final class LauncherStore {
         let entry = LocalGame(id: game?.id ?? local?.id ?? existing?.id ?? "local-\(UUID().uuidString)",
                               title: game?.title ?? local?.title ?? url.deletingPathExtension().lastPathComponent,
                               executablePath: url.path, workingDirectory: url.deletingLastPathComponent().path,
-                              resourceImagePath: local?.resourceImagePath ?? existing?.resourceImagePath)
+                              resourceImagePath: local?.resourceImagePath ?? existing?.resourceImagePath,
+                              sceModulePaths: local?.sceModulePaths ?? existing?.sceModulePaths ?? [])
         library.attach(entry)
         selectedID = entry.id
         if game == nil { section = .library }
@@ -171,6 +172,34 @@ final class LauncherStore {
             library.attach(updated)
             save()
         } catch { self.error = error.localizedDescription }
+    }
+
+    func chooseModules(for game: LocalGame) {
+        guard canSave else { error = "The saved library needs to be repaired before it can be changed."; return }
+        guard !isRunning, !isInspectingGame, !isCleaningResources else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose local game modules"
+        panel.message = "Select local SCE ELF or supported plaintext SELF libraries required by this game."
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = URL(fileURLWithPath: game.executablePath).deletingLastPathComponent()
+        guard panel.runModal() == .OK,
+              var updated = library.games.first(where: { $0.id == game.id }) else { return }
+        for url in panel.urls where !updated.sceModulePaths.contains(url.path) {
+            updated.sceModulePaths.append(url.path)
+        }
+        library.attach(updated)
+        save()
+    }
+
+    func removeModule(_ path: String, from game: LocalGame) {
+        guard canSave else { error = "The saved library needs to be repaired before it can be changed."; return }
+        guard !isRunning, !isInspectingGame, !isCleaningResources,
+              var updated = library.games.first(where: { $0.id == game.id }),
+              let index = updated.sceModulePaths.firstIndex(of: path) else { return }
+        updated.sceModulePaths.remove(at: index)
+        library.attach(updated)
+        save()
     }
 
     func launch(_ game: LocalGame) {

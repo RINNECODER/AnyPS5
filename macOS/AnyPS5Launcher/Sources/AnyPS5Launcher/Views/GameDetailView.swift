@@ -67,6 +67,27 @@ struct LocalGameActions: View {
                     .font(.caption).disabled(store.isRunning)
                 Text(game.resourceImagePath.map { "Read-only resources: \($0)" } ?? "Resources: \(game.workingDirectory)")
                     .font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                Divider()
+                Text("Local modules").font(.headline)
+                Button("Add local modules…") { store.chooseModules(for: game) }
+                    .font(.caption).disabled(store.isRunning || store.isInspectingGame || store.isCleaningResources)
+                if game.sceModulePaths.isEmpty {
+                    Text("Attach local libraries required by this game.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(game.sceModulePaths.enumerated()), id: \.offset) { _, path in
+                        HStack(alignment: .top) {
+                            Text(path).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                            Spacer()
+                            Button("Remove") { store.removeModule(path, from: game) }
+                                .font(.caption).help("Remove \(URL(fileURLWithPath: path).lastPathComponent)")
+                                .disabled(store.isRunning || store.isInspectingGame || store.isCleaningResources)
+                        }
+                    }
+                    if store.capabilities?.sceModuleArgument != "--sce-module" {
+                        Text("Choose an engine with local module loading support to run this configuration.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 if store.hasMountedResources {
                     Button("Retry resource cleanup") { Task { await store.retryResourceCleanup() } }
                         .font(.caption).disabled(store.isRunning || store.isCleaningResources)

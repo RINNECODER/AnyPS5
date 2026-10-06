@@ -59,6 +59,7 @@ public final class EngineRunner: @unchecked Sendable {
         var launchGame = game
         if !hasResourceArgument { launchGame.workingDirectory = resourceRoot }
         try Self.validate(engine: engine, game: launchGame, capabilities: capabilities)
+        try Self.validateModules(game: game, capabilities: capabilities)
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: resourceRoot, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw LauncherError("The game's resource folder is unavailable. Reconnect its drive or choose another folder.")
@@ -69,7 +70,8 @@ public final class EngineRunner: @unchecked Sendable {
         let pipe = Pipe()
         child.executableURL = engine
         let resourceArguments = hasResourceArgument ? ["--resource-root", resourceRoot] : []
-        child.arguments = resourceArguments + (capabilities != nil ? ["--diagnostics-json"] : []) + [game.executablePath]
+        let moduleArguments = game.sceModulePaths.flatMap { ["--sce-module", $0] }
+        child.arguments = resourceArguments + (capabilities != nil ? ["--diagnostics-json"] : []) + moduleArguments + [game.executablePath]
         child.currentDirectoryURL = URL(fileURLWithPath: launchGame.workingDirectory, isDirectory: true)
         child.standardOutput = pipe
         child.standardError = pipe
@@ -129,5 +131,33 @@ public final class EngineRunner: @unchecked Sendable {
         defer { lock.unlock() }
         stopRequested = true
         if let process, process.isRunning { process.terminate() }
+    }
+
+    // Launch-only checks: the CLI's metadata inspection does not accept modules.
+    private static func validateModules(game: LocalGame, capabilities: EngineCapabilities?) throws {
+        guard !game.sceModulePaths.isEmpty else { return }
+        guard capabilities?.sceModuleArgument == "--sce-module",
+              capabilities?.supportedFormats.contains("sce_elf64_x86_64") == true else {
+            throw LauncherError("This engine does not advertise loading supplied SCE game libraries. Choose a supported engine or remove the attached libraries.")
+        }
+        let input = try FileHandle(forReadingFrom: URL(fileURLWithPath: game.executablePath))
+        defer { try? input.close() }
+        let header = try input.read(upToCount: 64) ?? Data()
+        let magic = Array(header.prefix(4))
+        let selfContainer = magic == [0x4f, 0x15, 0x3d, 0x1d] || magic == [0x54, 0x14, 0xf5, 0xee]
+        let type = header.count >= 18 ? UInt16(header[16]) | (UInt16(header[17]) << 8) : 0
+        let sceELF = header.count >= 64 && magic == [0x7f, 0x45, 0x4c, 0x46] &&
+            (type == 0xfe10 || type == 0xfe18 || (type == 3 && (header[7] == 9 || header[8] == 2)))
+        guard selfContainer || sceELF else { throw LauncherError("Attached game libraries require an SCE executable.") }
+        for path in game.sceModulePaths {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+            guard (path as NSString).isAbsolutePath,
+                  attributes?[.type] as? FileAttributeType == .typeRegular,
+                  FileManager.default.isReadableFile(atPath: path),
+                  let module = FileHandle(forReadingAtPath: path) else {
+                throw LauncherError("The game library is unavailable or is not a readable regular file: \(path)")
+            }
+            try module.close()
+        }
     }
 }
