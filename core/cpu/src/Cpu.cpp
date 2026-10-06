@@ -88,6 +88,13 @@ void checkMapped(uc_engine* engine, std::uint64_t address, std::size_t size, uns
 }
 }
 
+struct Machine::Context::Payload {};
+Machine::Context::Context() = default;
+Machine::Context::~Context() = default;
+Machine::Context::Context(Context&&) noexcept = default;
+Machine::Context& Machine::Context::operator=(Context&&) noexcept = default;
+Machine::Context::Context(std::unique_ptr<Payload> value) : payload(std::move(value)) {}
+
 struct Machine::Impl {
     Machine& owner;
     const std::thread::id ownerThread = std::this_thread::get_id();
@@ -131,6 +138,12 @@ struct Machine::Impl {
         }
     }
     ~Impl() { uc_close(engine); }
+    [[noreturn]] void rejectContext() const {
+        if (std::this_thread::get_id() != ownerThread)
+            throw std::logic_error("Guest execution context requires its owner thread");
+        if (running) throw std::logic_error("Guest execution context requires an idle Machine");
+        throw std::runtime_error("Unsupported guest execution contexts in the Unicorn backend");
+    }
     void rejectPrivileged(std::uint64_t address, std::uint32_t size) {
         std::array<std::uint8_t,15> bytes{};
         if (!size || size > bytes.size()) return;
@@ -389,6 +402,9 @@ std::uint64_t Machine::Get(Register reg) const {
     return value;
 }
 void Machine::Set(Register reg, std::uint64_t value) { check(uc_reg_write(impl->engine, registerId(reg), &value), "Write guest register"); }
+Machine::Context Machine::CaptureContext() { impl->rejectContext(); }
+void Machine::SaveContext(Context&) { impl->rejectContext(); }
+void Machine::RestoreContext(const Context&) { impl->rejectContext(); }
 void Machine::SetSyscallHandler(std::function<void(Machine&)> handler) { impl->syscall = std::move(handler); }
 void Machine::AddHostCall(std::uint64_t address, std::function<void(Machine&)> handler) {
     if (!handler) throw std::invalid_argument("Guest host import requires a handler");
