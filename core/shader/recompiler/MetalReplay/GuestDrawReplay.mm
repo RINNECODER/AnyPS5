@@ -203,17 +203,26 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     constexpr std::uint64_t ComputeCodeAddress = 0x800000, ComputeInputAddress = 0x810000,
         ComputeOutputAddress = 0x820000, LabelAddress = 0x900000;
     constexpr std::uint64_t GraphicsCommandAddress = 0xa00000, ComputeCommandAddress = 0xa10000,
-        SecondCommandAddress = 0xa20000, IndirectAddress = 0xa30000, PacketAddress = 0xb00000;
-    auto vertices = Triangle;
+        SecondCommandAddress = 0xa20000, IndirectAddress = 0xa30000, PacketAddress = 0xb00000,
+        IndirectDrawCommandAddress = 0xa40000, ArgumentAddress = 0xc00000;
+    std::array<std::array<float, 4>, 6> vertices;
+    std::copy(Triangle.begin(), Triangle.end(), vertices.begin());
+    std::fill(vertices.begin() + 3, vertices.end(), std::array<float, 4>{8, 8, 0.5f, 1});
     const auto originalVertices = vertices;
     std::vector<std::byte> pixels(256 + Width * Height * 4 + 256, std::byte{0x7b});
     std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
-    auto vertexCode = VertexCode;
+    std::array<std::uint32_t, 9> vertexCode{};
+    std::copy(VertexCode.begin(), VertexCode.end(), vertexCode.begin());
     vertexCode[1] = 0x80020005;
     auto fragmentCode = MaskedPixelCode;
     std::array<std::uint32_t, 17> computeCode{
         0x34020082, 0xe0302000, 0x80000401, 0xbf8c3f70, 0x7e000000, 0x7e003600, 0x7e008200, 0x4a080881,
         0xd5800000, 0x00000000, 0xd59b0000, 0x00000000, 0xd5c10000, 0x00000000, 0xe0702000, 0x80010401, 0xbf810000};
+    std::array<std::uint32_t, 8 + 64 + 9> computeStorage;
+    computeStorage.fill(0xa6a6a6a6);
+    std::copy_n(computeCode.begin(), 8, computeStorage.begin());
+    std::copy(computeCode.begin() + 8, computeCode.end(), computeStorage.begin() + 72);
+    const auto originalComputeStorage = computeStorage;
     std::array<std::uint32_t, 64 * 4> input, output;
     input.fill(0xa5a5a5a5);
     for (std::uint32_t i = 0; i < 64; ++i) input[i * 4] = i * 3 + 7;
@@ -233,7 +242,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         std::memcpy(data.data(), &header, sizeof(header));
         return data;
     };
-    auto vertexHeader = makeHeader(0x700000, 0x500000, sizeof(vertexCode), 2);
+    auto vertexHeader = makeHeader(0x700000, 0x500000, sizeof(VertexCode), 2);
     auto fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(fragmentCode), 1);
     auto computeHeader = makeHeader(0x720000, ComputeCodeAddress, sizeof(computeCode), 0);
     const auto append = [](std::vector<std::uint32_t>& commands, std::uint32_t opcode,
@@ -260,15 +269,21 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     append(compute, 0x15, {1, 1, 1, 0x8041});
     append(compute, 0x49, {0, 1u << 29u, static_cast<std::uint32_t>(LabelAddress), 0, 1, 0, 0});
     std::array<std::uint32_t, 3> second{0xc0012d00, 3, 2};
-    std::array<::Packet, 3> packets{{
+    std::array<std::uint32_t, 256> indirectCommands{};
+    std::array<std::uint32_t, 80> arguments{};
+    std::array<std::uint16_t, 4> indices{0, 3, 4, 5};
+    const auto originalIndices = indices;
+    std::array<::Packet, 4> packets{{
         {reinterpret_cast<std::uint32_t*>(GraphicsCommandAddress), static_cast<std::uint32_t>(graphics.size()), 0, {}},
         {reinterpret_cast<std::uint32_t*>(ComputeCommandAddress), static_cast<std::uint32_t>(compute.size()), 0, {}},
-        {reinterpret_cast<std::uint32_t*>(SecondCommandAddress), static_cast<std::uint32_t>(second.size()), 0, {}}}};
+        {reinterpret_cast<std::uint32_t*>(SecondCommandAddress), static_cast<std::uint32_t>(second.size()), 0, {}},
+        {reinterpret_cast<std::uint32_t*>(IndirectDrawCommandAddress), 0, 0, {}}}};
     std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
         {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true},
         {0x500000, std::as_writable_bytes(std::span(vertexCode)), false},
         {0x600000, std::as_writable_bytes(std::span(fragmentCode)), false},
-        {ComputeCodeAddress, std::as_writable_bytes(std::span(computeCode)), false},
+        {ComputeCodeAddress, std::as_writable_bytes(std::span(computeStorage).first(8)), false},
+        {ComputeCodeAddress + 8 * sizeof(std::uint32_t), std::as_writable_bytes(std::span(computeStorage).subspan(72)), false},
         {0x700000, vertexHeader, false}, {0x710000, fragmentHeader, false}, {0x720000, computeHeader, false},
         {ComputeInputAddress, std::as_writable_bytes(std::span(input)), false},
         {ComputeOutputAddress, std::as_writable_bytes(std::span(output)), true},
@@ -277,7 +292,10 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         {ComputeCommandAddress, std::as_writable_bytes(std::span(compute)), false},
         {SecondCommandAddress, std::as_writable_bytes(std::span(second)), false},
         {IndirectAddress, std::as_writable_bytes(std::span(indirect)), false},
-        {PacketAddress, std::as_writable_bytes(std::span(packets)), false}};
+        {PacketAddress, std::as_writable_bytes(std::span(packets)), false},
+        {IndirectDrawCommandAddress, std::as_writable_bytes(std::span(indirectCommands)), false},
+        {ArgumentAddress, std::as_writable_bytes(std::span(arguments)), false},
+        {IndexAddress, std::as_writable_bytes(std::span(indices)), false}};
     const auto checkPixels = [&](bool masked) {
         for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
             auto expected = std::byte{0x7b};
@@ -301,7 +319,6 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         });
     AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x700000));
     AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
-    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x720000));
     AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0);
     indirect[1] = 0;
     std::fill(graphics.begin(), graphics.end(), 0x80000000);
@@ -312,7 +329,8 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     AgcDriverWaitIdle_nid_postfix();
     Require(interrupts.load() == 1, "Public submitted draw did not deliver exactly one completed EOP callback");
     checkPixels(true);
-    Require(vertices == originalVertices && input == originalInput && labels[2] == 0xcafef00d && labels[3] == 0x12345678,
+    Require(vertices == originalVertices && input == originalInput && computeStorage == originalComputeStorage &&
+        labels[2] == 0xcafef00d && labels[3] == 0x12345678,
         "Public submission changed borrowed input or label guards");
     std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
     AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress + 2 * sizeof(::Packet)), 0);
@@ -320,6 +338,91 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     checkPixels(false);
     Require(interrupts.load() == 1 && vertices == originalVertices && input == originalInput,
         "Persistent queue submission modified input or redelivered EOP");
+    const auto submitIndirect = [&](const std::vector<std::uint32_t>& words, std::uint8_t targetByte, const std::string& name) {
+        Require(words.size() <= indirectCommands.size(), "Indirect replay command allocation is too small");
+        std::copy(words.begin(), words.end(), indirectCommands.begin());
+        packets[3].dw_num = static_cast<std::uint32_t>(words.size());
+        std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+        const auto originalArguments = arguments;
+        AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress + 3 * sizeof(::Packet)), 0);
+        AgcDriverWaitIdle_nid_postfix();
+        for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
+            const auto expected = offset >= 256 && offset < 256 + Width * Height * 4 ? std::byte{targetByte} : std::byte{0x7b};
+            Require(pixels[offset] == expected, name + " produced wrong target byte " + std::to_string(offset));
+        }
+        Require(indices == originalIndices && arguments == originalArguments, name + " modified borrowed index or argument records");
+        std::cout << name << " passed\n";
+    };
+    std::vector<std::uint32_t> signedCommands;
+    append(signedCommands, 0x26, {static_cast<std::uint32_t>(IndexAddress), 0});
+    append(signedCommands, 0x2a, {0});
+    append(signedCommands, 0x13, {4});
+    const std::array<std::uint32_t, 1> negativeBase{0xfffffffdu};
+    RegisterPacket(signedCommands, 0x79, 0x24a, negativeBase);
+    append(signedCommands, 0x35, {4, 1, 3, 0});
+    submitIndirect(signedCommands, 255, "Actual public indexed draw: GE_INDX_OFFSET -3 with raw indices3/4/5");
+    std::copy(VertexCode.begin(), VertexCode.end(), vertexCode.begin() + 3);
+    vertexCode[0] = 0x4a0a0a0c;
+    vertexCode[1] = 0x4a0a0a0d;
+    vertexCode[2] = 0x4a0a0a0e;
+    vertexCode[4] = 0x80020005;
+    vertexHeader = makeHeader(0x700000, 0x500000, sizeof(vertexCode), 2);
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x700000));
+    std::vector<std::uint32_t> setup;
+    const std::array<std::uint32_t, 1> zeroBase{0}, sevenUsers{14};
+    const std::array<std::uint32_t, 7> indirectUsers{static_cast<std::uint32_t>(VertexAddress), 16u << 16u, 6, 0x01016fac, 5, 5, 5};
+    RegisterPacket(setup, 0x79, 0x24a, zeroBase);
+    RegisterPacket(setup, 0x76, 0x08b, sevenUsers);
+    RegisterPacket(setup, 0x76, 0x08c, indirectUsers);
+    append(setup, 0x11, {1, static_cast<std::uint32_t>(ArgumentAddress), 0});
+    std::fill(vertices.begin(), vertices.end(), std::array<float, 4>{8, 8, 0.5f, 1});
+    std::copy(Triangle.begin(), Triangle.end(), vertices.begin() + 3);
+    arguments.fill(0);
+    const std::array<std::uint32_t, 4> singleRecord{3, 1, 1, 2};
+    std::copy(singleRecord.begin(), singleRecord.end(), arguments.begin() + 4);
+    auto single = setup;
+    const std::array<std::uint32_t, 1> zeroDrawIndex{0};
+    RegisterPacket(single, 0x76, 0x092, zeroDrawIndex);
+    append(single, 0x24, {16, 0x90, 0x91, 2});
+    submitIndirect(single, 255, "Actual public DRAW_INDIRECT: SET_BASE offset and guest SGPR base/start");
+    std::fill(vertices.begin(), vertices.end(), std::array<float, 4>{8, 8, 0.5f, 1});
+    std::copy(Triangle.begin(), Triangle.end(), vertices.begin());
+    arguments.fill(0);
+    const std::array<std::uint32_t, 5> indexedRecord{99, 1, 1, 0xfffffffdu, 0};
+    std::copy(indexedRecord.begin(), indexedRecord.end(), arguments.begin() + 4);
+    std::vector<std::uint32_t> indexedSingle;
+    append(indexedSingle, 0x25, {16, 0x90, 0x91, 0});
+    submitIndirect(indexedSingle, 255, "Actual public DRAW_INDEX_INDIRECT: firstIndex and declared index-count clamp");
+    const std::array<std::uint32_t, 5> eighthPixel{0x7e0e02ff, 0x3e000000, 0xf800180f, 0x07070707, 0xbf810000};
+    std::copy(eighthPixel.begin(), eighthPixel.end(), fragmentCode.begin());
+    fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(eighthPixel), 1);
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+    std::fill(vertices.begin(), vertices.end(), std::array<float, 4>{8, 8, 0.5f, 1});
+    std::copy(Triangle.begin(), Triangle.end(), vertices.begin() + 3);
+    arguments.fill(0);
+    const std::array<std::array<std::uint32_t, 4>, 3> multiRecords{{{3, 1, 1, 2}, {3, 1, 0, 2}, {3, 1, 1, 0}}};
+    for (std::size_t i = 0; i < multiRecords.size(); ++i) {
+        std::copy(multiRecords[i].begin(), multiRecords[i].end(), arguments.begin() + 4 + i * 8);
+        std::fill_n(arguments.begin() + 8 + i * 8, 4, 0xabcdef01);
+    }
+    std::vector<std::uint32_t> multi;
+    const std::array<std::uint32_t, 1> additiveBlend{0x40000101};
+    RegisterPacket(multi, 0x69, 0x1e0, additiveBlend);
+    append(multi, 0x2c, {16, 0x90, 0x91, 0x92u | (1u << 31u) | (1u << 30u), 2,
+        static_cast<std::uint32_t>(ComputeOutputAddress), 0, 32, 2});
+    submitIndirect(multi, 128, "Actual public DRAW_INDIRECT_MULTI: padded records, GPU-written count cap and guest drawIndex");
+    std::fill(vertices.begin(), vertices.end(), std::array<float, 4>{8, 8, 0.5f, 1});
+    std::copy(Triangle.begin(), Triangle.end(), vertices.begin());
+    arguments.fill(0);
+    const std::array<std::array<std::uint32_t, 5>, 3> indexedRecords{{{3, 0, 1, 0, 0}, {99, 1, 1, 0xfffffffcu, 0}, {3, 1, 4, 0, 0}}};
+    for (std::size_t i = 0; i < indexedRecords.size(); ++i) {
+        std::copy(indexedRecords[i].begin(), indexedRecords[i].end(), arguments.begin() + 4 + i * 8);
+        std::fill_n(arguments.begin() + 9 + i * 8, 3, 0xabcdef01);
+    }
+    std::vector<std::uint32_t> indexedMulti;
+    append(indexedMulti, 0x38, {16, 0x90, 0x91, 0x92u | (1u << 31u), 3, 0, 0, 32, 0});
+    submitIndirect(indexedMulti, 96, "Actual public DRAW_INDEX_INDIRECT_MULTI: zero instances, clamped firstIndex and excluded out-of-range record");
+    vertices = originalVertices;
     AgcDriverShutdown_nid_postfix();
     std::cout << "Actual public AGC Submit: shader registration snapshots, immutable flattened IB, cross-queue compute WAIT/conditional draw, completed EOP and persistent registers passed\n";
     output.fill(0xdeadbeef);
@@ -384,7 +487,8 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         catch (...) {}
         throw;
     }
-    Require(vertices == originalVertices && input == originalInput, "Failed queue draining modified borrowed input memory");
+    Require(vertices == originalVertices && input == originalInput && computeStorage == originalComputeStorage,
+        "Failed queue draining modified borrowed input or raw shader storage guards");
     std::cout << "Actual native queue failure: WaitIdle retained borrowed memory until the completed EOP worker released it and preserved the original error passed\n";
 }
 

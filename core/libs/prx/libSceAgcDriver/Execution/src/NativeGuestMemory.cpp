@@ -77,6 +77,20 @@ std::span<std::byte> ContiguousBorrowedRange(std::uint64_t address, std::size_t 
         throw std::invalid_argument("Native guest memory range crosses borrowed spans");
     return range.host.subspan(offset, bytes);
 }
+
+std::size_t ReadableBorrowedBytes(std::uint64_t address, std::size_t maxBytes) {
+    if (address == 0) throw std::invalid_argument("Native guest memory address is null");
+    const auto end = End(address, maxBytes);
+    auto cursor = address;
+    for (const auto& range : ranges) {
+        const auto rangeEnd = End(range.guestAddress, range.host.size());
+        if (rangeEnd <= cursor) continue;
+        if (range.guestAddress > cursor) break;
+        cursor = std::min(end, rangeEnd);
+        if (cursor == end) break;
+    }
+    return static_cast<std::size_t>(cursor - address);
+}
 }
 
 namespace AgcDriver::GuestMemory {

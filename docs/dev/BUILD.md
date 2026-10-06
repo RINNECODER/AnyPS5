@@ -21,7 +21,7 @@ cmake --build build --target libs --parallel
 
 [Relinker usage and runtime layout](../user/USAGE.md).
 
-## macOS Metal utilities
+## macOS Metal backend
 
 On an Apple Silicon Mac with Xcode's Metal command-line tools available, build and test the native Metal utilities, presentation path, and guest-memory mapping with:
 
@@ -51,7 +51,7 @@ cmake --build build-metal --parallel
 ctest --test-dir build-metal --output-on-failure
 ```
 
-This mode selects Metal at the original AGC submission and presentation entry points. It exercises existing guest vertex, fragment, and compute shaders, PM4 register and memory packets, independent queues, indexed and nonindexed draws, texture and sampler resources, retained depth attachments, and native macOS drawables. Initialize `MetalDriver::Configure` with the device, utility library, and borrowed guest ranges before submission; keep the borrowed storage alive through `WaitIdle` and presentation completion. Vulkan-Headers supplies existing state metadata types; no Vulkan runtime is linked. The guest CPU runtime and unsupported graphics scheduling paths remain outside this mode.
+This mode selects Metal at the original AGC submission and presentation entry points. It exercises existing guest vertex and fragment shaders, registered and raw compute programs, PM4 register and memory packets, independent queues, direct and indirect indexed and nonindexed draws, texture and sampler resources, retained depth attachments, and native macOS drawables. Initialize `MetalDriver::Configure` with the device, utility library, and borrowed guest ranges before submission; keep the borrowed storage alive through `WaitIdle` and presentation completion. Vulkan-Headers supplies existing state metadata types; no Vulkan runtime is linked. Mesh, tessellation, rectangle-list draw stages and occlusion visibility dumps remain unsupported. The guest CPU runtime remains outside this mode.
 
 ## CMake flags
 

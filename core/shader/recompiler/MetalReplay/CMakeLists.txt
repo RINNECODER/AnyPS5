@@ -14,6 +14,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Execution/src/Pm4.cpp"
     "${agcDriverRoot}/Execution/src/ComputeDispatch.cpp"
     "${agcDriverRoot}/Execution/src/DrawDispatch.cpp"
+    "${agcDriverRoot}/Execution/src/IndirectDraw.cpp"
     "${agcDriverRoot}/Execution/src/NativeGuestMemory.cpp"
     "${agcDriverRoot}/Execution/src/SubmissionCapture.cpp"
     "${agcDriverRoot}/Execution/src/ShaderCapture.cpp"

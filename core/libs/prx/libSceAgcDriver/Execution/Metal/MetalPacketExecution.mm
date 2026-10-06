@@ -1,6 +1,7 @@
 #include "MetalDriverInternal.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ComputeDispatch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DrawDispatch.hpp"
+#include "prx/libSceAgcDriver/Execution/include/IndirectDraw.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
@@ -45,19 +46,28 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     if (backend == nullptr || submission.shaders == nullptr) throw std::runtime_error("Native Metal compute executor is not configured");
     const auto decoded = DecodeComputeDispatch(queue, packet);
     if (std::any_of(decoded.groups.begin(), decoded.groups.end(), [](auto value) { return value == 0; })) return;
+    std::shared_ptr<const DriverDetail::ShaderSnapshot> captured;
     auto position = submission.shaders->upper_bound(decoded.programAddress);
-    if (position == submission.shaders->begin()) throw std::runtime_error("Native Metal raw compute shader capture is not implemented; register the shader before submitting");
-    --position;
-    const auto& snapshot = *position->second;
-    if (decoded.programAddress < snapshot.codeAddress || decoded.programAddress - snapshot.codeAddress >= snapshot.code.size() * sizeof(std::uint32_t)) {
-        throw std::runtime_error("Native Metal raw compute shader capture is not implemented; program lies outside registered shader code");
+    if (position != submission.shaders->begin()) {
+        --position;
+        const auto& candidate = position->second;
+        if (decoded.programAddress >= candidate->codeAddress &&
+            decoded.programAddress - candidate->codeAddress < candidate->code.size() * sizeof(std::uint32_t)) {
+            captured = candidate;
+        }
     }
+    if (captured == nullptr) {
+        CompletePriorGpuWorkAndCopyBack();
+        const auto available = NativeGuestMemory::ReadableBorrowedBytes(decoded.programAddress, 1024 * 1024);
+        captured = DriverDetail::CaptureRawComputeShader(decoded.programAddress, available);
+    }
+    const auto& snapshot = *captured;
     if (snapshot.type != 0 || (decoded.programAddress - snapshot.codeAddress) % sizeof(std::uint32_t) != 0) {
         throw std::invalid_argument("Native Metal compute program refers to incompatible shader code");
     }
     const auto offset = static_cast<std::size_t>((decoded.programAddress - snapshot.codeAddress) / sizeof(std::uint32_t));
-    std::vector<MemoryRegion> memory{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))},
-        {snapshot.headerAddress, snapshot.header}};
+    std::vector<MemoryRegion> memory{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}};
+    if (!snapshot.header.empty()) memory.push_back({snapshot.headerAddress, snapshot.header});
     ShaderMemory capture(memory);
     RecompileRequest request{{ShaderStage::Compute, decoded.programAddress, std::span(snapshot.code).subspan(offset),
         snapshot.headerAddress, snapshot.header},
@@ -91,46 +101,66 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
 void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
     if (draw == nullptr || submission.shaders == nullptr) throw std::runtime_error("Native Metal draw executor is not configured");
     auto parameters = Pm4::ResolveDraw(packet, queue);
-    if (parameters.indirect) throw std::runtime_error("Native Metal indirect draw execution is not implemented");
-    if (parameters.indexCount == 0 || parameters.instanceCount == 0) return;
-    const auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
+    if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) return;
+    auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
     if (decoded.state.stages.path != Graphics::ShaderPath::Vertex || decoded.state.rectList) {
         throw std::runtime_error("Native Metal draw execution requires the implemented vertex/fragment path");
     }
-    std::vector<MemoryRegion> memory;
-    std::vector<LinkedProgram> linked;
-    for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
-        const auto& program = decoded.programs[i];
-        memory.insert(memory.end(), program.memory.begin(), program.memory.end());
-        linked.push_back({decoded.roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
+    const auto executeDirect = [&](Pm4::DrawParameters direct) {
+        CheckFailureAndStopping();
+        std::vector<MemoryRegion> memory;
+        std::vector<LinkedProgram> linked;
+        for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
+            const auto& program = decoded.programs[i];
+            memory.insert(memory.end(), program.memory.begin(), program.memory.end());
+            linked.push_back({decoded.roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
+        }
+        ShaderMemory capture(memory);
+        std::vector<RecompileResult> programs;
+        programs.reserve(decoded.programs.size());
+        std::vector<Graphics::CompiledShader> stages;
+        stages.reserve(decoded.programs.size());
+        std::uint32_t pushOffset = 0;
+        for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
+            const auto& program = decoded.programs[i];
+            std::optional<ShaderVertexStageInfo> vertex;
+            if (program.binary.stage != ShaderStage::Fragment) {
+                vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData);
+            }
+            auto request = BuildDrawRecompileRequest(program.binary, program.firstUserSgpr, program.userData,
+                decoded.state, decoded.pixel, vertex, nativeTarget(nativeDevice), pushOffset, direct, memory, linked);
+            const auto resources = capture.Capture(request);
+            memory = capture.Regions();
+            request.context.memory = memory;
+            programs.push_back(*Recompile(request, *resources));
+            const auto& result = programs.back();
+            if (result.pushConstants.size() > Graphics::PipelinePushConstantBytes - pushOffset) {
+                throw std::runtime_error("Native Metal draw stage push constants exceed the pipeline block");
+            }
+            stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushOffset});
+            pushOffset += static_cast<std::uint32_t>(result.pushConstants.size());
+            if (i == 0) FoldDrawOffsets(result, program.firstUserSgpr, program.userData, direct);
+        }
+        checkGpuFault(draw->DrawSynchronously(decoded.state, direct, stages, ranges));
+    };
+    if (!parameters.indirect) {
+        executeDirect(parameters);
+        return;
     }
-    ShaderMemory capture(memory);
-    std::vector<RecompileResult> programs;
+    std::vector<IndirectDrawProgram> programs;
     programs.reserve(decoded.programs.size());
-    std::vector<Graphics::CompiledShader> stages;
-    stages.reserve(decoded.programs.size());
-    std::uint32_t pushOffset = 0;
     for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
-        const auto& program = decoded.programs[i];
-        std::optional<ShaderVertexStageInfo> vertex;
-        if (program.binary.stage != ShaderStage::Fragment) {
-            vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData);
-        }
-        auto request = BuildDrawRecompileRequest(program.binary, program.firstUserSgpr, program.userData,
-            decoded.state, decoded.pixel, vertex, nativeTarget(nativeDevice), pushOffset, parameters, memory, linked);
-        const auto resources = capture.Capture(request);
-        memory = capture.Regions();
-        request.context.memory = memory;
-        programs.push_back(*Recompile(request, *resources));
-        const auto& result = programs.back();
-        if (result.pushConstants.size() > Graphics::PipelinePushConstantBytes - pushOffset) {
-            throw std::runtime_error("Native Metal draw stage push constants exceed the pipeline block");
-        }
-        stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushOffset});
-        pushOffset += static_cast<std::uint32_t>(result.pushConstants.size());
-        if (i == 0) FoldDrawOffsets(result, program.firstUserSgpr, program.userData, parameters);
+        auto& program = decoded.programs[i];
+        programs.push_back({decoded.roles[i], program.userDataBase, program.firstUserSgpr, program.userData});
     }
-    checkGpuFault(draw->DrawSynchronously(decoded.state, parameters, stages, ranges));
+    MarkIndirectDrawSgprs(*parameters.indirect, programs);
+    CompletePriorGpuWorkAndCopyBack();
+    const auto records = ReadIndirectDrawRecords(*parameters.indirect);
+    for (std::uint32_t record = 0; record < records.size(); ++record) {
+        CheckFailureAndStopping();
+        const auto expanded = ExpandIndirectDrawRecord(parameters, records[record], record, programs);
+        if (expanded) executeDirect(expanded->parameters);
+    }
 }
 
 void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueState& queue) {

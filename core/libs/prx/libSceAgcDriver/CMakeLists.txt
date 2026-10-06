@@ -129,6 +129,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ComputeDispatch.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DrawDispatch.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/IndirectDraw.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubmissionCapture.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderCapture.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubmissionValidation.cpp

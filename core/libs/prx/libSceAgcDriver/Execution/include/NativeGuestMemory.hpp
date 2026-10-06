@@ -25,5 +25,6 @@ private:
 };
 
 std::span<std::byte> ContiguousBorrowedRange(std::uint64_t address, std::size_t bytes, bool writable = false);
+std::size_t ReadableBorrowedBytes(std::uint64_t address, std::size_t maxBytes);
 
 }

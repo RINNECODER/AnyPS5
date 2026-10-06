@@ -9,7 +9,6 @@
 #include <cstring>
 #include <list>
 #include <stdexcept>
-#include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 
 namespace AgcDriver::DriverDetail {
 
@@ -41,42 +40,26 @@ std::shared_ptr<const ShaderSnapshot> ReadRawComputeShader(std::uint64_t address
         if (range.first != end) break;
         end = range.second;
     }
-    const auto available = static_cast<std::size_t>(end - address) / sizeof(std::uint32_t);
-    ShaderSnapshot snapshot{address, 0, 0, {}, {}};
-    while (snapshot.code.size() < available) {
-        const auto previous = snapshot.code.size();
-        snapshot.code.resize(std::min(available, std::max<std::size_t>(64, previous * 2)));
-        GuestMemory::Read(address + previous * sizeof(std::uint32_t),
-            std::as_writable_bytes(std::span(snapshot.code).subspan(previous)), alignof(std::uint32_t));
-        try {
-            const auto decoded = ShaderRecompiler::RdnaInstructionDecoder{}.Decode(snapshot.code);
-            const auto& last = decoded.instructions.back();
-            snapshot.code.resize(last.programCounter / sizeof(std::uint32_t) + last.wordCount);
-            auto result = std::make_shared<const ShaderSnapshot>(std::move(snapshot));
-            std::lock_guard lock(cacheMutex);
-            const auto found = std::find_if(cache.begin(), cache.end(), [address](const auto& entry) { return entry->codeAddress == address; });
-            if (found != cache.end()) {
-                if ((*found)->code == result->code) {
-                    result = *found;
-                    cache.splice(cache.begin(), cache, found);
-                    return result;
-                }
-                cacheBytes -= (*found)->code.size() * sizeof(std::uint32_t);
-                cache.erase(found);
-            }
-            const auto bytes = result->code.size() * sizeof(std::uint32_t);
-            while (!cache.empty() && (cache.size() >= 64 || cacheBytes + bytes > 8 * 1024 * 1024)) {
-                cacheBytes -= cache.back()->code.size() * sizeof(std::uint32_t);
-                cache.pop_back();
-            }
-            cache.push_front(result);
-            cacheBytes += bytes;
+    auto result = CaptureRawComputeShader(address, static_cast<std::size_t>(end - address));
+    std::lock_guard lock(cacheMutex);
+    const auto found = std::find_if(cache.begin(), cache.end(), [address](const auto& entry) { return entry->codeAddress == address; });
+    if (found != cache.end()) {
+        if ((*found)->code == result->code) {
+            result = *found;
+            cache.splice(cache.begin(), cache, found);
             return result;
-        } catch (const std::out_of_range&) {
-            if (snapshot.code.size() == available) break;
         }
+        cacheBytes -= (*found)->code.size() * sizeof(std::uint32_t);
+        cache.erase(found);
     }
-    throw std::runtime_error("AGC driver: raw compute program has no reachable end within mapped code or the size limit");
+    const auto bytes = result->code.size() * sizeof(std::uint32_t);
+    while (!cache.empty() && (cache.size() >= 64 || cacheBytes + bytes > 8 * 1024 * 1024)) {
+        cacheBytes -= cache.back()->code.size() * sizeof(std::uint32_t);
+        cache.pop_back();
+    }
+    cache.push_front(result);
+    cacheBytes += bytes;
+    return result;
 }
 
 bool FailureMemo() {

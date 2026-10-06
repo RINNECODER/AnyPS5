@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -207,6 +208,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     std::uint32_t nativeIndexSize = draw.indexSize;
     std::uint32_t maxIndex = 0;
     if (draw.indexed) {
+        std::uint32_t minIndex = std::numeric_limits<std::uint32_t>::max();
         if ((draw.indexSize != 2 && draw.indexSize != 4) || draw.indexAddress % draw.indexSize != 0) {
             throw std::invalid_argument("Metal draw index format or address is invalid");
         }
@@ -218,6 +220,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             std::uint32_t index = 0;
             if (draw.indexSize == 2) { std::uint16_t value; std::memcpy(&value, data + std::size_t{i} * 2u, 2); index = value; }
             else std::memcpy(&index, data + std::size_t{i} * 4u, 4);
+            minIndex = std::min(minIndex, index);
             maxIndex = std::max(maxIndex, index);
         }
         if ((primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip) &&
@@ -236,8 +239,13 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             indexBuffer = {promoted, 0, promoted.length};
             nativeIndexSize = 4;
         }
-        if (draw.firstVertex > std::numeric_limits<std::uint32_t>::max() - maxIndex) throw std::invalid_argument("Metal draw base vertex overflows guest invocation index");
-        maxIndex += draw.firstVertex;
+        const std::int64_t baseVertex = std::bit_cast<std::int32_t>(draw.firstVertex);
+        const auto firstIndex = std::int64_t{minIndex} + baseVertex;
+        const auto lastIndex = std::int64_t{maxIndex} + baseVertex;
+        if (firstIndex < 0 || lastIndex > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("Metal draw base vertex overflows guest invocation index");
+        }
+        maxIndex = static_cast<std::uint32_t>(lastIndex);
     } else {
         if (draw.indexAddress != 0 || draw.indexSize != 0 || draw.firstVertex > std::numeric_limits<std::uint32_t>::max() - (draw.indexCount - 1u)) {
             throw std::invalid_argument("Metal draw auto-index parameters are invalid");
@@ -294,7 +302,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setVertexBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
         if (draw.indexed) {
             [encoder drawIndexedPrimitives:primitive indexCount:draw.indexCount indexType:nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
-                indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset instanceCount:draw.instanceCount baseVertex:draw.firstVertex baseInstance:draw.firstInstance];
+                indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset instanceCount:draw.instanceCount baseVertex:static_cast<NSInteger>(std::bit_cast<std::int32_t>(draw.firstVertex)) baseInstance:draw.firstInstance];
         } else {
             [encoder drawPrimitives:primitive vertexStart:draw.firstVertex vertexCount:draw.indexCount instanceCount:draw.instanceCount baseInstance:draw.firstInstance];
         }
