@@ -669,6 +669,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     std::array<std::uint32_t, 9> vertexCode{};
     std::copy(VertexCode.begin(), VertexCode.end(), vertexCode.begin());
     vertexCode[1] = 0x80020005;
+    const auto originalVertexCode = vertexCode;
     std::array<std::uint32_t, 32> fragmentCode{};
     std::copy(MaskedPixelCode.begin(), MaskedPixelCode.end(), fragmentCode.begin());
     std::array<std::uint32_t, 17> computeCode{
@@ -711,7 +712,9 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     append(graphics, 0x22, {static_cast<std::uint32_t>(LabelAddress), 0, 0, 4});
     append(graphics, 0x3f, {static_cast<std::uint32_t>(IndirectAddress), 0, 3});
     append(graphics, 0x49, {0, (1u << 29u) | (1u << 24u), static_cast<std::uint32_t>(LabelAddress + 4), 0, 2, 0, 0});
+    const auto originalGraphics = graphics;
     std::array<std::uint32_t, 3> indirect{0xc0012d00, 3, 2};
+    const auto originalIndirect = indirect;
     std::vector<std::uint32_t> compute;
     const std::array<std::uint32_t, 3> threads{64, 1, 1};
     const std::array<std::uint32_t, 2> computeProgram{static_cast<std::uint32_t>(ComputeCodeAddress >> 8u), 0};
@@ -724,6 +727,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     RegisterPacket(compute, 0x76, 0x240, users);
     append(compute, 0x15, {1, 1, 1, 0x8041});
     append(compute, 0x49, {0, 1u << 29u, static_cast<std::uint32_t>(LabelAddress), 0, 1, 0, 0});
+    const auto originalComputeCommands = compute;
     std::array<std::uint32_t, 3> second{0xc0012d00, 3, 2};
     std::array<std::uint32_t, 256> indirectCommands{};
     std::array<std::uint32_t, 80> arguments{};
@@ -1427,7 +1431,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
             }
             transactionChanged.notify_all();
         };
-        std::future<void> transaction, submitting, registering, suspending;
+        std::future<void> transaction, submitting, numericSubmitting, registering, suspending;
         try {
             auto invalid = replacement;
             invalid.push_back({ComputeInputAddress + 4, std::as_writable_bytes(std::span(nextOwner->input).first(4)), false});
@@ -1474,11 +1478,16 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
                     "CPU mapping transaction did not enter its mutation callback after EOP drain");
             }
             Require(retainedOldEop, "CPU mapping transaction returned before old EOP drain");
-            std::promise<void> submitStarted, registerStarted, suspendStarted;
+            std::promise<void> submitStarted, numericSubmitStarted, registerStarted, suspendStarted;
             auto beganSubmit = submitStarted.get_future(), beganRegister = registerStarted.get_future(), beganSuspend = suspendStarted.get_future();
             submitting = std::async(std::launch::async, [&] {
                 submitStarted.set_value();
                 transactionDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+            });
+            auto beganNumericSubmit = numericSubmitStarted.get_future();
+            numericSubmitting = std::async(std::launch::async, [&] {
+                numericSubmitStarted.set_value();
+                transactionDriver.SubmitCommandBuffer(ComputeCommandAddress, static_cast<std::uint32_t>(compute.size()), 0, 0x20);
             });
             registering = std::async(std::launch::async, [&] {
                 registerStarted.set_value();
@@ -1489,21 +1498,24 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
                 transactionDriver.SuspendPoint();
             });
             beganSubmit.wait();
+            beganNumericSubmit.wait();
             beganRegister.wait();
             beganSuspend.wait();
             const bool submitBlocked = submitting.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+            const bool numericSubmitBlocked = numericSubmitting.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
             const bool registerBlocked = registering.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
             const bool suspendBlocked = suspending.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
             releaseTransaction();
             transaction.get();
             submitting.get();
+            numericSubmitting.get();
             registering.get();
             suspending.get();
             transactionDriver.WaitIdle();
-            Require(submitBlocked && registerBlocked && suspendBlocked,
+            Require(submitBlocked && numericSubmitBlocked && registerBlocked && suspendBlocked,
                 "Public GPU admission returned while the CPU mapping mutation was still active");
-            Require(transactionInterrupts.load() == 2 && mutations.load() == 1,
-                "CPU mapping transaction did not produce exactly one mutation and two completed EOPs");
+            Require(transactionInterrupts.load() == 3 && mutations.load() == 1,
+                "CPU mapping transaction did not produce exactly one mutation and three completed legacy/numeric EOPs");
             checkTransactionOutput(*previousOwner, 1);
             checkTransactionOutput(*nextOwner, 3);
             auto expectedInput = originalInput;
@@ -1523,7 +1535,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         } catch (...) {
             const auto error = std::current_exception();
             releaseTransaction();
-            for (auto* pending : {&transaction, &submitting, &registering, &suspending})
+            for (auto* pending : {&transaction, &submitting, &numericSubmitting, &registering, &suspending})
                 if (pending->valid()) try { pending->get(); } catch (...) {}
             try { transactionDriver.Shutdown(); } catch (...) {}
             std::rethrow_exception(error);
@@ -1656,6 +1668,41 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
             "Same-thread shutdown after failed CPU mutation lost the original failure or retained actual host owners");
         std::cout << "Same-thread CPU mutation teardown: active callback rejects shutdown; unwound failure drains both actual host owners and preserves original error passed\n";
     }
+    {
+        std::array<std::byte, 32> firstHost, secondHost;
+        firstHost.fill(std::byte{0x53});
+        secondHost.fill(std::byte{0x71});
+        const auto originalFirstHost = firstHost, originalSecondHost = secondHost;
+        const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 1> firstRanges{{{0x750000u, firstHost, false, 1}}};
+        const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 1> secondRanges{{{0x760000u, secondHost, false, 2}}};
+        const std::array<AgcDriver::Metal::ReadableGuestRange, 1> firstReadable{{{0x750008u, 8}}};
+        const std::array<AgcDriver::Metal::ReadableGuestRange, 1> secondReadable{{{0x760008u, 8}}};
+        AgcDriver::Metal::MetalDriver firstDriver;
+        firstDriver.Configure((__bridge void*)device, (__bridge void*)library, firstRanges);
+        std::unique_ptr<AgcDriver::Metal::MetalDriver> secondDriver;
+        std::array<std::uint32_t, 2> publications{};
+        bool ancestorRejected = false, independentDestroyed = false;
+        firstDriver.WithValidatedReadableRanges(firstReadable, [&] {
+            ++publications[0];
+            secondDriver = std::make_unique<AgcDriver::Metal::MetalDriver>();
+            secondDriver->Configure((__bridge void*)device, (__bridge void*)library, secondRanges);
+            secondDriver->WaitIdle();
+            secondDriver->WithValidatedReadableRanges(secondReadable, [&] {
+                ++publications[1];
+                try { firstDriver.WaitIdle(); }
+                catch (const std::runtime_error&) { ancestorRejected = true; }
+            });
+            secondDriver->WaitIdle();
+            secondDriver.reset();
+            independentDestroyed = true;
+        });
+        Require(publications == std::array<std::uint32_t, 2>{1, 1} && ancestorRejected && independentDestroyed && !secondDriver,
+            "Readable publication did not preserve independent driver lifetime and reject active ancestor reentry");
+        firstDriver.WaitIdle();
+        Require(firstHost == originalFirstHost && secondHost == originalSecondHost,
+            "Readable publication ownership changed borrowed host bytes or guards");
+        std::cout << "Readable publication ownership: independent driver configures, nests publication, and destroys inside A; ancestor reentry rejects and A resumes passed\n";
+    }
     std::mutex callbackMutex;
     std::condition_variable callbackChanged;
     bool callbackEntered = false, callbackReleased = false;
@@ -1724,6 +1771,86 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     Require(vertices == originalVertices && input == originalInput && computeStorage == originalComputeStorage,
         "Failed queue draining modified borrowed input or raw shader storage guards");
     std::cout << "Actual native queue failure: WaitIdle retained borrowed memory until the completed EOP worker released it and preserved the original error passed\n";
+    {
+        graphics = originalGraphics;
+        indirect = originalIndirect;
+        compute = originalComputeCommands;
+        vertexCode = originalVertexCode;
+        vertexHeader = makeHeader(0x700000, 0x500000, sizeof(VertexCode), 2);
+        fragmentCode.fill(0);
+        std::copy(MaskedPixelCode.begin(), MaskedPixelCode.end(), fragmentCode.begin());
+        fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(MaskedPixelCode), 1);
+        labels = {0, 0, 0xcafef00d, 0x12345678};
+        output.fill(0xdeadbeef);
+        std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+        auto numericRanges = ranges;
+        std::erase_if(numericRanges, [&](const auto& range) { return range.guestAddress == PacketAddress; });
+        std::atomic<std::uint32_t> numericInterrupts{0};
+        AgcDriver::Metal::MetalDriver numericDriver;
+        numericDriver.Configure((__bridge void*)device, (__bridge void*)library, numericRanges,
+            [&](std::uint32_t queue) {
+                Require(queue == 0 && labels == std::array<std::uint32_t, 4>{1, 2, 0xcafef00d, 0x12345678},
+                    "Numeric EOP arrived before cross-queue labels or changed their guards");
+                for (std::uint32_t i = 0; i < output.size(); ++i) {
+                    const auto expected = i % 4 == 0 ? (i / 4) * 3 + 8 : 0xdeadbeefu;
+                    Require(output[i] == expected, "Numeric EOP observed unfinished RDNA compute output or padding");
+                }
+                checkPixels(true);
+                numericInterrupts.fetch_add(1);
+            });
+        struct InvalidNumericSubmission {
+            std::uint64_t address;
+            std::uint32_t words;
+            std::uint8_t flags;
+            std::uint32_t queue;
+            const char* error;
+        };
+        const std::array invalid{
+            InvalidNumericSubmission{ComputeCommandAddress + 1, 1, 0, 0x20, "invalid alignment"},
+            InvalidNumericSubmission{ComputeCommandAddress, static_cast<std::uint32_t>(compute.size() + 1), 0, 0x20, "not borrowed"},
+            InvalidNumericSubmission{0xfffffffffffffffcull, 2, 0, 0x20, "address range overflow"},
+            InvalidNumericSubmission{ComputeCommandAddress, (1u << 26u) + 1, 0, 0x20, "copy limit"},
+            InvalidNumericSubmission{ComputeCommandAddress, 1, 1, 0x20, "nonzero submission flags"},
+            InvalidNumericSubmission{ComputeCommandAddress, 1, 0, 0x1f, "unsupported compute queue"},
+            InvalidNumericSubmission{ComputeCommandAddress, 1, 0, 0x58, "unsupported compute queue"}};
+        numericDriver.RegisterShader(reinterpret_cast<const Shader*>(0x700000));
+        numericDriver.RegisterShader(reinterpret_cast<const Shader*>(0x710000));
+        numericDriver.SubmitCommandBuffer(GraphicsCommandAddress, static_cast<std::uint32_t>(graphics.size()), 0, 0);
+        indirect[1] = 0;
+        std::fill(graphics.begin(), graphics.end(), 0x80000000);
+        std::copy(FullPixelCode.begin(), FullPixelCode.end(), fragmentCode.begin());
+        fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(FullPixelCode), 1);
+        numericDriver.RegisterShader(reinterpret_cast<const Shader*>(0x710000));
+        numericDriver.SubmitCommandBuffer(ComputeCommandAddress, static_cast<std::uint32_t>(compute.size()), 0, 0x20);
+        numericDriver.WaitIdle();
+        Require(numericInterrupts.load() == 1, "Numeric submission did not deliver exactly one completed EOP");
+        checkPixels(true);
+        Require(vertices == originalVertices && input == originalInput && computeStorage == originalComputeStorage,
+            "Numeric capture changed borrowed vertex/input/shader storage");
+        const auto completedNumericOutput = output;
+        for (const auto& value : invalid) {
+            bool rejected = false;
+            try { numericDriver.SubmitCommandBuffer(value.address, value.words, value.flags, value.queue); }
+            catch (const std::exception& error) {
+                rejected = std::string(error.what()).find(value.error) != std::string::npos;
+                if (!rejected) throw;
+            }
+            Require(rejected, std::string("Numeric submission accepted invalid input: ") + value.error);
+        }
+        numericDriver.WaitIdle();
+        Require(numericInterrupts.load() == 1 && labels == std::array<std::uint32_t, 4>{1, 2, 0xcafef00d, 0x12345678} &&
+            output == completedNumericOutput,
+            "Rejected numeric submission executed guest commands or delivered EOP");
+        checkPixels(true);
+        numericDriver.SubmitCommandBuffer(SecondCommandAddress, static_cast<std::uint32_t>(second.size()), 0, 0);
+        numericDriver.WaitIdle();
+        checkPixels(false);
+        Require(numericInterrupts.load() == 1 && output == completedNumericOutput &&
+            vertices == originalVertices && input == originalInput && computeStorage == originalComputeStorage,
+            "Valid submission after numeric rejection changed guest compute/input storage or redelivered EOP");
+        numericDriver.Shutdown();
+        std::cout << "Numeric public command input: descriptor-free checked capture, immutable commands/IB/shaders, RDNA frame/output and completed EOP passed\n";
+    }
 }
 
 }

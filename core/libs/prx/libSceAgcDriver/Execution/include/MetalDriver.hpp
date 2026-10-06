@@ -7,8 +7,14 @@
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace AgcDriver::Metal {
+
+struct ReadableGuestRange {
+    std::uint64_t address;
+    std::size_t bytes;
+};
 
 class MetalDriver {
 public:
@@ -24,7 +30,9 @@ public:
     void ReplaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation);
     void MutateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation,
         std::function<void()> mutateCpu, std::shared_ptr<const void> previousOwner, std::shared_ptr<const void> nextOwner);
+    void WithValidatedReadableRanges(std::span<const ReadableGuestRange> ranges, const std::function<void()>& publish);
     void Submit(const Packet* packet, std::uint32_t queue);
+    void SubmitCommandBuffer(std::uint64_t commandAddress, std::uint32_t wordCount, std::uint8_t flags, std::uint32_t queue);
     void WaitIdle();
     void Shutdown();
     void SuspendPoint();
@@ -37,6 +45,12 @@ public:
     void ReportFailure(std::exception_ptr error);
 
 private:
+    struct CommandBufferSubmission {
+        std::uint64_t address;
+        std::uint32_t words;
+        std::uint8_t flags;
+    };
+    void submit(CommandBufferSubmission descriptor, std::uint32_t queue, std::optional<std::uint64_t> guestPacketAddress);
     void replaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation,
         const std::function<void()>& mutateCpu, std::shared_ptr<const void> previousOwner, std::shared_ptr<const void> nextOwner);
     struct Impl;

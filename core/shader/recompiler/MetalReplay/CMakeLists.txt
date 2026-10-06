@@ -26,6 +26,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/BufferMetadata.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/VideoOutState.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/NativeHostWindow.mm"
+    "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/NativeMetalSession.mm"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/ControllerSource.mm"
     "${agcDriverRoot}/Execution/src/DisplayFormat.cpp"
     "${agcDriverRoot}/Execution/Metal/MetalDriver.mm"
@@ -107,7 +108,24 @@ target_compile_options(anyps5_metal_guest_replay PRIVATE -fobjc-arc)
 target_link_libraries(anyps5_metal_guest_replay PRIVATE
     anyps5_metal_guest_recompiler anyps5_metal_utilities)
 if(BUILD_TESTING)
+    add_test_executable(anyps5_metal_masked_shift_contract "${CMAKE_CURRENT_SOURCE_DIR}/../tests/MaskedShiftContract.cpp")
+    target_link_libraries(anyps5_metal_masked_shift_contract PRIVATE anyps5_metal_guest_recompiler)
+    set_target_properties(anyps5_metal_masked_shift_contract PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME anyps5_metal_masked_shift_contract COMMAND anyps5_metal_masked_shift_contract)
+    set_tests_properties(anyps5_metal_masked_shift_contract PROPERTIES TIMEOUT 120)
     get_target_property(metalUtilityLibrary anyps5_metal_utilities ANYPS5_METALLIB)
+    add_test_executable(anyps5_metal_native_session_acceptance NativeMetalSessionAcceptance.mm)
+    target_compile_options(anyps5_metal_native_session_acceptance PRIVATE -fobjc-arc)
+    target_link_libraries(anyps5_metal_native_session_acceptance PRIVATE anyps5_metal_native_execution)
+    file(WRITE "${ANYPS5_TEST_OUTPUT_DIRECTORY}/invalid.metallib" "invalid native library acceptance input\n")
+    foreach(sessionMode IN ITEMS own-shutdown backend-stopped configured-unwind)
+        add_test(NAME anyps5_metal_native_session_${sessionMode}
+            COMMAND anyps5_metal_native_session_acceptance "${metalUtilityLibrary}" "${sessionMode}")
+        set_tests_properties(anyps5_metal_native_session_${sessionMode} PROPERTIES
+            TIMEOUT 120
+            RUN_SERIAL TRUE
+            ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
+    endforeach()
     target_sources(metal_utility_tests PRIVATE
         "${agcDriverRoot}/tests/metal/TextureResource.mm"
         "${agcDriverRoot}/tests/metal/TextureViews.mm"
