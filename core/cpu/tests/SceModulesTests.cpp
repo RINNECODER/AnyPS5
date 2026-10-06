@@ -50,6 +50,16 @@ std::uint64_t tag(const Bytes& bytes, std::uint64_t type) {
         if (get(bytes, index) == type) return index;
     throw std::runtime_error("Fixture dynamic tag missing");
 }
+void libraryAttributes(Bytes& bytes, std::uint64_t imports, std::uint64_t exports) {
+    const auto header = program(bytes, 2);
+    const auto offset = get(bytes, header + 8);
+    for (auto index = offset; index < offset + get(bytes, header + 32); index += 16) {
+        const auto type = get(bytes, index);
+        if (type == 0x61000019 || type == 0x61000017)
+            put(bytes, index + 8, (get(bytes, index + 8) & 0xffff000000000000ull) |
+                (type == 0x61000019 ? imports : exports));
+    }
+}
 std::uint64_t fileOffset(const Bytes& bytes, std::uint64_t address) {
     for (unsigned index = 0; index < get(bytes, 56, 2); ++index) {
         const auto offset = get(bytes, 32) + index * 56;
@@ -284,8 +294,29 @@ void invalidGraphs(const std::filesystem::path& mainPath, const std::filesystem:
         Case{"unsupported CRT-array ownership", crtArray(25, 27, 12)},
         Case{"unsupported CRT-array ownership", crtArray(26, 28, 13)},
         Case{"named module/version", [](auto&, auto& guest) { const auto location = tag(guest, 0x61000043) + 8; put(guest, location, get(guest, location) ^ (3ull << 40)); }},
-        Case{"exported library attributes", [](auto&, auto& guest) { put(guest, tag(guest, 0x61000017) + 8, 1); }},
+        Case{"imported library attributes", [](auto& main, auto&) { libraryAttributes(main, 2, 1); }},
+        Case{"imported library attributes", [](auto& main, auto&) { libraryAttributes(main, 4, 1); }},
+        Case{"imported library attributes", [](auto& main, auto&) { libraryAttributes(main, 0xb, 1); }},
+        Case{"imported library attributes", [](auto& main, auto&) { libraryAttributes(main, 0xd, 1); }},
+        Case{"imported library attributes", [](auto& main, auto&) { libraryAttributes(main, (1ull << 47) | 9, 1); }},
+        Case{"exported library attributes", [](auto&, auto& guest) { libraryAttributes(guest, 9, 2); }},
+        Case{"exported library attributes", [](auto&, auto& guest) { libraryAttributes(guest, 9, 8); }},
+        Case{"exported library attributes", [](auto&, auto& guest) { libraryAttributes(guest, 9, 3); }},
+        Case{"exported library attributes", [](auto&, auto& guest) { libraryAttributes(guest, 9, (1ull << 47) | 1); }},
         Case{"unsupported dynamic", [](auto&, auto& guest) { put(guest, tag(guest, 0x61000017), 0x61234567); }},
+        Case{"typed import scope/version", [](auto& main, auto&) {
+            const auto dynlib = get(main, program(main, 0x61000000) + 8);
+            const auto strings = dynlib + get(main, tag(main, 0x61000035) + 8);
+            const auto symbols = dynlib + get(main, tag(main, 0x61000039) + 8);
+            const auto size = get(main, tag(main, 0x6100003f) + 8);
+            for (auto offset = symbols; offset < symbols + size; offset += 24) {
+                if (get(main, offset + 6, 2) || (get(main, offset + 4, 1) & 15) != 1) continue;
+                const auto name = strings + get(main, offset, 4);
+                put(main, name, get(main, name, 1) == 'Q' ? 'R' : 'Q', 1);
+                return;
+            }
+            throw std::runtime_error("Compiled fixture lacks an object import for the wrong-NID contract");
+        }, false},
         Case{"symbol type mismatch", [](auto& main, auto&) { changeImportType(main, "L+OvOB7GHzo", 2); }, false},
         Case{"typed import scope/version", [](auto&, auto& guest) {
             const auto location = tag(guest, 0x61000047) + 8;
@@ -298,6 +329,7 @@ void invalidGraphs(const std::filesystem::path& mainPath, const std::filesystem:
         Input input(changedMain, changedGuest);
         Cpu::Machine machine;
         Cpu::SceImports imports(machine);
+        const auto existingRanges = machine.Mappings().size();
         unsigned resolutions = 0;
         const std::array dependencies{Cpu::SceModuleFile{input.guest, GuestBias}};
         rejects([&] { Cpu::SceModules graph(machine, {input.main, MainBias}, dependencies, hostModules,
@@ -305,8 +337,9 @@ void invalidGraphs(const std::filesystem::path& mainPath, const std::filesystem:
                 ++resolutions;
                 return Cpu::SceResolvedImport{imports.Resolve(import), type};
             }); }, test.Expected);
-        require((!test.Early || resolutions == 0) && machine.Get(Cpu::Register::FsBase) == 0,
-                "Invalid module metadata reached host resolution or installed TLS before rejection");
+        require((!test.Early || resolutions == 0) && machine.Get(Cpu::Register::FsBase) == 0 &&
+                machine.Mappings().size() == existingRanges,
+                "Invalid module metadata reached host resolution, installed TLS, or mapped guest storage before rejection");
     }
     {
         Cpu::Machine machine;
@@ -390,11 +423,15 @@ void invalidGraphs(const std::filesystem::path& mainPath, const std::filesystem:
 int main(int argc, char** argv) {
     try {
         require(argc == 3 || argc == 4, "Usage: SceModulesTests main.elf dependency.prx [crt-receipt.txt]");
-        execute(argv[1], argv[2], false);
-        execute(argv[1], argv[2], true);
+        auto mainBytes = readFile(argv[1]), guestBytes = readFile(argv[2]);
+        libraryAttributes(mainBytes, 9, 1);
+        libraryAttributes(guestBytes, 9, 1);
+        Input attributed(mainBytes, guestBytes);
+        execute(attributed.main, attributed.guest, false);
+        execute(attributed.main, attributed.guest, true);
         const auto receipts = argc == 4 ? crtReceipts(argv[3]) : std::vector<CrtReceipt>{};
         for (const auto& receipt : receipts) executeCrt(receipt);
-        invalidGraphs(argv[1], argv[2], receipts);
+        invalidGraphs(attributed.main, attributed.guest, receipts);
         std::cout << "PASS compiled SCE module graph calls, objects, TLS, independent prime/Adler results, dependency-only lifecycle, and strict failures\n";
         if (!receipts.empty())
             std::cout << "PASS original ELF/SELF certification, chunked source identity, compiled CRT ordering, and certificate preflight failures\n";

@@ -15,6 +15,25 @@ namespace AgcDriver::Metal {
 namespace {
 
 thread_local bool driverCallback = false;
+class ReadablePublicationScope {
+public:
+    explicit ReadablePublicationScope(const void* owner) : owner(owner), previous(active) { active = this; }
+    ~ReadablePublicationScope() { active = previous; }
+    ReadablePublicationScope(const ReadablePublicationScope&) = delete;
+    ReadablePublicationScope& operator=(const ReadablePublicationScope&) = delete;
+    static bool Contains(const void* owner) {
+        for (auto scope = active; scope != nullptr; scope = scope->previous) {
+            if (scope->owner == owner) return true;
+        }
+        return false;
+    }
+private:
+    const void* owner;
+    const ReadablePublicationScope* previous;
+    static thread_local const ReadablePublicationScope* active;
+};
+
+thread_local const ReadablePublicationScope* ReadablePublicationScope::active = nullptr;
 
 class DriverCallbackScope {
 public:
@@ -31,6 +50,10 @@ public:
 
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("Metal driver: ") + reason);
+}
+
+void rejectReadablePublicationReentry(const void* owner) {
+    require(!ReadablePublicationScope::Contains(owner), "readable range publication cannot reenter its driver");
 }
 
 std::vector<NativeGuestMemory::BorrowedRange> changedMappings(
@@ -93,6 +116,7 @@ MetalDriver& MetalDriver::Get() { static MetalDriver driver; return driver; }
 
 void MetalDriver::Configure(void* device, void* library,
     std::span<const NativeGuestMemory::BorrowedRange> ranges, EopInterrupt interrupt, std::uint64_t initialGeneration) {
+    rejectReadablePublicationReentry(impl.get());
     require(!Impl::OnWorkerThread(), "worker cannot configure its driver");
     std::lock_guard gpuLock(impl->gpuMutex);
     std::lock_guard lock(impl->mutex);
@@ -228,6 +252,7 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
 }
 
 void MetalDriver::Impl::CheckFailureAndStopping() {
+    rejectReadablePublicationReentry(this);
     std::lock_guard lock(mutex);
     if (failure) std::rethrow_exception(failure);
     if (stopping) throw DriverStopped{};
@@ -235,6 +260,7 @@ void MetalDriver::Impl::CheckFailureAndStopping() {
 }
 
 void MetalDriver::Impl::RejectMappingReentry() {
+    rejectReadablePublicationReentry(this);
     std::lock_guard lock(mutex);
     require(!mappingUpdatePending || (!driverCallback && mappingUpdateThread != std::this_thread::get_id()),
         "mapping transaction callback cannot reenter its driver");
@@ -328,6 +354,31 @@ void MetalDriver::Impl::ReserveOutputs(Submission& submission) {
     if (!retained.empty()) {
         auto& captured = submissionOutputs[submission.serial];
         captured.insert(captured.end(), retained.begin(), retained.end());
+    }
+}
+
+void MetalDriver::WithValidatedReadableRanges(std::span<const ReadableGuestRange> ranges,
+    const std::function<void()>& publish) {
+    rejectReadablePublicationReentry(impl.get());
+    require(!Impl::OnWorkerThread(), "worker cannot publish readable guest ranges");
+    require(static_cast<bool>(publish), "readable range publication requires a callback");
+    for (;;) {
+        auto gpuLock = impl->LockForGuestCapture();
+        NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
+        for (const auto& range : ranges) {
+            require(range.address != 0 && range.bytes != 0, "readable guest range is null or empty");
+            require(range.bytes <= std::numeric_limits<std::uint64_t>::max() - range.address,
+                "readable guest range overflows");
+            require(NativeGuestMemory::ReadableBorrowedBytes(range.address, range.bytes) == range.bytes,
+                "readable guest range is not fully borrowed");
+        }
+        std::lock_guard lock(impl->mutex);
+        if (impl->failure) std::rethrow_exception(impl->failure);
+        if (impl->stopping) throw DriverStopped{};
+        if (impl->mappingUpdatePending) continue;
+        ReadablePublicationScope publication(impl.get());
+        publish();
+        return;
     }
 }
 
@@ -493,6 +544,7 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
 }
 
 void MetalDriver::WaitIdle() {
+    rejectReadablePublicationReentry(impl.get());
     require(!Impl::OnWorkerThread(), "worker cannot wait for itself");
     std::unique_lock lock(impl->mutex);
     const auto target = impl->accepted;
@@ -551,6 +603,7 @@ void MetalDriver::RegisterVideoOutput(std::uint32_t handle, const std::shared_pt
 }
 
 void MetalDriver::UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
+    rejectReadablePublicationReentry(impl.get());
     std::lock_guard lock(impl->mutex);
     const auto found = impl->outputs.find(handle);
     require(found != impl->outputs.end() && found->second == output, "video output registration mismatch");
@@ -586,9 +639,13 @@ void MetalDriver::Impl::ReportFailure(std::exception_ptr error) {
     for (const auto& flip : failedFlips) flip->Fail(error);
 }
 
-void MetalDriver::ReportFailure(std::exception_ptr error) { impl->ReportFailure(error); }
+void MetalDriver::ReportFailure(std::exception_ptr error) {
+    rejectReadablePublicationReentry(impl.get());
+    impl->ReportFailure(error);
+}
 
 void MetalDriver::Impl::Stop() {
+    rejectReadablePublicationReentry(this);
     require(!OnWorkerThread(), "worker cannot stop itself");
     std::unique_lock shutdownLock(shutdownMutex);
     if (stopped) return;
@@ -665,6 +722,7 @@ void MetalDriver::Present(const PresentationWindow& window, const DisplayBuffer*
 }
 
 void MetalDriver::ReleaseWindow(void* window) {
+    rejectReadablePublicationReentry(impl.get());
     std::lock_guard gpuLock(impl->gpuMutex);
     if (impl->presentation) impl->presentation->ReleaseWindow(window);
 }

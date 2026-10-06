@@ -1656,6 +1656,41 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
             "Same-thread shutdown after failed CPU mutation lost the original failure or retained actual host owners");
         std::cout << "Same-thread CPU mutation teardown: active callback rejects shutdown; unwound failure drains both actual host owners and preserves original error passed\n";
     }
+    {
+        std::array<std::byte, 32> firstHost, secondHost;
+        firstHost.fill(std::byte{0x53});
+        secondHost.fill(std::byte{0x71});
+        const auto originalFirstHost = firstHost, originalSecondHost = secondHost;
+        const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 1> firstRanges{{{0x750000u, firstHost, false, 1}}};
+        const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 1> secondRanges{{{0x760000u, secondHost, false, 2}}};
+        const std::array<AgcDriver::Metal::ReadableGuestRange, 1> firstReadable{{{0x750008u, 8}}};
+        const std::array<AgcDriver::Metal::ReadableGuestRange, 1> secondReadable{{{0x760008u, 8}}};
+        AgcDriver::Metal::MetalDriver firstDriver;
+        firstDriver.Configure((__bridge void*)device, (__bridge void*)library, firstRanges);
+        std::unique_ptr<AgcDriver::Metal::MetalDriver> secondDriver;
+        std::array<std::uint32_t, 2> publications{};
+        bool ancestorRejected = false, independentDestroyed = false;
+        firstDriver.WithValidatedReadableRanges(firstReadable, [&] {
+            ++publications[0];
+            secondDriver = std::make_unique<AgcDriver::Metal::MetalDriver>();
+            secondDriver->Configure((__bridge void*)device, (__bridge void*)library, secondRanges);
+            secondDriver->WaitIdle();
+            secondDriver->WithValidatedReadableRanges(secondReadable, [&] {
+                ++publications[1];
+                try { firstDriver.WaitIdle(); }
+                catch (const std::runtime_error&) { ancestorRejected = true; }
+            });
+            secondDriver->WaitIdle();
+            secondDriver.reset();
+            independentDestroyed = true;
+        });
+        Require(publications == std::array<std::uint32_t, 2>{1, 1} && ancestorRejected && independentDestroyed && !secondDriver,
+            "Readable publication did not preserve independent driver lifetime and reject active ancestor reentry");
+        firstDriver.WaitIdle();
+        Require(firstHost == originalFirstHost && secondHost == originalSecondHost,
+            "Readable publication ownership changed borrowed host bytes or guards");
+        std::cout << "Readable publication ownership: independent driver configures, nests publication, and destroys inside A; ancestor reentry rejects and A resumes passed\n";
+    }
     std::mutex callbackMutex;
     std::condition_variable callbackChanged;
     bool callbackEntered = false, callbackReleased = false;

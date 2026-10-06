@@ -188,6 +188,263 @@ void OriginalWave32Subgroup(id<MTLDevice> device, id<MTLLibrary> library) {
     std::cout << "Original RDNA wave32 subgroup: public driver RegisterShader/Submit methods, two waves, lane/count/readlane/EXEC goldens and guarded EOP passed\n";
 }
 
+namespace RetainedDsPermute {
+alignas(256) constexpr std::array<std::uint32_t, 37> Code{
+    0x34020084, 0x34060086, 0xe0301000, 0x80000401, 0xe0301004, 0x80000501, 0xbf8c3f70, 0x7e1402ff,
+    0xdeaddead, 0x7e1602ff, 0xdeaddead, 0x7e1802ff, 0xdeaddead, 0x7e1a02ff, 0xdeaddead, 0xdac80000,
+    0x0a000504, 0xdacc0000, 0x0b000504, 0xdac80008, 0x0c000504, 0xbe94037e, 0xbefe03ff, 0x0000ffff,
+    0xdac80000, 0x0d000504, 0xbefe0314, 0xbf8cc07f, 0xe0701000, 0x80010a03, 0xe0701004, 0x80010b03,
+    0xe0701008, 0x80010c03, 0xe070100c, 0x80010d03, 0xbf810000,
+};
+
+constexpr std::uint32_t Rows[32][2] = {
+    {0x000000f4u, 0x00001000u},
+    {0x000000dcu, 0x00001001u},
+    {0x000000f2u, 0x00001002u},
+    {0x000000d9u, 0x00001003u},
+    {0x0000000eu, 0x00001004u},
+    {0x00000017u, 0x00001005u},
+    {0x00000015u, 0x00001006u},
+    {0x0000005cu, 0x00001007u},
+    {0x000000d5u, 0x00001008u},
+    {0x0000002bu, 0x00001009u},
+    {0x000000bcu, 0x0000100au},
+    {0x000000cfu, 0x0000100bu},
+    {0x000000abu, 0x0000100cu},
+    {0x000000dau, 0x0000100du},
+    {0x0000004eu, 0x0000100eu},
+    {0x00000040u, 0x0000100fu},
+    {0x0000009bu, 0x00001010u},
+    {0x00000036u, 0x00001011u},
+    {0x0000009bu, 0x00001012u},
+    {0x00000009u, 0x00001013u},
+    {0x00000094u, 0x00001014u},
+    {0x000000aeu, 0x00001015u},
+    {0x00000028u, 0x00001016u},
+    {0x000000ffu, 0x00001017u},
+    {0x0000006eu, 0x00001018u},
+    {0x000000a3u, 0x00001019u},
+    {0x00000064u, 0x0000101au},
+    {0x000000cdu, 0x0000101bu},
+    {0x000000b9u, 0x0000101cu},
+    {0x000000dcu, 0x0000101du},
+    {0x000000feu, 0x0000101eu},
+    {0x00000082u, 0x0000101fu},
+};
+
+constexpr std::uint32_t Expected[32][4] = {
+    {0x0000101fu, 0x0000101du, 0x00000000u, 0x00000000u},
+    {0x00000000u, 0x00001017u, 0x0000101eu, 0x00000000u},
+    {0x00001013u, 0x0000101cu, 0x0000101fu, 0x00000000u},
+    {0x00001004u, 0x00001016u, 0x00000000u, 0x00001004u},
+    {0x00000000u, 0x00001003u, 0x00001013u, 0x00000000u},
+    {0x00001014u, 0x00001005u, 0x00001004u, 0x00001006u},
+    {0x00001012u, 0x00001005u, 0x00000000u, 0x00000000u},
+    {0x00000000u, 0x00001017u, 0x00001014u, 0x00000000u},
+    {0x00001019u, 0x00001015u, 0x00001012u, 0x00000000u},
+    {0x00000000u, 0x0000100au, 0x00000000u, 0x00000000u},
+    {0x00001016u, 0x0000100fu, 0x00001019u, 0x0000100cu},
+    {0x00001015u, 0x00001013u, 0x00000000u, 0x00000000u},
+    {0x00000000u, 0x0000100au, 0x00001016u, 0x00000000u},
+    {0x00001011u, 0x00001016u, 0x00001015u, 0x00000000u},
+    {0x0000101cu, 0x00001013u, 0x00000000u, 0x00000000u},
+    {0x0000100au, 0x00001010u, 0x00001011u, 0x0000100au},
+    {0x0000100fu, 0x00001006u, 0x0000101cu, 0xdeaddeadu},
+    {0x00000000u, 0x0000100du, 0x0000100au, 0xdeaddeadu},
+    {0x00000000u, 0x00001006u, 0x0000100fu, 0xdeaddeadu},
+    {0x0000101bu, 0x00001002u, 0x00000000u, 0xdeaddeadu},
+    {0x00000000u, 0x00001005u, 0x00000000u, 0xdeaddeadu},
+    {0x00001008u, 0x0000100bu, 0x0000101bu, 0xdeaddeadu},
+    {0x0000100du, 0x0000100au, 0x00000000u, 0xdeaddeadu},
+    {0x0000101du, 0x0000101fu, 0x00001008u, 0xdeaddeadu},
+    {0x00000000u, 0x0000101bu, 0x0000100du, 0xdeaddeadu},
+    {0x0000101au, 0x00001008u, 0x0000101du, 0xdeaddeadu},
+    {0x00000000u, 0x00001019u, 0x00000000u, 0xdeaddeadu},
+    {0x00001018u, 0x00001013u, 0x0000101au, 0xdeaddeadu},
+    {0x00001002u, 0x0000100eu, 0x00000000u, 0xdeaddeadu},
+    {0x00001000u, 0x00001017u, 0x00001018u, 0xdeaddeadu},
+    {0x00000000u, 0x0000101fu, 0x00001002u, 0xdeaddeadu},
+    {0x0000101eu, 0x00001000u, 0x00001000u, 0xdeaddeadu},
+};
+
+constexpr const char* Names[4] = {"permute", "bpermute", "permute_offset8", "permute_exec_low16"};
+
+constexpr std::array<std::uint32_t, 128> Input = [] {
+    std::array<std::uint32_t, 128> input{};
+    for (std::uint32_t tid = 0; tid < 32; ++tid) {
+        input[tid * 4] = Rows[tid][0];
+        input[tid * 4 + 1] = Rows[tid][1];
+    }
+    return input;
+}();
+constexpr std::array<std::uint32_t, 512> FullExpected = [] {
+    std::array<std::uint32_t, 512> output{};
+    output.fill(0xdeadbeefu);
+    for (std::uint32_t tid = 0; tid < 32; ++tid)
+        for (std::uint32_t result = 0; result < 4; ++result)
+            output[tid * 16 + result] = Expected[tid][result];
+    return output;
+}();
+}
+
+namespace RetainedReadLane {
+constexpr std::array<std::uint32_t, 21> RetainedReadLaneCode{
+    0x34020082, 0xe0302000, 0x80000401, 0xe0302004, 0x80000501, 0xbf8c3f70, 0xd7600008, 0x00014b04,
+    0x7e280505, 0xd7600009, 0x00002904, 0x7e140208, 0x7e160209, 0x7e180214, 0xe0702000, 0x80010a01,
+    0xe0702004, 0x80010b01, 0xe0702008, 0x80010c01, 0xbf810000,
+};
+
+constexpr std::array<const char*, 3> RetainedReadLaneNames{
+    "v_readlane_b32 inline 37 normalized to lane 5",
+    "v_readlane_b32 loaded SGPR selector 69 normalized to lane 5",
+    "v_readfirstlane_b32 loaded selector 69"};
+
+constexpr std::array<std::uint32_t, 128> RetainedReadLaneInput = [] {
+    std::array<std::uint32_t, 128> input{};
+    for (std::uint32_t tid = 0; tid < 32; ++tid) {
+        input[tid * 4] = 0xa0000000u + tid * 0x01010101u;
+        input[tid * 4 + 1] = 69u + tid;
+    }
+    return input;
+}();
+
+constexpr std::array<std::uint32_t, 128> RetainedReadLaneExpected = [] {
+    std::array<std::uint32_t, 128> expected{};
+    for (std::uint32_t tid = 0; tid < 32; ++tid) {
+        expected[tid * 4] = 0xa5050505u;
+        expected[tid * 4 + 1] = 0xa5050505u;
+        expected[tid * 4 + 2] = 69u;
+        expected[tid * 4 + 3] = 0xdeadbeefu;
+    }
+    return expected;
+}();
+}
+
+struct RetainedSubgroupCase {
+    const char* name;
+    std::span<const std::uint32_t> code, input, expected;
+    std::uint32_t outputRowWords, descriptorStrideBytes;
+    std::span<const char* const> resultNames;
+};
+
+void RetainedSubgroupReplay(id<MTLDevice> device, id<MTLLibrary> library, const RetainedSubgroupCase& test) {
+    constexpr std::uint32_t Threads = 32, GuardWords = 64, Sentinel = 0xdeadbeef;
+    constexpr std::uint64_t CodeAllocation = 0x800000, CodeAddress = CodeAllocation + GuardWords * 4,
+        InputAllocation = 0x810000, InputAddress = InputAllocation + GuardWords * 4,
+        OutputAllocation = 0x820000, OutputAddress = OutputAllocation + GuardWords * 4,
+        HeaderAllocation = 0x830000, HeaderAddress = HeaderAllocation + GuardWords * 4,
+        CommandsAllocation = 0x840000, CommandsAddress = CommandsAllocation + GuardWords * 4,
+        PacketAllocation = 0x850000, PacketAddress = PacketAllocation + GuardWords * 4, LabelAddress = 0x860000;
+    std::vector<std::uint32_t> code(test.code.size() + GuardWords * 2, Sentinel);
+    std::copy(test.code.begin(), test.code.end(), code.begin() + GuardWords);
+    const auto originalCode = code;
+    std::vector<std::uint32_t> input(test.input.size() + GuardWords * 2, Sentinel);
+    std::copy(test.input.begin(), test.input.end(), input.begin() + GuardWords);
+    const auto originalInput = input;
+    std::vector<std::uint32_t> output(test.expected.size() + GuardWords * 2, Sentinel);
+    auto expectedOutput = output;
+    std::copy(test.expected.begin(), test.expected.end(), expectedOutput.begin() + GuardWords);
+    std::array<std::byte, GuardWords * 8 + sizeof(Shader) + sizeof(ShaderUserData)> headerBytes;
+    headerBytes.fill(std::byte{0x7b});
+    std::fill_n(headerBytes.begin() + GuardWords * 4, sizeof(Shader) + sizeof(ShaderUserData), std::byte{0});
+    Shader header{};
+    header.file_header = 0x34333231;
+    header.version = 0x18;
+    header.code = reinterpret_cast<const volatile void*>(CodeAddress);
+    header.user_data = reinterpret_cast<ShaderUserData*>(HeaderAddress + sizeof(Shader));
+    header.header_size = sizeof(Shader) + sizeof(ShaderUserData);
+    header.shader_size = static_cast<std::uint32_t>(test.code.size_bytes());
+    std::memcpy(headerBytes.data() + GuardWords * 4, &header, sizeof(header));
+    const auto originalHeader = headerBytes;
+    const auto descriptor = [&](std::uint64_t address, std::span<const std::uint32_t> payload) {
+        const auto count = test.descriptorStrideBytes == 0 ? payload.size_bytes() : payload.size();
+        return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address),
+            static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (test.descriptorStrideBytes << 16u),
+            static_cast<std::uint32_t>(count), 0x01016facu};
+    };
+    const auto in = descriptor(InputAddress, test.input), out = descriptor(OutputAddress, test.expected);
+    std::array<std::uint32_t, 8> userData{};
+    std::copy(in.begin(), in.end(), userData.begin());
+    std::copy(out.begin(), out.end(), userData.begin() + 4);
+    std::vector<std::uint32_t> words;
+    const auto registers = [&](std::uint32_t first, std::span<const std::uint32_t> values) {
+        std::vector<std::uint32_t> payload{first};
+        payload.insert(payload.end(), values.begin(), values.end());
+        const auto packet = Packet(0x76, payload);
+        words.insert(words.end(), packet.begin(), packet.end());
+    };
+    const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+    const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>(CodeAddress >> 8u), 0};
+    const std::array<std::uint32_t, 1> rsrc2{static_cast<std::uint32_t>(userData.size()) << 1u};
+    registers(0x207, threads);
+    registers(0x20c, program);
+    registers(0x213, rsrc2);
+    registers(0x240, userData);
+    const std::array<std::uint32_t, 4> dispatchPayload{1, 1, 1, 0x8041};
+    const auto dispatch = Packet(0x15, dispatchPayload);
+    words.insert(words.end(), dispatch.begin(), dispatch.end());
+    const std::array<std::uint32_t, 8> eop{
+        0xc0064900, 0, (1u << 29) | (1u << 24), static_cast<std::uint32_t>(LabelAddress + 4), 0, 1, 0, 0};
+    words.insert(words.end(), eop.begin(), eop.end());
+    std::array<std::uint32_t, GuardWords * 2 + 128> commands;
+    commands.fill(Sentinel);
+    Require(words.size() <= 128, "Retained subgroup commands exceed their guarded allocation");
+    std::copy(words.begin(), words.end(), commands.begin() + GuardWords);
+    const auto originalCommands = commands;
+    std::array<std::byte, GuardWords * 8 + sizeof(::Packet)> packetBytes;
+    packetBytes.fill(std::byte{0x7b});
+    const ::Packet packet{reinterpret_cast<std::uint32_t*>(CommandsAddress), static_cast<std::uint32_t>(words.size()), 0, {}};
+    std::memcpy(packetBytes.data() + GuardWords * 4, &packet, sizeof(packet));
+    const auto originalPacket = packetBytes;
+    std::array<std::uint32_t, 3> label{Sentinel, 0, Sentinel};
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 7> ranges{{
+        {CodeAllocation, std::as_writable_bytes(std::span(code)), false},
+        {InputAllocation, std::as_writable_bytes(std::span(input)), false},
+        {OutputAllocation, std::as_writable_bytes(std::span(output)), true},
+        {HeaderAllocation, headerBytes, false},
+        {CommandsAllocation, std::as_writable_bytes(std::span(commands)), false},
+        {PacketAllocation, packetBytes, false},
+        {LabelAddress, std::as_writable_bytes(std::span(label)), true}}};
+    std::atomic<unsigned> callbacks{0};
+    AgcDriver::Metal::MetalDriver driver;
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t queue) {
+        Require(queue == 0x20 && label[1] == 1, "Retained subgroup EOP queue or completed label differs");
+        callbacks.fetch_add(1);
+    });
+    try {
+        driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
+        driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+        driver.WaitIdle();
+        for (std::uint32_t tid = 0; tid < Threads; ++tid)
+            for (std::uint32_t result = 0; result < test.resultNames.size(); ++result) {
+                const auto index = GuardWords + tid * test.outputRowWords + result;
+                Require(output[index] == expectedOutput[index],
+                    std::string(test.name) + " lane " + std::to_string(tid) + " " + test.resultNames[result] + " is " +
+                    std::to_string(output[index]) + ", expected " + std::to_string(expectedOutput[index]));
+            }
+        Require(output == expectedOutput, std::string(test.name) + " changed untouched output padding or allocation guards");
+        Require(label == std::array<std::uint32_t, 3>{Sentinel, 1, Sentinel} && callbacks.load() == 1,
+            std::string(test.name) + " did not finish exactly one guarded EOP");
+        Require(input == originalInput && code == originalCode && headerBytes == originalHeader &&
+                commands == originalCommands && packetBytes == originalPacket,
+            std::string(test.name) + " changed read-only input, code, header, commands, packet or allocation guards");
+        driver.Shutdown();
+    } catch (...) {
+        try { driver.Shutdown(); } catch (...) {}
+        throw;
+    }
+    std::cout << test.name << ": public driver RegisterShader/Submit methods, original goldens, padding and guarded EOP passed\n";
+}
+
+void RetainedSubgroupReplays(id<MTLDevice> device, id<MTLLibrary> library) {
+    const std::array<RetainedSubgroupCase, 2> cases{{
+        {"Original DS permute", RetainedDsPermute::Code, RetainedDsPermute::Input, RetainedDsPermute::FullExpected,
+            16, 0, RetainedDsPermute::Names},
+        {"Original readlane", RetainedReadLane::RetainedReadLaneCode, RetainedReadLane::RetainedReadLaneInput,
+            RetainedReadLane::RetainedReadLaneExpected, 4, 4, RetainedReadLane::RetainedReadLaneNames}}};
+    for (const auto& test : cases) RetainedSubgroupReplay(device, library, test);
+}
+
 void OriginalSubmitExports(id<MTLDevice> device, id<MTLLibrary> library) {
     alignas(8) ::Packet packet{reinterpret_cast<std::uint32_t*>(0x500000), 8, 0, {}};
     std::array<std::uint32_t, 8> commands{0xc0064900, 0, (1u << 29) | (1u << 24), 0x600004, 0, 1, 0, 0};
@@ -405,6 +662,7 @@ int main(int argc, char** argv) {
             Require(library != nil, error ? error.localizedDescription.UTF8String : "PM4 utility library failed to load");
             OriginalSubmitExports(device, library);
             OriginalWave32Subgroup(device, library);
+            RetainedSubgroupReplays(device, library);
             CheckedPm4Memory();
             Pm4DescriptorReplay(device);
             Pm4BdaReplay(device, true);

@@ -7,6 +7,8 @@
 #include "prx/libSceVideoOut/include/BufferMetadata.hpp"
 #include "prx/libSceVideoOut/include/VideoOutState.hpp"
 #include "prx/libSceVideoOut/include/NativeHostWindow.hpp"
+#include "prx/libSceVideoOut/include/ControllerSource.hpp"
+#import <GameController/GameController.h>
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include <algorithm>
 #include <future>
@@ -377,7 +379,53 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
     using namespace std::chrono_literals;
     auto host = NativeHostWindow::CreateMainThread({"AnyPS5 native host event replay", 160, 100});
     id<MTLCommandBuffer> gpuWork = nil;
+    std::unique_ptr<NativeControllerSource> controller;
+    const bool previousControllerMonitoring = GCController.shouldMonitorBackgroundEvents;
+    const auto controllerStartedAt = std::chrono::steady_clock::now();
     try {
+        controller = NativeControllerSource::CreateMainThread();
+        std::uint32_t actualSupportedControllers = 0, actualUnsupportedControllers = 0;
+        for (GCController* actual in GCController.controllers) {
+            if (actual.isSnapshot) continue;
+            if (actual.extendedGamepad) ++actualSupportedControllers;
+            else ++actualUnsupportedControllers;
+        }
+        const auto controllerInitial = controller->Snapshot();
+        Require(controllerInitial.sourceOpen && controllerInitial.connected == (actualSupportedControllers != 0) &&
+                controllerInitial.unsupportedControllerCount == actualUnsupportedControllers,
+                "Coexisting controller availability differs from actual nonsnapshot framework devices");
+        std::uint64_t controllerSequence = 0;
+        auto controllerCapturedAt = controllerStartedAt;
+        auto drainController = [&] {
+            auto batch = controller->DrainEvents();
+            for (const auto& event : batch.events) {
+                Require(event.after.lastSequence == ++controllerSequence &&
+                        event.capturedAt >= controllerCapturedAt && event.capturedAt <= std::chrono::steady_clock::now(),
+                        "Coexisting controller lost its independent event prefix or host capture time");
+                controllerCapturedAt = event.capturedAt;
+            }
+            Require(batch.after.lastSequence == controllerSequence,
+                    "Coexisting controller snapshot crossed its own drained cutoff");
+            if (!batch.events.empty()) {
+                const auto& last = batch.events.back().after;
+                Require(batch.after.controller == last.controller && batch.after.state == last.state &&
+                        batch.after.sourceOpen == last.sourceOpen && batch.after.connected == last.connected &&
+                        batch.after.kind == last.kind && batch.after.vendorName == last.vendorName &&
+                        batch.after.capabilities.leftStickButton == last.capabilities.leftStickButton &&
+                        batch.after.capabilities.rightStickButton == last.capabilities.rightStickButton &&
+                        batch.after.capabilities.optionsButton == last.capabilities.optionsButton &&
+                        batch.after.capabilities.touchpadButton == last.capabilities.touchpadButton &&
+                        batch.after.capabilities.motion == last.capabilities.motion &&
+                        batch.after.capabilities.touchCoordinates == last.capabilities.touchCoordinates &&
+                        batch.after.capabilities.haptics == last.capabilities.haptics &&
+                        batch.after.unsupportedControllerCount == last.unsupportedControllerCount,
+                        "Coexisting controller after-state differs from its final prefix event");
+            }
+            return batch;
+        };
+        const auto controllerAdmission = drainController();
+        Require(controllerAdmission.after.sourceOpen,
+                "Controller admission closed the independent source");
         NSWindow* window = nil;
         for (NSWindow* candidate in NSApp.windows)
             if ([candidate.title isEqualToString:@"AnyPS5 native host event replay"]) window = candidate;
@@ -495,6 +543,18 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
                 up.keyCode == 4 && !up.pressed && !first.after.heldKeys[4] && first.after.heldMouseButtons == 1,
                 "Actual AppKit key/repeat/mouse routing or first snapshot differs");
         Require(drain(0).after.heldMouseButtons == 1, "Empty drain changed the previous event cutoff state");
+        const auto controllerAfterWindowKeys = drainController();
+        Require(controllerAfterWindowKeys.after.sourceOpen && host->Snapshot().heldMouseButtons == 1 &&
+                host->Snapshot().window == initial.window,
+                "Independent controller drain changed the window input cutoff or owner");
+        if (actualSupportedControllers == 0 && actualUnsupportedControllers == 0) {
+            Require(controllerAfterWindowKeys.events.empty() && !controllerAfterWindowKeys.after.connected &&
+                    controllerAfterWindowKeys.after.controller == ControllerIdentity{} &&
+                    controllerAfterWindowKeys.after.state.buttons == 0 &&
+                    controllerAfterWindowKeys.after.state.sticks == std::array<std::uint8_t, 4>{128, 128, 128, 128} &&
+                    controllerAfterWindowKeys.after.state.leftTrigger == 0 && controllerAfterWindowKeys.after.state.rightTrigger == 0,
+                    "Window key/mouse events invented a physical controller or pressed state");
+        }
         post(@[mouse(false), mouse(true), key(true)]);
         auto otherConsumer = std::async(std::launch::async, [&] {
             try { static_cast<void>(host->DrainEvents()); }
@@ -574,6 +634,25 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
                 std::none_of(closing.after.heldKeys.begin(), closing.after.heldKeys.end(), [](bool held) { return held; }) &&
                 presentation.metalLayer(presentation.context) == (__bridge void*)layer,
                 "Actual AppKit close destroyed presentation before CPU/GPU drain or lost its ordered input reset");
+        controller->CloseMainThread();
+        const auto controllerClosed = drainController();
+        Require(!controllerClosed.after.sourceOpen && !controllerClosed.after.connected &&
+                controllerClosed.after.state.buttons == 0 &&
+                controllerClosed.after.state.sticks == std::array<std::uint8_t, 4>{128, 128, 128, 128} &&
+                controllerClosed.after.state.leftTrigger == 0 && controllerClosed.after.state.rightTrigger == 0 &&
+                std::count_if(controllerClosed.events.begin(), controllerClosed.events.end(), [](const auto& event) {
+                    return event.kind == ControllerEventKind::SourceClosed;
+                }) == 1 && !controllerClosed.events.empty() &&
+                controllerClosed.events.back().kind == ControllerEventKind::SourceClosed,
+                "Coexisting controller did not deliver its final neutral close prefix before GPU/window retirement");
+        Require(GCController.shouldMonitorBackgroundEvents == previousControllerMonitoring &&
+                host->Snapshot().open && host->Snapshot().closeRequested && window.visible &&
+                presentation.metalLayer(presentation.context) == (__bridge void*)layer,
+                "Controller close changed process policy or destroyed the window before GPU drain");
+        const auto controllerAfterClose = drainController();
+        Require(controllerAfterClose.events.empty() && !controllerAfterClose.after.sourceOpen &&
+                controllerAfterClose.after.lastSequence == controllerClosed.after.lastSequence,
+                "Closed coexisting controller repeated its terminal prefix");
         [gpuWork commit];
         [gpuWork waitUntilCompleted];
         Require(gpuWork.status == MTLCommandBufferStatusCompleted, "Deferred-close native drawable did not complete on the GPU");
@@ -596,12 +675,14 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
         host->RequestCloseMainThread();
         host->CloseAfterGpuDrainMainThread();
     } catch (...) {
+        if (controller) { try { controller->CloseMainThread(); } catch (...) {} }
         if (gpuWork.status >= MTLCommandBufferStatusCommitted) [gpuWork waitUntilCompleted];
         try { host->RequestCloseMainThread(); } catch (...) {}
         host->CloseAfterGpuDrainMainThread();
         throw;
     }
     std::cout << "PASS: real AppKit pump, ordered single-consumer event cutoffs, focus resets and deferred native drawable close\n";
+    std::cout << "PASS: production-linked real window/controller coexistence, separate event cutoffs and neutral controller close before GPU/window retirement; PHYSICAL_POSITIVE_UNVERIFIED\n";
 }
 
 void Run(id<MTLDevice> device, id<MTLLibrary> library) {

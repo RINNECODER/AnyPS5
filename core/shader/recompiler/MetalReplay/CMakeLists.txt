@@ -26,6 +26,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/BufferMetadata.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/VideoOutState.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/NativeHostWindow.mm"
+    "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/ControllerSource.mm"
     "${agcDriverRoot}/Execution/src/DisplayFormat.cpp"
     "${agcDriverRoot}/Execution/Metal/MetalDriver.mm"
     "${agcDriverRoot}/Execution/Metal/MetalPacketExecution.mm"
@@ -56,11 +57,13 @@ target_include_directories(anyps5_metal_native_execution PUBLIC
 find_library(NATIVE_APPKIT_FRAMEWORK AppKit REQUIRED)
 find_library(NATIVE_CARBON_FRAMEWORK Carbon REQUIRED)
 find_library(NATIVE_IOKIT_FRAMEWORK IOKit REQUIRED)
+find_library(NATIVE_GAMECONTROLLER_FRAMEWORK GameController REQUIRED)
 target_include_directories(anyps5_metal_native_execution PRIVATE "${PROJECT_SOURCE_DIR}/3rdparty/SDL2/include")
 target_link_libraries(anyps5_metal_native_execution PUBLIC
     "${NATIVE_APPKIT_FRAMEWORK}"
     "${NATIVE_CARBON_FRAMEWORK}"
     "${NATIVE_IOKIT_FRAMEWORK}"
+    "${NATIVE_GAMECONTROLLER_FRAMEWORK}"
     anyps5_metal_guest_recompiler
     anyps5_metal_utilities
 )
