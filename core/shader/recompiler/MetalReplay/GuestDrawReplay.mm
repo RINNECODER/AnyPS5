@@ -200,6 +200,159 @@ std::vector<std::uint32_t> GraphicsCommands() {
     return commands;
 }
 
+struct SubmittedFanReplay {
+    static constexpr std::uint64_t VertexAddress = 0x2000000, IndexAddress = 0x2010000, Index32Address = 0x2020000;
+    static constexpr std::uint64_t VertexCodeAddress = 0x2030000, PixelCodeAddress = 0x2040000;
+    static constexpr std::uint64_t VertexHeaderAddress = 0x2050000, PixelHeaderAddress = 0x2060000;
+    static constexpr std::uint64_t CommandAddress = 0x2070000, PacketAddress = 0x2080000;
+    struct Vertex { std::array<float, 4> position, color; };
+    std::array<Vertex, 16> vertices;
+    std::array<std::uint16_t, 32> indices16;
+    std::array<std::uint32_t, 32> indices32;
+    std::array<std::uint32_t, 10> vertexCode{
+        0xe0382000, 0x80020005, 0xe0382010, 0x80020405, 0xbf8c3f70,
+        0xf80008cf, 0x03020100, 0xf800020f, 0x07060504, 0xbf810000};
+    std::array<std::uint32_t, 7> pixelCode{
+        0xc8020002, 0xc8060102, 0xc80a0202, 0xc80e0302, 0xf800180f, 0x03020100, 0xbf810000};
+    std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> vertexHeader{}, pixelHeader{};
+    std::array<std::uint32_t, 512> commands{};
+    ::Packet packet{reinterpret_cast<std::uint32_t*>(CommandAddress), 0, 0, {}};
+
+    SubmittedFanReplay() {
+        const auto header = [](auto& destination, std::uint64_t address, std::uint64_t code, std::uint32_t bytes, std::uint8_t type) {
+            Shader shader{};
+            shader.file_header = 0x34333231;
+            shader.version = 0x18;
+            shader.code = reinterpret_cast<const volatile void*>(code);
+            shader.user_data = reinterpret_cast<ShaderUserData*>(address + sizeof(Shader));
+            shader.header_size = static_cast<std::uint32_t>(destination.size());
+            shader.shader_size = bytes;
+            shader.type = type;
+            std::memcpy(destination.data(), &shader, sizeof(shader));
+        };
+        header(vertexHeader, VertexHeaderAddress, VertexCodeAddress, sizeof(vertexCode), 2);
+        header(pixelHeader, PixelHeaderAddress, PixelCodeAddress, sizeof(pixelCode), 1);
+    }
+
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+        ranges.insert(ranges.end(), {
+            {VertexAddress, std::as_writable_bytes(std::span(vertices)), false},
+            {IndexAddress, std::as_writable_bytes(std::span(indices16)), false},
+            {Index32Address, std::as_writable_bytes(std::span(indices32)), false},
+            {VertexCodeAddress, std::as_writable_bytes(std::span(vertexCode)), false},
+            {PixelCodeAddress, std::as_writable_bytes(std::span(pixelCode)), false},
+            {VertexHeaderAddress, vertexHeader, false}, {PixelHeaderAddress, pixelHeader, false},
+            {CommandAddress, std::as_writable_bytes(std::span(commands)), false},
+            {PacketAddress, std::as_writable_bytes(std::span(&packet, 1)), false}});
+    }
+
+    void Run(std::vector<std::byte>& pixels) {
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(VertexHeaderAddress));
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(PixelHeaderAddress));
+        const auto append = [](std::vector<std::uint32_t>& words, std::uint32_t opcode, std::initializer_list<std::uint32_t> payload) {
+            words.push_back(0xc0000000u | (static_cast<std::uint32_t>(payload.size() - 1) << 16u) | (opcode << 8u));
+            words.insert(words.end(), payload.begin(), payload.end());
+        };
+        const auto reg = [](std::vector<std::uint32_t>& words, std::uint32_t bank, std::uint32_t offset, std::uint32_t value) {
+            RegisterPacket(words, bank, offset, std::span(&value, 1));
+        };
+        for (const auto mode : {0u, 1u, 2u, 3u, 4u, 5u, 6u}) {
+            const bool indexed = mode != 0;
+            const bool restart = mode >= 5;
+            const bool culled = mode == 3;
+            const std::uint32_t instances = mode == 4 ? 2 : 1;
+            const auto strength = mode == 4 ? 0.25f : 1.0f;
+            const std::array<Vertex, 4> fan{{
+                {{-.75f, -.75f, .5f, 1}, {0, 0, strength, strength}},
+                {{.75f, -.75f, .5f, 1}, {strength, 0, 0, strength}},
+                {{.75f, .75f, .5f, 1}, {0, strength, 0, strength}},
+                {{-.75f, .75f, .5f, 1}, {strength, strength, 0, strength}}}};
+            std::fill(vertices.begin(), vertices.end(), Vertex{{8, 8, .5f, 1}, {1, 0, 1, 1}});
+            if (restart) {
+                const std::array<Vertex, 8> separated{{
+                    {{-.75f, -.25f, .5f, 1}, {1, 0, 1, 1}},
+                    {{-.25f, -.25f, .5f, 1}, {1, 0, 0, 1}},
+                    {{-.25f, .25f, .5f, 1}, {0, 1, 0, 1}},
+                    {{-.75f, .25f, .5f, 1}, {1, 1, 1, 1}},
+                    {{.25f, -.25f, .5f, 1}, {1, 0, 1, 1}},
+                    {{.75f, -.25f, .5f, 1}, {0, 0, 1, 1}},
+                    {{.75f, .25f, .5f, 1}, {1, 1, 0, 1}},
+                    {{.25f, .25f, .5f, 1}, {1, 1, 1, 1}}}};
+                std::copy(separated.begin(), separated.end(), vertices.begin());
+            } else if (indexed) std::copy(fan.begin(), fan.end(), vertices.begin());
+            else std::copy(fan.begin(), fan.end(), vertices.begin() + 3);
+            indices16.fill(0xffff);
+            indices32.fill(0xffffffff);
+            if (restart) {
+                const std::array<std::uint32_t, 17> values{3, UINT32_MAX, 3, 4, 5, 6, UINT32_MAX, 3, 4, UINT32_MAX, 7, 8, 9, 10, UINT32_MAX, 7, 8};
+                for (std::uint32_t i = 0; i < values.size(); ++i) {
+                    indices16[1 + i] = static_cast<std::uint16_t>(values[i]);
+                    indices32[1 + i] = values[i];
+                }
+            } else for (std::uint32_t i = 0; i < 4; ++i) indices16[1 + i] = indices32[1 + i] = 3 + i;
+            const auto originalVertices = vertices;
+            const auto original16 = indices16;
+            const auto original32 = indices32;
+            auto words = GraphicsCommands();
+            const std::array<std::uint32_t, 2> vertexProgram{static_cast<std::uint32_t>(VertexCodeAddress >> 8u), 0},
+                pixelProgram{static_cast<std::uint32_t>(PixelCodeAddress >> 8u), 0};
+            RegisterPacket(words, 0x76, 0xc8, vertexProgram);
+            RegisterPacket(words, 0x76, 0x008, pixelProgram);
+            reg(words, 0x79, 0x242, 5);
+            reg(words, 0x79, 0x24a, indexed ? 0xfffffffdu : 3u);
+            reg(words, 0x79, 0x24b, restart ? 1u : 0u);
+            reg(words, 0x69, 0x205, culled ? 0x246 : 0x242);
+            reg(words, 0x69, 0x1b6, 0x8001);
+            reg(words, 0x69, 0x191, 0x400);
+            reg(words, 0x69, 0x1b3, 0);
+            reg(words, 0x69, 0x1b4, 0);
+            reg(words, 0x69, 0x1e0, mode == 4 ? 0x40000101 : 0);
+            const std::array<std::uint32_t, 4> users{static_cast<std::uint32_t>(VertexAddress), 32u << 16u, 16, 0x01016fac};
+            RegisterPacket(words, 0x76, 0x8c, users);
+            append(words, 0x2f, {instances});
+            const auto count = restart ? 17u : 4u;
+            if (indexed) {
+                const bool wide = mode == 2 || mode == 6;
+                append(words, 0x2a, {wide ? 1u : 0u});
+                append(words, 0x27, {count, static_cast<std::uint32_t>(wide ? Index32Address + 4 : IndexAddress + 2), 0, count, 0});
+            } else append(words, 0x2d, {count, 2});
+            Require(words.size() <= commands.size(), "Fan commands exceed borrowed allocation");
+            std::copy(words.begin(), words.end(), commands.begin());
+            packet.dw_num = static_cast<std::uint32_t>(words.size());
+            std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0});
+            AgcDriver::Submit(reinterpret_cast<const Packet*>(PacketAddress), 0);
+            AgcDriverWaitIdle_nid_postfix();
+            for (std::uint32_t y = 0; y < Height; ++y) for (std::uint32_t x = 0; x < Width; ++x) {
+                std::array<std::uint8_t, 4> expected{};
+                if (restart && y >= 12 && y < 20 && ((x >= 8 && x < 24) || (x >= 40 && x < 56))) {
+                    const bool left = x < 32;
+                    const bool lower = x + 2 * y >= (left ? 47u : 79u);
+                    if (left) expected[lower ? 0 : 1] = 255;
+                    else if (lower) expected[2] = 255;
+                    else expected[0] = expected[1] = 255;
+                    expected[3] = 255;
+                } else if (!restart && !culled && x >= 8 && x < 56 && y >= 4 && y < 28) {
+                    const auto value = static_cast<std::uint8_t>(mode == 4 ? 128 : 255);
+                    expected[x + 2 * y >= 63 ? 0 : 1] = value;
+                    expected[3] = value;
+                }
+                for (std::uint32_t c = 0; c < 4; ++c) Require(pixels[256 + (y * Width + x) * 4 + c] == std::byte{expected[c]},
+                    "Public fan mode=" + std::to_string(mode) + " pixel=" + std::to_string(x) + "," + std::to_string(y) + " channel=" + std::to_string(c));
+            }
+            Require(std::memcmp(vertices.data(), originalVertices.data(), sizeof(vertices)) == 0 && indices16 == original16 && indices32 == original32,
+                "Public fan changed borrowed vertices or index allocation");
+            for (std::size_t i = 0; i < 256; ++i) Require(pixels[i] == std::byte{0x7b} && pixels[pixels.size() - 1 - i] == std::byte{0x7b}, "Fan wrote target guard");
+            std::cout << "Public ordinary vertex fan " << mode << " all pixels and guards passed\n";
+        }
+        std::vector<std::uint32_t> reset;
+        reg(reset, 0x79, 0x24b, 0);
+        std::copy(reset.begin(), reset.end(), commands.begin());
+        packet.dw_num = static_cast<std::uint32_t>(reset.size());
+        AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0);
+        AgcDriverWaitIdle_nid_postfix();
+    }
+};
+
 void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     constexpr std::uint64_t ComputeCodeAddress = 0x800000, ComputeInputAddress = 0x810000,
         ComputeOutputAddress = 0x820000, LabelAddress = 0x900000;
@@ -321,6 +474,8 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     for (std::size_t i = 0; i < depthBacking.size(); ++i)
         ranges.push_back({DepthAllocation + i * 65536, depthBacking[i], false});
     ranges.push_back({DepthOutputAllocation, std::as_writable_bytes(std::span(depthOutput)), true});
+    SubmittedFanReplay fanReplay;
+    fanReplay.AddRanges(ranges);
     const auto checkPixels = [&](bool masked) {
         for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
             auto expected = std::byte{0x7b};
@@ -447,6 +602,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     std::vector<std::uint32_t> indexedMulti;
     append(indexedMulti, 0x38, {16, 0x90, 0x91, 0x92u | (1u << 31u), 3, 0, 0, 32, 0});
     submitIndirect(indexedMulti, 96, "Actual public DRAW_INDEX_INDIRECT_MULTI: zero instances, clamped firstIndex and excluded out-of-range record");
+    fanReplay.Run(pixels);
     vertices = originalVertices;
     std::copy(VertexCode.begin(), VertexCode.end(), vertexCode.begin());
     vertexCode[1] = 0x80020005;
