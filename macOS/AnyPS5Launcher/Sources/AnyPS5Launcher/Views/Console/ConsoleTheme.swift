@@ -45,7 +45,7 @@ struct ConsoleArtwork: View {
 
     var body: some View {
         if hero && conceptHero && title.localizedCaseInsensitiveContains("civilization") {
-            Image("ConsoleCoast", bundle: .module).resizable().scaledToFill()
+            Image("ConsoleCoast", bundle: ConsoleResources.bundle).resizable().scaledToFill()
         } else {
             AsyncImage(url: url) { phase in
                 if let image = phase.image {

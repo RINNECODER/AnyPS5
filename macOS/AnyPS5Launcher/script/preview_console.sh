@@ -11,7 +11,7 @@ swift build --scratch-path "$SCRATCH" --jobs 2 -Xswiftc -strict-concurrency=comp
 BIN="$(swift build --scratch-path "$SCRATCH" --show-bin-path)"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$STATE"
 cp "$BIN/AnyPS5Launcher" "$APP/Contents/MacOS/MacPSPreview"
-# SwiftPM's generated accessor resolves packaged resources under Contents/Resources.
+# ConsoleResources resolves the app's standard resource directory across SwiftPM versions.
 cp -R "$BIN/AnyPS5Launcher_AnyPS5Launcher.bundle" "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
