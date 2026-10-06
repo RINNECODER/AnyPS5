@@ -428,6 +428,31 @@ void Machine::Protect(std::uint64_t address, std::size_t size, Permission permis
     impl->check(anyps5_qemu_cpu_protect_range(impl->engine, address, size, bits), "Protect modern guest memory");
     impl->ranges.swap(replacement);
 }
+void Machine::ProtectFragment(std::uint64_t address, std::size_t size, Permission permissions) {
+    impl->checkOwner();
+    if (impl->contextLifetime->running) throw std::logic_error("Guest fragment protection requires the idle CPU owner");
+    if (!size || size > 4096 - (address & 4095) || size > std::numeric_limits<std::uint64_t>::max() - address)
+        throw std::invalid_argument("Guest fragment protection requires a nonempty interval within one 4 KiB page without overflow");
+    const auto bits = permissionBits(permissions);
+    if (bits & 4) throw std::invalid_argument("Guest fragment protection supports only data permissions");
+    const auto page = address & ~std::uint64_t{4095};
+    impl->checkMapped(page, 4096);
+    for (const auto& range : impl->ranges)
+        if (range.address < page + 4096 && page < range.address + range.size && (range.permissions & 4))
+            throw std::runtime_error("Guest fragment protection does not support executable shared pages");
+    auto replacement = impl->withoutRange(address, size);
+    replacement.reserve(impl->ranges.size() + 2);
+    const auto end = address + size;
+    for (const auto& range : impl->ranges) {
+        const auto begin = std::max(address, range.address);
+        const auto overlapEnd = std::min(end, range.address + range.size);
+        if (begin < overlapEnd)
+            replacement.push_back({begin, static_cast<std::size_t>(overlapEnd - begin),
+                range.backing + (begin - range.address), bits, range.borrowed});
+    }
+    impl->check(anyps5_qemu_cpu_protect_fragment(impl->engine, address, size, bits), "Protect modern guest data fragment");
+    impl->ranges.swap(replacement);
+}
 std::vector<Mapping> Machine::Mappings() const {
     impl->checkOwner();
     std::vector<Mapping> result;

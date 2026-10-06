@@ -168,6 +168,19 @@ struct Fixture {
     }
 };
 
+void sharedDataFixture(Fixture& fixture, bool noAccess) {
+    put(fixture.bytes, 56, 9, 2);
+    fixture.header(1, 1, 6, 0x3000, 0x3000, 0x180, 0x380, 16);
+    fixture.header(6, 1, 6, 0x2380, 0x3380, 0x80, 0x100, 16);
+    fixture.header(7, 1, noAccess ? 0 : 6, 0x2480, 0x3480, 0x40, 0x80, 16);
+    fixture.header(8, 1, 6, 0x2580, 0x3580, 0x20, 0x80, 16);
+    put(fixture.bytes, Symbols + 64, 0x380);
+    for (std::size_t i = 0; i < 0x180; ++i) fixture.bytes[0x3000 + i] = std::byte((i * 13 + 7) & 255);
+    for (std::size_t i = 0; i < 0x80; ++i) fixture.bytes[0x2380 + i] = std::byte((i * 29 + 0xa3) & 255);
+    for (std::size_t i = 0; i < 0x40; ++i) fixture.bytes[0x2480 + i] = std::byte((i * 17 + 0x5d) & 255);
+    for (std::size_t i = 0; i < 0x20; ++i) fixture.bytes[0x2580 + i] = std::byte((i * 43 + 0xc7) & 255);
+}
+
 struct Input {
     std::filesystem::path directory;
     std::filesystem::path path;
@@ -193,8 +206,9 @@ template<class Function> void rejects(Function&& function, const char* expected)
     throw std::runtime_error(std::string("Missing SCE rejection: ") + expected);
 }
 
-void translatedEntry(bool modern) {
+void translatedEntry(bool modern, bool sharedData = false) {
     Fixture fixture(modern);
+    if (sharedData) sharedDataFixture(fixture, true);
     Input input(fixture.bytes);
     const auto parsed = Cpu::ParseSce(input.path);
     require(parsed.Entry == 0x1000 && parsed.Type == 0xfe10 && parsed.RelocationCount == 5,
@@ -308,17 +322,106 @@ void sharedPageInspection() {
     Input input(fixture.bytes);
     const auto parsed = Cpu::ParseSce(input.path);
     require(parsed.Imports.size() == 2 && std::any_of(parsed.UnsupportedReasons.begin(), parsed.UnsupportedReasons.end(), [](const auto& reason) {
-        return reason.find("differing permissions on a shared guest page") != std::string::npos;
+        return reason.find("mixed executable shared guest pages are unsupported") != std::string::npos;
     }), "Nonconflicting logical segments sharing a page must remain inspectable with an explicit execution blocker");
     Cpu::Machine machine;
     unsigned resolutions = 0;
     rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); },
-            "differing permissions on a shared guest page");
+            "mixed executable shared guest pages are unsupported");
     require(resolutions == 0, "Unsafe shared-page permissions reached import resolution");
     rejects([&] { machine.CheckAccess(Bias + 0x1000, 1, Cpu::Permission::Execute); }, "permission");
     fixture.header(6, 1, 0, 0x2170, 0x1170, 0x80, 0x80, 16);
     Input conflicting(fixture.bytes);
     rejects([&] { Cpu::ParseSce(conflicting.path); }, "overlapping logical PT_LOAD ranges");
+}
+
+void sharedDataPages() {
+    constexpr auto read = Cpu::Permission::Read;
+    constexpr auto write = Cpu::Permission::Write;
+    for (const auto noAccess : {false, true}) {
+        Fixture fixture;
+        sharedDataFixture(fixture, noAccess);
+        Input input(fixture.bytes);
+        Cpu::Machine machine;
+#if !ANYPS5_CPU_MODERN_TCG
+        if (noAccess) {
+            unsigned resolutions = 0;
+            rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); },
+                    "Unicorn exact shared guest data page permissions are unsupported");
+            require(resolutions == 0 && machine.Mappings().empty(),
+                    "Unsupported Unicorn shared data-page permissions mapped memory or reached import resolution");
+            continue;
+        }
+#endif
+        Cpu::SceImports imports(machine);
+        const auto image = Cpu::LoadSce(machine, input.path, Bias, [&](const auto& import) { return imports.Resolve(import); });
+        require(image.Entry == Bias + 0x1000, "Shared-page loading changed the guest entry address");
+        const auto mappings = machine.Mappings();
+        auto cursor = Bias + 0x3000;
+        for (const auto& mapping : mappings) {
+            const auto end = mapping.Address + mapping.Size;
+            if (end <= Bias + 0x3000 || mapping.Address >= Bias + 0x4000) continue;
+            require(std::max(mapping.Address, Bias + 0x3000) == cursor,
+                    "Shared data page contains overlapping or missing physical mapping extents");
+            cursor = std::min(end, Bias + 0x4000);
+        }
+        require(cursor == Bias + 0x4000, "Shared logical data segments did not retain complete unique physical-page coverage");
+        const auto payload = [&](std::uint64_t address, std::size_t fileSize, std::size_t memorySize,
+                                 unsigned multiplier, unsigned addend) {
+            Bytes bytes(memorySize, std::byte{0xe1});
+            machine.Read(Bias + address, bytes);
+            for (std::size_t i = 0; i < fileSize; ++i)
+                require(bytes[i] == std::byte((i * multiplier + addend) & 255),
+                        "Shared-page loading clobbered a neighboring segment's original file payload");
+            for (std::size_t i = fileSize; i < bytes.size(); ++i)
+                require(bytes[i] == std::byte{0}, "Shared-page segment BSS was not zero without overwriting neighboring payload");
+        };
+        payload(0x3000, 0x180, 0x380, 13, 7);
+        payload(0x3380, 0x80, 0x100, 29, 0xa3);
+        payload(0x3580, 0x20, 0x80, 43, 0xc7);
+        machine.CheckAccess(Bias + 0x3380, 0x100, read | write);
+        if (noAccess) {
+            machine.CheckAccess(Bias + 0x347e, 2, read | write);
+            rejects([&] { machine.CheckAccess(Bias + 0x3480, 1, read); }, "permission");
+            rejects([&] { machine.CheckAccess(Bias + 0x3480, 1, write); }, "permission");
+            rejects([&] { machine.CheckAccess(Bias + 0x347f, 2, read); }, "permission");
+            std::array<std::byte, 2> output{std::byte{0xa7}, std::byte{0xb2}};
+            rejects([&] { machine.Read(Bias + 0x3480, std::span(output).first(1)); }, "permission");
+            rejects([&] { machine.Read(Bias + 0x347f, output); }, "permission");
+            require(output[0] == std::byte{0xa7} && output[1] == std::byte{0xb2},
+                    "Denied host read copied a permitted prefix before discovering the NONE suffix");
+            machine.ProtectFragment(Bias + 0x3480, 0x80, read);
+        }
+        payload(0x3480, 0x40, 0x80, 17, 0x5d);
+        if (noAccess) {
+            machine.ProtectFragment(Bias + 0x3480, 0x80, static_cast<Cpu::Permission>(0));
+            rejects([&] { machine.CheckAccess(Bias + 0x3480, 1, read); }, "permission");
+            machine.CheckAccess(Bias + 0x347f, 1, read | write);
+        }
+        if (noAccess) {
+            rejects([&] { machine.CheckAccess(Bias + 0x3500, 1, read); }, "permission");
+            rejects([&] { machine.CheckAccess(Bias + 0x3500, 1, write); }, "permission");
+            rejects([&] { machine.CheckAccess(Bias + 0x3600, 1, read); }, "permission");
+        } else machine.CheckAccess(Bias + 0x3500, 0xb00, read | write);
+    }
+    struct Case { const char* Expected; bool Execute; };
+    constexpr std::array<Case, 2> cases{{{"overlapping logical PT_LOAD ranges", false},
+        {"shared guest page", true}}};
+    for (const auto& value : cases) {
+        Fixture fixture;
+        sharedDataFixture(fixture, true);
+        if (value.Execute) fixture.header(7, 1, 1, 0x2480, 0x3480, 0x40, 0x80, 16);
+        else fixture.header(7, 1, 0, 0x2470, 0x3470, 0x40, 0x80, 16);
+        Input input(fixture.bytes);
+        Cpu::Machine machine;
+        unsigned resolutions = 0;
+        rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); }, value.Expected);
+        require(resolutions == 0 && machine.Mappings().empty(),
+                "Invalid shared-page executable or logical overlap mutated memory or reached import resolution");
+    }
+#if ANYPS5_CPU_MODERN_TCG
+    translatedEntry(true, true);
+#endif
 }
 
 void repeatedLibraryAttributes() {
@@ -750,6 +853,7 @@ int main() {
         Case{"distinct import scopes", distinctScopes},
         Case{"unsupported startup", unsupportedStartup},
         Case{"shared-page inspection", sharedPageInspection},
+        Case{"shared data page loading and host permissions", sharedDataPages},
         Case{"repeated library attributes", repeatedLibraryAttributes},
         Case{"translated TLS entry", [] { translatedTlsEntry(); }},
         Case{"translated BSS-only TLS entry", [] { translatedTlsEntry(true); }},

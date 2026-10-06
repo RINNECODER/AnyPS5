@@ -47,6 +47,7 @@ public:
     void Unmap(std::uint64_t address, std::size_t size);
     void ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions);
     void Protect(std::uint64_t address, std::size_t size, Permission permissions);
+    void ProtectFragment(std::uint64_t address, std::size_t size, Permission permissions);
     std::vector<Mapping> Mappings() const;
     void CheckAccess(std::uint64_t address, std::size_t size, Permission permissions) const;
     void Read(std::uint64_t address, std::span<std::byte> output) const;
