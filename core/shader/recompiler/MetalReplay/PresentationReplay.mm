@@ -4,6 +4,7 @@
 #import <QuartzCore/CATransaction.h>
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
+#include "prx/libSceVideoOut/include/BufferMetadata.hpp"
 #include <array>
 #include <cstring>
 #include <iostream>
@@ -187,7 +188,16 @@ void Run(id<MTLDevice> device, id<MTLLibrary> library) {
     const std::array<std::uint64_t, 4> formats{BGRA, RGBA, BGRA | TenBit, RGBA | TenBit};
     for (std::size_t i = 0; i < formats.size(); ++i) {
         FillLinear(linear[i], formats[i]);
-        const AgcDriver::DisplayBuffer buffer{0x10000u + i * 0x10000u, formats[i], SourceWidth, SourceHeight, 1, 10};
+        BufferAttributeGroup group{};
+        group.attribute.pixel_format = formats[i];
+        group.attribute.width = SourceWidth;
+        group.attribute.height = SourceHeight;
+        group.attribute.tiling_mode = 1;
+        group.attribute.pitch_in_pixel = 10;
+        group.attribute.option = VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY;
+        group.occupied = true;
+        const VideoOutBuffer registered{0, 0x10000u + i * 0x10000u, 0};
+        const auto buffer = DescribeVideoOutBuffer(registered, group);
         Present(presentation, buffer, context, queue, Golden(8, 4));
     }
     const AgcDriver::DisplayBuffer tiledBuffer{0x50000, BGRA, SourceWidth, SourceHeight};

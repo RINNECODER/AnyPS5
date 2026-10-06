@@ -177,6 +177,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Acb.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/CommandBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Dcb.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Submission.cpp
 )
 
 add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
