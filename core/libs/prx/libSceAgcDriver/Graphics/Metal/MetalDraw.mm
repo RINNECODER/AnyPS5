@@ -130,6 +130,13 @@ MetalDraw::MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary)
 
 MetalDraw::~MetalDraw() = default;
 
+MeshTargetLimits MetalDraw::MeshLimits() const {
+    const auto maximum = backend.Device().maxThreadsPerThreadgroup;
+    return {{static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(maximum.height), static_cast<std::uint32_t>(maximum.depth)},
+        static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(backend.Device().maxThreadgroupMemoryLength),
+        256, 512, 128, 16384, 1, 1};
+}
+
 void MetalDraw::DumpSamplesSynchronously(std::uint64_t guestAddress) {
     std::lock_guard lock(drawMutex);
     constexpr std::size_t targetBytes = 15 * 16 + 8;
@@ -162,7 +169,8 @@ void MetalDraw::DumpSamplesSynchronously(std::uint64_t guestAddress) {
 
 BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
-    std::span<const NativeGuestMemory::BorrowedRange> ranges) {
+    std::span<const NativeGuestMemory::BorrowedRange> ranges,
+    std::optional<std::array<std::uint32_t, 5>> meshArguments) {
     std::lock_guard lock(drawMutex);
     if (draw.indirect) throw std::invalid_argument("Metal draw indirect submission requires a native argument adapter");
     if (draw.flags != (draw.indexed ? 0u : (draw.flags & 0x20u))) throw std::invalid_argument("Metal draw packet flags are unsupported");
@@ -170,17 +178,60 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     if (draw.firstInstance > std::numeric_limits<std::uint32_t>::max() - (draw.instanceCount - 1u)) {
         throw std::invalid_argument("Metal draw instance range overflows guest invocation index");
     }
-    const auto primitive = PrimitiveType(state);
+    const bool meshPath = state.stages.mesh.has_value();
+    if (meshArguments && (!meshPath || !draw.indexed)) {
+        throw std::invalid_argument("Metal mesh arguments require an indexed mesh draw");
+    }
+    const auto primitive = meshPath ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
+    std::uint32_t meshGroups = 0;
+    if (meshPath) {
+        const auto& mesh = *state.stages.mesh;
+        const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
+        const auto step = mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize;
+        if (draw.indexCount < inputSize || mesh.primitivesPerGroup == 0) {
+            throw std::invalid_argument("Metal mesh draw contains no complete primitive");
+        }
+        meshGroups = ((draw.indexCount - inputSize) / step) / mesh.primitivesPerGroup + 1u;
+        if (meshArguments && ((*meshArguments)[0] != meshGroups || (*meshArguments)[1] != draw.instanceCount ||
+            (*meshArguments)[2] != 1 || (*meshArguments)[3] != draw.indexCount ||
+            (*meshArguments)[4] > std::numeric_limits<std::uint32_t>::max() - draw.indexCount)) {
+            throw std::invalid_argument("Metal mesh arguments disagree with the expanded draw");
+        }
+    }
     const Graphics::CompiledShader* vertex = nullptr;
     const Graphics::CompiledShader* fragment = nullptr;
     for (const auto& shader : shaders) {
         if (shader.program == nullptr) throw std::invalid_argument("Metal draw compiled shader is missing");
-        if (shader.stage == ShaderStage::Vertex && vertex == nullptr) vertex = &shader;
+        if (shader.stage == (meshPath ? ShaderStage::Mesh : ShaderStage::Vertex) && vertex == nullptr) vertex = &shader;
         else if (shader.stage == ShaderStage::Fragment && fragment == nullptr) fragment = &shader;
-        else throw std::invalid_argument("Metal draw requires exactly one vertex and one fragment program");
+        else throw std::invalid_argument("Metal draw requires one rasterization and one fragment program");
     }
     if (vertex == nullptr || fragment == nullptr) throw std::invalid_argument("Metal draw vertex or fragment program is missing");
-    const auto pushConstants = Graphics::AssemblePushConstants(shaders);
+    auto pushConstants = Graphics::AssemblePushConstants(shaders);
+    id<MTLBuffer> meshArgumentBuffer = nil;
+    if (meshPath) {
+        for (const auto& shader : shaders) {
+            if (!shader.program->pushConstants.empty() &&
+                shader.pushConstantOffset + shader.program->pushConstants.size() > MeshDrawPushOffsetBytes) {
+                throw std::invalid_argument("Metal mesh shader data overlaps the draw push constants");
+            }
+        }
+        std::uint64_t argumentAddress = 0;
+        if (meshArguments) {
+            static_assert(sizeof(*meshArguments) == MeshArgumentBytes);
+            meshArgumentBuffer = backend.Buffer(MeshArgumentBytes);
+            std::memcpy(meshArgumentBuffer.contents, meshArguments->data(), MeshArgumentBytes);
+            argumentAddress = meshArgumentBuffer.gpuAddress;
+            if (argumentAddress == 0 || argumentAddress % 4 != 0) {
+                throw std::runtime_error("Metal mesh argument buffer has no aligned GPU address");
+            }
+        }
+        const std::array<std::uint32_t, MeshDrawPushBytes / 4> words{
+            draw.indexCount, draw.firstVertex, draw.firstInstance, draw.indexed ? draw.indexSize : 0u,
+            static_cast<std::uint32_t>(argumentAddress), static_cast<std::uint32_t>(argumentAddress >> 32u)};
+        static_assert(MeshDrawPushOffsetBytes + MeshDrawPushBytes == Graphics::PipelinePushConstantBytes);
+        std::memcpy(pushConstants.data() + MeshDrawPushOffsetBytes, words.data(), sizeof(words));
+    }
     auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
     if (depth && std::find(depthSurfaces.begin(), depthSurfaces.end(), depth) == depthSurfaces.end()) depthSurfaces.push_back(depth);
     MetalShaderResources resources(backend, ranges, [&](const Graphics::GuestTextureResource& resource, bool storage, bool compare) -> id<MTLTexture> {
@@ -223,7 +274,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         return nil;
     });
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
+    if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
     renderPass.renderTargetWidth = state.renderExtent.width;
     renderPass.renderTargetHeight = state.renderExtent.height;
@@ -268,11 +319,11 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             minIndex = std::min(minIndex, index);
             maxIndex = std::max(maxIndex, index);
         }
-        if ((primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip) &&
+        if (!meshPath && (primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip) &&
             maxIndex == std::numeric_limits<std::uint32_t>::max()) {
             throw std::invalid_argument("Metal draw cannot represent the guest UINT32_MAX vertex index without native primitive restart");
         }
-        if ((primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip) &&
+        if (!meshPath && (primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip) &&
             draw.indexSize == 2 && maxIndex == std::numeric_limits<std::uint16_t>::max()) {
             id<MTLBuffer> promoted = backend.Buffer(std::size_t{draw.indexCount} * sizeof(std::uint32_t));
             auto* destination = static_cast<std::uint32_t*>(promoted.contents);
@@ -284,7 +335,11 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             indexBuffer = {promoted, 0, promoted.length};
             nativeIndexSize = 4;
         }
-        const std::int64_t baseVertex = std::bit_cast<std::int32_t>(draw.firstVertex);
+        if (meshPath && state.stages.mesh->inputPrimitive == 5 && state.primitiveRestart &&
+            maxIndex == (draw.indexSize == 2 ? 0xffffu : 0xffffffffu)) {
+            throw std::invalid_argument("Metal triangle fan geometry draw primitive restart is unsupported");
+        }
+        const std::int64_t baseVertex = meshPath ? std::int64_t{draw.firstVertex} : std::bit_cast<std::int32_t>(draw.firstVertex);
         const auto firstIndex = std::int64_t{minIndex} + baseVertex;
         const auto lastIndex = std::int64_t{maxIndex} + baseVertex;
         if (firstIndex < 0 || lastIndex > std::numeric_limits<std::uint32_t>::max()) {
@@ -298,6 +353,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         maxIndex = draw.firstVertex + draw.indexCount - 1u;
     }
     const auto& attributes = vertex->program->vertexAttributes;
+    if (meshPath && !attributes.empty()) throw std::invalid_argument("Metal mesh draw requires shader-based vertex fetch");
     const auto layout = Graphics::BuildVertexInputLayout(attributes, 29, 31, 2048,
         [](VkFormat format) { return vertexFormat(format) != MTLVertexFormatInvalid; });
     auto vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
@@ -329,13 +385,31 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     target.pushConstantOffsetBytes = vertex->pushConstantOffset;
     target.flipVertexY = state.viewport.height > 0;
     target.fixupClipSpace = state.negativeOneToOne;
-    auto nativeVertex = MetalBackend::ConvertToMetal(*vertex->program, ShaderStage::Vertex, target);
+    auto nativeVertex = MetalBackend::ConvertToMetal(*vertex->program, meshPath ? ShaderStage::Mesh : ShaderStage::Vertex, target);
     target.vertexBufferCount = 0;
     target.pushConstantOffsetBytes = fragment->pushConstantOffset;
     auto nativeFragment = MetalBackend::ConvertToMetal(*fragment->program, ShaderStage::Fragment, target);
-    MetalRenderPipeline pipeline(backend.Device(), std::move(nativeVertex), std::move(nativeFragment), pipelineDescriptor);
-    auto vertexBindings = resources.Bindings(pipeline.VertexReflection());
-    auto fragmentBindings = resources.Bindings(pipeline.FragmentReflection());
+    std::unique_ptr<MetalRenderPipeline> vertexPipeline;
+    std::unique_ptr<MetalMeshPipeline> meshPipeline;
+    if (meshPath) {
+        auto descriptor = [[MTLMeshRenderPipelineDescriptor alloc] init];
+        ConfigureRenderPipelineDescriptor(descriptor, state);
+        meshPipeline = std::make_unique<MetalMeshPipeline>(backend.Device(), std::move(nativeVertex), std::move(nativeFragment), descriptor);
+        meshPipeline->ValidateThreadgroups(MTLSizeMake(meshGroups, draw.instanceCount, 1));
+    } else {
+        vertexPipeline = std::make_unique<MetalRenderPipeline>(backend.Device(), std::move(nativeVertex), std::move(nativeFragment), pipelineDescriptor);
+    }
+    const auto& mainReflection = meshPath ? meshPipeline->MeshReflection() : vertexPipeline->VertexReflection();
+    const auto& fragmentReflection = meshPath ? meshPipeline->FragmentReflection() : vertexPipeline->FragmentReflection();
+    auto vertexBindings = resources.Bindings(mainReflection);
+    auto fragmentBindings = resources.Bindings(fragmentReflection);
+    auto residency = resources.Residency();
+    std::vector<id<MTLResource>> meshResidency;
+    if (meshArgumentBuffer != nil) {
+        meshResidency.assign(residency.begin(), residency.end());
+        meshResidency.push_back(meshArgumentBuffer);
+        residency = meshResidency;
+    }
     auto depthStencilState = CreateDepthStencilState(backend.Device(), state);
     if (sampleCounter != nil) {
         std::memset(static_cast<std::byte*>(sampleCounter.contents) + 16, 0, 8);
@@ -345,12 +419,22 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
     if (encoder == nil) throw std::runtime_error("Metal draw render encoder allocation failed");
     try {
-        pipeline.Bind(encoder, vertexBindings, fragmentBindings,
-            pushBlock(pipeline.VertexReflection(), pushConstants), pushBlock(pipeline.FragmentReflection(), pushConstants), resources.Residency());
+        if (meshPath) {
+            meshPipeline->Bind(encoder, vertexBindings, fragmentBindings,
+                pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency);
+        } else {
+            vertexPipeline->Bind(encoder, vertexBindings, fragmentBindings,
+                pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency);
+        }
         BindRenderState(encoder, state, depthStencilState);
         if (sampleCounter != nil) [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:16];
         for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setVertexBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
-        if (draw.indexed) {
+        if (meshPath) {
+            const auto threads = mainReflection.threadsPerThreadgroup;
+            [encoder drawMeshThreadgroups:MTLSizeMake(meshGroups, draw.instanceCount, 1)
+                threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
+                threadsPerMeshThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+        } else if (draw.indexed) {
             [encoder drawIndexedPrimitives:primitive indexCount:draw.indexCount indexType:nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
                 indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset instanceCount:draw.instanceCount baseVertex:static_cast<NSInteger>(std::bit_cast<std::int32_t>(draw.firstVertex)) baseInstance:draw.firstInstance];
         } else {

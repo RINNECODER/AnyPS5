@@ -31,6 +31,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Graphics/src/DccClearEncoding.cpp"
     "${agcDriverRoot}/Graphics/src/ShaderInputState.cpp"
     "${agcDriverRoot}/Graphics/src/ColorTargetLayout.cpp"
+    "${agcDriverRoot}/Graphics/src/MeshDraw.cpp"
     "${agcDriverRoot}/Graphics/src/TextureTiling.cpp"
     "${agcDriverRoot}/Graphics/src/TextureFormat.cpp"
     "${agcDriverRoot}/Graphics/src/GuestTextureResource.cpp"
@@ -70,6 +71,10 @@ add_test_executable(anyps5_metal_guest_draw_replay GuestDrawReplay.mm)
 target_compile_options(anyps5_metal_guest_draw_replay PRIVATE -fobjc-arc)
 target_link_libraries(anyps5_metal_guest_draw_replay PRIVATE anyps5_metal_native_execution)
 
+add_test_executable(anyps5_metal_mesh_replay MeshReplay.mm)
+target_compile_options(anyps5_metal_mesh_replay PRIVATE -fobjc-arc)
+target_link_libraries(anyps5_metal_mesh_replay PRIVATE anyps5_metal_native_execution)
+
 find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
 add_test_executable(anyps5_metal_presentation_replay PresentationReplay.mm)
 target_compile_options(anyps5_metal_presentation_replay PRIVATE -fobjc-arc)
@@ -90,6 +95,8 @@ if(BUILD_TESTING)
     target_link_libraries(metal_utility_tests PRIVATE anyps5_metal_native_execution)
     add_test(NAME anyps5_metal_guest_draw_replay COMMAND anyps5_metal_guest_draw_replay "${metalUtilityLibrary}")
     set_tests_properties(anyps5_metal_guest_draw_replay PROPERTIES TIMEOUT 120)
+    add_test(NAME anyps5_metal_mesh_replay COMMAND anyps5_metal_mesh_replay "${metalUtilityLibrary}")
+    set_tests_properties(anyps5_metal_mesh_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_presentation_replay COMMAND anyps5_metal_presentation_replay "${metalUtilityLibrary}")
     set_tests_properties(anyps5_metal_presentation_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_pm4_compute_replay COMMAND anyps5_metal_pm4_compute_replay)

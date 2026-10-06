@@ -59,4 +59,28 @@ private:
     ShaderRecompiler::MetalBackend::Result fragment;
 };
 
+class MetalMeshPipeline {
+public:
+    explicit MetalMeshPipeline(id<MTLDevice> device, ShaderRecompiler::MetalBackend::Result mesh,
+                              ShaderRecompiler::MetalBackend::Result fragment,
+                              MTLMeshRenderPipelineDescriptor* descriptor);
+    [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& MeshReflection() const;
+    [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& FragmentReflection() const;
+    void ValidateThreadgroups(MTLSize groups) const;
+    void Bind(id<MTLRenderCommandEncoder> encoder,
+              std::span<const MetalShaderResourceBinding> meshBindings,
+              std::span<const MetalShaderResourceBinding> fragmentBindings,
+              std::span<const std::byte> meshPushConstants = {},
+              std::span<const std::byte> fragmentPushConstants = {},
+              std::span<const id<MTLResource>> indirectResources = {}) const;
+
+private:
+    id<MTLDevice> device;
+    id<MTLRenderPipelineState> pipeline;
+    std::array<NSUInteger, 31> meshBufferAlignments{};
+    std::array<NSUInteger, 31> fragmentBufferAlignments{};
+    ShaderRecompiler::MetalBackend::Result mesh;
+    ShaderRecompiler::MetalBackend::Result fragment;
+};
+
 }

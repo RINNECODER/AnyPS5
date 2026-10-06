@@ -106,8 +106,10 @@ void ValidateDevice(const Graphics::State& state, id<MTLDevice> device) {
 }
 
 void Validate(const Graphics::State& state) {
-    Require(state.stages.path == Graphics::ShaderPath::Vertex && !state.stages.mesh && !state.stages.tessellation && !state.rectList,
-            "mesh, geometry, tessellation and rectangle scheduling is not implemented");
+    const bool vertex = state.stages.path == Graphics::ShaderPath::Vertex && !state.stages.mesh;
+    const bool mesh = state.stages.path == Graphics::ShaderPath::Geometry && state.stages.mesh.has_value();
+    Require((vertex || mesh) && !state.stages.tessellation && !state.rectList,
+            "graphics path requires unimplemented native scheduling");
     Require(!state.primitiveRestart, "primitive restart scheduling is not implemented");
     if (state.depthBoundsTest) {
         Require(std::isfinite(state.minDepthBounds) && std::isfinite(state.maxDepthBounds) &&
@@ -153,7 +155,26 @@ void Validate(const Graphics::State& state) {
                 "a depth format cannot be used as a color attachment");
     }
     Require(state.blends.size() == blendCount, "blend attachment count differs from sparse color exports");
-    (void)PrimitiveType(state);
+    if (vertex) (void)PrimitiveType(state);
+}
+
+void ConfigureAttachments(MTLRenderPipelineColorAttachmentDescriptorArray* attachments, const Graphics::State& state) {
+    for (NSUInteger i = 0; i < 8; ++i) attachments[i] = [MTLRenderPipelineColorAttachmentDescriptor new];
+    for (const auto& color : state.colors) {
+        const auto& blend = state.blends[color.exportIndex];
+        auto attachment = attachments[color.exportIndex];
+        attachment.pixelFormat = RenderPixelFormat(color.format);
+        attachment.writeMask = WriteMask(blend.colorWriteMask);
+        attachment.blendingEnabled = blend.blendEnable != 0;
+        if (attachment.blendingEnabled) {
+            attachment.sourceRGBBlendFactor = BlendFactor(blend.srcColorBlendFactor);
+            attachment.destinationRGBBlendFactor = BlendFactor(blend.dstColorBlendFactor);
+            attachment.rgbBlendOperation = BlendOperation(blend.colorBlendOp);
+            attachment.sourceAlphaBlendFactor = BlendFactor(blend.srcAlphaBlendFactor);
+            attachment.destinationAlphaBlendFactor = BlendFactor(blend.dstAlphaBlendFactor);
+            attachment.alphaBlendOperation = BlendOperation(blend.alphaBlendOp);
+        }
+    }
 }
 
 }
@@ -212,27 +233,25 @@ MTLPrimitiveType PrimitiveType(const Graphics::State& state) {
 
 void ConfigureRenderPipelineDescriptor(MTLRenderPipelineDescriptor* descriptor, const Graphics::State& state) {
     Require(descriptor != nil, "pipeline descriptor is missing");
+    Require(state.stages.path == Graphics::ShaderPath::Vertex && !state.stages.mesh, "vertex pipeline requires a vertex shader path");
     Validate(state);
-    for (NSUInteger i = 0; i < 8; ++i) descriptor.colorAttachments[i] = [MTLRenderPipelineColorAttachmentDescriptor new];
+    ConfigureAttachments(descriptor.colorAttachments, state);
     descriptor.rasterSampleCount = 1;
     const auto primitive = PrimitiveType(state);
     descriptor.inputPrimitiveTopology = primitive == MTLPrimitiveTypePoint ? MTLPrimitiveTopologyClassPoint :
         primitive == MTLPrimitiveTypeLine || primitive == MTLPrimitiveTypeLineStrip ? MTLPrimitiveTopologyClassLine : MTLPrimitiveTopologyClassTriangle;
-    for (const auto& color : state.colors) {
-        const auto& blend = state.blends[color.exportIndex];
-        auto attachment = descriptor.colorAttachments[color.exportIndex];
-        attachment.pixelFormat = RenderPixelFormat(color.format);
-        attachment.writeMask = WriteMask(blend.colorWriteMask);
-        attachment.blendingEnabled = blend.blendEnable != 0;
-        if (attachment.blendingEnabled) {
-            attachment.sourceRGBBlendFactor = BlendFactor(blend.srcColorBlendFactor);
-            attachment.destinationRGBBlendFactor = BlendFactor(blend.dstColorBlendFactor);
-            attachment.rgbBlendOperation = BlendOperation(blend.colorBlendOp);
-            attachment.sourceAlphaBlendFactor = BlendFactor(blend.srcAlphaBlendFactor);
-            attachment.destinationAlphaBlendFactor = BlendFactor(blend.dstAlphaBlendFactor);
-            attachment.alphaBlendOperation = BlendOperation(blend.alphaBlendOp);
-        }
-    }
+    descriptor.depthAttachmentPixelFormat = state.depth ? RenderPixelFormat(state.depth->format) : MTLPixelFormatInvalid;
+    descriptor.stencilAttachmentPixelFormat = !state.depth ? MTLPixelFormatInvalid :
+        state.depth->format == VK_FORMAT_D16_UNORM_S8_UINT ? MTLPixelFormatStencil8 :
+        state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
+}
+
+void ConfigureRenderPipelineDescriptor(MTLMeshRenderPipelineDescriptor* descriptor, const Graphics::State& state) {
+    Require(descriptor != nil, "mesh pipeline descriptor is missing");
+    Require(state.stages.path == Graphics::ShaderPath::Geometry && state.stages.mesh.has_value(), "mesh pipeline requires a mesh shader path");
+    Validate(state);
+    ConfigureAttachments(descriptor.colorAttachments, state);
+    descriptor.rasterSampleCount = 1;
     descriptor.depthAttachmentPixelFormat = state.depth ? RenderPixelFormat(state.depth->format) : MTLPixelFormatInvalid;
     descriptor.stencilAttachmentPixelFormat = !state.depth ? MTLPixelFormatInvalid :
         state.depth->format == VK_FORMAT_D16_UNORM_S8_UINT ? MTLPixelFormatStencil8 :

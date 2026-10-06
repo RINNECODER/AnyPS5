@@ -137,6 +137,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationScaler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Draw.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MeshDraw.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DepthSurface.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/SurfaceMetadata.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
@@ -440,6 +441,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/GuestSamplerResource.cpp
         tests/TextureDetiler.cpp
         Graphics/src/Draw.cpp
+        Graphics/src/MeshDraw.cpp
         Graphics/src/DepthSurface.cpp
         Graphics/src/SurfaceMetadata.cpp
         Graphics/src/Pipeline.cpp
@@ -592,6 +594,7 @@ if(AGC_BUILD_VISUAL_TEST)
             Execution/src/GuestMemory.cpp
             Execution/src/BdaFeatures.cpp
             Graphics/src/Draw.cpp
+            Graphics/src/MeshDraw.cpp
             Graphics/src/DepthSurface.cpp
             Graphics/src/SurfaceMetadata.cpp
             Graphics/src/ColorTargetLayout.cpp

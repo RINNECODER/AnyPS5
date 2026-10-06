@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderCapture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/MeshDraw.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalShaderResources.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
@@ -20,15 +21,27 @@ namespace AgcDriver::Metal {
 namespace {
 using namespace ShaderRecompiler;
 
-SpirvTarget nativeTarget(id<MTLDevice> device) {
+SpirvTarget nativeTarget(id<MTLDevice> device, std::optional<MeshTargetLimits> mesh = {}) {
     static constexpr std::array<std::uint32_t, 3> capabilities{
         spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
     static constexpr std::array<std::string_view, 2> extensions{
         "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     const auto maximum = device.maxThreadsPerThreadgroup;
-    return {0x00401000, 0x00010300, 32, BdaAbi::Version, capabilities, extensions, false,
+    SpirvTarget target{0x00401000, 0x00010300, 32, BdaAbi::Version, capabilities, extensions, false,
         {static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(maximum.height), static_cast<std::uint32_t>(maximum.depth)},
         static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(device.maxThreadgroupMemoryLength), {}, {}};
+    if (mesh) {
+        static constexpr std::array<std::uint32_t, 4> meshCapabilities{
+            spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
+            spv::CapabilityMeshShadingEXT};
+        static constexpr std::array<std::string_view, 3> meshExtensions{
+            "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_EXT_mesh_shader"};
+        target.spirvVersion = 0x00010400;
+        target.supportedCapabilities = meshCapabilities;
+        target.supportedExtensions = meshExtensions;
+        target.mesh = mesh;
+    }
+    return target;
 }
 
 void checkGpuFault(const BdaAbi::Fault& fault) {
@@ -103,11 +116,23 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     auto parameters = Pm4::ResolveDraw(packet, queue);
     if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) return;
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
-    if (decoded.state.stages.path != Graphics::ShaderPath::Vertex || decoded.state.rectList) {
-        throw std::runtime_error("Native Metal draw execution requires the implemented vertex/fragment path");
+    if ((decoded.state.stages.path != Graphics::ShaderPath::Vertex && decoded.state.stages.path != Graphics::ShaderPath::Geometry) || decoded.state.rectList) {
+        throw std::runtime_error("Native Metal draw execution requires the implemented vertex or mesh path");
     }
-    const auto executeDirect = [&](Pm4::DrawParameters direct) {
+    const auto executeDirect = [&](Pm4::DrawParameters direct,
+        std::optional<std::array<std::uint32_t, 5>> meshArguments = std::nullopt) {
         CheckFailureAndStopping();
+        const auto mesh = decoded.state.stages.mesh.has_value();
+        if (mesh) {
+            auto& front = decoded.programs.front();
+            if (front.firstUserSgpr != 0 || front.userData.size() < MeshIndexBufferUserWord + 4) {
+                throw std::runtime_error("Native Metal mesh program lacks the hidden user words");
+            }
+            const auto descriptor = Graphics::MeshIndexBufferDescriptor(meshArguments ? parameters : direct, front.binary.codeAddress);
+            std::copy(descriptor.begin(), descriptor.end(), front.userData.begin() + MeshIndexBufferUserWord);
+        }
+        const auto target = nativeTarget(nativeDevice, mesh ? std::optional(draw->MeshLimits()) : std::nullopt);
+        const auto pushLimit = mesh ? MeshDrawPushOffsetBytes : Graphics::PipelinePushConstantBytes;
         std::vector<MemoryRegion> memory;
         std::vector<LinkedProgram> linked;
         for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
@@ -122,26 +147,27 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         stages.reserve(decoded.programs.size());
         std::uint32_t pushOffset = 0;
         for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
+            if (decoded.roles[i] == ProgramRole::GeometryBack) continue;
             const auto& program = decoded.programs[i];
             std::optional<ShaderVertexStageInfo> vertex;
             if (program.binary.stage != ShaderStage::Fragment) {
                 vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData);
             }
             auto request = BuildDrawRecompileRequest(program.binary, program.firstUserSgpr, program.userData,
-                decoded.state, decoded.pixel, vertex, nativeTarget(nativeDevice), pushOffset, direct, memory, linked);
+                decoded.state, decoded.pixel, vertex, target, pushOffset, direct, memory, linked);
             const auto resources = capture.Capture(request);
             memory = capture.Regions();
             request.context.memory = memory;
             programs.push_back(*Recompile(request, *resources));
             const auto& result = programs.back();
-            if (result.pushConstants.size() > Graphics::PipelinePushConstantBytes - pushOffset) {
+            if (result.pushConstants.size() > pushLimit - pushOffset) {
                 throw std::runtime_error("Native Metal draw stage push constants exceed the pipeline block");
             }
             stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushOffset});
             pushOffset += static_cast<std::uint32_t>(result.pushConstants.size());
             if (i == 0) FoldDrawOffsets(result, program.firstUserSgpr, program.userData, direct);
         }
-        checkGpuFault(draw->DrawSynchronously(decoded.state, direct, stages, ranges));
+        checkGpuFault(draw->DrawSynchronously(decoded.state, direct, stages, ranges, meshArguments));
     };
     if (!parameters.indirect) {
         executeDirect(parameters);
@@ -159,7 +185,20 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     for (std::uint32_t record = 0; record < records.size(); ++record) {
         CheckFailureAndStopping();
         const auto expanded = ExpandIndirectDrawRecord(parameters, records[record], record, programs);
-        if (expanded) executeDirect(expanded->parameters);
+        if (!expanded) continue;
+        std::optional<std::array<std::uint32_t, 5>> meshArguments;
+        if (decoded.state.stages.mesh && expanded->parameters.indexed) {
+            const auto& mesh = *decoded.state.stages.mesh;
+            const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
+            const auto step = mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize;
+            if (expanded->parameters.indexCount < inputSize || mesh.primitivesPerGroup == 0) {
+                throw std::runtime_error("Native Metal mesh draw contains no complete primitive");
+            }
+            const auto groups = ((expanded->parameters.indexCount - inputSize) / step) / mesh.primitivesPerGroup + 1u;
+            meshArguments = {groups, expanded->parameters.instanceCount, 1, expanded->parameters.indexCount,
+                records[record].firstVertexOrIndex};
+        }
+        executeDirect(expanded->parameters, meshArguments);
     }
 }
 

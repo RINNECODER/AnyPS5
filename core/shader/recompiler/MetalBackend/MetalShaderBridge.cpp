@@ -11,6 +11,51 @@ namespace {
     throw std::runtime_error("Metal shader bridge: " + reason);
 }
 
+class MetalCompiler final : public spirv_cross::CompilerMSL {
+public:
+    using CompilerMSL::CompilerMSL;
+
+    void ConfigureMeshPosition(std::uint32_t position, std::uint32_t vertices, bool flipY, bool fixupDepth) {
+        meshPosition = position;
+        meshVertices = vertices;
+        meshFlipY = flipY;
+        meshFixupDepth = fixupDepth;
+    }
+
+protected:
+    void emit_function_prototype(spirv_cross::SPIRFunction& function,
+                                 const spirv_cross::Bitset& flags) override {
+        CompilerMSL::emit_function_prototype(function, flags);
+        if (function.self != ir.default_entry_point || meshPosition == 0 || positionHookInstalled ||
+            (!meshFlipY && !meshFixupDepth)) return;
+        positionHookInstalled = true;
+        function.fixup_hooks_out.insert(function.fixup_hooks_out.begin(), [this]() {
+            statement("threadgroup_barrier(mem_flags::mem_threadgroup);");
+            const auto& group = get_entry_point().workgroup_size;
+            const auto threads = group.x * group.y * group.z;
+            statement("if (", to_name(builtin_mesh_sizes_id), ".y != 0u)");
+            begin_scope();
+            statement("for (uint spvMetalPositionIndex = ", to_name(builtin_local_invocation_index_id),
+                      "; spvMetalPositionIndex < min(", to_name(builtin_mesh_sizes_id),
+                      ".x, ", meshVertices, "u); spvMetalPositionIndex += ", threads, "u)");
+            begin_scope();
+            const auto position = to_name(meshPosition) + "[spvMetalPositionIndex]";
+            if (meshFixupDepth)
+                statement(position, ".z = (", position, ".z + ", position, ".w) * 0.5;");
+            if (meshFlipY) statement(position, ".y = -(", position, ".y);");
+            end_scope();
+            end_scope();
+        });
+    }
+
+private:
+    std::uint32_t meshPosition = 0;
+    std::uint32_t meshVertices = 0;
+    bool meshFlipY = false;
+    bool meshFixupDepth = false;
+    bool positionHookInstalled = false;
+};
+
 std::uint32_t DescriptorCount(const spirv_cross::CompilerMSL& compiler,
                               const spirv_cross::Resource& resource) {
     const auto& type = compiler.get_type(resource.type_id);
@@ -31,10 +76,12 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     case ShaderStage::Compute: execution = spv::ExecutionModelGLCompute; break;
     case ShaderStage::Vertex: execution = spv::ExecutionModelVertex; break;
     case ShaderStage::Fragment: execution = spv::ExecutionModelFragment; break;
+    case ShaderStage::Mesh: execution = spv::ExecutionModelMeshEXT; break;
     default: Fail("stage requires unimplemented native Metal scheduling");
     }
     if (guest.spirv.empty()) Fail("empty SPIR-V module");
     if (target.mslVersion < 20200) Fail("MSL 2.2 or newer is required");
+    if (stage == ShaderStage::Mesh && target.mslVersion < 30000) Fail("mesh shaders require MSL 3.0 or newer");
     if (target.maxBuffers > 31 || target.maxBuffers < 3 || target.maxTextures > 128 || target.maxSamplers > 16)
         Fail("invalid Metal resource limits");
     if (target.pushConstantBuffer >= target.maxBuffers || target.bufferSizesBuffer >= target.maxBuffers ||
@@ -47,22 +94,45 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     if (stage == ShaderStage::Vertex && guest.vertexAttributes.size() > vertexBufferCount)
         Fail("vertex attribute buffers require reserved native Metal slots");
 
-    spirv_cross::CompilerMSL compiler(guest.spirv.Words());
+    MetalCompiler compiler(guest.spirv.Words());
     const auto entries = compiler.get_entry_points_and_stages();
     if (entries.size() != 1 || entries[0].execution_model != execution)
         Fail("expected exactly one entry point matching the requested stage");
     compiler.set_entry_point(entries[0].name, execution);
-    if (stage == ShaderStage::Compute) {
+    if (stage == ShaderStage::Compute || stage == ShaderStage::Mesh) {
         spirv_cross::SpecializationConstant x{}, y{}, z{};
         compiler.get_work_group_size_specialization_constants(x, y, z);
         if (x.id || y.id || z.id)
-            Fail("specialized compute workgroup dimensions require an explicit dispatch specialization contract");
+            Fail(stage == ShaderStage::Mesh ? "specialized mesh workgroup dimensions require an explicit dispatch specialization contract" :
+                 "specialized compute workgroup dimensions require an explicit dispatch specialization contract");
     }
 
     Result result;
     result.stage = stage;
     result.vertexBufferCount = vertexBufferCount;
     result.guest = guest;
+    if (stage == ShaderStage::Mesh) {
+        for (std::uint32_t i = 0; i < 3; ++i)
+            result.threadsPerThreadgroup[i] = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, i);
+        if (std::any_of(result.threadsPerThreadgroup.begin(), result.threadsPerThreadgroup.end(), [](auto dimension) { return dimension == 0; }))
+            Fail("specialized or missing mesh workgroup dimensions require an explicit dispatch specialization contract");
+    }
+    if (stage == ShaderStage::Mesh) {
+        const auto& modes = compiler.get_execution_mode_bitset();
+        if (!modes.get(spv::ExecutionModeOutputTrianglesEXT) ||
+            modes.get(spv::ExecutionModeOutputLinesEXT) || modes.get(spv::ExecutionModeOutputPoints))
+            Fail("mesh output requires the original triangle topology contract");
+        const auto vertices = compiler.get_execution_mode_argument(spv::ExecutionModeOutputVertices);
+        const auto primitives = compiler.get_execution_mode_argument(spv::ExecutionModeOutputPrimitivesEXT);
+        if (vertices == 0 || vertices > 256 || primitives == 0 || primitives > 512)
+            Fail("mesh output counts exceed native Metal limits");
+        std::uint32_t threads = 1;
+        for (const auto dimension : result.threadsPerThreadgroup) {
+            if (dimension > 1024u / threads) Fail("mesh workgroup exceeds native Metal thread limits");
+            threads *= dimension;
+        }
+        result.mesh = MeshOutputInfo{vertices, primitives};
+    }
     for (const auto capability : compiler.get_declared_capabilities()) {
         result.capabilities.push_back(static_cast<std::uint32_t>(capability));
         if (capability == spv::CapabilityFloat64) Fail("Float64 requires explicit software emulation");
@@ -101,6 +171,22 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     common.vertex.fixup_clipspace = stage == ShaderStage::Vertex && target.fixupClipSpace;
     compiler.set_common_options(common);
     const auto resources = compiler.get_shader_resources();
+    if (stage == ShaderStage::Mesh) {
+        std::uint32_t position = 0;
+        for (const auto& output : resources.builtin_outputs) {
+            if (output.builtin != spv::BuiltInPosition) continue;
+            const auto& type = compiler.get_type(output.resource.type_id);
+            if (position != 0 || !compiler.has_decoration(output.resource.id, spv::DecorationBuiltIn) ||
+                compiler.get_decoration(output.resource.id, spv::DecorationBuiltIn) != spv::BuiltInPosition ||
+                type.basetype != spirv_cross::SPIRType::Float || type.width != 32 || type.vecsize != 4 ||
+                type.columns != 1 || type.array.size() != 1 || !type.array_size_literal[0] ||
+                type.array[0] != result.mesh->maxVertices)
+                Fail("mesh position output requires the original standalone float4 array contract");
+            position = output.resource.id;
+        }
+        if (position == 0) Fail("mesh shader has no position output");
+        compiler.ConfigureMeshPosition(position, result.mesh->maxVertices, target.flipVertexY, target.fixupClipSpace);
+    }
     if (stage == ShaderStage::Vertex) {
         std::vector<std::uint32_t> locations;
         for (const auto& attribute : guest.vertexAttributes) {

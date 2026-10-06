@@ -26,6 +26,7 @@ id<MTLFunction> compile(id<MTLDevice> device, const ShaderResult& shader, MTLFun
     }
     const auto stage = type == MTLFunctionTypeKernel ? ShaderRecompiler::ShaderStage::Compute :
                        type == MTLFunctionTypeVertex ? ShaderRecompiler::ShaderStage::Vertex :
+                       type == MTLFunctionTypeMesh ? ShaderRecompiler::ShaderStage::Mesh :
                                                       ShaderRecompiler::ShaderStage::Fragment;
     if (shader.stage != stage) {
         throw std::invalid_argument("Converted Metal shader reflection has the wrong pipeline stage");
@@ -338,6 +339,21 @@ void bindRender(id<MTLRenderCommandEncoder> encoder, const ShaderResult& shader,
     }
 }
 
+void bindMesh(id<MTLRenderCommandEncoder> encoder, const ShaderResult& shader,
+              const PreparedBindings& bindings) {
+    for (const auto& binding : bindings.buffers) {
+        [encoder setMeshBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
+    }
+    for (const auto& binding : bindings.textures) [encoder setMeshTexture:binding.texture atIndex:binding.index];
+    for (const auto& binding : bindings.samplers) [encoder setMeshSamplerState:binding.sampler atIndex:binding.index];
+    if (shader.pushConstantBuffer) {
+        [encoder setMeshBytes:bindings.pushConstants.data() length:bindings.pushConstants.size() atIndex:*shader.pushConstantBuffer];
+    }
+    if (shader.bufferSizesBuffer) {
+        [encoder setMeshBytes:bindings.lengths.data() length:sizeof(bindings.lengths) atIndex:*shader.bufferSizesBuffer];
+    }
+}
+
 }
 
 MetalComputePipeline::MetalComputePipeline(id<MTLDevice> device, ShaderResult shader)
@@ -437,6 +453,85 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
     bindRender(encoder, fragment, preparedFragment, false);
     for (id<MTLResource> resource : indirectResources) {
         [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
+    }
+}
+
+MetalMeshPipeline::MetalMeshPipeline(id<MTLDevice> device, ShaderResult mesh,
+                                    ShaderResult fragment, MTLMeshRenderPipelineDescriptor* descriptor)
+    : device(device), mesh(std::move(mesh)), fragment(std::move(fragment)) {
+    if (descriptor == nil || device == nil) throw std::invalid_argument("Converted Metal mesh pipeline requires a device and descriptor");
+    if (![device supportsFamily:MTLGPUFamilyApple7] || ![device supportsFamily:MTLGPUFamilyMetal3]) {
+        throw std::invalid_argument("Converted Metal mesh pipeline requires an Apple GPU with Metal 3 mesh support");
+    }
+    if (!this->mesh.mesh || this->mesh.mesh->maxVertices == 0 || this->mesh.mesh->maxVertices > 256 ||
+        this->mesh.mesh->maxPrimitives == 0 || this->mesh.mesh->maxPrimitives > 512) {
+        throw std::invalid_argument("Converted Metal mesh output exceeds native limits");
+    }
+    const auto& threads = this->mesh.threadsPerThreadgroup;
+    const auto maximum = device.maxThreadsPerThreadgroup;
+    if (threads[0] == 0 || threads[1] == 0 || threads[2] == 0 ||
+        threads[0] > maximum.width || threads[1] > maximum.height || threads[2] > maximum.depth) {
+        throw std::invalid_argument("Converted Metal mesh workgroup exceeds the native device limit");
+    }
+    const std::uint64_t count = std::uint64_t{threads[0]} * threads[1] * threads[2];
+    if (count > maximum.width || count > std::numeric_limits<NSUInteger>::max()) {
+        throw std::invalid_argument("Converted Metal mesh workgroup exceeds the native device limit");
+    }
+    MTLMeshRenderPipelineDescriptor* native = [descriptor copy];
+    if (native.objectFunction != nil || native.payloadMemoryLength != 0) {
+        throw std::invalid_argument("Converted Metal mesh pipeline does not support object shader scheduling");
+    }
+    native.meshFunction = compile(device, this->mesh, MTLFunctionTypeMesh);
+    native.fragmentFunction = compile(device, this->fragment, MTLFunctionTypeFragment);
+    native.maxTotalThreadsPerMeshThreadgroup = static_cast<NSUInteger>(count);
+    NSError* error = nil;
+    MTLRenderPipelineReflection* reflection = nil;
+    pipeline = [device newRenderPipelineStateWithMeshDescriptor:native options:MTLPipelineOptionBindingInfo
+                                                   reflection:&reflection error:&error];
+    if (pipeline == nil) throw std::runtime_error(errorMessage("Converted Metal mesh pipeline creation failed", error));
+    if (reflection == nil) throw std::runtime_error("Metal mesh pipeline did not return native binding reflection");
+    meshBufferAlignments = nativeBufferAlignments(reflection.meshBindings);
+    fragmentBufferAlignments = nativeBufferAlignments(reflection.fragmentBindings);
+    if (this->mesh.requiresSimdGroups && this->mesh.guest.hostSubgroupSize != pipeline.meshThreadExecutionWidth) {
+        throw std::invalid_argument("Converted Metal mesh subgroup width differs from the guest compilation contract");
+    }
+    if (count > pipeline.maxTotalThreadsPerMeshThreadgroup || pipeline.maxTotalThreadgroupsPerMeshGrid == 0) {
+        throw std::invalid_argument("Converted Metal mesh workgroup exceeds the native pipeline limit");
+    }
+}
+
+const ShaderResult& MetalMeshPipeline::MeshReflection() const {
+    return mesh;
+}
+
+const ShaderResult& MetalMeshPipeline::FragmentReflection() const {
+    return fragment;
+}
+
+void MetalMeshPipeline::ValidateThreadgroups(MTLSize groups) const {
+    const auto maximum = pipeline.maxTotalThreadgroupsPerMeshGrid;
+    if (groups.width == 0 || groups.height == 0 || groups.depth == 0 || groups.width > maximum ||
+        groups.height > maximum / groups.width || groups.depth > maximum / groups.width / groups.height) {
+        throw std::invalid_argument("Converted Metal mesh grid exceeds the native pipeline limit");
+    }
+}
+
+void MetalMeshPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
+                            std::span<const MetalShaderResourceBinding> meshBindings,
+                            std::span<const MetalShaderResourceBinding> fragmentBindings,
+                            std::span<const std::byte> meshPushConstants,
+                            std::span<const std::byte> fragmentPushConstants,
+                            std::span<const id<MTLResource>> indirectResources) const {
+    if (encoder == nil || encoder.device != device) {
+        throw std::invalid_argument("Converted Metal mesh binding requires an encoder on this device");
+    }
+    auto preparedMesh = prepare(device, mesh, meshBufferAlignments, meshBindings, meshPushConstants, indirectResources);
+    auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentBindings, fragmentPushConstants, indirectResources);
+    [encoder setRenderPipelineState:pipeline];
+    bindMesh(encoder, mesh, preparedMesh);
+    bindRender(encoder, fragment, preparedFragment, false);
+    for (id<MTLResource> resource : indirectResources) {
+        [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageMesh | MTLRenderStageFragment];
     }
 }
 

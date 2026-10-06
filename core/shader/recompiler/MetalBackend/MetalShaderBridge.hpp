@@ -36,6 +36,11 @@ struct ResourceMapping {
     bool requiresByteLengths = false;
 };
 
+struct MeshOutputInfo {
+    std::uint32_t maxVertices;
+    std::uint32_t maxPrimitives;
+};
+
 struct Result {
     ShaderStage stage;
     std::uint32_t vertexBufferCount = 0;
@@ -53,6 +58,7 @@ struct Result {
     bool requiresGpuAddresses = false;
     bool requiresInt64 = false;
     bool requiresSimdGroups = false;
+    std::optional<MeshOutputInfo> mesh;
 };
 
 [[nodiscard]] Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage,
