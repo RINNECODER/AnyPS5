@@ -17,6 +17,7 @@ using Cpu::Register;
 constexpr auto rw = Permission::Read | Permission::Write;
 constexpr auto rx = Permission::Read | Permission::Execute;
 constexpr std::uint64_t parameterError = 0xffffffff80a10003ULL;
+constexpr std::uint64_t unavailable = 0xffffffff80a10002ULL;
 void require(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
 template<class Function> void rejects(Function&& function, const char* expected) {
     try { function(); }
@@ -57,6 +58,19 @@ struct Session {
     }
     std::uint64_t call(const char* nid, std::uint64_t first = 0, std::uint64_t second = 0, std::uint64_t third = 0) {
         return callGate(gate(nid), first, second, third);
+    }
+    void callerFailureBranch(std::uint64_t address, std::uint64_t pointer, bool negative) {
+        require(callGate(address, pointer, pointer, pointer) == unavailable,
+                "Unavailable system service did not return its full signed error to the guest");
+        // Exercise the observed nonzero/negative error policy through native x86 branches.
+        // Launch uses TEST/SETE in the title; JNE exercises its equivalent nonzero predicate here.
+        // EBX distinguishes the success path (0x44) from the error continuation (0x66).
+        const std::array<std::uint8_t, 16> branch{
+            0x85, 0xc0, std::uint8_t(negative ? 0x78 : 0x75), 0x07,
+            0xbb, 0x44, 0, 0, 0, 0xeb, 0x05, 0xbb, 0x66, 0, 0, 0};
+        machine.Write(0x1040, std::as_bytes(std::span(branch)));
+        require(machine.Run(0x1040, 0x1050, 100) == Cpu::StopReason::Address && machine.Get(Register::Rbx) == 0x66,
+                "Guest EAX branch did not enter the unavailable-service failure continuation");
     }
     std::vector<std::uint8_t> bytes(std::uint64_t address, std::size_t count) {
         std::vector<std::uint8_t> result(count);
@@ -138,23 +152,27 @@ void stringParameters() {
             session.bytes(0x1000000 + maximum - 1, 1) == std::vector<std::uint8_t>{0xa7}, "Maximum name capacity clobbered caller tail");
 }
 
-// Contract: hiding splash is idempotent; unresolved real-title services expose gates but fail before inventing outputs.
-// Regression: a generic success stub creates false dialog/status/event/HDR readiness. Other service tests cannot detect it.
+// Contract: unavailable status/event/HDR/launch return a signed error without touching guest arguments or outputs.
+// Regression: throwing aborts the real caller's error continuation, dereferencing invalid arguments faults, or success invents readiness.
+// The previous exception assertions could not prove guest error branches; initialization ABI remains explicitly unsupported.
 void restrictedServicesAndLifetime() {
     Session session;
     const auto splash = session.gate("Vo5V8KAwCmk");
     require(session.callGate(splash) == 0 && session.callGate(splash) == 0, "Hide splash was not idempotent success");
-    for (const auto [nid, symbol] : std::array<std::pair<const char*, const char*>, 5>{{
-             {"m5CYKX20wfg", "sceSystemServiceInitializePlayerDialogParam"}, {"uaieF+glFPs", "sceSystemServiceLaunchPlayerDialog"},
-             {"rPo6tV8D9bM", "sceSystemServiceGetStatus"}, {"656LMQSrg6U", "sceSystemServiceReceiveEvent"},
-             {"mPpPxv5CZt4", "sceSystemServiceGetHdrToneMapLuminance"}}}) {
+    for (const auto [nid, negative] : std::array<std::pair<const char*, bool>, 4>{{
+             {"uaieF+glFPs", false}, {"rPo6tV8D9bM", false}, {"656LMQSrg6U", true}, {"mPpPxv5CZt4", false}}}) {
         const auto gate = session.gate(nid);
         session.machine.CheckAccess(gate, 1, Permission::Execute);
         session.fill(0x3000, 256);
-        const auto diagnostic = std::string("Unsupported SCE system service invocation: ") + symbol;
-        rejects([&] { session.callGate(gate, 0x3000, 0x3000, 0x3000); }, diagnostic.c_str());
-        require(session.bytes(0x3000, 256) == std::vector<std::uint8_t>(256, 0xa7), "Unresolved service invented guest output");
+        for (const auto pointer : std::array<std::uint64_t, 4>{0x3000, 0, 0x9000, std::numeric_limits<std::uint64_t>::max() - 1}) {
+            session.callerFailureBranch(gate, pointer, negative);
+            require(session.bytes(0x3000, 256) == std::vector<std::uint8_t>(256, 0xa7), "Unavailable service changed guest output");
+        }
     }
+    session.fill(0x3000, 256);
+    rejects([&] { session.call("m5CYKX20wfg", 0x3000); },
+            "Unsupported SCE system service invocation: sceSystemServiceInitializePlayerDialogParam");
+    require(session.bytes(0x3000, 256) == std::vector<std::uint8_t>(256, 0xa7), "Unsupported dialog initializer changed guest output");
     // Distinct resolver ownership: preserve qualified local-ID cache and leave unrelated namespaces to other resolvers.
     const auto original = qualified("Vo5V8KAwCmk");
     require(session.imports->Resolve(original).value() == splash, "Qualified system gate cache changed function address");

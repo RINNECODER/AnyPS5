@@ -17,6 +17,7 @@ enum class Service {
 };
 
 constexpr std::int64_t parameterError = std::bit_cast<std::int32_t>(0x80a10003u);
+constexpr std::int64_t unavailableError = std::bit_cast<std::int32_t>(0x80a10002u);
 constexpr std::uint64_t minimumNameCapacity = 65;
 constexpr std::uint64_t maximumNameCapacity = 16 * 1024 * 1024;
 constexpr std::array systemName{
@@ -35,17 +36,6 @@ std::array<std::byte, 4> integer(std::uint32_t value) {
     for (std::size_t index = 0; index < bytes.size(); ++index)
         bytes[index] = std::byte((value >> (8 * index)) & 0xff);
     return bytes;
-}
-
-const char* unsupportedName(Service service) {
-    switch (service) {
-    case Service::GetStatus: return "sceSystemServiceGetStatus";
-    case Service::ReceiveEvent: return "sceSystemServiceReceiveEvent";
-    case Service::GetHdrToneMapLuminance: return "sceSystemServiceGetHdrToneMapLuminance";
-    case Service::InitializePlayerDialogParam: return "sceSystemServiceInitializePlayerDialogParam";
-    case Service::LaunchPlayerDialog: return "sceSystemServiceLaunchPlayerDialog";
-    default: return nullptr;
-    }
 }
 
 }
@@ -110,9 +100,20 @@ struct SceSystemImports::Impl {
     }
 
     void invoke(Machine& guest, Service service) {
-        // These layouts and host UI/HDR/event semantics are not established for this title yet.
-        if (const auto name = unsupportedName(service))
-            throw std::runtime_error(std::string("Unsupported SCE system service invocation: ") + name);
+        switch (service) {
+        case Service::GetStatus:
+        case Service::ReceiveEvent:
+        case Service::GetHdrToneMapLuminance:
+        case Service::LaunchPlayerDialog:
+            // Interoperability policy: report unavailable without inspecting opaque arguments
+            // or claiming function-specific PS5 SDK errors, output layouts, or host UI state.
+            guest.Set(Register::Rax, static_cast<std::uint64_t>(unavailableError));
+            return;
+        case Service::InitializePlayerDialogParam:
+            // Its ignored caller result does not establish a return ABI or safe initialization.
+            throw std::runtime_error("Unsupported SCE system service invocation: sceSystemServiceInitializePlayerDialogParam");
+        default: break;
+        }
         std::int64_t result;
         if (service == Service::ParamGetInt)
             result = paramGetInt(guest.Get(Register::Rdi), guest.Get(Register::Rsi));
