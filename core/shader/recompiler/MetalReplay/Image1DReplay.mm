@@ -114,6 +114,93 @@ struct Replay {
                   << ", dx=" << dx << ", five variants=" << wanted << ", inputs and guards passed\n";
     }
 };
+
+struct SamplerBankReplay {
+    static constexpr std::uint32_t Threads = 32, Samplers = 32;
+    static constexpr std::uint64_t Base = 0x400000;
+    std::vector<std::uint32_t> code{0x34020087, 0x7e0402ff, 0x3f000000, 0x7e060280};
+    std::array<std::uint32_t, GuardWords + Samplers * 4 + GuardWords> table;
+    std::array<std::uint32_t, GuardWords + 832 + GuardWords> texture;
+    std::array<std::uint32_t, GuardWords + Threads * Samplers + GuardWords> output;
+    std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> header{};
+    std::vector<std::uint32_t> commands;
+    Packet packet{};
+
+    SamplerBankReplay() {
+        for (std::uint32_t index = 0; index < Samplers; ++index) {
+            code.insert(code.end(), {0xf4080406, 0xfa000000u | (index * 16u), 0xbf8cc07f,
+                0xf0900100, 0x00810402, 0xbf8c3f70, 0xe0701000u | (index * 4u), 0x80000401});
+        }
+        code.push_back(0xbf810000);
+        table.fill(Sentinel);
+        for (std::uint32_t index = 0; index < Samplers; ++index) {
+            const std::array<std::uint32_t, 4> sampler{
+                0x92u, (index * 64u) | ((index * 64u) << 12u), (1u << 22u) | (2u << 26u), 0};
+            std::copy(sampler.begin(), sampler.end(), table.begin() + GuardWords + index * 4);
+        }
+        texture.fill(Sentinel);
+        constexpr std::array<std::uint32_t, 9> offsets{2304, 1792, 1536, 1280, 1024, 768, 512, 256, 0};
+        for (std::uint32_t level = 0; level < offsets.size(); ++level)
+            std::fill_n(texture.begin() + GuardWords + offsets[level] / 4, 256u >> level,
+                std::bit_cast<std::uint32_t>(float(level * 16u)));
+        output.fill(Sentinel);
+        Shader shader{};
+        shader.file_header = 0x34333231;
+        shader.version = 0x18;
+        shader.code = reinterpret_cast<const volatile void*>(Base + 0x30000);
+        shader.user_data = reinterpret_cast<ShaderUserData*>(Base + 0x40000 + sizeof(Shader));
+        shader.header_size = static_cast<std::uint32_t>(header.size());
+        shader.shader_size = static_cast<std::uint32_t>(code.size() * 4);
+        shader.type = 0;
+        std::memcpy(header.data(), &shader, sizeof(shader));
+        const std::array<std::uint32_t, 14> users{
+            static_cast<std::uint32_t>(Base + 0x20100), 0, Threads * Samplers * 4, 0x01016fac,
+            static_cast<std::uint32_t>((Base + 0x100) >> 8u), (22u << 20u) | (3u << 30u), 63u | (1u << 31u),
+            0xfacu | (8u << 16u) | (8u << 28u), 0, 8u << 4u, 0, 0,
+            static_cast<std::uint32_t>(Base + 0x10100), 0};
+        const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+        const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>((Base + 0x30000) >> 8u), 0};
+        const std::array<std::uint32_t, 1> resources{static_cast<std::uint32_t>(users.size()) << 1u};
+        RegisterPacket(commands, 0x207, threads);
+        RegisterPacket(commands, 0x20c, program);
+        RegisterPacket(commands, 0x213, resources);
+        RegisterPacket(commands, 0x240, users);
+        commands.insert(commands.end(), {0xc0031500u, 1, 1, 1, 0x8041});
+        packet = {reinterpret_cast<std::uint32_t*>(Base + 0x50000), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    }
+
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+        ranges.push_back({Base, std::as_writable_bytes(std::span(texture)), false});
+        ranges.push_back({Base + 0x10000, std::as_writable_bytes(std::span(table)), false});
+        ranges.push_back({Base + 0x20000, std::as_writable_bytes(std::span(output)), true});
+        ranges.push_back({Base + 0x30000, std::as_writable_bytes(std::span(code)), false});
+        ranges.push_back({Base + 0x40000, header, false});
+        ranges.push_back({Base + 0x50000, std::as_writable_bytes(std::span(commands)), false});
+        ranges.push_back({Base + 0x60000, std::as_writable_bytes(std::span(&packet, 1)), false});
+    }
+
+    void Run() {
+        const auto originalTable = table;
+        const auto originalTexture = texture;
+        const auto originalCode = code, originalCommands = commands;
+        const auto originalHeader = header;
+        const auto originalPacket = packet;
+        AgcDriver::Submit(reinterpret_cast<const Packet*>(Base + 0x60000), 0x20);
+        AgcDriverWaitIdle_nid_postfix();
+        for (std::size_t word = 0; word < output.size(); ++word) {
+            const auto wanted = word >= GuardWords && word < GuardWords + Threads * Samplers ?
+                std::bit_cast<std::uint32_t>(float(((word - GuardWords) % Samplers) * 4u)) : Sentinel;
+            Require(output[word] == wanted, "Public original RDNA 32 sampler identities word=" + std::to_string(word) +
+                " actual=" + std::to_string(output[word]) + " expected=" + std::to_string(wanted));
+        }
+        Require(table == originalTable && texture == originalTexture,
+            "Public 32 sampler identities changed read-only descriptors, texels or padding");
+        Require(code == originalCode && commands == originalCommands && header == originalHeader &&
+            std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
+            "Public 32 sampler identities changed read-only shader or PM4 submission memory");
+        std::cout << "Public original RDNA 32 sampler identities: 1024 quarter-LOD results, source padding and guards passed\n";
+    }
+};
 }
 
 int main(int argc, char** argv) {
@@ -132,19 +219,24 @@ int main(int argc, char** argv) {
             std::fill_n(texture.begin() + GuardWords + 128, 4, 0u);
             const auto originalTexture = texture;
             Replay wave32(32, 0x200000), wave64(64, 0x300000);
+            SamplerBankReplay samplerBank;
             std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
                 {TextureAddress - 256, std::as_writable_bytes(std::span(texture)), false}};
             wave32.AddRanges(ranges);
             wave64.AddRanges(ranges);
+            samplerBank.AddRanges(ranges);
             AgcDriver::Metal::MetalDriver::Get().Configure((__bridge void*)device, (__bridge void*)library, ranges);
             AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(wave32.base + 0x10000));
             AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(wave64.base + 0x10000));
+            AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(SamplerBankReplay::Base + 0x40000));
             for (auto* replay : {&wave32, &wave64}) {
                 for (const auto dx : {0.25f, 0.5f, 1.0f}) {
                     replay->Run(dx, dx == 0.25f ? 0.0f : dx == 0.5f ? 16.0f : 32.0f);
                     Require(texture == originalTexture, "Public 1D sampling changed read-only texels or mip-row padding");
                 }
             }
+            samplerBank.Run();
+            Require(texture == originalTexture, "Public sampler bank changed another borrowed 1D texture");
             AgcDriver::Metal::MetalDriver::Get().Shutdown();
             return 0;
         } catch (const std::exception& error) {

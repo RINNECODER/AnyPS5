@@ -1,5 +1,6 @@
 #include "MetalShaderPipeline.hpp"
 #include <algorithm>
+#import <objc/runtime.h>
 #include <array>
 #include <cstring>
 #include <limits>
@@ -63,6 +64,25 @@ id<MTLFunction> compile(id<MTLDevice> device, const ShaderResult& shader, MTLFun
     id<MTLFunction> function = [library newFunctionWithName:entryPoint];
     if (function == nil || function.functionType != type) {
         throw std::invalid_argument("Converted Metal shader entry point has the wrong stage or is missing");
+    }
+    return function;
+}
+
+
+char samplerStatesAssociation;
+
+id<MTLFunction> samplerBankFunction(id<MTLDevice> device, const ShaderResult& shader, id<MTLFunction> function) {
+    if (!shader.samplerArgumentBuffer) {
+        if (shader.samplerArgumentCount != 0) throw std::invalid_argument("Metal direct sampler reflection contains a bank count");
+        return nil;
+    }
+    if (device.argumentBuffersSupport != MTLArgumentBuffersTier2 || *shader.samplerArgumentBuffer >= 31 ||
+        shader.samplerArgumentCount == 0 || shader.samplerArgumentCount > 32) {
+        throw std::invalid_argument("Metal sampler bank requires Tier 2 and the original 32-sampler limit");
+    }
+    auto encoder = [function newArgumentEncoderWithBufferIndex:*shader.samplerArgumentBuffer];
+    if (encoder == nil || encoder.encodedLength == 0 || encoder.alignment == 0 || encoder.device != device) {
+        throw std::runtime_error("Metal sampler bank is missing native argument encoder reflection");
     }
     return function;
 }
@@ -183,7 +203,7 @@ void validateTexture(id<MTLTexture> texture, const ShaderRecompiler::DescriptorB
 }
 
 PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
-                         const std::array<NSUInteger, 31>& alignments,
+                         const std::array<NSUInteger, 31>& alignments, id<MTLFunction> samplerFunction,
                          std::span<const MetalShaderResourceBinding> supplied,
                          std::span<const std::byte> pushConstants,
                          std::span<const id<MTLResource>> indirectResources) {
@@ -197,6 +217,25 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
     std::set<std::uint32_t> bufferSlots;
     std::set<std::uint32_t> textureSlots;
     std::set<std::uint32_t> samplerSlots;
+    id<MTLArgumentEncoder> samplerEncoder = nil;
+    id<MTLBuffer> samplerBuffer = nil;
+    auto samplerOwners = [NSMutableArray new];
+    if (shader.samplerArgumentBuffer) {
+        if (samplerFunction == nil) throw std::runtime_error("Metal sampler bank native function is missing");
+        reserveSlots(bufferSlots, *shader.samplerArgumentBuffer, 1, 31);
+        samplerEncoder = [samplerFunction newArgumentEncoderWithBufferIndex:*shader.samplerArgumentBuffer];
+        if (samplerEncoder == nil || samplerEncoder.encodedLength == 0 || samplerEncoder.alignment == 0 || samplerEncoder.device != device) {
+            throw std::runtime_error("Metal sampler bank argument encoder allocation failed");
+        }
+        samplerBuffer = [device newBufferWithLength:samplerEncoder.encodedLength options:MTLResourceStorageModeShared];
+        if (samplerBuffer == nil || alignments[*shader.samplerArgumentBuffer] == 0) {
+            throw std::runtime_error("Metal sampler bank allocation or binding alignment reflection is missing");
+        }
+        [samplerEncoder setArgumentBuffer:samplerBuffer offset:0];
+        result.buffers.push_back({*shader.samplerArgumentBuffer, {samplerBuffer, 0, samplerBuffer.length}});
+    } else if (samplerFunction != nil || shader.samplerArgumentCount != 0) {
+        throw std::invalid_argument("Metal direct sampler reflection contains a native bank function");
+    }
     if (shader.vertexBufferCount != 0) {
         if (shader.stage != ShaderRecompiler::ShaderStage::Vertex) {
             throw std::invalid_argument("Converted Metal shader reserves vertex input slots outside the vertex stage");
@@ -284,7 +323,7 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
             }
         }
         if (mapping.sampler) {
-            reserveSlots(samplerSlots, *mapping.sampler, mapping.count, 16);
+            reserveSlots(samplerSlots, *mapping.sampler, mapping.count, shader.samplerArgumentBuffer ? shader.samplerArgumentCount : 16);
             for (std::uint32_t i = 0; i < mapping.count; ++i) {
                 id<MTLSamplerState> sampler = binding.samplers[i];
                 if (sampler == nil || sampler.device != device) {
@@ -311,6 +350,17 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
         if (resource == nil || resource.device != device) {
             throw std::invalid_argument("Metal shader indirect resource belongs to a different device or is missing");
         }
+    }
+    if (samplerBuffer != nil) {
+        if (samplerSlots.size() != shader.samplerArgumentCount || result.samplers.size() != shader.samplerArgumentCount) {
+            throw std::invalid_argument("Metal sampler bank argument IDs are incomplete");
+        }
+        for (const auto& binding : result.samplers) {
+            [samplerEncoder setSamplerState:binding.sampler atIndex:binding.index];
+            [samplerOwners addObject:binding.sampler];
+        }
+        objc_setAssociatedObject(samplerBuffer, &samplerStatesAssociation, [samplerOwners copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        result.samplers.clear();
     }
     return result;
 }
@@ -497,6 +547,7 @@ MetalRectKernelPipeline::MetalRectKernelPipeline(id<MTLDevice> device, ShaderRes
     }
     auto descriptor = [MTLComputePipelineDescriptor new];
     descriptor.computeFunction = compile(device, this->shader, MTLFunctionTypeKernel);
+    samplerFunction = samplerBankFunction(device, this->shader, descriptor.computeFunction);
     descriptor.stageInputDescriptor = captureInputs;
     NSError* error = nil;
     MTLComputePipelineReflection* reflection = nil;
@@ -530,7 +581,7 @@ void MetalRectKernelPipeline::Encode(id<MTLCommandBuffer> commands, std::span<co
         throw std::invalid_argument("Metal rectangle control requires an exact flattened four-invocation patch grid");
     }
     if (vertexBuffers.size() != shader.vertexBufferCount) throw std::invalid_argument("Metal rectangle capture vertex buffer count differs from reflection");
-    auto prepared = prepare(device, shader, bufferAlignments, bindings, pushConstants, indirectResources);
+    auto prepared = prepare(device, shader, bufferAlignments, samplerFunction, bindings, pushConstants, indirectResources);
     const auto vertices = checkedBytes(region.size.width, region.size.height);
     const auto patches = capture ? 0 : region.size.width / 4;
     auto implicit = prepareImplicit(device, shader, bufferAlignments, implicitBuffers, vertices, patches, capture ? region.size.width : 0);
@@ -558,6 +609,7 @@ MetalComputePipeline::MetalComputePipeline(id<MTLDevice> device, ShaderResult sh
     : device(device), shader(std::move(shader)) {
     if (this->shader.rectList) throw std::invalid_argument("Ordinary Metal compute pipelines do not accept rectangle kernels");
     id<MTLFunction> function = compile(device, this->shader, MTLFunctionTypeKernel);
+    samplerFunction = samplerBankFunction(device, this->shader, function);
     NSError* error = nil;
     MTLComputePipelineReflection* reflection = nil;
     pipeline = [device newComputePipelineStateWithFunction:function options:MTLPipelineOptionBindingInfo
@@ -591,7 +643,7 @@ void MetalComputePipeline::Encode(id<MTLCommandBuffer> commands,
     if (commands == nil || commands.device != device || commands.status >= MTLCommandBufferStatusCommitted) {
         throw std::invalid_argument("Converted Metal compute encoding requires an uncommitted command buffer on this device");
     }
-    auto prepared = prepare(device, shader, bufferAlignments, bindings, pushConstants, indirectResources);
+    auto prepared = prepare(device, shader, bufferAlignments, samplerFunction, bindings, pushConstants, indirectResources);
     if (grid.width == 0 || grid.height == 0 || grid.depth == 0) return;
     const auto& threads = shader.threadsPerThreadgroup;
     if (grid.width % threads[0] != 0 || grid.height % threads[1] != 0 || grid.depth % threads[2] != 0) {
@@ -633,7 +685,9 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
     if (this->fragment.rectList) throw std::invalid_argument("Metal fragment pipelines do not accept rectangle auxiliary reflection");
     MTLRenderPipelineDescriptor* native = [descriptor copy];
     native.vertexFunction = compile(device, this->vertex, MTLFunctionTypeVertex);
+    vertexSamplerFunction = samplerBankFunction(device, this->vertex, native.vertexFunction);
     native.fragmentFunction = compile(device, this->fragment, MTLFunctionTypeFragment);
+    fragmentSamplerFunction = samplerBankFunction(device, this->fragment, native.fragmentFunction);
     NSError* error = nil;
     MTLRenderPipelineReflection* reflection = nil;
     pipeline = [device newRenderPipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
@@ -665,8 +719,8 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal render binding requires an encoder on this device");
     }
-    auto preparedVertex = prepare(device, vertex, vertexBufferAlignments, vertexBindings, vertexPushConstants, indirectResources);
-    auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentBindings, fragmentPushConstants, indirectResources);
+    auto preparedVertex = prepare(device, vertex, vertexBufferAlignments, vertexSamplerFunction, vertexBindings, vertexPushConstants, indirectResources);
+    auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentSamplerFunction, fragmentBindings, fragmentPushConstants, indirectResources);
     std::vector<BufferArgument> implicit;
     if (vertex.rectList) {
         if (vertex.rectList->mode != RectMode::Evaluation || rectPatchCount == 0) {
@@ -711,7 +765,9 @@ MetalMeshPipeline::MetalMeshPipeline(id<MTLDevice> device, ShaderResult mesh,
         throw std::invalid_argument("Converted Metal mesh pipeline does not support object shader scheduling");
     }
     native.meshFunction = compile(device, this->mesh, MTLFunctionTypeMesh);
+    meshSamplerFunction = samplerBankFunction(device, this->mesh, native.meshFunction);
     native.fragmentFunction = compile(device, this->fragment, MTLFunctionTypeFragment);
+    fragmentSamplerFunction = samplerBankFunction(device, this->fragment, native.fragmentFunction);
     native.maxTotalThreadsPerMeshThreadgroup = static_cast<NSUInteger>(count);
     NSError* error = nil;
     MTLRenderPipelineReflection* reflection = nil;
@@ -754,8 +810,8 @@ void MetalMeshPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal mesh binding requires an encoder on this device");
     }
-    auto preparedMesh = prepare(device, mesh, meshBufferAlignments, meshBindings, meshPushConstants, indirectResources);
-    auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentBindings, fragmentPushConstants, indirectResources);
+    auto preparedMesh = prepare(device, mesh, meshBufferAlignments, meshSamplerFunction, meshBindings, meshPushConstants, indirectResources);
+    auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentSamplerFunction, fragmentBindings, fragmentPushConstants, indirectResources);
     [encoder setRenderPipelineState:pipeline];
     bindMesh(encoder, mesh, preparedMesh);
     bindRender(encoder, fragment, preparedFragment, false);

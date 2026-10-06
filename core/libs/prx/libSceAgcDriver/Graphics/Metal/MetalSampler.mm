@@ -94,6 +94,7 @@ MetalSampler::MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerRes
     descriptor.compareFunction = resource.compareEnable ? compare : MTLCompareFunctionNever;
     descriptor.maxAnisotropy = resource.anisotropyEnable ? static_cast<NSUInteger>(resource.maxAnisotropy) : 1u;
     descriptor.normalizedCoordinates = YES;
+    descriptor.supportArgumentBuffers = YES;
     descriptor.lodMinClamp = resource.minLod;
     descriptor.lodMaxClamp = resource.maxLod;
     if (resource.lodBias != 0.0f) {

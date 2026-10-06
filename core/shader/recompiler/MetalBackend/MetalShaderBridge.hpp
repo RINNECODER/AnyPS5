@@ -46,6 +46,9 @@ struct TargetOptions {
     bool supportsInt64 = false;
     bool supportsGpuAddresses = false;
     bool supportsSimdGroups = false;
+    bool samplerArgumentBuffer = false;
+    bool supportsArgumentBuffersTier2 = false;
+    std::uint32_t maxArgumentBufferSamplers = 32;
     bool flipVertexY = true;
     bool fixupClipSpace = false;
     RectListMode rectListMode = RectListMode::None;
@@ -99,6 +102,8 @@ struct Result {
     std::uint32_t pushConstantBytes = 0;
     std::vector<std::byte> pushConstantData;
     std::optional<std::uint32_t> bufferSizesBuffer;
+    std::optional<std::uint32_t> samplerArgumentBuffer;
+    std::uint32_t samplerArgumentCount = 0;
     std::array<std::uint32_t, 3> threadsPerThreadgroup{};
     std::vector<std::uint32_t> capabilities;
     std::vector<std::string> extensions;
