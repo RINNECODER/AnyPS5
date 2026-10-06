@@ -22,6 +22,8 @@ struct EngineSettingsView: View {
                             if let containers = capabilities.supportedContainers {
                                 Text("Executable containers: \(containers.joined(separator: ", "))").font(.caption.monospaced())
                             }
+                            LabeledContent("Local module loading", value: capabilities.sceModuleArgument == "--sce-module" ? "Supported" : "Not advertised")
+                                .font(.caption)
                             if let families = capabilities.unsupportedInstructionFamilies {
                                 Text("Unsupported instructions: \(families.joined(separator: ", "))").font(.caption).foregroundStyle(.secondary)
                             }
@@ -47,7 +49,7 @@ struct EngineSettingsView: View {
                 GroupBox("Launch contract") {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("anyps5_cpu_run <supported-x86-64.elf>").font(.callout.monospaced())
-                        Text("The executable path is passed as one argument. The resource folder becomes the engine's working directory. Standard output, errors and the exit code appear in the console.")
+                        Text("The executable path is passed as one argument. Engines with separate resource routing keep the game's saved working directory and receive the resource path separately. Other engines use the resource folder as the working directory. Attached modules are supplied in their saved order when the engine advertises support. Standard output, errors and the exit code appear in the console.")
                             .font(.callout).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
                 }

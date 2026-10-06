@@ -6,13 +6,30 @@ public struct LocalGame: Codable, Identifiable, Sendable, Equatable {
     public var executablePath: String
     public var workingDirectory: String
     public var resourceImagePath: String?
+    public var sceModulePaths: [String]
 
-    public init(id: String, title: String, executablePath: String, workingDirectory: String, resourceImagePath: String? = nil) {
+    public init(id: String, title: String, executablePath: String, workingDirectory: String, resourceImagePath: String? = nil,
+                sceModulePaths: [String] = []) {
         self.id = id
         self.title = title
         self.executablePath = executablePath
         self.workingDirectory = workingDirectory
         self.resourceImagePath = resourceImagePath
+        self.sceModulePaths = sceModulePaths
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, executablePath, workingDirectory, resourceImagePath, sceModulePaths
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        executablePath = try values.decode(String.self, forKey: .executablePath)
+        workingDirectory = try values.decode(String.self, forKey: .workingDirectory)
+        resourceImagePath = try values.decodeIfPresent(String.self, forKey: .resourceImagePath)
+        sceModulePaths = try values.decodeIfPresent([String].self, forKey: .sceModulePaths) ?? []
     }
 }
 
