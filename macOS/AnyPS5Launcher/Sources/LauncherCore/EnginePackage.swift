@@ -13,6 +13,7 @@ public struct EnginePackage: Sendable {
 
     private struct FileRecord: Decodable, Sendable { let sha256: String; let size: UInt64 }
     private struct Revision: Decodable, Sendable { let commit: String; let tree: String; let clean: Bool }
+    private struct ObservedRevision: Decodable, Sendable { let commit: String; let tree: String; let clean_observed: Bool }
     private struct Validation: Decodable, Sendable { let argv: [String]; let expected_stdout: [String] }
     private struct Manifest: Decodable, Sendable {
         let schema_version: Int
@@ -20,6 +21,39 @@ public struct EnginePackage: Sendable {
         let source_revisions: [String: Revision]
         let files: [String: FileRecord]
         let compiled_crt_validation: Validation
+
+        enum CodingKeys: String, CodingKey {
+            case schema_version, backend, source_revisions, files, compiled_crt_validation
+        }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            schema_version = try values.decode(Int.self, forKey: .schema_version)
+            backend = try values.decode(String.self, forKey: .backend)
+            if schema_version == 2 {
+                let observed = try values.decode([String: ObservedRevision].self, forKey: .source_revisions)
+                var normalized: [String: Revision] = [:]
+                for (key, canonical) in [("AnyPS5", "AnyPS5"), ("TCG", "3rdparty/anyps5-tcg"), ("Unicorn", "3rdparty/unicorn")] {
+                    if let revision = observed[key] {
+                        normalized[canonical] = Revision(commit: revision.commit, tree: revision.tree, clean: revision.clean_observed)
+                    }
+                }
+                source_revisions = normalized
+            } else {
+                source_revisions = try values.decode([String: Revision].self, forKey: .source_revisions)
+            }
+            files = try values.decode([String: FileRecord].self, forKey: .files)
+            if schema_version == 2 {
+                guard !values.contains(.compiled_crt_validation) else {
+                    throw DecodingError.dataCorruptedError(forKey: .compiled_crt_validation, in: values,
+                                                          debugDescription: "Schema 2 uses the fixed compiled CRT validation contract.")
+                }
+                // Schema 2 omits this declaration; acceptance still executes the same trusted keeper.
+                compiled_crt_validation = Validation(argv: keeperArguments, expected_stdout: keeperOutput)
+            } else {
+                compiled_crt_validation = try values.decode(Validation.self, forKey: .compiled_crt_validation)
+            }
+        }
     }
     private struct NativeImage { let dependencies: [String]; let rpaths: [String] }
     private static let enginePath = "bin/anyps5_cpu_run"
@@ -120,7 +154,9 @@ public struct EnginePackage: Sendable {
         let manifest: Manifest
         do { manifest = try JSONDecoder().decode(Manifest.self, from: data) }
         catch { throw LauncherError("Engine package manifest is missing or malformed: \(error.localizedDescription)") }
-        guard manifest.schema_version == 1, manifest.backend == "TCG", !manifest.files.isEmpty, manifest.files.count <= 128,
+        let supportedSchema = (manifest.schema_version == 1 && manifest.backend == "TCG") ||
+            (manifest.schema_version == 2 && manifest.backend == "TCG; native ARM64 host with in-process x86-64 translation")
+        guard supportedSchema, !manifest.files.isEmpty, manifest.files.count <= 128,
               manifest.compiled_crt_validation.argv == keeperArguments,
               manifest.compiled_crt_validation.expected_stdout == keeperOutput else {
             throw LauncherError("Engine package manifest has an unsupported schema or validation contract.")
