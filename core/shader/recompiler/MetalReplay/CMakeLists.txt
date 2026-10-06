@@ -25,6 +25,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Execution/src/DisplayBuffer.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/BufferMetadata.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/VideoOutState.cpp"
+    "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/NativeHostWindow.mm"
     "${agcDriverRoot}/Execution/src/DisplayFormat.cpp"
     "${agcDriverRoot}/Execution/Metal/MetalDriver.mm"
     "${agcDriverRoot}/Execution/Metal/MetalPacketExecution.mm"
@@ -52,7 +53,14 @@ target_include_directories(anyps5_metal_native_execution PUBLIC
     "${PROJECT_SOURCE_DIR}/core/libs"
     "${PROJECT_SOURCE_DIR}/3rdparty/Vulkan-Headers/include"
 )
+find_library(NATIVE_APPKIT_FRAMEWORK AppKit REQUIRED)
+find_library(NATIVE_CARBON_FRAMEWORK Carbon REQUIRED)
+find_library(NATIVE_IOKIT_FRAMEWORK IOKit REQUIRED)
+target_include_directories(anyps5_metal_native_execution PRIVATE "${PROJECT_SOURCE_DIR}/3rdparty/SDL2/include")
 target_link_libraries(anyps5_metal_native_execution PUBLIC
+    "${NATIVE_APPKIT_FRAMEWORK}"
+    "${NATIVE_CARBON_FRAMEWORK}"
+    "${NATIVE_IOKIT_FRAMEWORK}"
     anyps5_metal_guest_recompiler
     anyps5_metal_utilities
 )
