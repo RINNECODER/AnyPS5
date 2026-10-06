@@ -37,9 +37,9 @@ void configureSamplerArguments(MetalBackend::TargetOptions& options, const Recom
 }
 
 SpirvTarget nativeTarget(id<MTLDevice> device, std::optional<MeshTargetLimits> mesh = {}) {
-    static constexpr std::array<std::uint32_t, 4> capabilities{
+    static constexpr std::array<std::uint32_t, 5> capabilities{
         spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
-        spv::CapabilityMinLod};
+        spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing};
     static constexpr std::array<std::string_view, 2> extensions{
         "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     const auto maximum = device.maxThreadsPerThreadgroup;
@@ -47,9 +47,9 @@ SpirvTarget nativeTarget(id<MTLDevice> device, std::optional<MeshTargetLimits> m
         {static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(maximum.height), static_cast<std::uint32_t>(maximum.depth)},
         static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(device.maxThreadgroupMemoryLength), {}, {}};
     if (mesh) {
-        static constexpr std::array<std::uint32_t, 5> meshCapabilities{
+        static constexpr std::array<std::uint32_t, 6> meshCapabilities{
             spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
-            spv::CapabilityMeshShadingEXT, spv::CapabilityMinLod};
+            spv::CapabilityMeshShadingEXT, spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing};
         static constexpr std::array<std::string_view, 3> meshExtensions{
             "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_EXT_mesh_shader"};
         target.spirvVersion = 0x00010400;
@@ -153,9 +153,10 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         }
         auto target = nativeTarget(nativeDevice, mesh ? std::optional(draw->MeshLimits()) : std::nullopt);
         if (rectangle) {
-            static constexpr std::array<std::uint32_t, 5> capabilities{
+            static constexpr std::array<std::uint32_t, 6> capabilities{
                 spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses,
-                spv::CapabilityStorageBuffer8BitAccess, spv::CapabilityTessellation, spv::CapabilityMinLod};
+                spv::CapabilityStorageBuffer8BitAccess, spv::CapabilityTessellation, spv::CapabilityMinLod,
+                spv::CapabilitySampledImageArrayDynamicIndexing};
             target.supportedCapabilities = capabilities;
             target.tessellation = draw->TessellationLimits();
         }
