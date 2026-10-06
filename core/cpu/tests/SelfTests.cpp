@@ -3,6 +3,7 @@
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/SceUserImports.hpp>
+#include <cpu/SceSystemImports.hpp>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -216,7 +217,9 @@ void execute(const Bytes& compiled) {
     Cpu::SceImports imports(machine);
     Cpu::SceKernelImports kernel(machine, path.parent_path());
     Cpu::SceUserImports users(machine);
+    Cpu::SceSystemImports system(machine);
     auto image = Cpu::LoadSce(machine, path, 0x1000000, [&](const auto& import) {
+        if (const auto gate = system.Resolve(import)) return *gate;
         if (const auto gate = users.Resolve(import)) return *gate;
         if (import.ModuleName == "libkernel") return kernel.Resolve(import);
         return imports.Resolve(import);

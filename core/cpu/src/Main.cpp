@@ -6,6 +6,7 @@
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/SceModules.hpp>
 #include <cpu/SceUserImports.hpp>
+#include <cpu/SceSystemImports.hpp>
 #include <cpu/Self.hpp>
 #include <array>
 #include <csignal>
@@ -89,6 +90,10 @@ void Capabilities() {
         << "\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
         << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
+        << "\"sce_system_imports\":{\"module\":\"libSceSystemService\",\"module_version\":\"1.1\",\"library_version\":1,"
+        << "\"functions\":[\"sceSystemServiceParamGetInt\",\"sceSystemServiceParamGetString\",\"sceSystemServiceHideSplashScreen\"],"
+        << "\"recognized_unavailable\":[\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceLaunchPlayerDialog\"],"
+        << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes and shared permission pages unsupported\",\"dependency CRT initializers/finalizers only; main owns its initializer\",\"host imports require typed function gates; no host data or TLS imports\",\"entry termination callback unsupported\"],"
 #if ANYPS5_CPU_MODERN_TCG
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
@@ -138,7 +143,8 @@ std::vector<Cpu::SceHostModule> HostModules(const std::vector<Cpu::SceModuleFile
     std::vector<Cpu::SceHostModule> hosts{
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
         {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
-        {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}}};
+        {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
+        {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}}};
     for (const auto& file : files) {
         const auto image = Cpu::ParseSce(file.Path);
         std::erase_if(hosts, [&](const auto& host) {
@@ -308,6 +314,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
         std::unique_ptr<Cpu::SceModules> modules;
+        std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
@@ -317,7 +324,9 @@ int main(int argc, char** argv) {
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
+                systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
                 const auto resolve = [&](const auto& import) {
+                    if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
                     if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
                     return sceRuntime->Resolve(import);
