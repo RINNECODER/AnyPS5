@@ -57,7 +57,31 @@ std::size_t hostPageSize() {
     return static_cast<std::size_t>(size);
 }
 struct Free { void operator()(std::byte* value) const { std::free(value); } };
+struct ContextLifetime {
+    const std::thread::id owner = std::this_thread::get_id();
+    std::atomic<AnyPS5QemuCpu*> engine{nullptr};
+    bool running = false;
+};
 }
+
+struct Machine::Context::Payload {
+    std::weak_ptr<ContextLifetime> lifetime;
+    AnyPS5QemuContext* value = nullptr;
+    ~Payload() {
+        const auto live = lifetime.lock();
+        if (!live || !value) return;
+        const auto engine = live->engine.load();
+        if (!engine) return;
+        if (std::this_thread::get_id() != live->owner || live->running ||
+            anyps5_qemu_cpu_context_destroy(engine, value)) std::terminate();
+    }
+};
+
+Machine::Context::Context() = default;
+Machine::Context::~Context() = default;
+Machine::Context::Context(Context&&) noexcept = default;
+Machine::Context& Machine::Context::operator=(Context&&) noexcept = default;
+Machine::Context::Context(std::unique_ptr<Payload> value) : payload(std::move(value)) {}
 
 struct Machine::Impl {
     struct Range {
@@ -75,12 +99,12 @@ struct Machine::Impl {
     };
     AnyPS5QemuCpu* engine = nullptr;
     const std::thread::id owner = std::this_thread::get_id();
+    std::shared_ptr<ContextLifetime> contextLifetime = std::make_shared<ContextLifetime>();
     std::vector<Range> ranges;
     std::vector<Backing> backings;
     std::unordered_map<std::uint64_t, std::function<void(Machine&)>> calls;
     std::function<void(Machine&)> syscall;
     std::atomic<bool> requested{false};
-    bool running = false;
     bool exited = false;
     int exitCode = 0;
     std::uint64_t lastRunInstructions = 0;
@@ -89,8 +113,11 @@ struct Machine::Impl {
         std::array<char, 512> error{};
         engine = anyps5_qemu_cpu_create(error.data(), error.size());
         if (!engine) throw std::runtime_error(std::string("Create modern x86-64 translator: ") + error.data());
+        contextLifetime->engine = engine;
     }
     ~Impl() {
+        contextLifetime->engine.store(nullptr);
+        contextLifetime.reset();
         if (anyps5_qemu_cpu_destroy(engine)) std::terminate();
     }
     void check(int result, const char* operation) const {
@@ -98,6 +125,17 @@ struct Machine::Impl {
     }
     void checkOwner() const {
         if (std::this_thread::get_id() != owner) throw std::logic_error("Modern guest CPU requires its owner thread");
+    }
+    void checkContextIdle() const {
+        checkOwner();
+        if (contextLifetime->running) throw std::logic_error("Guest execution context requires an idle Machine");
+    }
+    void checkContext(const Context& context) const {
+        checkContextIdle();
+        if (!context.payload) throw std::invalid_argument("Guest execution context is empty");
+        const auto lifetime = context.payload->lifetime.lock();
+        if (!lifetime || !lifetime->engine.load()) throw std::invalid_argument("Guest execution context has expired");
+        if (lifetime != contextLifetime) throw std::invalid_argument("Guest execution context belongs to another Machine");
     }
     void checkMapped(std::uint64_t address, std::size_t size, unsigned required = 0) const {
         checkOwner();
@@ -423,6 +461,21 @@ std::uint64_t Machine::Get(Register reg) const {
 void Machine::Set(Register reg, std::uint64_t value) {
     impl->check(anyps5_qemu_cpu_set(impl->engine, registerId(reg), value), "Write modern guest register");
 }
+Machine::Context Machine::CaptureContext() {
+    impl->checkContextIdle();
+    auto payload = std::make_unique<Context::Payload>();
+    payload->lifetime = impl->contextLifetime;
+    impl->check(anyps5_qemu_cpu_context_create(impl->engine, &payload->value), "Capture modern guest execution context");
+    return Context(std::move(payload));
+}
+void Machine::SaveContext(Context& context) {
+    impl->checkContext(context);
+    impl->check(anyps5_qemu_cpu_context_save(impl->engine, context.payload->value), "Save modern guest execution context");
+}
+void Machine::RestoreContext(const Context& context) {
+    impl->checkContext(context);
+    impl->check(anyps5_qemu_cpu_context_restore(impl->engine, context.payload->value), "Restore modern guest execution context");
+}
 void Machine::SetSyscallHandler(std::function<void(Machine&)> handler) {
     impl->checkOwner();
     impl->syscall = std::move(handler);
@@ -442,17 +495,17 @@ void Machine::AddHostCall(std::uint64_t address, std::function<void(Machine&)> h
 }
 StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t instructionLimit) {
     impl->checkOwner();
-    if (impl->running) throw std::logic_error("Guest execution is already running");
+    if (impl->contextLifetime->running) throw std::logic_error("Guest execution is already running");
     if (!instructionLimit) throw std::invalid_argument("Guest execution requires a nonzero instruction limit");
     impl->check(anyps5_qemu_cpu_clear_stop(impl->engine), "Reset modern guest stop request");
-    impl->running = true;
+    impl->contextLifetime->running = true;
     impl->requested.store(false);
     impl->exited = false;
     std::uint64_t executed = 0;
     struct Reset {
         Impl& value;
         std::uint64_t& executed;
-        ~Reset() { value.lastRunInstructions = executed; value.running = false; }
+        ~Reset() { value.lastRunInstructions = executed; value.contextLifetime->running = false; }
     } reset{*impl, executed};
     Set(Register::Rip, entry);
     for (;;) {

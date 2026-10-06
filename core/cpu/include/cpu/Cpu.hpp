@@ -22,6 +22,20 @@ struct Mapping {
 
 class Machine {
 public:
+    class Context {
+    public:
+        Context();
+        ~Context();
+        Context(Context&&) noexcept;
+        Context& operator=(Context&&) noexcept;
+        Context(const Context&) = delete;
+        Context& operator=(const Context&) = delete;
+    private:
+        friend class Machine;
+        struct Payload;
+        explicit Context(std::unique_ptr<Payload> value);
+        std::unique_ptr<Payload> payload;
+    };
     Machine();
     ~Machine();
     Machine(const Machine&) = delete;
@@ -39,6 +53,9 @@ public:
     void Write(std::uint64_t address, std::span<const std::byte> input);
     std::uint64_t Get(Register reg) const;
     void Set(Register reg, std::uint64_t value);
+    Context CaptureContext();
+    void SaveContext(Context& context);
+    void RestoreContext(const Context& context);
     void SetSyscallHandler(std::function<void(Machine&)> handler);
     void AddHostCall(std::uint64_t address, std::function<void(Machine&)> handler);
     StopReason Run(std::uint64_t entry, std::uint64_t until, std::uint64_t instructionLimit);
