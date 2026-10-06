@@ -18,6 +18,7 @@ void require(bool condition, const char* message) {
 MTLPixelFormat pixelFormat(std::uint32_t format) {
     switch (Graphics::ResolveTextureFormat(format)) {
         case VK_FORMAT_R8_UNORM: return MTLPixelFormatR8Unorm;
+        case VK_FORMAT_R8_SRGB: return MTLPixelFormatR8Unorm_sRGB;
         case VK_FORMAT_R8_UINT: return MTLPixelFormatR8Uint;
         case VK_FORMAT_R16_UNORM: return MTLPixelFormatR16Unorm;
         case VK_FORMAT_R16_SNORM: return MTLPixelFormatR16Snorm;
@@ -25,6 +26,7 @@ MTLPixelFormat pixelFormat(std::uint32_t format) {
         case VK_FORMAT_R16_SINT: return MTLPixelFormatR16Sint;
         case VK_FORMAT_R16_SFLOAT: return MTLPixelFormatR16Float;
         case VK_FORMAT_R8G8_UNORM: return MTLPixelFormatRG8Unorm;
+        case VK_FORMAT_R8G8_SRGB: return MTLPixelFormatRG8Unorm_sRGB;
         case VK_FORMAT_R8G8_SNORM: return MTLPixelFormatRG8Snorm;
         case VK_FORMAT_R8G8_UINT: return MTLPixelFormatRG8Uint;
         case VK_FORMAT_R8G8_SINT: return MTLPixelFormatRG8Sint;
@@ -112,12 +114,18 @@ bool packed16(std::uint32_t format) {
 }
 
 MTLPixelFormat storageFormat(std::uint32_t format) {
-    return Graphics::ResolveTextureFormat(format) == VK_FORMAT_R8G8B8A8_SRGB ? MTLPixelFormatRGBA8Unorm : pixelFormat(format);
+    switch (Graphics::ResolveTextureFormat(format)) {
+        case VK_FORMAT_R8_SRGB: return MTLPixelFormatR8Unorm;
+        case VK_FORMAT_R8G8_SRGB: return MTLPixelFormatRG8Unorm;
+        case VK_FORMAT_R8G8B8A8_SRGB: return MTLPixelFormatRGBA8Unorm;
+        default: return pixelFormat(format);
+    }
 }
 
 std::uint32_t formatFamily(std::uint32_t format) {
     switch (Graphics::ResolveTextureFormat(format)) {
         case VK_FORMAT_R8_UNORM:
+        case VK_FORMAT_R8_SRGB:
         case VK_FORMAT_R8_UINT: return 1;
         case VK_FORMAT_R16_UNORM:
         case VK_FORMAT_R16_SNORM:
@@ -125,6 +133,7 @@ std::uint32_t formatFamily(std::uint32_t format) {
         case VK_FORMAT_R16_SINT:
         case VK_FORMAT_R16_SFLOAT: return 2;
         case VK_FORMAT_R8G8_UNORM:
+        case VK_FORMAT_R8G8_SRGB:
         case VK_FORMAT_R8G8_SNORM:
         case VK_FORMAT_R8G8_UINT:
         case VK_FORMAT_R8G8_SINT: return 3;
@@ -273,6 +282,9 @@ void MetalTexture::createViews(bool compare) {
     const auto& geometry = backing->geometry;
     require(descriptor.baseArray < geometry.imageLayers, "Metal texture view base array lies outside the surface");
     const auto nativeFormat = pixelFormat(descriptor.format);
+    if (nativeFormat == MTLPixelFormatR8Unorm_sRGB || nativeFormat == MTLPixelFormatRG8Unorm_sRGB) {
+        require([backend.Device() supportsFamily:MTLGPUFamilyApple2], "Metal R8/RG8 sRGB texture views require an Apple GPU");
+    }
     const auto nativeType = backing->texture.textureType;
     typedTexture = nativeFormat == backing->texture.pixelFormat ? backing->texture :
         [backing->texture newTextureViewWithPixelFormat:nativeFormat];

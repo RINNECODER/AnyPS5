@@ -1617,6 +1617,45 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         }
         std::cout << "Actual CPU mutation failure: blocked admission wakes, no GPU/EOP writes and both actual host leases survive until shutdown passed\n";
     }
+    {
+        auto previousOwner = transactionStorage(), nextOwner = transactionStorage();
+        std::weak_ptr<TransactionStorage> previousWeak = previousOwner, nextWeak = nextOwner;
+        const auto mapped = transactionRanges(previousOwner, 1), replacement = transactionRanges(nextOwner, 2);
+        const auto marker = std::make_exception_ptr(std::runtime_error("Same-thread CPU mapping mutation partial failure"));
+        AgcDriver::Metal::MetalDriver sameThreadTransaction;
+        sameThreadTransaction.Configure((__bridge void*)device, (__bridge void*)library, mapped);
+        bool mutationEntered = false, callbackShutdownRejected = false;
+        std::exception_ptr mutationError;
+        try {
+            sameThreadTransaction.MutateBorrowedRanges(replacement, 1, [&] {
+                mutationEntered = true;
+                nextOwner->input[0] = 97;
+                try { sameThreadTransaction.Shutdown(); }
+                catch (const std::runtime_error& error) {
+                    callbackShutdownRejected = std::string(error.what()).find("mapping transaction callback") != std::string::npos;
+                }
+                std::rethrow_exception(marker);
+            }, previousOwner, nextOwner);
+        } catch (...) { mutationError = std::current_exception(); }
+        Require(mutationEntered && callbackShutdownRejected && mutationError == marker,
+            "Same-thread CPU mutation did not reject active-callback shutdown and preserve its original failure");
+        for (const auto word : previousOwner->output) Require(word == 0xdeadbeef, "Same-thread failed mutation changed old output or guards");
+        for (const auto word : nextOwner->output) Require(word == 0xdeadbeef, "Same-thread failed mutation changed new output or guards");
+        auto partiallyMutatedInput = originalInput;
+        partiallyMutatedInput[0] = 97;
+        Require(previousOwner->input == originalInput && previousOwner->code == originalComputeStorage &&
+            nextOwner->input == partiallyMutatedInput && nextOwner->code == originalComputeStorage,
+            "Same-thread failed mutation changed storage beyond its partial CPU write");
+        previousOwner.reset();
+        nextOwner.reset();
+        Require(!previousWeak.expired() && !nextWeak.expired(),
+            "Same-thread failed mutation released actual host owners before shutdown");
+        std::exception_ptr shutdownError;
+        try { sameThreadTransaction.Shutdown(); } catch (...) { shutdownError = std::current_exception(); }
+        Require(shutdownError == marker && previousWeak.expired() && nextWeak.expired(),
+            "Same-thread shutdown after failed CPU mutation lost the original failure or retained actual host owners");
+        std::cout << "Same-thread CPU mutation teardown: active callback rejects shutdown; unwound failure drains both actual host owners and preserves original error passed\n";
+    }
     std::mutex callbackMutex;
     std::condition_variable callbackChanged;
     bool callbackEntered = false, callbackReleased = false;
