@@ -584,9 +584,9 @@ final class LauncherCoreTests: XCTestCase {
         }
     }
 
-    // Contract: native package acceptance rejects unsafe paths, stale bytes, wrong architectures/closure and a real failed CRT keeper.
-    // Regression: trusting manifest architecture text, omitting transitive dependencies, or ignoring validation process failure.
-    // Static/argv keepers cannot establish native package integrity. Controls alter only copies; no fake backend or production seam.
+    // Contract: schemas 1/2 retain native integrity and real CRT validation; each requires its own clean revision fields.
+    // Regression: schema 2 fails legacy decoding, or its omitted CRT metadata becomes a shortcut past original validation.
+    // Static/argv keepers miss acceptance; schema 1 alone misses the newer wire format. Only owned copies are altered.
     func testFrozenEnginePackageRejectsInvalidCandidates() async throws {
         let cases: [(String, String)] = [
             ("missing manifest", "Engine package path"), ("malformed manifest", "Engine package manifest"),
@@ -597,24 +597,66 @@ final class LauncherCoreTests: XCTestCase {
             ("unhashed CRT main", "Engine package integrity"), ("unhashed raw CRT", "Engine package integrity"),
             ("unhashed SELF CRT", "Engine package integrity"),
             ("changed validation contract", "Engine package manifest"), ("incorrect CRT certificate", "Engine package validation"),
-            ("changed saved identity", "Engine package integrity manifest differs from the saved accepted selection")
+            ("changed saved identity", "Engine package integrity manifest differs from the saved accepted selection"),
+            ("missing validation contract", "Engine package manifest is missing or malformed"),
+            ("wrong clean field", "Engine package manifest is missing or malformed")
         ]
-        for (control, diagnostic) in cases {
+        let candidates: [(Int, String, String?)] = cases.map { (1, $0.0, $0.1) } + [
+            (2, "valid", nil), (2, "wrong backend", "Engine package manifest has an unsupported schema or validation contract"),
+            (2, "dirty revision", "Engine package manifest lacks a clean source revision for 3rdparty/anyps5-tcg."),
+            (2, "missing revision", "Engine package manifest lacks a clean source revision for 3rdparty/unicorn."),
+            (2, "wrong clean field", "Engine package manifest is missing or malformed"),
+            (2, "changed bytes", "Engine package integrity hash/size mismatch: fixtures/cpu-homebrew.elf"),
+            (2, "wrong CLI architecture", "Engine package architecture requires thin ARM64 Mach-O: anyps5_cpu_run"),
+            (2, "incorrect CRT certificate", "Engine package validation failed (exit")
+        ]
+        for (schema, control, diagnostic) in candidates {
             let root = try copiedEnginePackage()
             defer { try? FileManager.default.removeItem(at: root) }
             let manifestURL = root.appendingPathComponent("manifest.json")
             let originalManifest = try Data(contentsOf: manifestURL)
             let originalIdentity = SHA256.hash(data: originalManifest).map { String(format: "%02x", $0) }.joined()
             var manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: originalManifest) as? [String: Any])
+            if schema == 2 {
+                // Independent schema-2 wire fixture over the genuine C01 binaries and certified guest inputs.
+                // Root separately verifies the actual sealed shared-pages-900085b1 checkpoint package.
+                manifest["schema_version"] = 2
+                manifest["backend"] = "TCG; native ARM64 host with in-process x86-64 translation"
+                var revisions = try XCTUnwrap(manifest["source_revisions"] as? [String: Any])
+                for (old, new) in [("AnyPS5", "AnyPS5"), ("3rdparty/anyps5-tcg", "TCG"), ("3rdparty/unicorn", "Unicorn")] {
+                    var revision = try XCTUnwrap(revisions.removeValue(forKey: old) as? [String: Any])
+                    revision["clean_observed"] = try XCTUnwrap(revision.removeValue(forKey: "clean"))
+                    revisions[new] = revision
+                }
+                manifest["source_revisions"] = revisions
+                manifest.removeValue(forKey: "compiled_crt_validation")
+            }
             var files = try XCTUnwrap(manifest["files"] as? [String: Any])
             func replaceAndRehash(_ path: String, _ bytes: Data) throws {
                 try bytes.write(to: root.appendingPathComponent(path))
                 files[path] = ["size": bytes.count, "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()]
             }
             switch control {
+            case "valid": break
             case "missing manifest": try FileManager.default.removeItem(at: manifestURL)
             case "malformed manifest": try Data("{malformed".utf8).write(to: manifestURL)
-            case "unknown schema": manifest["schema_version"] = 2
+            case "unknown schema": manifest["schema_version"] = 3
+            case "wrong backend": manifest["backend"] = "TCG"
+            case "missing validation contract": manifest.removeValue(forKey: "compiled_crt_validation")
+            case "dirty revision", "missing revision", "wrong clean field":
+                var revisions = try XCTUnwrap(manifest["source_revisions"] as? [String: Any])
+                if control == "missing revision" { revisions.removeValue(forKey: "Unicorn") }
+                else {
+                    let key = schema == 1 ? "3rdparty/anyps5-tcg" : "TCG"
+                    var revision = try XCTUnwrap(revisions[key] as? [String: Any])
+                    let clean = schema == 1 ? "clean" : "clean_observed"
+                    if control == "wrong clean field" {
+                        revision.removeValue(forKey: clean)
+                        revision[schema == 1 ? "clean_observed" : "clean"] = true
+                    } else { revision[clean] = false }
+                    revisions[key] = revision
+                }
+                manifest["source_revisions"] = revisions
             case "changed bytes":
                 let path = "fixtures/cpu-homebrew.elf"
                 var bytes = try Data(contentsOf: root.appendingPathComponent(path)); bytes[bytes.count - 1] ^= 1
@@ -676,11 +718,19 @@ final class LauncherCoreTests: XCTestCase {
             let selected = control == "malformed manifest" ? manifestURL :
                 (control == "unknown schema" ? root.appendingPathComponent("bin/anyps5_cpu_run") : root)
             do {
-                _ = try await EnginePackage.accept(selectedURL: selected,
+                let accepted = try await EnginePackage.accept(selectedURL: selected,
                                                    expectedManifestSHA256: control == "changed saved identity" ? originalIdentity : nil)
-                XCTFail("Invalid package accepted: \(control)")
+                if diagnostic != nil { XCTFail("Schema \(schema) invalid package accepted: \(control)") }
+                else {
+                    XCTAssertEqual(accepted.executableURL, root.appendingPathComponent("bin/anyps5_cpu_run"))
+                    XCTAssertEqual(accepted.sourceCommit, "5c9af66412d87c99651e87462ce6fee0f12f4cd2")
+                    XCTAssertEqual(accepted.engineCommit, "f82b6dd02638cfe76afa16fb54a1199daff21242")
+                    XCTAssertFalse(accepted.capabilities.ps5GameRuntimeReady)
+                }
             } catch {
-                XCTAssertTrue(error.localizedDescription.hasPrefix(diagnostic), "\(control) reached the wrong guard: \(error)")
+                if let diagnostic {
+                    XCTAssertTrue(error.localizedDescription.hasPrefix(diagnostic), "Schema \(schema) \(control) reached the wrong guard: \(error)")
+                } else { XCTFail("Schema 2 genuine native/CRT package was rejected: \(error)") }
             }
         }
     }
