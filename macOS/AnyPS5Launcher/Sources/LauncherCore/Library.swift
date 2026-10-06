@@ -5,12 +5,14 @@ public struct LocalGame: Codable, Identifiable, Sendable, Equatable {
     public var title: String
     public var executablePath: String
     public var workingDirectory: String
+    public var resourceImagePath: String?
 
-    public init(id: String, title: String, executablePath: String, workingDirectory: String) {
+    public init(id: String, title: String, executablePath: String, workingDirectory: String, resourceImagePath: String? = nil) {
         self.id = id
         self.title = title
         self.executablePath = executablePath
         self.workingDirectory = workingDirectory
+        self.resourceImagePath = resourceImagePath
     }
 }
 
