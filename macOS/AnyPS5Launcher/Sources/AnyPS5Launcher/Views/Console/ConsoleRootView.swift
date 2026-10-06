@@ -52,7 +52,6 @@ struct ConsoleRootView: View {
     private var header: some View {
         HStack(spacing: 30) {
             MPSWordmark().frame(width: 88, height: 24)
-            Text("MacPS").font(.system(size: 24, weight: .medium)).foregroundStyle(.white.opacity(0.8))
             HStack(spacing: 30) {
                 tab("Games", selected: !showingStore) { showingStore = false }
                 tab("Orbit Store", selected: showingStore) { showingStore = true; showingSearch = false; query = "" }
