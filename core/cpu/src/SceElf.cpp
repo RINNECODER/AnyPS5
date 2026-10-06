@@ -2,6 +2,7 @@
 #include <cpu/Self.hpp>
 #include <cpu/SceTls.hpp>
 #include "SceImageData.hpp"
+#include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -24,6 +25,21 @@ constexpr std::string_view Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno
 
 [[noreturn]] void fail(const std::string& message) {
     throw std::runtime_error("SCE ELF loader: " + message);
+}
+
+std::array<std::byte, 32> sourceSha256(std::span<const std::byte> bytes) {
+    CC_SHA256_CTX context;
+    if (CC_SHA256_Init(&context) != 1) fail("cannot initialize source SHA-256");
+    while (!bytes.empty()) {
+        const auto length = std::min<std::size_t>(bytes.size(), 1024 * 1024);
+        if (CC_SHA256_Update(&context, bytes.data(), static_cast<CC_LONG>(length)) != 1)
+            fail("cannot hash source bytes");
+        bytes = bytes.subspan(length);
+    }
+    std::array<std::byte, 32> digest{};
+    if (CC_SHA256_Final(reinterpret_cast<unsigned char*>(digest.data()), &context) != 1)
+        fail("cannot finalize source SHA-256");
+    return digest;
 }
 
 bool fits(std::uint64_t offset, std::uint64_t size, std::uint64_t end) {
@@ -107,6 +123,8 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
     bytes.resize(static_cast<std::size_t>(size));
     file.seekg(0);
     if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) fail("cannot read complete executable");
+    data->SourceSize = bytes.size();
+    data->SourceSha256 = sourceSha256(bytes);
     std::vector<std::string> reconstructionNotes;
     const bool fromSelf = IsSelf(bytes);
     if (fromSelf) {
@@ -125,6 +143,8 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
         data->Blockers.push_back({requirement, reason});
     };
     image.Path = path;
+    image.SourceSha256 = data->SourceSha256;
+    image.SourceSize = data->SourceSize;
     image.SourceContainer = fromSelf ? "plain_self" : "elf";
     image.ReconstructionNotes = std::move(reconstructionNotes);
     image.Type = static_cast<std::uint16_t>(read(bytes, 16, 2));

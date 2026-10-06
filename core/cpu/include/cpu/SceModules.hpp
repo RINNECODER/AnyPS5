@@ -8,9 +8,28 @@
 
 namespace Cpu {
 
+enum class SceCrtArrayOwner { Unsupported, DtInit, DtFini };
+
+struct SceCrtArrayContract {
+    std::uint64_t Address = 0;
+    std::uint64_t Size = 0;
+    SceCrtArrayOwner Owner = SceCrtArrayOwner::Unsupported;
+};
+
+struct SceCrtCertificate {
+    std::array<std::byte, 32> SourceSha256{};
+    std::uint64_t SourceSize = 0;
+    std::uint64_t Init = 0;
+    std::uint64_t Fini = 0;
+    SceCrtArrayContract Preinit;
+    SceCrtArrayContract InitArray;
+    SceCrtArrayContract FiniArray;
+};
+
 struct SceModuleFile {
     std::filesystem::path Path;
     std::uint64_t LoadBias = 0;
+    std::optional<SceCrtCertificate> Crt = std::nullopt;
 };
 
 struct SceHostModule {
