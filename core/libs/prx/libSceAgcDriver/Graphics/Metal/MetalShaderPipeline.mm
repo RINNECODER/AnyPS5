@@ -1,5 +1,9 @@
 #include "MetalShaderPipeline.hpp"
 #include <algorithm>
+#include "MetalSampler.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include <cmath>
+#include <tuple>
 #import <objc/runtime.h>
 #include <array>
 #include <cstring>
@@ -69,16 +73,53 @@ id<MTLFunction> compile(id<MTLDevice> device, const ShaderResult& shader, MTLFun
 }
 
 
+
+std::uint32_t samplerArgumentCapacity(id<MTLDevice> device) {
+    if ([device supportsFamily:MTLGPUFamilyApple10] || [device supportsFamily:MTLGPUFamilyApple9]) return 500000;
+    if ([device supportsFamily:MTLGPUFamilyApple8] || [device supportsFamily:MTLGPUFamilyApple7]) return 996;
+    if ([device supportsFamily:MTLGPUFamilyApple6]) return 128;
+    return 16;
+}
+
+const ShaderRecompiler::DescriptorBinding& descriptorElement(const ShaderResult& shader, std::uint32_t set,
+    std::uint32_t binding, std::uint32_t element, DescriptorKind kind, ShaderRecompiler::DescriptorRole role,
+    std::uint32_t words) {
+    const auto found = std::find_if(shader.guest.bindings.begin(), shader.guest.bindings.end(), [&](const auto& descriptor) {
+        return descriptor.descriptorSet == set && descriptor.binding == binding;
+    });
+    if (found == shader.guest.bindings.end() || found->kind != kind || found->role != role || element >= found->count ||
+        found->guestDescriptor.size() != static_cast<std::size_t>(found->count) * words) {
+        throw std::invalid_argument("Metal minimum LOD recipe descriptor identity or captured words are invalid");
+    }
+    const auto mapping = std::find_if(shader.resources.begin(), shader.resources.end(), [&](const auto& value) {
+        return value.descriptorSet == set && value.binding == binding;
+    });
+    if (mapping == shader.resources.end() || !mapping->active || mapping->kind != kind || mapping->count != found->count ||
+        (kind == DescriptorKind::SampledImage && !mapping->texture) || (kind == DescriptorKind::Sampler && !mapping->sampler)) {
+        throw std::invalid_argument("Metal minimum LOD recipe does not reference an active native resource mapping");
+    }
+    return *found;
+}
+
+auto samplerConfiguration(const Graphics::GuestSamplerResource& value) {
+    return std::tuple(value.magFilter, value.minFilter, value.mipmapMode, value.addressModeU, value.addressModeV,
+        value.addressModeW, value.anisotropyEnable, value.maxAnisotropy, value.minLod, value.maxLod, value.lodBias,
+        value.borderColor, value.compareEnable, value.compareOp);
+}
+
 char samplerStatesAssociation;
 
 id<MTLFunction> samplerBankFunction(id<MTLDevice> device, const ShaderResult& shader, id<MTLFunction> function) {
+    if (shader.requiresTextureLodQueries && !device.supportsQueryTextureLOD) {
+        throw std::invalid_argument("Metal minimum LOD shadow selection requires native texture LOD queries");
+    }
     if (!shader.samplerArgumentBuffer) {
         if (shader.samplerArgumentCount != 0) throw std::invalid_argument("Metal direct sampler reflection contains a bank count");
         return nil;
     }
     if (device.argumentBuffersSupport != MTLArgumentBuffersTier2 || *shader.samplerArgumentBuffer >= 31 ||
-        shader.samplerArgumentCount == 0 || shader.samplerArgumentCount > 32) {
-        throw std::invalid_argument("Metal sampler bank requires Tier 2 and the original 32-sampler limit");
+        shader.samplerArgumentCount == 0 || shader.samplerArgumentCount > samplerArgumentCapacity(device)) {
+        throw std::invalid_argument("Metal sampler bank exceeds its native per-stage argument capacity or lacks Tier 2");
     }
     auto encoder = [function newArgumentEncoderWithBufferIndex:*shader.samplerArgumentBuffer];
     if (encoder == nil || encoder.encodedLength == 0 || encoder.alignment == 0 || encoder.device != device) {
@@ -350,6 +391,59 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
         if (resource == nil || resource.device != device) {
             throw std::invalid_argument("Metal shader indirect resource belongs to a different device or is missing");
         }
+    }
+    for (const auto& requirement : shader.capturedSamplerRequirements) {
+        descriptorElement(shader, requirement.descriptorSet, requirement.binding, requirement.element,
+            DescriptorKind::Sampler, ShaderRecompiler::DescriptorRole::GuestSamplers, 4);
+        const auto native = std::find_if(supplied.begin(), supplied.end(), [&](const auto& binding) {
+            return binding.descriptorSet == requirement.descriptorSet && binding.binding == requirement.binding;
+        });
+        if (native == supplied.end() || requirement.element >= native->samplers.size() ||
+            !native->samplersMatchCapturedDescriptors) {
+            throw std::invalid_argument("Metal captured sampler lowering requires explicit native sampler agreement with captured guest descriptors");
+        }
+    }
+    using Configuration = decltype(samplerConfiguration(Graphics::GuestSamplerResource{}));
+    std::set<Configuration> uniqueConfigurations;
+    for (const auto& pair : shader.minimumLodPairs) {
+        if (!shader.samplerArgumentBuffer) throw std::invalid_argument("Metal minimum LOD recipe requires an argument bank");
+        const auto& image = descriptorElement(shader, pair.imageSet, pair.imageBinding, pair.imageElement,
+            DescriptorKind::SampledImage, ShaderRecompiler::DescriptorRole::GuestImages, 8);
+        const auto& sampler = descriptorElement(shader, pair.samplerSet, pair.samplerBinding, pair.samplerElement,
+            DescriptorKind::Sampler, ShaderRecompiler::DescriptorRole::GuestSamplers, 4);
+        const auto native = std::find_if(supplied.begin(), supplied.end(), [&](const auto& binding) {
+            return binding.descriptorSet == pair.samplerSet && binding.binding == pair.samplerBinding;
+        });
+        if (native == supplied.end() || !native->samplersMatchCapturedDescriptors) {
+            throw std::invalid_argument("Metal minimum LOD shadows require explicit native sampler agreement with captured guest descriptors");
+        }
+        if (!sampler.samplerDepthCompare.empty() && sampler.samplerDepthCompare.size() != sampler.count) {
+            throw std::invalid_argument("Metal minimum LOD sampler comparison metadata has the wrong descriptor count");
+        }
+        const auto imageResource = Graphics::DecodeTextureResource(std::span(image.guestDescriptor).subspan(pair.imageElement * 8u, 8));
+        const float relative = std::max(0.0f, Graphics::EffectiveMinLod(imageResource) - static_cast<float>(imageResource.baseLevel));
+        if (!std::isfinite(pair.relativeViewMin) || pair.relativeViewMin < 0.0f || pair.relativeViewMin != relative) {
+            throw std::invalid_argument("Metal minimum LOD recipe differs from its captured image view");
+        }
+        auto original = Graphics::DecodeSamplerResource(std::span(sampler.guestDescriptor).subspan(pair.samplerElement * 4u, 4));
+        original.compareEnable = !sampler.samplerDepthCompare.empty() && sampler.samplerDepthCompare[pair.samplerElement];
+        uniqueConfigurations.insert(samplerConfiguration(original));
+        auto mag = original;
+        mag.minLod = std::max(original.minLod, relative);
+        mag.maxLod = std::max(original.maxLod, relative);
+        mag.minFilter = mag.magFilter = original.magFilter;
+        auto min = mag;
+        min.minFilter = min.magFilter = original.minFilter;
+        reserveSlots(samplerSlots, pair.magArgument, 1, shader.samplerArgumentCount);
+        reserveSlots(samplerSlots, pair.minArgument, 1, shader.samplerArgumentCount);
+        uniqueConfigurations.insert(samplerConfiguration(mag));
+        uniqueConfigurations.insert(samplerConfiguration(min));
+        if (uniqueConfigurations.size() > device.maxArgumentBufferSamplerCount) {
+            throw std::invalid_argument("Metal minimum LOD sampler configurations exceed the separate per-app native budget");
+        }
+        MetalSampler magSampler(device, mag), minSampler(device, min);
+        result.samplers.push_back({pair.magArgument, magSampler.Handle()});
+        result.samplers.push_back({pair.minArgument, minSampler.Handle()});
     }
     if (samplerBuffer != nil) {
         if (samplerSlots.size() != shader.samplerArgumentCount || result.samplers.size() != shader.samplerArgumentCount) {

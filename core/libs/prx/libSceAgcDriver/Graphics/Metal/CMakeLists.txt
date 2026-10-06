@@ -48,7 +48,15 @@ add_dependencies(anyps5_metal_utilities anyps5_metal_shaders)
 set_target_properties(anyps5_metal_utilities PROPERTIES ANYPS5_METALLIB "${metalLibrary}")
 
 if(ANYPS5_METAL_SHADER_BRIDGE)
-    target_sources(anyps5_metal_utilities PRIVATE MetalShaderPipeline.mm)
+    target_sources(anyps5_metal_utilities PRIVATE
+        MetalShaderPipeline.mm
+        MetalSampler.mm
+        ../src/GuestSamplerResource.cpp
+        ../src/GuestTextureResource.cpp
+        ../src/TextureTiling.cpp
+        ../src/TextureFormat.cpp
+    )
+    target_include_directories(anyps5_metal_utilities PRIVATE "${PROJECT_SOURCE_DIR}/3rdparty/Vulkan-Headers/include")
     target_compile_definitions(anyps5_metal_utilities PUBLIC ANYPS5_METAL_SHADER_BRIDGE=1)
     target_link_libraries(anyps5_metal_utilities PUBLIC anyps5_metal_shader_bridge)
 endif()

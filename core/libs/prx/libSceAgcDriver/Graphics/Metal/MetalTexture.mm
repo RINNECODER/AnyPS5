@@ -172,8 +172,8 @@ std::uint32_t formatFamily(std::uint32_t format) {
     }
 }
 
-void validateDescriptor(const Graphics::GuestTextureResource& descriptor, bool compare) {
-    require(Graphics::EffectiveMinLod(descriptor) == 0, "Metal texture minimum LOD view clamp is not supported");
+void validateDescriptor(const Graphics::GuestTextureResource& descriptor, bool compare, bool minimumLodLowered) {
+    require(Graphics::EffectiveMinLod(descriptor) == 0 || minimumLodLowered, "Metal texture minimum LOD view clamp is not supported");
     require(descriptor.width != 0 && descriptor.height != 0 && descriptor.mipCount != 0 && descriptor.mipCount <= 16, "Metal texture has invalid dimensions or mip count");
     require(descriptor.baseLevel <= descriptor.lastLevel && descriptor.lastLevel < descriptor.mipCount, "Metal texture view mip range lies outside the surface");
     require(descriptor.dimension != Graphics::TextureDimension::k1D || descriptor.height == 1, "Metal 1D texture has a non-unit height");
@@ -230,8 +230,12 @@ MetalTexture::MetalTexture(const MetalDevice& backend, std::span<const std::uint
     : MetalTexture(backend, Graphics::DecodeTextureResource(words), compare) {}
 
 MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor, bool compare)
+    : MetalTexture(backend, descriptor, compare, false) {}
+
+MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor,
+    bool compare, bool minimumLodLowered)
     : backend(backend), descriptor(descriptor), backing(std::make_shared<Backing>()) {
-    validateDescriptor(descriptor, compare);
+    validateDescriptor(descriptor, compare, minimumLodLowered);
     const bool compressed = Graphics::IsBlockCompressed(descriptor.format);
     require(!compressed || backend.Device().supportsBCTextureCompression, "Metal device does not support BC compressed textures");
     backing->descriptor = descriptor;
@@ -259,9 +263,9 @@ MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestText
 }
 
 MetalTexture::MetalTexture(const MetalDevice& backend, std::shared_ptr<Backing> backing,
-    const Graphics::GuestTextureResource& descriptor, bool compare)
+    const Graphics::GuestTextureResource& descriptor, bool compare, bool minimumLodLowered)
     : backend(backend), descriptor(descriptor), backing(std::move(backing)) {
-    validateDescriptor(descriptor, compare);
+    validateDescriptor(descriptor, compare, minimumLodLowered);
     createViews(compare);
 }
 
@@ -303,8 +307,13 @@ bool MetalTexture::CanShareBacking(const Graphics::GuestTextureResource& resourc
 }
 
 std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestTextureResource& resource, bool compare) const {
+    return CreateView(resource, compare, false);
+}
+
+std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestTextureResource& resource,
+    bool compare, bool minimumLodLowered) const {
     require(CanShareBacking(resource), "Metal texture view is incompatible with the captured backing");
-    return std::shared_ptr<MetalTexture>(new MetalTexture(backend, backing, resource, compare));
+    return std::shared_ptr<MetalTexture>(new MetalTexture(backend, backing, resource, compare, minimumLodLowered));
 }
 
 void MetalTexture::transfer(id<MTLBuffer> source, id<MTLBuffer> destination, bool retile) const {
@@ -406,6 +415,7 @@ void MetalTexture::Readback(std::span<std::byte> guestBytes) const {
 id<MTLTexture> MetalTexture::Texture() const { return typedTexture; }
 id<MTLTexture> MetalTexture::SampledView() const { return sampledView; }
 id<MTLTexture> MetalTexture::StorageView(bool atomic) const {
+    require(descriptor.minLod <= descriptor.baseLevel * 256u, "guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
     require(SupportsStorage(), "Metal texture format does not support native storage or render writes");
     require(!atomic || SupportsAtomic(), "Metal texture atomics require one 32-bit component");
     return atomic ? atomicView : storageView;

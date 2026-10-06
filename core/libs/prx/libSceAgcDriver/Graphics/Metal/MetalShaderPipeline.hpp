@@ -19,6 +19,7 @@ struct MetalShaderResourceBinding {
     std::vector<MetalBufferBinding> buffers;
     std::vector<id<MTLTexture>> textures;
     std::vector<id<MTLSamplerState>> samplers;
+    bool samplersMatchCapturedDescriptors = false;
 };
 
 struct MetalImplicitBufferBinding {
