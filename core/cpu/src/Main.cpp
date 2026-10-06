@@ -81,7 +81,7 @@ void Capabilities() {
         << "\"sce_imports\":{\"module\":\"libc\",\"module_version\":\"1.1\",\"library\":\"libc\",\"library_version\":1,"
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
         << "\"sce_constraints\":[\"clean decrypted ELF only\",\"no guest TLS\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
-        << "\"ps5_game_runtime_ready\":false}\n";
+        << "\"unsupported_instruction_families\":[\"AVX\",\"AVX2\",\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
 }
 
 bool SceExecutable(const std::string& path) {
@@ -131,7 +131,8 @@ ErrorCode LoaderCode(std::string_view message) {
 }
 
 ErrorCode ExecutionCode(std::string_view message) {
-    if (message.starts_with("Unsupported guest instruction")) return ErrorCode::UnsupportedInstruction;
+    if (message.starts_with("Unsupported guest instruction") || message.starts_with("Unsupported guest VEX/EVEX instruction") ||
+        message.starts_with("Unsupported guest XOP instruction")) return ErrorCode::UnsupportedInstruction;
     if (message.starts_with("Unsupported Linux guest syscall") || message.starts_with("Unsupported guest syscall") ||
         message.starts_with("Unsupported guest interrupt") || message.starts_with("Unsupported guest SYSENTER") ||
         message.starts_with("Unsupported guest port ") || message.starts_with("Unsupported guest privileged service instruction") ||
