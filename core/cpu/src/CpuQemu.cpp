@@ -134,35 +134,40 @@ struct Machine::Impl {
         }
     }
     void map(std::uint64_t address, std::span<std::byte> memory, unsigned permissions,
-             bool borrowed, std::size_t allocationSize, std::unique_ptr<std::byte, Free> storage = {}) {
+             bool borrowed, std::size_t allocationSize, std::unique_ptr<std::byte, Free> storage = {},
+             std::span<std::byte> fullBacking = {}) {
         checkOwner();
         const auto hostPage = hostPageSize();
         for (const auto& range : ranges)
             if (address < range.address + range.size && range.address < address + memory.size())
                 throw std::invalid_argument("Map guest memory: guest mappings overlap");
         const auto pointer = reinterpret_cast<std::uintptr_t>(memory.data());
-        if (allocationSize > std::numeric_limits<std::uintptr_t>::max() - pointer)
+        const auto allocation = fullBacking.empty() ? memory.data() : fullBacking.data();
+        const auto allocationPointer = reinterpret_cast<std::uintptr_t>(allocation);
+        if (allocationSize > std::numeric_limits<std::uintptr_t>::max() - allocationPointer)
             throw std::invalid_argument("Guest backing memory range overflows");
         std::uint64_t backingId = 0;
-        std::size_t offset = 0;
+        std::size_t offset = pointer - allocationPointer;
+        const auto searchedPointer = fullBacking.empty() ? pointer : allocationPointer;
+        const auto searchedSize = fullBacking.empty() ? memory.size() : allocationSize;
         for (const auto& backing : backings) {
             const auto begin = reinterpret_cast<std::uintptr_t>(backing.pointer);
-            if (pointer >= begin && pointer - begin <= backing.size && memory.size() <= backing.size - (pointer - begin)) {
+            if (searchedPointer >= begin && searchedPointer - begin <= backing.size && searchedSize <= backing.size - (searchedPointer - begin)) {
                 backingId = backing.id;
                 offset = pointer - begin;
                 break;
             }
-            if (pointer < begin + backing.size && begin < pointer + memory.size())
+            if (searchedPointer < begin + backing.size && begin < searchedPointer + searchedSize)
                 throw std::runtime_error("Guest borrowed mapping crosses a registered backing allocation");
         }
         const auto newBacking = backingId == 0;
-        if (newBacking && (allocationSize % hostPage || pointer % hostPage))
+        if (newBacking && (allocationSize % hostPage || allocationPointer % hostPage))
             throw std::runtime_error("Modern guest CPU borrowed mapping requires a complete aligned host-page backing or a slice of a registered backing");
         if (offset & 4095) throw std::runtime_error("Modern guest CPU backing aliases require a 4 KiB aligned offset");
         ranges.reserve(ranges.size() + 1);
         if (newBacking) {
             backings.reserve(backings.size() + 1);
-            check(anyps5_qemu_cpu_register_backing(engine, memory.data(), allocationSize, &backingId), "Register modern guest backing");
+            check(anyps5_qemu_cpu_register_backing(engine, allocation, allocationSize, &backingId), "Register modern guest backing");
         }
         try {
             check(anyps5_qemu_cpu_map_alias(engine, address, backingId, offset, memory.size(), permissions), "Map modern guest backing alias");
@@ -170,7 +175,7 @@ struct Machine::Impl {
             if (newBacking && anyps5_qemu_cpu_release_backing(engine, backingId)) std::terminate();
             throw;
         }
-        if (newBacking) backings.push_back({memory.data(), allocationSize, backingId, std::move(storage)});
+        if (newBacking) backings.push_back({allocation, allocationSize, backingId, std::move(storage)});
         ranges.push_back({address, memory.size(), memory.data(), permissions, borrowed});
     }
     void refresh() const {
@@ -295,6 +300,22 @@ void Machine::MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Pe
     checkRange(address, memory.size());
     if (!memory.data()) throw std::invalid_argument("Guest borrowed mapping requires backing memory");
     impl->map(address, memory, permissionBits(permissions), true, memory.size());
+}
+void Machine::MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions,
+                          std::span<std::byte> fullBacking) {
+    checkRange(address, memory.size());
+    const auto bits = permissionBits(permissions);
+    const auto pointer = reinterpret_cast<std::uintptr_t>(memory.data());
+    const auto begin = reinterpret_cast<std::uintptr_t>(fullBacking.data());
+    const auto hostPage = hostPageSize();
+    if (!memory.data() || !fullBacking.data() || fullBacking.empty() ||
+        memory.size() > std::numeric_limits<std::uintptr_t>::max() - pointer ||
+        fullBacking.size() > std::numeric_limits<std::uintptr_t>::max() - begin ||
+        (pointer & 4095) || begin % hostPage || fullBacking.size() % hostPage ||
+        pointer < begin || pointer - begin > fullBacking.size() ||
+        memory.size() > fullBacking.size() - (pointer - begin))
+        throw std::invalid_argument("Guest borrowed mapping requires an aligned complete backing containing the mapped span without overflow");
+    impl->map(address, memory, bits, true, fullBacking.size(), {}, fullBacking);
 }
 void Machine::Unmap(std::uint64_t address, std::size_t size) {
     checkRange(address, size);
