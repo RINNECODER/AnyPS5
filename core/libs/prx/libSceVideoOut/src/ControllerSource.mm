@@ -152,7 +152,6 @@ struct NativeControllerSource::Impl : std::enable_shared_from_this<Impl> {
         if (profile.valueChangedHandler) throw std::runtime_error("Controller value handler is already owned");
         if (nextIdentity == std::numeric_limits<std::uint64_t>::max()) throw std::overflow_error("Controller identity exhausted");
         const ControllerIdentity identity{nextIdentity++, 1};
-        const ControllerState state = ReadState(profile.capture, Kind(profile), TouchpadButton(profile) != nil);
         std::string vendor;
         if (controller.vendorName) {
             const char* name = controller.vendorName.UTF8String;
@@ -168,6 +167,7 @@ struct NativeControllerSource::Impl : std::enable_shared_from_this<Impl> {
             if (auto self = weak.lock()) self->Callback([&] { self->UpdateState(identity); });
         };
         profile.valueChangedHandler = installedHandler;
+        const ControllerState state = ReadState(profile.capture, Kind(profile), TouchpadButton(profile) != nil);
         std::lock_guard lock(mutex);
         snapshot.controller = identity;
         snapshot.kind = Kind(profile);
