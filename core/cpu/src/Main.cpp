@@ -4,6 +4,7 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
+#include <cpu/SceLibcBootstrapImports.hpp>
 #include <cpu/SceModules.hpp>
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceSystemImports.hpp>
@@ -95,7 +96,8 @@ void Capabilities() {
         << "\"functions\":[\"sceSystemServiceParamGetInt\",\"sceSystemServiceParamGetString\",\"sceSystemServiceHideSplashScreen\"],"
         << "\"recognized_unavailable\":[\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceLaunchPlayerDialog\"],"
         << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
-        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes and shared permission pages unsupported\",\"dependency CRT initializers/finalizers only; main owns its initializer\",\"host imports require typed function gates; no host data or TLS imports\",\"entry termination callback unsupported\"],"
+        << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes and shared permission pages unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback unsupported\"],"
 #if ANYPS5_CPU_MODERN_TCG
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
         << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\"],"
@@ -134,7 +136,16 @@ std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
         if (alignment >= ceiling || next > ceiling - alignment)
             throw std::runtime_error("SCE module placement alignment exceeds the supported guest address range");
         const auto bias = (next + alignment - 1) & ~(alignment - 1);
-        files.push_back({path, bias});
+        Cpu::SceModuleFile file{path, bias};
+        constexpr std::array<std::byte, 32> libcSource{
+            std::byte{0x78}, std::byte{0xa0}, std::byte{0x80}, std::byte{0xfd}, std::byte{0xec}, std::byte{0xcc}, std::byte{0x28}, std::byte{0xf2},
+            std::byte{0xaa}, std::byte{0x76}, std::byte{0x35}, std::byte{0x6e}, std::byte{0x97}, std::byte{0xf8}, std::byte{0x2a}, std::byte{0x35},
+            std::byte{0xb3}, std::byte{0xba}, std::byte{0x09}, std::byte{0xde}, std::byte{0xba}, std::byte{0x84}, std::byte{0x08}, std::byte{0xdf},
+            std::byte{0xce}, std::byte{0x27}, std::byte{0xdb}, std::byte{0x28}, std::byte{0xfa}, std::byte{0x0c}, std::byte{0xe6}, std::byte{0x7f}};
+        if (image.SourceSize == 1875018 && image.SourceSha256 == libcSource)
+            file.Crt = Cpu::SceCrtCertificate{libcSource, 1875018, 0x10, 0x114cb0,
+                {0x192818, 8, Cpu::SceCrtArrayOwner::DtInit}, {}, {}};
+        files.push_back(std::move(file));
         next = extent(image, bias);
     }
     return files;
@@ -146,6 +157,7 @@ std::vector<Cpu::SceHostModule> HostModules(const std::vector<Cpu::SceModuleFile
         {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
         {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
+        {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}}},
         {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}}};
     for (const auto& file : files) {
         const auto image = Cpu::ParseSce(file.Path);
@@ -318,6 +330,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceModules> modules;
         std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
         std::unique_ptr<Cpu::SceAudioOut2Imports> audioRuntime;
+        std::unique_ptr<Cpu::SceLibcBootstrapImports> bootstrapRuntime;
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
@@ -329,6 +342,7 @@ int main(int argc, char** argv) {
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
                 audioRuntime = std::make_unique<Cpu::SceAudioOut2Imports>(machine);
+                bootstrapRuntime = std::make_unique<Cpu::SceLibcBootstrapImports>(machine, std::filesystem::path(executable).filename().string());
                 const auto resolve = [&](const auto& import) {
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
@@ -338,6 +352,8 @@ int main(int argc, char** argv) {
                 };
                 if (modulePaths.empty()) {
                     auto image = Cpu::LoadSce(machine, executable, 0x1000000, resolve);
+                    bootstrapRuntime->SetProcessParameters(image.ProcParam ? image.ProcParam->Address : 0,
+                        image.ProcParam ? image.ProcParam->FileSize : 0);
                     kernelRuntime->SetTls(image.Tls);
                     Cpu::SetupSceEntry(machine, image, arguments, sceRuntime->ExitGate());
                     entry = image.Entry;
@@ -346,10 +362,18 @@ int main(int argc, char** argv) {
                     const auto hosts = HostModules(files);
                     modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
                         [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                            if (const auto address = bootstrapRuntime->Resolve(import)) {
+                                const std::uint8_t expectedType = import.Nid == "f7uOxY9mM1U" || import.Nid == "djxxOmW6-aw" ? 1 : 2;
+                                if (type != expectedType)
+                                    throw std::runtime_error("Unsupported SCE libc bootstrap symbol type");
+                                return Cpu::SceResolvedImport{*address, expectedType, expectedType == 1 ? 8u : 0u};
+                            }
                             if (type != 2) return std::nullopt;
                             return Cpu::SceResolvedImport{resolve(import), 2};
                         });
                     kernelRuntime->SetTls(modules->Tls());
+                    bootstrapRuntime->SetProcessParameters(modules->Main().ProcParam ? modules->Main().ProcParam->Address : 0,
+                        modules->Main().ProcParam ? modules->Main().ProcParam->FileSize : 0);
                     Cpu::SetupSceEntry(machine, modules->Main(), arguments, sceRuntime->ExitGate());
                     try { modules->InitializeDependencies(); }
                     catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
