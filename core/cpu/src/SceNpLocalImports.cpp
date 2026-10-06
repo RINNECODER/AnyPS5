@@ -12,8 +12,6 @@ namespace Cpu {
 namespace {
 
 constexpr std::int64_t invalidArgument = std::bit_cast<std::int32_t>(0x80550003u);
-// Repository sceNpGetState writes 1; the observed title initializes its u32 state
-// to 1 and skips polling at 2. This is the local offline policy, not SDK enum proof.
 constexpr std::array offlineState{std::byte{1}, std::byte{0}, std::byte{0}, std::byte{0}};
 
 std::string identity(const SceImport& import) {
@@ -58,8 +56,6 @@ struct SceNpLocalImports::Impl {
     void getState(Machine& guest) {
         const auto user = static_cast<std::uint32_t>(guest.Get(Register::Rdi));
         const auto destination = guest.Get(Register::Rsi);
-        // Restrict the query to the configured local user. This is session policy,
-        // not the original source's ignored-user behavior or a PSN user lookup.
         std::int64_t result = invalidArgument;
         if (user == userId && writable(destination)) {
             machine.Write(destination, offlineState);
@@ -82,8 +78,6 @@ std::optional<std::uint64_t> SceNpLocalImports::Resolve(const SceImport& import)
         throw std::runtime_error("Unsupported SCE local NP import scope/version: " + identity(import));
     if (import.Nid != "eQH7nWPcAgc")
         throw std::runtime_error("Unsupported SCE local NP import service: " + identity(import));
-    // Library/module IDs belong to each importing image; retain them in the cache
-    // rather than treating the selected title's IDs 7/8 as a universal ABI value.
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;

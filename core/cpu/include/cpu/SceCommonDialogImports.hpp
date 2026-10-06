@@ -9,8 +9,6 @@ namespace Cpu {
 
 struct SceImport;
 
-// Own one provider for each Machine/session. Initialization does not open a
-// dialog or manufacture UI completion, results or user decisions.
 class SceCommonDialogImports {
 public:
     explicit SceCommonDialogImports(Machine& machine, std::uint64_t gateBase);

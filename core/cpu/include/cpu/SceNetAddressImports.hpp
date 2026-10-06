@@ -9,7 +9,6 @@ namespace Cpu {
 
 struct SceImport;
 
-// Local IPv4 conversion only; no socket, resolver, or guest errno services.
 class SceNetAddressImports {
 public:
     explicit SceNetAddressImports(Machine& machine, std::uint64_t gateBase = 0x7ffdf3000000);

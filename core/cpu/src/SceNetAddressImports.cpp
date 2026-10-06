@@ -46,7 +46,6 @@ std::array<char, ipv4TextCapacity> copyText(Machine& guest, std::uint64_t addres
 }
 
 void requireIpv4(std::uint64_t family) {
-    // The guest int argument is 32 bits; host AF_INET is not the guest ABI.
     if (static_cast<std::uint32_t>(family) != 2)
         throw std::runtime_error("Unsupported SCE network address family: " +
                                  std::to_string(static_cast<std::uint32_t>(family)));
@@ -111,9 +110,6 @@ struct SceNetAddressImports::Impl {
         const auto bytes = std::as_writable_bytes(std::span(&address, 1));
         checkSpan(guest, source, bytes.size(), Permission::Read);
         guest.Read(source, bytes);
-        // Check the entire caller-declared output span, even though only the
-        // formatted text and its terminator are committed. Copying input first
-        // also permits source/destination aliasing without borrowed host data.
         checkSpan(guest, destination, capacity, Permission::Write);
         std::array<char, ipv4TextCapacity> text{};
         if (!::inet_ntop(AF_INET, &address, text.data(), static_cast<socklen_t>(text.size())))

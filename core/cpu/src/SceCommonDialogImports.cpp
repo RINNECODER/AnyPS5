@@ -10,7 +10,6 @@
 namespace Cpu {
 namespace {
 
-// Preserve the repository's repeated-initialization status as signed int32.
 constexpr std::int64_t alreadyInitialized = std::bit_cast<std::int32_t>(0x80b80002u);
 
 std::string identity(const SceImport& import) {
@@ -42,8 +41,6 @@ struct SceCommonDialogImports::Impl {
     }
 
     void initialize(Machine& guest) {
-        // State belongs to this session, replacing the original process-global
-        // source bool. The evidenced import has no arguments or output buffer.
         const auto result = initialized ? alreadyInitialized : std::int64_t{0};
         initialized = true;
         guest.Set(Register::Rax, static_cast<std::uint64_t>(result));

@@ -66,7 +66,7 @@ add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.c
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/NidCompute.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
-target_sources(anyps5_cpu PRIVATE src/GuestMemoryRuntime.cpp src/SceMemoryImports.cpp)
+target_sources(anyps5_cpu PRIVATE src/GuestMemoryRuntime.cpp src/SceMemoryImports.cpp src/SceNpLocalImports.cpp src/SceNetAddressImports.cpp src/SceCommonDialogImports.cpp)
 target_include_directories(anyps5_cpu PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
 target_link_libraries(anyps5_cpu PRIVATE ${cpuEngineLibrary} unicorn)
 find_library(cpuAudioToolbox AudioToolbox REQUIRED)
@@ -192,6 +192,30 @@ if(BUILD_TESTING)
     target_link_libraries(anyps5_sce_system_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_system_imports COMMAND anyps5_sce_system_import_tests)
     set_tests_properties(anyps5_sce_system_imports PROPERTIES TIMEOUT 30)
+    set(platformGuest "${CMAKE_CURRENT_BINARY_DIR}/PlatformServiceGuest.prx")
+    set(platformMain "${CMAKE_CURRENT_BINARY_DIR}/platform-service-main.elf")
+    add_custom_command(OUTPUT "${platformGuest}" "${platformMain}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_PLATFORM_DEPENDENCY=1 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/PlatformServiceHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/platform-guest.o"
+        COMMAND "${guestLinker}" -shared -soname PlatformServiceGuest.prx -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/platform-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/platform-guest.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_PLATFORM_DEPENDENCY=0 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/PlatformServiceHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/platform-main.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/platform-start.o"
+        COMMAND "${guestLinker}" -shared -e _start -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/platform-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/platform-main.o" "${CMAKE_CURRENT_BINARY_DIR}/platform-start.o" "${CMAKE_CURRENT_BINARY_DIR}/platform-guest-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildPlatformServiceFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/platform-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/platform-main-linked.elf" "${platformGuest}" "${platformMain}"
+        DEPENDS fixtures/PlatformServiceHomebrew.c fixtures/SceStart.S tests/BuildPlatformServiceFixture.py tests/BuildSceModulesFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_service_fixture ALL DEPENDS "${platformGuest}" "${platformMain}")
+    add_test(NAME anyps5_platform_service_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/PlatformServiceCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${platformMain}" "${platformGuest}")
+    set_tests_properties(anyps5_platform_service_cli PROPERTIES TIMEOUT 30)
+    add_test_executable(anyps5_sce_common_dialog_import_tests tests/SceCommonDialogImportsTest.cpp)
+    target_link_libraries(anyps5_sce_common_dialog_import_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_common_dialog_imports COMMAND anyps5_sce_common_dialog_import_tests)
+    set_tests_properties(anyps5_sce_common_dialog_imports PROPERTIES TIMEOUT 30)
+    add_test_executable(anyps5_sce_np_local_import_tests tests/SceNpLocalImportsTest.cpp)
+    target_link_libraries(anyps5_sce_np_local_import_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_np_local_imports COMMAND anyps5_sce_np_local_import_tests)
+    add_test_executable(anyps5_sce_net_address_import_tests tests/SceNetAddressImportsTest.cpp)
+    target_link_libraries(anyps5_sce_net_address_import_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_net_address_imports COMMAND anyps5_sce_net_address_import_tests)
+    set_tests_properties(anyps5_sce_np_local_imports anyps5_sce_net_address_imports PROPERTIES TIMEOUT 30)
     add_test_executable(anyps5_sce_libc_bootstrap_import_tests tests/SceLibcBootstrapImportsTest.cpp)
     target_link_libraries(anyps5_sce_libc_bootstrap_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_libc_bootstrap_imports COMMAND anyps5_sce_libc_bootstrap_import_tests)

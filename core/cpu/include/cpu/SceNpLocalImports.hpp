@@ -9,8 +9,6 @@ namespace Cpu {
 
 struct SceImport;
 
-// A session-local, offline NP state query. This provides no account, authentication,
-// entitlement or callback service. The user must match the session's local user.
 class SceNpLocalImports {
 public:
     explicit SceNpLocalImports(Machine& machine, std::uint32_t sessionUserId = 0x10000000,
