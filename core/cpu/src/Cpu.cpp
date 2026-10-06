@@ -347,6 +347,16 @@ void Machine::Protect(std::uint64_t address, std::size_t size, Permission permis
     checkRange(address, size);
     check(uc_mem_protect(impl->engine, address, size, static_cast<unsigned>(permissions)), "Protect guest memory");
 }
+void Machine::ProtectFragment(std::uint64_t address, std::size_t size, Permission permissions) {
+    if (std::this_thread::get_id() != impl->ownerThread || impl->running)
+        throw std::logic_error("Guest fragment protection requires the idle CPU owner");
+    if (!size || size > 4096 - (address & 4095) || size > std::numeric_limits<std::uint64_t>::max() - address)
+        throw std::invalid_argument("Guest fragment protection requires a nonempty interval within one 4 KiB page without overflow");
+    const auto bits = static_cast<unsigned>(permissions);
+    if (bits & ~3u) throw std::invalid_argument("Guest fragment protection supports only data permissions");
+    checkMapped(impl->engine, address & ~std::uint64_t{4095}, 4096, 0);
+    throw std::runtime_error("Unicorn exact guest data fragment protection is unsupported");
+}
 std::vector<Mapping> Machine::Mappings() const {
     if (std::this_thread::get_id() != impl->ownerThread)
         throw std::logic_error("Guest CPU mapping inventory requires its owner thread");

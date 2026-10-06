@@ -67,6 +67,80 @@ bool loadable(const SceSegment& segment) {
     return segment.Type == 1 || segment.Type == 0x61000010;
 }
 
+struct PageFragment {
+    std::uint64_t Address;
+    std::size_t Size;
+    Permission Permissions;
+};
+
+struct PagePlan {
+    std::uint64_t Address;
+    Permission Permissions;
+    bool Mixed;
+    std::vector<PageFragment> Fragments;
+};
+
+std::vector<PagePlan> pagePlan(const SceParsedImage& image) {
+    std::map<std::uint64_t, std::vector<PageFragment>> pages;
+    for (const auto& segment : image.Segments) {
+        if (!loadable(segment) || !segment.MemorySize) continue;
+        const auto end = segment.Address + segment.MemorySize;
+        for (auto page = segment.Address & ~(PageSize - 1); page < end; page += PageSize) {
+            const auto begin = std::max(page, segment.Address);
+            const auto last = std::min(page + PageSize, end);
+            pages[page].push_back({begin, static_cast<std::size_t>(last - begin), permissions(segment.Flags)});
+        }
+    }
+    std::vector<PagePlan> result;
+    result.reserve(pages.size());
+    for (auto& [address, fragments] : pages) {
+        std::sort(fragments.begin(), fragments.end(), [](const PageFragment& left, const PageFragment& right) {
+            return left.Address < right.Address;
+        });
+        auto cursor = address;
+        for (const auto& fragment : fragments) {
+            if (fragment.Address < cursor) fail("overlapping logical PT_LOAD ranges");
+            cursor = fragment.Address + fragment.Size;
+        }
+        const auto first = fragments.front().Permissions;
+        const auto mixed = std::any_of(fragments.begin(), fragments.end(), [&](const PageFragment& fragment) {
+            return fragment.Permissions != first;
+        });
+        if (mixed && std::any_of(fragments.begin(), fragments.end(), [](const PageFragment& fragment) {
+            return (static_cast<unsigned>(fragment.Permissions) & 4) != 0;
+        })) fail("mixed executable shared guest pages are unsupported");
+        std::vector<PageFragment> plan;
+        if (mixed) {
+            plan.reserve(fragments.size() * 2 + 1);
+            const auto append = [&](PageFragment fragment) {
+                if (!plan.empty() && plan.back().Address + plan.back().Size == fragment.Address &&
+                    plan.back().Permissions == fragment.Permissions) plan.back().Size += fragment.Size;
+                else plan.push_back(fragment);
+            };
+            cursor = address;
+            for (const auto& fragment : fragments) {
+                if (cursor < fragment.Address)
+                    append({cursor, static_cast<std::size_t>(fragment.Address - cursor), static_cast<Permission>(0)});
+                append(fragment);
+                cursor = fragment.Address + fragment.Size;
+            }
+            if (cursor < address + PageSize)
+                append({cursor, static_cast<std::size_t>(address + PageSize - cursor), static_cast<Permission>(0)});
+        }
+        result.push_back({address, mixed ? static_cast<Permission>(0) : first, mixed, std::move(plan)});
+    }
+    for (auto& page : result) {
+        const auto protectedPage = std::any_of(image.Data->Relro.begin(), image.Data->Relro.end(), [&](const SceSegment& relro) {
+            return page.Address >= relro.Address && page.Address - relro.Address < relro.MemorySize;
+        });
+        if (!protectedPage) continue;
+        if (!page.Mixed) page.Permissions = Permission::Read;
+        else for (auto& fragment : page.Fragments)
+            if (static_cast<unsigned>(fragment.Permissions)) fragment.Permissions = Permission::Read;
+    }
+    return result;
+}
+
 std::uint16_t identifier(std::string_view encoded) {
     if (encoded.empty() || encoded.size() > 3) fail("invalid scoped symbol identifier");
     unsigned result = 0;
@@ -163,7 +237,7 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
     if (read(bytes, 54, 2) != 56 || phCount == 0 || phCount > 1024 || !fits(phOffset, phCount * 56, bytes.size()))
         fail("invalid program header table");
     std::optional<SceSegment> dynamic, dynlib;
-    std::uint64_t mappedSize = 0;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> mappedRanges;
     for (std::uint64_t index = 0; index < phCount; ++index) {
         const auto offset = phOffset + index * 56;
         SceSegment segment{static_cast<std::uint32_t>(read(bytes, offset, 4)),
@@ -185,13 +259,16 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
                 if (!loadable(other)) continue;
                 if (segment.Address < other.Address + other.MemorySize &&
                     other.Address < segment.Address + segment.MemorySize) fail("overlapping logical PT_LOAD ranges");
-                if (begin < rounded(other.Address + other.MemorySize) && (other.Address & ~(PageSize - 1)) < end)
-                    block(segment.Flags != other.Flags
-                        ? "differing permissions on a shared guest page are unsupported for execution"
-                        : "shared guest page mapping is unsupported for execution");
+                if (begin < rounded(other.Address + other.MemorySize) && (other.Address & ~(PageSize - 1)) < end &&
+                    segment.Flags != other.Flags) {
+                    if ((segment.Flags | other.Flags) & 1)
+                        block("mixed executable shared guest pages are unsupported");
+#if !ANYPS5_CPU_MODERN_TCG
+                    else block("Unicorn exact shared guest data page permissions are unsupported");
+#endif
+                }
             }
-            if (end - begin > 1024 * 1024 * 1024 - mappedSize) fail("image mappings exceed 1-GiB limit");
-            mappedSize += end - begin;
+            mappedRanges.emplace_back(begin, end);
             if (segment.Type == 0x61000010) {
                 if ((segment.Flags & 4) == 0 || (segment.Flags & 1)) fail("SCE RELRO requires nonexecutable readable memory");
                 auto relro = segment;
@@ -222,6 +299,16 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
             fail("unsupported program header type " + std::to_string(segment.Type));
         }
         image.Segments.push_back(segment);
+    }
+    std::sort(mappedRanges.begin(), mappedRanges.end());
+    std::uint64_t mappedSize = 0, mappedEnd = 0;
+    for (const auto& [begin, end] : mappedRanges) {
+        const auto first = std::max(begin, mappedEnd);
+        if (end > first) {
+            if (end - first > 1024 * 1024 * 1024 - mappedSize) fail("image mappings exceed 1-GiB limit");
+            mappedSize += end - first;
+        }
+        mappedEnd = std::max(mappedEnd, end);
     }
     if (!mappedSize || !dynamic) fail("missing load or dynamic segment");
     const auto mapped = [&](std::uint64_t address, std::uint64_t length, std::uint32_t flags, bool backed = false) {
@@ -546,31 +633,42 @@ void ValidateSceMapping(const SceParsedImage& image, std::uint64_t bias) {
 
 void MapSceImage(Machine& machine, const SceParsedImage& image, std::uint64_t bias) {
     ValidateSceMapping(image, bias);
-    for (const auto& segment : image.Segments) {
-        if (!loadable(segment)) continue;
-        const auto begin = segment.Address & ~(PageSize - 1);
-        const auto length = rounded(segment.Address + segment.MemorySize) - begin;
-        machine.Map(SceAddress(bias, begin), length, Permission::Read | Permission::Write);
-        machine.Write(SceAddress(bias, segment.Address), std::span(image.Data->Bytes).subspan(segment.Offset, segment.FileSize));
-        const std::array<std::byte, PageSize> zeros{};
-        auto cursor = segment.Address + segment.FileSize;
-        const auto end = segment.Address + segment.MemorySize;
-        while (cursor < end) {
-            const auto count = std::min<std::uint64_t>(zeros.size(), end - cursor);
-            machine.Write(SceAddress(bias, cursor), std::span(zeros).first(count));
-            cursor += count;
+    const auto pages = pagePlan(image);
+    for (std::size_t index = 0; index < pages.size();) {
+        const auto begin = pages[index].Address;
+        auto end = begin + PageSize;
+        ++index;
+        while (index < pages.size() && pages[index].Address == end) {
+            end += PageSize;
+            ++index;
         }
+        machine.Map(SceAddress(bias, begin), end - begin, Permission::Read | Permission::Write);
+    }
+    for (const auto& segment : image.Segments) {
+        if (!loadable(segment) || !segment.MemorySize) continue;
+        machine.Write(SceAddress(bias, segment.Address), std::span(image.Data->Bytes).subspan(segment.Offset, segment.FileSize));
     }
 }
 
 void ProtectSceImage(Machine& machine, const SceParsedImage& image, std::uint64_t bias) {
-    for (const auto& segment : image.Segments) {
-        if (!loadable(segment)) continue;
-        const auto begin = segment.Address & ~(PageSize - 1);
-        machine.Protect(SceAddress(bias, begin), rounded(segment.Address + segment.MemorySize) - begin, permissions(segment.Flags));
+    const auto pages = pagePlan(image);
+    for (std::size_t index = 0; index < pages.size();) {
+        const auto begin = pages[index].Address;
+        const auto access = pages[index].Permissions;
+        auto end = begin + PageSize;
+        const auto mixed = pages[index].Mixed;
+        ++index;
+        while (index < pages.size() && !mixed && !pages[index].Mixed &&
+            pages[index].Address == end && pages[index].Permissions == access) {
+            end += PageSize;
+            ++index;
+        }
+        machine.Protect(SceAddress(bias, begin), end - begin, access);
     }
-    for (const auto& segment : image.Data->Relro)
-        machine.Protect(SceAddress(bias, segment.Address), segment.MemorySize, Permission::Read);
+    for (const auto& page : pages)
+        if (page.Mixed)
+            for (const auto& fragment : page.Fragments)
+                machine.ProtectFragment(SceAddress(bias, fragment.Address), fragment.Size, fragment.Permissions);
 }
 
 std::vector<SceRelocationWrite> PlanSceRelocations(const SceParsedImage& image, std::uint64_t bias,
