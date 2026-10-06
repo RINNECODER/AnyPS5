@@ -50,8 +50,8 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: cache), catalogue)
     }
 
-    // Contract: associations retain the original image across restarts, and older folder-based libraries still load.
-    // Regression: replacement drops the image path or the new field makes existing libraries undecodable.
+    // Contract: saved associations retain image and ordered module paths; older libraries decode with no modules.
+    // Regression: Codable requires the new key, silently discards malformed lists or reorders persisted modules.
     // This is the persistence owner; subprocess and image tests do not exercise saved library migrations.
     func testLibraryReplacementRoundTrips() throws {
         let url = try directory().appendingPathComponent("library.json")
@@ -59,14 +59,16 @@ final class LauncherCoreTests: XCTestCase {
         var library = try storage.load()
         library.enginePath = "/engine with spaces/anyps5_cpu_run"
         library.attach(LocalGame(id: "a", title: "Example", executablePath: "/old.elf", workingDirectory: "/old"))
+        let modules = ["/libraries/z $(literal) module.prx", "/libraries/a quoted 'module'.prx"]
         library.attach(LocalGame(id: "a", title: "Example", executablePath: "/new.elf", workingDirectory: "/resources",
-                                 resourceImagePath: "/downloads/game image.exfat"))
+                                 resourceImagePath: "/downloads/game image.exfat", sceModulePaths: modules))
         try storage.save(library)
         let restored = try storage.load()
         XCTAssertEqual(restored.games.count, 1)
         XCTAssertEqual(restored.games[0].executablePath, "/new.elf")
         XCTAssertEqual(restored.games[0].workingDirectory, "/resources")
         XCTAssertEqual(restored.games[0].resourceImagePath, "/downloads/game image.exfat")
+        XCTAssertEqual(restored.games[0].sceModulePaths, modules)
         XCTAssertEqual(restored.enginePath, "/engine with spaces/anyps5_cpu_run")
         try Data("""
         {"enginePath":"/legacy-engine","games":[{"id":"legacy","title":"Existing game","executablePath":"/existing.elf","workingDirectory":"/existing-resources"}]}
@@ -75,7 +77,12 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(legacy.games.count, 1)
         XCTAssertEqual(legacy.games[0].workingDirectory, "/existing-resources")
         XCTAssertNil(legacy.games[0].resourceImagePath)
+        XCTAssertEqual(legacy.games[0].sceModulePaths, [])
         XCTAssertEqual(legacy.enginePath, "/legacy-engine")
+        try Data("""
+        {"games":[{"id":"bad","title":"Malformed","executablePath":"/existing.elf","workingDirectory":"/existing-resources","sceModulePaths":"not-an-array"}],"enginePath":"/engine"}
+        """.utf8).write(to: url)
+        XCTAssertThrowsError(try storage.load(), "Malformed module associations must not silently become an empty list.")
     }
 
     // Contract: incomplete downloads and inconsistent raw-volume sizes are rejected before an OS mount.
@@ -162,9 +169,9 @@ final class LauncherCoreTests: XCTestCase {
         return LocalGame(id: "local", title: "Fixture", executablePath: input.path, workingDirectory: folder.path)
     }
 
-    // Contract: resource argv and writable working directory remain separate, with legacy cwd fallback and live output.
-    // Regression: an advertised root still changes cwd to the mounted image, or the override is lost/interpolated.
-    // This subprocess boundary owns routing; prior same-directory cases and the CPU oracle cannot prove separation.
+    // Contract: resources, ordered SCE modules and executable remain literal argv; unsupported modules cannot start a child.
+    // Regression: a module flag/path is reordered, interpolated, accepted by an old engine or validated after launch.
+    // This process recorder is the protocol owner; CPU linking tests cannot protect Swift persistence/argv routing.
     func testEngineArgumentsOutputAndFailureExit() async throws {
         let folder = try directory().appendingPathComponent("resources $(no-shell) folder", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
@@ -172,7 +179,29 @@ final class LauncherCoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: separateResources, withIntermediateDirectories: false)
         let game = try guest(in: folder)
         let engine = folder.appendingPathComponent("engine")
-        try Data("#!/bin/sh\nif [ \"$1\" = '--resource-root' ]; then\nprintf 'root=%s\\n' \"$2\"\nshift 2\nfi\nif [ \"$1\" = '--diagnostics-json' ]; then printf 'diagnostics\\n'; shift; fi\n[ \"$#\" = 1 ] || exit 9\nprintf 'guest=%s\\ncwd=%s\\n' \"$1\" \"$PWD\"\nfor attempt in 1 2 3 4 5 6 7 8 9 10; do\n[ -f observed ] && break\nsleep 0.1\ndone\n[ -f observed ] || exit 8\nprintf 'unsupported import\\n' >&2\nexit 7\n".utf8).write(to: engine)
+        let script = #"""
+        #!/bin/sh
+        : > started
+        printf 'arg=%s\n' "$@"
+        while [ "$#" -gt 1 ]; do
+          case "$1" in
+            --resource-root) printf 'root=%s\n' "$2"; shift 2 ;;
+            --diagnostics-json) printf 'diagnostics\n'; shift ;;
+            --sce-module) shift 2 ;;
+            *) exit 9 ;;
+          esac
+        done
+        [ "$#" = 1 ] || exit 9
+        printf 'guest=%s\ncwd=%s\n' "$1" "$PWD"
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          [ -f observed ] && break
+          sleep 0.1
+        done
+        [ -f observed ] || exit 8
+        printf 'unsupported import\n' >&2
+        exit 7
+        """#
+        try Data(script.utf8).write(to: engine)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: engine.path)
         let payload = """
         {"schema_version":1,"host_architecture":"arm64","guest_architecture":"x86_64","backend":"unicorn","supported_formats":["static_elf64_x86_64"],"resource_root_argument":"--resource-root","runtime_abi":"linux_sysv","ps5_game_runtime_ready":false}
@@ -180,41 +209,116 @@ final class LauncherCoreTests: XCTestCase {
         let capabilities = try EngineCapabilities.decode(Data(payload.utf8))
         let legacyCapabilities = try EngineCapabilities.decode(Data(payload.replacingOccurrences(of:
             "\"resource_root_argument\":\"--resource-root\",", with: "").utf8))
-        for override: URL? in [nil, separateResources] {
+        func clearMarkers() throws {
+            for location in [folder, separateResources] {
+                for name in ["observed", "started"] {
+                    let marker = location.appendingPathComponent(name)
+                    if FileManager.default.fileExists(atPath: marker.path) { try FileManager.default.removeItem(at: marker) }
+                }
+            }
+        }
+        func recordRun(_ target: LocalGame, _ contract: EngineCapabilities?, _ override: URL?) async throws -> (String, Int32?) {
+            try clearMarkers()
+            let root = override ?? folder
+            let cwd = contract?.resourceRootArgument == "--resource-root" ? folder : root
+            let marker = cwd.appendingPathComponent("observed")
+            let runner = EngineRunner()
+            var output = Data()
+            var status: Int32?
+            for try await event in try runner.run(engine: engine, game: target, capabilities: contract, resourceDirectory: override) {
+                switch event {
+                case .output(let bytes):
+                    output.append(bytes)
+                    // The child waits for this acknowledgement: output must stream before it exits.
+                    try Data().write(to: marker)
+                case .exited(let code): status = code
+                }
+            }
+            return (String(decoding: output, as: UTF8.self), status)
+        }
+        func checkOutput(_ text: String, _ status: Int32?, _ target: LocalGame, _ contract: EngineCapabilities?,
+                         _ override: URL?, _ expectedModuleArguments: [String] = []) throws {
             let resourceRoot = override ?? folder
+            let hasResourceArgument = contract?.resourceRootArgument == "--resource-root"
+            let expectedCWD = hasResourceArgument ? folder : resourceRoot
+            let expectedArguments = (hasResourceArgument ? ["--resource-root", resourceRoot.path] : []) +
+                (contract != nil ? ["--diagnostics-json"] : []) +
+                expectedModuleArguments + [target.executablePath]
+            let recordedArguments = text.components(separatedBy: "\n").filter { $0.hasPrefix("arg=") }.map { String($0.dropFirst(4)) }
+            XCTAssertEqual(recordedArguments, expectedArguments, "Literal argv order/pairing changed: \(text)")
+            XCTAssertTrue(text.contains("guest=\(target.executablePath)\n"))
+            XCTAssertEqual(text.contains("diagnostics\n"), contract != nil)
+            if hasResourceArgument { XCTAssertTrue(text.contains("root=\(resourceRoot.path)\n"), text) }
+            else { XCTAssertFalse(text.contains("root="), text) }
+            let cwd = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("cwd=") }).dropFirst(4)
+            let actualDirectory = try FileManager.default.attributesOfItem(atPath: String(cwd))
+            let expectedDirectory = try FileManager.default.attributesOfItem(atPath: expectedCWD.path)
+            XCTAssertEqual(actualDirectory[.systemFileNumber] as? NSNumber, expectedDirectory[.systemFileNumber] as? NSNumber)
+            XCTAssertEqual(actualDirectory[.systemNumber] as? NSNumber, expectedDirectory[.systemNumber] as? NSNumber)
+            XCTAssertTrue(text.contains("unsupported import\n"))
+            XCTAssertEqual(status, 7)
+        }
+        for override: URL? in [nil, separateResources] {
             for contract: EngineCapabilities? in [nil, legacyCapabilities, capabilities] {
-                let hasResourceArgument = contract?.resourceRootArgument == "--resource-root"
-                let expectedCWD = hasResourceArgument ? folder : resourceRoot
-                // Remove every previous marker, so choosing the wrong cwd cannot reuse an acknowledgement.
-                for location in [folder, separateResources] {
-                    let oldMarker = location.appendingPathComponent("observed")
-                    if FileManager.default.fileExists(atPath: oldMarker.path) { try FileManager.default.removeItem(at: oldMarker) }
-                }
-                let marker = expectedCWD.appendingPathComponent("observed")
-                let runner = EngineRunner()
-                var output = Data()
-                var status: Int32?
-                for try await event in try runner.run(engine: engine, game: game, capabilities: contract, resourceDirectory: override) {
-                    switch event {
-                    case .output(let bytes):
-                        output.append(bytes)
-                        // The child waits for this acknowledgement: output must stream before it exits.
-                        try Data().write(to: marker)
-                    case .exited(let code): status = code
-                    }
-                }
-                let text = String(decoding: output, as: UTF8.self)
-                XCTAssertTrue(text.contains("guest=\(game.executablePath)\n"))
-                XCTAssertEqual(text.contains("diagnostics\n"), contract != nil)
-                if hasResourceArgument { XCTAssertTrue(text.contains("root=\(resourceRoot.path)\n"), text) }
-                else { XCTAssertFalse(text.contains("root="), text) }
-                let cwd = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("cwd=") }).dropFirst(4)
-                let actualDirectory = try FileManager.default.attributesOfItem(atPath: String(cwd))
-                let expectedDirectory = try FileManager.default.attributesOfItem(atPath: expectedCWD.path)
-                XCTAssertEqual(actualDirectory[.systemFileNumber] as? NSNumber, expectedDirectory[.systemFileNumber] as? NSNumber)
-                XCTAssertEqual(actualDirectory[.systemNumber] as? NSNumber, expectedDirectory[.systemNumber] as? NSNumber)
-                XCTAssertTrue(text.contains("unsupported import\n"))
-                XCTAssertEqual(status, 7)
+                let (text, status) = try await recordRun(game, contract, override)
+                try checkOutput(text, status, game, contract, override)
+            }
+        }
+        var sceHeader = try Data(contentsOf: URL(fileURLWithPath: game.executablePath))
+        sceHeader[7] = 9; sceHeader[8] = 2; sceHeader[16] = 0x10; sceHeader[17] = 0xfe
+        let sceExecutable = folder.appendingPathComponent("SCE guest $(literal) name.elf")
+        try sceHeader.write(to: sceExecutable)
+        let modules = ["z $(literal) ; module.prx", "a quoted 'module'.prx"].map { folder.appendingPathComponent($0) }
+        for module in modules { try Data("literal module argv fixture\n".utf8).write(to: module) }
+        var sceGame = LocalGame(id: "sce", title: "SCE fixture", executablePath: sceExecutable.path,
+                                workingDirectory: folder.path, sceModulePaths: modules.map(\.path))
+        var selfHeader = sceHeader; selfHeader.replaceSubrange(0..<4, with: [0x4f, 0x15, 0x3d, 0x1d])
+        let selfExecutable = folder.appendingPathComponent("SELF guest $(literal) name.bin")
+        try selfHeader.write(to: selfExecutable)
+        var selfGame = sceGame; selfGame.executablePath = selfExecutable.path
+        // Signature routes the protocol; segment/plaintext validation remains the engine's responsibility.
+        let modulePayload = payload.replacingOccurrences(of: "\"static_elf64_x86_64\"", with: "\"static_elf64_x86_64\",\"sce_elf64_x86_64\"")
+            .replacingOccurrences(of: "\"runtime_abi\":", with: "\"supported_containers\":[\"plain_self\"],\"sce_module_argument\":\"--sce-module\",\"runtime_abi\":")
+        let moduleCapabilities = try EngineCapabilities.decode(Data(modulePayload.utf8))
+        for target in [sceGame, selfGame] {
+            for override: URL? in [nil, separateResources] {
+                let (text, status) = try await recordRun(target, moduleCapabilities, override)
+                try checkOutput(text, status, target, moduleCapabilities, override,
+                                ["--sce-module", modules[0].path, "--sce-module", modules[1].path])
+            }
+        }
+        let missingCapability = try EngineCapabilities.decode(Data(modulePayload.replacingOccurrences(of:
+            "\"sce_module_argument\":\"--sce-module\",", with: "").utf8))
+        let unknownCapability = try EngineCapabilities.decode(Data(modulePayload.replacingOccurrences(of:
+            "\"--sce-module\"", with: "\"--unknown-module\"").utf8))
+        let staticOnlyCapability = try EngineCapabilities.decode(Data(modulePayload.replacingOccurrences(of:
+            ",\"sce_elf64_x86_64\"", with: "").utf8))
+        let unavailable = folder.appendingPathComponent("removed library.prx")
+        let unreadable = folder.appendingPathComponent("unreadable library.prx")
+        try Data("unreadable fixture\n".utf8).write(to: unreadable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unreadable.path)
+        XCTAssertFalse(FileManager.default.isReadableFile(atPath: unreadable.path), "Unreadable-file case needs an unreadable premise.")
+        var staticWithModules = game; staticWithModules.sceModulePaths = modules.map(\.path)
+        var rejected: [(LocalGame, EngineCapabilities?, String)] = [
+            (staticWithModules, nil, "does not advertise loading supplied SCE"),
+            (staticWithModules, legacyCapabilities, "does not advertise loading supplied SCE"),
+            (sceGame, missingCapability, "does not advertise loading supplied SCE"),
+            (sceGame, unknownCapability, "does not advertise loading supplied SCE"),
+            (staticWithModules, staticOnlyCapability, "does not advertise loading supplied SCE")
+        ]
+        rejected.append((staticWithModules, moduleCapabilities, "require an SCE executable"))
+        for path in [unavailable.path, unreadable.path, folder.path, "relative-library.prx"] {
+            sceGame.sceModulePaths = [path]
+            rejected.append((sceGame, moduleCapabilities, "not a readable regular file"))
+        }
+        for (target, contract, diagnostic) in rejected {
+            do {
+                _ = try await recordRun(target, contract, separateResources)
+                XCTFail("Unsupported attached modules must be rejected before child launch.")
+            } catch { XCTAssertTrue(error.localizedDescription.contains(diagnostic), "\(error)") }
+            for location in [folder, separateResources] {
+                XCTAssertFalse(FileManager.default.fileExists(atPath: location.appendingPathComponent("started").path),
+                               "Rejected module routing started an engine child.")
             }
         }
     }
@@ -274,7 +378,8 @@ final class LauncherCoreTests: XCTestCase {
     // Existing subprocess coverage launches guests and cannot protect the non-executing inspection protocol.
     func testInspectionProtocolAndRejection() async throws {
         let folder = try directory()
-        let game = try guest(in: folder)
+        var game = try guest(in: folder)
+        game.sceModulePaths = [folder.appendingPathComponent("missing inspection-only library.prx").path]
         let engine = folder.appendingPathComponent("inspector")
         let capabilities = try EngineCapabilities.decode(Data("""
         {"schema_version":1,"host_architecture":"arm64","guest_architecture":"x86_64","backend":"unicorn","supported_formats":["sce_elf64_x86_64"],"runtime_abi":"sce_sysv","ps5_game_runtime_ready":false}
@@ -284,7 +389,7 @@ final class LauncherCoreTests: XCTestCase {
         """
         // No shell is used by production; the test child checks its literal argv independently.
         let literalPath = "'" + game.executablePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let script = "#!/bin/sh\n[ \"$1\" = '--inspect-sce-json' ] || exit 91\n[ \"$2\" = \(literalPath) ] || exit 92\ncat <<'JSON'\n\(report)\nJSON\n"
+        let script = "#!/bin/sh\n[ \"$#\" = 2 ] || exit 93\n[ \"$1\" = '--inspect-sce-json' ] || exit 91\n[ \"$2\" = \(literalPath) ] || exit 92\ncat <<'JSON'\n\(report)\nJSON\n"
         try Data(script.utf8).write(to: engine)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: engine.path)
         let result = try await EngineInspection.inspect(engine: engine, game: game, capabilities: capabilities)
