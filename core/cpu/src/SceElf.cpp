@@ -1,4 +1,5 @@
 #include <cpu/SceElf.hpp>
+#include <cpu/Self.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -100,14 +101,22 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
     bytes.resize(static_cast<std::size_t>(size));
     file.seekg(0);
     if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) fail("cannot read complete executable");
+    std::vector<std::string> reconstructionNotes;
+    const bool fromSelf = IsSelf(bytes);
+    if (fromSelf) {
+        auto decoded = DecodePlainSelf(bytes);
+        bytes = std::move(decoded.Bytes);
+        reconstructionNotes = std::move(decoded.NormalizationNotes);
+    }
     const auto magic = read(bytes, 0, 4);
-    if (magic == 0x5414f5ee || magic == 0x1d3d154f) fail("SELF containers require an extracted decrypted ELF");
     if (magic != 0x464c457f || read(bytes, 4, 1) != 2 || read(bytes, 5, 1) != 1 || read(bytes, 6, 1) != 1)
         fail("requires little-endian ELF64 version 1");
     if (read(bytes, 18, 2) != 62 || read(bytes, 20, 4) != 1 || read(bytes, 52, 2) != 64)
         fail("requires a valid x86-64 ELF header");
     SceParsedImage image;
     image.Path = path;
+    image.SourceContainer = fromSelf ? "plain_self" : "elf";
+    image.ReconstructionNotes = std::move(reconstructionNotes);
     image.Type = static_cast<std::uint16_t>(read(bytes, 16, 2));
     image.OsAbi = static_cast<std::uint8_t>(read(bytes, 7, 1));
     image.AbiVersion = static_cast<std::uint8_t>(read(bytes, 8, 1));

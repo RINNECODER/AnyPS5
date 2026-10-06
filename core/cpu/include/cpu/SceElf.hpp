@@ -35,6 +35,8 @@ struct SceImageData;
 
 struct SceParsedImage {
     std::filesystem::path Path;
+    std::string SourceContainer = "elf";
+    std::vector<std::string> ReconstructionNotes;
     std::uint16_t Type = 0;
     std::uint8_t OsAbi = 0;
     std::uint8_t AbiVersion = 0;

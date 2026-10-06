@@ -82,13 +82,14 @@ with tempfile.TemporaryDirectory() as directory:
     assert default.returncode == 126 and default.stdout == "", default
     assert default.stderr == "anyps5_cpu_run: ELF loader: input is not an ELF executable\n", default
 
-    encrypted = pathlib.Path(directory) / "encrypted.self"
-    encrypted.write_bytes(bytes.fromhex("ee f5 14 54") + bytes(124))
-    container = run("--diagnostics-json", encrypted)
-    assert container.returncode == 126 and container.stdout == "", container
-    error, = events(container)
-    assert error["code"] == "unsupported_executable", error
-    assert "SELF containers require an extracted decrypted ELF" in error["message"], error
+    for magic in ("4f 15 3d 1d", "54 14 f5 ee"):
+        container_path = pathlib.Path(directory) / "unsupported-profile.self"
+        container_path.write_bytes(bytes.fromhex(magic) + bytes(124))
+        container = run("--diagnostics-json", container_path)
+        assert container.returncode == 126 and container.stdout == "", container
+        error, = events(container)
+        assert error["code"] == "unsupported_executable", error
+        assert "unsupported SELF header profile" in error["message"], error
 
 for arguments in (("--unknown",), ("--capabilities-json", fixture), (),
                   ("--diagnostics-json",), ("--diagnostics-json", "--unknown")):

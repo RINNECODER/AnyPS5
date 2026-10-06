@@ -3,6 +3,7 @@
 #include <cpu/Runtime.hpp>
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
+#include <cpu/Self.hpp>
 #include <array>
 #include <csignal>
 #include <fstream>
@@ -80,7 +81,7 @@ void Capabilities() {
         << "{\"name\":\"arch_prctl\",\"number\":158,\"constraints\":\"ARCH_SET_FS and ARCH_GET_FS only\"}],"
         << "\"sce_imports\":{\"module\":\"libc\",\"module_version\":\"1.1\",\"library\":\"libc\",\"library_version\":1,"
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
-        << "\"sce_constraints\":[\"clean decrypted ELF only\",\"no guest TLS\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"no guest TLS\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
         << "\"unsupported_instruction_families\":[\"AVX\",\"AVX2\",\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
 }
 
@@ -88,8 +89,7 @@ bool SceExecutable(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     std::array<unsigned char, 18> bytes{};
     if (!file.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) return false;
-    if ((bytes[0] == 0xee && bytes[1] == 0xf5 && bytes[2] == 0x14 && bytes[3] == 0x54) ||
-        (bytes[0] == 0x4f && bytes[1] == 0x15 && bytes[2] == 0x3d && bytes[3] == 0x1d)) return true;
+    if (Cpu::IsSelf(std::as_bytes(std::span(bytes)))) return true;
     if (bytes[0] != 0x7f || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F') return false;
     const auto type = bytes[16] | (unsigned(bytes[17]) << 8);
     return type == 0xfe10 || type == 0xfe18 || (type == 3 && (bytes[7] == 9 || bytes[8] == 2));
@@ -98,7 +98,7 @@ bool SceExecutable(const std::string& path) {
 void InspectSce(const Cpu::SceParsedImage& image) {
     std::cout << "{\"schema_version\":1,\"event\":\"inspection\",\"format\":\"sce_elf64_x86_64\",\"executable\":" << Json(image.Path.string())
         << ",\"type\":" << image.Type << ",\"os_abi\":" << unsigned(image.OsAbi) << ",\"abi_version\":" << unsigned(image.AbiVersion)
-        << ",\"entry\":" << image.Entry << ",\"segment_count\":" << image.Segments.size() << ",\"relocation_count\":" << image.RelocationCount
+        << ",\"entry\":" << image.Entry << ",\"container_format\":" << Json(image.SourceContainer) << ",\"segment_count\":" << image.Segments.size() << ",\"relocation_count\":" << image.RelocationCount
         << ",\"has_tls\":" << (image.Tls ? "true" : "false") << ",\"has_process_parameters\":" << (image.ProcParam ? "true" : "false") << ",\"imports\":[";
     for (std::size_t index = 0; index < image.Imports.size(); ++index) {
         if (index) std::cout << ',';
@@ -113,6 +113,7 @@ void InspectSce(const Cpu::SceParsedImage& image) {
     std::cout << "],\"needed_modules\":["; strings(image.NeededModules);
     std::cout << "],\"needed_files\":["; strings(image.NeededFiles);
     std::cout << "],\"unsupported_reasons\":["; strings(image.UnsupportedReasons);
+    std::cout << "],\"normalization_notes\":["; strings(image.ReconstructionNotes);
     std::cout << "],\"relocation_types\":[";
     for (std::size_t index = 0; index < image.RelocationTypes.size(); ++index) { if (index) std::cout << ','; std::cout << image.RelocationTypes[index]; }
     std::cout << "]}\n";
