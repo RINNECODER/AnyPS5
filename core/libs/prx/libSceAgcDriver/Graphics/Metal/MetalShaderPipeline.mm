@@ -57,6 +57,11 @@ id<MTLFunction> compile(id<MTLDevice> device, const ShaderResult& shader, MTLFun
     MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
     if (@available(macOS 15.0, *)) {
         options.mathMode = MTLMathModeSafe;
+        if (shader.requiresWorkgroupAtomicFences) {
+            if (![device supportsFamily:MTLGPUFamilyApple1])
+                throw std::invalid_argument("Workgroup acquire/release fences require an Apple Silicon device");
+            options.languageVersion = MTLLanguageVersion3_2;
+        }
     } else {
         throw std::runtime_error("Converted Metal shader pipelines require macOS 15 or later");
     }

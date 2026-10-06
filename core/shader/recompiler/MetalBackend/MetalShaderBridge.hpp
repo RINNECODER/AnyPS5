@@ -43,6 +43,7 @@ struct TargetOptions {
     std::uint32_t bufferSizesBuffer = 29;
     std::uint32_t pushConstantOffsetBytes = 0;
     std::uint32_t vertexBufferCount = 0;
+    bool supportsWorkgroupAtomicFences = false;
     bool supportsInt64 = false;
     bool supportsGpuAddresses = false;
     bool supportsSimdGroups = false;
@@ -126,6 +127,7 @@ struct Result {
     std::array<std::uint32_t, 3> threadsPerThreadgroup{};
     std::vector<std::uint32_t> capabilities;
     std::vector<std::string> extensions;
+    bool requiresWorkgroupAtomicFences = false;
     bool requiresGpuAddresses = false;
     bool requiresInt64 = false;
     bool requiresSimdGroups = false;

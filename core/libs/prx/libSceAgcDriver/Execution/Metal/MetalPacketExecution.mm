@@ -109,6 +109,8 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     request.context.memory = memory;
     const auto guest = Recompile(request, *resources);
     MetalBackend::TargetOptions options;
+    if (@available(macOS 15.0, *))
+        options.supportsWorkgroupAtomicFences = [nativeDevice supportsFamily:MTLGPUFamilyApple1];
     options.supportsInt64 = true;
     options.supportsGpuAddresses = true;
     options.supportsSimdGroups = true;
