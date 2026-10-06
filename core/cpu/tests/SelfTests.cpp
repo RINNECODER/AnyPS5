@@ -2,6 +2,8 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
+#include <cpu/GuestMemoryRuntime.hpp>
+#include <cpu/SceMemoryImports.hpp>
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceSystemImports.hpp>
 #include <algorithm>
@@ -214,18 +216,21 @@ void execute(const Bytes& compiled) {
     require(parsed.SourceContainer == "plain_self" && parsed.Path == path,
             "SCE inspection lost SELF source identity or caller path");
     Cpu::Machine machine;
+    auto memory = std::make_shared<Cpu::GuestMemoryRuntime>(machine, 12ULL << 30);
+    Cpu::SceMemoryImports memoryImports(machine, memory);
     Cpu::SceImports imports(machine);
     Cpu::SceKernelImports kernel(machine, path.parent_path());
     Cpu::SceUserImports users(machine);
     Cpu::SceSystemImports system(machine);
     auto image = Cpu::LoadSce(machine, path, 0x1000000, [&](const auto& import) {
+        if (const auto gate = memoryImports.Resolve(import)) return *gate;
         if (const auto gate = system.Resolve(import)) return *gate;
         if (const auto gate = users.Resolve(import)) return *gate;
         if (import.ModuleName == "libkernel") return kernel.Resolve(import);
         return imports.Resolve(import);
     });
     kernel.SetTls(image.Tls);
-    Cpu::SetupSceEntry(machine, image, {"fixture", "not-a-number", "0", "0", "0", "0", "import", "0", "0"}, imports.ExitGate());
+    Cpu::SetupSceEntry(machine, image, {"fixture", "not-a-number", "0", "0", "0", "0", "import", "0", "0", "0"}, imports.ExitGate());
     require(machine.Run(image.Entry, 0, 2000) == Cpu::StopReason::Exit && machine.ExitCode() == 82,
             "Reconstructed compiler-produced x86 SCE program did not reach its independently specified invalid-number exit");
 }

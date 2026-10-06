@@ -24,13 +24,15 @@ assert metadata["type"] == 0xfe10 and metadata["os_abi"] == 9 and metadata["abi_
 assert metadata["format"] == "sce_elf64_x86_64", metadata
 assert metadata["unsupported_reasons"] == [] and metadata["needed_files"] == [], metadata
 assert metadata["needed_modules"] == ["libc", "libkernel", "libSceUserService", "libSceSystemService"] and not metadata["has_tls"], metadata
-assert metadata["relocation_count"] >= 20 and set(metadata["relocation_types"]) == {7, 8}, metadata
+assert metadata["relocation_count"] >= 31 and set(metadata["relocation_types"]) == {7, 8}, metadata
 libc_nids = {"Q3VBxCXhUHs", "+P6FRGH4LfA", "8zTFvBIAIN8", "j4ViWNHEgww", "Ovb2dSJOAuE", "uMei1W9uyNo"}
-kernel_nids = {"1G3lF1Gg1k8", "Cg4srZ6TKbU", "+r3rMFwItV4", "oib76F-12fk", "UK2Tl2DWUns"}
+kernel_nids = {"1G3lF1Gg1k8", "Cg4srZ6TKbU", "+r3rMFwItV4", "oib76F-12fk", "UK2Tl2DWUns",
+               "pO96TwzOm5E", "C0f7TJcbfac", "rTXw65xmLIA", "B+vc2AO2Zrc", "L-Q3LEjIbgA",
+               "IWIBBdTHit4", "7oxv3PPCumo", "vSMAm3cxYTY", "rVjRvHJ0X6c", "cQke9UuBQOk", "MBuItvba6z8"}
 user_nids = {"j3YMu1MVNNo", "CdWp0oHWGr0", "fPhymKNvK-A", "1xxcMiGu2fo"}
 system_nids = {"fZo48un7LK4", "SsC-m-S9JTA", "Vo5V8KAwCmk"}
 expected_nids = libc_nids | kernel_nids | user_nids | system_nids
-assert len(metadata["imports"]) == 18 and {value["nid"] for value in metadata["imports"]} == expected_nids, metadata
+assert len(metadata["imports"]) == 29 and {value["nid"] for value in metadata["imports"]} == expected_nids, metadata
 for value in metadata["imports"]:
     library, local_id = (("libc", 1) if value["nid"] in libc_nids else
                          ("libkernel", 2) if value["nid"] in kernel_nids else
@@ -38,7 +40,7 @@ for value in metadata["imports"]:
     assert value["library"] == library and value["module"] == library, value
     assert value["library_id"] == value["module_id"] == local_id and value["library_version"] == 1, value
     assert value["module_major"] == value["module_minor"] == 1, value
-print("compiled SCE inspection: eighteen qualified libc/libkernel/UserService/SystemService NIDs and real PLT/RELATIVE tables PASS")
+print("compiled SCE inspection: twenty-nine qualified libc/libkernel/UserService/SystemService NIDs and real PLT/RELATIVE tables PASS")
 
 
 def oracle(limit, seed):
@@ -52,9 +54,15 @@ def oracle(limit, seed):
 resource_bytes = bytes(((index * 41) ^ (index >> 1) ^ 0xa3) & 255 for index in range(37))
 
 
+def memory_oracle(seed):
+    return zlib.adler32(bytes(((index * 29 + (index >> 2) + seed * 11) ^ (index >> 4)) & 255
+                             for index in range(4096)))
+
+
 def execute(arguments, expected, content=resource_bytes, cwd_default=False,
-            resource_checksum=None, create_resource=True):
+            resource_checksum=None, create_resource=True, memory_checksum=None):
     checksum = zlib.adler32(content) if resource_checksum is None else resource_checksum
+    memory_checksum = memory_oracle(int(arguments[1])) if memory_checksum is None else memory_checksum
     with tempfile.TemporaryDirectory(prefix="anyps5 resource é ") as directory:
         root = Path(directory) / "root with spaces"
         root.mkdir()
@@ -62,7 +70,7 @@ def execute(arguments, expected, content=resource_bytes, cwd_default=False,
             (root / "resource.bin").write_bytes(content)
         root_options = [] if cwd_default else ["--resource-root", str(root)]
         result = subprocess.run([runner, *root_options, "--diagnostics-json", fixture,
-                                 *map(str, arguments), str(len(content)), str(checksum)],
+                                 *map(str, arguments), str(len(content)), str(checksum), str(memory_checksum)],
                                 cwd=root if cwd_default else directory,
                                 capture_output=True, text=True, timeout=20)
     assert result.returncode == expected, (arguments, expected, result.returncode, result.stderr)
@@ -79,7 +87,7 @@ for limit, seed in ((2, 0), (31, 1), (1000, 91), (4095, 255)):
     expected = oracle(limit, seed)
     execute((limit, seed, *expected, "import"), 0)
     print(f"SCE x86 homebrew limit={limit} seed={seed}: primes={expected[0]} "
-          f"sum={expected[1]} adler32={expected[2]}, imported exit PASS")
+          f"sum={expected[1]} adler32={expected[2]} memory_adler32={memory_oracle(seed)}, imported exit PASS")
 
 expected = oracle(1000, 91)
 for index in range(3):
@@ -87,6 +95,9 @@ for index in range(3):
     wrong[index] ^= 1
     execute((1000, 91, *wrong, "import"), 77)
 print("independently wrong prime count, prime sum, and full Adler32: rejected with guest exit77")
+execute((1000, 91, *expected, "import"), 77, memory_checksum=memory_oracle(91) ^ 1)
+print("compiled guest memory imports, virtual 12 GiB capacity, aliases, RX code returning1234, query, flexible and reserved ranges: PASS")
+print("independently wrong shared-alias Adler32: rejected with guest exit77")
 print("compiled guest UserService NULL initialization, ID 0x10000000, four login slots, Player name and output guards: PASS")
 print("compiled guest SystemService English/UTC/summertime integers, AnyPS5 name with untouched capacity tail, output guards and repeated hide splash: PASS")
 
@@ -103,7 +114,7 @@ with tempfile.TemporaryDirectory(prefix="anyps5-sce-callback-") as directory:
     (Path(directory) / "resource.bin").write_bytes(resource_bytes)
     callback = subprocess.run([runner, "--diagnostics-json", "--resource-root", directory, fixture,
                                "1000", "91", *map(str, expected), "callback",
-                               str(len(resource_bytes)), str(zlib.adler32(resource_bytes))],
+                               str(len(resource_bytes)), str(zlib.adler32(resource_bytes)), str(memory_oracle(91))],
                               capture_output=True, text=True, timeout=20)
 assert callback.returncode == 126 and callback.stdout == "", (callback.returncode, callback.stdout, callback.stderr)
 events = [json.loads(line) for line in callback.stderr.splitlines()]
@@ -116,7 +127,7 @@ with tempfile.TemporaryDirectory(prefix="anyps5-sce-unsupported-open-") as direc
     resource_path.write_bytes(resource_bytes)
     unsupported = subprocess.run([runner, "--diagnostics-json", "--resource-root", directory, fixture,
                                   "1000", "91", *map(str, expected), "unsupported-flags",
-                                  str(len(resource_bytes)), str(zlib.adler32(resource_bytes))],
+                                  str(len(resource_bytes)), str(zlib.adler32(resource_bytes)), str(memory_oracle(91))],
                                  capture_output=True, text=True, timeout=20)
     assert resource_path.read_bytes() == resource_bytes, "Unsupported guest open changed actual resource bytes"
 assert unsupported.returncode == 126 and unsupported.stdout == "", (unsupported.returncode, unsupported.stdout, unsupported.stderr)

@@ -21,6 +21,17 @@ extern int sce_user_name(int, char*, u64) __asm__("1xxcMiGu2fo");
 extern int sce_system_int(int, int*) __asm__("fZo48un7LK4");
 extern int sce_system_string(int, char*, u64) __asm__("SsC-m-S9JTA");
 extern int sce_system_hide_splash(void) __asm__("Vo5V8KAwCmk");
+extern u64 sce_direct_size(void) __asm__("pO96TwzOm5E");
+extern int sce_available_direct(i64, i64, u64, i64*, u64*) __asm__("C0f7TJcbfac");
+extern int sce_allocate_direct(i64, i64, u64, u64, int, i64*) __asm__("rTXw65xmLIA");
+extern int sce_allocate_main(u64, u64, int, i64*) __asm__("B+vc2AO2Zrc");
+extern int sce_map_direct(void**, u64, int, int, i64, u64) __asm__("L-Q3LEjIbgA");
+extern int sce_map_flexible(void**, u64, int, int) __asm__("IWIBBdTHit4");
+extern int sce_reserve(void**, u64, int, u64) __asm__("7oxv3PPCumo");
+extern int sce_mprotect(const void*, u64, int) __asm__("vSMAm3cxYTY");
+extern int sce_virtual_query(const void*, int, void*, u64) __asm__("rVjRvHJ0X6c");
+extern int sce_munmap(void*, u64) __asm__("cQke9UuBQOk");
+extern int sce_release_direct(i64, u64) __asm__("MBuItvba6z8");
 
 static u8 composite[4096];
 static u8 pixels[4096];
@@ -51,14 +62,98 @@ static u32 adler32(const u8* bytes, u64 size) {
     return (b << 16) | a;
 }
 
+struct QueryInfo {
+    u64 Start, End, Offset;
+    int Protection, MemoryType;
+    u32 Flags;
+    char Name[32];
+    u8 GpuMask, Reserved, Padding[2];
+};
+_Static_assert(sizeof(struct QueryInfo) == 72, "PS5 virtual query ABI must be 72 bytes");
+
+static int memory_services(u32 seed, u32* checksum) {
+    const u64 page = 0x4000;
+    const u64 profile = 12UL * 1024 * 1024 * 1024;
+    i64 availableStart = -1, physical = -1, mainPhysical = -1;
+    u64 availableSize = 0;
+    if (sce_direct_size() != profile ||
+        sce_available_direct(0, (i64)profile, 0, &availableStart, &availableSize) != 0 ||
+        availableStart != 0 || availableSize != profile) return 115;
+    if (sce_allocate_direct((i64)page, (i64)profile, 2 * page, 0x10000, 0, &physical) != 0 ||
+        physical != 0x10000) return 116;
+    if (sce_allocate_main(page, page, 12, &mainPhysical) != 0 || mainPhysical != 0) return 117;
+    void* first = (void*)0x1000000000UL;
+    void* second = (void*)0x1000100000UL;
+    if (sce_map_direct(&first, 2 * page, 2, 0x90, physical, 0x10000) != 0 ||
+        first != (void*)0x1000000000UL ||
+        sce_map_direct(&second, 2 * page, 2, 0x90, physical, 0x10000) != 0 ||
+        second != (void*)0x1000100000UL) return 118;
+    volatile u8* left = (volatile u8*)first + page;
+    volatile u8* right = (volatile u8*)second + page;
+    for (u64 i = 0; i < 4096; ++i) {
+        if (left[i] || right[i]) return 119;
+        left[i] = (u8)(((i * 29 + (i >> 2) + seed * 11) ^ (i >> 4)) ^ (i * 7 + seed * 3));
+    }
+    u32 a = 1, b = 0;
+    for (u64 i = 0; i < 4096; ++i) {
+        right[i] ^= (u8)(i * 7 + seed * 3);
+        const u8 expected = (u8)((i * 29 + (i >> 2) + seed * 11) ^ (i >> 4));
+        if (left[i] != expected) return 120;
+        a = (a + left[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    *checksum = (b << 16) | a;
+    volatile u8* instructions = (volatile u8*)first;
+    instructions[0] = 0xb8; instructions[1] = 0xd2; instructions[2] = 0x04;
+    instructions[3] = 0; instructions[4] = 0; instructions[5] = 0xc3;
+    if (sce_mprotect(first, page, 5) != 0 || ((int (*)(void))first)() != 1234) return 121;
+    struct { u64 Before; struct QueryInfo Info; u64 After; } query;
+    sce_memset(&query, 0xa5, sizeof query);
+    if (sce_virtual_query(first, 0, &query.Info, sizeof query.Info) != 0 ||
+        query.Info.Start != (u64)first || query.Info.End != (u64)first + page ||
+        query.Info.Offset != (u64)physical || query.Info.Protection != 5 ||
+        query.Info.MemoryType != 0 || query.Info.Flags != 0x12 || query.Info.GpuMask ||
+        query.Info.Reserved || query.Info.Padding[0] || query.Info.Padding[1] ||
+        query.Before != 0xa5a5a5a5a5a5a5a5UL || query.After != 0xa5a5a5a5a5a5a5a5UL) return 122;
+    for (u64 i = 0; i < sizeof query.Info.Name; ++i) if (query.Info.Name[i]) return 122;
+    if (sce_virtual_query((const u8*)first + page, 0, &query.Info, sizeof query.Info) != 0 ||
+        query.Info.Start != (u64)first + page || query.Info.End != (u64)first + 2 * page ||
+        query.Info.Offset != (u64)physical + page || query.Info.Protection != 2 ||
+        query.Info.MemoryType != 0 || query.Info.Flags != 0x12) return 123;
+    void* flexible = (void*)0x1000200000UL;
+    if (sce_map_flexible(&flexible, page, 3, 0x90) != 0 || flexible != (void*)0x1000200000UL) return 124;
+    volatile u64* values = (volatile u64*)flexible;
+    u64 total = 0;
+    for (u64 i = 0; i < 64; ++i) {
+        if (values[i]) return 125;
+        values[i] = i * i + seed;
+        total += values[i];
+    }
+    if (total != 85344 + 64 * (u64)seed ||
+        sce_virtual_query(flexible, 0, &query.Info, sizeof query.Info) != 0 ||
+        query.Info.Start != (u64)flexible || query.Info.End != (u64)flexible + page ||
+        query.Info.Offset || query.Info.Protection != 3 || query.Info.MemoryType || query.Info.Flags != 0x11) return 125;
+    void* reserved = (void*)0x1000300000UL;
+    if (sce_reserve(&reserved, page, 0x90, 0x10000) != 0 || reserved != (void*)0x1000300000UL ||
+        sce_virtual_query(reserved, 0, &query.Info, sizeof query.Info) != 0 ||
+        query.Info.Start != (u64)reserved || query.Info.End != (u64)reserved + page ||
+        query.Info.Offset || query.Info.Protection || query.Info.MemoryType || query.Info.Flags) return 126;
+    if (sce_munmap(reserved, page) != 0 || sce_munmap(flexible, page) != 0 ||
+        sce_munmap(first, 2 * page) != 0 || sce_munmap(second, 2 * page) != 0) return 127;
+    if (sce_release_direct(physical, 2 * page) != 0 || sce_release_direct(mainPhysical, page) != 0 ||
+        sce_available_direct(0, (i64)profile, 0, &availableStart, &availableSize) != 0 ||
+        availableStart != 0 || availableSize != profile || sce_direct_size() != profile) return 128;
+    return 0;
+}
+
 int SceGuestMain(u64 argc, char** argv, u64 exitCallback, u64 entryAlignment, u64 sharedArgumentBlock) {
     if (entryAlignment != 8 || !exitCallback || !sharedArgumentBlock) return 80;
-    if (argc != 9 || !argv[0] || !sce_strlen(argv[0]) || argv[argc]) return 81;
-    u32 limit, seed, expectedCount, expectedSum, expectedAdler, expectedSize, expectedResourceAdler;
+    if (argc != 10 || !argv[0] || !sce_strlen(argv[0]) || argv[argc]) return 81;
+    u32 limit, seed, expectedCount, expectedSum, expectedAdler, expectedSize, expectedResourceAdler, expectedMemoryAdler;
     if (!number(argv[1], &limit) || !number(argv[2], &seed) ||
         !number(argv[3], &expectedCount) || !number(argv[4], &expectedSum) ||
         !number(argv[5], &expectedAdler) || !number(argv[7], &expectedSize) ||
-        !number(argv[8], &expectedResourceAdler) || limit < 2 || limit > 4095 || seed > 255 ||
+        !number(argv[8], &expectedResourceAdler) || !number(argv[9], &expectedMemoryAdler) || limit < 2 || limit > 4095 || seed > 255 ||
         expectedSize < 10 || expectedSize >= sizeof resource) return 82;
     int importedExit;
     if (sce_strcmp(argv[6], modes[0]) == 0) importedExit = 0;
@@ -134,8 +229,11 @@ int SceGuestMain(u64 argc, char** argv, u64 exitCallback, u64 entryAlignment, u6
         sce_lseek(descriptor, 0, 1) != expectedSize) return 101;
     if (sce_close(descriptor) != 0 || sce_close(descriptor) != (int)0x80020009u ||
         sce_pread(descriptor, last, 1, 0) != (i64)(int)0x80020009u) return 102;
+    u32 memoryChecksum = 0;
+    const int memoryStatus = memory_services(seed, &memoryChecksum);
+    if (memoryStatus) return memoryStatus;
     const int status = count == expectedCount && sum == expectedSum && checksum == expectedAdler &&
-                       adler32(resource, expectedSize) == expectedResourceAdler ? 0 : 77;
+                       adler32(resource, expectedSize) == expectedResourceAdler && memoryChecksum == expectedMemoryAdler ? 0 : 77;
     if (importedExit) sce_exit(status);
     ((void (*)(void))exitCallback)();
     return 92;

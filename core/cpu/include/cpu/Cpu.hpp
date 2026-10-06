@@ -28,6 +28,8 @@ public:
     Machine& operator=(const Machine&) = delete;
     void Map(std::uint64_t address, std::size_t size, Permission permissions);
     void MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions);
+    void MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions,
+                     std::span<std::byte> fullBacking);
     void Unmap(std::uint64_t address, std::size_t size);
     void ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions);
     void Protect(std::uint64_t address, std::size_t size, Permission permissions);
