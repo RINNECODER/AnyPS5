@@ -28,9 +28,18 @@ public final class EngineRunner: @unchecked Sendable {
         catch { throw LauncherError("The local executable is unavailable: \(error.localizedDescription)") }
         defer { try? handle.close() }
         let header = try handle.read(upToCount: 64) ?? Data()
+        let magic = Array(header.prefix(4))
+        if header.count >= 64, magic == [0x4f, 0x15, 0x3d, 0x1d] || magic == [0x54, 0x14, 0xf5, 0xee] {
+            guard capabilities?.supportedContainers?.contains("plain_self") == true,
+                  capabilities?.supportedFormats.contains("sce_elf64_x86_64") == true else {
+                throw LauncherError("This engine does not advertise plaintext SELF loading. Select a supported engine or a verified extracted ELF.")
+            }
+            // The engine validates every SELF segment. A signature alone cannot establish plaintext.
+            return
+        }
         guard header.count >= 64, Array(header.prefix(7)) == [0x7f, 0x45, 0x4c, 0x46, 2, 1, 1],
               header[18] == 62, header[19] == 0 else {
-            throw LauncherError("AnyPS5 needs a clean x86-64 ELF executable. FFPFSC, exFAT, PKG, archives and SELF containers cannot be launched directly.")
+            throw LauncherError("AnyPS5 needs a supported x86-64 ELF or plaintext SELF executable. FFPFSC, exFAT, PKG and archives cannot be launched directly.")
         }
         // Unadvertised engines use the static checkpoint contract; SCE support requires a capability.
         if let capabilities, !capabilities.supportedFormats.contains("static_elf64_x86_64") && !capabilities.supportedFormats.contains("sce_elf64_x86_64") {

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import LauncherCore
 import XCTest
 
@@ -49,20 +50,106 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: cache), catalogue)
     }
 
-    // Contract: catalogue associations, engine path and replacement resource directories survive restart.
-    // Regression: attaching a replacement duplicates a game or drops its paths; no prior persistence tests exist.
+    // Contract: associations retain the original image across restarts, and older folder-based libraries still load.
+    // Regression: replacement drops the image path or the new field makes existing libraries undecodable.
+    // This is the persistence owner; subprocess and image tests do not exercise saved library migrations.
     func testLibraryReplacementRoundTrips() throws {
-        let storage = LibraryPersistence(url: try directory().appendingPathComponent("library.json"))
+        let url = try directory().appendingPathComponent("library.json")
+        let storage = LibraryPersistence(url: url)
         var library = try storage.load()
         library.enginePath = "/engine with spaces/anyps5_cpu_run"
         library.attach(LocalGame(id: "a", title: "Example", executablePath: "/old.elf", workingDirectory: "/old"))
-        library.attach(LocalGame(id: "a", title: "Example", executablePath: "/new.elf", workingDirectory: "/resources"))
+        library.attach(LocalGame(id: "a", title: "Example", executablePath: "/new.elf", workingDirectory: "/resources",
+                                 resourceImagePath: "/downloads/game image.exfat"))
         try storage.save(library)
         let restored = try storage.load()
         XCTAssertEqual(restored.games.count, 1)
         XCTAssertEqual(restored.games[0].executablePath, "/new.elf")
         XCTAssertEqual(restored.games[0].workingDirectory, "/resources")
+        XCTAssertEqual(restored.games[0].resourceImagePath, "/downloads/game image.exfat")
         XCTAssertEqual(restored.enginePath, "/engine with spaces/anyps5_cpu_run")
+        try Data("""
+        {"enginePath":"/legacy-engine","games":[{"id":"legacy","title":"Existing game","executablePath":"/existing.elf","workingDirectory":"/existing-resources"}]}
+        """.utf8).write(to: url)
+        let legacy = try storage.load()
+        XCTAssertEqual(legacy.games.count, 1)
+        XCTAssertEqual(legacy.games[0].workingDirectory, "/existing-resources")
+        XCTAssertNil(legacy.games[0].resourceImagePath)
+        XCTAssertEqual(legacy.enginePath, "/legacy-engine")
+    }
+
+    // Contract: incomplete downloads and inconsistent raw-volume sizes are rejected before an OS mount.
+    // Regression: a renamed partial download or overflowing sector count passes preflight.
+    // Existing ELF guards only inspect executables; this exercises the public image boundary without a mock.
+    func testExFATPreflightRejectsIncompleteAndMalformedImages() throws {
+        let folder = try directory()
+        var complete = Data(repeating: 0, count: 4096)
+        complete.replaceSubrange(3..<11, with: Data("EXFAT   ".utf8))
+        complete[72] = 8 // Eight 512-byte sectors, independently matching this fixture's length.
+        complete[108] = 9
+        complete[510] = 0x55
+        complete[511] = 0xaa
+        let valid = folder.appendingPathComponent("complete.exfat")
+        try complete.write(to: valid)
+        try ExFATResources.validate(valid)
+
+        var overflowing = complete
+        overflowing.replaceSubrange(72..<80, with: Data(repeating: 0xff, count: 8))
+        var badSignature = complete
+        badSignature[511] = 0
+        let cases: [(String, Data, String)] = [
+            ("complete.crdownload", complete, "still downloading"),
+            ("renamed-partial.exfat", Data(complete.prefix(512)), "size does not match"),
+            ("overflow.exfat", overflowing, "size does not match"),
+            ("bad-signature.exfat", badSignature, "not a raw exFAT volume"),
+            ("short-header.exfat", Data(complete.prefix(128)), "not a raw exFAT volume")
+        ]
+        for (name, bytes, diagnostic) in cases {
+            let input = folder.appendingPathComponent(name)
+            try bytes.write(to: input)
+            XCTAssertThrowsError(try ExFATResources.validate(input), name) { error in
+                XCTAssertTrue(error.localizedDescription.contains(diagnostic), "\(name): \(error)")
+            }
+        }
+    }
+
+    // Contract: sessions are read-only, reject known attachments with an actionable preflight diagnostic, and preserve bytes.
+    // Regression: duplicate attachment falls through to an unrelated OS error instead of explaining the existing volume.
+    // Header validation cannot establish OS mount permissions or lifecycle; the fixture uses the actual public API.
+    func testActualReadOnlyExFATResourceSession() async throws {
+        guard let path = ProcessInfo.processInfo.environment["ANYPS5_EXFAT_FIXTURE"] else {
+            throw XCTSkip("Set ANYPS5_EXFAT_FIXTURE to a system-created image containing fixture-resource.txt.")
+        }
+        let image = URL(fileURLWithPath: path)
+        let size = try FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber
+        guard let size, size.uint64Value <= 64 * 1024 * 1024 else {
+            throw XCTSkip("The OS mount check requires a small non-game fixture, at most 64 MiB.")
+        }
+        let originalDigest = SHA256.hash(data: try Data(contentsOf: image))
+        let session = try await ExFATResources.mount(image)
+        let resource = session.directory.appendingPathComponent("fixture-resource.txt")
+        do {
+            XCTAssertEqual(try String(contentsOf: resource, encoding: .utf8), "AnyPS5 read-only resource fixture\n")
+            do {
+                let duplicate = try await ExFATResources.mount(image)
+                XCTFail("An already attached source image must be rejected without taking ownership of its mount.")
+                try await duplicate.unmount()
+            } catch {
+                XCTAssertTrue(error.localizedDescription.hasPrefix("This resource image is already attached."),
+                              "Duplicate attachment must fail at public preflight, not an unrelated OS error: \(error)")
+            }
+            XCTAssertEqual(try String(contentsOf: resource, encoding: .utf8), "AnyPS5 read-only resource fixture\n",
+                           "Rejecting duplicate attachment must preserve access to the existing mounted volume.")
+            XCTAssertThrowsError(try Data("must not change the resource\n".utf8).write(to: resource))
+            XCTAssertThrowsError(try Data().write(to: session.directory.appendingPathComponent("must-not-create.txt")))
+            try await session.unmount()
+        } catch {
+            try? await session.unmount()
+            throw error
+        }
+        XCTAssertThrowsError(try Data(contentsOf: resource), "Unmount must release access to the mounted resource.")
+        XCTAssertEqual(SHA256.hash(data: try Data(contentsOf: image)), originalDigest,
+                       "Reading resources and unmounting must preserve the original image byte for byte.")
     }
 
     private func guest(in folder: URL) throws -> LocalGame {
@@ -117,7 +204,7 @@ final class LauncherCoreTests: XCTestCase {
         let input = URL(fileURLWithPath: game.executablePath)
         try Data(repeating: 0, count: 64).write(to: input)
         XCTAssertThrowsError(try EngineRunner.validate(engine: engine, game: game)) { error in
-            XCTAssertTrue(error.localizedDescription.contains("clean x86-64 ELF"))
+            XCTAssertTrue(error.localizedDescription.contains("supported x86-64 ELF"))
         }
         _ = try guest(in: folder)
         var bytes = try Data(contentsOf: input)
@@ -126,6 +213,17 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertThrowsError(try EngineRunner.validate(engine: engine, game: game)) { error in
             XCTAssertTrue(error.localizedDescription.contains("PS5 game loader"))
         }
+        // SELF routing must require an advertised capability; the engine owns per-segment validation.
+        // Regression: the legacy runner accepts wrapped inputs, or the launcher blocks a capable engine.
+        bytes.replaceSubrange(0..<4, with: [0x4f, 0x15, 0x3d, 0x1d])
+        try bytes.write(to: input)
+        XCTAssertThrowsError(try EngineRunner.validate(engine: engine, game: game)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("does not advertise plaintext SELF"))
+        }
+        let capabilities = try EngineCapabilities.decode(Data("""
+        {"schema_version":1,"host_architecture":"arm64","guest_architecture":"x86_64","backend":"unicorn","supported_formats":["sce_elf64_x86_64"],"supported_containers":["plain_self"],"runtime_abi":"sce_sysv","ps5_game_runtime_ready":false}
+        """.utf8))
+        try EngineRunner.validate(engine: engine, game: game, capabilities: capabilities)
     }
 
     // Contract: capability probing reads schema1 native architecture and format support from the executable.

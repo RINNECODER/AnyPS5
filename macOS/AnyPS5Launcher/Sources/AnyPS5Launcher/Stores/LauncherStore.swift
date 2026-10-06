@@ -31,6 +31,7 @@ final class LauncherStore {
     var engineProbeStatus = "Choose an engine to read its capabilities."
     var isProbingEngine = false
     var isInspectingGame = false
+    private(set) var isCleaningResources = false
     var inspectedGame: LocalGame?
     var inspectionText: String?
     private var engineCompatibilityError: String?
@@ -40,6 +41,9 @@ final class LauncherStore {
     private let runner = EngineRunner()
     private var logBytes = Data()
     private var canSave = true
+    private var sessionCancelled = false
+    private var mountedResources: MountedExFATResources?
+    var hasMountedResources: Bool { mountedResources != nil }
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -79,13 +83,14 @@ final class LauncherStore {
         guard canSave else { error = "The saved library needs to be repaired before it can be changed."; return }
         let panel = NSOpenPanel()
         panel.title = "Choose a local game executable"
-        panel.message = "Select a clean x86-64 ELF or eboot.bin. Console containers cannot run directly."
+        panel.message = "Select an x86-64 ELF or a supported plaintext SELF eboot.bin. Disk images cannot run directly."
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let existing = library.games.first { $0.executablePath == url.path }
         let entry = LocalGame(id: game?.id ?? local?.id ?? existing?.id ?? "local-\(UUID().uuidString)",
                               title: game?.title ?? local?.title ?? url.deletingPathExtension().lastPathComponent,
-                              executablePath: url.path, workingDirectory: url.deletingLastPathComponent().path)
+                              executablePath: url.path, workingDirectory: url.deletingLastPathComponent().path,
+                              resourceImagePath: local?.resourceImagePath ?? existing?.resourceImagePath)
         library.attach(entry)
         selectedID = entry.id
         if game == nil { section = .library }
@@ -147,26 +152,56 @@ final class LauncherStore {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         var updated = game
         updated.workingDirectory = url.path
+        updated.resourceImagePath = nil
         library.attach(updated)
         save()
     }
 
-    func launch(_ game: LocalGame) {
-        guard !isRunning, !isInspectingGame else { return }
+    func chooseImageResources(for game: LocalGame) {
+        guard canSave, !isRunning else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose a completed exFAT resource image"
+        panel.message = "AnyPS5 mounts this image read-only during the session. Attach a separate supported ELF or plaintext SELF executable."
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            guard !isProbingEngine else { throw LauncherError("Wait for the engine capability check to finish.") }
-            if let engineCompatibilityError { throw LauncherError(engineCompatibilityError) }
-            let stream = try runner.run(engine: URL(fileURLWithPath: library.enginePath), game: game, capabilities: capabilities)
-            isRunning = true
-            runningTitle = game.title
-            sessionStatus = "Running \(game.title)"
-            logBytes = Data()
-            console = "Engine: \(library.enginePath)\nGuest: \(game.executablePath)\nResources: \(game.workingDirectory)\n\n"
-            let prefix = console
-            showConsole = true
-            Task {
-                defer { isRunning = false; runningTitle = nil }
-                do {
+            try ExFATResources.validate(url)
+            var updated = game
+            updated.resourceImagePath = url.path
+            library.attach(updated)
+            save()
+        } catch { self.error = error.localizedDescription }
+    }
+
+    func launch(_ game: LocalGame) {
+        guard !isRunning, !isInspectingGame, !isCleaningResources else { return }
+        guard !isProbingEngine else { error = "Wait for the engine capability check to finish."; return }
+        if let engineCompatibilityError { error = engineCompatibilityError; return }
+        isRunning = true
+        sessionCancelled = false
+        runningTitle = game.title
+        sessionStatus = "Preparing \(game.title)"
+        logBytes = Data()
+        console = "Preparing local game resources…\n"
+        showConsole = true
+        Task {
+            defer { isRunning = false; runningTitle = nil }
+            do {
+                try await releaseResources()
+                var sessionGame = game
+                if let imagePath = game.resourceImagePath {
+                    let resources = try await ExFATResources.mount(URL(fileURLWithPath: imagePath))
+                    mountedResources = resources
+                    sessionGame.workingDirectory = resources.directory.path
+                }
+                if sessionCancelled {
+                    sessionStatus = "Session cancelled"
+                    console += "Session cancelled before guest execution.\n"
+                } else {
+                    let stream = try runner.run(engine: URL(fileURLWithPath: library.enginePath), game: sessionGame, capabilities: capabilities)
+                    sessionStatus = "Running \(game.title)"
+                    console = "Engine: \(library.enginePath)\nGuest: \(game.executablePath)\nResources: \(sessionGame.workingDirectory)\n\n"
+                    let prefix = console
                     for try await event in stream {
                         switch event {
                         case .output(let bytes):
@@ -178,12 +213,19 @@ final class LauncherStore {
                             console += "\n[Engine exited with code \(code)]\n"
                         }
                     }
-                } catch {
-                    sessionStatus = "Engine session failed"
-                    console += "\n\(error.localizedDescription)\n"
                 }
+            } catch {
+                if let failure = error as? ResourceImageCleanupFailure { mountedResources = failure.resources }
+                sessionStatus = "Engine session failed"
+                console += "\n\(error.localizedDescription)\n"
+                self.error = error.localizedDescription
             }
-        } catch { self.error = error.localizedDescription; showConsole = true }
+            do { try await releaseResources() }
+            catch {
+                console += "\nResource image could not be detached: \(error.localizedDescription)\n"
+                self.error = "Resource cleanup failed. Close files using the mounted volume, then retry cleanup. \(error.localizedDescription)"
+            }
+        }
     }
 
     func inspect(_ game: LocalGame) {
@@ -206,7 +248,29 @@ final class LauncherStore {
         }
     }
 
-    func stop() { runner.stop(); sessionStatus = "Stopping \(runningTitle ?? "engine")…" }
+    func stop() { sessionCancelled = true; runner.stop(); sessionStatus = "Stopping \(runningTitle ?? "engine")…" }
+
+    func stopAndWait() async throws {
+        stop()
+        while isRunning || isCleaningResources { try? await Task.sleep(for: .milliseconds(100)) }
+        isCleaningResources = true
+        defer { isCleaningResources = false }
+        try await releaseResources()
+    }
+
+    func retryResourceCleanup() async {
+        guard !isRunning, !isCleaningResources else { return }
+        isCleaningResources = true
+        defer { isCleaningResources = false }
+        do { try await releaseResources() }
+        catch { self.error = "Resource cleanup failed: \(error.localizedDescription)" }
+    }
+
+    private func releaseResources() async throws {
+        guard let resources = mountedResources else { return }
+        try await resources.unmount()
+        if mountedResources?.directory == resources.directory { mountedResources = nil }
+    }
 
     func removeFromLibrary(_ game: LocalGame) {
         guard canSave else { error = "The saved library needs to be repaired before it can be changed."; return }
