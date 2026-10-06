@@ -6,6 +6,10 @@ Includes a [relinker](core/relinker) that converts executable to the target syst
 
 [Usage](docs/user/USAGE.md), [Build instructions](docs/dev/BUILD.md), [Technical debt of the project](docs/dev/TechnicalDebt.md), [code style conventions](docs/dev/CONVENTIONS.md), [contributing](CONTRIBUTING.md)
 
+## macOS app
+
+The native macOS app is maintained separately in [MacPS](https://github.com/RINNECODER/MacPS). This repository contains the engine and runtime tooling.
+
 ## Status
 
 [![libraries](https://boykopovar.github.io/AnyPS5/badge-libraries.svg)](https://boykopovar.github.io/AnyPS5/) [![shaders](https://boykopovar.github.io/AnyPS5/badge-shaders.svg)](https://boykopovar.github.io/AnyPS5/)
