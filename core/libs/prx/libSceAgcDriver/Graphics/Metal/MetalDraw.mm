@@ -17,6 +17,21 @@ namespace AgcDriver::Metal {
 namespace {
 using namespace ShaderRecompiler;
 
+void configureSamplerArguments(MetalBackend::TargetOptions& options, const RecompileResult& guest, id<MTLDevice> device) {
+    options.supportsArgumentBuffersTier2 = device.argumentBuffersSupport == MTLArgumentBuffersTier2;
+    options.maxArgumentBufferSamplers = 32;
+    options.samplerArgumentBuffer = false;
+    std::uint32_t count = 0;
+    for (const auto& binding : guest.bindings) {
+        if (binding.kind != DescriptorKind::Sampler) continue;
+        if (binding.count > options.maxSamplers - count) {
+            options.samplerArgumentBuffer = true;
+            break;
+        }
+        count += binding.count;
+    }
+}
+
 std::atomic<std::uint64_t> samplesPassed{0};
 
 struct SampleCounterParameters {
@@ -460,6 +475,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     target.fixupClipSpace = state.negativeOneToOne;
     target.rectListMode = rectPath ? MetalBackend::RectListMode::VertexCapture : MetalBackend::RectListMode::None;
     target.rectListIndexSize = rectPath && draw.indexed ? nativeIndexSize : 0;
+    configureSamplerArguments(target, *vertex->program, backend.Device());
     auto nativeVertex = MetalBackend::ConvertToMetal(*vertex->program, meshPath ? ShaderStage::Mesh : ShaderStage::Vertex, target);
     std::unique_ptr<MetalRectKernelPipeline> capturePipeline;
     std::unique_ptr<MetalRectKernelPipeline> controlPipeline;
@@ -496,6 +512,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         target.rectListMode = MetalBackend::RectListMode::Control;
         target.rectListIndexSize = 0;
         target.rectListInputLayout = captured.rectList->outputLayout;
+        configureSamplerArguments(target, *control->program, backend.Device());
         auto nativeControl = MetalBackend::ConvertToMetal(*control->program, ShaderStage::TessellationControl, target);
         controlPipeline = std::make_unique<MetalRectKernelPipeline>(backend.Device(), std::move(nativeControl));
         const auto& controlled = controlPipeline->Reflection();
@@ -508,6 +525,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         target.pushConstantOffsetBytes = evaluation->pushConstantOffset;
         target.rectListMode = MetalBackend::RectListMode::Evaluation;
         target.rectListInputLayout = controlled.rectList->outputLayout;
+        configureSamplerArguments(target, *evaluation->program, backend.Device());
         nativeVertex = MetalBackend::ConvertToMetal(*evaluation->program, ShaderStage::TessellationEvaluation, target);
         evaluationBuffers.push_back({rectSlot(nativeVertex, MetalBackend::ImplicitBufferRole::StageInput), {rectOutput, 0, rectOutput.length}});
     }
@@ -515,6 +533,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     target.pushConstantOffsetBytes = fragment->pushConstantOffset;
     target.rectListMode = MetalBackend::RectListMode::None;
     target.rectListInputLayout.reset();
+    configureSamplerArguments(target, *fragment->program, backend.Device());
     auto nativeFragment = MetalBackend::ConvertToMetal(*fragment->program, ShaderStage::Fragment, target);
     std::unique_ptr<MetalRenderPipeline> vertexPipeline;
     std::unique_ptr<MetalMeshPipeline> meshPipeline;

@@ -193,6 +193,10 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     if (stage == ShaderStage::Mesh && target.mslVersion < 30000) Fail("mesh shaders require MSL 3.0 or newer");
     if (target.maxBuffers > 31 || target.maxBuffers < 3 || target.maxTextures > 128 || target.maxSamplers > 16)
         Fail("invalid Metal resource limits");
+    if (target.samplerArgumentBuffer && (!target.supportsArgumentBuffersTier2 || target.maxArgumentBufferSamplers == 0))
+        Fail("sampler argument buffers require an explicit Tier2 capacity contract");
+    if (target.samplerArgumentBuffer && std::any_of(guest.bindings.begin(), guest.bindings.end(), [](const auto& binding) { return binding.descriptorSet != 0; }))
+        Fail("sampler argument buffers require original descriptor set zero");
     if (target.pushConstantBuffer >= target.maxBuffers || target.bufferSizesBuffer >= target.maxBuffers ||
         target.pushConstantBuffer == target.bufferSizesBuffer)
         Fail("invalid or overlapping auxiliary buffer indices");
@@ -303,7 +307,12 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     options.buffer_size_buffer_index = target.bufferSizesBuffer;
     options.texture_buffer_native = true;
     options.texture_1D_as_2D = true;
-    options.argument_buffers = false;
+    options.argument_buffers = target.samplerArgumentBuffer;
+    if (target.samplerArgumentBuffer) {
+        options.argument_buffers_tier = spirv_cross::CompilerMSL::Options::ArgumentBuffersTier::Tier2;
+        options.force_active_argument_buffer_resources = true;
+        compiler.add_discrete_descriptor_set(0);
+    }
     if (rectangle) {
         options.vertex_for_tessellation = capture;
         options.multi_patch_workgroup = control;
@@ -322,6 +331,8 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     common.vertex.fixup_clipspace = (evaluation || (stage == ShaderStage::Vertex && !capture)) && target.fixupClipSpace;
     compiler.set_common_options(common);
     const auto resources = compiler.get_shader_resources();
+    const bool useSamplerBank = target.samplerArgumentBuffer && !resources.separate_samplers.empty();
+    const auto activeResources = compiler.get_shader_resources(compiler.get_active_interface_variables());
     if (control || evaluation) {
         const auto checkPosition = [&](const auto& reflected, std::uint32_t count) {
             std::uint32_t positions = 0;
@@ -485,8 +496,13 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
             texture += binding.count;
             break;
         case DescriptorKind::Sampler:
-            if (binding.count > target.maxSamplers || sampler > target.maxSamplers - binding.count)
-                Fail("sampler descriptors exceed native Metal slots");
+            if (binding.count > (useSamplerBank ? target.maxArgumentBufferSamplers : target.maxSamplers) ||
+                sampler > (useSamplerBank ? target.maxArgumentBufferSamplers : target.maxSamplers) - binding.count)
+                Fail(useSamplerBank ? "sampler descriptors exceed explicit argument-buffer capacity" : "sampler descriptors exceed native Metal slots");
+            if (useSamplerBank) {
+                native.desc_set = 1;
+                native.basetype = spirv_cross::SPIRType::Sampler;
+            }
             mapping.sampler = sampler;
             native.msl_sampler = sampler;
             sampler += binding.count;
@@ -516,6 +532,49 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     reflect(resources.separate_images, DescriptorKind::SampledImage, DescriptorKind::UniformTexelBuffer);
     reflect(resources.storage_images, DescriptorKind::StorageImage, DescriptorKind::StorageTexelBuffer);
     reflect(resources.separate_samplers, DescriptorKind::Sampler);
+    if (useSamplerBank) {
+        std::vector<std::uint32_t> occupied;
+        for (std::uint32_t i = 0; i < vertexBufferCount; ++i) occupied.push_back(i);
+        if (!resources.push_constant_buffers.empty()) occupied.push_back(target.pushConstantBuffer);
+        const auto words = guest.spirv.Words();
+        for (std::size_t i = 5; i < words.size();) {
+            const auto count = words[i] >> 16u;
+            if (count == 0 || count > words.size() - i) Fail("invalid SPIR-V instruction while reserving auxiliary buffers");
+            if ((words[i] & 0xffffu) == spv::OpArrayLength) occupied.push_back(target.bufferSizesBuffer);
+            i += count;
+        }
+        if (result.rectList)
+            for (const auto& implicit : result.rectList->buffers) occupied.push_back(implicit.index);
+        const auto activeBuffer = [&](const ResourceMapping& mapping) {
+            const auto present = [&](const auto& reflected) {
+                return std::any_of(reflected.begin(), reflected.end(), [&](const auto& resource) {
+                    return compiler.get_decoration(resource.id, spv::DecorationDescriptorSet) == mapping.descriptorSet &&
+                        compiler.get_decoration(resource.id, spv::DecorationBinding) == mapping.binding;
+                });
+            };
+            return present(activeResources.uniform_buffers) || present(activeResources.storage_buffers);
+        };
+        for (const auto& mapping : result.resources)
+            if (mapping.buffer && activeBuffer(mapping))
+                for (std::uint32_t i = 0; i < mapping.count; ++i) occupied.push_back(*mapping.buffer + i);
+        auto slot = target.maxBuffers;
+        while (slot != 0) {
+            --slot;
+            if (std::find(occupied.begin(), occupied.end(), slot) == occupied.end()) break;
+        }
+        if (std::find(occupied.begin(), occupied.end(), slot) != occupied.end())
+            Fail("sampler argument buffer has no available native buffer slot");
+        result.samplerArgumentBuffer = slot;
+        spirv_cross::MSLResourceBinding bank{};
+        bank.stage = execution;
+        bank.desc_set = 1;
+        bank.binding = spirv_cross::kArgumentBufferBinding;
+        bank.msl_buffer = slot;
+        compiler.add_msl_resource_binding(bank);
+        result.samplerArgumentCount = sampler;
+        for (const auto& resource : resources.separate_samplers)
+            compiler.set_decoration(resource.id, spv::DecorationDescriptorSet, 1);
+    }
     if (!resources.push_constant_buffers.empty()) {
         spirv_cross::MSLResourceBinding push{};
         push.stage = execution;
@@ -539,7 +598,8 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
             Fail("image atomic emulation requires an unimplemented secondary Metal buffer contract");
     result.entryPoint = compiler.get_cleansed_entry_point_name(entries[0].name, execution);
     for (auto& mapping : result.resources)
-        mapping.active = compiler.is_msl_resource_binding_used(execution, mapping.descriptorSet, mapping.binding);
+        mapping.active = compiler.is_msl_resource_binding_used(execution,
+            result.samplerArgumentBuffer && mapping.kind == DescriptorKind::Sampler ? 1u : mapping.descriptorSet, mapping.binding);
     for (const auto& resource : resources.storage_buffers) {
         for (auto& mapping : result.resources)
             if (mapping.descriptorSet == compiler.get_decoration(resource.id, spv::DecorationDescriptorSet) &&
@@ -547,6 +607,9 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
                 mapping.requiresByteLengths = compiler.buffer_requires_array_length(resource.id);
     }
     if (compiler.needs_buffer_size_buffer()) result.bufferSizesBuffer = target.bufferSizesBuffer;
+    if (result.samplerArgumentBuffer && (result.samplerArgumentBuffer == result.pushConstantBuffer ||
+        result.samplerArgumentBuffer == result.bufferSizesBuffer))
+        Fail("sampler argument buffer overlaps an active auxiliary buffer");
     if (compiler.needs_swizzle_buffer() || compiler.needs_view_mask_buffer() || compiler.needs_depth_clip_state_buffer() ||
         compiler.needs_dispatch_base_buffer() || compiler.needs_patch_output_buffer() ||
         (compiler.needs_output_buffer() != (capture || control)) ||
