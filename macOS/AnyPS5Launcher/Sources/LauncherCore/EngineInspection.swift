@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// The engine parses the guest without executing it. A parsed file is not a playable game.
 public struct EngineInspection: Decodable, Sendable {
@@ -56,10 +57,10 @@ public struct EngineInspection: Decodable, Sendable {
             throw LauncherError("This engine does not advertise SCE ELF inspection support.")
         }
         try EngineRunner.validate(engine: engine, game: game, capabilities: capabilities)
-        let cancellation = EnginePreparationCancellation()
+        let cancellation = InspectionOperation()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            return try await withCheckedThrowingContinuation { continuation in
+            let result: Self = try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
                     let child = Process()
                     let pipe = Pipe()
@@ -70,18 +71,28 @@ public struct EngineInspection: Decodable, Sendable {
                     child.standardInput = FileHandle.nullDevice
                     child.standardOutput = pipe
                     child.standardError = pipe
-                    let timeout = DispatchWorkItem { if child.isRunning { child.terminate() } }
+                    let timeout = DispatchWorkItem { cancellation.terminate() }
+                    var started = false
+                    defer {
+                        timeout.cancel()
+                        cancellation.complete(child)
+                        try? pipe.fileHandleForReading.close()
+                        try? pipe.fileHandleForWriting.close()
+                    }
                     do {
-                        try cancellation.start { try child.run() }
+                        try cancellation.start(child)
+                        started = true
                         try? pipe.fileHandleForWriting.close()
                         DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: timeout)
                         var data = Data()
                         while let bytes = try pipe.fileHandleForReading.read(upToCount: 4096), !bytes.isEmpty {
                             data.append(bytes)
-                            if data.count > 4_194_304 { child.terminate(); throw LauncherError("The engine returned excessive inspection output.") }
+                            if data.count > 4_194_304 { throw LauncherError("The engine returned excessive inspection output.") }
                         }
                         child.waitUntilExit()
+                        cancellation.complete(child)
                         timeout.cancel()
+                        try cancellation.check()
                         guard child.terminationStatus == 0 else {
                             let diagnostic = String(decoding: data.prefix(16_384), as: UTF8.self)
                             throw LauncherError("Engine inspection failed (exit \(child.terminationStatus)).\n\(diagnostic)")
@@ -90,18 +101,81 @@ public struct EngineInspection: Decodable, Sendable {
                         guard result.schemaVersion == 1, result.event == "inspection", result.format == "sce_elf64_x86_64" else {
                             throw LauncherError("The engine returned an unsupported inspection protocol.")
                         }
+                        try cancellation.check()
                         continuation.resume(returning: result)
                     } catch {
                         timeout.cancel()
-                        if child.isRunning { child.terminate(); child.waitUntilExit() }
-                        continuation.resume(throwing: error)
+                        cancellation.terminate()
+                        if started { child.waitUntilExit() }
+                        cancellation.complete(child)
+                        let failure: Error = cancellation.isCancelled ? CancellationError() : error
+                        continuation.resume(throwing: failure)
                     }
-                    try? pipe.fileHandleForReading.close()
-                    try? pipe.fileHandleForWriting.close()
                 }
             }
+            try Task.checkCancellation()
+            return result
         } onCancel: {
             cancellation.cancel()
         }
+    }
+}
+
+/// Owns only this inspection's child. Start/registration and cancellation share one lock,
+/// and delayed escalation is disarmed after the launching worker finishes waiting.
+private final class InspectionOperation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var child: Process?
+    private var escalation: DispatchWorkItem?
+
+    var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    func check() throws {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled { throw CancellationError() }
+    }
+
+    func start(_ process: Process) throws {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled { throw CancellationError() }
+        try process.run()
+        child = process
+    }
+
+    func cancel() {
+        lock.lock(); defer { lock.unlock() }
+        cancelled = true
+        terminateLocked()
+    }
+
+    func terminate() {
+        lock.lock(); defer { lock.unlock() }
+        terminateLocked()
+    }
+
+    private func terminateLocked() {
+        guard let child, child.isRunning else { return }
+        child.terminate()
+        guard escalation == nil else { return }
+        let escalation = DispatchWorkItem { [weak self, child] in
+            guard let self else { return }
+            self.lock.lock(); defer { self.lock.unlock() }
+            // The process must still be the active, unreleased child owned by this operation.
+            if self.child === child, child.isRunning { Darwin.kill(child.processIdentifier, SIGKILL) }
+        }
+        self.escalation = escalation
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: escalation)
+    }
+
+    func complete(_ process: Process) {
+        lock.lock(); defer { lock.unlock() }
+        guard child === process else { return }
+        escalation?.cancel()
+        escalation = nil
+        child = nil
     }
 }

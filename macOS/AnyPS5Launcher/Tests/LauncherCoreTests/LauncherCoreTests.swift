@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 import LauncherCore
 import XCTest
 
@@ -395,8 +396,8 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertThrowsError(try EngineCapabilities.decode(Data(payload.replacingOccurrences(of: "schema_version\":1", with: "schema_version\":2").utf8)))
     }
 
-    // Contract: inspection never launches a guest, retains restrictions, and refuses rejected/unknown reports.
-    // Regression: using the run flag or swallowing engine exit126 presents a false ready state.
+    // Contract: inspection retains restrictions, rejects unknown reports, and cancels its started child without returning success.
+    // Regression: wrong run flags, swallowed exit126, or cancellation ignored after child startup presents a false result.
     // Existing subprocess coverage launches guests and cannot protect the non-executing inspection protocol.
     func testInspectionProtocolAndRejection() async throws {
         let folder = try directory()
@@ -428,6 +429,74 @@ final class LauncherCoreTests: XCTestCase {
             } catch {
                 XCTAssertTrue(error.localizedDescription.contains(rejection.contains("exit 126") ? "missing segment" : "unsupported inspection protocol"))
             }
+        }
+        // Process cancellation is an inspection protocol contract, not evidence of game compatibility.
+        // A valid TERM response catches success-after-cancel; ignored TERM exercises owned escalation without pipe-holding descendants.
+        let literalReport = "'" + report.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let inspectedGame = game
+        for (index, ignoresTERM) in [false, true].enumerated() {
+            let ready = folder.appendingPathComponent("inspection-started-\(index)")
+            let pidFile = folder.appendingPathComponent("inspection-child-\(index).pid")
+            let waiting = """
+            #!/bin/sh
+            [ "$#" = 2 ] || exit 93
+            [ "$1" = '--inspect-sce-json' ] || exit 91
+            [ "$2" = \(literalPath) ] || exit 92
+            complete_after_term() {
+              printf '%s\\n' \(literalReport)
+              exit 0
+            }
+            \(ignoresTERM ? "trap ':' TERM" : "trap complete_after_term TERM")
+            printf '%s\\n' "$$" > '\(pidFile.lastPathComponent)' || exit 94
+            : > '\(ready.lastPathComponent)' || exit 94
+            while :; do :; done
+            """
+            try Data(waiting.utf8).write(to: engine)
+            let operation = Task { try await EngineInspection.inspect(engine: engine, game: inspectedGame, capabilities: capabilities) }
+            let clock = ContinuousClock()
+            let startupDeadline = clock.now.advanced(by: .seconds(3))
+            while !FileManager.default.fileExists(atPath: ready.path), clock.now < startupDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            guard FileManager.default.fileExists(atPath: ready.path) else {
+                operation.cancel()
+                _ = try? await operation.value
+                XCTFail("Cancellation control never reached its child-start witness.")
+                continue
+            }
+            let pid = try XCTUnwrap(Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+            guard pid > 1, pid != Darwin.getpid() else {
+                operation.cancel()
+                XCTFail("Invalid owned inspection child PID: \(pid)")
+                continue
+            }
+            XCTAssertEqual(Darwin.kill(pid, 0), 0, "The started fixture must still be alive before cancellation.")
+            func childIsGone() -> Bool { Darwin.kill(pid, 0) == -1 && errno == ESRCH }
+            var observedGone = false
+            defer {
+                operation.cancel()
+                if !observedGone, Darwin.kill(pid, 0) == 0 { Darwin.kill(pid, SIGKILL) }
+            }
+            operation.cancel() // Trap installation and PID publication both precede this cancellation.
+            let shutdownDeadline = clock.now.advanced(by: .seconds(3))
+            while !childIsGone(), clock.now < shutdownDeadline { try await Task.sleep(for: .milliseconds(10)) }
+            observedGone = childIsGone()
+            XCTAssertTrue(observedGone, "Canceled inspection child remained alive beyond 3s; the 15s inspection timeout must not mask cancellation.")
+            if !observedGone {
+                // Preserve the failed shutdown observation, then clean up only this test's witnessed child before awaiting the old API.
+                Darwin.kill(pid, SIGTERM)
+                let cleanupDeadline = clock.now.advanced(by: .milliseconds(500))
+                while !childIsGone(), clock.now < cleanupDeadline { try await Task.sleep(for: .milliseconds(10)) }
+                if !childIsGone(), Darwin.kill(pid, 0) == 0 { Darwin.kill(pid, SIGKILL) }
+            }
+            do {
+                _ = try await operation.value
+                XCTFail("Canceled inspection returned a successful report, including a valid JSON/exit0 TERM response.")
+            } catch is CancellationError {
+                // Cancellation wins over a valid report or the exit status from terminating a stubborn owned child.
+            } catch { XCTFail("Started inspection returned \(error) instead of CancellationError.") }
+            observedGone = childIsGone()
+            XCTAssertTrue(observedGone, "Inspection completed while its owned child remained present.")
         }
     }
 

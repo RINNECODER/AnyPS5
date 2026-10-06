@@ -362,8 +362,7 @@ public struct EnginePackage: Sendable {
     }
 }
 
-// Shared by package scans and inspection preparation. Cancellation and Process.run are
-// serialized so a canceled preparation cannot race its final check and start a child.
+// Cooperatively interrupts a package scan dispatched outside the caller's executor.
 final class EnginePreparationCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
@@ -372,10 +371,5 @@ final class EnginePreparationCancellation: @unchecked Sendable {
     func check() throws {
         lock.lock(); defer { lock.unlock() }
         if cancelled { throw CancellationError() }
-    }
-    func start(_ operation: () throws -> Void) throws {
-        lock.lock(); defer { lock.unlock() }
-        if cancelled { throw CancellationError() }
-        try operation()
     }
 }
