@@ -52,16 +52,25 @@ public final class EngineRunner: @unchecked Sendable {
         }
     }
 
-    public func run(engine: URL, game: LocalGame, capabilities: EngineCapabilities? = nil) throws -> AsyncThrowingStream<EngineEvent, Error> {
-        try Self.validate(engine: engine, game: game, capabilities: capabilities)
+    public func run(engine: URL, game: LocalGame, capabilities: EngineCapabilities? = nil,
+                    resourceDirectory: URL? = nil) throws -> AsyncThrowingStream<EngineEvent, Error> {
+        let resourceRoot = resourceDirectory?.path ?? game.workingDirectory
+        let hasResourceArgument = capabilities?.resourceRootArgument == "--resource-root"
+        var launchGame = game
+        if !hasResourceArgument { launchGame.workingDirectory = resourceRoot }
+        try Self.validate(engine: engine, game: launchGame, capabilities: capabilities)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: resourceRoot, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw LauncherError("The game's resource folder is unavailable. Reconnect its drive or choose another folder.")
+        }
         lock.lock()
         guard process == nil else { lock.unlock(); throw LauncherError("An AnyPS5 session is already running.") }
         let child = Process()
         let pipe = Pipe()
         child.executableURL = engine
-        let resourceArguments = capabilities?.resourceRootArgument == "--resource-root" ? ["--resource-root", game.workingDirectory] : []
+        let resourceArguments = hasResourceArgument ? ["--resource-root", resourceRoot] : []
         child.arguments = resourceArguments + (capabilities != nil ? ["--diagnostics-json"] : []) + [game.executablePath]
-        child.currentDirectoryURL = URL(fileURLWithPath: game.workingDirectory, isDirectory: true)
+        child.currentDirectoryURL = URL(fileURLWithPath: launchGame.workingDirectory, isDirectory: true)
         child.standardOutput = pipe
         child.standardError = pipe
         child.standardInput = FileHandle.nullDevice
