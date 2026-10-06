@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ComputeDispatch.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <cstdlib>
 #include <stdexcept>
@@ -11,7 +12,8 @@
 namespace AgcDriver::DriverDetail {
 
 void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments) {
-    const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
+    auto decoded = DecodeComputeDispatch(queue, packet, [](std::uint32_t offset) { Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, offset); });
+    const auto address = decoded.programAddress;
     auto it = submission.shaders->upper_bound(address);
     std::shared_ptr<const ShaderSnapshot> registeredShader;
     if (it != submission.shaders->begin()) {
@@ -21,12 +23,8 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     if (!registeredShader) registeredShader = ReadRawComputeShader(address);
     const auto& snapshot = *registeredShader;
     require(snapshot.type == 0, "compute program refers to a non-compute shader");
-    const auto userCount = (readRegister(queue.shader, 0x213) >> 1u) & 0x1fu;
-    std::vector<std::uint32_t> userData;
-    for (std::uint32_t i = 0; i < userCount; ++i) {
-        userData.push_back(readRegister(queue.shader, 0x240 + i));
-    }
-    auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
+    auto& userData = decoded.userData;
+    auto compute = decoded.compute;
     std::vector<ShaderRecompiler::MemoryRegion> memory{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}};
     if (!snapshot.header.empty()) memory.push_back({snapshot.headerAddress, snapshot.header});
 
@@ -48,6 +46,8 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         countIndirect(IndirectFillKernel, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - readStart).count());
         packet = resolved;
         indirectArguments = 0;
+        decoded = DecodeComputeDispatch(queue, packet);
+        compute = decoded.compute;
     }
     if (fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
         pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
@@ -57,16 +57,10 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
         return;
     }
-    if (indirectArguments == 0 && (packet[4] & 0x20u) != 0) {
-        const std::array<std::uint32_t, 3> threads{packet[1], packet[2], packet[3]};
-        for (std::uint32_t axis = 0; axis < 3; ++axis) {
-            if (threads[axis] % compute.numThreads[axis] != 0) compute.partialThreads = threads;
-        }
-    }
     ShaderRecompiler::RecompileRequest request{
         {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
-        {(packet[4] & 0x8000u) != 0 ? 32u : 64u, 0, userData, compute, std::nullopt, std::nullopt, memory},
-        localDevice->ComputeTarget((packet[4] & 0x8000u) != 0 ? 32u : 64u),
+        {decoded.waveSize, 0, userData, compute, std::nullopt, std::nullopt, memory},
+        localDevice->ComputeTarget(decoded.waveSize),
         {0, 0, 0, 128}
     };
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -243,14 +237,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     const auto& compiled = *compiledResult;
     std::vector<Graphics::GuestMemorySnapshot> snapshots;
     for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
-    std::array<std::uint32_t, 3> groups{packet[1], packet[2], packet[3]};
-    if (indirectArguments == 0 && (packet[4] & 0x20u) != 0) {
-
-        for (std::uint32_t axis = 0; axis < 3; ++axis) {
-            const auto threads = std::max(readRegister(queue.shader, 0x207 + axis) & 0xffffu, 1u);
-            groups[axis] = (groups[axis] + threads - 1) / threads;
-        }
-    }
+    const auto groups = decoded.groups;
     static const bool traceIo = std::getenv("APS5_TRACE_DISPATCH_IO") != nullptr;
     if (traceIo) {
 

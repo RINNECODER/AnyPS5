@@ -3,6 +3,9 @@
 
 #include <cstdint>
 #include "SDL.h"
+#if defined(ANYPS5_METAL_BACKEND)
+#include "SDL_metal.h"
+#endif
 
 inline constexpr std::uint32_t DisplayWindowMinimumWidth = 320;
 inline constexpr std::uint32_t DisplayWindowMinimumHeight = 180;
@@ -18,6 +21,9 @@ public:
     void Ensure(std::uint32_t sourceWidth, std::uint32_t sourceHeight);
     void Destroy() noexcept;
     SDL_Window* Handle() const;
+#if defined(ANYPS5_METAL_BACKEND)
+    void* MetalLayer() const;
+#endif
     void DrawableSize(std::uint32_t& width, std::uint32_t& height) const;
     void UpdateTitle();
     void ToggleFullscreen();
@@ -32,6 +38,9 @@ private:
     static std::intptr_t windowProc(void* hwnd, unsigned int message, std::uintptr_t wParam, std::intptr_t lParam, std::uintptr_t subclassId, std::uintptr_t referenceData);
 
     SDL_Window* window = nullptr;
+#if defined(ANYPS5_METAL_BACKEND)
+    SDL_MetalView metalView = nullptr;
+#endif
     std::uint32_t aspectWidth = 0;
     std::uint32_t aspectHeight = 0;
 };

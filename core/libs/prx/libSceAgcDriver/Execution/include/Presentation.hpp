@@ -21,6 +21,7 @@ struct PresentationWindow {
     std::uint32_t width;
     std::uint32_t height;
     std::shared_ptr<FrameTiming> timing;
+    void* (*metalLayer)(void* context) = nullptr;
 };
 
 }

@@ -3,6 +3,8 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawDispatch.hpp"
+#include "prx/libSceAgcDriver/Execution/include/IndirectDraw.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <cstdlib>
 
@@ -99,25 +101,12 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
     const std::vector<Role>& roles = decode->roles;
     phaseTiming.Phase(DrawRowDecode);
 
-    const auto locate = [&](std::uint32_t location) -> std::optional<std::pair<std::size_t, std::size_t>> {
-        if (location == 0x280u) return std::nullopt;
-        for (std::size_t i = 0; i < programs.size(); ++i) {
-            if (roles[i] == Role::Fragment || roles[i] == Role::GeometryBack || location < programs[i].userDataBase) continue;
-            const auto word = location - programs[i].userDataBase + (8u - programs[i].firstUserSgpr);
-            if (word < programs[i].userData.size()) return std::make_pair(i, static_cast<std::size_t>(word));
-        }
-        return std::nullopt;
-    };
+    std::vector<IndirectDrawProgram> indirectPrograms;
     if (drawParameters.indirect) {
-        auto& indirect = *drawParameters.indirect;
-        const auto sgprOf = [&](std::uint32_t location) -> std::int32_t {
-            const auto word = locate(location);
-            if (!word || word->first != 0) return -1;
-            return static_cast<std::int32_t>(programs.front().firstUserSgpr + word->second);
-        };
-        indirect.baseVertexSgpr = sgprOf(indirect.baseVertexLocation);
-        indirect.startInstanceSgpr = sgprOf(indirect.startInstanceLocation);
-        indirect.drawIndexSgpr = sgprOf(indirect.drawIndexLocation);
+        for (std::size_t i = 0; i < programs.size(); ++i) {
+            indirectPrograms.push_back({roles[i], programs[i].userDataBase, programs[i].firstUserSgpr, programs[i].userData});
+        }
+        MarkIndirectDrawSgprs(*drawParameters.indirect, indirectPrograms);
     }
     std::vector<ShaderRecompiler::MemoryRegion> memory;
     std::vector<ShaderRecompiler::LinkedProgram> linked;
@@ -179,16 +168,8 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         phaseTiming.Phase(DrawRowDecode);
     }
 
-    static const bool indxOffsetSkipFold = std::getenv("APS5_INDX_OFFSET_SKIP_FOLD") != nullptr;
-    static const bool indexedOffsetFold = std::getenv("APS5_NO_INDEXED_OFFSET_FOLD") == nullptr;
     const auto fold = [&](const ShaderRecompiler::RecompileResult& main, Pm4::DrawParameters& parameters) {
-        if (parameters.indexed && !indexedOffsetFold) return;
-        if (main.vertexOffsetSgpr >= 0 && (parameters.firstVertex == 0 || !indxOffsetSkipFold)) {
-            const auto offset = drawUserWord(programs.front(), main.vertexOffsetSgpr);
-            require(offset <= std::numeric_limits<std::uint32_t>::max() - parameters.firstVertex, "draw vertex offset overflow");
-            parameters.firstVertex += offset;
-        }
-        if (main.instanceOffsetSgpr >= 0) parameters.firstInstance = drawUserWord(programs.front(), main.instanceOffsetSgpr);
+        FoldDrawOffsets(main, programs.front().firstUserSgpr, programs.front().userData, parameters);
     };
 
     std::optional<Graphics::IndirectDrawPath> indirectCpu;
@@ -291,36 +272,15 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         }
         recordQueuedLabelsBeforeRead(submission.queue);
         const auto readStart = std::chrono::steady_clock::now();
-        const auto count = std::min(indirect.countIndirect ? Pm4::ReadDrawCount(indirect) : indirect.count, indirect.count);
-        std::vector<Pm4::DrawArguments> records;
-        for (std::uint32_t record = 0; record < count; ++record) records.push_back(Pm4::ReadDrawArguments(indirect, record));
+        const auto records = ReadIndirectDrawRecords(indirect);
         Graphics::CountIndirectDraw(*indirectCpu, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - readStart).count());
-        const auto baseVertexWord = locate(indirect.baseVertexLocation);
-        const auto startInstanceWord = locate(indirect.startInstanceLocation);
-        const auto drawIndexWord = indirect.drawIndexEnabled ? locate(indirect.drawIndexLocation) : std::nullopt;
         for (std::uint32_t record = 0; record < records.size(); ++record) {
             const auto& arguments = records[record];
             if (traceIndirect) std::fprintf(stderr, "[draw]   record %u: count %u instances %u first %u vertexOffset %u startInstance %u\n", record, arguments.count, arguments.instances, arguments.firstVertexOrIndex, arguments.vertexOffset, arguments.firstInstance);
-            if (arguments.count == 0 || arguments.instances == 0) continue;
-            std::set<std::size_t> patched;
-            const auto patch = [&](const std::optional<std::pair<std::size_t, std::size_t>>& word, std::uint32_t value) {
-                if (!word) return;
-                programs[word->first].userData[word->second] = value;
-                patched.insert(word->first);
-            };
-            patch(baseVertexWord, indirect.recordBytes == 20 ? arguments.vertexOffset : arguments.firstVertexOrIndex);
-            patch(startInstanceWord, arguments.firstInstance);
-            patch(drawIndexWord, record);
-            Pm4::DrawParameters direct{0, arguments.count, 0, arguments.instances, drawParameters.flags, drawParameters.indexed, 0, 0};
-            if (drawParameters.indexed) {
-
-                if (arguments.firstVertexOrIndex >= drawParameters.indexCount) continue;
-                direct.indexAddress = drawParameters.indexAddress + static_cast<std::uint64_t>(arguments.firstVertexOrIndex) * drawParameters.indexSize;
-                direct.indexCount = std::min(arguments.count, drawParameters.indexCount - arguments.firstVertexOrIndex);
-                direct.indexSize = drawParameters.indexSize;
-            } else {
-                direct.firstVertex = indirect.indxOffset;
-            }
+            auto expanded = ExpandIndirectDrawRecord(drawParameters, arguments, record, indirectPrograms);
+            if (!expanded) continue;
+            auto& direct = expanded->parameters;
+            auto& patched = expanded->patchedPrograms;
             if (graphics.stages.mesh) {
                 setMeshIndexBuffer(direct);
                 patched.insert(0);

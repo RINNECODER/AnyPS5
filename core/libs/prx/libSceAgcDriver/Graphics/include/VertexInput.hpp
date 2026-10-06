@@ -94,29 +94,39 @@ struct VertexInputLayout {
     std::vector<VkVertexInputAttributeDescription> attributes;
 };
 
-inline VertexInputLayout BuildVertexInputLayout(const Context& context, std::span<const ShaderRecompiler::VertexAttribute> attributes) {
-    Require(attributes.size() <= context.limits.maxVertexInputBindings && attributes.size() <= context.limits.maxVertexInputAttributes, "vertex input count exceeds device limits");
+template <typename SupportsFormat>
+inline VertexInputLayout BuildVertexInputLayout(std::span<const ShaderRecompiler::VertexAttribute> attributes,
+                                               std::uint32_t maxBindings, std::uint32_t maxAttributes,
+                                               std::uint32_t maxStride, SupportsFormat&& supportsFormat) {
+    Require(attributes.size() <= maxBindings && attributes.size() <= maxAttributes, "vertex input count exceeds device limits");
     VertexInputLayout result;
     std::set<std::uint32_t> locations;
     for (const auto& attribute : attributes) {
         const auto& fields = attribute.resource.fields;
         const auto format = DecodeVertexFormat(attribute);
-        Require(attribute.location < context.limits.maxVertexInputAttributes && locations.insert(attribute.location).second, "invalid or duplicate vertex attribute location");
+        Require(attribute.location < maxAttributes && locations.insert(attribute.location).second, "invalid or duplicate vertex attribute location");
         Require(attribute.fetchIndex <= 1, "unsupported vertex fetch index");
         Require((fields[1] & 0x80000000u) == 0 && (fields[3] & 0x00800000u) == 0 && (fields[3] >> 30u) == 0, "unsupported vertex buffer descriptor flags");
         const auto stride = (fields[1] >> 16u) & 0x3fffu;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
         Require(address != 0 && address % format.alignment == 0 && stride % format.alignment == 0, "unaligned vertex buffer");
-        Require(stride <= context.limits.maxVertexInputBindingStride, "vertex stride exceeds device limits");
-        Require(context.formatProperties != nullptr, "missing vertex format property query");
-        VkFormatProperties properties{};
-        context.formatProperties(context.physical, format.format, &properties);
-        Require((properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) != 0, "device does not support vertex format " + std::to_string(format.format));
+        Require(stride <= maxStride, "vertex stride exceeds device limits");
+        Require(supportsFormat(format.format), "device does not support vertex format " + std::to_string(format.format));
         const auto binding = static_cast<std::uint32_t>(result.bindings.size());
         result.bindings.push_back({binding, stride, attribute.fetchIndex == 0 ? VK_VERTEX_INPUT_RATE_VERTEX : VK_VERTEX_INPUT_RATE_INSTANCE});
         result.attributes.push_back({attribute.location, binding, format.format, 0});
     }
     return result;
+}
+
+inline VertexInputLayout BuildVertexInputLayout(const Context& context, std::span<const ShaderRecompiler::VertexAttribute> attributes) {
+    return BuildVertexInputLayout(attributes, context.limits.maxVertexInputBindings,
+        context.limits.maxVertexInputAttributes, context.limits.maxVertexInputBindingStride, [&](VkFormat format) {
+            Require(context.formatProperties != nullptr, "missing vertex format property query");
+            VkFormatProperties properties{};
+            context.formatProperties(context.physical, format, &properties);
+            return (properties.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) != 0;
+        });
 }
 
 // The whole byte range a vertex buffer descriptor covers (records * stride, or records when the

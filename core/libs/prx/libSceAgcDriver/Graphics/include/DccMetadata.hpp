@@ -22,6 +22,7 @@ enum class DccKeys { Uncompressed, Clear0000, Clear0001, Clear1110, Clear1111, C
 
 const char* DccKeysName(DccKeys keys);
 std::size_t DccKeyBytes(std::uint64_t surfaceBytes);
+DccKeys ClassifyDccKeys(std::span<const std::byte> keys);
 
 template<typename ReadFollowed, typename ReadNamed>
 bool KeysServeSurface(std::uint64_t followedDcc, DccKeys uploaded, DccKeys filled, std::uint64_t namedDcc, ReadFollowed&& readFollowed, ReadNamed&& readNamed) {

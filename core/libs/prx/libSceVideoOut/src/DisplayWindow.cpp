@@ -2,7 +2,9 @@
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
+#if !defined(ANYPS5_METAL_BACKEND)
 #include "SDL_vulkan.h"
+#endif
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -45,8 +47,21 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     const auto initialSize = AgcDriver::ComputeContainSize_nid_postfix(sourceWidth, sourceHeight, boundsWidth, boundsHeight, true);
     require(initialSize.width >= DisplayWindowMinimumWidth && initialSize.height >= DisplayWindowMinimumHeight, "initial window extent is smaller than the minimum");
     const auto title = GetAppTitle_nid_postfix();
-    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+#if defined(ANYPS5_METAL_BACKEND)
+    constexpr auto graphicsWindowFlag = SDL_WINDOW_METAL;
+#else
+    constexpr auto graphicsWindowFlag = SDL_WINDOW_VULKAN;
+#endif
+    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | graphicsWindowFlag | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     require(window != nullptr, SDL_GetError());
+#if defined(ANYPS5_METAL_BACKEND)
+    metalView = SDL_Metal_CreateView(window);
+    if (metalView == nullptr) {
+        const auto error = std::string(SDL_GetError());
+        Destroy();
+        throw std::runtime_error("DisplayWindow: " + error);
+    }
+#endif
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
     installSubclass();
 }
@@ -59,6 +74,10 @@ void DisplayWindow::updateAspectRatio(std::uint32_t sourceWidth, std::uint32_t s
 void DisplayWindow::Destroy() noexcept {
     if (window == nullptr) return;
     removeSubclass();
+#if defined(ANYPS5_METAL_BACKEND)
+    if (metalView != nullptr) SDL_Metal_DestroyView(metalView);
+    metalView = nullptr;
+#endif
     SDL_DestroyWindow(window);
     window = nullptr;
 }
@@ -66,6 +85,15 @@ void DisplayWindow::Destroy() noexcept {
 SDL_Window* DisplayWindow::Handle() const {
     return window;
 }
+
+#if defined(ANYPS5_METAL_BACKEND)
+void* DisplayWindow::MetalLayer() const {
+    require(window != nullptr && metalView != nullptr, "Metal view must exist before querying its layer");
+    auto* layer = SDL_Metal_GetLayer(metalView);
+    require(layer != nullptr, SDL_GetError());
+    return layer;
+}
+#endif
 
 void DisplayWindow::ToggleFullscreen() {
     require(window != nullptr, "window must exist before toggling fullscreen");
@@ -81,7 +109,16 @@ void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) co
     }
     int drawableWidth = 0;
     int drawableHeight = 0;
+#if defined(ANYPS5_METAL_BACKEND)
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_MINIMIZED) != 0) {
+        width = 0;
+        height = 0;
+        return;
+    }
+    SDL_Metal_GetDrawableSize(window, &drawableWidth, &drawableHeight);
+#else
     SDL_Vulkan_GetDrawableSize(window, &drawableWidth, &drawableHeight);
+#endif
     width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
     height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
 }
