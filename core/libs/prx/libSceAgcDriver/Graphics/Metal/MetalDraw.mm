@@ -205,9 +205,10 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     if (meshArguments && (!meshPath || !draw.indexed)) {
         throw std::invalid_argument("Metal mesh arguments require an indexed mesh draw");
     }
+    const bool fanPath = !meshPath && !rectPath && state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
     const auto primitive = meshPath || rectPath ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
     const bool nativeStrip = !meshPath && !rectPath && (primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip);
-    const bool nativeRestart = nativeStrip && state.primitiveRestart;
+    const bool nativeRestart = (nativeStrip || fanPath) && state.primitiveRestart;
     std::uint32_t meshGroups = 0;
     if (meshPath) {
         const auto& mesh = *state.stages.mesh;
@@ -336,6 +337,20 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     std::uint32_t nativeIndexSize = draw.indexSize;
     std::uint32_t maxIndex = 0;
     bool noVertexIndices = false;
+    std::vector<std::uint32_t> fanIndices;
+    std::uint32_t fanCenter = 0, fanPrevious = 0, fanVertexCount = 0;
+    const auto appendFanVertex = [&](std::uint32_t index) {
+        if (fanVertexCount == 0) fanCenter = index;
+        else if (fanVertexCount >= 2) {
+            if (backend.Device().maxBufferLength / sizeof(std::uint32_t) < 3 ||
+                fanIndices.size() > backend.Device().maxBufferLength / sizeof(std::uint32_t) - 3) {
+                throw std::invalid_argument("Metal triangle fan expansion exceeds the device index buffer limit");
+            }
+            fanIndices.insert(fanIndices.end(), {fanPrevious, index, fanCenter});
+        }
+        fanPrevious = index;
+        if (fanVertexCount < 2) ++fanVertexCount;
+    };
     if (draw.indexed) {
         std::uint32_t minIndex = std::numeric_limits<std::uint32_t>::max();
         if ((draw.indexSize != 2 && draw.indexSize != 4) || draw.indexAddress % draw.indexSize != 0) {
@@ -351,7 +366,11 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             std::uint32_t index = 0;
             if (draw.indexSize == 2) { std::uint16_t value; std::memcpy(&value, data + std::size_t{i} * 2u, 2); index = value; }
             else std::memcpy(&index, data + std::size_t{i} * 4u, 4);
-            if (nativeRestart && index == restartIndex) continue;
+            if (nativeRestart && index == restartIndex) {
+                if (fanPath) fanVertexCount = 0;
+                continue;
+            }
+            if (fanPath) appendFanVertex(index);
             hasVertexIndex = true;
             minIndex = std::min(minIndex, index);
             maxIndex = std::max(maxIndex, index);
@@ -391,6 +410,17 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             throw std::invalid_argument("Metal draw auto-index parameters are invalid");
         }
         maxIndex = draw.firstVertex + draw.indexCount - 1u;
+        if (fanPath) for (std::uint32_t i = 0; i < draw.indexCount; ++i) appendFanVertex(draw.firstVertex + i);
+    }
+    NSUInteger nativeIndexCount = draw.indexCount;
+    if (fanPath) {
+        nativeIndexCount = fanIndices.size();
+        if (!fanIndices.empty()) {
+            auto expanded = backend.Buffer(fanIndices.size() * sizeof(std::uint32_t));
+            std::memcpy(expanded.contents, fanIndices.data(), expanded.length);
+            indexBuffer = {expanded, 0, expanded.length};
+            nativeIndexSize = 4;
+        }
     }
     const auto& attributes = vertex->program->vertexAttributes;
     if (meshPath && !attributes.empty()) throw std::invalid_argument("Metal mesh draw requires shader-based vertex fetch");
@@ -540,7 +570,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         residency = meshResidency;
     }
     auto depthStencilState = CreateDepthStencilState(backend.Device(), state);
-    if (noVertexIndices) return {};
+    if (noVertexIndices || (fanPath && fanIndices.empty())) return {};
     if (sampleCounter != nil) {
         std::memset(static_cast<std::byte*>(sampleCounter.contents) + 16, 0, 8);
         renderPass.visibilityResultBuffer = sampleCounter;
@@ -567,9 +597,9 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         } else if (rectPath) {
             [encoder setTessellationFactorBuffer:rectFactors offset:0 instanceStride:0];
             [encoder drawPatches:4 patchStart:0 patchCount:rectPatches patchIndexBuffer:nil patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];
-        } else if (draw.indexed) {
-            [encoder drawIndexedPrimitives:primitive indexCount:draw.indexCount indexType:nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
-                indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset instanceCount:draw.instanceCount baseVertex:static_cast<NSInteger>(std::bit_cast<std::int32_t>(draw.firstVertex)) baseInstance:draw.firstInstance];
+        } else if (draw.indexed || fanPath) {
+            [encoder drawIndexedPrimitives:primitive indexCount:nativeIndexCount indexType:nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
+                indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset instanceCount:draw.instanceCount baseVertex:draw.indexed ? static_cast<NSInteger>(std::bit_cast<std::int32_t>(draw.firstVertex)) : 0 baseInstance:draw.firstInstance];
         } else {
             [encoder drawPrimitives:primitive vertexStart:draw.firstVertex vertexCount:draw.indexCount instanceCount:draw.instanceCount baseInstance:draw.firstInstance];
         }

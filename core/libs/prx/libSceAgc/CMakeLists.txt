@@ -1,4 +1,4 @@
-add_library(libSceAgc SHARED EXCLUDE_FROM_ALL
+set(agcSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Unimplemented.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Acb/src/Control.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Acb/src/Dispatch.cpp
@@ -51,6 +51,38 @@ add_library(libSceAgc SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Shader/src/PrimState.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Shader/src/ShaderUtils.cpp
 )
+
+if(ANYPS5_METAL_UTILITIES_ONLY)
+    add_library(anyps5_metal_agc_host_objects OBJECT ${agcSources}
+        "${PROJECT_SOURCE_DIR}/core/libs/prx/libc/src/NotImplemented.cpp")
+    target_link_libraries(anyps5_metal_agc_host_objects PRIVATE anyps5_metal_native_execution)
+    add_library(anyps5_metal_agc_host STATIC $<TARGET_OBJECTS:anyps5_metal_agc_host_objects>)
+    target_include_directories(anyps5_metal_agc_host PUBLIC "${PROJECT_SOURCE_DIR}/core/libs")
+    target_link_libraries(anyps5_metal_agc_host PUBLIC anyps5_metal_native_execution)
+    if(BUILD_TESTING)
+        function(add_native_agc_test name source)
+            add_test_executable(anyps5_metal_agc_${name} "${CMAKE_CURRENT_SOURCE_DIR}/tests/${source}.cpp")
+            target_include_directories(anyps5_metal_agc_${name} PRIVATE "${PROJECT_SOURCE_DIR}/core/libs")
+            target_link_libraries(anyps5_metal_agc_${name} PRIVATE anyps5_metal_agc_host)
+            add_test(NAME anyps5_metal_agc_${name} COMMAND anyps5_metal_agc_${name})
+        endfunction()
+        add_native_agc_test(branch_patch BranchPatch)
+        add_native_agc_test(predication Predication)
+        add_native_agc_test(dma_data DmaData)
+        add_native_agc_test(prime_utcl2 PrimeUtcl2)
+        add_native_agc_test(cond_exec_patch CondExecPatch)
+        add_native_agc_test(register_commands RegisterCommands)
+        add_library(anyps5_metal_agc_host_fixture SHARED $<TARGET_OBJECTS:anyps5_metal_agc_host_objects>)
+        target_link_libraries(anyps5_metal_agc_host_fixture PRIVATE anyps5_metal_native_execution)
+        add_test_executable(anyps5_metal_agc_host_exports tests/NativeHostExports.cpp)
+        target_include_directories(anyps5_metal_agc_host_exports PRIVATE "${PROJECT_SOURCE_DIR}/core/libs")
+        add_dependencies(anyps5_metal_agc_host_exports anyps5_metal_agc_host_fixture)
+        add_test(NAME anyps5_metal_agc_host_exports COMMAND anyps5_metal_agc_host_exports "$<TARGET_FILE:anyps5_metal_agc_host_fixture>")
+    endif()
+    return()
+endif()
+
+add_library(libSceAgc SHARED EXCLUDE_FROM_ALL ${agcSources})
 
 target_include_directories(libSceAgc PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(libSceAgc PRIVATE libSceAgcDriver libc)
