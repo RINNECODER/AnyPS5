@@ -203,7 +203,12 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
     attribute.option = VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY;
     const auto output = CreateVideoOutput(cfg, queue);
     AgcDriverRegisterVideoOutput_nid_postfix(Handle, output);
-    std::future<void> firstWait, secondWait, idle;
+    auto otherConfig = std::make_shared<VideoOutConfig>(stop.get_token());
+    otherConfig->opened = true;
+    otherConfig->generation = 8;
+    const auto otherOutput = CreateVideoOutput(otherConfig, queue);
+    std::future<void> firstWait, secondWait, idle, room;
+    std::vector<std::shared_ptr<AgcDriver::IFlipRequest>> otherReservations;
     struct Cleanup {
         std::shared_ptr<AgcDriver::IVideoOutput> output;
         std::stop_source* stop;
@@ -300,8 +305,38 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
         }
         Require((i == 0 ? firstWait : secondWait).wait_for(50ms) == std::future_status::timeout,
                 "Original rendering wait retired at GPU readiness instead of flip completion");
+        if (i == 0) {
+            for (std::uint32_t extra = 0; extra < 14; ++extra)
+                otherReservations.push_back(otherOutput->Reserve({4, VIDEO_OUT_BUFFER_INDEX_BLACK, 1, 0}));
+            {
+                std::scoped_lock lock(cfg->mutex, otherConfig->mutex);
+                Require(queue->reservations == 16 && cfg->flipStatus.flipPendingNum == 2 &&
+                        otherConfig->flipStatus.flipPendingNum == 14,
+                        "Original shared VideoOut queue did not retain both owners' reservations");
+            }
+            room = std::async(std::launch::async, [output] { output->WaitForFlipRoom(); });
+            Require(room.wait_for(50ms) == std::future_status::timeout,
+                    "Original shared VideoOut queue admitted a producer while all sixteen flips were reserved");
+        }
         events.expected = i == 0 ? 0x1122334412345678ll : 0x5566778887654321ll;
         CompleteFlip(*request, callbacks);
+        if (i == 0) {
+            Require(room.wait_for(2s) == std::future_status::ready,
+                    "Actual drawable flip completion did not wake the blocked original VideoOut producer");
+            room.get();
+            {
+                std::scoped_lock lock(cfg->mutex, otherConfig->mutex);
+                Require(queue->reservations == 15 && cfg->flipStatus.flipPendingNum == 1 &&
+                        otherConfig->flipStatus.flipPendingNum == 14 && request->terminal,
+                        "Original queue room woke before the presented flip retired its own reservation");
+            }
+            otherReservations.clear();
+            {
+                std::lock_guard lock(otherConfig->mutex);
+                Require(otherConfig->flipStatus.flipPendingNum == 0,
+                        "Original unready VideoOut requests did not roll back the other owner's reservations");
+            }
+        }
         {
             std::lock_guard lock(cfg->mutex);
             Require(request->terminal && cfg->flipStatus.count == i + 1 && cfg->flipStatus.processTime == 101 &&
@@ -333,7 +368,7 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
     try { firstFence->Wait(); } catch (const std::exception& error) { closed = std::string(error.what()).find("closed") != std::string::npos; }
     Require(closed, "Original captured wait ignored its closed VideoOut owner lifecycle");
     cleanup.done = true;
-    std::cout << "PASS: public PM4 original VideoOut reservation, immutable metadata, sync readiness, paced actual drawable pixels, completion callbacks and captured ticket retirement\n";
+    std::cout << "PASS: public PM4 original VideoOut reservation, immutable metadata, sync readiness, paced actual drawable pixels, completion callbacks, global queue room and captured ticket retirement\n";
 }
 
 void Run(id<MTLDevice> device, id<MTLLibrary> library) {

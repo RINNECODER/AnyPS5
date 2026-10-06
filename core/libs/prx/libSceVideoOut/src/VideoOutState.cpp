@@ -203,7 +203,7 @@ void MarkFlipGpuComplete(FlipRequest& request) {
 
 void CompleteFlip(FlipRequest& req, const VideoOutCompletionCallbacks& callbacks,
                   AgcDriver::PerformanceTimer* timing) {
-    std::lock_guard lock(req.cfg->mutex);
+    std::unique_lock lock(req.cfg->mutex);
     if (timing) timing->Mark("completion_mutex_wait");
     checkConfig(*req.cfg);
     require(!req.terminal && req.cfg->generation == req.generation, "flip cancelled during presentation");
@@ -227,4 +227,7 @@ void CompleteFlip(FlipRequest& req, const VideoOutCompletionCallbacks& callbacks
     req.terminal = true;
     req.cfg->vblankCond.notify_all();
     if (timing) timing->Mark("notify_game");
+    lock.unlock();
+    std::lock_guard queueLock(req.queue->mutex);
+    req.queue->changed.notify_all();
 }
