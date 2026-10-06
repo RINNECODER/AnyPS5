@@ -107,6 +107,11 @@ target_compile_options(anyps5_metal_guest_replay PRIVATE -fobjc-arc)
 target_link_libraries(anyps5_metal_guest_replay PRIVATE
     anyps5_metal_guest_recompiler anyps5_metal_utilities)
 if(BUILD_TESTING)
+    add_test_executable(anyps5_metal_masked_shift_contract "${CMAKE_CURRENT_SOURCE_DIR}/../tests/MaskedShiftContract.cpp")
+    target_link_libraries(anyps5_metal_masked_shift_contract PRIVATE anyps5_metal_guest_recompiler)
+    set_target_properties(anyps5_metal_masked_shift_contract PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME anyps5_metal_masked_shift_contract COMMAND anyps5_metal_masked_shift_contract)
+    set_tests_properties(anyps5_metal_masked_shift_contract PROPERTIES TIMEOUT 120)
     get_target_property(metalUtilityLibrary anyps5_metal_utilities ANYPS5_METALLIB)
     target_sources(metal_utility_tests PRIVATE
         "${agcDriverRoot}/tests/metal/TextureResource.mm"
