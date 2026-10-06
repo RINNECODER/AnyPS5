@@ -294,9 +294,11 @@ struct DynamicStorageMipReplay {
     }
 };
 
+template<bool AcrossWaves = false>
 struct DynamicImageReplay {
-    static constexpr std::uint32_t Threads = 32, Layers = 3, LayerWords = 1984;
-    static constexpr std::uint64_t Base = 0xc00000;
+    static constexpr std::uint32_t Threads = AcrossWaves ? 64u : 32u, Layers = 3, LayerWords = 1984;
+    static constexpr std::uint32_t MaterialRecords = AcrossWaves ? 64u : 3u;
+    static constexpr std::uint64_t Base = AcrossWaves ? 0xf00000u : 0xc00000u;
     std::array<std::uint32_t, 27> code{
         0xf4080100, 0xfa000000, 0xf4080200, 0xfa000010, 0xf4080300, 0xfa000020, 0xf4080700, 0xfa000030,
         0x7e200500, 0x93109010, 0xf4200406, 0x20000004, 0x8f108510, 0xf42c0502, 0x20000000,
@@ -305,7 +307,7 @@ struct DynamicImageReplay {
     };
     std::array<std::array<std::uint32_t, GuardWords + Layers * LayerWords + GuardWords>, 2> textures;
     std::array<std::uint32_t, GuardWords + 16 + GuardWords> heap, srt;
-    std::array<std::uint32_t, GuardWords + 12 + GuardWords> materials;
+    std::array<std::uint32_t, GuardWords + MaterialRecords * 4u + GuardWords> materials;
     std::array<std::uint32_t, GuardWords + Threads + GuardWords> output;
     std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> header{};
     std::vector<std::uint32_t> commands;
@@ -331,15 +333,16 @@ struct DynamicImageReplay {
                 2u | ((image + 1u) << 16u), 4u << 4u, 0, 0};
             std::copy(descriptor.begin(), descriptor.end(), heap.begin() + GuardWords + image * 8u);
         }
-        for (std::uint32_t record = 0; record < 3; ++record) {
+        for (std::uint32_t record = 0; record < MaterialRecords; ++record) {
             auto start = materials.begin() + GuardWords + record * 4u;
             std::fill_n(start, 4, 0u);
-            start[1] = record == 2 ? 1u : 0u;
+            if constexpr (AcrossWaves) start[1] = record < 32u ? 0u : 1u;
+            else start[1] = record == 2 ? 1u : 0u;
         }
         const std::array<std::uint32_t, 16> table{
             static_cast<std::uint32_t>(Base + 0x20100u), 32u << 16u, 2, 0xfac,
             0x92, (4u * 256u) << 12u, (1u << 22u) | (2u << 26u), 0,
-            static_cast<std::uint32_t>(Base + 0x21100u), 16u << 16u, 3, 0xfac,
+            static_cast<std::uint32_t>(Base + 0x21100u), 16u << 16u, MaterialRecords, 0xfac,
             static_cast<std::uint32_t>(Base + 0x30100u), 0, Threads * 4u, 0xfac};
         std::copy(table.begin(), table.end(), srt.begin() + GuardWords);
         Shader shader{};
@@ -377,6 +380,38 @@ struct DynamicImageReplay {
     }
 
     void Run(bool minimumLod = false) {
+        if constexpr (AcrossWaves) {
+            heap[GuardWords + 1u] = (22u << 20u) | (3u << 30u) | (minimumLod ? 640u << 8u : 0u);
+            heap[GuardWords + 9u] = (22u << 20u) | (3u << 30u) | (minimumLod ? 768u << 8u : 0u);
+            const auto originalTextures = textures;
+            const auto originalHeap = heap, originalSrt = srt;
+            const auto originalMaterials = materials;
+            const auto originalCode = code;
+            const auto originalHeader = header;
+            const auto originalCommands = commands;
+            const auto originalPacket = packet;
+            output.fill(Sentinel);
+            auto expected = output;
+            for (std::uint32_t lane = 0; lane < Threads; ++lane)
+                expected[GuardWords + lane] = std::bit_cast<std::uint32_t>(lane < 32u ?
+                    (minimumLod ? 104.0f : 80.0f) : (minimumLod ? 432.0f : 400.0f));
+            AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(Base + 0x50000u));
+            AgcDriver::Submit(reinterpret_cast<const Packet*>(Base + 0x70000u), 0x20);
+            AgcDriverWaitIdle_nid_postfix();
+            for (std::size_t word = 0; word < output.size(); ++word)
+                Require(output[word] == expected[word], "Public original RDNA two-wave sampled images mixed-floor=" +
+                    std::to_string(minimumLod) + " word=" + std::to_string(word) +
+                    " actual=" + std::to_string(output[word]) + " expected=" + std::to_string(expected[word]));
+            Require(textures == originalTextures && heap == originalHeap && materials == originalMaterials && srt == originalSrt,
+                "Public two-wave sampled images changed read-only texels, layers, mip padding, table descriptors or keys");
+            Require(code == originalCode && header == originalHeader && commands == originalCommands &&
+                std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
+                "Public two-wave sampled images changed shader, header or PM4 bytes");
+            std::cout << "Public original RDNA two-wave sampled images: baseMip1, baseArray1/2, relative floors="
+                      << (minimumLod ? "1.5/2" : "0/0")
+                      << ", all 64 lane outputs, inputs, padding and guards passed\n";
+            return;
+        }
         heap[GuardWords + 9u] = (22u << 20u) | (3u << 30u) | (minimumLod ? 768u << 8u : 0u);
         const auto originalTextures = textures;
         const auto originalHeap = heap, originalSrt = srt;
@@ -515,7 +550,8 @@ int main(int argc, char** argv) {
             const auto originalTexture = texture;
             Replay wave32(32, 0x200000), wave64(64, 0x300000);
             SamplerBankReplay samplerBank;
-            DynamicImageReplay dynamicImages;
+            DynamicImageReplay<> dynamicImages;
+            DynamicImageReplay<true> nonuniformImages;
             MinimumLodFamilies instructionClamp;
             MinimumLodFamilies biasZero(0x700000, false, 0), biasFloor(0x900000, false, 384),
                 clampFloor(0xa00000, true, 384);
@@ -527,6 +563,7 @@ int main(int argc, char** argv) {
             wave64.AddRanges(ranges);
             samplerBank.AddRanges(ranges);
             dynamicImages.AddRanges(ranges);
+            nonuniformImages.AddRanges(ranges);
             instructionClamp.AddRanges(ranges);
             for (auto* replay : {&biasZero, &biasFloor, &clampFloor}) replay->AddRanges(ranges);
             for (auto* replay : {&floorGrad, &anisoZero, &anisoFloor}) replay->AddRanges(ranges);
@@ -555,6 +592,8 @@ int main(int argc, char** argv) {
             }
             biasFloor.Run(1.5f);
             clampFloor.Run(1.5f);
+            nonuniformImages.Run();
+            nonuniformImages.Run(true);
             Require(texture == originalTexture, "Public sampler bank changed another borrowed 1D texture");
             AgcDriver::Metal::MetalDriver::Get().Shutdown();
             return 0;

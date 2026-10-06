@@ -73,11 +73,12 @@ void appendShaderRegion(std::vector<MemoryRegion>& memory, std::uint64_t address
 }
 
 SpirvTarget target(id<MTLDevice> device) {
-    static constexpr std::array<std::uint32_t, 5> capabilities{
+    static constexpr std::array<std::uint32_t, 7> capabilities{
         spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
-        spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing};
-    static constexpr std::array<std::string_view, 2> extensions{
-        "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+        spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing,
+        spv::CapabilityShaderNonUniform, spv::CapabilitySampledImageArrayNonUniformIndexing};
+    static constexpr std::array<std::string_view, 3> extensions{
+        "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_EXT_descriptor_indexing"};
     const auto maximum = device.maxThreadsPerThreadgroup;
     return {0x00401000, 0x00010300, 32, Abi::Version, capabilities, extensions, false,
             {static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(maximum.height),
