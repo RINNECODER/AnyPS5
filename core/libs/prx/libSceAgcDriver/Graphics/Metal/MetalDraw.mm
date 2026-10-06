@@ -199,6 +199,8 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         throw std::invalid_argument("Metal mesh arguments require an indexed mesh draw");
     }
     const auto primitive = meshPath || rectPath ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
+    const bool nativeStrip = !meshPath && !rectPath && (primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip);
+    const bool nativeRestart = nativeStrip && state.primitiveRestart;
     std::uint32_t meshGroups = 0;
     if (meshPath) {
         const auto& mesh = *state.stages.mesh;
@@ -324,6 +326,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     MetalBufferBinding indexBuffer;
     std::uint32_t nativeIndexSize = draw.indexSize;
     std::uint32_t maxIndex = 0;
+    bool noVertexIndices = false;
     if (draw.indexed) {
         std::uint32_t minIndex = std::numeric_limits<std::uint32_t>::max();
         if ((draw.indexSize != 2 && draw.indexSize != 4) || draw.indexAddress % draw.indexSize != 0) {
@@ -333,18 +336,23 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         if (bytes > std::numeric_limits<std::size_t>::max()) throw std::invalid_argument("Metal draw index byte count overflows");
         indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
         const auto* data = static_cast<const std::byte*>(indexBuffer.buffer.contents) + indexBuffer.offset;
+        const auto restartIndex = draw.indexSize == 2 ? 0xffffu : 0xffffffffu;
+        bool hasVertexIndex = false;
         for (std::uint32_t i = 0; i < draw.indexCount; ++i) {
             std::uint32_t index = 0;
             if (draw.indexSize == 2) { std::uint16_t value; std::memcpy(&value, data + std::size_t{i} * 2u, 2); index = value; }
             else std::memcpy(&index, data + std::size_t{i} * 4u, 4);
+            if (nativeRestart && index == restartIndex) continue;
+            hasVertexIndex = true;
             minIndex = std::min(minIndex, index);
             maxIndex = std::max(maxIndex, index);
         }
-        if (!meshPath && (primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip) &&
+        noVertexIndices = !hasVertexIndex;
+        if (nativeStrip && !nativeRestart &&
             maxIndex == std::numeric_limits<std::uint32_t>::max()) {
             throw std::invalid_argument("Metal draw cannot represent the guest UINT32_MAX vertex index without native primitive restart");
         }
-        if (!meshPath && (primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip) &&
+        if (nativeStrip && !nativeRestart &&
             draw.indexSize == 2 && maxIndex == std::numeric_limits<std::uint16_t>::max()) {
             id<MTLBuffer> promoted = backend.Buffer(std::size_t{draw.indexCount} * sizeof(std::uint32_t));
             auto* destination = static_cast<std::uint32_t*>(promoted.contents);
@@ -360,13 +368,15 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             maxIndex == (draw.indexSize == 2 ? 0xffffu : 0xffffffffu)) {
             throw std::invalid_argument("Metal triangle fan geometry draw primitive restart is unsupported");
         }
-        const std::int64_t baseVertex = meshPath ? std::int64_t{draw.firstVertex} : std::bit_cast<std::int32_t>(draw.firstVertex);
-        const auto firstIndex = std::int64_t{minIndex} + baseVertex;
-        const auto lastIndex = std::int64_t{maxIndex} + baseVertex;
-        if (firstIndex < 0 || lastIndex > std::numeric_limits<std::uint32_t>::max()) {
-            throw std::invalid_argument("Metal draw base vertex overflows guest invocation index");
+        if (!noVertexIndices) {
+            const std::int64_t baseVertex = meshPath ? std::int64_t{draw.firstVertex} : std::bit_cast<std::int32_t>(draw.firstVertex);
+            const auto firstIndex = std::int64_t{minIndex} + baseVertex;
+            const auto lastIndex = std::int64_t{maxIndex} + baseVertex;
+            if (firstIndex < 0 || lastIndex > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("Metal draw base vertex overflows guest invocation index");
+            }
+            maxIndex = static_cast<std::uint32_t>(lastIndex);
         }
-        maxIndex = static_cast<std::uint32_t>(lastIndex);
     } else {
         if (draw.indexAddress != 0 || draw.indexSize != 0 || draw.firstVertex > std::numeric_limits<std::uint32_t>::max() - (draw.indexCount - 1u)) {
             throw std::invalid_argument("Metal draw auto-index parameters are invalid");
@@ -383,10 +393,13 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         const auto& attribute = attributes[i];
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (std::uint64_t{fields[1] & 0xffffu} << 32u);
-        auto buffer = resources.Buffer(address, Graphics::VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance));
-        const auto adjustment = buffer.offset % 4;
-        buffer.offset -= adjustment;
-        vertexBuffers.push_back(buffer);
+        std::size_t adjustment = 0;
+        if (!noVertexIndices) {
+            auto buffer = resources.Buffer(address, Graphics::VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance));
+            adjustment = buffer.offset % 4;
+            buffer.offset -= adjustment;
+            vertexBuffers.push_back(buffer);
+        }
         auto nativeAttribute = vertexDescriptor.attributes[attribute.location];
         nativeAttribute.format = vertexFormat(layout.attributes[i].format);
         nativeAttribute.bufferIndex = i;
@@ -518,6 +531,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         residency = meshResidency;
     }
     auto depthStencilState = CreateDepthStencilState(backend.Device(), state);
+    if (noVertexIndices) return {};
     if (sampleCounter != nil) {
         std::memset(static_cast<std::byte*>(sampleCounter.contents) + 16, 0, 8);
         renderPass.visibilityResultBuffer = sampleCounter;

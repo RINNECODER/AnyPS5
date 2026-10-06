@@ -151,7 +151,7 @@ void validateTexture(id<MTLTexture> texture, const ShaderRecompiler::DescriptorB
         bool matches = false;
         switch (*descriptor.imageShape) {
         case ShaderRecompiler::DescriptorImageShape::Image1D:
-            matches = texture.textureType == MTLTextureType1D;
+            matches = texture.textureType == MTLTextureType2D && texture.height == 1;
             break;
         case ShaderRecompiler::DescriptorImageShape::Image2D:
             matches = texture.textureType == MTLTextureType2D;

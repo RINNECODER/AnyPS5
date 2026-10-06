@@ -625,7 +625,7 @@ void setRawWords(RdnaInstruction& instruction, std::span<const std::uint32_t> co
 void requireTwoWords(std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t programCounter, const char* reason) {
     const std::size_t index = wordIndex;
     if (index >= code.size() || code.size() - index < 2u) {
-        throw std::runtime_error(reason);
+        throw std::out_of_range(reason);
     }
     if (programCounter % 4u != 0u || programCounter > std::numeric_limits<std::uint32_t>::max() - 7u) {
         throw std::runtime_error("invalid memory instruction program counter");

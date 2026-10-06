@@ -26,6 +26,31 @@ public:
     InterfaceLayout OutputLayout() const { return Layout(stage_out_var_id); }
 
 protected:
+    std::string to_function_args(const TextureFunctionArguments& args, bool* forward) override {
+        if (args.base.imgtype->image.dim != spv::Dim1D || (!args.grad_x && !args.grad_y))
+            return CompilerMSL::to_function_args(args, forward);
+        auto expanded = args;
+        const auto expandGradient = [&](std::uint32_t gradient) {
+            if (gradient == 0) return 0u;
+            const auto& scalar = expression_type(gradient);
+            if ((scalar.basetype != spirv_cross::SPIRType::Float && scalar.basetype != spirv_cross::SPIRType::Half) ||
+                scalar.vecsize != 1 || scalar.columns != 1 || !scalar.array.empty())
+                Fail("logical 1D texture derivatives require scalar floating-point gradients");
+            const auto ids = ir.increase_bound_by(2);
+            auto& vector = set<spirv_cross::SPIRType>(ids, spirv_cross::SPIRType{spv::OpTypeVector});
+            vector.basetype = spirv_cross::SPIRType::Float;
+            vector.width = 32;
+            vector.vecsize = 2;
+            vector.columns = 1;
+            emit_op(ids, ids + 1, "float2(" + to_unpacked_expression(gradient) + ", 0.0)", should_forward(gradient));
+            inherit_expression_dependencies(ids + 1, gradient);
+            return ids + 1;
+        };
+        expanded.grad_x = expandGradient(args.grad_x);
+        expanded.grad_y = expandGradient(args.grad_y);
+        return CompilerMSL::to_function_args(expanded, forward);
+    }
+
     void emit_function_prototype(spirv_cross::SPIRFunction& function,
                                  const spirv_cross::Bitset& flags) override {
         CompilerMSL::emit_function_prototype(function, flags);
@@ -277,6 +302,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     options.msl_version = target.mslVersion;
     options.buffer_size_buffer_index = target.bufferSizesBuffer;
     options.texture_buffer_native = true;
+    options.texture_1D_as_2D = true;
     options.argument_buffers = false;
     if (rectangle) {
         options.vertex_for_tessellation = capture;

@@ -18,6 +18,7 @@
 #include <iostream>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -205,7 +206,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     constexpr std::uint64_t GraphicsCommandAddress = 0xa00000, ComputeCommandAddress = 0xa10000,
         SecondCommandAddress = 0xa20000, IndirectAddress = 0xa30000, PacketAddress = 0xb00000,
         IndirectDrawCommandAddress = 0xa40000, ArgumentAddress = 0xc00000, QueryAllocation = 0xd00000;
-    std::array<std::array<float, 4>, 6> vertices;
+    std::vector<std::array<float, 4>> vertices(65536);
     std::copy(Triangle.begin(), Triangle.end(), vertices.begin());
     std::fill(vertices.begin() + 3, vertices.end(), std::array<float, 4>{8, 8, 0.5f, 1});
     const auto originalVertices = vertices;
@@ -277,6 +278,11 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     std::array<std::uint64_t, 36> queries;
     queries.fill(QueryGuard);
     auto expectedQueries = queries;
+    constexpr std::uint64_t Restart16Address = 0xe00000, Restart32Address = 0xe10000, VertexCounterAddress = 0xe20004;
+    std::array<std::uint16_t, 11> restart16{0xffff, 0, 1, 2, 3, 0xffff, 4, 5, 6, 7, 0xffff};
+    std::array<std::uint32_t, 11> restart32{0xffffffff, 0, 1, 2, 3, 0xffffffff, 4, 5, 6, 7, 0xffffffff};
+    std::array<std::uint32_t, 3> vertexCounter{0xcafef00d, 0, 0xdeadbeef};
+    std::uint64_t finalSamples = 384;
     std::array<::Packet, 4> packets{{
         {reinterpret_cast<std::uint32_t*>(GraphicsCommandAddress), static_cast<std::uint32_t>(graphics.size()), 0, {}},
         {reinterpret_cast<std::uint32_t*>(ComputeCommandAddress), static_cast<std::uint32_t>(compute.size()), 0, {}},
@@ -300,7 +306,10 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         {IndirectDrawCommandAddress, std::as_writable_bytes(std::span(indirectCommands)), false},
         {ArgumentAddress, std::as_writable_bytes(std::span(arguments)), false},
         {IndexAddress, std::as_writable_bytes(std::span(indices)), false},
-        {QueryAllocation, std::as_writable_bytes(std::span(queries)), true}};
+        {QueryAllocation, std::as_writable_bytes(std::span(queries)), true},
+        {Restart16Address, std::as_writable_bytes(std::span(restart16)), false},
+        {Restart32Address, std::as_writable_bytes(std::span(restart32)), false},
+        {VertexCounterAddress - 4, std::as_writable_bytes(std::span(vertexCounter)), true}};
     const auto checkPixels = [&](bool masked) {
         for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
             auto expected = std::byte{0x7b};
@@ -500,6 +509,100 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     checkQueryPixels(true);
     checkQueries(0, 384, "Masked guest fragment discard contributes128 visible samples");
     std::cout << "Actual public EVENT_WRITE samples: activation, hardware256+128 cumulative total, repeated dumps and16 sparse ready slots with neighbor guards passed\n";
+    const std::array<std::uint32_t, 9> writingVertex{
+        0xe0382000, 0x80020005, 0xbf8c3f70, 0x7e100281, 0xe0c80000,
+        0x80030800, 0xf80008cf, 0x03020100, 0xbf810000};
+    vertexCode = writingVertex;
+    vertexHeader = makeHeader(0x700000, 0x500000, sizeof(writingVertex), 2);
+    std::copy(FullPixelCode.begin(), FullPixelCode.end(), fragmentCode.begin());
+    fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(FullPixelCode), 1);
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x700000));
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+    const auto effectSetup = [&](std::uint32_t primitive, bool restart, bool cullBoth) {
+        auto words = GraphicsCommands();
+        const auto reg = [&](std::uint32_t bank, std::uint32_t offset, std::uint32_t value) {
+            RegisterPacket(words, bank, offset, std::span(&value, 1));
+        };
+        reg(0x79, 0x242, primitive);
+        reg(0x79, 0x24a, 0);
+        reg(0x79, 0x24b, restart ? 1 : 0);
+        reg(0x69, 0x103, 0xffffffff);
+        reg(0x69, 0x205, cullBoth ? 0x243 : 0x240);
+        reg(0x76, 0x8b, 16);
+        const std::array<std::uint32_t, 8> users{
+            static_cast<std::uint32_t>(VertexAddress), 16u << 16u, 65536, 0x01016fac,
+            static_cast<std::uint32_t>(VertexCounterAddress), 0, 4, 0x31016fac};
+        RegisterPacket(words, 0x76, 0x8c, users);
+        append(words, 0x2f, {1});
+        return words;
+    };
+    const auto checkEffects = [&](const std::vector<std::uint32_t>& words, std::optional<std::uint32_t> writes,
+                                  std::uint64_t samples, std::uint32_t shape, const std::string& name) {
+        vertexCounter[1] = 0;
+        std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+        const auto savedVertices = vertices;
+        const auto savedRestart16 = restart16;
+        const auto savedRestart32 = restart32;
+        auto commandsWithDump = words;
+        const auto queryDump = dump(0);
+        commandsWithDump.insert(commandsWithDump.end(), queryDump.begin(), queryDump.end());
+        querySubmit(commandsWithDump);
+        for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
+            auto expected = std::byte{0x7b};
+            if (offset >= 256 && offset < 256 + Width * Height * 4) {
+                const auto pixel = (offset - 256) / 4;
+                const auto x = pixel % Width, y = pixel / Width;
+                const bool covered = shape == 1 ? y >= 8 && y < 24 &&
+                    ((x >= 8 && x < 24) || (x >= 40 && x < 56)) :
+                    shape == 2 ? y == 16 && x >= 8 && x < 24 : false;
+                expected = covered ? std::byte{255} : std::byte{0x40};
+            }
+            Require(pixels[offset] == expected, name + " produced wrong target byte " + std::to_string(offset));
+        }
+        Require(!writes || vertexCounter[1] == *writes, name + " produced wrong actual VS atomic write count: observed " +
+            std::to_string(vertexCounter[1]) + ", expected " + std::to_string(writes.value_or(0)));
+        Require(vertexCounter[0] == 0xcafef00d && vertexCounter[2] == 0xdeadbeef &&
+            vertices == savedVertices && restart16 == savedRestart16 && restart32 == savedRestart32,
+            name + " modified borrowed vertex/index inputs or counter guards");
+        finalSamples += samples;
+        checkQueries(0, finalSamples, name);
+        std::cout << name << " passed\n";
+    };
+    const std::array<std::array<float, 4>, 8> stripVertices{{{-.75f, -.5f, .5f, 1}, {-.25f, -.5f, .5f, 1},
+        {-.75f, .5f, .5f, 1}, {-.25f, .5f, .5f, 1},
+        {.25f, -.5f, .5f, 1}, {.75f, -.5f, .5f, 1},
+        {.25f, .5f, .5f, 1}, {.75f, .5f, .5f, 1}}};
+    std::copy(stripVertices.begin(), stripVertices.end(), vertices.begin());
+    vertices[65535] = {0, 0, .5f, 1};
+    for (const auto indexSize : {2u, 4u}) {
+        auto words = effectSetup(6, true, false);
+        append(words, 0x2a, {indexSize == 2 ? 0u : 1u});
+        append(words, 0x27, {11, static_cast<std::uint32_t>(indexSize == 2 ? Restart16Address : Restart32Address), 0, 11, 0});
+        checkEffects(words, std::nullopt, 512, 1, "Public restarted triangle strips UInt" + std::to_string(indexSize * 8) +
+            ": leading/internal/trailing markers and disconnected pixel regions");
+    }
+    restart32.fill(0xffffffff);
+    auto markers = effectSetup(6, true, false);
+    append(markers, 0x2a, {1});
+    append(markers, 0x27, {11, static_cast<std::uint32_t>(Restart32Address), 0, 11, 0});
+    checkEffects(markers, 0, 0, 0, "Public all-marker strip preserves VS writes, pixels and sample total");
+    vertices = originalVertices;
+    auto emptyScissor = effectSetup(4, false, false);
+    const std::uint32_t emptyEdge = 0;
+    RegisterPacket(emptyScissor, 0x69, 0x91, std::span(&emptyEdge, 1));
+    append(emptyScissor, 0x2f, {2});
+    append(emptyScissor, 0x2d, {6, 2});
+    checkEffects(emptyScissor, 12, 0, 0, "Public empty scissor retains twelve actual guest VS writes");
+    auto culledTriangles = effectSetup(4, false, true);
+    append(culledTriangles, 0x2f, {2});
+    append(culledTriangles, 0x2d, {6, 2});
+    checkEffects(culledTriangles, 12, 0, 0, "Public cullboth triangles retain twelve actual guest VS writes");
+    vertices[0] = {-.75f, -.03125f, .5f, 1};
+    vertices[1] = {-.25f, -.03125f, .5f, 1};
+    auto visibleLine = effectSetup(2, false, true);
+    append(visibleLine, 0x2d, {2, 2});
+    checkEffects(visibleLine, 2, 16, 2, "Public cullboth line retains visible pixels and two actual guest VS writes");
+    vertices = originalVertices;
     AgcDriverShutdown_nid_postfix();
     std::cout << "Actual public AGC Submit: shader registration snapshots, immutable flattened IB, cross-queue compute WAIT/conditional draw, completed EOP and persistent registers passed\n";
     output.fill(0xdeadbeef);
@@ -534,7 +637,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         packets[3].dw_num = static_cast<std::uint32_t>(firstDump.size());
         failureDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + 3 * sizeof(::Packet)), 0);
         failureDriver.WaitIdle();
-        checkQueries(0, 384, "Replacement native driver preserves process sample total");
+        checkQueries(0, finalSamples, "Replacement native driver preserves process sample total");
         failureDriver.RegisterShader(reinterpret_cast<const Shader*>(0x720000));
         failureDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
         bool entered;

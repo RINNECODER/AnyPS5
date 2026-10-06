@@ -79,6 +79,14 @@ add_test_executable(anyps5_metal_rect_replay RectReplay.mm)
 target_compile_options(anyps5_metal_rect_replay PRIVATE -fobjc-arc)
 target_link_libraries(anyps5_metal_rect_replay PRIVATE anyps5_metal_native_execution)
 
+add_test_executable(anyps5_metal_image_atomic_replay ImageAtomicReplay.mm)
+target_compile_options(anyps5_metal_image_atomic_replay PRIVATE -fobjc-arc)
+target_link_libraries(anyps5_metal_image_atomic_replay PRIVATE anyps5_metal_native_execution)
+
+add_test_executable(anyps5_metal_image_1d_replay Image1DReplay.mm)
+target_compile_options(anyps5_metal_image_1d_replay PRIVATE -fobjc-arc)
+target_link_libraries(anyps5_metal_image_1d_replay PRIVATE anyps5_metal_native_execution)
+
 find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
 add_test_executable(anyps5_metal_presentation_replay PresentationReplay.mm)
 target_compile_options(anyps5_metal_presentation_replay PRIVATE -fobjc-arc)
@@ -93,6 +101,7 @@ if(BUILD_TESTING)
     get_target_property(metalUtilityLibrary anyps5_metal_utilities ANYPS5_METALLIB)
     target_sources(metal_utility_tests PRIVATE
         "${agcDriverRoot}/tests/metal/TextureResource.mm"
+        "${agcDriverRoot}/tests/metal/TextureViews.mm"
         "${agcDriverRoot}/tests/metal/SamplerResource.mm"
         "${agcDriverRoot}/tests/metal/DepthResource.mm"
     )
@@ -103,6 +112,10 @@ if(BUILD_TESTING)
     set_tests_properties(anyps5_metal_mesh_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_rect_replay COMMAND anyps5_metal_rect_replay "${metalUtilityLibrary}")
     set_tests_properties(anyps5_metal_rect_replay PROPERTIES TIMEOUT 120)
+    add_test(NAME anyps5_metal_image_atomic_replay COMMAND anyps5_metal_image_atomic_replay "${metalUtilityLibrary}")
+    set_tests_properties(anyps5_metal_image_atomic_replay PROPERTIES TIMEOUT 120)
+    add_test(NAME anyps5_metal_image_1d_replay COMMAND anyps5_metal_image_1d_replay "${metalUtilityLibrary}")
+    set_tests_properties(anyps5_metal_image_1d_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_presentation_replay COMMAND anyps5_metal_presentation_replay "${metalUtilityLibrary}")
     set_tests_properties(anyps5_metal_presentation_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_pm4_compute_replay COMMAND anyps5_metal_pm4_compute_replay)
