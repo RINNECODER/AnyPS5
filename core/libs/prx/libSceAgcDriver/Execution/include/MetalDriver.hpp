@@ -10,6 +10,11 @@
 
 namespace AgcDriver::Metal {
 
+struct ReadableGuestRange {
+    std::uint64_t address;
+    std::size_t bytes;
+};
+
 class MetalDriver {
 public:
     using EopInterrupt = std::function<void(std::uint32_t)>;
@@ -24,6 +29,7 @@ public:
     void ReplaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation);
     void MutateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation,
         std::function<void()> mutateCpu, std::shared_ptr<const void> previousOwner, std::shared_ptr<const void> nextOwner);
+    void WithValidatedReadableRanges(std::span<const ReadableGuestRange> ranges, const std::function<void()>& publish);
     void Submit(const Packet* packet, std::uint32_t queue);
     void WaitIdle();
     void Shutdown();
