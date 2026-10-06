@@ -16,7 +16,9 @@ BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_BINARY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 cp "$ROOT_DIR/Assets/AppIcon/MacPS.icns" "$APP_BUNDLE/Contents/Resources/MacPS.icns"
-BUILD_VERSION="$(date -u +%Y%m%d%H%M%S)"
+BUILD_COUNT="$(git rev-list --count HEAD)"
+BUILD_VERSION="$((BUILD_COUNT / 10000 + 1)).$((BUILD_COUNT / 100 % 100)).$((BUILD_COUNT % 100))"
+BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SOURCE_REVISION="$(git rev-parse --short HEAD)"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,6 +33,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>$BUILD_VERSION</string>
 <key>MacPSSourceRevision</key><string>$SOURCE_REVISION</string>
+<key>MacPSBuildTimestamp</key><string>$BUILD_TIMESTAMP</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
