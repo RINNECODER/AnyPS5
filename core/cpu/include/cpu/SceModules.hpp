@@ -68,13 +68,16 @@ public:
     SceLoadedImage& Main();
     std::span<const SceModuleRecord> Modules() const;
     std::shared_ptr<SceTls> Tls() const;
+    std::uint64_t EntryTerminationGate() const;
+    StopReason RunMain(std::uint64_t entryPhaseBudget = 100000000,
+                       std::uint64_t finalizerBudget = 1000000);
     void InitializeDependencies(std::uint64_t args = 0, std::uint64_t argp = 0,
                                 std::uint64_t param = 0, std::uint64_t instructionBudget = 1000000);
     void FinalizeDependencies(std::uint64_t args = 0, std::uint64_t argp = 0,
                               std::uint64_t param = 0, std::uint64_t instructionBudget = 1000000);
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl;
+    std::shared_ptr<Impl> impl;
 };
 
 }
