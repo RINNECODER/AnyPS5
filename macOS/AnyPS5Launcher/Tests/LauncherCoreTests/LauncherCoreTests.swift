@@ -312,8 +312,12 @@ final class LauncherCoreTests: XCTestCase {
             let sceGame = LocalGame(id: "sce-homebrew", title: "SCE Homebrew", executablePath: sceGuest,
                                     workingDirectory: URL(fileURLWithPath: sceGuest).deletingLastPathComponent().path)
             let inspection = try await EngineInspection.inspect(engine: engine, game: sceGame, capabilities: capabilities)
-            XCTAssertEqual(inspection.neededModules, ["libc"])
-            XCTAssertEqual(Set(inspection.imports.map(\.nid)), ["uMei1W9uyNo", "j4ViWNHEgww", "Ovb2dSJOAuE", "8zTFvBIAIN8", "Q3VBxCXhUHs", "+P6FRGH4LfA"])
+            XCTAssertEqual(Set(inspection.neededModules), ["libc", "libkernel"])
+            XCTAssertEqual(inspection.imports.count, 11)
+            XCTAssertEqual(Set(inspection.imports.filter { $0.module == "libc" && $0.library == "libc" }.map(\.nid)),
+                           ["uMei1W9uyNo", "j4ViWNHEgww", "Ovb2dSJOAuE", "8zTFvBIAIN8", "Q3VBxCXhUHs", "+P6FRGH4LfA"])
+            XCTAssertEqual(Set(inspection.imports.filter { $0.module == "libkernel" && $0.library == "libkernel" }.map(\.nid)),
+                           ["1G3lF1Gg1k8", "Cg4srZ6TKbU", "+r3rMFwItV4", "oib76F-12fk", "UK2Tl2DWUns"])
             XCTAssertFalse(inspection.hasTLS)
             XCTAssertTrue(inspection.unsupportedReasons.isEmpty)
         }
