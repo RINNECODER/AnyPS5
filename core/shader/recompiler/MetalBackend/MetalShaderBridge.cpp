@@ -22,6 +22,9 @@ public:
         meshFixupDepth = fixupDepth;
     }
 
+    InterfaceLayout InputLayout() const { return Layout(stage_in_var_id); }
+    InterfaceLayout OutputLayout() const { return Layout(stage_out_var_id); }
+
 protected:
     void emit_function_prototype(spirv_cross::SPIRFunction& function,
                                  const spirv_cross::Bitset& flags) override {
@@ -49,6 +52,61 @@ protected:
     }
 
 private:
+    InterfaceLayout Layout(std::uint32_t variable) const {
+        if (variable == 0) Fail("rectangle stage has no raw interface");
+        const auto& type = get_variable_data_type(get<spirv_cross::SPIRVariable>(variable));
+        if (type.basetype != spirv_cross::SPIRType::Struct || type.member_types.empty())
+            Fail("rectangle raw interface is not a structure");
+        InterfaceLayout result;
+        std::uint64_t offset = 0;
+        std::uint32_t positionCount = 0;
+        std::vector<std::uint32_t> locations;
+        for (std::uint32_t i = 0; i < type.member_types.size(); ++i) {
+            const auto& memberType = get_type(type.member_types[i]);
+            if ((memberType.basetype != spirv_cross::SPIRType::Float &&
+                 memberType.basetype != spirv_cross::SPIRType::UInt &&
+                 memberType.basetype != spirv_cross::SPIRType::Int) ||
+                memberType.width != 32 || memberType.columns != 1 || memberType.vecsize != 4 ||
+                !memberType.array.empty())
+                Fail("rectangle interface requires the original 32-bit four-component fields");
+            const auto alignment = get_declared_struct_member_alignment_msl(type, i);
+            const auto bytes = get_declared_struct_member_size_msl(type, i);
+            if (alignment == 0 || alignment > std::numeric_limits<std::uint32_t>::max() ||
+                bytes == 0 || bytes > std::numeric_limits<std::uint32_t>::max())
+                Fail("invalid rectangle interface field packing");
+            offset = (offset + alignment - 1) / alignment * alignment;
+            if (offset > std::numeric_limits<std::uint32_t>::max() - bytes)
+                Fail("rectangle interface size overflow");
+            InterfaceMember member;
+            if (has_member_decoration(type.self, i, spv::DecorationBuiltIn))
+                member.builtin = get_member_decoration(type.self, i, spv::DecorationBuiltIn);
+            else if (has_member_decoration(type.self, i, spv::DecorationLocation))
+                member.location = get_member_decoration(type.self, i, spv::DecorationLocation);
+            if (member.location.has_value() == member.builtin.has_value() ||
+                (member.builtin && *member.builtin != spv::BuiltInPosition))
+                Fail("rectangle interface field lacks an original location or position semantic");
+            if (member.builtin && (++positionCount != 1 || memberType.basetype != spirv_cross::SPIRType::Float))
+                Fail("rectangle interface requires one float4 position field");
+            if (member.location) {
+                if (*member.location >= 32 || std::find(locations.begin(), locations.end(), *member.location) != locations.end())
+                    Fail("invalid or duplicate rectangle interface location");
+                locations.push_back(*member.location);
+            }
+            member.components = memberType.vecsize;
+            member.width = memberType.width;
+            member.offset = static_cast<std::uint32_t>(offset);
+            member.bytes = static_cast<std::uint32_t>(bytes);
+            result.members.push_back(member);
+            result.alignment = std::max(result.alignment, static_cast<std::uint32_t>(alignment));
+            offset += bytes;
+        }
+        offset = (offset + result.alignment - 1) / result.alignment * result.alignment;
+        if (offset > std::numeric_limits<std::uint32_t>::max()) Fail("rectangle interface stride overflow");
+        result.stride = static_cast<std::uint32_t>(offset);
+        if (positionCount != 1) Fail("rectangle interface has no position field");
+        return result;
+    }
+
     std::uint32_t meshPosition = 0;
     std::uint32_t meshVertices = 0;
     bool meshFlipY = false;
@@ -71,12 +129,38 @@ std::uint32_t DescriptorCount(const spirv_cross::CompilerMSL& compiler,
 }
 
 Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
+    switch (target.rectListMode) {
+    case RectListMode::None:
+    case RectListMode::VertexCapture:
+    case RectListMode::Control:
+    case RectListMode::Evaluation: break;
+    default: Fail("invalid rectangle execution mode");
+    }
+    const bool capture = target.rectListMode == RectListMode::VertexCapture;
+    const bool control = target.rectListMode == RectListMode::Control;
+    const bool evaluation = target.rectListMode == RectListMode::Evaluation;
+    const bool rectangle = target.rectListMode != RectListMode::None;
+    if ((capture && stage != ShaderStage::Vertex) ||
+        (control && stage != ShaderStage::TessellationControl) ||
+        (evaluation && stage != ShaderStage::TessellationEvaluation))
+        Fail("rectangle execution mode does not match the guest stage");
+    if ((control || evaluation) != target.rectListInputLayout.has_value())
+        Fail("rectangle control and evaluation require an upstream raw interface layout");
+    if ((target.rectListIndexSize != 0 && !capture) ||
+        (capture && target.rectListIndexSize != 0 && target.rectListIndexSize != 2 && target.rectListIndexSize != 4))
+        Fail("rectangle vertex capture requires an explicit 16-bit, 32-bit, or absent index contract");
     spv::ExecutionModel execution;
     switch (stage) {
     case ShaderStage::Compute: execution = spv::ExecutionModelGLCompute; break;
     case ShaderStage::Vertex: execution = spv::ExecutionModelVertex; break;
     case ShaderStage::Fragment: execution = spv::ExecutionModelFragment; break;
     case ShaderStage::Mesh: execution = spv::ExecutionModelMeshEXT; break;
+    case ShaderStage::TessellationControl:
+        if (!control) Fail("guest tessellation control requires unimplemented native Metal scheduling");
+        execution = spv::ExecutionModelTessellationControl; break;
+    case ShaderStage::TessellationEvaluation:
+        if (!evaluation) Fail("guest tessellation evaluation requires unimplemented native Metal scheduling");
+        execution = spv::ExecutionModelTessellationEvaluation; break;
     default: Fail("stage requires unimplemented native Metal scheduling");
     }
     if (guest.spirv.empty()) Fail("empty SPIR-V module");
@@ -109,8 +193,25 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
 
     Result result;
     result.stage = stage;
+    result.nativeExecutionKind = stage == ShaderStage::Mesh ? NativeExecutionKind::Mesh :
+        stage == ShaderStage::Fragment ? NativeExecutionKind::Fragment :
+        evaluation || (stage == ShaderStage::Vertex && !capture) ? NativeExecutionKind::Vertex : NativeExecutionKind::Compute;
     result.vertexBufferCount = vertexBufferCount;
     result.guest = guest;
+    if (rectangle) {
+        result.rectList = RectListInfo{target.rectListMode};
+        result.rectList->indexSize = target.rectListIndexSize;
+        if (control && compiler.get_execution_mode_argument(spv::ExecutionModeOutputVertices) != 4)
+            Fail("generated rectangle control requires exactly four output control points");
+        if (evaluation) {
+            const auto& modes = compiler.get_execution_mode_bitset();
+            if (!modes.get(spv::ExecutionModeQuads) || !modes.get(spv::ExecutionModeSpacingEqual) ||
+                !modes.get(spv::ExecutionModeVertexOrderCw) || modes.get(spv::ExecutionModeTriangles) ||
+                modes.get(spv::ExecutionModeIsolines) || modes.get(spv::ExecutionModePointMode))
+                Fail("generated rectangle evaluation requires equal-spaced clockwise quad patches");
+            compiler.set_execution_mode(spv::ExecutionModeOutputVertices, 4);
+        }
+    }
     if (stage == ShaderStage::Mesh) {
         for (std::uint32_t i = 0; i < 3; ++i)
             result.threadsPerThreadgroup[i] = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, i);
@@ -152,12 +253,24 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     if (result.requiresGpuAddresses && !target.supportsGpuAddresses) Fail("target lacks GPU-address support");
     if (result.requiresSimdGroups && !target.supportsSimdGroups) Fail("target lacks SIMD-group support");
     if (guest.bdaAbiVersion != 0) {
-        if (guest.bdaAbiVersion != BdaAbi::Version || !result.requiresGpuAddresses)
+        const bool generatedFault = control && guest.bdaAbiVersion == BdaAbi::Version &&
+            !result.requiresGpuAddresses && guest.bindings.size() == 1 &&
+            guest.bindings[0].kind == DescriptorKind::StorageBuffer &&
+            guest.bindings[0].role == DescriptorRole::FaultBuffer && guest.bindings[0].count == 1 &&
+            guest.bindings[0].descriptorSet == 0;
+        if (!generatedFault && (guest.bdaAbiVersion != BdaAbi::Version || !result.requiresGpuAddresses))
             Fail("incompatible BDA ABI or missing physical-address capability");
         for (const auto role : {DescriptorRole::BdaPagetable, DescriptorRole::FaultBuffer})
-            if (std::none_of(guest.bindings.begin(), guest.bindings.end(), [role](const auto& binding) { return binding.role == role; }))
+            if (!generatedFault && std::none_of(guest.bindings.begin(), guest.bindings.end(), [role](const auto& binding) { return binding.role == role; }))
                 Fail("BDA ABI requires page-table and fault-buffer descriptor metadata");
     }
+    if (control && (guest.bdaAbiVersion != BdaAbi::Version || result.requiresGpuAddresses ||
+        guest.bindings.size() != 1 || guest.bindings[0].kind != DescriptorKind::StorageBuffer ||
+        guest.bindings[0].role != DescriptorRole::FaultBuffer || guest.bindings[0].count != 1 ||
+        guest.bindings[0].descriptorSet != 0))
+        Fail("generated rectangle control requires the original fault-only descriptor ABI");
+    if (evaluation && (guest.bdaAbiVersion != 0 || !guest.bindings.empty()))
+        Fail("generated rectangle evaluation has no guest descriptors");
 
     auto options = compiler.get_msl_options();
     options.platform = spirv_cross::CompilerMSL::Options::macOS;
@@ -165,12 +278,86 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     options.buffer_size_buffer_index = target.bufferSizesBuffer;
     options.texture_buffer_native = true;
     options.argument_buffers = false;
+    if (rectangle) {
+        options.vertex_for_tessellation = capture;
+        options.multi_patch_workgroup = control;
+        options.raw_buffer_tese_input = evaluation;
+        options.vertex_index_type = target.rectListIndexSize == 2 ? spirv_cross::CompilerMSL::Options::IndexType::UInt16 :
+            target.rectListIndexSize == 4 ? spirv_cross::CompilerMSL::Options::IndexType::UInt32 : spirv_cross::CompilerMSL::Options::IndexType::None;
+        options.shader_output_buffer_index = target.rectListBuffers.output;
+        options.shader_input_buffer_index = target.rectListBuffers.input;
+        options.shader_tess_factor_buffer_index = target.rectListBuffers.factors;
+        options.indirect_params_buffer_index = target.rectListBuffers.indirect;
+        options.shader_index_buffer_index = target.rectListBuffers.indices;
+    }
     compiler.set_msl_options(options);
     auto common = compiler.get_common_options();
-    common.vertex.flip_vert_y = stage == ShaderStage::Vertex && target.flipVertexY;
-    common.vertex.fixup_clipspace = stage == ShaderStage::Vertex && target.fixupClipSpace;
+    common.vertex.flip_vert_y = (evaluation || (stage == ShaderStage::Vertex && !capture)) && target.flipVertexY;
+    common.vertex.fixup_clipspace = (evaluation || (stage == ShaderStage::Vertex && !capture)) && target.fixupClipSpace;
     compiler.set_common_options(common);
     const auto resources = compiler.get_shader_resources();
+    if (control || evaluation) {
+        const auto checkPosition = [&](const auto& reflected, std::uint32_t count) {
+            std::uint32_t positions = 0;
+            for (const auto& builtin : reflected) {
+                if (builtin.builtin != spv::BuiltInPosition) continue;
+                ++positions;
+                const auto& type = compiler.get_type(builtin.resource.type_id);
+                if (type.basetype != spirv_cross::SPIRType::Struct || type.member_types.size() != 1 ||
+                    (count ? type.array.size() != 1 || !type.array_size_literal[0] || type.array[0] != count : !type.array.empty()))
+                    Fail("generated rectangle position array differs from the original control-point contract");
+                const auto& position = compiler.get_type(type.member_types[0]);
+                if (!compiler.has_member_decoration(type.self, 0, spv::DecorationBuiltIn) ||
+                    compiler.get_member_decoration(type.self, 0, spv::DecorationBuiltIn) != spv::BuiltInPosition ||
+                    position.basetype != spirv_cross::SPIRType::Float || position.width != 32 ||
+                    position.vecsize != 4 || position.columns != 1 || !position.array.empty())
+                    Fail("generated rectangle position requires the original float4 interface block");
+            }
+            if (positions != 1) Fail("generated rectangle requires one position input and output");
+        };
+        const auto checkParameters = [&](const auto& reflected, std::uint32_t count) {
+            for (const auto& resource : reflected) {
+                const auto& type = compiler.get_type(resource.type_id);
+                if (!compiler.has_decoration(resource.id, spv::DecorationLocation) ||
+                    compiler.get_decoration(resource.id, spv::DecorationLocation) >= 32 ||
+                    type.basetype != spirv_cross::SPIRType::Float || type.width != 32 || type.vecsize != 4 || type.columns != 1 ||
+                    (count ? type.array.size() != 1 || !type.array_size_literal[0] || type.array[0] != count : !type.array.empty()))
+                    Fail("generated rectangle parameters differ from the original float4 control-point contract");
+            }
+        };
+        checkPosition(resources.builtin_inputs, control ? 3 : 4);
+        checkPosition(resources.builtin_outputs, control ? 4 : 0);
+        checkParameters(resources.stage_inputs, control ? 3 : 4);
+        checkParameters(resources.stage_outputs, control ? 4 : 0);
+    }
+    if (target.rectListInputLayout) {
+        const auto& layout = *target.rectListInputLayout;
+        if (layout.stride == 0 || layout.alignment != 16 || layout.stride % layout.alignment != 0 || layout.members.empty())
+            Fail("invalid upstream rectangle interface layout");
+        std::vector<std::uint32_t> locations;
+        std::uint32_t positionCount = 0;
+        std::uint32_t end = 0;
+        for (const auto& member : layout.members) {
+            if (member.components != 4 || member.width != 32 || member.bytes != 16 ||
+                member.offset != end || member.location.has_value() == member.builtin.has_value())
+                Fail("upstream rectangle interface differs from the original float4 layout");
+            if (member.location) {
+                if (*member.location >= 32 || std::find(locations.begin(), locations.end(), *member.location) != locations.end())
+                    Fail("invalid or duplicate rectangle interface location");
+                locations.push_back(*member.location);
+                spirv_cross::MSLShaderInterfaceVariable input{};
+                input.location = *member.location;
+                input.vecsize = member.components;
+                input.format = spirv_cross::MSL_SHADER_VARIABLE_FORMAT_ANY32;
+                compiler.add_msl_shader_input(input);
+            } else if (*member.builtin != spv::BuiltInPosition || ++positionCount != 1)
+                Fail("upstream rectangle interface requires one position field");
+            if (end > std::numeric_limits<std::uint32_t>::max() - member.bytes)
+                Fail("upstream rectangle interface size overflow");
+            end += member.bytes;
+        }
+        if (positionCount != 1 || end != layout.stride) Fail("upstream rectangle interface stride does not match its fields");
+    }
     if (stage == ShaderStage::Mesh) {
         std::uint32_t position = 0;
         for (const auto& output : resources.builtin_outputs) {
@@ -219,13 +406,28 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         Fail("combined images, subpass inputs, atomic counters, and acceleration structures are outside this compute slice");
     if (resources.push_constant_buffers.size() > 1) Fail("multiple push-constant blocks");
 
+    std::vector<std::uint32_t> reservedBuffers{target.pushConstantBuffer, target.bufferSizesBuffer};
+    const auto reserveImplicit = [&](ImplicitBufferRole role, std::uint32_t index, std::uint32_t bytes) {
+        if (index >= target.maxBuffers || index < vertexBufferCount ||
+            std::find(reservedBuffers.begin(), reservedBuffers.end(), index) != reservedBuffers.end())
+            Fail("implicit rectangle buffer slot overlaps a reserved Metal slot");
+        reservedBuffers.push_back(index);
+        result.rectList->buffers.push_back({role, index, bytes});
+    };
+    if (capture || control) reserveImplicit(ImplicitBufferRole::StageOutput, target.rectListBuffers.output, 0);
+    if (control || evaluation) reserveImplicit(ImplicitBufferRole::StageInput, target.rectListBuffers.input, target.rectListInputLayout->stride);
+    if (control) {
+        reserveImplicit(ImplicitBufferRole::TessellationFactors, target.rectListBuffers.factors, 12);
+        reserveImplicit(ImplicitBufferRole::IndirectParameters, target.rectListBuffers.indirect, 8);
+    }
+    if (capture && target.rectListIndexSize) reserveImplicit(ImplicitBufferRole::Indices, target.rectListBuffers.indices, target.rectListIndexSize);
     std::uint32_t buffer = vertexBufferCount, texture = 0, sampler = 0;
     const auto allocateBuffer = [&](std::uint32_t count) {
-        while (buffer == target.pushConstantBuffer || buffer == target.bufferSizesBuffer) ++buffer;
+        while (std::find(reservedBuffers.begin(), reservedBuffers.end(), buffer) != reservedBuffers.end()) ++buffer;
         const auto first = buffer;
         if (count > target.maxBuffers || first > target.maxBuffers - count) Fail("buffer descriptors exceed native Metal slots");
         for (std::uint32_t i = first; i < first + count; ++i)
-            if (i == target.pushConstantBuffer || i == target.bufferSizesBuffer) Fail("descriptor array overlaps auxiliary Metal slots");
+            if (std::find(reservedBuffers.begin(), reservedBuffers.end(), i) != reservedBuffers.end()) Fail("descriptor array overlaps reserved Metal slots");
         buffer += count;
         return first;
     };
@@ -320,9 +522,33 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     }
     if (compiler.needs_buffer_size_buffer()) result.bufferSizesBuffer = target.bufferSizesBuffer;
     if (compiler.needs_swizzle_buffer() || compiler.needs_view_mask_buffer() || compiler.needs_depth_clip_state_buffer() ||
-        compiler.needs_dispatch_base_buffer() || compiler.needs_output_buffer() || compiler.needs_patch_output_buffer() ||
-        compiler.needs_input_threadgroup_mem())
+        compiler.needs_dispatch_base_buffer() || compiler.needs_patch_output_buffer() ||
+        (compiler.needs_output_buffer() != (capture || control)) ||
+        (compiler.needs_input_threadgroup_mem() && !control))
         Fail("unimplemented implicit Metal resource contract");
+    if (rectangle) {
+        if (control || evaluation) {
+            result.rectList->inputLayout = compiler.InputLayout();
+            const auto& actual = result.rectList->inputLayout;
+            const auto& expected = *target.rectListInputLayout;
+            if (actual.stride != expected.stride || actual.alignment != expected.alignment ||
+                actual.members.size() != expected.members.size())
+                Fail("rectangle raw input packing does not match the upstream output");
+            for (std::size_t i = 0; i < actual.members.size(); ++i) {
+                const auto& a = actual.members[i];
+                const auto& e = expected.members[i];
+                if (a.location != e.location || a.builtin != e.builtin || a.components != e.components ||
+                    a.width != e.width || a.offset != e.offset || a.bytes != e.bytes)
+                    Fail("rectangle raw input semantic packing does not match the upstream output");
+            }
+        }
+        if (capture || control) {
+            result.rectList->outputLayout = compiler.OutputLayout();
+            for (auto& implicit : result.rectList->buffers)
+                if (implicit.role == ImplicitBufferRole::StageOutput)
+                    implicit.elementBytes = result.rectList->outputLayout.stride;
+        }
+    }
     if (stage == ShaderStage::Compute) for (std::uint32_t i = 0; i < 3; ++i)
         result.threadsPerThreadgroup[i] = compiler.get_execution_mode_argument(spv::ExecutionModeLocalSize, i);
     if (stage == ShaderStage::Compute && std::any_of(result.threadsPerThreadgroup.begin(), result.threadsPerThreadgroup.end(), [](auto dimension) { return dimension == 0; }))

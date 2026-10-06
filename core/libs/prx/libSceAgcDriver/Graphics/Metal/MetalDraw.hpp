@@ -23,6 +23,7 @@ public:
     MetalDraw& operator=(const MetalDraw&) = delete;
     void DumpSamplesSynchronously(std::uint64_t guestAddress);
     [[nodiscard]] ShaderRecompiler::MeshTargetLimits MeshLimits() const;
+    [[nodiscard]] ShaderRecompiler::TessellationTargetLimits TessellationLimits() const;
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault DrawSynchronously(
         const Graphics::State& state, const Pm4::DrawParameters& draw,
         std::span<const Graphics::CompiledShader> shaders,

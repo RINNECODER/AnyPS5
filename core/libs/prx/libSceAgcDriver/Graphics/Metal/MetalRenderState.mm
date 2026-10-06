@@ -108,7 +108,7 @@ void ValidateDevice(const Graphics::State& state, id<MTLDevice> device) {
 void Validate(const Graphics::State& state) {
     const bool vertex = state.stages.path == Graphics::ShaderPath::Vertex && !state.stages.mesh;
     const bool mesh = state.stages.path == Graphics::ShaderPath::Geometry && state.stages.mesh.has_value();
-    Require((vertex || mesh) && !state.stages.tessellation && !state.rectList,
+    Require((vertex || mesh) && !state.stages.tessellation && (!state.rectList || vertex),
             "graphics path requires unimplemented native scheduling");
     Require(!state.primitiveRestart, "primitive restart scheduling is not implemented");
     if (state.depthBoundsTest) {
@@ -155,7 +155,7 @@ void Validate(const Graphics::State& state) {
                 "a depth format cannot be used as a color attachment");
     }
     Require(state.blends.size() == blendCount, "blend attachment count differs from sparse color exports");
-    if (vertex) (void)PrimitiveType(state);
+    if (vertex && !state.rectList) (void)PrimitiveType(state);
 }
 
 void ConfigureAttachments(MTLRenderPipelineColorAttachmentDescriptorArray* attachments, const Graphics::State& state) {
@@ -237,7 +237,18 @@ void ConfigureRenderPipelineDescriptor(MTLRenderPipelineDescriptor* descriptor, 
     Validate(state);
     ConfigureAttachments(descriptor.colorAttachments, state);
     descriptor.rasterSampleCount = 1;
-    const auto primitive = PrimitiveType(state);
+    const auto primitive = state.rectList ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
+    if (state.rectList) {
+        Require(state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST, "rectangle pipeline requires the original patch topology");
+        descriptor.vertexDescriptor = nil;
+        descriptor.tessellationPartitionMode = MTLTessellationPartitionModePow2;
+        descriptor.maxTessellationFactor = 64;
+        descriptor.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        descriptor.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+        descriptor.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+        descriptor.tessellationFactorScaleEnabled = NO;
+        descriptor.tessellationOutputWindingOrder = MTLWindingClockwise;
+    }
     descriptor.inputPrimitiveTopology = primitive == MTLPrimitiveTypePoint ? MTLPrimitiveTopologyClassPoint :
         primitive == MTLPrimitiveTypeLine || primitive == MTLPrimitiveTypeLineStrip ? MTLPrimitiveTopologyClassLine : MTLPrimitiveTopologyClassTriangle;
     descriptor.depthAttachmentPixelFormat = state.depth ? RenderPixelFormat(state.depth->format) : MTLPixelFormatInvalid;

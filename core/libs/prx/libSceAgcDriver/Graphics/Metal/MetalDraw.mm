@@ -29,6 +29,14 @@ std::uint64_t sampleTotal(id<MTLBuffer> counter) {
     return total;
 }
 
+std::uint32_t rectSlot(const MetalBackend::Result& shader, MetalBackend::ImplicitBufferRole role) {
+    if (!shader.rectList) throw std::invalid_argument("Metal rectangle stage lacks an intermediate ABI");
+    const auto& buffers = shader.rectList->buffers;
+    const auto found = std::find_if(buffers.begin(), buffers.end(), [&](const auto& buffer) { return buffer.role == role; });
+    if (found == buffers.end()) throw std::invalid_argument("Metal rectangle intermediate binding is absent");
+    return found->index;
+}
+
 MTLVertexFormat vertexFormat(VkFormat format) {
     switch (format) {
     case VK_FORMAT_R8_UNORM: return MTLVertexFormatUCharNormalized;
@@ -137,6 +145,10 @@ MeshTargetLimits MetalDraw::MeshLimits() const {
         256, 512, 128, 16384, 1, 1};
 }
 
+TessellationTargetLimits MetalDraw::TessellationLimits() const {
+    return {32, 128, 128, 120, 4096, 128, 128};
+}
+
 void MetalDraw::DumpSamplesSynchronously(std::uint64_t guestAddress) {
     std::lock_guard lock(drawMutex);
     constexpr std::size_t targetBytes = 15 * 16 + 8;
@@ -179,10 +191,14 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         throw std::invalid_argument("Metal draw instance range overflows guest invocation index");
     }
     const bool meshPath = state.stages.mesh.has_value();
+    const bool rectPath = state.rectList;
+    if (rectPath && (meshPath || draw.indexCount % 3 != 0)) {
+        throw std::invalid_argument("Metal rectangle draw requires complete three-vertex primitives");
+    }
     if (meshArguments && (!meshPath || !draw.indexed)) {
         throw std::invalid_argument("Metal mesh arguments require an indexed mesh draw");
     }
-    const auto primitive = meshPath ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
+    const auto primitive = meshPath || rectPath ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
     std::uint32_t meshGroups = 0;
     if (meshPath) {
         const auto& mesh = *state.stages.mesh;
@@ -200,13 +216,18 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     }
     const Graphics::CompiledShader* vertex = nullptr;
     const Graphics::CompiledShader* fragment = nullptr;
+    const Graphics::CompiledShader* control = nullptr;
+    const Graphics::CompiledShader* evaluation = nullptr;
     for (const auto& shader : shaders) {
         if (shader.program == nullptr) throw std::invalid_argument("Metal draw compiled shader is missing");
         if (shader.stage == (meshPath ? ShaderStage::Mesh : ShaderStage::Vertex) && vertex == nullptr) vertex = &shader;
         else if (shader.stage == ShaderStage::Fragment && fragment == nullptr) fragment = &shader;
+        else if (rectPath && shader.stage == ShaderStage::TessellationControl && control == nullptr) control = &shader;
+        else if (rectPath && shader.stage == ShaderStage::TessellationEvaluation && evaluation == nullptr) evaluation = &shader;
         else throw std::invalid_argument("Metal draw requires one rasterization and one fragment program");
     }
     if (vertex == nullptr || fragment == nullptr) throw std::invalid_argument("Metal draw vertex or fragment program is missing");
+    if (rectPath && (control == nullptr || evaluation == nullptr)) throw std::invalid_argument("Metal rectangle draw requires the original generated control and evaluation programs");
     auto pushConstants = Graphics::AssemblePushConstants(shaders);
     id<MTLBuffer> meshArgumentBuffer = nil;
     if (meshPath) {
@@ -376,7 +397,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             (attribute.fetchIndex == 0 ? MTLVertexStepFunctionPerVertex : MTLVertexStepFunctionPerInstance);
         nativeLayout.stepRate = layout.bindings[i].stride == 0 ? 0 : 1;
     }
-    pipelineDescriptor.vertexDescriptor = vertexDescriptor;
+    pipelineDescriptor.vertexDescriptor = rectPath ? nil : vertexDescriptor;
     MetalBackend::TargetOptions target;
     target.supportsInt64 = true;
     target.supportsGpuAddresses = true;
@@ -385,9 +406,63 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     target.pushConstantOffsetBytes = vertex->pushConstantOffset;
     target.flipVertexY = state.viewport.height > 0;
     target.fixupClipSpace = state.negativeOneToOne;
+    target.rectListMode = rectPath ? MetalBackend::RectListMode::VertexCapture : MetalBackend::RectListMode::None;
+    target.rectListIndexSize = rectPath && draw.indexed ? nativeIndexSize : 0;
     auto nativeVertex = MetalBackend::ConvertToMetal(*vertex->program, meshPath ? ShaderStage::Mesh : ShaderStage::Vertex, target);
+    std::unique_ptr<MetalRectKernelPipeline> capturePipeline;
+    std::unique_ptr<MetalRectKernelPipeline> controlPipeline;
+    id<MTLBuffer> rectCapture = nil;
+    id<MTLBuffer> rectOutput = nil;
+    id<MTLBuffer> rectFactors = nil;
+    id<MTLBuffer> rectParameters = nil;
+    std::uint32_t rectPatches = 0;
+    std::vector<MetalImplicitBufferBinding> evaluationBuffers;
+    if (rectPath) {
+        const auto patches = std::uint64_t{draw.indexCount / 3} * draw.instanceCount;
+        if (patches > std::numeric_limits<std::uint32_t>::max() / 4u) throw std::invalid_argument("Metal rectangle patch grid exceeds shader integer range");
+        rectPatches = static_cast<std::uint32_t>(patches);
+        auto inputs = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
+        inputs.indexType = nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+        inputs.indexBufferIndex = target.rectListBuffers.indices;
+        for (std::size_t i = 0; i < attributes.size(); ++i) {
+            auto input = inputs.attributes[attributes[i].location];
+            auto source = vertexDescriptor.attributes[attributes[i].location];
+            input.format = static_cast<MTLAttributeFormat>(source.format);
+            input.offset = source.offset;
+            input.bufferIndex = i;
+            auto inputLayout = inputs.layouts[i];
+            auto sourceLayout = vertexDescriptor.layouts[i];
+            inputLayout.stride = sourceLayout.stride;
+            inputLayout.stepRate = sourceLayout.stepRate;
+            inputLayout.stepFunction = sourceLayout.stepFunction == MTLVertexStepFunctionConstant ? MTLStepFunctionConstant :
+                attributes[i].fetchIndex == 0 ? (draw.indexed ? MTLStepFunctionThreadPositionInGridXIndexed : MTLStepFunctionThreadPositionInGridX) : MTLStepFunctionThreadPositionInGridY;
+        }
+        capturePipeline = std::make_unique<MetalRectKernelPipeline>(backend.Device(), std::move(nativeVertex), inputs);
+        const auto& captured = capturePipeline->Reflection();
+        target.vertexBufferCount = 0;
+        target.pushConstantOffsetBytes = control->pushConstantOffset;
+        target.rectListMode = MetalBackend::RectListMode::Control;
+        target.rectListIndexSize = 0;
+        target.rectListInputLayout = captured.rectList->outputLayout;
+        auto nativeControl = MetalBackend::ConvertToMetal(*control->program, ShaderStage::TessellationControl, target);
+        controlPipeline = std::make_unique<MetalRectKernelPipeline>(backend.Device(), std::move(nativeControl));
+        const auto& controlled = controlPipeline->Reflection();
+        rectCapture = backend.Buffer(std::uint64_t{rectPatches} * 3u * captured.rectList->outputLayout.stride);
+        rectOutput = backend.Buffer(std::uint64_t{rectPatches} * 4u * controlled.rectList->outputLayout.stride);
+        rectFactors = backend.Buffer(std::uint64_t{rectPatches} * sizeof(MTLQuadTessellationFactorsHalf));
+        rectParameters = backend.Buffer(2 * sizeof(std::uint32_t));
+        const std::array<std::uint32_t, 2> parameters{3, rectPatches};
+        std::memcpy(rectParameters.contents, parameters.data(), sizeof(parameters));
+        target.pushConstantOffsetBytes = evaluation->pushConstantOffset;
+        target.rectListMode = MetalBackend::RectListMode::Evaluation;
+        target.rectListInputLayout = controlled.rectList->outputLayout;
+        nativeVertex = MetalBackend::ConvertToMetal(*evaluation->program, ShaderStage::TessellationEvaluation, target);
+        evaluationBuffers.push_back({rectSlot(nativeVertex, MetalBackend::ImplicitBufferRole::StageInput), {rectOutput, 0, rectOutput.length}});
+    }
     target.vertexBufferCount = 0;
     target.pushConstantOffsetBytes = fragment->pushConstantOffset;
+    target.rectListMode = MetalBackend::RectListMode::None;
+    target.rectListInputLayout.reset();
     auto nativeFragment = MetalBackend::ConvertToMetal(*fragment->program, ShaderStage::Fragment, target);
     std::unique_ptr<MetalRenderPipeline> vertexPipeline;
     std::unique_ptr<MetalMeshPipeline> meshPipeline;
@@ -403,6 +478,38 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     const auto& fragmentReflection = meshPath ? meshPipeline->FragmentReflection() : vertexPipeline->FragmentReflection();
     auto vertexBindings = resources.Bindings(mainReflection);
     auto fragmentBindings = resources.Bindings(fragmentReflection);
+    if (rectPath) {
+        const auto& captured = capturePipeline->Reflection();
+        const auto& controlled = controlPipeline->Reflection();
+        const auto captureBindings = resources.Bindings(captured);
+        const auto controlBindings = resources.Bindings(controlled);
+        std::vector<MetalImplicitBufferBinding> captureBuffers{{rectSlot(captured, MetalBackend::ImplicitBufferRole::StageOutput), {rectCapture, 0, rectCapture.length}}};
+        if (draw.indexed) captureBuffers.push_back({rectSlot(captured, MetalBackend::ImplicitBufferRole::Indices), indexBuffer});
+        const std::array<MetalImplicitBufferBinding, 4> controlBuffers{{
+            {rectSlot(controlled, MetalBackend::ImplicitBufferRole::StageInput), {rectCapture, 0, rectCapture.length}},
+            {rectSlot(controlled, MetalBackend::ImplicitBufferRole::StageOutput), {rectOutput, 0, rectOutput.length}},
+            {rectSlot(controlled, MetalBackend::ImplicitBufferRole::TessellationFactors), {rectFactors, 0, rectFactors.length}},
+            {rectSlot(controlled, MetalBackend::ImplicitBufferRole::IndirectParameters), {rectParameters, 0, rectParameters.length}}}};
+        auto commands = backend.CommandBuffer();
+        capturePipeline->Encode(commands, captureBindings, MTLRegionMake3D(draw.firstVertex, draw.firstInstance, 0, draw.indexCount, draw.instanceCount, 1),
+            captureBuffers, vertexBuffers, pushBlock(captured, pushConstants), resources.Residency());
+        controlPipeline->Encode(commands, controlBindings, MTLRegionMake3D(0, 0, 0, std::uint64_t{rectPatches} * 4u, 1, 1),
+            controlBuffers, {}, pushBlock(controlled, pushConstants), resources.Residency());
+        backend.Wait(commands);
+        bool faultFound = false;
+        for (const auto& mapping : controlled.resources) {
+            if (mapping.role != DescriptorRole::FaultBuffer) continue;
+            const auto binding = std::find_if(controlBindings.begin(), controlBindings.end(), [&](const auto& resource) {
+                return resource.descriptorSet == mapping.descriptorSet && resource.binding == mapping.binding;
+            });
+            if (binding == controlBindings.end() || binding->buffers.size() != 1) throw std::runtime_error("Metal rectangle control fault binding is missing");
+            BdaAbi::Fault fault{};
+            std::memcpy(&fault, static_cast<const std::byte*>(binding->buffers[0].buffer.contents) + binding->buffers[0].offset, sizeof(fault));
+            faultFound = true;
+            if (fault.state != BdaAbi::FaultState::Empty) return resources.Complete(commands);
+        }
+        if (!faultFound) throw std::runtime_error("Metal rectangle control requires its original fault buffer");
+    }
     auto residency = resources.Residency();
     std::vector<id<MTLResource>> meshResidency;
     if (meshArgumentBuffer != nil) {
@@ -424,16 +531,19 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
                 pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency);
         } else {
             vertexPipeline->Bind(encoder, vertexBindings, fragmentBindings,
-                pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency);
+                pushBlock(mainReflection, pushConstants), pushBlock(fragmentReflection, pushConstants), residency, evaluationBuffers, rectPatches);
         }
         BindRenderState(encoder, state, depthStencilState);
         if (sampleCounter != nil) [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:16];
-        for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setVertexBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
+        if (!rectPath) for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setVertexBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
         if (meshPath) {
             const auto threads = mainReflection.threadsPerThreadgroup;
             [encoder drawMeshThreadgroups:MTLSizeMake(meshGroups, draw.instanceCount, 1)
                 threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
                 threadsPerMeshThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+        } else if (rectPath) {
+            [encoder setTessellationFactorBuffer:rectFactors offset:0 instanceStride:0];
+            [encoder drawPatches:4 patchStart:0 patchCount:rectPatches patchIndexBuffer:nil patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];
         } else if (draw.indexed) {
             [encoder drawIndexedPrimitives:primitive indexCount:draw.indexCount indexType:nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
                 indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset instanceCount:draw.instanceCount baseVertex:static_cast<NSInteger>(std::bit_cast<std::int32_t>(draw.firstVertex)) baseInstance:draw.firstInstance];

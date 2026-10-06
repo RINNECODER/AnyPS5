@@ -21,6 +21,29 @@ struct MetalShaderResourceBinding {
     std::vector<id<MTLSamplerState>> samplers;
 };
 
+struct MetalImplicitBufferBinding {
+    std::uint32_t index;
+    MetalBufferBinding buffer;
+};
+
+class MetalRectKernelPipeline {
+public:
+    explicit MetalRectKernelPipeline(id<MTLDevice> device, ShaderRecompiler::MetalBackend::Result shader,
+                                    MTLStageInputOutputDescriptor* captureInputs = nil);
+    [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& Reflection() const;
+    void Encode(id<MTLCommandBuffer> commands, std::span<const MetalShaderResourceBinding> bindings,
+                MTLRegion region, std::span<const MetalImplicitBufferBinding> implicitBuffers,
+                std::span<const MetalBufferBinding> vertexBuffers = {},
+                std::span<const std::byte> pushConstants = {},
+                std::span<const id<MTLResource>> indirectResources = {}) const;
+
+private:
+    id<MTLDevice> device;
+    id<MTLComputePipelineState> pipeline;
+    std::array<NSUInteger, 31> bufferAlignments{};
+    ShaderRecompiler::MetalBackend::Result shader;
+};
+
 class MetalComputePipeline {
 public:
     explicit MetalComputePipeline(id<MTLDevice> device, ShaderRecompiler::MetalBackend::Result shader);
@@ -48,7 +71,9 @@ public:
               std::span<const MetalShaderResourceBinding> fragmentBindings,
               std::span<const std::byte> vertexPushConstants = {},
               std::span<const std::byte> fragmentPushConstants = {},
-              std::span<const id<MTLResource>> indirectResources = {}) const;
+              std::span<const id<MTLResource>> indirectResources = {},
+              std::span<const MetalImplicitBufferBinding> implicitBuffers = {},
+              std::size_t rectPatchCount = 0) const;
 
 private:
     id<MTLDevice> device;

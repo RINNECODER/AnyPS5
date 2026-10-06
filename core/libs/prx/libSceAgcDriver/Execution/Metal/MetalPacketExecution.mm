@@ -116,13 +116,16 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     auto parameters = Pm4::ResolveDraw(packet, queue);
     if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) return;
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
-    if ((decoded.state.stages.path != Graphics::ShaderPath::Vertex && decoded.state.stages.path != Graphics::ShaderPath::Geometry) || decoded.state.rectList) {
+    if ((decoded.state.stages.path != Graphics::ShaderPath::Vertex && decoded.state.stages.path != Graphics::ShaderPath::Geometry) ||
+        (decoded.state.rectList && decoded.state.stages.path != Graphics::ShaderPath::Vertex)) {
         throw std::runtime_error("Native Metal draw execution requires the implemented vertex or mesh path");
     }
     const auto executeDirect = [&](Pm4::DrawParameters direct,
         std::optional<std::array<std::uint32_t, 5>> meshArguments = std::nullopt) {
         CheckFailureAndStopping();
         const auto mesh = decoded.state.stages.mesh.has_value();
+        const auto rectangle = decoded.state.rectList;
+        if (rectangle && direct.indexCount % 3 != 0) throw std::runtime_error("Native Metal draw contains an incomplete rect-list primitive");
         if (mesh) {
             auto& front = decoded.programs.front();
             if (front.firstUserSgpr != 0 || front.userData.size() < MeshIndexBufferUserWord + 4) {
@@ -131,7 +134,14 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             const auto descriptor = Graphics::MeshIndexBufferDescriptor(meshArguments ? parameters : direct, front.binary.codeAddress);
             std::copy(descriptor.begin(), descriptor.end(), front.userData.begin() + MeshIndexBufferUserWord);
         }
-        const auto target = nativeTarget(nativeDevice, mesh ? std::optional(draw->MeshLimits()) : std::nullopt);
+        auto target = nativeTarget(nativeDevice, mesh ? std::optional(draw->MeshLimits()) : std::nullopt);
+        if (rectangle) {
+            static constexpr std::array<std::uint32_t, 4> capabilities{
+                spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses,
+                spv::CapabilityStorageBuffer8BitAccess, spv::CapabilityTessellation};
+            target.supportedCapabilities = capabilities;
+            target.tessellation = draw->TessellationLimits();
+        }
         const auto pushLimit = mesh ? MeshDrawPushOffsetBytes : Graphics::PipelinePushConstantBytes;
         std::vector<MemoryRegion> memory;
         std::vector<LinkedProgram> linked;
@@ -142,9 +152,9 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         }
         ShaderMemory capture(memory);
         std::vector<RecompileResult> programs;
-        programs.reserve(decoded.programs.size());
+        programs.reserve(decoded.programs.size() + (rectangle ? 2u : 0u));
         std::vector<Graphics::CompiledShader> stages;
-        stages.reserve(decoded.programs.size());
+        stages.reserve(decoded.programs.size() + (rectangle ? 2u : 0u));
         std::uint32_t pushOffset = 0;
         for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
             if (decoded.roles[i] == ProgramRole::GeometryBack) continue;
@@ -166,6 +176,17 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushOffset});
             pushOffset += static_cast<std::uint32_t>(result.pushConstants.size());
             if (i == 0) FoldDrawOffsets(result, program.firstUserSgpr, program.userData, direct);
+        }
+        if (rectangle) {
+            if (programs.size() != 2 || stages.size() != 2 || stages[0].stage != ShaderStage::Vertex ||
+                stages[1].stage != ShaderStage::Fragment) {
+                throw std::runtime_error("Native Metal rect-list requires vertex and fragment programs");
+            }
+            auto generated = BuildRectListShaders(programs[0], programs[1], target);
+            programs.push_back(std::move(generated.control));
+            programs.push_back(std::move(generated.evaluation));
+            stages.insert(stages.begin() + 1, {{ShaderStage::TessellationControl, &programs[2], 0},
+                {ShaderStage::TessellationEvaluation, &programs[3], 0}});
         }
         checkGpuFault(draw->DrawSynchronously(decoded.state, direct, stages, ranges, meshArguments));
     };

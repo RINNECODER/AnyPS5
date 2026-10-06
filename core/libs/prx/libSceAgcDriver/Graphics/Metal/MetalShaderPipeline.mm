@@ -1,6 +1,7 @@
 #include "MetalShaderPipeline.hpp"
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
@@ -14,6 +15,8 @@ namespace {
 using ShaderResult = ShaderRecompiler::MetalBackend::Result;
 using ResourceMapping = ShaderRecompiler::MetalBackend::ResourceMapping;
 using DescriptorKind = ShaderRecompiler::DescriptorKind;
+using RectMode = ShaderRecompiler::MetalBackend::RectListMode;
+using ImplicitRole = ShaderRecompiler::MetalBackend::ImplicitBufferRole;
 
 std::string errorMessage(const char* operation, NSError* error) {
     const char* message = error.localizedDescription.UTF8String;
@@ -28,7 +31,15 @@ id<MTLFunction> compile(id<MTLDevice> device, const ShaderResult& shader, MTLFun
                        type == MTLFunctionTypeVertex ? ShaderRecompiler::ShaderStage::Vertex :
                        type == MTLFunctionTypeMesh ? ShaderRecompiler::ShaderStage::Mesh :
                                                       ShaderRecompiler::ShaderStage::Fragment;
-    if (shader.stage != stage) {
+    const bool capture = type == MTLFunctionTypeKernel && shader.rectList &&
+        ((shader.rectList->mode == RectMode::VertexCapture && shader.stage == ShaderRecompiler::ShaderStage::Vertex) ||
+         (shader.rectList->mode == RectMode::Control && shader.stage == ShaderRecompiler::ShaderStage::TessellationControl));
+    const bool evaluation = type == MTLFunctionTypeVertex && shader.rectList &&
+        shader.rectList->mode == RectMode::Evaluation && shader.stage == ShaderRecompiler::ShaderStage::TessellationEvaluation;
+    if ((shader.rectList && !(capture || evaluation)) ||
+        (capture && shader.nativeExecutionKind != ShaderRecompiler::MetalBackend::NativeExecutionKind::Compute) ||
+        (evaluation && shader.nativeExecutionKind != ShaderRecompiler::MetalBackend::NativeExecutionKind::Vertex) ||
+        (shader.stage != stage && !capture && !evaluation)) {
         throw std::invalid_argument("Converted Metal shader reflection has the wrong pipeline stage");
     }
     NSString* source = [[NSString alloc] initWithBytes:shader.source.data() length:shader.source.size()
@@ -198,6 +209,9 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
     if (shader.bufferSizesBuffer) {
         reserveSlots(bufferSlots, *shader.bufferSizesBuffer, 1, 31);
     }
+    if (shader.rectList) for (const auto& mapping : shader.rectList->buffers) {
+        reserveSlots(bufferSlots, mapping.index, 1, 31);
+    }
     for (const auto& mapping : shader.resources) {
         const auto key = std::pair(mapping.descriptorSet, mapping.binding);
         const auto found = bindings.find(key);
@@ -301,6 +315,101 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
     return result;
 }
 
+std::size_t checkedBytes(std::size_t count, std::size_t stride) {
+    if (stride == 0 || count > std::numeric_limits<std::size_t>::max() / stride) {
+        throw std::invalid_argument("Metal rectangle intermediate byte count is invalid");
+    }
+    return count * stride;
+}
+
+void validateLayout(const ShaderRecompiler::MetalBackend::InterfaceLayout& layout) {
+    if (layout.stride == 0 || layout.alignment == 0 || (layout.alignment & (layout.alignment - 1u)) != 0 ||
+        layout.stride % layout.alignment != 0 || layout.members.empty()) {
+        throw std::invalid_argument("Metal rectangle interface layout is invalid");
+    }
+    for (const auto& member : layout.members) {
+        if (member.bytes == 0 || member.offset > layout.stride || member.bytes > layout.stride - member.offset) {
+            throw std::invalid_argument("Metal rectangle interface member exceeds its record");
+        }
+    }
+}
+
+std::vector<BufferArgument> prepareImplicit(id<MTLDevice> device, const ShaderResult& shader,
+    const std::array<NSUInteger, 31>& alignments, std::span<const MetalImplicitBufferBinding> supplied,
+    std::size_t vertices, std::size_t patches, std::size_t indices = 0) {
+    if (!shader.rectList || supplied.size() != shader.rectList->buffers.size()) {
+        throw std::invalid_argument("Metal rectangle implicit buffer count differs from reflection");
+    }
+    std::map<std::uint32_t, MetalBufferBinding> bindings;
+    for (const auto& binding : supplied) if (!bindings.emplace(binding.index, binding.buffer).second) {
+        throw std::invalid_argument("Metal rectangle implicit buffer was supplied more than once");
+    }
+    const auto& rect = *shader.rectList;
+    std::vector<BufferArgument> result;
+    for (const auto& mapping : rect.buffers) {
+        const auto found = bindings.find(mapping.index);
+        if (found == bindings.end() || mapping.index >= alignments.size() || alignments[mapping.index] == 0) {
+            throw std::invalid_argument("Metal rectangle implicit slot lacks a binding or native alignment");
+        }
+        auto buffer = found->second;
+        if (buffer.buffer == nil || buffer.buffer.device != device || buffer.offset >= buffer.buffer.length ||
+            buffer.offset % alignments[mapping.index] != 0) {
+            throw std::invalid_argument("Metal rectangle implicit buffer device, offset or alignment is invalid");
+        }
+        const auto available = buffer.buffer.length - buffer.offset;
+        const auto length = buffer.length.value_or(available);
+        if (length == 0 || length > available) throw std::invalid_argument("Metal rectangle implicit buffer extent is invalid");
+        buffer.length = length;
+        std::size_t count = 0;
+        std::size_t stride = mapping.elementBytes;
+        switch (mapping.role) {
+        case ImplicitRole::StageOutput:
+            validateLayout(rect.outputLayout);
+            if (stride != rect.outputLayout.stride || buffer.offset % rect.outputLayout.alignment != 0) {
+                throw std::invalid_argument("Metal rectangle output buffer differs from its typed layout");
+            }
+            count = vertices;
+            break;
+        case ImplicitRole::StageInput:
+            validateLayout(rect.inputLayout);
+            if (stride != rect.inputLayout.stride || buffer.offset % rect.inputLayout.alignment != 0) {
+                throw std::invalid_argument("Metal rectangle input buffer differs from its typed layout");
+            }
+            count = checkedBytes(patches, rect.mode == RectMode::Control ? rect.inputControlPoints : rect.outputControlPoints);
+            break;
+        case ImplicitRole::TessellationFactors:
+            if (stride != sizeof(MTLQuadTessellationFactorsHalf)) throw std::invalid_argument("Metal rectangle tessellation factor layout is invalid");
+            count = patches;
+            break;
+        case ImplicitRole::IndirectParameters:
+            if (stride != 2 * sizeof(std::uint32_t) || length < stride || buffer.buffer.contents == nullptr ||
+                patches > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("Metal rectangle control parameters are invalid");
+            }
+            {
+                std::array<std::uint32_t, 2> parameters;
+                std::memcpy(parameters.data(), static_cast<const std::byte*>(buffer.buffer.contents) + buffer.offset, sizeof(parameters));
+                if (parameters[0] != rect.inputControlPoints || parameters[1] != patches) {
+                    throw std::invalid_argument("Metal rectangle control parameters differ from its dispatch");
+                }
+            }
+            count = 1;
+            break;
+        case ImplicitRole::Indices:
+            if ((rect.indexSize != 2 && rect.indexSize != 4) || stride != rect.indexSize) {
+                throw std::invalid_argument("Metal rectangle capture index layout is invalid");
+            }
+            count = indices;
+            break;
+        }
+        if (length < checkedBytes(count, stride)) throw std::invalid_argument("Metal rectangle implicit buffer is smaller than its invocation range");
+        result.push_back({mapping.index, buffer});
+        bindings.erase(found);
+    }
+    if (!bindings.empty()) throw std::invalid_argument("Metal rectangle received an unknown implicit buffer");
+    return result;
+}
+
 void bindCompute(id<MTLComputeCommandEncoder> encoder, const ShaderResult& shader, const PreparedBindings& bindings) {
     for (const auto& binding : bindings.buffers) {
         [encoder setBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
@@ -356,8 +465,98 @@ void bindMesh(id<MTLRenderCommandEncoder> encoder, const ShaderResult& shader,
 
 }
 
+MetalRectKernelPipeline::MetalRectKernelPipeline(id<MTLDevice> device, ShaderResult shader,
+                                                MTLStageInputOutputDescriptor* captureInputs)
+    : device(device), shader(std::move(shader)) {
+    if (!this->shader.rectList ||
+        (this->shader.rectList->mode != RectMode::VertexCapture && this->shader.rectList->mode != RectMode::Control) ||
+        this->shader.nativeExecutionKind != ShaderRecompiler::MetalBackend::NativeExecutionKind::Compute ||
+        this->shader.rectList->inputControlPoints != 3 || this->shader.rectList->outputControlPoints != 4) {
+        throw std::invalid_argument("Metal rectangle kernel requires typed capture or generated control reflection");
+    }
+    const bool capture = this->shader.rectList->mode == RectMode::VertexCapture;
+    if ((!capture && captureInputs != nil) || (capture && this->shader.vertexBufferCount != 0 && captureInputs == nil)) {
+        throw std::invalid_argument("Metal rectangle kernel stage input descriptor differs from its capture contract");
+    }
+    if (captureInputs != nil) {
+        for (std::size_t i = 0; i < this->shader.guest.vertexAttributes.size(); ++i) {
+            const auto attribute = captureInputs.attributes[this->shader.guest.vertexAttributes[i].location];
+            if (attribute.format == MTLAttributeFormatInvalid || attribute.bufferIndex != i ||
+                attribute.bufferIndex >= this->shader.vertexBufferCount) {
+                throw std::invalid_argument("Metal rectangle native attributes differ from guest capture metadata");
+            }
+        }
+        if (this->shader.rectList->indexSize != 0 && this->shader.vertexBufferCount != 0) {
+            const auto& mappings = this->shader.rectList->buffers;
+            const auto indices = std::find_if(mappings.begin(), mappings.end(), [](const auto& mapping) { return mapping.role == ImplicitRole::Indices; });
+            if (indices == mappings.end() || captureInputs.indexBufferIndex != indices->index ||
+                captureInputs.indexType != (this->shader.rectList->indexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32)) {
+                throw std::invalid_argument("Metal rectangle native stage input indexing differs from its capture contract");
+            }
+        }
+    }
+    auto descriptor = [MTLComputePipelineDescriptor new];
+    descriptor.computeFunction = compile(device, this->shader, MTLFunctionTypeKernel);
+    descriptor.stageInputDescriptor = captureInputs;
+    NSError* error = nil;
+    MTLComputePipelineReflection* reflection = nil;
+    pipeline = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionBindingInfo reflection:&reflection error:&error];
+    if (pipeline == nil) throw std::runtime_error(errorMessage("Converted Metal rectangle kernel creation failed", error));
+    if (reflection == nil) throw std::runtime_error("Metal rectangle kernel did not return native binding reflection");
+    bufferAlignments = nativeBufferAlignments(reflection.bindings);
+    if (pipeline.threadExecutionWidth == 0 || pipeline.threadExecutionWidth > pipeline.maxTotalThreadsPerThreadgroup ||
+        pipeline.threadExecutionWidth > device.maxThreadsPerThreadgroup.width) {
+        throw std::invalid_argument("Metal rectangle kernel has an invalid native threadgroup width");
+    }
+    if (this->shader.requiresSimdGroups && this->shader.guest.hostSubgroupSize != pipeline.threadExecutionWidth) {
+        throw std::invalid_argument("Metal rectangle kernel subgroup width differs from the guest compilation contract");
+    }
+}
+
+const ShaderResult& MetalRectKernelPipeline::Reflection() const {
+    return shader;
+}
+
+void MetalRectKernelPipeline::Encode(id<MTLCommandBuffer> commands, std::span<const MetalShaderResourceBinding> bindings,
+    MTLRegion region, std::span<const MetalImplicitBufferBinding> implicitBuffers,
+    std::span<const MetalBufferBinding> vertexBuffers, std::span<const std::byte> pushConstants,
+    std::span<const id<MTLResource>> indirectResources) const {
+    if (commands == nil || commands.device != device || commands.status >= MTLCommandBufferStatusCommitted ||
+        region.size.width == 0 || region.size.height == 0 || region.size.depth != 1 || region.origin.z != 0) {
+        throw std::invalid_argument("Metal rectangle kernel command buffer or invocation region is invalid");
+    }
+    const bool capture = shader.rectList->mode == RectMode::VertexCapture;
+    if (!capture && (region.origin.x != 0 || region.origin.y != 0 || region.size.height != 1 || region.size.width % 4 != 0)) {
+        throw std::invalid_argument("Metal rectangle control requires an exact flattened four-invocation patch grid");
+    }
+    if (vertexBuffers.size() != shader.vertexBufferCount) throw std::invalid_argument("Metal rectangle capture vertex buffer count differs from reflection");
+    auto prepared = prepare(device, shader, bufferAlignments, bindings, pushConstants, indirectResources);
+    const auto vertices = checkedBytes(region.size.width, region.size.height);
+    const auto patches = capture ? 0 : region.size.width / 4;
+    auto implicit = prepareImplicit(device, shader, bufferAlignments, implicitBuffers, vertices, patches, capture ? region.size.width : 0);
+    for (std::size_t i = 0; i < vertexBuffers.size(); ++i) {
+        const auto& buffer = vertexBuffers[i];
+        if (buffer.buffer == nil || buffer.buffer.device != device || buffer.offset >= buffer.buffer.length ||
+            bufferAlignments[i] == 0 || buffer.offset % bufferAlignments[i] != 0 ||
+            buffer.length.value_or(buffer.buffer.length - buffer.offset) > buffer.buffer.length - buffer.offset) {
+            throw std::invalid_argument("Metal rectangle native vertex buffer device, range or alignment is invalid");
+        }
+    }
+    auto encoder = [commands computeCommandEncoder];
+    if (encoder == nil) throw std::runtime_error("Metal rectangle compute encoder allocation failed");
+    [encoder setComputePipelineState:pipeline];
+    if (capture) [encoder setStageInRegion:region];
+    bindCompute(encoder, shader, prepared);
+    for (const auto& binding : implicit) [encoder setBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
+    for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
+    for (id<MTLResource> resource : indirectResources) [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+    [encoder dispatchThreads:region.size threadsPerThreadgroup:MTLSizeMake(pipeline.threadExecutionWidth, 1, 1)];
+    [encoder endEncoding];
+}
+
 MetalComputePipeline::MetalComputePipeline(id<MTLDevice> device, ShaderResult shader)
     : device(device), shader(std::move(shader)) {
+    if (this->shader.rectList) throw std::invalid_argument("Ordinary Metal compute pipelines do not accept rectangle kernels");
     id<MTLFunction> function = compile(device, this->shader, MTLFunctionTypeKernel);
     NSError* error = nil;
     MTLComputePipelineReflection* reflection = nil;
@@ -414,6 +613,24 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
                                         ShaderResult fragment, MTLRenderPipelineDescriptor* descriptor)
     : device(device), vertex(std::move(vertex)), fragment(std::move(fragment)) {
     if (descriptor == nil) throw std::invalid_argument("Converted Metal render pipeline requires a descriptor");
+    if (this->vertex.rectList) {
+        const auto& rect = *this->vertex.rectList;
+        bool hasAttributes = false;
+        for (NSUInteger i = 0; i < 31; ++i) {
+            hasAttributes |= descriptor.vertexDescriptor.attributes[i].format != MTLVertexFormatInvalid;
+        }
+        if (rect.mode != RectMode::Evaluation || rect.inputControlPoints != 3 || rect.outputControlPoints != 4 ||
+            hasAttributes || descriptor.rasterSampleCount != 1 ||
+            descriptor.tessellationPartitionMode != MTLTessellationPartitionModePow2 || descriptor.maxTessellationFactor != 64 ||
+            descriptor.tessellationFactorFormat != MTLTessellationFactorFormatHalf ||
+            descriptor.tessellationFactorStepFunction != MTLTessellationFactorStepFunctionPerPatch ||
+            descriptor.tessellationControlPointIndexType != MTLTessellationControlPointIndexTypeNone ||
+            descriptor.tessellationFactorScaleEnabled || descriptor.tessellationOutputWindingOrder != MTLWindingClockwise) {
+            throw std::invalid_argument("Metal rectangle evaluation descriptor differs from its generated quad patch contract");
+        }
+        validateLayout(rect.inputLayout);
+    }
+    if (this->fragment.rectList) throw std::invalid_argument("Metal fragment pipelines do not accept rectangle auxiliary reflection");
     MTLRenderPipelineDescriptor* native = [descriptor copy];
     native.vertexFunction = compile(device, this->vertex, MTLFunctionTypeVertex);
     native.fragmentFunction = compile(device, this->fragment, MTLFunctionTypeFragment);
@@ -442,14 +659,26 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
                                std::span<const MetalShaderResourceBinding> fragmentBindings,
                                std::span<const std::byte> vertexPushConstants,
                                std::span<const std::byte> fragmentPushConstants,
-                               std::span<const id<MTLResource>> indirectResources) const {
+                               std::span<const id<MTLResource>> indirectResources,
+                               std::span<const MetalImplicitBufferBinding> implicitBuffers,
+                               std::size_t rectPatchCount) const {
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal render binding requires an encoder on this device");
     }
     auto preparedVertex = prepare(device, vertex, vertexBufferAlignments, vertexBindings, vertexPushConstants, indirectResources);
     auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentBindings, fragmentPushConstants, indirectResources);
+    std::vector<BufferArgument> implicit;
+    if (vertex.rectList) {
+        if (vertex.rectList->mode != RectMode::Evaluation || rectPatchCount == 0) {
+            throw std::invalid_argument("Metal rectangle evaluation requires a positive patch count");
+        }
+        implicit = prepareImplicit(device, vertex, vertexBufferAlignments, implicitBuffers, 0, rectPatchCount);
+    } else if (!implicitBuffers.empty() || rectPatchCount != 0) {
+        throw std::invalid_argument("Ordinary Metal render pipelines do not accept rectangle intermediate buffers");
+    }
     [encoder setRenderPipelineState:pipeline];
     bindRender(encoder, vertex, preparedVertex, true);
+    for (const auto& binding : implicit) [encoder setVertexBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
     bindRender(encoder, fragment, preparedFragment, false);
     for (id<MTLResource> resource : indirectResources) {
         [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
