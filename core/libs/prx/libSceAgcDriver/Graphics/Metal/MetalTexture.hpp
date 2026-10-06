@@ -27,6 +27,11 @@ public:
     [[nodiscard]] std::size_t GuestBytes() const;
 
 private:
+    friend class MetalShaderResources;
+    MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor,
+                 bool compare, bool minimumLodLowered);
+    [[nodiscard]] std::shared_ptr<MetalTexture> CreateView(const Graphics::GuestTextureResource& descriptor,
+                                                        bool compare, bool minimumLodLowered) const;
     struct Backing {
         Graphics::GuestTextureResource descriptor;
         Graphics::SurfaceGeometry geometry;
@@ -34,7 +39,7 @@ private:
         id<MTLTexture> texture;
     };
     MetalTexture(const MetalDevice& backend, std::shared_ptr<Backing> backing,
-                 const Graphics::GuestTextureResource& descriptor, bool compare);
+                 const Graphics::GuestTextureResource& descriptor, bool compare, bool minimumLodLowered);
     void createViews(bool compare);
     void transfer(id<MTLBuffer> source, id<MTLBuffer> destination, bool retile) const;
     const MetalDevice& backend;

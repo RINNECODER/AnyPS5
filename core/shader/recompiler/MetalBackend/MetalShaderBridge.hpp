@@ -91,7 +91,26 @@ struct RectListInfo {
     std::vector<ImplicitBufferMapping> buffers;
 };
 
+struct MinimumLodPair {
+    std::uint32_t imageSet, imageBinding, imageElement;
+    std::uint32_t samplerSet, samplerBinding, samplerElement;
+    std::uint32_t magArgument, minArgument;
+    float relativeViewMin;
+};
+
+struct MinimumLodImage {
+    std::uint32_t descriptorSet, binding, element;
+};
+
+struct CapturedSamplerRequirement {
+    std::uint32_t descriptorSet, binding, element;
+};
+
 struct Result {
+    std::vector<CapturedSamplerRequirement> capturedSamplerRequirements;
+    std::vector<MinimumLodImage> minimumLodImages;
+    bool requiresTextureLodQueries = false;
+    std::vector<MinimumLodPair> minimumLodPairs;
     ShaderStage stage;
     std::uint32_t vertexBufferCount = 0;
     std::string source;
