@@ -1,75 +1,92 @@
+#if defined(ANYPS5_METAL_BACKEND)
+#include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
+#else
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+#endif
+
+namespace {
+#if defined(ANYPS5_METAL_BACKEND)
+using BackendDriver = AgcDriver::Metal::MetalDriver;
+#else
+using BackendDriver = AgcDriver::DriverDetail::Driver;
+#endif
+
+template <typename Operation>
+void InvokeEntry(Operation&& operation) {
+#if defined(ANYPS5_METAL_BACKEND)
+    operation();
+#else
+    try {
+        operation();
+    } catch (const ProcessShutdown&) {
+        LibcAwaitExit_nid_postfix();
+    }
+#endif
+}
+}
 
 namespace AgcDriver {
 
-void Submit(const Packet* packet, std::uint32_t queue) try {
-    DriverDetail::Driver::Get().Submit(packet, queue);
-} catch (const ProcessShutdown&) {
-    LibcAwaitExit_nid_postfix();
+void Submit(const Packet* packet, std::uint32_t queue) {
+    InvokeEntry([&] { BackendDriver::Get().Submit(packet, queue); });
 }
 
 void WaitIdle() {
-    DriverDetail::Driver::Get().WaitIdle();
+    BackendDriver::Get().WaitIdle();
 }
 
 void Shutdown() {
-    DriverDetail::Driver::Get().Shutdown();
+    BackendDriver::Get().Shutdown();
 }
 
 void RegisterShader(const Shader* shader) {
-    DriverDetail::Driver::Get().RegisterShader(shader);
+    BackendDriver::Get().RegisterShader(shader);
 }
 
 void SuspendPoint() {
-    DriverDetail::Driver::Get().SuspendPoint();
+    BackendDriver::Get().SuspendPoint();
 }
 
 void RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
-    DriverDetail::Driver::Get().RegisterVideoOutput(handle, output);
+    BackendDriver::Get().RegisterVideoOutput(handle, output);
 }
 
 void UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
-    DriverDetail::Driver::Get().UnregisterVideoOutput(handle, output);
+    BackendDriver::Get().UnregisterVideoOutput(handle, output);
 }
 
 void PresentClear(const PresentationWindow& window, bool opaque, void (*gpuReady)(void*), void* context) {
-    DriverDetail::Driver::Get().Present(window, nullptr, opaque, gpuReady, context);
+    BackendDriver::Get().Present(window, nullptr, opaque, gpuReady, context);
 }
 
 void PresentBuffer(const PresentationWindow& window, const DisplayBuffer& buffer, void (*gpuReady)(void*), void* context) {
-    DriverDetail::Driver::Get().Present(window, &buffer, true, gpuReady, context);
+    BackendDriver::Get().Present(window, &buffer, true, gpuReady, context);
 }
 
 void ReleaseWindow(void* window) {
-    DriverDetail::Driver::Get().ReleaseWindow(window);
+    BackendDriver::Get().ReleaseWindow(window);
 }
 
 void ReportFailure(std::exception_ptr error) {
-    DriverDetail::Driver::Get().ReportFailure(error);
+    BackendDriver::Get().ReportFailure(error);
 }
 
 }
 
-extern "C" void AgcDriverWaitIdle_nid_postfix() try {
-    AgcDriver::WaitIdle();
-} catch (const ProcessShutdown&) {
-    LibcAwaitExit_nid_postfix();
+extern "C" void AgcDriverWaitIdle_nid_postfix() {
+    InvokeEntry([&] { AgcDriver::WaitIdle(); });
 }
 
 extern "C" void AgcDriverShutdown_nid_postfix() {
     AgcDriver::Shutdown();
 }
 
-extern "C" void AgcDriverRegisterShader_nid_postfix(const Shader* shader) try {
-    AgcDriver::RegisterShader(shader);
-} catch (const ProcessShutdown&) {
-    LibcAwaitExit_nid_postfix();
+extern "C" void AgcDriverRegisterShader_nid_postfix(const Shader* shader) {
+    InvokeEntry([&] { AgcDriver::RegisterShader(shader); });
 }
 
-extern "C" void AgcDriverSuspendPoint_nid_postfix() try {
-    AgcDriver::SuspendPoint();
-} catch (const ProcessShutdown&) {
-    LibcAwaitExit_nid_postfix();
+extern "C" void AgcDriverSuspendPoint_nid_postfix() {
+    InvokeEntry([&] { AgcDriver::SuspendPoint(); });
 }
 
 extern "C" void AgcDriverRegisterVideoOutput_nid_postfix(std::uint32_t handle, const std::shared_ptr<AgcDriver::IVideoOutput>& output) {

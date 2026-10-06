@@ -51,7 +51,7 @@ cmake --build build-metal --parallel
 ctest --test-dir build-metal --output-on-failure
 ```
 
-This mode exercises existing guest vertex, fragment, and compute shaders, original PM4 register and memory packets, native compute dispatch, indexed and nonindexed draws, texture and sampler resources, and retained depth attachments. Vulkan-Headers supplies existing state metadata types; no Vulkan runtime is linked. The guest CPU runtime and whole renderer remain outside this mode.
+This mode selects Metal at the original AGC submission and presentation entry points. It exercises existing guest vertex, fragment, and compute shaders, PM4 register and memory packets, independent queues, indexed and nonindexed draws, texture and sampler resources, retained depth attachments, and native macOS drawables. Initialize `MetalDriver::Configure` with the device, utility library, and borrowed guest ranges before submission; keep the borrowed storage alive through `WaitIdle` and presentation completion. Vulkan-Headers supplies existing state metadata types; no Vulkan runtime is linked. The guest CPU runtime and unsupported graphics scheduling paths remain outside this mode.
 
 ## CMake flags
 

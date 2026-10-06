@@ -124,10 +124,9 @@ std::vector<std::byte> ReadDisplayBuffer(const DisplayBuffer& buffer) {
         static const auto start = std::chrono::steady_clock::now();
         std::fprintf(stderr, "[gpu] scanout display buffer 0x%llx %ux%u format 0x%016llx at %.1f s\n", static_cast<unsigned long long>(buffer.address), buffer.width, buffer.height, static_cast<unsigned long long>(buffer.pixelFormat), std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
     }
-    GuestMemory::FlushGpuWrites(buffer.address, size);
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(buffer.address), size, 65536);
-    const auto* source = reinterpret_cast<const std::byte*>(buffer.address);
-    return DecodeDisplayBuffer(buffer, {source, size});
+    std::vector<std::byte> source(size);
+    GuestMemory::Read(buffer.address, source, 65536);
+    return DecodeDisplayBuffer(buffer, source);
 }
 
 }

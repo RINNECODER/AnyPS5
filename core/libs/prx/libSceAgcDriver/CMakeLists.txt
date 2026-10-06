@@ -129,6 +129,9 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ComputeDispatch.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DrawDispatch.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubmissionCapture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderCapture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubmissionValidation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanDevice.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationScaler.cpp
@@ -154,6 +157,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestSamplerResource.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureFormat.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DccMetadata.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DccClearEncoding.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureDetiler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
@@ -452,6 +456,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/GuestSamplerResource.cpp
         Graphics/src/TextureFormat.cpp
         Graphics/src/DccMetadata.cpp
+        Graphics/src/DccClearEncoding.cpp
         Graphics/src/TextureTiling.cpp
         Graphics/src/TextureDetiler.cpp
         Graphics/src/Texture.cpp
@@ -603,6 +608,7 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/GuestSamplerResource.cpp
             Graphics/src/TextureFormat.cpp
             Graphics/src/DccMetadata.cpp
+            Graphics/src/DccClearEncoding.cpp
             Graphics/src/TextureTiling.cpp
             Graphics/src/TextureDetiler.cpp
             Graphics/src/Texture.cpp

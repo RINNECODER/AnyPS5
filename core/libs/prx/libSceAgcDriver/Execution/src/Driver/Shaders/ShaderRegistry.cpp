@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderCapture.hpp"
 #include "CacheKey.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <cstdlib>
@@ -145,58 +146,37 @@ std::shared_ptr<const ShaderRecompiler::SourceHandle> SourceHandleFor(const Shad
     return handle;
 }
 
-alignas(256) static const std::uint32_t NullPixelCode[64] = {0xbf810000u};
-static const Shader NullPixelShader = [] {
-    Shader shader{};
-    shader.file_header = 0x34333231u;
-    shader.version = 0x18u;
-    shader.code = NullPixelCode;
-    shader.header_size = sizeof(Shader);
-    shader.shader_size = sizeof(NullPixelCode);
-    shader.type = 1;
-    return shader;
-}();
-
-std::uint64_t NullPixelProgramAddress() {
-    return reinterpret_cast<std::uintptr_t>(NullPixelCode);
-}
-
 void Driver::RegisterShader(const Shader* shader) {
     CheckFailure();
-    GuestMemory::CheckRange(shader, sizeof(Shader), alignof(Shader));
-    require(shader->file_header == 0x34333231u && shader->version == 0x18u, "invalid shader header");
-    require(shader->header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
-    require(shader->shader_size != 0 && (shader->shader_size & 3u) == 0, "invalid shader size");
-    GuestMemory::CheckRange(shader, shader->header_size, alignof(Shader));
-    const auto* code = const_cast<const void*>(shader->code);
-    GuestMemory::CheckRange(code, shader->shader_size, 256);
-    ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(code), reinterpret_cast<std::uintptr_t>(shader), shader->type, {}, {}};
-    snapshot.code.resize(shader->shader_size / sizeof(std::uint32_t));
-    std::memcpy(snapshot.code.data(), code, shader->shader_size);
-    snapshot.header.resize(shader->header_size);
-    std::memcpy(snapshot.header.data(), shader, shader->header_size);
+    auto snapshot = ReadRegisteredShader(reinterpret_cast<std::uintptr_t>(shader));
 
     static const char* traceRegs = std::getenv("APS5_TRACE_SHADER_REGS");
-    if (traceRegs != nullptr && (std::string(traceRegs) == "all" || std::strtoull(traceRegs, nullptr, 16) == snapshot.codeAddress)) {
-        std::fprintf(stderr, "[shader] 0x%llx type %u cx", static_cast<unsigned long long>(snapshot.codeAddress), shader->type);
-        for (std::uint32_t i = 0; i < shader->num_cx_registers && shader->cx_registers != nullptr; ++i) std::fprintf(stderr, " %x=%08x", shader->cx_registers[i].offset, shader->cx_registers[i].value);
+    if (traceRegs != nullptr && (std::string(traceRegs) == "all" || std::strtoull(traceRegs, nullptr, 16) == snapshot->codeAddress)) {
+        Shader header{};
+        std::memcpy(&header, snapshot->header.data(), sizeof(header));
+        const auto trace = [](const ShaderRegister* registers, std::uint32_t count) {
+            for (std::uint32_t i = 0; i < count && registers != nullptr; ++i) {
+                ShaderRegister value{};
+                GuestMemory::Read(reinterpret_cast<std::uintptr_t>(registers) + std::uint64_t{i} * sizeof(value),
+                    std::as_writable_bytes(std::span(&value, 1)), alignof(ShaderRegister));
+                std::fprintf(stderr, " %x=%08x", value.offset, value.value);
+            }
+        };
+        std::fprintf(stderr, "[shader] 0x%llx type %u cx", static_cast<unsigned long long>(snapshot->codeAddress), header.type);
+        trace(header.cx_registers, header.num_cx_registers);
         std::fprintf(stderr, " sh");
-        for (std::uint32_t i = 0; i < shader->num_sh_registers && shader->sh_registers != nullptr; ++i) std::fprintf(stderr, " %x=%08x", shader->sh_registers[i].offset, shader->sh_registers[i].value);
+        trace(header.sh_registers, header.num_sh_registers);
         std::fprintf(stderr, "\n");
     }
     std::lock_guard lock(mutex);
     rethrowFailure();
-    const auto address = snapshot.codeAddress;
+    const auto address = snapshot->codeAddress;
 
     if (shaders == nullptr) shaders = std::make_shared<ShaderRegistry>();
     else if (shaders.use_count() != 1) shaders = std::make_shared<ShaderRegistry>(*shaders);
-    shaders->insert_or_assign(address, std::make_shared<const ShaderSnapshot>(std::move(snapshot)));
+    shaders->insert_or_assign(address, std::move(snapshot));
     if (shaders->find(NullPixelProgramAddress()) == shaders->end()) {
-        ShaderSnapshot null{NullPixelProgramAddress(), reinterpret_cast<std::uintptr_t>(&NullPixelShader), NullPixelShader.type, {}, {}};
-        null.code.assign(std::begin(NullPixelCode), std::end(NullPixelCode));
-        null.header.resize(sizeof(Shader));
-        std::memcpy(null.header.data(), &NullPixelShader, sizeof(Shader));
-        shaders->insert_or_assign(NullPixelProgramAddress(), std::make_shared<const ShaderSnapshot>(std::move(null)));
+        shaders->insert_or_assign(NullPixelProgramAddress(), CaptureNullPixelShader());
     }
 }
 

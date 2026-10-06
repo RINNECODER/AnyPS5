@@ -2,15 +2,22 @@
 #include "MetalDraw.hpp"
 #include "Recompiler.hpp"
 #include "SceShaders.hpp"
-#include "prx/libSceAgcDriver/Execution/include/DrawDispatch.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <future>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -152,18 +159,17 @@ void DrawGuest(id<MTLDevice> device, id<MTLLibrary> library, bool masked, bool i
                   indexed ? ", indexed vertex fetch with nonzero guest index offset" : ", descriptor vertex fetch") << " passed\n";
 }
 
-void RegisterPacket(AgcDriver::QueueState& queue, std::uint32_t opcode, std::uint32_t offset,
+void RegisterPacket(std::vector<std::uint32_t>& commands, std::uint32_t opcode, std::uint32_t offset,
                     std::span<const std::uint32_t> words) {
     std::vector<std::uint32_t> packet{0xc0000000u | (static_cast<std::uint32_t>(words.size()) << 16u) | (opcode << 8u), offset};
     packet.insert(packet.end(), words.begin(), words.end());
-    AgcDriver::Pm4::Validate(packet, 0);
-    AgcDriver::Pm4::Execute(packet, queue);
+    commands.insert(commands.end(), packet.begin(), packet.end());
 }
 
-AgcDriver::QueueState Queue() {
-    AgcDriver::QueueState queue;
+std::vector<std::uint32_t> GraphicsCommands() {
+    std::vector<std::uint32_t> commands;
     const std::array<std::uint32_t, 1> primitive{4};
-    RegisterPacket(queue, 0x79, 0x242, primitive);
+    RegisterPacket(commands, 0x79, 0x242, primitive);
     const AgcDriver::Registers context{
         {0x2d5, 0x00402000}, {0x1b6, 0x8000}, {0x207, 0}, {0x200, 0}, {0x203, 0x800},
         {0x2dc, 0xaa00}, {0x2f8, 0}, {0x292, 2}, {0x293, 0},
@@ -181,92 +187,205 @@ AgcDriver::QueueState Queue() {
         {0x1b3, PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY)},
         {0x1b4, PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY)}
     };
-    for (const auto& [offset, value] : context) RegisterPacket(queue, 0x69, offset, std::span(&value, 1));
+    for (const auto& [offset, value] : context) RegisterPacket(commands, 0x69, offset, std::span(&value, 1));
     const std::array<std::uint32_t, 2> vertexProgram{0x500000u >> 8u, 0}, fragmentProgram{0x600000u >> 8u, 0};
     const std::array<std::uint32_t, 1> vertexResources{8}, fragmentResources{0};
     const std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(VertexAddress), 16u << 16u, 3, 0x01016fac};
-    RegisterPacket(queue, 0x76, 0xc8, vertexProgram);
-    RegisterPacket(queue, 0x76, 0x008, fragmentProgram);
-    RegisterPacket(queue, 0x76, 0x08b, vertexResources);
-    RegisterPacket(queue, 0x76, 0x00b, fragmentResources);
-    RegisterPacket(queue, 0x76, 0x08c, userData);
-    return queue;
+    RegisterPacket(commands, 0x76, 0xc8, vertexProgram);
+    RegisterPacket(commands, 0x76, 0x008, fragmentProgram);
+    RegisterPacket(commands, 0x76, 0x08b, vertexResources);
+    RegisterPacket(commands, 0x76, 0x00b, fragmentResources);
+    RegisterPacket(commands, 0x76, 0x08c, userData);
+    return commands;
 }
 
-void DrawDecodedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
+void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
+    constexpr std::uint64_t ComputeCodeAddress = 0x800000, ComputeInputAddress = 0x810000,
+        ComputeOutputAddress = 0x820000, LabelAddress = 0x900000;
+    constexpr std::uint64_t GraphicsCommandAddress = 0xa00000, ComputeCommandAddress = 0xa10000,
+        SecondCommandAddress = 0xa20000, IndirectAddress = 0xa30000, PacketAddress = 0xb00000;
     auto vertices = Triangle;
     const auto originalVertices = vertices;
     std::vector<std::byte> pixels(256 + Width * Height * 4 + 256, std::byte{0x7b});
     std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
-    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 2> ranges{{
-        {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true}}};
-    auto vertex = std::make_shared<AgcDriver::DriverDetail::ShaderSnapshot>();
-    vertex->codeAddress = 0x500000;
-    vertex->headerAddress = 0x700000;
-    vertex->type = 2;
-    vertex->code.assign(VertexCode.begin(), VertexCode.end());
-    vertex->code[1] = 0x80020005;
-    vertex->header.resize(sizeof(Shader) + sizeof(ShaderUserData));
-    Shader header{};
-    header.user_data = reinterpret_cast<ShaderUserData*>(vertex->headerAddress + sizeof(Shader));
-    header.code = reinterpret_cast<void*>(vertex->codeAddress);
-    header.header_size = static_cast<std::uint32_t>(vertex->header.size());
-    header.shader_size = static_cast<std::uint32_t>(vertex->code.size() * sizeof(std::uint32_t));
-    header.type = 2;
-    std::memcpy(vertex->header.data(), &header, sizeof(header));
-    auto fragment = std::make_shared<AgcDriver::DriverDetail::ShaderSnapshot>();
-    fragment->codeAddress = 0x600000;
-    fragment->headerAddress = 0x710000;
-    fragment->type = 1;
-    fragment->code.assign(MaskedPixelCode.begin(), MaskedPixelCode.end());
-    fragment->header.resize(sizeof(Shader) + sizeof(ShaderUserData));
-    header.user_data = reinterpret_cast<ShaderUserData*>(fragment->headerAddress + sizeof(Shader));
-    header.code = reinterpret_cast<void*>(fragment->codeAddress);
-    header.header_size = static_cast<std::uint32_t>(fragment->header.size());
-    header.shader_size = static_cast<std::uint32_t>(fragment->code.size() * sizeof(std::uint32_t));
-    header.type = 1;
-    std::memcpy(fragment->header.data(), &header, sizeof(header));
-    const AgcDriver::DriverDetail::ShaderRegistry registry{{vertex->codeAddress, vertex}, {fragment->codeAddress, fragment}};
-    const AgcDriver::NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
-    auto queue = Queue();
-    const std::array<std::uint32_t, 3> drawPacket{0xc0012d00, 3, 2};
-    AgcDriver::Pm4::Validate(drawPacket, 0);
-    auto draw = AgcDriver::Pm4::ResolveDraw(drawPacket, queue);
-    const auto decoded = AgcDriver::DecodeDrawDispatch(queue, registry);
-    const auto vertexInfo = AgcDriver::Graphics::DecodeVertexStageInfo(
-        decoded.programs[0].binary.header, decoded.programs[0].binary.headerAddress, decoded.programs[0].userData);
-    std::array<RecompileResult, 2> programs;
-    std::array<AgcDriver::Graphics::CompiledShader, 2> shaders;
-    std::vector<LinkedProgram> linked;
-    for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
-        const auto& program = decoded.programs[i];
-        linked.push_back({decoded.roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
-    }
-    std::uint32_t pushOffset = 0;
-    for (std::uint32_t i = 0; i < 2; ++i) {
-        const auto& program = decoded.programs[i];
-        auto request = AgcDriver::BuildDrawRecompileRequest(program.binary, program.firstUserSgpr,
-            program.userData, decoded.state, decoded.pixel, i == 0 ? std::optional(vertexInfo) : std::nullopt,
-            Target(device), pushOffset, draw, program.memory, linked);
-        request.useCache = false;
-        programs[i] = Recompile(request);
-        shaders[i] = {program.binary.stage, &programs[i], pushOffset};
-        pushOffset += static_cast<std::uint32_t>(programs[i].pushConstants.size());
-    }
-    AgcDriver::FoldDrawOffsets(programs[0], decoded.programs[0].firstUserSgpr, decoded.programs[0].userData, draw);
-    AgcDriver::Metal::MetalDraw adapter(device, library);
-    const auto fault = adapter.DrawSynchronously(decoded.state, draw, shaders, ranges);
-    Require(fault.state == BdaAbi::FaultState::Empty, "Shared decoded actual guest draw published a GPU fault");
-    for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
-        auto expected = std::byte{0x7b};
-        if (offset >= 256 && offset < 256 + Width * Height * 4) {
-            const auto x = ((offset - 256) / 4) % Width;
-            expected = x % 2 == 0 ? std::byte{255} : std::byte{0x40};
+    auto vertexCode = VertexCode;
+    vertexCode[1] = 0x80020005;
+    auto fragmentCode = MaskedPixelCode;
+    std::array<std::uint32_t, 17> computeCode{
+        0x34020082, 0xe0302000, 0x80000401, 0xbf8c3f70, 0x7e000000, 0x7e003600, 0x7e008200, 0x4a080881,
+        0xd5800000, 0x00000000, 0xd59b0000, 0x00000000, 0xd5c10000, 0x00000000, 0xe0702000, 0x80010401, 0xbf810000};
+    std::array<std::uint32_t, 64 * 4> input, output;
+    input.fill(0xa5a5a5a5);
+    for (std::uint32_t i = 0; i < 64; ++i) input[i * 4] = i * 3 + 7;
+    const auto originalInput = input;
+    output.fill(0xdeadbeef);
+    std::array<std::uint32_t, 4> labels{0, 0, 0xcafef00d, 0x12345678};
+    const auto makeHeader = [](std::uint64_t address, std::uint64_t codeAddress, std::uint32_t bytes, std::uint8_t type) {
+        std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> data{};
+        Shader header{};
+        header.file_header = 0x34333231;
+        header.version = 0x18;
+        header.user_data = reinterpret_cast<ShaderUserData*>(address + sizeof(Shader));
+        header.code = reinterpret_cast<const volatile void*>(codeAddress);
+        header.header_size = static_cast<std::uint32_t>(data.size());
+        header.shader_size = bytes;
+        header.type = type;
+        std::memcpy(data.data(), &header, sizeof(header));
+        return data;
+    };
+    auto vertexHeader = makeHeader(0x700000, 0x500000, sizeof(vertexCode), 2);
+    auto fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(fragmentCode), 1);
+    auto computeHeader = makeHeader(0x720000, ComputeCodeAddress, sizeof(computeCode), 0);
+    const auto append = [](std::vector<std::uint32_t>& commands, std::uint32_t opcode,
+                           std::initializer_list<std::uint32_t> payload) {
+        commands.push_back(0xc0000000u | (static_cast<std::uint32_t>(payload.size() - 1) << 16u) | (opcode << 8u));
+        commands.insert(commands.end(), payload.begin(), payload.end());
+    };
+    auto graphics = GraphicsCommands();
+    append(graphics, 0x3c, {0x13, static_cast<std::uint32_t>(LabelAddress), 0, 1, 0xffffffff, 0x190});
+    append(graphics, 0x22, {static_cast<std::uint32_t>(LabelAddress), 0, 0, 4});
+    append(graphics, 0x3f, {static_cast<std::uint32_t>(IndirectAddress), 0, 3});
+    append(graphics, 0x49, {0, (1u << 29u) | (1u << 24u), static_cast<std::uint32_t>(LabelAddress + 4), 0, 2, 0, 0});
+    std::array<std::uint32_t, 3> indirect{0xc0012d00, 3, 2};
+    std::vector<std::uint32_t> compute;
+    const std::array<std::uint32_t, 3> threads{64, 1, 1};
+    const std::array<std::uint32_t, 2> computeProgram{static_cast<std::uint32_t>(ComputeCodeAddress >> 8u), 0};
+    const std::array<std::uint32_t, 1> resources{16};
+    const std::array<std::uint32_t, 8> users{static_cast<std::uint32_t>(ComputeInputAddress), 4u << 16u, 256, 0x01016fac,
+        static_cast<std::uint32_t>(ComputeOutputAddress), 4u << 16u, 256, 0x01016fac};
+    RegisterPacket(compute, 0x76, 0x207, threads);
+    RegisterPacket(compute, 0x76, 0x20c, computeProgram);
+    RegisterPacket(compute, 0x76, 0x213, resources);
+    RegisterPacket(compute, 0x76, 0x240, users);
+    append(compute, 0x15, {1, 1, 1, 0x8041});
+    append(compute, 0x49, {0, 1u << 29u, static_cast<std::uint32_t>(LabelAddress), 0, 1, 0, 0});
+    std::array<std::uint32_t, 3> second{0xc0012d00, 3, 2};
+    std::array<::Packet, 3> packets{{
+        {reinterpret_cast<std::uint32_t*>(GraphicsCommandAddress), static_cast<std::uint32_t>(graphics.size()), 0, {}},
+        {reinterpret_cast<std::uint32_t*>(ComputeCommandAddress), static_cast<std::uint32_t>(compute.size()), 0, {}},
+        {reinterpret_cast<std::uint32_t*>(SecondCommandAddress), static_cast<std::uint32_t>(second.size()), 0, {}}}};
+    std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
+        {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true},
+        {0x500000, std::as_writable_bytes(std::span(vertexCode)), false},
+        {0x600000, std::as_writable_bytes(std::span(fragmentCode)), false},
+        {ComputeCodeAddress, std::as_writable_bytes(std::span(computeCode)), false},
+        {0x700000, vertexHeader, false}, {0x710000, fragmentHeader, false}, {0x720000, computeHeader, false},
+        {ComputeInputAddress, std::as_writable_bytes(std::span(input)), false},
+        {ComputeOutputAddress, std::as_writable_bytes(std::span(output)), true},
+        {LabelAddress, std::as_writable_bytes(std::span(labels)), true},
+        {GraphicsCommandAddress, std::as_writable_bytes(std::span(graphics)), false},
+        {ComputeCommandAddress, std::as_writable_bytes(std::span(compute)), false},
+        {SecondCommandAddress, std::as_writable_bytes(std::span(second)), false},
+        {IndirectAddress, std::as_writable_bytes(std::span(indirect)), false},
+        {PacketAddress, std::as_writable_bytes(std::span(packets)), false}};
+    const auto checkPixels = [&](bool masked) {
+        for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
+            auto expected = std::byte{0x7b};
+            if (offset >= 256 && offset < 256 + Width * Height * 4) {
+                const auto x = ((offset - 256) / 4) % Width;
+                expected = !masked || x % 2 == 0 ? std::byte{255} : std::byte{0x40};
+            }
+            Require(pixels[offset] == expected, "Public submitted actual RDNA draw produced wrong target byte " + std::to_string(offset));
         }
-        Require(pixels[offset] == expected, "Shared PM4 draw decode and production SGPR ABI produced wrong target byte " + std::to_string(offset));
+    };
+    std::atomic<std::uint32_t> interrupts{0};
+    AgcDriver::Metal::MetalDriver::Get().Configure((__bridge void*)device, (__bridge void*)library, ranges,
+        [&](std::uint32_t queue) {
+            Require(queue == 0 && labels[0] == 1 && labels[1] == 2, "EOP callback ran before cross-queue label completion");
+            for (std::uint32_t i = 0; i < output.size(); ++i) {
+                const auto expected = i % 4 == 0 ? (i / 4) * 3 + 8 : 0xdeadbeefu;
+                Require(output[i] == expected, "EOP callback observed unfinished actual RDNA compute copyback");
+            }
+            checkPixels(true);
+            interrupts.fetch_add(1);
+        });
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x700000));
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x720000));
+    AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0);
+    indirect[1] = 0;
+    std::fill(graphics.begin(), graphics.end(), 0x80000000);
+    std::copy(FullPixelCode.begin(), FullPixelCode.end(), fragmentCode.begin());
+    fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(FullPixelCode), 1);
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+    AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+    AgcDriverWaitIdle_nid_postfix();
+    Require(interrupts.load() == 1, "Public submitted draw did not deliver exactly one completed EOP callback");
+    checkPixels(true);
+    Require(vertices == originalVertices && input == originalInput && labels[2] == 0xcafef00d && labels[3] == 0x12345678,
+        "Public submission changed borrowed input or label guards");
+    std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+    AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress + 2 * sizeof(::Packet)), 0);
+    AgcDriverWaitIdle_nid_postfix();
+    checkPixels(false);
+    Require(interrupts.load() == 1 && vertices == originalVertices && input == originalInput,
+        "Persistent queue submission modified input or redelivered EOP");
+    AgcDriverShutdown_nid_postfix();
+    std::cout << "Actual public AGC Submit: shader registration snapshots, immutable flattened IB, cross-queue compute WAIT/conditional draw, completed EOP and persistent registers passed\n";
+    output.fill(0xdeadbeef);
+    compute[compute.size() - 6] |= 1u << 24u;
+    std::mutex callbackMutex;
+    std::condition_variable callbackChanged;
+    bool callbackEntered = false, callbackReleased = false;
+    AgcDriver::Metal::MetalDriver failureDriver;
+    failureDriver.WaitIdle();
+    failureDriver.ReleaseWindow(nullptr);
+    failureDriver.Configure((__bridge void*)device, (__bridge void*)library, ranges,
+        [&](std::uint32_t queue) {
+            Require(queue == 0x20, "Failure lifetime EOP arrived from the wrong native queue");
+            for (std::uint32_t i = 0; i < output.size(); ++i) {
+                const auto expected = i % 4 == 0 ? (i / 4) * 3 + 8 : 0xdeadbeefu;
+                Require(output[i] == expected, "Failure lifetime EOP observed unfinished actual RDNA compute copyback");
+            }
+            std::unique_lock lock(callbackMutex);
+            callbackEntered = true;
+            callbackChanged.notify_all();
+            callbackChanged.wait(lock, [&] { return callbackReleased; });
+        });
+    const auto releaseCallback = [&] {
+        {
+            std::lock_guard lock(callbackMutex);
+            callbackReleased = true;
+        }
+        callbackChanged.notify_all();
+    };
+    try {
+        failureDriver.RegisterShader(reinterpret_cast<const Shader*>(0x720000));
+        failureDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+        bool entered;
+        {
+            std::unique_lock lock(callbackMutex);
+            entered = callbackChanged.wait_for(lock, std::chrono::seconds(10), [&] { return callbackEntered; });
+        }
+        if (!entered) throw std::runtime_error("Failure lifetime actual RDNA EOP callback did not enter");
+        const auto marker = std::make_exception_ptr(std::runtime_error("Native queue failure lifetime marker"));
+        failureDriver.ReportFailure(marker);
+        std::promise<void> waiterStarted;
+        auto started = waiterStarted.get_future();
+        auto waiter = std::async(std::launch::async, [&] {
+            waiterStarted.set_value();
+            try { failureDriver.WaitIdle(); }
+            catch (...) { return std::current_exception(); }
+            return std::exception_ptr{};
+        });
+        started.wait();
+        const bool remainedPending = waiter.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+        releaseCallback();
+        const auto reported = waiter.get();
+        std::exception_ptr shutdownFailure;
+        try { failureDriver.Shutdown(); }
+        catch (...) { shutdownFailure = std::current_exception(); }
+        Require(remainedPending, "Native WaitIdle returned failure while the EOP worker still held borrowed memory");
+        Require(reported == marker, "Native WaitIdle did not preserve the original queue failure after draining its worker");
+        Require(shutdownFailure == marker, "Native shutdown did not preserve the drained queue failure");
+    } catch (...) {
+        releaseCallback();
+        try { failureDriver.Shutdown(); }
+        catch (...) {}
+        throw;
     }
-    Require(vertices == originalVertices, "Shared decoded actual guest draw modified the vertex input");
-    std::cout << "Actual PM4 draw: shared state/program/request decode, production SGPR8 descriptor fetch and masked fragment exports passed\n";
+    Require(vertices == originalVertices && input == originalInput, "Failed queue draining modified borrowed input memory");
+    std::cout << "Actual native queue failure: WaitIdle retained borrowed memory until the completed EOP worker released it and preserved the original error passed\n";
 }
 
 }
@@ -285,7 +404,7 @@ int main(int argc, const char* argv[]) {
             DrawGuest(device, library, true, false);
             DrawGuest(device, library, false, true);
             DrawGuest(device, library, false, true, true);
-            DrawDecodedGuest(device, library);
+            DrawSubmittedGuest(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';
