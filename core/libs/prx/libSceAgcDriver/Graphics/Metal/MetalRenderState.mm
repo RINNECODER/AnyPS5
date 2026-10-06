@@ -110,7 +110,11 @@ void Validate(const Graphics::State& state) {
     const bool mesh = state.stages.path == Graphics::ShaderPath::Geometry && state.stages.mesh.has_value();
     Require((vertex || mesh) && !state.stages.tessellation && (!state.rectList || vertex),
             "graphics path requires unimplemented native scheduling");
-    Require(!state.primitiveRestart, "primitive restart scheduling is not implemented");
+    const bool restartTopology = state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST ||
+        state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
+        state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    Require(!state.primitiveRestart || (vertex && !state.rectList && restartTopology),
+            "primitive restart requires an implemented ordinary vertex topology");
     if (state.depthBoundsTest) {
         Require(std::isfinite(state.minDepthBounds) && std::isfinite(state.maxDepthBounds) &&
                 state.minDepthBounds >= 0 && state.maxDepthBounds <= 1 && state.minDepthBounds <= state.maxDepthBounds,
@@ -124,13 +128,13 @@ void Validate(const Graphics::State& state) {
             viewport.minDepth >= 0 && viewport.minDepth <= 1 && viewport.maxDepth >= 0 && viewport.maxDepth <= 1,
             "viewport depth must lie within zero-to-one");
     Require(state.renderExtent.width != 0 && state.renderExtent.height != 0, "render extent must be nonzero");
-    Require(state.scissor.offset.x >= 0 && state.scissor.offset.y >= 0 && state.scissor.extent.width != 0 && state.scissor.extent.height != 0,
-            "negative or empty scissor requires draw scheduling");
+    Require(state.scissor.offset.x >= 0 && state.scissor.offset.y >= 0, "negative scissor offset is unsupported");
     Require(static_cast<std::uint64_t>(state.scissor.offset.x) + state.scissor.extent.width <= state.renderExtent.width &&
             static_cast<std::uint64_t>(state.scissor.offset.y) + state.scissor.extent.height <= state.renderExtent.height,
             "scissor exceeds the decoded render extent");
-    Require(state.cullMode == VK_CULL_MODE_NONE || state.cullMode == VK_CULL_MODE_FRONT_BIT || state.cullMode == VK_CULL_MODE_BACK_BIT,
-            "front-and-back culling requires draw scheduling");
+    Require(state.cullMode == VK_CULL_MODE_NONE || state.cullMode == VK_CULL_MODE_FRONT_BIT ||
+            state.cullMode == VK_CULL_MODE_BACK_BIT || state.cullMode == VK_CULL_MODE_FRONT_AND_BACK,
+            "unsupported cull mode");
     Require(state.frontFace == VK_FRONT_FACE_CLOCKWISE || state.frontFace == VK_FRONT_FACE_COUNTER_CLOCKWISE,
             "unsupported front-face winding");
     Require(std::isfinite(state.depthBiasConstant) && std::isfinite(state.depthBiasSlope) && std::isfinite(state.depthBiasClamp),
@@ -300,8 +304,11 @@ void BindRenderState(id<MTLRenderCommandEncoder> encoder, const Graphics::State&
                                 maxBound:state.depthBoundsTest && state.depth ? state.maxDepthBounds : 1];
         }
     }
+    const bool triangles = state.rectList || state.stages.mesh.has_value() ||
+        state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+    const auto scissorWidth = triangles && state.cullMode == VK_CULL_MODE_FRONT_AND_BACK ? 0u : state.scissor.extent.width;
     [encoder setScissorRect:MTLScissorRect{static_cast<NSUInteger>(state.scissor.offset.x), static_cast<NSUInteger>(state.scissor.offset.y),
-                                        state.scissor.extent.width, state.scissor.extent.height}];
+                                        scissorWidth, state.scissor.extent.height}];
     [encoder setCullMode:state.cullMode == VK_CULL_MODE_FRONT_BIT ? MTLCullModeFront :
                         state.cullMode == VK_CULL_MODE_BACK_BIT ? MTLCullModeBack : MTLCullModeNone];
     [encoder setFrontFacingWinding:state.frontFace == VK_FRONT_FACE_CLOCKWISE ? MTLWindingClockwise : MTLWindingCounterClockwise];

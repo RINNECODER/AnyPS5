@@ -13,6 +13,7 @@ void RunShaderAlignmentTests(const MetalTests::Context& context);
 #endif
 #if ANYPS5_METAL_GUEST_REPLAY
 void RunTextureResourceTests(const MetalTests::Context& context);
+void RunTextureViewsTests(const MetalTests::Context& context);
 void RunSamplerResourceTests(const MetalTests::Context& context);
 void RunDepthResourceTests(const MetalTests::Context& context);
 #endif
@@ -49,6 +50,8 @@ int main(int argc, char** argv) {
 #if ANYPS5_METAL_GUEST_REPLAY
             RunTextureResourceTests(context);
             std::cout << "Guest texture resource GPU output passed\n";
+            RunTextureViewsTests(context);
+            std::cout << "Shared texture views and DCC GPU output passed\n";
             RunSamplerResourceTests(context);
             std::cout << "Guest sampler resource GPU output passed\n";
             RunDepthResourceTests(context);
