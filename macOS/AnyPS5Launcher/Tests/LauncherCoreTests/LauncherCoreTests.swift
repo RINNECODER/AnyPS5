@@ -192,9 +192,9 @@ final class LauncherCoreTests: XCTestCase {
         return LocalGame(id: "local", title: "Fixture", executablePath: input.path, workingDirectory: folder.path)
     }
 
-    // Contract: resources, ordered SCE modules and executable remain literal argv; unsupported modules cannot start a child.
-    // Regression: a module flag/path is reordered, interpolated, accepted by an old engine or validated after launch.
-    // This process recorder is the protocol owner; CPU linking tests cannot protect Swift persistence/argv routing.
+    // Contract: one started event precedes output/exit and identifies the real child and literal invocation; unsupported modules cannot start it.
+    // Regression: start evidence is missing, early/fabricated, duplicated, delayed or describes different argv/cwd.
+    // This real-child recorder owns the protocol; CPU linking tests cannot protect Swift startup evidence or invocation routing.
     func testEngineArgumentsOutputAndFailureExit() async throws {
         let folder = try directory().appendingPathComponent("resources $(no-shell) folder", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
@@ -205,6 +205,7 @@ final class LauncherCoreTests: XCTestCase {
         let script = #"""
         #!/bin/sh
         : > started
+        printf 'pid=%s\n' "$$"
         printf 'arg=%s\n' "$@"
         while [ "$#" -gt 1 ]; do
           case "$1" in
@@ -240,7 +241,8 @@ final class LauncherCoreTests: XCTestCase {
                 }
             }
         }
-        func recordRun(_ target: LocalGame, _ contract: EngineCapabilities?, _ override: URL?) async throws -> (String, Int32?) {
+        typealias ProcessStart = (pid: Int32, executable: String, arguments: [String], workingDirectory: String)
+        func recordRun(_ target: LocalGame, _ contract: EngineCapabilities?, _ override: URL?) async throws -> (String, Int32?, ProcessStart) {
             try clearMarkers()
             let root = override ?? folder
             let cwd = contract?.resourceRootArgument == "--resource-root" ? folder : root
@@ -248,18 +250,28 @@ final class LauncherCoreTests: XCTestCase {
             let runner = EngineRunner()
             var output = Data()
             var status: Int32?
+            var starts: [ProcessStart] = []
             for try await event in try runner.run(engine: engine, game: target, capabilities: contract, resourceDirectory: override) {
                 switch event {
+                case .started(let pid, let executable, let arguments, let workingDirectory):
+                    XCTAssertTrue(starts.isEmpty, "A child must have exactly one started event.")
+                    XCTAssertTrue(output.isEmpty, "Started evidence must precede the first output.")
+                    XCTAssertNil(status, "Started evidence must precede exit.")
+                    starts.append((pid, executable, arguments, workingDirectory))
                 case .output(let bytes):
+                    XCTAssertEqual(starts.count, 1, "Output arrived without exactly one prior started event.")
                     output.append(bytes)
                     // The child waits for this acknowledgement: output must stream before it exits.
                     try Data().write(to: marker)
-                case .exited(let code): status = code
+                case .exited(let code):
+                    XCTAssertEqual(starts.count, 1, "Exit arrived without exactly one prior started event.")
+                    status = code
                 }
             }
-            return (String(decoding: output, as: UTF8.self), status)
+            XCTAssertEqual(starts.count, 1)
+            return (String(decoding: output, as: UTF8.self), status, try XCTUnwrap(starts.first))
         }
-        func checkOutput(_ text: String, _ status: Int32?, _ target: LocalGame, _ contract: EngineCapabilities?,
+        func checkOutput(_ text: String, _ status: Int32?, _ start: ProcessStart, _ target: LocalGame, _ contract: EngineCapabilities?,
                          _ override: URL?, _ expectedModuleArguments: [String] = []) throws {
             let resourceRoot = override ?? folder
             let hasResourceArgument = contract?.resourceRootArgument == "--resource-root"
@@ -269,22 +281,30 @@ final class LauncherCoreTests: XCTestCase {
                 expectedModuleArguments + [target.executablePath]
             let recordedArguments = text.components(separatedBy: "\n").filter { $0.hasPrefix("arg=") }.map { String($0.dropFirst(4)) }
             XCTAssertEqual(recordedArguments, expectedArguments, "Literal argv order/pairing changed: \(text)")
+            let pidLine = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("pid=") })
+            let actualPID = try XCTUnwrap(Int32(pidLine.dropFirst(4)))
+            XCTAssertGreaterThan(actualPID, 1)
+            XCTAssertEqual(start.pid, actualPID, "Started PID must match the child's own shell builtin $$.")
+            XCTAssertEqual(start.executable, engine.path)
+            XCTAssertEqual(start.arguments, expectedArguments, "Started evidence describes a different literal invocation.")
             XCTAssertTrue(text.contains("guest=\(target.executablePath)\n"))
             XCTAssertEqual(text.contains("diagnostics\n"), contract != nil)
             if hasResourceArgument { XCTAssertTrue(text.contains("root=\(resourceRoot.path)\n"), text) }
             else { XCTAssertFalse(text.contains("root="), text) }
             let cwd = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("cwd=") }).dropFirst(4)
-            let actualDirectory = try FileManager.default.attributesOfItem(atPath: String(cwd))
             let expectedDirectory = try FileManager.default.attributesOfItem(atPath: expectedCWD.path)
-            XCTAssertEqual(actualDirectory[.systemFileNumber] as? NSNumber, expectedDirectory[.systemFileNumber] as? NSNumber)
-            XCTAssertEqual(actualDirectory[.systemNumber] as? NSNumber, expectedDirectory[.systemNumber] as? NSNumber)
+            for actualPath in [String(cwd), start.workingDirectory] {
+                let actualDirectory = try FileManager.default.attributesOfItem(atPath: actualPath)
+                XCTAssertEqual(actualDirectory[.systemFileNumber] as? NSNumber, expectedDirectory[.systemFileNumber] as? NSNumber)
+                XCTAssertEqual(actualDirectory[.systemNumber] as? NSNumber, expectedDirectory[.systemNumber] as? NSNumber)
+            }
             XCTAssertTrue(text.contains("unsupported import\n"))
             XCTAssertEqual(status, 7)
         }
         for override: URL? in [nil, separateResources] {
             for contract: EngineCapabilities? in [nil, legacyCapabilities, capabilities] {
-                let (text, status) = try await recordRun(game, contract, override)
-                try checkOutput(text, status, game, contract, override)
+                let (text, status, start) = try await recordRun(game, contract, override)
+                try checkOutput(text, status, start, game, contract, override)
             }
         }
         var sceHeader = try Data(contentsOf: URL(fileURLWithPath: game.executablePath))
@@ -305,8 +325,8 @@ final class LauncherCoreTests: XCTestCase {
         let moduleCapabilities = try EngineCapabilities.decode(Data(modulePayload.utf8))
         for target in [sceGame, selfGame] {
             for override: URL? in [nil, separateResources] {
-                let (text, status) = try await recordRun(target, moduleCapabilities, override)
-                try checkOutput(text, status, target, moduleCapabilities, override,
+                let (text, status, start) = try await recordRun(target, moduleCapabilities, override)
+                try checkOutput(text, status, start, target, moduleCapabilities, override,
                                 ["--sce-module", modules[0].path, "--sce-module", modules[1].path])
             }
         }
@@ -625,7 +645,7 @@ final class LauncherCoreTests: XCTestCase {
 
         var output = Data(); var status: Int32?
         for try await event in try runner.run(engine: package.executableURL, game: game, acceptedPackage: package) {
-            switch event { case .output(let bytes): output.append(bytes); case .exited(let code): status = code }
+            switch event { case .started: break; case .output(let bytes): output.append(bytes); case .exited(let code): status = code }
         }
         XCTAssertEqual(status, 0, "Canceled preparation must release the reserved session for a fresh launch.")
         XCTAssertTrue(String(decoding: output, as: UTF8.self)
@@ -649,7 +669,7 @@ final class LauncherCoreTests: XCTestCase {
         var output = Data()
         var exit: Int32?
         for try await event in try runner.run(engine: engine, game: game, capabilities: capabilities) {
-            switch event { case .output(let bytes): output.append(bytes); case .exited(let code): exit = code }
+            switch event { case .started: break; case .output(let bytes): output.append(bytes); case .exited(let code): exit = code }
         }
         XCTAssertEqual(exit, 0)
         // Prime count and sum for <=1000; CRC of the fixture's independently specified 4096-byte pattern.
@@ -700,7 +720,7 @@ final class LauncherCoreTests: XCTestCase {
                 // Accepted proof supplies capabilities even when the caller has no cached probe.
                 for try await event in try EngineRunner().run(engine: package.executableURL, game: moduleGame,
                                                          resourceDirectory: unrelated, acceptedPackage: package) {
-                    switch event { case .output(let chunk): bytes.append(chunk); case .exited(let code): status = code }
+                    switch event { case .started: break; case .output(let chunk): bytes.append(chunk); case .exited(let code): status = code }
                 }
                 let events = try String(decoding: bytes, as: UTF8.self).split(separator: "\n").map {
                     try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
