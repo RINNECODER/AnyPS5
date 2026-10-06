@@ -112,7 +112,8 @@ void Validate(const Graphics::State& state) {
             "graphics path requires unimplemented native scheduling");
     const bool restartTopology = state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST ||
         state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
-        state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||
+        state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
     Require(!state.primitiveRestart || (vertex && !state.rectList && restartTopology),
             "primitive restart requires an implemented ordinary vertex topology");
     if (state.depthBoundsTest) {
@@ -231,6 +232,7 @@ MTLPrimitiveType PrimitiveType(const Graphics::State& state) {
     case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: return MTLPrimitiveTypeLineStrip;
     case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: return MTLPrimitiveTypeTriangle;
     case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: return MTLPrimitiveTypeTriangleStrip;
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: return MTLPrimitiveTypeTriangle;
     default: throw std::invalid_argument("Metal render state: topology requires unimplemented native scheduling");
     }
 }
@@ -305,7 +307,8 @@ void BindRenderState(id<MTLRenderCommandEncoder> encoder, const Graphics::State&
         }
     }
     const bool triangles = state.rectList || state.stages.mesh.has_value() ||
-        state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||
+        state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;
     const auto scissorWidth = triangles && state.cullMode == VK_CULL_MODE_FRONT_AND_BACK ? 0u : state.scissor.extent.width;
     [encoder setScissorRect:MTLScissorRect{static_cast<NSUInteger>(state.scissor.offset.x), static_cast<NSUInteger>(state.scissor.offset.y),
                                         scissorWidth, state.scissor.extent.height}];
