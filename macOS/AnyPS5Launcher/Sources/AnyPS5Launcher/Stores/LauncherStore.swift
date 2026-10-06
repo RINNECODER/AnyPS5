@@ -46,8 +46,8 @@ final class LauncherStore {
     private var mountedResources: MountedExFATResources?
     var hasMountedResources: Bool { mountedResources != nil }
 
-    init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(supportDirectory: URL? = nil) {
+        let support = supportDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AnyPS5Launcher", isDirectory: true)
         persistence = LibraryPersistence(url: support.appendingPathComponent("library.json"))
         client = CatalogueClient(cacheURL: support.appendingPathComponent("orbit-catalogue-v2.json"))

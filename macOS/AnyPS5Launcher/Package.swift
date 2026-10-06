@@ -7,7 +7,7 @@ let package = Package(
     products: [.executable(name: "AnyPS5Launcher", targets: ["AnyPS5Launcher"])],
     targets: [
         .target(name: "LauncherCore"),
-        .executableTarget(name: "AnyPS5Launcher", dependencies: ["LauncherCore"]),
+        .executableTarget(name: "AnyPS5Launcher", dependencies: ["LauncherCore"], resources: [.process("Resources")]),
         .testTarget(name: "LauncherCoreTests", dependencies: ["LauncherCore"])
     ]
 )
