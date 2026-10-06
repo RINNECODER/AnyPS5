@@ -79,11 +79,28 @@ public struct EnginePackage: Sendable {
     }
 
     /// Recheck the same accepted bytes before a launch; capabilities cannot migrate to another engine.
-    public func verifyIntegrity(for engine: URL) throws {
+    public func verifyIntegrity(for engine: URL) async throws {
+        let cancellation = EnginePreparationCancellation()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await Self.background {
+                try verifyIntegrityOnWorker(for: engine, checkingCancellation: cancellation.check)
+            }
+            try Task.checkCancellation()
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
+    // The runner already owns a background worker, so it must not dispatch Process.run/wait
+    // across an await. Keep the complete scan and process lifecycle on that worker.
+    func verifyIntegrityOnWorker(for engine: URL, checkingCancellation: () throws -> Void) throws {
+        try checkingCancellation()
         guard engine.standardizedFileURL == executableURL else {
             throw LauncherError("Engine package integrity belongs to a different selected engine.")
         }
-        let (_, identity) = try Self.inspect(root: rootURL)
+        let (_, identity) = try Self.inspect(root: rootURL, checkingCancellation: checkingCancellation)
+        try checkingCancellation()
         guard identity == manifestSHA256 else { throw LauncherError("Engine package integrity manifest changed after acceptance.") }
     }
 
@@ -92,7 +109,8 @@ public struct EnginePackage: Sendable {
         ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("LD_") }
     }
 
-    private static func inspect(root: URL) throws -> (Manifest, String) {
+    private static func inspect(root: URL, checkingCancellation: () throws -> Void = {}) throws -> (Manifest, String) {
+        try checkingCancellation()
         let manifestURL = try contained("manifest.json", root: root)
         let attributes = try FileManager.default.attributesOfItem(atPath: manifestURL.path)
         guard ((attributes[.size] as? NSNumber)?.uint64Value ?? UInt64.max) <= 1_048_576 else {
@@ -114,6 +132,7 @@ public struct EnginePackage: Sendable {
             }
         }
         for (path, record) in manifest.files {
+            try checkingCancellation()
             guard validHex(record.sha256, count: 64), record.size <= 268_435_456 else {
                 throw LauncherError("Engine package integrity has an invalid file record: \(path)")
             }
@@ -122,6 +141,7 @@ public struct EnginePackage: Sendable {
             defer { try? file.close() }
             var hash = SHA256(); var size: UInt64 = 0
             while let chunk = try file.read(upToCount: 65_536), !chunk.isEmpty {
+                try checkingCancellation()
                 size += UInt64(chunk.count)
                 guard size <= record.size else { throw LauncherError("Engine package integrity size mismatch: \(path)") }
                 hash.update(data: chunk)
@@ -144,6 +164,7 @@ public struct EnginePackage: Sendable {
             throw LauncherError("Engine package manifest has an unsupported CRT receipt path contract.")
         }
         for executable in [enginePath, keeperArguments[0]] {
+            try checkingCancellation()
             guard FileManager.default.isExecutableFile(atPath: try contained(executable, root: root).path) else {
                 throw LauncherError("Engine package architecture requires an executable native binary: \(executable)")
             }
@@ -338,5 +359,23 @@ public struct EnginePackage: Sendable {
     }
     private static func hex<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
         bytes.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+// Shared by package scans and inspection preparation. Cancellation and Process.run are
+// serialized so a canceled preparation cannot race its final check and start a child.
+final class EnginePreparationCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    func check() throws {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled { throw CancellationError() }
+    }
+    func start(_ operation: () throws -> Void) throws {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled { throw CancellationError() }
+        try operation()
     }
 }

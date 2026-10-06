@@ -315,6 +315,9 @@ final class LauncherStore {
                         }
                     }
                 }
+            } catch is CancellationError {
+                sessionStatus = "Session cancelled"
+                console += "\nSession cancelled before guest execution.\n"
             } catch {
                 if let failure = error as? ResourceImageCleanupFailure { mountedResources = failure.resources }
                 sessionStatus = "Engine session failed"

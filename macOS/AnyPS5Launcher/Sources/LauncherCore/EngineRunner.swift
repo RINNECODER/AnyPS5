@@ -54,7 +54,7 @@ public final class EngineRunner: @unchecked Sendable {
 
     public func run(engine: URL, game: LocalGame, capabilities: EngineCapabilities? = nil,
                     resourceDirectory: URL? = nil, acceptedPackage: EnginePackage? = nil) throws -> AsyncThrowingStream<EngineEvent, Error> {
-        if let acceptedPackage { try acceptedPackage.verifyIntegrity(for: engine) }
+        try Task.checkCancellation()
         let capabilities = acceptedPackage?.capabilities ?? capabilities
         let resourceRoot = resourceDirectory?.path ?? game.workingDirectory
         let hasResourceArgument = capabilities?.resourceRootArgument == "--resource-root"
@@ -83,16 +83,27 @@ public final class EngineRunner: @unchecked Sendable {
         stopRequested = false
         lock.unlock()
         return AsyncThrowingStream { continuation in
+            continuation.onTermination = { [weak self] _ in self?.stop(child: child) }
             DispatchQueue.global(qos: .userInitiated).async { [self] in
                 var started = false
                 do {
                     // Foundation ties child-exit delivery to the launching thread's run loop.
                     // Launch and wait on the same worker, keeping the UI and Swift executor free.
-                    try child.run()
-                    started = true
+                    if let acceptedPackage {
+                        try acceptedPackage.verifyIntegrityOnWorker(for: engine) { [self] in
+                            self.lock.lock(); defer { self.lock.unlock() }
+                            if self.stopRequested { throw CancellationError() }
+                        }
+                    }
+                    // Reserve the start under the same lock stop() uses. Cancellation during
+                    // preparation prevents a child, rather than starting one just to kill it.
                     lock.lock()
-                    if stopRequested, child.isRunning { child.terminate() }
-                    lock.unlock()
+                    do {
+                        if stopRequested { throw CancellationError() }
+                        try child.run()
+                        started = true
+                        lock.unlock()
+                    } catch { lock.unlock(); throw error }
                     // Closing the parent's writer makes EOF observable after child shutdown.
                     try? pipe.fileHandleForWriting.close()
                     var buffer = [UInt8](repeating: 0, count: 4096)
@@ -127,6 +138,14 @@ public final class EngineRunner: @unchecked Sendable {
                 try? pipe.fileHandleForReading.close()
             }
         }
+    }
+
+    private func stop(child: Process) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard process === child else { return }
+        stopRequested = true
+        if child.isRunning { child.terminate() }
     }
 
     public func stop() {

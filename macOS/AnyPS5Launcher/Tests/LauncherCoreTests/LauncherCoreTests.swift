@@ -532,6 +532,38 @@ final class LauncherCoreTests: XCTestCase {
         }
     }
 
+    // Contract: MainActor can stop an intact accepted launch during preparation; no guest starts and the runner remains reusable.
+    // Regression: stop is ignored during the hash scan or canceled preparation leaves the session reserved.
+    // Invalid-package rows only protect rejection, not cancellation of valid preparation. This uses the real package and runner.
+    @MainActor
+    func testStopDuringAcceptedPreparationPreventsGuestAndAllowsRelaunch() async throws {
+        let root = try copiedEnginePackage()
+        let package = try await EnginePackage.accept(selectedURL: root)
+        let game = LocalGame(id: "prepared-homebrew", title: "Prepared homebrew",
+                             executablePath: root.appendingPathComponent("fixtures/cpu-homebrew.elf").path,
+                             workingDirectory: root.path)
+        let runner = EngineRunner()
+        let stream = try runner.run(engine: package.executableURL, game: game, acceptedPackage: package)
+        runner.stop() // The UI actor acts immediately after the factory, before yielding to stream consumption.
+        var received = 0
+        do {
+            for try await _ in stream { received += 1 }
+            XCTFail("Stopped preparation must finish with cancellation before any guest event.")
+        } catch is CancellationError {
+            // A valid package canceled before startup must not be reported as an integrity failure or a guest exit.
+        } catch { XCTFail("Wrong preparation failure: \(error)") }
+        XCTAssertEqual(received, 0, "Canceled preparation started a guest or published a guest exit.")
+
+        var output = Data(); var status: Int32?
+        for try await event in try runner.run(engine: package.executableURL, game: game, acceptedPackage: package) {
+            switch event { case .output(let bytes): output.append(bytes); case .exited(let code): status = code }
+        }
+        XCTAssertEqual(status, 0, "Canceled preparation must release the reserved session for a fresh launch.")
+        XCTAssertTrue(String(decoding: output, as: UTF8.self)
+            .contains("homebrew primes=168 sum=76127 buffer_crc32=2511520486 tls=ok bss=ok\n"),
+                      "Relaunch did not execute the real arithmetic/TLS fixture: \(String(decoding: output, as: UTF8.self))")
+    }
+
     // Contract: the actual engine preserves static results/inspection and accepts a relocated native package before routing real modules.
     // Regression: accepting stale runtime bytes, losing supplied modules, or dropping qualified inspection service families.
     // Shell protocol tests cannot establish the real engine report; CPU tests do not own launcher decoding or display.
@@ -623,13 +655,25 @@ final class LauncherCoreTests: XCTestCase {
             let original = try Data(contentsOf: fixture)
             var changed = original; changed[changed.count - 1] ^= 1
             try changed.write(to: fixture)
-            XCTAssertThrowsError(try EngineRunner().run(engine: package.executableURL, game: moduleGame, acceptedPackage: package)) {
-                XCTAssertTrue($0.localizedDescription.hasPrefix("Engine package integrity"), "\($0)")
+            // Hash work belongs to preparation after the factory returns, and failure must precede all guest events.
+            // This phase assertion fails the former synchronous full scan without adding a timing threshold or a test hook.
+            func rejectPreparedRun(_ selected: URL, _ target: LocalGame, _ diagnostic: String) async throws {
+                let stream: AsyncThrowingStream<EngineEvent, Error>
+                do { stream = try EngineRunner().run(engine: selected, game: target, acceptedPackage: package) }
+                catch {
+                    XCTFail("Full package verification blocked/failed inside the stream factory: \(error)")
+                    throw error
+                }
+                var received = 0
+                do {
+                    for try await _ in stream { received += 1 }
+                    XCTFail("Changed package or mismatched engine reached guest execution.")
+                } catch { XCTAssertTrue(error.localizedDescription.hasPrefix(diagnostic), "\(error)") }
+                XCTAssertEqual(received, 0, "Integrity failure must precede guest output, startup and exit.")
             }
+            try await rejectPreparedRun(package.executableURL, moduleGame, "Engine package integrity")
             try original.write(to: fixture)
-            XCTAssertThrowsError(try EngineRunner().run(engine: engine, game: game, acceptedPackage: package)) {
-                XCTAssertTrue($0.localizedDescription.contains("different selected engine"), "\($0)")
-            }
+            try await rejectPreparedRun(engine, game, "Engine package integrity belongs to a different selected engine")
         }
     }
 }

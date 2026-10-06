@@ -48,52 +48,60 @@ public struct EngineInspection: Decodable, Sendable {
     }
 
     public static func inspect(engine: URL, game: LocalGame, capabilities: EngineCapabilities, acceptedPackage: EnginePackage? = nil) async throws -> Self {
-        if let acceptedPackage { try acceptedPackage.verifyIntegrity(for: engine) }
+        try Task.checkCancellation()
+        if let acceptedPackage { try await acceptedPackage.verifyIntegrity(for: engine) }
+        try Task.checkCancellation()
         let capabilities = acceptedPackage?.capabilities ?? capabilities
         guard capabilities.supportedFormats.contains("sce_elf64_x86_64") else {
             throw LauncherError("This engine does not advertise SCE ELF inspection support.")
         }
         try EngineRunner.validate(engine: engine, game: game, capabilities: capabilities)
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let child = Process()
-                let pipe = Pipe()
-                child.executableURL = engine
-                if acceptedPackage != nil { child.environment = EnginePackage.controlledEnvironment }
-                child.arguments = ["--inspect-sce-json", game.executablePath]
-                child.currentDirectoryURL = URL(fileURLWithPath: game.workingDirectory, isDirectory: true)
-                child.standardInput = FileHandle.nullDevice
-                child.standardOutput = pipe
-                child.standardError = pipe
-                let timeout = DispatchWorkItem { if child.isRunning { child.terminate() } }
-                do {
-                    try child.run()
+        let cancellation = EnginePreparationCancellation()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let child = Process()
+                    let pipe = Pipe()
+                    child.executableURL = engine
+                    if acceptedPackage != nil { child.environment = EnginePackage.controlledEnvironment }
+                    child.arguments = ["--inspect-sce-json", game.executablePath]
+                    child.currentDirectoryURL = URL(fileURLWithPath: game.workingDirectory, isDirectory: true)
+                    child.standardInput = FileHandle.nullDevice
+                    child.standardOutput = pipe
+                    child.standardError = pipe
+                    let timeout = DispatchWorkItem { if child.isRunning { child.terminate() } }
+                    do {
+                        try cancellation.start { try child.run() }
+                        try? pipe.fileHandleForWriting.close()
+                        DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: timeout)
+                        var data = Data()
+                        while let bytes = try pipe.fileHandleForReading.read(upToCount: 4096), !bytes.isEmpty {
+                            data.append(bytes)
+                            if data.count > 4_194_304 { child.terminate(); throw LauncherError("The engine returned excessive inspection output.") }
+                        }
+                        child.waitUntilExit()
+                        timeout.cancel()
+                        guard child.terminationStatus == 0 else {
+                            let diagnostic = String(decoding: data.prefix(16_384), as: UTF8.self)
+                            throw LauncherError("Engine inspection failed (exit \(child.terminationStatus)).\n\(diagnostic)")
+                        }
+                        let result = try JSONDecoder().decode(Self.self, from: data)
+                        guard result.schemaVersion == 1, result.event == "inspection", result.format == "sce_elf64_x86_64" else {
+                            throw LauncherError("The engine returned an unsupported inspection protocol.")
+                        }
+                        continuation.resume(returning: result)
+                    } catch {
+                        timeout.cancel()
+                        if child.isRunning { child.terminate(); child.waitUntilExit() }
+                        continuation.resume(throwing: error)
+                    }
+                    try? pipe.fileHandleForReading.close()
                     try? pipe.fileHandleForWriting.close()
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 15, execute: timeout)
-                    var data = Data()
-                    while let bytes = try pipe.fileHandleForReading.read(upToCount: 4096), !bytes.isEmpty {
-                        data.append(bytes)
-                        if data.count > 4_194_304 { child.terminate(); throw LauncherError("The engine returned excessive inspection output.") }
-                    }
-                    child.waitUntilExit()
-                    timeout.cancel()
-                    guard child.terminationStatus == 0 else {
-                        let diagnostic = String(decoding: data.prefix(16_384), as: UTF8.self)
-                        throw LauncherError("Engine inspection failed (exit \(child.terminationStatus)).\n\(diagnostic)")
-                    }
-                    let result = try JSONDecoder().decode(Self.self, from: data)
-                    guard result.schemaVersion == 1, result.event == "inspection", result.format == "sce_elf64_x86_64" else {
-                        throw LauncherError("The engine returned an unsupported inspection protocol.")
-                    }
-                    continuation.resume(returning: result)
-                } catch {
-                    timeout.cancel()
-                    if child.isRunning { child.terminate(); child.waitUntilExit() }
-                    continuation.resume(throwing: error)
                 }
-                try? pipe.fileHandleForReading.close()
-                try? pipe.fileHandleForWriting.close()
             }
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 }
