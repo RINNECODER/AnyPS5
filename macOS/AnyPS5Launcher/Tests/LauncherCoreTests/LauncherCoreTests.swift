@@ -304,15 +304,16 @@ final class LauncherCoreTests: XCTestCase {
         }
     }
 
-    // Contract: the launcher invokes the actual ARM64 AnyPS5 engine and preserves independently expected guest results.
-    // Regression: capability flags or process plumbing break the real CLI while a shell fixture still succeeds.
+    // Contract: the actual engine preserves static guest results and enabled SCE inspection's qualified imports through display.
+    // Regression: a failed probe silently skips SCE coverage, or an older CLI/decoder/summary loses service families.
+    // Shell protocol tests cannot establish the real engine report; CPU tests do not own launcher decoding or display.
     func testActualAnyPS5Checkpoint() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard let path = environment["ANYPS5_ENGINE"], let guest = environment["ANYPS5_GUEST_FIXTURE"] else {
             throw XCTSkip("Set ANYPS5_ENGINE and ANYPS5_GUEST_FIXTURE to run the real runtime integration check.")
         }
         let engine = URL(fileURLWithPath: path)
-        let capabilities = try? await EngineCapabilities.probe(engine)
+        let capabilities = try await EngineCapabilities.probe(engine)
         let game = LocalGame(id: "homebrew", title: "Homebrew", executablePath: guest,
                              workingDirectory: URL(fileURLWithPath: guest).deletingLastPathComponent().path)
         let runner = EngineRunner()
@@ -324,16 +325,28 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(exit, 0)
         // Prime count and sum for <=1000; CRC of the fixture's independently specified 4096-byte pattern.
         XCTAssertTrue(String(decoding: output, as: UTF8.self).contains("homebrew primes=168 sum=76127 buffer_crc32=2511520486 tls=ok bss=ok\n"), String(decoding: output, as: UTF8.self))
-        if let sceGuest = environment["ANYPS5_SCE_GUEST_FIXTURE"], let capabilities {
+        if let sceGuest = environment["ANYPS5_SCE_GUEST_FIXTURE"] {
             let sceGame = LocalGame(id: "sce-homebrew", title: "SCE Homebrew", executablePath: sceGuest,
                                     workingDirectory: URL(fileURLWithPath: sceGuest).deletingLastPathComponent().path)
             let inspection = try await EngineInspection.inspect(engine: engine, game: sceGame, capabilities: capabilities)
-            XCTAssertEqual(Set(inspection.neededModules), ["libc", "libkernel"])
-            XCTAssertEqual(inspection.imports.count, 11)
-            XCTAssertEqual(Set(inspection.imports.filter { $0.module == "libc" && $0.library == "libc" }.map(\.nid)),
-                           ["uMei1W9uyNo", "j4ViWNHEgww", "Ovb2dSJOAuE", "8zTFvBIAIN8", "Q3VBxCXhUHs", "+P6FRGH4LfA"])
-            XCTAssertEqual(Set(inspection.imports.filter { $0.module == "libkernel" && $0.library == "libkernel" }.map(\.nid)),
-                           ["1G3lF1Gg1k8", "Cg4srZ6TKbU", "+r3rMFwItV4", "oib76F-12fk", "UK2Tl2DWUns"])
+            XCTAssertEqual(inspection.format, "sce_elf64_x86_64")
+            XCTAssertEqual(Set(inspection.neededModules), ["libc", "libkernel", "libSceUserService", "libSceSystemService"])
+            XCTAssertEqual(inspection.imports.count, 18)
+            let representatives: [(nid: String, library: String, module: String)] = [
+                ("Q3VBxCXhUHs", "libc", "libc"),
+                ("1G3lF1Gg1k8", "libkernel", "libkernel"),
+                ("CdWp0oHWGr0", "libSceUserService", "libSceUserService"),
+                ("fZo48un7LK4", "libSceSystemService", "libSceSystemService")
+            ]
+            let summaryLines = inspection.summary.components(separatedBy: "\n")
+            XCTAssertTrue(summaryLines.contains("Imports (18):"))
+            for expected in representatives {
+                XCTAssertTrue(inspection.imports.contains {
+                    $0.nid == expected.nid && $0.library == expected.library && $0.module == expected.module
+                }, "Inspection lost qualified import \(expected.nid)")
+                XCTAssertTrue(summaryLines.contains("  \(expected.module) / \(expected.library) / \(expected.nid)"),
+                              "Displayed inspection lost qualified import \(expected.nid)")
+            }
             XCTAssertFalse(inspection.hasTLS)
             XCTAssertTrue(inspection.unsupportedReasons.isEmpty)
         }
