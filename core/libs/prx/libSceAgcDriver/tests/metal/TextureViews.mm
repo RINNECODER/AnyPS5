@@ -284,6 +284,62 @@ void Dcc(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
             Require(std::all_of(keys.begin(),keys.end(),[](auto key){return key==std::byte{0xff};}),"DCC image copyback did not publish uncompressed metadata");
         }
     }
+    for(unsigned mode=0;mode<5;++mode) {
+        auto descriptor=Descriptor(); descriptor.dccAddress=0x400000;
+        const auto extent=Graphics::DescribeSurface(descriptor).guestBytes;
+        std::vector<std::byte> guest(extent,std::byte{0x93});
+        std::vector<std::byte> keys(Graphics::DccKeyBytes(extent),std::byte{0x00});
+        const auto expectedGuest=guest,expectedKeys=keys;
+        std::vector<NativeGuestMemory::BorrowedRange> ranges{
+            {descriptor.baseAddress,std::span(guest).first(extent/2),true},
+            {descriptor.dccAddress,keys,true}};
+        if(mode!=0) ranges.push_back({descriptor.baseAddress+extent/2,std::span(guest).subspan(extent/2),mode==3});
+        if(mode==4) ranges[0].host=guest;
+        if(mode==4) ranges.pop_back();
+        Metal::MetalShaderResources resources(backend,ranges);
+        DescriptorBinding binding{};
+        binding.kind=DescriptorKind::StorageImage; binding.role=DescriptorRole::GuestImages;
+        binding.count=1; binding.imageShape=DescriptorImageShape::Image2D; binding.imageWritten={true};
+        binding.guestDescriptor={static_cast<std::uint32_t>(descriptor.baseAddress>>8),
+            (descriptor.format<<20)|(3u<<30),1u|(7u<<14),0xfacu|(9u<<28),0,0,
+            (1u<<21)|static_cast<std::uint32_t>((descriptor.dccAddress>>8)&0xffu)<<24,
+            static_cast<std::uint32_t>(descriptor.dccAddress>>16)};
+        MetalBackend::Result shader{}; shader.guest.bindings.push_back(binding);
+        MetalBackend::ResourceMapping mapping{};
+        mapping.count=1; mapping.kind=binding.kind; mapping.role=binding.role; mapping.texture=0; mapping.active=true;
+        shader.resources.push_back(mapping);
+        if(mode==2) {
+            shader.guest.bindings[0].imageWritten={false};
+            shader.guest.bindings[0].readOnly=true;
+            static_cast<void>(resources.Bindings(shader));
+            shader.guest.bindings[0]=binding;
+        }
+        const auto residency=resources.Residency().size();
+        bool rejected=false;
+        std::vector<Metal::MetalShaderResourceBinding> bindings;
+        try {bindings=resources.Bindings(shader);} catch(const std::invalid_argument&) {rejected=true;}
+        if(mode<3) {
+            Require(rejected,"partially writable DCC storage binding was accepted");
+            Require(resources.Residency().size()==residency,"rejected DCC write published a native image view");
+            auto commands=backend.CommandBuffer();
+            backend.Wait(commands);
+            Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"rejected DCC write left a completion fault");
+            Require(guest==expectedGuest&&keys==expectedKeys,"rejected DCC write changed texels or clear metadata");
+        } else {
+            Require(!rejected&&bindings.size()==1&&bindings[0].textures.size()==1,"fully writable DCC storage binding was rejected");
+            auto commands=backend.CommandBuffer();
+            Encode(backend,library,commands,@"write2D",bindings[0].textures[0],nil,MTLSizeMake(8,8,1));
+            backend.Wait(commands);
+            Require(guest==expectedGuest&&keys==expectedKeys,"dense DCC storage published before completion");
+            Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"dense DCC storage completion faulted");
+            auto expected=expectedGuest;
+            const std::array<std::uint8_t,4> color{17,31,73,127};
+            for(unsigned y=0;y<8;++y) for(unsigned x=0;x<8;++x)
+                std::memcpy(expected.data()+y*geometry.mips[0].pitchBytes+x*4,color.data(),4);
+            Require(guest==expected,"fully writable DCC storage lost texels or row padding");
+            Require(std::all_of(keys.begin(),keys.end(),[](auto key){return key==std::byte{0xff};}),"dense DCC storage did not publish uncompressed metadata");
+        }
+    }
     constexpr std::array<std::string_view,4> categories{"register","mixed","unreadable","1111"};
     for(unsigned unresolved=0;unresolved<categories.size();++unresolved) {
         auto descriptor=d;

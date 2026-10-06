@@ -197,6 +197,9 @@ Graphics::DccKeys MetalShaderResources::textureKeys(const Graphics::GuestTexture
 
 void MetalShaderResources::validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys) {
     if (descriptor.dccAddress == 0) return;
+    if (!GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.baseAddress), bytes, true)) {
+        throw std::invalid_argument("Metal DCC image writes require a fully writable guest surface");
+    }
     const auto count = Graphics::DccKeyBytes(bytes);
     if (count == 0) return;
     if (keys == Graphics::DccKeys::Uncompressed && !GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.dccAddress), count, true)) return;
