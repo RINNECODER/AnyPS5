@@ -72,11 +72,10 @@ struct SceSystemImports::Impl {
 
     std::int64_t paramGetInt(std::uint64_t param, std::uint64_t destination) {
         const auto id = static_cast<std::uint32_t>(param);
-        // Virtual console policy for the title's observed language/time-zone/DST queries.
         std::uint32_t value;
         switch (id) {
-        case 1: value = 1; break; // English (US).
-        case 4: case 5: value = 0; break; // UTC, no summertime offset.
+        case 1: value = 1; break;
+        case 4: case 5: value = 0; break;
         default:
             throw std::runtime_error("Unsupported SCE system service integer parameter: " + std::to_string(id));
         }
@@ -91,7 +90,6 @@ struct SceSystemImports::Impl {
         const auto id = static_cast<std::uint32_t>(param);
         if (id != 6)
             throw std::runtime_error("Unsupported SCE system service string parameter: " + std::to_string(id));
-        // The title/repository's 65-byte buffer contract and the 16 MiB limit are compatibility policy.
         if (capacity < minimumNameCapacity || capacity > maximumNameCapacity)
             throw std::runtime_error("Unsupported SCE system service name buffer capacity: " + std::to_string(capacity));
         if (!writable(destination, static_cast<std::size_t>(capacity))) return parameterError;
@@ -105,12 +103,9 @@ struct SceSystemImports::Impl {
         case Service::ReceiveEvent:
         case Service::GetHdrToneMapLuminance:
         case Service::LaunchPlayerDialog:
-            // Interoperability policy: report unavailable without inspecting opaque arguments
-            // or claiming function-specific PS5 SDK errors, output layouts, or host UI state.
             guest.Set(Register::Rax, static_cast<std::uint64_t>(unavailableError));
             return;
         case Service::InitializePlayerDialogParam:
-            // Its ignored caller result does not establish a return ABI or safe initialization.
             throw std::runtime_error("Unsupported SCE system service invocation: sceSystemServiceInitializePlayerDialogParam");
         default: break;
         }
@@ -119,7 +114,7 @@ struct SceSystemImports::Impl {
             result = paramGetInt(guest.Get(Register::Rdi), guest.Get(Register::Rsi));
         else if (service == Service::ParamGetString)
             result = paramGetString(guest.Get(Register::Rdi), guest.Get(Register::Rsi), guest.Get(Register::Rdx));
-        else result = 0; // HideSplashScreen is idempotent: this virtual engine has no OS splash.
+        else result = 0;
         guest.Set(Register::Rax, static_cast<std::uint64_t>(result));
     }
 };
