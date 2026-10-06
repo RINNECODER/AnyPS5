@@ -47,7 +47,9 @@ public struct EngineInspection: Decodable, Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public static func inspect(engine: URL, game: LocalGame, capabilities: EngineCapabilities) async throws -> Self {
+    public static func inspect(engine: URL, game: LocalGame, capabilities: EngineCapabilities, acceptedPackage: EnginePackage? = nil) async throws -> Self {
+        if let acceptedPackage { try acceptedPackage.verifyIntegrity(for: engine) }
+        let capabilities = acceptedPackage?.capabilities ?? capabilities
         guard capabilities.supportedFormats.contains("sce_elf64_x86_64") else {
             throw LauncherError("This engine does not advertise SCE ELF inspection support.")
         }
@@ -57,6 +59,7 @@ public struct EngineInspection: Decodable, Sendable {
                 let child = Process()
                 let pipe = Pipe()
                 child.executableURL = engine
+                if acceptedPackage != nil { child.environment = EnginePackage.controlledEnvironment }
                 child.arguments = ["--inspect-sce-json", game.executablePath]
                 child.currentDirectoryURL = URL(fileURLWithPath: game.workingDirectory, isDirectory: true)
                 child.standardInput = FileHandle.nullDevice

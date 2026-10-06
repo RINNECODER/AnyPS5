@@ -53,7 +53,9 @@ public final class EngineRunner: @unchecked Sendable {
     }
 
     public func run(engine: URL, game: LocalGame, capabilities: EngineCapabilities? = nil,
-                    resourceDirectory: URL? = nil) throws -> AsyncThrowingStream<EngineEvent, Error> {
+                    resourceDirectory: URL? = nil, acceptedPackage: EnginePackage? = nil) throws -> AsyncThrowingStream<EngineEvent, Error> {
+        if let acceptedPackage { try acceptedPackage.verifyIntegrity(for: engine) }
+        let capabilities = acceptedPackage?.capabilities ?? capabilities
         let resourceRoot = resourceDirectory?.path ?? game.workingDirectory
         let hasResourceArgument = capabilities?.resourceRootArgument == "--resource-root"
         var launchGame = game
@@ -69,6 +71,7 @@ public final class EngineRunner: @unchecked Sendable {
         let child = Process()
         let pipe = Pipe()
         child.executableURL = engine
+        if acceptedPackage != nil { child.environment = EnginePackage.controlledEnvironment }
         let resourceArguments = hasResourceArgument ? ["--resource-root", resourceRoot] : []
         let moduleArguments = game.sceModulePaths.flatMap { ["--sce-module", $0] }
         child.arguments = resourceArguments + (capabilities != nil ? ["--diagnostics-json"] : []) + moduleArguments + [game.executablePath]

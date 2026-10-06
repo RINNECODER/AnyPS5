@@ -11,6 +11,25 @@ final class LauncherCoreTests: XCTestCase {
         return url
     }
 
+    private func copiedEnginePackage() throws -> URL {
+        guard let path = ProcessInfo.processInfo.environment["ANYPS5_ENGINE_PACKAGE"] else {
+            throw XCTSkip("Set ANYPS5_ENGINE_PACKAGE to the frozen native module/CRT package.")
+        }
+        let copy = try directory().appendingPathComponent("relocated engine $(literal) 'é' package")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: copy)
+        // The frozen source is read-only. Only this owned copy becomes writable for controls/cleanup.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copy.path)
+        let items = try XCTUnwrap(FileManager.default.enumerator(at: copy, includingPropertiesForKeys: [.isDirectoryKey]))
+        for case let item as URL in items {
+            let attributes = try FileManager.default.attributesOfItem(atPath: item.path)
+            let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o644
+            let isDirectory = try item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+            try FileManager.default.setAttributes([.posixPermissions: permissions | (isDirectory ? 0o700 : 0o200)],
+                                                 ofItemAtPath: item.path)
+        }
+        return copy.resolvingSymlinksInPath()
+    }
+
     private let catalogue = Data("""
     {"schemaVersion":1,"revision":13,"releases":[
       {"id":"a-exfat","gameId":"a","titleId":"PPSA00001","title":"Example Game","sizeBytes":42,"provider":"Vikingfile","format":"exFAT","filename":"a.exfat","url":"https://example.com/a","genre":null},
@@ -50,14 +69,15 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: cache), catalogue)
     }
 
-    // Contract: saved associations retain image and ordered module paths; older libraries decode with no modules.
-    // Regression: Codable requires the new key, silently discards malformed lists or reorders persisted modules.
+    // Contract: saved associations retain image/module paths and accepted package identity; older libraries decode without either.
+    // Regression: decoding requires new keys, drops malformed lists or loses identity so a changed engine can regain legacy routing.
     // This is the persistence owner; subprocess and image tests do not exercise saved library migrations.
     func testLibraryReplacementRoundTrips() throws {
         let url = try directory().appendingPathComponent("library.json")
         let storage = LibraryPersistence(url: url)
         var library = try storage.load()
         library.enginePath = "/engine with spaces/anyps5_cpu_run"
+        library.enginePackageManifestSHA256 = String(repeating: "a", count: 64)
         library.attach(LocalGame(id: "a", title: "Example", executablePath: "/old.elf", workingDirectory: "/old"))
         let modules = ["/libraries/z $(literal) module.prx", "/libraries/a quoted 'module'.prx"]
         library.attach(LocalGame(id: "a", title: "Example", executablePath: "/new.elf", workingDirectory: "/resources",
@@ -70,6 +90,7 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(restored.games[0].resourceImagePath, "/downloads/game image.exfat")
         XCTAssertEqual(restored.games[0].sceModulePaths, modules)
         XCTAssertEqual(restored.enginePath, "/engine with spaces/anyps5_cpu_run")
+        XCTAssertEqual(restored.enginePackageManifestSHA256, String(repeating: "a", count: 64))
         try Data("""
         {"enginePath":"/legacy-engine","games":[{"id":"legacy","title":"Existing game","executablePath":"/existing.elf","workingDirectory":"/existing-resources"}]}
         """.utf8).write(to: url)
@@ -79,6 +100,7 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertNil(legacy.games[0].resourceImagePath)
         XCTAssertEqual(legacy.games[0].sceModulePaths, [])
         XCTAssertEqual(legacy.enginePath, "/legacy-engine")
+        XCTAssertNil(legacy.enginePackageManifestSHA256)
         try Data("""
         {"games":[{"id":"bad","title":"Malformed","executablePath":"/existing.elf","workingDirectory":"/existing-resources","sceModulePaths":"not-an-array"}],"enginePath":"/engine"}
         """.utf8).write(to: url)
@@ -409,8 +431,109 @@ final class LauncherCoreTests: XCTestCase {
         }
     }
 
-    // Contract: the actual engine preserves static guest results and enabled SCE inspection's qualified imports through display.
-    // Regression: a failed probe silently skips SCE coverage, or an older CLI/decoder/summary loses service families.
+    // Contract: native package acceptance rejects unsafe paths, stale bytes, wrong architectures/closure and a real failed CRT keeper.
+    // Regression: trusting manifest architecture text, omitting transitive dependencies, or ignoring validation process failure.
+    // Static/argv keepers cannot establish native package integrity. Controls alter only copies; no fake backend or production seam.
+    func testFrozenEnginePackageRejectsInvalidCandidates() async throws {
+        let cases: [(String, String)] = [
+            ("missing manifest", "Engine package path"), ("malformed manifest", "Engine package manifest"),
+            ("unknown schema", "Engine package manifest"), ("changed bytes", "Engine package integrity"),
+            ("wrong CLI architecture", "Engine package architecture"), ("wrong dylib architecture", "Engine package architecture"),
+            ("parent traversal", "Engine package path"), ("escaped symlink", "Engine package path"),
+            ("unhashed dependency", "Engine package dependency"), ("external load command", "Engine package dependency"),
+            ("unhashed CRT main", "Engine package integrity"), ("unhashed raw CRT", "Engine package integrity"),
+            ("unhashed SELF CRT", "Engine package integrity"),
+            ("changed validation contract", "Engine package manifest"), ("incorrect CRT certificate", "Engine package validation"),
+            ("changed saved identity", "Engine package integrity manifest differs from the saved accepted selection")
+        ]
+        for (control, diagnostic) in cases {
+            let root = try copiedEnginePackage()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let manifestURL = root.appendingPathComponent("manifest.json")
+            let originalManifest = try Data(contentsOf: manifestURL)
+            let originalIdentity = SHA256.hash(data: originalManifest).map { String(format: "%02x", $0) }.joined()
+            var manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: originalManifest) as? [String: Any])
+            var files = try XCTUnwrap(manifest["files"] as? [String: Any])
+            func replaceAndRehash(_ path: String, _ bytes: Data) throws {
+                try bytes.write(to: root.appendingPathComponent(path))
+                files[path] = ["size": bytes.count, "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()]
+            }
+            switch control {
+            case "missing manifest": try FileManager.default.removeItem(at: manifestURL)
+            case "malformed manifest": try Data("{malformed".utf8).write(to: manifestURL)
+            case "unknown schema": manifest["schema_version"] = 2
+            case "changed bytes":
+                let path = "fixtures/cpu-homebrew.elf"
+                var bytes = try Data(contentsOf: root.appendingPathComponent(path)); bytes[bytes.count - 1] ^= 1
+                try bytes.write(to: root.appendingPathComponent(path)) // Deliberately retain the old digest.
+            case "wrong CLI architecture", "wrong dylib architecture":
+                let path = control == "wrong CLI architecture" ? "bin/anyps5_cpu_run" : "lib/libqemu-x86_64-softmmu.dylib"
+                var bytes = try Data(contentsOf: root.appendingPathComponent(path))
+                XCTAssertEqual(Array(bytes.prefix(4)), [0xcf, 0xfa, 0xed, 0xfe], "Architecture control needs thin little-endian Mach-O.")
+                bytes.replaceSubrange(4..<8, with: [7, 0, 0, 1]) // CPU_TYPE_X86_64, with matching digest to reach architecture guard.
+                try replaceAndRehash(path, bytes)
+            case "parent traversal":
+                try FileManager.default.copyItem(at: root.appendingPathComponent("licenses/AnyPS5-LICENSE"),
+                                                 to: root.deletingLastPathComponent().appendingPathComponent("outside-license"))
+                files["../outside-license"] = files["licenses/AnyPS5-LICENSE"]
+            case "escaped symlink":
+                let path = "fixtures/SceModuleGuest.prx"
+                let originalRoot = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["ANYPS5_ENGINE_PACKAGE"]))
+                try FileManager.default.removeItem(at: root.appendingPathComponent(path))
+                try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(path),
+                                                          withDestinationURL: originalRoot.appendingPathComponent(path))
+            case "unhashed dependency":
+                files.removeValue(forKey: "lib/libglib-2.0.0.dylib")
+                try FileManager.default.removeItem(at: root.appendingPathComponent("lib/libglib-2.0.0.dylib"))
+            case "unhashed CRT main", "unhashed raw CRT", "unhashed SELF CRT":
+                let path = control == "unhashed CRT main" ? "fixtures/sce-crt/sce-crt-main.elf" :
+                    (control == "unhashed raw CRT" ? "fixtures/sce-crt/raw/SceCrtGuest.prx" : "fixtures/sce-crt/plain-self/SceCrtGuest.prx")
+                files.removeValue(forKey: path) // Keep the real file: a keeper read failure must not substitute for hash coverage.
+            case "external load command":
+                let path = "lib/libqemu-x86_64-softmmu.dylib"
+                var bytes = try Data(contentsOf: root.appendingPathComponent(path))
+                let loadPath = Data("@loader_path/libglib-2.0.0.dylib".utf8)
+                let commandsEnd = 32 + (0..<4).reduce(0) { $0 | (Int(bytes[20 + $1]) << (8 * $1)) }
+                let range = try XCTUnwrap(bytes.range(of: loadPath, in: 32..<commandsEnd), "Control needs the genuine QEMU GLib load command.")
+                var external = Data("/opt/homebrew/lib/glib.dylib".utf8)
+                XCTAssertLessThan(external.count, loadPath.count)
+                external.append(Data(repeating: 0, count: loadPath.count - external.count))
+                bytes.replaceSubrange(range, with: external)
+                try replaceAndRehash(path, bytes)
+            case "changed validation contract":
+                var validation = try XCTUnwrap(manifest["compiled_crt_validation"] as? [String: Any])
+                validation["expected_stdout"] = ["arbitrary success"]
+                manifest["compiled_crt_validation"] = validation
+            case "incorrect CRT certificate", "changed saved identity":
+                if control == "changed saved identity" { manifest["checkpoint"] = "changed accepted package" }
+                let path = "fixtures/sce-crt/crt-receipt.txt"
+                var text = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+                let digest = try XCTUnwrap(text.split(separator: " ").dropFirst(2).first)
+                XCTAssertEqual(digest.count, 64)
+                let wrongDigest = (digest.first == "0" ? "1" : "0") + String(digest.dropFirst())
+                text = text.replacingOccurrences(of: String(digest), with: wrongDigest)
+                try replaceAndRehash(path, Data(text.utf8)) // Hash-valid package; real compiled source certificate now disagrees.
+                // Restored identity must reject before this genuine keeper fault, not after fixtures execute.
+            default: XCTFail("Unhandled negative control: \(control)")
+            }
+            if control != "missing manifest" && control != "malformed manifest" {
+                manifest["files"] = files
+                try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: manifestURL)
+            }
+            let selected = control == "malformed manifest" ? manifestURL :
+                (control == "unknown schema" ? root.appendingPathComponent("bin/anyps5_cpu_run") : root)
+            do {
+                _ = try await EnginePackage.accept(selectedURL: selected,
+                                                   expectedManifestSHA256: control == "changed saved identity" ? originalIdentity : nil)
+                XCTFail("Invalid package accepted: \(control)")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.hasPrefix(diagnostic), "\(control) reached the wrong guard: \(error)")
+            }
+        }
+    }
+
+    // Contract: the actual engine preserves static results/inspection and accepts a relocated native package before routing real modules.
+    // Regression: accepting stale runtime bytes, losing supplied modules, or dropping qualified inspection service families.
     // Shell protocol tests cannot establish the real engine report; CPU tests do not own launcher decoding or display.
     func testActualAnyPS5Checkpoint() async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -454,6 +577,59 @@ final class LauncherCoreTests: XCTestCase {
             }
             XCTAssertFalse(inspection.hasTLS)
             XCTAssertTrue(inspection.unsupportedReasons.isEmpty)
+        }
+        if environment["ANYPS5_ENGINE_PACKAGE"] != nil {
+            let root = try copiedEnginePackage()
+            let package = try await EnginePackage.accept(selectedURL: root)
+            XCTAssertEqual(package.executableURL, root.appendingPathComponent("bin/anyps5_cpu_run"))
+            XCTAssertEqual(package.sourceCommit, "5c9af66412d87c99651e87462ce6fee0f12f4cd2")
+            XCTAssertEqual(package.engineCommit, "f82b6dd02638cfe76afa16fb54a1199daff21242")
+            XCTAssertEqual(package.capabilities.backend, "Modern QEMU TCG x86-64 dynamic translation")
+            XCTAssertEqual(package.capabilities.sceModuleArgument, "--sce-module")
+            XCTAssertFalse(package.capabilities.ps5GameRuntimeReady)
+            let unrelated = try directory().appendingPathComponent("unrelated resource $(literal) directory")
+            try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: false)
+            let moduleMain = root.appendingPathComponent("fixtures/sce-module-main.elf")
+            let dependency = root.appendingPathComponent("fixtures/SceModuleGuest.prx")
+            var moduleGame = LocalGame(id: "compiled-module", title: "Compiled module routing", executablePath: moduleMain.path,
+                                      workingDirectory: unrelated.path, sceModulePaths: [dependency.path])
+            for withDependency in [true, false] {
+                moduleGame.sceModulePaths = withDependency ? [dependency.path] : []
+                var bytes = Data(); var status: Int32?
+                // Accepted proof supplies capabilities even when the caller has no cached probe.
+                for try await event in try EngineRunner().run(engine: package.executableURL, game: moduleGame,
+                                                         resourceDirectory: unrelated, acceptedPackage: package) {
+                    switch event { case .output(let chunk): bytes.append(chunk); case .exited(let code): status = code }
+                }
+                let events = try String(decoding: bytes, as: UTF8.self).split(separator: "\n").map {
+                    try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+                }
+                XCTAssertEqual(events.compactMap { $0["event"] as? String }, withDependency ? ["startup", "guest_exit"] : ["error"])
+                if withDependency {
+                    // SceModuleMain.c independently requires argc6; production launcher supplies argc1 and returns81.
+                    // This establishes routing/translated entry/exit. Full arithmetic/TLS/CRT proof is accept's packaged keeper.
+                    XCTAssertEqual(status, 81)
+                    XCTAssertEqual(events.last?["exit_code"] as? Int, 81)
+                    XCTAssertEqual(events.first?["host_architecture"] as? String, "arm64")
+                    XCTAssertGreaterThan((events.first?["entry"] as? NSNumber)?.uint64Value ?? 0, 0)
+                } else {
+                    XCTAssertEqual(status, 126)
+                    XCTAssertEqual(events.first?["code"] as? String, "unsupported_executable")
+                    XCTAssertTrue((events.first?["message"] as? String)?.contains("DT_NEEDED guest module loading is unsupported") == true)
+                }
+            }
+            // Acceptance cannot authorize different bytes or transfer its live capabilities to a different engine.
+            let fixture = root.appendingPathComponent("fixtures/cpu-homebrew.elf")
+            let original = try Data(contentsOf: fixture)
+            var changed = original; changed[changed.count - 1] ^= 1
+            try changed.write(to: fixture)
+            XCTAssertThrowsError(try EngineRunner().run(engine: package.executableURL, game: moduleGame, acceptedPackage: package)) {
+                XCTAssertTrue($0.localizedDescription.hasPrefix("Engine package integrity"), "\($0)")
+            }
+            try original.write(to: fixture)
+            XCTAssertThrowsError(try EngineRunner().run(engine: engine, game: game, acceptedPackage: package)) {
+                XCTAssertTrue($0.localizedDescription.contains("different selected engine"), "\($0)")
+            }
         }
     }
 }

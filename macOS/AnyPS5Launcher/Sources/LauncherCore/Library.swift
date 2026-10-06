@@ -36,6 +36,7 @@ public struct LocalGame: Codable, Identifiable, Sendable, Equatable {
 public struct LauncherLibrary: Codable, Sendable {
     public var games: [LocalGame] = []
     public var enginePath: String = ""
+    public var enginePackageManifestSHA256: String?
     public init() {}
 
     public mutating func attach(_ game: LocalGame) {
