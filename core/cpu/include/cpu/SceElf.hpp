@@ -32,6 +32,12 @@ struct SceSegment {
 };
 
 struct SceImageData;
+class SceTls;
+
+struct SceLibraryAttribute {
+    std::uint16_t LibraryId = 0;
+    std::uint64_t Attributes = 0;
+};
 
 struct SceParsedImage {
     std::filesystem::path Path;
@@ -45,6 +51,7 @@ struct SceParsedImage {
     std::vector<SceImport> Imports;
     std::vector<std::string> NeededModules;
     std::vector<std::string> NeededFiles;
+    std::vector<SceLibraryAttribute> ImportLibraryAttributes;
     std::vector<std::uint32_t> RelocationTypes;
     std::uint64_t RelocationCount = 0;
     std::vector<std::string> UnsupportedReasons;
@@ -62,6 +69,7 @@ struct SceLoadedImage {
     std::vector<SceImport> Imports;
     std::vector<std::string> NeededModules;
     std::optional<SceSegment> ProcParam;
+    std::shared_ptr<SceTls> Tls;
 };
 
 SceParsedImage ParseSce(const std::filesystem::path& path);

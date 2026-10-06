@@ -3,10 +3,12 @@
 #include <cpu/Runtime.hpp>
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
+#include <cpu/SceKernelImports.hpp>
 #include <cpu/Self.hpp>
 #include <array>
 #include <csignal>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -81,7 +83,8 @@ void Capabilities() {
         << "{\"name\":\"arch_prctl\",\"number\":158,\"constraints\":\"ARCH_SET_FS and ARCH_GET_FS only\"}],"
         << "\"sce_imports\":{\"module\":\"libc\",\"module_version\":\"1.1\",\"library\":\"libc\",\"library_version\":1,"
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
-        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"no guest TLS\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
+        << "\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"main-module TLS only; zero alignment remainder\",\"read-only /app0 resources; regular files only\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
         << "\"unsupported_instruction_families\":[\"AVX\",\"AVX2\",\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
 }
 
@@ -110,6 +113,12 @@ void InspectSce(const Cpu::SceParsedImage& image) {
     const auto strings = [](const auto& values) {
         for (std::size_t index = 0; index < values.size(); ++index) { if (index) std::cout << ','; std::cout << Json(values[index]); }
     };
+    std::cout << "],\"import_library_attributes\":[";
+    for (std::size_t index = 0; index < image.ImportLibraryAttributes.size(); ++index) {
+        if (index) std::cout << ',';
+        const auto& attribute = image.ImportLibraryAttributes[index];
+        std::cout << "{\"library_id\":" << attribute.LibraryId << ",\"attributes\":" << attribute.Attributes << '}';
+    }
     std::cout << "],\"needed_modules\":["; strings(image.NeededModules);
     std::cout << "],\"needed_files\":["; strings(image.NeededFiles);
     std::cout << "],\"unsupported_reasons\":["; strings(image.UnsupportedReasons);
@@ -135,6 +144,7 @@ ErrorCode ExecutionCode(std::string_view message) {
     if (message.starts_with("Unsupported guest instruction") || message.starts_with("Unsupported guest VEX/EVEX instruction") ||
         message.starts_with("Unsupported guest XOP instruction")) return ErrorCode::UnsupportedInstruction;
     if (message.starts_with("Unsupported Linux guest syscall") || message.starts_with("Unsupported guest syscall") ||
+        message.starts_with("Unsupported guest /app0 ") ||
         message.starts_with("Unsupported guest interrupt") || message.starts_with("Unsupported guest SYSENTER") ||
         message.starts_with("Unsupported guest port ") || message.starts_with("Unsupported guest privileged service instruction") ||
         message.starts_with("Unsupported SCE ") || message.find("unsupported operation") != std::string_view::npos)
@@ -153,19 +163,28 @@ int main(int argc, char** argv) {
     try {
         int first = 1;
         bool inspect = false;
+        std::filesystem::path resourceRoot;
         if (argc > 1 && std::string_view(argv[1]) == "--capabilities-json") {
             if (argc != 2) throw std::runtime_error("--capabilities-json does not accept executable arguments");
             Capabilities();
             return 0;
         }
-        if (argc > 1 && std::string_view(argv[1]) == "--diagnostics-json") {
-            diagnostics = true;
-            first = 2;
-        }
-        if (argc > first && std::string_view(argv[first]) == "--inspect-sce-json") {
-            diagnostics = true;
-            inspect = true;
-            ++first;
+        while (argc > first) {
+            const std::string_view option(argv[first]);
+            if (option == "--diagnostics-json") {
+                diagnostics = true;
+                ++first;
+            } else if (option == "--inspect-sce-json") {
+                diagnostics = true;
+                inspect = true;
+                ++first;
+            } else if (option == "--resource-root") {
+                if (argc <= first + 1 || std::string_view(argv[first + 1]).empty() || std::string_view(argv[first + 1]).starts_with('-'))
+                    throw std::runtime_error("--resource-root requires a directory path");
+                if (!resourceRoot.empty()) throw std::runtime_error("--resource-root may be supplied only once");
+                resourceRoot = argv[first + 1];
+                first += 2;
+            } else break;
         }
         if (argc <= first)
             throw std::runtime_error("Usage: anyps5_cpu_run [--diagnostics-json] <x86-64.elf> [guest arguments...] or --inspect-sce-json <clean-sce.elf>");
@@ -184,6 +203,7 @@ int main(int argc, char** argv) {
         Cpu::Machine machine;
         std::unique_ptr<Cpu::LinuxRuntime> linuxRuntime;
         std::unique_ptr<Cpu::SceImports> sceRuntime;
+        std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
@@ -191,7 +211,12 @@ int main(int argc, char** argv) {
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
             if (sce) {
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
-                auto image = Cpu::LoadSce(machine, executable, 0x1000000, [&](const auto& import) { return sceRuntime->Resolve(import); });
+                kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
+                auto image = Cpu::LoadSce(machine, executable, 0x1000000, [&](const auto& import) {
+                    if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
+                    return sceRuntime->Resolve(import);
+                });
+                kernelRuntime->SetTls(image.Tls);
                 Cpu::SetupSceEntry(machine, image, arguments, sceRuntime->ExitGate());
                 entry = image.Entry;
             } else {

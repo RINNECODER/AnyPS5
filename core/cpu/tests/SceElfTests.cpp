@@ -1,5 +1,6 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
+#include <cpu/SceTls.hpp>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -241,7 +242,7 @@ void invalidInputs() {
         Case{"unmapped or inaccessible", [](auto& f) { put(f.bytes, 24, 0x3000); }},
         Case{"program segment exceeds", [](auto& f) { put(f.bytes, 64 + 4 * 56 + 32, 0x10000); }},
         Case{"unterminated dynamic segment", [](auto& f) { put(f.bytes, Dyn + f.tags * 16, 21); }},
-        Case{"overlapping PT_LOAD pages", [](auto& f) { put(f.bytes, 64 + 2 * 56 + 16, 0x3000); }},
+        Case{"overlapping logical PT_LOAD ranges", [](auto& f) { put(f.bytes, 64 + 2 * 56 + 16, 0x3000); }},
         Case{"RELATIVE relocation must", [](auto& f) { put(f.bytes, Relocations + 8, (1ull << 32) | 8); }},
         Case{"addend must be zero", [](auto& f) { put(f.bytes, Plt + 16, 1); }},
     };
@@ -298,17 +299,157 @@ void distinctScopes() {
             "Same-NID imports in distinct scopes bound to the wrong guest gate");
 }
 
+void sharedPageInspection() {
+    Fixture fixture;
+    put(fixture.bytes, 56, 7, 2);
+    put(fixture.bytes, 64 + 40, 0x180);
+    fixture.header(6, 1, 0, 0x2180, 0x1180, 0x80, 0x80, 16);
+    Input input(fixture.bytes);
+    const auto parsed = Cpu::ParseSce(input.path);
+    require(parsed.Imports.size() == 2 && std::any_of(parsed.UnsupportedReasons.begin(), parsed.UnsupportedReasons.end(), [](const auto& reason) {
+        return reason.find("differing permissions on a shared guest page") != std::string::npos;
+    }), "Nonconflicting logical segments sharing a page must remain inspectable with an explicit execution blocker");
+    Cpu::Machine machine;
+    unsigned resolutions = 0;
+    rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); },
+            "differing permissions on a shared guest page");
+    require(resolutions == 0, "Unsafe shared-page permissions reached import resolution");
+    rejects([&] { machine.CheckAccess(Bias + 0x1000, 1, Cpu::Permission::Execute); }, "permission");
+    fixture.header(6, 1, 0, 0x2170, 0x1170, 0x80, 0x80, 16);
+    Input conflicting(fixture.bytes);
+    rejects([&] { Cpu::ParseSce(conflicting.path); }, "overlapping logical PT_LOAD ranges");
+}
+
+void repeatedLibraryAttributes() {
+    Fixture fixture;
+    put(fixture.bytes, Dyn + 8, (1ull << 32) | fixture.libcOffset);
+    put(fixture.bytes, Dyn + 16 + 8, (1ull << 32) | fixture.libcOffset);
+    fixture.bytes[Strings + fixture.nidOffset + 12] = std::byte{'A'};
+    fixture.bytes[Strings + fixture.exitOffset + 12] = std::byte{'A'};
+    fixture.tag(0x61000019, 9);
+    fixture.tag(0x61000019, 9);
+    fixture.finish();
+    Input input(fixture.bytes);
+    const auto parsed = Cpu::ParseSce(input.path);
+    require(parsed.Imports.size() == 2 && parsed.Imports[0].LibraryId == 0 && parsed.Imports[1].LibraryId == 0 &&
+            parsed.Imports[0].LibraryName == "libc" && parsed.Imports[0].ModuleId == 1,
+            "Repeated imported-library attributes or importer-local library ID zero lost qualified identity");
+    require(parsed.ImportLibraryAttributes.size() == 2 && parsed.ImportLibraryAttributes[0].LibraryId == 0 &&
+            parsed.ImportLibraryAttributes[0].Attributes == 9 && parsed.ImportLibraryAttributes[1].Attributes == 9,
+            "Inspection discarded repeated scoped imported-library attribute records");
+    require(std::any_of(parsed.UnsupportedReasons.begin(), parsed.UnsupportedReasons.end(), [](const auto& reason) {
+        return reason.find("imported library attributes") != std::string::npos;
+    }), "Unimplemented imported-library attribute semantics must remain an explicit execution blocker");
+    Cpu::Machine machine;
+    unsigned resolutions = 0;
+    rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); },
+            "imported library attributes");
+    require(resolutions == 0, "Unsupported imported-library attributes reached host resolution");
+    put(fixture.bytes, Dyn + (fixture.tags - 1) * 16 + 8, 8);
+    Input conflicting(fixture.bytes);
+    rejects([&] { Cpu::ParseSce(conflicting.path); }, "conflicting imported library attributes");
+    put(fixture.bytes, Dyn + (fixture.tags - 1) * 16 + 8, (2ull << 48) | 9);
+    Input unbound(fixture.bytes);
+    rejects([&] { Cpu::ParseSce(unbound.path); }, "attribute has no matching imported library id");
+}
+
+struct TlsFixture : Fixture {
+    explicit TlsFixture(bool bssOnly = false) {
+        header(5, 7, 4, bssOnly ? 0x3200 : 0x3040, bssOnly ? 0x3200 : 0x3040,
+               bssOnly ? 0 : 16, 32, 16);
+        put(bytes, Dyn + 7 * 16 + 8, 144);
+        put(bytes, Dyn + 9 * 16 + 8, bssOnly ? 120 : 168);
+        put(bytes, Dyn + 11 * 16 + 8, 0x500);
+        std::copy_n(bytes.begin() + Plt, 48, bytes.begin() + 0x6500);
+        put(bytes, Symbols + 100, 0x16, 1);
+        put(bytes, Symbols + 102, 1, 2);
+        put(bytes, Symbols + 104, 0);
+        put(bytes, Symbols + 112, 16);
+        put(bytes, Symbols + 124, 0x16, 1);
+        put(bytes, Symbols + 126, 1, 2);
+        put(bytes, Symbols + 128, 24);
+        put(bytes, Symbols + 136, 8);
+        relocation(Relocations, 0x4008, 0, 16, 0);
+        relocation(Relocations + 24, 0x4010, 4, 17, 8);
+        relocation(Relocations + 48, 0x4018, 4, 18, 8);
+        relocation(Relocations + 72, 0x4028, 4, 16, 0);
+        relocation(Relocations + 96, 0x4030, 5, 18, 0);
+        relocation(Relocations + 120, 0x3040, 0, 8, 0x1000);
+        relocation(Relocations + 144, 0x3048, 5, 17, 0);
+        Bytes code;
+        const auto emit = [&](std::initializer_list<unsigned> values) {
+            for (const auto value : values) code.push_back(static_cast<std::byte>(value));
+        };
+        const auto rip = [&](std::initializer_list<unsigned> opcode, std::uint64_t target) {
+            emit(opcode);
+            const auto displacement = target - (0x1000 + code.size() + 4);
+            for (unsigned index = 0; index < 4; ++index) code.push_back(static_cast<std::byte>(displacement >> (8 * index)));
+        };
+        rip({0x48, 0x8b, 0x05}, 0x4018);
+        emit({0x64, 0x48, 0x8b, 0x18});
+        rip({0x48, 0x89, 0x1d}, 0x3000);
+        emit({0x64, 0x48, 0x8b, 0x04, 0x25, 0xe0, 0xff, 0xff, 0xff});
+        rip({0x48, 0x89, 0x05}, 0x3008);
+        emit({0x64, 0x48, 0x8b, 0x04, 0x25, 0xf8, 0xff, 0xff, 0xff});
+        rip({0x48, 0x89, 0x05}, 0x3010);
+        emit({0x64, 0xc7, 0x04, 0x25, 0xf8, 0xff, 0xff, 0xff, 0x78, 0x56, 0x34, 0x12});
+        emit({0x64, 0x8b, 0x04, 0x25, 0xf8, 0xff, 0xff, 0xff});
+        rip({0x48, 0x89, 0x05}, 0x3018);
+        emit({0x31, 0xff, 0x3d, 0x78, 0x56, 0x34, 0x12, 0x40, 0x0f, 0x95, 0xc7, 0x48, 0x83, 0xec, 8});
+        rip({0xff, 0x15}, 0x4020);
+        emit({0x0f, 0x0b});
+        std::copy(code.begin(), code.end(), bytes.begin() + 0x1000);
+        header(0, 1, 5, 0x1000, 0x1000, code.size(), 4096, 4096);
+    }
+};
+
+void translatedTlsEntry(bool bssOnly = false) {
+    TlsFixture fixture(bssOnly);
+    Input input(fixture.bytes);
+    Cpu::Machine machine;
+    Cpu::SceImports imports(machine);
+    auto image = Cpu::LoadSce(machine, input.path, Bias, [&](const auto& import) { return imports.Resolve(import); });
+    require(image.Tls && image.Tls->ModuleId() == 1 && image.Tls->MemorySize() == 32,
+            "Loaded SCE main module did not expose its initialized TLS service");
+    require(word(machine, Bias + 0x4008) == 1 && word(machine, Bias + 0x4028) == 1 &&
+            word(machine, Bias + 0x4010) == 8 && word(machine, Bias + 0x4018) == 0xffffffffffffffe8ull &&
+            word(machine, Bias + 0x4030) == 0xfffffffffffffff8ull,
+            "DTPMOD64, DTPOFF64, or TPOFF64 disagrees with the independent main-module TLS ABI offsets");
+    const auto tp = machine.Get(Cpu::Register::FsBase);
+    require(tp && word(machine, tp - 32) == (bssOnly ? 0 : Bias + 0x1000) &&
+            word(machine, tp - 24) == (bssOnly ? 0 : 24) && word(machine, tp - 8) == 0,
+            "TLS initial template must copy relocated image values and keep its BSS zero");
+    Cpu::SetupSceEntry(machine, image, {"tls-fixture"}, imports.ExitGate());
+    require(machine.Run(image.Entry, 0, 200) == Cpu::StopReason::Exit && machine.ExitCode() == 0,
+            "Actual x86 SCE TLS program failed its FS-based BSS write/control-flow check");
+    require(word(machine, Bias + 0x3000) == (bssOnly ? 0 : 24) &&
+            word(machine, Bias + 0x3008) == (bssOnly ? 0 : Bias + 0x1000) &&
+            word(machine, Bias + 0x3010) == 0 && word(machine, Bias + 0x3018) == 0x12345678 &&
+            word(machine, tp - 8) == 0x12345678 && machine.Get(Cpu::Register::Rbx) == (bssOnly ? 0 : 24),
+            "Actual x86 FS accesses observed incorrect initialized TLS bytes, relocated pointer, BSS, or register result");
+}
+
 void unsupportedStartup() {
     struct Case { const char* Expected; std::function<void(Fixture&)> Change; };
     const std::array cases{
         Case{"guest initializer", [](auto& f) { f.tag(12, 0x1000); f.finish(); }},
         Case{"guest initializer", [](auto& f) { f.tag(25, 0x3010); f.tag(27, 8); f.finish(); }},
         Case{"DT_NEEDED guest module", [](auto& f) { f.tag(1, f.libcOffset); f.finish(); }},
-        Case{"guest module initialization/loading", [](auto& f) { f.tag(0x61000045, (2ull << 48) | (2ull << 40) | (1ull << 32) | f.libcOffset); f.finish(); }},
+        Case{"guest module initialization/loading", [](auto& f) { f.header(5, 7, 4, 0x3100, 0x3100, 8, 16, 8); f.tag(0x61000045, (2ull << 48) | (2ull << 40) | (1ull << 32) | f.libcOffset); f.finish(); }},
         Case{"data or TLS imports", [](auto& f) { put(f.bytes, Symbols + 28, 0x11, 1); }},
         Case{"untyped imports", [](auto& f) { put(f.bytes, Symbols + 28, 0x10, 1); }},
-        Case{"guest TLS initialization", [](auto& f) { f.header(5, 7, 4, 0x3100, 0x3100, 8, 16, 8); }},
-        Case{"unsupported relocation type 18", [](auto& f) { put(f.bytes, Relocations + 8, (2ull << 32) | 18); }},
+        Case{"TLS alignment residue", [](auto& f) { f = TlsFixture(); f.header(5, 7, 4, 0x3041, 0x3041, 16, 32, 16); }},
+        Case{"TLS template file mapping", [](auto& f) { f = TlsFixture(); f.header(5, 7, 4, 0x3140, 0x3040, 16, 32, 16); }},
+        Case{"unmapped or inaccessible", [](auto& f) { f = TlsFixture(); f.header(5, 7, 4, 0x3200, 0x3200, 16, 32, 16); }},
+        Case{"unmapped or inaccessible", [](auto& f) { f = TlsFixture(true); f.header(5, 7, 4, 0x3ff0, 0x3ff0, 0, 32, 16); }},
+        Case{"empty guest TLS segment", [](auto& f) { f.header(5, 7, 4, 0x3100, 0x3100, 0, 0, 16); }},
+        Case{"DTPMOD64 addend", [](auto& f) { f = TlsFixture(); put(f.bytes, Relocations + 16, 1); }},
+        Case{"TLS relocation addend", [](auto& f) { f = TlsFixture(); put(f.bytes, Relocations + 24 + 16, 0xffffffffffffffffull); }},
+        Case{"TLS relocation addend", [](auto& f) { f = TlsFixture(); put(f.bytes, Relocations + 24 + 16, 32); }},
+        Case{"TLS relocation requires a defined", [](auto& f) { f = TlsFixture(); put(f.bytes, Relocations + 24 + 8, (2ull << 32) | 17); }},
+        Case{"data or TLS imports", [](auto& f) { f = TlsFixture(); put(f.bytes, Symbols + 96, f.nidOffset, 4); put(f.bytes, Symbols + 102, 0, 2); }},
+        Case{"TLS relocation requires a nonempty", [](auto& f) { put(f.bytes, Relocations + 8, 16); }},
+        Case{"unsupported relocation type 999", [](auto& f) { put(f.bytes, Relocations + 8, (2ull << 32) | 999); }},
         Case{"guest shared module", [](auto& f) { put(f.bytes, 16, 0xfe18, 2); }},
     };
     for (const auto& test : cases) {
@@ -319,6 +460,7 @@ void unsupportedStartup() {
         unsigned resolutions = 0;
         rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); }, test.Expected);
         require(resolutions == 0, "Unsupported startup mutated import resolution before failing");
+        require(machine.Get(Cpu::Register::FsBase) == 0, "Unsupported startup installed a guest TLS thread pointer before failing");
         rejects([&] { machine.CheckAccess(0x1001000, 1, Cpu::Permission::Execute); }, "permission");
     }
     Fixture fixture;
@@ -330,16 +472,27 @@ void unsupportedStartup() {
 }
 
 int main() {
-    try {
-        translatedEntry(true);
-        translatedEntry(false);
-        invalidInputs();
-        distinctScopes();
-        unsupportedStartup();
-        std::cout << "PASS translated SCE entry, scoped host imports, relocations, RELRO, BSS, Orbis ABI, malformed metadata, and unsupported startup\n";
-        return 0;
-    } catch (const std::exception& error) {
-        std::cerr << "FAIL " << error.what() << '\n';
-        return 1;
+    struct Case { const char* Name; std::function<void()> Run; };
+    const std::array cases{
+        Case{"modern SCE entry", [] { translatedEntry(true); }},
+        Case{"older SCE entry", [] { translatedEntry(false); }},
+        Case{"malformed metadata", invalidInputs},
+        Case{"distinct import scopes", distinctScopes},
+        Case{"unsupported startup", unsupportedStartup},
+        Case{"shared-page inspection", sharedPageInspection},
+        Case{"repeated library attributes", repeatedLibraryAttributes},
+        Case{"translated TLS entry", [] { translatedTlsEntry(); }},
+        Case{"translated BSS-only TLS entry", [] { translatedTlsEntry(true); }},
+    };
+    unsigned failures = 0;
+    for (const auto& test : cases) {
+        try { test.Run(); }
+        catch (const std::exception& error) {
+            ++failures;
+            std::cerr << "FAIL " << test.Name << ": " << error.what() << '\n';
+        }
     }
+    if (failures) return 1;
+    std::cout << "PASS translated SCE entry, scoped host imports, relocations, TLS, shared-page inspection, RELRO, BSS, Orbis ABI, malformed metadata, and unsupported startup\n";
+    return 0;
 }

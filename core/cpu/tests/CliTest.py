@@ -50,6 +50,14 @@ assert started["entry"] > 0 and started["host_architecture"] == "arm64", started
 assert started["guest_architecture"] == "x86_64" and started["backend"] == support["backend"], started
 assert exited == {"schema_version": 1, "event": "guest_exit", "exit_code": 0}, exited
 
+with tempfile.TemporaryDirectory(prefix="anyps5-cli-resources-") as directory:
+    for options in (("--resource-root", directory, "--diagnostics-json"),
+                    ("--diagnostics-json", "--resource-root", directory)):
+        resource_launch = run(*options, fixture, limit)
+        assert resource_launch.returncode == 0 and resource_launch.stdout == expected, resource_launch
+        assert [value["event"] for value in events(resource_launch)] == ["startup", "guest_exit"], resource_launch
+    assert support["resource_root_argument"] == "--resource-root", support
+
 rejected = run("--diagnostics-json", fixture, "--not-a-host-option")
 assert rejected.returncode == 2 and rejected.stdout == "", rejected
 assert [value["event"] for value in events(rejected)] == ["startup", "guest_exit"], rejected
@@ -92,7 +100,10 @@ with tempfile.TemporaryDirectory() as directory:
         assert "unsupported SELF header profile" in error["message"], error
 
 for arguments in (("--unknown",), ("--capabilities-json", fixture), (),
-                  ("--diagnostics-json",), ("--diagnostics-json", "--unknown")):
+                  ("--diagnostics-json",), ("--diagnostics-json", "--unknown"),
+                  ("--diagnostics-json", "--resource-root"),
+                  ("--diagnostics-json", "--resource-root", "--unknown"),
+                  ("--diagnostics-json", "--resource-root", "/tmp", "--resource-root", "/tmp", fixture)):
     invalid = run(*arguments)
     assert invalid.returncode == 126 and invalid.stdout == "", invalid
     if arguments and arguments[0] == "--diagnostics-json":

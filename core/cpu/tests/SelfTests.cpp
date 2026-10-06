@@ -1,6 +1,7 @@
 #include <cpu/Self.hpp>
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
+#include <cpu/SceKernelImports.hpp>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -212,8 +213,13 @@ void execute(const Bytes& compiled) {
             "SCE inspection lost SELF source identity or caller path");
     Cpu::Machine machine;
     Cpu::SceImports imports(machine);
-    auto image = Cpu::LoadSce(machine, path, 0x1000000, [&](const auto& import) { return imports.Resolve(import); });
-    Cpu::SetupSceEntry(machine, image, {"fixture", "not-a-number", "0", "0", "0", "0", "import"}, imports.ExitGate());
+    Cpu::SceKernelImports kernel(machine, path.parent_path());
+    auto image = Cpu::LoadSce(machine, path, 0x1000000, [&](const auto& import) {
+        if (import.ModuleName == "libkernel") return kernel.Resolve(import);
+        return imports.Resolve(import);
+    });
+    kernel.SetTls(image.Tls);
+    Cpu::SetupSceEntry(machine, image, {"fixture", "not-a-number", "0", "0", "0", "0", "import", "0", "0"}, imports.ExitGate());
     require(machine.Run(image.Entry, 0, 2000) == Cpu::StopReason::Exit && machine.ExitCode() == 82,
             "Reconstructed compiler-produced x86 SCE program did not reach its independently specified invalid-number exit");
 }
