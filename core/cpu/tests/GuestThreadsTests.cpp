@@ -1,5 +1,6 @@
 #include <cpu/GuestThreads.hpp>
 #include <cpu/SceImports.hpp>
+#include <cpu/SceLifecycleImports.hpp>
 #include <cpu/SceThreadImports.hpp>
 #include <algorithm>
 #include <array>
@@ -48,11 +49,14 @@ struct Session {
     std::shared_ptr<Cpu::GuestThreads> Threads = std::make_shared<Cpu::GuestThreads>(Machine);
     Cpu::SceImports Libc{Machine};
     Cpu::SceThreadImports Kernel{Machine, Threads};
+    Cpu::SceLifecycleImports Lifecycle{Machine};
     std::unique_ptr<Cpu::SceModules> Graph;
     std::uint64_t ReceiptAddress, EventsAddress, LifecycleAddress;
     std::array<std::byte, 16> EdgeGuard;
     unsigned TlsFactoryCalls = 0;
     bool ProcessExitObserved = false, ExitBeforeFini = false;
+    unsigned ProcessExitCalls = 0;
+    int ObservedExitStatus = -1;
     std::array<std::uint64_t, PreservedRegisters.size()> ExitRegisters{};
     std::uint64_t ExitFrameAddress = 0;
     std::vector<std::byte> ExitFrame;
@@ -61,20 +65,30 @@ struct Session {
             unsigned mode = 0, std::uint64_t oracle = ArithmeticResult, bool returnParentTls = false) {
         require(std::string_view(Cpu::Machine::Backend()).find("Modern QEMU TCG") != std::string_view::npos,
                 "Translated thread fixture requires native modern TCG");
-        Libc.SetProcessExitHandler([this, runtime = std::weak_ptr<Cpu::GuestThreads>(Threads)](int status) {
+        const auto processExit = [this, runtime = std::weak_ptr<Cpu::GuestThreads>(Threads)](int status) {
             const auto owner = runtime.lock();
             if (!owner) throw std::runtime_error("Guest thread process exit owner expired");
             const auto state = lifecycle();
             ProcessExitObserved = true;
-            ExitBeforeFini = state[0] == 1 && state[1] == 0 && state[2] == 2;
+            ++ProcessExitCalls;
+            ObservedExitStatus = status;
+            ExitBeforeFini = state[0] == 1 && state[1] == 0 && (state[2] == 2 || state[2] == 3);
             for (std::size_t index = 0; index < PreservedRegisters.size(); ++index)
                 ExitRegisters[index] = Machine.Get(PreservedRegisters[index]);
-            ExitFrameAddress = Machine.Get(Cpu::Register::Rsp) - 128;
-            const auto stack = Graph->InitialStack();
-            ExitFrame.resize(stack.Address + stack.Size - ExitFrameAddress);
+            const auto rsp = Machine.Get(Cpu::Register::Rsp);
+            const auto mappings = Machine.Mappings();
+            const auto stack = std::find_if(mappings.begin(), mappings.end(), [&](const auto& mapping) {
+                return !mapping.Borrowed && mapping.Permissions == rw && rsp >= mapping.Address &&
+                    rsp - mapping.Address >= 128 && rsp - mapping.Address < mapping.Size;
+            });
+            require(stack != mappings.end(), "Process exit lacks its actual owned writable caller stack");
+            ExitFrameAddress = rsp - 128;
+            ExitFrame.resize(stack->Size - (ExitFrameAddress - stack->Address));
             Machine.Read(ExitFrameAddress, ExitFrame);
             owner->ProcessExitFromHostCall(status);
-        });
+        };
+        Libc.SetProcessExitHandler(processExit);
+        Lifecycle.SetProcessExitHandler(processExit);
         const std::array dependencies{Cpu::SceModuleFile{guest, GuestBias}};
         const std::array hosts{
             Cpu::SceHostModule{"libkernel.prx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
@@ -83,6 +97,7 @@ struct Session {
             [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
                 require(type == 2, "Thread fixture attempted a host data or TLS provider");
                 if (const auto gate = Kernel.Resolve(import, type)) return Cpu::SceResolvedImport{*gate, type};
+                if (const auto gate = Lifecycle.Resolve(import)) return Cpu::SceResolvedImport{*gate, type};
                 return Cpu::SceResolvedImport{Libc.Resolve(import), type};
             });
         require(Graph->Tls() && Graph->Tls()->ModuleCount() == 2, "Thread fixture lost its genuine two-module TLS graph");
@@ -158,6 +173,28 @@ struct Session {
     }
 };
 
+void freshExecution(Session& session, const std::array<std::uint64_t, 36>& state,
+                    const std::array<std::uint64_t, 24>& lifecycle) {
+    session.withdraw();
+    constexpr std::uint64_t fresh = 0x4000000, result = fresh + 4096;
+    constexpr std::array<unsigned char, 11> code{0xb8, 0x29, 0, 0, 0, 0x83, 0xc0, 1, 0x48, 0x89, 0x07};
+    session.Machine.Map(fresh, 4096, rw);
+    session.Machine.Map(result, 4096, rw);
+    session.Machine.Write(fresh, std::as_bytes(std::span(code)));
+    session.Machine.Protect(fresh, 4096, Cpu::Permission::Read | Cpu::Permission::Execute);
+    session.Machine.Set(Cpu::Register::Rsp, result + 4096 - 16);
+    session.Machine.Set(Cpu::Register::Rdi, result);
+    session.Machine.Set(Cpu::Register::Rax, 0xfeedface);
+    require(session.Machine.Run(fresh, fresh + code.size(), 100) == Cpu::StopReason::Address &&
+            session.Machine.Get(Cpu::Register::Rip) == fresh + code.size() &&
+            session.Machine.Get(Cpu::Register::Rax) == 42,
+            "Withdraw after compiled terminal exit retained a suspended guard or resumed old guest code");
+    std::uint64_t stored{};
+    session.Machine.Read(result, std::as_writable_bytes(std::span(&stored, 1)));
+    require(stored == 42 && session.receipt() == state && session.lifecycle() == lifecycle,
+            "Fresh guest run failed its independent result or replayed withdrawn thread callbacks");
+}
+
 void translatedLifecycle(const std::filesystem::path& main, const std::filesystem::path& guest, bool wrongOracle,
                          unsigned mode = 0) {
     Session session(main, guest, mode, ArithmeticResult + (wrongOracle ? 1 : 0));
@@ -201,24 +238,49 @@ void translatedLifecycle(const std::filesystem::path& main, const std::filesyste
     session.Machine.Read(session.ExitFrameAddress, exitFrame);
     require(exitFrame == session.ExitFrame, "Actual dependency finalizer corrupted the paused entry frame or red zone");
     session.edgeUnchanged();
-    if (mode == 12) {
-        session.withdraw();
-        constexpr std::uint64_t fresh = 0x4000000, result = fresh + 4096;
-        constexpr std::array<unsigned char, 11> code{0xb8, 0x29, 0, 0, 0, 0x83, 0xc0, 1, 0x48, 0x89, 0x07};
-        session.Machine.Map(fresh, 4096, rw);
-        session.Machine.Map(result, 4096, rw);
-        session.Machine.Write(fresh, std::as_bytes(std::span(code)));
-        session.Machine.Protect(fresh, 4096, Cpu::Permission::Read | Cpu::Permission::Execute);
-        session.Machine.Set(Cpu::Register::Rdi, result);
-        session.Machine.Set(Cpu::Register::Rax, 0xfeedface);
-        require(session.Machine.Run(fresh, fresh + code.size(), 100) == Cpu::StopReason::Address &&
-                session.Machine.Get(Cpu::Register::Rip) == fresh + code.size() &&
-                session.Machine.Get(Cpu::Register::Rax) == 42,
-                "Withdraw after compiled scePthreadExit retained a suspended guard or resumed old guest code");
-        std::uint64_t stored{};
-        session.Machine.Read(result, std::as_writable_bytes(std::span(&stored, 1)));
-        require(stored == 42 && session.receipt() == state && session.lifecycle() == lifecycle,
-                "Fresh guest run failed its independent result or replayed withdrawn thread callbacks");
+    if (mode == 12) freshExecution(session, state, lifecycle);
+}
+
+void workerProcessExit(const std::filesystem::path& main, const std::filesystem::path& guest) {
+    for (const auto mode : {13u, 14u}) {
+        Session session(main, guest, mode);
+        const auto expectedStatus = mode == 13 ? 23 : 24;
+        require(session.Graph->RunMain(2000000, 100000) == Cpu::StopReason::Exit &&
+                session.Machine.ExitCode() == expectedStatus && session.ProcessExitCalls == 1 &&
+                session.ObservedExitStatus == expectedStatus && session.ProcessExitObserved && session.ExitBeforeFini,
+                "Compiled worker process exit did not terminate the process with its exact requested status");
+        const auto state = session.receipt();
+        const auto lifecycle = session.lifecycle();
+        require(session.events() == std::array<std::uint64_t, 6>{1, 2, 3, 4, 0, 0} && state[0] == 4 &&
+                state[1] == 0 && state[9] == 0 && state[10] == 0 && state[11] == 0 && state[13] == 0 &&
+                state[14] == 0 && state[15] == 0 && state[16] == 0 && state[17] == 0 && state[18] == 0 &&
+                state[19] == 0 && state[20] == 0 && state[21] == 0 && state[24] == 0 && state[25] == 0 &&
+                state[33] == 0 && state[34] == 0,
+                "Process exit returned, resumed the joining parent, or fabricated thread destructors or join results");
+        require(state[12] == ArithmeticResult && state[26] == 0xabcdef0198765432ULL &&
+                state[2] && state[3] && state[2] != state[3] && state[4] && state[5] && state[4] != state[5] &&
+                state[6] && state[7] && state[6] != state[7] && state[8] == 0 &&
+                state[22] == 0x13579bdf2468ace0ULL && state[23] == 0xeca86420fdb97531ULL &&
+                state[27] != state[28] && state[29] != state[30],
+                "Worker process exit lost actual arithmetic, full-width argument, child identity or independent TLS");
+        require(lifecycle[0] == 1 && lifecycle[1] == 1 && lifecycle[2] == 3 &&
+                lifecycle[3] == state[6] && lifecycle[10] == state[7] && lifecycle[4] == state[2] &&
+                lifecycle[11] == state[3] && lifecycle[5] == state[4] && lifecycle[12] == state[5] &&
+                lifecycle[13] == 29 && lifecycle[14] == 0x8877665544332255ULL && lifecycle[15] == 13 &&
+                lifecycle[16] == 0x59687786 && lifecycle[20] == 0 && lifecycle[21] == 0 &&
+                lifecycle[22] == 0 && lifecycle[23] == 0,
+                "Compiled DT_FINI failed to run exactly once on the exiting worker with its actual TLS, errno and ABI");
+        for (std::size_t index = 0; index < PreservedRegisters.size(); ++index)
+            require(session.Machine.Get(PreservedRegisters[index]) == session.ExitRegisters[index],
+                    "Worker process finalizer corrupted the paused exit registers");
+        std::vector<std::byte> frame(session.ExitFrame.size());
+        session.Machine.Read(session.ExitFrameAddress, frame);
+        require(frame == session.ExitFrame, "Worker process finalizer corrupted its actual exit frame or red zone");
+        std::int32_t parentError{};
+        session.Machine.Read(state[4], std::as_writable_bytes(std::span(&parentError, 1)));
+        require(parentError == 17, "Worker process finalizer modified the parked parent's errno");
+        session.edgeUnchanged();
+        freshExecution(session, state, lifecycle);
     }
 }
 
@@ -341,6 +403,7 @@ int main(int argc, char** argv) {
         translatedLifecycle(argv[1], argv[2], false);
         translatedLifecycle(argv[1], argv[2], true);
         translatedLifecycle(argv[1], argv[2], false, 12);
+        workerProcessExit(argv[1], argv[2]);
         arithmeticBudgetStop(argv[1], argv[2]);
         preflightFailures(argv[1], argv[2]);
         rejectedFactoryPreservesParent(argv[1], argv[2]);

@@ -19,7 +19,8 @@ THREAD_NIDS = {"rNhWz+lvOMU", "pB-yGZ2nQ9o", "WhCc1w3EhSI", "6UgtwV+0zb4", "T72h
 MAIN_IMPORTS = {name: (nid(name), 1, symbol_type) for name, symbol_type in GUEST_EXPORTS.items()
                 if name not in {"ThreadDependencyInit", "ThreadDependencyFini"}}
 MAIN_IMPORTS.update({name: (name, 3, 2) for name in THREAD_NIDS})
-MAIN_IMPORTS.update({"__tls_get_addr": ("vNe1w4diLCs", 3, 2), "uMei1W9uyNo": ("uMei1W9uyNo", 2, 2)})
+MAIN_IMPORTS.update({"__tls_get_addr": ("vNe1w4diLCs", 3, 2), "uMei1W9uyNo": ("uMei1W9uyNo", 2, 2),
+                     "6Z83sYWFlA8": ("6Z83sYWFlA8", 3, 2)})
 SCOPES = {1: "ThreadGuest", 2: "libc", 3: "libkernel"}
 
 

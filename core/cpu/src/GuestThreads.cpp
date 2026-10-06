@@ -77,7 +77,9 @@ struct GuestThreads::Impl {
     std::optional<StopReason> terminal;
     GuestEntryControl control;
     std::optional<Machine::SuspendedCall> controlToken;
-    std::uint64_t initialUntil = 0;
+    GuestThreadHandle controlOwner = 0;
+    GuestThreadHandle moduleOwner = 0;
+    std::uint64_t moduleUntil = 0;
 
     explicit Impl(Machine& value) : machine(value) {}
 
@@ -145,6 +147,9 @@ struct GuestThreads::Impl {
         auto& record = current();
         if (!driving || record.state != State::Running || record.pending)
             fail("thread action requires a single active guest host call");
+        if (control.Kind == GuestEntryControlKind::ProcessExit &&
+            (action == Action::Create || action == Action::Join || action == Action::ExitThread))
+            fail("thread creation, join and completion during process finalization are unsupported");
         auto pending = std::make_unique<Pending>();
         pending->kind = action;
         pending->args = args;
@@ -327,12 +332,21 @@ struct GuestThreads::Impl {
         case Action::ExitThread: beginFinish(record, record.pending->args[0]); break;
         case Action::TerminateEntry:
         case Action::ExitProcess:
-            if (!record.initial || phase != Phase::Entry || control.Kind != GuestEntryControlKind::None)
-                fail("process entry control is unsupported outside initial entry execution");
+            if (phase != Phase::Entry || control.Kind != GuestEntryControlKind::None ||
+                (record.pending->kind == Action::TerminateEntry && !record.initial))
+                fail("process entry control is unsupported in the current guest execution");
             control.Kind = record.pending->kind == Action::TerminateEntry
                 ? GuestEntryControlKind::TerminationCallback : GuestEntryControlKind::ProcessExit;
-            if (control.Kind == GuestEntryControlKind::ProcessExit)
+            controlOwner = record.id;
+            if (control.Kind == GuestEntryControlKind::ProcessExit) {
                 control.ExitCode = static_cast<int>(static_cast<std::int32_t>(record.pending->args[0]));
+                // Process exit abandons every other continuation without
+                // publishing pthread completion, destructors or join results.
+                runnable.clear();
+                for (auto& [id, other] : records)
+                    if (id != record.id && other->state != State::Finished && other->state != State::Reaped)
+                        other->state = State::Cancelled;
+            }
             controlToken.emplace(std::move(record.pending->token));
             record.pending.reset();
             record.state = State::Control;
@@ -373,7 +387,8 @@ struct GuestThreads::Impl {
                 fail("guest run queue contains an ineligible thread");
             activate(record);
             record.state = State::Running;
-            const auto until = record.initial ? initialUntil : ReturnGate;
+            const auto until = phase == Phase::Module && record.id == moduleOwner
+                ? moduleUntil : (record.initial ? 0 : ReturnGate);
             StopReason reason;
             try {
                 reason = machine.RunSlice(machine.Get(Register::Rip), until, std::min(Quantum, budget.Remaining()));
@@ -395,7 +410,7 @@ struct GuestThreads::Impl {
             } else if (reason == StopReason::Address) {
                 if (machine.Get(Register::Rsp) != record.returnStack)
                     fail("guest callback reached its return sentinel without unwinding its call frame");
-                if (record.initial) {
+                if (record.initial || (phase == Phase::Module && record.id == moduleOwner)) {
                     record.state = State::Runnable;
                     return reason;
                 }
@@ -427,26 +442,27 @@ struct GuestThreads::Impl {
         }
         if (control.Kind != GuestEntryControlKind::None) return StopReason::Paused;
         auto& record = lookup(initial);
-        initialUntil = 0;
         if (record.state == State::Runnable) enqueue(record, true);
         return drive(budget);
     }
     GuestCallResult invokeModule(const GuestModuleCall& call, GuestPhaseBudget& budget) {
         Execution execution(*this, Phase::Module);
         if (terminal) return {*terminal, std::nullopt};
-        auto& record = lookup(initial);
+        auto& record = lookup(control.Kind == GuestEntryControlKind::None ? initial : controlOwner);
         if (record.state != State::Runnable && record.state != State::Control)
-            fail("module callback requires an idle initial continuation");
+            fail("module callback requires an idle execution continuation");
         if (control.Kind != GuestEntryControlKind::None && call.Kind != GuestModuleCallKind::Finalize)
             fail("pending entry control permits only module finalization");
         activate(record);
         auto saved = machine.CaptureContext();
         const auto previousState = record.state;
-        const auto previousUntil = initialUntil;
+        const auto previousOwner = moduleOwner;
+        const auto previousUntil = moduleUntil;
         const auto previousReturnStack = record.returnStack;
         record.returnStack = callFrame(call.Entry, call.ReturnGate, call.Arguments);
         machine.SaveContext(record.context);
-        initialUntil = call.ReturnGate;
+        moduleOwner = record.id;
+        moduleUntil = call.ReturnGate;
         record.state = State::Runnable;
         enqueue(record, true);
         const auto reason = drive(budget);
@@ -455,7 +471,8 @@ struct GuestThreads::Impl {
         machine.RestoreContext(saved);
         machine.SaveContext(record.context);
         record.state = previousState;
-        initialUntil = previousUntil;
+        moduleOwner = previousOwner;
+        moduleUntil = previousUntil;
         record.returnStack = previousReturnStack;
         return {reason, result};
     }
@@ -463,8 +480,8 @@ struct GuestThreads::Impl {
         checkOwner();
         if (driving || terminal || !controlToken || control.Kind == GuestEntryControlKind::None)
             fail("entry control cannot complete in the current runtime state");
-        auto& record = lookup(initial);
-        if (record.state != State::Control) fail("entry control lost its initial continuation");
+        auto& record = lookup(controlOwner);
+        if (record.state != State::Control) fail("entry control lost its paused continuation");
         activate(record);
         if (const auto stopped = observeStop()) {
             cancel(*stopped);
@@ -480,12 +497,14 @@ struct GuestThreads::Impl {
             ready(record, true);
         }
         controlToken.reset();
+        controlOwner = 0;
         control = {};
     }
     void withdraw() {
         checkOwner();
         if (driving) fail("cannot withdraw a running guest scheduler");
         controlToken.reset();
+        controlOwner = moduleOwner = 0;
         runnable.clear();
         for (auto& [id, record] : records) {
             retire(*record);

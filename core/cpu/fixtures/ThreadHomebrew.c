@@ -48,10 +48,14 @@ EXPORT int ThreadDependencyFini(u64 args, u64 argp, u64 param) {
     ThreadLifecycle[20] = args;
     ThreadLifecycle[21] = argp;
     ThreadLifecycle[22] = param;
-    if (ThreadLifecycle[0] != 1 || ThreadLifecycle[1] != 1 || ThreadLifecycle[2] != 2 ||
-        ThreadLifecycle[10] != ThreadLifecycle[3] || ThreadLifecycle[11] != ThreadLifecycle[4] ||
-        ThreadLifecycle[12] != ThreadLifecycle[5] || !ThreadDependencyProbe(0x8877665544332231ul, 7) ||
-        *thread_error() != 17) { ThreadLifecycle[23] = 92; return 92; }
+    const int worker = ThreadLifecycle[2] == 3;
+    if (ThreadLifecycle[0] != 1 || ThreadLifecycle[1] != 1 || (!worker && ThreadLifecycle[2] != 2) ||
+        (worker ? (ThreadLifecycle[10] == ThreadLifecycle[3] || ThreadLifecycle[11] == ThreadLifecycle[4] ||
+                   ThreadLifecycle[12] == ThreadLifecycle[5]) :
+                  (ThreadLifecycle[10] != ThreadLifecycle[3] || ThreadLifecycle[11] != ThreadLifecycle[4] ||
+                   ThreadLifecycle[12] != ThreadLifecycle[5])) ||
+        !ThreadDependencyProbe(worker ? 0x8877665544332255ul : 0x8877665544332231ul, worker ? 13 : 7) ||
+        *thread_error() != (worker ? 29 : 17)) { ThreadLifecycle[23] = 92; return 92; }
     return 0;
 }
 
@@ -71,6 +75,8 @@ extern void thread_yield(void) __asm__("T72hz6ffq08");
 extern int thread_join(u64, void**) __asm__("onNY9Byn-W8");
 extern int thread_equal(u64, u64) __asm__("3PtV6p3QNX4");
 extern void thread_exit(void*) __asm__("3kg7rT0NQIs");
+extern void process_exit(int) __asm__("uMei1W9uyNo");
+extern void kernel_exit(int) __asm__("6Z83sYWFlA8");
 
 static u64 anchor = 0x69887796ul;
 EXPORT __thread volatile u64 ThreadMainTls __attribute__((aligned(16))) TLS_IE = 0x1122334455667788ul;
@@ -158,7 +164,14 @@ EXPORT void* ThreadChild(void* argument) {
     for (u64 index = 0; index < 32; ++index)
         if (canary[index] != 0xabcdef0100000000ul + index * 37) ThreadReceipt[1] = 105;
     record(4);
-    if (exitChild) {
+    if (exitChild == 13 || exitChild == 14) {
+        ThreadLifecycle[2] = 3;
+        if (exitChild == 13) process_exit(23);
+        else kernel_exit(24);
+        ThreadReceipt[1] = 107;
+        return (void*)0x1122334455667788ul;
+    }
+    if (exitChild == 12) {
         thread_exit((void*)0x8877665544332211ul);
         ThreadReceipt[1] = 106;
         return (void*)0x1122334455667788ul;
@@ -202,7 +215,7 @@ EXPORT int SceGuestMain(u64 argc, char** argv) {
     volatile u64 canary[32];
     for (u64 index = 0; index < 32; ++index) canary[index] = 0x1234567800000000ul + index * 41;
     record(1);
-    exitChild = mode == 12;
+    exitChild = mode == 12 || mode == 13 || mode == 14 ? mode : 0;
     if (mode == 8) thread_join(thread_self(), (void**)0);
     if (mode == 9) thread_join(0xfedcba9876543210ul, (void**)0);
     volatile struct { u64 before, handle, after; } created = {0x13579bdf2468ace0ul, 0, 0xeca86420fdb97531ul};
