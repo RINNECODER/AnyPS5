@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <cpu/Cpu.hpp>
+#include <cpu/GuestMemoryMetal.hpp>
 #include <cpu/SceNativeVideoOutBackend.hpp>
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
@@ -73,14 +74,32 @@ struct DriverSession {
 void run(id<MTLDevice> device, id<MTLLibrary> library) {
     constexpr std::uint64_t address = 0x400000000ULL;
     constexpr auto rw = Cpu::Permission::Read | Cpu::Permission::Write;
-    Backing first, second;
+    auto pinned = std::make_shared<std::array<Backing, 2>>();
+    auto& first = (*pinned)[0];
+    auto& second = (*pinned)[1];
     Cpu::Machine machine;
     machine.MapBorrowed(address, first.Bytes(), rw);
     machine.MapBorrowed(address + 65536, second.Bytes(), Cpu::Permission::Write);
-    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 2> ranges{{
-        {address, first.Bytes(), false}, {address + 65536, second.Bytes(), false}}};
-    AgcDriver::Metal::MetalDriver::Get().Configure((__bridge void*)device, (__bridge void*)library, ranges);
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 1> ranges{{
+        {address, first.Bytes(), false}}};
+    auto& metal = AgcDriver::Metal::MetalDriver::Get();
+    auto initial = Cpu::BorrowGuestMemoryForMetal({0, {}, {}}, ranges, pinned);
+    metal.Configure((__bridge void*)device, (__bridge void*)library, initial.Ranges);
     DriverSession driver;
+    Cpu::GuestMemoryRuntime memory(machine, 1024 * 1024,
+        Cpu::MakeGuestMemoryMetalTransaction(metal, ranges, pinned));
+    constexpr std::uint64_t gpuRead = 0x1000800000ULL;
+    constexpr std::uint64_t gpuReadWrite = gpuRead + 2 * 65536;
+    const auto physical = memory.AllocateDirect(0, 1024 * 1024, 2 * 65536, 65536, 0);
+    require(memory.MapDirect(gpuRead, 65536, 0x10, 0x90, physical, 65536) == gpuRead &&
+        memory.MapDirect(gpuReadWrite, 65536, 0x30, 0x90, physical + 65536, 65536) == gpuReadWrite,
+        "Cannot create GPU-readable display mappings without CPU permissions");
+    require(memory.Query(gpuRead).Protection == 0x10 && memory.Query(gpuReadWrite).Protection == 0x30,
+        "GPU-only display setup accidentally granted CPU permissions");
+    rejects([&] { machine.CheckAccess(gpuRead, 65536, Cpu::Permission::Read); },
+        "Guest access denied at 0x1000800000 for permissions 1", "GPU read-only mapping became CPU-readable");
+    rejects([&] { machine.CheckAccess(gpuReadWrite, 65536, Cpu::Permission::Read); },
+        "Guest access denied at 0x1000820000 for permissions 1", "GPU read/write mapping became CPU-readable");
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     auto window = [[NSWindow alloc] initWithContentRect:NSMakeRect(120, 120, 64, 64)
@@ -108,10 +127,60 @@ void run(id<MTLDevice> device, id<MTLLibrary> library) {
         attribute.Width = 64;
         attribute.Height = 64;
         attribute.PixelFormat = 0x8000000000000000ULL;
+        const std::array<Cpu::SceVideoOutBuffer, 1> gpuReadBuffer{{{gpuRead, 0, {}}}};
+        std::cout << "Checking native registration of raw 0x10 GPU-readable, CPU-inaccessible display backing\n";
+        require(callbacks.RegisterBuffers(handle, 0, 0, gpuReadBuffer, attribute, 0) == 0,
+            "Native display registration required CPU Read for a valid GPU-readable allocation");
+        require(callbacks.UnregisterBuffers(handle, 0) == 0, "GPU read-only display failed to unregister");
+        const std::array<Cpu::SceVideoOutBuffer, 1> gpuReadWriteBuffer{{{gpuReadWrite, 0, {}}}};
+        require(callbacks.RegisterBuffers(handle, 0, 0, gpuReadWriteBuffer, attribute, 0) == 0,
+            "Native display registration required CPU Read for a valid GPU read/write allocation");
+        require(callbacks.UnregisterBuffers(handle, 0) == 0, "GPU read/write display failed to unregister");
+        auto oversized = attribute;
+        oversized.Width = 129;
+        oversized.Height = 128;
+        rejects([&] { callbacks.RegisterBuffers(handle, 0, 0, gpuReadBuffer, oversized, 0); },
+            "Metal driver: readable guest range is not fully borrowed",
+            "Native display registration validated only the first of two 64 KiB tiles");
+        require(callbacks.RegisterBuffers(handle, 0, 0, gpuReadBuffer, attribute, 0) == 0,
+            "Incomplete GPU display extent partially published group or slot state");
+        require(callbacks.UnregisterBuffers(handle, 0) == 0, "Retried GPU display failed to unregister");
+        constexpr std::uint64_t gpuWriteOnly = gpuRead + 4 * 65536;
+        const auto beforeWriteOnly = memory.Snapshot();
+        rejects([&] { memory.MapDirect(gpuWriteOnly, 65536, 0x20, 0x90, physical, 65536); },
+            "GPU write-only guest memory is not representable by Metal borrowed ranges",
+            "GPU write-only mapping was silently published as readable");
+        const auto afterWriteOnly = memory.Snapshot();
+        require(afterWriteOnly.Generation == beforeWriteOnly.Generation &&
+            afterWriteOnly.Views.size() == beforeWriteOnly.Views.size(),
+            "Rejected GPU write-only publication changed the live allocation snapshot");
+        const std::array<Cpu::SceVideoOutBuffer, 1> rejectedWriteOnly{{{gpuWriteOnly, 0, {}}}};
+        rejects([&] { callbacks.RegisterBuffers(handle, 0, 0, rejectedWriteOnly, attribute, 0); },
+            "Metal driver: readable guest range is not fully borrowed",
+            "Native display registration accepted a rejected GPU write-only mapping");
+        require(callbacks.RegisterBuffers(handle, 0, 0, gpuReadBuffer, attribute, 0) == 0,
+            "Rejected GPU write-only display partially published native state");
+        require(callbacks.UnregisterBuffers(handle, 0) == 0, "GPU write-only rejection retry failed to unregister");
+        auto gpuCompressed = attribute;
+        gpuCompressed.DccControl = 0x208;
+        const std::array<Cpu::SceVideoOutBuffer, 1> gpuShortMetadata{{{gpuRead, gpuRead + 65536 - 128, {}}}};
+        rejects([&] { callbacks.RegisterBuffers(handle, 0, 0, gpuShortMetadata, gpuCompressed, 1); },
+            "Metal driver: readable guest range is not fully borrowed",
+            "Native DCC registration validated only 128 of the required 256 GPU-readable metadata bytes");
+        const std::array<Cpu::SceVideoOutBuffer, 1> gpuMetadata{{{gpuRead, gpuReadWrite + 64000, {}}}};
+        require(callbacks.RegisterBuffers(handle, 0, 0, gpuMetadata, gpuCompressed, 1) == 0,
+            "Native DCC registration required CPU Read for GPU-readable metadata");
+        {
+            std::lock_guard lock(original->mutex);
+            require(original->buffers[0].dataAddress == gpuRead &&
+                original->buffers[0].metadataAddress == gpuReadWrite + 64000,
+                "GPU-only display registration lost numeric data or metadata guest VAs");
+        }
+        require(callbacks.UnregisterBuffers(handle, 0) == 0, "GPU-only DCC display failed to unregister");
         const std::array<Cpu::SceVideoOutBuffer, 2> invalid{{
             {address, 0, {}}, {0x500000000ULL, 0, {}}}};
         rejects([&] { callbacks.RegisterBuffers(handle, 0, 0, invalid, attribute, 0); },
-            "Guest access denied at 0x500000000 for permissions 1",
+            "Metal driver: readable guest range is not fully borrowed",
             "Native backend accepted an unmapped second display buffer");
         const std::array<Cpu::SceVideoOutBuffer, 1> valid{{{address, 0, {}}}};
         require(callbacks.RegisterBuffers(handle, 0, 0, valid, attribute, 0) == 0,
@@ -124,15 +193,15 @@ void run(id<MTLDevice> device, id<MTLLibrary> library) {
         const std::array<Cpu::SceVideoOutBuffer, 2> unreadable{{
             {address, 0, {}}, {address + 65536, 0, {}}}};
         rejects([&] { callbacks.RegisterBuffers(handle, 1, 3, unreadable, attribute, 0); },
-            "Guest access denied at 0x400010000 for permissions 1",
-            "Native backend accepted a write-only second display span");
+            "Metal driver: readable guest range is not fully borrowed",
+            "Native backend accepted a CPU write-only span without readable GPU backing");
         require(callbacks.RegisterBuffers(handle, 1, 3, valid, attribute, 0) == 0,
             "Unreadable display batch partially published native state");
         auto compressed = attribute;
         compressed.DccControl = 0x208;
         const std::array<Cpu::SceVideoOutBuffer, 1> shortMetadata{{{address, address + 65536 - 128, {}}}};
         rejects([&] { callbacks.RegisterBuffers(handle, 2, 6, shortMetadata, compressed, 1); },
-            "Guest access denied at 0x400010000 for permissions 1",
+            "Metal driver: readable guest range is not fully borrowed",
             "Native backend checked only the first half of DCC metadata");
         const std::array<Cpu::SceVideoOutBuffer, 1> completeMetadata{{{address, address + 64000, {}}}};
         require(callbacks.RegisterBuffers(handle, 2, 6, completeMetadata, compressed, 1) == 0,
@@ -156,6 +225,7 @@ void run(id<MTLDevice> device, id<MTLLibrary> library) {
         }
         require(callbacks.Close(reopened) == 0, "Native reopened output failed to close");
         retiredCallbacks = callbacks;
+        memory.Shutdown();
         backend.Shutdown();
     }
     rejects([&] { retiredCallbacks.Open(255, 0, 0, std::nullopt); }, "expired",
@@ -163,7 +233,7 @@ void run(id<MTLDevice> device, id<MTLLibrary> library) {
     require(events.count == 0, "Registration lifecycle fabricated a completed frame event");
     AgcDriver::Metal::MetalDriver::Get().Shutdown();
     [window close];
-    std::cout << "PASS native VideoOut numeric guest spans, atomic batch publication, fresh GPU output generation and callback retirement\n";
+    std::cout << "PASS native VideoOut GPU-only readable backing, full data/DCC spans, atomic batch publication, fresh output generation and callback retirement\n";
 }
 
 }

@@ -1,6 +1,7 @@
 #include <cpu/SceNativeVideoOutBackend.hpp>
 #include "prx/libSceVideoOut/include/VideoOutState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include <array>
@@ -191,29 +192,34 @@ struct SceNativeVideoOutBackend::Impl {
         const auto config = getConfig(handle);
         BufferAttributeGroup group{nativeAttribute(attribute), category, true};
         std::array<VideoOutBuffer, VIDEO_OUT_BUFFER_NUM_MAX> validated{};
+        using MetalDriver = AgcDriver::Metal::MetalDriver;
+        std::array<AgcDriver::Metal::ReadableGuestRange, VIDEO_OUT_BUFFER_NUM_MAX * 2> readable{};
+        std::size_t readableCount = 0;
         for (std::size_t index = 0; index < rows.size(); ++index) {
             require(!rows[index].Reserved[0] && !rows[index].Reserved[1],
                     "SCE VideoOut reserved buffer pointers are set");
             validated[index] = {set, rows[index].DataAddress, rows[index].MetadataAddress};
             const auto display = DescribeVideoOutBuffer(validated[index], group);
             const auto dataBytes = AgcDriverDisplayBufferSize_nid_postfix(display);
-            machine.CheckAccess(display.address, dataBytes, Permission::Read);
+            readable[readableCount++] = {display.address, dataBytes};
             if (display.dccAddress) {
                 const auto metadataBytes = AgcDriver::Graphics::DccKeyBytes(dataBytes);
                 require(metadataBytes != 0, "SCE VideoOut empty DCC metadata range");
-                machine.CheckAccess(display.dccAddress, metadataBytes, Permission::Read);
+                readable[readableCount++] = {display.dccAddress, metadataBytes};
             }
         }
-        std::lock_guard lock(config->mutex);
-        config->Check();
-        require(!config->groups[set].occupied, "SCE VideoOut buffer attribute set is occupied");
-        for (std::size_t index = 0; index < rows.size(); ++index)
-            require(!config->buffers[start + index].Occupied(), "SCE VideoOut buffer slot is occupied");
-        config->groups[set] = group;
-        config->width = attribute.Width;
-        config->height = attribute.Height;
-        for (std::size_t index = 0; index < rows.size(); ++index)
-            config->buffers[start + index] = validated[index];
+        MetalDriver::Get().WithValidatedReadableRanges(std::span(readable).first(readableCount), [&] {
+            std::lock_guard lock(config->mutex);
+            config->Check();
+            require(!config->groups[set].occupied, "SCE VideoOut buffer attribute set is occupied");
+            for (std::size_t index = 0; index < rows.size(); ++index)
+                require(!config->buffers[start + index].Occupied(), "SCE VideoOut buffer slot is occupied");
+            config->groups[set] = group;
+            config->width = attribute.Width;
+            config->height = attribute.Height;
+            for (std::size_t index = 0; index < rows.size(); ++index)
+                config->buffers[start + index] = validated[index];
+        });
         return 0;
     }
 
