@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 import LauncherCore
 import XCTest
 
@@ -9,6 +10,25 @@ final class LauncherCoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         addTeardownBlock { try FileManager.default.removeItem(at: url) }
         return url
+    }
+
+    private func copiedEnginePackage() throws -> URL {
+        guard let path = ProcessInfo.processInfo.environment["ANYPS5_ENGINE_PACKAGE"] else {
+            throw XCTSkip("Set ANYPS5_ENGINE_PACKAGE to the frozen native module/CRT package.")
+        }
+        let copy = try directory().appendingPathComponent("relocated engine $(literal) 'é' package")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: copy)
+        // The frozen source is read-only. Only this owned copy becomes writable for controls/cleanup.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: copy.path)
+        let items = try XCTUnwrap(FileManager.default.enumerator(at: copy, includingPropertiesForKeys: [.isDirectoryKey]))
+        for case let item as URL in items {
+            let attributes = try FileManager.default.attributesOfItem(atPath: item.path)
+            let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o644
+            let isDirectory = try item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+            try FileManager.default.setAttributes([.posixPermissions: permissions | (isDirectory ? 0o700 : 0o200)],
+                                                 ofItemAtPath: item.path)
+        }
+        return copy.resolvingSymlinksInPath()
     }
 
     private let catalogue = Data("""
@@ -50,14 +70,15 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: cache), catalogue)
     }
 
-    // Contract: saved associations retain image and ordered module paths; older libraries decode with no modules.
-    // Regression: Codable requires the new key, silently discards malformed lists or reorders persisted modules.
+    // Contract: saved associations retain image/module paths and accepted package identity; older libraries decode without either.
+    // Regression: decoding requires new keys, drops malformed lists or loses identity so a changed engine can regain legacy routing.
     // This is the persistence owner; subprocess and image tests do not exercise saved library migrations.
     func testLibraryReplacementRoundTrips() throws {
         let url = try directory().appendingPathComponent("library.json")
         let storage = LibraryPersistence(url: url)
         var library = try storage.load()
         library.enginePath = "/engine with spaces/anyps5_cpu_run"
+        library.enginePackageManifestSHA256 = String(repeating: "a", count: 64)
         library.attach(LocalGame(id: "a", title: "Example", executablePath: "/old.elf", workingDirectory: "/old"))
         let modules = ["/libraries/z $(literal) module.prx", "/libraries/a quoted 'module'.prx"]
         library.attach(LocalGame(id: "a", title: "Example", executablePath: "/new.elf", workingDirectory: "/resources",
@@ -70,6 +91,7 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(restored.games[0].resourceImagePath, "/downloads/game image.exfat")
         XCTAssertEqual(restored.games[0].sceModulePaths, modules)
         XCTAssertEqual(restored.enginePath, "/engine with spaces/anyps5_cpu_run")
+        XCTAssertEqual(restored.enginePackageManifestSHA256, String(repeating: "a", count: 64))
         try Data("""
         {"enginePath":"/legacy-engine","games":[{"id":"legacy","title":"Existing game","executablePath":"/existing.elf","workingDirectory":"/existing-resources"}]}
         """.utf8).write(to: url)
@@ -79,6 +101,7 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertNil(legacy.games[0].resourceImagePath)
         XCTAssertEqual(legacy.games[0].sceModulePaths, [])
         XCTAssertEqual(legacy.enginePath, "/legacy-engine")
+        XCTAssertNil(legacy.enginePackageManifestSHA256)
         try Data("""
         {"games":[{"id":"bad","title":"Malformed","executablePath":"/existing.elf","workingDirectory":"/existing-resources","sceModulePaths":"not-an-array"}],"enginePath":"/engine"}
         """.utf8).write(to: url)
@@ -373,8 +396,8 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertThrowsError(try EngineCapabilities.decode(Data(payload.replacingOccurrences(of: "schema_version\":1", with: "schema_version\":2").utf8)))
     }
 
-    // Contract: inspection never launches a guest, retains restrictions, and refuses rejected/unknown reports.
-    // Regression: using the run flag or swallowing engine exit126 presents a false ready state.
+    // Contract: inspection retains restrictions, rejects unknown reports, and cancels its started child without returning success.
+    // Regression: wrong run flags, swallowed exit126, or cancellation ignored after child startup presents a false result.
     // Existing subprocess coverage launches guests and cannot protect the non-executing inspection protocol.
     func testInspectionProtocolAndRejection() async throws {
         let folder = try directory()
@@ -407,10 +430,211 @@ final class LauncherCoreTests: XCTestCase {
                 XCTAssertTrue(error.localizedDescription.contains(rejection.contains("exit 126") ? "missing segment" : "unsupported inspection protocol"))
             }
         }
+        // Process cancellation is an inspection protocol contract, not evidence of game compatibility.
+        // A valid TERM response catches success-after-cancel; ignored TERM exercises owned escalation without pipe-holding descendants.
+        let literalReport = "'" + report.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let inspectedGame = game
+        for (index, ignoresTERM) in [false, true].enumerated() {
+            let ready = folder.appendingPathComponent("inspection-started-\(index)")
+            let pidFile = folder.appendingPathComponent("inspection-child-\(index).pid")
+            let waiting = """
+            #!/bin/sh
+            [ "$#" = 2 ] || exit 93
+            [ "$1" = '--inspect-sce-json' ] || exit 91
+            [ "$2" = \(literalPath) ] || exit 92
+            complete_after_term() {
+              printf '%s\\n' \(literalReport)
+              exit 0
+            }
+            \(ignoresTERM ? "trap ':' TERM" : "trap complete_after_term TERM")
+            printf '%s\\n' "$$" > '\(pidFile.lastPathComponent)' || exit 94
+            : > '\(ready.lastPathComponent)' || exit 94
+            while :; do :; done
+            """
+            try Data(waiting.utf8).write(to: engine)
+            let operation = Task { try await EngineInspection.inspect(engine: engine, game: inspectedGame, capabilities: capabilities) }
+            let clock = ContinuousClock()
+            let startupDeadline = clock.now.advanced(by: .seconds(3))
+            while !FileManager.default.fileExists(atPath: ready.path), clock.now < startupDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            guard FileManager.default.fileExists(atPath: ready.path) else {
+                operation.cancel()
+                _ = try? await operation.value
+                XCTFail("Cancellation control never reached its child-start witness.")
+                continue
+            }
+            let pid = try XCTUnwrap(Int32(try String(contentsOf: pidFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)))
+            guard pid > 1, pid != Darwin.getpid() else {
+                operation.cancel()
+                XCTFail("Invalid owned inspection child PID: \(pid)")
+                continue
+            }
+            XCTAssertEqual(Darwin.kill(pid, 0), 0, "The started fixture must still be alive before cancellation.")
+            func childIsGone() -> Bool { Darwin.kill(pid, 0) == -1 && errno == ESRCH }
+            var observedGone = false
+            defer {
+                operation.cancel()
+                if !observedGone, Darwin.kill(pid, 0) == 0 { Darwin.kill(pid, SIGKILL) }
+            }
+            operation.cancel() // Trap installation and PID publication both precede this cancellation.
+            let shutdownDeadline = clock.now.advanced(by: .seconds(3))
+            while !childIsGone(), clock.now < shutdownDeadline { try await Task.sleep(for: .milliseconds(10)) }
+            observedGone = childIsGone()
+            XCTAssertTrue(observedGone, "Canceled inspection child remained alive beyond 3s; the 15s inspection timeout must not mask cancellation.")
+            if !observedGone {
+                // Preserve the failed shutdown observation, then clean up only this test's witnessed child before awaiting the old API.
+                Darwin.kill(pid, SIGTERM)
+                let cleanupDeadline = clock.now.advanced(by: .milliseconds(500))
+                while !childIsGone(), clock.now < cleanupDeadline { try await Task.sleep(for: .milliseconds(10)) }
+                if !childIsGone(), Darwin.kill(pid, 0) == 0 { Darwin.kill(pid, SIGKILL) }
+            }
+            do {
+                _ = try await operation.value
+                XCTFail("Canceled inspection returned a successful report, including a valid JSON/exit0 TERM response.")
+            } catch is CancellationError {
+                // Cancellation wins over a valid report or the exit status from terminating a stubborn owned child.
+            } catch { XCTFail("Started inspection returned \(error) instead of CancellationError.") }
+            observedGone = childIsGone()
+            XCTAssertTrue(observedGone, "Inspection completed while its owned child remained present.")
+        }
     }
 
-    // Contract: the actual engine preserves static guest results and enabled SCE inspection's qualified imports through display.
-    // Regression: a failed probe silently skips SCE coverage, or an older CLI/decoder/summary loses service families.
+    // Contract: native package acceptance rejects unsafe paths, stale bytes, wrong architectures/closure and a real failed CRT keeper.
+    // Regression: trusting manifest architecture text, omitting transitive dependencies, or ignoring validation process failure.
+    // Static/argv keepers cannot establish native package integrity. Controls alter only copies; no fake backend or production seam.
+    func testFrozenEnginePackageRejectsInvalidCandidates() async throws {
+        let cases: [(String, String)] = [
+            ("missing manifest", "Engine package path"), ("malformed manifest", "Engine package manifest"),
+            ("unknown schema", "Engine package manifest"), ("changed bytes", "Engine package integrity"),
+            ("wrong CLI architecture", "Engine package architecture"), ("wrong dylib architecture", "Engine package architecture"),
+            ("parent traversal", "Engine package path"), ("escaped symlink", "Engine package path"),
+            ("unhashed dependency", "Engine package dependency"), ("external load command", "Engine package dependency"),
+            ("unhashed CRT main", "Engine package integrity"), ("unhashed raw CRT", "Engine package integrity"),
+            ("unhashed SELF CRT", "Engine package integrity"),
+            ("changed validation contract", "Engine package manifest"), ("incorrect CRT certificate", "Engine package validation"),
+            ("changed saved identity", "Engine package integrity manifest differs from the saved accepted selection")
+        ]
+        for (control, diagnostic) in cases {
+            let root = try copiedEnginePackage()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let manifestURL = root.appendingPathComponent("manifest.json")
+            let originalManifest = try Data(contentsOf: manifestURL)
+            let originalIdentity = SHA256.hash(data: originalManifest).map { String(format: "%02x", $0) }.joined()
+            var manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: originalManifest) as? [String: Any])
+            var files = try XCTUnwrap(manifest["files"] as? [String: Any])
+            func replaceAndRehash(_ path: String, _ bytes: Data) throws {
+                try bytes.write(to: root.appendingPathComponent(path))
+                files[path] = ["size": bytes.count, "sha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()]
+            }
+            switch control {
+            case "missing manifest": try FileManager.default.removeItem(at: manifestURL)
+            case "malformed manifest": try Data("{malformed".utf8).write(to: manifestURL)
+            case "unknown schema": manifest["schema_version"] = 2
+            case "changed bytes":
+                let path = "fixtures/cpu-homebrew.elf"
+                var bytes = try Data(contentsOf: root.appendingPathComponent(path)); bytes[bytes.count - 1] ^= 1
+                try bytes.write(to: root.appendingPathComponent(path)) // Deliberately retain the old digest.
+            case "wrong CLI architecture", "wrong dylib architecture":
+                let path = control == "wrong CLI architecture" ? "bin/anyps5_cpu_run" : "lib/libqemu-x86_64-softmmu.dylib"
+                var bytes = try Data(contentsOf: root.appendingPathComponent(path))
+                XCTAssertEqual(Array(bytes.prefix(4)), [0xcf, 0xfa, 0xed, 0xfe], "Architecture control needs thin little-endian Mach-O.")
+                bytes.replaceSubrange(4..<8, with: [7, 0, 0, 1]) // CPU_TYPE_X86_64, with matching digest to reach architecture guard.
+                try replaceAndRehash(path, bytes)
+            case "parent traversal":
+                try FileManager.default.copyItem(at: root.appendingPathComponent("licenses/AnyPS5-LICENSE"),
+                                                 to: root.deletingLastPathComponent().appendingPathComponent("outside-license"))
+                files["../outside-license"] = files["licenses/AnyPS5-LICENSE"]
+            case "escaped symlink":
+                let path = "fixtures/SceModuleGuest.prx"
+                let originalRoot = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["ANYPS5_ENGINE_PACKAGE"]))
+                try FileManager.default.removeItem(at: root.appendingPathComponent(path))
+                try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(path),
+                                                          withDestinationURL: originalRoot.appendingPathComponent(path))
+            case "unhashed dependency":
+                files.removeValue(forKey: "lib/libglib-2.0.0.dylib")
+                try FileManager.default.removeItem(at: root.appendingPathComponent("lib/libglib-2.0.0.dylib"))
+            case "unhashed CRT main", "unhashed raw CRT", "unhashed SELF CRT":
+                let path = control == "unhashed CRT main" ? "fixtures/sce-crt/sce-crt-main.elf" :
+                    (control == "unhashed raw CRT" ? "fixtures/sce-crt/raw/SceCrtGuest.prx" : "fixtures/sce-crt/plain-self/SceCrtGuest.prx")
+                files.removeValue(forKey: path) // Keep the real file: a keeper read failure must not substitute for hash coverage.
+            case "external load command":
+                let path = "lib/libqemu-x86_64-softmmu.dylib"
+                var bytes = try Data(contentsOf: root.appendingPathComponent(path))
+                let loadPath = Data("@loader_path/libglib-2.0.0.dylib".utf8)
+                let commandsEnd = 32 + (0..<4).reduce(0) { $0 | (Int(bytes[20 + $1]) << (8 * $1)) }
+                let range = try XCTUnwrap(bytes.range(of: loadPath, in: 32..<commandsEnd), "Control needs the genuine QEMU GLib load command.")
+                var external = Data("/opt/homebrew/lib/glib.dylib".utf8)
+                XCTAssertLessThan(external.count, loadPath.count)
+                external.append(Data(repeating: 0, count: loadPath.count - external.count))
+                bytes.replaceSubrange(range, with: external)
+                try replaceAndRehash(path, bytes)
+            case "changed validation contract":
+                var validation = try XCTUnwrap(manifest["compiled_crt_validation"] as? [String: Any])
+                validation["expected_stdout"] = ["arbitrary success"]
+                manifest["compiled_crt_validation"] = validation
+            case "incorrect CRT certificate", "changed saved identity":
+                if control == "changed saved identity" { manifest["checkpoint"] = "changed accepted package" }
+                let path = "fixtures/sce-crt/crt-receipt.txt"
+                var text = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+                let digest = try XCTUnwrap(text.split(separator: " ").dropFirst(2).first)
+                XCTAssertEqual(digest.count, 64)
+                let wrongDigest = (digest.first == "0" ? "1" : "0") + String(digest.dropFirst())
+                text = text.replacingOccurrences(of: String(digest), with: wrongDigest)
+                try replaceAndRehash(path, Data(text.utf8)) // Hash-valid package; real compiled source certificate now disagrees.
+                // Restored identity must reject before this genuine keeper fault, not after fixtures execute.
+            default: XCTFail("Unhandled negative control: \(control)")
+            }
+            if control != "missing manifest" && control != "malformed manifest" {
+                manifest["files"] = files
+                try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys]).write(to: manifestURL)
+            }
+            let selected = control == "malformed manifest" ? manifestURL :
+                (control == "unknown schema" ? root.appendingPathComponent("bin/anyps5_cpu_run") : root)
+            do {
+                _ = try await EnginePackage.accept(selectedURL: selected,
+                                                   expectedManifestSHA256: control == "changed saved identity" ? originalIdentity : nil)
+                XCTFail("Invalid package accepted: \(control)")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.hasPrefix(diagnostic), "\(control) reached the wrong guard: \(error)")
+            }
+        }
+    }
+
+    // Contract: MainActor can stop an intact accepted launch during preparation; no guest starts and the runner remains reusable.
+    // Regression: stop is ignored during the hash scan or canceled preparation leaves the session reserved.
+    // Invalid-package rows only protect rejection, not cancellation of valid preparation. This uses the real package and runner.
+    @MainActor
+    func testStopDuringAcceptedPreparationPreventsGuestAndAllowsRelaunch() async throws {
+        let root = try copiedEnginePackage()
+        let package = try await EnginePackage.accept(selectedURL: root)
+        let game = LocalGame(id: "prepared-homebrew", title: "Prepared homebrew",
+                             executablePath: root.appendingPathComponent("fixtures/cpu-homebrew.elf").path,
+                             workingDirectory: root.path)
+        let runner = EngineRunner()
+        let stream = try runner.run(engine: package.executableURL, game: game, acceptedPackage: package)
+        runner.stop() // The UI actor acts immediately after the factory, before yielding to stream consumption.
+        var received = 0
+        do {
+            for try await _ in stream { received += 1 }
+            XCTFail("Stopped preparation must finish with cancellation before any guest event.")
+        } catch is CancellationError {
+            // A valid package canceled before startup must not be reported as an integrity failure or a guest exit.
+        } catch { XCTFail("Wrong preparation failure: \(error)") }
+        XCTAssertEqual(received, 0, "Canceled preparation started a guest or published a guest exit.")
+
+        var output = Data(); var status: Int32?
+        for try await event in try runner.run(engine: package.executableURL, game: game, acceptedPackage: package) {
+            switch event { case .output(let bytes): output.append(bytes); case .exited(let code): status = code }
+        }
+        XCTAssertEqual(status, 0, "Canceled preparation must release the reserved session for a fresh launch.")
+        XCTAssertTrue(String(decoding: output, as: UTF8.self)
+            .contains("homebrew primes=168 sum=76127 buffer_crc32=2511520486 tls=ok bss=ok\n"),
+                      "Relaunch did not execute the real arithmetic/TLS fixture: \(String(decoding: output, as: UTF8.self))")
+    }
+
+    // Contract: the actual engine preserves static results/inspection and accepts a relocated native package before routing real modules.
+    // Regression: accepting stale runtime bytes, losing supplied modules, or dropping qualified inspection service families.
     // Shell protocol tests cannot establish the real engine report; CPU tests do not own launcher decoding or display.
     func testActualAnyPS5Checkpoint() async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -454,6 +678,71 @@ final class LauncherCoreTests: XCTestCase {
             }
             XCTAssertFalse(inspection.hasTLS)
             XCTAssertTrue(inspection.unsupportedReasons.isEmpty)
+        }
+        if environment["ANYPS5_ENGINE_PACKAGE"] != nil {
+            let root = try copiedEnginePackage()
+            let package = try await EnginePackage.accept(selectedURL: root)
+            XCTAssertEqual(package.executableURL, root.appendingPathComponent("bin/anyps5_cpu_run"))
+            XCTAssertEqual(package.sourceCommit, "5c9af66412d87c99651e87462ce6fee0f12f4cd2")
+            XCTAssertEqual(package.engineCommit, "f82b6dd02638cfe76afa16fb54a1199daff21242")
+            XCTAssertEqual(package.capabilities.backend, "Modern QEMU TCG x86-64 dynamic translation")
+            XCTAssertEqual(package.capabilities.sceModuleArgument, "--sce-module")
+            XCTAssertFalse(package.capabilities.ps5GameRuntimeReady)
+            let unrelated = try directory().appendingPathComponent("unrelated resource $(literal) directory")
+            try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: false)
+            let moduleMain = root.appendingPathComponent("fixtures/sce-module-main.elf")
+            let dependency = root.appendingPathComponent("fixtures/SceModuleGuest.prx")
+            var moduleGame = LocalGame(id: "compiled-module", title: "Compiled module routing", executablePath: moduleMain.path,
+                                      workingDirectory: unrelated.path, sceModulePaths: [dependency.path])
+            for withDependency in [true, false] {
+                moduleGame.sceModulePaths = withDependency ? [dependency.path] : []
+                var bytes = Data(); var status: Int32?
+                // Accepted proof supplies capabilities even when the caller has no cached probe.
+                for try await event in try EngineRunner().run(engine: package.executableURL, game: moduleGame,
+                                                         resourceDirectory: unrelated, acceptedPackage: package) {
+                    switch event { case .output(let chunk): bytes.append(chunk); case .exited(let code): status = code }
+                }
+                let events = try String(decoding: bytes, as: UTF8.self).split(separator: "\n").map {
+                    try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+                }
+                XCTAssertEqual(events.compactMap { $0["event"] as? String }, withDependency ? ["startup", "guest_exit"] : ["error"])
+                if withDependency {
+                    // SceModuleMain.c independently requires argc6; production launcher supplies argc1 and returns81.
+                    // This establishes routing/translated entry/exit. Full arithmetic/TLS/CRT proof is accept's packaged keeper.
+                    XCTAssertEqual(status, 81)
+                    XCTAssertEqual(events.last?["exit_code"] as? Int, 81)
+                    XCTAssertEqual(events.first?["host_architecture"] as? String, "arm64")
+                    XCTAssertGreaterThan((events.first?["entry"] as? NSNumber)?.uint64Value ?? 0, 0)
+                } else {
+                    XCTAssertEqual(status, 126)
+                    XCTAssertEqual(events.first?["code"] as? String, "unsupported_executable")
+                    XCTAssertTrue((events.first?["message"] as? String)?.contains("DT_NEEDED guest module loading is unsupported") == true)
+                }
+            }
+            // Acceptance cannot authorize different bytes or transfer its live capabilities to a different engine.
+            let fixture = root.appendingPathComponent("fixtures/cpu-homebrew.elf")
+            let original = try Data(contentsOf: fixture)
+            var changed = original; changed[changed.count - 1] ^= 1
+            try changed.write(to: fixture)
+            // Hash work belongs to preparation after the factory returns, and failure must precede all guest events.
+            // This phase assertion fails the former synchronous full scan without adding a timing threshold or a test hook.
+            func rejectPreparedRun(_ selected: URL, _ target: LocalGame, _ diagnostic: String) async throws {
+                let stream: AsyncThrowingStream<EngineEvent, Error>
+                do { stream = try EngineRunner().run(engine: selected, game: target, acceptedPackage: package) }
+                catch {
+                    XCTFail("Full package verification blocked/failed inside the stream factory: \(error)")
+                    throw error
+                }
+                var received = 0
+                do {
+                    for try await _ in stream { received += 1 }
+                    XCTFail("Changed package or mismatched engine reached guest execution.")
+                } catch { XCTAssertTrue(error.localizedDescription.hasPrefix(diagnostic), "\(error)") }
+                XCTAssertEqual(received, 0, "Integrity failure must precede guest output, startup and exit.")
+            }
+            try await rejectPreparedRun(package.executableURL, moduleGame, "Engine package integrity")
+            try original.write(to: fixture)
+            try await rejectPreparedRun(engine, game, "Engine package integrity belongs to a different selected engine")
         }
     }
 }

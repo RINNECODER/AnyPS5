@@ -42,6 +42,7 @@ public:
     void SetSyscallHandler(std::function<void(Machine&)> handler);
     void AddHostCall(std::uint64_t address, std::function<void(Machine&)> handler);
     StopReason Run(std::uint64_t entry, std::uint64_t until, std::uint64_t instructionLimit);
+    std::uint64_t LastRunInstructions() const;
     void Exit(int code);
     void RequestStop();
     int ExitCode() const;

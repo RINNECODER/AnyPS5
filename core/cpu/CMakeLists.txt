@@ -66,6 +66,7 @@ add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.c
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/NidCompute.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
+target_sources(anyps5_cpu PRIVATE src/SceLifecycleImports.cpp)
 target_sources(anyps5_cpu PRIVATE src/GuestMemoryRuntime.cpp src/SceMemoryImports.cpp src/SceNpLocalImports.cpp src/SceNetAddressImports.cpp src/SceCommonDialogImports.cpp)
 target_include_directories(anyps5_cpu PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
 target_link_libraries(anyps5_cpu PRIVATE ${cpuEngineLibrary} unicorn)
@@ -144,6 +145,22 @@ if(BUILD_TESTING)
     set_tests_properties(anyps5_sce_modules PROPERTIES TIMEOUT 60)
     add_test(NAME anyps5_sce_module_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceModuleCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${CMAKE_CURRENT_BINARY_DIR}/sce-module-main.elf" "${CMAKE_CURRENT_BINARY_DIR}/SceModuleGuest.prx" "${guestFixture}")
     set_tests_properties(anyps5_sce_module_cli PROPERTIES TIMEOUT 60)
+    set(mainLifecycleDirectory "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle")
+    set(mainLifecycleReceipt "${mainLifecycleDirectory}/SceMainLifecycleReceipt.txt")
+    add_custom_command(OUTPUT "${mainLifecycleReceipt}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceMainLifecycleRuntime.c" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-runtime.o"
+        COMMAND "${guestLinker}" -shared -soname SceMainLifecycleRuntime.prx -init SceMainLifecycleDependencyInit -fini SceMainLifecycleDependencyFini -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-runtime-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-runtime.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceMainLifecycleGuest.c" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-guest.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceMainLifecycleStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-start.o"
+        COMMAND "${guestLinker}" -shared -e _start -init SceMainLifecycleInit -fini SceMainLifecycleFini -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-guest.o" "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-start.o" "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-runtime-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceMainLifecycleBuild.py" "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-runtime-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-main-lifecycle-main-linked.elf" "${mainLifecycleDirectory}"
+        DEPENDS fixtures/SceMainLifecycleRuntime.c fixtures/SceMainLifecycleGuest.c fixtures/SceMainLifecycleStart.S tests/SceMainLifecycleBuild.py tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_sce_main_lifecycle_fixture ALL DEPENDS "${mainLifecycleReceipt}")
+    add_test_executable(anyps5_sce_main_lifecycle_tests tests/SceMainLifecycleTests.cpp)
+    target_link_libraries(anyps5_sce_main_lifecycle_tests PRIVATE anyps5_cpu)
+    add_dependencies(anyps5_sce_main_lifecycle_tests anyps5_sce_main_lifecycle_fixture)
+    add_test(NAME anyps5_sce_main_lifecycle COMMAND anyps5_sce_main_lifecycle_tests "${mainLifecycleReceipt}")
+    set_tests_properties(anyps5_sce_main_lifecycle PROPERTIES TIMEOUT 60)
     add_test_executable(anyps5_cpu_tests tests/CpuTests.cpp)
     target_link_libraries(anyps5_cpu_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_cpu_instructions COMMAND anyps5_cpu_tests)

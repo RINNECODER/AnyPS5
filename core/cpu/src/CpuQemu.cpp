@@ -83,6 +83,7 @@ struct Machine::Impl {
     bool running = false;
     bool exited = false;
     int exitCode = 0;
+    std::uint64_t lastRunInstructions = 0;
 
     Impl() {
         std::array<char, 512> error{};
@@ -447,9 +448,13 @@ StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t 
     impl->running = true;
     impl->requested.store(false);
     impl->exited = false;
-    struct Reset { Impl& value; ~Reset() { value.running = false; } } reset{*impl};
-    Set(Register::Rip, entry);
     std::uint64_t executed = 0;
+    struct Reset {
+        Impl& value;
+        std::uint64_t& executed;
+        ~Reset() { value.lastRunInstructions = executed; value.running = false; }
+    } reset{*impl, executed};
+    Set(Register::Rip, entry);
     for (;;) {
         if (impl->exited) return StopReason::Exit;
         if (impl->requested.load()) return StopReason::Requested;
@@ -515,6 +520,10 @@ StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t 
             throw std::runtime_error("Modern guest CPU returned an unknown stop reason");
         }
     }
+}
+std::uint64_t Machine::LastRunInstructions() const {
+    impl->checkOwner();
+    return impl->lastRunInstructions;
 }
 void Machine::Exit(int code) {
     impl->checkOwner();
