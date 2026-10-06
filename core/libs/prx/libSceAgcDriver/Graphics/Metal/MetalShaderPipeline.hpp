@@ -1,0 +1,58 @@
+#pragma once
+
+#import <Metal/Metal.h>
+#include "MetalBackend/MetalShaderBridge.hpp"
+#include <span>
+
+namespace AgcDriver::Metal {
+
+struct MetalBufferBinding {
+    id<MTLBuffer> buffer = nil;
+    NSUInteger offset = 0;
+    NSUInteger length = 0;
+};
+
+struct MetalShaderResourceBinding {
+    std::uint32_t descriptorSet = 0;
+    std::uint32_t binding = 0;
+    std::vector<MetalBufferBinding> buffers;
+    std::vector<id<MTLTexture>> textures;
+    std::vector<id<MTLSamplerState>> samplers;
+};
+
+class MetalComputePipeline {
+public:
+    explicit MetalComputePipeline(id<MTLDevice> device, ShaderRecompiler::MetalBackend::Result shader);
+    [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& Reflection() const;
+    void Encode(id<MTLCommandBuffer> commands, std::span<const MetalShaderResourceBinding> bindings,
+                MTLSize grid, std::span<const std::byte> pushConstants = {},
+                std::span<const id<MTLResource>> indirectResources = {}) const;
+
+private:
+    id<MTLDevice> device;
+    id<MTLComputePipelineState> pipeline;
+    ShaderRecompiler::MetalBackend::Result shader;
+};
+
+class MetalRenderPipeline {
+public:
+    explicit MetalRenderPipeline(id<MTLDevice> device, ShaderRecompiler::MetalBackend::Result vertex,
+                                 ShaderRecompiler::MetalBackend::Result fragment,
+                                 MTLRenderPipelineDescriptor* descriptor);
+    [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& VertexReflection() const;
+    [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& FragmentReflection() const;
+    void Bind(id<MTLRenderCommandEncoder> encoder,
+              std::span<const MetalShaderResourceBinding> vertexBindings,
+              std::span<const MetalShaderResourceBinding> fragmentBindings,
+              std::span<const std::byte> vertexPushConstants = {},
+              std::span<const std::byte> fragmentPushConstants = {},
+              std::span<const id<MTLResource>> indirectResources = {}) const;
+
+private:
+    id<MTLDevice> device;
+    id<MTLRenderPipelineState> pipeline;
+    ShaderRecompiler::MetalBackend::Result vertex;
+    ShaderRecompiler::MetalBackend::Result fragment;
+};
+
+}
