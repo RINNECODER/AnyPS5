@@ -500,6 +500,9 @@ protected:
     }
 
     void emit_instruction(const spirv_cross::Instruction& instruction) override {
+        if (instruction.op == spv::OpGroupNonUniformShuffle) {
+            forced_temporaries.insert(stream(instruction)[1]);
+        }
         if (instruction.op != spv::OpImageQueryLod) {
             CompilerMSL::emit_instruction(instruction);
             return;
