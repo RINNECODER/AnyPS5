@@ -15,6 +15,22 @@ namespace AgcDriver::Metal {
 namespace {
 
 using namespace ShaderRecompiler;
+
+void configureSamplerArguments(MetalBackend::TargetOptions& options, const RecompileResult& guest, id<MTLDevice> device) {
+    options.supportsArgumentBuffersTier2 = device.argumentBuffersSupport == MTLArgumentBuffersTier2;
+    options.maxArgumentBufferSamplers = 32;
+    options.samplerArgumentBuffer = false;
+    std::uint32_t count = 0;
+    for (const auto& binding : guest.bindings) {
+        if (binding.kind != DescriptorKind::Sampler) continue;
+        if (binding.count > options.maxSamplers - count) {
+            options.samplerArgumentBuffer = true;
+            break;
+        }
+        count += binding.count;
+    }
+}
+
 namespace Abi = ShaderRecompiler::BdaAbi;
 
 void validatePhysicalRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges) {
@@ -159,6 +175,7 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
     options.supportsInt64 = true;
     options.supportsGpuAddresses = true;
     options.supportsSimdGroups = true;
+    configureSamplerArguments(options, guest, device);
     const auto converted = MetalBackend::ConvertToMetal(guest, ShaderStage::Compute, options);
     MetalComputePipeline pipeline(device, converted);
     MetalGuestMemory guestMemory(device);
