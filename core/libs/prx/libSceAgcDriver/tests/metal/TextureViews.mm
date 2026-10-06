@@ -18,7 +18,7 @@ using namespace metal;
 kernel void writeArray(texture2d_array<float,access::write> t [[texture(0)]],uint2 p [[thread_position_in_grid]]) { t.write(float4(17,31,73,127)/255.0f,p,0); }
 kernel void readArray(texture2d_array<float,access::read> t [[texture(0)]],device uchar4* out [[buffer(0)]],constant uint4& at [[buffer(1)]]) { out[0]=uchar4(round(t.read(uint2(0),at.x,at.y)*255.0f)); }
 kernel void readUint(texture2d_array<uint,access::read> t [[texture(0)]],device uint4* out [[buffer(0)]]) { out[0]=t.read(uint2(0),0); }
-kernel void readSrgb(texture2d_array<float,access::read> t [[texture(0)]],device float4* out [[buffer(0)]]) { out[0]=t.read(uint2(0),0); }
+kernel void readSrgb(texture2d_array<float> t [[texture(0)]],device float4* out [[buffer(0)]],uint i [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized,filter::nearest); out[i]=t.sample(s,(float2(i%t.get_width(),i/t.get_width())+.5f)/float2(t.get_width(),t.get_height()),0); }
 kernel void compare(depth2d<float> t [[texture(0)]],device float* out [[buffer(0)]],uint i [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::nearest,compare_func::less_equal); out[i]=t.sample_compare(s,float2(.5f),i==0?.1f:.5f); }
 kernel void read2D(texture2d<float> t [[texture(0)]],device uchar4* out [[buffer(0)]],uint2 p [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized,filter::nearest); out[p.y*8+p.x]=uchar4(round(t.sample(s,(float2(p)+.5f)/8.0f)*255.0f)); }
 kernel void readR32Uint(texture2d<uint,access::read> t [[texture(0)]],device uint* out [[buffer(0)]],uint2 p [[thread_position_in_grid]]) { out[p.y*8+p.x]=t.read(p).x; }
@@ -131,6 +131,86 @@ void SharedViews(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
     for(unsigned y=0;y<4;++y) for(unsigned x=0;x<4;++x)
         std::memcpy(expected.data()+64+geometry.GuestLayerOffset(1)+mip.tiledOffset+y*mip.pitchBytes+x*4,written.data(),4);
     Require(allocation==expected,"shared image copyback changed other mips, layers, padding, or guards");
+
+    struct ChannelFormat { std::uint32_t srgb,unorm,integer,channels; };
+    constexpr std::array<ChannelFormat,2> channelFormats{{{128,1,5,1},{129,14,18,2}}};
+    constexpr std::array<unsigned,8> redBytes{0,1,10,11,64,128,192,255},greenBytes{255,192,128,64,11,10,1,0};
+    for(const auto& format:channelFormats) for(bool srgbFirst:{false,true}) {
+        auto narrow=Descriptor(format.unorm);
+        narrow.dimension=Graphics::TextureDimension::k2DArray;
+        narrow.depthOrLastArray=2;
+        narrow.mipCount=narrow.allocatedMipCount=3;
+        narrow.lastLevel=2;
+        const auto surface=Graphics::DescribeSurface(narrow);
+        std::vector<std::byte> bytes(surface.guestBytes+128,std::byte{0xa5});
+        auto pixels=std::span(bytes).subspan(64,surface.guestBytes);
+        for(unsigned layer=0;layer<3;++layer) for(unsigned level=0;level<3;++level) {
+            const auto& plane=surface.mips[level];
+            for(unsigned y=0;y<plane.height;++y) for(unsigned x=0;x<plane.width;++x) {
+                auto* at=pixels.data()+surface.GuestLayerOffset(layer)+plane.tiledOffset+y*plane.pitchBytes+x*format.channels;
+                at[0]=std::byte((redBytes[x]+layer*11+level*7+y*17)&255);
+                if(format.channels==2) at[1]=std::byte((greenBytes[x]+level*19+layer*23+y*5)&255);
+            }
+        }
+        auto expectedBytes=bytes;
+        const NativeGuestMemory::BorrowedRange range{narrow.baseAddress,pixels,true};
+        Metal::MetalShaderResources narrowResources(backend,std::span(&range,1));
+        auto first=narrow; if(srgbFirst) first.format=format.srgb;
+        static_cast<void>(narrowResources.Texture(first));
+        auto gammaFull=narrow; gammaFull.format=format.srgb;
+        auto gammaFullView=narrowResources.Texture(gammaFull);
+        auto selectedGamma=gammaFull; selectedGamma.baseArray=1; selectedGamma.baseLevel=selectedGamma.lastLevel=1;
+        auto storageGamma=narrowResources.Texture(selectedGamma,true);
+        auto narrowCommands=backend.CommandBuffer();
+        Encode(backend,library,narrowCommands,@"writeArray",storageGamma->StorageView(),nil,MTLSizeMake(4,4,1));
+        auto selectedLinear=selectedGamma; selectedLinear.format=format.unorm;
+        auto linearSelected=narrowResources.Texture(selectedLinear);
+        auto selectedInteger=selectedGamma; selectedInteger.format=format.integer;
+        auto integerSelected=narrowResources.Texture(selectedInteger);
+        const auto guarded=[&](unsigned size=16) {
+            auto result=backend.Buffer(size+16);
+            std::memset(result.contents,0xa7,result.length);
+            return result;
+        };
+        auto narrowUnchanged=guarded(64*16),narrowPlain=guarded(4),narrowInteger=guarded(),narrowLinear=guarded();
+        Encode(backend,library,narrowCommands,@"readSrgb",gammaFullView->SampledView(),narrowUnchanged,MTLSizeMake(64,1,1));
+        Encode(backend,library,narrowCommands,@"readArray",linearSelected->SampledView(),narrowPlain,MTLSizeMake(1,1,1),rebasedAt.data(),sizeof(rebasedAt));
+        Encode(backend,library,narrowCommands,@"readUint",integerSelected->SampledView(),narrowInteger);
+        Encode(backend,library,narrowCommands,@"readSrgb",storageGamma->SampledView(),narrowLinear);
+        backend.Wait(narrowCommands);
+        const auto decode=[](float encoded) {
+            const float value=std::clamp(encoded/255,0.0f,1.0f);
+            return value<=.04045f?value/12.92f:std::pow((value+.055f)/1.055f,2.4f);
+        };
+        const auto color=[&](const float* actual,unsigned red,unsigned green,const char* message) {
+            const std::array<unsigned,2> encoded{red,green};
+            for(unsigned channel=0;channel<format.channels;++channel)
+                Require(std::isfinite(actual[channel])&&actual[channel]>=decode(float(encoded[channel])-.5f)-.00001f&&actual[channel]<=decode(float(encoded[channel])+.5f)+.00001f,message);
+            for(unsigned channel=format.channels;channel<4;++channel)
+                Require(actual[channel]==(channel==3?1.0f:0.0f),message);
+        };
+        for(unsigned y=0;y<8;++y) for(unsigned x=0;x<8;++x)
+            color(static_cast<const float*>(narrowUnchanged.contents)+(y*8+x)*4,(redBytes[x]+y*17)&255,(greenBytes[x]+y*5)&255,"R8 or RG8 sRGB materialization changed original encoded-channel transfer or an unrelated mip");
+        color(static_cast<const float*>(narrowLinear.contents),17,31,"R8 or RG8 sRGB sampled view lost shared storage writes or channel transfer");
+        Pixels(narrowPlain.contents,{17,std::uint8_t(format.channels==2?31:0),0,255},1,"R8 or RG8 sRGB storage view encoded gamma instead of writing UNORM channel bits");
+        const std::array<std::uint32_t,4> integerColor{17,format.channels==2?31u:0u,0,1};
+        Require(std::memcmp(narrowInteger.contents,integerColor.data(),sizeof(integerColor))==0,"R8 or RG8 integer view changed shared sRGB storage bits");
+        const std::array<id<MTLBuffer>,4> outputs{narrowUnchanged,narrowPlain,narrowInteger,narrowLinear};
+        for(unsigned index=0;index<outputs.size();++index) {
+            const auto* at=static_cast<const std::uint8_t*>(outputs[index].contents);
+            const unsigned writtenBytes=index==0?64*16:index==1?4:16;
+            Require(std::all_of(at+writtenBytes,at+outputs[index].length,[](auto value){return value==0xa7;}),"R8 or RG8 texture view probe overwrote its output guard");
+        }
+        Require(bytes==expectedBytes,"R8 or RG8 storage bits published before resource completion");
+        Require(narrowResources.Complete(narrowCommands).state==BdaAbi::FaultState::Empty,"R8 or RG8 sRGB view completion faulted");
+        const auto& writtenMip=surface.mips[1];
+        for(unsigned y=0;y<4;++y) for(unsigned x=0;x<4;++x) {
+            auto* at=expectedBytes.data()+64+surface.GuestLayerOffset(1)+writtenMip.tiledOffset+y*writtenMip.pitchBytes+x*format.channels;
+            at[0]=std::byte{17};
+            if(format.channels==2) at[1]=std::byte{31};
+        }
+        Require(bytes==expectedBytes,"R8 or RG8 sRGB copyback changed other mips, layers, channel bits, row padding, or guards");
+    }
 }
 
 void Comparison(const Metal::MetalDevice& backend,id<MTLLibrary> library,std::uint32_t format) {
