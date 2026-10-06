@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <string_view>
 
 namespace {
 using MetalTests::Require;
@@ -190,20 +191,25 @@ void Dcc(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
             Require(std::all_of(keys.begin(),keys.end(),[](auto key){return key==std::byte{0xff};}),"DCC image copyback did not publish uncompressed metadata");
         }
     }
-    for(unsigned fallback=0;fallback<2;++fallback) {
-        std::vector<std::byte> guest(geometry.guestBytes,std::byte{0x93});
-        std::vector<std::byte> keys(geometry.guestBytes/256,std::byte{0x20});
-        if(fallback==1) {std::fill(keys.begin(),keys.end(),std::byte{0xff});keys[1]=std::byte{0x40};}
+    constexpr std::array<std::string_view,4> categories{"register","mixed","unreadable","1111"};
+    for(unsigned unresolved=0;unresolved<categories.size();++unresolved) {
+        auto descriptor=d;
+        if(unresolved==3) descriptor.format=169;
+        const auto extent=Graphics::DescribeSurface(descriptor).guestBytes;
+        std::vector<std::byte> guest(extent,std::byte{0x93});
+        std::vector<std::byte> keys(extent/256,std::byte{0x20});
+        if(unresolved==1) {std::fill(keys.begin(),keys.end(),std::byte{0xff});keys[1]=std::byte{0x40};}
+        if(unresolved==3) std::fill(keys.begin(),keys.end(),std::byte{0xc0});
         const auto expectedGuest=guest,expectedKeys=keys;
-        std::array<NativeGuestMemory::BorrowedRange,2> ranges{{{d.baseAddress,guest,false},{d.dccAddress,keys,false}}};
-        Metal::MetalShaderResources resources(backend,ranges);
-        auto texture=resources.Texture(d);
-        auto output=backend.Buffer(256);
-            auto commands=backend.CommandBuffer();
-        Encode(backend,library,commands,@"read2D",texture->SampledView(),output,MTLSizeMake(8,8,1));
-        backend.Wait(commands);
-        Pixels(output.contents,{147,147,147,147},64,"mixed or register-dependent DCC metadata replaced stored guest texels");
-        Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty&&guest==expectedGuest&&keys==expectedKeys,"DCC fallback sampling changed guest memory");
+        std::array<NativeGuestMemory::BorrowedRange,2> ranges{{{descriptor.baseAddress,guest,false},{descriptor.dccAddress,keys,false}}};
+        Metal::MetalShaderResources resources(backend,std::span(ranges).first(unresolved==2?1:2));
+        bool rejected=false;
+        try {static_cast<void>(resources.Texture(descriptor));} catch(const std::runtime_error& error) {
+            const std::string_view message(error.what());
+            rejected=message.starts_with("Metal texture DCC metadata is unresolved (")&&message.find(categories[unresolved])!=std::string_view::npos;
+        }
+        Require(rejected,"unresolved DCC metadata exposed stored texels instead of an explicit categorized failure");
+        Require(guest==expectedGuest&&keys==expectedKeys,"unresolved DCC rejection changed guest memory");
     }
 }
 

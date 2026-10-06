@@ -3,8 +3,6 @@
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <cstdio>
-#include <mutex>
-#include <set>
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -138,15 +136,12 @@ Graphics::DccKeys MetalShaderResources::textureKeys(const Graphics::GuestTexture
     std::array<std::byte, 16> probe{};
     if (Graphics::IsDccClear(keys) && Graphics::FillDccClear(Graphics::ResolveTextureFormat(descriptor.format), keys,
             descriptor.dccAlphaOnMsb, std::span(probe).first(Graphics::BytesPerElement(descriptor.format)))) return keys;
-    static std::mutex reportedMutex;
-    static std::set<std::pair<std::uint64_t, int>> reported;
-    std::lock_guard lock(reportedMutex);
-    if (reported.size() < 32 && reported.insert({descriptor.baseAddress, static_cast<int>(keys)}).second) {
-        std::fprintf(stderr, "[gpu] texture 0x%llx (format %u) has %s DCC keys at 0x%llx; its texels are read as stored\n",
-            static_cast<unsigned long long>(descriptor.baseAddress), descriptor.format, Graphics::DccKeysName(keys),
-            static_cast<unsigned long long>(descriptor.dccAddress));
-    }
-    return Graphics::DccKeys::Uncompressed;
+    char message[320];
+    std::snprintf(message, sizeof(message),
+        "Metal texture DCC metadata is unresolved (%s keys, format %u, surface 0x%llx, metadata 0x%llx)",
+        Graphics::DccKeysName(keys), descriptor.format, static_cast<unsigned long long>(descriptor.baseAddress),
+        static_cast<unsigned long long>(descriptor.dccAddress));
+    throw std::runtime_error(message);
 }
 
 void MetalShaderResources::validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys) {
