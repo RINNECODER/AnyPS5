@@ -28,6 +28,7 @@ struct MetalDriver::Impl {
     };
     std::mutex mutex;
     std::mutex shutdownMutex;
+    std::mutex mappingMutex;
     std::recursive_mutex gpuMutex;
     std::condition_variable changed;
     std::map<std::uint32_t, Worker> workers;
@@ -36,6 +37,10 @@ struct MetalDriver::Impl {
     std::shared_ptr<const DriverDetail::ShaderRegistry> shaders = std::make_shared<DriverDetail::ShaderRegistry>();
     std::vector<NativeGuestMemory::BorrowedRange> ranges;
     std::uint64_t rangeGeneration = 0;
+    bool mappingUpdatePending = false;
+    std::thread::id mappingUpdateThread;
+    std::shared_ptr<const void> rangeOwner;
+    std::vector<std::shared_ptr<const void>> retainedRangeOwners;
     id<MTLDevice> nativeDevice = nil;
     id<MTLLibrary> nativeLibrary = nil;
     std::unique_ptr<MetalDevice> backend;
@@ -56,6 +61,9 @@ struct MetalDriver::Impl {
     std::set<std::uint64_t> completedOutOfOrder;
     static bool& OnWorkerThread();
     void CheckFailureAndStopping();
+    void RejectMappingReentry();
+    void WaitForMappingAdmission(std::unique_lock<std::mutex>& lock);
+    std::unique_lock<std::recursive_mutex> LockForGuestCapture();
     void ReportFailure(std::exception_ptr error);
     void Run(std::uint32_t queue) noexcept;
     void Enqueue(Submission submission);
