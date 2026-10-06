@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 
 public enum EngineEvent: Sendable {
+    case started(pid: Int32, executable: String, arguments: [String], workingDirectory: String)
     case output(Data)
     case exited(Int32)
 }
@@ -74,8 +75,10 @@ public final class EngineRunner: @unchecked Sendable {
         if acceptedPackage != nil { child.environment = EnginePackage.controlledEnvironment }
         let resourceArguments = hasResourceArgument ? ["--resource-root", resourceRoot] : []
         let moduleArguments = game.sceModulePaths.flatMap { ["--sce-module", $0] }
-        child.arguments = resourceArguments + (capabilities != nil ? ["--diagnostics-json"] : []) + moduleArguments + [game.executablePath]
-        child.currentDirectoryURL = URL(fileURLWithPath: launchGame.workingDirectory, isDirectory: true)
+        let arguments = resourceArguments + (capabilities != nil ? ["--diagnostics-json"] : []) + moduleArguments + [game.executablePath]
+        let workingDirectory = URL(fileURLWithPath: launchGame.workingDirectory, isDirectory: true)
+        child.arguments = arguments
+        child.currentDirectoryURL = workingDirectory
         child.standardOutput = pipe
         child.standardError = pipe
         child.standardInput = FileHandle.nullDevice
@@ -104,6 +107,9 @@ public final class EngineRunner: @unchecked Sendable {
                         started = true
                         lock.unlock()
                     } catch { lock.unlock(); throw error }
+                    // These immutable values are the invocation assigned to this child above.
+                    continuation.yield(.started(pid: child.processIdentifier, executable: engine.path,
+                                                arguments: arguments, workingDirectory: workingDirectory.path))
                     // Closing the parent's writer makes EOF observable after child shutdown.
                     try? pipe.fileHandleForWriting.close()
                     var buffer = [UInt8](repeating: 0, count: 4096)

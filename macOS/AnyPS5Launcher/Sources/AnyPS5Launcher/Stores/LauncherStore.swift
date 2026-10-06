@@ -300,11 +300,12 @@ final class LauncherStore {
                     let stream = try runner.run(engine: URL(fileURLWithPath: library.enginePath), game: game,
                                                 capabilities: capabilities, resourceDirectory: resourceDirectory,
                                                 acceptedPackage: acceptedPackage)
-                    sessionStatus = "Running \(game.title)"
                     console = "Engine: \(library.enginePath)\nGuest: \(game.executablePath)\nResources: \(resourceDirectory?.path ?? game.workingDirectory)\n\n"
                     let prefix = console
                     for try await event in stream {
                         switch event {
+                        case .started:
+                            if !sessionCancelled { sessionStatus = "Running \(game.title)" }
                         case .output(let bytes):
                             logBytes.append(bytes)
                             if logBytes.count > 524_288 { logBytes.removeFirst(logBytes.count - 524_288) }
