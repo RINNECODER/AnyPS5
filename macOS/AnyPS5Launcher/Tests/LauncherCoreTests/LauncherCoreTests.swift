@@ -50,8 +50,9 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertThrowsError(try OrbitCatalogue.decode(future))
     }
 
-    // Contract: a failed refresh retains the last valid catalogue and marks it as cached.
-    // Regression: HTML/error responses overwrite good offline data. CPU/Metal tests do not use this HTTP boundary.
+    // Contract: authenticated v3 HTTP data becomes a validated plaintext cache; failed refreshes preserve it.
+    // Regression: wrong endpoint, unauthenticated/plaintext acceptance or invalid responses overwrite offline data.
+    // The JSON grouping test misses this envelope/network/cache boundary; historical plaintext caches remain readable.
     func testRefreshPreservesCacheWhenServerReturnsError() async throws {
         let cache = try directory().appendingPathComponent("cache.json")
         let configuration = URLSessionConfiguration.ephemeral
@@ -59,15 +60,78 @@ final class LauncherCoreTests: XCTestCase {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let client = CatalogueClient(cacheURL: cache, session: session)
-        CatalogueProtocol.set(response: catalogue, status: 200)
+        // Independently sealed by Python cryptography 44.0.2 AESGCM from official orbit-store-0.8.0
+        // catalog_crypto.c/catalog_key.h: nonce 000102030405060708090a0b, full 24-byte header AAD.
+        // Protocol source SHA256: 26cbe053ca3f8f876711663917654748f13d218ab6e077317721269dc298fd42.
+        // Local receipt: /tmp/anyps5-orbit-v3-http-fixture-provenance.json. No Swift production encryption.
+        let encrypted = try XCTUnwrap(Data(base64Encoded:
+            "T1JCSVRFTkMBAQEAAAECAwQFBgcICQoLIxX7hvFKK8O8CvFz9T0TWmGHVxtMIv2thOPPnZ3ek1f0r8PdsNSCQtLTnLbloCDxHhdCngtASrhtLGl4blccmMSZbtjcnYxFqof4+dBjKJxihvnCDNA0wZoul2pd9RItsdsWPEJVUvkjlXjo4seGYI5xMRaip2VtQBwvG6GYiNhwX7WvdEPMIBxvCZ9vsIGZPGNtkyVTaXAzpaf1bevIrwNeE8Jh4oVWx3hB5oC2Fi+2A6elj3mbHYLQaQe0JsZxuCpeeSLNqh7NwM57odLcyFVqD/RMl6ehVXV/c0K7FxHBE7hppt/F3cP8RvhmBULThkderOv6wHw6UmjxG5Mb0caXhCn2HSVjKBa0hwlUNwMib2WwatY+gqd9sDe11Cc5ujFZf1ak7AGi0OEW8eRdosemZu8QJ3JloevmN3HMqjsGudL2TCeOEbcT10m2C2vMtlFR/I6tNJCbVYHUHyIgRCCDcDR8aGGxrDadmXbGAEULL0D3In3avBuDRRFbYa94tAsP+G2LH9MHC0OIljBNQJcksd3UNQca1TaRPH+wu/cCDqxc94SBa6X4NzPSlx4VHtakgu1bKQ2DsjRkB7Oo7vO2"))
+        let endpoint = "https://raw.githubusercontent.com/saawant12/orbit-store-ps5/main/catalogue-v3.enc"
+        CatalogueProtocol.set(response: encrypted, status: 200)
         let first = try await client.refresh()
         XCTAssertFalse(first.isCached)
-        CatalogueProtocol.set(response: Data("<html>unavailable</html>".utf8), status: 503)
-        let second = try await client.refresh()
-        XCTAssertTrue(second.isCached)
-        XCTAssertNotNil(second.warning)
-        XCTAssertEqual(second.catalogue.games[0].title, "Example Game")
+        XCTAssertNil(first.warning)
+        XCTAssertEqual(first.catalogue.games[0].title, "Example Game")
         XCTAssertEqual(try Data(contentsOf: cache), catalogue)
+        XCTAssertEqual(CatalogueProtocol.requestURLs(), [endpoint])
+
+        let format = "Orbit catalogue envelope has an unsupported format or size."
+        let authentication = "Orbit catalogue authentication failed."
+        var rejected: [(String, Data, Int, String?)] = []
+        // Independently authenticated invalid headers isolate the format guard from GCM rejection.
+        for (name, offset, tag) in [("magic", 0, "1xej162RcgNlk+JVNeiXNA=="),
+                                    ("version", 8, "yVDs/JDzQJjD8Uk/LHICBw=="),
+                                    ("key ID", 9, "YE0/Wo60fXEek5L9JGpvRw=="),
+                                    ("reserved", 11, "UA4LlPsMJAvKpy1EPaB/Mg==")] {
+            var bytes = encrypted; bytes[offset] ^= 1
+            bytes.replaceSubrange((bytes.count - 16)..<bytes.count, with: try XCTUnwrap(Data(base64Encoded: tag)))
+            rejected.append((name, bytes, 200, format))
+        }
+        var wrongPurpose = encrypted; wrongPurpose[10] = 2
+        // A genuinely authenticated games-purpose envelope must still be refused by the feed client.
+        wrongPurpose.replaceSubrange((wrongPurpose.count - 16)..<wrongPurpose.count,
+                                     with: try XCTUnwrap(Data(base64Encoded: "u6m9LSvlSbFxGx8Me3t+Ew==")))
+        rejected.append(("authenticated wrong purpose", wrongPurpose, 200, format))
+        for (name, offset) in [("nonce", 12), ("ciphertext", 24), ("tag", encrypted.count - 1)] {
+            var bytes = encrypted; bytes[offset] ^= 1
+            rejected.append((name, bytes, 200, authentication))
+        }
+        var oversize = encrypted
+        oversize.append(Data(repeating: 0, count: 8_388_649 - oversize.count))
+        rejected += [
+            ("empty/truncated payload", Data(encrypted.prefix(40)), 200, format),
+            ("truncated tag", Data(encrypted.dropLast()), 200, authentication),
+            ("oversize", oversize, 200, format),
+            ("plaintext network JSON", catalogue, 200, format),
+            ("authenticated malformed JSON", try XCTUnwrap(Data(base64Encoded:
+                "T1JCSVRFTkMBAQEAAAECAwQFBgcICQoLI+mwqPNtgu7G2rGl2+322Qs=")), 200, nil),
+            ("HTTP error", Data("<html>unavailable</html>".utf8), 503,
+             "Orbit catalogue server returned an unsuccessful response.")
+        ]
+        let missingCache = cache.deletingLastPathComponent().appendingPathComponent("missing-cache.json")
+        for (name, response, status, diagnostic) in rejected {
+            CatalogueProtocol.set(response: response, status: status)
+            let fallback = try await client.refresh()
+            XCTAssertTrue(fallback.isCached, name)
+            XCTAssertNotNil(fallback.warning, name)
+            XCTAssertEqual(fallback.catalogue.games[0].title, "Example Game", name)
+            XCTAssertEqual(try Data(contentsOf: cache), catalogue, "\(name) replaced valid cache bytes.")
+            do {
+                _ = try await CatalogueClient(cacheURL: missingCache, session: session).refresh()
+                XCTFail("\(name) accepted without a valid cache.")
+            } catch {
+                if let diagnostic { XCTAssertEqual(error.localizedDescription, diagnostic, name) }
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: missingCache.path), name)
+            XCTAssertEqual(CatalogueProtocol.requestURLs(), [endpoint, endpoint], name)
+        }
+        let legacyCache = cache.deletingLastPathComponent().appendingPathComponent("old-plaintext-cache.json")
+        try catalogue.write(to: legacyCache)
+        CatalogueProtocol.set(response: Data("unavailable".utf8), status: 503)
+        let legacy = try await CatalogueClient(cacheURL: legacyCache, session: session).refresh()
+        XCTAssertTrue(legacy.isCached)
+        XCTAssertEqual(legacy.catalogue.games[0].title, "Example Game")
+        XCTAssertEqual(try Data(contentsOf: legacyCache), catalogue)
     }
 
     // Contract: saved associations retain image/module paths and accepted package identity; older libraries decode without either.
@@ -771,15 +835,21 @@ private final class CatalogueProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var response = Data()
     private static var status = 200
+    private static var urls: [String] = []
     static func set(response: Data, status: Int) {
         lock.lock(); defer { lock.unlock() }
-        self.response = response; self.status = status
+        self.response = response; self.status = status; urls = []
+    }
+    static func requestURLs() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return urls
     }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         Self.lock.lock()
         let data = Self.response, status = Self.status
+        Self.urls.append(request.url!.absoluteString)
         Self.lock.unlock()
         client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)

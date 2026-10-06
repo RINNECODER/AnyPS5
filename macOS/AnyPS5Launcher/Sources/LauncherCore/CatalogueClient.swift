@@ -1,7 +1,7 @@
 import Foundation
 
 public actor CatalogueClient {
-    public static let endpoint = URL(string: "https://raw.githubusercontent.com/saawant12/orbit-store-ps5/main/catalogue-v2.json")!
+    public static let endpoint = URL(string: "https://raw.githubusercontent.com/saawant12/orbit-store-ps5/main/catalogue-v3.enc")!
     private let session: URLSession
     private let cacheURL: URL
 
@@ -19,12 +19,13 @@ public actor CatalogueClient {
             guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
                 throw LauncherError("Orbit catalogue server returned an unsuccessful response.")
             }
-            let catalogue = try OrbitCatalogue.decode(data)
+            let plaintext = try OrbitFeedEnvelope.decode(data)
+            let catalogue = try OrbitCatalogue.decode(plaintext)
             let date = Date()
             var warning: String?
             do {
                 try FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try data.write(to: cacheURL, options: .atomic)
+                try plaintext.write(to: cacheURL, options: .atomic)
             } catch { warning = "Catalogue loaded, but its offline cache could not be saved: \(error.localizedDescription)" }
             return CatalogueSnapshot(catalogue: catalogue, fetchedAt: date, isCached: false, warning: warning)
         } catch {
