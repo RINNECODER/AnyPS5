@@ -1,8 +1,13 @@
 #include <cpu/Cpu.hpp>
 #include <cpu/ElfLoader.hpp>
 #include <cpu/Runtime.hpp>
+#include <cpu/SceElf.hpp>
+#include <cpu/SceImports.hpp>
+#include <array>
 #include <csignal>
+#include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -68,18 +73,57 @@ std::string Json(std::string_view value) {
 void Capabilities() {
     std::cout << "{\"schema_version\":1,\"host_architecture\":" << Json(HostArchitecture())
         << ",\"guest_architecture\":\"x86_64\",\"backend\":" << Json(Cpu::Machine::Backend())
-        << ",\"supported_formats\":[\"static_elf64_x86_64\"],\"runtime_abi\":\"linux_sysv\",\"services\":["
+        << ",\"supported_formats\":[\"static_elf64_x86_64\",\"sce_elf64_x86_64\"],\"runtime_abi\":\"linux_sysv\",\"runtime_abis\":[\"linux_sysv\",\"sce_sysv\"],\"services\":["
         << "{\"name\":\"write\",\"number\":1,\"constraints\":\"stdout/stderr only; at most 16 MiB per call\"},"
         << "{\"name\":\"exit\",\"number\":60,\"constraints\":\"status truncated to 8 bits\"},"
         << "{\"name\":\"exit_group\",\"number\":231,\"constraints\":\"single guest thread; status truncated to 8 bits\"},"
         << "{\"name\":\"arch_prctl\",\"number\":158,\"constraints\":\"ARCH_SET_FS and ARCH_GET_FS only\"}],"
+        << "\"sce_imports\":{\"module\":\"libc\",\"module_version\":\"1.1\",\"library\":\"libc\",\"library_version\":1,"
+        << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
+        << "\"sce_constraints\":[\"clean decrypted ELF only\",\"no guest TLS\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
         << "\"ps5_game_runtime_ready\":false}\n";
 }
 
+bool SceExecutable(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    std::array<unsigned char, 18> bytes{};
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) return false;
+    if ((bytes[0] == 0xee && bytes[1] == 0xf5 && bytes[2] == 0x14 && bytes[3] == 0x54) ||
+        (bytes[0] == 0x4f && bytes[1] == 0x15 && bytes[2] == 0x3d && bytes[3] == 0x1d)) return true;
+    if (bytes[0] != 0x7f || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F') return false;
+    const auto type = bytes[16] | (unsigned(bytes[17]) << 8);
+    return type == 0xfe10 || type == 0xfe18 || (type == 3 && (bytes[7] == 9 || bytes[8] == 2));
+}
+
+void InspectSce(const Cpu::SceParsedImage& image) {
+    std::cout << "{\"schema_version\":1,\"event\":\"inspection\",\"format\":\"sce_elf64_x86_64\",\"executable\":" << Json(image.Path.string())
+        << ",\"type\":" << image.Type << ",\"os_abi\":" << unsigned(image.OsAbi) << ",\"abi_version\":" << unsigned(image.AbiVersion)
+        << ",\"entry\":" << image.Entry << ",\"segment_count\":" << image.Segments.size() << ",\"relocation_count\":" << image.RelocationCount
+        << ",\"has_tls\":" << (image.Tls ? "true" : "false") << ",\"has_process_parameters\":" << (image.ProcParam ? "true" : "false") << ",\"imports\":[";
+    for (std::size_t index = 0; index < image.Imports.size(); ++index) {
+        if (index) std::cout << ',';
+        const auto& import = image.Imports[index];
+        std::cout << "{\"nid\":" << Json(import.Nid) << ",\"library\":" << Json(import.LibraryName) << ",\"library_id\":" << import.LibraryId
+            << ",\"library_version\":" << import.LibraryVersion << ",\"module\":" << Json(import.ModuleName) << ",\"module_id\":" << import.ModuleId
+            << ",\"module_major\":" << unsigned(import.ModuleMajor) << ",\"module_minor\":" << unsigned(import.ModuleMinor) << '}';
+    }
+    const auto strings = [](const auto& values) {
+        for (std::size_t index = 0; index < values.size(); ++index) { if (index) std::cout << ','; std::cout << Json(values[index]); }
+    };
+    std::cout << "],\"needed_modules\":["; strings(image.NeededModules);
+    std::cout << "],\"needed_files\":["; strings(image.NeededFiles);
+    std::cout << "],\"unsupported_reasons\":["; strings(image.UnsupportedReasons);
+    std::cout << "],\"relocation_types\":[";
+    for (std::size_t index = 0; index < image.RelocationTypes.size(); ++index) { if (index) std::cout << ','; std::cout << image.RelocationTypes[index]; }
+    std::cout << "]}\n";
+}
+
 ErrorCode LoaderCode(std::string_view message) {
-    if (message.starts_with("ELF loader: cannot open ") || message == "ELF loader: cannot read complete executable")
+    if (message.starts_with("ELF loader: cannot open ") || message == "ELF loader: cannot read complete executable" ||
+        message.starts_with("SCE ELF loader: cannot open ") || message == "SCE ELF loader: cannot read complete executable")
         return ErrorCode::InputUnavailable;
-    if (message.find("unsupported") != std::string_view::npos || message.find("requires ") != std::string_view::npos ||
+    if (message.find("unsupported") != std::string_view::npos || message.find("Unsupported") != std::string_view::npos || message.find("requires ") != std::string_view::npos ||
+        message == "SCE ELF loader: SELF containers require an extracted decrypted ELF" ||
         message == "ELF loader: input is not an ELF executable" ||
         message == "ELF loader: only static ET_EXEC executables are supported")
         return ErrorCode::UnsupportedExecutable;
@@ -90,7 +134,8 @@ ErrorCode ExecutionCode(std::string_view message) {
     if (message.starts_with("Unsupported guest instruction")) return ErrorCode::UnsupportedInstruction;
     if (message.starts_with("Unsupported Linux guest syscall") || message.starts_with("Unsupported guest syscall") ||
         message.starts_with("Unsupported guest interrupt") || message.starts_with("Unsupported guest SYSENTER") ||
-        message.starts_with("Unsupported guest port ") || message.find("unsupported operation") != std::string_view::npos)
+        message.starts_with("Unsupported guest port ") || message.starts_with("Unsupported guest privileged service instruction") ||
+        message.starts_with("Unsupported SCE ") || message.find("unsupported operation") != std::string_view::npos)
         return ErrorCode::UnsupportedService;
     if (message.starts_with("Guest unmapped ") || message.starts_with("Guest protected ") ||
         message.starts_with("Guest access denied ") || message == "Guest access range overflows")
@@ -105,6 +150,7 @@ int main(int argc, char** argv) {
     auto code = ErrorCode::InvalidArguments;
     try {
         int first = 1;
+        bool inspect = false;
         if (argc > 1 && std::string_view(argv[1]) == "--capabilities-json") {
             if (argc != 2) throw std::runtime_error("--capabilities-json does not accept executable arguments");
             Capabilities();
@@ -114,36 +160,58 @@ int main(int argc, char** argv) {
             diagnostics = true;
             first = 2;
         }
+        if (argc > first && std::string_view(argv[first]) == "--inspect-sce-json") {
+            diagnostics = true;
+            inspect = true;
+            ++first;
+        }
         if (argc <= first)
-            throw std::runtime_error("Usage: anyps5_cpu_run <static-x86-64.elf> [guest arguments...]");
+            throw std::runtime_error("Usage: anyps5_cpu_run [--diagnostics-json] <x86-64.elf> [guest arguments...] or --inspect-sce-json <clean-sce.elf>");
         if (std::string_view(argv[first]).starts_with('-'))
             throw std::runtime_error("Unsupported CLI option: " + std::string(argv[first]));
         executable = argv[first];
+        if (inspect) {
+            if (argc != first + 1) throw std::runtime_error("--inspect-sce-json accepts exactly one executable");
+            try { InspectSce(Cpu::ParseSce(executable)); }
+            catch (const std::exception& error) { code = LoaderCode(error.what()); throw; }
+            return 0;
+        }
         code = ErrorCode::HostFailure;
         if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
             throw std::runtime_error("Cannot configure standalone CLI SIGPIPE handling");
         Cpu::Machine machine;
-        Cpu::LinuxRuntime runtime(machine);
-        Cpu::LoadedImage image;
+        std::unique_ptr<Cpu::LinuxRuntime> linuxRuntime;
+        std::unique_ptr<Cpu::SceImports> sceRuntime;
+        std::uint64_t entry;
+        const bool sce = SceExecutable(executable);
         try {
-            image = Cpu::Load(machine, executable);
             std::vector<std::string> arguments;
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
-            Cpu::SetupStack(machine, image, arguments);
+            if (sce) {
+                sceRuntime = std::make_unique<Cpu::SceImports>(machine);
+                auto image = Cpu::LoadSce(machine, executable, 0x1000000, [&](const auto& import) { return sceRuntime->Resolve(import); });
+                Cpu::SetupSceEntry(machine, image, arguments, sceRuntime->ExitGate());
+                entry = image.Entry;
+            } else {
+                linuxRuntime = std::make_unique<Cpu::LinuxRuntime>(machine);
+                auto image = Cpu::Load(machine, executable);
+                Cpu::SetupStack(machine, image, arguments);
+                entry = image.Entry;
+            }
         } catch (const std::exception& error) {
             code = LoaderCode(error.what());
             throw;
         }
         if (diagnostics) {
             std::cerr << "{\"schema_version\":1,\"event\":\"startup\",\"executable\":" << Json(executable)
-                << ",\"entry\":" << image.Entry << ",\"host_architecture\":" << Json(HostArchitecture())
+                << ",\"entry\":" << entry << ",\"format\":" << Json(sce ? "sce_elf64_x86_64" : "static_elf64_x86_64") << ",\"host_architecture\":" << Json(HostArchitecture())
                 << ",\"guest_architecture\":\"x86_64\",\"backend\":" << Json(Cpu::Machine::Backend()) << "}\n";
         } else {
             std::cerr << "host=" << HostArchitecture() << " backend=" << Cpu::Machine::Backend()
-                << " guest=x86_64 entry=0x" << std::hex << image.Entry << std::dec << '\n';
+                << " guest=x86_64 entry=0x" << std::hex << entry << std::dec << '\n';
         }
         Cpu::StopReason reason;
-        try { reason = machine.Run(image.Entry, 0, 100000000); }
+        try { reason = machine.Run(entry, 0, 100000000); }
         catch (const std::exception& error) {
             code = ExecutionCode(error.what());
             throw;

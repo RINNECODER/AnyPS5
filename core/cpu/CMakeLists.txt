@@ -18,8 +18,11 @@ if(NOT unicornHostConfig MATCHES "CONFIG_DARWIN" OR NOT unicornHostConfig MATCHE
     message(FATAL_ERROR "Unicorn host feature detection failed; inspect configure diagnostics")
 endif()
 
-add_library(anyps5_cpu STATIC src/Cpu.cpp src/ElfLoader.cpp src/Runtime.cpp src/SystemMachine.cpp)
+add_library(anyps5_cpu STATIC src/Cpu.cpp src/ElfLoader.cpp src/Runtime.cpp src/SystemMachine.cpp src/SceImports.cpp src/SceElf.cpp
+    "${PROJECT_SOURCE_DIR}/core/libs/nid/src/NidCompute.cpp"
+    "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
+target_include_directories(anyps5_cpu PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
 target_link_libraries(anyps5_cpu PRIVATE unicorn)
 target_compile_options(anyps5_cpu PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(anyps5_cpu_run src/Main.cpp)
@@ -55,6 +58,14 @@ if(BUILD_TESTING)
         COMMAND "${guestLinker}" -static -e _start -o "${guestFixture}" "${CMAKE_CURRENT_BINARY_DIR}/cpu-start.o" "${CMAKE_CURRENT_BINARY_DIR}/cpu-homebrew.o"
         DEPENDS fixtures/Homebrew.c fixtures/Start.S VERBATIM)
     add_custom_target(anyps5_cpu_fixture ALL DEPENDS "${guestFixture}")
+    set(sceFixture "${CMAKE_CURRENT_BINARY_DIR}/sce-homebrew.elf")
+    add_custom_command(OUTPUT "${sceFixture}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -march=x86-64 -mno-avx -mno-avx2 -ffreestanding -fno-stack-protector -fno-builtin -fno-unwind-tables -fno-asynchronous-unwind-tables -fPIC -O2 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-homebrew.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-start.o"
+        COMMAND "${guestLinker}" -shared -Bsymbolic -e _start --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/sce-homebrew-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-start.o" "${CMAKE_CURRENT_BINARY_DIR}/sce-homebrew.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildSceFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/sce-homebrew-linked.elf" "${sceFixture}"
+        DEPENDS fixtures/SceHomebrew.c fixtures/SceStart.S tests/BuildSceFixture.py VERBATIM)
+    add_custom_target(anyps5_sce_fixture ALL DEPENDS "${sceFixture}")
     add_test_executable(anyps5_cpu_tests tests/CpuTests.cpp)
     target_link_libraries(anyps5_cpu_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_cpu_instructions COMMAND anyps5_cpu_tests)
@@ -64,9 +75,16 @@ if(BUILD_TESTING)
     add_test_executable(anyps5_cpu_runtime_tests tests/RuntimeTests.cpp)
     target_link_libraries(anyps5_cpu_runtime_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_cpu_runtime COMMAND anyps5_cpu_runtime_tests)
+    add_test_executable(anyps5_sce_import_tests tests/SceImportsTests.cpp)
+    target_link_libraries(anyps5_sce_import_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_imports COMMAND anyps5_sce_import_tests)
+    add_test_executable(anyps5_sce_loader_tests tests/SceElfTests.cpp)
+    target_link_libraries(anyps5_sce_loader_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_loader COMMAND anyps5_sce_loader_tests)
+    add_test(NAME anyps5_sce_homebrew COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceHomebrewTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${sceFixture}")
     add_test(NAME anyps5_cpu_homebrew COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/HomebrewTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${guestFixture}")
     add_test(NAME anyps5_cpu_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/CliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${guestFixture}")
-    set_tests_properties(anyps5_cpu_instructions anyps5_cpu_loader anyps5_cpu_runtime anyps5_cpu_homebrew anyps5_cpu_cli PROPERTIES TIMEOUT 30)
+    set_tests_properties(anyps5_cpu_instructions anyps5_cpu_loader anyps5_cpu_runtime anyps5_sce_imports anyps5_sce_loader anyps5_sce_homebrew anyps5_cpu_homebrew anyps5_cpu_cli PROPERTIES TIMEOUT 30)
 endif()
 
 set(ANYPS5_CPU_METAL_SOURCE_DIR "" CACHE PATH "Committed GPU worktree for the CPU to Metal guest fixture")

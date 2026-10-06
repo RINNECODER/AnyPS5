@@ -29,7 +29,7 @@ assert support["schema_version"] == 1, support
 assert support["host_architecture"] == "arm64", support
 assert support["guest_architecture"] == "x86_64", support
 assert support["backend"] == "Unicorn 2 x86-64 dynamic translation", support
-assert support["supported_formats"] == ["static_elf64_x86_64"], support
+assert support["supported_formats"] == ["static_elf64_x86_64", "sce_elf64_x86_64"], support
 assert support["runtime_abi"] == "linux_sysv", support
 assert support["ps5_game_runtime_ready"] is False, support
 assert {(value["name"], value["number"]) for value in support["services"]} == {
@@ -81,6 +81,14 @@ with tempfile.TemporaryDirectory() as directory:
     default = run(invalid)
     assert default.returncode == 126 and default.stdout == "", default
     assert default.stderr == "anyps5_cpu_run: ELF loader: input is not an ELF executable\n", default
+
+    encrypted = pathlib.Path(directory) / "encrypted.self"
+    encrypted.write_bytes(bytes.fromhex("ee f5 14 54") + bytes(124))
+    container = run("--diagnostics-json", encrypted)
+    assert container.returncode == 126 and container.stdout == "", container
+    error, = events(container)
+    assert error["code"] == "unsupported_executable", error
+    assert "SELF containers require an extracted decrypted ELF" in error["message"], error
 
 for arguments in (("--unknown",), ("--capabilities-json", fixture), (),
                   ("--diagnostics-json",), ("--diagnostics-json", "--unknown")):
