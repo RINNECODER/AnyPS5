@@ -617,7 +617,11 @@ std::vector<std::uint32_t> noPerspectiveLocations(std::span<const std::uint32_t>
     std::map<std::uint32_t, std::uint32_t> locations;
     std::vector<std::uint32_t> decorated;
     for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
-        if (static_cast<spv::Op>(words[at] & 0xffffu) != spv::OpDecorate) continue;
+        const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+        if (op == spv::OpCapability) require(words[at + 1] != spv::CapabilityFragmentBarycentricKHR, "fixed-function interpolation requires barycentric support");
+        if (op != spv::OpDecorate) continue;
+        require(words[at + 2] != spv::DecorationPerVertexKHR, "fixed-function interpolation exposed per-vertex parameter arrays");
+        if (words[at + 2] == spv::DecorationBuiltIn) require(words[at + 3] != spv::BuiltInBaryCoordKHR && words[at + 3] != spv::BuiltInBaryCoordNoPerspKHR, "fixed-function interpolation exposed raw barycentric inputs");
         if (words[at + 2] == spv::DecorationLocation) locations[words[at + 1]] = words[at + 3];
         if (words[at + 2] == spv::DecorationNoPerspective) decorated.push_back(words[at + 1]);
     }
@@ -636,6 +640,68 @@ void verifyPixelInputs() {
     require(linear.size() == 1u && linear[0] == 1u, "only the parameter interpolated through the linear pair must be NoPerspective");
     static constexpr std::array<std::uint32_t, 7> bothPairs{0xc8100000u, 0xc8110001u, 0xc8140002u, 0xc8150003u, 0xf800180fu, 0x05040504u, 0xbf810000u};
     expectFailure([&] { static_cast<void>(noPerspectiveLocations(bothPairs)); }, "interpolated through both a perspective and a linear I/J pair", "a parameter read through both pairs was given one interpolation");
+
+    const auto interpolated = [](std::initializer_list<std::uint32_t> prefix, std::uint32_t output = 0x04040404u) {
+        std::vector<std::uint32_t> shader(prefix);
+        shader.insert(shader.end(), {0xf800180fu, output, 0xbf810000u});
+        return shader;
+    };
+    const auto scheduled = interpolated({0xc8100000u, 0x7e1002f2u, 0xc8110001u});
+    require(noPerspectiveLocations(scheduled).empty(), "independent ALU changed perspective center interpolation");
+    const auto queued = interpolated({0xc8100000u, 0xc8140100u, 0x7e1002f2u, 0xc8110001u, 0xc8150101u}, 0x05040504u);
+    require(noPerspectiveLocations(queued).empty(), "independent ALU changed queued center interpolation");
+    const auto inPlace = interpolated({0xc8000000u, 0xc8010001u, 0x7e080300u});
+    require(noPerspectiveLocations(inPlace).empty(), "in-place center I interpolation was rejected");
+    const auto branchAfterInputs = interpolated({0xc8100000u, 0xc8110001u, 0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u, 0xbf820000u});
+    require(noPerspectiveLocations(branchAfterInputs).empty(), "a branch after complete interpolation and raw input overwrites was rejected");
+    for (const auto& shader : {
+        interpolated({0xc8110001u}),
+        interpolated({0xc8100000u}),
+        interpolated({0xc8100000u, 0xc8110401u}),
+        interpolated({0xc8100000u, 0xc8110101u}),
+        interpolated({0xc8100000u, 0x7e0c0304u, 0xc8110001u}, 0x06060606u),
+        interpolated({0x7e0002f2u, 0xc8100000u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xbe802480u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0x7e1002f2u, 0xbf820000u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xc8110001u, 0x7e0c0300u}, 0x06060606u),
+        interpolated({0x7e0002f9u, 0x00061008u, 0xc8100000u, 0xc8110001u}),
+        interpolated({0x7e040280u, 0x7e060280u, 0xc8100000u, 0xd5640008u, 0x00021103u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xbefe0380u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0x7c2c10f2u, 0xc8110001u})
+    }) {
+        expectFailure([&] { static_cast<void>(noPerspectiveLocations(shader)); }, "fixed-function interpolation requires", "noncanonical I/J arithmetic was collapsed to a hardware attribute");
+    }
+
+    static constexpr std::array<std::uint32_t, 7> flatCode{0xc8020002u, 0xc8060102u, 0xc80a0202u, 0xc80e0302u, 0xf800180fu, 0x03020100u, 0xbf810000u};
+    RecompileRequest flatRequest{};
+    flatRequest.shader = {ShaderStage::Fragment, 0x30000u, flatCode, 0, {}};
+    flatRequest.context.waveSize = 32u;
+    ShaderPixelStageInfo flatPixel{};
+    flatPixel.wave32 = true;
+    flatPixel.interpolatorCount = 1u;
+    flatPixel.interpolatorSettings[0] = 0x400u;
+    flatPixel.inputAddr = PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY);
+    flatPixel.posX = true;
+    flatPixel.posY = true;
+    flatPixel.targetOutputMode[0] = 9u;
+    flatPixel.targetExportMapping[0] = 0xe4u;
+    flatRequest.context.pixel = flatPixel;
+    flatRequest.target.vulkanVersion = 0x00401000u;
+    flatRequest.target.spirvVersion = 0x00010300u;
+    flatRequest.target.subgroupSize = 32u;
+    flatRequest.layout.pushConstantSizeBytes = 128u;
+    flatRequest.useCache = false;
+    const auto flatResult = Recompile(flatRequest);
+    std::map<std::uint32_t, std::uint32_t> flatLocations;
+    std::vector<std::uint32_t> flatDecorated;
+    const auto& flatWords = flatResult.spirv.Words();
+    for (std::size_t at = 5u; at < flatWords.size() && (flatWords[at] >> 16u) != 0u; at += flatWords[at] >> 16u) {
+        if (static_cast<spv::Op>(flatWords[at] & 0xffffu) != spv::OpDecorate) continue;
+        if (flatWords[at + 2u] == spv::DecorationLocation) flatLocations[flatWords[at + 1u]] = flatWords[at + 3u];
+        if (flatWords[at + 2u] == spv::DecorationFlat) flatDecorated.push_back(flatWords[at + 1u]);
+    }
+    require(std::any_of(flatDecorated.begin(), flatDecorated.end(), [&](const auto id) { return flatLocations.contains(id) && flatLocations.at(id) == 0u; }), "flat-only guest interpolation lost its flat location0 input");
+    expectFailure([&] { static_cast<void>(noPerspectiveLocations(flatCode)); }, "fixed-function interpolation requires", "flat interpolation overwrote a live raw I/J input");
 
     static constexpr std::array<std::uint32_t, 1> code{0xbf810000u};
     RecompileRequest request{};

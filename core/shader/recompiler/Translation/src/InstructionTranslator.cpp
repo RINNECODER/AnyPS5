@@ -4,6 +4,8 @@
 #include "Translation/TranslationContext.hpp"
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -35,6 +37,118 @@ IrShaderStage toIrShaderStage(ShaderStageKind stage) {
         return IrShaderStage::TessellationEvaluation;
     }
     throw std::runtime_error("InstructionTranslator::Translate unknown shader stage kind");
+}
+
+void validateFixedFunctionInterpolation(const RdnaProgram& decoded, const ControlFlowGraph& cfg, const ShaderPixelInputInfo& pixel) {
+    std::set<std::uint32_t> live;
+    std::set<std::uint32_t> centers;
+    for (const auto input : {PixelInput::PerspectiveSample, PixelInput::PerspectiveCenter,
+                             PixelInput::PerspectiveCentroid, PixelInput::PerspectivePullModel,
+                             PixelInput::LinearSample, PixelInput::LinearCenter, PixelInput::LinearCentroid}) {
+        const auto base = pixel.psInputVgpr[static_cast<std::size_t>(input)];
+        if (base == ShaderPixelInputInfo::NoPixelInputVgpr) continue;
+        live.insert(base);
+        live.insert(base + 1u);
+        if (input == PixelInput::PerspectivePullModel) live.insert(base + 2u);
+        if (input == PixelInput::PerspectiveCenter || input == PixelInput::LinearCenter) centers.insert(base);
+    }
+    const bool hasInterpolation = std::any_of(decoded.instructions.begin(), decoded.instructions.end(), [](const RdnaInstruction& instruction) {
+        return instruction.op == RdnaOpcode::VInterpP1F32 || instruction.op == RdnaOpcode::VInterpP2F32;
+    });
+    if (!hasInterpolation && live.empty()) return;
+    std::uint32_t pc = 0u;
+    const auto fail = [&] {
+        throw std::runtime_error("fixed-function interpolation requires unmodified center I/J pairs and complete P1/P2 sequences in an unconditional entry block (pc=" + std::to_string(pc) + ")");
+    };
+    const auto entry = std::find_if(cfg.blocks.begin(), cfg.blocks.end(), [&](const BasicBlock& block) { return block.id == cfg.entryBlock; });
+    if (cfg.unsupported || cfg.irreducible || entry == cfg.blocks.end() || entry != cfg.blocks.begin() ||
+        entry->instructionBegin != 0u || entry->instructionEnd == 0u || entry->instructionEnd > decoded.instructions.size() || !entry->predecessors.empty()) fail();
+    struct Pair { std::uint32_t base, attribute, component; };
+    std::map<std::uint32_t, Pair> pending;
+    const auto plain = [](const RdnaOperand& operand) {
+        return !operand.negate && !operand.negateHi && !operand.absolute && !operand.clamp && !operand.omod &&
+               !operand.opSel && !operand.opSelHi && !operand.dpp && !operand.dpp8 && !operand.explicitSdwaDst &&
+               !operand.sdwaSext && operand.sdwaSel == 6u;
+    };
+    const auto overlaps = [](const auto& registers, const RdnaOperand& operand, std::uint32_t count) {
+        if (operand.kind != RdnaOperandKind::VectorRegister) return false;
+        return std::any_of(registers.begin(), registers.end(), [&](const auto reg) {
+            return reg >= operand.reg && reg - operand.reg < count;
+        });
+    };
+    for (std::size_t index = 0u; index < decoded.instructions.size(); ++index) {
+        const auto& instruction = decoded.instructions[index];
+        pc = instruction.programCounter;
+        if (index >= entry->instructionEnd && cfg.blocks.size() > 1u && (!live.empty() || !pending.empty())) fail();
+        if (instruction.op == RdnaOpcode::VInterpMovF32) {
+            if ((!live.empty() || !pending.empty()) && (instruction.destination.kind != RdnaOperandKind::VectorRegister ||
+                !plain(instruction.destination) || live.contains(instruction.destination.reg) || pending.contains(instruction.destination.reg))) fail();
+            continue;
+        }
+        if (instruction.op == RdnaOpcode::VInterpP1F32 || instruction.op == RdnaOpcode::VInterpP2F32) {
+            if (index >= entry->instructionEnd || instruction.source0.kind != RdnaOperandKind::VectorRegister ||
+                instruction.destination.kind != RdnaOperandKind::VectorRegister || !plain(instruction.source0) ||
+                !plain(instruction.source1) || !plain(instruction.source2) || !plain(instruction.destination) || instruction.clampResult ||
+                instruction.source1.value >= 32u || instruction.source1.value >= pixel.inputNum ||
+                instruction.source2.value >= 4u || pixel.InputIsCustom(instruction.source1.value)) fail();
+            if (instruction.op == RdnaOpcode::VInterpP1F32) {
+                if (!centers.contains(instruction.source0.reg) || !live.contains(instruction.source0.reg) ||
+                    !live.contains(instruction.source0.reg + 1u) || pending.contains(instruction.destination.reg) ||
+                    (live.contains(instruction.destination.reg) && instruction.destination.reg != instruction.source0.reg)) fail();
+                pending.emplace(instruction.destination.reg, Pair{instruction.source0.reg, instruction.source1.value, instruction.source2.value});
+            } else {
+                const auto pair = pending.find(instruction.destination.reg);
+                if (pair == pending.end() || instruction.source0.reg != pair->second.base + 1u ||
+                    !live.contains(instruction.source0.reg) || pending.contains(instruction.source0.reg) ||
+                    pair->second.attribute != instruction.source1.value || pair->second.component != instruction.source2.value) fail();
+                pending.erase(pair);
+            }
+            live.erase(instruction.destination.reg);
+            continue;
+        }
+        if (live.empty() && pending.empty()) continue;
+        const bool scalarAlu = instruction.op == RdnaOpcode::SMovB32 || instruction.op == RdnaOpcode::SMovB64 ||
+                               instruction.op == RdnaOpcode::SMovkI32 || instruction.op == RdnaOpcode::SAddU32 ||
+                               instruction.op == RdnaOpcode::SAddI32 || instruction.op == RdnaOpcode::SAddcU32 ||
+                               instruction.op == RdnaOpcode::SSubU32 || instruction.op == RdnaOpcode::SSubI32 ||
+                               instruction.op == RdnaOpcode::SAndB32 || instruction.op == RdnaOpcode::SAndB64 ||
+                               instruction.op == RdnaOpcode::SOrB32 || instruction.op == RdnaOpcode::SOrB64 ||
+                               instruction.op == RdnaOpcode::SLshlB32 || instruction.op == RdnaOpcode::SLshrB32;
+        const bool vectorAlu = instruction.op == RdnaOpcode::VMovB32 || instruction.op == RdnaOpcode::VAddF32 ||
+                               instruction.op == RdnaOpcode::VSubF32 || instruction.op == RdnaOpcode::VMulF32 ||
+                               instruction.op == RdnaOpcode::VMadF32 || instruction.op == RdnaOpcode::VFmaF32;
+        const bool memory = instruction.family == RdnaInstructionFamily::SMEM || instruction.family == RdnaInstructionFamily::MUBUF ||
+                            instruction.family == RdnaInstructionFamily::MTBUF || instruction.family == RdnaInstructionFamily::FLAT ||
+                            instruction.family == RdnaInstructionFamily::DS || instruction.family == RdnaInstructionFamily::MIMG;
+        if (!scalarAlu && !vectorAlu && !memory && instruction.op != RdnaOpcode::Exp &&
+            instruction.op != RdnaOpcode::SEndpgm && instruction.op != RdnaOpcode::SWaitcnt &&
+            instruction.op != RdnaOpcode::SWaitcntDepctr && instruction.op != RdnaOpcode::SNop) fail();
+        const auto writesExec = [](const RdnaOperand& operand) {
+            return operand.kind == RdnaOperandKind::ExecLo || operand.kind == RdnaOperandKind::ExecHi;
+        };
+        if ((!live.empty() || !pending.empty()) && (writesExec(instruction.destination) || writesExec(instruction.destination2))) fail();
+        const bool alu = instruction.family == RdnaInstructionFamily::VOP1 || instruction.family == RdnaInstructionFamily::VOP2 ||
+                         instruction.family == RdnaInstructionFamily::VOP3 || instruction.family == RdnaInstructionFamily::VOP3P ||
+                         instruction.family == RdnaInstructionFamily::VOPC;
+        const auto width = vectorAlu ? 1u : alu ? 2u : std::max({4u, instruction.dataDwordCount, instruction.dataComponents, instruction.imageAddressComponents});
+        std::set<std::uint32_t> partials;
+        for (const auto& pair : pending) partials.insert(pair.first);
+        if (!pending.empty() && (!vectorAlu || instruction.destination.kind != RdnaOperandKind::VectorRegister ||
+                                 overlaps(partials, instruction.destination, width) || overlaps(partials, instruction.destination2, width))) fail();
+        for (const auto& source : {instruction.source0, instruction.source1, instruction.source2, instruction.source3}) {
+            if ((!live.empty() || !pending.empty()) && (source.dpp || source.dpp8)) fail();
+            if (overlaps(live, source, width) || overlaps(partials, source, width)) fail();
+        }
+        if (instruction.imageNsaDwordCount != 0u) {
+            for (const auto reg : instruction.imageNsaVectorRegisters) if (live.contains(reg) || partials.contains(reg)) fail();
+        }
+        for (const auto& destination : {instruction.destination, instruction.destination2}) {
+            if (!overlaps(live, destination, width)) continue;
+            if (!vectorAlu || !plain(destination) || destination.kind != RdnaOperandKind::VectorRegister) fail();
+            live.erase(destination.reg);
+        }
+    }
+    if (!pending.empty()) fail();
 }
 
 void validateTranslateOptions(const TranslateOptions& options) {
@@ -388,6 +502,10 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
             }
             includeInstructionVectorRegisters(instruction, vectorLimit);
         }
+    }
+
+    if (options.stage == ShaderStageKind::Pixel && !options.fragmentShaderBarycentricEnabled) {
+        validateFixedFunctionInterpolation(decoded, cfg, *options.inputInfo.pixel);
     }
 
     IrProgram program;
