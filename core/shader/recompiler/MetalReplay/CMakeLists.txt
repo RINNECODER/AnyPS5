@@ -21,7 +21,9 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Execution/src/SubmissionValidation.cpp"
     "${agcDriverRoot}/Execution/src/ShaderMemory.cpp"
     "${agcDriverRoot}/Execution/src/Driver/EntryPoints.cpp"
+    "${agcDriverRoot}/Submit/src/Submission.cpp"
     "${agcDriverRoot}/Execution/src/DisplayBuffer.cpp"
+    "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/BufferMetadata.cpp"
     "${agcDriverRoot}/Execution/src/DisplayFormat.cpp"
     "${agcDriverRoot}/Execution/Metal/MetalDriver.mm"
     "${agcDriverRoot}/Execution/Metal/MetalPacketExecution.mm"
@@ -118,7 +120,7 @@ if(BUILD_TESTING)
     set_tests_properties(anyps5_metal_image_1d_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_presentation_replay COMMAND anyps5_metal_presentation_replay "${metalUtilityLibrary}")
     set_tests_properties(anyps5_metal_presentation_replay PROPERTIES TIMEOUT 120)
-    add_test(NAME anyps5_metal_pm4_compute_replay COMMAND anyps5_metal_pm4_compute_replay)
+    add_test(NAME anyps5_metal_pm4_compute_replay COMMAND anyps5_metal_pm4_compute_replay "${metalUtilityLibrary}")
     set_tests_properties(anyps5_metal_pm4_compute_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_render_state COMMAND anyps5_metal_render_state_tests)
     set_tests_properties(anyps5_metal_render_state PROPERTIES TIMEOUT 120)

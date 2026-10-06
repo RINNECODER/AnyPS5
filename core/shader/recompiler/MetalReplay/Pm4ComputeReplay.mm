@@ -1,5 +1,11 @@
 #import <Foundation/Foundation.h>
 #include "MetalComputeDispatch.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
+#include "prx/libSceAgc/Misc/include/Suspend.hpp"
+#include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
+#include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
+#include <atomic>
+#include <cstring>
 #include "prx/libSceAgcDriver/Execution/include/ComputeDispatch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
@@ -69,6 +75,57 @@ std::array<std::uint32_t, 8> UserData(std::uint64_t input, std::uint64_t output,
     std::copy(in.begin(), in.end(), userData.begin());
     std::copy(out.begin(), out.end(), userData.begin() + 4);
     return userData;
+}
+
+void OriginalSubmitExports(id<MTLDevice> device, id<MTLLibrary> library) {
+    alignas(8) ::Packet packet{reinterpret_cast<std::uint32_t*>(0x500000), 8, 0, {}};
+    std::array<std::uint32_t, 8> commands{0xc0064900, 0, (1u << 29) | (1u << 24), 0x600004, 0, 1, 0, 0};
+    std::array<std::uint32_t, 3> label{0xcafef00d, 0, 0xdeadbeef};
+    const auto originalPacket = packet;
+    std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 3> ranges{{
+        {0x400000, std::as_writable_bytes(std::span(&packet, 1)), false},
+        {0x500000, std::as_writable_bytes(std::span(commands)), false},
+        {0x600000, std::as_writable_bytes(std::span(label)), true}}};
+    std::uint32_t expectedQueue = 0, expectedLabel = 1;
+    std::atomic<unsigned> callbacks{0};
+    auto& driver = AgcDriver::Metal::MetalDriver::Get();
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t queue) {
+        Require(queue == expectedQueue && label[1] == expectedLabel, "EOP queue or completed label differs");
+        Require(label[0] == 0xcafef00d && label[2] == 0xdeadbeef, "allocation guard changed");
+        callbacks.fetch_add(1);
+    });
+    Require(sceAgcSuspendPoint() == 0, "Original AGC suspend did not use the configured native driver");
+    auto* guestPacket = reinterpret_cast<const ::Packet*>(0x400000);
+    struct Case { std::uint32_t queue; int (*submit)(std::uint32_t, const ::Packet*); };
+    const std::array<Case, 4> cases{{
+        {0, [](std::uint32_t, const ::Packet* value) { return sceAgcDriverSubmitDcb(value); }},
+        {0, [](std::uint32_t, const ::Packet* value) { return sceAgcDriverAgrSubmitDcb(value); }},
+        {0x20, sceAgcDriverSubmitAcb}, {0x57, sceAgcDriverSubmitAcb}}};
+    for (const auto& test : cases) {
+        expectedQueue = test.queue;
+        commands[5] = expectedLabel;
+        const auto originalCommands = commands;
+        Require(test.submit(test.queue, guestPacket) == 0, "Original Submit wrapper returned an error");
+        driver.WaitIdle();
+        Require(callbacks.load() == expectedLabel && label[1] == expectedLabel,
+            "Original Submit wrapper did not complete its label and exactly one EOP");
+        Require(commands == originalCommands, "Original Submit wrapper modified read-only guest PM4 commands");
+        ++expectedLabel;
+    }
+    for (auto queue : {0x1fu, 0x58u}) {
+        bool rejected = false;
+        try {
+            sceAgcDriverSubmitAcb(queue, guestPacket);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("unsupported compute queue") != std::string::npos;
+            if (!rejected) throw;
+        }
+        Require(rejected, "Original SubmitAcb accepted an invalid compute queue");
+    }
+    Require(callbacks.load() == 4 && label[1] == 4, "Invalid queue rejection changed the completed EOP count or label");
+    Require(std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0, "read-only guest packet changed");
+    driver.Shutdown();
+    std::cout << "Original AGC Submit exports: checked nonidentity Packet/PM4 capture, compute queue bounds and completed EOP labels passed\n";
 }
 
 void CheckedPm4Memory() {
@@ -224,12 +281,18 @@ void Pm4BdaReplay(id<MTLDevice> device, bool writable) {
 
 }
 
-int main() {
+int main(int argc, char** argv) {
     @autoreleasepool {
         try {
             id<MTLDevice> device = MTLCreateSystemDefaultDevice();
             Require(device != nil && [device supportsFamily:MTLGPUFamilyMetal3], "PM4 compute replay requires a Metal 3 device");
             std::cout << "Native PM4 compute replay on " << device.name.UTF8String << '\n';
+            Require(argc == 2, "PM4 replay requires its utility Metal library path");
+            NSError* error = nil;
+            auto url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]]];
+            id<MTLLibrary> library = [device newLibraryWithURL:url error:&error];
+            Require(library != nil, error ? error.localizedDescription.UTF8String : "PM4 utility library failed to load");
+            OriginalSubmitExports(device, library);
             CheckedPm4Memory();
             Pm4DescriptorReplay(device);
             Pm4BdaReplay(device, true);

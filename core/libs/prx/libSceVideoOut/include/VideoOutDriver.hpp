@@ -22,6 +22,7 @@
 
 #include "SDL.h"
 #include "SceTypes.hpp"
+#include "prx/libSceVideoOut/include/BufferMetadata.hpp"
 
 static constexpr int VIDEO_OUT_ERROR_INVALID_VALUE = -2144796671;
 static constexpr int VIDEO_OUT_ERROR_INVALID_ADDRESS = -2144796670;
@@ -60,11 +61,6 @@ static constexpr int VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX = 4;
 static constexpr int VIDEO_OUT_NUM_MAX = 4;
 static constexpr std::size_t VIDEO_OUT_FLIP_QUEUE_CAPACITY = 16;
 
-static constexpr int VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED = 0;
-static constexpr int VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_COMPRESSED = 1;
-static constexpr std::uint64_t VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE = 0;
-static constexpr std::uint64_t VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY = 8;
-static constexpr std::uint32_t VIDEO_OUT_DCC_CONTROL_BLOCK_LAYOUT = 0x10026c;
 
 static constexpr int VIDEO_OUT_EVENT_FLIP = 0;
 static constexpr int VIDEO_OUT_EVENT_VBLANK = 1;
@@ -82,22 +78,6 @@ static constexpr uint64_t VIDEO_OUT_OUTPUT_MODE_119_88HZ = 0x000000000000000FULL
 
 static constexpr uint64_t VIDEO_OUT_REFRESH_RATE_59_94HZ = 3;
 static constexpr uint64_t VIDEO_OUT_REFRESH_RATE_119_88HZ = 13;
-
-struct VideoOutBuffer {
-    int groupIndex = -1;
-    uint64_t dataAddress = 0;
-    uint64_t metadataAddress = 0;
-
-    bool Occupied() const { return groupIndex >= 0; }
-};
-
-struct BufferAttributeGroup {
-    VideoOutBufferAttribute2 attribute{};
-    int category = VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED;
-    bool occupied = false;
-};
-
-AgcDriver::DisplayBuffer DescribeVideoOutBuffer(const VideoOutBuffer& buffer, const BufferAttributeGroup& group);
 
 struct EventRegistration {
     KernelEqueue eq = 0;
