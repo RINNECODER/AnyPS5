@@ -29,6 +29,18 @@ add_compile_definitions(APS5_ENABLE_TIMING_LOG=$<BOOL:${APS5_ENABLE_TIMING_LOG}>
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(ANYPS5_CPU_RUNTIME_ONLY "Build the embedded guest CPU runtime without graphics libraries" OFF)
+if(ANYPS5_CPU_RUNTIME_ONLY)
+    if(NOT APPLE OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+        message(FATAL_ERROR "ANYPS5_CPU_RUNTIME_ONLY currently requires native Apple Silicon macOS")
+    endif()
+    if(CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        message(FATAL_ERROR "The CPU runtime requires CMAKE_OSX_ARCHITECTURES=arm64")
+    endif()
+    add_subdirectory(core/cpu)
+    return()
+endif()
+
 option(ANYPS5_METAL_UTILITIES_ONLY "Build only the native macOS Metal backend components" OFF)
 if(ANYPS5_METAL_UTILITIES_ONLY)
     if(NOT APPLE)
