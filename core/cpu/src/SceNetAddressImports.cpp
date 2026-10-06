@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -14,6 +15,7 @@ namespace {
 
 enum class Service { Htonl, Htons, InetNtop, InetPton };
 constexpr std::size_t ipv4TextCapacity = 16;
+constexpr std::size_t minimumIpv4TextCapacity = 8;
 constexpr std::uint32_t maximumTextCapacity = 16 * 1024 * 1024;
 static_assert(sizeof(in_addr) == 4);
 
@@ -30,7 +32,7 @@ void checkSpan(Machine& guest, std::uint64_t address, std::size_t size, Permissi
     guest.CheckAccess(address, size, permission);
 }
 
-std::array<char, ipv4TextCapacity> copyText(Machine& guest, std::uint64_t address) {
+std::optional<std::array<char, ipv4TextCapacity>> copyText(Machine& guest, std::uint64_t address) {
     std::array<char, ipv4TextCapacity> text{};
     for (std::size_t index = 0; index < text.size(); ++index) {
         if (index > std::numeric_limits<std::uint64_t>::max() - address)
@@ -42,7 +44,7 @@ std::array<char, ipv4TextCapacity> copyText(Machine& guest, std::uint64_t addres
         text[index] = static_cast<char>(std::to_integer<unsigned char>(byte[0]));
         if (!text[index]) return text;
     }
-    throw std::runtime_error("Unsupported SCE network address text: IPv4 requires at most 15 characters and a terminator");
+    return std::nullopt;
 }
 
 void requireIpv4(std::uint64_t family) {
@@ -93,10 +95,21 @@ struct SceNetAddressImports::Impl {
         const auto source = guest.Get(Register::Rsi);
         const auto destination = guest.Get(Register::Rdx);
         if (service == Service::InetPton) {
+            if (!destination)
+                throw std::runtime_error("Unsupported SCE network address null destination: guest errno is unavailable");
             const auto text = copyText(guest, source);
+            if (!text) {
+                guest.Set(Register::Rax, 0);
+                return;
+            }
             in_addr address{};
-            if (::inet_pton(AF_INET, text.data(), &address) != 1)
-                throw std::runtime_error("Unsupported SCE network address text: invalid IPv4 address");
+            const auto parsed = ::inet_pton(AF_INET, text->data(), &address);
+            if (parsed == 0) {
+                guest.Set(Register::Rax, 0);
+                return;
+            }
+            if (parsed != 1)
+                throw std::runtime_error("Unsupported SCE network address conversion: native IPv4 parsing failed");
             const auto bytes = std::as_bytes(std::span(&address, 1));
             checkSpan(guest, destination, bytes.size(), Permission::Write);
             guest.Write(destination, bytes);
@@ -104,7 +117,7 @@ struct SceNetAddressImports::Impl {
             return;
         }
         const auto capacity = static_cast<std::uint32_t>(guest.Get(Register::Rcx));
-        if (capacity < ipv4TextCapacity || capacity > maximumTextCapacity)
+        if (capacity < minimumIpv4TextCapacity || capacity > maximumTextCapacity)
             throw std::runtime_error("Unsupported SCE network address buffer capacity: " + std::to_string(capacity));
         in_addr address{};
         const auto bytes = std::as_writable_bytes(std::span(&address, 1));
@@ -115,6 +128,8 @@ struct SceNetAddressImports::Impl {
         if (!::inet_ntop(AF_INET, &address, text.data(), static_cast<socklen_t>(text.size())))
             throw std::runtime_error("Unsupported SCE network address conversion: native IPv4 formatting failed");
         const auto length = std::strlen(text.data()) + 1;
+        if (length > capacity)
+            throw std::runtime_error("Unsupported SCE network address buffer capacity: IPv4 text does not fit; guest errno is unavailable");
         guest.Write(destination, std::as_bytes(std::span(text).first(length)));
         guest.Set(Register::Rax, destination);
     }

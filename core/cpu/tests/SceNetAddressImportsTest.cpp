@@ -127,13 +127,14 @@ void scalarWidthsAndByteOrder() {
 
 void ipv4TextAndGuestPointer() {
     Session session;
-    struct Case { std::array<std::uint8_t, 4> input; const char* output; };
+    struct Case { std::array<std::uint8_t, 4> input; const char* output; std::uint32_t capacity; };
     for (const auto& value : std::array<Case, 3>{{
-             {{192, 0, 2, 129}, "192.0.2.129"}, {{0, 0, 0, 0}, "0.0.0.0"},
-             {{255, 255, 255, 255}, "255.255.255.255"}}}) {
+             {{192, 0, 2, 129}, "192.0.2.129", 12}, {{0, 0, 0, 0}, "0.0.0.0", 8},
+             {{255, 255, 255, 255}, "255.255.255.255", 16}}}) {
         session.machine.Write(0x2200, std::as_bytes(std::span(value.input)));
         session.fill(0x3000, 34);
-        require(session.call(ntop, 0xffff000000000002ULL, 0x2200, 0x3001, 0xffff000000000020ULL) == 0x3001,
+        require(session.call(ntop, 0xffff000000000002ULL, 0x2200, 0x3001,
+                             0xffff000000000000ULL | value.capacity) == 0x3001,
                 "InetNtop did not return the original guest destination pointer");
         auto expected = std::vector<std::uint8_t>(34, 0xa7);
         const std::string_view literal(value.output);
@@ -141,12 +142,13 @@ void ipv4TextAndGuestPointer() {
         expected[literal.size() + 1] = 0;
         require(session.bytes(0x3000, 34) == expected, "InetNtop literal, NUL, capacity tail or guards differ");
     }
-    constexpr std::array<std::uint8_t, 4> input{192, 0, 2, 129};
-    session.machine.Write(0x3000, std::as_bytes(std::span(input)));
-    require(session.call(ntop, 2, 0x3000, 0x3000, 16) == 0x3000,
-            "InetNtop failed when source and destination alias");
-    require(session.bytes(0x3000, 12) == std::vector<std::uint8_t>{'1','9','2','.','0','.','2','.','1','2','9',0},
-            "InetNtop did not capture aliased source before writing");
+    constexpr std::array<std::uint8_t, 4> input{0, 0, 0, 0};
+    session.fill(0x3000, 10);
+    session.machine.Write(0x3001, std::as_bytes(std::span(input)));
+    require(session.call(ntop, 2, 0x3001, 0x3001, 8) == 0x3001,
+            "InetNtop failed when source and exact-size destination alias");
+    require(session.bytes(0x3000, 10) == std::vector<std::uint8_t>{0xa7,'0','.','0','.','0','.','0',0,0xa7},
+            "InetNtop did not preserve guards or capture aliased source before writing");
 }
 
 void ipv4ParsingAndAliasing() {
@@ -161,6 +163,28 @@ void ipv4ParsingAndAliasing() {
         require(session.bytes(0x3000, 6) == std::vector<std::uint8_t>{0xa7, value.output[0], value.output[1],
                 value.output[2], value.output[3], 0xa7}, "InetPton did not write exactly four network-order bytes");
     }
+    for (const auto* text : {"", "256.0.2.129", "192.0.2.129garbage", "255.255.255.255x"}) {
+        session.text(0x6000, text);
+        session.fill(0x3000, 6);
+        require(session.call(pton, 2, 0x6000, 0x3001) == 0,
+                "Malformed readable IPv4 text did not return zero");
+        require(session.bytes(0x3000, 6) == std::vector<std::uint8_t>(6, 0xa7),
+                "Malformed IPv4 text changed output or its guards");
+        require(session.call(pton, 2, 0x6000, 0xa000) == 0,
+                "Malformed IPv4 text accessed an unused output pointer");
+    }
+    session.text(0x6fff, "");
+    rejects([&] { session.call(pton, 2, 0x6fff, 0); },
+            "Unsupported SCE network address null destination: guest errno is unavailable");
+    require(session.call(pton, 2, 0x6fff, 0x3001) == 0,
+            "Empty IPv4 text read past its last-mapped-byte terminator");
+    constexpr std::array<std::uint8_t, 16> overlong{
+        '2','5','5','.','2','5','5','.','2','5','5','.','2','5','5','x'};
+    session.machine.Write(0x6ff0, std::as_bytes(std::span(overlong)));
+    require(session.call(pton, 2, 0x6ff0, 0x3001) == 0,
+            "Overlong readable IPv4 text read beyond its bounded guest span");
+    require(session.bytes(0x3000, 6) == std::vector<std::uint8_t>(6, 0xa7),
+            "Boundary malformed IPv4 text changed output or its guards");
     session.text(0x3000, "192.0.2.129");
     require(session.call(pton, 2, 0x3000, 0x3000) == 1 &&
             session.bytes(0x3000, 4) == std::vector<std::uint8_t>{192, 0, 2, 129},
@@ -222,23 +246,20 @@ void checkedMemoryAndFailureAtomicity() {
         require(session.bytes(0x3000, 32) == std::vector<std::uint8_t>(32, 0xa7),
                 "Invalid source pointer changed network output");
     }
-    session.text(0x6000, "256.0.2.129");
-    session.fill(0x3000, 32);
-    rejects([&] { session.call(pton, 2, 0x6000, 0xa000); }, "Unsupported SCE network address text");
-    rejects([&] { session.call(pton, 2, 0x6000, 0x3000); }, "Unsupported SCE network address text");
-    constexpr std::array<std::uint8_t, 16> noTerminator{
-        '2','5','5','.','2','5','5','.','2','5','5','.','2','5','5','x'};
-    session.machine.Write(0x6000, std::as_bytes(std::span(noTerminator)));
-    rejects([&] { session.call(pton, 2, 0x6000, 0xa000); }, "Unsupported SCE network address text");
     for (auto family : {0u, 28u}) {
         rejects([&] { session.call(pton, family, 0xa000, 0xa000); }, "Unsupported SCE network address family");
         rejects([&] { session.call(ntop, family, 0xa000, 0xa000, 16); }, "Unsupported SCE network address family");
     }
-    for (auto capacity : {15u, 16u * 1024 * 1024 + 1})
+    for (auto capacity : {0u, 7u, 16u * 1024 * 1024 + 1})
         rejects([&] { session.call(ntop, 2, 0xa000, 0xa000, capacity); },
                 "Unsupported SCE network address buffer capacity");
+    constexpr std::array<std::uint8_t, 4> longest{255, 255, 255, 255};
+    session.machine.Write(0x2200, std::as_bytes(std::span(longest)));
+    rejects([&] { session.call(ntop, 2, 0x2200, 0x3000, 15); },
+            "IPv4 text does not fit; guest errno is unavailable");
+    session.machine.Write(0x2200, std::as_bytes(std::span(address)));
     require(session.bytes(0x3000, 32) == std::vector<std::uint8_t>(32, 0xa7),
-            "Invalid IPv4 text wrote output before rejecting");
+            "Rejected network-address operation changed output");
     session.machine.Map(0x9000, 4096, Permission::Write);
     session.fill(0x9000, 32);
     require(session.call(ntop, 2, 0x2200, 0x9000, 32) == 0x9000,

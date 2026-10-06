@@ -60,6 +60,14 @@ EXPORT int SceGuestMain(u64 argc, char** argv) {
     for (u32 index = 0; index < 4; ++index)
         if (binary.before[index] != 0xa5 || binary.address[index] != expectedAddress[index] ||
             binary.after[index] != 0x5a) return 86;
+    const char overlong[16] = {'2','5','5','.','2','5','5','.','2','5','5','.','2','5','5','x'};
+    const char* malformedTexts[4] = {"", "256.0.2.129", "192.0.2.129garbage", overlong};
+    for (u32 item = 0; item < 4; ++item) {
+        if (sce_inet_pton(2, malformedTexts[item], (void*)binary.address) != 0) return 93;
+        for (u32 index = 0; index < 4; ++index)
+            if (binary.before[index] != 0xa5 || binary.address[index] != expectedAddress[index] ||
+                binary.after[index] != 0x5a) return 94;
+    }
 
     volatile struct { u8 before[4]; char text[16]; u8 after[4]; } formatted;
     for (u32 index = 0; index < 4; ++index) {
@@ -75,6 +83,20 @@ EXPORT int SceGuestMain(u64 argc, char** argv) {
         if ((u8)formatted.text[index] != 0xa5) return 89;
     for (u32 index = 0; index < 4; ++index)
         if (formatted.before[index] != 0x3c || formatted.after[index] != 0xc3) return 90;
+    const struct { u8 address[4]; const char* text; u32 capacity; } exactCases[2] = {
+        {{0, 0, 0, 0}, "0.0.0.0", 8}, {{255, 255, 255, 255}, "255.255.255.255", 16}};
+    for (u32 item = 0; item < 2; ++item) {
+        for (u32 index = 0; index < 16; ++index) formatted.text[index] = (char)0xa5;
+        for (u32 index = 0; index < 4; ++index) formatted.text[index] = (char)exactCases[item].address[index];
+        if (sce_inet_ntop(2, (const void*)formatted.text, (char*)formatted.text,
+                          exactCases[item].capacity) != (const char*)formatted.text) return 95;
+        for (u32 index = 0; index < exactCases[item].capacity; ++index)
+            if (formatted.text[index] != exactCases[item].text[index]) return 96;
+        for (u32 index = exactCases[item].capacity; index < 16; ++index)
+            if ((u8)formatted.text[index] != 0xa5) return 97;
+        for (u32 index = 0; index < 4; ++index)
+            if (formatted.before[index] != 0x3c || formatted.after[index] != 0xc3) return 98;
+    }
 
     return PlatformServiceGuestMath(input) == expectedMath ? 0 : 77;
 }
