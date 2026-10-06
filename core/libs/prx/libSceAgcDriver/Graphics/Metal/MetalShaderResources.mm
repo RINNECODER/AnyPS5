@@ -104,6 +104,40 @@ MetalBufferBinding MetalShaderResources::mirror(std::uint64_t address, std::size
     throw std::out_of_range("Metal draw guest range has no shared mirror");
 }
 
+MetalBufferBinding MetalShaderResources::stageStorageImage(std::uint64_t address, std::size_t bytes,
+    std::vector<ImageRange>& writableRanges) {
+    std::vector<ImageRange> readableRanges;
+    const auto end = address + bytes;
+    for (const auto& range : borrowedRanges) {
+        const auto begin = std::max(address, range.guestAddress);
+        const auto limit = std::min(end, range.guestAddress + range.host.size());
+        if (begin >= limit) continue;
+        const auto size = static_cast<std::size_t>(limit - begin);
+        const ImageRange clipped{static_cast<std::size_t>(begin - address),
+            range.host.subspan(static_cast<std::size_t>(begin - range.guestAddress), size),
+            mirror(begin, size, false)};
+        for (const auto& other : readableRanges) {
+            const auto host = reinterpret_cast<std::uintptr_t>(clipped.host.data());
+            const auto otherHost = reinterpret_cast<std::uintptr_t>(other.host.data());
+            if (overlaps(host, host + clipped.host.size(), otherHost, otherHost + other.host.size())) {
+                throw std::invalid_argument("Metal storage image committed intervals alias each other physically");
+            }
+        }
+        readableRanges.push_back(clipped);
+        if (range.writable) writableRanges.push_back(clipped);
+    }
+    if (writableRanges.empty()) {
+        throw std::invalid_argument("Metal storage texture has no writable committed guest intervals");
+    }
+    id<MTLBuffer> buffer = backend.Buffer(bytes);
+    std::memset(buffer.contents, 0, bytes);
+    for (const auto& range : readableRanges) {
+        std::memcpy(static_cast<std::byte*>(buffer.contents) + range.offset,
+            static_cast<const std::byte*>(range.mirror.buffer.contents) + range.mirror.offset, range.host.size());
+    }
+    return {buffer, 0, bytes};
+}
+
 MetalBufferBinding MetalShaderResources::Buffer(std::uint64_t address, std::size_t bytes, bool writable) {
     auto buffer = mirror(address, bytes, writable);
     for (const auto& image : images) {
@@ -171,11 +205,11 @@ void MetalShaderResources::validateDccWrite(const Graphics::GuestTextureResource
 
 std::shared_ptr<MetalTexture> MetalShaderResources::Texture(const Graphics::GuestTextureResource& descriptor,
     bool written, bool compare, bool atomic) {
-    return texture(descriptor, written, compare, atomic, false);
+    return texture(descriptor, written, compare, atomic, false, false);
 }
 
 std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::GuestTextureResource& descriptor,
-    bool written, bool compare, bool atomic, bool minimumLodLowered) {
+    bool written, bool compare, bool atomic, bool minimumLodLowered, bool storage) {
     if (Graphics::EffectiveMinLod(descriptor) != 0 && !minimumLodLowered) {
         throw std::invalid_argument("Metal texture minimum LOD view clamp is not supported");
     }
@@ -208,8 +242,13 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
                 throw std::invalid_argument("Metal texture views require incompatible captured DCC clear encodings");
             }
         }
+        if (!storage && !image.original.empty()) {
+            static_cast<void>(NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, image.texture->GuestBytes(), written));
+        }
         if (written) {
-            static_cast<void>(NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, image.texture->GuestBytes(), true));
+            if (image.original.empty()) {
+                static_cast<void>(NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, image.texture->GuestBytes(), true));
+            }
             validateDccWrite(descriptor, image.texture->GuestBytes(), image.keys);
             image.written = true;
         }
@@ -226,7 +265,15 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         throw std::invalid_argument("Metal texture guest surface exceeds native addressing");
     }
     const auto bytes = static_cast<std::size_t>(geometry.guestBytes);
-    auto buffer = mirror(descriptor.baseAddress, bytes, written);
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - descriptor.baseAddress) {
+        throw std::invalid_argument("Metal texture guest byte range is invalid");
+    }
+    const bool staged = storage && !std::any_of(borrowedRanges.begin(), borrowedRanges.end(), [&](const auto& range) {
+        return descriptor.baseAddress >= range.guestAddress && descriptor.baseAddress - range.guestAddress < range.host.size() &&
+            bytes <= range.host.size() - (descriptor.baseAddress - range.guestAddress) && (!written || range.writable);
+    });
+    std::vector<ImageRange> writableRanges;
+    auto buffer = staged ? stageStorageImage(descriptor.baseAddress, bytes, writableRanges) : mirror(descriptor.baseAddress, bytes, written);
     const auto end = descriptor.baseAddress + bytes;
     const auto keyCount = Graphics::DccKeyBytes(bytes);
     if (descriptor.dccAddress != 0 && (keyCount > std::numeric_limits<std::uint64_t>::max() - descriptor.dccAddress ||
@@ -254,7 +301,12 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         }
     }
     auto texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
-    auto host = NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, bytes, written);
+    auto host = staged ? std::span<std::byte>{} : NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, bytes, written);
+    std::vector<std::byte> original;
+    if (staged) {
+        const auto* captured = static_cast<const std::byte*>(buffer.buffer.contents) + buffer.offset;
+        original.assign(captured, captured + bytes);
+    }
     const auto keys = textureKeys(descriptor, bytes);
     if (written) validateDccWrite(descriptor, bytes, keys);
     if (keys == Graphics::DccKeys::Uncompressed) {
@@ -267,7 +319,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         texture->Upload(clear);
     }
     resident.push_back(texture->Texture());
-    images.push_back({texture, buffer, host, written, keys});
+    images.push_back({texture, buffer, host, written, keys, std::move(writableRanges), std::move(original)});
     imageViews.push_back({texture, compare});
     return texture;
 }
@@ -367,8 +419,11 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 }
                 id<MTLTexture> view = depthLookup ? depthLookup(descriptor, storage, depth) : nil;
                 if (view == nil) {
-                    auto texture = this->texture(descriptor, written, depth, atomic, minimumLodLowered);
-                    view = storage ? texture->StorageView(atomic) : texture->SampledView();
+                    auto texture = this->texture(descriptor, written, depth, atomic, minimumLodLowered, storage);
+                    const bool rawSintStorage = storage && written && !atomic && mapping.unsignedStorageImage &&
+                        Graphics::ResolveTextureFormat(descriptor.format) == VK_FORMAT_R32_SINT;
+                    view = rawSintStorage ? texture->RawSintStorageView() :
+                        storage ? texture->StorageView(atomic) : texture->SampledView();
                 }
                 native.textures.push_back(view);
             }
@@ -439,8 +494,28 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         std::memcpy(write.host.data(), static_cast<const std::byte*>(write.buffer.buffer.contents) + write.buffer.offset, write.host.size());
     }
     for (const auto& image : images) {
-        if (image.written) {
-            std::memcpy(image.host.data(), static_cast<const std::byte*>(image.buffer.buffer.contents) + image.buffer.offset, image.texture->GuestBytes());
+        if (!image.written) continue;
+        const auto* current = static_cast<const std::byte*>(image.buffer.buffer.contents) + image.buffer.offset;
+        if (image.original.empty()) {
+            std::memcpy(image.host.data(), current, image.texture->GuestBytes());
+            continue;
+        }
+        for (const auto& range : image.writableRanges) {
+            const auto* captured = image.original.data() + range.offset;
+            const auto* updated = current + range.offset;
+            auto* mirror = static_cast<std::byte*>(range.mirror.buffer.contents) + range.mirror.offset;
+            for (std::size_t block = 0; block < range.host.size(); block += 256) {
+                const auto limit = block + std::min<std::size_t>(256, range.host.size() - block);
+                if (std::memcmp(updated + block, captured + block, limit - block) == 0) continue;
+                for (std::size_t at = block; at < limit;) {
+                    if (updated[at] == captured[at]) { ++at; continue; }
+                    auto end = at + 1;
+                    while (end < limit && updated[end] != captured[end]) ++end;
+                    std::memcpy(range.host.data() + at, updated + at, end - at);
+                    std::memcpy(mirror + at, updated + at, end - at);
+                    at = end;
+                }
+            }
         }
     }
     for (const auto& image : images) {

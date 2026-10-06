@@ -25,11 +25,16 @@ public:
 
 private:
     [[nodiscard]] std::shared_ptr<MetalTexture> texture(const Graphics::GuestTextureResource& descriptor,
-        bool written, bool compare, bool atomic, bool minimumLodLowered);
+        bool written, bool compare, bool atomic, bool minimumLodLowered, bool storage);
     struct BufferWrite {
         std::uint64_t address;
         std::span<std::byte> host;
         MetalBufferBinding buffer;
+    };
+    struct ImageRange {
+        std::size_t offset;
+        std::span<std::byte> host;
+        MetalBufferBinding mirror;
     };
     struct Image {
         std::shared_ptr<MetalTexture> texture;
@@ -37,6 +42,8 @@ private:
         std::span<std::byte> host;
         bool written;
         Graphics::DccKeys keys;
+        std::vector<ImageRange> writableRanges;
+        std::vector<std::byte> original;
     };
     struct ImageView {
         std::shared_ptr<MetalTexture> texture;
@@ -59,6 +66,8 @@ private:
     void validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys);
     [[nodiscard]] bool physicallyOverlaps(std::uint64_t begin, std::uint64_t end,
         std::uint64_t otherBegin, std::uint64_t otherEnd) const;
+    [[nodiscard]] MetalBufferBinding stageStorageImage(std::uint64_t address, std::size_t bytes,
+        std::vector<ImageRange>& writableRanges);
     [[nodiscard]] MetalBufferBinding mirror(std::uint64_t address, std::size_t bytes, bool writable);
 };
 

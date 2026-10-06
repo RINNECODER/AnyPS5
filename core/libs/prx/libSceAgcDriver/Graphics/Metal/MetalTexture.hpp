@@ -40,6 +40,7 @@ private:
     };
     MetalTexture(const MetalDevice& backend, std::shared_ptr<Backing> backing,
                  const Graphics::GuestTextureResource& descriptor, bool compare, bool minimumLodLowered);
+    [[nodiscard]] id<MTLTexture> RawSintStorageView() const;
     void createViews(bool compare);
     void transfer(id<MTLBuffer> source, id<MTLBuffer> destination, bool retile) const;
     const MetalDevice& backend;

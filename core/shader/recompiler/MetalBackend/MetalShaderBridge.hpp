@@ -68,6 +68,7 @@ struct ResourceMapping {
     std::optional<std::uint32_t> sampler;
     bool active = false;
     bool requiresByteLengths = false;
+    bool unsignedStorageImage = false;
 };
 
 struct MeshOutputInfo {
