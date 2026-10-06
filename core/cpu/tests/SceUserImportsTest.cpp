@@ -109,23 +109,27 @@ struct Session {
 // Regression: global initialization or setting state before validating all four option bytes.
 // libc/kernel tests have no user-service state; these invoke public NIDs through the real Machine boundary.
 void initializationAndState() {
-    Session session;
-    session.fill(0x3000, 32);
-    require(session.call("CdWp0oHWGr0", 0x3000) == notInitialized, "Initial-user getter lost signed not-initialized error");
-    require(session.call("fPhymKNvK-A", 0) == notInitialized, "Login-list getter checked null before initialization");
-    require(session.call("1xxcMiGu2fo", 0, 0, 0) == notInitialized, "Name getter checked arguments before initialization");
-    require(session.bytes(0x3000, 32) == std::vector<std::uint8_t>(32, 0xa7), "Uninitialized getter changed output");
-    for (const auto pointer : std::array<std::uint64_t, 3>{0x9000, 0x6ffe, std::numeric_limits<std::uint64_t>::max() - 1}) {
-        require(session.call("j3YMu1MVNNo", pointer) == invalidArgument, "Invalid initialization options were not rejected");
-        require(session.call("CdWp0oHWGr0", 0x3000) == notInitialized, "Failed option read initialized the session");
+    {
+        Session session;
+        session.fill(0x3000, 32);
+        require(session.call("CdWp0oHWGr0", 0x3000) == notInitialized, "Initial-user getter lost signed not-initialized error");
+        require(session.call("fPhymKNvK-A", 0) == notInitialized, "Login-list getter checked null before initialization");
+        require(session.call("1xxcMiGu2fo", 0, 0, 0) == notInitialized, "Name getter checked arguments before initialization");
+        require(session.bytes(0x3000, 32) == std::vector<std::uint8_t>(32, 0xa7), "Uninitialized getter changed output");
+        for (const auto pointer : std::array<std::uint64_t, 3>{0x9000, 0x6ffe, std::numeric_limits<std::uint64_t>::max() - 1}) {
+            require(session.call("j3YMu1MVNNo", pointer) == invalidArgument, "Invalid initialization options were not rejected");
+            require(session.call("CdWp0oHWGr0", 0x3000) == notInitialized, "Failed option read initialized the session");
+        }
+        session.machine.Protect(0x3000, 4096, Permission::Write);
+        require(session.call("j3YMu1MVNNo", 0x3000) == invalidArgument, "Initialization read ignored guest read permission");
+        session.machine.Protect(0x3000, 4096, rw);
+        require(session.call("j3YMu1MVNNo", 0) == 0, "Null initialization options failed");
+        require(session.call("j3YMu1MVNNo", 0) == alreadyInitialized, "Repeated initialization lost signed error");
     }
-    session.machine.Protect(0x3000, 4096, Permission::Write);
-    require(session.call("j3YMu1MVNNo", 0x3000) == invalidArgument, "Initialization read ignored guest read permission");
-    session.machine.Protect(0x3000, 4096, rw);
-    require(session.call("j3YMu1MVNNo", 0) == 0, "Null initialization options failed");
-    require(session.call("j3YMu1MVNNo", 0) == alreadyInitialized, "Repeated initialization lost signed error");
-    Session independent;
-    require(independent.call("CdWp0oHWGr0", 0x3000) == notInitialized, "Initialization leaked into another Machine session");
+    {
+        Session independent;
+        require(independent.call("CdWp0oHWGr0", 0x3000) == notInitialized, "Initialization leaked into another Machine session");
+    }
     for (const std::array<std::uint8_t, 4> options : {
              std::array<std::uint8_t, 4>{0x00, 0x01, 0, 0}, {0xff, 0x02, 0, 0}}) {
         Session accepted;
@@ -213,36 +217,38 @@ void names() {
 // Regression: NID-only caches, accepting wrong scope/version, or callbacks retaining dangling user-session pointers.
 // Other service resolvers cannot protect this separately owned gate page or weak user-service state lifetime.
 void scopeAndLifetime() {
-    Session session;
-    const auto original = qualified("j3YMu1MVNNo");
-    const auto gate = session.imports->Resolve(original).value();
-    require(gate > 0 && gate < 0x7ffffffff000ULL, "User-service gate is not a low canonical guest address");
-    require(session.imports->Resolve(original).value() == gate, "Repeated qualified user import changed gate address");
-    session.machine.CheckAccess(gate, 1, Permission::Execute);
-    rejects([&] { session.machine.CheckAccess(gate, 1, Permission::Write); }, "permission");
-    auto other = original;
-    other.LibraryId = 12; other.ModuleId = 29;
-    const auto otherGate = session.imports->Resolve(other).value();
-    require(otherGate != gate && session.callGate(otherGate) == 0, "Importer-local IDs were discarded or prevented qualified binding");
-    require(session.callGate(gate) == alreadyInitialized, "Distinct importer gates did not share their owning session state");
-    for (unsigned mismatch = 0; mismatch < 5; ++mismatch) {
-        auto wrong = original;
-        switch (mismatch) {
-        case 0: wrong.LibraryName = "libkernel"; break;
-        case 1: wrong.ModuleName = "unrelated"; break;
-        case 2: wrong.LibraryVersion = 2; break;
-        case 3: wrong.ModuleMajor = 2; break;
-        case 4: wrong.ModuleMinor = 2; break;
+    {
+        Session session;
+        const auto original = qualified("j3YMu1MVNNo");
+        const auto gate = session.imports->Resolve(original).value();
+        require(gate > 0 && gate < 0x7ffffffff000ULL, "User-service gate is not a low canonical guest address");
+        require(session.imports->Resolve(original).value() == gate, "Repeated qualified user import changed gate address");
+        session.machine.CheckAccess(gate, 1, Permission::Execute);
+        rejects([&] { session.machine.CheckAccess(gate, 1, Permission::Write); }, "permission");
+        auto other = original;
+        other.LibraryId = 12; other.ModuleId = 29;
+        const auto otherGate = session.imports->Resolve(other).value();
+        require(otherGate != gate && session.callGate(otherGate) == 0, "Importer-local IDs were discarded or prevented qualified binding");
+        require(session.callGate(gate) == alreadyInitialized, "Distinct importer gates did not share their owning session state");
+        for (unsigned mismatch = 0; mismatch < 5; ++mismatch) {
+            auto wrong = original;
+            switch (mismatch) {
+            case 0: wrong.LibraryName = "libkernel"; break;
+            case 1: wrong.ModuleName = "unrelated"; break;
+            case 2: wrong.LibraryVersion = 2; break;
+            case 3: wrong.ModuleMajor = 2; break;
+            case 4: wrong.ModuleMinor = 2; break;
+            }
+            rejects([&] { session.imports->Resolve(wrong); }, "scope/version");
         }
-        rejects([&] { session.imports->Resolve(wrong); }, "scope/version");
+        auto unrelated = original;
+        unrelated.LibraryName = "libc"; unrelated.ModuleName = "libc";
+        require(!session.imports->Resolve(unrelated), "User resolver captured an unrelated module/library scope");
+        auto unknown = original; unknown.Nid = "AAAAAAAAAAA";
+        rejects([&] { session.imports->Resolve(unknown); }, "Unsupported SCE user import service");
+        session.imports.reset();
+        rejects([&] { session.callGate(gate); }, "runtime has expired");
     }
-    auto unrelated = original;
-    unrelated.LibraryName = "libc"; unrelated.ModuleName = "libc";
-    require(!session.imports->Resolve(unrelated), "User resolver captured an unrelated module/library scope");
-    auto unknown = original; unknown.Nid = "AAAAAAAAAAA";
-    rejects([&] { session.imports->Resolve(unknown); }, "Unsupported SCE user import service");
-    session.imports.reset();
-    rejects([&] { session.callGate(gate); }, "runtime has expired");
     for (const auto base : {std::uint64_t(0), std::uint64_t(1), std::uint64_t(0x7ffffffff000), std::uint64_t(0x800000000000)}) {
         Cpu::Machine machine;
         rejects([&] { Cpu::SceUserImports invalid(machine, base); }, "aligned low canonical guest page");

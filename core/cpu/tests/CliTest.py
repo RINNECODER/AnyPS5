@@ -8,7 +8,7 @@ import tempfile
 import zlib
 
 
-runner, fixture = sys.argv[1:]
+runner, fixture, backend = sys.argv[1:]
 
 
 def run(*arguments):
@@ -28,7 +28,14 @@ support = json.loads(capabilities.stdout)
 assert support["schema_version"] == 1, support
 assert support["host_architecture"] == "arm64", support
 assert support["guest_architecture"] == "x86_64", support
-assert support["backend"] == "Unicorn 2 x86-64 dynamic translation", support
+expected_backend = {"UNICORN": "Unicorn 2 x86-64 dynamic translation",
+                    "TCG": "Modern QEMU TCG x86-64 dynamic translation"}[backend]
+assert support["backend"] == expected_backend, support
+if backend == "TCG":
+    assert set(support.get("supported_instruction_families", [])) == {"AVX", "AVX2", "F16C", "FMA"}, support
+    assert set(support["unsupported_instruction_families"]) == {"AVX-512", "XOP"}, support
+else:
+    assert set(support["unsupported_instruction_families"]) == {"AVX", "AVX2", "AVX-512", "XOP"}, support
 assert support["supported_formats"] == ["static_elf64_x86_64", "sce_elf64_x86_64"], support
 assert support["runtime_abi"] == "linux_sysv", support
 assert support["ps5_game_runtime_ready"] is False, support

@@ -4,6 +4,7 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
+#include <cpu/SceUserImports.hpp>
 #include <cpu/Self.hpp>
 #include <array>
 #include <csignal>
@@ -84,8 +85,16 @@ void Capabilities() {
         << "\"sce_imports\":{\"module\":\"libc\",\"module_version\":\"1.1\",\"library\":\"libc\",\"library_version\":1,"
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
         << "\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
+        << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
+        << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"main-module TLS only; zero alignment remainder\",\"read-only /app0 resources; regular files only\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
+#if ANYPS5_CPU_MODERN_TCG
+        << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
+        << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\"],"
+        << "\"unsupported_instruction_families\":[\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
+#else
         << "\"unsupported_instruction_families\":[\"AVX\",\"AVX2\",\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
+#endif
 }
 
 bool SceExecutable(const std::string& path) {
@@ -237,6 +246,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::LinuxRuntime> linuxRuntime;
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
+        std::unique_ptr<Cpu::SceUserImports> userRuntime;
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
@@ -245,7 +255,9 @@ int main(int argc, char** argv) {
             if (sce) {
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
+                userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 auto image = Cpu::LoadSce(machine, executable, 0x1000000, [&](const auto& import) {
+                    if (const auto gate = userRuntime->Resolve(import)) return *gate;
                     if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
                     return sceRuntime->Resolve(import);
                 });
