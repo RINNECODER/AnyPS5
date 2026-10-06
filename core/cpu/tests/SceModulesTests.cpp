@@ -7,6 +7,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <unistd.h>
 
@@ -20,7 +21,7 @@ Bytes readFile(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary | std::ios::ate);
     require(bool(stream), "Cannot open compiled module fixture");
     const auto size = stream.tellg();
-    require(size > 0 && size < 1024 * 1024, "Compiled module fixture size is invalid");
+    require(size > 0 && size < 8 * 1024 * 1024, "Compiled module fixture size is invalid");
     Bytes bytes(static_cast<std::size_t>(size));
     stream.seekg(0);
     stream.read(reinterpret_cast<char*>(bytes.data()), size);
@@ -152,12 +153,12 @@ struct Input {
     std::filesystem::path directory;
     std::filesystem::path main;
     std::filesystem::path guest;
-    Input(const Bytes& mainBytes, const Bytes& guestBytes) {
+    Input(const Bytes& mainBytes, const Bytes& guestBytes, const char* guestFilename = "SceModuleGuest.prx") {
         directory = std::filesystem::temp_directory_path() / ("anyps5-modules-" + std::to_string(::getpid()) + "-" +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         require(std::filesystem::create_directory(directory), "Cannot create copied module fixture directory");
         main = directory / "sce-module-main.elf";
-        guest = directory / "SceModuleGuest.prx";
+        guest = directory / guestFilename;
         for (const auto& [path, bytes] : std::array{std::pair{main, mainBytes}, std::pair{guest, guestBytes}}) {
             std::ofstream stream(path, std::ios::binary);
             stream.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
@@ -167,7 +168,92 @@ struct Input {
     ~Input() { std::error_code ignored; std::filesystem::remove_all(directory, ignored); }
 };
 
-void invalidGraphs(const std::filesystem::path& mainPath, const std::filesystem::path& guestPath) {
+struct CrtReceipt {
+    std::string Kind;
+    std::filesystem::path Main;
+    std::filesystem::path Guest;
+    Cpu::SceCrtCertificate Certificate;
+    std::uint64_t State;
+};
+
+std::vector<CrtReceipt> crtReceipts(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    require(bool(input), "Cannot open independent CRT fixture receipt");
+    std::vector<CrtReceipt> receipts;
+    std::string line;
+    while (std::getline(input, line)) {
+        std::istringstream record(line);
+        CrtReceipt receipt;
+        std::string filename, digest;
+        require(bool(record >> receipt.Kind >> filename >> digest), "Invalid CRT fixture receipt");
+        require((receipt.Kind == "elf" || receipt.Kind == "plain_self") && digest.size() == 64,
+                "Invalid CRT fixture source kind or digest");
+        constexpr std::string_view hex = "0123456789abcdef";
+        for (unsigned index = 0; index < receipt.Certificate.SourceSha256.size(); ++index) {
+            const auto high = hex.find(digest[index * 2]);
+            const auto low = hex.find(digest[index * 2 + 1]);
+            require(high != std::string_view::npos && low != std::string_view::npos, "Invalid CRT fixture SHA-256");
+            receipt.Certificate.SourceSha256[index] = static_cast<std::byte>((high << 4) | low);
+        }
+        std::array<std::uint64_t, 10> values{};
+        for (auto& value : values) {
+            std::string field;
+            require(bool(record >> field), "Incomplete CRT fixture layout");
+            std::size_t end = 0;
+            value = std::stoull(field, &end, 0);
+            require(end == field.size(), "Invalid CRT fixture layout integer");
+        }
+        std::string extra;
+        require(!(record >> extra), "Unexpected CRT fixture receipt fields");
+        const auto owner = [](std::uint64_t size, Cpu::SceCrtArrayOwner expected) {
+            return size ? expected : Cpu::SceCrtArrayOwner::Unsupported;
+        };
+        receipt.Certificate.SourceSize = values[0];
+        receipt.Certificate.Init = values[1];
+        receipt.Certificate.Fini = values[2];
+        receipt.Certificate.Preinit = {values[3], values[4], owner(values[4], Cpu::SceCrtArrayOwner::DtInit)};
+        receipt.Certificate.InitArray = {values[5], values[6], owner(values[6], Cpu::SceCrtArrayOwner::DtInit)};
+        receipt.Certificate.FiniArray = {values[7], values[8], owner(values[8], Cpu::SceCrtArrayOwner::DtFini)};
+        receipt.State = values[9];
+        receipt.Main = path.parent_path() / "sce-crt-main.elf";
+        receipt.Guest = path.parent_path() / filename;
+        receipts.push_back(std::move(receipt));
+    }
+    require(receipts.size() == 2 && receipts[0].Kind == "elf" && receipts[1].Kind == "plain_self" &&
+            receipts[0].Certificate.SourceSize > 1024 * 1024,
+            "Independent CRT receipt must cover chunked ELF hashing and original SELF identity");
+    return receipts;
+}
+
+void requireCrtState(Cpu::Machine& machine, std::uint64_t state, const std::array<std::uint64_t, 9>& expected) {
+    for (unsigned index = 0; index < expected.size(); ++index)
+        require(word(machine, state + index * 8) == expected[index],
+                "Compiled CRT violated callback ordering, counters, or independent arithmetic result");
+}
+
+void executeCrt(const CrtReceipt& receipt) {
+    Cpu::Machine machine;
+    Cpu::SceImports imports(machine);
+    const std::array dependencies{Cpu::SceModuleFile{receipt.Guest, GuestBias, receipt.Certificate}};
+    Cpu::SceModules graph(machine, {receipt.Main, MainBias}, dependencies, hostModules,
+        [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+            require(type == 2, "CRT fixture unexpectedly needs a host data or TLS provider");
+            return Cpu::SceResolvedImport{imports.Resolve(import), type};
+        });
+    const auto state = GuestBias + receipt.State;
+    requireCrtState(machine, state, {0, 0, 0, 0, 0, 0, 0, 5, 0});
+    Cpu::SetupSceEntry(machine, graph.Main(), {"crt-fixture"}, imports.ExitGate());
+    graph.InitializeDependencies();
+    requireCrtState(machine, state, {123, 1, 0, 1, 1, 0, 0, 82, 0});
+    require(machine.Run(graph.Main().Entry, 0, 1000000) == Cpu::StopReason::Exit && machine.ExitCode() == 0,
+            "Actual compiled CRT main rejected initialization state");
+    requireCrtState(machine, state, {1234, 1, 0, 1, 1, 0, 0, 577, 1});
+    graph.FinalizeDependencies();
+    requireCrtState(machine, state, {1234576, 1, 1, 1, 1, 1, 1, 82583, 1});
+}
+
+void invalidGraphs(const std::filesystem::path& mainPath, const std::filesystem::path& guestPath,
+                   std::span<const CrtReceipt> receipts) {
     const auto mainBytes = readFile(mainPath);
     const auto guestBytes = readFile(guestPath);
     struct Case { const char* Expected; std::function<void(Bytes&, Bytes&)> Change; bool Early = true; };
@@ -231,6 +317,56 @@ void invalidGraphs(const std::filesystem::path& mainPath, const std::filesystem:
         const std::array dependencies{Cpu::SceModuleFile{guestPath, MainBias}};
         rejects([&] { Cpu::SceModules graph(machine, {mainPath, MainBias}, dependencies, hostModules, {}); }, "mapping ranges overlap");
     }
+    struct CertificateCase {
+        const char* Expected;
+        std::function<void(std::optional<Cpu::SceCrtCertificate>&)> Change;
+    };
+    const std::array certificateCases{
+        CertificateCase{"unsupported CRT-array ownership", [](auto& crt) { crt.reset(); }},
+        CertificateCase{"source identity mismatch", [](auto& crt) { crt->SourceSha256[0] ^= std::byte{1}; }},
+        CertificateCase{"source identity mismatch", [](auto& crt) { --crt->SourceSize; }},
+        CertificateCase{"layout mismatch", [](auto& crt) { ++crt->Init; }},
+        CertificateCase{"layout mismatch", [](auto& crt) { ++crt->Fini; }},
+        CertificateCase{"layout mismatch", [](auto& crt) { crt->InitArray.Address += 8; }},
+        CertificateCase{"layout mismatch", [](auto& crt) { crt->FiniArray.Size += 8; }},
+        CertificateCase{"array owner mismatch", [](auto& crt) { crt->InitArray.Owner = Cpu::SceCrtArrayOwner::DtFini; }},
+        CertificateCase{"array owner mismatch", [](auto& crt) { crt->FiniArray.Owner = Cpu::SceCrtArrayOwner::DtInit; }},
+        CertificateCase{"array owner mismatch", [](auto& crt) { crt->Preinit.Owner = Cpu::SceCrtArrayOwner::DtInit; }},
+    };
+    if (!receipts.empty()) {
+        const auto& receipt = receipts.front();
+        for (const auto& test : certificateCases) {
+            std::optional crt{receipt.Certificate};
+            test.Change(crt);
+            Cpu::Machine machine;
+            Cpu::SceImports imports(machine);
+            const auto existingRanges = machine.Mappings().size();
+            unsigned resolutions = 0;
+            const std::array dependencies{Cpu::SceModuleFile{receipt.Guest, GuestBias, crt}};
+            rejects([&] { Cpu::SceModules graph(machine, {receipt.Main, MainBias}, dependencies, hostModules,
+                [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                    ++resolutions;
+                    return Cpu::SceResolvedImport{imports.Resolve(import), type};
+                }); }, test.Expected);
+            require(!resolutions && machine.Get(Cpu::Register::FsBase) == 0 && machine.Mappings().size() == existingRanges,
+                    "Invalid CRT certificate reached host resolution, TLS, or mapped guest storage");
+        }
+        auto changedSource = readFile(receipt.Guest);
+        changedSource.back() ^= std::byte{1};
+        Input sourceInput(readFile(receipt.Main), changedSource, "SceCrtGuest.prx");
+        Cpu::Machine machine;
+        Cpu::SceImports imports(machine);
+        const auto existingRanges = machine.Mappings().size();
+        unsigned resolutions = 0;
+        const std::array dependencies{Cpu::SceModuleFile{sourceInput.guest, GuestBias, receipt.Certificate}};
+        rejects([&] { Cpu::SceModules graph(machine, {sourceInput.main, MainBias}, dependencies, hostModules,
+            [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                ++resolutions;
+                return Cpu::SceResolvedImport{imports.Resolve(import), type};
+            }); }, "source identity mismatch");
+        require(!resolutions && machine.Get(Cpu::Register::FsBase) == 0 && machine.Mappings().size() == existingRanges,
+                "Changed final source chunk was accepted before guest mutation");
+    }
     auto changedGuest = guestBytes;
     const auto init = get(changedGuest, tag(changedGuest, 12) + 8);
     const auto location = fileOffset(changedGuest, init);
@@ -253,11 +389,15 @@ void invalidGraphs(const std::filesystem::path& mainPath, const std::filesystem:
 
 int main(int argc, char** argv) {
     try {
-        require(argc == 3, "Usage: SceModulesTests main.elf dependency.prx");
+        require(argc == 3 || argc == 4, "Usage: SceModulesTests main.elf dependency.prx [crt-receipt.txt]");
         execute(argv[1], argv[2], false);
         execute(argv[1], argv[2], true);
-        invalidGraphs(argv[1], argv[2]);
+        const auto receipts = argc == 4 ? crtReceipts(argv[3]) : std::vector<CrtReceipt>{};
+        for (const auto& receipt : receipts) executeCrt(receipt);
+        invalidGraphs(argv[1], argv[2], receipts);
         std::cout << "PASS compiled SCE module graph calls, objects, TLS, independent prime/Adler results, dependency-only lifecycle, and strict failures\n";
+        if (!receipts.empty())
+            std::cout << "PASS original ELF/SELF certification, chunked source identity, compiled CRT ordering, and certificate preflight failures\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';

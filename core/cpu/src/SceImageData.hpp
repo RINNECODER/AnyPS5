@@ -29,6 +29,8 @@ struct SceImageData {
     };
     struct Blocker { SceRequirement Requirement; std::string Reason; };
     struct Array { std::uint64_t Address = 0; std::uint64_t Size = 0; };
+    std::array<std::byte, 32> SourceSha256{};
+    std::uint64_t SourceSize = 0;
     std::vector<std::byte> Bytes;
     std::vector<Symbol> Symbols;
     std::vector<Relocation> Relocations;

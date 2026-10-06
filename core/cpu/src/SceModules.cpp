@@ -45,6 +45,30 @@ void writeWord(Machine& machine, std::uint64_t address, std::uint64_t value) {
     for (unsigned index = 0; index < bytes.size(); ++index) bytes[index] = static_cast<std::byte>(value >> (index * 8));
     machine.Write(address, bytes);
 }
+
+void validateCrt(const SceImageData& data, const std::optional<SceCrtCertificate>& certificate, bool isMain) {
+    if (!certificate) {
+        if (data.PreinitArray.Size || data.InitArray.Size || data.FiniArray.Size)
+            fail("unsupported CRT-array ownership for the generic module profile");
+        return;
+    }
+    if (isMain) fail("main executable CRT certification is unsupported");
+    const auto& crt = *certificate;
+    if (crt.SourceSize != data.SourceSize || crt.SourceSha256 != data.SourceSha256)
+        fail("CRT certificate source identity mismatch");
+    if (crt.Init != data.Init || crt.Fini != data.Fini)
+        fail("CRT certificate layout mismatch");
+    const auto array = [&](const SceImageData::Array& actual, const SceCrtArrayContract& expected,
+                           SceCrtArrayOwner owner, std::uint64_t entry) {
+        if (actual.Address != expected.Address || actual.Size != expected.Size)
+            fail("CRT certificate layout mismatch");
+        if (actual.Size ? expected.Owner != owner || !entry : expected.Owner != SceCrtArrayOwner::Unsupported)
+            fail("CRT certificate array owner mismatch");
+    };
+    array(data.PreinitArray, crt.Preinit, SceCrtArrayOwner::DtInit, data.Init);
+    array(data.InitArray, crt.InitArray, SceCrtArrayOwner::DtInit, data.Init);
+    array(data.FiniArray, crt.FiniArray, SceCrtArrayOwner::DtFini, data.Fini);
+}
 }
 
 struct SceModules::Impl {
@@ -65,11 +89,10 @@ struct SceModules::Impl {
             auto parsed = ParseSce(file.Path);
             if (isMain ? parsed.Type == 0xfe18 : parsed.Type != 0xfe18)
                 fail(isMain ? "main image must be an executable" : "dependency image must be an SCE shared module");
+            validateCrt(*parsed.Data, file.Crt, isMain);
             RequireSceProfile(parsed, GraphRequirements);
             ValidateSceMapping(parsed, file.LoadBias);
             const auto& data = *parsed.Data;
-            if (data.PreinitArray.Size || data.InitArray.Size || data.FiniArray.Size)
-                fail("unsupported CRT-array ownership for the generic module profile");
             if (isMain && data.Fini) fail("main executable DT_FINI lifecycle is unsupported by the dependency finalizer");
             modules.push_back({std::move(parsed), file.LoadBias, 0,
                 data.Init ? SceAddress(file.LoadBias, data.Init) : 0,

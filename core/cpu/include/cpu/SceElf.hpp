@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cpu/Cpu.hpp>
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -65,6 +66,8 @@ struct SceExport {
 
 struct SceParsedImage {
     std::filesystem::path Path;
+    std::array<std::byte, 32> SourceSha256{};
+    std::uint64_t SourceSize = 0;
     std::string SourceContainer = "elf";
     std::vector<std::string> ReconstructionNotes;
     std::uint16_t Type = 0;
