@@ -32,6 +32,7 @@ public:
 private:
     id<MTLDevice> device;
     id<MTLComputePipelineState> pipeline;
+    std::array<NSUInteger, 31> bufferAlignments{};
     ShaderRecompiler::MetalBackend::Result shader;
 };
 
@@ -52,6 +53,8 @@ public:
 private:
     id<MTLDevice> device;
     id<MTLRenderPipelineState> pipeline;
+    std::array<NSUInteger, 31> vertexBufferAlignments{};
+    std::array<NSUInteger, 31> fragmentBufferAlignments{};
     ShaderRecompiler::MetalBackend::Result vertex;
     ShaderRecompiler::MetalBackend::Result fragment;
 };

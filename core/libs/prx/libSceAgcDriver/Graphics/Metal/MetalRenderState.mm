@@ -95,15 +95,29 @@ MTLColorWriteMask WriteMask(VkColorComponentFlags mask) {
     return result;
 }
 
+bool SupportsDepthBounds(id<MTLDevice> device) {
+    if (@available(macOS 26.0, *)) return [device supportsFamily:MTLGPUFamilyApple10];
+    return false;
+}
+
+void ValidateDevice(const Graphics::State& state, id<MTLDevice> device) {
+    Require(!state.depthBoundsTest || !state.depth || SupportsDepthBounds(device),
+            "depth bounds testing requires macOS 26 and an Apple10 GPU");
+}
+
 void Validate(const Graphics::State& state) {
     Require(state.stages.path == Graphics::ShaderPath::Vertex && !state.stages.mesh && !state.stages.tessellation && !state.rectList,
             "mesh, geometry, tessellation and rectangle scheduling is not implemented");
     Require(!state.primitiveRestart, "primitive restart scheduling is not implemented");
-    Require(!state.negativeOneToOne, "negative-one-to-one clip-depth conversion is not implemented");
-    Require(!state.depthBoundsTest, "depth bounds testing is not implemented");
+    if (state.depthBoundsTest) {
+        Require(std::isfinite(state.minDepthBounds) && std::isfinite(state.maxDepthBounds) &&
+                state.minDepthBounds >= 0 && state.maxDepthBounds <= 1 && state.minDepthBounds <= state.maxDepthBounds,
+                "depth bounds must be ordered within zero-to-one");
+    }
     const auto& viewport = state.viewport;
     Require(std::isfinite(viewport.x) && std::isfinite(viewport.y) && std::isfinite(viewport.width) && std::isfinite(viewport.height) &&
-            viewport.width > 0 && viewport.height > 0, "viewport must be finite with positive width and height");
+            viewport.width > 0 && viewport.height != 0 && std::isfinite(viewport.y + viewport.height),
+            "viewport must be finite with positive width and nonzero height");
     Require(std::isfinite(viewport.minDepth) && std::isfinite(viewport.maxDepth) &&
             viewport.minDepth >= 0 && viewport.minDepth <= 1 && viewport.maxDepth >= 0 && viewport.maxDepth <= 1,
             "viewport depth must lie within zero-to-one");
@@ -124,9 +138,9 @@ void Validate(const Graphics::State& state) {
             "depth/stencil state requires a decoded depth target");
     if (state.depth) {
         const auto format = state.depth->format;
-        Require(format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT,
+        Require(format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT,
                 "depth target format has no implemented native mapping");
-        Require(!state.stencilTest || format == VK_FORMAT_D32_SFLOAT_S8_UINT, "stencil testing requires a native stencil attachment");
+        Require(!state.stencilTest || format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT, "stencil testing requires a native stencil attachment");
     }
     Require(state.colors.size() <= 8 && state.blends.size() <= 8, "too many color attachments");
     std::set<std::uint32_t> exports;
@@ -177,7 +191,8 @@ MTLPixelFormat RenderPixelFormat(VkFormat format) {
     case VK_FORMAT_R16G16B16A16_SFLOAT: return MTLPixelFormatRGBA16Float;
     case VK_FORMAT_R32G32B32A32_UINT: return MTLPixelFormatRGBA32Uint;
     case VK_FORMAT_R32G32B32A32_SFLOAT: return MTLPixelFormatRGBA32Float;
-    case VK_FORMAT_D16_UNORM: return MTLPixelFormatDepth16Unorm;
+    case VK_FORMAT_D16_UNORM:
+    case VK_FORMAT_D16_UNORM_S8_UINT: return MTLPixelFormatDepth16Unorm;
     case VK_FORMAT_D32_SFLOAT: return MTLPixelFormatDepth32Float;
     case VK_FORMAT_D32_SFLOAT_S8_UINT: return MTLPixelFormatDepth32Float_Stencil8;
     default: throw std::invalid_argument("Metal render state: unsupported attachment format " + std::to_string(format));
@@ -219,13 +234,15 @@ void ConfigureRenderPipelineDescriptor(MTLRenderPipelineDescriptor* descriptor, 
         }
     }
     descriptor.depthAttachmentPixelFormat = state.depth ? RenderPixelFormat(state.depth->format) : MTLPixelFormatInvalid;
-    descriptor.stencilAttachmentPixelFormat = state.depth && state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT ?
-        MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
+    descriptor.stencilAttachmentPixelFormat = !state.depth ? MTLPixelFormatInvalid :
+        state.depth->format == VK_FORMAT_D16_UNORM_S8_UINT ? MTLPixelFormatStencil8 :
+        state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
 }
 
 id<MTLDepthStencilState> CreateDepthStencilState(id<MTLDevice> device, const Graphics::State& state) {
     Require(device != nil, "device is missing");
     Validate(state);
+    ValidateDevice(state, device);
     auto descriptor = [MTLDepthStencilDescriptor new];
     descriptor.depthCompareFunction = state.depthTest ? Compare(state.depthCompare) : MTLCompareFunctionAlways;
     descriptor.depthWriteEnabled = state.depthTest && state.depthWrite;
@@ -243,8 +260,16 @@ void BindRenderState(id<MTLRenderCommandEncoder> encoder, const Graphics::State&
     Require(encoder != nil && depthStencilState != nil && encoder.device == depthStencilState.device,
             "encoder and depth/stencil state must share a device");
     Validate(state);
+    ValidateDevice(state, encoder.device);
     const auto& viewport = state.viewport;
-    [encoder setViewport:MTLViewport{viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth, viewport.maxDepth}];
+    const auto y = viewport.height < 0 ? static_cast<double>(viewport.y) + viewport.height : viewport.y;
+    [encoder setViewport:MTLViewport{viewport.x, y, viewport.width, std::abs(viewport.height), viewport.minDepth, viewport.maxDepth}];
+    if (@available(macOS 26.0, *)) {
+        if (SupportsDepthBounds(encoder.device)) {
+            [encoder setDepthTestMinBound:state.depthBoundsTest && state.depth ? state.minDepthBounds : 0
+                                maxBound:state.depthBoundsTest && state.depth ? state.maxDepthBounds : 1];
+        }
+    }
     [encoder setScissorRect:MTLScissorRect{static_cast<NSUInteger>(state.scissor.offset.x), static_cast<NSUInteger>(state.scissor.offset.y),
                                         state.scissor.extent.width, state.scissor.extent.height}];
     [encoder setCullMode:state.cullMode == VK_CULL_MODE_FRONT_BIT ? MTLCullModeFront :

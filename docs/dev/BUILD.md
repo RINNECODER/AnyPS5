@@ -51,7 +51,7 @@ cmake --build build-metal --parallel
 ctest --test-dir build-metal --output-on-failure
 ```
 
-This mode exercises guest shaders, original PM4 register and memory packets, native compute dispatch, and decoded draw-state pixels. Vulkan-Headers supplies existing state metadata types; no Vulkan runtime is linked. The guest CPU runtime and whole renderer remain outside this mode.
+This mode exercises existing guest vertex, fragment, and compute shaders, original PM4 register and memory packets, native compute dispatch, indexed and nonindexed draws, texture and sampler resources, and retained depth attachments. Vulkan-Headers supplies existing state metadata types; no Vulkan runtime is linked. The guest CPU runtime and whole renderer remain outside this mode.
 
 ## CMake flags
 

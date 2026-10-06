@@ -124,7 +124,7 @@ RecompileResult ComputeFixture() {
                           Descriptor(DescriptorKind::StorageBuffer, DescriptorRole::GuestBuffers, 5, 3)}, Bytes(push));
 }
 
-RecompileResult VertexFixture() {
+RecompileResult VertexFixture(std::uint32_t depth = 0) {
     SpirvFixture module;
     module.Add(spv::OpCapability, {spv::CapabilityShader});
     module.Add(spv::OpMemoryModel, {spv::AddressingModelLogical, spv::MemoryModelGLSL450});
@@ -144,7 +144,7 @@ RecompileResult VertexFixture() {
     module.Add(spv::OpConstant, {3, 10, 2});
     module.Add(spv::OpConstant, {5, 11, 0xbf800000u});
     module.Add(spv::OpConstant, {5, 12, 0x3f000000u});
-    module.Add(spv::OpConstant, {5, 13, 0});
+    module.Add(spv::OpConstant, {5, 13, depth});
     module.Add(spv::OpConstant, {5, 14, 0x3f800000u});
     module.Add(spv::OpConstant, {5, 15, 0x3e800000u});
     module.Add(spv::OpConstant, {5, 16, 0x3f000000u});
@@ -313,10 +313,12 @@ void Compute(const MetalTests::Context& context) {
                         "Converted compute modified input data or its untouched prefix");
 }
 
-void Render(const MetalTests::Context& context) {
+void Render(const MetalTests::Context& context, bool negativeOneToOne = false) {
     TargetOptions options;
     options.pushConstantOffsetBytes = 16;
-    auto vertex = ConvertToMetal(VertexFixture(), ShaderStage::Vertex);
+    TargetOptions vertexOptions;
+    vertexOptions.fixupClipSpace = negativeOneToOne;
+    auto vertex = ConvertToMetal(VertexFixture(negativeOneToOne ? 0xbf000000u : 0u), ShaderStage::Vertex, vertexOptions);
     auto fragment = ConvertToMetal(FragmentFixture(), ShaderStage::Fragment, options);
     MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
     descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
@@ -390,7 +392,8 @@ void Render(const MetalTests::Context& context) {
         const auto offset = (point[1] * 8 + point[0]) * 4;
         for (std::size_t channel = 0; channel < 4; ++channel)
             MetalTests::Require(std::abs(static_cast<int>(pixels[offset + channel]) - expected[channel]) <= 1,
-                                "Converted SPIRV positive-viewport triangle lost its original upper-left coverage or fragment data");
+                                negativeOneToOne ? "Converted SPIRV negative-one-to-one clip depth incorrectly clipped a triangle at z=-0.5,w=1" :
+                                    "Converted SPIRV positive-viewport triangle lost its original upper-left coverage or fragment data");
     }
     const std::array<std::array<std::size_t, 2>, 5> untouched{{{0, 7}, {1, 6}, {2, 5}, {7, 0}, {4, 4}}};
     for (const auto& point : untouched) {
@@ -406,4 +409,5 @@ void Render(const MetalTests::Context& context) {
 void RunShaderPipelineTests(const MetalTests::Context& context) {
     Compute(context);
     Render(context);
+    Render(context, true);
 }

@@ -78,6 +78,22 @@ struct PreparedBindings {
     std::span<const std::byte> pushConstants;
 };
 
+std::array<NSUInteger, 31> nativeBufferAlignments(NSArray<id<MTLBinding>>* bindings) {
+    if (bindings == nil) {
+        throw std::runtime_error("Metal pipeline did not return native buffer binding reflection");
+    }
+    std::array<NSUInteger, 31> result{};
+    for (id<MTLBinding> binding in bindings) {
+        if (binding.type != MTLBindingTypeBuffer) continue;
+        id<MTLBufferBinding> buffer = static_cast<id<MTLBufferBinding>>(binding);
+        if (buffer.index >= result.size() || buffer.bufferAlignment == 0 || result[buffer.index] != 0) {
+            throw std::runtime_error("Metal pipeline returned invalid native buffer alignment reflection");
+        }
+        result[buffer.index] = buffer.bufferAlignment;
+    }
+    return result;
+}
+
 void reserveSlots(std::set<std::uint32_t>& slots, std::uint32_t first, std::uint32_t count,
                   std::uint32_t limit) {
     if (count == 0 || first >= limit || count > limit - first) {
@@ -155,6 +171,7 @@ void validateTexture(id<MTLTexture> texture, const ShaderRecompiler::DescriptorB
 }
 
 PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
+                         const std::array<NSUInteger, 31>& alignments,
                          std::span<const MetalShaderResourceBinding> supplied,
                          std::span<const std::byte> pushConstants,
                          std::span<const id<MTLResource>> indirectResources) {
@@ -168,6 +185,12 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
     std::set<std::uint32_t> bufferSlots;
     std::set<std::uint32_t> textureSlots;
     std::set<std::uint32_t> samplerSlots;
+    if (shader.vertexBufferCount != 0) {
+        if (shader.stage != ShaderRecompiler::ShaderStage::Vertex) {
+            throw std::invalid_argument("Converted Metal shader reserves vertex input slots outside the vertex stage");
+        }
+        reserveSlots(bufferSlots, 0, shader.vertexBufferCount, 31);
+    }
     if (shader.pushConstantBuffer) {
         reserveSlots(bufferSlots, *shader.pushConstantBuffer, 1, 31);
     }
@@ -215,6 +238,12 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
                     throw std::invalid_argument("Metal shader buffer range exceeds its allocation");
                 }
                 const std::uint32_t index = *mapping.buffer + i;
+                if (alignments[index] == 0) {
+                    throw std::runtime_error("Metal shader buffer slot is missing native alignment reflection");
+                }
+                if (resource.offset % alignments[index] != 0) {
+                    throw std::invalid_argument("Metal shader buffer offset violates its native alignment");
+                }
                 result.buffers.push_back({index, resource});
                 if (mapping.requiresByteLengths) {
                     if (!shader.bufferSizesBuffer || length > std::numeric_limits<std::uint32_t>::max()) {
@@ -315,10 +344,14 @@ MetalComputePipeline::MetalComputePipeline(id<MTLDevice> device, ShaderResult sh
     : device(device), shader(std::move(shader)) {
     id<MTLFunction> function = compile(device, this->shader, MTLFunctionTypeKernel);
     NSError* error = nil;
-    pipeline = [device newComputePipelineStateWithFunction:function error:&error];
+    MTLComputePipelineReflection* reflection = nil;
+    pipeline = [device newComputePipelineStateWithFunction:function options:MTLPipelineOptionBindingInfo
+                                               reflection:&reflection error:&error];
     if (pipeline == nil) {
         throw std::runtime_error(errorMessage("Converted Metal compute pipeline creation failed", error));
     }
+    if (reflection == nil) throw std::runtime_error("Metal compute pipeline did not return native binding reflection");
+    bufferAlignments = nativeBufferAlignments(reflection.bindings);
     if (this->shader.requiresSimdGroups && this->shader.guest.hostSubgroupSize != 0 &&
         this->shader.guest.hostSubgroupSize != pipeline.threadExecutionWidth) {
         throw std::invalid_argument("Converted Metal compute subgroup width differs from the guest compilation contract");
@@ -343,7 +376,7 @@ void MetalComputePipeline::Encode(id<MTLCommandBuffer> commands,
     if (commands == nil || commands.device != device || commands.status >= MTLCommandBufferStatusCommitted) {
         throw std::invalid_argument("Converted Metal compute encoding requires an uncommitted command buffer on this device");
     }
-    auto prepared = prepare(device, shader, bindings, pushConstants, indirectResources);
+    auto prepared = prepare(device, shader, bufferAlignments, bindings, pushConstants, indirectResources);
     if (grid.width == 0 || grid.height == 0 || grid.depth == 0) return;
     const auto& threads = shader.threadsPerThreadgroup;
     if (grid.width % threads[0] != 0 || grid.height % threads[1] != 0 || grid.depth % threads[2] != 0) {
@@ -369,10 +402,15 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
     native.vertexFunction = compile(device, this->vertex, MTLFunctionTypeVertex);
     native.fragmentFunction = compile(device, this->fragment, MTLFunctionTypeFragment);
     NSError* error = nil;
-    pipeline = [device newRenderPipelineStateWithDescriptor:native error:&error];
+    MTLRenderPipelineReflection* reflection = nil;
+    pipeline = [device newRenderPipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
+                                                reflection:&reflection error:&error];
     if (pipeline == nil) {
         throw std::runtime_error(errorMessage("Converted Metal render pipeline creation failed", error));
     }
+    if (reflection == nil) throw std::runtime_error("Metal render pipeline did not return native binding reflection");
+    vertexBufferAlignments = nativeBufferAlignments(reflection.vertexBindings);
+    fragmentBufferAlignments = nativeBufferAlignments(reflection.fragmentBindings);
 }
 
 const ShaderResult& MetalRenderPipeline::VertexReflection() const {
@@ -392,8 +430,8 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal render binding requires an encoder on this device");
     }
-    auto preparedVertex = prepare(device, vertex, vertexBindings, vertexPushConstants, indirectResources);
-    auto preparedFragment = prepare(device, fragment, fragmentBindings, fragmentPushConstants, indirectResources);
+    auto preparedVertex = prepare(device, vertex, vertexBufferAlignments, vertexBindings, vertexPushConstants, indirectResources);
+    auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentBindings, fragmentPushConstants, indirectResources);
     [encoder setRenderPipelineState:pipeline];
     bindRender(encoder, vertex, preparedVertex, true);
     bindRender(encoder, fragment, preparedFragment, false);

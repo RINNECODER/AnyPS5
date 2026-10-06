@@ -15,10 +15,12 @@ struct TargetOptions {
     std::uint32_t pushConstantBuffer = 30;
     std::uint32_t bufferSizesBuffer = 29;
     std::uint32_t pushConstantOffsetBytes = 0;
+    std::uint32_t vertexBufferCount = 0;
     bool supportsInt64 = false;
     bool supportsGpuAddresses = false;
     bool supportsSimdGroups = false;
     bool flipVertexY = true;
+    bool fixupClipSpace = false;
 };
 
 struct ResourceMapping {
@@ -36,6 +38,7 @@ struct ResourceMapping {
 
 struct Result {
     ShaderStage stage;
+    std::uint32_t vertexBufferCount = 0;
     std::string source;
     std::string entryPoint;
     RecompileResult guest;

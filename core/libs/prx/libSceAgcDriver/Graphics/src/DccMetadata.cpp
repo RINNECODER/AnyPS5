@@ -513,15 +513,6 @@ bool FillDccClear(VkFormat format, DccKeys keys, bool alphaOnMsb, std::span<std:
     return true;
 }
 
-bool DccAlphaOnMsb(VkFormat format, std::uint32_t componentSwap) {
-    Layout layout{};
-    const auto channels = LayoutFor(format, layout) ? layout.channels : 4u;
-    constexpr std::uint32_t standardReversed = 2;
-    constexpr std::uint32_t alternateReversed = 3;
-    if (channels == 1) return componentSwap == alternateReversed;
-    return componentSwap != standardReversed && componentSwap != alternateReversed;
-}
-
 DccKeys TextureClearKeys(const GuestTextureResource& resource, std::uint64_t guestBytes) {
     bool memoized = false;
     return textureClearKeys(resource, guestBytes, memoized);

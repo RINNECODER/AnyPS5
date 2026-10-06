@@ -9,6 +9,12 @@ void RunPresentationTests(const MetalTests::Context& context);
 void RunGuestMemoryTests(const MetalTests::Context& context);
 #if ANYPS5_METAL_SHADER_BRIDGE
 void RunShaderPipelineTests(const MetalTests::Context& context);
+void RunShaderAlignmentTests(const MetalTests::Context& context);
+#endif
+#if ANYPS5_METAL_GUEST_REPLAY
+void RunTextureResourceTests(const MetalTests::Context& context);
+void RunSamplerResourceTests(const MetalTests::Context& context);
+void RunDepthResourceTests(const MetalTests::Context& context);
 #endif
 
 int main(int argc, char** argv) {
@@ -37,6 +43,16 @@ int main(int argc, char** argv) {
 #if ANYPS5_METAL_SHADER_BRIDGE
             RunShaderPipelineTests(context);
             std::cout << "Converted shader pipeline GPU output passed\n";
+            RunShaderAlignmentTests(context);
+            std::cout << "Shader buffer alignment GPU output passed\n";
+#endif
+#if ANYPS5_METAL_GUEST_REPLAY
+            RunTextureResourceTests(context);
+            std::cout << "Guest texture resource GPU output passed\n";
+            RunSamplerResourceTests(context);
+            std::cout << "Guest sampler resource GPU output passed\n";
+            RunDepthResourceTests(context);
+            std::cout << "Depth surface GPU output passed\n";
 #endif
             return 0;
         } catch (const std::exception& error) {

@@ -40,6 +40,12 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     if (target.pushConstantBuffer >= target.maxBuffers || target.bufferSizesBuffer >= target.maxBuffers ||
         target.pushConstantBuffer == target.bufferSizesBuffer)
         Fail("invalid or overlapping auxiliary buffer indices");
+    const auto vertexBufferCount = stage == ShaderStage::Vertex ? target.vertexBufferCount : 0u;
+    if (vertexBufferCount > target.maxBuffers || vertexBufferCount > target.pushConstantBuffer ||
+        vertexBufferCount > target.bufferSizesBuffer)
+        Fail("vertex buffer slots overlap auxiliary Metal slots or exceed the buffer limit");
+    if (stage == ShaderStage::Vertex && guest.vertexAttributes.size() > vertexBufferCount)
+        Fail("vertex attribute buffers require reserved native Metal slots");
 
     spirv_cross::CompilerMSL compiler(guest.spirv.Words());
     const auto entries = compiler.get_entry_points_and_stages();
@@ -55,6 +61,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
 
     Result result;
     result.stage = stage;
+    result.vertexBufferCount = vertexBufferCount;
     result.guest = guest;
     for (const auto capability : compiler.get_declared_capabilities()) {
         result.capabilities.push_back(static_cast<std::uint32_t>(capability));
@@ -91,14 +98,42 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     compiler.set_msl_options(options);
     auto common = compiler.get_common_options();
     common.vertex.flip_vert_y = stage == ShaderStage::Vertex && target.flipVertexY;
+    common.vertex.fixup_clipspace = stage == ShaderStage::Vertex && target.fixupClipSpace;
     compiler.set_common_options(common);
     const auto resources = compiler.get_shader_resources();
+    if (stage == ShaderStage::Vertex) {
+        std::vector<std::uint32_t> locations;
+        for (const auto& attribute : guest.vertexAttributes) {
+            if (attribute.components == 0 || attribute.components > 4 ||
+                std::find(locations.begin(), locations.end(), attribute.location) != locations.end())
+                Fail("invalid or duplicate vertex attribute metadata");
+            locations.push_back(attribute.location);
+            const auto reflected = std::find_if(resources.stage_inputs.begin(), resources.stage_inputs.end(), [&](const auto& input) {
+                return compiler.has_decoration(input.id, spv::DecorationLocation) &&
+                    compiler.get_decoration(input.id, spv::DecorationLocation) == attribute.location;
+            });
+            if (reflected == resources.stage_inputs.end()) Fail("vertex attribute metadata has no matching SPIR-V input");
+            const auto& type = compiler.get_type(reflected->type_id);
+            if (type.columns != 1 || !type.array.empty() || type.width != 32 || type.vecsize > attribute.components ||
+                (type.basetype != spirv_cross::SPIRType::Float && type.basetype != spirv_cross::SPIRType::Int &&
+                 type.basetype != spirv_cross::SPIRType::UInt))
+                Fail("vertex attribute component/scalar contract does not match the SPIR-V input");
+            spirv_cross::MSLShaderInterfaceVariable input{};
+            input.location = attribute.location;
+            input.vecsize = attribute.components;
+            compiler.add_msl_shader_input(input);
+        }
+        for (const auto& input : resources.stage_inputs)
+            if (compiler.has_decoration(input.id, spv::DecorationLocation) &&
+                std::find(locations.begin(), locations.end(), compiler.get_decoration(input.id, spv::DecorationLocation)) == locations.end())
+                Fail("SPIR-V vertex input is missing original vertex attribute metadata");
+    }
     if (!resources.sampled_images.empty() || !resources.subpass_inputs.empty() ||
         !resources.atomic_counters.empty() || !resources.acceleration_structures.empty())
         Fail("combined images, subpass inputs, atomic counters, and acceleration structures are outside this compute slice");
     if (resources.push_constant_buffers.size() > 1) Fail("multiple push-constant blocks");
 
-    std::uint32_t buffer = 0, texture = 0, sampler = 0;
+    std::uint32_t buffer = vertexBufferCount, texture = 0, sampler = 0;
     const auto allocateBuffer = [&](std::uint32_t count) {
         while (buffer == target.pushConstantBuffer || buffer == target.bufferSizesBuffer) ++buffer;
         const auto first = buffer;

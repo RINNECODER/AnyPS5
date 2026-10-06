@@ -45,6 +45,7 @@ target_link_libraries(anyps5_metal_utilities PUBLIC
     "${ANYPS5_QUARTZCORE_FRAMEWORK}"
 )
 add_dependencies(anyps5_metal_utilities anyps5_metal_shaders)
+set_target_properties(anyps5_metal_utilities PROPERTIES ANYPS5_METALLIB "${metalLibrary}")
 
 if(ANYPS5_METAL_SHADER_BRIDGE)
     target_sources(anyps5_metal_utilities PRIVATE MetalShaderPipeline.mm)
@@ -68,8 +69,10 @@ if(BUILD_TESTING)
     target_link_libraries(metal_utility_tests PRIVATE anyps5_metal_utilities)
     if(ANYPS5_METAL_SHADER_BRIDGE)
         target_sources(metal_utility_tests PRIVATE "${metalTestDirectory}/ShaderPipeline.mm")
+        target_sources(metal_utility_tests PRIVATE "${metalTestDirectory}/ShaderAlignment.mm")
         target_include_directories(metal_utility_tests PRIVATE "${PROJECT_SOURCE_DIR}/3rdparty/SPIRV-Cross")
     endif()
     add_dependencies(metal_utility_tests anyps5_metal_shaders)
     add_test(NAME metal_utility_tests COMMAND metal_utility_tests "${metalLibrary}")
+    set_tests_properties(metal_utility_tests PROPERTIES TIMEOUT 120)
 endif()
