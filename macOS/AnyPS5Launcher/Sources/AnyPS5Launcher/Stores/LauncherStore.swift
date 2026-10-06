@@ -30,6 +30,7 @@ final class LauncherStore {
     var capabilities: EngineCapabilities?
     var engineProbeStatus = "Choose an engine to read its capabilities."
     var isProbingEngine = false
+    private var engineCompatibilityError: String?
 
     private let persistence: LibraryPersistence
     private let client: CatalogueClient
@@ -102,6 +103,7 @@ final class LauncherStore {
         }
         library.enginePath = url.path
         capabilities = nil
+        engineCompatibilityError = nil
         save()
         Task { await probeEngine() }
     }
@@ -115,11 +117,18 @@ final class LauncherStore {
             let result = try await EngineCapabilities.probe(URL(fileURLWithPath: path))
             guard library.enginePath == path else { return }
             capabilities = result
+            engineCompatibilityError = nil
             engineProbeStatus = "\(result.backend) · \(result.hostArchitecture) → \(result.guestArchitecture) · \(result.runtimeABI)"
         } catch {
             guard library.enginePath == path else { return }
             capabilities = nil
-            engineProbeStatus = "Capabilities unavailable. Using the legacy static ELF checkpoint contract. \(error.localizedDescription)"
+            if error is EngineCapabilitiesUnavailable {
+                engineCompatibilityError = nil
+                engineProbeStatus = "Capabilities unavailable. Using the legacy static ELF checkpoint contract. \(error.localizedDescription)"
+            } else {
+                engineCompatibilityError = error.localizedDescription
+                engineProbeStatus = "Engine capability check failed: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -141,6 +150,7 @@ final class LauncherStore {
         guard !isRunning else { return }
         do {
             guard !isProbingEngine else { throw LauncherError("Wait for the engine capability check to finish.") }
+            if let engineCompatibilityError { throw LauncherError(engineCompatibilityError) }
             let stream = try runner.run(engine: URL(fileURLWithPath: library.enginePath), game: game, capabilities: capabilities)
             isRunning = true
             runningTitle = game.title

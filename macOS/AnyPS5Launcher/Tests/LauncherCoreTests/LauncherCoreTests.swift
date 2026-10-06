@@ -81,13 +81,19 @@ final class LauncherCoreTests: XCTestCase {
         let folder = try directory()
         let game = try guest(in: folder)
         let engine = folder.appendingPathComponent("engine")
-        try Data("#!/bin/sh\nprintf 'guest=%s\\ncwd=%s\\n' \"$1\" \"$PWD\"\nprintf 'unsupported import\\n' >&2\nexit 7\n".utf8).write(to: engine)
+        try Data("#!/bin/sh\nprintf 'guest=%s\\ncwd=%s\\n' \"$1\" \"$PWD\"\nfor attempt in 1 2 3 4 5 6 7 8 9 10; do\n[ -f observed ] && break\nsleep 0.1\ndone\n[ -f observed ] || exit 8\nprintf 'unsupported import\\n' >&2\nexit 7\n".utf8).write(to: engine)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: engine.path)
         let runner = EngineRunner()
         var output = Data()
         var status: Int32?
         for try await event in try runner.run(engine: engine, game: game) {
-            switch event { case .output(let bytes): output.append(bytes); case .exited(let code): status = code }
+            switch event {
+            case .output(let bytes):
+                output.append(bytes)
+                // The child waits for this acknowledgement: output must stream before it exits.
+                try Data().write(to: folder.appendingPathComponent("observed"))
+            case .exited(let code): status = code
+            }
         }
         let text = String(decoding: output, as: UTF8.self)
         XCTAssertTrue(text.contains("guest=\(game.executablePath)\n"))

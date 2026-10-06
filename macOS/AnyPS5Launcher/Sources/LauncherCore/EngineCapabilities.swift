@@ -1,5 +1,10 @@
 import Foundation
 
+public struct EngineCapabilitiesUnavailable: LocalizedError, Sendable {
+    public let exitCode: Int32
+    public var errorDescription: String? { "Engine capability probe failed (exit \(exitCode))." }
+}
+
 public struct EngineCapabilities: Decodable, Sendable {
     public let schemaVersion: Int
     public let hostArchitecture: String
@@ -46,7 +51,7 @@ public struct EngineCapabilities: Decodable, Sendable {
                     }
                     process.waitUntilExit()
                     timeout.cancel()
-                    guard process.terminationStatus == 0 else { throw LauncherError("Engine capability probe failed (exit \(process.terminationStatus)).") }
+                    guard process.terminationStatus == 0 else { throw EngineCapabilitiesUnavailable(exitCode: process.terminationStatus) }
                     continuation.resume(returning: try decode(data))
                 } catch { timeout.cancel(); continuation.resume(throwing: error) }
                 try? pipe.fileHandleForReading.close()

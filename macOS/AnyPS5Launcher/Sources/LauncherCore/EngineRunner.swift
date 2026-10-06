@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public enum EngineEvent: Sendable {
     case output(Data)
@@ -9,6 +10,7 @@ public enum EngineEvent: Sendable {
 public final class EngineRunner: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
+    private var stopRequested = false
 
     public init() {}
 
@@ -54,16 +56,34 @@ public final class EngineRunner: @unchecked Sendable {
         child.standardError = pipe
         child.standardInput = FileHandle.nullDevice
         process = child
-        do { try child.run() }
-        catch { process = nil; lock.unlock(); throw error }
+        stopRequested = false
         lock.unlock()
-        // Closing the parent's writer makes EOF observable after the child closes its copy.
-        try? pipe.fileHandleForWriting.close()
         return AsyncThrowingStream { continuation in
             DispatchQueue.global(qos: .userInitiated).async { [self] in
+                var started = false
                 do {
-                    while let bytes = try pipe.fileHandleForReading.read(upToCount: 4096), !bytes.isEmpty {
-                        continuation.yield(.output(bytes))
+                    // Foundation ties child-exit delivery to the launching thread's run loop.
+                    // Launch and wait on the same worker, keeping the UI and Swift executor free.
+                    try child.run()
+                    started = true
+                    lock.lock()
+                    if stopRequested, child.isRunning { child.terminate() }
+                    lock.unlock()
+                    // Closing the parent's writer makes EOF observable after child shutdown.
+                    try? pipe.fileHandleForWriting.close()
+                    var buffer = [UInt8](repeating: 0, count: 4096)
+                    while true {
+                        // FileHandle.read(upToCount:) can wait to fill a pipe buffer. POSIX read
+                        // returns available bytes immediately, so game diagnostics stream live.
+                        let count = buffer.withUnsafeMutableBytes { bytes in
+                            Darwin.read(pipe.fileHandleForReading.fileDescriptor, bytes.baseAddress, bytes.count)
+                        }
+                        if count == 0 { break }
+                        if count < 0 {
+                            if errno == EINTR { continue }
+                            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                        }
+                        continuation.yield(.output(Data(buffer.prefix(count))))
                     }
                     child.waitUntilExit()
                     lock.lock()
@@ -73,12 +93,13 @@ public final class EngineRunner: @unchecked Sendable {
                     continuation.finish()
                 } catch {
                     stop()
-                    child.waitUntilExit()
+                    if started { child.waitUntilExit() }
                     lock.lock()
                     process = nil
                     lock.unlock()
                     continuation.finish(throwing: error)
                 }
+                try? pipe.fileHandleForWriting.close()
                 try? pipe.fileHandleForReading.close()
             }
         }
@@ -87,6 +108,7 @@ public final class EngineRunner: @unchecked Sendable {
     public func stop() {
         lock.lock()
         defer { lock.unlock() }
+        stopRequested = true
         if let process, process.isRunning { process.terminate() }
     }
 }
