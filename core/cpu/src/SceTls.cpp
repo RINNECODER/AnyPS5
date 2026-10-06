@@ -14,6 +14,7 @@ constexpr std::uint64_t hostPageSize = 16384;
 constexpr std::uint64_t maximumTlsSize = 16 * 1024 * 1024;
 constexpr std::size_t maximumModuleCount = pageSize / sizeof(std::uint64_t) - 2;
 constexpr std::uint64_t addressLimit = 0x800000000000;
+constexpr std::uint64_t minimumTcbSize = 0x30;
 
 std::uint64_t roundUp(std::uint64_t value, std::uint64_t alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -21,11 +22,14 @@ std::uint64_t roundUp(std::uint64_t value, std::uint64_t alignment) {
 }
 
 SceTls::SceTls(Machine& guest, std::span<const std::byte> initialBytes,
-               std::uint64_t size, std::uint64_t alignment, std::uint64_t allocationBase)
-    : SceTls(guest, std::array{SceTlsModuleTemplate{1, initialBytes, size, alignment}}, allocationBase) {}
+               std::uint64_t size, std::uint64_t alignment, std::uint64_t allocationBase,
+               SceTlsActivation activation)
+    : SceTls(guest, std::array{SceTlsModuleTemplate{1, initialBytes, size, alignment}}, allocationBase, activation) {}
 
 SceTls::SceTls(Machine& guest, std::span<const SceTlsModuleTemplate> templates,
-               std::uint64_t allocationBase) : machine(guest) {
+               std::uint64_t allocationBase, SceTlsActivation activation) : machine(guest) {
+    if (activation != SceTlsActivation::Activate && activation != SceTlsActivation::Deferred)
+        throw std::invalid_argument("Invalid SCE TLS activation policy");
     if (templates.empty() || templates.size() > maximumModuleCount)
         throw std::invalid_argument("Invalid SCE TLS module count");
     std::uint64_t totalOffset = 0;
@@ -55,7 +59,7 @@ SceTls::SceTls(Machine& guest, std::span<const SceTlsModuleTemplate> templates,
     const auto tcbOffset = roundUp(totalOffset, maximumAlignment);
     if (tcbOffset > maximumTlsSize)
         throw std::invalid_argument("SCE TLS total static size exceeds 16 MiB");
-    const auto dtvOffset = roundUp(tcbOffset + 16, pageSize);
+    const auto dtvOffset = roundUp(tcbOffset + minimumTcbSize, pageSize);
     const auto dtvSize = (modules.size() + 2) * sizeof(std::uint64_t);
     const auto mappedSize = roundUp(dtvOffset + dtvSize, mappingAlignment);
     if (allocationBase >= addressLimit || mappedSize > addressLimit - allocationBase)
@@ -80,11 +84,22 @@ SceTls::SceTls(Machine& guest, std::span<const SceTlsModuleTemplate> templates,
     const auto dtvBytes = std::as_bytes(std::span(dtv));
     std::copy(tcbBytes.begin(), tcbBytes.end(), bytes.begin() + static_cast<std::size_t>(tcbOffset));
     std::copy(dtvBytes.begin(), dtvBytes.end(), bytes.begin() + static_cast<std::size_t>(dtvOffset));
-    machine.Map(allocationBase, static_cast<std::size_t>(mappedSize), Permission::Read | Permission::Write);
-    machine.Write(allocationBase, bytes);
-    machine.Set(Register::FsBase, fsBase);
+    allocation = {allocationBase, static_cast<std::size_t>(mappedSize), Permission::Read | Permission::Write, false};
+    machine.Map(allocation.Address, allocation.Size, allocation.Permissions);
+    try {
+        machine.Write(allocation.Address, bytes);
+        if (activation == SceTlsActivation::Activate) Activate();
+    } catch (...) {
+        machine.Unmap(allocation.Address, allocation.Size);
+        throw;
+    }
 }
 
+void SceTls::Activate() {
+    machine.CheckAccess(allocation.Address, allocation.Size, allocation.Permissions);
+    machine.Set(Register::FsBase, fsBase);
+}
+Mapping SceTls::Allocation() const { return allocation; }
 std::uint64_t SceTls::FsBase() const { return fsBase; }
 std::uint64_t SceTls::TlsBase() const { return modules.front().base; }
 std::uint64_t SceTls::TlsBase(std::uint64_t moduleId) const { return moduleLayout(moduleId).base; }

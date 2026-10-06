@@ -1,6 +1,7 @@
 #include <cpu/Cpu.hpp>
 #include <cpu/ElfLoader.hpp>
 #include <cpu/GuestMemoryRuntime.hpp>
+#include <cpu/GuestThreads.hpp>
 #include <cpu/Runtime.hpp>
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
@@ -14,6 +15,7 @@
 #include <cpu/SceModules.hpp>
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceSystemImports.hpp>
+#include <cpu/SceThreadImports.hpp>
 #include <cpu/SceAudioOut2Imports.hpp>
 #include <cpu/Self.hpp>
 #include <array>
@@ -110,12 +112,16 @@ void Capabilities() {
         << "\"sce_np_local_imports\":{\"module\":\"libSceNpManager\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNpGetState\"],\"constraints\":\"session-local user and offline state only; no network account or authentication services\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
-        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes and shared permission pages unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
+        << "\"sce_thread_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
+        << "\"functions\":[\"_sceKernelSetThreadDtors\",\"_sceKernelSetThreadAtexitCount\",\"_sceKernelSetThreadAtexitReport\",\"scePthreadCreate\",\"scePthreadYield\",\"scePthreadJoin\",\"scePthreadSelf\",\"scePthreadEqual\",\"__error\",\"__tls_get_addr\",\"scePthreadExit\"],"
+        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; cumulative bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; nullable default attributes only; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; scheduling policies, affinity, cancellation, detach, once and TSD unsupported\"},"
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
-        << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\"],"
+        << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\",\"shared data pages preserve exact byte permissions; mixed executable permission pages unsupported\"],"
         << "\"unsupported_instruction_families\":[\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
 #else
+        << "\"cpu_constraints\":[\"mixed permission pages unsupported\"],"
         << "\"unsupported_instruction_families\":[\"AVX\",\"AVX2\",\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
 #endif
 }
@@ -164,7 +170,8 @@ std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
     return files;
 }
 
-std::vector<Cpu::SceHostModule> HostModules(const std::vector<Cpu::SceModuleFile>& files) {
+std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
+                                         const std::vector<Cpu::SceModuleFile>& files) {
     std::vector<Cpu::SceHostModule> hosts{
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
         {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
@@ -175,13 +182,27 @@ std::vector<Cpu::SceHostModule> HostModules(const std::vector<Cpu::SceModuleFile
         {"libSceNpManager.prx", {"libSceNpManager", 0, 1, 1}, {{"libSceNpManager", 0, 1}}},
         {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
         {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}}};
+    bool kernelPrx = false, kernelSprx = false;
+    const auto neededKernel = [&](const Cpu::SceParsedImage& image) {
+        for (const auto& needed : image.NeededFiles) {
+            if (needed == "libkernel.prx") kernelPrx = true;
+            else if (needed == "libkernel.sprx") kernelSprx = true;
+        }
+    };
+    neededKernel(Cpu::ParseSce(main));
     for (const auto& file : files) {
         const auto image = Cpu::ParseSce(file.Path);
+        neededKernel(image);
         std::erase_if(hosts, [&](const auto& host) {
             return std::any_of(image.ExportModules.begin(), image.ExportModules.end(), [&](const auto& module) {
                 return host.Module.Name == module.Name && host.Module.Major == module.Major && host.Module.Minor == module.Minor;
             });
         });
+    }
+    for (auto& host : hosts) if (host.Module.Name == "libkernel") {
+        if (kernelPrx && kernelSprx)
+            throw std::runtime_error("Unsupported SCE libkernel host filename aliases: graph requires both libkernel.prx and libkernel.sprx");
+        if (kernelPrx) host.Filename = "libkernel.prx";
     }
     return hosts;
 }
@@ -339,6 +360,8 @@ int main(int argc, char** argv) {
         if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
             throw std::runtime_error("Cannot configure standalone CLI SIGPIPE handling");
         Cpu::Machine machine;
+        std::shared_ptr<Cpu::GuestThreads> threadRuntime;
+        std::unique_ptr<Cpu::SceThreadImports> threadImports;
         std::shared_ptr<Cpu::GuestMemoryRuntime> memoryRuntime;
         std::unique_ptr<Cpu::SceMemoryImports> memoryImports;
         std::unique_ptr<Cpu::LinuxRuntime> linuxRuntime;
@@ -372,6 +395,7 @@ int main(int argc, char** argv) {
                 audioRuntime = std::make_unique<Cpu::SceAudioOut2Imports>(machine);
                 bootstrapRuntime = std::make_unique<Cpu::SceLibcBootstrapImports>(machine, std::filesystem::path(executable).filename().string());
                 const auto resolve = [&](const auto& import) {
+                    if (threadImports) if (const auto gate = threadImports->Resolve(import)) return *gate;
                     if (const auto gate = lifecycleRuntime->Resolve(import)) return *gate;
                     if (const auto gate = memoryImports->Resolve(import)) return *gate;
                     if (const auto gate = commonDialogRuntime->Resolve(import)) return *gate;
@@ -391,10 +415,23 @@ int main(int argc, char** argv) {
                     Cpu::SetupSceEntry(machine, image, arguments, sceRuntime->ExitGate());
                     entry = image.Entry;
                 } else {
+#if ANYPS5_CPU_MODERN_TCG
+                    threadRuntime = std::make_shared<Cpu::GuestThreads>(machine);
+                    threadImports = std::make_unique<Cpu::SceThreadImports>(machine, threadRuntime);
+                    const auto processExit = [owner = std::weak_ptr<Cpu::GuestThreads>(threadRuntime)](int status) {
+                        const auto runtime = owner.lock();
+                        if (!runtime) throw std::runtime_error("SCE process exit guest thread runtime has expired");
+                        runtime->ProcessExitFromHostCall(status);
+                    };
+                    sceRuntime->SetProcessExitHandler(processExit);
+                    lifecycleRuntime->SetProcessExitHandler(processExit);
+#endif
                     const auto files = ModuleFiles(executable, modulePaths);
-                    const auto hosts = HostModules(files);
+                    const auto hosts = HostModules(executable, files);
                     modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
                         [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                            if (threadImports) if (const auto address = threadImports->Resolve(import, type))
+                                return Cpu::SceResolvedImport{*address, type};
                             if (const auto address = bootstrapRuntime->Resolve(import)) {
                                 const std::uint8_t expectedType = import.Nid == "f7uOxY9mM1U" || import.Nid == "djxxOmW6-aw" ? 1 : 2;
                                 if (type != expectedType)
@@ -408,6 +445,12 @@ int main(int argc, char** argv) {
                     bootstrapRuntime->SetProcessParameters(modules->Main().ProcParam ? modules->Main().ProcParam->Address : 0,
                         modules->Main().ProcParam ? modules->Main().ProcParam->FileSize : 0);
                     Cpu::SetupSceEntry(machine, modules->Main(), arguments, modules->EntryTerminationGate());
+                    if (threadRuntime) {
+                        auto factory = modules->ThreadTlsFactory();
+                        if (!factory) throw std::runtime_error("Unsupported SCE guest threads: frozen TLS factory is not configured");
+                        threadRuntime->AdoptInitial({modules->Main().Entry, modules->InitialStack(), modules->Tls(), std::move(factory)});
+                        modules->SetExecutor(threadRuntime->ModuleExecutor());
+                    }
                     try { modules->InitializeDependencies(); }
                     catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
                     entry = modules->Main().Entry;
@@ -435,7 +478,10 @@ int main(int argc, char** argv) {
                 << " guest=x86_64 entry=0x" << std::hex << entry << std::dec << '\n';
         }
         Cpu::StopReason reason;
-        try { reason = modules ? modules->RunMain() : machine.Run(entry, 0, 100000000); }
+        try {
+            reason = modules ? modules->RunMain() : machine.Run(entry, 0, 100000000);
+            if (threadRuntime) threadRuntime->Withdraw();
+        }
         catch (const std::exception& error) {
             code = ExecutionCode(error.what());
             throw;

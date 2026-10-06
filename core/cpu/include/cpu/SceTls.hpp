@@ -8,6 +8,8 @@
 
 namespace Cpu {
 
+enum class SceTlsActivation { Activate, Deferred };
+
 struct SceTlsModuleTemplate {
     std::uint64_t ModuleId;
     std::span<const std::byte> InitialBytes;
@@ -19,9 +21,13 @@ class SceTls {
 public:
     SceTls(Machine& machine, std::span<const std::byte> initialBytes,
            std::uint64_t memorySize, std::uint64_t alignment,
-           std::uint64_t allocationBase = 0x7ffc00000000);
+           std::uint64_t allocationBase = 0x7ffc00000000,
+           SceTlsActivation activation = SceTlsActivation::Activate);
     SceTls(Machine& machine, std::span<const SceTlsModuleTemplate> modules,
-           std::uint64_t allocationBase = 0x7ffc00000000);
+           std::uint64_t allocationBase = 0x7ffc00000000,
+           SceTlsActivation activation = SceTlsActivation::Activate);
+    void Activate();
+    Mapping Allocation() const;
     std::uint64_t FsBase() const;
     std::uint64_t TlsBase() const;
     std::uint64_t TlsBase(std::uint64_t moduleId) const;
@@ -42,6 +48,7 @@ private:
     const ModuleLayout& moduleLayout(std::uint64_t moduleId) const;
     Machine& machine;
     std::uint64_t fsBase = 0;
+    Mapping allocation{0, 0, Permission::Read | Permission::Write, false};
     std::vector<ModuleLayout> modules;
 };
 

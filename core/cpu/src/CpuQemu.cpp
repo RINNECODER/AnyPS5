@@ -62,6 +62,13 @@ struct ContextLifetime {
     std::atomic<AnyPS5QemuCpu*> engine{nullptr};
     bool running = false;
 };
+struct SuspendedFrame {
+    std::uint64_t gate;
+    std::uint64_t stack;
+    std::uint64_t destination;
+    bool completed = false;
+    bool abandoned = false;
+};
 }
 
 struct Machine::Context::Payload {
@@ -83,7 +90,29 @@ Machine::Context::Context(Context&&) noexcept = default;
 Machine::Context& Machine::Context::operator=(Context&&) noexcept = default;
 Machine::Context::Context(std::unique_ptr<Payload> value) : payload(std::move(value)) {}
 
+struct Machine::SuspendedCall::Payload {
+    std::weak_ptr<ContextLifetime> lifetime;
+    std::shared_ptr<SuspendedFrame> frame;
+    ~Payload() {
+        const auto live = lifetime.lock();
+        if (!live || !live->engine.load()) return;
+        if (std::this_thread::get_id() != live->owner || live->running) std::terminate();
+        if (frame && !frame->completed) frame->abandoned = true;
+    }
+};
+
+Machine::SuspendedCall::SuspendedCall() = default;
+Machine::SuspendedCall::~SuspendedCall() = default;
+Machine::SuspendedCall::SuspendedCall(SuspendedCall&&) noexcept = default;
+Machine::SuspendedCall& Machine::SuspendedCall::operator=(SuspendedCall&&) noexcept = default;
+Machine::SuspendedCall::SuspendedCall(std::unique_ptr<Payload> value) : payload(std::move(value)) {}
+
 struct Machine::Impl {
+    struct ActiveCall {
+        std::uint64_t gate;
+        std::uint64_t stack;
+        std::shared_ptr<SuspendedFrame> paused;
+    };
     struct Range {
         std::uint64_t address;
         std::size_t size;
@@ -103,6 +132,8 @@ struct Machine::Impl {
     std::vector<Range> ranges;
     std::vector<Backing> backings;
     std::unordered_map<std::uint64_t, std::function<void(Machine&)>> calls;
+    std::vector<std::shared_ptr<SuspendedFrame>> pendingCalls;
+    ActiveCall* activeCall = nullptr;
     std::function<void(Machine&)> syscall;
     std::atomic<bool> requested{false};
     bool exited = false;
@@ -136,6 +167,21 @@ struct Machine::Impl {
         const auto lifetime = context.payload->lifetime.lock();
         if (!lifetime || !lifetime->engine.load()) throw std::invalid_argument("Guest execution context has expired");
         if (lifetime != contextLifetime) throw std::invalid_argument("Guest execution context belongs to another Machine");
+    }
+    void checkSuspendedCall(const SuspendedCall& call) const {
+        checkOwner();
+        if (contextLifetime->running) throw std::logic_error("Suspended guest host call requires an idle Machine");
+        if (!call.payload) throw std::invalid_argument("Suspended guest host call is empty");
+        const auto lifetime = call.payload->lifetime.lock();
+        if (!lifetime || !lifetime->engine.load()) throw std::invalid_argument("Suspended guest host call has expired");
+        if (lifetime != contextLifetime) throw std::invalid_argument("Suspended guest host call belongs to another Machine");
+        if (call.payload->frame->completed) throw std::logic_error("Suspended guest host call is already completed");
+        if (call.payload->frame->abandoned) throw std::logic_error("Suspended guest host call was abandoned");
+    }
+    void checkPendingFrame(std::uint64_t gate, std::uint64_t stack) const {
+        if (std::any_of(pendingCalls.begin(), pendingCalls.end(), [&](const auto& frame) {
+            return frame->gate == gate && frame->stack == stack;
+        })) throw std::logic_error("Suspended guest host call requires completion before redispatch");
     }
     void checkMapped(std::uint64_t address, std::size_t size, unsigned required = 0) const {
         checkOwner();
@@ -501,6 +547,49 @@ void Machine::RestoreContext(const Context& context) {
     impl->checkContext(context);
     impl->check(anyps5_qemu_cpu_context_restore(impl->engine, context.payload->value), "Restore modern guest execution context");
 }
+Machine::SuspendedCall Machine::PauseHostCall() {
+    impl->checkOwner();
+    if (!impl->contextLifetime->running || !impl->activeCall)
+        throw std::logic_error("Guest host-call suspension requires an active host callback");
+    auto& active = *impl->activeCall;
+    if (active.paused) throw std::logic_error("Guest host callback is already paused");
+    if (Get(Register::Rip) != active.gate || Get(Register::Rsp) != active.stack)
+        throw std::logic_error("Guest host callback changed its caller frame before suspension");
+    if (active.stack > std::numeric_limits<std::uint64_t>::max() - 8)
+        throw std::runtime_error("Guest suspended host-call return stack overflows");
+    CheckAccess(active.gate, 1, Permission::Execute);
+    CheckAccess(active.stack, 8, Permission::Read);
+    std::uint64_t destination = 0;
+    Read(active.stack, std::as_writable_bytes(std::span(&destination, 1)));
+    CheckAccess(destination, 1, Permission::Execute);
+    auto frame = std::make_shared<SuspendedFrame>(SuspendedFrame{active.gate, active.stack, destination});
+    auto payload = std::make_unique<SuspendedCall::Payload>();
+    impl->pendingCalls.reserve(impl->pendingCalls.size() + 1);
+    payload->frame = frame;
+    payload->lifetime = impl->contextLifetime;
+    impl->pendingCalls.push_back(frame);
+    active.paused = std::move(frame);
+    return SuspendedCall(std::move(payload));
+}
+void Machine::CompleteHostCall(SuspendedCall& call) {
+    impl->checkSuspendedCall(call);
+    if (impl->exited || impl->requested.load())
+        throw std::logic_error("Suspended guest host call cannot complete after terminal stop or exit");
+    auto& frame = *call.payload->frame;
+    if (Get(Register::Rip) != frame.gate || Get(Register::Rsp) != frame.stack)
+        throw std::logic_error("Suspended guest host call requires its restored caller frame");
+    if (!impl->calls.contains(frame.gate)) throw std::logic_error("Suspended guest host-call gate is no longer registered");
+    CheckAccess(frame.gate, 1, Permission::Execute);
+    CheckAccess(frame.stack, 8, Permission::Read);
+    std::uint64_t destination = 0;
+    Read(frame.stack, std::as_writable_bytes(std::span(&destination, 1)));
+    if (destination != frame.destination) throw std::logic_error("Suspended guest host-call return word changed");
+    CheckAccess(destination, 1, Permission::Execute);
+    Set(Register::Rsp, frame.stack + 8);
+    Set(Register::Rip, destination);
+    frame.completed = true;
+    std::erase(impl->pendingCalls, call.payload->frame);
+}
 void Machine::SetSyscallHandler(std::function<void(Machine&)> handler) {
     impl->checkOwner();
     impl->syscall = std::move(handler);
@@ -522,17 +611,30 @@ StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t 
     impl->checkOwner();
     if (impl->contextLifetime->running) throw std::logic_error("Guest execution is already running");
     if (!instructionLimit) throw std::invalid_argument("Guest execution requires a nonzero instruction limit");
+    if (!impl->pendingCalls.empty()) throw std::logic_error("Guest session reset requires completion of all suspended host calls");
     impl->check(anyps5_qemu_cpu_clear_stop(impl->engine), "Reset modern guest stop request");
-    impl->contextLifetime->running = true;
     impl->requested.store(false);
     impl->exited = false;
+    Set(Register::Rip, entry);
+    return RunSlice(entry, until, instructionLimit);
+}
+StopReason Machine::RunSlice(std::uint64_t entry, std::uint64_t until, std::uint64_t instructionLimit) {
+    impl->checkOwner();
+    if (impl->contextLifetime->running) throw std::logic_error("Guest execution is already running");
+    if (!instructionLimit) throw std::invalid_argument("Guest execution requires a nonzero instruction limit");
+    if (impl->exited || impl->requested.load()) {
+        impl->lastRunInstructions = 0;
+        return impl->exited ? StopReason::Exit : StopReason::Requested;
+    }
+    if (Get(Register::Rip) != entry) throw std::invalid_argument("Guest execution slice requires the current continuation PC");
+    impl->checkPendingFrame(entry, Get(Register::Rsp));
+    impl->contextLifetime->running = true;
     std::uint64_t executed = 0;
     struct Reset {
         Impl& value;
         std::uint64_t& executed;
         ~Reset() { value.lastRunInstructions = executed; value.contextLifetime->running = false; }
     } reset{*impl, executed};
-    Set(Register::Rip, entry);
     for (;;) {
         if (impl->exited) return StopReason::Exit;
         if (impl->requested.load()) return StopReason::Requested;
@@ -548,11 +650,22 @@ StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t 
             if (!result.instructions) throw std::runtime_error("Modern guest CPU budget stop made no progress");
             break;
         case ANYPS5_QEMU_HOST_GATE: {
+            impl->checkPendingFrame(result.rip, Get(Register::Rsp));
             ++executed;
             const auto found = impl->calls.find(result.gate);
             if (found == impl->calls.end()) throw std::runtime_error("Modern guest CPU returned an unknown host gate");
             auto callback = found->second;
+            Impl::ActiveCall active{result.rip, Get(Register::Rsp), {}};
+            impl->activeCall = &active;
+            struct ClearActive { Impl& value; ~ClearActive() { value.activeCall = nullptr; } } clearActive{*impl};
             callback(*this);
+            if (active.paused) {
+                if (Get(Register::Rip) != active.gate || Get(Register::Rsp) != active.stack)
+                    throw std::logic_error("Paused guest host callback changed its caller frame");
+                if (impl->exited) return StopReason::Exit;
+                if (impl->requested.load()) return StopReason::Requested;
+                return StopReason::Paused;
+            }
             if (!impl->exited && !impl->requested.load()) {
                 const auto stack = Get(Register::Rsp);
                 if (stack > std::numeric_limits<std::uint64_t>::max() - 8)

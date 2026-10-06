@@ -95,6 +95,13 @@ Machine::Context::Context(Context&&) noexcept = default;
 Machine::Context& Machine::Context::operator=(Context&&) noexcept = default;
 Machine::Context::Context(std::unique_ptr<Payload> value) : payload(std::move(value)) {}
 
+struct Machine::SuspendedCall::Payload {};
+Machine::SuspendedCall::SuspendedCall() = default;
+Machine::SuspendedCall::~SuspendedCall() = default;
+Machine::SuspendedCall::SuspendedCall(SuspendedCall&&) noexcept = default;
+Machine::SuspendedCall& Machine::SuspendedCall::operator=(SuspendedCall&&) noexcept = default;
+Machine::SuspendedCall::SuspendedCall(std::unique_ptr<Payload> value) : payload(std::move(value)) {}
+
 struct Machine::Impl {
     Machine& owner;
     const std::thread::id ownerThread = std::this_thread::get_id();
@@ -143,6 +150,12 @@ struct Machine::Impl {
             throw std::logic_error("Guest execution context requires its owner thread");
         if (running) throw std::logic_error("Guest execution context requires an idle Machine");
         throw std::runtime_error("Unsupported guest execution contexts in the Unicorn backend");
+    }
+    [[noreturn]] void rejectSuspension() const {
+        if (std::this_thread::get_id() != ownerThread)
+            throw std::logic_error("Guest host-call suspension requires its owner thread");
+        if (running) throw std::logic_error("Guest host-call suspension requires an idle Machine");
+        throw std::runtime_error("Unsupported guest host-call suspension and execution slices in the Unicorn backend");
     }
     void rejectPrivileged(std::uint64_t address, std::uint32_t size) {
         std::array<std::uint8_t,15> bytes{};
@@ -415,6 +428,9 @@ void Machine::Set(Register reg, std::uint64_t value) { check(uc_reg_write(impl->
 Machine::Context Machine::CaptureContext() { impl->rejectContext(); }
 void Machine::SaveContext(Context&) { impl->rejectContext(); }
 void Machine::RestoreContext(const Context&) { impl->rejectContext(); }
+Machine::SuspendedCall Machine::PauseHostCall() { impl->rejectSuspension(); }
+void Machine::CompleteHostCall(SuspendedCall&) { impl->rejectSuspension(); }
+StopReason Machine::RunSlice(std::uint64_t, std::uint64_t, std::uint64_t) { impl->rejectSuspension(); }
 void Machine::SetSyscallHandler(std::function<void(Machine&)> handler) { impl->syscall = std::move(handler); }
 void Machine::AddHostCall(std::uint64_t address, std::function<void(Machine&)> handler) {
     if (!handler) throw std::invalid_argument("Guest host import requires a handler");

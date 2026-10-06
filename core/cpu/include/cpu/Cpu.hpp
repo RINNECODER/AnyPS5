@@ -12,7 +12,7 @@ namespace Cpu {
 enum class Register { Rax, Rbx, Rcx, Rdx, Rsi, Rdi, Rbp, Rsp, R8, R9, R10, R11, R12, R13, R14, R15, Rip, Rflags, FsBase, GsBase };
 enum class Permission : unsigned { Read = 1, Write = 2, Execute = 4 };
 constexpr Permission operator|(Permission a, Permission b) { return static_cast<Permission>(static_cast<unsigned>(a) | static_cast<unsigned>(b)); }
-enum class StopReason { Address, Exit, InstructionLimit, Requested };
+enum class StopReason { Address, Exit, InstructionLimit, Requested, Paused };
 struct Mapping {
     std::uint64_t Address;
     std::size_t Size;
@@ -36,6 +36,20 @@ public:
         explicit Context(std::unique_ptr<Payload> value);
         std::unique_ptr<Payload> payload;
     };
+    class SuspendedCall {
+    public:
+        SuspendedCall();
+        ~SuspendedCall();
+        SuspendedCall(SuspendedCall&&) noexcept;
+        SuspendedCall& operator=(SuspendedCall&&) noexcept;
+        SuspendedCall(const SuspendedCall&) = delete;
+        SuspendedCall& operator=(const SuspendedCall&) = delete;
+    private:
+        friend class Machine;
+        struct Payload;
+        explicit SuspendedCall(std::unique_ptr<Payload> value);
+        std::unique_ptr<Payload> payload;
+    };
     Machine();
     ~Machine();
     Machine(const Machine&) = delete;
@@ -57,9 +71,12 @@ public:
     Context CaptureContext();
     void SaveContext(Context& context);
     void RestoreContext(const Context& context);
+    SuspendedCall PauseHostCall();
+    void CompleteHostCall(SuspendedCall& call);
     void SetSyscallHandler(std::function<void(Machine&)> handler);
     void AddHostCall(std::uint64_t address, std::function<void(Machine&)> handler);
     StopReason Run(std::uint64_t entry, std::uint64_t until, std::uint64_t instructionLimit);
+    StopReason RunSlice(std::uint64_t entry, std::uint64_t until, std::uint64_t instructionLimit);
     std::uint64_t LastRunInstructions() const;
     void Exit(int code);
     void RequestStop();

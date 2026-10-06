@@ -192,16 +192,197 @@ void ExpiredAcrossMachines() {
     replacement.RestoreContext(live);
     Require(replacement.Get(Register::Rax) == 91, "Expired context retirement damaged the new Machine's own live context");
 }
+
+constexpr std::uint64_t CallCode = 0x100001000, CallEntry = 0x100001200, CallGate = 0x100003000;
+constexpr std::uint64_t CallReturn = 0x10000120c, CallEnd = 0x100001216;
+constexpr std::uint64_t CallStack = 0x100008000, CallerStack = 0x100008ff0, ReturnSlot = CallerStack - 8;
+constexpr std::uint64_t OtherEntry = 0x100001400, OtherAdd = 0x100001404, OtherEnd = 0x10000140b;
+constexpr std::uint64_t OtherStack = 0x100009ff0;
+
+void SuspendedFixture(Machine& machine) {
+    machine.Map(CallCode, 4096, rx);
+    machine.Map(CallGate, 4096, rx);
+    machine.Map(DataA, 4096, rw);
+    machine.Map(CallStack, 8192, rw);
+    std::array<std::uint8_t, 4096> guard;
+    guard.fill(0xa5);
+    machine.Write(CallStack, std::as_bytes(std::span(guard)));
+    constexpr std::array<std::uint8_t, 22> caller{
+        0x48,0xb8,0,0x30,0,0,1,0,0,0, 0xff,0xd0,
+        0x48,0x83,0xc0,0x09, 0x48,0x89,0x07, 0x48,0xff,0xc3};
+    machine.Write(CallEntry, std::as_bytes(std::span(caller)));
+    constexpr std::array<std::uint8_t, 11> other{
+        0x48,0x83,0xc0,0x03, 0x48,0x89,0x07, 0x48,0xff,0xc3, 0x90};
+    machine.Write(OtherEntry, std::as_bytes(std::span(other)));
+    Initialize(machine, 19, 61, DataA, CallerStack);
+    machine.Set(Register::Rip, CallEntry);
+}
+
+void CallerGuards(Machine& machine) {
+    std::array<std::uint8_t, 4096> actual{};
+    machine.Read(CallStack, std::as_writable_bytes(std::span(actual)));
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        const auto position = CallStack + i;
+        const auto expected = position >= ReturnSlot && position < CallerStack
+            ? static_cast<std::uint8_t>(CallReturn >> ((position - ReturnSlot) * 8)) : 0xa5;
+        Require(actual[i] == expected, "Suspended CALL or completion corrupted its independently guarded stack");
+    }
+}
+
+void SuspendedContinuations() {
+    Machine machine;
+    SuspendedFixture(machine);
+    Initialize(machine, 50, 71, DataB, OtherStack);
+    machine.Set(Register::Rip, OtherEntry);
+    auto other = machine.CaptureContext();
+    Initialize(machine, 19, 61, DataA, CallerStack);
+    machine.Set(Register::Rip, CallEntry);
+    Machine::SuspendedCall paused, unexpected, empty;
+    unsigned calls = 0;
+    RejectsUnchanged(machine, [&] { unexpected = machine.PauseHostCall(); }, "active host callback");
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(empty); }, "empty");
+    RejectsUnchanged(machine, [&] { machine.RunSlice(CallEntry + 1, CallEnd, 100); }, "current continuation PC");
+    machine.AddHostCall(CallGate, [&](Machine& running) {
+        ++calls;
+        Require(running.Get(Register::Rip) == CallGate && running.Get(Register::Rsp) == ReturnSlot &&
+            Read(running, ReturnSlot) == CallReturn, "Actual x86 CALL did not establish the independently expected frame");
+        running.Set(Register::Rax, 7);
+        paused = running.PauseHostCall();
+        RejectsUnchanged(running, [&] { unexpected = running.PauseHostCall(); }, "already paused");
+        RejectsUnchanged(running, [&] { running.CompleteHostCall(paused); }, "idle");
+        RejectsUnchanged(running, [&] { running.RunSlice(CallGate, CallEnd, 100); }, "already running");
+    });
+    Require(machine.RunSlice(CallEntry, CallEnd, 100) == Cpu::StopReason::Paused && calls == 1 &&
+        machine.Get(Register::Rip) == CallGate && machine.Get(Register::Rsp) == ReturnSlot &&
+        machine.Get(Register::Rax) == 7 && Read(machine, DataA) == 0 && machine.LastRunInstructions() == 3,
+        "Pause performed an automatic RET, guest continuation or repeated gate accounting");
+    CallerGuards(machine);
+    auto originating = machine.CaptureContext();
+    auto moved = std::move(paused);
+    Machine::SuspendedCall call;
+    call = std::move(moved);
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(paused); }, "empty");
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(moved); }, "empty");
+    RejectsUnchanged(machine, [&] { machine.Run(CallGate, CallEnd, 100); }, "completion of all suspended host calls");
+    RejectsUnchanged(machine, [&] { machine.RunSlice(CallGate, CallEnd, 100); }, "completion before redispatch");
+    Require(calls == 1, "Pending host call was redispatched before completion");
+
+    machine.RestoreContext(other);
+    Require(machine.RunSlice(OtherEntry, OtherEnd, 1) == Cpu::StopReason::InstructionLimit &&
+        machine.Get(Register::Rip) == OtherAdd && machine.Get(Register::Rax) == 53 &&
+        machine.Get(Register::Rbx) == 71 && Read(machine, DataB) == 0 && machine.LastRunInstructions() == 1,
+        "A bounded slice did not preserve the actual arithmetic continuation");
+    Require(machine.RunSlice(OtherAdd, OtherEnd, 100) == Cpu::StopReason::Address &&
+        machine.Get(Register::Rip) == OtherEnd && machine.Get(Register::Rax) == 53 &&
+        machine.Get(Register::Rbx) == 72 && machine.Get(Register::Rsp) == OtherStack && Read(machine, DataB) == 53,
+        "Other guest continuation failed while the original host call remained suspended");
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(call); }, "restored caller frame");
+    machine.RestoreContext(originating);
+    machine.Set(Register::Rip, CallGate + 1);
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(call); }, "restored caller frame");
+    machine.RestoreContext(originating);
+    machine.Set(Register::Rsp, CallerStack);
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(call); }, "restored caller frame");
+    machine.RestoreContext(originating);
+    Write(machine, ReturnSlot, std::uint64_t{0x100001210});
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(call); }, "return word changed");
+    Require(Read(machine, ReturnSlot) == 0x100001210, "Rejected completion rewrote the caller's changed return word");
+    Write(machine, ReturnSlot, CallReturn);
+    machine.Protect(CallGate, 4096, Permission::Read);
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(call); }, "Guest access denied at 0x100003000");
+    machine.Protect(CallGate, 4096, rx);
+    machine.Protect(CallStack, 4096, static_cast<Permission>(0));
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(call); }, "Guest access denied at 0x100008fe8");
+    machine.Protect(CallStack, 4096, rw);
+    machine.Protect(CallCode, 4096, Permission::Read);
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(call); }, "Guest access denied at 0x10000120c");
+    machine.Protect(CallCode, 4096, rx);
+    CallerGuards(machine);
+
+    const auto beforeThread = Current(machine);
+    std::exception_ptr failure;
+    std::thread nonowner([&] {
+        try {
+            Rejects([&] { machine.CompleteHostCall(call); }, "owner thread");
+            Rejects([&] { unexpected = machine.PauseHostCall(); }, "owner thread");
+            Rejects([&] { machine.RunSlice(CallGate, CallEnd, 100); }, "owner thread");
+        } catch (...) { failure = std::current_exception(); }
+    });
+    nonowner.join();
+    if (failure) std::rethrow_exception(failure);
+    Require(Current(machine) == beforeThread, "Nonowner suspended-call operation changed guest state");
+    machine.CompleteHostCall(call);
+    Require(machine.Get(Register::Rip) == CallReturn && machine.Get(Register::Rsp) == CallerStack &&
+        machine.Get(Register::Rax) == 7 && machine.Get(Register::Rbx) == 61 && Read(machine, DataB) == 53,
+        "Completion did not return through the originating restored context exactly once");
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(call); }, "already completed");
+    Require(machine.RunSlice(CallReturn, CallEnd, 100) == Cpu::StopReason::Address &&
+        machine.Get(Register::Rip) == CallEnd && machine.Get(Register::Rsp) == CallerStack &&
+        machine.Get(Register::Rax) == 16 && machine.Get(Register::Rbx) == 62 && Read(machine, DataA) == 16 &&
+        Read(machine, DataB) == 53 && calls == 1 && machine.LastRunInstructions() == 3,
+        "Completed host call redispatched, popped twice or lost the independent guest continuation");
+    CallerGuards(machine);
+}
+
+void StickyTerminalSlices(bool exit) {
+    Machine machine;
+    SuspendedFixture(machine);
+    Machine::SuspendedCall paused;
+    unsigned calls = 0;
+    machine.AddHostCall(CallGate, [&](Machine& running) {
+        ++calls;
+        paused = running.PauseHostCall();
+        if (exit) running.Exit(73); else running.RequestStop();
+    });
+    const auto reason = exit ? Cpu::StopReason::Exit : Cpu::StopReason::Requested;
+    Require(machine.RunSlice(CallEntry, CallEnd, 100) == reason && calls == 1 &&
+        machine.Get(Register::Rip) == CallGate && machine.Get(Register::Rsp) == ReturnSlot &&
+        machine.LastRunInstructions() == 3, "Terminal paused host call returned or consumed its frame");
+    if (exit) Require(machine.ExitCode() == 73, "Terminal slice lost the actual guest exit code");
+    const auto stopped = Current(machine);
+    Require(machine.RunSlice(CallEntry, CallEnd, 100) == reason && machine.LastRunInstructions() == 0 &&
+        Current(machine) == stopped && calls == 1 && Read(machine, DataA) == 0,
+        "Terminal RunSlice cleared stop/exit or advanced guest state");
+    RejectsUnchanged(machine, [&] { machine.Run(CallEntry, CallEnd, 100); }, "completion of all suspended host calls");
+    Require(machine.RunSlice(CallEntry, CallEnd, 100) == reason && machine.LastRunInstructions() == 0 &&
+        Current(machine) == stopped && calls == 1, "Rejected session reset cleared terminal state before rejecting its pending call");
+    RejectsUnchanged(machine, [&] { machine.CompleteHostCall(paused); }, "terminal stop or exit");
+    CallerGuards(machine);
+}
+
+void ExpiredSuspendedCall() {
+    Machine::SuspendedCall expired;
+    {
+        Machine previous;
+        SuspendedFixture(previous);
+        previous.AddHostCall(CallGate, [&](Machine& running) { expired = running.PauseHostCall(); });
+        Require(previous.RunSlice(CallEntry, CallEnd, 100) == Cpu::StopReason::Paused,
+            "Could not obtain an actual suspended frame for lifetime validation");
+    }
+    Machine replacement;
+    Initialize(replacement, 91, 301, DataB, 0x8fd0);
+    RejectsUnchanged(replacement, [&] { replacement.CompleteHostCall(expired); }, "expired");
+    const auto previous = Current(replacement);
+    expired = Machine::SuspendedCall{};
+    Require(Current(replacement) == previous, "Expired suspended-call destruction touched a replacement Machine");
+}
 }
 
 int main() {
     static_assert(!std::is_copy_constructible_v<Machine::Context> && !std::is_copy_assignable_v<Machine::Context>);
     static_assert(std::is_nothrow_move_constructible_v<Machine::Context> && std::is_nothrow_move_assignable_v<Machine::Context>);
+    static_assert(!std::is_copy_constructible_v<Machine::SuspendedCall> && !std::is_copy_assignable_v<Machine::SuspendedCall>);
+    static_assert(std::is_nothrow_move_constructible_v<Machine::SuspendedCall> && std::is_nothrow_move_assignable_v<Machine::SuspendedCall>);
     try {
         ProgressingContinuations();
         ExpiredAcrossMachines();
+        SuspendedContinuations();
+        StickyTerminalSlices(false);
+        StickyTerminalSlices(true);
+        ExpiredSuspendedCall();
         std::cout << "PASS C++ context move/lifetime/owner/idle contracts; actual x86 A/B continuation PCs and arithmetic; "
-            "shared RAM and later mapping protection persist; expired context retirement is safe\n";
+            "shared RAM and later mapping protection persist; expired context retirement is safe; "
+            "suspended CALL frame validation and exactly-once completion; sticky terminal slices make no progress\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';

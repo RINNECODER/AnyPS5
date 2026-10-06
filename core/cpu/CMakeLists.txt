@@ -67,6 +67,7 @@ add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.c
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
 target_sources(anyps5_cpu PRIVATE src/SceLifecycleImports.cpp)
+target_sources(anyps5_cpu PRIVATE src/GuestThreads.cpp src/SceThreadImports.cpp)
 target_sources(anyps5_cpu PRIVATE src/GuestMemoryRuntime.cpp src/SceMemoryImports.cpp src/SceNpLocalImports.cpp src/SceNetAddressImports.cpp src/SceCommonDialogImports.cpp)
 target_include_directories(anyps5_cpu PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
 target_link_libraries(anyps5_cpu PRIVATE ${cpuEngineLibrary} unicorn)
@@ -165,6 +166,22 @@ if(BUILD_TESTING)
     target_link_libraries(anyps5_cpu_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_cpu_instructions COMMAND anyps5_cpu_tests)
     if(ANYPS5_CPU_BACKEND STREQUAL "TCG")
+        set(threadGuest "${CMAKE_CURRENT_BINARY_DIR}/ThreadGuest.prx")
+        set(threadMain "${CMAKE_CURRENT_BINARY_DIR}/thread-main.elf")
+        add_custom_command(OUTPUT "${threadGuest}" "${threadMain}"
+            COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -DTHREAD_DEPENDENCY=1 -mavx2 -mno-red-zone -O2 -ffreestanding -fPIC -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ThreadHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/thread-dependency.o"
+            COMMAND "${guestLinker}" -shared -soname ThreadGuest.prx -init ThreadDependencyInit -fini ThreadDependencyFini -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/thread-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/thread-dependency.o"
+            COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -mavx2 -mno-red-zone -O2 -ffreestanding -fPIC -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ThreadHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/thread-main.o"
+            COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/thread-start.o"
+            COMMAND "${guestLinker}" -shared -e _start -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/thread-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/thread-start.o" "${CMAKE_CURRENT_BINARY_DIR}/thread-main.o" "${CMAKE_CURRENT_BINARY_DIR}/thread-guest-linked.elf"
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/BuildThreadFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/thread-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/thread-main-linked.elf" "${threadGuest}" "${threadMain}"
+            DEPENDS fixtures/ThreadHomebrew.c fixtures/SceStart.S fixtures/BuildThreadFixture.py tests/BuildSceModulesFixture.py VERBATIM)
+        add_custom_target(anyps5_guest_thread_fixture ALL DEPENDS "${threadGuest}" "${threadMain}")
+        add_test_executable(anyps5_guest_thread_tests tests/GuestThreadsTests.cpp)
+        target_link_libraries(anyps5_guest_thread_tests PRIVATE anyps5_cpu)
+        add_dependencies(anyps5_guest_thread_tests anyps5_guest_thread_fixture)
+        add_test(NAME anyps5_guest_threads COMMAND anyps5_guest_thread_tests "${threadMain}" "${threadGuest}")
+        set_tests_properties(anyps5_guest_threads PROPERTIES TIMEOUT 60)
         add_test_executable(anyps5_cpu_context_tests tests/ContextTests.cpp)
         target_link_libraries(anyps5_cpu_context_tests PRIVATE anyps5_cpu)
         add_test(NAME anyps5_cpu_contexts COMMAND anyps5_cpu_context_tests)
