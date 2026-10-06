@@ -162,35 +162,45 @@ final class LauncherCoreTests: XCTestCase {
         return LocalGame(id: "local", title: "Fixture", executablePath: input.path, workingDirectory: folder.path)
     }
 
-    // Contract: launch passes the guest path literally, preserves cwd, captures both streams and actual exit status.
-    // Regression: shell interpolation, lost stderr or false success. This tests the new real subprocess boundary.
+    // Contract: launch passes guest/resource paths literally, preserves cwd, streams both outputs and actual status.
+    // Regression: shell interpolation, lost stderr, false success, or advertising a resource root but omitting it.
+    // This real subprocess boundary owns legacy and capability-gated argv; the CPU oracle does not check root routing.
     func testEngineArgumentsOutputAndFailureExit() async throws {
-        let folder = try directory()
+        let folder = try directory().appendingPathComponent("resources $(no-shell) folder", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         let game = try guest(in: folder)
         let engine = folder.appendingPathComponent("engine")
-        try Data("#!/bin/sh\nprintf 'guest=%s\\ncwd=%s\\n' \"$1\" \"$PWD\"\nfor attempt in 1 2 3 4 5 6 7 8 9 10; do\n[ -f observed ] && break\nsleep 0.1\ndone\n[ -f observed ] || exit 8\nprintf 'unsupported import\\n' >&2\nexit 7\n".utf8).write(to: engine)
+        try Data("#!/bin/sh\nif [ \"$1\" = '--resource-root' ]; then\nprintf 'root=%s\\n' \"$2\"\nshift 2\n[ \"$1\" = '--diagnostics-json' ] || exit 9\nshift\nfi\nprintf 'guest=%s\\ncwd=%s\\n' \"$1\" \"$PWD\"\nfor attempt in 1 2 3 4 5 6 7 8 9 10; do\n[ -f observed ] && break\nsleep 0.1\ndone\n[ -f observed ] || exit 8\nprintf 'unsupported import\\n' >&2\nexit 7\n".utf8).write(to: engine)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: engine.path)
-        let runner = EngineRunner()
-        var output = Data()
-        var status: Int32?
-        for try await event in try runner.run(engine: engine, game: game) {
-            switch event {
-            case .output(let bytes):
-                output.append(bytes)
-                // The child waits for this acknowledgement: output must stream before it exits.
-                try Data().write(to: folder.appendingPathComponent("observed"))
-            case .exited(let code): status = code
+        let capabilities = try EngineCapabilities.decode(Data("""
+        {"schema_version":1,"host_architecture":"arm64","guest_architecture":"x86_64","backend":"unicorn","supported_formats":["static_elf64_x86_64"],"resource_root_argument":"--resource-root","runtime_abi":"linux_sysv","ps5_game_runtime_ready":false}
+        """.utf8))
+        for contract: EngineCapabilities? in [nil, capabilities] {
+            let marker = folder.appendingPathComponent("observed")
+            if FileManager.default.fileExists(atPath: marker.path) { try FileManager.default.removeItem(at: marker) }
+            let runner = EngineRunner()
+            var output = Data()
+            var status: Int32?
+            for try await event in try runner.run(engine: engine, game: game, capabilities: contract) {
+                switch event {
+                case .output(let bytes):
+                    output.append(bytes)
+                    // The child waits for this acknowledgement: output must stream before it exits.
+                    try Data().write(to: marker)
+                case .exited(let code): status = code
+                }
             }
+            let text = String(decoding: output, as: UTF8.self)
+            XCTAssertTrue(text.contains("guest=\(game.executablePath)\n"))
+            if contract != nil { XCTAssertTrue(text.contains("root=\(game.workingDirectory)\n")) }
+            let cwd = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("cwd=") }).dropFirst(4)
+            let actualDirectory = try FileManager.default.attributesOfItem(atPath: String(cwd))
+            let expectedDirectory = try FileManager.default.attributesOfItem(atPath: folder.path)
+            XCTAssertEqual(actualDirectory[.systemFileNumber] as? NSNumber, expectedDirectory[.systemFileNumber] as? NSNumber)
+            XCTAssertEqual(actualDirectory[.systemNumber] as? NSNumber, expectedDirectory[.systemNumber] as? NSNumber)
+            XCTAssertTrue(text.contains("unsupported import\n"))
+            XCTAssertEqual(status, 7)
         }
-        let text = String(decoding: output, as: UTF8.self)
-        XCTAssertTrue(text.contains("guest=\(game.executablePath)\n"))
-        let cwd = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("cwd=") }).dropFirst(4)
-        let actualDirectory = try FileManager.default.attributesOfItem(atPath: String(cwd))
-        let expectedDirectory = try FileManager.default.attributesOfItem(atPath: folder.path)
-        XCTAssertEqual(actualDirectory[.systemFileNumber] as? NSNumber, expectedDirectory[.systemFileNumber] as? NSNumber)
-        XCTAssertEqual(actualDirectory[.systemNumber] as? NSNumber, expectedDirectory[.systemNumber] as? NSNumber)
-        XCTAssertTrue(text.contains("unsupported import\n"))
-        XCTAssertEqual(status, 7)
     }
 
     // Contract: console containers cannot start an engine; static CPU mode refuses PS5 OSABI inputs explicitly.

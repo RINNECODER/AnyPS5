@@ -59,7 +59,8 @@ public final class EngineRunner: @unchecked Sendable {
         let child = Process()
         let pipe = Pipe()
         child.executableURL = engine
-        child.arguments = (capabilities != nil ? ["--diagnostics-json"] : []) + [game.executablePath]
+        let resourceArguments = capabilities?.resourceRootArgument == "--resource-root" ? ["--resource-root", game.workingDirectory] : []
+        child.arguments = resourceArguments + (capabilities != nil ? ["--diagnostics-json"] : []) + [game.executablePath]
         child.currentDirectoryURL = URL(fileURLWithPath: game.workingDirectory, isDirectory: true)
         child.standardOutput = pipe
         child.standardError = pipe
