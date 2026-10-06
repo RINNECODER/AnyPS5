@@ -35,16 +35,18 @@ SceTls::SceTls(Machine& guest, std::span<const SceTlsModuleTemplate> templates,
         const auto& module = templates[index];
         if (module.ModuleId != index + 1)
             throw std::invalid_argument("SCE TLS module IDs must be ordered and contiguous from main module 1");
-        if (!module.MemorySize || module.MemorySize > maximumTlsSize || module.InitialBytes.size() > module.MemorySize)
+        if (module.MemorySize > maximumTlsSize || module.InitialBytes.size() > module.MemorySize)
             throw std::invalid_argument("Invalid SCE TLS template or memory size");
         const auto alignment = std::max<std::uint64_t>(module.Alignment, 1);
         if (!std::has_single_bit(alignment) || alignment > maximumTlsSize)
             throw std::invalid_argument("Unsupported SCE TLS alignment");
-        totalOffset = roundUp(totalOffset + module.MemorySize, alignment);
-        if (totalOffset > maximumTlsSize)
-            throw std::invalid_argument("SCE TLS total static size exceeds 16 MiB");
-        maximumAlignment = std::max(maximumAlignment, alignment);
-        modules.push_back({module.MemorySize, totalOffset, 0});
+        if (module.MemorySize) {
+            totalOffset = roundUp(totalOffset + module.MemorySize, alignment);
+            if (totalOffset > maximumTlsSize)
+                throw std::invalid_argument("SCE TLS total static size exceeds 16 MiB");
+            maximumAlignment = std::max(maximumAlignment, alignment);
+        }
+        modules.push_back({module.MemorySize, module.MemorySize ? totalOffset : 0, 0});
     }
     const auto mappingAlignment = templates.size() == 1 ? pageSize : hostPageSize;
     const auto allocationAlignment = std::max(maximumAlignment, mappingAlignment);
@@ -66,10 +68,12 @@ SceTls::SceTls(Machine& guest, std::span<const SceTlsModuleTemplate> templates,
     dtv[1] = modules.size();
     for (std::size_t index = 0; index < modules.size(); ++index) {
         auto& module = modules[index];
-        module.base = fsBase - module.threadOffset;
-        const auto initialBytes = templates[index].InitialBytes;
-        std::copy(initialBytes.begin(), initialBytes.end(), bytes.begin() + static_cast<std::size_t>(module.base - allocationBase));
-        dtv[index + 2] = module.base;
+        if (module.memorySize) {
+            module.base = fsBase - module.threadOffset;
+            const auto initialBytes = templates[index].InitialBytes;
+            std::copy(initialBytes.begin(), initialBytes.end(), bytes.begin() + static_cast<std::size_t>(module.base - allocationBase));
+            dtv[index + 2] = module.base;
+        }
     }
     const std::array<std::uint64_t, 2> tcb{fsBase, dtvBase};
     const auto tcbBytes = std::as_bytes(std::span(tcb));

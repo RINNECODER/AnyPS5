@@ -90,7 +90,7 @@ void layoutAndBounds() {
     }
     Machine machine;
     rejects([&] { Cpu::SceTls tls(machine, bytes, 6, 16); }, "memory size");
-    rejects([&] { Cpu::SceTls tls(machine, {}, 0, 16); }, "memory size");
+    rejects([&] { Cpu::SceTls tls(machine, bytes, 0, 16); }, "memory size");
     rejects([&] { Cpu::SceTls tls(machine, {}, std::uint64_t{1} << 25, 16); }, "memory size");
     rejects([&] { Cpu::SceTls tls(machine, bytes, 43, 16, 0x1234); }, "alignment");
     rejects([&] { Cpu::SceTls tls(machine, bytes, 43, 16, 0x7ffffffff000); }, "address range");
@@ -212,6 +212,65 @@ void multiModuleState(const char* fixturePath) {
     rejects([&] { first.MemorySize(0); }, "module ID");
 }
 
+
+void emptyModuleIdentities() {
+    {
+        Machine machine;
+        constexpr std::uint64_t firstValue = 0x1122334455667788;
+        constexpr std::uint64_t futureValue = 0x8877665544332211;
+        const std::array<Cpu::SceTlsModuleTemplate, 3> templates{{
+            {1, std::as_bytes(std::span(&firstValue, 1)), 40, 16},
+            {2, {}, 0, 8192},
+            {3, std::as_bytes(std::span(&futureValue, 1)), 50, 64}}};
+        Cpu::SceTls tls(machine, templates);
+        require(tls.ModuleCount() == 3 && tls.MemorySize(2) == 0 && tls.TlsBase(2) == 0,
+                "Empty TLS provider lost identity or acquired fabricated storage");
+        require(tls.FsBase() == 0x7ffc00000080 && tls.Tpoff(1, 0) == -48 && tls.Tpoff(3, 0) == -128,
+                "Empty TLS provider changed static offsets or imposed allocation alignment without storage");
+        const auto dtv = word(machine, tls.FsBase() + 8);
+        require(word(machine, dtv + 8) == 3 && word(machine, dtv + 24) == 0 &&
+                word(machine, dtv + 32) == tls.TlsBase(3), "Empty DTV slot renumbered the later initialized provider");
+        require(word(machine, tls.Resolve(1, 0)) == firstValue && word(machine, tls.Resolve(3, 0)) == futureValue,
+                "Empty provider disturbed another module's initialized bytes");
+        std::array<std::byte, 42> bss{};
+        machine.Read(tls.Resolve(3, 8), bss);
+        require(std::all_of(bss.begin(), bss.end(), [](auto value) { return value == std::byte{0}; }),
+                "Later provider BSS was not initialized after an empty TLS identity");
+        rejects([&] { tls.Resolve(2, 0); }, "outside module 2");
+        rejects([&] { tls.Dtpoff(2, 0); }, "outside module 2");
+        rejects([&] { tls.Tpoff(2, 0); }, "outside module 2");
+        rejects([&] { machine.CheckAccess(0, 1, Permission::Read); }, "access denied");
+        machine.Map(0x1000, 4096, rw);
+        const std::array<std::uint64_t, 2> emptyIndex{2, 0};
+        machine.Write(0x1000, std::as_bytes(std::span(emptyIndex)));
+        rejects([&] { tls.ResolveIndex(0x1000); }, "outside module 2");
+        const std::array<std::uint64_t, 2> futureIndex{3, 0};
+        machine.Write(0x1000, std::as_bytes(std::span(futureIndex)));
+        require(word(machine, tls.ResolveIndex(0x1000)) == futureValue, "Later module's guest TLS index was renumbered");
+    }
+    {
+        Machine emptyMachine;
+        Cpu::SceTls empty(emptyMachine, {}, 0, 0);
+        require(empty.ModuleId() == 1 && empty.ModuleCount() == 1 && empty.MemorySize() == 0 && empty.TlsBase() == 0,
+                "Empty main TLS was removed or given byte storage");
+        require(word(emptyMachine, empty.FsBase()) == empty.FsBase() &&
+                word(emptyMachine, word(emptyMachine, empty.FsBase() + 8) + 16) == 0,
+                "Empty main TLS lacks source-backed TCB/DTV identity metadata");
+        rejects([&] { empty.Resolve(1, 0); }, "outside the main module");
+    }
+    {
+        const std::array<Cpu::SceTlsModuleTemplate, 2> emptyThenStored{{{1, {}, 0, 0}, {2, {}, 3, 16}}};
+        Machine laterMachine;
+        Cpu::SceTls later(laterMachine, emptyThenStored);
+        require(later.ModuleCount() == 2 && later.TlsBase(1) == 0 && later.Tpoff(2, 0) == -16,
+                "Empty main identity displaced or renumbered dependent TLS storage");
+        std::array<std::byte, 3> zero{};
+        laterMachine.Read(later.Resolve(2, 0), zero);
+        require(std::all_of(zero.begin(), zero.end(), [](auto value) { return value == std::byte{0}; }),
+                "BSS-only dependent storage after empty main TLS was not zero");
+    }
+}
+
 void malformedModuleGraphs() {
     const std::array<Cpu::SceTlsModuleTemplate, 2> good{{{1, {}, 1, 1}, {2, {}, 3, 16}}};
     for (const auto ids : {std::array<std::uint64_t, 2>{2, 1}, std::array<std::uint64_t, 2>{1, 1}, std::array<std::uint64_t, 2>{1, 3}}) {
@@ -226,6 +285,8 @@ void malformedModuleGraphs() {
     rejects([&] { Cpu::SceTls tls(machine, std::span<const Cpu::SceTlsModuleTemplate>{}); }, "module count");
     auto invalid = good;
     invalid[1].MemorySize = 0;
+    const std::byte invalidByte{0x41};
+    invalid[1].InitialBytes = std::span(&invalidByte, 1);
     rejects([&] { Cpu::SceTls tls(machine, invalid); }, "memory size");
     invalid = good;
     invalid[0].MemorySize = 16 * 1024 * 1024;
@@ -278,6 +339,7 @@ int main(int argc, char** argv) {
         compiledFsProbe(argv[1]);
         multiModuleState(argv[1]);
         malformedModuleGraphs();
+        emptyModuleIdentities();
         std::cout << "SCE static TLS: Variant II layout, compiler FS execution, module-index gateways, thread isolation and strict rejection passed\n";
         return 0;
     } catch (const std::exception& error) {
