@@ -164,8 +164,8 @@ struct GuestMemoryRuntime::Impl {
         regions.swap(mappings); physical.swap(allocations); generation = next;
     }
     std::pair<std::uint64_t, std::uint64_t> search(std::int64_t start, std::int64_t stop, std::uint64_t align) const {
-        if (start < 0 || stop <= start || static_cast<std::uint64_t>(stop) > capacity) error(22, "Invalid guest physical search range");
-        return {aligned(static_cast<std::uint64_t>(start), align), static_cast<std::uint64_t>(stop)};
+        if (start < 0 || stop <= start) error(22, "Invalid guest physical search range");
+        return {aligned(static_cast<std::uint64_t>(start), align), std::min(static_cast<std::uint64_t>(stop), capacity)};
     }
     GuestPhysicalExtent available(std::int64_t start, std::int64_t stop, std::uint64_t align) const {
         const auto bounds = search(start, stop, align);
@@ -336,18 +336,21 @@ std::uint64_t GuestMemoryRuntime::Reserve(std::uint64_t hint, std::uint64_t byte
 }
 void GuestMemoryRuntime::Protect(std::uint64_t address, std::uint64_t bytes, std::uint32_t protection) {
     impl->live(); Impl::MutationScope mutation(impl->transactionInProgress);
-    length(bytes); if (!address || address % page) error(22, "Invalid guest protection address");
-    const auto stop = end(address, bytes);
+    if (!address) error(22, "Invalid guest protection address");
+    const auto first = address & ~(page - 1);
+    const auto stop = aligned(end(address, bytes), page);
+    const auto size = stop - first;
+    if (size > std::numeric_limits<std::size_t>::max()) error(22, "Invalid guest protection size");
     const auto cpu = permissions(protection);
-    auto affected = impl->covered(address, stop);
-    auto candidate = Impl::remove(impl->regions, address, stop);
+    auto affected = impl->covered(first, stop);
+    auto candidate = Impl::remove(impl->regions, first, stop);
     for (auto& region : affected) {
         if (!region.owner) throw std::runtime_error("Unsupported guest memory protection of uncommitted reservation");
         region.protection = protection; region.identity = ++impl->nextIdentity; candidate.push_back(region);
     }
     Impl::sort(candidate);
-    impl->commit(std::move(candidate), impl->physical, [state = impl.get(), address, bytes, cpu] {
-        state->machine.Protect(address, static_cast<std::size_t>(bytes), cpu);
+    impl->commit(std::move(candidate), impl->physical, [state = impl.get(), first, size, cpu] {
+        state->machine.Protect(first, static_cast<std::size_t>(size), cpu);
     });
 }
 void GuestMemoryRuntime::Unmap(std::uint64_t address, std::uint64_t bytes) {

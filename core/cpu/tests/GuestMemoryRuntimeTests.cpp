@@ -95,7 +95,7 @@ void truthfulIntervalsAndFailures() {
     failure([&] { runtime.ReleaseDirect(physical, page); }, "Unsupported guest memory release of mapped");
     kernelError([&] { runtime.AllocateDirect(0, 8 * page, 6 * page, page, 0); }, 35);
     kernelError([&] { runtime.AllocateDirect(-1, 8 * page, page, page, 0); }, 22);
-    kernelError([&] { runtime.AllocateDirect(0, 9 * page, page, page, 0); }, 22);
+    kernelError([&] { runtime.AllocateDirect(8 * page, 8 * page, page, page, 0); }, 22);
     kernelError([&] { runtime.AllocateDirect(0, 8 * page, page, 3 * page, 0); }, 22);
     kernelError([&] { runtime.Reserve(std::numeric_limits<std::uint64_t>::max() - page + 1, page, 0x90, page); }, 22);
     require(runtime.Snapshot().Generation == stableGeneration && runtime.AvailableDirect(0, 8 * page, page).Address == 3 * page,
@@ -229,11 +229,93 @@ void transactionReentrancy() {
     runtime.Shutdown();
     require(machine.Mappings().empty() && outerOwner.expired(), "Completed shutdown retained unleased runtime backing");
 }
+
+void boundedSearchEnds() {
+    Cpu::Machine machine;
+    Cpu::GuestMemoryRuntime runtime(machine, 4 * page);
+    constexpr std::array<std::int64_t, 4> bounds{4 * page, 5 * page, 0x7fffffffff,
+        std::numeric_limits<std::int64_t>::max()};
+    const auto generation = runtime.Snapshot().Generation;
+    for (const auto bound : bounds) {
+        const auto available = runtime.AvailableDirect(0, bound, page);
+        require(available.Address == 0 && available.Size == 4 * page,
+                "Oversized physical search end did not bound available bytes to configured capacity");
+    }
+    require(runtime.Snapshot().Generation == generation, "Available search mutated the physical allocation registry");
+    require(runtime.AllocateDirect(0, 0x7fffffffff, page, page, 0) == 0 &&
+            runtime.AllocateDirect(0, std::numeric_limits<std::int64_t>::max(), 3 * page, page, 12) == page,
+            "Sentinel search end rejected a valid allocation inside configured capacity");
+    kernelError([&] { runtime.AvailableDirect(0, 0x7fffffffff, page); }, 35);
+    kernelError([&] { runtime.AllocateDirect(0, 0x7fffffffff, page, page, 0); }, 35);
+    kernelError([&] { runtime.AvailableDirect(4 * page, std::numeric_limits<std::int64_t>::max(), page); }, 35);
+    kernelError([&] { runtime.AllocateDirect(4 * page, std::numeric_limits<std::int64_t>::max(), page, page, 0); }, 35);
+    runtime.ReleaseDirect(page, 3 * page);
+    const auto available = runtime.AvailableDirect(0, 0x7fffffffff, 2 * page);
+    require(available.Address == 2 * page && available.Size == 2 * page,
+            "Bounded sentinel search ignored alignment or reported bytes outside the physical pool");
 }
 
-int main() {
+void roundedProtectionLengths() {
+    Cpu::Machine machine;
+    machine.Map(0x1000, 4096, rx);
+    struct Case { std::uint64_t Offset, Length, Begin, End; };
+    constexpr std::array<Case, 4> cases{{{0, 1, 0, page}, {23, 1, 0, page},
+        {page - 1, 2, 0, 2 * page}, {page + 19, page, page, 3 * page}}};
+    for (const auto& value : cases) {
+        Cpu::GuestMemoryRuntime runtime(machine, 4 * page);
+        runtime.MapFlexible(first, 3 * page, 2, 0x90);
+        runtime.Protect(first + value.Offset, value.Length, 1);
+        const auto query = runtime.Query(first + value.Offset);
+        require(query.Start == first + value.Begin && query.End == first + value.End && query.Protection == 1,
+                "Sub-page protection did not round the complete guest-page interval");
+        if (value.Begin) require(runtime.Query(first).Protection == 2, "Rounded protection changed an earlier untouched page");
+        if (value.End < 3 * page) require(runtime.Query(first + value.End).Protection == 2,
+                                        "Rounded protection changed a later untouched page");
+        for (const auto target : {first + value.Begin, first + value.End - 1}) {
+            runtime.Protect(first + value.Offset, value.Length, 1);
+            std::vector<std::uint8_t> code{0x48, 0xb8}; append64(code, target);
+            code.insert(code.end(), {0xc6, 0x00, 0x5a});
+            machine.Write(0x1000, std::as_bytes(std::span(code)));
+            machine.Set(Register::Rflags, 2);
+            bool denied = false;
+            try { machine.Run(0x1000, 0x100d, 32); }
+            catch (const std::exception&) { denied = true; }
+            require(denied && machine.Get(Register::Rip) == 0x100a && read(machine, target) == std::byte{0},
+                    "Actual x86 store did not fault at a protected rounded-range endpoint");
+            runtime.Protect(first + value.Offset, value.Length, 2);
+            require(machine.Run(0x100a, 0x100d, 10) == Cpu::StopReason::Address && read(machine, target) == std::byte{0x5a},
+                    "Actual x86 faulting store did not resume after restoring rounded-page write permission");
+        }
+    }
+    Cpu::GuestMemoryRuntime runtime(machine, 4 * page);
+    runtime.MapFlexible(first, 3 * page, 2, 0x90);
+    runtime.Unmap(first + 2 * page, page);
+    machine.Map(first + 2 * page, 4096, rw);
+    const auto generation = runtime.Snapshot().Generation;
+    kernelError([&] { runtime.Protect(first + 2 * page - 1, 2, 1); }, 13);
+    kernelError([&] { runtime.Protect(first, 0, 1); }, 22);
+    kernelError([&] { runtime.Protect(0, 1, 1); }, 22);
+    kernelError([&] { runtime.Protect(std::numeric_limits<std::uint64_t>::max(), 2, 1); }, 22);
+    kernelError([&] { runtime.Protect(std::numeric_limits<std::uint64_t>::max() - page + 2, 1, 1); }, 22);
+    require(runtime.Snapshot().Generation == generation && runtime.Query(first).Protection == 2 &&
+            runtime.Query(first + page).Protection == 2 && runtime.Query(first + 2 * page).Protection == 3,
+            "Rejected rounded protection changed an owned or pinned mapping");
+    std::vector<std::uint8_t> code{0x48, 0xb8}; append64(code, first + page + 17);
+    code.insert(code.end(), {0xc6, 0x00, 0x5a}); machine.Write(0x1000, std::as_bytes(std::span(code)));
+    require(machine.Run(0x1000, 0x100d, 32) == Cpu::StopReason::Address && read(machine, first + page + 17) == std::byte{0x5a},
+            "Failed full-page ownership validation partially protected the preceding owned page");
+}
+}
+
+int main(int argc, char** argv) {
     try {
-        secondPageFirstAliases(); truthfulIntervalsAndFailures(); gpuTransactionLifetime(); transactionReentrancy();
+        if (argc == 2 && std::string(argv[1]) == "search-bounds") boundedSearchEnds();
+        else if (argc == 2 && std::string(argv[1]) == "protect-lengths") roundedProtectionLengths();
+        else {
+            require(argc == 1, "Unknown guest memory test group");
+            secondPageFirstAliases(); truthfulIntervalsAndFailures(); gpuTransactionLifetime(); transactionReentrancy();
+            boundedSearchEnds(); roundedProtectionLengths();
+        }
         std::cout << "PASS guest memory physical aliases, query ABI, atomic failures, and GPU lease retirement\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
