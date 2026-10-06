@@ -37,21 +37,23 @@ void configureSamplerArguments(MetalBackend::TargetOptions& options, const Recom
 }
 
 SpirvTarget nativeTarget(id<MTLDevice> device, std::optional<MeshTargetLimits> mesh = {}) {
-    static constexpr std::array<std::uint32_t, 5> capabilities{
+    static constexpr std::array<std::uint32_t, 7> capabilities{
         spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
-        spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing};
-    static constexpr std::array<std::string_view, 2> extensions{
-        "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+        spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing,
+        spv::CapabilityShaderNonUniform, spv::CapabilitySampledImageArrayNonUniformIndexing};
+    static constexpr std::array<std::string_view, 3> extensions{
+        "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_EXT_descriptor_indexing"};
     const auto maximum = device.maxThreadsPerThreadgroup;
     SpirvTarget target{0x00401000, 0x00010300, 32, BdaAbi::Version, capabilities, extensions, false,
         {static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(maximum.height), static_cast<std::uint32_t>(maximum.depth)},
         static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(device.maxThreadgroupMemoryLength), {}, {}};
     if (mesh) {
-        static constexpr std::array<std::uint32_t, 6> meshCapabilities{
+        static constexpr std::array<std::uint32_t, 8> meshCapabilities{
             spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
-            spv::CapabilityMeshShadingEXT, spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing};
-        static constexpr std::array<std::string_view, 3> meshExtensions{
-            "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_EXT_mesh_shader"};
+            spv::CapabilityMeshShadingEXT, spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing,
+            spv::CapabilityShaderNonUniform, spv::CapabilitySampledImageArrayNonUniformIndexing};
+        static constexpr std::array<std::string_view, 4> meshExtensions{
+            "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_EXT_mesh_shader", "SPV_EXT_descriptor_indexing"};
         target.spirvVersion = 0x00010400;
         target.supportedCapabilities = meshCapabilities;
         target.supportedExtensions = meshExtensions;
@@ -153,10 +155,11 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         }
         auto target = nativeTarget(nativeDevice, mesh ? std::optional(draw->MeshLimits()) : std::nullopt);
         if (rectangle) {
-            static constexpr std::array<std::uint32_t, 6> capabilities{
+            static constexpr std::array<std::uint32_t, 8> capabilities{
                 spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses,
                 spv::CapabilityStorageBuffer8BitAccess, spv::CapabilityTessellation, spv::CapabilityMinLod,
-                spv::CapabilitySampledImageArrayDynamicIndexing};
+                spv::CapabilitySampledImageArrayDynamicIndexing,
+                spv::CapabilityShaderNonUniform, spv::CapabilitySampledImageArrayNonUniformIndexing};
             target.supportedCapabilities = capabilities;
             target.tessellation = draw->TessellationLimits();
         }
