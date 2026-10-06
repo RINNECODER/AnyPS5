@@ -114,9 +114,19 @@ void validateFixedFunctionInterpolation(const RdnaProgram& decoded, const Contro
                                instruction.op == RdnaOpcode::SAndB32 || instruction.op == RdnaOpcode::SAndB64 ||
                                instruction.op == RdnaOpcode::SOrB32 || instruction.op == RdnaOpcode::SOrB64 ||
                                instruction.op == RdnaOpcode::SLshlB32 || instruction.op == RdnaOpcode::SLshrB32;
-        const bool vectorAlu = instruction.op == RdnaOpcode::VMovB32 || instruction.op == RdnaOpcode::VAddF32 ||
-                               instruction.op == RdnaOpcode::VSubF32 || instruction.op == RdnaOpcode::VMulF32 ||
-                               instruction.op == RdnaOpcode::VMadF32 || instruction.op == RdnaOpcode::VFmaF32;
+        const bool singleWordVectorAlu = instruction.op == RdnaOpcode::VMovB32 || instruction.op == RdnaOpcode::VAddF32 ||
+                                         instruction.op == RdnaOpcode::VSubF32 || instruction.op == RdnaOpcode::VMulF32 ||
+                                         instruction.op == RdnaOpcode::VMadF32 || instruction.op == RdnaOpcode::VFmaF32 || instruction.op == RdnaOpcode::VMaxF32;
+        const bool vectorFamily = instruction.family == RdnaInstructionFamily::VOP1 || instruction.family == RdnaInstructionFamily::VOP2 ||
+                                  instruction.family == RdnaInstructionFamily::VOP3 || instruction.family == RdnaInstructionFamily::VOP3P ||
+                                  instruction.family == RdnaInstructionFamily::VOPC;
+        const bool indirectVector = instruction.op == RdnaOpcode::VMovrelsB32 || instruction.op == RdnaOpcode::VMovreldB32 ||
+                                    instruction.op == RdnaOpcode::VMovrelsdB32 || instruction.op == RdnaOpcode::VMovrelsd2B32 ||
+                                    instruction.op == RdnaOpcode::VSwaprelB32 || instruction.op == RdnaOpcode::VSwapB32 ||
+                                    instruction.op == RdnaOpcode::VReadfirstlaneB32 || instruction.op == RdnaOpcode::VReadlaneB32 ||
+                                    instruction.op == RdnaOpcode::VWritelaneB32 || instruction.op == RdnaOpcode::VPermlane16B32 ||
+                                    instruction.op == RdnaOpcode::VPermlanex16B32;
+        const bool vectorAlu = vectorFamily && !indirectVector;
         const bool memory = instruction.family == RdnaInstructionFamily::SMEM || instruction.family == RdnaInstructionFamily::MUBUF ||
                             instruction.family == RdnaInstructionFamily::MTBUF || instruction.family == RdnaInstructionFamily::FLAT ||
                             instruction.family == RdnaInstructionFamily::DS || instruction.family == RdnaInstructionFamily::MIMG;
@@ -127,24 +137,22 @@ void validateFixedFunctionInterpolation(const RdnaProgram& decoded, const Contro
             return operand.kind == RdnaOperandKind::ExecLo || operand.kind == RdnaOperandKind::ExecHi;
         };
         if ((!live.empty() || !pending.empty()) && (writesExec(instruction.destination) || writesExec(instruction.destination2))) fail();
-        const bool alu = instruction.family == RdnaInstructionFamily::VOP1 || instruction.family == RdnaInstructionFamily::VOP2 ||
-                         instruction.family == RdnaInstructionFamily::VOP3 || instruction.family == RdnaInstructionFamily::VOP3P ||
-                         instruction.family == RdnaInstructionFamily::VOPC;
-        const auto width = vectorAlu ? 1u : alu ? 2u : std::max({4u, instruction.dataDwordCount, instruction.dataComponents, instruction.imageAddressComponents});
+        const auto width = singleWordVectorAlu ? 1u : vectorFamily ? 2u : std::max({4u, instruction.dataDwordCount, instruction.dataComponents, instruction.imageAddressComponents});
+        const auto sourceWidth = instruction.op == RdnaOpcode::Exp ? 1u : width;
         std::set<std::uint32_t> partials;
         for (const auto& pair : pending) partials.insert(pair.first);
         if (!pending.empty() && (!vectorAlu || instruction.destination.kind != RdnaOperandKind::VectorRegister ||
                                  overlaps(partials, instruction.destination, width) || overlaps(partials, instruction.destination2, width))) fail();
         for (const auto& source : {instruction.source0, instruction.source1, instruction.source2, instruction.source3}) {
             if ((!live.empty() || !pending.empty()) && (source.dpp || source.dpp8)) fail();
-            if (overlaps(live, source, width) || overlaps(partials, source, width)) fail();
+            if (overlaps(live, source, sourceWidth) || overlaps(partials, source, sourceWidth)) fail();
         }
         if (instruction.imageNsaDwordCount != 0u) {
             for (const auto reg : instruction.imageNsaVectorRegisters) if (live.contains(reg) || partials.contains(reg)) fail();
         }
         for (const auto& destination : {instruction.destination, instruction.destination2}) {
             if (!overlaps(live, destination, width)) continue;
-            if (!vectorAlu || !plain(destination) || destination.kind != RdnaOperandKind::VectorRegister) fail();
+            if (!singleWordVectorAlu || !plain(destination) || destination.kind != RdnaOperandKind::VectorRegister) fail();
             live.erase(destination.reg);
         }
     }

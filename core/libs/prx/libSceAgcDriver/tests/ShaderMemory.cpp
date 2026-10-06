@@ -601,7 +601,7 @@ ShaderRecompiler::ShaderPixelStageInfo twoParameterPixel() {
     return pixel;
 }
 
-std::vector<std::uint32_t> noPerspectiveLocations(std::span<const std::uint32_t> code) {
+ShaderRecompiler::RecompileResult compilePixelInputs(std::span<const std::uint32_t> code) {
     using namespace ShaderRecompiler;
     RecompileRequest request{};
     request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
@@ -612,7 +612,11 @@ std::vector<std::uint32_t> noPerspectiveLocations(std::span<const std::uint32_t>
     request.target.subgroupSize = 64;
     request.layout.pushConstantSizeBytes = 128;
     request.useCache = false;
-    const auto result = Recompile(request);
+    return Recompile(request);
+}
+
+std::vector<std::uint32_t> noPerspectiveLocations(std::span<const std::uint32_t> code) {
+    const auto result = compilePixelInputs(code);
     const auto& words = result.spirv.Words();
     std::map<std::uint32_t, std::uint32_t> locations;
     std::vector<std::uint32_t> decorated;
@@ -650,6 +654,57 @@ void verifyPixelInputs() {
     require(noPerspectiveLocations(scheduled).empty(), "independent ALU changed perspective center interpolation");
     const auto queued = interpolated({0xc8100000u, 0xc8140100u, 0x7e1002f2u, 0xc8110001u, 0xc8150101u}, 0x05040504u);
     require(noPerspectiveLocations(queued).empty(), "independent ALU changed queued center interpolation");
+    for (const auto& shader : {
+        interpolated({0xc8000000u, 0xc8010001u}, 0u),
+        interpolated({0xc8000000u, 0xc8010001u, 0x20101300u}, 0u)
+    }) {
+        const auto result = compilePixelInputs(shader);
+        require(result.fragmentParameters.size() == 1u && result.fragmentParameters[0].location == 0u &&
+                result.fragmentParameters[0].sourceLocation == 0u && !result.fragmentParameters[0].flat &&
+                !result.fragmentParameters[0].perVertex && !result.fragmentParameters[0].custom,
+                "in-place exported interpolation lost its materialized perspective input");
+        std::map<std::uint32_t, std::uint32_t> locations;
+        std::map<std::uint32_t, std::uint32_t> storage;
+        std::map<std::uint32_t, std::vector<std::uint32_t>> values;
+        const auto& words = result.spirv.Words();
+        for (std::size_t at = 5u; at < words.size(); at += words[at] >> 16u) {
+            const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+            if (op == spv::OpDecorate && words[at + 2u] == spv::DecorationLocation) locations[words[at + 1u]] = words[at + 3u];
+            if (op == spv::OpDecorate) require(words[at + 2u] != spv::DecorationNoPerspective && words[at + 2u] != spv::DecorationFlat,
+                                             "in-place exported perspective interpolation changed its qualifier");
+            if (op == spv::OpVariable) storage[words[at + 2u]] = words[at + 3u];
+        }
+        bool exported = false;
+        for (std::size_t at = 5u; at < words.size(); at += words[at] >> 16u) {
+            const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+            if (op == spv::OpLoad && storage.contains(words[at + 3u]) && storage.at(words[at + 3u]) == spv::StorageClassInput &&
+                locations.contains(words[at + 3u]) && locations.at(words[at + 3u]) == 0u) {
+                values[words[at + 2u]] = {0x3e800000u, 0x3f000000u, 0x3f400000u, 0x3f800000u};
+            }
+            if (op == spv::OpBitcast && values.contains(words[at + 3u])) values[words[at + 2u]] = values.at(words[at + 3u]);
+            if (op == spv::OpCompositeExtract && values.contains(words[at + 3u])) {
+                const auto& source = values.at(words[at + 3u]);
+                require(words[at + 4u] < source.size(), "in-place interpolation extracted an invalid parameter component");
+                values[words[at + 2u]] = {source[words[at + 4u]]};
+            }
+            if (op == spv::OpCompositeConstruct) {
+                std::vector<std::uint32_t> composite;
+                for (std::size_t operand = 3u; operand < (words[at] >> 16u); ++operand) {
+                    if (!values.contains(words[at + operand])) { composite.clear(); break; }
+                    const auto& component = values.at(words[at + operand]);
+                    composite.insert(composite.end(), component.begin(), component.end());
+                }
+                if (!composite.empty()) values[words[at + 2u]] = std::move(composite);
+            }
+            if (op == spv::OpStore && storage.contains(words[at + 1u]) && storage.at(words[at + 1u]) == spv::StorageClassOutput &&
+                locations.contains(words[at + 1u]) && locations.at(words[at + 1u]) == 0u) {
+                require(values.contains(words[at + 2u]) && values.at(words[at + 2u]) == std::vector<std::uint32_t>{0x3e800000u, 0x3e800000u, 0x3e800000u, 0x3e800000u},
+                        "scalar EXP did not export the interpolated component0 to all four channels");
+                exported = true;
+            }
+        }
+        require(exported, "in-place interpolation omitted its materialized output");
+    }
     const auto inPlace = interpolated({0xc8000000u, 0xc8010001u, 0x7e080300u});
     require(noPerspectiveLocations(inPlace).empty(), "in-place center I interpolation was rejected");
     const auto branchAfterInputs = interpolated({0xc8100000u, 0xc8110001u, 0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u, 0xbf820000u});
