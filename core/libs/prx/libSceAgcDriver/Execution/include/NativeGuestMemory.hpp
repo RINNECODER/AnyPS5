@@ -11,6 +11,7 @@ struct BorrowedRange {
     std::uint64_t guestAddress;
     std::span<std::byte> host;
     bool writable;
+    std::uint64_t identity = 0;
 };
 
 class BorrowedRangesScope {

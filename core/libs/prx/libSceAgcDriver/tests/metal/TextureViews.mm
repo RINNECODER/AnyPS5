@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <string_view>
+#include <spirv/unified1/spirv.hpp>
 
 namespace {
 using MetalTests::Require;
@@ -22,6 +23,18 @@ kernel void compare(depth2d<float> t [[texture(0)]],device float* out [[buffer(0
 kernel void read2D(texture2d<float> t [[texture(0)]],device uchar4* out [[buffer(0)]],uint2 p [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized,filter::nearest); out[p.y*8+p.x]=uchar4(round(t.sample(s,(float2(p)+.5f)/8.0f)*255.0f)); }
 kernel void readR32Uint(texture2d<uint,access::read> t [[texture(0)]],device uint* out [[buffer(0)]],uint2 p [[thread_position_in_grid]]) { out[p.y*8+p.x]=t.read(p).x; }
 kernel void readR32Float(texture2d<float,access::read> t [[texture(0)]],device uint* out [[buffer(0)]],uint2 p [[thread_position_in_grid]]) { out[p.y*8+p.x]=as_type<uint>(t.read(p).x); }
+struct BdaHeader { uint version,count,entryBytes,reserved; };
+struct BdaRange { ulong begin,end; device uchar* address; uint permissions,reserved; };
+kernel void physicalStore(device const BdaHeader* header [[buffer(0)]],device atomic_uint* fault [[buffer(1)]],constant ulong& address [[buffer(2)]]) {
+    device const BdaRange* ranges=reinterpret_cast<device const BdaRange*>(header+1);
+    for(uint i=0;i<header->count;++i) {
+        if(address<ranges[i].begin||address>=ranges[i].end||4>ranges[i].end-address||(ranges[i].permissions&2)==0) continue;
+        *reinterpret_cast<device uint*>(ranges[i].address+address-ranges[i].begin)=0x9172a3b4;
+        uint page=uint(address>>12)+1u;
+        atomic_store_explicit(fault+9+(((page*0x9e3779b1u)>>20)&4095),page,memory_order_relaxed);
+        return;
+    }
+}
 kernel void write2D(texture2d<float,access::write> t [[texture(0)]],uint2 p [[thread_position_in_grid]]) { t.write(float4(17,31,73,127)/255.0f,p); }
 )";
 
@@ -249,6 +262,149 @@ void DccTypedViews(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
     }
 }
 
+MetalBackend::Result AliasProgram(const Metal::MetalDevice& backend,bool global,std::uint64_t address) {
+    constexpr std::array<std::uint32_t,17> descriptorCode{
+        0x34020082,0xe0302000,0x80000401,0xbf8c3f70,0x7e000000,0x7e003600,0x7e008200,0x4a080881,
+        0xd5800000,0x00000000,0xd59b0000,0x00000000,0xd5c10000,0x00000000,0xe0702000,0x80010401,0xbf810000};
+    constexpr std::array<std::uint32_t,22> globalCode{
+        0xbeea0400,0x34020082,0x34040084,0x340c0085,0x4a0c0cff,0x00001000,0x4ad404ff,0x00000048,
+        0xdc308010,0x046a0001,0xdcc98700,0x0c6a0201,0xdc3887b8,0x006a006a,0xbf8c3f70,0xdc788000,
+        0x006a0006,0xdc708010,0x006a0406,0xdc708014,0x006a0c06,0xbf810000};
+    std::vector<std::uint32_t> users;
+    if(global) users={static_cast<std::uint32_t>(address),0};
+    else users={0x800000,4u<<16,256,0x01016fac,0x900000,4u<<16,256,0x01016fac};
+    const auto code=global?std::span<const std::uint32_t>(globalCode):std::span<const std::uint32_t>(descriptorCode);
+    static constexpr std::array<std::uint32_t,3> capabilities{spv::CapabilityInt64,spv::CapabilityPhysicalStorageBufferAddresses,spv::CapabilityStorageBuffer8BitAccess};
+    static constexpr std::array<std::string_view,2> extensions{"SPV_KHR_physical_storage_buffer","SPV_KHR_8bit_storage"};
+    const auto maximum=backend.Device().maxThreadsPerThreadgroup;
+    const SpirvTarget target{0x00401000,0x00010300,32,BdaAbi::Version,capabilities,extensions,false,
+        {std::uint32_t(maximum.width),std::uint32_t(maximum.height),std::uint32_t(maximum.depth)},
+        std::uint32_t(maximum.width),std::uint32_t(backend.Device().maxThreadgroupMemoryLength),{}, {}};
+    const std::array<MemoryRegion,1> memory{{{0x500000,std::as_bytes(code)}}};
+    const ShaderComputeStageInfo compute{{64,1,1},0,{false,false,false},false,1,{}};
+    RecompileRequest request{{ShaderStage::Compute,0x500000,code,0,{}},{32,0,users,compute,{},{},memory},target,{0,0,0,128},{},false};
+    MetalBackend::TargetOptions options;
+    options.supportsInt64=options.supportsGpuAddresses=options.supportsSimdGroups=true;
+    return MetalBackend::ConvertToMetal(Recompile(request),ShaderStage::Compute,options);
+}
+
+void PhysicalAllowed(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    {
+        std::array<std::uint32_t,288> allocation;
+        allocation.fill(0xdeadbeef);
+        auto words=std::span(allocation).subspan(16,256);
+        for(unsigned lane=0;lane<64;++lane) words[lane*4]=lane*0x01010101u+7;
+        auto expected=allocation;
+        for(unsigned lane=0;lane<64;++lane) ++expected[16+lane*4];
+        auto bytes=std::as_writable_bytes(words);
+        const std::array<NativeGuestMemory::BorrowedRange,2> ranges{{{0x800000,bytes,false},{0x900000,bytes,true}}};
+        Metal::MetalShaderResources resources(backend,ranges);
+        const auto shader=AliasProgram(backend,false,0);
+        Metal::MetalComputePipeline pipeline(backend.Device(),shader);
+        auto commands=backend.CommandBuffer();
+        pipeline.Encode(commands,resources.Bindings(shader),MTLSizeMake(64,1,1),{},resources.Residency());
+        backend.Wait(commands);
+        Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"aliased descriptor execution faulted");
+        Require(allocation==expected,"legal descriptor aliases lost original load/add/store results or guards");
+    }
+    auto d=Descriptor();
+    const auto count=Graphics::DescribeSurface(d).guestBytes;
+    std::vector<std::byte> guest(count,std::byte{0x93});
+    const auto expected=guest;
+    const std::array<NativeGuestMemory::BorrowedRange,2> ranges{{{d.baseAddress,guest,false},{0x600000,guest,true}}};
+    Metal::MetalShaderResources resources(backend,ranges);
+    auto texture=resources.Texture(d);
+    auto output=backend.Buffer(256);
+    auto commands=backend.CommandBuffer();
+    Encode(backend,library,commands,@"read2D",texture->SampledView(),output,MTLSizeMake(8,8,1));
+    backend.Wait(commands);
+    Pixels(output.contents,{147,147,147,147},64,"unused physical borrow alias changed active sampled image");
+    Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty&&guest==expected,"unused physical alias changed guest bytes at completion");
+}
+
+void PhysicalGuards(const Metal::MetalDevice& backend) {
+    auto d=Descriptor();
+    const auto count=Graphics::DescribeSurface(d).guestBytes;
+    constexpr std::uint64_t alias=0x600100;
+    for(unsigned target=0;target<3;++target) for(bool bufferFirst:{false,true}) {
+        std::vector<std::byte> guest(count,std::byte{0x93}),keys(count/256,std::byte{0xff});
+        auto descriptor=d;
+        if(target==1) descriptor.dccAddress=0x400000;
+        auto physical=target==1?std::span(keys):std::span(guest).subspan(256,16);
+        std::vector<NativeGuestMemory::BorrowedRange> ranges{{d.baseAddress,guest,false}};
+        if(target==1) ranges.push_back({descriptor.dccAddress,keys,false});
+        ranges.push_back({alias,target==2?std::span(guest):physical,true});
+        Metal::MetalShaderResources resources(backend,ranges);
+        bool rejected=false;
+        try {
+            if(target==2) {
+                static_cast<void>(resources.Texture(descriptor));
+                auto other=descriptor;other.baseAddress=alias;
+                static_cast<void>(resources.Texture(other));
+            } else {
+                if(bufferFirst) static_cast<void>(resources.Buffer(alias,physical.size(),true));
+                static_cast<void>(resources.Texture(descriptor));
+                if(!bufferFirst) static_cast<void>(resources.Buffer(alias,physical.size(),true));
+            }
+        } catch(const std::invalid_argument& error) {
+            const std::string_view message(error.what());
+            rejected=message.find(target==1?"DCC metadata":"image")!=std::string_view::npos&&message.find(target==2?"overlapping":"alias")!=std::string_view::npos;
+        }
+        Require(rejected,"active physical image or metadata alias was accepted at a distinct guest address");
+        Require(std::all_of(guest.begin(),guest.end(),[](auto byte){return byte==std::byte{0x93};})&&
+            std::all_of(keys.begin(),keys.end(),[](auto byte){return byte==std::byte{0xff};}),"physical access rejection changed guest bytes");
+        if(target==2) break;
+    }
+}
+
+void PhysicalBdaGuards(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    constexpr std::uint64_t writeAddress=0x600080;
+    const auto shader=AliasProgram(backend,true,writeAddress);
+    for(bool metadata:{false,true}) for(bool adjacent:{false,true}) {
+        auto d=Descriptor();
+        const auto count=Graphics::DescribeSurface(d).guestBytes;
+        std::vector<std::byte> guest(count,std::byte{0x93}),keys(count/256,std::byte{0xff});
+        std::array<std::uint32_t,3> scalar{0xdeadbeef,0xcdcdcdcd,0xdeadbeef};
+        auto destination=adjacent?std::as_writable_bytes(std::span(scalar)).subspan(4,4):
+            (metadata?std::span(keys).first(4):std::span(guest).first(4));
+        if(metadata) d.dccAddress=adjacent?0x600100:0x400000;
+        else if(adjacent) d.baseAddress=0x600100;
+        std::vector<NativeGuestMemory::BorrowedRange> ranges{{d.baseAddress,guest,false},{writeAddress,destination,true}};
+        if(metadata) ranges.push_back({d.dccAddress,keys,false});
+        const auto expectedGuest=guest,expectedKeys=keys;
+        Metal::MetalShaderResources resources(backend,ranges);
+        static_cast<void>(resources.Texture(d));
+        id<MTLBuffer> table=nil,fault=nil;
+        for(const auto& binding:resources.Bindings(shader)) {
+            const auto found=std::find_if(shader.guest.bindings.begin(),shader.guest.bindings.end(),[&](const auto& guestBinding){
+                return guestBinding.descriptorSet==binding.descriptorSet&&guestBinding.binding==binding.binding;
+            });
+            Require(found!=shader.guest.bindings.end()&&binding.buffers.size()==1,"physical write ABI binding is invalid");
+            if(found->role==DescriptorRole::BdaPagetable) table=binding.buffers[0].buffer;
+            if(found->role==DescriptorRole::FaultBuffer) fault=binding.buffers[0].buffer;
+        }
+        Require(table!=nil&&fault!=nil,"physical write ABI resources are missing");
+        auto commands=backend.CommandBuffer();
+        auto encoder=[commands computeCommandEncoder];
+        [encoder setComputePipelineState:Pipeline(backend,library,@"physicalStore")];
+        for(auto resource:resources.Residency()) [encoder useResource:resource usage:MTLResourceUsageRead|MTLResourceUsageWrite];
+        [encoder setBuffer:table offset:0 atIndex:0]; [encoder setBuffer:fault offset:0 atIndex:1];
+        [encoder setBytes:&writeAddress length:sizeof(writeAddress) atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+        [encoder endEncoding]; backend.Wait(commands);
+        bool rejected=false;
+        try {Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"physical write completion faulted");}
+        catch(const std::runtime_error& error) {
+            const std::string_view message(error.what());
+            rejected=message.starts_with("Metal draw BDA writes alias")&&message.find(metadata?"DCC metadata":"active image")!=std::string_view::npos;
+            if(!rejected) throw;
+        }
+        Require(rejected!=adjacent,"dirty physical write accepted an active image alias or rejected an unrelated same-page neighbor");
+        Require(guest==expectedGuest&&keys==expectedKeys,"dirty physical write modified active image texels or metadata");
+        Require(scalar[0]==0xdeadbeef&&scalar[2]==0xdeadbeef&&scalar[1]==(adjacent?0x9172a3b4u:0xcdcdcdcdu),"partial-page copyback lost its actual GPU write or scalar guards");
+    }
+}
+
 void AccessGuards(const Metal::MetalDevice& backend) {
     auto d=Descriptor();
     const auto bytes=Graphics::DescribeSurface(d).guestBytes;
@@ -284,5 +440,8 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     for(auto format:{7u,22u}) Comparison(backend,library,format);
     Dcc(backend,library);
     DccTypedViews(backend,library);
+    PhysicalAllowed(backend,library);
+    PhysicalGuards(backend);
+    PhysicalBdaGuards(backend,library);
     AccessGuards(backend);
 }

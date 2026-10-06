@@ -21,6 +21,7 @@ public:
     ~MetalDraw();
     MetalDraw(const MetalDraw&) = delete;
     MetalDraw& operator=(const MetalDraw&) = delete;
+    void InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed);
     void DumpSamplesSynchronously(std::uint64_t guestAddress);
     [[nodiscard]] ShaderRecompiler::MeshTargetLimits MeshLimits() const;
     [[nodiscard]] ShaderRecompiler::TessellationTargetLimits TessellationLimits() const;

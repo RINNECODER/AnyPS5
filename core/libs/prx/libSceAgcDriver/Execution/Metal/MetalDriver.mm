@@ -23,6 +23,41 @@ void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("Metal driver: ") + reason);
 }
 
+std::vector<NativeGuestMemory::BorrowedRange> changedMappings(
+    std::span<const NativeGuestMemory::BorrowedRange> previous,
+    std::span<const NativeGuestMemory::BorrowedRange> replacement) {
+    std::vector<NativeGuestMemory::BorrowedRange> changed;
+    for (const auto& old : previous) {
+        const auto oldEnd = old.guestAddress + old.host.size();
+        auto cursor = old.guestAddress;
+        while (cursor < oldEnd) {
+            auto next = std::upper_bound(replacement.begin(), replacement.end(), cursor,
+                [](std::uint64_t address, const auto& range) { return address < range.guestAddress; });
+            const NativeGuestMemory::BorrowedRange* current = nullptr;
+            if (next != replacement.begin()) {
+                const auto& candidate = *std::prev(next);
+                if (cursor - candidate.guestAddress < candidate.host.size()) current = &candidate;
+            }
+            const auto end = current ? std::min(oldEnd, current->guestAddress + current->host.size()) :
+                next == replacement.end() ? oldEnd : std::min(oldEnd, next->guestAddress);
+            const auto offset = static_cast<std::size_t>(cursor - old.guestAddress);
+            const bool same = current && old.writable == current->writable && old.identity == current->identity &&
+                old.host.data() + offset == current->host.data() + static_cast<std::size_t>(cursor - current->guestAddress);
+            if (!same) changed.push_back({cursor, old.host.subspan(offset, static_cast<std::size_t>(end - cursor)), old.writable, old.identity});
+            cursor = end;
+        }
+    }
+    return changed;
+}
+
+bool overlapsMappings(std::uint64_t address, std::size_t bytes,
+    std::span<const NativeGuestMemory::BorrowedRange> changed) {
+    if (bytes == 0) return false;
+    return std::any_of(changed.begin(), changed.end(), [&](const auto& range) {
+        return address <= range.guestAddress ? range.guestAddress - address < bytes : address - range.guestAddress < range.host.size();
+    });
+}
+
 bool waitFree(const DriverDetail::Submission& submission) {
     if (submission.queue == 0 || submission.suspend || !submission.flips.empty() ||
         !submission.renderingWaits.empty() || submission.rewindTail != nullptr) return false;
@@ -47,7 +82,7 @@ MetalDriver::~MetalDriver() { impl->Stop(); }
 MetalDriver& MetalDriver::Get() { static MetalDriver driver; return driver; }
 
 void MetalDriver::Configure(void* device, void* library,
-    std::span<const NativeGuestMemory::BorrowedRange> ranges, EopInterrupt interrupt) {
+    std::span<const NativeGuestMemory::BorrowedRange> ranges, EopInterrupt interrupt, std::uint64_t initialGeneration) {
     require(!Impl::OnWorkerThread(), "worker cannot configure its driver");
     std::lock_guard gpuLock(impl->gpuMutex);
     std::lock_guard lock(impl->mutex);
@@ -58,13 +93,16 @@ void MetalDriver::Configure(void* device, void* library,
     auto nativeLibrary = (__bridge id<MTLLibrary>)library;
     require(nativeDevice != nil && nativeLibrary != nil && nativeLibrary.device == nativeDevice, "native device and library are missing or incompatible");
     NativeGuestMemory::BorrowedRangesScope scope(ranges);
+    std::vector<NativeGuestMemory::BorrowedRange> captured(ranges.begin(), ranges.end());
+    std::sort(captured.begin(), captured.end(), [](const auto& a, const auto& b) { return a.guestAddress < b.guestAddress; });
     auto backend = std::make_unique<MetalDevice>(nativeDevice, nativeLibrary);
     auto presentation = std::make_unique<MetalPresentation>(*backend, nativeLibrary);
     auto draw = std::make_unique<MetalDraw>(nativeDevice, nativeLibrary);
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>();
     auto nullPixel = DriverDetail::CaptureNullPixelShader();
     registry->emplace(nullPixel->codeAddress, std::move(nullPixel));
-    impl->ranges.assign(ranges.begin(), ranges.end());
+    impl->ranges = std::move(captured);
+    impl->rangeGeneration = initialGeneration;
     impl->nativeDevice = nativeDevice;
     impl->nativeLibrary = nativeLibrary;
     impl->backend = std::move(backend);
@@ -73,6 +111,41 @@ void MetalDriver::Configure(void* device, void* library,
     impl->eopInterrupt = std::move(interrupt);
     impl->shaders = std::move(registry);
     impl->configured = true;
+}
+
+void MetalDriver::ReplaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation) {
+    require(!Impl::OnWorkerThread(), "worker cannot replace its borrowed ranges");
+    std::vector<NativeGuestMemory::BorrowedRange> replacement(ranges.begin(), ranges.end());
+    std::sort(replacement.begin(), replacement.end(), [](const auto& a, const auto& b) { return a.guestAddress < b.guestAddress; });
+    {
+        NativeGuestMemory::BorrowedRangesScope scope(replacement);
+    }
+    impl->CheckFailureAndStopping();
+    WaitIdle();
+    std::lock_guard gpuLock(impl->gpuMutex);
+    std::lock_guard lock(impl->mutex);
+    if (impl->failure) std::rethrow_exception(impl->failure);
+    if (impl->stopping) throw DriverStopped{};
+    require(impl->configured, "native resources have not been configured");
+    require(generation > impl->rangeGeneration, "borrowed range generation must increase");
+    require(impl->accepted == impl->completed &&
+        std::none_of(impl->workers.begin(), impl->workers.end(), [](const auto& item) {
+            return item.second.active || !item.second.pending.empty();
+        }), "borrowed range replacement requires drained submissions");
+    auto changed = changedMappings(impl->ranges, replacement);
+    auto added = changedMappings(replacement, impl->ranges);
+    changed.insert(changed.end(), added.begin(), added.end());
+    auto registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
+    std::erase_if(*registry, [&](const auto& entry) {
+        const auto& snapshot = *entry.second;
+        if (snapshot.codeAddress == DriverDetail::NullPixelProgramAddress()) return false;
+        return overlapsMappings(snapshot.codeAddress, snapshot.code.size() * sizeof(std::uint32_t), changed) ||
+            overlapsMappings(snapshot.headerAddress, snapshot.header.size(), changed);
+    });
+    impl->draw->InvalidateBorrowedRanges(changed);
+    impl->shaders = std::move(registry);
+    impl->ranges = std::move(replacement);
+    impl->rangeGeneration = generation;
 }
 
 void MetalDriver::Impl::CheckFailureAndStopping() {
@@ -149,8 +222,10 @@ void MetalDriver::Submit(const Packet* packet, std::uint32_t queue) {
     Impl::Submission submission{};
     submission.queue = queue;
     Packet descriptor{};
+    std::uint64_t generation = 0;
     {
         std::lock_guard gpuLock(impl->gpuMutex);
+        generation = impl->rangeGeneration;
         NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
         GuestMemory::Read(reinterpret_cast<std::uintptr_t>(packet), std::as_writable_bytes(std::span(&descriptor, 1)), alignof(Packet));
         require(descriptor.flags == 0, "nonzero submission flags are not implemented");
@@ -162,6 +237,7 @@ void MetalDriver::Submit(const Packet* packet, std::uint32_t queue) {
         std::lock_guard lock(impl->mutex);
         if (impl->failure) std::rethrow_exception(impl->failure);
         if (impl->stopping) throw DriverStopped{};
+        require(generation == impl->rangeGeneration, "borrowed ranges changed while submission was captured");
         require(impl->accepted != std::numeric_limits<std::uint64_t>::max() && impl->eventSerial != std::numeric_limits<std::uint64_t>::max(), "submission serial overflow");
         submission.serial = impl->accepted + 1;
         impl->ReserveOutputs(submission);
@@ -337,14 +413,17 @@ void MetalDriver::SuspendPoint() {
 void MetalDriver::RegisterShader(const Shader* shader) {
     impl->CheckFailureAndStopping();
     std::shared_ptr<const DriverDetail::ShaderSnapshot> snapshot;
+    std::uint64_t generation = 0;
     {
         std::lock_guard gpuLock(impl->gpuMutex);
+        generation = impl->rangeGeneration;
         NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
         snapshot = DriverDetail::ReadRegisteredShader(reinterpret_cast<std::uintptr_t>(shader));
     }
     std::lock_guard lock(impl->mutex);
     if (impl->failure) std::rethrow_exception(impl->failure);
     if (impl->stopping) throw DriverStopped{};
+    require(generation == impl->rangeGeneration, "borrowed ranges changed while shader was captured");
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
     registry->insert_or_assign(snapshot->codeAddress, std::move(snapshot));
     impl->shaders = std::move(registry);

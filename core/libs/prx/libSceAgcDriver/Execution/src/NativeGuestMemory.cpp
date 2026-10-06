@@ -58,6 +58,9 @@ BorrowedRangesScope::BorrowedRangesScope(std::span<const BorrowedRange> borrowed
     for (const auto& range : validated) {
         if (range.guestAddress == 0 || range.host.empty() || range.host.data() == nullptr)
             throw std::invalid_argument("Native guest memory borrow is empty or null");
+        const auto hostAddress = reinterpret_cast<std::uintptr_t>(range.host.data());
+        if (range.host.size() > std::numeric_limits<std::uintptr_t>::max() - hostAddress)
+            throw std::invalid_argument("Native guest memory host range overflows");
         const auto end = End(range.guestAddress, range.host.size());
         if (range.guestAddress < previousEnd)
             throw std::invalid_argument("Native guest memory borrows overlap");
