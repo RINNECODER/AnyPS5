@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include "MetalComputeDispatch.hpp"
+#include "SceShaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgc/Misc/include/Suspend.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
@@ -29,6 +30,12 @@ constexpr std::array<std::uint32_t, 22> VccBaseCode{
     0xbeea0400, 0x34020082, 0x34040084, 0x340c0085, 0x4a0c0cff, 0x00001000, 0x4ad404ff, 0x00000048,
     0xdc308010, 0x046a0001, 0xdcc98700, 0x0c6a0201, 0xdc3887b8, 0x006a006a, 0xbf8c3f70, 0xdc788000,
     0x006a0006, 0xdc708010, 0x006a0406, 0xdc708014, 0x006a0c06, 0xbf810000,
+};
+
+constexpr std::array<std::uint32_t, 24> Wave32SubgroupCode{
+    0x34020084, 0xd765000a, 0x000100c1, 0x3604009f, 0x7d880488, 0xbe880f6a, 0x7e160208, 0xd7600009,
+    0x00010700, 0x7e180209, 0xbe9e037e, 0x7e1a0280, 0x7da80488, 0x7e1a0281, 0xbefe031e, 0xe0701000,
+    0x80010a01, 0xe0701004, 0x80010b01, 0xe0701008, 0x80010c01, 0xe070100c, 0x80010d01, 0xbf810000,
 };
 
 void Require(bool condition, const std::string& reason) {
@@ -75,6 +82,110 @@ std::array<std::uint32_t, 8> UserData(std::uint64_t input, std::uint64_t output,
     std::copy(in.begin(), in.end(), userData.begin());
     std::copy(out.begin(), out.end(), userData.begin() + 4);
     return userData;
+}
+
+void OriginalWave32Subgroup(id<MTLDevice> device, id<MTLLibrary> library) {
+    constexpr std::uint32_t Sentinel = 0xdeadbeef, Threads = 64, Results = 4, GuardWords = 64;
+    constexpr std::uint64_t CodeAllocation = 0x700000, CodeAddress = CodeAllocation + GuardWords * 4,
+        OutputAllocation = 0x710000, OutputAddress = OutputAllocation + GuardWords * 4,
+        HeaderAllocation = 0x720000, HeaderAddress = HeaderAllocation + GuardWords * 4,
+        CommandsAllocation = 0x730000, CommandsAddress = CommandsAllocation + GuardWords * 4,
+        PacketAllocation = 0x740000, PacketAddress = PacketAllocation + GuardWords * 4, LabelAddress = 0x750000;
+    std::array<std::uint32_t, GuardWords * 2 + Wave32SubgroupCode.size()> code;
+    code.fill(Sentinel);
+    std::copy(Wave32SubgroupCode.begin(), Wave32SubgroupCode.end(), code.begin() + GuardWords);
+    const auto originalCode = code;
+    std::array<std::uint32_t, GuardWords * 2 + Threads * Results> output;
+    output.fill(Sentinel);
+    auto expectedOutput = output;
+    constexpr std::array<const char*, Results> names{
+        "v_mbcnt_lo_u32_b32", "s_bcnt1 of a VCC compare", "v_readlane_b32 lane 3", "v_cmpx EXEC"};
+    for (std::uint32_t tid = 0; tid < Threads; ++tid) {
+        const auto lane = tid % 32u;
+        const std::array<std::uint32_t, Results> expected{lane, 8u, tid - lane + 3u, lane < 8u ? 1u : 0u};
+        std::copy(expected.begin(), expected.end(), expectedOutput.begin() + GuardWords + tid * Results);
+    }
+    std::array<std::byte, GuardWords * 8 + sizeof(Shader) + sizeof(ShaderUserData)> headerBytes;
+    headerBytes.fill(std::byte{0x7b});
+    std::fill_n(headerBytes.begin() + GuardWords * 4, sizeof(Shader) + sizeof(ShaderUserData), std::byte{0});
+    Shader header{};
+    header.file_header = 0x34333231;
+    header.version = 0x18;
+    header.code = reinterpret_cast<const volatile void*>(CodeAddress);
+    header.user_data = reinterpret_cast<ShaderUserData*>(HeaderAddress + sizeof(Shader));
+    header.header_size = sizeof(Shader) + sizeof(ShaderUserData);
+    header.shader_size = sizeof(Wave32SubgroupCode);
+    std::memcpy(headerBytes.data() + GuardWords * 4, &header, sizeof(header));
+    const auto originalHeader = headerBytes;
+    std::array<std::uint32_t, 8> userData{};
+    const auto descriptor = Descriptor(OutputAddress, Threads * Results);
+    std::copy(descriptor.begin(), descriptor.end(), userData.begin() + 4);
+    std::vector<std::uint32_t> words;
+    const auto registers = [&](std::uint32_t first, std::span<const std::uint32_t> values) {
+        std::vector<std::uint32_t> payload{first};
+        payload.insert(payload.end(), values.begin(), values.end());
+        const auto packet = Packet(0x76, payload);
+        words.insert(words.end(), packet.begin(), packet.end());
+    };
+    const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+    const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>(CodeAddress >> 8u), 0};
+    const std::array<std::uint32_t, 1> rsrc2{static_cast<std::uint32_t>(userData.size()) << 1u};
+    registers(0x207, threads);
+    registers(0x20c, program);
+    registers(0x213, rsrc2);
+    registers(0x240, userData);
+    const std::array<std::uint32_t, 4> dispatchPayload{1, 1, 1, 0x8041};
+    const auto dispatch = Packet(0x15, dispatchPayload);
+    words.insert(words.end(), dispatch.begin(), dispatch.end());
+    const std::array<std::uint32_t, 8> eop{
+        0xc0064900, 0, (1u << 29) | (1u << 24), static_cast<std::uint32_t>(LabelAddress + 4), 0, 1, 0, 0};
+    words.insert(words.end(), eop.begin(), eop.end());
+    std::array<std::uint32_t, GuardWords * 2 + 128> commands;
+    commands.fill(Sentinel);
+    Require(words.size() <= 128, "Original wave32 commands exceed their guarded allocation");
+    std::copy(words.begin(), words.end(), commands.begin() + GuardWords);
+    const auto originalCommands = commands;
+    std::array<std::byte, GuardWords * 8 + sizeof(::Packet)> packetBytes;
+    packetBytes.fill(std::byte{0x7b});
+    const ::Packet packet{reinterpret_cast<std::uint32_t*>(CommandsAddress), static_cast<std::uint32_t>(words.size()), 0, {}};
+    std::memcpy(packetBytes.data() + GuardWords * 4, &packet, sizeof(packet));
+    const auto originalPacket = packetBytes;
+    std::array<std::uint32_t, 3> label{Sentinel, 0, Sentinel};
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 6> ranges{{
+        {CodeAllocation, std::as_writable_bytes(std::span(code)), false},
+        {OutputAllocation, std::as_writable_bytes(std::span(output)), true},
+        {HeaderAllocation, headerBytes, false},
+        {CommandsAllocation, std::as_writable_bytes(std::span(commands)), false},
+        {PacketAllocation, packetBytes, false},
+        {LabelAddress, std::as_writable_bytes(std::span(label)), true}}};
+    std::atomic<unsigned> callbacks{0};
+    AgcDriver::Metal::MetalDriver driver;
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t queue) {
+        Require(queue == 0x20 && label[1] == 1, "Original wave32 EOP queue or completed label differs");
+        callbacks.fetch_add(1);
+    });
+    try {
+        driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
+        driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+        driver.WaitIdle();
+        for (std::uint32_t tid = 0; tid < Threads; ++tid)
+            for (std::uint32_t result = 0; result < Results; ++result) {
+                const auto index = GuardWords + tid * Results + result;
+                Require(output[index] == expectedOutput[index],
+                    "Original wave32 thread " + std::to_string(tid) + " " + names[result] + " is " +
+                    std::to_string(output[index]) + ", expected " + std::to_string(expectedOutput[index]));
+            }
+        Require(output == expectedOutput, "Original wave32 changed its output allocation guards");
+        Require(label == std::array<std::uint32_t, 3>{Sentinel, 1, Sentinel} && callbacks.load() == 1,
+            "Original wave32 did not finish exactly one guarded EOP");
+        Require(code == originalCode && headerBytes == originalHeader && commands == originalCommands && packetBytes == originalPacket,
+            "Original wave32 changed borrowed read-only code, header, commands, packet or allocation guards");
+        driver.Shutdown();
+    } catch (...) {
+        try { driver.Shutdown(); } catch (...) {}
+        throw;
+    }
+    std::cout << "Original RDNA wave32 subgroup: public driver RegisterShader/Submit methods, two waves, lane/count/readlane/EXEC goldens and guarded EOP passed\n";
 }
 
 void OriginalSubmitExports(id<MTLDevice> device, id<MTLLibrary> library) {
@@ -293,6 +404,7 @@ int main(int argc, char** argv) {
             id<MTLLibrary> library = [device newLibraryWithURL:url error:&error];
             Require(library != nil, error ? error.localizedDescription.UTF8String : "PM4 utility library failed to load");
             OriginalSubmitExports(device, library);
+            OriginalWave32Subgroup(device, library);
             CheckedPm4Memory();
             Pm4DescriptorReplay(device);
             Pm4BdaReplay(device, true);
