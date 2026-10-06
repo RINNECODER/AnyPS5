@@ -188,19 +188,20 @@ final class LauncherStore {
             defer { isRunning = false; runningTitle = nil }
             do {
                 try await releaseResources()
-                var sessionGame = game
+                var resourceDirectory: URL?
                 if let imagePath = game.resourceImagePath {
                     let resources = try await ExFATResources.mount(URL(fileURLWithPath: imagePath))
                     mountedResources = resources
-                    sessionGame.workingDirectory = resources.directory.path
+                    resourceDirectory = resources.directory
                 }
                 if sessionCancelled {
                     sessionStatus = "Session cancelled"
                     console += "Session cancelled before guest execution.\n"
                 } else {
-                    let stream = try runner.run(engine: URL(fileURLWithPath: library.enginePath), game: sessionGame, capabilities: capabilities)
+                    let stream = try runner.run(engine: URL(fileURLWithPath: library.enginePath), game: game,
+                                                capabilities: capabilities, resourceDirectory: resourceDirectory)
                     sessionStatus = "Running \(game.title)"
-                    console = "Engine: \(library.enginePath)\nGuest: \(game.executablePath)\nResources: \(sessionGame.workingDirectory)\n\n"
+                    console = "Engine: \(library.enginePath)\nGuest: \(game.executablePath)\nResources: \(resourceDirectory?.path ?? game.workingDirectory)\n\n"
                     let prefix = console
                     for try await event in stream {
                         switch event {
