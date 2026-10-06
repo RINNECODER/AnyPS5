@@ -85,7 +85,7 @@ struct GuestFiles::Impl {
 
     std::int64_t readPath(std::uint64_t address, std::string& path) const {
         for (std::size_t index = 0; index < maxPath; ++index) {
-            if (address > std::numeric_limits<std::uint64_t>::max() - index) return kernelError(14);
+            if (address >= std::numeric_limits<std::uint64_t>::max() - index) return kernelError(14);
             std::array<std::byte, 1> byte;
             try {
                 machine.CheckAccess(address + index, 1, Permission::Read);

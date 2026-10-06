@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -119,6 +120,8 @@ struct Session {
 
 void fileGates() {
     Session session;
+    require(session.call("1G3lF1Gg1k8", std::numeric_limits<std::uint64_t>::max(), 0) == 0xffffffff8002000eULL,
+            "Overflowing kernel open pathname did not return signed EFAULT to actual x86 caller");
     const auto descriptor = session.call("1G3lF1Gg1k8", 0x3000, 0, 0666);
     require(descriptor == 3, "Kernel open did not return a private guest descriptor");
     require(session.call("Cg4srZ6TKbU", descriptor, 0x5000, 3) == 3 &&
