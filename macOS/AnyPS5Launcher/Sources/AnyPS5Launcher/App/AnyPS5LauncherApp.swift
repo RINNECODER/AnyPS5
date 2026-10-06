@@ -4,33 +4,46 @@ import SwiftUI
 @main
 struct AnyPS5LauncherApp: App {
     @NSApplicationDelegateAdaptor(LauncherDelegate.self) private var delegate
-    @State private var store = LauncherStore()
+    @State private var store: LauncherStore
+    @AppStorage("MacPS.consoleInterface") private var consoleInterface = true
+
+    init() {
+        _store = State(initialValue: LauncherStore(supportDirectory: MacPSPreview.supportDirectory))
+    }
 
     var body: some Scene {
-        WindowGroup("AnyPS5", id: "launcher") {
-            ContentView(store: store)
+        WindowGroup("MacPS", id: "launcher") {
+            ContentView(store: store, isPreview: MacPSPreview.enabled)
                 .frame(minWidth: 1050, minHeight: 680)
                 .onAppear { delegate.store = store }
                 .task {
+                    if MacPSPreview.enabled {
+                        MacPSPreview.loadCatalogue(into: store)
+                        return
+                    }
                     async let refresh: () = store.snapshot == nil ? store.refresh() : ()
                     async let probe: () = store.probeEngine()
                     _ = await (refresh, probe)
                 }
         }
-        .defaultSize(width: 1320, height: 850)
+        .defaultSize(width: 1440, height: 850)
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(after: .newItem) {
-                Button("Add Local Executable…") { store.attach() }.keyboardShortcut("o")
+                Button("Add Local Executable…") { store.attach() }.keyboardShortcut("o").disabled(MacPSPreview.enabled)
                 Button("Refresh Orbit Catalogue") { Task { await store.refresh() } }
                     .keyboardShortcut("r").disabled(store.isRefreshing)
             }
             CommandMenu("Engine") {
                 Button("Choose AnyPS5 Runtime…") { store.chooseEngine() }
-                    .disabled(store.isRunning || store.isProbingEngine)
+                    .disabled(MacPSPreview.enabled || store.isRunning || store.isProbingEngine)
                 Button("Run Selected Game") { if let game = store.selectedLocal { store.launch(game) } }
-                    .keyboardShortcut(.return).disabled(store.selectedLocal == nil || store.isRunning || store.isCleaningResources)
-                Button("Stop Session") { store.stop() }.disabled(!store.isRunning)
+                    .keyboardShortcut(.return).disabled(MacPSPreview.enabled || store.selectedLocal == nil || store.isRunning || store.isCleaningResources || store.isInspectingGame || store.isProbingEngine)
+                Button("Stop Session") { store.stop() }.disabled(MacPSPreview.enabled || !store.isRunning)
                 Toggle("Show Console", isOn: $store.showConsole).keyboardShortcut("l")
+            }
+            CommandGroup(after: .toolbar) {
+                Toggle("Console interface", isOn: $consoleInterface)
             }
         }
     }
