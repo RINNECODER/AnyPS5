@@ -87,9 +87,14 @@ void writeWord(Machine& machine, std::uint64_t address, std::uint64_t value) {
 
 std::uint64_t tlsOffset(const SceImageData::Relocation& relocation, const SceImageData::Symbol& symbol,
                         const std::optional<SceSegment>& tls) {
-    if (!tls || !tls->MemorySize) fail("TLS relocation requires a nonempty main-module TLS segment");
-    if (relocation.Type == 16 && relocation.Addend != 0) fail("DTPMOD64 addend must be zero");
-    if (relocation.Type == 16 && relocation.Symbol == 0) return 0;
+    if (!tls) fail("TLS relocation requires a nonempty main-module TLS segment");
+    if (relocation.Type == 16) {
+        if (relocation.Addend != 0) fail("DTPMOD64 addend must be zero");
+        if (relocation.Symbol && (symbol.Type != 6 || !symbol.Section || symbol.Section >= 0xff00 || symbol.Import))
+            fail("TLS relocation requires a defined ordinary-section TLS symbol");
+        return 0;
+    }
+    if (!tls->MemorySize) fail("TLS relocation requires a nonempty main-module TLS segment");
     if (relocation.Symbol == 0) {
         if (relocation.Addend < 0 || static_cast<std::uint64_t>(relocation.Addend) >= tls->MemorySize)
             fail("TLS relocation addend is outside the main module");
@@ -239,8 +244,7 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
     if (image.ProcParam) mapped(image.ProcParam->Address, image.ProcParam->FileSize, 4, true);
     if (image.Tls) {
         const auto& tls = *image.Tls;
-        if (!tls.MemorySize) block("empty guest TLS segment is unsupported");
-        else {
+        if (tls.MemorySize) {
             const auto alignment = std::max<std::uint64_t>(tls.Alignment, 1);
             if (tls.Address % alignment || tls.Offset % alignment) fail("unsupported TLS alignment residue");
             if ((tls.Flags & 4) == 0) fail("TLS template must be readable");
@@ -580,24 +584,25 @@ std::vector<SceRelocationWrite> PlanSceRelocations(const SceParsedImage& image, 
             if (relocation.Symbol && !source.Section && !source.Import) fail("unresolved local symbol relocation");
             const auto symbol = symbolResolver(relocation.Symbol);
             if (relocation.Type == 16 || relocation.Type == 17 || relocation.Type == 18) {
-                if (!tls || symbol.Type != 6 || !symbol.TlsModuleId) fail("TLS relocation requires initialized typed provider storage");
-                auto offset = symbol.TlsOffset;
+                if (!tls || symbol.Type != 6 || !symbol.TlsModuleId) fail("TLS relocation requires initialized typed provider identity");
+                const auto size = tls->MemorySize(symbol.TlsModuleId);
                 if (relocation.Type == 16) {
                     if (relocation.Addend != 0) fail("DTPMOD64 addend must be zero");
-                } else if (relocation.Addend < 0) {
-                    const auto magnitude = 0 - static_cast<std::uint64_t>(relocation.Addend);
-                    if (magnitude > offset) fail("TLS relocation addend is outside the provider module");
-                    offset -= magnitude;
+                    value = symbol.TlsModuleId;
                 } else {
-                    const auto addend = static_cast<std::uint64_t>(relocation.Addend);
-                    const auto size = tls->MemorySize(symbol.TlsModuleId);
-                    if (offset >= size || addend >= size - offset) fail("TLS relocation addend is outside the provider module");
-                    offset += addend;
+                    auto offset = symbol.TlsOffset;
+                    if (relocation.Addend < 0) {
+                        const auto magnitude = 0 - static_cast<std::uint64_t>(relocation.Addend);
+                        if (magnitude > offset) fail("TLS relocation addend is outside the provider module");
+                        offset -= magnitude;
+                    } else {
+                        const auto addend = static_cast<std::uint64_t>(relocation.Addend);
+                        if (offset >= size || addend >= size - offset) fail("TLS relocation addend is outside the provider module");
+                        offset += addend;
+                    }
+                    if (relocation.Type == 17) value = tls->Dtpoff(symbol.TlsModuleId, offset);
+                    else value = static_cast<std::uint64_t>(tls->Tpoff(symbol.TlsModuleId, offset));
                 }
-                tls->Resolve(symbol.TlsModuleId, offset);
-                if (relocation.Type == 16) value = symbol.TlsModuleId;
-                else if (relocation.Type == 17) value = tls->Dtpoff(symbol.TlsModuleId, offset);
-                else value = static_cast<std::uint64_t>(tls->Tpoff(symbol.TlsModuleId, offset));
             } else {
                 if (symbol.Type == 6 || symbol.TlsModuleId || symbol.TlsOffset) fail("non-TLS relocation resolved to TLS storage");
                 if (relocation.Type == 7 && symbol.Type != 2) fail("JUMP_SLOT relocation requires a function provider");

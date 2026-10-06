@@ -1,5 +1,6 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
+#include <cpu/SceModules.hpp>
 #include <cpu/SceTls.hpp>
 #include <algorithm>
 #include <array>
@@ -429,6 +430,131 @@ void translatedTlsEntry(bool bssOnly = false) {
             "Actual x86 FS accesses observed incorrect initialized TLS bytes, relocated pointer, BSS, or register result");
 }
 
+
+void translatedEmptyTlsEntry() {
+    for (const auto alignment : {std::uint64_t{0}, std::uint64_t{16}}) {
+        Fixture fixture;
+        fixture.header(5, 7, 4, alignment ? 1 : 0, alignment ? 1 : 0, 0, 0, alignment);
+        put(fixture.bytes, Dyn + 7 * 16 + 8, 120);
+        put(fixture.bytes, Dyn + 9 * 16 + 8, 120);
+        put(fixture.bytes, Symbols + 100, 0x16, 1);
+        put(fixture.bytes, Symbols + 102, 1, 2);
+        fixture.relocation(Relocations + 72, 0x4030, 0, 16, 0);
+        fixture.relocation(Relocations + 96, 0x4038, 4, 16, 0);
+        Input input(fixture.bytes);
+        const auto parsed = Cpu::ParseSce(input.path);
+        require(parsed.Tls && parsed.Tls->MemorySize == 0 && parsed.Tls->FileSize == 0 &&
+                parsed.UnsupportedReasons.empty(), "Empty PT_TLS was lost or incorrectly blocked");
+        Cpu::Machine machine;
+        Cpu::SceImports imports(machine);
+        auto image = Cpu::LoadSce(machine, input.path, Bias, [&](const auto& import) { return imports.Resolve(import); });
+        require(image.Tls && image.Tls->ModuleId() == 1 && image.Tls->MemorySize() == 0 &&
+                image.Tls->TlsBase() == 0 && word(machine, Bias + 0x4030) == 1 && word(machine, Bias + 0x4038) == 1,
+                "Empty TLS identity-only null/typed DTPMOD64 produced fabricated storage or incorrect module ID");
+        rejects([&] { image.Tls->Resolve(1, 0); }, "outside the main module");
+        Cpu::SetupSceEntry(machine, image, {"empty-tls"}, imports.ExitGate());
+        require(machine.Run(image.Entry, 0, 200) == Cpu::StopReason::Exit && machine.ExitCode() == 0 &&
+                word(machine, Bias + 0x4030) == 1 && word(machine, Bias + 0x4038) == 1,
+                "Actual x86 entry failed with empty TLS identity or rewrote identity-only relocation outputs");
+    }
+    struct Case { const char* Expected; std::function<void(Fixture&)> Change; };
+    const std::array cases{
+        Case{"invalid or duplicate TLS segment", [](auto& f) { f.header(5, 7, 4, 0, 0, 0, 0, 3); }},
+        Case{"invalid or duplicate TLS segment", [](auto& f) { f.header(6, 7, 4, 0, 0, 0, 0, 0); put(f.bytes, 56, 7, 2); }},
+        Case{"DTPMOD64 addend", [](auto& f) { f.relocation(Relocations + 72, 0x4030, 0, 16, 1); }},
+        Case{"requires a nonempty", [](auto& f) { f.relocation(Relocations + 72, 0x4030, 0, 17, 0); }},
+        Case{"requires a nonempty", [](auto& f) { f.relocation(Relocations + 72, 0x4030, 0, 18, 0); }},
+        Case{"defined ordinary-section TLS symbol", [](auto& f) { f.relocation(Relocations + 72, 0x4030, 2, 16, 0); }},
+        Case{"TLS symbol exceeds", [](auto& f) {
+            put(f.bytes, Dyn + 7 * 16 + 8, 120);
+            put(f.bytes, Symbols + 100, 0x16, 1); put(f.bytes, Symbols + 102, 1, 2); put(f.bytes, Symbols + 112, 1);
+        }},
+    };
+    for (const auto& test : cases) {
+        Fixture fixture;
+        fixture.header(5, 7, 4, 0, 0, 0, 0, 0);
+        put(fixture.bytes, Dyn + 9 * 16 + 8, 96);
+        fixture.relocation(Relocations + 72, 0x4030, 0, 16, 0);
+        test.Change(fixture);
+        Input input(fixture.bytes);
+        Cpu::Machine machine;
+        unsigned resolutions = 0;
+        rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); }, test.Expected);
+        require(resolutions == 0 && machine.Mappings().empty() && machine.Get(Cpu::Register::FsBase) == 0,
+                "Invalid empty-TLS metadata reached import resolution or guest mutation");
+    }
+}
+
+void emptyTlsModuleGraph() {
+    Fixture main;
+    main.header(5, 7, 4, 0x3040, 0x3040, 8, 32, 16);
+    put(main.bytes, 0x3040, 0x1122334455667788);
+    const auto appendNeeded = [&](std::string_view filename) {
+        const auto length = [&] {
+            std::uint64_t result = 0;
+            for (unsigned index = 0; index < 8; ++index)
+                result |= std::uint64_t(std::to_integer<unsigned>(main.bytes.at(Dyn + 4 * 16 + 8 + index))) << (index * 8);
+            return result;
+        }();
+        std::memcpy(main.bytes.data() + Strings + length, filename.data(), filename.size());
+        put(main.bytes, Strings + length + filename.size(), 0, 1);
+        put(main.bytes, Dyn + 4 * 16 + 8, length + filename.size() + 1);
+        main.tag(1, length);
+    };
+    appendNeeded("EmptyTls.prx");
+    appendNeeded("StoredTls.prx");
+    main.tag(16, 0);
+    main.finish();
+    const auto dependency = [](bool empty) {
+        Fixture fixture;
+        put(fixture.bytes, 16, 0xfe18, 2);
+        put(fixture.bytes, 24, 0);
+        fixture.header(5, 7, 4, empty ? 0 : 0x3040, empty ? 0 : 0x3040, empty ? 0 : 8, empty ? 0 : 16, empty ? 0 : 16);
+        put(fixture.bytes, Dyn + 7 * 16 + 8, 24);
+        put(fixture.bytes, Dyn + 9 * 16 + 8, empty ? 24 : 72);
+        put(fixture.bytes, Dyn + 12 * 16 + 8, 0);
+        fixture.relocation(Relocations, 0x4008, 0, 16, 0);
+        if (!empty) {
+            put(fixture.bytes, 0x3040, 0x8877665544332211);
+            fixture.relocation(Relocations + 24, 0x4010, 0, 18, 0);
+            fixture.relocation(Relocations + 48, 0x4018, 0, 17, 0);
+        }
+        return fixture;
+    };
+    auto empty = dependency(true), stored = dependency(false);
+    Input mainInput(main.bytes), emptyInput(empty.bytes), storedInput(stored.bytes);
+    const auto emptyPath = mainInput.directory / "EmptyTls.prx";
+    const auto storedPath = mainInput.directory / "StoredTls.prx";
+    std::filesystem::copy_file(emptyInput.path, emptyPath);
+    std::filesystem::copy_file(storedInput.path, storedPath);
+    Cpu::Machine machine;
+    Cpu::SceImports imports(machine);
+    const std::array dependencies{Cpu::SceModuleFile{emptyPath, 0x2000000}, Cpu::SceModuleFile{storedPath, 0x3000000}};
+    const std::array hosts{Cpu::SceHostModule{"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}}};
+    Cpu::SceModules graph(machine, {mainInput.path, Bias}, dependencies, hosts,
+        [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+            require(type == 2, "Independent empty-TLS fixture unexpectedly needs host data or TLS");
+            return Cpu::SceResolvedImport{imports.Resolve(import), type};
+        });
+    require(graph.Modules().size() == 3 && graph.Tls() && graph.Tls()->ModuleCount() == 3 &&
+            graph.Modules()[0].TlsModuleId == 1 && graph.Modules()[1].TlsModuleId == 2 && graph.Modules()[2].TlsModuleId == 3,
+            "Empty PT_TLS module was removed or renumbered a future module");
+    const auto tls = graph.Tls();
+    require(tls->MemorySize(2) == 0 && tls->TlsBase(2) == 0 && word(machine, 0x2004008) == 2 &&
+            word(machine, 0x3004008) == 3 && word(machine, 0x3004010) == 0xffffffffffffffd0ull &&
+            word(machine, 0x3004018) == 0 && word(machine, tls->Resolve(3, 0)) == 0x8877665544332211,
+            "Empty provider's identity relocation or later provider's initialized storage/offsets are incorrect");
+    const auto dtv = word(machine, tls->FsBase() + 8);
+    require(word(machine, dtv + 24) == 0 && word(machine, dtv + 32) == tls->TlsBase(3),
+            "Graph DTV fabricated empty storage or lost later module index");
+    rejects([&] { tls->Resolve(2, 0); }, "outside module 2");
+    Cpu::SetupSceEntry(machine, graph.Main(), {"empty-tls-graph"}, imports.ExitGate());
+    graph.InitializeDependencies();
+    require(machine.Run(graph.Main().Entry, 0, 200) == Cpu::StopReason::Exit && machine.ExitCode() == 0,
+            "Actual x86 main entry failed with an identity-only TLS dependency");
+    graph.FinalizeDependencies();
+}
+
 struct ExportFixture : Fixture {
     std::size_t moduleTag = 0;
     std::size_t libraryTag = 0;
@@ -586,7 +712,7 @@ void unsupportedStartup() {
         Case{"TLS template file mapping", [](auto& f) { f = TlsFixture(); f.header(5, 7, 4, 0x3140, 0x3040, 16, 32, 16); }},
         Case{"unmapped or inaccessible", [](auto& f) { f = TlsFixture(); f.header(5, 7, 4, 0x3200, 0x3200, 16, 32, 16); }},
         Case{"unmapped or inaccessible", [](auto& f) { f = TlsFixture(true); f.header(5, 7, 4, 0x3ff0, 0x3ff0, 0, 32, 16); }},
-        Case{"empty guest TLS segment", [](auto& f) { f.header(5, 7, 4, 0x3100, 0x3100, 0, 0, 16); }},
+        Case{"invalid or duplicate TLS segment", [](auto& f) { f.header(5, 7, 4, 0, 0, 1, 0, 0); }},
         Case{"DTPMOD64 addend", [](auto& f) { f = TlsFixture(); put(f.bytes, Relocations + 16, 1); }},
         Case{"TLS relocation addend", [](auto& f) { f = TlsFixture(); put(f.bytes, Relocations + 24 + 16, 0xffffffffffffffffull); }},
         Case{"TLS relocation addend", [](auto& f) { f = TlsFixture(); put(f.bytes, Relocations + 24 + 16, 32); }},
@@ -627,6 +753,8 @@ int main() {
         Case{"repeated library attributes", repeatedLibraryAttributes},
         Case{"translated TLS entry", [] { translatedTlsEntry(); }},
         Case{"translated BSS-only TLS entry", [] { translatedTlsEntry(true); }},
+        Case{"translated empty TLS identity", translatedEmptyTlsEntry},
+        Case{"empty TLS module graph", emptyTlsModuleGraph},
         Case{"exported module metadata", exportedModuleMetadata},
         Case{"invalid export metadata", invalidExportMetadata},
     };
