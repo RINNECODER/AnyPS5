@@ -18,6 +18,7 @@ struct TargetOptions {
     bool supportsInt64 = false;
     bool supportsGpuAddresses = false;
     bool supportsSimdGroups = false;
+    bool flipVertexY = true;
 };
 
 struct ResourceMapping {

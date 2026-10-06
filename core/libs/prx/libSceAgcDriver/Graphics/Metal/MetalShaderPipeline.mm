@@ -209,17 +209,18 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
                     throw std::invalid_argument("Metal shader buffer device or offset is invalid");
                 }
                 const NSUInteger remaining = resource.buffer.length - resource.offset;
-                if (resource.length == 0) resource.length = remaining;
-                if (resource.length > remaining) {
+                const NSUInteger length = resource.length.value_or(remaining);
+                resource.length = length;
+                if (length > remaining) {
                     throw std::invalid_argument("Metal shader buffer range exceeds its allocation");
                 }
                 const std::uint32_t index = *mapping.buffer + i;
                 result.buffers.push_back({index, resource});
                 if (mapping.requiresByteLengths) {
-                    if (!shader.bufferSizesBuffer || resource.length > std::numeric_limits<std::uint32_t>::max()) {
+                    if (!shader.bufferSizesBuffer || length > std::numeric_limits<std::uint32_t>::max()) {
                         throw std::invalid_argument("Metal shader buffer byte length cannot be represented");
                     }
-                    result.lengths[index] = static_cast<std::uint32_t>(resource.length);
+                    result.lengths[index] = static_cast<std::uint32_t>(length);
                 }
             }
         }

@@ -89,6 +89,9 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     options.texture_buffer_native = true;
     options.argument_buffers = false;
     compiler.set_msl_options(options);
+    auto common = compiler.get_common_options();
+    common.vertex.flip_vert_y = stage == ShaderStage::Vertex && target.flipVertexY;
+    compiler.set_common_options(common);
     const auto resources = compiler.get_shader_resources();
     if (!resources.sampled_images.empty() || !resources.subpass_inputs.empty() ||
         !resources.atomic_counters.empty() || !resources.acceleration_structures.empty())

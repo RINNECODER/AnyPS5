@@ -45,13 +45,13 @@ ctest --test-dir build-metal --output-on-failure
 After configuring the bridge above, enable the existing guest shader frontend replay through Metal with:
 
 ```sh
-git submodule update --init 3rdparty/glslang 3rdparty/SPIRV-Headers
+git submodule update --init 3rdparty/glslang 3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers
 cmake -S . -B build-metal -DANYPS5_METAL_GUEST_REPLAY=ON
 cmake --build build-metal --parallel
 ctest --test-dir build-metal --output-on-failure
 ```
 
-This replay exercises guest shaders; the guest CPU runtime and whole renderer remain outside this mode.
+This mode exercises guest shaders, original PM4 register and memory packets, native compute dispatch, and decoded draw-state pixels. Vulkan-Headers supplies existing state metadata types; no Vulkan runtime is linked. The guest CPU runtime and whole renderer remain outside this mode.
 
 ## CMake flags
 

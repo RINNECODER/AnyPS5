@@ -82,7 +82,7 @@ RecompileResult ComputeFixture() {
     module.Add(spv::OpTypePointer, {5, spv::StorageClassInput, 4});
     module.Add(spv::OpTypeRuntimeArray, {6, 3});
     module.Add(spv::OpTypeStruct, {7, 6});
-    module.Add(spv::OpConstant, {3, 8, 2});
+    module.Add(spv::OpConstant, {3, 8, 3});
     module.Add(spv::OpTypeArray, {9, 7, 8});
     module.Add(spv::OpTypePointer, {10, spv::StorageClassStorageBuffer, 9});
     module.Add(spv::OpTypePointer, {11, spv::StorageClassStorageBuffer, 7});
@@ -92,6 +92,7 @@ RecompileResult ComputeFixture() {
     module.Add(spv::OpTypePointer, {15, spv::StorageClassStorageBuffer, 3});
     module.Add(spv::OpConstant, {3, 16, 0});
     module.Add(spv::OpConstant, {3, 17, 1});
+    module.Add(spv::OpConstant, {3, 18, 2});
     module.Add(spv::OpVariable, {5, 20, spv::StorageClassInput});
     module.Add(spv::OpVariable, {10, 21, spv::StorageClassStorageBuffer});
     module.Add(spv::OpVariable, {11, 22, spv::StorageClassStorageBuffer});
@@ -108,7 +109,8 @@ RecompileResult ComputeFixture() {
     module.Add(spv::OpAccessChain, {14, 39, 23, 17});
     module.Add(spv::OpLoad, {3, 40, 38});
     module.Add(spv::OpLoad, {3, 41, 39});
-    module.Add(spv::OpArrayLength, {3, 42, 22, 0});
+    module.Add(spv::OpAccessChain, {11, 48, 21, 18});
+    module.Add(spv::OpArrayLength, {3, 42, 48, 0});
     module.Add(spv::OpIMul, {3, 43, 36, 40});
     module.Add(spv::OpIAdd, {3, 44, 43, 37});
     module.Add(spv::OpIAdd, {3, 45, 44, 41});
@@ -118,7 +120,7 @@ RecompileResult ComputeFixture() {
     module.Add(spv::OpReturn, {});
     module.Add(spv::OpFunctionEnd, {});
     const std::array<std::uint32_t, 2> push{5, 9};
-    return module.Result({Descriptor(DescriptorKind::StorageBuffer, DescriptorRole::GuestBuffers, 2, 7, 2),
+    return module.Result({Descriptor(DescriptorKind::StorageBuffer, DescriptorRole::GuestBuffers, 2, 7, 3),
                           Descriptor(DescriptorKind::StorageBuffer, DescriptorRole::GuestBuffers, 5, 3)}, Bytes(push));
 }
 
@@ -141,7 +143,7 @@ RecompileResult VertexFixture() {
     module.Add(spv::OpConstant, {3, 9, 1});
     module.Add(spv::OpConstant, {3, 10, 2});
     module.Add(spv::OpConstant, {5, 11, 0xbf800000u});
-    module.Add(spv::OpConstant, {5, 12, 0x40000000u});
+    module.Add(spv::OpConstant, {5, 12, 0x3f000000u});
     module.Add(spv::OpConstant, {5, 13, 0});
     module.Add(spv::OpConstant, {5, 14, 0x3f800000u});
     module.Add(spv::OpConstant, {5, 15, 0x3e800000u});
@@ -269,7 +271,7 @@ void Compute(const MetalTests::Context& context) {
     bindings[0].buffers = {{output, 0, output.length}};
     bindings[1].descriptorSet = 2;
     bindings[1].binding = 7;
-    bindings[1].buffers = {{input0, 0, sizeof(first)}, {input1, 16, sizeof(second)}};
+    bindings[1].buffers = {{input0, 0, sizeof(first)}, {input1, 16, sizeof(second)}, {output, 0, output.length}};
     id<MTLCommandBuffer> commands = [context.queue commandBuffer];
     bool rejected = false;
     try {
@@ -292,11 +294,18 @@ void Compute(const MetalTests::Context& context) {
         rejected = true;
     }
     MetalTests::Require(rejected, "Converted compute accepted a partial native workgroup for a fixed-size SPIRV contract");
-    pipeline.Encode(commands, bindings, MTLSizeMake(4, 1, 1));
-    Complete(commands);
-    const std::array<std::uint32_t, 7> expected{33, 60, 107, 181, 0xa5a5a5a5u, 0xa5a5a5a5u, 0xa5a5a5a5u};
-    MetalTests::Require(std::memcmp(output.contents, expected.data(), sizeof(expected)) == 0,
-                        "Converted SPIRV compute lost descriptor arrays, buffer offsets, ArrayLength, push offset, or output bounds");
+    for (const NSUInteger visibleBytes : {output.length, NSUInteger{0}}) {
+        bindings[1].buffers[2].length = visibleBytes;
+        std::memset(output.contents, 0xa5, output.length);
+        commands = [context.queue commandBuffer];
+        pipeline.Encode(commands, bindings, MTLSizeMake(4, 1, 1));
+        Complete(commands);
+        const std::array<std::uint32_t, 7> expected = visibleBytes == 0 ?
+            std::array<std::uint32_t, 7>{26, 53, 100, 174, 0xa5a5a5a5u, 0xa5a5a5a5u, 0xa5a5a5a5u} :
+            std::array<std::uint32_t, 7>{33, 60, 107, 181, 0xa5a5a5a5u, 0xa5a5a5a5u, 0xa5a5a5a5u};
+        MetalTests::Require(std::memcmp(output.contents, expected.data(), sizeof(expected)) == 0,
+                            "Converted SPIRV compute lost descriptor arrays, buffer offsets, explicit zero ArrayLength, push offset, or output bounds");
+    }
     const std::array<std::uint8_t, 16> prefix{0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
                                           0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab};
     MetalTests::Require(std::memcmp(input1.contents, prefix.data(), prefix.size()) == 0 &&
@@ -369,15 +378,26 @@ void Render(const MetalTests::Context& context) {
     MetalTests::Require(rejected, "Converted render binding silently accepted wrong native texture dimensions");
     bindings[1].textures = {texture};
     pipeline.Bind(encoder, {}, bindings);
+    [encoder setViewport:MTLViewport{0, 0, 8, 8, 0, 1}];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [encoder endEncoding];
     Complete(commands);
     std::array<std::uint8_t, 8 * 8 * 4> pixels{};
     [target getBytes:pixels.data() bytesPerRow:8 * 4 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
     const std::array<int, 4> expected{64, 64, 24, 255};
-    for (std::size_t i = 0; i < pixels.size(); ++i) {
-        MetalTests::Require(std::abs(static_cast<int>(pixels[i]) - expected[i % 4]) <= 1,
-                            "Converted SPIRV vertex/fragment draw lost varying, texture, sampler, uniform, or offset push data");
+    const std::array<std::array<std::size_t, 2>, 6> covered{{{0, 0}, {1, 0}, {0, 1}, {2, 0}, {0, 2}, {1, 1}}};
+    for (const auto& point : covered) {
+        const auto offset = (point[1] * 8 + point[0]) * 4;
+        for (std::size_t channel = 0; channel < 4; ++channel)
+            MetalTests::Require(std::abs(static_cast<int>(pixels[offset + channel]) - expected[channel]) <= 1,
+                                "Converted SPIRV positive-viewport triangle lost its original upper-left coverage or fragment data");
+    }
+    const std::array<std::array<std::size_t, 2>, 5> untouched{{{0, 7}, {1, 6}, {2, 5}, {7, 0}, {4, 4}}};
+    for (const auto& point : untouched) {
+        const auto offset = (point[1] * 8 + point[0]) * 4;
+        for (std::size_t channel = 0; channel < 4; ++channel)
+            MetalTests::Require(pixels[offset + channel] == 0,
+                                "Converted SPIRV positive-viewport triangle covered pixels outside its original upper-left region");
     }
 }
 

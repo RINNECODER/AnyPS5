@@ -2,6 +2,7 @@
 
 #import <Metal/Metal.h>
 #include "MetalBackend/MetalShaderBridge.hpp"
+#include <optional>
 #include <span>
 
 namespace AgcDriver::Metal {
@@ -9,7 +10,7 @@ namespace AgcDriver::Metal {
 struct MetalBufferBinding {
     id<MTLBuffer> buffer = nil;
     NSUInteger offset = 0;
-    NSUInteger length = 0;
+    std::optional<NSUInteger> length;
 };
 
 struct MetalShaderResourceBinding {
