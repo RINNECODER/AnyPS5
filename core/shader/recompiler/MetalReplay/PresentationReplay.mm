@@ -5,6 +5,13 @@
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceVideoOut/include/BufferMetadata.hpp"
+#include "prx/libSceVideoOut/include/VideoOutState.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include <algorithm>
+#include <future>
+#include <chrono>
+#include <cstdlib>
+#include <stop_token>
 #include <array>
 #include <cstring>
 #include <iostream>
@@ -155,6 +162,215 @@ void Present(const AgcDriver::PresentationWindow& window, const AgcDriver::Displ
     }
 }
 
+
+void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContext& window,
+                             const AgcDriver::PresentationWindow& target, id<MTLCommandQueue> readbackQueue,
+                             std::vector<std::byte>& source) {
+    using namespace std::chrono_literals;
+    constexpr std::uint32_t Handle = 3;
+    std::array<std::array<std::uint32_t, 6>, 2> words{{
+        {AgcDriver::FlipPacketHeader, Handle, 0, 1, 0x12345678, 0x11223344},
+        {AgcDriver::FlipPacketHeader, Handle, 0, 1, 0x87654321, 0x55667788}}};
+    std::array<Packet, 2> packets{{
+        {reinterpret_cast<std::uint32_t*>(0xa0000), 6, 0, {}},
+        {reinterpret_cast<std::uint32_t*>(0xb0000), 6, 0, {}}}};
+    const auto originalWords = words;
+    const auto originalPackets = std::as_bytes(std::span(packets));
+    const std::vector<std::byte> packetGolden(originalPackets.begin(), originalPackets.end());
+    const auto sourceGolden = source;
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 4> ranges{{
+        {0x10000, source, false},
+        {0x90000, std::as_writable_bytes(std::span(packets)), false},
+        {0xa0000, std::as_writable_bytes(std::span(words[0])), false},
+        {0xb0000, std::as_writable_bytes(std::span(words[1])), false}}};
+    driver.ReplaceBorrowedRanges(ranges, 1);
+    std::stop_source stop;
+    auto cfg = std::make_shared<VideoOutConfig>(stop.get_token());
+    auto queue = std::make_shared<FlipQueue>();
+    cfg->opened = true;
+    cfg->generation = 7;
+    cfg->width = 8;
+    cfg->height = 4;
+    cfg->flipRate = 1;
+    cfg->buffers[0] = {0, 0x10000, 0};
+    cfg->groups[0].occupied = true;
+    auto& attribute = cfg->groups[0].attribute;
+    attribute.pixel_format = BGRA;
+    attribute.width = 8;
+    attribute.height = 4;
+    attribute.pitch_in_pixel = 10;
+    attribute.tiling_mode = 1;
+    attribute.option = VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_STRICT_COLORIMETRY;
+    const auto output = CreateVideoOutput(cfg, queue);
+    AgcDriverRegisterVideoOutput_nid_postfix(Handle, output);
+    auto otherConfig = std::make_shared<VideoOutConfig>(stop.get_token());
+    otherConfig->opened = true;
+    otherConfig->generation = 8;
+    const auto otherOutput = CreateVideoOutput(otherConfig, queue);
+    std::future<void> firstWait, secondWait, idle, room;
+    std::vector<std::shared_ptr<AgcDriver::IFlipRequest>> otherReservations;
+    struct Cleanup {
+        std::shared_ptr<AgcDriver::IVideoOutput> output;
+        std::stop_source* stop;
+        bool done = false;
+        ~Cleanup() {
+            if (!done) {
+                output->Fail(std::make_exception_ptr(std::runtime_error("Original VideoOut replay cancelled")));
+                stop->request_stop();
+            }
+        }
+    } cleanup{output, &stop};
+    AgcDriver::Submit(reinterpret_cast<const Packet*>(0x90000), 0);
+    const auto firstFence = output->CaptureRenderingWait(0);
+    AgcDriver::Submit(reinterpret_cast<const Packet*>(0x90000 + sizeof(Packet)), 0);
+    const auto secondFence = output->CaptureRenderingWait(0);
+    firstWait = std::async(std::launch::async, [firstFence] { firstFence->Wait(); });
+    secondWait = std::async(std::launch::async, [secondFence] { secondFence->Wait(); });
+    idle = std::async(std::launch::async, [&driver] { driver.WaitIdle(); });
+    {
+        std::lock_guard lock(cfg->mutex);
+        Require(cfg->flipStatus.flipPendingNum == 2 && cfg->bufferPending[0] == 2 && queue->reservations == 2,
+                "Original public flip submission did not reserve both pending tickets");
+        cfg->buffers[0].dataAddress = 0xc0000;
+        cfg->groups[0].attribute.width = 2;
+    }
+    struct EventState { std::uint32_t calls = 0; std::int64_t expected; } events;
+    const VideoOutCompletionCallbacks callbacks{&events,
+        +[](void*) -> std::uint64_t { return 101; },
+        +[](void*) -> std::uint64_t { return 202; },
+        +[](void* context, VideoOutConfig& state, std::int64_t argument) {
+            auto& event = *static_cast<EventState*>(context);
+            Require(argument == event.expected && state.flipStatus.count == event.calls,
+                    "Original flip event did not precede its completed status update");
+            Require(state.flipStatus.flipPendingNum == 2 - static_cast<int>(event.calls),
+                    "Original flip event observed premature pending retirement");
+            ++event.calls;
+        }};
+    window.width = 8;
+    window.height = 4;
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        std::shared_ptr<FlipRequest> request;
+        {
+            std::unique_lock lock(queue->mutex);
+            Require(queue->changed.wait_for(lock, 2s, [&] { return !queue->requests.empty(); }),
+                    "Original public PM4 flip never entered the ready queue");
+            request = queue->requests.front();
+            queue->requests.pop_front();
+        }
+        Require(request->ready && !request->terminal && request->reuseTicket == i + 1 &&
+                request->buffer.dataAddress == 0x10000 && request->group.attribute.width == 8,
+                "Original reserved flip lost its buffer snapshot or reuse ticket");
+        auto pacing = std::async(std::launch::async, [request] { WaitForFlipVblank(*request); });
+        Cleanup pacingCleanup{output, &stop};
+        Require(pacing.wait_for(75ms) == std::future_status::timeout,
+                "Original flip pacing ignored its reserved two-vblank interval");
+        {
+            std::lock_guard lock(cfg->mutex);
+            cfg->vblankStatus.count = 2 * i + 1;
+            cfg->vblankCond.notify_all();
+        }
+        Require(pacing.wait_for(75ms) == std::future_status::timeout,
+                "Original flip pacing ignored the reserved flip-rate interval");
+        {
+            std::lock_guard lock(cfg->mutex);
+            cfg->vblankStatus.count = 2 * (i + 1);
+            cfg->vblankCond.notify_all();
+        }
+        Require(pacing.wait_for(2s) == std::future_status::ready, "Original vblank pacing did not wake");
+        pacing.get();
+        pacingCleanup.done = true;
+        Completion pixels{&window, readbackQueue, Golden(8, 4)};
+        struct ActualCompletion { Completion* pixels; FlipRequest* request; } completion{&pixels, request.get()};
+        const auto display = DescribeVideoOutBuffer(request->buffer, request->group);
+        auto presentation = std::async(std::launch::async, [&] {
+            @autoreleasepool {
+                AgcDriverPresentBuffer_nid_postfix(target, display, +[](void* context) {
+                    auto& completion = *static_cast<ActualCompletion*>(context);
+                    Ready(completion.pixels);
+                    MarkFlipGpuComplete(*completion.request);
+                }, &completion);
+            }
+        });
+        if (presentation.wait_for(2s) != std::future_status::ready) {
+            output->Fail(std::make_exception_ptr(std::runtime_error("Sync flip held the GPU mutex during actual presentation")));
+            presentation.get();
+            throw std::runtime_error("Sync flip held the GPU mutex during actual presentation");
+        }
+        presentation.get();
+        {
+            std::lock_guard lock(cfg->mutex);
+            Require(request->gpuComplete && !request->terminal && cfg->flipStatus.count == i &&
+                    cfg->flipStatus.flipPendingNum == 2 - static_cast<int>(i),
+                    "Actual drawable completion prematurely retired original flip state");
+        }
+        Require((i == 0 ? firstWait : secondWait).wait_for(50ms) == std::future_status::timeout,
+                "Original rendering wait retired at GPU readiness instead of flip completion");
+        if (i == 0) {
+            for (std::uint32_t extra = 0; extra < 14; ++extra)
+                otherReservations.push_back(otherOutput->Reserve({4, VIDEO_OUT_BUFFER_INDEX_BLACK, 1, 0}));
+            {
+                std::scoped_lock lock(cfg->mutex, otherConfig->mutex);
+                Require(queue->reservations == 16 && cfg->flipStatus.flipPendingNum == 2 &&
+                        otherConfig->flipStatus.flipPendingNum == 14,
+                        "Original shared VideoOut queue did not retain both owners' reservations");
+            }
+            room = std::async(std::launch::async, [output] { output->WaitForFlipRoom(); });
+            Require(room.wait_for(50ms) == std::future_status::timeout,
+                    "Original shared VideoOut queue admitted a producer while all sixteen flips were reserved");
+        }
+        events.expected = i == 0 ? 0x1122334412345678ll : 0x5566778887654321ll;
+        CompleteFlip(*request, callbacks);
+        if (i == 0) {
+            Require(room.wait_for(2s) == std::future_status::ready,
+                    "Actual drawable flip completion did not wake the blocked original VideoOut producer");
+            room.get();
+            {
+                std::scoped_lock lock(cfg->mutex, otherConfig->mutex);
+                Require(queue->reservations == 15 && cfg->flipStatus.flipPendingNum == 1 &&
+                        otherConfig->flipStatus.flipPendingNum == 14 && request->terminal,
+                        "Original queue room woke before the presented flip retired its own reservation");
+            }
+            otherReservations.clear();
+            {
+                std::lock_guard lock(otherConfig->mutex);
+                Require(otherConfig->flipStatus.flipPendingNum == 0,
+                        "Original unready VideoOut requests did not roll back the other owner's reservations");
+            }
+        }
+        {
+            std::lock_guard lock(cfg->mutex);
+            Require(request->terminal && cfg->flipStatus.count == i + 1 && cfg->flipStatus.processTime == 101 &&
+                    cfg->flipStatus.processTimeCounter == 202 && cfg->flipStatus.flipArg == events.expected &&
+                    cfg->flipStatus.currentBuffer == 0 && cfg->width == 8 && cfg->height == 4 &&
+                    cfg->lastFlipVblank == 2 * (i + 1) && cfg->bufferPending[0] == 1 - i && queue->reservations == 1 - i,
+                    "Original flip completion lost counters, dimensions, interval, or pending retirement");
+        }
+        auto& wait = i == 0 ? firstWait : secondWait;
+        Require(wait.wait_for(2s) == std::future_status::ready,
+                "Original captured rendering wait did not retire its completed ticket");
+        wait.get();
+        if (i == 0) Require(secondWait.wait_for(50ms) == std::future_status::timeout,
+                            "First flip completion incorrectly released the later captured buffer ticket");
+    }
+    Require(idle.wait_for(2s) == std::future_status::ready, "Original sync flips did not release public WaitIdle");
+    idle.get();
+    Require(events.calls == 2 && source == sourceGolden && words == originalWords &&
+            std::equal(packetGolden.begin(), packetGolden.end(), std::as_bytes(std::span(packets)).begin()),
+            "Original VideoOut integration changed borrowed pixels, packet bytes, or callback count");
+    AgcDriverUnregisterVideoOutput_nid_postfix(Handle, output);
+    {
+        std::lock_guard lock(cfg->mutex);
+        cfg->closing = true;
+        cfg->opened = false;
+        cfg->vblankCond.notify_all();
+    }
+    bool closed = false;
+    try { firstFence->Wait(); } catch (const std::exception& error) { closed = std::string(error.what()).find("closed") != std::string::npos; }
+    Require(closed, "Original captured wait ignored its closed VideoOut owner lifecycle");
+    cleanup.done = true;
+    std::cout << "PASS: public PM4 original VideoOut reservation, immutable metadata, sync readiness, paced actual drawable pixels, completion callbacks, global queue room and captured ticket retirement\n";
+}
+
 void Run(id<MTLDevice> device, id<MTLLibrary> library) {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -238,6 +454,7 @@ void Run(id<MTLDevice> device, id<MTLLibrary> library) {
     AgcDriverPresentBuffer_nid_postfix(presentation, unreadable, Ready, &minimized);
     Require(minimized.calls == 1 && context.layer.acquisitionCount == acquisitions,
             "Minimized original presentation read an unborrowed display or acquired a drawable");
+    ReplayOriginalFlipState(driver, context, presentation, queue, linear[0]);
     AgcDriverReleaseWindow_nid_postfix(&context);
     driver.Shutdown();
     [window orderOut:nil];
@@ -255,6 +472,7 @@ int main(int argc, const char* argv[]) {
             NSError* error = nil;
             auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]]] error:&error];
             Require(library != nil, error.localizedDescription.UTF8String ?: "Utility library load failed");
+            setenv("APS5_SYNC_FLIP", "1", 1);
             Run(device, library);
             return 0;
         } catch (const std::exception& error) {

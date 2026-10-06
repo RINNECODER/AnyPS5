@@ -24,6 +24,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Submit/src/Submission.cpp"
     "${agcDriverRoot}/Execution/src/DisplayBuffer.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/BufferMetadata.cpp"
+    "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/VideoOutState.cpp"
     "${agcDriverRoot}/Execution/src/DisplayFormat.cpp"
     "${agcDriverRoot}/Execution/Metal/MetalDriver.mm"
     "${agcDriverRoot}/Execution/Metal/MetalPacketExecution.mm"
