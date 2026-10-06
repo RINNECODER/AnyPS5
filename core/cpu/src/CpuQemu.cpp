@@ -176,6 +176,43 @@ struct Machine::Impl {
     void refresh() const {
         check(anyps5_qemu_cpu_invalidate(engine), "Invalidate modern translated guest code");
     }
+    std::vector<Range> withoutRange(std::uint64_t address, std::size_t size) const {
+        std::vector<Range> result;
+        result.reserve(ranges.size() + 2);
+        const auto end = address + size;
+        for (const auto& range : ranges) {
+            const auto rangeEnd = range.address + range.size;
+            if (range.address >= end || rangeEnd <= address) result.push_back(range);
+            else {
+                if (range.address < address)
+                    result.push_back({range.address, static_cast<std::size_t>(address - range.address), range.backing, range.permissions, range.borrowed});
+                if (rangeEnd > end)
+                    result.push_back({end, static_cast<std::size_t>(rangeEnd - end), range.backing + (end - range.address), range.permissions, range.borrowed});
+            }
+        }
+        return result;
+    }
+    void removeCalls(std::uint64_t address, std::size_t size) {
+        const auto end = address + size;
+        for (auto call = calls.begin(); call != calls.end(); ) {
+            if (call->first >= address && call->first < end) call = calls.erase(call);
+            else ++call;
+        }
+    }
+    void releaseUnused() {
+        for (auto backing = backings.begin(); backing != backings.end(); ) {
+            const auto begin = reinterpret_cast<std::uintptr_t>(backing->pointer);
+            const auto used = std::any_of(ranges.begin(), ranges.end(), [&](const Range& range) {
+                const auto pointer = reinterpret_cast<std::uintptr_t>(range.backing);
+                return pointer >= begin && pointer - begin < backing->size;
+            });
+            if (used) ++backing;
+            else {
+                check(anyps5_qemu_cpu_release_backing(engine, backing->id), "Release unused modern guest backing");
+                backing = backings.erase(backing);
+            }
+        }
+    }
     void rejectPrivileged(std::uint64_t address, std::uint64_t port) const {
         std::array<std::uint8_t, 15> bytes{};
         std::size_t size = 0;
@@ -259,6 +296,57 @@ void Machine::MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Pe
     if (!memory.data()) throw std::invalid_argument("Guest borrowed mapping requires backing memory");
     impl->map(address, memory, permissionBits(permissions), true, memory.size());
 }
+void Machine::Unmap(std::uint64_t address, std::size_t size) {
+    checkRange(address, size);
+    impl->checkMapped(address, size);
+    auto replacement = impl->withoutRange(address, size);
+    impl->check(anyps5_qemu_cpu_unmap_range(impl->engine, address, size), "Unmap modern guest memory");
+    impl->ranges.swap(replacement);
+    impl->removeCalls(address, size);
+    impl->releaseUnused();
+}
+void Machine::ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions) {
+    checkRange(address, memory.size());
+    if (!memory.data()) throw std::invalid_argument("Guest borrowed replacement requires backing memory");
+    const auto bits = permissionBits(permissions);
+    impl->checkMapped(address, memory.size());
+    const auto pointer = reinterpret_cast<std::uintptr_t>(memory.data());
+    if (memory.size() > std::numeric_limits<std::uintptr_t>::max() - pointer)
+        throw std::invalid_argument("Guest backing memory range overflows");
+    auto replacement = impl->withoutRange(address, memory.size());
+    replacement.push_back({address, memory.size(), memory.data(), bits, true});
+    std::uint64_t backingId = 0;
+    std::size_t offset = 0;
+    for (const auto& backing : impl->backings) {
+        const auto begin = reinterpret_cast<std::uintptr_t>(backing.pointer);
+        if (pointer >= begin && pointer - begin <= backing.size && memory.size() <= backing.size - (pointer - begin)) {
+            backingId = backing.id;
+            offset = pointer - begin;
+            break;
+        }
+        if (pointer < begin + backing.size && begin < pointer + memory.size())
+            throw std::runtime_error("Guest borrowed replacement crosses a registered backing allocation");
+    }
+    const auto newBacking = backingId == 0;
+    const auto hostPage = hostPageSize();
+    if (newBacking && (memory.size() % hostPage || pointer % hostPage))
+        throw std::runtime_error("Modern guest CPU borrowed replacement requires a complete aligned host-page backing or a slice of a registered backing");
+    if (offset & 4095) throw std::runtime_error("Modern guest CPU backing aliases require a 4 KiB aligned offset");
+    if (newBacking) {
+        impl->backings.reserve(impl->backings.size() + 1);
+        impl->check(anyps5_qemu_cpu_register_backing(impl->engine, memory.data(), memory.size(), &backingId), "Register modern replacement backing");
+    }
+    try {
+        impl->check(anyps5_qemu_cpu_replace_alias(impl->engine, address, backingId, offset, memory.size(), bits), "Replace modern guest backing alias");
+    } catch (...) {
+        if (newBacking && anyps5_qemu_cpu_release_backing(impl->engine, backingId)) std::terminate();
+        throw;
+    }
+    if (newBacking) impl->backings.push_back({memory.data(), memory.size(), backingId, {}});
+    impl->ranges.swap(replacement);
+    impl->removeCalls(address, memory.size());
+    impl->releaseUnused();
+}
 void Machine::Protect(std::uint64_t address, std::size_t size, Permission permissions) {
     checkRange(address, size);
     const auto bits = permissionBits(permissions);
@@ -279,6 +367,15 @@ void Machine::Protect(std::uint64_t address, std::size_t size, Permission permis
     }
     impl->check(anyps5_qemu_cpu_protect_range(impl->engine, address, size, bits), "Protect modern guest memory");
     impl->ranges.swap(replacement);
+}
+std::vector<Mapping> Machine::Mappings() const {
+    impl->checkOwner();
+    std::vector<Mapping> result;
+    result.reserve(impl->ranges.size());
+    for (const auto& range : impl->ranges)
+        result.push_back({range.address, range.size, static_cast<Permission>(range.permissions), range.borrowed});
+    std::sort(result.begin(), result.end(), [](const Mapping& left, const Mapping& right) { return left.Address < right.Address; });
+    return result;
 }
 void Machine::CheckAccess(std::uint64_t address, std::size_t size, Permission permissions) const {
     if (!size) return;

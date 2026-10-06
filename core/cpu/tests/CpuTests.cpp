@@ -1,4 +1,5 @@
 #include <cpu/Cpu.hpp>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -6,6 +7,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -16,6 +18,28 @@ using Cpu::StopReason;
 constexpr auto rw = Permission::Read | Permission::Write;
 constexpr auto rx = Permission::Read | Permission::Execute;
 void require(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
+void inventory(const std::vector<Cpu::Mapping>& actual, std::initializer_list<Cpu::Mapping> expected) {
+    std::size_t actualSize = 0;
+    std::uint64_t previousEnd = 0;
+    for (const auto& mapping : actual) {
+        require(mapping.Size && !(mapping.Address & 4095) && !(mapping.Size & 4095) && mapping.Address >= previousEnd,
+                "Mapping inventory is unordered, overlapping or not page aligned");
+        previousEnd = mapping.Address + mapping.Size;
+        actualSize += mapping.Size;
+    }
+    std::size_t expectedSize = 0;
+    for (const auto& mapping : expected) {
+        expectedSize += mapping.Size;
+        for (auto page = mapping.Address; page < mapping.Address + mapping.Size; page += 4096) {
+            const auto found = std::find_if(actual.begin(), actual.end(), [&](const Cpu::Mapping& extent) {
+                return page >= extent.Address && page - extent.Address < extent.Size;
+            });
+            require(found != actual.end() && found->Permissions == mapping.Permissions && found->Borrowed == mapping.Borrowed,
+                    "Mapping inventory omitted occupied pages or reported incorrect permissions or backing status");
+        }
+    }
+    require(actualSize == expectedSize, "Mapping inventory retained unmapped pages or omitted occupied storage");
+}
 void failure(const std::function<void()>& operation, const char* expected, const char* alternative = nullptr) {
     try { operation(); }
     catch (const std::exception& error) {
@@ -457,6 +481,157 @@ void errorsAndBudget() {
     failure([&] { machine.CheckAccess(0x4ff8, 16, Permission::Read); }, "Guest access denied at 0x5000");
     failure([&] { machine.CheckAccess(0xfffffffffffffff8, 16, Permission::Read); }, "access range overflows");
 }
+void unmapRanges() {
+    Machine machine;
+    machine.Map(0x1000, 4096, rx);
+    machine.Map(0x3000, 12288, rw);
+    code(machine, 0x1000, {0x48,0x8b,0x07});
+    code(machine, 0x1020, {0x48,0x89,0x07});
+    write(machine, 0x3000, std::uint64_t{11});
+    write(machine, 0x4000, std::uint64_t{22});
+    write(machine, 0x5000, std::uint64_t{33});
+    machine.Protect(0x3000, 4096, Permission::Read);
+    machine.Protect(0x4000, 4096, static_cast<Permission>(0));
+    machine.Protect(0x5000, 4096, Permission::Write);
+    const auto protectedSnapshot = machine.Mappings();
+    inventory(protectedSnapshot, {{0x1000,4096,rx,false}, {0x3000,4096,Permission::Read,false},
+              {0x4000,4096,static_cast<Permission>(0),false}, {0x5000,4096,Permission::Write,false}});
+    std::string foreignDiagnostic;
+    std::thread foreign([&] {
+        try { machine.Mappings(); }
+        catch (const std::exception& error) { foreignDiagnostic = error.what(); }
+    });
+    foreign.join();
+    require(foreignDiagnostic.find("owner thread") != std::string::npos, "Mapping inventory allowed access outside its owner thread");
+    machine.Unmap(0x4000, 4096);
+    inventory(machine.Mappings(), {{0x1000,4096,rx,false}, {0x3000,4096,Permission::Read,false},
+              {0x5000,4096,Permission::Write,false}});
+    inventory(protectedSnapshot, {{0x1000,4096,rx,false}, {0x3000,4096,Permission::Read,false},
+              {0x4000,4096,static_cast<Permission>(0),false}, {0x5000,4096,Permission::Write,false}});
+    machine.Set(Register::Rdi, 0x4000);
+    failure([&] { machine.Run(0x1000, 0x1003, 10); }, "unmapped read at 0x4000");
+    failure([&] { machine.Unmap(0x3000, 12288); }, "Guest access denied at 0x4000");
+    failure([&] { machine.Unmap(0x3001, 4096); }, "4 KiB aligned");
+    failure([&] { machine.Unmap(0xfffffffffffff000, 4096); }, "without overflow");
+    machine.Set(Register::Rdi, 0x3000);
+    machine.Set(Register::Rax, 99);
+    failure([&] { machine.Run(0x1020, 0x1023, 10); }, "protected write at 0x3000");
+    require(read<std::uint64_t>(machine, 0x3000) == 11, "Partial or rejected unmap changed its retained read-only neighbor");
+    machine.Set(Register::Rdi, 0x5000);
+    failure([&] { machine.Run(0x1000, 0x1003, 10); }, "protected read at 0x5000");
+    machine.Set(Register::Rax, 99);
+    require(machine.Run(0x1020, 0x1023, 10) == StopReason::Address,
+            "Partial or rejected unmap removed its retained writable neighbor");
+    machine.Protect(0x5000, 4096, rw);
+    require(read<std::uint64_t>(machine, 0x5000) == 99, "Retained neighbor no longer refers to its original storage");
+    machine.Map(0x4000, 4096, rw);
+    machine.Set(Register::Rdi, 0x4000);
+    require(machine.Run(0x1000, 0x1003, 10) == StopReason::Address && machine.Get(Register::Rax) == 0,
+            "Remapping a removed page retained old bytes or a stale memory translation");
+    machine.Map(0x2000, 4096, rx);
+    unsigned calls = 0;
+    machine.AddHostCall(0x2000, [&](Machine& guest) { ++calls; guest.Exit(7); });
+    require(machine.Run(0x2000, 0, 10) == StopReason::Exit && machine.ExitCode() == 7 && calls == 1,
+            "Original host gate did not execute before unmapping");
+    machine.Unmap(0x2000, 4096);
+    machine.Map(0x2000, 4096, rx);
+    code(machine, 0x2000, {0xb8,77,0,0,0});
+    require(machine.Run(0x2000, 0x2005, 10) == StopReason::Address && machine.Get(Register::Rax) == 77 && calls == 1,
+            "Address reuse retained a removed host gate or stale translated code");
+    for (std::uint64_t iteration = 0; iteration < 512; ++iteration) {
+        machine.Map(0x7000, 4096, rw);
+        write(machine, 0x7000, iteration);
+        machine.Set(Register::Rdi, 0x7000);
+        require(machine.Run(0x1000, 0x1003, 10) == StopReason::Address && machine.Get(Register::Rax) == iteration,
+                "Repeated allocation reuse leaked backing capacity or executed stale memory");
+        machine.Unmap(0x7000, 4096);
+    }
+    failure([&] { machine.CheckAccess(0x7000, 1, Permission::Read); }, "Guest access denied at 0x7000");
+    inventory(machine.Mappings(), {{0x1000,8192,rx,false}, {0x3000,4096,Permission::Read,false}, {0x4000,8192,rw,false}});
+}
+void replacementRanges() {
+#if ANYPS5_CPU_MODERN_TCG
+    alignas(16384) std::array<std::byte,16384> original{};
+    alignas(16384) std::array<std::byte,16384> fresh{};
+#endif
+    alignas(16384) std::array<std::byte,16384> replacement{};
+    Machine machine;
+    machine.Map(0x1000, 4096, rx);
+    machine.Map(0x3000, 16384, rw);
+    write(machine, 0x4000, std::uint64_t{111});
+    code(machine, 0x1000, {0x48,0x8b,0x07});
+    machine.Set(Register::Rdi, 0x4000);
+    require(machine.Run(0x1000, 0x1003, 10) == StopReason::Address && machine.Get(Register::Rax) == 111,
+            "Original range did not execute its memory read before replacement");
+#if ANYPS5_CPU_MODERN_TCG
+    machine.Unmap(0x3000, 16384);
+    machine.MapBorrowed(0x3000, original, rw);
+    machine.MapBorrowed(0x8000, std::span(original).subspan(4096, 4096), rw);
+    machine.MapBorrowed(0x10000, replacement, rw);
+    write(machine, 0x4000, std::uint64_t{111});
+    write(machine, 0x11000, std::uint64_t{222});
+    require(machine.Run(0x1000, 0x1003, 10) == StopReason::Address && machine.Get(Register::Rax) == 111,
+            "Original borrowed alias did not warm its memory translation");
+    machine.ReplaceBorrowed(0x4000, std::span(replacement).subspan(4096, 4096), rw);
+    require(machine.Run(0x1000, 0x1003, 10) == StopReason::Address && machine.Get(Register::Rax) == 222,
+            "Partial replacement retained its old physical backing or stale memory translation");
+    machine.Set(Register::Rdi, 0x8000);
+    require(machine.Run(0x1000, 0x1003, 10) == StopReason::Address && machine.Get(Register::Rax) == 111,
+            "Partial replacement changed a retained peer of the old backing");
+    code(machine, 0x1020, {0x48,0x89,0x07});
+    machine.Set(Register::Rdi, 0x4000);
+    machine.Set(Register::Rax, 333);
+    require(machine.Run(0x1020, 0x1023, 10) == StopReason::Address && read<std::uint64_t>(machine, 0x11000) == 333 &&
+            read<std::uint64_t>(machine, 0x8000) == 111, "Replacement writes did not cohere only with their new backing");
+    machine.Unmap(0x3000, 16384);
+    require(read<std::uint64_t>(machine, 0x8000) == 111 && read<std::uint64_t>(machine, 0x11000) == 333,
+            "Unmapping mixed fragments released an allocation still used by another guest alias");
+    failure([&] { machine.ReplaceBorrowed(0x8000, replacement, rw); }, "Guest access denied at 0x9000");
+    failure([&] { machine.ReplaceBorrowed(0x8000, std::span(replacement).subspan(1, 4096), rw); }, "4 KiB aligned offset");
+    std::array<std::byte,4096> unknownAllocation{};
+    failure([&] { machine.ReplaceBorrowed(0x8000, unknownAllocation, rw); }, "requires a complete aligned host-page backing");
+    require(read<std::uint64_t>(machine, 0x8000) == 111, "Rejected replacement changed existing storage");
+    machine.Map(0x2000, 4096, rx);
+    code(machine, 0x2000, {0xb8,1,0,0,0});
+    require(machine.Run(0x2000, 0x2005, 10) == StopReason::Address && machine.Get(Register::Rax) == 1,
+            "Original executable range did not warm its translation");
+    unsigned calls = 0;
+    machine.AddHostCall(0x2000, [&](Machine& guest) { ++calls; guest.Exit(7); });
+    require(machine.Run(0x2000, 0, 10) == StopReason::Exit && calls == 1, "Original replacement gate did not execute");
+    constexpr std::array<std::uint8_t,5> newCode{0xb8,9,0,0,0};
+    std::copy(newCode.begin(), newCode.end(), reinterpret_cast<std::uint8_t*>(replacement.data()));
+    machine.ReplaceBorrowed(0x2000, std::span(replacement).first(4096), rx);
+    inventory(machine.Mappings(), {{0x1000,4096,rx,false}, {0x2000,4096,rx,true},
+              {0x8000,4096,rw,true}, {0x10000,16384,rw,true}});
+    failure([&] { machine.CheckAccess(0x2000, 1, Permission::Write); }, "Guest access denied");
+    require(machine.Run(0x2000, 0x2005, 10) == StopReason::Address && machine.Get(Register::Rax) == 9 && calls == 1,
+            "Executable replacement retained a host gate, old code or old permissions");
+    replacement[1] = std::byte{19};
+    require(machine.Run(0x2000, 0x2005, 10) == StopReason::Address && machine.Get(Register::Rax) == 19,
+            "Replaced borrowed code stopped observing host changes");
+    fresh[0] = std::byte{0xf5}; fresh[1] = std::byte{1};
+    machine.ReplaceBorrowed(0x10000, fresh, rw);
+    machine.Set(Register::Rdi, 0x10000);
+    require(machine.Run(0x1000, 0x1003, 10) == StopReason::Address && machine.Get(Register::Rax) == 501,
+            "Replacement did not register a new complete borrowed allocation");
+    require(machine.Run(0x2000, 0x2005, 10) == StopReason::Address && machine.Get(Register::Rax) == 19,
+            "Full replacement released old storage still used by a retained executable alias");
+#else
+    failure([&] { machine.ReplaceBorrowed(0x3000, replacement, rw); }, "Unicorn guest borrowed range replacement is unsupported");
+    require(machine.Run(0x1000, 0x1003, 10) == StopReason::Address && machine.Get(Register::Rax) == 111,
+            "Unsupported replacement changed the original Unicorn guest mapping");
+#endif
+    machine.MapBorrowed(0x20000, replacement, rw);
+    machine.Protect(0x21000, 4096, static_cast<Permission>(0));
+    machine.Unmap(0x22000, 4096);
+#if ANYPS5_CPU_MODERN_TCG
+    inventory(machine.Mappings(), {{0x1000,4096,rx,false}, {0x2000,4096,rx,true}, {0x8000,4096,rw,true},
+              {0x10000,16384,rw,true}, {0x20000,4096,rw,true}, {0x21000,4096,static_cast<Permission>(0),true}, {0x23000,4096,rw,true}});
+#else
+    inventory(machine.Mappings(), {{0x1000,4096,rx,false}, {0x3000,16384,rw,false},
+              {0x20000,4096,rw,true}, {0x21000,4096,static_cast<Permission>(0),true}, {0x23000,4096,rw,true}});
+#endif
+}
 }
 int main(int argc, const char** argv) {
     try {
@@ -471,7 +646,8 @@ int main(int argc, const char** argv) {
             {"unsupported VEX/EVEX", unsupportedVectorEncodings},
 #endif
             {"unsupported XOP", unsupportedXopEncoding}, {"syscall/import ABI", syscallAndHostAbi},
-            {"borrowed memory", borrowedMemory}, {"errors/budget", errorsAndBudget}
+            {"borrowed memory", borrowedMemory}, {"errors/budget", errorsAndBudget},
+            {"unmap ranges", unmapRanges}, {"replacement ranges", replacementRanges}
         };
         bool selected = false;
         for (const auto& [name, test] : tests) {
