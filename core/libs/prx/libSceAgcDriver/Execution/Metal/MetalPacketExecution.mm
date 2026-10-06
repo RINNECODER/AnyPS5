@@ -274,6 +274,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             const auto now = FrameTiming::Clock::now();
             frame->IncludeSubmission(submission.serial, now, now, now, true);
             frame->SetFlip(submission.serial, cursor, now, now);
+            lock.unlock();
             flip->GpuReady(frame);
         } else if (opcode == 0x15) {
             ExecuteDispatchSynchronously(queue, packet, submission);
