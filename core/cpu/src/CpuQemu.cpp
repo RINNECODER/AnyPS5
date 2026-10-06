@@ -133,6 +133,7 @@ struct Machine::Impl {
     std::vector<Backing> backings;
     std::unordered_map<std::uint64_t, std::function<void(Machine&)>> calls;
     std::vector<std::shared_ptr<SuspendedFrame>> pendingCalls;
+    std::vector<std::shared_ptr<SuspendedFrame>> retiredCalls;
     ActiveCall* activeCall = nullptr;
     std::function<void(Machine&)> syscall;
     std::atomic<bool> requested{false};
@@ -178,7 +179,25 @@ struct Machine::Impl {
         if (call.payload->frame->completed) throw std::logic_error("Suspended guest host call is already completed");
         if (call.payload->frame->abandoned) throw std::logic_error("Suspended guest host call was abandoned");
     }
+    void retireAbandonedCalls() {
+        checkContextIdle();
+        const auto count = static_cast<std::size_t>(std::count_if(pendingCalls.begin(), pendingCalls.end(),
+            [](const auto& frame) { return frame->abandoned; }));
+        if (!count) return;
+        // Retain frame identities for the Machine lifetime: a saved context can
+        // still restore an abandoned caller after an unrelated session starts.
+        retiredCalls.reserve(retiredCalls.size() + count);
+        for (const auto& frame : pendingCalls)
+            if (frame->abandoned) retiredCalls.push_back(frame);
+        std::erase_if(pendingCalls, [](const auto& frame) { return frame->abandoned; });
+    }
+    void checkRetiredFrame(std::uint64_t gate, std::uint64_t stack) const {
+        if (std::any_of(retiredCalls.begin(), retiredCalls.end(), [&](const auto& frame) {
+            return frame->gate == gate && frame->stack == stack;
+        })) throw std::logic_error("Suspended guest host call requires completion before redispatch");
+    }
     void checkPendingFrame(std::uint64_t gate, std::uint64_t stack) const {
+        checkRetiredFrame(gate, stack);
         if (std::any_of(pendingCalls.begin(), pendingCalls.end(), [&](const auto& frame) {
             return frame->gate == gate && frame->stack == stack;
         })) throw std::logic_error("Suspended guest host call requires completion before redispatch");
@@ -611,7 +630,9 @@ StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t 
     impl->checkOwner();
     if (impl->contextLifetime->running) throw std::logic_error("Guest execution is already running");
     if (!instructionLimit) throw std::invalid_argument("Guest execution requires a nonzero instruction limit");
+    impl->retireAbandonedCalls();
     if (!impl->pendingCalls.empty()) throw std::logic_error("Guest session reset requires completion of all suspended host calls");
+    impl->checkPendingFrame(entry, Get(Register::Rsp));
     impl->check(anyps5_qemu_cpu_clear_stop(impl->engine), "Reset modern guest stop request");
     impl->requested.store(false);
     impl->exited = false;
@@ -622,10 +643,14 @@ StopReason Machine::RunSlice(std::uint64_t entry, std::uint64_t until, std::uint
     impl->checkOwner();
     if (impl->contextLifetime->running) throw std::logic_error("Guest execution is already running");
     if (!instructionLimit) throw std::invalid_argument("Guest execution requires a nonzero instruction limit");
+    // A sticky terminal observation never dispatches or resets a guest frame.
+    // Keep abandoned-frame checks on every path that can execute instructions.
     if (impl->exited || impl->requested.load()) {
         impl->lastRunInstructions = 0;
         return impl->exited ? StopReason::Exit : StopReason::Requested;
     }
+    impl->retireAbandonedCalls();
+    impl->checkRetiredFrame(Get(Register::Rip), Get(Register::Rsp));
     if (Get(Register::Rip) != entry) throw std::invalid_argument("Guest execution slice requires the current continuation PC");
     impl->checkPendingFrame(entry, Get(Register::Rsp));
     impl->contextLifetime->running = true;

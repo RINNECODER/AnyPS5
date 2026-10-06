@@ -129,7 +129,9 @@ struct Session {
         Machine.Protect(Edge + 4096, 4096, Cpu::Permission::Read);
     }
 
-    ~Session() { Threads->Withdraw(); }
+    bool Withdrawn = false;
+    void withdraw() { Threads->Withdraw(); Withdrawn = true; }
+    ~Session() { if (!Withdrawn) Threads->Withdraw(); }
 
     std::array<std::uint64_t, 36> receipt() const {
         std::array<std::uint64_t, 36> data{};
@@ -156,8 +158,9 @@ struct Session {
     }
 };
 
-void translatedLifecycle(const std::filesystem::path& main, const std::filesystem::path& guest, bool wrongOracle) {
-    Session session(main, guest, 0, ArithmeticResult + (wrongOracle ? 1 : 0));
+void translatedLifecycle(const std::filesystem::path& main, const std::filesystem::path& guest, bool wrongOracle,
+                         unsigned mode = 0) {
+    Session session(main, guest, mode, ArithmeticResult + (wrongOracle ? 1 : 0));
     require(session.Graph->RunMain(2000000, 100000) == Cpu::StopReason::Exit &&
             session.Machine.ExitCode() == (wrongOracle ? 77 : 0),
             "Compiled thread program rejected scheduling, TLS, guard, arithmetic or independent result oracle");
@@ -198,6 +201,25 @@ void translatedLifecycle(const std::filesystem::path& main, const std::filesyste
     session.Machine.Read(session.ExitFrameAddress, exitFrame);
     require(exitFrame == session.ExitFrame, "Actual dependency finalizer corrupted the paused entry frame or red zone");
     session.edgeUnchanged();
+    if (mode == 12) {
+        session.withdraw();
+        constexpr std::uint64_t fresh = 0x4000000, result = fresh + 4096;
+        constexpr std::array<unsigned char, 11> code{0xb8, 0x29, 0, 0, 0, 0x83, 0xc0, 1, 0x48, 0x89, 0x07};
+        session.Machine.Map(fresh, 4096, rw);
+        session.Machine.Map(result, 4096, rw);
+        session.Machine.Write(fresh, std::as_bytes(std::span(code)));
+        session.Machine.Protect(fresh, 4096, Cpu::Permission::Read | Cpu::Permission::Execute);
+        session.Machine.Set(Cpu::Register::Rdi, result);
+        session.Machine.Set(Cpu::Register::Rax, 0xfeedface);
+        require(session.Machine.Run(fresh, fresh + code.size(), 100) == Cpu::StopReason::Address &&
+                session.Machine.Get(Cpu::Register::Rip) == fresh + code.size() &&
+                session.Machine.Get(Cpu::Register::Rax) == 42,
+                "Withdraw after compiled scePthreadExit retained a suspended guard or resumed old guest code");
+        std::uint64_t stored{};
+        session.Machine.Read(result, std::as_writable_bytes(std::span(&stored, 1)));
+        require(stored == 42 && session.receipt() == state && session.lifecycle() == lifecycle,
+                "Fresh guest run failed its independent result or replayed withdrawn thread callbacks");
+    }
 }
 
 void arithmeticBudgetStop(const std::filesystem::path& main, const std::filesystem::path& guest) {
@@ -318,6 +340,7 @@ int main(int argc, char** argv) {
         require(argc == 3, "Usage: GuestThreadsTests main.elf ThreadGuest.prx");
         translatedLifecycle(argv[1], argv[2], false);
         translatedLifecycle(argv[1], argv[2], true);
+        translatedLifecycle(argv[1], argv[2], false, 12);
         arithmeticBudgetStop(argv[1], argv[2]);
         preflightFailures(argv[1], argv[2]);
         rejectedFactoryPreservesParent(argv[1], argv[2]);

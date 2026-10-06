@@ -15,7 +15,7 @@ MAIN_EXPORTS = {"_start": 2, "SceGuestMain": 2, "ThreadMainTls": 6, "ThreadMainP
                 "ThreadMainZero": 6, "ThreadMainGd": 6, "ThreadReceipt": 1, "ThreadEvents": 1,
                 "ThreadCount": 2, "ThreadReport": 2, "ThreadDestructor": 2, "ThreadChild": 2, "ThreadArithmetic": 2}
 THREAD_NIDS = {"rNhWz+lvOMU", "pB-yGZ2nQ9o", "WhCc1w3EhSI", "6UgtwV+0zb4", "T72hz6ffq08",
-               "onNY9Byn-W8", "aI+OeCz8xrQ", "3PtV6p3QNX4", "9BcDykPmo1I"}
+               "onNY9Byn-W8", "aI+OeCz8xrQ", "3PtV6p3QNX4", "9BcDykPmo1I", "3kg7rT0NQIs"}
 MAIN_IMPORTS = {name: (nid(name), 1, symbol_type) for name, symbol_type in GUEST_EXPORTS.items()
                 if name not in {"ThreadDependencyInit", "ThreadDependencyFini"}}
 MAIN_IMPORTS.update({name: (name, 3, 2) for name in THREAD_NIDS})

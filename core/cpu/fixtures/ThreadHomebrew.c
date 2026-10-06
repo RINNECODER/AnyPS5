@@ -70,6 +70,7 @@ extern int thread_create(u64*, const u64*, void* (*)(void*), void*, const char*)
 extern void thread_yield(void) __asm__("T72hz6ffq08");
 extern int thread_join(u64, void**) __asm__("onNY9Byn-W8");
 extern int thread_equal(u64, u64) __asm__("3PtV6p3QNX4");
+extern void thread_exit(void*) __asm__("3kg7rT0NQIs");
 
 static u64 anchor = 0x69887796ul;
 EXPORT __thread volatile u64 ThreadMainTls __attribute__((aligned(16))) TLS_IE = 0x1122334455667788ul;
@@ -79,6 +80,7 @@ EXPORT __thread volatile u64 ThreadMainGd = 0x2233445566778899ul;
 EXPORT volatile u64 ThreadReceipt[36];
 EXPORT volatile u64 ThreadEvents[6];
 static volatile u64 iterations = 8192;
+static volatile u64 exitChild;
 
 static void record(u64 event) {
     const u64 index = ThreadReceipt[0];
@@ -156,6 +158,11 @@ EXPORT void* ThreadChild(void* argument) {
     for (u64 index = 0; index < 32; ++index)
         if (canary[index] != 0xabcdef0100000000ul + index * 37) ThreadReceipt[1] = 105;
     record(4);
+    if (exitChild) {
+        thread_exit((void*)0x8877665544332211ul);
+        ThreadReceipt[1] = 106;
+        return (void*)0x1122334455667788ul;
+    }
     return (void*)0x8877665544332211ul;
 }
 
@@ -195,6 +202,7 @@ EXPORT int SceGuestMain(u64 argc, char** argv) {
     volatile u64 canary[32];
     for (u64 index = 0; index < 32; ++index) canary[index] = 0x1234567800000000ul + index * 41;
     record(1);
+    exitChild = mode == 12;
     if (mode == 8) thread_join(thread_self(), (void**)0);
     if (mode == 9) thread_join(0xfedcba9876543210ul, (void**)0);
     volatile struct { u64 before, handle, after; } created = {0x13579bdf2468ace0ul, 0, 0xeca86420fdb97531ul};

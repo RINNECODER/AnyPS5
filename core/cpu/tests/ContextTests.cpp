@@ -339,6 +339,7 @@ void StickyTerminalSlices(bool exit) {
         machine.Get(Register::Rip) == CallGate && machine.Get(Register::Rsp) == ReturnSlot &&
         machine.LastRunInstructions() == 3, "Terminal paused host call returned or consumed its frame");
     if (exit) Require(machine.ExitCode() == 73, "Terminal slice lost the actual guest exit code");
+    auto abandoned = machine.CaptureContext();
     const auto stopped = Current(machine);
     Require(machine.RunSlice(CallEntry, CallEnd, 100) == reason && machine.LastRunInstructions() == 0 &&
         Current(machine) == stopped && calls == 1 && Read(machine, DataA) == 0,
@@ -347,6 +348,42 @@ void StickyTerminalSlices(bool exit) {
     Require(machine.RunSlice(CallEntry, CallEnd, 100) == reason && machine.LastRunInstructions() == 0 &&
         Current(machine) == stopped && calls == 1, "Rejected session reset cleared terminal state before rejecting its pending call");
     RejectsUnchanged(machine, [&] { machine.CompleteHostCall(paused); }, "terminal stop or exit");
+    constexpr std::uint64_t freshEntry = 0x100001600, freshEnd = 0x100001617;
+    constexpr std::array<std::uint8_t, 23> fresh{
+        0xb8,0x29,0,0,0, 0x83,0xc0,0x01, 0x83,0xf8,0x2a, 0x75,0x05,
+        0x48,0x89,0x07, 0xeb,0x05, 0xb8,0x63,0,0,0};
+    machine.Write(freshEntry, std::as_bytes(std::span(fresh)));
+    RejectsUnchanged(machine, [&] { machine.Run(freshEntry, freshEnd, 100); },
+        "completion of all suspended host calls");
+    Require(machine.RunSlice(CallEntry, CallEnd, 100) == reason && machine.LastRunInstructions() == 0 &&
+        Current(machine) == stopped && calls == 1,
+        "Unrelated session reset with a live token cleared the sticky terminal state");
+    paused = Machine::SuspendedCall{};
+    Require(machine.RunSlice(CallGate, CallEnd, 100) == reason && machine.LastRunInstructions() == 0 &&
+        Current(machine) == stopped && calls == 1 && Read(machine, DataA) == 0,
+        "Abandoning a terminal host call prevented zero-instruction observation or replayed its frame");
+    if (exit) Require(machine.ExitCode() == 73, "Abandoned terminal observation lost the exit code");
+    RejectsUnchanged(machine, [&] { machine.Run(CallGate, CallEnd, 100); }, "completion before redispatch");
+    Require(calls == 1 && Read(machine, DataA) == 0,
+        "An abandoned actual CALL frame replayed its host callback or guest continuation");
+    Initialize(machine, 0, 83, DataB, OtherStack);
+    machine.Set(Register::Rip, freshEntry);
+    const auto freshStopped = Current(machine);
+    Require(machine.RunSlice(freshEntry, freshEnd, 100) == reason && machine.LastRunInstructions() == 0 &&
+        Current(machine) == freshStopped && Read(machine, DataB) == 0 && calls == 1,
+        "Abandoned terminal observation cleared state before a fresh session reset");
+    if (exit) Require(machine.ExitCode() == 73, "Abandoned terminal observation cleared the sticky exit code");
+    Require(machine.Run(freshEntry, freshEnd, 100) == Cpu::StopReason::Address &&
+        machine.Get(Register::Rip) == freshEnd && machine.Get(Register::Rsp) == OtherStack &&
+        machine.Get(Register::Rax) == 42 && machine.Get(Register::Rbx) == 83 &&
+        machine.Get(Register::Rflags) == 0x46 && machine.LastRunInstructions() == 6 &&
+        Read(machine, DataB) == 42 && Read(machine, DataA) == 0 && calls == 1,
+        "Abandoned host call prevented a fresh session or corrupted independent x86 arithmetic, flags or control flow");
+    machine.RestoreContext(abandoned);
+    RejectsUnchanged(machine, [&] { machine.RunSlice(CallGate, CallEnd, 100); }, "completion before redispatch");
+    RejectsUnchanged(machine, [&] { machine.Run(CallGate, CallEnd, 100); }, "completion before redispatch");
+    Require(calls == 1 && Read(machine, DataB) == 42 && Read(machine, DataA) == 0,
+        "A fresh session forgot the abandoned frame or rolled back shared guest memory");
     CallerGuards(machine);
 }
 
