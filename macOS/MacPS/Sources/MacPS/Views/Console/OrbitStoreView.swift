@@ -4,7 +4,6 @@ import SwiftUI
 /// A catalogue browser with view-local filters: browsing Orbit never changes library selection.
 struct OrbitStoreView: View {
     @Bindable var store: LauncherStore
-    var isPreview = false
     @State private var query = ""
     @State private var genre = "All genres"
     @State private var detailGame: CatalogueGame?
@@ -82,13 +81,13 @@ struct OrbitStoreView: View {
         .sheet(item: $detailGame) { game in
             VStack(spacing: 0) {
                 HStack {
-                    Label("Orbit Store", systemImage: "sparkles").font(.headline)
+                    Label("Catalogue", systemImage: "sparkles").font(.headline)
                     Spacer()
                     Button("Done") { detailGame = nil }.keyboardShortcut(.cancelAction)
                 }.padding(20)
                 Divider()
                 GameDetailView(store: store, game: game)
-                    .disabled(isPreview)
+
             }
             .frame(minWidth: 640, idealWidth: 760, minHeight: 620, idealHeight: 760)
             .preferredColorScheme(.dark)
@@ -102,8 +101,8 @@ struct OrbitStoreView: View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Orbit Store").font(.system(size: 38, weight: .semibold))
-                    Text("Explore games. Connect your local copy.")
+                    Text("Catalogue").font(.system(size: 38, weight: .semibold))
+                    Text("Browse games and add your local copy to the library.")
                         .font(.title3).foregroundStyle(.secondary)
                 }
                 Spacer()

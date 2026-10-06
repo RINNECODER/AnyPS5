@@ -4,7 +4,6 @@ import SwiftUI
 
 struct ConsoleRootView: View {
     @Bindable var store: LauncherStore
-    let isPreview: Bool
     @State private var showingStore = false
     @State private var showingSearch = false
     @State private var showingSettings = false
@@ -16,11 +15,11 @@ struct ConsoleRootView: View {
         VStack(spacing: 0) {
             header
             if showingStore {
-                OrbitStoreView(store: store, isPreview: isPreview)
+                OrbitStoreView(store: store)
             } else {
-                ConsoleHomeView(store: store, query: query, isPreview: isPreview) { optionsGame = $0 }
+                ConsoleHomeView(store: store, query: query) { optionsGame = $0 }
             }
-            if !isPreview && (store.isRunning || store.showConsole || store.hasMountedResources) {
+            if (store.isRunning || store.showConsole || store.hasMountedResources || store.sessionStatus != "No session yet") {
                 sessionBar
                 if store.showConsole { ConsoleView(text: store.console).frame(height: 160) }
             }
@@ -30,7 +29,7 @@ struct ConsoleRootView: View {
         .sheet(isPresented: $showingSettings) {
             VStack(spacing: 0) {
                 sheetHeader("Settings") { showingSettings = false }
-                EngineSettingsView(store: store).disabled(isPreview)
+                AppSettingsView(store: store)
             }.frame(width: 800, height: 700).preferredColorScheme(.dark)
         }
         .sheet(item: $optionsGame) { game in
@@ -40,7 +39,7 @@ struct ConsoleRootView: View {
                     LocalGameActions(store: store,
                                      game: store.library.games.first { $0.id == game.id },
                                      catalogueGame: game.catalogue)
-                        .padding(28).disabled(isPreview)
+                        .padding(28)
                 }
             }.frame(width: 640, height: 680).preferredColorScheme(.dark)
         }
@@ -50,11 +49,11 @@ struct ConsoleRootView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 30) {
-            MPSWordmark().frame(width: 88, height: 24)
-            HStack(spacing: 30) {
-                tab("Games", selected: !showingStore) { showingStore = false }
-                tab("Orbit Store", selected: showingStore) { showingStore = true; showingSearch = false; query = "" }
+        HStack(spacing: 22) {
+            Text("MacPS").font(.system(size: 24, weight: .semibold))
+            HStack(spacing: 22) {
+                tab("Library", selected: !showingStore) { showingStore = false }
+                tab("Catalogue", selected: showingStore) { showingStore = true; showingSearch = false; query = "" }
             }.padding(.leading, 18)
             Spacer(minLength: 8)
             if showingSearch && !showingStore {
@@ -79,7 +78,7 @@ struct ConsoleRootView: View {
                     .font(.system(size: 18, weight: .light)).foregroundStyle(.white.opacity(0.8))
             }.frame(minWidth: 74, alignment: .trailing)
         }
-        .padding(.horizontal, 54).padding(.vertical, 25)
+        .padding(.horizontal, 32).padding(.vertical, 25)
         .background(ConsoleTheme.ink.opacity(0.72))
     }
 

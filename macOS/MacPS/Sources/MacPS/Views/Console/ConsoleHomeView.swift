@@ -4,7 +4,6 @@ import SwiftUI
 struct ConsoleHomeView: View {
     @Bindable var store: LauncherStore
     let query: String
-    let isPreview: Bool
     let showOptions: (ConsoleGame) -> Void
     @FocusState private var shelfFocused: Bool
 
@@ -15,69 +14,70 @@ struct ConsoleHomeView: View {
     private var selectedID: String? { ConsoleLibrary.selectedID(store.selectedID, in: games) }
     private var selected: ConsoleGame? { games.first { $0.id == selectedID } }
     private var canPlay: Bool {
-        !isPreview && selected != nil && !store.isRunning && !store.isInspectingGame
+        selected != nil && !store.isRunning && !store.isInspectingGame
             && !store.isProbingEngine && !store.isCleaningResources && !store.library.enginePath.isEmpty
     }
 
     var body: some View {
         GeometryReader { geometry in
-            VStack(alignment: .leading, spacing: 0) {
-                shelf
-                Spacer(minLength: 28)
-                if let game = selected {
-                    VStack(alignment: .leading, spacing: 22) {
-                        Text(game.title)
-                            .font(.system(size: min(geometry.size.width * 0.046, 66), weight: .regular, design: .serif))
-                            .lineLimit(2).shadow(color: .black.opacity(0.6), radius: 12, y: 3)
-                        Text(game.genre ?? "Local game").font(.title3).foregroundStyle(.white.opacity(0.8))
-                        HStack(spacing: 20) {
-                            Button { store.launch(game.local) } label: {
-                                Label("Play", systemImage: "play.fill").frame(minWidth: 150)
-                            }
-                            .buttonStyle(ConsolePillStyle(primary: true))
-                            .disabled(!canPlay)
-                            .opacity(canPlay || isPreview ? 1 : 0.55)
-                            .accessibilityLabel("Play \(game.title)")
-                            Button { showOptions(game) } label: {
-                                Image(systemName: "ellipsis").font(.title2).frame(width: 54, height: 54)
-                            }
-                            .buttonStyle(.plain)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .overlay { Circle().stroke(.white.opacity(0.3), lineWidth: 1) }
-                            .accessibilityLabel("Options for \(game.title)")
-                        }.padding(.top, 8)
-                        Text(isPreview ? "Interface preview · game launch is disabled" : "Runtime in development · compatibility unverified")
-                            .font(.caption).foregroundStyle(.white.opacity(0.65))
-                    }
-                    .frame(maxWidth: geometry.size.width * 0.67, alignment: .leading)
-                    .padding(.horizontal, 54)
-                } else {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text(query.isEmpty ? "Your next game starts here." : "No matching local games.")
-                            .font(.system(size: 44, weight: .medium))
-                        Text(query.isEmpty ? "Add a local game, or explore the Orbit catalogue." : "Try another search or clear the filter.")
-                            .font(.title3).foregroundStyle(.secondary)
-                        if query.isEmpty {
-                            Button { store.attach() } label: { Label("Add local game", systemImage: "plus") }
-                                .buttonStyle(ConsolePillStyle(primary: true)).disabled(isPreview || store.isRunning)
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 0) {
+                    shelf
+                    Spacer(minLength: 8)
+                    if let game = selected {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text(game.title)
+                                .font(.system(size: min(geometry.size.width * 0.04, 54), weight: .regular, design: .serif))
+                                .lineLimit(2).shadow(color: .black.opacity(0.6), radius: 12, y: 3)
+                            Text(game.genre ?? "Local game").font(.title3).foregroundStyle(.white.opacity(0.8))
+                            HStack(spacing: 20) {
+                                Button { store.launch(game.local) } label: {
+                                    Label("Play", systemImage: "play.fill").frame(minWidth: 150)
+                                }
+                                .buttonStyle(ConsolePillStyle(primary: true))
+                                .disabled(!canPlay)
+                                .opacity(canPlay ? 1 : 0.55)
+                                .accessibilityLabel("Play \(game.title)")
+                                Button { showOptions(game) } label: {
+                                    Image(systemName: "ellipsis").font(.title2).frame(width: 54, height: 54)
+                                }
+                                .buttonStyle(.plain)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .overlay { Circle().stroke(.white.opacity(0.3), lineWidth: 1) }
+                                .accessibilityLabel("Options for \(game.title)")
+                            }.padding(.top, 8)
+                            Text("Compatibility unverified · game runtime in development")
+                                .font(.caption).foregroundStyle(.white.opacity(0.65))
                         }
-                    }.padding(.horizontal, 54)
-                }
-                Spacer(minLength: 34)
-                HStack(spacing: 24) {
-                    Label("Browse", systemImage: "arrow.left.arrow.right")
-                    Label("Select", systemImage: "return")
-                    Label("Options", systemImage: "ellipsis.circle")
-                    Spacer()
-                    if isPreview { Text("UI preview").foregroundStyle(ConsoleTheme.blue) }
-                }
-                .font(.callout).foregroundStyle(.white.opacity(0.75))
-                .padding(.horizontal, 54).padding(.bottom, 24)
+                        .frame(maxWidth: geometry.size.width * 0.67, alignment: .leading)
+                        .padding(.horizontal, 54)
+                    } else {
+                        VStack(alignment: .leading, spacing: 20) {
+                            Text(query.isEmpty ? "Your next game starts here." : "No matching local games.")
+                                .font(.system(size: 44, weight: .medium))
+                            Text(query.isEmpty ? "Add a local game, or explore the Orbit catalogue." : "Try another search or clear the filter.")
+                                .font(.title3).foregroundStyle(.secondary)
+                            if query.isEmpty {
+                                Button { store.attach() } label: { Label("Add local game", systemImage: "plus") }
+                                    .buttonStyle(ConsolePillStyle(primary: true)).disabled(store.isRunning)
+                            }
+                        }.padding(.horizontal, 54)
+                    }
+                    Spacer(minLength: 12)
+                    HStack(spacing: 24) {
+                        Label("Browse", systemImage: "arrow.left.arrow.right")
+                        Label("Select", systemImage: "return")
+                        Label("Options", systemImage: "ellipsis.circle")
+                        Spacer()
+                    }
+                    .font(.callout).foregroundStyle(.white.opacity(0.75))
+                    .padding(.horizontal, 54).padding(.bottom, 24)
+                }.frame(minHeight: geometry.size.height, alignment: .topLeading)
             }
         }
         .background {
             GeometryReader { geometry in
-                ConsoleArtwork(url: selected?.heroURL, title: selected?.title ?? "MacPS", hero: true, conceptHero: isPreview)
+                ConsoleArtwork(url: selected?.heroURL, title: selected?.title ?? "MacPS", hero: true)
                     .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                     .overlay {
                         LinearGradient(stops: [.init(color: .black.opacity(0.62), location: 0), .init(color: .black.opacity(0.22), location: 0.65), .init(color: .clear, location: 1)], startPoint: .leading, endPoint: .trailing)
@@ -107,7 +107,7 @@ struct ConsoleHomeView: View {
                         .frame(width: 126, height: 136)
                         .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
                         .overlay { RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.15), lineWidth: 1) }
-                    }.buttonStyle(.plain).disabled(isPreview || store.isRunning)
+                    }.buttonStyle(.plain).disabled(store.isRunning)
                 }
                 .padding(.horizontal, 54).padding(.top, 22).padding(.bottom, 20)
             }
@@ -140,7 +140,7 @@ private struct ConsoleShelfTile: View {
     var body: some View {
         Button(action: select) {
             ConsoleArtwork(url: game.coverURL, title: game.title)
-                .frame(width: selected ? 176 : 126, height: selected ? 176 : 136)
+                .frame(width: selected ? 156 : 116, height: selected ? 156 : 126)
                 .clipShape(RoundedRectangle(cornerRadius: 18))
                 .overlay { RoundedRectangle(cornerRadius: 18).stroke(selected ? .white : .white.opacity(0.22), lineWidth: selected ? 3 : 1) }
                 .shadow(color: selected ? ConsoleTheme.blue.opacity(0.85) : .clear, radius: 12)

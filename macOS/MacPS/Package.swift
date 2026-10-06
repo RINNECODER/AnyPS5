@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "AnyPS5Launcher",
+    name: "MacPS",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "AnyPS5Launcher", targets: ["AnyPS5Launcher"])],
+    products: [.executable(name: "MacPS", targets: ["MacPS"])],
     targets: [
         .target(name: "LauncherCore"),
-        .executableTarget(name: "AnyPS5Launcher", dependencies: ["LauncherCore"], resources: [.process("Resources")]),
+        .executableTarget(name: "MacPS", dependencies: ["LauncherCore"]),
         .testTarget(name: "LauncherCoreTests", dependencies: ["LauncherCore"])
     ]
 )

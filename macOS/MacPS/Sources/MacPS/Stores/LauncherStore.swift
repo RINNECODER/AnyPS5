@@ -5,16 +5,6 @@ import Observation
 
 @MainActor @Observable
 final class LauncherStore {
-    enum Section: String, CaseIterable, Identifiable {
-        case catalogue = "Orbit Catalogue", library = "My Library", engine = "Engine"
-        var id: String { rawValue }
-        var icon: String {
-            switch self { case .catalogue: "square.grid.2x2"; case .library: "gamecontroller"; case .engine: "cpu" }
-        }
-    }
-
-    var section = Section.catalogue
-    var search = ""
     var selectedID: String?
     var games: [CatalogueGame] = []
     var library = LauncherLibrary()
@@ -25,7 +15,7 @@ final class LauncherStore {
     var isRunning = false
     var runningTitle: String?
     var sessionStatus = "No session yet"
-    var console = "Select a local executable and configure the AnyPS5 engine to start a session."
+    var console = "Add a game to your library to start a session."
     var showConsole = false
     var capabilities: EngineCapabilities?
     var engineProbeStatus = "Choose an engine to read its capabilities."
@@ -48,24 +38,21 @@ final class LauncherStore {
 
     init(supportDirectory: URL? = nil) {
         let support = supportDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AnyPS5Launcher", isDirectory: true)
+            .appendingPathComponent("MacPS", isDirectory: true)
         persistence = LibraryPersistence(url: support.appendingPathComponent("library.json"))
         client = CatalogueClient(cacheURL: support.appendingPathComponent("orbit-catalogue-v2.json"))
-        do { library = try persistence.load() }
+        do {
+            if supportDirectory == nil {
+                _ = try MacPSStorage.prepare(in: support.deletingLastPathComponent())
+            }
+            library = try persistence.load()
+        }
         catch {
             canSave = false
             self.error = "Your library could not be read. It has been preserved at \(support.path)/library.json. \(error.localizedDescription)"
         }
     }
 
-    var visibleGames: [CatalogueGame] {
-        games.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) || $0.titleIDs.localizedCaseInsensitiveContains(search) }
-    }
-    var visibleLocalGames: [LocalGame] {
-        library.games.filter { search.isEmpty || $0.title.localizedCaseInsensitiveContains(search) }
-            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-    }
-    var selectedGame: CatalogueGame? { games.first { $0.id == selectedID } }
     var selectedLocal: LocalGame? { library.games.first { $0.id == selectedID } }
 
     func refresh() async {
@@ -95,7 +82,6 @@ final class LauncherStore {
                               sceModulePaths: local?.sceModulePaths ?? existing?.sceModulePaths ?? [])
         library.attach(entry)
         selectedID = entry.id
-        if game == nil { section = .library }
         save()
     }
 
@@ -282,7 +268,7 @@ final class LauncherStore {
         sessionStatus = "Preparing \(game.title)"
         logBytes = Data()
         console = "Preparing local game resources…\n"
-        showConsole = true
+        showConsole = UserDefaults.standard.bool(forKey: "MacPS.showActivityAfterLaunch")
         Task {
             defer { isRunning = false; runningTitle = nil }
             do {
