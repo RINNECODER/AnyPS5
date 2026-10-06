@@ -7,6 +7,7 @@
 #include <cpu/SceModules.hpp>
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceSystemImports.hpp>
+#include <cpu/SceAudioOut2Imports.hpp>
 #include <cpu/Self.hpp>
 #include <array>
 #include <csignal>
@@ -144,7 +145,8 @@ std::vector<Cpu::SceHostModule> HostModules(const std::vector<Cpu::SceModuleFile
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
         {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
-        {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}}};
+        {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
+        {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}}};
     for (const auto& file : files) {
         const auto image = Cpu::ParseSce(file.Path);
         std::erase_if(hosts, [&](const auto& host) {
@@ -315,6 +317,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
         std::unique_ptr<Cpu::SceModules> modules;
         std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
+        std::unique_ptr<Cpu::SceAudioOut2Imports> audioRuntime;
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
@@ -325,7 +328,9 @@ int main(int argc, char** argv) {
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
+                audioRuntime = std::make_unique<Cpu::SceAudioOut2Imports>(machine);
                 const auto resolve = [&](const auto& import) {
+                    if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
                     if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
