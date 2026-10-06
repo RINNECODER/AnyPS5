@@ -30,6 +30,9 @@ final class LauncherStore {
     var capabilities: EngineCapabilities?
     var engineProbeStatus = "Choose an engine to read its capabilities."
     var isProbingEngine = false
+    var isInspectingGame = false
+    var inspectedGame: LocalGame?
+    var inspectionText: String?
     private var engineCompatibilityError: String?
 
     private let persistence: LibraryPersistence
@@ -90,7 +93,7 @@ final class LauncherStore {
     }
 
     func chooseEngine() {
-        guard !isRunning, !isProbingEngine else { return }
+        guard !isRunning, !isProbingEngine, !isInspectingGame else { return }
         guard canSave else { error = "The saved library needs to be repaired before it can be changed."; return }
         let panel = NSOpenPanel()
         panel.title = "Choose the AnyPS5 engine"
@@ -103,6 +106,8 @@ final class LauncherStore {
         }
         library.enginePath = url.path
         capabilities = nil
+        inspectedGame = nil
+        inspectionText = nil
         engineCompatibilityError = nil
         save()
         Task { await probeEngine() }
@@ -118,7 +123,7 @@ final class LauncherStore {
             guard library.enginePath == path else { return }
             capabilities = result
             engineCompatibilityError = nil
-            engineProbeStatus = "\(result.backend) · \(result.hostArchitecture) → \(result.guestArchitecture) · \(result.runtimeABI)"
+            engineProbeStatus = "\(result.backend) · \(result.hostArchitecture) → \(result.guestArchitecture) · \((result.runtimeABIs ?? [result.runtimeABI]).joined(separator: ", "))"
         } catch {
             guard library.enginePath == path else { return }
             capabilities = nil
@@ -147,7 +152,7 @@ final class LauncherStore {
     }
 
     func launch(_ game: LocalGame) {
-        guard !isRunning else { return }
+        guard !isRunning, !isInspectingGame else { return }
         do {
             guard !isProbingEngine else { throw LauncherError("Wait for the engine capability check to finish.") }
             if let engineCompatibilityError { throw LauncherError(engineCompatibilityError) }
@@ -179,6 +184,26 @@ final class LauncherStore {
                 }
             }
         } catch { self.error = error.localizedDescription; showConsole = true }
+    }
+
+    func inspect(_ game: LocalGame) {
+        guard !isInspectingGame, !isRunning, !isProbingEngine else { return }
+        guard let capabilities else { error = "Recheck engine capabilities before inspecting a game."; return }
+        isInspectingGame = true
+        inspectedGame = game
+        inspectionText = "Reading executable metadata…"
+        let enginePath = library.enginePath
+        Task {
+            defer { isInspectingGame = false }
+            do {
+                let result = try await EngineInspection.inspect(engine: URL(fileURLWithPath: enginePath), game: game, capabilities: capabilities)
+                guard library.enginePath == enginePath else { return }
+                inspectionText = result.summary
+            } catch {
+                guard library.enginePath == enginePath else { return }
+                inspectionText = error.localizedDescription
+            }
+        }
     }
 
     func stop() { runner.stop(); sessionStatus = "Stopping \(runningTitle ?? "engine")…" }

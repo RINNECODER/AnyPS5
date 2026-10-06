@@ -12,12 +12,15 @@ public struct EngineCapabilities: Decodable, Sendable {
     public let backend: String
     public let supportedFormats: [String]
     public let runtimeABI: String
+    public let runtimeABIs: [String]?
+    public let sceConstraints: [String]?
     public let ps5GameRuntimeReady: Bool
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version", hostArchitecture = "host_architecture"
         case guestArchitecture = "guest_architecture", supportedFormats = "supported_formats"
         case runtimeABI = "runtime_abi", ps5GameRuntimeReady = "ps5_game_runtime_ready"
+        case runtimeABIs = "runtime_abis", sceConstraints = "sce_constraints"
         case backend
     }
 

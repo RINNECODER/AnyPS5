@@ -30,7 +30,7 @@ public final class EngineRunner: @unchecked Sendable {
         let header = try handle.read(upToCount: 64) ?? Data()
         guard header.count >= 64, Array(header.prefix(7)) == [0x7f, 0x45, 0x4c, 0x46, 2, 1, 1],
               header[18] == 62, header[19] == 0 else {
-            throw LauncherError("AnyPS5 needs a clean x86-64 ELF executable. FFPFSC, exFAT, PKG, archives and encrypted SELF files cannot be launched directly.")
+            throw LauncherError("AnyPS5 needs a clean x86-64 ELF executable. FFPFSC, exFAT, PKG, archives and SELF containers cannot be launched directly.")
         }
         // Unadvertised engines use the static checkpoint contract; SCE support requires a capability.
         if let capabilities, !capabilities.supportedFormats.contains("static_elf64_x86_64") && !capabilities.supportedFormats.contains("sce_elf64_x86_64") {

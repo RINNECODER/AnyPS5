@@ -52,7 +52,12 @@ struct LocalGameActions: View {
             if let game {
                 Text(game.executablePath).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                 Button { store.launch(game) } label: { Label("Run with AnyPS5", systemImage: "play.fill") }
-                    .buttonStyle(.borderedProminent).disabled(store.isRunning || store.library.enginePath.isEmpty)
+                    .buttonStyle(.borderedProminent).disabled(store.isRunning || store.isInspectingGame || store.library.enginePath.isEmpty)
+                Button("Inspect executable") { store.inspect(game) }
+                    .disabled(store.isRunning || store.isInspectingGame || store.isProbingEngine || store.library.enginePath.isEmpty)
+                if store.inspectedGame == game, let text = store.inspectionText {
+                    Text(text).font(.caption.monospaced()).textSelection(.enabled)
+                }
                 if store.library.enginePath.isEmpty {
                     Button("Choose engine…") { store.chooseEngine() }.font(.caption)
                 }
