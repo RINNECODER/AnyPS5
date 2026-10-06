@@ -430,8 +430,8 @@ void repeatedLibraryAttributes() {
     put(fixture.bytes, Dyn + 16 + 8, (1ull << 32) | fixture.libcOffset);
     fixture.bytes[Strings + fixture.nidOffset + 12] = std::byte{'A'};
     fixture.bytes[Strings + fixture.exitOffset + 12] = std::byte{'A'};
-    fixture.tag(0x61000019, 9);
-    fixture.tag(0x61000019, 9);
+    fixture.tag(0x61000019, 2);
+    fixture.tag(0x61000019, 2);
     fixture.finish();
     Input input(fixture.bytes);
     const auto parsed = Cpu::ParseSce(input.path);
@@ -439,7 +439,7 @@ void repeatedLibraryAttributes() {
             parsed.Imports[0].LibraryName == "libc" && parsed.Imports[0].ModuleId == 1,
             "Repeated imported-library attributes or importer-local library ID zero lost qualified identity");
     require(parsed.ImportLibraryAttributes.size() == 2 && parsed.ImportLibraryAttributes[0].LibraryId == 0 &&
-            parsed.ImportLibraryAttributes[0].Attributes == 9 && parsed.ImportLibraryAttributes[1].Attributes == 9,
+            parsed.ImportLibraryAttributes[0].Attributes == 2 && parsed.ImportLibraryAttributes[1].Attributes == 2,
             "Inspection discarded repeated scoped imported-library attribute records");
     require(std::any_of(parsed.UnsupportedReasons.begin(), parsed.UnsupportedReasons.end(), [](const auto& reason) {
         return reason.find("imported library attributes") != std::string::npos;
@@ -448,11 +448,12 @@ void repeatedLibraryAttributes() {
     unsigned resolutions = 0;
     rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); },
             "imported library attributes");
-    require(resolutions == 0, "Unsupported imported-library attributes reached host resolution");
+    require(resolutions == 0 && machine.Mappings().empty(),
+            "Unsupported imported-library attributes mapped guest memory or reached host resolution");
     put(fixture.bytes, Dyn + (fixture.tags - 1) * 16 + 8, 8);
     Input conflicting(fixture.bytes);
     rejects([&] { Cpu::ParseSce(conflicting.path); }, "conflicting imported library attributes");
-    put(fixture.bytes, Dyn + (fixture.tags - 1) * 16 + 8, (2ull << 48) | 9);
+    put(fixture.bytes, Dyn + (fixture.tags - 1) * 16 + 8, (2ull << 48) | 2);
     Input unbound(fixture.bytes);
     rejects([&] { Cpu::ParseSce(unbound.path); }, "attribute has no matching imported library id");
 }
