@@ -11,6 +11,8 @@ public struct EngineInspection: Decodable, Sendable {
     public let schemaVersion: Int
     public let event: String
     public let format: String
+    public let containerFormat: String?
+    public let normalizationNotes: [String]?
     public let segmentCount: Int
     public let relocationCount: Int
     public let hasTLS: Bool
@@ -22,6 +24,7 @@ public struct EngineInspection: Decodable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version", event, format, imports
+        case containerFormat = "container_format", normalizationNotes = "normalization_notes"
         case segmentCount = "segment_count", relocationCount = "relocation_count"
         case hasTLS = "has_tls", hasProcessParameters = "has_process_parameters"
         case neededModules = "needed_modules", neededFiles = "needed_files"
@@ -31,6 +34,8 @@ public struct EngineInspection: Decodable, Sendable {
     public var summary: String {
         var lines = ["Parsed \(format): \(segmentCount) segments, \(relocationCount) relocations.",
                      "Guest TLS: \(hasTLS ? "present" : "absent"). Process parameters: \(hasProcessParameters ? "present" : "absent")."]
+        if let containerFormat { lines.append("Container: \(containerFormat)") }
+        lines += normalizationNotes ?? []
         if !neededModules.isEmpty { lines.append("Modules: \(neededModules.joined(separator: ", "))") }
         if !neededFiles.isEmpty { lines.append("Needed files: \(neededFiles.joined(separator: ", "))") }
         lines.append("Imports (\(imports.count)):")

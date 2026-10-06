@@ -52,7 +52,7 @@ struct LocalGameActions: View {
             if let game {
                 Text(game.executablePath).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                 Button { store.launch(game) } label: { Label("Run with AnyPS5", systemImage: "play.fill") }
-                    .buttonStyle(.borderedProminent).disabled(store.isRunning || store.isInspectingGame || store.library.enginePath.isEmpty)
+                    .buttonStyle(.borderedProminent).disabled(store.isRunning || store.isInspectingGame || store.isCleaningResources || store.library.enginePath.isEmpty)
                 Button("Inspect executable") { store.inspect(game) }
                     .disabled(store.isRunning || store.isInspectingGame || store.isProbingEngine || store.library.enginePath.isEmpty)
                 if store.inspectedGame == game, let text = store.inspectionText {
@@ -63,9 +63,16 @@ struct LocalGameActions: View {
                 }
                 Button("Change executable…") { store.attach(to: catalogueGame, replacing: game) }.font(.caption)
                 Button("Choose resource folder…") { store.chooseResources(for: game) }.font(.caption)
-                Text("Resources: \(game.workingDirectory)").font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                Button("Use exFAT resource image…") { store.chooseImageResources(for: game) }
+                    .font(.caption).disabled(store.isRunning)
+                Text(game.resourceImagePath.map { "Read-only resources: \($0)" } ?? "Resources: \(game.workingDirectory)")
+                    .font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                if store.hasMountedResources {
+                    Button("Retry resource cleanup") { Task { await store.retryResourceCleanup() } }
+                        .font(.caption).disabled(store.isRunning || store.isCleaningResources)
+                }
             } else {
-                Text("Attach a clean local ELF to try it with the configured engine.").font(.callout).foregroundStyle(.secondary)
+                Text("Attach a supported local ELF or plaintext SELF to try it with the configured engine.").font(.callout).foregroundStyle(.secondary)
                 Button("Attach local executable…") { store.attach(to: catalogueGame) }.buttonStyle(.borderedProminent)
             }
             Text("Runtime support is in development. A catalogue entry does not establish game compatibility.")

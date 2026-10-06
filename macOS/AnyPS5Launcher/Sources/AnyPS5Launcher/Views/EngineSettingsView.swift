@@ -19,6 +19,12 @@ struct EngineSettingsView: View {
                         Text(store.engineProbeStatus).font(.caption).foregroundStyle(.secondary)
                         if let capabilities = store.capabilities {
                             Text("Inputs: \(capabilities.supportedFormats.joined(separator: ", "))").font(.caption.monospaced())
+                            if let containers = capabilities.supportedContainers {
+                                Text("Executable containers: \(containers.joined(separator: ", "))").font(.caption.monospaced())
+                            }
+                            if let families = capabilities.unsupportedInstructionFamilies {
+                                Text("Unsupported instructions: \(families.joined(separator: ", "))").font(.caption).foregroundStyle(.secondary)
+                            }
                             Label(capabilities.ps5GameRuntimeReady ? "Engine reports PS5 game runtime ready" : "PS5 game runtime in development",
                                   systemImage: capabilities.ps5GameRuntimeReady ? "checkmark.circle" : "hammer")
                                 .font(.caption)
@@ -33,7 +39,7 @@ struct EngineSettingsView: View {
                 GroupBox("Current support") {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("The selected engine advertises its executable formats and runtime restrictions above. PS5 game loading, system-library calls and game graphics are still in development.")
-                        Text("Orbit's exFAT and FFPFSC releases cannot be passed directly to this engine. Attach a clean executable to test the runtime; unsupported inputs and calls are reported in the console.")
+                        Text("Attach a supported local executable. An exFAT release can supply read-only resources during the session; the image itself is not an executable. Unsupported inputs and calls are reported in the console.")
                         Text("A successful process exit records that session's result. It does not establish graphics correctness or playable game compatibility.")
                             .foregroundStyle(.secondary)
                     }.font(.callout).padding(12)

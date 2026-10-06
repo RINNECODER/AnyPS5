@@ -28,7 +28,7 @@ struct AnyPS5LauncherApp: App {
                 Button("Choose AnyPS5 Runtime…") { store.chooseEngine() }
                     .disabled(store.isRunning || store.isProbingEngine)
                 Button("Run Selected Game") { if let game = store.selectedLocal { store.launch(game) } }
-                    .keyboardShortcut(.return).disabled(store.selectedLocal == nil || store.isRunning)
+                    .keyboardShortcut(.return).disabled(store.selectedLocal == nil || store.isRunning || store.isCleaningResources)
                 Button("Stop Session") { store.stop() }.disabled(!store.isRunning)
                 Toggle("Show Console", isOn: $store.showConsole).keyboardShortcut("l")
             }
@@ -44,13 +44,24 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let store, store.isRunning else { return .terminateNow }
+        guard let store, store.isRunning || store.hasMountedResources else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "An AnyPS5 session is running"
-        alert.informativeText = "Stop the session before quitting?"
-        alert.addButton(withTitle: "Keep Running")
+        alert.messageText = store.isRunning ? "An AnyPS5 session is running" : "Game resources are still mounted"
+        alert.informativeText = "Stop the session and detach its resource image before quitting?"
+        alert.addButton(withTitle: "Keep Open")
         alert.addButton(withTitle: "Stop and Quit")
-        if alert.runModal() == .alertSecondButtonReturn { store.stop(); return .terminateNow }
+        if alert.runModal() == .alertSecondButtonReturn {
+            Task {
+                do {
+                    try await store.stopAndWait()
+                    sender.reply(toApplicationShouldTerminate: true)
+                } catch {
+                    store.error = "Resource cleanup failed; AnyPS5 stayed open. \(error.localizedDescription)"
+                    sender.reply(toApplicationShouldTerminate: false)
+                }
+            }
+            return .terminateLater
+        }
         return .terminateCancel
     }
 }
