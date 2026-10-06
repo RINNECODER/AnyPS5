@@ -62,7 +62,7 @@ elseif(NOT ANYPS5_CPU_BACKEND STREQUAL "UNICORN")
     message(FATAL_ERROR "ANYPS5_CPU_BACKEND must be TCG or UNICORN")
 endif()
 
-add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.cpp src/SystemMachine.cpp src/SceImports.cpp src/SceElf.cpp src/Self.cpp src/SceTls.cpp src/GuestFiles.cpp src/SceKernelImports.cpp src/SceUserImports.cpp
+add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.cpp src/SystemMachine.cpp src/SceImports.cpp src/SceElf.cpp src/Self.cpp src/SceTls.cpp src/GuestFiles.cpp src/SceKernelImports.cpp src/SceUserImports.cpp src/SceSystemImports.cpp
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/NidCompute.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
@@ -148,6 +148,10 @@ if(BUILD_TESTING)
     target_link_libraries(anyps5_sce_user_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_user_imports COMMAND anyps5_sce_user_import_tests)
     set_tests_properties(anyps5_sce_user_imports PROPERTIES TIMEOUT 30)
+    add_test_executable(anyps5_sce_system_import_tests tests/SceSystemImportsTest.cpp)
+    target_link_libraries(anyps5_sce_system_import_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_system_imports COMMAND anyps5_sce_system_import_tests)
+    set_tests_properties(anyps5_sce_system_imports PROPERTIES TIMEOUT 30)
     add_test_executable(anyps5_self_tests tests/SelfTests.cpp)
     target_link_libraries(anyps5_self_tests PRIVATE anyps5_cpu)
     add_dependencies(anyps5_self_tests anyps5_sce_fixture)
