@@ -20,6 +20,7 @@ public:
     ~MetalDraw();
     MetalDraw(const MetalDraw&) = delete;
     MetalDraw& operator=(const MetalDraw&) = delete;
+    void DumpSamplesSynchronously(std::uint64_t guestAddress);
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault DrawSynchronously(
         const Graphics::State& state, const Pm4::DrawParameters& draw,
         std::span<const Graphics::CompiledShader> shaders,
@@ -30,6 +31,8 @@ private:
     std::unique_ptr<MetalDepthSurfaceCache> depthCache;
     std::vector<std::shared_ptr<MetalDepthSurface>> depthSurfaces;
     std::mutex drawMutex;
+    id<MTLBuffer> sampleCounter = nil;
+    id<MTLBuffer> sampleTarget = nil;
 };
 
 }

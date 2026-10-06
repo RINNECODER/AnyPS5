@@ -249,7 +249,9 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         } else if (opcode == 0x42 || opcode == 0x58 || opcode == 0x46) {
             CompletePriorGpuWorkAndCopyBack();
             if (opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u) {
-                throw std::runtime_error("Native Metal EVENT_WRITE occlusion counter dump requires an implemented visibility-result adapter");
+                if (draw == nullptr) throw std::runtime_error("Native Metal sample counter executor is not configured");
+                const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+                draw->DumpSamplesSynchronously(address);
             }
         } else {
             if (opcode == 0x49 || opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x83) {

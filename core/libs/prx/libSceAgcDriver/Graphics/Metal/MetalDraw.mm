@@ -4,7 +4,9 @@
 #include "MetalDepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstring>
 #include <limits>
@@ -13,6 +15,19 @@
 namespace AgcDriver::Metal {
 namespace {
 using namespace ShaderRecompiler;
+
+std::atomic<std::uint64_t> samplesPassed{0};
+
+struct SampleCounterParameters {
+    std::uint32_t count;
+    std::uint32_t store;
+};
+
+std::uint64_t sampleTotal(id<MTLBuffer> counter) {
+    std::uint64_t total;
+    std::memcpy(&total, counter.contents, sizeof(total));
+    return total;
+}
 
 MTLVertexFormat vertexFormat(VkFormat format) {
     switch (format) {
@@ -114,6 +129,36 @@ MetalDraw::MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary)
 }
 
 MetalDraw::~MetalDraw() = default;
+
+void MetalDraw::DumpSamplesSynchronously(std::uint64_t guestAddress) {
+    std::lock_guard lock(drawMutex);
+    constexpr std::size_t targetBytes = 15 * 16 + 8;
+    if (guestAddress == 0 || guestAddress % 8 != 0 ||
+        guestAddress > std::numeric_limits<std::uint64_t>::max() - targetBytes) {
+        throw std::invalid_argument("Metal sample counter target is null, misaligned or overflowing");
+    }
+    for (std::uint64_t db = 0; db < 16; ++db) {
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(guestAddress + db * 16), 8, 8, true);
+    }
+    if (sampleCounter == nil) {
+        auto counter = backend.Buffer(24);
+        auto target = backend.Buffer(targetBytes);
+        std::memset(counter.contents, 0, counter.length);
+        const auto initial = samplesPassed.load(std::memory_order_acquire);
+        std::memcpy(counter.contents, &initial, sizeof(initial));
+        sampleCounter = counter;
+        sampleTarget = target;
+    }
+    const SampleCounterParameters parameters{0, 1};
+    auto commands = backend.CommandBuffer();
+    backend.Encode(commands, @"SampleCounter", @[sampleCounter, sampleTarget], &parameters, sizeof(parameters), MTLSizeMake(1, 1, 1));
+    backend.Wait(commands);
+    samplesPassed.store(sampleTotal(sampleCounter), std::memory_order_release);
+    const auto* values = static_cast<const std::byte*>(sampleTarget.contents);
+    for (std::uint64_t db = 0; db < 16; ++db) {
+        GuestMemory::Write(guestAddress + db * 16, std::span(values + db * 16, 8), 8);
+    }
+}
 
 BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
@@ -292,6 +337,10 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     auto vertexBindings = resources.Bindings(pipeline.VertexReflection());
     auto fragmentBindings = resources.Bindings(pipeline.FragmentReflection());
     auto depthStencilState = CreateDepthStencilState(backend.Device(), state);
+    if (sampleCounter != nil) {
+        std::memset(static_cast<std::byte*>(sampleCounter.contents) + 16, 0, 8);
+        renderPass.visibilityResultBuffer = sampleCounter;
+    }
     auto commands = backend.CommandBuffer();
     auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
     if (encoder == nil) throw std::runtime_error("Metal draw render encoder allocation failed");
@@ -299,6 +348,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         pipeline.Bind(encoder, vertexBindings, fragmentBindings,
             pushBlock(pipeline.VertexReflection(), pushConstants), pushBlock(pipeline.FragmentReflection(), pushConstants), resources.Residency());
         BindRenderState(encoder, state, depthStencilState);
+        if (sampleCounter != nil) [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:16];
         for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setVertexBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
         if (draw.indexed) {
             [encoder drawIndexedPrimitives:primitive indexCount:draw.indexCount indexType:nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
@@ -311,7 +361,12 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         throw;
     }
     [encoder endEncoding];
+    if (sampleCounter != nil) {
+        const SampleCounterParameters parameters{1, 0};
+        backend.Encode(commands, @"SampleCounter", @[sampleCounter, sampleTarget], &parameters, sizeof(parameters), MTLSizeMake(1, 1, 1));
+    }
     backend.Wait(commands);
+    if (sampleCounter != nil) samplesPassed.store(sampleTotal(sampleCounter), std::memory_order_release);
     return resources.Complete(commands);
 }
 

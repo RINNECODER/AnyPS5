@@ -204,7 +204,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         ComputeOutputAddress = 0x820000, LabelAddress = 0x900000;
     constexpr std::uint64_t GraphicsCommandAddress = 0xa00000, ComputeCommandAddress = 0xa10000,
         SecondCommandAddress = 0xa20000, IndirectAddress = 0xa30000, PacketAddress = 0xb00000,
-        IndirectDrawCommandAddress = 0xa40000, ArgumentAddress = 0xc00000;
+        IndirectDrawCommandAddress = 0xa40000, ArgumentAddress = 0xc00000, QueryAllocation = 0xd00000;
     std::array<std::array<float, 4>, 6> vertices;
     std::copy(Triangle.begin(), Triangle.end(), vertices.begin());
     std::fill(vertices.begin() + 3, vertices.end(), std::array<float, 4>{8, 8, 0.5f, 1});
@@ -273,6 +273,10 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     std::array<std::uint32_t, 80> arguments{};
     std::array<std::uint16_t, 4> indices{0, 3, 4, 5};
     const auto originalIndices = indices;
+    constexpr std::uint64_t QueryGuard = 0x9192939495969798, Ready = 1ull << 63u;
+    std::array<std::uint64_t, 36> queries;
+    queries.fill(QueryGuard);
+    auto expectedQueries = queries;
     std::array<::Packet, 4> packets{{
         {reinterpret_cast<std::uint32_t*>(GraphicsCommandAddress), static_cast<std::uint32_t>(graphics.size()), 0, {}},
         {reinterpret_cast<std::uint32_t*>(ComputeCommandAddress), static_cast<std::uint32_t>(compute.size()), 0, {}},
@@ -295,7 +299,8 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         {PacketAddress, std::as_writable_bytes(std::span(packets)), false},
         {IndirectDrawCommandAddress, std::as_writable_bytes(std::span(indirectCommands)), false},
         {ArgumentAddress, std::as_writable_bytes(std::span(arguments)), false},
-        {IndexAddress, std::as_writable_bytes(std::span(indices)), false}};
+        {IndexAddress, std::as_writable_bytes(std::span(indices)), false},
+        {QueryAllocation, std::as_writable_bytes(std::span(queries)), true}};
     const auto checkPixels = [&](bool masked) {
         for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
             auto expected = std::byte{0x7b};
@@ -423,6 +428,78 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     append(indexedMulti, 0x38, {16, 0x90, 0x91, 0x92u | (1u << 31u), 3, 0, 0, 32, 0});
     submitIndirect(indexedMulti, 96, "Actual public DRAW_INDEX_INDIRECT_MULTI: zero instances, clamped firstIndex and excluded out-of-range record");
     vertices = originalVertices;
+    std::copy(VertexCode.begin(), VertexCode.end(), vertexCode.begin());
+    vertexCode[1] = 0x80020005;
+    vertexHeader = makeHeader(0x700000, 0x500000, sizeof(VertexCode), 2);
+    std::copy(FullPixelCode.begin(), FullPixelCode.end(), fragmentCode.begin());
+    fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(FullPixelCode), 1);
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x700000));
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+    const auto querySubmit = [&](const std::vector<std::uint32_t>& words) {
+        Require(words.size() <= indirectCommands.size(), "Sample query replay command allocation is too small");
+        std::copy(words.begin(), words.end(), indirectCommands.begin());
+        packets[3].dw_num = static_cast<std::uint32_t>(words.size());
+        AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress + 3 * sizeof(::Packet)), 0);
+        AgcDriverWaitIdle_nid_postfix();
+    };
+    const auto checkQueries = [&](std::uint32_t lane, std::uint64_t total, const std::string& name) {
+        for (std::uint32_t db = 0; db < 16; ++db) expectedQueries[2 + lane + db * 2] = Ready | (db == 0 ? total : 0);
+        for (std::size_t i = 0; i < queries.size(); ++i)
+            Require(queries[i] == expectedQueries[i], name + " produced wrong sparse query word " + std::to_string(i) +
+                ": observed " + std::to_string(queries[i]) + ", expected " + std::to_string(expectedQueries[i]));
+    };
+    const auto checkQueryPixels = [&](bool masked) {
+        for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
+            auto expected = std::byte{0x7b};
+            if (offset >= 256 && offset < 256 + Width * Height * 4) {
+                expected = std::byte{0x40};
+                const auto pixel = (offset - 256) / 4;
+                if (pixel / 64 < 16 && pixel % 64 < 16 && (!masked || pixel % 2 == 0)) expected = std::byte{255};
+            }
+            Require(pixels[offset] == expected, "Actual sample query draw produced wrong target byte " + std::to_string(offset));
+        }
+    };
+    const auto dump = [&](std::uint32_t lane) {
+        std::vector<std::uint32_t> words;
+        append(words, 0x46, {0x139, static_cast<std::uint32_t>(QueryAllocation + 16 + lane * 8), 0});
+        return words;
+    };
+    auto querySetup = GraphicsCommands();
+    const std::array<std::uint32_t, 1> queryDimensions{(15u << 14u) | 15u}, queryRect{(16u << 16u) | 16u},
+        queryScale{std::bit_cast<std::uint32_t>(8.0f)}, queryYScale{std::bit_cast<std::uint32_t>(-8.0f)}, disabledBlend{0};
+    RegisterPacket(querySetup, 0x69, 0x3b0, queryDimensions);
+    for (const auto offset : {0xdu, 0x82u, 0x91u, 0x95u}) RegisterPacket(querySetup, 0x69, offset, queryRect);
+    for (const auto offset : {0x10fu, 0x110u, 0x112u}) RegisterPacket(querySetup, 0x69, offset, queryScale);
+    RegisterPacket(querySetup, 0x69, 0x111, queryYScale);
+    RegisterPacket(querySetup, 0x69, 0x1e0, disabledBlend);
+    RegisterPacket(querySetup, 0x79, 0x24a, zeroBase);
+    std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+    append(querySetup, 0x2d, {3, 2});
+    const auto firstDump = dump(0);
+    querySetup.insert(querySetup.end(), firstDump.begin(), firstDump.end());
+    querySubmit(querySetup);
+    checkQueryPixels(false);
+    checkQueries(0, 0, "First EVENT_WRITE sample dump excludes preactivation draw");
+    std::vector<std::uint32_t> countedDraw;
+    append(countedDraw, 0x2d, {3, 2});
+    const auto shiftedDump = dump(1);
+    countedDraw.insert(countedDraw.end(), shiftedDump.begin(), shiftedDump.end());
+    querySubmit(countedDraw);
+    checkQueryPixels(false);
+    checkQueries(1, 256, "Full 16x16 guest draw sample dump");
+    querySubmit(shiftedDump);
+    checkQueries(1, 256, "Repeated sample dump preserves cumulative total");
+    fragmentCode = MaskedPixelCode;
+    fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(MaskedPixelCode), 1);
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+    std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+    std::vector<std::uint32_t> maskedQuery;
+    append(maskedQuery, 0x2d, {3, 2});
+    maskedQuery.insert(maskedQuery.end(), firstDump.begin(), firstDump.end());
+    querySubmit(maskedQuery);
+    checkQueryPixels(true);
+    checkQueries(0, 384, "Masked guest fragment discard contributes128 visible samples");
+    std::cout << "Actual public EVENT_WRITE samples: activation, hardware256+128 cumulative total, repeated dumps and16 sparse ready slots with neighbor guards passed\n";
     AgcDriverShutdown_nid_postfix();
     std::cout << "Actual public AGC Submit: shader registration snapshots, immutable flattened IB, cross-queue compute WAIT/conditional draw, completed EOP and persistent registers passed\n";
     output.fill(0xdeadbeef);
@@ -453,6 +530,11 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         callbackChanged.notify_all();
     };
     try {
+        std::copy(firstDump.begin(), firstDump.end(), indirectCommands.begin());
+        packets[3].dw_num = static_cast<std::uint32_t>(firstDump.size());
+        failureDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + 3 * sizeof(::Packet)), 0);
+        failureDriver.WaitIdle();
+        checkQueries(0, 384, "Replacement native driver preserves process sample total");
         failureDriver.RegisterShader(reinterpret_cast<const Shader*>(0x720000));
         failureDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
         bool entered;
