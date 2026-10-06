@@ -35,6 +35,7 @@ final class LauncherStore {
     var inspectedGame: LocalGame?
     var inspectionText: String?
     private var engineCompatibilityError: String?
+    private var acceptedPackage: EnginePackage?
 
     private let persistence: LibraryPersistence
     private let client: CatalogueClient
@@ -103,20 +104,63 @@ final class LauncherStore {
         guard canSave else { error = "The saved library needs to be repaired before it can be changed."; return }
         let panel = NSOpenPanel()
         panel.title = "Choose the AnyPS5 engine"
-        panel.message = "Choose a built AnyPS5 CLI runtime. The current checkpoint is anyps5_cpu_run."
-        panel.canChooseDirectories = false
+        panel.message = "Choose an AnyPS5 engine package folder, its manifest, or a runtime executable. Packages are checked before selection is saved."
+        panel.canChooseDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard FileManager.default.isExecutableFile(atPath: url.path) else {
-            error = "The selected file is not executable. Choose a built AnyPS5 runtime binary."
-            return
+        Task { await selectEngine(url) }
+    }
+
+    private func isPackageSelection(_ url: URL) -> Bool {
+        if url.hasDirectoryPath || url.lastPathComponent == "manifest.json" { return true }
+        guard url.lastPathComponent == "anyps5_cpu_run", url.deletingLastPathComponent().lastPathComponent == "bin" else { return false }
+        return FileManager.default.fileExists(atPath: url.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("manifest.json").path)
+    }
+
+    private func selectEngine(_ url: URL) async {
+        guard !isRunning, !isProbingEngine, !isInspectingGame, canSave else { return }
+        isProbingEngine = true
+        defer { isProbingEngine = false }
+        do {
+            let package: EnginePackage?
+            let result: EngineCapabilities?
+            let executable: URL
+            if isPackageSelection(url) {
+                engineProbeStatus = "Checking engine package and compiled execution fixtures…"
+                let verified = try await EnginePackage.accept(selectedURL: url)
+                package = verified; result = verified.capabilities; executable = verified.executableURL
+            } else {
+                guard FileManager.default.isExecutableFile(atPath: url.path) else {
+                    throw LauncherError("The selected file is not executable. Choose an AnyPS5 runtime or package.")
+                }
+                package = nil; executable = url
+                do { result = try await EngineCapabilities.probe(url) }
+                catch is EngineCapabilitiesUnavailable { result = nil }
+            }
+            var updated = library
+            updated.enginePath = executable.path
+            updated.enginePackageManifestSHA256 = package?.manifestSHA256
+            try persistence.save(updated)
+            library = updated
+            acceptedPackage = package
+            capabilities = result
+            inspectedGame = nil
+            inspectionText = nil
+            engineCompatibilityError = nil
+            updateEngineStatus()
+        } catch {
+            self.error = "Engine selection failed: \(error.localizedDescription)"
+            updateEngineStatus()
         }
-        library.enginePath = url.path
-        capabilities = nil
-        inspectedGame = nil
-        inspectionText = nil
-        engineCompatibilityError = nil
-        save()
-        Task { await probeEngine() }
+    }
+
+    private func updateEngineStatus() {
+        if let package = acceptedPackage {
+            engineProbeStatus = "Package accepted · \(package.capabilities.backend) · source \(package.sourceCommit.prefix(8)) · TCG \(package.engineCommit.prefix(8))"
+        } else if let capabilities {
+            engineProbeStatus = "\(capabilities.backend) · \(capabilities.hostArchitecture) → \(capabilities.guestArchitecture) · \((capabilities.runtimeABIs ?? [capabilities.runtimeABI]).joined(separator: ", "))"
+        } else {
+            engineProbeStatus = library.enginePath.isEmpty ? "Choose an engine to read its capabilities." : "Capabilities unavailable. Using the legacy static ELF checkpoint contract."
+        }
     }
 
     func probeEngine() async {
@@ -125,15 +169,36 @@ final class LauncherStore {
         let path = library.enginePath
         defer { isProbingEngine = false }
         do {
-            let result = try await EngineCapabilities.probe(URL(fileURLWithPath: path))
+            let url = URL(fileURLWithPath: path)
+            let result: EngineCapabilities
+            if library.enginePackageManifestSHA256 != nil || isPackageSelection(url) {
+                let package = try await EnginePackage.accept(selectedURL: url, expectedManifestSHA256: library.enginePackageManifestSHA256)
+                if let expected = library.enginePackageManifestSHA256, package.manifestSHA256 != expected {
+                    throw LauncherError("The selected engine package changed since it was saved. Choose the updated package explicitly to accept it.")
+                }
+                guard library.enginePath == path else { return }
+                acceptedPackage = package
+                result = package.capabilities
+                if library.enginePackageManifestSHA256 == nil {
+                    var updated = library
+                    updated.enginePackageManifestSHA256 = package.manifestSHA256
+                    try persistence.save(updated)
+                    library = updated
+                }
+            } else {
+                result = try await EngineCapabilities.probe(url)
+                acceptedPackage = nil
+            }
             guard library.enginePath == path else { return }
             capabilities = result
             engineCompatibilityError = nil
-            engineProbeStatus = "\(result.backend) · \(result.hostArchitecture) → \(result.guestArchitecture) · \((result.runtimeABIs ?? [result.runtimeABI]).joined(separator: ", "))"
+            updateEngineStatus()
         } catch {
             guard library.enginePath == path else { return }
             capabilities = nil
-            if error is EngineCapabilitiesUnavailable {
+            acceptedPackage = nil
+            if error is EngineCapabilitiesUnavailable, library.enginePackageManifestSHA256 == nil,
+               !isPackageSelection(URL(fileURLWithPath: path)) {
                 engineCompatibilityError = nil
                 engineProbeStatus = "Capabilities unavailable. Using the legacy static ELF checkpoint contract. \(error.localizedDescription)"
             } else {
@@ -206,6 +271,11 @@ final class LauncherStore {
         guard !isRunning, !isInspectingGame, !isCleaningResources else { return }
         guard !isProbingEngine else { error = "Wait for the engine capability check to finish."; return }
         if let engineCompatibilityError { error = engineCompatibilityError; return }
+        if (library.enginePackageManifestSHA256 != nil || isPackageSelection(URL(fileURLWithPath: library.enginePath))),
+           acceptedPackage == nil {
+            error = "Recheck the saved engine package before launching a game."
+            return
+        }
         isRunning = true
         sessionCancelled = false
         runningTitle = game.title
@@ -228,7 +298,8 @@ final class LauncherStore {
                     console += "Session cancelled before guest execution.\n"
                 } else {
                     let stream = try runner.run(engine: URL(fileURLWithPath: library.enginePath), game: game,
-                                                capabilities: capabilities, resourceDirectory: resourceDirectory)
+                                                capabilities: capabilities, resourceDirectory: resourceDirectory,
+                                                acceptedPackage: acceptedPackage)
                     sessionStatus = "Running \(game.title)"
                     console = "Engine: \(library.enginePath)\nGuest: \(game.executablePath)\nResources: \(resourceDirectory?.path ?? game.workingDirectory)\n\n"
                     let prefix = console
@@ -244,6 +315,9 @@ final class LauncherStore {
                         }
                     }
                 }
+            } catch is CancellationError {
+                sessionStatus = "Session cancelled"
+                console += "\nSession cancelled before guest execution.\n"
             } catch {
                 if let failure = error as? ResourceImageCleanupFailure { mountedResources = failure.resources }
                 sessionStatus = "Engine session failed"
@@ -268,7 +342,8 @@ final class LauncherStore {
         Task {
             defer { isInspectingGame = false }
             do {
-                let result = try await EngineInspection.inspect(engine: URL(fileURLWithPath: enginePath), game: game, capabilities: capabilities)
+                let result = try await EngineInspection.inspect(engine: URL(fileURLWithPath: enginePath), game: game,
+                                                                capabilities: capabilities, acceptedPackage: acceptedPackage)
                 guard library.enginePath == enginePath else { return }
                 inspectionText = result.summary
             } catch {

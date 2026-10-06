@@ -11,7 +11,7 @@ struct EngineSettingsView: View {
                 }
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
-                        Label("Runtime executable", systemImage: "cpu").font(.headline)
+                        Label("Engine package or runtime", systemImage: "cpu").font(.headline)
                         Text(store.library.enginePath.isEmpty ? "No engine selected" : store.library.enginePath)
                             .font(.callout.monospaced()).textSelection(.enabled)
                         Button("Choose AnyPS5 Runtime…") { store.chooseEngine() }
