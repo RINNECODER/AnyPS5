@@ -669,8 +669,100 @@ protected:
         return CompilerMSL::to_function_args(expanded, forward);
     }
 
+    void EmitNonInlineFunctionPrototype(spirv_cross::SPIRFunction& func) {
+        using namespace spirv_cross;
+        using namespace spv;
+        if (func.self != ir.default_entry_point)
+            add_function_overload(func);
+        local_variable_names = resource_names;
+        std::string decl;
+        processing_entry_point = false;
+        if (!processing_entry_point)
+            statement("static __attribute__((noinline))");
+        auto &type = get<SPIRType>(func.return_type);
+        if (!type.array.empty() && msl_options.force_native_arrays)
+        {
+            decl += "void";
+        }
+        else
+        {
+            decl += func_type_decl(type);
+        }
+        decl += " ";
+        decl += to_name(func.self);
+        decl += "(";
+        if (!type.array.empty() && msl_options.force_native_arrays)
+        {
+            decl += "thread ";
+            decl += type_to_glsl(type);
+            decl += " (&spvReturnValue)";
+            decl += type_to_array_glsl(type, 0);
+            if (!func.arguments.empty())
+                decl += ", ";
+        }
+        for (auto &arg : func.arguments)
+        {
+            uint32_t name_id = arg.id;
+            auto *var = maybe_get<SPIRVariable>(arg.id);
+            if (var)
+            {
+                if (arg.alias_global_variable && var->basevariable)
+                    name_id = var->basevariable;
+                var->parameter = &arg;
+            }
+            add_local_variable_name(name_id);
+            decl += argument_decl(arg);
+            bool is_dynamic_img_sampler = has_extended_decoration(arg.id, SPIRVCrossDecorationDynamicImageSampler);
+            auto &arg_type = get<SPIRType>(arg.type);
+            if (arg_type.basetype == SPIRType::SampledImage && !is_dynamic_img_sampler)
+            {
+                uint32_t planes = 1;
+                if (auto *constexpr_sampler = find_constexpr_sampler(name_id))
+                    if (constexpr_sampler->ycbcr_conversion_enable)
+                        planes = constexpr_sampler->planes;
+                for (uint32_t i = 1; i < planes; i++)
+                    decl += join(", ", argument_decl(arg), plane_name_suffix, i);
+                if (arg_type.image.dim != DimBuffer)
+                {
+                    if (arg_type.array.empty() || (var ? is_var_runtime_size_array(*var) : is_runtime_size_array(arg_type)))
+                    {
+                        decl += join(", ", sampler_type(arg_type, arg.id, false), " ", to_sampler_expression(name_id));
+                    }
+                    else
+                    {
+                        const char *sampler_address_space =
+                                descriptor_address_space(name_id,
+                                                         StorageClassUniformConstant,
+                                                         "thread const");
+                        decl += join(", ", sampler_address_space, " ", sampler_type(arg_type, name_id, false), "& ",
+                                     to_sampler_expression(name_id));
+                    }
+                }
+            }
+            if (msl_options.swizzle_texture_samples && has_sampled_images && is_sampled_image_type(arg_type) &&
+                !is_dynamic_img_sampler)
+            {
+                bool arg_is_array = !arg_type.array.empty();
+                decl += join(", constant uint", arg_is_array ? "* " : "& ", to_swizzle_expression(name_id));
+            }
+            if (buffer_requires_array_length(name_id))
+            {
+                bool arg_is_array = !arg_type.array.empty();
+                decl += join(", constant uint", arg_is_array ? "* " : "& ", to_buffer_size_expression(name_id));
+            }
+            if (&arg != &func.arguments.back())
+                decl += ", ";
+        }
+        decl += ")";
+        statement(decl);
+    }
+
     void emit_function_prototype(spirv_cross::SPIRFunction& function,
                                  const spirv_cross::Bitset& flags) override {
+        if (function.self != ir.default_entry_point && (function.function_control & spv::FunctionControlDontInlineMask)) {
+            EmitNonInlineFunctionPrototype(function);
+            return;
+        }
         CompilerMSL::emit_function_prototype(function, flags);
         if (function.self != ir.default_entry_point || meshPosition == 0 || positionHookInstalled ||
             (!meshFlipY && !meshFixupDepth)) return;
