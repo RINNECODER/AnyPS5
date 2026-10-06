@@ -119,7 +119,40 @@ void InspectSce(const Cpu::SceParsedImage& image) {
         const auto& attribute = image.ImportLibraryAttributes[index];
         std::cout << "{\"library_id\":" << attribute.LibraryId << ",\"attributes\":" << attribute.Attributes << '}';
     }
-    std::cout << "],\"needed_modules\":["; strings(image.NeededModules);
+    std::cout << "],\"export_modules\":[";
+    for (std::size_t index = 0; index < image.ExportModules.size(); ++index) {
+        if (index) std::cout << ',';
+        const auto& module = image.ExportModules[index];
+        std::cout << "{\"name\":" << Json(module.Name) << ",\"id\":" << module.Id
+            << ",\"major\":" << unsigned(module.Major) << ",\"minor\":" << unsigned(module.Minor) << '}';
+    }
+    std::cout << "],\"export_libraries\":[";
+    for (std::size_t index = 0; index < image.ExportLibraries.size(); ++index) {
+        if (index) std::cout << ',';
+        const auto& library = image.ExportLibraries[index];
+        std::cout << "{\"name\":" << Json(library.Name) << ",\"id\":" << library.Id << ",\"version\":" << library.Version << '}';
+    }
+    std::cout << "],\"export_library_attributes\":[";
+    for (std::size_t index = 0; index < image.ExportLibraryAttributes.size(); ++index) {
+        if (index) std::cout << ',';
+        const auto& attribute = image.ExportLibraryAttributes[index];
+        std::cout << "{\"library_id\":" << attribute.LibraryId << ",\"attributes\":" << attribute.Attributes << '}';
+    }
+    std::cout << "],\"exports\":[";
+    for (std::size_t index = 0; index < image.Exports.size(); ++index) {
+        if (index) std::cout << ',';
+        const auto& symbol = image.Exports[index];
+        const auto& identity = symbol.Identity;
+        std::cout << "{\"nid\":" << Json(identity.Nid) << ",\"library\":" << Json(identity.LibraryName)
+            << ",\"library_id\":" << identity.LibraryId << ",\"library_version\":" << identity.LibraryVersion
+            << ",\"module\":" << Json(identity.ModuleName) << ",\"module_id\":" << identity.ModuleId
+            << ",\"module_major\":" << unsigned(identity.ModuleMajor) << ",\"module_minor\":" << unsigned(identity.ModuleMinor)
+            << ",\"symbol_index\":" << symbol.SymbolIndex << ",\"value\":" << symbol.Value << ",\"size\":" << symbol.Size
+            << ",\"section\":" << symbol.Section << ",\"type\":" << unsigned(symbol.Type)
+            << ",\"binding\":" << unsigned(symbol.Binding) << ",\"visibility\":" << unsigned(symbol.Visibility) << '}';
+    }
+    std::cout << "],\"original_filename\":" << (image.OriginalFilename ? Json(*image.OriginalFilename) : "null");
+    std::cout << ",\"needed_modules\":["; strings(image.NeededModules);
     std::cout << "],\"needed_files\":["; strings(image.NeededFiles);
     std::cout << "],\"unsupported_reasons\":["; strings(image.UnsupportedReasons);
     std::cout << "],\"normalization_notes\":["; strings(image.ReconstructionNotes);

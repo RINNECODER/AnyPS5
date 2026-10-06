@@ -429,6 +429,150 @@ void translatedTlsEntry(bool bssOnly = false) {
             "Actual x86 FS accesses observed incorrect initialized TLS bytes, relocated pointer, BSS, or register result");
 }
 
+struct ExportFixture : Fixture {
+    std::size_t moduleTag = 0;
+    std::size_t libraryTag = 0;
+    std::size_t attributeTag = 0;
+    std::size_t filenameTag = 0;
+    std::uint32_t stringsSize = 0;
+    std::uint32_t functionOffset = 0;
+    std::uint32_t ownerOffset = 0;
+    std::uint32_t alternateOwnerOffset = 0;
+
+    explicit ExportFixture(bool modern = true) : Fixture(modern) {
+        put(bytes, 16, 0xfe18, 2);
+        put(bytes, 24, 0);
+        put(bytes, 64 + 16, 0);
+        header(5, 7, 4, 0x3040, 0x3040, 8, 16, 16);
+        stringsSize = static_cast<std::uint32_t>(libcOffset + 5 + 16 + 16);
+        const auto append = [&](const std::string& value) {
+            const auto offset = stringsSize;
+            for (const auto character : value) bytes.at(Strings + stringsSize++) = static_cast<std::byte>(character);
+            bytes.at(Strings + stringsSize++) = std::byte{};
+            return offset;
+        };
+        ownerOffset = append("guest-libc");
+        alternateOwnerOffset = append("alternate-owner");
+        const auto otherLibrary = append("guest-objects");
+        functionOffset = append("z8GPiQwaAEY#B#A");
+        const auto object = append("qG50MWOiS-Q#C#A");
+        const auto tls = append("eul2MC3gaYs#B#A");
+        const auto filename = append("W:/Build/J03341591/sys/internal/usermode/src/libc/Prospero_Release/libc.prx");
+        put(bytes, Dyn + 4 * 16 + 8, stringsSize);
+        put(bytes, Dyn + 7 * 16 + 8, 168);
+        moduleTag = tags;
+        tag(modern ? 0x61000043 : 0x6100000d, (2ull << 40) | (3ull << 32) | ownerOffset);
+        tag(modern ? 0x61000043 : 0x6100000d, (1ull << 48) | (4ull << 40) | (5ull << 32) | alternateOwnerOffset);
+        libraryTag = tags;
+        tag(modern ? 0x61000047 : 0x61000013, (1ull << 48) | (7ull << 32) | ownerOffset);
+        tag(modern ? 0x61000047 : 0x61000013, (2ull << 48) | (9ull << 32) | otherLibrary);
+        attributeTag = tags;
+        tag(0x61000017, (1ull << 48) | 1);
+        tag(0x61000017, (2ull << 48) | 2);
+        filenameTag = tags;
+        tag(modern ? 0x61000041 : 0x61000009, filename);
+        finish();
+        const auto symbol = [&](unsigned index, std::uint32_t name, unsigned info, std::uint64_t value, std::uint64_t size) {
+            const auto offset = Symbols + index * 24;
+            put(bytes, offset, name, 4);
+            put(bytes, offset + 4, info, 1);
+            put(bytes, offset + 5, 3, 1);
+            put(bytes, offset + 6, 1, 2);
+            put(bytes, offset + 8, value);
+            put(bytes, offset + 16, size);
+        };
+        symbol(4, functionOffset, 0x12, 0, 4);
+        symbol(5, object, 0x21, 0x3000, 8);
+        symbol(6, tls, 0x16, 0, 8);
+    }
+};
+
+void exportedModuleMetadata() {
+    for (const bool modern : {true, false}) {
+        ExportFixture fixture(modern);
+        Input input(fixture.bytes);
+        const auto parsed = Cpu::ParseSce(input.path);
+        require(parsed.Type == 0xfe18 && parsed.Entry == 0 && parsed.Imports.size() == 2 &&
+                parsed.Imports[0].LibraryName == "libc" && parsed.Imports[0].ModuleName == "libc" &&
+                parsed.Imports[0].LibraryId == 1 && parsed.Imports[0].ModuleId == 1,
+                "Export metadata changed the distinct imported module/library namespace");
+        require(parsed.ExportModules.size() == 2 && parsed.ExportModules[0].Name == "guest-libc" &&
+                parsed.ExportModules[0].Id == 0 && parsed.ExportModules[0].Major == 2 && parsed.ExportModules[0].Minor == 3 &&
+                parsed.ExportModules[1].Name == "alternate-owner" && parsed.ExportModules[1].Id == 1 &&
+                parsed.ExportModules[1].Major == 4 && parsed.ExportModules[1].Minor == 5 &&
+                parsed.ExportLibraries.size() == 2 && parsed.ExportLibraries[0].Name == "guest-libc" &&
+                parsed.ExportLibraries[0].Id == 1 && parsed.ExportLibraries[0].Version == 7 &&
+                parsed.ExportLibraries[1].Name == "guest-objects" && parsed.ExportLibraries[1].Id == 2 &&
+                parsed.ExportLibraries[1].Version == 9,
+                "Export metadata lost distinct names, ID zero, record order, or packed versions");
+        require(parsed.ExportLibraryAttributes.size() == 2 && parsed.ExportLibraryAttributes[0].LibraryId == 1 &&
+                parsed.ExportLibraryAttributes[0].Attributes == 1 && parsed.ExportLibraryAttributes[1].LibraryId == 2 &&
+                parsed.ExportLibraryAttributes[1].Attributes == 2,
+                "Repeated export attributes lost their individual library identity");
+        require(parsed.OriginalFilename && *parsed.OriginalFilename ==
+                "W:/Build/J03341591/sys/internal/usermode/src/libc/Prospero_Release/libc.prx" &&
+                std::none_of(parsed.UnsupportedReasons.begin(), parsed.UnsupportedReasons.end(), [](const auto& reason) {
+                    return reason.find("unsupported dynamic tag") != std::string::npos;
+                }), "Bounded original filename was lost or treated as an unsupported service");
+        require(parsed.Exports.size() == 3, "Defined qualified function, object, and TLS symbols were omitted");
+        const auto& function = parsed.Exports[0];
+        const auto& object = parsed.Exports[1];
+        const auto& tls = parsed.Exports[2];
+        require(function.Identity.Nid == "z8GPiQwaAEY" && function.Identity.LibraryName == "guest-libc" &&
+                function.Identity.LibraryId == 1 && function.Identity.LibraryVersion == 7 &&
+                function.Identity.ModuleName == "guest-libc" && function.Identity.ModuleId == 0 &&
+                function.Identity.ModuleMajor == 2 && function.Identity.ModuleMinor == 3 &&
+                function.SymbolIndex == 4 && function.Value == 0 && function.Size == 4 && function.Section == 1 &&
+                function.Type == 2 && function.Binding == 1 && function.Visibility == 3,
+                "Zero-valued protected function definition was misclassified or lost its full export scope");
+        require(object.Identity.Nid == "qG50MWOiS-Q" && object.Identity.LibraryName == "guest-objects" &&
+                object.Identity.LibraryId == 2 && object.Identity.LibraryVersion == 9 &&
+                object.Identity.ModuleName == "guest-libc" && object.Identity.ModuleId == 0 &&
+                object.SymbolIndex == 5 && object.Value == 0x3000 && object.Size == 8 && object.Section == 1 &&
+                object.Type == 1 && object.Binding == 2 && object.Visibility == 3 &&
+                tls.Identity.Nid == "eul2MC3gaYs" && tls.Identity.LibraryName == "guest-libc" &&
+                tls.Identity.LibraryId == 1 && tls.Identity.ModuleId == 0 && tls.SymbolIndex == 6 &&
+                tls.Value == 0 && tls.Size == 8 && tls.Section == 1 && tls.Type == 6 && tls.Binding == 1 && tls.Visibility == 3,
+                "Weak object or zero-offset TLS export lost its symbol type, value kind, or protected visibility");
+        Cpu::Machine machine;
+        unsigned resolutions = 0;
+        rejects([&] { Cpu::LoadSce(machine, input.path, Bias, [&](const auto&) { ++resolutions; return 0; }); },
+                "guest shared module loading");
+        require(resolutions == 0 && machine.Get(Cpu::Register::FsBase) == 0,
+                "PRX metadata inspection must not enable guest module execution or install TLS");
+    }
+}
+
+void invalidExportMetadata() {
+    struct Case { const char* Expected; std::function<void(ExportFixture&)> Change; };
+    const std::array cases{
+        Case{"conflicting exported identity", [](auto& f) { f.tag(0x61000047, (1ull << 48) | (7ull << 32) | f.libcOffset); f.finish(); }},
+        Case{"conflicting exported identity", [](auto& f) { f.tag(0x61000043, (2ull << 40) | (3ull << 32) | f.alternateOwnerOffset); f.finish(); }},
+        Case{"conflicting exported identity", [](auto& f) { f.tag(0x61000047, (1ull << 48) | (8ull << 32) | f.ownerOffset); f.finish(); }},
+        Case{"conflicting exported library attributes", [](auto& f) { f.tag(0x61000017, (1ull << 48) | 2); f.finish(); }},
+        Case{"attribute has no matching exported library", [](auto& f) { put(f.bytes, Dyn + f.attributeTag * 16 + 8, (3ull << 48) | 1); }},
+        Case{"export qualifier has no matching", [](auto& f) { put(f.bytes, Dyn + f.moduleTag * 16, 0x61000007); }},
+        Case{"export qualifier has no matching", [](auto& f) {
+            put(f.bytes, Dyn + f.libraryTag * 16, 0x61000007);
+            put(f.bytes, Dyn + f.attributeTag * 16 + 8, (2ull << 48) | 2);
+        }},
+        Case{"export qualifier has no matching", [](auto& f) { put(f.bytes, Strings + f.functionOffset + 14, 'C', 1); }},
+        Case{"export requires full", [](auto& f) { put(f.bytes, Strings + f.functionOffset + 11, '!', 1); }},
+        Case{"invalid export NID", [](auto& f) { put(f.bytes, Strings + f.functionOffset, '*', 1); }},
+        Case{"dynamic string offset exceeds", [](auto& f) { put(f.bytes, Dyn + f.filenameTag * 16 + 8, f.stringsSize); }},
+        Case{"unterminated dynamic string", [](auto& f) { put(f.bytes, Strings + f.stringsSize - 1, 'X', 1); }},
+        Case{"conflicting original filename", [](auto& f) { f.tag(0x61000009, f.libcOffset); f.finish(); }},
+        Case{"unmapped or inaccessible", [](auto& f) { put(f.bytes, Symbols + 4 * 24 + 16, 4097); }},
+        Case{"TLS symbol exceeds", [](auto& f) { put(f.bytes, Symbols + 6 * 24 + 8, 16); }},
+    };
+    for (const auto& test : cases) {
+        ExportFixture fixture;
+        test.Change(fixture);
+        Input input(fixture.bytes);
+        rejects([&] { Cpu::ParseSce(input.path); }, test.Expected);
+    }
+}
+
 void unsupportedStartup() {
     struct Case { const char* Expected; std::function<void(Fixture&)> Change; };
     const std::array cases{
@@ -483,6 +627,8 @@ int main() {
         Case{"repeated library attributes", repeatedLibraryAttributes},
         Case{"translated TLS entry", [] { translatedTlsEntry(); }},
         Case{"translated BSS-only TLS entry", [] { translatedTlsEntry(true); }},
+        Case{"exported module metadata", exportedModuleMetadata},
+        Case{"invalid export metadata", invalidExportMetadata},
     };
     unsigned failures = 0;
     for (const auto& test : cases) {
