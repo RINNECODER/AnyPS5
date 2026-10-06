@@ -15,21 +15,24 @@ struct EngineSettingsView: View {
                         Text(store.library.enginePath.isEmpty ? "No engine selected" : store.library.enginePath)
                             .font(.callout.monospaced()).textSelection(.enabled)
                         Button("Choose AnyPS5 Runtime…") { store.chooseEngine() }
-                            .disabled(store.isProbingEngine || store.isRunning)
+                            .disabled(store.isProbingEngine || store.isRunning || store.isInspectingGame)
                         Text(store.engineProbeStatus).font(.caption).foregroundStyle(.secondary)
                         if let capabilities = store.capabilities {
                             Text("Inputs: \(capabilities.supportedFormats.joined(separator: ", "))").font(.caption.monospaced())
                             Label(capabilities.ps5GameRuntimeReady ? "Engine reports PS5 game runtime ready" : "PS5 game runtime in development",
                                   systemImage: capabilities.ps5GameRuntimeReady ? "checkmark.circle" : "hammer")
                                 .font(.caption)
+                            if let constraints = capabilities.sceConstraints {
+                                ForEach(constraints, id: \.self) { Text($0).font(.caption).foregroundStyle(.secondary) }
+                            }
                         }
                         Button("Recheck Capabilities") { Task { await store.probeEngine() } }
-                            .disabled(store.library.enginePath.isEmpty || store.isProbingEngine || store.isRunning)
+                            .disabled(store.library.enginePath.isEmpty || store.isProbingEngine || store.isRunning || store.isInspectingGame)
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
                 }
                 GroupBox("Current support") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("The current anyps5_cpu_run checkpoint runs static x86-64 ELF programs on Apple Silicon. PS5 game loading, system-library calls and game graphics are still in development.")
+                        Text("The selected engine advertises its executable formats and runtime restrictions above. PS5 game loading, system-library calls and game graphics are still in development.")
                         Text("Orbit's exFAT and FFPFSC releases cannot be passed directly to this engine. Attach a clean executable to test the runtime; unsupported inputs and calls are reported in the console.")
                         Text("A successful process exit records that session's result. It does not establish graphics correctness or playable game compatibility.")
                             .foregroundStyle(.secondary)
@@ -37,7 +40,7 @@ struct EngineSettingsView: View {
                 }
                 GroupBox("Launch contract") {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("anyps5_cpu_run <static-x86-64.elf>").font(.callout.monospaced())
+                        Text("anyps5_cpu_run <supported-x86-64.elf>").font(.callout.monospaced())
                         Text("The executable path is passed as one argument. The resource folder becomes the engine's working directory. Standard output, errors and the exit code appear in the console.")
                             .font(.callout).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
