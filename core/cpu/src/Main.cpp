@@ -5,6 +5,7 @@
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/SceUserImports.hpp>
+#include <cpu/SceSystemImports.hpp>
 #include <cpu/Self.hpp>
 #include <array>
 #include <csignal>
@@ -87,6 +88,10 @@ void Capabilities() {
         << "\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
         << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
+        << "\"sce_system_imports\":{\"module\":\"libSceSystemService\",\"module_version\":\"1.1\",\"library_version\":1,"
+        << "\"functions\":[\"sceSystemServiceParamGetInt\",\"sceSystemServiceParamGetString\",\"sceSystemServiceHideSplashScreen\"],"
+        << "\"recognized_unavailable\":[\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceLaunchPlayerDialog\"],"
+        << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"main-module TLS only; zero alignment remainder\",\"read-only /app0 resources; regular files only\",\"no guest module loading\",\"no initializers or finalizers\",\"no data imports\",\"entry termination callback unsupported\"],"
 #if ANYPS5_CPU_MODERN_TCG
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
@@ -247,6 +252,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
+        std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
@@ -256,7 +262,9 @@ int main(int argc, char** argv) {
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
+                systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
                 auto image = Cpu::LoadSce(machine, executable, 0x1000000, [&](const auto& import) {
+                    if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
                     if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
                     return sceRuntime->Resolve(import);

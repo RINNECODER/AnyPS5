@@ -18,6 +18,9 @@ extern int sce_user_initialize(const void*) __asm__("j3YMu1MVNNo");
 extern int sce_user_initial(int*) __asm__("CdWp0oHWGr0");
 extern int sce_user_login_list(int*) __asm__("fPhymKNvK-A");
 extern int sce_user_name(int, char*, u64) __asm__("1xxcMiGu2fo");
+extern int sce_system_int(int, int*) __asm__("fZo48un7LK4");
+extern int sce_system_string(int, char*, u64) __asm__("SsC-m-S9JTA");
+extern int sce_system_hide_splash(void) __asm__("Vo5V8KAwCmk");
 
 static u8 composite[4096];
 static u8 pixels[4096];
@@ -81,6 +84,20 @@ int SceGuestMain(u64 argc, char** argv, u64 exitCallback, u64 entryAlignment, u6
     if (user.Before != 0xa5a5a5a5u || user.After != 0xa5a5a5a5u ||
         users.Before != 0xa5a5a5a5u || users.After != 0xa5a5a5a5u ||
         name.Before != 0xa5 || name.After != 0xa5) return 108;
+    struct { u32 Before; int Language; int Zone; int Summer; u32 After; } system;
+    struct { u8 Before; char Bytes[65]; u8 After; } systemName;
+    sce_memset(&system, 0xa7, sizeof system);
+    sce_memset(&systemName, 0xa7, sizeof systemName);
+    if (sce_system_int(1, &system.Language) != 0 || system.Language != 1) return 109;
+    if (sce_system_int(4, &system.Zone) != 0 || system.Zone != 0) return 110;
+    if (sce_system_int(5, &system.Summer) != 0 || system.Summer != 0) return 111;
+    if (sce_system_string(6, systemName.Bytes, sizeof systemName.Bytes) != 0 ||
+        systemName.Bytes[6] != 0 || sce_strcmp(systemName.Bytes, "AnyPS5") != 0) return 112;
+    for (u64 i = 7; i < sizeof systemName.Bytes; ++i)
+        if ((u8)systemName.Bytes[i] != 0xa7) return 113;
+    if (system.Before != 0xa7a7a7a7u || system.After != 0xa7a7a7a7u ||
+        systemName.Before != 0xa7 || systemName.After != 0xa7) return 113;
+    if (sce_system_hide_splash() != 0 || sce_system_hide_splash() != 0) return 114;
     for (u64 i = 0; i < sizeof composite; ++i)
         if (composite[i] || pixels[i] || copied[i]) return 84;
     if (sce_memset(composite, 0x177, sizeof composite) != composite) return 85;
