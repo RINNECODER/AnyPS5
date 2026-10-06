@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace Cpu {
 
@@ -12,6 +13,12 @@ enum class Register { Rax, Rbx, Rcx, Rdx, Rsi, Rdi, Rbp, Rsp, R8, R9, R10, R11, 
 enum class Permission : unsigned { Read = 1, Write = 2, Execute = 4 };
 constexpr Permission operator|(Permission a, Permission b) { return static_cast<Permission>(static_cast<unsigned>(a) | static_cast<unsigned>(b)); }
 enum class StopReason { Address, Exit, InstructionLimit, Requested };
+struct Mapping {
+    std::uint64_t Address;
+    std::size_t Size;
+    Permission Permissions;
+    bool Borrowed;
+};
 
 class Machine {
 public:
@@ -21,7 +28,10 @@ public:
     Machine& operator=(const Machine&) = delete;
     void Map(std::uint64_t address, std::size_t size, Permission permissions);
     void MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions);
+    void Unmap(std::uint64_t address, std::size_t size);
+    void ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions);
     void Protect(std::uint64_t address, std::size_t size, Permission permissions);
+    std::vector<Mapping> Mappings() const;
     void CheckAccess(std::uint64_t address, std::size_t size, Permission permissions) const;
     void Read(std::uint64_t address, std::span<std::byte> output) const;
     void Write(std::uint64_t address, std::span<const std::byte> input);

@@ -1,12 +1,14 @@
 #include <cpu/Cpu.hpp>
 #include <unicorn/unicorn.h>
 #include <unicorn/x86.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <exception>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -56,10 +58,38 @@ const char* memoryAccess(uc_mem_type type) {
     default: return "invalid memory access";
     }
 }
+void checkMapped(uc_engine* engine, std::uint64_t address, std::size_t size, unsigned required) {
+    if (!size) return;
+    if (size > std::numeric_limits<std::uint64_t>::max() - address)
+        throw std::invalid_argument("Guest access range overflows");
+    uc_mem_region* regions = nullptr;
+    std::uint32_t count = 0;
+    check(uc_mem_regions(engine, &regions, &count), "Inspect guest access permissions");
+    struct Release { uc_mem_region* value; ~Release() { uc_free(value); } } release{regions};
+    auto cursor = address;
+    const auto end = address + size;
+    while (cursor < end) {
+        bool found = false;
+        for (std::uint32_t index = 0; index < count; ++index) {
+            const auto& region = regions[index];
+            if (cursor >= region.begin && cursor <= region.end && (region.perms & required) == required) {
+                cursor = region.end >= end - 1 ? end : region.end + 1;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std::ostringstream message;
+            message << "Guest access denied at 0x" << std::hex << cursor << " for permissions " << required;
+            throw std::runtime_error(message.str());
+        }
+    }
+}
 }
 
 struct Machine::Impl {
     Machine& owner;
+    const std::thread::id ownerThread = std::this_thread::get_id();
     uc_engine* engine = nullptr;
     std::function<void(Machine&)> syscall;
     std::unordered_map<std::uint64_t, std::function<void(Machine&)>> calls;
@@ -249,9 +279,67 @@ void Machine::MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Pe
     check(uc_mem_map_ptr(impl->engine, address, memory.size(), static_cast<unsigned>(permissions), memory.data()), "Map shared guest memory");
     impl->borrowed.emplace_back(address, address + memory.size());
 }
+void Machine::Unmap(std::uint64_t address, std::size_t size) {
+    checkRange(address, size);
+    checkMapped(impl->engine, address, size, 0);
+    const auto end = address + size;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> borrowed;
+    borrowed.reserve(impl->borrowed.size() + 1);
+    for (const auto& [begin, limit] : impl->borrowed) {
+        if (begin >= end || limit <= address) borrowed.emplace_back(begin, limit);
+        else {
+            if (begin < address) borrowed.emplace_back(begin, address);
+            if (limit > end) borrowed.emplace_back(end, limit);
+        }
+    }
+    check(uc_mem_unmap(impl->engine, address, size), "Unmap guest memory");
+    check(uc_ctl_remove_cache(impl->engine, address, end), "Invalidate unmapped guest code");
+    impl->borrowed.swap(borrowed);
+    for (auto call = impl->calls.begin(); call != impl->calls.end(); ) {
+        if (call->first >= address && call->first < end) call = impl->calls.erase(call);
+        else ++call;
+    }
+}
+void Machine::ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions) {
+    checkRange(address, memory.size());
+    if (!memory.data()) throw std::invalid_argument("Guest borrowed replacement requires backing memory");
+    if (static_cast<unsigned>(permissions) & ~UC_PROT_ALL) throw std::invalid_argument("Invalid guest mapping permissions");
+    checkMapped(impl->engine, address, memory.size(), 0);
+    throw std::runtime_error("Unicorn guest borrowed range replacement is unsupported");
+}
 void Machine::Protect(std::uint64_t address, std::size_t size, Permission permissions) {
     checkRange(address, size);
     check(uc_mem_protect(impl->engine, address, size, static_cast<unsigned>(permissions)), "Protect guest memory");
+}
+std::vector<Mapping> Machine::Mappings() const {
+    if (std::this_thread::get_id() != impl->ownerThread)
+        throw std::logic_error("Guest CPU mapping inventory requires its owner thread");
+    uc_mem_region* regions = nullptr;
+    std::uint32_t count = 0;
+    check(uc_mem_regions(impl->engine, &regions, &count), "Inspect guest mapping inventory");
+    struct Release { uc_mem_region* value; ~Release() { uc_free(value); } } release{regions};
+    std::vector<Mapping> result;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        const auto& region = regions[index];
+        auto cursor = region.begin;
+        while (cursor <= region.end) {
+            auto last = region.end;
+            bool borrowed = false;
+            for (const auto& [begin, end] : impl->borrowed) {
+                if (cursor >= begin && cursor < end) {
+                    borrowed = true;
+                    last = std::min(last, end - 1);
+                } else if (begin > cursor) last = std::min(last, begin - 1);
+            }
+            if (last - cursor == std::numeric_limits<std::size_t>::max())
+                throw std::overflow_error("Guest mapping inventory extent overflows");
+            result.push_back({cursor, static_cast<std::size_t>(last - cursor + 1), static_cast<Permission>(region.perms), borrowed});
+            if (last == region.end) break;
+            cursor = last + 1;
+        }
+    }
+    std::sort(result.begin(), result.end(), [](const Mapping& left, const Mapping& right) { return left.Address < right.Address; });
+    return result;
 }
 void Machine::Read(std::uint64_t address, std::span<std::byte> output) const {
     CheckAccess(address, output.size(), Permission::Read);
@@ -263,28 +351,7 @@ void Machine::CheckAccess(std::uint64_t address, std::size_t size, Permission pe
         throw std::invalid_argument("Guest access range overflows");
     const auto required = static_cast<unsigned>(permissions);
     if (!required || (required & ~UC_PROT_ALL)) throw std::invalid_argument("Invalid guest access permissions");
-    uc_mem_region* regions = nullptr;
-    std::uint32_t count = 0;
-    check(uc_mem_regions(impl->engine, &regions, &count), "Inspect guest access permissions");
-    struct Release { uc_mem_region* value; ~Release() { uc_free(value); } } release{regions};
-    auto cursor = address;
-    const auto end = address + size;
-    while (cursor < end) {
-        bool found = false;
-        for (std::uint32_t index = 0; index < count; ++index) {
-            const auto& region = regions[index];
-            if (cursor >= region.begin && cursor <= region.end && (region.perms & required) == required) {
-                cursor = region.end >= end - 1 ? end : region.end + 1;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            std::ostringstream message;
-            message << "Guest access denied at 0x" << std::hex << cursor << " for permissions " << required;
-            throw std::runtime_error(message.str());
-        }
-    }
+    checkMapped(impl->engine, address, size, required);
 }
 void Machine::Write(std::uint64_t address, std::span<const std::byte> input) {
     if (input.empty()) return;
