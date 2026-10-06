@@ -47,7 +47,9 @@ def package(linked_path, output_path):
     old_strings = virtual(tags[5], tags[10])
     strings = bytearray(b"\0")
     libc = {"Q3VBxCXhUHs", "+P6FRGH4LfA", "8zTFvBIAIN8", "j4ViWNHEgww", "Ovb2dSJOAuE", "uMei1W9uyNo"}
-    libkernel = {"1G3lF1Gg1k8", "Cg4srZ6TKbU", "+r3rMFwItV4", "oib76F-12fk", "UK2Tl2DWUns"}
+    libkernel = {"1G3lF1Gg1k8", "Cg4srZ6TKbU", "+r3rMFwItV4", "oib76F-12fk", "UK2Tl2DWUns",
+                 "pO96TwzOm5E", "C0f7TJcbfac", "rTXw65xmLIA", "B+vc2AO2Zrc", "L-Q3LEjIbgA",
+                 "IWIBBdTHit4", "7oxv3PPCumo", "vSMAm3cxYTY", "rVjRvHJ0X6c", "cQke9UuBQOk", "MBuItvba6z8"}
     user_service = {"j3YMu1MVNNo", "CdWp0oHWGr0", "fPhymKNvK-A", "1xxcMiGu2fo"}
     system_service = {"fZo48un7LK4", "SsC-m-S9JTA", "Vo5V8KAwCmk"}
     required = libc | libkernel | user_service | system_service

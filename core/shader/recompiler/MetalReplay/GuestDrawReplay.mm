@@ -354,6 +354,306 @@ struct SubmittedFanReplay {
     }
 };
 
+namespace MinimumLodCompare {
+using namespace ShaderRecompiler;
+constexpr uint32_t Width=64, Height=32, GuardWords=64, Sentinel=0xdeadbeef;
+constexpr uint64_t VertexAddress=0x3100000, ColorAllocation=0x3200000, ColorAddress=ColorAllocation+256;
+constexpr uint64_t TextureAllocation=0x3300000, TextureAddress=TextureAllocation+256;
+constexpr uint64_t OutputAllocation=0x3400000, OutputAddress=OutputAllocation+256;
+constexpr uint64_t VertexCodeAddress=0x3500000, PixelCodeAddress=0x3600000;
+constexpr uint64_t VertexHeaderAddress=0x3700000, PixelHeaderAddress=0x3710000;
+constexpr uint64_t CommandAddress=0x3800000, PacketAddress=0x3810000;
+void Require(bool v,const std::string& m){if(!v)throw std::runtime_error(m);}
+constexpr std::array<std::array<float,4>,3> Triangle{{{-1,-1,.5f,1},{3,-1,.5f,1},{-1,3,.5f,1}}};
+constexpr std::array<uint32_t,6> VertexCode{0xe0382000,0x80020005,0xbf8c3f70,0xf80008cf,0x03020100,0xbf810000};
+constexpr std::array<uint32_t,22> CompareCode{
+0xbe90037e,0xbefe097e,0x7e0802f0,
+0x100a00ff,0x3c800000,0x100c02ff,0x3d000000,
+0x7e0e0f00,0x7e140f01,0x34141486,0x4a0e1507,0x340e0e83,
+0xf0a00108,0x00610804,0xbf8c3f70,
+0xbefe0310,0xe0701000,0x80000807,
+0x7e1402f2,0xf800180f,0x0a0a0a0a,0xbf810000};
+void RegisterPacket(std::vector<std::uint32_t>& commands, std::uint32_t opcode, std::uint32_t offset,
+                    std::span<const std::uint32_t> words) {
+    std::vector<std::uint32_t> packet{0xc0000000u | (static_cast<std::uint32_t>(words.size()) << 16u) | (opcode << 8u), offset};
+    packet.insert(packet.end(), words.begin(), words.end());
+    commands.insert(commands.end(), packet.begin(), packet.end());
+}
+
+std::vector<std::uint32_t> GraphicsCommands() {
+    std::vector<std::uint32_t> commands;
+    const std::array<std::uint32_t, 1> primitive{4};
+    RegisterPacket(commands, 0x79, 0x242, primitive);
+    const AgcDriver::Registers context{
+        {0x2d5, 0x00402000}, {0x1b6, 0x8000}, {0x207, 0}, {0x200, 0}, {0x203, 0x800},
+        {0x2dc, 0xaa00}, {0x2f8, 0}, {0x292, 2}, {0x293, 0},
+        {0x80, 0}, {0x8d, 0}, {0x83, 0xffff}, {0x8c, 0xa},
+        {0x2f9, 0x2d}, {0x313, 0x6000}, {0x30e, 0xffffffff}, {0x30f, 0xffffffff},
+        {0x206, 0x43f}, {0x204, 0x80000}, {0x205, 0x240}, {0x8e, 0xf}, {0x8f, 0xf}, {0x202, 0xcc0010},
+        {0x1c4, 0}, {0x1c5, 9}, {0x1c3, 4}, {0x31c, 0x28028}, {0x31b, 0}, {0x31d, 0},
+        {0x3b0, ((Width - 1) << 14u) | (Height - 1)}, {0x3b8, 0x9000000}, {0x1e0, 0},
+        {0xc, 0}, {0xd, (Height << 16u) | Width}, {0x81, 0x80000000}, {0x82, (Height << 16u) | Width},
+        {0x90, 0x80000000}, {0x91, (Height << 16u) | Width}, {0x94, 0x80000000}, {0x95, (Height << 16u) | Width},
+        {0x318, static_cast<std::uint32_t>(ColorAddress >> 8u)}, {0x390, 0},
+        {0x10f, std::bit_cast<std::uint32_t>(32.0f)}, {0x110, std::bit_cast<std::uint32_t>(32.0f)},
+        {0x111, std::bit_cast<std::uint32_t>(-16.0f)}, {0x112, std::bit_cast<std::uint32_t>(16.0f)},
+        {0x113, std::bit_cast<std::uint32_t>(1.0f)}, {0x114, 0}, {0xb4, 0}, {0xb5, std::bit_cast<std::uint32_t>(1.0f)},
+        {0x1b3, PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY)},
+        {0x1b4, PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY)}
+    };
+    for (const auto& [offset, value] : context) RegisterPacket(commands, 0x69, offset, std::span(&value, 1));
+    const std::array<std::uint32_t, 2> vertexProgram{0x3500000 >> 8u, 0}, fragmentProgram{0x3600000 >> 8u, 0};
+    const std::array<std::uint32_t, 1> vertexResources{8}, fragmentResources{0};
+    const std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(VertexAddress), 16u << 16u, 3, 0x01016fac};
+    RegisterPacket(commands, 0x76, 0xc8, vertexProgram);
+    RegisterPacket(commands, 0x76, 0x008, fragmentProgram);
+    RegisterPacket(commands, 0x76, 0x08b, vertexResources);
+    RegisterPacket(commands, 0x76, 0x00b, fragmentResources);
+    RegisterPacket(commands, 0x76, 0x08c, userData);
+    return commands;
+}
+
+void Header(auto& backing,uint64_t address,uint64_t code,uint32_t bytes,uint8_t type){
+Shader s{};s.file_header=0x34333231;s.version=0x18;s.user_data=reinterpret_cast<ShaderUserData*>(address+sizeof(Shader));
+s.code=reinterpret_cast<const volatile void*>(code);s.header_size=backing.size();s.shader_size=bytes;s.type=type;std::memcpy(backing.data(),&s,sizeof(s));}
+
+struct Replay {
+    std::array<std::array<float,4>,3> vertices=Triangle;
+    std::array<uint32_t,6> vertexCode=VertexCode;
+    std::array<uint32_t,22> pixelCode=CompareCode;
+    std::array<std::byte,sizeof(Shader)+sizeof(ShaderUserData)> vertexHeader{},pixelHeader{};
+    std::vector<std::byte> pixels=std::vector<std::byte>(256+Width*Height*4+256,std::byte{0x7b});
+    std::vector<uint32_t> texture=std::vector<uint32_t>(GuardWords+8192+GuardWords,Sentinel);
+    std::vector<uint32_t> output=std::vector<uint32_t>(GuardWords+Width*Height*2+GuardWords,Sentinel);
+    std::vector<uint32_t> commands;
+    ::Packet packet{};
+
+    Replay() {
+        Header(vertexHeader,VertexHeaderAddress,VertexCodeAddress,sizeof(vertexCode),2);
+        Header(pixelHeader,PixelHeaderAddress,PixelCodeAddress,sizeof(pixelCode),1);
+        constexpr std::array<uint32_t,6> offsets{7936,3840,1792,768,256,0};
+        for(uint32_t level=0;level<6;++level)
+            for(uint32_t y=0;y<std::max(1u,Height>>level);++y)
+                std::fill_n(texture.begin()+GuardWords+offsets[level]/4+y*64,Width>>level,
+                    std::bit_cast<uint32_t>(level<2?.25f:.75f));
+        commands=GraphicsCommands();
+        const std::array<uint32_t,1> zeroBase{0};
+        RegisterPacket(commands,0x79,0x24a,zeroBase);
+        commands.insert(commands.end(),{0xc0002f00,1});
+        const std::array<uint32_t,16> users{
+            static_cast<uint32_t>(OutputAddress),0,Width*Height*8,0x01016fac,
+            static_cast<uint32_t>(TextureAddress>>8),(22u<<20)|(3u<<30)|(384u<<8),15u|(31u<<14)|(1u<<31),
+            0xfacu|(5u<<16)|(9u<<28),0,5u<<4,0,0,
+            0x92u|(1u<<12),(8u*256u)<<12,(1u<<22)|(2u<<26),0};
+        const std::array<uint32_t,1> resources{32};
+        RegisterPacket(commands,0x76,0x00b,resources);RegisterPacket(commands,0x76,0x00c,users);
+        commands.insert(commands.end(),{0xc0012d00,3,2});
+        packet={reinterpret_cast<uint32_t*>(CommandAddress),static_cast<uint32_t>(commands.size()),0,{}};
+    }
+
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+        ranges.insert(ranges.end(),{
+            {VertexAddress,std::as_writable_bytes(std::span(vertices)),false},{ColorAllocation,pixels,true},
+            {TextureAllocation,std::as_writable_bytes(std::span(texture)),false},{OutputAllocation,std::as_writable_bytes(std::span(output)),true},
+            {VertexCodeAddress,std::as_writable_bytes(std::span(vertexCode)),false},{PixelCodeAddress,std::as_writable_bytes(std::span(pixelCode)),false},
+            {VertexHeaderAddress,vertexHeader,false},{PixelHeaderAddress,pixelHeader,false},
+            {CommandAddress,std::as_writable_bytes(std::span(commands)),false},{PacketAddress,std::as_writable_bytes(std::span(&packet,1)),false}});
+    }
+
+    void Run(bool levelZero, uint32_t floor=384, uint32_t format=22) {
+        pixelCode=CompareCode;
+        for(auto& word:commands) if((word&~(0xfffu<<8))==((22u<<20)|(3u<<30))||(word&~(0xfffu<<8))==((7u<<20)|(3u<<30))) word=(format<<20)|(3u<<30)|(floor<<8);
+        std::fill(texture.begin(),texture.end(),Sentinel);
+        constexpr std::array<uint32_t,6> offsets{7936,3840,1792,768,256,0};
+        for(uint32_t level=0;level<6;++level) for(uint32_t y=0;y<std::max(1u,Height>>level);++y) {
+            auto* row=reinterpret_cast<std::byte*>(texture.data()+GuardWords)+offsets[level]+y*256;
+            if(format==22) std::fill_n(reinterpret_cast<uint32_t*>(row),Width>>level,std::bit_cast<uint32_t>(level<2?.25f:.75f));
+            else std::fill_n(reinterpret_cast<uint16_t*>(row),Width>>level,static_cast<uint16_t>(level<2?0x4000:0xbfff));
+        }
+        if(levelZero) pixelCode[12]=0xf0bc0108;
+        std::fill(output.begin(),output.end(),Sentinel);
+        std::fill_n(pixels.begin()+256,Width*Height*4,std::byte{0x40});
+        const auto originalTexture=texture;
+        const auto originalCode=pixelCode;
+        const auto originalVertices=vertices;
+        const auto originalCommands=commands;
+        const auto originalHeader=pixelHeader;
+        const auto originalPacket=packet;
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(VertexHeaderAddress));
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(PixelHeaderAddress));
+        AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress),0);AgcDriverWaitIdle_nid_postfix();
+        for(size_t word=0;word<output.size();++word) {
+            uint32_t wanted=Sentinel;
+            if(word>=GuardWords&&word<GuardWords+Width*Height*2)
+                wanted=(word-GuardWords)%2==0?std::bit_cast<uint32_t>(floor==0?0.0f:.5f):Sentinel;
+            Require(output[word]==wanted,"Public pixel comparison minimumLOD levelZero="+std::to_string(levelZero)+" word="+std::to_string(word)+
+                " actual="+std::to_string(output[word])+" expected="+std::to_string(wanted));
+        }
+        for(size_t i=0;i<pixels.size();++i) {
+            const auto wanted=i>=256&&i<256+Width*Height*4?std::byte{255}:std::byte{0x7b};
+            Require(pixels[i]==wanted,"Public pixel LOD framebuffer/guard byte="+std::to_string(i));
+        }
+        Require(texture==originalTexture&&vertices==originalVertices&&pixelCode==originalCode&&commands==originalCommands&&pixelHeader==originalHeader&&
+            std::memcmp(&packet,&originalPacket,sizeof(packet))==0,"Public pixel LOD changed read-only shader, inputs or PM4 bytes");
+        std::cout<<"Public pixel comparison format="<<format<<" floor="<<floor<<" levelZero="<<levelZero<<": 2048 exact comparison values, untouched neighboring DWORDs, full framebuffer, input padding and guards passed\n";
+    }
+};
+
+}
+namespace MinimumLodPixel {
+using namespace ShaderRecompiler;
+constexpr uint32_t Width=64, Height=32, GuardWords=64, Sentinel=0xdeadbeef;
+constexpr uint64_t VertexAddress=0x2100000, ColorAllocation=0x2200000, ColorAddress=ColorAllocation+256;
+constexpr uint64_t TextureAllocation=0x2300000, TextureAddress=TextureAllocation+256;
+constexpr uint64_t OutputAllocation=0x2400000, OutputAddress=OutputAllocation+256;
+constexpr uint64_t VertexCodeAddress=0x2500000, PixelCodeAddress=0x2600000;
+constexpr uint64_t VertexHeaderAddress=0x2700000, PixelHeaderAddress=0x2710000;
+constexpr uint64_t CommandAddress=0x2800000, PacketAddress=0x2810000;
+void Require(bool v,const std::string& m){if(!v)throw std::runtime_error(m);}
+constexpr std::array<std::array<float,4>,3> Triangle{{{-1,-1,.5f,1},{3,-1,.5f,1},{-1,3,.5f,1}}};
+constexpr std::array<uint32_t,6> VertexCode{0xe0382000,0x80020005,0xbf8c3f70,0xf80008cf,0x03020100,0xbf810000};
+constexpr std::array<uint32_t,23> QueryCode{
+0xbe90037e,0xbefe097e,0x100800ff,0x3c800000,0x100a02ff,0x3d000000,
+0x7e0c0f00,0x7e0e0f01,0x340e0e86,0x4a0c0f06,0x340c0c83,
+0xf1800308,0x00610804,0xbf8c3f70,
+0xbefe0310,0xe0701000,0x80000806,0xe0701004,0x80000906,
+0x7e1402f2,0xf800180f,0x0a0a0a0a,0xbf810000};
+void RegisterPacket(std::vector<std::uint32_t>& commands, std::uint32_t opcode, std::uint32_t offset,
+                    std::span<const std::uint32_t> words) {
+    std::vector<std::uint32_t> packet{0xc0000000u | (static_cast<std::uint32_t>(words.size()) << 16u) | (opcode << 8u), offset};
+    packet.insert(packet.end(), words.begin(), words.end());
+    commands.insert(commands.end(), packet.begin(), packet.end());
+}
+
+std::vector<std::uint32_t> GraphicsCommands() {
+    std::vector<std::uint32_t> commands;
+    const std::array<std::uint32_t, 1> primitive{4};
+    RegisterPacket(commands, 0x79, 0x242, primitive);
+    const AgcDriver::Registers context{
+        {0x2d5, 0x00402000}, {0x1b6, 0x8000}, {0x207, 0}, {0x200, 0}, {0x203, 0x800},
+        {0x2dc, 0xaa00}, {0x2f8, 0}, {0x292, 2}, {0x293, 0},
+        {0x80, 0}, {0x8d, 0}, {0x83, 0xffff}, {0x8c, 0xa},
+        {0x2f9, 0x2d}, {0x313, 0x6000}, {0x30e, 0xffffffff}, {0x30f, 0xffffffff},
+        {0x206, 0x43f}, {0x204, 0x80000}, {0x205, 0x240}, {0x8e, 0xf}, {0x8f, 0xf}, {0x202, 0xcc0010},
+        {0x1c4, 0}, {0x1c5, 9}, {0x1c3, 4}, {0x31c, 0x28028}, {0x31b, 0}, {0x31d, 0},
+        {0x3b0, ((Width - 1) << 14u) | (Height - 1)}, {0x3b8, 0x9000000}, {0x1e0, 0},
+        {0xc, 0}, {0xd, (Height << 16u) | Width}, {0x81, 0x80000000}, {0x82, (Height << 16u) | Width},
+        {0x90, 0x80000000}, {0x91, (Height << 16u) | Width}, {0x94, 0x80000000}, {0x95, (Height << 16u) | Width},
+        {0x318, static_cast<std::uint32_t>(ColorAddress >> 8u)}, {0x390, 0},
+        {0x10f, std::bit_cast<std::uint32_t>(32.0f)}, {0x110, std::bit_cast<std::uint32_t>(32.0f)},
+        {0x111, std::bit_cast<std::uint32_t>(-16.0f)}, {0x112, std::bit_cast<std::uint32_t>(16.0f)},
+        {0x113, std::bit_cast<std::uint32_t>(1.0f)}, {0x114, 0}, {0xb4, 0}, {0xb5, std::bit_cast<std::uint32_t>(1.0f)},
+        {0x1b3, PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY)},
+        {0x1b4, PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY)}
+    };
+    for (const auto& [offset, value] : context) RegisterPacket(commands, 0x69, offset, std::span(&value, 1));
+    const std::array<std::uint32_t, 2> vertexProgram{0x2500000 >> 8u, 0}, fragmentProgram{0x2600000 >> 8u, 0};
+    const std::array<std::uint32_t, 1> vertexResources{8}, fragmentResources{0};
+    const std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(VertexAddress), 16u << 16u, 3, 0x01016fac};
+    RegisterPacket(commands, 0x76, 0xc8, vertexProgram);
+    RegisterPacket(commands, 0x76, 0x008, fragmentProgram);
+    RegisterPacket(commands, 0x76, 0x08b, vertexResources);
+    RegisterPacket(commands, 0x76, 0x00b, fragmentResources);
+    RegisterPacket(commands, 0x76, 0x08c, userData);
+    return commands;
+}
+
+void Header(auto& backing,uint64_t address,uint64_t code,uint32_t bytes,uint8_t type){
+Shader s{};s.file_header=0x34333231;s.version=0x18;s.user_data=reinterpret_cast<ShaderUserData*>(address+sizeof(Shader));
+s.code=reinterpret_cast<const volatile void*>(code);s.header_size=backing.size();s.shader_size=bytes;s.type=type;std::memcpy(backing.data(),&s,sizeof(s));}
+
+struct Replay {
+    std::array<std::array<float,4>,3> vertices=Triangle;
+    std::array<uint32_t,6> vertexCode=VertexCode;
+    std::array<uint32_t,26> pixelCode{};
+    std::array<std::byte,sizeof(Shader)+sizeof(ShaderUserData)> vertexHeader{},pixelHeader{};
+    std::vector<std::byte> pixels=std::vector<std::byte>(256+Width*Height*4+256,std::byte{0x7b});
+    std::vector<uint32_t> texture=std::vector<uint32_t>(GuardWords+8192+GuardWords,Sentinel);
+    std::vector<uint32_t> output=std::vector<uint32_t>(GuardWords+Width*Height*2+GuardWords,Sentinel);
+    std::vector<uint32_t> commands;
+    ::Packet packet{};
+    std::size_t imageWord=0;
+
+    Replay() {
+        pixelCode.fill(0xbf800000);
+        std::copy(QueryCode.begin(),QueryCode.end(),pixelCode.begin());
+        Header(vertexHeader,VertexHeaderAddress,VertexCodeAddress,sizeof(vertexCode),2);
+        Header(pixelHeader,PixelHeaderAddress,PixelCodeAddress,sizeof(pixelCode),1);
+        constexpr std::array<uint32_t,6> offsets{7936,3840,1792,768,256,0};
+        for(uint32_t level=0;level<6;++level)
+            for(uint32_t y=0;y<std::max(1u,Height>>level);++y)
+                std::fill_n(texture.begin()+GuardWords+offsets[level]/4+y*64,Width>>level,
+                    std::bit_cast<uint32_t>(float(level*16u)));
+        commands=GraphicsCommands();
+        const std::array<uint32_t,1> zeroBase{0};
+        RegisterPacket(commands,0x79,0x24a,zeroBase);
+        commands.insert(commands.end(),{0xc0002f00,1});
+        const std::array<uint32_t,16> users{
+            static_cast<uint32_t>(OutputAddress),0,Width*Height*8,0x01016fac,
+            static_cast<uint32_t>(TextureAddress>>8),(22u<<20)|(3u<<30)|(384u<<8),15u|(31u<<14)|(1u<<31),
+            0xfacu|(5u<<16)|(9u<<28),0,5u<<4,0,0,
+            0x92u,(8u*256u)<<12,(1u<<22)|(2u<<26),0};
+        const std::array<uint32_t,1> resources{32};
+        RegisterPacket(commands,0x76,0x00b,resources);
+        imageWord=commands.size()+7;
+        RegisterPacket(commands,0x76,0x00c,users);
+        commands.insert(commands.end(),{0xc0012d00,3,2});
+        packet={reinterpret_cast<uint32_t*>(CommandAddress),static_cast<uint32_t>(commands.size()),0,{}};
+    }
+
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+        ranges.insert(ranges.end(),{
+            {VertexAddress,std::as_writable_bytes(std::span(vertices)),false},{ColorAllocation,pixels,true},
+            {TextureAllocation,std::as_writable_bytes(std::span(texture)),false},{OutputAllocation,std::as_writable_bytes(std::span(output)),true},
+            {VertexCodeAddress,std::as_writable_bytes(std::span(vertexCode)),false},{PixelCodeAddress,std::as_writable_bytes(std::span(pixelCode)),false},
+            {VertexHeaderAddress,vertexHeader,false},{PixelHeaderAddress,pixelHeader,false},
+            {CommandAddress,std::as_writable_bytes(std::span(commands)),false},{PacketAddress,std::as_writable_bytes(std::span(&packet,1)),false}});
+    }
+
+    void Run(uint32_t mode, uint32_t viewFloor=384) {
+        commands[imageWord]=(22u<<20)|(3u<<30)|(viewFloor<<8);
+        pixelCode.fill(0xbf800000);
+        std::copy(QueryCode.begin(),QueryCode.end(),pixelCode.begin());
+        if(mode==0) pixelCode[11]=0xf0800308;
+        if(mode>=2) {
+            std::copy_backward(pixelCode.begin()+11,pixelCode.begin()+23,pixelCode.end());
+            pixelCode[11]=mode==2?0x7e1802f0:0x7e180304;
+            pixelCode[12]=mode==2?0x7e1a0304:0x7e1a0305;
+            pixelCode[13]=mode==2?0x7e1c0305:0x7e1c02f4;
+            pixelCode[14]=mode==2?0xf0940308:0xf0840308;
+            pixelCode[15]=0x0061080c;
+        }
+        std::fill(output.begin(),output.end(),Sentinel);
+        std::fill_n(pixels.begin()+256,Width*Height*4,std::byte{0x40});
+        const auto originalTexture=texture;
+        const auto originalCode=pixelCode;
+        const auto originalVertices=vertices;
+        const auto originalCommands=commands;
+        const auto originalHeader=pixelHeader;
+        const auto originalPacket=packet;
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(VertexHeaderAddress));
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(PixelHeaderAddress));
+        AgcDriver::Submit(reinterpret_cast<const ::Packet*>(PacketAddress),0);AgcDriverWaitIdle_nid_postfix();
+        for(size_t word=0;word<output.size();++word) {
+            uint32_t wanted=Sentinel;
+            if(word>=GuardWords&&word<GuardWords+Width*Height*2)
+                wanted=std::bit_cast<uint32_t>((word-GuardWords)%2==0?
+                    (mode==1?float(viewFloor)/256.0f:16.0f*std::max(float(viewFloor)/256.0f,mode==2?.5f:mode==3?2.0f:0.0f)):0.0f);
+            Require(output[word]==wanted,"Public pixel LOD mode="+std::to_string(mode)+" floor="+std::to_string(viewFloor)+" word="+std::to_string(word)+
+                " actual="+std::to_string(output[word])+" expected="+std::to_string(wanted));
+        }
+        for(size_t i=0;i<pixels.size();++i) {
+            const auto wanted=i>=256&&i<256+Width*Height*4?std::byte{255}:std::byte{0x7b};
+            Require(pixels[i]==wanted,"Public pixel LOD framebuffer/guard byte="+std::to_string(i));
+        }
+        Require(texture==originalTexture&&vertices==originalVertices&&pixelCode==originalCode&&commands==originalCommands&&pixelHeader==originalHeader&&
+            std::memcmp(&packet,&originalPacket,sizeof(packet))==0,"Public pixel LOD changed read-only shader, inputs or PM4 bytes");
+        std::cout<<"Public pixel LOD mode="<<mode<<": 2048 exact float pairs, full framebuffer, input padding and guards passed\n";
+    }
+};
+
+}
+
 void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     constexpr std::uint64_t ComputeCodeAddress = 0x800000, ComputeInputAddress = 0x810000,
         ComputeOutputAddress = 0x820000, LabelAddress = 0x900000;
@@ -477,6 +777,10 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     ranges.push_back({DepthOutputAllocation, std::as_writable_bytes(std::span(depthOutput)), true});
     SubmittedFanReplay fanReplay;
     fanReplay.AddRanges(ranges);
+    MinimumLodPixel::Replay pixelLod;
+    pixelLod.AddRanges(ranges);
+    MinimumLodCompare::Replay compareLod;
+    compareLod.AddRanges(ranges);
     const auto checkPixels = [&](bool masked) {
         for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
             auto expected = std::byte{0x7b};
@@ -641,6 +945,15 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         append(words, 0x46, {0x139, static_cast<std::uint32_t>(QueryAllocation + 16 + lane * 8), 0});
         return words;
     };
+    for (const auto mode : {1u, 0u, 2u, 3u}) {
+        pixelLod.Run(mode, 0);
+        pixelLod.Run(mode);
+    }
+    for (const auto format : {22u, 7u}) {
+        compareLod.Run(false, 0, format);
+        compareLod.Run(false, 384, format);
+        compareLod.Run(true, 384, format);
+    }
     auto querySetup = GraphicsCommands();
     const std::array<std::uint32_t, 1> queryDimensions{(15u << 14u) | 15u}, queryRect{(16u << 16u) | 16u},
         queryScale{std::bit_cast<std::uint32_t>(8.0f)}, queryYScale{std::bit_cast<std::uint32_t>(-8.0f)}, disabledBlend{0};
@@ -1303,6 +1616,45 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
             std::rethrow_exception(error);
         }
         std::cout << "Actual CPU mutation failure: blocked admission wakes, no GPU/EOP writes and both actual host leases survive until shutdown passed\n";
+    }
+    {
+        auto previousOwner = transactionStorage(), nextOwner = transactionStorage();
+        std::weak_ptr<TransactionStorage> previousWeak = previousOwner, nextWeak = nextOwner;
+        const auto mapped = transactionRanges(previousOwner, 1), replacement = transactionRanges(nextOwner, 2);
+        const auto marker = std::make_exception_ptr(std::runtime_error("Same-thread CPU mapping mutation partial failure"));
+        AgcDriver::Metal::MetalDriver sameThreadTransaction;
+        sameThreadTransaction.Configure((__bridge void*)device, (__bridge void*)library, mapped);
+        bool mutationEntered = false, callbackShutdownRejected = false;
+        std::exception_ptr mutationError;
+        try {
+            sameThreadTransaction.MutateBorrowedRanges(replacement, 1, [&] {
+                mutationEntered = true;
+                nextOwner->input[0] = 97;
+                try { sameThreadTransaction.Shutdown(); }
+                catch (const std::runtime_error& error) {
+                    callbackShutdownRejected = std::string(error.what()).find("mapping transaction callback") != std::string::npos;
+                }
+                std::rethrow_exception(marker);
+            }, previousOwner, nextOwner);
+        } catch (...) { mutationError = std::current_exception(); }
+        Require(mutationEntered && callbackShutdownRejected && mutationError == marker,
+            "Same-thread CPU mutation did not reject active-callback shutdown and preserve its original failure");
+        for (const auto word : previousOwner->output) Require(word == 0xdeadbeef, "Same-thread failed mutation changed old output or guards");
+        for (const auto word : nextOwner->output) Require(word == 0xdeadbeef, "Same-thread failed mutation changed new output or guards");
+        auto partiallyMutatedInput = originalInput;
+        partiallyMutatedInput[0] = 97;
+        Require(previousOwner->input == originalInput && previousOwner->code == originalComputeStorage &&
+            nextOwner->input == partiallyMutatedInput && nextOwner->code == originalComputeStorage,
+            "Same-thread failed mutation changed storage beyond its partial CPU write");
+        previousOwner.reset();
+        nextOwner.reset();
+        Require(!previousWeak.expired() && !nextWeak.expired(),
+            "Same-thread failed mutation released actual host owners before shutdown");
+        std::exception_ptr shutdownError;
+        try { sameThreadTransaction.Shutdown(); } catch (...) { shutdownError = std::current_exception(); }
+        Require(shutdownError == marker && previousWeak.expired() && nextWeak.expired(),
+            "Same-thread shutdown after failed CPU mutation lost the original failure or retained actual host owners");
+        std::cout << "Same-thread CPU mutation teardown: active callback rejects shutdown; unwound failure drains both actual host owners and preserves original error passed\n";
     }
     std::mutex callbackMutex;
     std::condition_variable callbackChanged;

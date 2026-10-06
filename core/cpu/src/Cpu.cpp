@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 namespace Cpu {
 namespace {
@@ -276,6 +277,28 @@ void Machine::Map(std::uint64_t address, std::size_t size, Permission permission
 }
 void Machine::MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions) {
     checkRange(address, memory.size());
+    check(uc_mem_map_ptr(impl->engine, address, memory.size(), static_cast<unsigned>(permissions), memory.data()), "Map shared guest memory");
+    impl->borrowed.emplace_back(address, address + memory.size());
+}
+void Machine::MapBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions,
+                          std::span<std::byte> fullBacking) {
+    if (std::this_thread::get_id() != impl->ownerThread)
+        throw std::logic_error("Guest borrowed mapping requires its owner thread");
+    checkRange(address, memory.size());
+    if (static_cast<unsigned>(permissions) & ~UC_PROT_ALL) throw std::invalid_argument("Invalid guest mapping permissions");
+    const auto pointer = reinterpret_cast<std::uintptr_t>(memory.data());
+    const auto begin = reinterpret_cast<std::uintptr_t>(fullBacking.data());
+    const auto pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) throw std::runtime_error("Cannot determine the guest CPU host page size");
+    const auto hostPage = static_cast<std::size_t>(pageSize);
+    if (!memory.data() || !fullBacking.data() || fullBacking.empty() ||
+        memory.size() > std::numeric_limits<std::uintptr_t>::max() - pointer ||
+        fullBacking.size() > std::numeric_limits<std::uintptr_t>::max() - begin ||
+        (pointer & 4095) || begin % hostPage || fullBacking.size() % hostPage ||
+        pointer < begin || pointer - begin > fullBacking.size() ||
+        memory.size() > fullBacking.size() - (pointer - begin))
+        throw std::invalid_argument("Guest borrowed mapping requires an aligned complete backing containing the mapped span without overflow");
+    impl->borrowed.reserve(impl->borrowed.size() + 1);
     check(uc_mem_map_ptr(impl->engine, address, memory.size(), static_cast<unsigned>(permissions), memory.data()), "Map shared guest memory");
     impl->borrowed.emplace_back(address, address + memory.size());
 }

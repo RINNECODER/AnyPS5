@@ -1,11 +1,13 @@
 #include <cpu/Cpu.hpp>
 #include <cpu/ElfLoader.hpp>
+#include <cpu/GuestMemoryRuntime.hpp>
 #include <cpu/Runtime.hpp>
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
 #include <cpu/SceLifecycleImports.hpp>
+#include <cpu/SceMemoryImports.hpp>
 #include <cpu/SceModules.hpp>
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceSystemImports.hpp>
@@ -92,6 +94,9 @@ void Capabilities() {
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
         << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
         << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
+        << "\"sce_memory_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
+        << "\"functions\":[\"sceKernelGetDirectMemorySize\",\"sceKernelAvailableDirectMemorySize\",\"sceKernelAllocateDirectMemory\",\"sceKernelAllocateMainDirectMemory\",\"sceKernelMapDirectMemory\",\"sceKernelMapFlexibleMemory\",\"sceKernelReserveVirtualRange\",\"sceKernelMprotect\",\"sceKernelVirtualQuery\",\"sceKernelMunmap\",\"sceKernelReleaseDirectMemory\"],"
+        << "\"constraints\":\"virtual 12 GiB direct address capacity; demand-backed 16 KiB extents; direct types 0/12; protection mask 0x37 with raw query metadata; fixed non-overwriting maps 0x90; unsupported flags fail explicitly\"},"
         << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
         << "\"sce_system_imports\":{\"module\":\"libSceSystemService\",\"module_version\":\"1.1\",\"library_version\":1,"
@@ -261,7 +266,7 @@ ErrorCode ExecutionCode(std::string_view message) {
     if (message.starts_with("Unsupported guest instruction") || message.starts_with("Unsupported guest VEX/EVEX instruction") ||
         message.starts_with("Unsupported guest XOP instruction")) return ErrorCode::UnsupportedInstruction;
     if (message.starts_with("Unsupported Linux guest syscall") || message.starts_with("Unsupported guest syscall") ||
-        message.starts_with("Unsupported guest /app0 ") ||
+        message.starts_with("Unsupported guest /app0 ") || message.starts_with("Unsupported guest memory ") ||
         message.starts_with("Unsupported guest interrupt") || message.starts_with("Unsupported guest SYSENTER") ||
         message.starts_with("Unsupported guest port ") || message.starts_with("Unsupported guest privileged service instruction") ||
         message.starts_with("Unsupported SCE ") || message.find("unsupported operation") != std::string_view::npos)
@@ -325,6 +330,8 @@ int main(int argc, char** argv) {
         if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
             throw std::runtime_error("Cannot configure standalone CLI SIGPIPE handling");
         Cpu::Machine machine;
+        std::shared_ptr<Cpu::GuestMemoryRuntime> memoryRuntime;
+        std::unique_ptr<Cpu::SceMemoryImports> memoryImports;
         std::unique_ptr<Cpu::LinuxRuntime> linuxRuntime;
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
@@ -340,6 +347,8 @@ int main(int argc, char** argv) {
             std::vector<std::string> arguments;
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
             if (sce) {
+                memoryRuntime = std::make_shared<Cpu::GuestMemoryRuntime>(machine, 12ULL << 30);
+                memoryImports = std::make_unique<Cpu::SceMemoryImports>(machine, memoryRuntime);
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
@@ -349,6 +358,7 @@ int main(int argc, char** argv) {
                 bootstrapRuntime = std::make_unique<Cpu::SceLibcBootstrapImports>(machine, std::filesystem::path(executable).filename().string());
                 const auto resolve = [&](const auto& import) {
                     if (const auto gate = lifecycleRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = memoryImports->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;

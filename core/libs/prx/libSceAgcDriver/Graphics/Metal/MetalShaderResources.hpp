@@ -24,6 +24,8 @@ public:
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault Complete(id<MTLCommandBuffer> commands);
 
 private:
+    [[nodiscard]] std::shared_ptr<MetalTexture> texture(const Graphics::GuestTextureResource& descriptor,
+        bool written, bool compare, bool atomic, bool minimumLodLowered);
     struct BufferWrite {
         std::uint64_t address;
         std::span<std::byte> host;
