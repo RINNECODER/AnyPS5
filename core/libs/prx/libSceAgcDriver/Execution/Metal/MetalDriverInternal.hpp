@@ -35,6 +35,7 @@ struct MetalDriver::Impl {
     std::map<std::uint64_t, std::vector<std::shared_ptr<IVideoOutput>>> submissionOutputs;
     std::shared_ptr<const DriverDetail::ShaderRegistry> shaders = std::make_shared<DriverDetail::ShaderRegistry>();
     std::vector<NativeGuestMemory::BorrowedRange> ranges;
+    std::uint64_t rangeGeneration = 0;
     id<MTLDevice> nativeDevice = nil;
     id<MTLLibrary> nativeLibrary = nil;
     std::unique_ptr<MetalDevice> backend;

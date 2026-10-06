@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MetalDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@ public:
     [[nodiscard]] id<MTLTexture> SampledDepthView() const;
     [[nodiscard]] id<MTLTexture> SampledStencilView() const;
     [[nodiscard]] const Graphics::DepthTarget& Target() const;
+    [[nodiscard]] bool OverlapsMappings(std::span<const NativeGuestMemory::BorrowedRange> changed) const;
 
 private:
     Graphics::DepthTarget target;
@@ -31,6 +33,7 @@ public:
     explicit MetalDepthSurfaceCache(const MetalDevice& backend);
     [[nodiscard]] std::shared_ptr<MetalDepthSurface> Acquire(const Graphics::DepthTarget& target);
     void Clear();
+    void Invalidate(std::span<const NativeGuestMemory::BorrowedRange> changed);
 
 private:
     const MetalDevice& backend;

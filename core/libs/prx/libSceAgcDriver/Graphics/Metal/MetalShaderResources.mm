@@ -17,20 +17,12 @@ namespace Abi = ShaderRecompiler::BdaAbi;
 
 MetalGuestMemory::DispatchSnapshot capture(MetalGuestMemory& memory,
     std::span<const NativeGuestMemory::BorrowedRange> ranges) {
-    std::vector<std::pair<std::uintptr_t, std::uintptr_t>> physical;
     for (const auto& range : ranges) {
         const auto begin = reinterpret_cast<std::uintptr_t>(range.host.data());
         if (range.host.size() > std::numeric_limits<std::uintptr_t>::max() - begin) {
             throw std::invalid_argument("Metal draw borrowed host address overflows");
         }
-        physical.emplace_back(begin, begin + range.host.size());
         memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(range.guestAddress, range.host, range.writable);
-    }
-    std::sort(physical.begin(), physical.end());
-    for (std::size_t i = 1; i < physical.size(); ++i) {
-        if (physical[i].first < physical[i - 1].second) {
-            throw std::invalid_argument("Metal draw cannot mirror physically aliased guest borrows independently");
-        }
     }
     return memory.CaptureAfterPriorSnapshotsComplete();
 }
@@ -61,11 +53,31 @@ bool writtenBuffer(const DescriptorBinding& binding, std::uint32_t i) {
 
 MetalShaderResources::MetalShaderResources(const MetalDevice& backend,
     std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup)
-    : backend(backend), borrowed(ranges), memory(backend.Device()), snapshot(capture(memory, ranges)),
+    : backend(backend), borrowed(ranges), borrowedRanges(ranges.begin(), ranges.end()),
+      memory(backend.Device()), snapshot(capture(memory, ranges)),
       depthLookup(std::move(depthLookup)) {
     resident.push_back(snapshot.Table());
     resident.push_back(snapshot.FaultBuffer());
     for (id<MTLBuffer> buffer in snapshot.Buffers()) resident.push_back(buffer);
+}
+
+bool MetalShaderResources::physicallyOverlaps(std::uint64_t begin, std::uint64_t end,
+    std::uint64_t otherBegin, std::uint64_t otherEnd) const {
+    for (const auto& range : borrowedRanges) {
+        const auto clippedBegin = std::max(begin, range.guestAddress);
+        const auto clippedEnd = std::min(end, range.guestAddress + range.host.size());
+        if (clippedBegin >= clippedEnd) continue;
+        const auto hostBegin = reinterpret_cast<std::uintptr_t>(range.host.data()) + clippedBegin - range.guestAddress;
+        const auto hostEnd = hostBegin + clippedEnd - clippedBegin;
+        for (const auto& other : borrowedRanges) {
+            const auto clippedOtherBegin = std::max(otherBegin, other.guestAddress);
+            const auto clippedOtherEnd = std::min(otherEnd, other.guestAddress + other.host.size());
+            if (clippedOtherBegin >= clippedOtherEnd) continue;
+            const auto otherHostBegin = reinterpret_cast<std::uintptr_t>(other.host.data()) + clippedOtherBegin - other.guestAddress;
+            if (overlaps(hostBegin, hostEnd, otherHostBegin, otherHostBegin + clippedOtherEnd - clippedOtherBegin)) return true;
+        }
+    }
+    return false;
 }
 
 MetalBufferBinding MetalShaderResources::mirror(std::uint64_t address, std::size_t bytes, bool writable) {
@@ -98,10 +110,13 @@ MetalBufferBinding MetalShaderResources::Buffer(std::uint64_t address, std::size
         const auto& descriptor = image.texture->Descriptor();
         const auto begin = descriptor.baseAddress;
         const auto count = Graphics::DccKeyBytes(image.texture->GuestBytes());
-        if (writable && descriptor.dccAddress != 0 && overlaps(address, address + bytes, descriptor.dccAddress, descriptor.dccAddress + count)) {
+        if (writable && descriptor.dccAddress != 0 &&
+            (overlaps(address, address + bytes, descriptor.dccAddress, descriptor.dccAddress + count) ||
+             physicallyOverlaps(address, address + bytes, descriptor.dccAddress, descriptor.dccAddress + count))) {
             throw std::invalid_argument("Metal draw guest buffer writes alias active image DCC metadata");
         }
-        if (overlaps(address, address + bytes, begin, begin + image.texture->GuestBytes())) {
+        if (overlaps(address, address + bytes, begin, begin + image.texture->GuestBytes()) ||
+            physicallyOverlaps(address, address + bytes, begin, begin + image.texture->GuestBytes())) {
             throw std::invalid_argument("Metal draw guest buffer aliases an active native image");
         }
     }
@@ -118,12 +133,14 @@ Graphics::DccKeys MetalShaderResources::textureKeys(const Graphics::GuestTexture
     }
     for (const auto& image : images) {
         const auto begin = image.texture->Descriptor().baseAddress;
-        if (overlaps(descriptor.dccAddress, descriptor.dccAddress + count, begin, begin + image.texture->GuestBytes())) {
+        if (overlaps(descriptor.dccAddress, descriptor.dccAddress + count, begin, begin + image.texture->GuestBytes()) ||
+            physicallyOverlaps(descriptor.dccAddress, descriptor.dccAddress + count, begin, begin + image.texture->GuestBytes())) {
             throw std::invalid_argument("Metal texture DCC metadata aliases an active native image");
         }
     }
     for (const auto& write : bufferWrites) {
-        if (overlaps(descriptor.dccAddress, descriptor.dccAddress + count, write.address, write.address + write.host.size())) {
+        if (overlaps(descriptor.dccAddress, descriptor.dccAddress + count, write.address, write.address + write.host.size()) ||
+            physicallyOverlaps(descriptor.dccAddress, descriptor.dccAddress + count, write.address, write.address + write.host.size())) {
             throw std::invalid_argument("Metal texture DCC metadata aliases active guest buffer writes");
         }
     }
@@ -202,21 +219,26 @@ std::shared_ptr<MetalTexture> MetalShaderResources::Texture(const Graphics::Gues
     const auto end = descriptor.baseAddress + bytes;
     const auto keyCount = Graphics::DccKeyBytes(bytes);
     if (descriptor.dccAddress != 0 && (keyCount > std::numeric_limits<std::uint64_t>::max() - descriptor.dccAddress ||
-        overlaps(descriptor.baseAddress, end, descriptor.dccAddress, descriptor.dccAddress + keyCount))) {
+        overlaps(descriptor.baseAddress, end, descriptor.dccAddress, descriptor.dccAddress + keyCount) ||
+        physicallyOverlaps(descriptor.baseAddress, end, descriptor.dccAddress, descriptor.dccAddress + keyCount))) {
         throw std::invalid_argument("Metal texture DCC metadata aliases its own native image or overflows");
     }
     for (const auto& [begin, bufferEnd] : bufferRanges) {
-        if (overlaps(descriptor.baseAddress, end, begin, bufferEnd)) {
+        if (overlaps(descriptor.baseAddress, end, begin, bufferEnd) ||
+            physicallyOverlaps(descriptor.baseAddress, end, begin, bufferEnd)) {
             throw std::invalid_argument("Metal draw native image aliases an active guest buffer");
         }
     }
     for (const auto& image : images) {
         const auto& other = image.texture->Descriptor();
         const auto begin = other.baseAddress;
-        if (other.dccAddress != 0 && overlaps(descriptor.baseAddress, end, other.dccAddress, other.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes()))) {
+        if (other.dccAddress != 0 &&
+            (overlaps(descriptor.baseAddress, end, other.dccAddress, other.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes())) ||
+             physicallyOverlaps(descriptor.baseAddress, end, other.dccAddress, other.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes())))) {
             throw std::invalid_argument("Metal texture native image aliases active DCC metadata");
         }
-        if (overlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes())) {
+        if (overlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes()) ||
+            physicallyOverlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes())) {
             throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing");
         }
     }
@@ -350,14 +372,23 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         const auto encoded = words[Abi::WrittenSlotsWord + i];
         if (encoded == 0) continue;
         const auto page = std::uint64_t{encoded - 1u} << Abi::WrittenPageShift;
-        for (const auto& image : images) {
-            const auto& descriptor = image.texture->Descriptor();
-            const auto begin = descriptor.baseAddress;
-            if (descriptor.dccAddress != 0 && overlaps(page, page + pageBytes, descriptor.dccAddress, descriptor.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes()))) {
-                throw std::runtime_error("Metal draw BDA writes alias active image DCC metadata");
-            }
-            if (overlaps(page, page + pageBytes, begin, begin + image.texture->GuestBytes())) {
-                throw std::runtime_error("Metal draw BDA writes alias an active image and require native image-buffer coherence");
+        for (const auto& range : borrowedRanges) {
+            if (!range.writable) continue;
+            const auto writeBegin = std::max(page, range.guestAddress);
+            const auto writeEnd = std::min(page + pageBytes, range.guestAddress + range.host.size());
+            if (writeBegin >= writeEnd) continue;
+            for (const auto& image : images) {
+                const auto& descriptor = image.texture->Descriptor();
+                const auto begin = descriptor.baseAddress;
+                if (descriptor.dccAddress != 0 &&
+                    (overlaps(writeBegin, writeEnd, descriptor.dccAddress, descriptor.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes())) ||
+                     physicallyOverlaps(writeBegin, writeEnd, descriptor.dccAddress, descriptor.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes())))) {
+                    throw std::runtime_error("Metal draw BDA writes alias active image DCC metadata");
+                }
+                if (overlaps(writeBegin, writeEnd, begin, begin + image.texture->GuestBytes()) ||
+                    physicallyOverlaps(writeBegin, writeEnd, begin, begin + image.texture->GuestBytes())) {
+                    throw std::runtime_error("Metal draw BDA writes alias an active image and require native image-buffer coherence");
+                }
             }
         }
     }

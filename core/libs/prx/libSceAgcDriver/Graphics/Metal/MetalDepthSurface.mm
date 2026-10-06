@@ -1,4 +1,5 @@
 #include "MetalDepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -77,6 +78,19 @@ id<MTLTexture> MetalDepthSurface::SampledDepthView() const { return depth; }
 id<MTLTexture> MetalDepthSurface::SampledStencilView() const { return sampledStencil; }
 const Graphics::DepthTarget& MetalDepthSurface::Target() const { return target; }
 
+bool MetalDepthSurface::OverlapsMappings(std::span<const NativeGuestMemory::BorrowedRange> changed) const {
+    const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+    const auto overlaps = [&](std::uint64_t address, std::uint64_t bytes) {
+        if (address == 0 || bytes == 0) return false;
+        return std::any_of(changed.begin(), changed.end(), [&](const auto& range) {
+            if (range.host.empty()) return false;
+            return address <= range.guestAddress ? range.guestAddress - address < bytes : address - range.guestAddress < range.host.size();
+        });
+    };
+    return overlaps(target.address, Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u)) ||
+        overlaps(target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u));
+}
+
 MetalDepthSurfaceCache::MetalDepthSurfaceCache(const MetalDevice& backend) : backend(backend) {}
 
 std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphics::DepthTarget& target) {
@@ -86,6 +100,11 @@ std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphic
     auto result = std::make_shared<MetalDepthSurface>(backend, target);
     surfaces.push_back(result);
     return result;
+}
+
+void MetalDepthSurfaceCache::Invalidate(std::span<const NativeGuestMemory::BorrowedRange> changed) {
+    std::lock_guard lock(mutex);
+    std::erase_if(surfaces, [&](const auto& surface) { return surface->OverlapsMappings(changed); });
 }
 
 void MetalDepthSurfaceCache::Clear() {

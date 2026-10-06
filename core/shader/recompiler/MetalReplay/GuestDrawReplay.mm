@@ -215,7 +215,8 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     std::array<std::uint32_t, 9> vertexCode{};
     std::copy(VertexCode.begin(), VertexCode.end(), vertexCode.begin());
     vertexCode[1] = 0x80020005;
-    auto fragmentCode = MaskedPixelCode;
+    std::array<std::uint32_t, 32> fragmentCode{};
+    std::copy(MaskedPixelCode.begin(), MaskedPixelCode.end(), fragmentCode.begin());
     std::array<std::uint32_t, 17> computeCode{
         0x34020082, 0xe0302000, 0x80000401, 0xbf8c3f70, 0x7e000000, 0x7e003600, 0x7e008200, 0x4a080881,
         0xd5800000, 0x00000000, 0xd59b0000, 0x00000000, 0xd5c10000, 0x00000000, 0xe0702000, 0x80010401, 0xbf810000};
@@ -244,7 +245,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         return data;
     };
     auto vertexHeader = makeHeader(0x700000, 0x500000, sizeof(VertexCode), 2);
-    auto fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(fragmentCode), 1);
+    auto fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(MaskedPixelCode), 1);
     auto computeHeader = makeHeader(0x720000, ComputeCodeAddress, sizeof(computeCode), 0);
     const auto append = [](std::vector<std::uint32_t>& commands, std::uint32_t opcode,
                            std::initializer_list<std::uint32_t> payload) {
@@ -282,7 +283,14 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     std::array<std::uint16_t, 11> restart16{0xffff, 0, 1, 2, 3, 0xffff, 4, 5, 6, 7, 0xffff};
     std::array<std::uint32_t, 11> restart32{0xffffffff, 0, 1, 2, 3, 0xffffffff, 4, 5, 6, 7, 0xffffffff};
     std::array<std::uint32_t, 3> vertexCounter{0xcafef00d, 0, 0xdeadbeef};
-    std::uint64_t finalSamples = 384;
+    std::uint64_t finalSamples = 384, depthRangeGeneration = 0;
+    constexpr std::uint64_t DepthAllocation = 0x1000000, DepthOutputAllocation = 0x1800000, DepthOutputAddress = DepthOutputAllocation + 256;
+    std::array<std::array<std::byte, 65536>, 8> depthBacking;
+    for (auto& plane : depthBacking) plane.fill(std::byte{0xa5});
+    std::array<std::byte, 16> unrelatedDepthStorage;
+    unrelatedDepthStorage.fill(std::byte{0x6e});
+    std::array<std::uint32_t, Width * Height + 128> depthOutput;
+    depthOutput.fill(0xdeadbeef);
     std::array<::Packet, 4> packets{{
         {reinterpret_cast<std::uint32_t*>(GraphicsCommandAddress), static_cast<std::uint32_t>(graphics.size()), 0, {}},
         {reinterpret_cast<std::uint32_t*>(ComputeCommandAddress), static_cast<std::uint32_t>(compute.size()), 0, {}},
@@ -310,6 +318,9 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         {Restart16Address, std::as_writable_bytes(std::span(restart16)), false},
         {Restart32Address, std::as_writable_bytes(std::span(restart32)), false},
         {VertexCounterAddress - 4, std::as_writable_bytes(std::span(vertexCounter)), true}};
+    for (std::size_t i = 0; i < depthBacking.size(); ++i)
+        ranges.push_back({DepthAllocation + i * 65536, depthBacking[i], false});
+    ranges.push_back({DepthOutputAllocation, std::as_writable_bytes(std::span(depthOutput)), true});
     const auto checkPixels = [&](bool masked) {
         for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
             auto expected = std::byte{0x7b};
@@ -498,7 +509,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     checkQueries(1, 256, "Full 16x16 guest draw sample dump");
     querySubmit(shiftedDump);
     checkQueries(1, 256, "Repeated sample dump preserves cumulative total");
-    fragmentCode = MaskedPixelCode;
+    std::copy(MaskedPixelCode.begin(), MaskedPixelCode.end(), fragmentCode.begin());
     fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(MaskedPixelCode), 1);
     AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
     std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
@@ -603,10 +614,282 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     append(visibleLine, 0x2d, {2, 2});
     checkEffects(visibleLine, 2, 16, 2, "Public cullboth line retains visible pixels and two actual guest VS writes");
     vertices = originalVertices;
+    std::copy(VertexCode.begin(), VertexCode.end(), vertexCode.begin());
+    vertexCode[1] = 0x80020005;
+    vertexHeader = makeHeader(0x700000, 0x500000, sizeof(VertexCode), 2);
+    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x700000));
+    constexpr std::array<std::uint32_t, 14> depthBitsPixel{
+        0x7e080f00, 0x7e0a0f01, 0x340c0a86, 0x4a0c0d04, 0x340c0c82,
+        0xf0000188, 0x00000804, 0xbf8c3f70, 0xe0701000, 0x80020806,
+        0x7e0e02f2, 0xf800180f, 0x07070707, 0xbf810000};
+    for (std::uint32_t format = 0; format < 4; ++format) {
+        const bool d16 = format < 2, stencil = (format & 1u) != 0;
+        const auto depthAddress = DepthAllocation + format * 131072;
+        const auto stencilAddress = stencil ? depthAddress + 65536 : 0;
+        std::copy(FullPixelCode.begin(), FullPixelCode.end(), fragmentCode.begin());
+        fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(FullPixelCode), 1);
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+        for (std::uint32_t band = 0; band < 3; ++band) {
+            const float z = band == 0 ? 0.0f : band == 1 ? 0.5f : 1.0f;
+            for (std::uint32_t vertex = 0; vertex < 3; ++vertex) vertices[vertex][2] = z;
+            auto writer = GraphicsCommands();
+            const auto reg = [&](std::uint32_t offset, std::uint32_t value) {
+                RegisterPacket(writer, 0x69, offset, std::span(&value, 1));
+            };
+            reg(0x0, 0); reg(0x2, 0); reg(0x7, ((Height - 1) << 16u) | (Width - 1));
+            reg(0xa, 17); reg(0xb, std::bit_cast<std::uint32_t>(0.75f));
+            reg(0x10, d16 ? 1 : 3); reg(0x11, stencil ? 1 : 0);
+            reg(0x12, static_cast<std::uint32_t>(depthAddress >> 8u));
+            reg(0x14, static_cast<std::uint32_t>(depthAddress >> 8u));
+            reg(0x13, static_cast<std::uint32_t>(stencilAddress >> 8u));
+            reg(0x15, static_cast<std::uint32_t>(stencilAddress >> 8u));
+            reg(0x200, 0x76);
+            reg(0x90, 0x80000000u | (band == 0 ? 0 : band == 1 ? 16 : 48));
+            reg(0x91, (Height << 16u) | (band == 0 ? 16 : band == 1 ? 48 : 64));
+            const std::uint32_t zero = 0;
+            RegisterPacket(writer, 0x79, 0x24a, std::span(&zero, 1));
+            RegisterPacket(writer, 0x79, 0x24b, std::span(&zero, 1));
+            append(writer, 0x2d, {3, 2});
+            querySubmit(writer);
+        }
+        finalSamples += Width * Height;
+        vertices = originalVertices;
+        const std::array<std::uint32_t, 2> guestFormats{d16 ? 11u : 20u, 21u};
+        for (const auto guestFormat : std::span(guestFormats).first(d16 ? 1 : 2)) {
+            std::copy(depthBitsPixel.begin(), depthBitsPixel.end(), fragmentCode.begin());
+            fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(depthBitsPixel), 1);
+            AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+            auto reader = GraphicsCommands();
+            const std::array<std::uint32_t, 12> depthUsers{
+                static_cast<std::uint32_t>(depthAddress >> 8u), (guestFormat << 20u) | (3u << 30u),
+                ((Width - 1) >> 2u) | ((Height - 1) << 14u), 0xfacu | (24u << 20u) | (9u << 28u), 0, 0, 0, 0,
+                static_cast<std::uint32_t>(DepthOutputAddress), 0, Width * Height * 4, 0x01016fac};
+            const std::uint32_t twelveUsers = 24, zero = 0;
+            RegisterPacket(reader, 0x76, 0xb, std::span(&twelveUsers, 1));
+            RegisterPacket(reader, 0x76, 0xc, depthUsers);
+            RegisterPacket(reader, 0x79, 0x24a, std::span(&zero, 1));
+            RegisterPacket(reader, 0x79, 0x24b, std::span(&zero, 1));
+            append(reader, 0x2d, {3, 2});
+            const auto queryDump = dump(0);
+            reader.insert(reader.end(), queryDump.begin(), queryDump.end());
+            const auto readDepth = [&](bool cleared, const std::string& name) {
+                depthOutput.fill(0xdeadbeef);
+                std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+                querySubmit(reader);
+                checkPixels(false);
+                for (std::size_t i = 0; i < depthOutput.size(); ++i) {
+                    std::uint32_t expected = 0xdeadbeef;
+                    if (i >= 64 && i < 64 + Width * Height) {
+                        const auto x = (i - 64) % Width;
+                        expected = cleared ? (d16 ? 49151 : 0x3f400000) : x < 16 ? 0 : x < 48 ? (d16 ? 32768 : 0x3f000000) : (d16 ? 65535 : 0x3f800000);
+                    }
+                    Require(depthOutput[i] == expected, name +
+                        " produced wrong guest DWORD " + std::to_string(i) + ": observed " + std::to_string(depthOutput[i]) +
+                        ", expected " + std::to_string(expected));
+                }
+                for (const auto& plane : depthBacking) for (const auto value : plane)
+                    Require(value == std::byte{0xa5}, "Public retained depth reader modified borrowed depth/stencil shadow bytes");
+                Require(vertices == originalVertices, "Public retained depth reader modified borrowed vertex inputs");
+                finalSamples += Width * Height;
+                checkQueries(0, finalSamples, name + " hardware samples");
+            };
+            readDepth(false, "Public retained depth bits format" + std::to_string(format));
+            std::cout << "Public retained " << (d16 ? "D16" : "D32") << (stencil ? "S8" : "")
+                      << " guestformat" << guestFormat << " actual RDNA depth writer and integer IMAGE_LOAD reader exact bits with guards passed\n";
+            if (format == 0) {
+                const auto reacquireReadOnlyDepth = [&] {
+                    std::copy(FullPixelCode.begin(), FullPixelCode.end(), fragmentCode.begin());
+                    fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(FullPixelCode), 1);
+                    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+                    auto reacquire = GraphicsCommands();
+                    const std::uint32_t readOnlyDepth = 0x72, zero = 0;
+                    RegisterPacket(reacquire, 0x69, 0x200, std::span(&readOnlyDepth, 1));
+                    RegisterPacket(reacquire, 0x79, 0x24a, std::span(&zero, 1));
+                    RegisterPacket(reacquire, 0x79, 0x24b, std::span(&zero, 1));
+                    append(reacquire, 0x2d, {3, 2});
+                    querySubmit(reacquire);
+                    finalSamples += Width * Height;
+                    std::copy(depthBitsPixel.begin(), depthBitsPixel.end(), fragmentCode.begin());
+                    fragmentHeader = makeHeader(0x710000, 0x600000, sizeof(depthBitsPixel), 1);
+                    AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
+                };
+                auto replacement = ranges;
+                replacement.push_back({0x1900000, unrelatedDepthStorage, false});
+                AgcDriver::Metal::MetalDriver::Get().ReplaceBorrowedRanges(replacement, ++depthRangeGeneration);
+                ranges = replacement;
+                reacquireReadOnlyDepth();
+                readDepth(false, "Public depth cache survives an unrelated borrowed mapping");
+                const auto whole = std::find_if(replacement.begin(), replacement.end(), [&](const auto& range) {
+                    return range.guestAddress == depthAddress;
+                });
+                Require(whole != replacement.end(), "Depth split fixture could not find its existing borrow");
+                const auto tail = AgcDriver::NativeGuestMemory::BorrowedRange{
+                    depthAddress + 32768, whole->host.subspan(32768), whole->writable, whole->identity};
+                whole->host = whole->host.first(32768);
+                replacement.push_back(tail);
+                AgcDriver::Metal::MetalDriver::Get().ReplaceBorrowedRanges(replacement, ++depthRangeGeneration);
+                ranges = replacement;
+                reacquireReadOnlyDepth();
+                readDepth(false, "Public depth cache survives an equivalent split borrow");
+                for (auto& range : replacement)
+                    if (range.guestAddress >= depthAddress && range.guestAddress < depthAddress + 65536) range.identity = 1;
+                AgcDriver::Metal::MetalDriver::Get().ReplaceBorrowedRanges(replacement, ++depthRangeGeneration);
+                ranges = replacement;
+                reacquireReadOnlyDepth();
+                readDepth(true, "Public depth identity replacement reacquires initial clear instead of stale written depth");
+                for (const auto value : unrelatedDepthStorage)
+                    Require(value == std::byte{0x6e}, "Depth cache replacement modified unrelated borrowed bytes");
+                std::cout << "Public depth cache replacement: unrelated addition, equivalent split and same-host new identity passed\n";
+            }
+        }
+    }
     AgcDriverShutdown_nid_postfix();
     std::cout << "Actual public AGC Submit: shader registration snapshots, immutable flattened IB, cross-queue compute WAIT/conditional draw, completed EOP and persistent registers passed\n";
     output.fill(0xdeadbeef);
     compute[compute.size() - 6] |= 1u << 24u;
+    {
+        std::array<std::uint32_t, 64 * 4> nextInput, nextOutput, rejectedInput, rejectedOutput;
+        nextInput.fill(0xb5b5b5b5);
+        rejectedInput.fill(0xc5c5c5c5);
+        nextOutput.fill(0xdeadbeef);
+        rejectedOutput.fill(0xdeadbeef);
+        for (std::uint32_t i = 0; i < 64; ++i) {
+            nextInput[i * 4] = i * 5 + 31;
+            rejectedInput[i * 4] = i * 7 + 59;
+        }
+        const auto originalNextInput = nextInput, originalRejectedInput = rejectedInput;
+        std::array<std::uint32_t, 4> addedStorage{0xcafef00d, 11, 22, 0xdeadbeef};
+        const auto originalAddedStorage = addedStorage;
+        auto replacement = ranges;
+        const auto pointData = [&](auto& borrows, auto& source, auto& destination) {
+            for (auto& range : borrows) {
+                if (range.guestAddress == ComputeInputAddress) range.host = std::as_writable_bytes(std::span(source));
+                if (range.guestAddress == ComputeOutputAddress) range.host = std::as_writable_bytes(std::span(destination));
+            }
+        };
+        pointData(replacement, nextInput, nextOutput);
+        std::array<std::uint32_t, 64 * 4>* activeInput = &input;
+        std::array<std::uint32_t, 64 * 4>* activeOutput = &output;
+        std::uint32_t increment = 1;
+        std::atomic<std::uint32_t> rangeInterrupts{0};
+        std::mutex rangeCallbackMutex;
+        std::condition_variable rangeCallbackChanged;
+        bool rangeCallbackEntered = false, rangeCallbackReleased = false, blockRangeCallback = true;
+        AgcDriver::Metal::MetalDriver rangeDriver;
+        const auto checkOutput = [&] {
+            for (std::uint32_t i = 0; i < activeOutput->size(); ++i) {
+                const auto expected = i % 4 == 0 ? (*activeInput)[i] + increment : 0xdeadbeefu;
+                Require((*activeOutput)[i] == expected,
+                    "Borrow replacement actual RDNA output or padding is incorrect at word " + std::to_string(i) +
+                    ", actual=" + std::to_string((*activeOutput)[i]) + ", expected=" + std::to_string(expected));
+            }
+        };
+        rangeDriver.Configure((__bridge void*)device, (__bridge void*)library, ranges,
+            [&](std::uint32_t queue) {
+                Require(queue == 0x20, "Borrow replacement EOP arrived from the wrong queue");
+                checkOutput();
+                rangeInterrupts.fetch_add(1);
+                std::unique_lock lock(rangeCallbackMutex);
+                if (blockRangeCallback) {
+                    rangeCallbackEntered = true;
+                    rangeCallbackChanged.notify_all();
+                    rangeCallbackChanged.wait(lock, [&] { return rangeCallbackReleased; });
+                }
+            }, 0);
+        rangeDriver.RegisterShader(reinterpret_cast<const Shader*>(0x720000));
+        output.fill(0xdeadbeef);
+        rangeDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+        {
+            std::unique_lock lock(rangeCallbackMutex);
+            if (!rangeCallbackChanged.wait_for(lock, std::chrono::seconds(10), [&] { return rangeCallbackEntered; })) {
+                rangeCallbackReleased = true;
+                rangeCallbackChanged.notify_all();
+                throw std::runtime_error("Borrow replacement EOP did not reach the old mapping");
+            }
+        }
+        std::promise<void> replacingStarted;
+        auto startedReplacing = replacingStarted.get_future();
+        auto replacing = std::async(std::launch::async, [&] {
+            replacingStarted.set_value();
+            rangeDriver.ReplaceBorrowedRanges(replacement, 1);
+        });
+        startedReplacing.wait();
+        const bool drainedBeforeReplacing = replacing.wait_for(std::chrono::milliseconds(200)) == std::future_status::timeout;
+        const auto completedOldOutput = output;
+        {
+            std::lock_guard lock(rangeCallbackMutex);
+            rangeCallbackReleased = true;
+            blockRangeCallback = false;
+        }
+        rangeCallbackChanged.notify_all();
+        replacing.get();
+        Require(drainedBeforeReplacing, "Borrow replacement returned while the EOP worker still retained old storage");
+        Require(rangeInterrupts.load() == 1 && input == originalInput && output == completedOldOutput,
+            "Borrow replacement changed old input/output before retiring its completed worker");
+        activeInput = &nextInput;
+        activeOutput = &nextOutput;
+        const auto submitReplacement = [&] {
+            activeOutput->fill(0xdeadbeef);
+            const auto before = rangeInterrupts.load();
+            rangeDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+            rangeDriver.WaitIdle();
+            Require(rangeInterrupts.load() == before + 1, "Borrow replacement did not deliver exactly one completed EOP");
+            checkOutput();
+            Require(input == originalInput && output == completedOldOutput && nextInput == originalNextInput &&
+                rejectedInput == originalRejectedInput && addedStorage == originalAddedStorage,
+                "Borrow replacement modified old, read-only or unrelated storage");
+        };
+        submitReplacement();
+        const auto rejectReplacement = [&](const auto& invalid, std::uint64_t generation) {
+            bool refused = false;
+            try { rangeDriver.ReplaceBorrowedRanges(invalid, generation); }
+            catch (const std::exception&) { refused = true; }
+            Require(refused, "Borrow replacement accepted invalid ranges or a nonmonotonic generation");
+        };
+        auto invalid = replacement;
+        pointData(invalid, rejectedInput, rejectedOutput);
+        invalid.push_back({ComputeInputAddress + 4, std::as_writable_bytes(std::span(addedStorage)), true});
+        rejectReplacement(invalid, 2);
+        invalid.pop_back();
+        rejectReplacement(invalid, 1);
+        submitReplacement();
+        Require(std::all_of(rejectedOutput.begin(), rejectedOutput.end(), [](auto word) { return word == 0xdeadbeef; }),
+            "Rejected borrow replacement partially published the future destination");
+        computeStorage[7] = 0x4a080882;
+        replacement.push_back({0xe30000, std::as_writable_bytes(std::span(addedStorage)), true});
+        rangeDriver.ReplaceBorrowedRanges(replacement, 2);
+        submitReplacement();
+        for (auto& range : replacement) {
+            if (range.guestAddress == ComputeCodeAddress || range.guestAddress == ComputeCodeAddress + 8 * sizeof(std::uint32_t)) {
+                range.identity = 1;
+            }
+        }
+        rangeDriver.ReplaceBorrowedRanges(replacement, 3);
+        increment = 2;
+        submitReplacement();
+        for (auto& range : replacement) {
+            if (range.guestAddress == ComputeOutputAddress) range.writable = false;
+        }
+        rangeDriver.ReplaceBorrowedRanges(replacement, 4);
+        nextOutput.fill(0xdeadbeef);
+        const auto interruptsBeforePermission = rangeInterrupts.load();
+        bool permissionRefused = false;
+        try {
+            rangeDriver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress + sizeof(::Packet)), 0x20);
+            rangeDriver.WaitIdle();
+        } catch (const std::exception& error) {
+            permissionRefused = std::string(error.what()).find("read-only") != std::string::npos;
+            if (!permissionRefused) throw;
+        }
+        try { rangeDriver.Shutdown(); } catch (...) { if (!permissionRefused) throw; }
+        Require(permissionRefused && rangeInterrupts.load() == interruptsBeforePermission &&
+            std::all_of(nextOutput.begin(), nextOutput.end(), [](auto word) { return word == 0xdeadbeef; }) &&
+            nextInput == originalNextInput && input == originalInput && output == completedOldOutput,
+            "Read-only replacement did not reject the actual guest write atomically before EOP");
+        computeStorage = originalComputeStorage;
+        output.fill(0xdeadbeef);
+        std::cout << "Actual PM4 borrow replacement: old EOP drain, same-VA new storage, invalid publication atomicity, add-only shader capture, allocation identity and read-only writes passed\n";
+    }
     std::mutex callbackMutex;
     std::condition_variable callbackChanged;
     bool callbackEntered = false, callbackReleased = false;

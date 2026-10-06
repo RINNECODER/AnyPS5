@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "RdnaDecoder/include/RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -137,6 +138,12 @@ MetalDraw::MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary)
 }
 
 MetalDraw::~MetalDraw() = default;
+
+void MetalDraw::InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed) {
+    std::lock_guard lock(drawMutex);
+    depthCache->Invalidate(changed);
+    std::erase_if(depthSurfaces, [&](const auto& surface) { return surface->OverlapsMappings(changed); });
+}
 
 MeshTargetLimits MetalDraw::MeshLimits() const {
     const auto maximum = backend.Device().maxThreadsPerThreadgroup;
@@ -271,7 +278,9 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             }
             const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
             const auto expected = stencil ? VK_FORMAT_R8_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
-            if (Graphics::ResolveTextureFormat(resource.format) != expected) {
+            const bool depthBits = !stencil && DepthBitsTextureWidth(resource.format << 20u,
+                Graphics::XorSwizzleMode(resource.tileMode) << 20u) == (d16 ? 16u : 32u);
+            if (Graphics::ResolveTextureFormat(resource.format) != expected && !depthBits) {
                 throw std::invalid_argument("Metal draw resident depth plane format disagrees with the guest descriptor");
             }
             auto channel = [](std::uint8_t value) {

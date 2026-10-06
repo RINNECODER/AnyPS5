@@ -42,6 +42,7 @@ private:
     };
     const MetalDevice& backend;
     NativeGuestMemory::BorrowedRangesScope borrowed;
+    std::vector<NativeGuestMemory::BorrowedRange> borrowedRanges;
     MetalGuestMemory memory;
     MetalGuestMemory::DispatchSnapshot snapshot;
     std::vector<id<MTLResource>> resident;
@@ -54,6 +55,8 @@ private:
     DepthTextureLookup depthLookup;
     [[nodiscard]] Graphics::DccKeys textureKeys(const Graphics::GuestTextureResource& descriptor, std::size_t bytes);
     void validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys);
+    [[nodiscard]] bool physicallyOverlaps(std::uint64_t begin, std::uint64_t end,
+        std::uint64_t otherBegin, std::uint64_t otherEnd) const;
     [[nodiscard]] MetalBufferBinding mirror(std::uint64_t address, std::size_t bytes, bool writable);
 };
 
