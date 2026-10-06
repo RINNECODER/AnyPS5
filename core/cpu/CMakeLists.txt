@@ -18,12 +18,57 @@ if(NOT unicornHostConfig MATCHES "CONFIG_DARWIN" OR NOT unicornHostConfig MATCHE
     message(FATAL_ERROR "Unicorn host feature detection failed; inspect configure diagnostics")
 endif()
 
-add_library(anyps5_cpu STATIC src/Cpu.cpp src/ElfLoader.cpp src/Runtime.cpp src/SystemMachine.cpp src/SceImports.cpp src/SceElf.cpp src/Self.cpp src/SceTls.cpp src/GuestFiles.cpp src/SceKernelImports.cpp
+set(ANYPS5_CPU_BACKEND "TCG" CACHE STRING "Embedded application CPU engine: TCG or UNICORN")
+set_property(CACHE ANYPS5_CPU_BACKEND PROPERTY STRINGS TCG UNICORN)
+set(cpuEngineSource src/Cpu.cpp)
+set(cpuEngineLibrary unicorn)
+set(cpuModernTcg 0)
+if(ANYPS5_CPU_BACKEND STREQUAL "TCG")
+    if(NOT EXISTS "${PROJECT_SOURCE_DIR}/3rdparty/anyps5-tcg/include/qemu/anyps5-cpu.h")
+        message(FATAL_ERROR "Initialize the pinned 3rdparty/anyps5-tcg submodule")
+    endif()
+    include(ExternalProject)
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+    find_program(tcgNinja ninja REQUIRED)
+    execute_process(COMMAND "${unicornPkgConfig}" --exists "glib-2.0 >= 2.66"
+        RESULT_VARIABLE tcgGlibResult)
+    if(NOT tcgGlibResult EQUAL 0)
+        message(FATAL_ERROR "The embedded TCG engine requires GLib >= 2.66 development files")
+    endif()
+    set(tcgBuildDirectory "${CMAKE_CURRENT_BINARY_DIR}/tcg")
+    set(tcgLibrary "${tcgBuildDirectory}/libqemu-x86_64-softmmu.dylib")
+    ExternalProject_Add(anyps5_tcg_build
+        SOURCE_DIR "${PROJECT_SOURCE_DIR}/3rdparty/anyps5-tcg"
+        BINARY_DIR "${tcgBuildDirectory}"
+        PREFIX "${CMAKE_CURRENT_BINARY_DIR}/tcg-project"
+        CONFIGURE_COMMAND <SOURCE_DIR>/configure --python=${Python3_EXECUTABLE} --ninja=${tcgNinja}
+            --target-list=x86_64-softmmu --enable-shared-lib --enable-tcg
+            --disable-hvf --disable-kvm --disable-cocoa --disable-sdl --disable-tools
+            --disable-docs --disable-plugins --without-default-features --disable-pixman --disable-fdt
+            "--extra-cflags=-arch arm64" "--extra-ldflags=-arch arm64"
+        BUILD_COMMAND "${tcgNinja}" -C <BINARY_DIR> -j 8 libqemu-x86_64-softmmu.dylib
+        BUILD_ALWAYS ON
+        BUILD_BYPRODUCTS "${tcgLibrary}"
+        INSTALL_COMMAND "")
+    add_library(anyps5_tcg SHARED IMPORTED)
+    set_target_properties(anyps5_tcg PROPERTIES IMPORTED_LOCATION "${tcgLibrary}"
+        INTERFACE_INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/3rdparty/anyps5-tcg/include")
+    set(CMAKE_BUILD_RPATH "${CMAKE_BUILD_RPATH};${tcgBuildDirectory}")
+    add_dependencies(anyps5_tcg anyps5_tcg_build)
+    set(cpuEngineSource src/CpuQemu.cpp)
+    set(cpuEngineLibrary anyps5_tcg)
+    set(cpuModernTcg 1)
+elseif(NOT ANYPS5_CPU_BACKEND STREQUAL "UNICORN")
+    message(FATAL_ERROR "ANYPS5_CPU_BACKEND must be TCG or UNICORN")
+endif()
+
+add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.cpp src/SystemMachine.cpp src/SceImports.cpp src/SceElf.cpp src/Self.cpp src/SceTls.cpp src/GuestFiles.cpp src/SceKernelImports.cpp src/SceUserImports.cpp
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/NidCompute.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
 target_include_directories(anyps5_cpu PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
-target_link_libraries(anyps5_cpu PRIVATE unicorn)
+target_link_libraries(anyps5_cpu PRIVATE ${cpuEngineLibrary} unicorn)
+target_compile_definitions(anyps5_cpu PUBLIC ANYPS5_CPU_MODERN_TCG=${cpuModernTcg})
 target_compile_options(anyps5_cpu PRIVATE -Wall -Wextra -Wpedantic)
 add_executable(anyps5_cpu_run src/Main.cpp)
 target_link_libraries(anyps5_cpu_run PRIVATE anyps5_cpu)
@@ -99,13 +144,17 @@ if(BUILD_TESTING)
     target_link_libraries(anyps5_sce_kernel_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_kernel_imports COMMAND anyps5_sce_kernel_import_tests)
     set_tests_properties(anyps5_sce_tls anyps5_guest_files anyps5_sce_kernel_imports PROPERTIES TIMEOUT 30)
+    add_test_executable(anyps5_sce_user_import_tests tests/SceUserImportsTest.cpp)
+    target_link_libraries(anyps5_sce_user_import_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_user_imports COMMAND anyps5_sce_user_import_tests)
+    set_tests_properties(anyps5_sce_user_imports PROPERTIES TIMEOUT 30)
     add_test_executable(anyps5_self_tests tests/SelfTests.cpp)
     target_link_libraries(anyps5_self_tests PRIVATE anyps5_cpu)
     add_dependencies(anyps5_self_tests anyps5_sce_fixture)
     add_test(NAME anyps5_plain_self COMMAND anyps5_self_tests "${sceFixture}")
     add_test(NAME anyps5_sce_homebrew COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceHomebrewTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${sceFixture}")
     add_test(NAME anyps5_cpu_homebrew COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/HomebrewTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${guestFixture}")
-    add_test(NAME anyps5_cpu_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/CliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${guestFixture}")
+    add_test(NAME anyps5_cpu_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/CliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${guestFixture}" "${ANYPS5_CPU_BACKEND}")
     set_tests_properties(anyps5_cpu_instructions anyps5_cpu_loader anyps5_cpu_runtime anyps5_sce_imports anyps5_sce_loader anyps5_plain_self anyps5_sce_homebrew anyps5_cpu_homebrew anyps5_cpu_cli PROPERTIES TIMEOUT 30)
 endif()
 

@@ -10,7 +10,9 @@ namespace Cpu {
 
 namespace {
 constexpr std::uint64_t pageSize = 4096;
+constexpr std::uint64_t hostPageSize = 16384;
 constexpr std::uint64_t maximumTlsSize = 16 * 1024 * 1024;
+constexpr std::size_t maximumModuleCount = pageSize / sizeof(std::uint64_t) - 2;
 constexpr std::uint64_t addressLimit = 0x800000000000;
 
 std::uint64_t roundUp(std::uint64_t value, std::uint64_t alignment) {
@@ -20,28 +22,56 @@ std::uint64_t roundUp(std::uint64_t value, std::uint64_t alignment) {
 
 SceTls::SceTls(Machine& guest, std::span<const std::byte> initialBytes,
                std::uint64_t size, std::uint64_t alignment, std::uint64_t allocationBase)
-    : machine(guest), memorySize(size) {
-    if (!size || size > maximumTlsSize || initialBytes.size() > size)
-        throw std::invalid_argument("Invalid SCE TLS template or memory size");
-    if (alignment == 0) alignment = 1;
-    if (!std::has_single_bit(alignment) || alignment > maximumTlsSize)
-        throw std::invalid_argument("Unsupported SCE TLS alignment");
-    const auto allocationAlignment = std::max(alignment, pageSize);
+    : SceTls(guest, std::array{SceTlsModuleTemplate{1, initialBytes, size, alignment}}, allocationBase) {}
+
+SceTls::SceTls(Machine& guest, std::span<const SceTlsModuleTemplate> templates,
+               std::uint64_t allocationBase) : machine(guest) {
+    if (templates.empty() || templates.size() > maximumModuleCount)
+        throw std::invalid_argument("Invalid SCE TLS module count");
+    std::uint64_t totalOffset = 0;
+    std::uint64_t maximumAlignment = 8;
+    modules.reserve(templates.size());
+    for (std::size_t index = 0; index < templates.size(); ++index) {
+        const auto& module = templates[index];
+        if (module.ModuleId != index + 1)
+            throw std::invalid_argument("SCE TLS module IDs must be ordered and contiguous from main module 1");
+        if (!module.MemorySize || module.MemorySize > maximumTlsSize || module.InitialBytes.size() > module.MemorySize)
+            throw std::invalid_argument("Invalid SCE TLS template or memory size");
+        const auto alignment = std::max<std::uint64_t>(module.Alignment, 1);
+        if (!std::has_single_bit(alignment) || alignment > maximumTlsSize)
+            throw std::invalid_argument("Unsupported SCE TLS alignment");
+        totalOffset = roundUp(totalOffset + module.MemorySize, alignment);
+        if (totalOffset > maximumTlsSize)
+            throw std::invalid_argument("SCE TLS total static size exceeds 16 MiB");
+        maximumAlignment = std::max(maximumAlignment, alignment);
+        modules.push_back({module.MemorySize, totalOffset, 0});
+    }
+    const auto mappingAlignment = templates.size() == 1 ? pageSize : hostPageSize;
+    const auto allocationAlignment = std::max(maximumAlignment, mappingAlignment);
     if (!allocationBase || allocationBase % allocationAlignment)
         throw std::invalid_argument("SCE TLS allocation address does not satisfy alignment");
-    blockSize = roundUp(size, alignment);
-    const auto tcbOffset = roundUp(blockSize, std::max<std::uint64_t>(alignment, 8));
+    const auto tcbOffset = roundUp(totalOffset, maximumAlignment);
+    if (tcbOffset > maximumTlsSize)
+        throw std::invalid_argument("SCE TLS total static size exceeds 16 MiB");
     const auto dtvOffset = roundUp(tcbOffset + 16, pageSize);
-    const auto mappedSize = roundUp(dtvOffset + 24, pageSize);
+    const auto dtvSize = (modules.size() + 2) * sizeof(std::uint64_t);
+    const auto mappedSize = roundUp(dtvOffset + dtvSize, mappingAlignment);
     if (allocationBase >= addressLimit || mappedSize > addressLimit - allocationBase)
         throw std::invalid_argument("SCE TLS allocation exceeds guest address range");
     fsBase = allocationBase + tcbOffset;
-    tlsBase = fsBase - blockSize;
     const auto dtvBase = allocationBase + dtvOffset;
     std::vector<std::byte> bytes(static_cast<std::size_t>(mappedSize));
-    std::copy(initialBytes.begin(), initialBytes.end(), bytes.begin() + static_cast<std::size_t>(tlsBase - allocationBase));
+    std::vector<std::uint64_t> dtv(modules.size() + 2);
+    dtv[0] = 1;
+    dtv[1] = modules.size();
+    for (std::size_t index = 0; index < modules.size(); ++index) {
+        auto& module = modules[index];
+        module.base = fsBase - module.threadOffset;
+        const auto initialBytes = templates[index].InitialBytes;
+        std::copy(initialBytes.begin(), initialBytes.end(), bytes.begin() + static_cast<std::size_t>(module.base - allocationBase));
+        dtv[index + 2] = module.base;
+    }
     const std::array<std::uint64_t, 2> tcb{fsBase, dtvBase};
-    const std::array<std::uint64_t, 3> dtv{1, 1, tlsBase};
     const auto tcbBytes = std::as_bytes(std::span(tcb));
     const auto dtvBytes = std::as_bytes(std::span(dtv));
     std::copy(tcbBytes.begin(), tcbBytes.end(), bytes.begin() + static_cast<std::size_t>(tcbOffset));
@@ -52,16 +82,24 @@ SceTls::SceTls(Machine& guest, std::span<const std::byte> initialBytes,
 }
 
 std::uint64_t SceTls::FsBase() const { return fsBase; }
-std::uint64_t SceTls::TlsBase() const { return tlsBase; }
+std::uint64_t SceTls::TlsBase() const { return modules.front().base; }
+std::uint64_t SceTls::TlsBase(std::uint64_t moduleId) const { return moduleLayout(moduleId).base; }
 std::uint64_t SceTls::ModuleId() const { return 1; }
-std::uint64_t SceTls::MemorySize() const { return memorySize; }
+std::uint64_t SceTls::MemorySize() const { return modules.front().memorySize; }
+std::uint64_t SceTls::MemorySize(std::uint64_t moduleId) const { return moduleLayout(moduleId).memorySize; }
+std::uint64_t SceTls::ModuleCount() const { return modules.size(); }
+
+const SceTls::ModuleLayout& SceTls::moduleLayout(std::uint64_t moduleId) const {
+    if (moduleId == 0 || moduleId > modules.size())
+        throw std::runtime_error("Unsupported SCE TLS module ID " + std::to_string(moduleId) + "; only initialized static modules are available");
+    return modules[static_cast<std::size_t>(moduleId - 1)];
+}
 
 std::uint64_t SceTls::Resolve(std::uint64_t moduleId, std::uint64_t offset) const {
-    if (moduleId != 1)
-        throw std::runtime_error("Unsupported SCE TLS module ID " + std::to_string(moduleId) + "; only the main module is initialized");
-    if (offset >= memorySize)
-        throw std::out_of_range("SCE TLS offset is outside the main module");
-    return tlsBase + offset;
+    const auto& module = moduleLayout(moduleId);
+    if (offset >= module.memorySize)
+        throw std::out_of_range(moduleId == 1 ? "SCE TLS offset is outside the main module" : "SCE TLS offset is outside module " + std::to_string(moduleId));
+    return module.base + offset;
 }
 
 std::uint64_t SceTls::ResolveIndex(std::uint64_t guestIndexAddress) const {
@@ -77,7 +115,7 @@ std::uint64_t SceTls::Dtpoff(std::uint64_t moduleId, std::uint64_t offset) const
 
 std::int64_t SceTls::Tpoff(std::uint64_t moduleId, std::uint64_t offset) const {
     Resolve(moduleId, offset);
-    return static_cast<std::int64_t>(offset) - static_cast<std::int64_t>(blockSize);
+    return static_cast<std::int64_t>(offset) - static_cast<std::int64_t>(moduleLayout(moduleId).threadOffset);
 }
 
 }

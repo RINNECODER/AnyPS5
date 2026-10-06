@@ -97,11 +97,13 @@ void tlsAndSse() {
 }
 void unsupportedVectorEncodings() {
     const std::vector<std::vector<std::uint8_t>> encodings{
+#if !ANYPS5_CPU_MODERN_TCG
         {0xc5,0xf0,0x58,0xc2},
         {0xc4,0xe1,0x70,0x58,0xc2},
-        {0x62,0xf1,0x74,0x08,0x58,0xc2},
         {0x67,0xc5,0xf0,0x58,0xc2},
         {0x64,0xc4,0xe1,0x70,0x58,0xc2},
+#endif
+        {0x62,0xf1,0x74,0x08,0x58,0xc2},
         {0x64,0x62,0xf1,0x74,0x08,0x58,0xc2},
     };
     for (const auto& encoding : encodings) {
@@ -145,6 +147,129 @@ void unsupportedVectorEncodings() {
                 "Unsupported vector instruction changed XMM destination before rejection");
     }
 }
+#if ANYPS5_CPU_MODERN_TCG
+void modernVectors() {
+    using Vector = std::array<std::uint32_t, 8>;
+    const Vector first{0x3f800000,0x40000000,0x40400000,0x40800000,0x40a00000,0x40c00000,0x40e00000,0x41000000};
+    const Vector second{0x40000000,0x40800000,0x40c00000,0x41000000,0x41200000,0x41400000,0x41600000,0x41800000};
+    const Vector destination{0x42c80000,0x42c80000,0x42c80000,0x42c80000,0x42c80000,0x42c80000,0x42c80000,0x42c80000};
+    struct Case {
+        const char* name;
+        Vector left, right, oldDestination, expected;
+        std::vector<std::uint8_t> instruction;
+    };
+    const Case cases[] = {
+        {"AVX256 three operands", first, second, destination,
+            {0x40400000,0x40c00000,0x41100000,0x41400000,0x41700000,0x41900000,0x41a80000,0x41c00000},
+            {0xc5,0xfc,0x58,0xd1}},
+        {"VEX128 clears upper lanes", first, second, destination,
+            {0x40400000,0x40c00000,0x41100000,0x41400000,0,0,0,0},
+            {0xc5,0xf8,0x58,0xd1}},
+        {"AVX2 wrapping addition",
+            {1,0xffffffff,0x7fffffff,0x80000000,0x12345678,17,0,0xfffffffe},
+            {2,1,1,0xffffffff,0x11111111,25,0xffffffff,3}, destination,
+            {3,0,0x80000000,0x7fffffff,0x23456789,42,0xffffffff,1},
+            {0xc5,0xfd,0xfe,0xd1}},
+        {"FMA fused residual and ordering",
+            {0xbf800002,0x40000000,0x40400000,0x40800000,0x40a00000,0x40c00000,0x40e00000,0x41000000},
+            {0x3f800001,0x40800000,0x40c00000,0x41000000,0x41200000,0x41400000,0x41600000,0x41800000},
+            {0x3f800001,0x40000000,0x40000000,0x40000000,0x40000000,0x40000000,0x40000000,0x40000000},
+            {0x28800000,0x41200000,0x41700000,0x41a00000,0x41c80000,0x41f00000,0x420c0000,0x42200000},
+            {0xc4,0xe2,0x7d,0x98,0xd1}},
+    };
+    for (const auto& test : cases) {
+        Machine machine;
+        setup(machine);
+        write(machine, 0x3200, test.left);
+        write(machine, 0x3220, test.right);
+        write(machine, 0x3240, test.oldDestination);
+        write(machine, 0x32c0, std::uint64_t{0x123456789abcdef0});
+        machine.Set(Register::Rdi, 0x3200);
+        machine.Set(Register::Rsi, 0x3220);
+        machine.Set(Register::Rcx, 0x3240);
+        machine.Set(Register::Rdx, 0x3260);
+        machine.Set(Register::Rax, 0x8877665544332211);
+        machine.Set(Register::Rflags, 2);
+        std::vector<std::uint8_t> program{0xc5,0xfc,0x10,0x07,0xc5,0xfc,0x10,0x0e,0xc5,0xfc,0x10,0x11};
+        program.insert(program.end(), test.instruction.begin(), test.instruction.end());
+        program.insert(program.end(), {0xc5,0xfc,0x11,0x12,0xc5,0xfc,0x11,0x42,0x20,0xc5,0xfc,0x11,0x4a,0x40});
+        machine.Write(0x1100, std::as_bytes(std::span(program)));
+        require(machine.Run(0x1100, 0x1100 + program.size(), 20) == StopReason::Address,
+                "Modern vector program did not reach its expected control-flow boundary");
+        if (read<Vector>(machine, 0x3260) != test.expected) throw std::runtime_error(std::string(test.name) + " has incorrect result bits");
+        require(read<Vector>(machine, 0x3280) == test.left && read<Vector>(machine, 0x32a0) == test.right,
+                "Three-operand vector instruction changed a source register");
+        require(read<std::uint64_t>(machine, 0x32c0) == 0x123456789abcdef0,
+                "Vector result store exceeded its expected memory range");
+        require(machine.Get(Register::Rax) == 0x8877665544332211 && machine.Get(Register::Rflags) == 2,
+                "Vector program changed scalar register or flag state");
+    }
+    const std::array<std::uint16_t,8> halves{0x3c00,0xc000,0x3800,0,0x8000,0x7bff,0x0400,0x0001};
+    const Vector singles{0x3f800000,0xc0000000,0x3f000000,0,0x80000000,0x477fe000,0x38800000,0x33800000};
+    Machine machine;
+    setup(machine);
+    write(machine, 0x3200, halves);
+    machine.Set(Register::Rdi, 0x3200);
+    machine.Set(Register::Rdx, 0x3260);
+    code(machine, 0x1100, {0xc5,0xfa,0x6f,0x07,0xc4,0xe2,0x7d,0x13,0xd0,0xc5,0xfc,0x11,0x12});
+    require(machine.Run(0x1100, 0x110d, 10) == StopReason::Address && read<Vector>(machine, 0x3260) == singles,
+            "F16C half-to-single conversion lost signed zero, finite maximum, normal or subnormal values");
+    write(machine, 0x3200, singles);
+    code(machine, 0x1140, {0xc5,0xfc,0x10,0x17,0xc4,0xe3,0x7d,0x1d,0xd3,0,0xc5,0xfa,0x7f,0x1a});
+    require(machine.Run(0x1140, 0x114e, 10) == StopReason::Address && read<std::array<std::uint16_t,8>>(machine, 0x3260) == halves,
+            "F16C single-to-half conversion disagrees with independently specified half encodings");
+}
+void modernCpuFeatures() {
+    Machine machine;
+    setup(machine);
+    code(machine, 0x1100, {0x0f,0xa2});
+    machine.Set(Register::Rax, 1);
+    machine.Set(Register::Rcx, 0);
+    require(machine.Run(0x1100, 0x1102, 10) == StopReason::Address, "Guest CPUID leaf 1 did not execute");
+    constexpr std::uint64_t required = (1ULL << 12) | (1ULL << 26) | (1ULL << 27) | (1ULL << 28) | (1ULL << 29);
+    require((machine.Get(Register::Rcx) & required) == required, "CPUID does not advertise the FMA/XSAVE/OSXSAVE/AVX/F16C instructions exercised by the guest");
+    machine.Set(Register::Rax, 7);
+    machine.Set(Register::Rcx, 0);
+    require(machine.Run(0x1100, 0x1102, 10) == StopReason::Address && (machine.Get(Register::Rbx) & 32),
+            "CPUID does not advertise the AVX2 instruction exercised by the guest");
+    machine.Set(Register::Rcx, 0);
+    code(machine, 0x1120, {0x0f,0x01,0xd0});
+    require(machine.Run(0x1120, 0x1123, 10) == StopReason::Address && machine.Get(Register::Rax) == 7 && machine.Get(Register::Rdx) == 0,
+            "XGETBV does not enable x87, SSE and YMM state for advertised AVX execution");
+}
+void invalidInstructionDiagnostics() {
+    const std::vector<std::vector<std::uint8_t>> encodings{{0x0f,0x20,0xc8}, {0xf0,0x0f,0x08}};
+    for (const auto& encoding : encodings) {
+        Machine machine;
+        setup(machine);
+        constexpr std::uint64_t initialRax = 0x8877665544332211;
+        constexpr std::uint64_t initialRbx = 0x123456789abcdef0;
+        machine.Set(Register::Rax, initialRax);
+        machine.Set(Register::Rbx, initialRbx);
+        machine.Set(Register::Rdi, 0x3000);
+        machine.Set(Register::Rflags, 2);
+        write(machine, 0x3000, std::uint32_t{0xaabbccdd});
+        auto program = encoding;
+        program.insert(program.end(), {0xc7,0x07,0x78,0x56,0x34,0x12,0x48,0xff,0xc3});
+        machine.Write(0x1100, std::as_bytes(std::span(program)));
+        bool rejected = false;
+        try { machine.Run(0x1100, 0x1100 + program.size(), 20); }
+        catch (const std::exception& error) {
+            require(std::string(error.what()) == "Unsupported guest instruction at 0x1100", error.what());
+            rejected = true;
+        }
+        require(rejected, "Invalid control-register or LOCK encoding executed without an unsupported-instruction diagnostic");
+        require(machine.Get(Register::Rip) == 0x1100 && machine.Get(Register::Rax) == initialRax &&
+                machine.Get(Register::Rbx) == initialRbx && machine.Get(Register::Rflags) == 2,
+                "Invalid instruction changed guest registers or flags before rejection");
+        require(read<std::uint32_t>(machine, 0x3000) == 0xaabbccdd,
+                "Invalid instruction retired its following memory store before rejection");
+        require(machine.Run(0x1100 + encoding.size(), 0x1100 + program.size(), 10) == StopReason::Address &&
+                read<std::uint32_t>(machine, 0x3000) == 0x12345678 && machine.Get(Register::Rbx) == initialRbx + 1,
+                "Valid continuation after rejected instruction failed to execute its store and increment");
+    }
+}
+#endif
 void unsupportedXopEncoding() {
     for (const std::uint8_t prefix : {0, 0x64, 0x67}) {
         Machine machine;
@@ -209,8 +334,49 @@ void syscallAndHostAbi() {
     require(machine.Run(0x1060, 0x1064, 10) == StopReason::Exit && machine.ExitCode() == 17, "Guest exit service did not stop execution");
 }
 void borrowedMemory() {
+#if ANYPS5_CPU_MODERN_TCG
+    alignas(16384) std::array<std::byte,16384> backing{};
+    alignas(16384) std::array<std::byte,16384> executable{};
+    std::array<std::byte,4096> unknownAllocation{};
+#endif
     Machine machine;
     machine.Map(0x1000, 4096, rx);
+#if ANYPS5_CPU_MODERN_TCG
+    machine.MapBorrowed(0x3000, backing, rw);
+    backing[3] = std::byte{9};
+    machine.Set(Register::Rdi, 0x3000);
+    code(machine, 0x1000, {0x0f,0xb6,0x47,3,0x83,0xc0,4,0x89,0x47,8});
+    require(machine.Run(0x1000, 0x100a, 10) == StopReason::Address,
+            "Borrowed-memory program did not finish");
+    require(backing[8] == std::byte{13} && backing[9] == std::byte{0} && machine.Get(Register::Rax) == 13,
+            "Guest/host borrowed-memory visibility is incorrect");
+    backing[3] = std::byte{20};
+    require(machine.Run(0x1000, 0x100a, 10) == StopReason::Address && machine.Get(Register::Rax) == 24 && backing[8] == std::byte{24},
+            "Host update was invisible on resumed guest execution");
+    machine.MapBorrowed(0x8000, std::span(backing).subspan(4096, 4096), rw);
+    machine.Protect(0x4000, 4096, Permission::Read);
+    backing[4099] = std::byte{38};
+    machine.Set(Register::Rdi, 0x8000);
+    require(machine.Run(0x1000, 0x100a, 10) == StopReason::Address && read<std::uint32_t>(machine, 0x4008) == 42 && backing[4104] == std::byte{42},
+            "A 4 KiB backing alias lost shared bytes or inherited its peer's read-only permission");
+    machine.Set(Register::Rdi, 0x4000);
+    failure([&] { machine.Run(0x1000, 0x100a, 10); }, "protected write at 0x4008");
+    require(read<std::uint32_t>(machine, 0x8008) == 42,
+            "Rejected write through a read-only alias changed shared storage");
+    executable[0] = std::byte{0xb8};
+    executable[1] = std::byte{7};
+    machine.MapBorrowed(0x9000, executable, rx);
+    machine.MapBorrowed(0x10000, std::span(executable).first(4096), rx);
+    for (const std::uint64_t entry : {0x9000, 0x10000})
+        require(machine.Run(entry, entry + 5, 10) == StopReason::Address && machine.Get(Register::Rax) == 7,
+                "Borrowed executable alias did not execute its actual source bytes");
+    executable[1] = std::byte{19};
+    for (const std::uint64_t entry : {0x9000, 0x10000})
+        require(machine.Run(entry, entry + 5, 10) == StopReason::Address && machine.Get(Register::Rax) == 19,
+                "Borrowed executable alias retained stale translated instructions after a host update");
+    failure([&] { machine.MapBorrowed(0x20000, unknownAllocation, rw); }, "requires a complete aligned host-page backing");
+    failure([&] { machine.CheckAccess(0x20000, 1, Permission::Read); }, "Guest access denied at 0x20000");
+#else
     std::array<std::byte,4096> backing{};
     machine.MapBorrowed(0x3000, backing, rw);
     backing[3] = std::byte{9};
@@ -227,6 +393,7 @@ void borrowedMemory() {
     require(machine.Run(0x5000, 0x5005, 10) == StopReason::Address && machine.Get(Register::Rax) == 7, "Borrowed executable code did not run");
     executable[1] = std::byte{19};
     require(machine.Run(0x5000, 0x5005, 10) == StopReason::Address && machine.Get(Register::Rax) == 19, "Borrowed executable update reused stale translated instructions");
+#endif
 }
 void errorsAndBudget() {
     Machine machine;
@@ -295,7 +462,14 @@ int main(int argc, const char** argv) {
     try {
         const std::pair<const char*,void(*)()> tests[] = {
             {"widths/flags", widthsAndFlags}, {"calls/branches/memory", callsBranchesAndMemory},
-            {"TLS/SSE", tlsAndSse}, {"unsupported VEX/EVEX", unsupportedVectorEncodings},
+            {"TLS/SSE", tlsAndSse},
+#if ANYPS5_CPU_MODERN_TCG
+            {"unsupported EVEX", unsupportedVectorEncodings},
+            {"AVX/AVX2/F16C/FMA", modernVectors}, {"CPUID/XGETBV", modernCpuFeatures},
+            {"invalid instruction diagnostics", invalidInstructionDiagnostics},
+#else
+            {"unsupported VEX/EVEX", unsupportedVectorEncodings},
+#endif
             {"unsupported XOP", unsupportedXopEncoding}, {"syscall/import ABI", syscallAndHostAbi},
             {"borrowed memory", borrowedMemory}, {"errors/budget", errorsAndBudget}
         };

@@ -14,6 +14,10 @@ extern i64 sce_read(int, void*, u64) __asm__("Cg4srZ6TKbU");
 extern i64 sce_pread(int, void*, u64, i64) __asm__("+r3rMFwItV4");
 extern i64 sce_lseek(int, i64, int) __asm__("oib76F-12fk");
 extern int sce_close(int) __asm__("UK2Tl2DWUns");
+extern int sce_user_initialize(const void*) __asm__("j3YMu1MVNNo");
+extern int sce_user_initial(int*) __asm__("CdWp0oHWGr0");
+extern int sce_user_login_list(int*) __asm__("fPhymKNvK-A");
+extern int sce_user_name(int, char*, u64) __asm__("1xxcMiGu2fo");
 
 static u8 composite[4096];
 static u8 pixels[4096];
@@ -61,6 +65,22 @@ int SceGuestMain(u64 argc, char** argv, u64 exitCallback, u64 entryAlignment, u6
         return 103;
     }
     else return 83;
+    struct { u32 Before; int Id; u32 After; } user;
+    struct { u32 Before; int Ids[4]; u32 After; } users;
+    struct { u8 Before; char Bytes[17]; u8 After; } name;
+    sce_memset(&user, 0xa5, sizeof user);
+    sce_memset(&users, 0xa5, sizeof users);
+    sce_memset(&name, 0xa5, sizeof name);
+    if (sce_user_initialize((void*)0) != 0) return 104;
+    if (sce_user_initial(&user.Id) != 0 || user.Id != 0x10000000) return 105;
+    if (sce_user_login_list(users.Ids) != 0 || users.Ids[0] != user.Id ||
+        users.Ids[1] != -1 || users.Ids[2] != -1 || users.Ids[3] != -1) return 106;
+    if (sce_user_name(user.Id, name.Bytes, sizeof name.Bytes) != 0 || name.Bytes[6] != 0 ||
+        sce_strcmp(name.Bytes, "Player") != 0) return 107;
+    for (u64 i = 7; i < sizeof name.Bytes; ++i) if (name.Bytes[i]) return 107;
+    if (user.Before != 0xa5a5a5a5u || user.After != 0xa5a5a5a5u ||
+        users.Before != 0xa5a5a5a5u || users.After != 0xa5a5a5a5u ||
+        name.Before != 0xa5 || name.After != 0xa5) return 108;
     for (u64 i = 0; i < sizeof composite; ++i)
         if (composite[i] || pixels[i] || copied[i]) return 84;
     if (sce_memset(composite, 0x177, sizeof composite) != composite) return 85;

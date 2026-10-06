@@ -48,7 +48,8 @@ def package(linked_path, output_path):
     strings = bytearray(b"\0")
     libc = {"Q3VBxCXhUHs", "+P6FRGH4LfA", "8zTFvBIAIN8", "j4ViWNHEgww", "Ovb2dSJOAuE", "uMei1W9uyNo"}
     libkernel = {"1G3lF1Gg1k8", "Cg4srZ6TKbU", "+r3rMFwItV4", "oib76F-12fk", "UK2Tl2DWUns"}
-    required = libc | libkernel
+    user_service = {"j3YMu1MVNNo", "CdWp0oHWGr0", "fPhymKNvK-A", "1xxcMiGu2fo"}
+    required = libc | libkernel | user_service
     found = set()
     for offset in range(0, len(symbols), 24):
         name_offset, info, other, section, value, size = struct.unpack_from("<IBBHQQ", symbols, offset)
@@ -57,7 +58,7 @@ def package(linked_path, output_path):
             if name not in required or (info & 15) not in (0, 2):
                 raise ValueError(f"Unexpected compiled guest import: {name}")
             found.add(name)
-            name += "#B#B" if name in libc else "#C#C"
+            name += "#B#B" if name in libc else "#C#C" if name in libkernel else "#D#D"
             symbols[offset + 4] = (info & 0xf0) | 2
         if offset == 0:
             if name or any(symbols[:24]):
@@ -71,6 +72,8 @@ def package(linked_path, output_path):
     strings += b"libc\0"
     kernel_offset = len(strings)
     strings += b"libkernel\0"
+    user_offset = len(strings)
+    strings += b"libSceUserService\0"
     data = bytearray()
 
     def append(table):
@@ -95,8 +98,11 @@ def package(linked_path, output_path):
     module = (1 << 48) | (1 << 40) | (1 << 32) | libc_offset
     kernel_library = (2 << 48) | (1 << 32) | kernel_offset
     kernel_module = (2 << 48) | (1 << 40) | (1 << 32) | kernel_offset
+    user_library = (3 << 48) | (1 << 32) | user_offset
+    user_module = (3 << 48) | (1 << 40) | (1 << 32) | user_offset
     sce_tags = [(0x61000049, library), (0x61000045, module),
                 (0x61000049, kernel_library), (0x61000045, kernel_module),
+                (0x61000049, user_library), (0x61000045, user_module),
                 (0x61000035, str_offset), (0x61000037, len(strings)),
                 (0x61000039, sym_offset), (0x6100003b, 24), (0x6100003f, len(symbols)),
                 (0x6100002f, rela_offset), (0x61000031, len(rela)), (0x61000033, 24),

@@ -250,6 +250,7 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
     }
     std::map<std::uint64_t, std::uint64_t> tags;
     std::vector<std::uint64_t> libraries, modules, neededFiles, libraryAttributes;
+    std::vector<std::uint64_t> exportLibraries, exportModules, exportLibraryAttributes, filenames;
     bool terminated = false;
     for (std::uint64_t offset = dynamic->Offset; offset < dynamic->Offset + dynamic->FileSize; offset += 16) {
         const auto tag = read(bytes, offset, 8);
@@ -259,7 +260,11 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
         if (tag == 0x61000015 || tag == 0x61000049) { libraries.push_back(value); continue; }
         if (tag == 0x6100000f || tag == 0x61000045) { modules.push_back(value); continue; }
         if (tag == 0x61000019) { libraryAttributes.push_back(value); continue; }
-        if (tag == 0x61000007 || tag == 0x6100000d || tag == 0x61000013 || tag == 0x61000043 || tag == 0x61000047) continue;
+        if (tag == 0x6100000d || tag == 0x61000043) { exportModules.push_back(value); continue; }
+        if (tag == 0x61000013 || tag == 0x61000047) { exportLibraries.push_back(value); continue; }
+        if (tag == 0x61000017) { exportLibraryAttributes.push_back(value); continue; }
+        if (tag == 0x61000009 || tag == 0x61000041) { filenames.push_back(value); continue; }
+        if (tag == 0x61000007) continue;
         if (!tags.emplace(tag, value).second) fail("duplicate dynamic tag " + std::to_string(tag));
     }
     if (!terminated) fail("unterminated dynamic segment");
@@ -289,20 +294,33 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
         return std::string{};
     };
     struct Identity { std::string Name; std::uint16_t Version; };
-    std::map<std::uint16_t, Identity> libraryIds, moduleIds;
-    const auto identities = [&](const auto& entries, auto& output) {
+    std::map<std::uint16_t, Identity> libraryIds, moduleIds, exportLibraryIds, exportModuleIds;
+    const auto identities = [&](const auto& entries, auto& output, const std::string& direction) {
         for (const auto value : entries) {
             const auto id = static_cast<std::uint16_t>(value >> 48);
             const auto name = string(value & 0xffffffff);
-            if (name.empty() || name.find_first_of("/\\:#\r\n") != std::string::npos) fail("invalid imported library or module name");
+            if (name.empty() || name.find_first_of("/\\:#\r\n") != std::string::npos) fail("invalid " + direction + " library or module name");
             Identity identity{name, static_cast<std::uint16_t>(value >> 32)};
             const auto [found, inserted] = output.emplace(id, identity);
             if (!inserted && (found->second.Name != name || found->second.Version != identity.Version))
-                fail("conflicting imported identity for id " + std::to_string(id));
+                fail("conflicting " + direction + " identity for id " + std::to_string(id));
         }
     };
-    identities(libraries, libraryIds);
-    identities(modules, moduleIds);
+    identities(libraries, libraryIds, "imported");
+    identities(modules, moduleIds, "imported");
+    identities(exportLibraries, exportLibraryIds, "exported");
+    identities(exportModules, exportModuleIds, "exported");
+    for (const auto value : exportModules) {
+        const auto id = static_cast<std::uint16_t>(value >> 48);
+        const auto& identity = exportModuleIds.at(id);
+        image.ExportModules.push_back({identity.Name, id, static_cast<std::uint8_t>(identity.Version >> 8),
+            static_cast<std::uint8_t>(identity.Version)});
+    }
+    for (const auto value : exportLibraries) {
+        const auto id = static_cast<std::uint16_t>(value >> 48);
+        const auto& identity = exportLibraryIds.at(id);
+        image.ExportLibraries.push_back({identity.Name, id, identity.Version});
+    }
     std::map<std::uint16_t, std::uint64_t> attributesById;
     for (const auto value : libraryAttributes) {
         const auto id = static_cast<std::uint16_t>(value >> 48);
@@ -313,6 +331,22 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
         image.ImportLibraryAttributes.push_back({id, attributes});
         if (inserted && attributes) image.UnsupportedReasons.push_back("imported library attributes are unsupported for execution: id=" +
             std::to_string(id) + " value=" + std::to_string(attributes));
+    }
+    std::map<std::uint16_t, std::uint64_t> exportAttributesById;
+    for (const auto value : exportLibraryAttributes) {
+        const auto id = static_cast<std::uint16_t>(value >> 48);
+        const auto attributes = value & 0xffffffffffffull;
+        if (!exportLibraryIds.contains(id)) fail("attribute has no matching exported library id " + std::to_string(id));
+        const auto [found, inserted] = exportAttributesById.emplace(id, attributes);
+        if (!inserted && found->second != attributes) fail("conflicting exported library attributes for id " + std::to_string(id));
+        image.ExportLibraryAttributes.push_back({id, attributes});
+        if (inserted && attributes) image.UnsupportedReasons.push_back("exported library attributes are unsupported for execution: id=" +
+            std::to_string(id) + " value=" + std::to_string(attributes));
+    }
+    for (const auto value : filenames) {
+        const auto filename = string(value);
+        if (image.OriginalFilename && *image.OriginalFilename != filename) fail("conflicting original filename metadata");
+        image.OriginalFilename = filename;
     }
     for (const auto& [id, identity] : moduleIds) {
         image.NeededModules.push_back(identity.Name);
@@ -332,8 +366,7 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
             if (value) image.UnsupportedReasons.push_back("guest initializer or finalizer execution is unsupported");
             continue;
         }
-        if (tag == 0x61000009) { string(value); continue; }
-        if ((tag == 0x61000011 || tag == 0x61000017) && value == 0) continue;
+        if (tag == 0x61000011 && value == 0) continue;
         image.UnsupportedReasons.push_back("unsupported dynamic tag " + std::to_string(tag));
     }
     if (get(11, 0x6100003b) != 24) fail("unsupported dynamic symbol entry size");
@@ -376,6 +409,24 @@ SceParsedImage ParseSce(const std::filesystem::path& path) {
         } else if (symbol.Section && symbol.Section != 0xfff1 && symbol.Type != 6) {
             if (symbol.Section >= 0xff00) fail("unsupported dynamic symbol section");
             mapped(symbol.Value, std::max<std::uint64_t>(symbol.Size, 1), symbol.Type == 2 ? 1 : 0);
+        }
+        if (symbol.Section && (info >> 4) != 0 && name.find('#') != std::string::npos) {
+            const auto first = name.find('#');
+            const auto second = name.find('#', first + 1);
+            if (first != 11 || second == std::string::npos || name.find('#', second + 1) != std::string::npos)
+                fail("export requires full NID#library#module scope: " + name);
+            if (name.substr(0, first).find_first_not_of(Alphabet) != std::string::npos) fail("invalid export NID");
+            const auto libraryId = identifier(std::string_view(name).substr(first + 1, second - first - 1));
+            const auto moduleId = identifier(std::string_view(name).substr(second + 1));
+            if (!exportLibraryIds.contains(libraryId) || !exportModuleIds.contains(moduleId))
+                fail("export qualifier has no matching library or module metadata: " + name);
+            const auto& library = exportLibraryIds.at(libraryId);
+            const auto& module = exportModuleIds.at(moduleId);
+            image.Exports.push_back({{name.substr(0, first), library.Name, libraryId, module.Name, moduleId,
+                library.Version, static_cast<std::uint8_t>(module.Version >> 8), static_cast<std::uint8_t>(module.Version)},
+                offset / 24, symbol.Value, symbol.Size, symbol.Section, symbol.Type, static_cast<std::uint8_t>(info >> 4),
+                static_cast<std::uint8_t>(visibility)});
+            if (symbol.Type == 0) image.UnsupportedReasons.push_back("untyped guest exports are unsupported for execution: " + name);
         }
         data->Symbols.push_back(symbol);
     }

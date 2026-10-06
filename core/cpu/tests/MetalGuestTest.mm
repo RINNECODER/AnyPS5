@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 @interface CpuGuestMetalLayer : CAMetalLayer
 @property(nonatomic, strong) id<CAMetalDrawable> capturedDrawable;
@@ -49,11 +50,15 @@ struct Page {
     std::uint64_t address;
     std::size_t size;
     std::unique_ptr<std::byte, decltype(&std::free)> memory{nullptr, &std::free};
-    Page(std::uint64_t guestAddress, std::size_t bytes = 4096) : address(guestAddress), size(bytes) {
+    Page(std::uint64_t guestAddress, std::size_t bytes = 4096) : address(guestAddress) {
+        const auto pageSize = sysconf(_SC_PAGESIZE);
+        Require(pageSize > 0, "Cannot determine shared guest host page size");
+        const auto alignment = static_cast<std::size_t>(pageSize);
+        size = ((bytes + alignment - 1) / alignment) * alignment;
         void* pointer = nullptr;
-        Require(posix_memalign(&pointer, 4096, bytes) == 0, "Shared guest page allocation failed");
+        Require(posix_memalign(&pointer, alignment, size) == 0, "Shared guest page allocation failed");
         memory.reset(static_cast<std::byte*>(pointer));
-        std::memset(memory.get(), 0, bytes);
+        std::memset(memory.get(), 0, size);
     }
     std::span<std::byte> Bytes() { return {memory.get(), size}; }
 };

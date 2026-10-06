@@ -127,6 +127,125 @@ void indexGateway() {
     rejects([&] { tls.ResolveIndex(0x3000); }, "access denied");
 }
 
+
+void multiModuleState(const char* fixturePath) {
+    Machine machine;
+    constexpr std::uint64_t mainValue = 0x1122334455667788;
+    constexpr std::uint64_t dependencyValue = 0x8877665544332211;
+    constexpr std::array<std::byte, 3> lastBytes{std::byte{0x4f}, std::byte{0xa2}, std::byte{0x71}};
+    const std::array<Cpu::SceTlsModuleTemplate, 3> templates{{
+        {1, std::as_bytes(std::span(&mainValue, 1)), 40, 16},
+        {2, std::as_bytes(std::span(&dependencyValue, 1)), 50, 64},
+        {3, lastBytes, 17, 8192}}};
+    Cpu::SceTls first(machine, templates);
+    require(first.ModuleCount() == 3, "Static TLS graph lost a provider");
+    constexpr std::array<std::int64_t, 3> expectedOffsets{-48, -128, -8192};
+    constexpr std::array<std::uint64_t, 3> expectedSizes{40, 50, 17};
+    constexpr std::array<std::uint64_t, 3> expectedAlignments{16, 64, 8192};
+    const auto firstDtv = word(machine, first.FsBase() + 8);
+    require(word(machine, firstDtv) == 1 && word(machine, firstDtv + 8) == 3, "Static graph DTV generation or provider count is incorrect");
+    for (std::uint64_t id = 1; id <= 3; ++id) {
+        const auto position = static_cast<std::size_t>(id - 1);
+        require(first.Tpoff(id, 0) == expectedOffsets[position], "Dependent TLS blocks displaced the main block or overlap another provider");
+        require(first.MemorySize(id) == expectedSizes[position], "TLS provider has incorrect memory bounds");
+        require(first.TlsBase(id) % expectedAlignments[position] == 0, "TLS provider alignment is incorrect");
+        require(word(machine, firstDtv + (id + 1) * 8) == first.TlsBase(id), "DTV points at another provider's TLS storage");
+        require(first.Resolve(id, expectedSizes[position] - 1) == first.TlsBase(id) + expectedSizes[position] - 1, "TLS provider last byte cannot be resolved");
+        require(first.Dtpoff(id, 2) == 2, "Dependent DTPOFF includes a load bias or other provider offset");
+        rejects([&] { first.Resolve(id, expectedSizes[position]); }, "outside");
+        std::vector<std::byte> contents(static_cast<std::size_t>(expectedSizes[position]));
+        machine.Read(first.TlsBase(id), contents);
+        const auto initialBytes = templates[position].InitialBytes;
+        require(std::equal(initialBytes.begin(), initialBytes.end(), contents.begin()), "A static provider's initialization template is corrupt");
+        require(std::all_of(contents.begin() + initialBytes.size(), contents.end(), [](auto value) { return value == std::byte{0}; }), "A static provider's BSS is not zero initialized");
+    }
+    Cpu::SceTls second(machine, templates, 0x7ffb00000000);
+    require(first.FsBase() != second.FsBase() && first.TlsBase(2) != second.TlsBase(2), "Separate thread TLS instances share storage");
+    require(machine.Get(Register::FsBase) == second.FsBase(), "New thread TLS instance did not install its FS base");
+    const std::uint64_t changed = 0x1029384756abcdef;
+    machine.Write(first.TlsBase(2), std::as_bytes(std::span(&changed, 1)));
+    require(word(machine, second.TlsBase(2)) == dependencyValue, "One thread's TLS mutation leaked into another thread");
+    require(word(machine, second.TlsBase()) == mainValue, "Initializing another thread corrupted main TLS");
+
+    machine.Map(0x1000, 4096, rx);
+    machine.Map(0x2000, 4096, rx);
+    machine.Map(0x3000, 4096, rw);
+    machine.Map(0x4000, 4096, rw);
+    constexpr std::array<std::uint8_t, 17> gatewayCode{
+        0xe8, 0xfb, 0x0f, 0, 0,
+        0x48, 0x8b, 0x00,
+        0x48, 0x89, 0x05, 0x01, 0x20, 0, 0,
+        0x90, 0x90};
+    machine.Write(0x1000, std::as_bytes(std::span(gatewayCode)));
+    constexpr std::array<std::uint8_t, 1> ret{0xc3};
+    machine.Write(0x2000, std::as_bytes(std::span(ret)));
+    machine.AddHostCall(0x2000, [&](Machine& guest) { guest.Set(Register::Rax, first.ResolveIndex(guest.Get(Register::Rdi))); });
+    const std::array<std::uint64_t, 2> index{2, 0};
+    machine.Write(0x3000, std::as_bytes(std::span(index)));
+    machine.Set(Register::Rdi, 0x3000);
+    machine.Set(Register::Rsp, 0x4ff0);
+    machine.Set(Register::FsBase, first.FsBase());
+    require(machine.Run(0x1000, 0x1011, 100) == Cpu::StopReason::Address, "Dependent TLS gateway did not resume the actual x86 caller");
+    require(word(machine, 0x3010) == changed, "x86 module-2 TLS index resolved to main or second-thread storage");
+    require(machine.Get(Register::Rsp) == 0x4ff0, "Dependent TLS gateway corrupted CALL/RET stack");
+
+    std::ifstream input(fixturePath, std::ios::binary);
+    if (!input) throw std::runtime_error("Cannot read compiler-built x86 TLS fixture");
+    const std::vector<char> code{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    require(!code.empty() && code.size() < 4096, "Compiler-built TLS text must fit one guest page");
+    machine.Write(0x1000, std::as_bytes(std::span(code)));
+    const std::uint64_t returnAddress = 0x1800;
+    machine.Write(0x4ff8, std::as_bytes(std::span(&returnAddress, 1)));
+    machine.Set(Register::Rsp, 0x4ff8);
+    require(machine.Run(0x1000, returnAddress, 100) == Cpu::StopReason::Address, "Compiler local-exec TLS failed with dependent providers present");
+    require(machine.Get(Register::Rax) == mainValue + 0x3a, "Dependent providers changed compiler main local-exec TPOFF semantics");
+    require(word(machine, first.TlsBase()) == mainValue + 9 && word(machine, first.TlsBase() + 16) == (mainValue ^ 0xa5a5a5a5a5a5a5a5), "Compiler main TLS wrote into a dependent provider");
+    require(word(machine, first.TlsBase() + 24) == 0 && word(machine, first.TlsBase() + 32) == 0x31, "Compiler main TLS BSS offsets changed after graph allocation");
+    require(word(machine, first.TlsBase(2)) == changed && word(machine, second.TlsBase()) == mainValue, "Compiler main TLS corrupted another provider or thread");
+    machine.Set(Register::FsBase, second.FsBase());
+    machine.Write(0x4ff8, std::as_bytes(std::span(&returnAddress, 1)));
+    machine.Set(Register::Rsp, 0x4ff8);
+    require(machine.Run(0x1000, returnAddress, 100) == Cpu::StopReason::Address, "Second thread compiler TLS program failed");
+    require(machine.Get(Register::Rax) == mainValue + 0x3a, "FS thread switch reused first thread's initialized or BSS values");
+    require(word(machine, first.TlsBase()) == mainValue + 9, "Second thread execution changed first thread TLS");
+    rejects([&] { first.TlsBase(4); }, "module ID");
+    rejects([&] { first.MemorySize(0); }, "module ID");
+}
+
+void malformedModuleGraphs() {
+    const std::array<Cpu::SceTlsModuleTemplate, 2> good{{{1, {}, 1, 1}, {2, {}, 3, 16}}};
+    for (const auto ids : {std::array<std::uint64_t, 2>{2, 1}, std::array<std::uint64_t, 2>{1, 1}, std::array<std::uint64_t, 2>{1, 3}}) {
+        Machine machine;
+        auto modules = good;
+        modules[0].ModuleId = ids[0];
+        modules[1].ModuleId = ids[1];
+        rejects([&] { Cpu::SceTls tls(machine, modules); }, "module IDs");
+        require(machine.Get(Register::FsBase) == 0, "Malformed TLS graph modified FS before validation");
+    }
+    Machine machine;
+    rejects([&] { Cpu::SceTls tls(machine, std::span<const Cpu::SceTlsModuleTemplate>{}); }, "module count");
+    auto invalid = good;
+    invalid[1].MemorySize = 0;
+    rejects([&] { Cpu::SceTls tls(machine, invalid); }, "memory size");
+    invalid = good;
+    invalid[0].MemorySize = 16 * 1024 * 1024;
+    rejects([&] { Cpu::SceTls tls(machine, invalid); }, "total static size");
+    rejects([&] { Cpu::SceTls tls(machine, good, 0x7ffc00001000); }, "alignment");
+    std::vector<Cpu::SceTlsModuleTemplate> tooMany(511);
+    rejects([&] { Cpu::SceTls tls(machine, tooMany); }, "module count");
+    require(machine.Get(Register::FsBase) == 0, "Rejected TLS graph modified FS");
+    std::vector<Cpu::SceTlsModuleTemplate> largestGraph;
+    for (std::uint64_t id = 1; id <= 510; ++id) largestGraph.push_back({id, {}, 1, 1});
+    Cpu::SceTls largest(machine, largestGraph);
+    require(largest.ModuleCount() == 510 && largest.Tpoff(510, 0) == -510, "Last bounded TLS provider is not usable");
+    const auto dtv = word(machine, largest.FsBase() + 8);
+    require(word(machine, dtv + 511 * 8) == largest.Resolve(510, 0), "Last bounded DTV slot does not address its provider");
+    std::byte lastByte{0xff};
+    machine.Read(largest.Resolve(510, 0), std::span(&lastByte, 1));
+    require(lastByte == std::byte{0}, "Last bounded TLS provider BSS is not initialized");
+    rejects([&] { largest.Resolve(511, 0); }, "module ID");
+}
+
 void compiledFsProbe(const char* fixturePath) {
     std::ifstream input(fixturePath, std::ios::binary);
     if (!input) throw std::runtime_error("Cannot read compiler-built x86 TLS fixture");
@@ -157,7 +276,9 @@ int main(int argc, char** argv) {
         layoutAndBounds();
         indexGateway();
         compiledFsProbe(argv[1]);
-        std::cout << "SCE main-module TLS: Variant II layout, compiler FS execution, index gateway and strict rejection passed\n";
+        multiModuleState(argv[1]);
+        malformedModuleGraphs();
+        std::cout << "SCE static TLS: Variant II layout, compiler FS execution, module-index gateways, thread isolation and strict rejection passed\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

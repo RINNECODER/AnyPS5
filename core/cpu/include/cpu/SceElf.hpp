@@ -39,6 +39,30 @@ struct SceLibraryAttribute {
     std::uint64_t Attributes = 0;
 };
 
+struct SceModuleIdentity {
+    std::string Name;
+    std::uint16_t Id = 0;
+    std::uint8_t Major = 0;
+    std::uint8_t Minor = 0;
+};
+
+struct SceLibraryIdentity {
+    std::string Name;
+    std::uint16_t Id = 0;
+    std::uint16_t Version = 0;
+};
+
+struct SceExport {
+    SceImport Identity;
+    std::uint64_t SymbolIndex = 0;
+    std::uint64_t Value = 0;
+    std::uint64_t Size = 0;
+    std::uint16_t Section = 0;
+    std::uint8_t Type = 0;
+    std::uint8_t Binding = 0;
+    std::uint8_t Visibility = 0;
+};
+
 struct SceParsedImage {
     std::filesystem::path Path;
     std::string SourceContainer = "elf";
@@ -52,6 +76,11 @@ struct SceParsedImage {
     std::vector<std::string> NeededModules;
     std::vector<std::string> NeededFiles;
     std::vector<SceLibraryAttribute> ImportLibraryAttributes;
+    std::vector<SceModuleIdentity> ExportModules;
+    std::vector<SceLibraryIdentity> ExportLibraries;
+    std::vector<SceLibraryAttribute> ExportLibraryAttributes;
+    std::vector<SceExport> Exports;
+    std::optional<std::string> OriginalFilename;
     std::vector<std::uint32_t> RelocationTypes;
     std::uint64_t RelocationCount = 0;
     std::vector<std::string> UnsupportedReasons;
