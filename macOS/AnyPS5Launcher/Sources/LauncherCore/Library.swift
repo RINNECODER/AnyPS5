@@ -1,6 +1,6 @@
 import Foundation
 
-public struct LocalGame: Codable, Identifiable, Sendable {
+public struct LocalGame: Codable, Identifiable, Sendable, Equatable {
     public let id: String
     public var title: String
     public var executablePath: String

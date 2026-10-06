@@ -145,6 +145,41 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertThrowsError(try EngineCapabilities.decode(Data(payload.replacingOccurrences(of: "schema_version\":1", with: "schema_version\":2").utf8)))
     }
 
+    // Contract: inspection never launches a guest, retains restrictions, and refuses rejected/unknown reports.
+    // Regression: using the run flag or swallowing engine exit126 presents a false ready state.
+    // Existing subprocess coverage launches guests and cannot protect the non-executing inspection protocol.
+    func testInspectionProtocolAndRejection() async throws {
+        let folder = try directory()
+        let game = try guest(in: folder)
+        let engine = folder.appendingPathComponent("inspector")
+        let capabilities = try EngineCapabilities.decode(Data("""
+        {"schema_version":1,"host_architecture":"arm64","guest_architecture":"x86_64","backend":"unicorn","supported_formats":["sce_elf64_x86_64"],"runtime_abi":"sce_sysv","ps5_game_runtime_ready":false}
+        """.utf8))
+        let report = """
+        {"schema_version":1,"event":"inspection","format":"sce_elf64_x86_64","segment_count":2,"relocation_count":1,"has_tls":true,"has_process_parameters":false,"imports":[{"nid":"required-NID","library":"libkernel","module":"libkernel"}],"needed_modules":["libkernel"],"needed_files":[],"unsupported_reasons":["guest TLS unsupported"]}
+        """
+        // No shell is used by production; the test child checks its literal argv independently.
+        let literalPath = "'" + game.executablePath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let script = "#!/bin/sh\n[ \"$1\" = '--inspect-sce-json' ] || exit 91\n[ \"$2\" = \(literalPath) ] || exit 92\ncat <<'JSON'\n\(report)\nJSON\n"
+        try Data(script.utf8).write(to: engine)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: engine.path)
+        let result = try await EngineInspection.inspect(engine: engine, game: game, capabilities: capabilities)
+        XCTAssertEqual(result.neededModules, ["libkernel"])
+        XCTAssertTrue(result.hasTLS)
+        XCTAssertTrue(result.summary.contains("guest TLS unsupported"))
+        XCTAssertTrue(result.summary.contains("required-NID"))
+        for rejection in ["printf 'missing segment\\n' >&2\nexit 126\n",
+                          "cat <<'JSON'\n\(report.replacingOccurrences(of: "schema_version\":1", with: "schema_version\":2"))\nJSON\n"] {
+            try Data(("#!/bin/sh\n" + rejection).utf8).write(to: engine)
+            do {
+                _ = try await EngineInspection.inspect(engine: engine, game: game, capabilities: capabilities)
+                XCTFail("A rejected or unknown report must not produce an inspection result.")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains(rejection.contains("exit 126") ? "missing segment" : "unsupported inspection protocol"))
+            }
+        }
+    }
+
     // Contract: the launcher invokes the actual ARM64 AnyPS5 engine and preserves independently expected guest results.
     // Regression: capability flags or process plumbing break the real CLI while a shell fixture still succeeds.
     func testActualAnyPS5Checkpoint() async throws {
@@ -165,6 +200,15 @@ final class LauncherCoreTests: XCTestCase {
         XCTAssertEqual(exit, 0)
         // Prime count and sum for <=1000; CRC of the fixture's independently specified 4096-byte pattern.
         XCTAssertTrue(String(decoding: output, as: UTF8.self).contains("homebrew primes=168 sum=76127 buffer_crc32=2511520486 tls=ok bss=ok\n"), String(decoding: output, as: UTF8.self))
+        if let sceGuest = environment["ANYPS5_SCE_GUEST_FIXTURE"], let capabilities {
+            let sceGame = LocalGame(id: "sce-homebrew", title: "SCE Homebrew", executablePath: sceGuest,
+                                    workingDirectory: URL(fileURLWithPath: sceGuest).deletingLastPathComponent().path)
+            let inspection = try await EngineInspection.inspect(engine: engine, game: sceGame, capabilities: capabilities)
+            XCTAssertEqual(inspection.neededModules, ["libc"])
+            XCTAssertEqual(Set(inspection.imports.map(\.nid)), ["uMei1W9uyNo", "j4ViWNHEgww", "Ovb2dSJOAuE", "8zTFvBIAIN8", "Q3VBxCXhUHs", "+P6FRGH4LfA"])
+            XCTAssertFalse(inspection.hasTLS)
+            XCTAssertTrue(inspection.unsupportedReasons.isEmpty)
+        }
     }
 }
 
