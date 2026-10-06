@@ -331,15 +331,26 @@ void StickyTerminalSlices(bool exit) {
     unsigned calls = 0;
     machine.AddHostCall(CallGate, [&](Machine& running) {
         ++calls;
-        paused = running.PauseHostCall();
-        if (exit) running.Exit(73); else running.RequestStop();
+        if (calls == 1) {
+            paused = running.PauseHostCall();
+            if (exit) running.Exit(73); else running.RequestStop();
+        } else {
+            Require(calls == 2 && running.Get(Register::Rip) == CallGate &&
+                running.Get(Register::Rsp) == ReturnSlot && Read(running, ReturnSlot) == CallReturn,
+                "Fresh session did not reach the same actual CALL gate and stack layout");
+            running.Set(Register::Rax, 33);
+        }
     });
     const auto reason = exit ? Cpu::StopReason::Exit : Cpu::StopReason::Requested;
-    Require(machine.RunSlice(CallEntry, CallEnd, 100) == reason && calls == 1 &&
+    auto abandoned = machine.CaptureContext();
+    Require(machine.Run(CallEntry, CallEnd, 100) == reason && calls == 1 &&
         machine.Get(Register::Rip) == CallGate && machine.Get(Register::Rsp) == ReturnSlot &&
         machine.LastRunInstructions() == 3, "Terminal paused host call returned or consumed its frame");
     if (exit) Require(machine.ExitCode() == 73, "Terminal slice lost the actual guest exit code");
-    auto abandoned = machine.CaptureContext();
+    // Both capture and overwriting a saved context must retain the originating
+    // session identity when restoring an abandoned continuation later.
+    if (exit) machine.SaveContext(abandoned);
+    else abandoned = machine.CaptureContext();
     const auto stopped = Current(machine);
     Require(machine.RunSlice(CallEntry, CallEnd, 100) == reason && machine.LastRunInstructions() == 0 &&
         Current(machine) == stopped && calls == 1 && Read(machine, DataA) == 0,
@@ -379,10 +390,19 @@ void StickyTerminalSlices(bool exit) {
         machine.Get(Register::Rflags) == 0x46 && machine.LastRunInstructions() == 6 &&
         Read(machine, DataB) == 42 && Read(machine, DataA) == 0 && calls == 1,
         "Abandoned host call prevented a fresh session or corrupted independent x86 arithmetic, flags or control flow");
+    Initialize(machine, 0, 83, DataA, CallerStack);
+    machine.Set(Register::Rip, CallEntry);
+    Require(machine.Run(CallEntry, CallEnd, 100) == Cpu::StopReason::Address &&
+        machine.Get(Register::Rip) == CallEnd && machine.Get(Register::Rsp) == CallerStack &&
+        machine.Get(Register::Rax) == 42 && machine.Get(Register::Rbx) == 84 &&
+        machine.Get(Register::Rflags) == 2 && machine.LastRunInstructions() == 6 &&
+        Read(machine, DataA) == 42 && Read(machine, DataB) == 42 && calls == 2,
+        "Fresh actual CALL reusing an abandoned layout failed or corrupted its independent result and return frame");
+    CallerGuards(machine);
     machine.RestoreContext(abandoned);
     RejectsUnchanged(machine, [&] { machine.RunSlice(CallGate, CallEnd, 100); }, "completion before redispatch");
     RejectsUnchanged(machine, [&] { machine.Run(CallGate, CallEnd, 100); }, "completion before redispatch");
-    Require(calls == 1 && Read(machine, DataB) == 42 && Read(machine, DataA) == 0,
+    Require(calls == 2 && Read(machine, DataB) == 42 && Read(machine, DataA) == 42,
         "A fresh session forgot the abandoned frame or rolled back shared guest memory");
     CallerGuards(machine);
 }
