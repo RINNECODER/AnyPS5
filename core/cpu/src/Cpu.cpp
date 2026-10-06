@@ -420,6 +420,11 @@ StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t 
         if (!impl->restart) throw std::runtime_error("Guest execution stopped without reaching its exit or stop address");
     }
 }
+std::uint64_t Machine::LastRunInstructions() const {
+    if (std::this_thread::get_id() != impl->ownerThread)
+        throw std::logic_error("Guest instruction accounting requires its owner thread");
+    return impl->executed;
+}
 void Machine::Exit(int code) {
     impl->exitCode = code;
     impl->exited = true;

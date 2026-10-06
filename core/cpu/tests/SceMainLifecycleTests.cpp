@@ -123,6 +123,36 @@ Cpu::SceImport exitImport() {
     return result;
 }
 
+void cumulativeEntryBudget(const Inputs& inputs) {
+    for (const auto budget : {7ULL, 8ULL, 13ULL}) {
+        Session session(inputs);
+        const auto gate = session.KernelExit.Resolve(exitImport());
+        require(bool(gate), "Instruction budget fixture requires typed kernel exit");
+        std::array<std::uint8_t, 36> program{
+            0x90, 0x90, 0x90, 0x90, 0x90, 0xff, 0xd6,
+            0xb8, 1, 0, 0, 0, 0xb8, 2, 0, 0, 0, 0xb8, 3, 0, 0, 0,
+            0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xd0, 0x0f, 0x0b};
+        for (unsigned index = 0; index < 8; ++index) program[24 + index] = *gate >> (8 * index);
+        const auto entry = session.Modules->Main().Entry;
+        session.Machine.Write(entry, std::as_bytes(std::span(program)));
+        session.Machine.Set(Cpu::Register::Rax, 0);
+        session.Machine.Set(Cpu::Register::Rdi, 0);
+        const auto reason = session.Modules->RunMain(budget, 100000);
+        require(state(session.Machine, session.State)[8] == 1,
+                "Entry budget test did not finalize dependency at the deferred pause");
+        if (budget == 13) {
+            require(reason == Cpu::StopReason::Exit && session.Machine.ExitCode() == 0,
+                    "Exact cumulative entry budget did not permit the literal thirteen-instruction exit");
+        } else {
+            require(reason == Cpu::StopReason::InstructionLimit,
+                    "Resumed main received a fresh instruction budget instead of the remaining entry budget");
+            require(session.Machine.Get(Cpu::Register::Rip) == entry + (budget == 7 ? 7 : 12) &&
+                    session.Machine.Get(Cpu::Register::Rax) == (budget == 7 ? 0 : 1),
+                    "Resumed main executed beyond the independently counted entry budget");
+        }
+    }
+}
+
 void kernelExitAbi() {
     Cpu::Machine machine;
     auto imports = std::make_unique<Cpu::SceLifecycleImports>(machine);
@@ -170,6 +200,7 @@ int main(int argc, char** argv) {
         require(argc == 2, "Usage: SceMainLifecycleTests SceMainLifecycleReceipt.txt");
         const auto inputs = receipt(argv[1]);
         compiledLifecycle(inputs);
+        cumulativeEntryBudget(inputs);
         stoppedLifecycle(inputs);
         expiredGraph(inputs);
         kernelExitAbi();

@@ -298,6 +298,8 @@ struct SceModules::Impl {
         struct Reset { bool& running; ~Reset() { running = false; } } reset{mainRunning};
         try {
             auto reason = machine.Run(main.Entry, 0, entryBudget);
+            const auto consumed = machine.LastRunInstructions();
+            if (consumed > entryBudget) fail("main execution exceeded its entry instruction budget");
             if (terminationRequested) {
                 if (reason != StopReason::Requested || machine.Get(Register::Rip) != TerminationGate)
                     fail("entry termination callback did not pause at its exact guest gate");
@@ -317,7 +319,8 @@ struct SceModules::Impl {
                 machine.Set(Register::Rsp, stack + 8);
                 machine.Set(Register::Rip, destination);
                 terminationRequested = false;
-                reason = machine.Run(destination, 0, entryBudget);
+                const auto remaining = entryBudget - consumed;
+                reason = remaining ? machine.Run(destination, 0, remaining) : StopReason::InstructionLimit;
             }
             if (reason == StopReason::Exit) {
                 if (phase == Phase::Initialized) finalize(0, 0, 0, finalizerBudget);
