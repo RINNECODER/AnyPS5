@@ -12,6 +12,7 @@ BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 mkdir -p "$APP_MACOS"
 cp "$BUILD_BINARY" "$APP_MACOS/$APP_NAME"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
+cp "$ROOT_DIR/Assets/AppIcon/MacPS.icns" "$APP_BUNDLE/Contents/Resources/MacPS.icns"
 cp -R "$(dirname "$BUILD_BINARY")/AnyPS5Launcher_AnyPS5Launcher.bundle" "$APP_BUNDLE/Contents/Resources/"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -20,6 +21,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <key>CFBundleExecutable</key><string>$APP_NAME</string>
 <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
 <key>CFBundleName</key><string>MacPS</string>
+<key>CFBundleIconFile</key><string>MacPS.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
