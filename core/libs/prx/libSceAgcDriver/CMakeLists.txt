@@ -127,11 +127,19 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/BdaFeatures.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ComputeDispatch.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DrawDispatch.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/IndirectDraw.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubmissionCapture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderCapture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubmissionValidation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanDevice.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationScaler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Draw.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MeshDraw.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DepthSurface.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/SurfaceMetadata.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetTransfer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Pipeline.cpp
@@ -139,6 +147,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Resources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Recorder.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderInputState.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ComputeStageInfo.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderResources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderAddressResources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestBufferMemory.cpp
@@ -150,6 +159,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestSamplerResource.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureFormat.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DccMetadata.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DccClearEncoding.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureDetiler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
@@ -431,7 +441,9 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/GuestSamplerResource.cpp
         tests/TextureDetiler.cpp
         Graphics/src/Draw.cpp
+        Graphics/src/MeshDraw.cpp
         Graphics/src/DepthSurface.cpp
+        Graphics/src/SurfaceMetadata.cpp
         Graphics/src/Pipeline.cpp
         Graphics/src/State.cpp
         Graphics/src/ColorTargetLayout.cpp
@@ -447,6 +459,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/GuestSamplerResource.cpp
         Graphics/src/TextureFormat.cpp
         Graphics/src/DccMetadata.cpp
+        Graphics/src/DccClearEncoding.cpp
         Graphics/src/TextureTiling.cpp
         Graphics/src/TextureDetiler.cpp
         Graphics/src/Texture.cpp
@@ -454,6 +467,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/Sampler.cpp
         Graphics/src/Recorder.cpp
         Graphics/src/ShaderInputState.cpp
+        Graphics/src/ComputeStageInfo.cpp
         ${agcTextureDetileShaderHeader}
         ${agcMeshArgumentsShaderHeader}
         ${agcSampleCounterShaderHeader}
@@ -580,7 +594,9 @@ if(AGC_BUILD_VISUAL_TEST)
             Execution/src/GuestMemory.cpp
             Execution/src/BdaFeatures.cpp
             Graphics/src/Draw.cpp
+            Graphics/src/MeshDraw.cpp
             Graphics/src/DepthSurface.cpp
+            Graphics/src/SurfaceMetadata.cpp
             Graphics/src/ColorTargetLayout.cpp
             Graphics/src/ColorTargetTransfer.cpp
             Graphics/src/Pipeline.cpp
@@ -596,6 +612,7 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/GuestSamplerResource.cpp
             Graphics/src/TextureFormat.cpp
             Graphics/src/DccMetadata.cpp
+            Graphics/src/DccClearEncoding.cpp
             Graphics/src/TextureTiling.cpp
             Graphics/src/TextureDetiler.cpp
             Graphics/src/Texture.cpp

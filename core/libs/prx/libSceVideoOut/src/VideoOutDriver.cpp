@@ -8,7 +8,9 @@
 #include <stdexcept>
 
 #include "SDL.h"
+#if !defined(ANYPS5_METAL_BACKEND)
 #include "SDL_vulkan.h"
+#endif
 #include "prx/libSceVideoOut/include/PadInput.hpp"
 #include "prx/libSceVideoOut/include/MouseInput.hpp"
 #include "prx/libSceVideoOut/include/KeyboardInput.hpp"
@@ -398,6 +400,13 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     }
     require(req.width != 0 && req.height != 0 && req.width <= static_cast<uint32_t>(std::numeric_limits<int>::max()) && req.height <= static_cast<uint32_t>(std::numeric_limits<int>::max()), "invalid window dimensions");
     window.Ensure(req.width, req.height);
+#if defined(ANYPS5_METAL_BACKEND)
+    const AgcDriver::PresentationWindow target{&window, {}, nullptr, [](void* context, std::uint32_t* width, std::uint32_t* height) {
+        static_cast<DisplayWindow*>(context)->DrawableSize(*width, *height);
+    }, req.width, req.height, req.timing, [](void* context) {
+        return static_cast<DisplayWindow*>(context)->MetalLayer();
+    }};
+#else
     unsigned extensionCount = 0;
     if (!SDL_Vulkan_GetInstanceExtensions(window.Handle(), &extensionCount, nullptr)) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
     std::vector<const char*> extensions(extensionCount);
@@ -419,6 +428,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
         *width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
         *height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
     }, req.width, req.height, req.timing};
+#endif
     timing.Mark("window_prepare");
     const auto gpuReady = [](void* context) {
         auto& request = *static_cast<FlipRequest*>(context);
@@ -531,6 +541,9 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
             cancelled.swap(flipQueue->requests);
         }
     }
+#if defined(ANYPS5_METAL_BACKEND)
+    AgcDriverReleaseWindow_nid_postfix(&window);
+#endif
     AgcDriverShutdown_nid_postfix();
     window.Destroy();
 }
