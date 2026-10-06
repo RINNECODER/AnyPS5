@@ -466,6 +466,8 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     }
     pipelineDescriptor.vertexDescriptor = rectPath ? nil : vertexDescriptor;
     MetalBackend::TargetOptions target;
+    if (@available(macOS 15.0, *))
+        target.supportsWorkgroupAtomicFences = [backend.Device() supportsFamily:MTLGPUFamilyApple1];
     target.supportsInt64 = true;
     target.supportsGpuAddresses = true;
     target.supportsSimdGroups = true;

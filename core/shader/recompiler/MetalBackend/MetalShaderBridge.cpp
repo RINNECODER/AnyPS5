@@ -19,6 +19,13 @@ namespace {
 class MetalCompiler final : public spirv_cross::CompilerMSL {
 public:
     using CompilerMSL::CompilerMSL;
+    bool supportsWorkgroupAtomicFences = false;
+    bool requiresWorkgroupAtomicFences = false;
+    bool supportsSimdGroups = false;
+    bool requiresLdsLaneElection = false;
+
+#include "../ProtocolClassifier.inc"
+#include "../TypedCfgLowering.inc"
 
     struct ShadowPair {
         std::uint32_t imageSet, imageBinding, imageElement;
@@ -499,10 +506,59 @@ protected:
             ", " + QueryCoord(imageId, coordId) + ")";
     }
 
+    bool EmitWorkgroupAtomicFence(const spirv_cross::Instruction& instruction) {
+        const auto* words = stream(instruction);
+        const bool compare = instruction.op == spv::OpAtomicCompareExchange;
+        const bool store = instruction.op == spv::OpAtomicStore;
+        if (!compare && !store) return false;
+        const auto pointer = words[compare ? 2 : 0];
+        if (expression_type(pointer).storage != spv::StorageClassWorkgroup) return false;
+        const auto scope = get<spirv_cross::SPIRConstant>(words[compare ? 3 : 1]).scalar();
+        const auto semantics = get<spirv_cross::SPIRConstant>(words[compare ? 4 : 2]).scalar();
+        if (scope != spv::ScopeWorkgroup) return false;
+        const auto expected = spv::MemorySemanticsWorkgroupMemoryMask |
+            (compare ? spv::MemorySemanticsAcquireMask : spv::MemorySemanticsReleaseMask);
+        if (semantics != expected) return false;
+        if (compare && get<spirv_cross::SPIRConstant>(words[5]).scalar() != spv::MemorySemanticsMaskNone)
+            return false;
+        if (!supportsWorkgroupAtomicFences || !get_msl_options().supports_msl_version(3, 2))
+            Fail("workgroup acquire/release atomics require MSL 3.2 Apple Silicon fence support");
+        requiresWorkgroupAtomicFences = true;
+        const auto fence = "atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_threadgroup);";
+        if (store) statement(fence);
+        if (compare && electedLockCasResults.contains(words[1])) {
+            if (!supportsSimdGroups) Fail("LDS lock lane election requires native SIMD-group support");
+            const auto pendingDone = LdsPendingDone(words[1]);
+            if (!pendingDone) Fail("recognized LDS lock has no uniform pending state");
+            requiresLdsLaneElection = true;
+            const auto pendingRank = ir.increase_bound_by(1);
+            emit_op(words[0], pendingRank,
+                "simd_prefix_exclusive_sum(uint(!" + to_enclosed_expression(*pendingDone) + "))", false);
+            emit_op(words[0], words[1], to_expression(words[6]), false);
+            statement("if (!", to_enclosed_expression(*pendingDone), " && ", to_expression(pendingRank), " == 0u)");
+            begin_scope();
+            const auto temporary = ir.increase_bound_by(1);
+            emit_atomic_func_op(words[0], temporary, "atomic_compare_exchange_weak", spv::OpAtomicCompareExchange,
+                words[4], words[5], true, words[2], words[7], true, false, words[6]);
+            statement(to_expression(words[1]), " = ", to_expression(temporary), ";");
+            end_scope();
+        } else {
+            CompilerMSL::emit_instruction(instruction);
+        }
+        if (compare) {
+            statement("if (", to_expression(words[1]), " == ", to_enclosed_expression(words[7]), ")");
+            begin_scope();
+            statement(fence);
+            end_scope();
+        }
+        return true;
+    }
+
     void emit_instruction(const spirv_cross::Instruction& instruction) override {
         if (instruction.op == spv::OpGroupNonUniformShuffle) {
             forced_temporaries.insert(stream(instruction)[1]);
         }
+        if (EmitWorkgroupAtomicFence(instruction)) return;
         if (instruction.op != spv::OpImageQueryLod) {
             CompilerMSL::emit_instruction(instruction);
             return;
@@ -935,6 +991,10 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         Fail("vertex attribute buffers require reserved native Metal slots");
 
     MetalCompiler compiler(guest.spirv.Words());
+    compiler.supportsWorkgroupAtomicFences = target.supportsWorkgroupAtomicFences;
+    compiler.supportsSimdGroups = target.supportsSimdGroups;
+    compiler.PrepareLdsLockElection(guest);
+    compiler.PrepareLdsUniformPending();
     compiler.PrepareMinimumLodCertificate(guest);
     compiler.PrepareMinimumLod(guest);
     const bool samplerArgumentBuffer = target.samplerArgumentBuffer || !compiler.MinimumLodPairs().empty();
@@ -1332,6 +1392,8 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     result.requiresTextureLodQueries = compiler.RequiresTextureLodQueries();
     result.minimumLodImages = compiler.MinimumLodImages();
     result.capturedSamplerRequirements = compiler.CapturedSamplers();
+    result.requiresWorkgroupAtomicFences = compiler.requiresWorkgroupAtomicFences;
+    result.requiresSimdGroups |= compiler.requiresLdsLaneElection;
     for (const auto& image : resources.storage_images)
         if (compiler.get_automatic_msl_resource_binding_secondary(image.id) != std::numeric_limits<std::uint32_t>::max())
             Fail("image atomic emulation requires an unimplemented secondary Metal buffer contract");

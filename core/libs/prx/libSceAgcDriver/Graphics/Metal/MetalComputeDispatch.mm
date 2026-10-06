@@ -174,6 +174,8 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
         {state.waveSize, 0, state.userData, state.compute, {}, {}, memory}, target(device), {0, 0, 0, 128}, {}, true};
     const auto guest = Recompile(request);
     MetalBackend::TargetOptions options;
+    if (@available(macOS 15.0, *))
+        options.supportsWorkgroupAtomicFences = [device supportsFamily:MTLGPUFamilyApple1];
     options.supportsInt64 = true;
     options.supportsGpuAddresses = true;
     options.supportsSimdGroups = true;
