@@ -11,7 +11,7 @@ struct SceImport;
 
 class SceUserImports {
 public:
-    explicit SceUserImports(Machine& machine, std::uint64_t gateBase = 0x7ffdfd000000);
+    explicit SceUserImports(Machine& machine, std::uint64_t gateBase = 0x7ffdfc000000);
     ~SceUserImports();
     SceUserImports(const SceUserImports&) = delete;
     SceUserImports& operator=(const SceUserImports&) = delete;
