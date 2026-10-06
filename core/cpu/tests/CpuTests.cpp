@@ -95,6 +95,91 @@ void tlsAndSse() {
     require(machine.Run(0x1040, 0x1046, 10) == StopReason::Address, "FP-default-state program did not finish");
     require(read<std::uint16_t>(machine, 0x3400) == 0x037f && read<std::uint32_t>(machine, 0x3404) == 0x1f80, "Guest ABI floating-point defaults are incorrect");
 }
+void unsupportedVectorEncodings() {
+    const std::vector<std::vector<std::uint8_t>> encodings{
+        {0xc5,0xf0,0x58,0xc2},
+        {0xc4,0xe1,0x70,0x58,0xc2},
+        {0x62,0xf1,0x74,0x08,0x58,0xc2},
+        {0x67,0xc5,0xf0,0x58,0xc2},
+        {0x64,0xc4,0xe1,0x70,0x58,0xc2},
+        {0x64,0x62,0xf1,0x74,0x08,0x58,0xc2},
+    };
+    for (const auto& encoding : encodings) {
+        Machine machine;
+        setup(machine);
+        const std::array<std::uint32_t,4> destination{0x42c80000,0x42c80000,0x42c80000,0x42c80000};
+        const std::array<std::uint32_t,4> first{0x3f800000,0x3f800000,0x3f800000,0x3f800000};
+        const std::array<std::uint32_t,4> second{0x40000000,0x40000000,0x40000000,0x40000000};
+        const std::array<std::uint32_t,4> sentinel{0xaabbccdd,0x12345678,0xdeadbeef,0x76543210};
+        write(machine, 0x3200, destination);
+        write(machine, 0x3220, first);
+        write(machine, 0x3240, second);
+        write(machine, 0x3260, sentinel);
+        machine.Set(Register::Rdi, 0x3200);
+        machine.Set(Register::Rsi, 0x3220);
+        machine.Set(Register::Rdx, 0x3240);
+        machine.Set(Register::Rcx, 0x3260);
+        std::vector<std::uint8_t> program{0x0f,0x10,0x07,0x0f,0x10,0x0e,0x0f,0x10,0x12};
+        program.insert(program.end(), encoding.begin(), encoding.end());
+        const auto storeAddress = 0x1100 + program.size();
+        program.insert(program.end(), {0x0f,0x11,0x01});
+        machine.Write(0x1100, std::as_bytes(std::span(program)));
+        bool rejected = false;
+        try { machine.Run(0x1100, storeAddress + 3, 20); }
+        catch (const std::exception& error) {
+            const std::string diagnostic = error.what();
+            require(diagnostic.find("Unsupported guest VEX/EVEX instruction") != std::string::npos ||
+                    diagnostic.find("Unsupported guest instruction") != std::string::npos, error.what());
+            rejected = true;
+        }
+        if (!rejected) {
+            const auto actual = read<std::array<std::uint32_t,4>>(machine, 0x3260);
+            throw std::runtime_error("VEX/EVEX unexpectedly executed: first result bits=" + std::to_string(actual[0]) +
+                                     "; VADDPS(1,2) mathematical result bits=1077936128; explicit rejection required");
+        }
+        require(read<std::array<std::uint32_t,4>>(machine, 0x3260) == sentinel,
+                "Rejected vector instruction executed its following guest memory store");
+        require(machine.Run(storeAddress, storeAddress + 3, 10) == StopReason::Address,
+                "Legacy SSE register-state readback did not finish after rejected vector instruction");
+        require(read<std::array<std::uint32_t,4>>(machine, 0x3260) == destination,
+                "Unsupported vector instruction changed XMM destination before rejection");
+    }
+}
+void unsupportedXopEncoding() {
+    for (const std::uint8_t prefix : {0, 0x64, 0x67}) {
+        Machine machine;
+        setup(machine);
+        constexpr std::uint64_t stackValue = 0x123456789abcdef0;
+        constexpr std::uint64_t initialRax = 0xfedcba9876543210;
+        write(machine, 0x4ff0, stackValue);
+        machine.Set(Register::Rax, initialRax);
+        std::vector<std::uint8_t> program;
+        if (prefix) program.push_back(prefix);
+        program.insert(program.end(), {0x8f,0xe8,0x60,0xa2,0xe2,0x10});
+        machine.Write(0x1000, std::as_bytes(std::span(program)));
+        bool rejected = false;
+        try { machine.Run(0x1000, 0x1002 + (prefix != 0), 10); }
+        catch (const std::exception& error) {
+            const std::string diagnostic = error.what();
+            require(diagnostic.find("Unsupported guest XOP instruction") != std::string::npos ||
+                    diagnostic.find("Unsupported guest instruction") != std::string::npos, error.what());
+            rejected = true;
+        }
+        if (!rejected) {
+            throw std::runtime_error("XOP unexpectedly executed: RAX=" + std::to_string(machine.Get(Register::Rax)) +
+                                     " RSP=" + std::to_string(machine.Get(Register::Rsp)) +
+                                     "; XOP must not decode as legacy POP");
+        }
+        require(machine.Get(Register::Rax) == initialRax && machine.Get(Register::Rsp) == 0x4ff0,
+                "Rejected XOP instruction changed scalar registers or consumed guest stack");
+        require(read<std::uint64_t>(machine, 0x4ff0) == stackValue, "Rejected XOP instruction changed guest stack memory");
+        code(machine, 0x1040, {0x8f,0xc0});
+        require(machine.Run(0x1040, 0x1042, 10) == StopReason::Address,
+                "Vector prefix guard rejected valid legacy POP encoding");
+        require(machine.Get(Register::Rax) == stackValue && machine.Get(Register::Rsp) == 0x4ff8,
+                "Legacy POP did not retain its register and stack semantics");
+    }
+}
 void syscallAndHostAbi() {
     Machine machine;
     setup(machine);
@@ -210,7 +295,8 @@ int main(int argc, const char** argv) {
     try {
         const std::pair<const char*,void(*)()> tests[] = {
             {"widths/flags", widthsAndFlags}, {"calls/branches/memory", callsBranchesAndMemory},
-            {"TLS/SSE", tlsAndSse}, {"syscall/import ABI", syscallAndHostAbi},
+            {"TLS/SSE", tlsAndSse}, {"unsupported VEX/EVEX", unsupportedVectorEncodings},
+            {"unsupported XOP", unsupportedXopEncoding}, {"syscall/import ABI", syscallAndHostAbi},
             {"borrowed memory", borrowedMemory}, {"errors/budget", errorsAndBudget}
         };
         bool selected = false;

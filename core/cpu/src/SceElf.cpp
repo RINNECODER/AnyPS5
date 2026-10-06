@@ -1,0 +1,543 @@
+#include <cpu/SceElf.hpp>
+#include <cpu/Self.hpp>
+#include <cpu/SceTls.hpp>
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include <string_view>
+
+namespace Cpu {
+
+struct SceImageData {
+    struct Symbol {
+        std::uint64_t Value = 0;
+        std::uint64_t Size = 0;
+        std::uint16_t Section = 0;
+        std::uint8_t Type = 0;
+        std::optional<std::size_t> Import;
+    };
+    struct Relocation {
+        std::uint64_t Target;
+        std::uint64_t Symbol;
+        std::uint32_t Type;
+        std::int64_t Addend;
+        bool Plt;
+    };
+    std::vector<std::byte> Bytes;
+    std::vector<Symbol> Symbols;
+    std::vector<Relocation> Relocations;
+    std::vector<SceSegment> Relro;
+    std::map<std::uint16_t, std::string> NeededModuleIds;
+};
+
+namespace {
+constexpr std::uint64_t PageSize = 4096;
+constexpr std::uint64_t AddressLimit = 0x7ffd00000000;
+constexpr std::uint64_t StackTop = 0x7ffeff000000;
+constexpr std::uint64_t StackSize = 1024 * 1024;
+constexpr std::string_view Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+
+[[noreturn]] void fail(const std::string& message) {
+    throw std::runtime_error("SCE ELF loader: " + message);
+}
+
+bool fits(std::uint64_t offset, std::uint64_t size, std::uint64_t end) {
+    return offset <= end && size <= end - offset;
+}
+
+std::uint64_t read(const std::vector<std::byte>& bytes, std::uint64_t offset, unsigned size) {
+    if (!fits(offset, size, bytes.size())) fail("truncated ELF data");
+    std::uint64_t result = 0;
+    for (unsigned index = 0; index < size; ++index)
+        result |= std::uint64_t(std::to_integer<unsigned>(bytes[offset + index])) << (index * 8);
+    return result;
+}
+
+std::uint64_t rounded(std::uint64_t value) {
+    if (value > std::numeric_limits<std::uint64_t>::max() - PageSize + 1) fail("page address overflow");
+    return (value + PageSize - 1) & ~(PageSize - 1);
+}
+
+Permission permissions(std::uint32_t flags) {
+    return static_cast<Permission>(((flags & 4) ? 1 : 0) | ((flags & 2) ? 2 : 0) | ((flags & 1) ? 4 : 0));
+}
+
+bool loadable(const SceSegment& segment) {
+    return segment.Type == 1 || segment.Type == 0x61000010;
+}
+
+std::uint16_t identifier(std::string_view encoded) {
+    if (encoded.empty() || encoded.size() > 3) fail("invalid scoped symbol identifier");
+    unsigned result = 0;
+    for (const char character : encoded) {
+        const auto digit = Alphabet.find(character);
+        if (digit == std::string_view::npos || result > (65535 - digit) / 64)
+            fail("invalid or overflowing scoped symbol identifier");
+        result = result * 64 + static_cast<unsigned>(digit);
+    }
+    return static_cast<std::uint16_t>(result);
+}
+
+void writeWord(Machine& machine, std::uint64_t address, std::uint64_t value) {
+    std::array<std::byte, 8> bytes{};
+    for (unsigned index = 0; index < bytes.size(); ++index) bytes[index] = static_cast<std::byte>(value >> (8 * index));
+    machine.Write(address, bytes);
+}
+
+std::uint64_t tlsOffset(const SceImageData::Relocation& relocation, const SceImageData::Symbol& symbol,
+                        const std::optional<SceSegment>& tls) {
+    if (!tls || !tls->MemorySize) fail("TLS relocation requires a nonempty main-module TLS segment");
+    if (relocation.Type == 16 && relocation.Addend != 0) fail("DTPMOD64 addend must be zero");
+    if (relocation.Type == 16 && relocation.Symbol == 0) return 0;
+    if (!relocation.Symbol || symbol.Type != 6 || !symbol.Section || symbol.Section >= 0xff00 || symbol.Import)
+        fail("TLS relocation requires a defined ordinary-section TLS symbol");
+    if (symbol.Value >= tls->MemorySize) fail("TLS relocation symbol offset is outside the main module");
+    std::uint64_t offset;
+    if (relocation.Addend < 0) {
+        const auto magnitude = 0 - static_cast<std::uint64_t>(relocation.Addend);
+        if (magnitude > symbol.Value) fail("TLS relocation addend is outside the main module");
+        offset = symbol.Value - magnitude;
+    } else {
+        const auto addend = static_cast<std::uint64_t>(relocation.Addend);
+        if (addend >= tls->MemorySize - symbol.Value) fail("TLS relocation addend is outside the main module");
+        offset = symbol.Value + addend;
+    }
+    return offset;
+}
+
+}
+
+SceParsedImage ParseSce(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) fail("cannot open " + path.string());
+    const auto size = file.tellg();
+    if (size < 64 || size > 256 * 1024 * 1024) fail("input size exceeds supported 64-byte to 256-MiB range");
+    auto data = std::make_shared<SceImageData>();
+    auto& bytes = data->Bytes;
+    bytes.resize(static_cast<std::size_t>(size));
+    file.seekg(0);
+    if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) fail("cannot read complete executable");
+    std::vector<std::string> reconstructionNotes;
+    const bool fromSelf = IsSelf(bytes);
+    if (fromSelf) {
+        auto decoded = DecodePlainSelf(bytes);
+        bytes = std::move(decoded.Bytes);
+        reconstructionNotes = std::move(decoded.NormalizationNotes);
+    }
+    const auto magic = read(bytes, 0, 4);
+    if (magic != 0x464c457f || read(bytes, 4, 1) != 2 || read(bytes, 5, 1) != 1 || read(bytes, 6, 1) != 1)
+        fail("requires little-endian ELF64 version 1");
+    if (read(bytes, 18, 2) != 62 || read(bytes, 20, 4) != 1 || read(bytes, 52, 2) != 64)
+        fail("requires a valid x86-64 ELF header");
+    SceParsedImage image;
+    image.Path = path;
+    image.SourceContainer = fromSelf ? "plain_self" : "elf";
+    image.ReconstructionNotes = std::move(reconstructionNotes);
+    image.Type = static_cast<std::uint16_t>(read(bytes, 16, 2));
+    image.OsAbi = static_cast<std::uint8_t>(read(bytes, 7, 1));
+    image.AbiVersion = static_cast<std::uint8_t>(read(bytes, 8, 1));
+    image.Entry = read(bytes, 24, 8);
+    if (image.Type != 3 && image.Type != 0xfe10 && image.Type != 0xfe18) fail("unsupported SCE executable type");
+    if ((image.OsAbi != 0 && image.OsAbi != 9) || image.AbiVersion > 2) fail("unsupported SCE OS ABI or ABI version");
+    const auto phOffset = read(bytes, 32, 8);
+    const auto phCount = read(bytes, 56, 2);
+    if (read(bytes, 54, 2) != 56 || phCount == 0 || phCount > 1024 || !fits(phOffset, phCount * 56, bytes.size()))
+        fail("invalid program header table");
+    std::optional<SceSegment> dynamic, dynlib;
+    std::uint64_t mappedSize = 0;
+    for (std::uint64_t index = 0; index < phCount; ++index) {
+        const auto offset = phOffset + index * 56;
+        SceSegment segment{static_cast<std::uint32_t>(read(bytes, offset, 4)),
+            static_cast<std::uint32_t>(read(bytes, offset + 4, 4)), read(bytes, offset + 8, 8),
+            read(bytes, offset + 16, 8), read(bytes, offset + 32, 8),
+            read(bytes, offset + 40, 8), read(bytes, offset + 48, 8)};
+        if (!fits(segment.Offset, segment.FileSize, bytes.size())) fail("program segment exceeds input file");
+        if (segment.Flags & ~7u) fail("unsupported program segment permissions");
+        if (loadable(segment)) {
+            if (segment.FileSize > segment.MemorySize || !fits(segment.Address, segment.MemorySize, AddressLimit))
+                fail("invalid PT_LOAD memory range");
+            if (segment.Alignment > 1 && (!std::has_single_bit(segment.Alignment) ||
+                segment.Offset % segment.Alignment != segment.Address % segment.Alignment)) fail("invalid PT_LOAD alignment");
+            if (segment.Offset % PageSize != segment.Address % PageSize) fail("PT_LOAD is not page congruent");
+            if (segment.MemorySize == 0) continue;
+            const auto begin = segment.Address & ~(PageSize - 1);
+            const auto end = rounded(segment.Address + segment.MemorySize);
+            for (const auto& other : image.Segments) {
+                if (!loadable(other)) continue;
+                if (segment.Address < other.Address + other.MemorySize &&
+                    other.Address < segment.Address + segment.MemorySize) fail("overlapping logical PT_LOAD ranges");
+                if (begin < rounded(other.Address + other.MemorySize) && (other.Address & ~(PageSize - 1)) < end)
+                    image.UnsupportedReasons.push_back(segment.Flags != other.Flags
+                        ? "differing permissions on a shared guest page are unsupported for execution"
+                        : "shared guest page mapping is unsupported for execution");
+            }
+            if (end - begin > 1024 * 1024 * 1024 - mappedSize) fail("image mappings exceed 1-GiB limit");
+            mappedSize += end - begin;
+            if (segment.Type == 0x61000010) {
+                if ((segment.Flags & 4) == 0 || (segment.Flags & 1)) fail("SCE RELRO requires nonexecutable readable memory");
+                auto relro = segment;
+                relro.Address = begin;
+                relro.MemorySize = end - begin;
+                data->Relro.push_back(relro);
+            }
+        } else if (segment.Type == 2) {
+            if (dynamic || segment.FileSize == 0 || segment.FileSize % 16) fail("invalid or duplicate dynamic segment");
+            dynamic = segment;
+        } else if (segment.Type == 0x61000000) {
+            if (dynlib) fail("duplicate SCE dynamic data segment");
+            dynlib = segment;
+        } else if (segment.Type == 7) {
+            if (image.Tls || segment.FileSize > segment.MemorySize ||
+                (segment.Alignment > 1 && !std::has_single_bit(segment.Alignment))) fail("invalid or duplicate TLS segment");
+            image.Tls = segment;
+        } else if (segment.Type == 0x61000001) {
+            if (image.ProcParam || segment.FileSize < 0x40) fail("invalid or duplicate process parameter segment");
+            image.ProcParam = segment;
+        } else if (segment.Type == 0x6474e552) {
+            data->Relro.push_back(segment);
+        } else if (segment.Type == 0x6474e551) {
+            if (segment.Flags & 1) fail("executable guest stack is unsupported");
+        } else if (segment.Type != 0 && segment.Type != 4 && segment.Type != 6 && segment.Type != 0x6474e550 &&
+                   segment.Type != 0x61000002 && segment.Type != 0x61000003 &&
+                   segment.Type != 0x6fffff00 && segment.Type != 0x6fffff01) {
+            fail("unsupported program header type " + std::to_string(segment.Type));
+        }
+        image.Segments.push_back(segment);
+    }
+    if (!mappedSize || !dynamic) fail("missing load or dynamic segment");
+    const auto mapped = [&](std::uint64_t address, std::uint64_t length, std::uint32_t flags, bool backed = false) {
+        for (const auto& segment : image.Segments) {
+            const auto extent = backed ? segment.FileSize : segment.MemorySize;
+            const auto accessible = segment.Flags | (segment.Type == 0x61000010 ? 2u : 0u);
+            if (loadable(segment) && (accessible & flags) == flags && address >= segment.Address &&
+                fits(address - segment.Address, length, extent)) return;
+        }
+        fail("unmapped or inaccessible guest range at " + std::to_string(address));
+    };
+    const auto translate = [&](std::uint64_t address, std::uint64_t length) {
+        for (const auto& segment : image.Segments)
+            if (loadable(segment) && address >= segment.Address && fits(address - segment.Address, length, segment.FileSize))
+                return segment.Offset + address - segment.Address;
+        fail("dynamic virtual address is outside file-backed PT_LOAD memory");
+        return std::uint64_t{};
+    };
+    if (image.Type != 0xfe18 || image.Entry != 0) mapped(image.Entry, 1, 1, true);
+    if (image.ProcParam) mapped(image.ProcParam->Address, image.ProcParam->FileSize, 4, true);
+    if (image.Tls) {
+        const auto& tls = *image.Tls;
+        if (!tls.MemorySize) image.UnsupportedReasons.push_back("empty guest TLS segment is unsupported");
+        else {
+            const auto alignment = std::max<std::uint64_t>(tls.Alignment, 1);
+            if (tls.Address % alignment || tls.Offset % alignment) fail("unsupported TLS alignment residue");
+            if ((tls.Flags & 4) == 0) fail("TLS template must be readable");
+            mapped(tls.Address, tls.MemorySize, 4);
+            if (tls.FileSize) {
+                mapped(tls.Address, tls.FileSize, 4, true);
+                if (translate(tls.Address, tls.FileSize) != tls.Offset) fail("TLS template file mapping does not match its guest address");
+            }
+        }
+    }
+    for (const auto& segment : data->Relro) {
+        if (segment.MemorySize == 0 || segment.Address % PageSize || segment.MemorySize % PageSize)
+            fail("unaligned or empty RELRO range is unsupported");
+        mapped(segment.Address, segment.MemorySize, 4);
+    }
+    std::map<std::uint64_t, std::uint64_t> tags;
+    std::vector<std::uint64_t> libraries, modules, neededFiles, libraryAttributes;
+    bool terminated = false;
+    for (std::uint64_t offset = dynamic->Offset; offset < dynamic->Offset + dynamic->FileSize; offset += 16) {
+        const auto tag = read(bytes, offset, 8);
+        const auto value = read(bytes, offset + 8, 8);
+        if (tag == 0) { terminated = true; break; }
+        if (tag == 1) { neededFiles.push_back(value); continue; }
+        if (tag == 0x61000015 || tag == 0x61000049) { libraries.push_back(value); continue; }
+        if (tag == 0x6100000f || tag == 0x61000045) { modules.push_back(value); continue; }
+        if (tag == 0x61000019) { libraryAttributes.push_back(value); continue; }
+        if (tag == 0x61000007 || tag == 0x6100000d || tag == 0x61000013 || tag == 0x61000043 || tag == 0x61000047) continue;
+        if (!tags.emplace(tag, value).second) fail("duplicate dynamic tag " + std::to_string(tag));
+    }
+    if (!terminated) fail("unterminated dynamic segment");
+    const auto get = [&](std::uint64_t standard, std::uint64_t sce) {
+        if (tags.contains(standard) == tags.contains(sce)) fail("missing or ambiguous dynamic tag " + std::to_string(standard));
+        return tags.at(tags.contains(standard) ? standard : sce);
+    };
+    const auto table = [&](std::uint64_t standard, std::uint64_t sce, std::uint64_t length) {
+        const auto value = get(standard, sce);
+        if (tags.contains(standard)) return translate(value, length);
+        if (!dynlib || !fits(value, length, dynlib->FileSize)) fail("SCE table exceeds DYNLIBDATA segment");
+        return dynlib->Offset + value;
+    };
+    const auto strSize = get(10, 0x61000037);
+    if (strSize == 0) fail("empty dynamic string table");
+    const auto strOffset = table(5, 0x61000035, strSize);
+    if (read(bytes, strOffset, 1) != 0) fail("invalid dynamic string table null entry");
+    const auto string = [&](std::uint64_t offset) {
+        if (offset >= strSize) fail("dynamic string offset exceeds table");
+        std::string result;
+        while (offset < strSize) {
+            const auto character = static_cast<char>(read(bytes, strOffset + offset++, 1));
+            if (!character) return result;
+            result.push_back(character);
+        }
+        fail("unterminated dynamic string");
+        return std::string{};
+    };
+    struct Identity { std::string Name; std::uint16_t Version; };
+    std::map<std::uint16_t, Identity> libraryIds, moduleIds;
+    const auto identities = [&](const auto& entries, auto& output) {
+        for (const auto value : entries) {
+            const auto id = static_cast<std::uint16_t>(value >> 48);
+            const auto name = string(value & 0xffffffff);
+            if (name.empty() || name.find_first_of("/\\:#\r\n") != std::string::npos) fail("invalid imported library or module name");
+            Identity identity{name, static_cast<std::uint16_t>(value >> 32)};
+            const auto [found, inserted] = output.emplace(id, identity);
+            if (!inserted && (found->second.Name != name || found->second.Version != identity.Version))
+                fail("conflicting imported identity for id " + std::to_string(id));
+        }
+    };
+    identities(libraries, libraryIds);
+    identities(modules, moduleIds);
+    std::map<std::uint16_t, std::uint64_t> attributesById;
+    for (const auto value : libraryAttributes) {
+        const auto id = static_cast<std::uint16_t>(value >> 48);
+        const auto attributes = value & 0xffffffffffffull;
+        if (!libraryIds.contains(id)) fail("attribute has no matching imported library id " + std::to_string(id));
+        const auto [found, inserted] = attributesById.emplace(id, attributes);
+        if (!inserted && found->second != attributes) fail("conflicting imported library attributes for id " + std::to_string(id));
+        image.ImportLibraryAttributes.push_back({id, attributes});
+        if (inserted && attributes) image.UnsupportedReasons.push_back("imported library attributes are unsupported for execution: id=" +
+            std::to_string(id) + " value=" + std::to_string(attributes));
+    }
+    for (const auto& [id, identity] : moduleIds) {
+        image.NeededModules.push_back(identity.Name);
+        data->NeededModuleIds.emplace(id, identity.Name);
+    }
+    for (const auto offset : neededFiles) image.NeededFiles.push_back(string(offset));
+    if (!image.NeededFiles.empty()) image.UnsupportedReasons.push_back("DT_NEEDED guest module loading is unsupported");
+    for (const auto& [tag, value] : tags) {
+        const bool tableTag = tag == 2 || tag == 3 || tag == 4 || (tag >= 5 && tag <= 11) || tag == 14 || tag == 20 || tag == 23 ||
+            tag == 0x61000025 || (tag >= 0x61000027 && tag <= 0x6100003f && (tag & 1)) || tag == 0x6ffffff9;
+        if (tableTag) continue;
+        if (tag == 30 && !(value & ~8ull)) continue;
+        if (tag == 0x6ffffffb && !(value & ~(1ull | 0x8000000ull))) continue;
+        if (tag == 21) continue;
+        if (tag == 12 || tag == 13 || (tag >= 25 && tag <= 28) || tag == 32 || tag == 33 ||
+            tag == 0x6000000c || tag == 0x6000000d || (tag >= 0x60000019 && tag <= 0x6000001c)) {
+            if (value) image.UnsupportedReasons.push_back("guest initializer or finalizer execution is unsupported");
+            continue;
+        }
+        if (tag == 0x61000009) { string(value); continue; }
+        if ((tag == 0x61000011 || tag == 0x61000017) && value == 0) continue;
+        image.UnsupportedReasons.push_back("unsupported dynamic tag " + std::to_string(tag));
+    }
+    if (get(11, 0x6100003b) != 24) fail("unsupported dynamic symbol entry size");
+    std::uint64_t symSize;
+    if (tags.contains(0x6100003f)) symSize = tags.at(0x6100003f);
+    else if (tags.contains(4)) symSize = read(bytes, translate(tags.at(4), 8) + 4, 4) * 24;
+    else fail("missing dynamic symbol count");
+    if (!symSize || symSize % 24 || symSize / 24 > 1024 * 1024) fail("invalid dynamic symbol table size");
+    const auto symOffset = table(6, 0x61000039, symSize);
+    std::map<std::string, std::size_t> importedNames;
+    for (std::uint64_t offset = 0; offset < symSize; offset += 24) {
+        const auto name = string(read(bytes, symOffset + offset, 4));
+        const auto info = read(bytes, symOffset + offset + 4, 1);
+        const auto visibility = read(bytes, symOffset + offset + 5, 1);
+        SceImageData::Symbol symbol{read(bytes, symOffset + offset + 8, 8), read(bytes, symOffset + offset + 16, 8),
+            static_cast<std::uint16_t>(read(bytes, symOffset + offset + 6, 2)), static_cast<std::uint8_t>(info & 15), {}};
+        if (!offset && (info || visibility || symbol.Value || symbol.Size || symbol.Section || !name.empty())) fail("invalid null dynamic symbol");
+        if ((info >> 4) > 2 || visibility > 3) fail("unsupported dynamic symbol attributes");
+        if (symbol.Type != 0 && symbol.Type != 1 && symbol.Type != 2 && symbol.Type != 6)
+            image.UnsupportedReasons.push_back("unsupported dynamic symbol type " + std::to_string(symbol.Type));
+        if (symbol.Type == 6 && symbol.Section &&
+            (!image.Tls || symbol.Section >= 0xff00 || !fits(symbol.Value, symbol.Size, image.Tls->MemorySize)))
+            fail("TLS symbol exceeds TLS segment or uses an unsupported section");
+        if (offset && !symbol.Section && (info >> 4) != 0) {
+            const auto first = name.find('#');
+            const auto second = first == std::string::npos ? first : name.find('#', first + 1);
+            if (first != 11 || second == std::string::npos || name.find('#', second + 1) != std::string::npos)
+                fail("import requires full NID#library#module scope: " + name);
+            if (name.substr(0, first).find_first_not_of(Alphabet) != std::string::npos) fail("invalid import NID");
+            const auto libraryId = identifier(std::string_view(name).substr(first + 1, second - first - 1));
+            const auto moduleId = identifier(std::string_view(name).substr(second + 1));
+            if (!libraryIds.contains(libraryId) || !moduleIds.contains(moduleId)) fail("import qualifier has no matching library or module metadata: " + name);
+            const auto& library = libraryIds.at(libraryId);
+            const auto& module = moduleIds.at(moduleId);
+            const auto [found, inserted] = importedNames.emplace(name, image.Imports.size());
+            if (inserted) image.Imports.push_back({name.substr(0, first), library.Name, libraryId, module.Name, moduleId,
+                library.Version, static_cast<std::uint8_t>(module.Version >> 8), static_cast<std::uint8_t>(module.Version)});
+            symbol.Import = found->second;
+            if (symbol.Type != 2) image.UnsupportedReasons.push_back("guest data or TLS imports, including untyped imports, are unsupported: " + name);
+        } else if (symbol.Section && symbol.Section != 0xfff1 && symbol.Type != 6) {
+            if (symbol.Section >= 0xff00) fail("unsupported dynamic symbol section");
+            mapped(symbol.Value, std::max<std::uint64_t>(symbol.Size, 1), symbol.Type == 2 ? 1 : 0);
+        }
+        data->Symbols.push_back(symbol);
+    }
+    std::map<std::uint64_t, std::uint64_t> targets;
+    const auto relocations = [&](std::uint64_t pointer, std::uint64_t scePointer, std::uint64_t lengthTag, std::uint64_t sceLength, bool plt) {
+        if (!tags.contains(pointer) && !tags.contains(scePointer) && !tags.contains(lengthTag) && !tags.contains(sceLength)) return;
+        const auto length = get(lengthTag, sceLength);
+        if (length % 24) fail("invalid RELA table size");
+        const auto offset = table(pointer, scePointer, length);
+        for (std::uint64_t index = 0; index < length; index += 24) {
+            const auto info = read(bytes, offset + index + 8, 8);
+            SceImageData::Relocation relocation{read(bytes, offset + index, 8), info >> 32, static_cast<std::uint32_t>(info),
+                std::bit_cast<std::int64_t>(read(bytes, offset + index + 16, 8)), plt};
+            if (relocation.Symbol >= data->Symbols.size()) fail("relocation symbol index exceeds symbol table");
+            if (plt && relocation.Type != 7) fail("unsupported PLT relocation type");
+            if (relocation.Type == 1 || relocation.Type == 6 || relocation.Type == 7 || relocation.Type == 8 ||
+                relocation.Type == 16 || relocation.Type == 17 || relocation.Type == 18) {
+                mapped(relocation.Target, 8, 2);
+                const auto next = targets.lower_bound(relocation.Target);
+                if ((next != targets.end() && next->first < relocation.Target + 8) ||
+                    (next != targets.begin() && std::prev(next)->second > relocation.Target)) fail("overlapping relocation writes");
+                targets.emplace(relocation.Target, relocation.Target + 8);
+                if (relocation.Type == 8 && relocation.Symbol != 0) fail("RELATIVE relocation must have symbol zero");
+                if ((relocation.Type == 6 || relocation.Type == 7) && relocation.Addend != 0) fail("GLOB_DAT/JUMP_SLOT addend must be zero");
+                if (relocation.Type <= 7) {
+                    if (relocation.Symbol == 0) fail("symbol relocation has null symbol");
+                    if (data->Symbols[relocation.Symbol].Type == 6) fail("non-TLS relocation references a TLS symbol");
+                }
+                if (relocation.Type >= 16) {
+                    const auto& symbol = data->Symbols[relocation.Symbol];
+                    if (symbol.Import && symbol.Type == 6) {
+                        if (relocation.Type == 16 && relocation.Addend != 0) fail("DTPMOD64 addend must be zero");
+                    } else tlsOffset(relocation, symbol, image.Tls);
+                }
+            } else image.UnsupportedReasons.push_back("unsupported relocation type " + std::to_string(relocation.Type));
+            if (std::find(image.RelocationTypes.begin(), image.RelocationTypes.end(), relocation.Type) == image.RelocationTypes.end())
+                image.RelocationTypes.push_back(relocation.Type);
+            data->Relocations.push_back(relocation);
+        }
+    };
+    if ((tags.contains(7) || tags.contains(0x6100002f)) && get(9, 0x61000033) != 24) fail("unsupported RELA entry size");
+    relocations(7, 0x6100002f, 8, 0x61000031, false);
+    relocations(23, 0x61000029, 2, 0x6100002d, true);
+    if ((tags.contains(23) || tags.contains(0x61000029)) && get(20, 0x6100002b) != 7) fail("PLT table is not RELA");
+    image.RelocationCount = data->Relocations.size();
+    image.Data = std::move(data);
+    return image;
+}
+
+SceLoadedImage LoadSce(Machine& machine, const std::filesystem::path& path, std::uint64_t loadBias,
+                      const std::function<std::uint64_t(const SceImport&)>& resolver) {
+    const auto parsed = ParseSce(path);
+    if (parsed.Type == 0xfe18) fail("guest shared module loading is unsupported");
+    if (!parsed.UnsupportedReasons.empty()) fail(parsed.UnsupportedReasons.front());
+    if (loadBias < PageSize || loadBias % PageSize) fail("load bias must be a nonzero page-aligned guest address");
+    const auto address = [&](std::uint64_t value) {
+        if (loadBias > AddressLimit || value > AddressLimit - loadBias) fail("relocated address exceeds guest image range");
+        return loadBias + value;
+    };
+    for (const auto& segment : parsed.Segments)
+        if (loadable(segment)) address(rounded(segment.Address + segment.MemorySize));
+    const auto& data = *parsed.Data;
+    std::set<std::uint16_t> providers;
+    for (const auto& import : parsed.Imports) providers.insert(import.ModuleId);
+    for (const auto& [id, name] : data.NeededModuleIds)
+        if (!providers.contains(id)) fail("guest module initialization/loading is unsupported: " + name + " id=" + std::to_string(id));
+    std::vector<std::uint64_t> imports;
+    for (const auto& import : parsed.Imports) {
+        if (!resolver) fail("host import resolver is required");
+        const auto gate = resolver(import);
+        if (!gate) fail("unresolved import " + import.Nid + " in " + import.LibraryName + "/" + import.ModuleName);
+        machine.CheckAccess(gate, 1, Permission::Execute);
+        imports.push_back(gate);
+    }
+    std::shared_ptr<SceTls> tls;
+    if (parsed.Tls)
+        tls = std::make_shared<SceTls>(machine, std::span(data.Bytes).subspan(parsed.Tls->Offset, parsed.Tls->FileSize),
+            parsed.Tls->MemorySize, parsed.Tls->Alignment);
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+    for (const auto& relocation : data.Relocations) {
+        std::uint64_t value;
+        if (relocation.Type == 16 || relocation.Type == 17 || relocation.Type == 18) {
+            const auto offset = tlsOffset(relocation, data.Symbols.at(relocation.Symbol), parsed.Tls);
+            if (!tls) fail("main-module TLS is not initialized");
+            if (relocation.Type == 16) value = tls->ModuleId();
+            else if (relocation.Type == 17) value = tls->Dtpoff(1, offset);
+            else value = static_cast<std::uint64_t>(tls->Tpoff(1, offset));
+        } else if (relocation.Type == 8) value = loadBias + static_cast<std::uint64_t>(relocation.Addend);
+        else {
+            const auto& symbol = data.Symbols.at(relocation.Symbol);
+            if (symbol.Type == 6) fail("guest TLS relocations are unsupported");
+            if (symbol.Import) value = imports.at(*symbol.Import);
+            else if (symbol.Section == 0xfff1) value = symbol.Value;
+            else if (symbol.Section) value = address(symbol.Value);
+            else fail("unresolved local symbol relocation");
+            if (relocation.Type == 1) value += static_cast<std::uint64_t>(relocation.Addend);
+        }
+        writes.emplace_back(address(relocation.Target), value);
+    }
+    for (const auto& segment : parsed.Segments) {
+        if (!loadable(segment)) continue;
+        const auto begin = segment.Address & ~(PageSize - 1);
+        const auto length = rounded(segment.Address + segment.MemorySize) - begin;
+        machine.Map(address(begin), length, Permission::Read | Permission::Write);
+        machine.Write(address(segment.Address), std::span(data.Bytes).subspan(segment.Offset, segment.FileSize));
+        const std::array<std::byte, PageSize> zeros{};
+        auto cursor = segment.Address + segment.FileSize;
+        const auto end = segment.Address + segment.MemorySize;
+        while (cursor < end) {
+            const auto size = std::min<std::uint64_t>(zeros.size(), end - cursor);
+            machine.Write(address(cursor), std::span(zeros).first(size));
+            cursor += size;
+        }
+    }
+    for (const auto& [target, value] : writes) writeWord(machine, target, value);
+    if (tls && parsed.Tls->FileSize) {
+        std::vector<std::byte> initializedBytes(static_cast<std::size_t>(parsed.Tls->FileSize));
+        machine.Read(address(parsed.Tls->Address), initializedBytes);
+        machine.Write(tls->TlsBase(), initializedBytes);
+    }
+    for (const auto& segment : parsed.Segments) {
+        if (!loadable(segment)) continue;
+        const auto begin = segment.Address & ~(PageSize - 1);
+        machine.Protect(address(begin), rounded(segment.Address + segment.MemorySize) - begin, permissions(segment.Flags));
+    }
+    for (const auto& segment : data.Relro) machine.Protect(address(segment.Address), segment.MemorySize, Permission::Read);
+    SceLoadedImage image{path, address(parsed.Entry), loadBias, 0, 0, parsed.Imports, parsed.NeededModules, parsed.ProcParam, std::move(tls)};
+    if (image.ProcParam) image.ProcParam->Address = address(image.ProcParam->Address);
+    return image;
+}
+
+void SetupSceEntry(Machine& machine, SceLoadedImage& image, const std::vector<std::string>& arguments,
+                   std::uint64_t exitGate) {
+    if (image.StackPointer) fail("SCE entry stack is already configured");
+    machine.CheckAccess(exitGate, 1, Permission::Execute);
+    std::uint64_t required = 8 * (arguments.size() + 4) + 15;
+    for (const auto& argument : arguments) {
+        if (argument.find('\0') != std::string::npos) fail("entry arguments contain embedded NUL");
+        if (argument.size() >= StackSize || required > StackSize - argument.size() - 1) fail("entry arguments exceed stack size");
+        required += argument.size() + 1;
+    }
+    if (required > StackSize) fail("entry arguments exceed stack size");
+    machine.Map(StackTop - StackSize, StackSize, Permission::Read | Permission::Write);
+    auto cursor = StackTop;
+    std::vector<std::uint64_t> pointers;
+    for (const auto& argument : arguments) {
+        cursor -= argument.size() + 1;
+        machine.Write(cursor, std::as_bytes(std::span(argument.c_str(), argument.size() + 1)));
+        pointers.push_back(cursor);
+    }
+    cursor = ((cursor - 8 * (pointers.size() + 3) - 8) & ~15ull) + 8;
+    image.ArgumentBlock = cursor;
+    writeWord(machine, cursor, pointers.size());
+    for (std::size_t index = 0; index < pointers.size(); ++index) writeWord(machine, cursor + 8 * (index + 1), pointers[index]);
+    writeWord(machine, cursor + 8 * (pointers.size() + 1), 0);
+    writeWord(machine, cursor + 8 * (pointers.size() + 2), 0);
+    image.StackPointer = cursor;
+    machine.Set(Register::Rdi, image.ArgumentBlock);
+    machine.Set(Register::Rsi, exitGate);
+    machine.Set(Register::Rsp, image.StackPointer);
+    machine.Set(Register::Rdx, 0);
+    machine.Set(Register::Rflags, 2);
+}
+
+}

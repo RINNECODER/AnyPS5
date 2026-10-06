@@ -113,6 +113,16 @@ struct Machine::Impl {
         }
         if (offset == size) return;
         const auto opcode = bytes[offset];
+        if (opcode == 0xc4 || opcode == 0xc5 || opcode == 0x62) {
+            std::ostringstream message;
+            message << "Unsupported guest VEX/EVEX instruction at 0x" << std::hex << address;
+            throw std::runtime_error(message.str());
+        }
+        if (opcode == 0x8f && offset + 1 < size && (bytes[offset + 1] & 0x1f) >= 8) {
+            std::ostringstream message;
+            message << "Unsupported guest XOP instruction at 0x" << std::hex << address;
+            throw std::runtime_error(message.str());
+        }
         bool unsupported = opcode == 0xf4 || opcode == 0xfa || opcode == 0xfb;
         if (opcode == 0x0f && offset + 1 < size) {
             switch (bytes[offset + 1]) {
