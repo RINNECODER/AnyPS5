@@ -52,7 +52,7 @@ struct Replay {
     std::vector<std::uint32_t> commands;
     Packet packet{};
 
-    Replay(std::uint32_t wave, std::uint64_t base) : wave(wave), base(base), code(Code1D),
+    Replay(std::uint32_t wave, std::uint64_t base, std::uint32_t viewFloor = 0, bool aniso = false) : wave(wave), base(base), code(Code1D),
         buffer(GuardWords + wave * (Inputs + Results) + GuardWords, Sentinel) {
         for (auto& word : code) {
             if ((word & 0xfffff000u) == 0xe0701000u && (word & 0xfffu) >= 32u * Inputs * 4u)
@@ -69,9 +69,10 @@ struct Replay {
         std::memcpy(header.data(), &shader, sizeof(shader));
         std::array<std::uint32_t, 16> users{
             static_cast<std::uint32_t>(base + 0x20100), 0, wave * (Inputs + Results) * 4u, 0x01016fac,
-            static_cast<std::uint32_t>(TextureAddress >> 8u), (22u << 20u) | (3u << 30u), 1u << 31u,
+            static_cast<std::uint32_t>(TextureAddress >> 8u), (22u << 20u) | (3u << 30u) | (viewFloor << 8u), 1u << 31u,
             0xfacu | (2u << 16u) | (8u << 28u), 0, 2u << 4u, 0, 0,
-            0x92u, (4u * 256u) << 12u, (1u << 22u) | (2u << 26u), 0};
+            0x92u | (aniso ? 4u << 9u : 0u), (4u * 256u) << 12u,
+            (1u << 22u) | (2u << 26u) | (aniso ? 3u << 20u : 0u), 0};
         const std::array<std::uint32_t, 3> threads{wave, 1, 1};
         const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>(base >> 8u), 0};
         const std::array<std::uint32_t, 1> resources{32};
@@ -115,14 +116,23 @@ struct Replay {
     }
 };
 
+alignas(256) constexpr std::array<std::uint32_t, 41> BiasCode{
+    0x34020087, 0xe0301000, 0x80000501, 0xe0301004, 0x80000601, 0xbf8c3f70, 0xf0940f08, 0x40610c05,
+    0xe0701020, 0x80000c01, 0xe0701024, 0x80000d01, 0xe0701028, 0x80000e01, 0xe070102c, 0x80000f01,
+    0x7e0802ff, 0x00000201, 0xf0d40f08, 0x40610c04, 0xe0701030, 0x80000c01, 0xe0701034, 0x80000d01,
+    0xe0701038, 0x80000e01, 0xe070103c, 0x80000f01, 0x7e0802ff, 0x00003e3f, 0xf0d40f08, 0x40610c04,
+    0xe0701040, 0x80000c01, 0xe0701044, 0x80000d01, 0xe0701048, 0x80000e01, 0xe070104c, 0x80000f01,
+    0xbf810000,
+};
 alignas(256) constexpr std::array<std::uint32_t, 19> BiasClampCode{
     0x34020087, 0xe0301000, 0x80000501, 0xe0301004, 0x80000601, 0xe0301008, 0x80000701, 0xbf8c3f70,
     0xf0980f08, 0x40610c05, 0xe0701050, 0x80000c01, 0xe0701054, 0x80000d01, 0xe0701058, 0x80000e01,
     0xe070105c, 0x80000f01, 0xbf810000,
 };
-struct InstructionClampReplay {
+struct MinimumLodFamilies {
     static constexpr std::uint32_t Threads = 32, Words = 32;
     std::uint64_t base;
+    bool clamp;
     std::vector<std::uint32_t> code;
     std::array<std::uint32_t, GuardWords + Threads * Words + GuardWords> buffer;
     std::array<std::uint32_t, GuardWords + 2048 + GuardWords> texture;
@@ -130,7 +140,9 @@ struct InstructionClampReplay {
     std::vector<std::uint32_t> commands;
     Packet packet{};
 
-    InstructionClampReplay() : base(0x800000), code(BiasClampCode.begin(), BiasClampCode.end()) {
+    MinimumLodFamilies(std::uint64_t base = 0x800000, bool clamp = true, std::uint32_t floor = 0) :
+        base(base), clamp(clamp), code(clamp ? std::vector<std::uint32_t>(BiasClampCode.begin(), BiasClampCode.end()) :
+            std::vector<std::uint32_t>(BiasCode.begin(), BiasCode.end())) {
         texture.fill(Sentinel);
         constexpr std::array<std::uint32_t, 5> offsets{3840, 1792, 768, 256, 0};
         for (std::uint32_t mip = 0; mip < 5; ++mip)
@@ -148,7 +160,7 @@ struct InstructionClampReplay {
         std::memcpy(header.data(), &shader, sizeof(shader));
         const std::array<std::uint32_t, 16> users{
             static_cast<std::uint32_t>(base + 0x20100), 0, Threads * Words * 4, 0x01016fac,
-            static_cast<std::uint32_t>((base + 0x100) >> 8), (22u << 20) | (3u << 30), 3u | (15u << 14),
+            static_cast<std::uint32_t>((base + 0x100) >> 8), (22u << 20) | (3u << 30) | (floor << 8), 3u | (15u << 14),
             0xfacu | (4u << 16) | (9u << 28), 0, 4u << 4, 0, 0,
             0x92, (4u * 256u) << 12, (1u << 22) | (2u << 26), 0};
         const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
@@ -178,15 +190,17 @@ struct InstructionClampReplay {
         ranges.push_back({base + 0x60000, std::as_writable_bytes(std::span(&packet, 1)), false});
     }
 
-    void Run() {
+    void Run(float viewFloor = 0.0f) {
         const auto textureGolden = texture;
         auto expected = buffer;
         for (std::uint32_t lane = 0; lane < Threads; ++lane) {
-            const auto level = float(lane % 4);
-            const auto word = GuardWords + lane * Words + 20u;
-            expected[word] = std::bit_cast<std::uint32_t>(level * 16.0f);
-            expected[word + 1] = expected[word + 2] = 0;
-            expected[word + 3] = std::bit_cast<std::uint32_t>(1.0f);
+            const auto level = clamp ? std::max(viewFloor, float(lane % 4)) : viewFloor;
+            for (std::uint32_t sample = 0; sample < (clamp ? 1u : 3u); ++sample) {
+                const auto word = GuardWords + lane * Words + (clamp ? 20u : 8u + sample * 4u);
+                expected[word] = std::bit_cast<std::uint32_t>(level * 16.0f);
+                expected[word + 1] = expected[word + 2] = 0;
+                expected[word + 3] = std::bit_cast<std::uint32_t>(1.0f);
+            }
         }
         const auto originalCode = code, originalCommands = commands;
         const auto originalHeader = header;
@@ -195,13 +209,88 @@ struct InstructionClampReplay {
         AgcDriver::Submit(reinterpret_cast<const Packet*>(base + 0x60000), 0x20);
         AgcDriverWaitIdle_nid_postfix();
         for (std::size_t word = 0; word < buffer.size(); ++word)
-            Require(buffer[word] == expected[word], "Public original instruction minimum LOD word=" + std::to_string(word) +
+            Require(buffer[word] == expected[word], "Public original Bias/CL minimum LOD family=" + std::to_string(clamp) +
+                " floor=" + std::to_string(viewFloor) + " word=" + std::to_string(word) +
                 " observed=" + std::to_string(buffer[word]) + " expected=" + std::to_string(expected[word]));
         Require(texture == textureGolden, "Instruction minimum LOD changed read-only texture or mip padding");
         Require(code == originalCode && commands == originalCommands && header == originalHeader &&
             std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
             "Instruction minimum LOD changed read-only shader or PM4 bytes");
-        std::cout << "Public original instruction minimum LOD: 32 exact mip results, full inputs, padding and guards passed\n";
+        std::cout << "Public original Bias/CL minimum LOD family=" << clamp << " floor=" << viewFloor
+                  << ": 32 exact mip results, full inputs, padding and guards passed\n";
+    }
+};
+
+struct DynamicStorageMipReplay {
+    static constexpr std::uint32_t Threads = 32, TexelWords = 2048;
+    static constexpr std::uint64_t Base = 0xb00000;
+    std::array<std::uint32_t, 17> code{
+        0x4a500081, 0xd5690014, 0x0201ff28, 0x9e3779b1, 0x4a2a28ff, 0x7f4a7c15, 0x4a2c28ff, 0xfe94f82a,
+        0x4a2e28ff, 0x7ddf743f, 0x2c3c0081, 0x36400081, 0x34424081, 0x4c3e4284, 0xf02c1b08, 0x0001141e,
+        0xbf810000,
+    };
+    std::array<std::uint32_t, GuardWords + TexelWords + GuardWords> texture;
+    std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> header{};
+    std::vector<std::uint32_t> commands;
+    Packet packet{};
+
+    DynamicStorageMipReplay() {
+        texture.fill(Sentinel);
+        Shader shader{};
+        shader.file_header = 0x34333231;
+        shader.version = 0x18;
+        shader.code = reinterpret_cast<const volatile void*>(Base + 0x30000);
+        shader.user_data = reinterpret_cast<ShaderUserData*>(Base + 0x40000 + sizeof(Shader));
+        shader.header_size = static_cast<std::uint32_t>(header.size());
+        shader.shader_size = static_cast<std::uint32_t>(code.size() * 4u);
+        shader.type = 0;
+        std::memcpy(header.data(), &shader, sizeof(shader));
+        const std::array<std::uint32_t, 16> users{
+            0, 0, 0, 0,
+            static_cast<std::uint32_t>((Base + 0x100) >> 8u), (20u << 20u) | (3u << 30u),
+            7u | (7u << 14u), 0xfacu | (1u << 16u) | (9u << 28u), 0, 1u << 4u, 0, 0,
+            0, 0, 0, 0};
+        const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+        const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>((Base + 0x30000) >> 8u), 0};
+        const std::array<std::uint32_t, 1> resources{static_cast<std::uint32_t>(users.size()) << 1u};
+        RegisterPacket(commands, 0x207, threads);
+        RegisterPacket(commands, 0x20c, program);
+        RegisterPacket(commands, 0x213, resources);
+        RegisterPacket(commands, 0x240, users);
+        commands.insert(commands.end(), {0xc0031500u, 1, 1, 1, 0x8041});
+        packet = {reinterpret_cast<std::uint32_t*>(Base + 0x50000), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    }
+
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+        ranges.push_back({Base, std::as_writable_bytes(std::span(texture)), true});
+        ranges.push_back({Base + 0x30000, std::as_writable_bytes(std::span(code)), false});
+        ranges.push_back({Base + 0x40000, header, false});
+        ranges.push_back({Base + 0x50000, std::as_writable_bytes(std::span(commands)), false});
+        ranges.push_back({Base + 0x60000, std::as_writable_bytes(std::span(&packet, 1)), false});
+    }
+
+    void Run() {
+        auto expected = texture;
+        for (std::uint32_t lane = 0; lane < Threads; ++lane) {
+            const auto level = lane & 1u;
+            const auto offsetBytes = (level == 0u ? 1024u : 0u) + (4u - 2u * level) * 256u + (lane >> 1u) * 4u;
+            expected[GuardWords + offsetBytes / 4u] = (lane + 1u) * 0x9e3779b1u;
+        }
+        const auto originalCode = code;
+        const auto originalCommands = commands;
+        const auto originalHeader = header;
+        const auto originalPacket = packet;
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(Base + 0x40000));
+        AgcDriver::Submit(reinterpret_cast<const Packet*>(Base + 0x60000), 0x20);
+        AgcDriverWaitIdle_nid_postfix();
+        for (std::size_t word = 0; word < texture.size(); ++word)
+            Require(texture[word] == expected[word], "Public retained ImageStoreMipPck physical mip routing word=" +
+                std::to_string(word) + " actual=" + std::to_string(texture[word]) +
+                " expected=" + std::to_string(expected[word]));
+        Require(code == originalCode && commands == originalCommands && header == originalHeader &&
+            std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
+            "Public ImageStoreMipPck changed read-only guest shader, descriptor or PM4 bytes");
+        std::cout << "Public retained ImageStoreMipPck: 32 independent texels in two physical mips, full padding and guards passed\n";
     }
 };
 
@@ -287,7 +376,8 @@ struct DynamicImageReplay {
         ranges.push_back({Base + 0x70000u, std::as_writable_bytes(std::span(&packet, 1)), false});
     }
 
-    void Run() {
+    void Run(bool minimumLod = false) {
+        heap[GuardWords + 9u] = (22u << 20u) | (3u << 30u) | (minimumLod ? 768u << 8u : 0u);
         const auto originalTextures = textures;
         const auto originalHeap = heap, originalSrt = srt;
         const auto originalCode = code;
@@ -300,7 +390,7 @@ struct DynamicImageReplay {
             const auto originalMaterials = materials;
             output.fill(Sentinel);
             auto expected = output;
-            std::fill_n(expected.begin() + GuardWords, Threads, std::bit_cast<std::uint32_t>(key == 0 ? 80.0f : 400.0f));
+            std::fill_n(expected.begin() + GuardWords, Threads, std::bit_cast<std::uint32_t>(key == 0 ? 80.0f : minimumLod ? 432.0f : 400.0f));
             AgcDriver::Submit(reinterpret_cast<const Packet*>(Base + 0x70000u), 0x20);
             AgcDriverWaitIdle_nid_postfix();
             for (std::size_t word = 0; word < output.size(); ++word)
@@ -314,6 +404,7 @@ struct DynamicImageReplay {
                 "Public dynamic sampled image changed shader, header or PM4 bytes");
             std::cout << "Public original RDNA dynamic sampled image key=" << key
                       << ": baseMip1, baseArray" << key + 1u
+                      << ", relative floor=" << (minimumLod && key == 1 ? 2 : 0)
                       << ", all 32 lane outputs, inputs, padding and guards passed\n";
         }
     }
@@ -425,7 +516,11 @@ int main(int argc, char** argv) {
             Replay wave32(32, 0x200000), wave64(64, 0x300000);
             SamplerBankReplay samplerBank;
             DynamicImageReplay dynamicImages;
-            InstructionClampReplay instructionClamp;
+            MinimumLodFamilies instructionClamp;
+            MinimumLodFamilies biasZero(0x700000, false, 0), biasFloor(0x900000, false, 384),
+                clampFloor(0xa00000, true, 384);
+            Replay floorGrad(32, 0x500000, 384), anisoZero(32, 0xd00000, 0, true), anisoFloor(32, 0xe00000, 384, true);
+            DynamicStorageMipReplay storageMips;
             std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
                 {TextureAddress - 256, std::as_writable_bytes(std::span(texture)), false}};
             wave32.AddRanges(ranges);
@@ -433,6 +528,9 @@ int main(int argc, char** argv) {
             samplerBank.AddRanges(ranges);
             dynamicImages.AddRanges(ranges);
             instructionClamp.AddRanges(ranges);
+            for (auto* replay : {&biasZero, &biasFloor, &clampFloor}) replay->AddRanges(ranges);
+            for (auto* replay : {&floorGrad, &anisoZero, &anisoFloor}) replay->AddRanges(ranges);
+            storageMips.AddRanges(ranges);
             AgcDriver::Metal::MetalDriver::Get().Configure((__bridge void*)device, (__bridge void*)library, ranges);
             AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(wave32.base + 0x10000));
             AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(wave64.base + 0x10000));
@@ -446,6 +544,17 @@ int main(int argc, char** argv) {
             instructionClamp.Run();
             samplerBank.Run();
             dynamicImages.Run();
+            dynamicImages.Run(true);
+            storageMips.Run();
+            biasZero.Run();
+            AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(floorGrad.base + 0x10000));
+            for (const auto dx : {0.25f, 0.5f, 1.0f}) floorGrad.Run(dx, dx == 1.0f ? 32.0f : 24.0f);
+            for (auto* replay : {&anisoZero, &anisoFloor}) {
+                AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(replay->base + 0x10000));
+                for (const auto dx : {0.25f, 0.5f, 1.0f}) replay->Run(dx, replay == &anisoZero ? 0.0f : 24.0f);
+            }
+            biasFloor.Run(1.5f);
+            clampFloor.Run(1.5f);
             Require(texture == originalTexture, "Public sampler bank changed another borrowed 1D texture");
             AgcDriver::Metal::MetalDriver::Get().Shutdown();
             return 0;

@@ -171,6 +171,17 @@ void MetalShaderResources::validateDccWrite(const Graphics::GuestTextureResource
 
 std::shared_ptr<MetalTexture> MetalShaderResources::Texture(const Graphics::GuestTextureResource& descriptor,
     bool written, bool compare, bool atomic) {
+    return texture(descriptor, written, compare, atomic, false);
+}
+
+std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::GuestTextureResource& descriptor,
+    bool written, bool compare, bool atomic, bool minimumLodLowered) {
+    if (Graphics::EffectiveMinLod(descriptor) != 0 && !minimumLodLowered) {
+        throw std::invalid_argument("Metal texture minimum LOD view clamp is not supported");
+    }
+    if (minimumLodLowered && (written || atomic)) {
+        throw std::invalid_argument("Metal shader minimum LOD certificate cannot authorize native texture writes");
+    }
     written = written || atomic;
     if (written && Graphics::IsBlockCompressed(descriptor.format)) {
         throw std::invalid_argument("Metal BC compressed textures cannot be written by shaders or render passes");
@@ -205,7 +216,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::Texture(const Graphics::Gues
         for (const auto& view : imageViews) {
             if (textureKey(view.texture->Descriptor(), view.compare) == textureKey(descriptor, compare)) return view.texture;
         }
-        auto view = image.texture->CreateView(descriptor, compare);
+        auto view = image.texture->CreateView(descriptor, compare, minimumLodLowered);
         imageViews.push_back({view, compare});
         resident.push_back(view->Texture());
         return view;
@@ -242,7 +253,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::Texture(const Graphics::Gues
             throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing");
         }
     }
-    auto texture = std::make_shared<MetalTexture>(backend, descriptor, compare);
+    auto texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
     auto host = NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, bytes, written);
     const auto keys = textureKeys(descriptor, bytes);
     if (written) validateDccWrite(descriptor, bytes, keys);
@@ -314,7 +325,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
             native.buffers.push_back({buffer, 0, buffer.length});
             break;
         }
-        case DescriptorRole::GuestImages:
+        case DescriptorRole::GuestImages: {
             if (!mapping.texture || found->guestDescriptor.size() != static_cast<std::size_t>(found->count) * 8) {
                 throw std::invalid_argument("Metal draw image descriptor words are invalid");
             }
@@ -323,21 +334,46 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 (!found->imageDepthCompare.empty() && found->imageDepthCompare.size() != found->count)) {
                 throw std::invalid_argument("Metal draw image access metadata has the wrong descriptor count");
             }
+            std::uint32_t storageMipOffset = 0;
             for (std::uint32_t i = 0; i < found->count; ++i) {
-                const auto descriptor = Graphics::DecodeTextureResource(std::span(found->guestDescriptor).subspan(i * 8u, 8));
+                auto descriptor = Graphics::DecodeTextureResource(std::span(found->guestDescriptor).subspan(i * 8u, 8));
                 const bool storage = found->kind == DescriptorKind::StorageImage || found->kind == DescriptorKind::StorageTexelBuffer;
+                if (storage) {
+                    const auto words = std::span(found->guestDescriptor).subspan(i * 8u, 8);
+                    const bool sameAsPrevious = i != 0 && std::equal(words.begin(), words.end(), found->guestDescriptor.begin() + (i - 1u) * 8u);
+                    storageMipOffset = sameAsPrevious ? storageMipOffset + 1u : 0u;
+                    if (descriptor.mipCount == 0 || storageMipOffset > std::numeric_limits<std::uint32_t>::max() - descriptor.baseLevel) {
+                        throw std::invalid_argument("Metal storage descriptor array mip addressing is invalid");
+                    }
+                    const auto mip = std::min(descriptor.baseLevel + storageMipOffset, descriptor.mipCount - 1u);
+                    if (descriptor.minLod > mip * 256u) {
+                        throw std::invalid_argument("guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
+                    }
+                    descriptor.baseLevel = descriptor.lastLevel = mip;
+                }
                 const bool atomic = i < found->imageAtomic.size() && found->imageAtomic[i];
                 const bool written = (i < found->imageWritten.size() && found->imageWritten[i]) || atomic;
                 if (written && !storage) throw std::invalid_argument("Metal draw sampled image has writable metadata");
                 const bool depth = i < found->imageDepthCompare.size() && found->imageDepthCompare[i];
+                const bool minimumLodLowered = !storage && Graphics::EffectiveMinLod(descriptor) != 0 &&
+                    std::any_of(shader.minimumLodImages.begin(), shader.minimumLodImages.end(), [&](const auto& image) {
+                        return image.descriptorSet == mapping.descriptorSet && image.binding == mapping.binding && image.element == i;
+                    });
+                if (!storage && Graphics::EffectiveMinLod(descriptor) != 0 && !minimumLodLowered) {
+                    throw std::invalid_argument("Metal sampled minimum LOD view is missing complete shader lowering certification");
+                }
+                if (storage && descriptor.minLod > descriptor.baseLevel * 256u) {
+                    throw std::invalid_argument("guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
+                }
                 id<MTLTexture> view = depthLookup ? depthLookup(descriptor, storage, depth) : nil;
                 if (view == nil) {
-                    auto texture = Texture(descriptor, written, depth, atomic);
+                    auto texture = this->texture(descriptor, written, depth, atomic, minimumLodLowered);
                     view = storage ? texture->StorageView(atomic) : texture->SampledView();
                 }
                 native.textures.push_back(view);
             }
             break;
+        }
         case DescriptorRole::GuestSamplers:
             if (!mapping.sampler || found->guestDescriptor.size() != static_cast<std::size_t>(found->count) * 4) {
                 throw std::invalid_argument("Metal draw sampler descriptor words are invalid");
@@ -351,6 +387,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 native.samplers.push_back(sampler->Handle());
                 samplers.push_back(std::move(sampler));
             }
+            native.samplersMatchCapturedDescriptors = true;
             break;
         default:
             throw std::invalid_argument("Metal draw descriptor role requires an unimplemented native resource adapter");
