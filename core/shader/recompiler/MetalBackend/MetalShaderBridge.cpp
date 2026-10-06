@@ -1345,6 +1345,15 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
                 mapping.binding == compiler.get_decoration(resource.id, spv::DecorationBinding))
                 mapping.requiresByteLengths = compiler.buffer_requires_array_length(resource.id);
     }
+    for (const auto& resource : resources.storage_images) {
+        const auto& imageType = compiler.get_type(resource.type_id);
+        const auto& scalar = compiler.get_type(imageType.image.type);
+        if (scalar.basetype != spirv_cross::SPIRType::UInt || scalar.width != 32) continue;
+        for (auto& mapping : result.resources)
+            if (mapping.descriptorSet == compiler.get_decoration(resource.id, spv::DecorationDescriptorSet) &&
+                mapping.binding == compiler.get_decoration(resource.id, spv::DecorationBinding))
+                mapping.unsignedStorageImage = true;
+    }
     if (compiler.needs_buffer_size_buffer()) result.bufferSizesBuffer = target.bufferSizesBuffer;
     if (result.samplerArgumentBuffer && (result.samplerArgumentBuffer == result.pushConstantBuffer ||
         result.samplerArgumentBuffer == result.bufferSizesBuffer))

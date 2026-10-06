@@ -432,6 +432,14 @@ id<MTLTexture> MetalTexture::StorageView(bool atomic) const {
     require(!atomic || SupportsAtomic(), "Metal texture atomics require one 32-bit component");
     return atomic ? atomicView : storageView;
 }
+id<MTLTexture> MetalTexture::RawSintStorageView() const {
+    static_cast<void>(StorageView());
+    require(Graphics::ResolveTextureFormat(descriptor.format) == VK_FORMAT_R32_SINT,
+        "Metal raw signed storage view requires one signed 32-bit component");
+    require(atomicView != nil && atomicView.pixelFormat == MTLPixelFormatR32Uint,
+        "Metal raw signed storage view requires an unsigned native format view");
+    return atomicView;
+}
 bool MetalTexture::SupportsStorage() const { return !Graphics::IsBlockCompressed(descriptor.format) && !packed16(descriptor.format); }
 bool MetalTexture::SupportsAtomic() const { return atomicFormat(descriptor.format); }
 const Graphics::GuestTextureResource& MetalTexture::Descriptor() const { return descriptor; }

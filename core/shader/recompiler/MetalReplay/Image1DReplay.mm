@@ -3,6 +3,8 @@
 #include "SceShaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -218,6 +220,175 @@ struct MinimumLodFamilies {
             "Instruction minimum LOD changed read-only shader or PM4 bytes");
         std::cout << "Public original Bias/CL minimum LOD family=" << clamp << " floor=" << viewFloor
                   << ": 32 exact mip results, full inputs, padding and guards passed\n";
+    }
+};
+
+constexpr std::uint32_t ImageStorePackedThreads = 32;
+constexpr std::array<std::uint32_t, 24> ImageStorePackedCode{
+    0x4a500081, 0xd5690014, 0x0201ff28, 0x9e3779b1, 0x4a2a28ff, 0x7f4a7c15, 0x4a2c28ff, 0xfe94f82a,
+    0x4a2e28ff, 0x7ddf743f, 0x7e3c0300, 0x7e3e0280, 0xf0281f08, 0x0001141e, 0x7e3e0281, 0xf0281508,
+    0x0001141e, 0x7e3e0282, 0xf0281a08, 0x0001141e, 0x7e3e0283, 0xf0281808, 0x0001141e, 0xbf810000,
+
+};
+
+std::uint32_t ImageStorePackedData(std::uint32_t lane, std::uint32_t component) {
+    return (lane + 1u) * 0x9e3779b1u + component * 0x7f4a7c15u;
+}
+
+template<bool Packed = false>
+struct PartiallyCommittedStorageReplay {
+    static constexpr std::uint32_t Threads = ImageStorePackedThreads, PageWords = 4096;
+    static constexpr std::uint64_t Base = Packed ? 0x1200000u : 0x1100000u, Texels = Base + 16384 - 512;
+    std::array<std::uint32_t, 24> code = ImageStorePackedCode;
+    std::array<std::array<std::uint32_t, GuardWords + PageWords + GuardWords>, 2> pages;
+    std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> header{};
+    std::vector<std::uint32_t> commands;
+    Packet packet{};
+
+    PartiallyCommittedStorageReplay() {
+        for (std::uint32_t page = 0; page < pages.size(); ++page) {
+            pages[page].fill(Sentinel);
+            for (std::uint32_t word = 0; word < PageWords; ++word)
+                pages[page][GuardWords + word] = 0x81000000u + page * 0x01000000u + 37u * word;
+        }
+        Shader shader{};
+        shader.file_header = 0x34333231;
+        shader.version = 0x18;
+        shader.code = reinterpret_cast<const volatile void*>(Base + 0x30000);
+        shader.user_data = reinterpret_cast<ShaderUserData*>(Base + 0x40000 + sizeof(Shader));
+        shader.header_size = static_cast<std::uint32_t>(header.size());
+        shader.shader_size = static_cast<std::uint32_t>(code.size() * 4u);
+        shader.type = 0;
+        std::memcpy(header.data(), &shader, sizeof(shader));
+        const std::array<std::uint32_t, 16> users{
+            0, 0, 0, 0,
+            static_cast<std::uint32_t>(Texels >> 8u), ((Packed ? 69u : 20u) << 20u) | (3u << 30u),
+            7u | (127u << 14u), 0xfacu | (9u << 28u), 0, 0, 0, 0,
+            0, 0, 0, 0};
+        const auto descriptor = AgcDriver::Graphics::DecodeTextureResource(std::span(users).subspan(4, 8));
+        const auto geometry = AgcDriver::Graphics::DescribeSurface(descriptor);
+        Require(descriptor.baseAddress == Texels && descriptor.width == 32 && descriptor.height == 128 &&
+            AgcDriver::Graphics::ResolveTextureFormat(descriptor.format) == (Packed ? VK_FORMAT_R16G16B16A16_UINT : VK_FORMAT_R32_UINT) &&
+            geometry.guestBytes == 32768 && geometry.mips.size() == 1 && geometry.mips[0].pitchBytes == 256,
+            "Partial storage fixture does not describe the original linear integer extent");
+        const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+        const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>((Base + 0x30000) >> 8u), 0};
+        const std::array<std::uint32_t, 1> resources{static_cast<std::uint32_t>(users.size()) << 1u};
+        RegisterPacket(commands, 0x207, threads);
+        RegisterPacket(commands, 0x20c, program);
+        RegisterPacket(commands, 0x213, resources);
+        RegisterPacket(commands, 0x240, users);
+        commands.insert(commands.end(), {0xc0031500u, 1, 1, 1, 0x8041});
+        packet = {reinterpret_cast<std::uint32_t*>(Base + 0x50000), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    }
+
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+        ranges.push_back({Base, std::as_writable_bytes(std::span(pages[0]).subspan(GuardWords, PageWords)), true});
+        ranges.push_back({Base + 0x8000, std::as_writable_bytes(std::span(pages[1]).subspan(GuardWords, PageWords)), false});
+        ranges.push_back({Base + 0x30000, std::as_writable_bytes(std::span(code)), false});
+        ranges.push_back({Base + 0x40000, header, false});
+        ranges.push_back({Base + 0x50000, std::as_writable_bytes(std::span(commands)), false});
+        ranges.push_back({Base + 0x60000, std::as_writable_bytes(std::span(&packet, 1)), false});
+    }
+
+    void Run() {
+        auto expected = pages;
+        for (std::uint32_t lane = 0; lane < Threads; ++lane) {
+            for (std::uint32_t row = 0; row < 2; ++row) {
+                const auto word = GuardWords + PageWords - 128u + row * 64u + lane * (Packed ? 2u : 1u);
+                expected[0][word] = ImageStorePackedData(lane, 0);
+                if constexpr (Packed) expected[0][word + 1] = row == 0 ? ImageStorePackedData(lane, 1) : 0u;
+            }
+        }
+        const auto originalCode = code;
+        const auto originalCommands = commands;
+        const auto originalHeader = header;
+        const auto originalPacket = packet;
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(Base + 0x40000));
+        AgcDriver::Submit(reinterpret_cast<const Packet*>(Base + 0x60000), 0x20);
+        AgcDriverWaitIdle_nid_postfix();
+        for (std::size_t page = 0; page < pages.size(); ++page)
+            for (std::size_t word = 0; word < pages[page].size(); ++word)
+                Require(pages[page][word] == expected[page][word], "Public retained ImageStorePacked committed-only publication packed=" + std::to_string(Packed) + " page=" +
+                    std::to_string(page) + " word=" + std::to_string(word) + " actual=" +
+                    std::to_string(pages[page][word]) + " expected=" + std::to_string(expected[page][word]));
+        Require(code == originalCode && commands == originalCommands && header == originalHeader &&
+            std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
+            "Partially committed storage changed read-only shader or PM4 memory");
+        std::cout << "Public retained ImageStorePacked packed=" << Packed
+                  << ": 64 committed texels, unmapped stores, unchanged read-only page and full padding guards passed\n";
+    }
+};
+
+struct OriginalRawSignedStoreReplay {
+    static constexpr std::uint32_t Threads = ImageStorePackedThreads, TexelWords = 8192;
+    static constexpr std::uint64_t Base = 0x1300000u;
+    std::array<std::uint32_t, 24> code = ImageStorePackedCode;
+    std::array<std::uint32_t, GuardWords + TexelWords + GuardWords> texels;
+    std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> header{};
+    std::vector<std::uint32_t> commands;
+    Packet packet{};
+
+    OriginalRawSignedStoreReplay() {
+        texels.fill(Sentinel);
+        for (std::uint32_t word = 0; word < TexelWords; ++word)
+            texels[GuardWords + word] = 0x81000000u + 37u * word;
+        Shader shader{};
+        shader.file_header = 0x34333231;
+        shader.version = 0x18;
+        shader.code = reinterpret_cast<const volatile void*>(Base + 0x30000);
+        shader.user_data = reinterpret_cast<ShaderUserData*>(Base + 0x40000 + sizeof(Shader));
+        shader.header_size = static_cast<std::uint32_t>(header.size());
+        shader.shader_size = static_cast<std::uint32_t>(code.size() * 4u);
+        shader.type = 0;
+        std::memcpy(header.data(), &shader, sizeof(shader));
+        const std::array<std::uint32_t, 16> users{
+            0, 0, 0, 0, static_cast<std::uint32_t>(Base >> 8u), (21u << 20u) | (3u << 30u),
+            7u | (127u << 14u), 0xfacu | (9u << 28u), 0, 0, 0, 0, 0, 0, 0, 0};
+        const auto descriptor = AgcDriver::Graphics::DecodeTextureResource(std::span(users).subspan(4, 8));
+        const auto geometry = AgcDriver::Graphics::DescribeSurface(descriptor);
+        Require(descriptor.baseAddress == Base && descriptor.width == 32 && descriptor.height == 128 &&
+            AgcDriver::Graphics::ResolveTextureFormat(descriptor.format) == VK_FORMAT_R32_SINT &&
+            geometry.guestBytes == 32768 && geometry.mips.size() == 1 && geometry.mips[0].pitchBytes == 256,
+            "Original signed store fixture has the wrong descriptor geometry");
+        const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+        const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>((Base + 0x30000) >> 8u), 0};
+        const std::array<std::uint32_t, 1> resources{static_cast<std::uint32_t>(users.size()) << 1u};
+        RegisterPacket(commands, 0x207, threads);
+        RegisterPacket(commands, 0x20c, program);
+        RegisterPacket(commands, 0x213, resources);
+        RegisterPacket(commands, 0x240, users);
+        commands.insert(commands.end(), {0xc0031500u, 1, 1, 1, 0x8041});
+        packet = {reinterpret_cast<std::uint32_t*>(Base + 0x50000), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    }
+
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+        ranges.push_back({Base, std::as_writable_bytes(std::span(texels).subspan(GuardWords, TexelWords)), true});
+        ranges.push_back({Base + 0x30000, std::as_writable_bytes(std::span(code)), false});
+        ranges.push_back({Base + 0x40000, header, false});
+        ranges.push_back({Base + 0x50000, std::as_writable_bytes(std::span(commands)), false});
+        ranges.push_back({Base + 0x60000, std::as_writable_bytes(std::span(&packet, 1)), false});
+    }
+
+    void Run() {
+        auto expected = texels;
+        for (std::uint32_t lane = 0; lane < Threads; ++lane)
+            for (std::uint32_t row = 0; row < 4; ++row)
+                expected[GuardWords + row * 64u + lane] = row < 2 ? ImageStorePackedData(lane, 0) : 0u;
+        const auto originalCode = code;
+        const auto originalCommands = commands;
+        const auto originalHeader = header;
+        const auto originalPacket = packet;
+        AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(Base + 0x40000));
+        AgcDriver::Submit(reinterpret_cast<const Packet*>(Base + 0x60000), 0x20);
+        AgcDriverWaitIdle_nid_postfix();
+        for (std::size_t word = 0; word < texels.size(); ++word)
+            Require(texels[word] == expected[word], "Public original signed32 packed storage word=" + std::to_string(word) +
+                " actual=" + std::to_string(texels[word]) + " expected=" + std::to_string(expected[word]));
+        Require(code == originalCode && commands == originalCommands && header == originalHeader &&
+            std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
+            "Original signed32 storage changed read-only shader or PM4 memory");
+        std::cout << "Public original signed32 packed storage: 128 texels, four original dmasks, all padding and guards passed\n";
     }
 };
 
@@ -557,6 +728,9 @@ int main(int argc, char** argv) {
                 clampFloor(0xa00000, true, 384);
             Replay floorGrad(32, 0x500000, 384), anisoZero(32, 0xd00000, 0, true), anisoFloor(32, 0xe00000, 384, true);
             DynamicStorageMipReplay storageMips;
+            OriginalRawSignedStoreReplay rawSignedStore;
+            PartiallyCommittedStorageReplay<> partialStorage;
+            PartiallyCommittedStorageReplay<true> packedPartialStorage;
             std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
                 {TextureAddress - 256, std::as_writable_bytes(std::span(texture)), false}};
             wave32.AddRanges(ranges);
@@ -568,6 +742,9 @@ int main(int argc, char** argv) {
             for (auto* replay : {&biasZero, &biasFloor, &clampFloor}) replay->AddRanges(ranges);
             for (auto* replay : {&floorGrad, &anisoZero, &anisoFloor}) replay->AddRanges(ranges);
             storageMips.AddRanges(ranges);
+            rawSignedStore.AddRanges(ranges);
+            partialStorage.AddRanges(ranges);
+            packedPartialStorage.AddRanges(ranges);
             AgcDriver::Metal::MetalDriver::Get().Configure((__bridge void*)device, (__bridge void*)library, ranges);
             AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(wave32.base + 0x10000));
             AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(wave64.base + 0x10000));
@@ -595,6 +772,9 @@ int main(int argc, char** argv) {
             nonuniformImages.Run();
             nonuniformImages.Run(true);
             Require(texture == originalTexture, "Public sampler bank changed another borrowed 1D texture");
+            partialStorage.Run();
+            packedPartialStorage.Run();
+            rawSignedStore.Run();
             AgcDriver::Metal::MetalDriver::Get().Shutdown();
             return 0;
         } catch (const std::exception& error) {
