@@ -73,9 +73,9 @@ void appendShaderRegion(std::vector<MemoryRegion>& memory, std::uint64_t address
 }
 
 SpirvTarget target(id<MTLDevice> device) {
-    static constexpr std::array<std::uint32_t, 4> capabilities{
+    static constexpr std::array<std::uint32_t, 5> capabilities{
         spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
-        spv::CapabilityMinLod};
+        spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing};
     static constexpr std::array<std::string_view, 2> extensions{
         "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     const auto maximum = device.maxThreadsPerThreadgroup;
