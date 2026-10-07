@@ -1,6 +1,7 @@
 #pragma once
 #include "KernelEvents.hpp"
 #include <cpu/GuestThreads.hpp>
+#include <cpu/SceAgcImports.hpp>
 #include <cpu/SceLifecycleImports.hpp>
 #include <cpu/SceThreadImports.hpp>
 #include <array>
@@ -32,6 +33,7 @@ struct Session {
     Cpu::SceThreadImports imports{machine,threads};
     Cpu::SceLifecycleImports lifecycle{machine};
     std::unique_ptr<Cpu::Platform::KernelEvents> queues;
+    std::unique_ptr<Cpu::SceAgcImports> graphics;
     std::unique_ptr<Cpu::SceModules> graph;
     alignas(65536) std::array<std::byte,65536> page{};
     std::uint64_t address=0;
@@ -41,7 +43,7 @@ struct Session {
     const std::thread::id owner=std::this_thread::get_id();
     std::function<void(bool)> boundary;
     Session(const char* path,unsigned mode) {
-        secondaryOutputs=mode==10;
+        secondaryOutputs=mode==10 || mode==15;
         require(std::string(Cpu::Machine::Backend()).find("Modern QEMU TCG")!=std::string::npos,
                 "Event fixture requires native Modern QEMU TCG");
         page.fill(std::byte{0xa5});
@@ -52,18 +54,28 @@ struct Session {
             const auto owner=runtime.lock(); require(bool(owner),"Event scheduler expired");
             owner->ProcessExitFromHostCall(code);
         });
-        const std::array hosts{Cpu::SceHostModule{"libkernel.prx",{"libkernel",0,1,1},{{"libkernel",0,1}}}};
+        Cpu::SceAgcBackend eventBackend;
+        eventBackend.DeleteEvent=[this](std::uint64_t handle,std::int32_t id){
+            return queues->DeleteGraphicsEvent(handle,id);
+        };
+        const std::array sourceContracts{Cpu::AgcAbiContract::DeleteEqEvent};
+        graphics=std::make_unique<Cpu::SceAgcImports>(machine,std::move(eventBackend),sourceContracts);
+        const std::array hosts{
+            Cpu::SceHostModule{"libkernel.prx",{"libkernel",0,1,1},{{"libkernel",0,1}}},
+            Cpu::SceHostModule{"libSceAgcDriver.prx",{"libSceAgcDriver",0,1,1},{{"libSceAgcDriver",0,1}}}};
         graph=std::make_unique<Cpu::SceModules>(machine,Cpu::SceModuleFile{path,Bias},
             std::span<const Cpu::SceModuleFile>{},hosts,
             [&](const auto& row,std::uint8_t type)->std::optional<Cpu::SceResolvedImport>{
                 require(type==2,"Event fixture lost genuine linked STT_FUNC");
+                if(row.ModuleName=="libSceAgcDriver")
+                    return Cpu::SceResolvedImport{graphics->Resolve(row,type,0),type};
                 if(const auto gate=queues->Resolve(row,type)) return Cpu::SceResolvedImport{*gate,type};
                 if(const auto gate=imports.Resolve(row,type)) return Cpu::SceResolvedImport{*gate,type};
                 if(const auto gate=lifecycle.Resolve(row)) return Cpu::SceResolvedImport{*gate,type};
                 return std::nullopt;
             });
         const auto& image=graph->Modules()[0].Image;
-        require(image.Imports.size()==8 && image.NeededFiles.empty() && image.Tls,
+        require(image.Imports.size()==9 && image.NeededFiles.empty() && image.Tls,
                 "Event fixture import/TLS graph differs");
         require(std::set<std::uint32_t>(image.RelocationTypes.begin(),image.RelocationTypes.end())==
                 std::set<std::uint32_t>{7,8},"Event fixture lacks genuine PLT/RELATIVE relocations");
@@ -83,14 +95,14 @@ struct Session {
         },std::chrono::milliseconds(500));
         graph->SetExecutor(threads->ModuleExecutor()); graph->InitializeDependencies();
     }
-    ~Session() { queues.reset(); if(!withdrawn)threads->Withdraw(); }
+    ~Session() { graphics.reset(); queues.reset(); if(!withdrawn)threads->Withdraw(); }
     void withdraw(){threads->Withdraw();withdrawn=true;}
     State state() const { State r{};machine.Read(address,std::as_writable_bytes(std::span(r)));return r; }
     void put(std::uint64_t p,std::uint64_t value) { machine.Write(p,std::as_bytes(std::span(&value,1))); }
     std::uint64_t get(std::uint64_t p) const { std::uint64_t r{};machine.Read(p,std::as_writable_bytes(std::span(&r,1)));return r; }
-    void finish(bool alreadyDeleted=false) {
+    void finish(bool alreadyDeleted=false,const char* progressFailure="Event guest failed its fixed progress ceiling") {
         require(graph->RunMain(1000000,10000)==Cpu::StopReason::Exit && machine.ExitCode()==0,
-                "Event guest failed its fixed progress ceiling");
+                progressFailure);
         const auto r=state();
         require(r[0]==0x455155455545574bULL && r[16]==0 && r[37]==(alreadyDeleted?0x80020009ULL:0) && r[38]==0x80020009 &&
                 r[39]==0x80020009 && r[40]==0 && r[41]!=r[2] && r[42]==0,

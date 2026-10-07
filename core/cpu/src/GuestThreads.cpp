@@ -294,6 +294,29 @@ struct GuestThreads::Impl {
         cancel(StopReason::Requested);
         return true;
     }
+    bool retractWake(std::uint64_t domain, GuestThreadHandle id, std::uint64_t key) {
+        checkIdleOwner();
+        const auto found = records.find(id);
+        if (found == records.end()) return false;
+        auto& record = *found->second;
+        if ((record.state != State::Runnable && record.state != State::Finishing) ||
+            !record.pending || record.pending->kind != Action::Wait ||
+            !record.pending->awakened || record.pending->args[0] != domain ||
+            record.pending->args[1] != key) return false;
+        const auto queued = std::find(runnable.begin(), runnable.end(), id);
+        if (queued == runnable.end()) fail("queued guest wait lacks its runnable continuation");
+        runnable.erase(queued);
+        // Provider reservations can disappear without invalidating the live
+        // queue wait. Retain its original token, saved context, TLS and key;
+        // only the deferred return is withdrawn. A finalizing thread remains
+        // finalizing when a later genuine wake makes it runnable again.
+        record.state = State::BlockedWaiting;
+        record.pending->awakened = false;
+        record.pending->args[2] = 0;
+        record.pending->ownerCompletion = {};
+        recomputePriorities();
+        return true;
+    }
     void setOwnerPump(std::uint64_t domain, std::function<bool()> pump) {
         checkIdleOwner();
         if (driving || pumping) fail("cannot change a guest owner pump during execution");
@@ -858,6 +881,10 @@ bool GuestThreads::WaitDomain::Wake(GuestThreadHandle thread, std::uint64_t key,
 bool GuestThreads::WaitDomain::Cancel(GuestThreadHandle thread, std::uint64_t key) {
     if (!state) fail("guest wait domain is empty");
     return state->lock()->cancelWait(state->id, thread, key);
+}
+bool GuestThreads::WaitDomain::RetractWake(GuestThreadHandle thread, std::uint64_t key) {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->retractWake(state->id, thread, key);
 }
 void GuestThreads::WaitDomain::SetOwnerPump(std::function<bool()> pump) {
     if (!state) fail("guest wait domain is empty");

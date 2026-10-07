@@ -4,13 +4,14 @@ typedef unsigned int u32;
 #define EXPORT __attribute__((visibility("protected")))
 extern int queue_create(u64*, const char*);
 extern int queue_delete(u64);
+extern int graphics_delete(u64, int);
 extern int queue_wait(u64, void*, int, int*, const u32*);
 extern int thread_create(u64*, const u64*, void* (*)(void*), void*, const char*);
 extern void thread_yield(void);
 extern int thread_join(u64, void**);
 extern u64 thread_self(void);
 extern __attribute__((noreturn)) void process_exit(int);
-__asm__(".type queue_create,@function\n.type queue_delete,@function\n.type queue_wait,@function\n"
+__asm__(".type queue_create,@function\n.type queue_delete,@function\n.type queue_wait,@function\n.type graphics_delete,@function\n"
         ".type thread_create,@function\n.type thread_yield,@function\n.type thread_join,@function\n"
         ".type thread_self,@function\n.type process_exit,@function\n");
 EXPORT volatile u64 KernelEventsReceipt[160];
@@ -45,9 +46,9 @@ static void* worker(void* payload) {
     volatile u64* r = KernelEventsReceipt;
     r[9] = thread_self();
     r[8] = 1;
-    if(r[1] == 10) {
+    if(r[1] == 10 || r[1] == 15) {
         r[45] = (u32)queue_wait(r[44], (void*)(r[6]+256), 1, (int*)(r[7]+256), 0);
-        r[43] = (u32)queue_delete(r[2]);
+        r[43] = r[1] == 15 ? (u32)graphics_delete(r[2], 0x20) : (u32)queue_delete(r[2]);
         r[46] = (u32)queue_delete(r[44]);
         r[8] = 2;
         return payload;
@@ -93,8 +94,8 @@ EXPORT int _start(void) {
         r[29] = (u32)queue_wait(r[2], out, 2, count, 0);
         r[30] = *(u32*)count; copy_records(76, (unsigned)r[30]);
     } else {
-        if(r[1] == 10) r[47] = (u32)queue_create((u64*)&r[44], relocated_name);
-        r[31] = (u32)thread_create(&child, r[1] == 10 ? (const u64*)&r[120] : 0,
+        if(r[1] == 10 || r[1] == 15) r[47] = (u32)queue_create((u64*)&r[44], relocated_name);
+        r[31] = (u32)thread_create(&child, (r[1] == 10 || r[1] == 15) ? (const u64*)&r[120] : 0,
                                   worker, (void*)0x5566778899aabbccULL, relocated_name);
         wait_abi(r[2], out, 2, count, 0, r);
         r[5] = 1;

@@ -77,6 +77,44 @@ void queuedDelete(const char* file) {
     for(unsigned i=16;i<80;++i)require(s.page[i]==std::byte{0xa5},"Queued deleted receipt wrote stale records");
     std::cout<<"PASS two parked guests, actual priority selection, Delete racing reserved queued wake yields EBADF/count4 without stale delivery\n";
 }
+// Successful source DeleteEqEvent withdraws a reserved subscription receipt;
+// the queue and suspended Wait remain live while unrelated guest code runs.
+void reservedSubscriptionDelete(const char* file) {
+    Session s(file,15);bool registered=false,published=false,reparked=false;
+    auto publish=s.queues->EopPublisher();
+    const auto attr=s.address+120*8,param=s.address+121*8;s.put(param,256);
+    require(s.threads->AttributeInit(attr)==0 && s.threads->AttributeSetPriority(attr,param)==0 &&
+            s.threads->AttributeSetInherit(attr,0)==0,"Subscription-delete child priority setup rejected");
+    s.boundary=[&](bool waiting){
+        const auto r=s.state();
+        if(r[2] && r[44] && !registered) {
+            require(s.queues->AddGraphicsEvent(r[2],0x20,User)==0 &&
+                    s.queues->AddGraphicsEvent(r[2],0x21,~User)==0 &&
+                    s.queues->AddGraphicsEvent(r[44],0x22,User)==0,
+                    "Reserved subscription-delete registration rejected");registered=true;
+        }
+        if(waiting && !published) {
+            require(registered && r[5]==0 && r[8]==1,"Subscription-delete guests did not both park");
+            publish(0x20);publish(0x22);published=true;
+        } else if(waiting && published && !reparked) {
+            require(r[43]==0 && r[8]==2 && r[45]==0 && r[46]==0 && r[5]==0 &&
+                    r[10]==0 && s.get(r[32])==r[33],
+                    "Reserved subscription deletion stopped unrelated progress or completed its live wait");
+            for(unsigned i=16;i<80;++i)require(s.page[i]==std::byte{0xa5},"Retracted receipt wrote stale records");
+            for(unsigned i=128;i<132;++i)require(s.page[i]==std::byte{0xa5},"Retracted receipt wrote count");
+            publish(0x20); // Removed subscription has no new receipt.
+            publish(0x21); // The original pending Wait can receive a live event.
+            reparked=true;
+        }
+    };
+    s.finish(false,"Successful reserved subscription deletion terminally cancelled live guest threads");
+    const auto r=s.state();
+    require(published && reparked && r[10]==0 && r[34]==1 && r[5]==1 && r[35]==0 &&
+            r[36]==0x5566778899aabbccULL && r[43]==0 && r[8]==2,
+            "Retracted live wait did not resume on a fresh surviving subscription");
+    record(r,64,0x21,1,~User);
+    std::cout<<"PASS reserved subscription source DeleteEqEvent keeps pending wait live, unrelated guest progresses, fresh EOP resumes without stale records\n";
+}
 void subscriptionRace(const char* file) {
     Session s(file,9);bool registered=false,published=false;auto publish=s.queues->EopPublisher();
     s.boundary=[&](bool waiting){
@@ -235,10 +273,10 @@ void admission() {
 }
 int main(int argc,char** argv) {
     try {
-        require(argc==2 || (argc==3 && std::string(argv[2])=="--queued-delete"),
-                "Usage: KernelEventsTest kernel-events.elf [--queued-delete]");
-        if(argc==3){queuedDelete(argv[1]);return 0;}
-        asynchronous(argv[1]);timeouts(argv[1]);capacity(argv[1]);deletedWait(argv[1]);queuedDelete(argv[1]);subscriptionRace(argv[1]);
+        require(argc==2 || (argc==3 && (std::string(argv[2])=="--queued-delete" || std::string(argv[2])=="--subscription-delete")),
+                "Usage: KernelEventsTest kernel-events.elf [--queued-delete|--subscription-delete]");
+        if(argc==3){if(std::string(argv[2])=="--queued-delete")queuedDelete(argv[1]);else reservedSubscriptionDelete(argv[1]);return 0;}
+        asynchronous(argv[1]);timeouts(argv[1]);capacity(argv[1]);deletedWait(argv[1]);queuedDelete(argv[1]);reservedSubscriptionDelete(argv[1]);subscriptionRace(argv[1]);
         for(unsigned mode:{3U,4U,5U,6U})cancellation(argv[1],mode);
         memoryAndIdleBound(argv[1]);
         admission();

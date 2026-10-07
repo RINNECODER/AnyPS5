@@ -52,6 +52,10 @@ public:
         // exact suspended gate has been validated on the idle owner Machine.
         bool Wake(GuestThreadHandle, std::uint64_t key,
                   std::function<std::uint32_t()> ownerCompletion);
+        // Owner-idle only: withdraw an exact queued wake before it resumes.
+        // The original suspended call remains blocked in this live domain,
+        // with no guest writes, return value, or lifecycle cancellation.
+        bool RetractWake(GuestThreadHandle, std::uint64_t key);
         // An exact live or queued wake is abandoned with terminal Requested,
         // without manufacturing a guest provider return value.
         bool Cancel(GuestThreadHandle, std::uint64_t key);

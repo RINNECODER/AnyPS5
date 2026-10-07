@@ -263,9 +263,16 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
             const auto waiting = q->waiting;
             for (const auto& w : waiting) {
                 if (w->queued) {
-                    if (std::any_of(w->reserved.begin(), w->reserved.end(), [](const auto& s) { return !s->live; }) &&
-                        state->waits->Cancel(w->thread, w->key)) return false;
-                    continue;
+                    if (std::none_of(w->reserved.begin(), w->reserved.end(), [](const auto& s) { return !s->live; }))
+                        continue;
+                    // DeleteEvent removes only its subscription. Retract the
+                    // exact not-yet-delivered wake, retain the suspended call,
+                    // then reselect live pending events or its original timeout.
+                    const bool retracted = state->waits->RetractWake(w->thread, w->key);
+                    for (auto& s : w->reserved) if (s->reservedKey == w->key) s->reservedKey = 0;
+                    w->reserved.clear();
+                    w->queued = false;
+                    if (!retracted) { state->stopped(w->thread); continue; }
                 }
                 if (!state->waits->IsWaiting(w->thread, w->key)) { state->stopped(w->thread); continue; }
                 external = true;

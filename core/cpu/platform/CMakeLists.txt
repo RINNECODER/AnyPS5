@@ -159,6 +159,13 @@ if(BUILD_TESTING)
     add_custom_target(anyps5_platform_kernel_events_fixture DEPENDS "${kernelEventsFixture}")
     add_executable(anyps5_platform_kernel_events_test tests/KernelEventsTest.cpp)
     target_link_libraries(anyps5_platform_kernel_events_test PRIVATE anyps5_platform_components)
+    if(TARGET anyps5_cpu_agc)
+        target_link_libraries(anyps5_platform_kernel_events_test PRIVATE anyps5_cpu_agc)
+    else()
+        target_sources(anyps5_platform_kernel_events_test PRIVATE ../src/SceAgcImports.cpp
+            ../../libs/prx/libSceAgc/Shader/src/ShaderUtils.cpp)
+        target_include_directories(anyps5_platform_kernel_events_test PRIVATE ../../libs)
+    endif()
     target_compile_options(anyps5_platform_kernel_events_test PRIVATE -Wall -Wextra -Wpedantic)
     add_dependencies(anyps5_platform_kernel_events_test anyps5_platform_kernel_events_fixture)
     add_test(NAME anyps5_platform_kernel_events
