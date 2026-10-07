@@ -34,6 +34,15 @@ if(BUILD_TESTING)
     get_target_property(videoUtilityLibrary anyps5_metal_utilities ANYPS5_METALLIB)
     add_test(NAME anyps5_cpu_videoout_native_qualified
         COMMAND anyps5_cpu_videoout_native_fixture "${videoUtilityLibrary}" ${videoGuestCallers})
+    add_executable(anyps5_cpu_videoout_packed_hdr_fixture "${CMAKE_CURRENT_LIST_DIR}/PackedHdrVideoOutFixture.mm")
+    add_dependencies(anyps5_cpu_videoout_packed_hdr_fixture anyps5_videoout_callers)
+    target_compile_features(anyps5_cpu_videoout_packed_hdr_fixture PRIVATE cxx_std_20)
+    target_compile_options(anyps5_cpu_videoout_packed_hdr_fixture PRIVATE -fobjc-arc -Wall -Wextra -Wpedantic)
+    target_link_libraries(anyps5_cpu_videoout_packed_hdr_fixture PRIVATE anyps5_cpu anyps5_metal_native_execution "${videoAppKit}")
+    add_test(NAME anyps5_cpu_videoout_packed_hdr
+        COMMAND anyps5_cpu_videoout_packed_hdr_fixture "${videoUtilityLibrary}" ${videoGuestCallers})
+    set_tests_properties(anyps5_cpu_videoout_packed_hdr PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
     add_executable(anyps5_cpu_videoout_admission_fixture "${CMAKE_CURRENT_LIST_DIR}/AdmissionFixture.cpp")
     add_dependencies(anyps5_cpu_videoout_admission_fixture anyps5_videoout_callers)
     target_compile_features(anyps5_cpu_videoout_admission_fixture PRIVATE cxx_std_20)

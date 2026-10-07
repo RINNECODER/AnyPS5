@@ -10,6 +10,8 @@ namespace AgcDriver {
 VkFormat DisplayTexelFormat(std::uint64_t pixelFormat);
 bool DisplayTenBit(std::uint64_t pixelFormat);
 bool DisplayRedLow(std::uint64_t pixelFormat);
+// Exact source-qualified packed BT.2100 PQ format; unknown variants stay unsupported.
+bool DisplayPqHdr(std::uint64_t pixelFormat);
 
 enum class ResidentPresent : std::uint8_t { None, Blit, Convert };
 ResidentPresent ResidentPresentPath(VkFormat storage, std::uint64_t pixelFormat, bool blitSource);

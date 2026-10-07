@@ -5,6 +5,7 @@ namespace {
 
 constexpr std::uint64_t PixelFormatUnormBit = 0x0100000000000000ull;
 constexpr std::uint64_t PixelFormatR8G8B8A8 = 0x8000000022000000ull;
+constexpr std::uint64_t PixelFormatR10G10B10A2Bt2100Pq = 0x8100070422000000ull;
 
 }
 
@@ -13,7 +14,11 @@ bool DisplayTenBit(std::uint64_t pixelFormat) {
 }
 
 bool DisplayRedLow(std::uint64_t pixelFormat) {
-    return (pixelFormat & ~PixelFormatUnormBit) == PixelFormatR8G8B8A8;
+    return DisplayPqHdr(pixelFormat) || (pixelFormat & ~PixelFormatUnormBit) == PixelFormatR8G8B8A8;
+}
+
+bool DisplayPqHdr(std::uint64_t pixelFormat) {
+    return pixelFormat == PixelFormatR10G10B10A2Bt2100Pq;
 }
 
 VkFormat DisplayTexelFormat(std::uint64_t pixelFormat) {
@@ -23,6 +28,8 @@ VkFormat DisplayTexelFormat(std::uint64_t pixelFormat) {
 }
 
 ResidentPresent ResidentPresentPath(VkFormat storage, std::uint64_t pixelFormat, bool blitSource) {
+    // The existing Vulkan resident conversion has no matching PQ output contract.
+    if (DisplayPqHdr(pixelFormat)) return ResidentPresent::None;
     const bool tenBit = DisplayTenBit(pixelFormat);
     if (!tenBit && blitSource && storage == DisplayTexelFormat(pixelFormat)) return ResidentPresent::Blit;
     switch (storage) {

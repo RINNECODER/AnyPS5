@@ -54,7 +54,7 @@ void decodeTexel(const std::byte* texel, std::byte* pixel, bool rgba, bool tenBi
 
 std::size_t DisplayBufferSize(const DisplayBuffer& buffer) {
     require(buffer.width != 0 && buffer.height != 0 && buffer.width <= 16384 && buffer.height <= 16384, "VideoOut: invalid display buffer dimensions");
-    if (baseFormat(buffer.pixelFormat) != PixelFormatB8G8R8A8 && baseFormat(buffer.pixelFormat) != PixelFormatR8G8B8A8) {
+    if (!DisplayPqHdr(buffer.pixelFormat) && baseFormat(buffer.pixelFormat) != PixelFormatB8G8R8A8 && baseFormat(buffer.pixelFormat) != PixelFormatR8G8B8A8) {
         char message[96];
         std::snprintf(message, sizeof(message), "VideoOut: unsupported display pixel format 0x%016llx", static_cast<unsigned long long>(buffer.pixelFormat));
         throw std::runtime_error(message);
@@ -63,6 +63,7 @@ std::size_t DisplayBufferSize(const DisplayBuffer& buffer) {
     require(buffer.tilingMode <= 1, "VideoOut: unsupported display tiling mode");
     require(buffer.tilingMode != 0 || buffer.pitchInPixel == 0, "VideoOut: tiled display pitch is unsupported");
     require(buffer.dccAddress == 0 || buffer.tilingMode == 0, "VideoOut: a linear display buffer cannot carry DCC metadata");
+    require(!DisplayPqHdr(buffer.pixelFormat) || buffer.dccAddress == 0, "VideoOut: packed PQ HDR DCC is unsupported");
     require(buffer.dccAddress != 0 || buffer.dccClearColor == 0, "VideoOut: a DCC clear color needs DCC metadata");
     const auto pitch = buffer.pitchInPixel == 0 ? buffer.width : buffer.pitchInPixel;
     require(pitch >= buffer.width && pitch <= 16384, "VideoOut: invalid linear display pitch");
@@ -75,6 +76,7 @@ std::size_t DisplayBufferSize(const DisplayBuffer& buffer) {
 std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::span<const std::byte> source) {
     PerformanceTimer timing("DisplayBuffer.Decode");
     require(source.size() == DisplayBufferSize(buffer), "VideoOut: invalid display buffer size");
+    require(!DisplayPqHdr(buffer.pixelFormat), "VideoOut: packed PQ HDR requires the native PQ presentation path");
     std::vector<std::byte> pixels(static_cast<std::size_t>(buffer.width) * buffer.height * 4);
     const auto blocksPerRow = (buffer.width + 127u) / 128u;
     const bool rgba = baseFormat(buffer.pixelFormat) == PixelFormatR8G8B8A8;
@@ -97,6 +99,7 @@ std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::spa
 
 std::array<std::byte, 4> DisplayBufferClearPixel(const DisplayBuffer& buffer, Graphics::DccKeys keys) {
     static_cast<void>(DisplayBufferSize(buffer));
+    require(!DisplayPqHdr(buffer.pixelFormat), "VideoOut: packed PQ HDR clear conversion is unsupported");
     require(buffer.dccAddress != 0, "VideoOut: a display buffer without DCC metadata has no fast-clear value");
     std::array<std::byte, 4> texel{};
     if (keys == Graphics::DccKeys::ClearRegister) {
@@ -115,6 +118,34 @@ std::array<std::byte, 4> DisplayBufferClearPixel(const DisplayBuffer& buffer, Gr
     std::array<std::byte, 4> pixel{};
     decodeTexel(texel.data(), pixel.data(), baseFormat(buffer.pixelFormat) == PixelFormatR8G8B8A8, (buffer.pixelFormat & PixelFormatUnormBit) != 0);
     return pixel;
+}
+
+std::vector<std::byte> DecodeDisplayBufferPqHdr(const DisplayBuffer& buffer, std::span<const std::byte> source) {
+    require(DisplayPqHdr(buffer.pixelFormat), "VideoOut: native PQ decode requires the exact qualified packed HDR format");
+    require(source.size() == DisplayBufferSize(buffer), "VideoOut: invalid display buffer size");
+    std::vector<std::byte> pixels(static_cast<std::size_t>(buffer.width) * buffer.height * 4u);
+    const auto blocksPerRow = (buffer.width + 127u) / 128u;
+    const auto pitch = buffer.pitchInPixel == 0 ? buffer.width : buffer.pitchInPixel;
+    for (std::uint32_t y = 0; y < buffer.height; ++y) {
+        for (std::uint32_t x = 0; x < buffer.width; ++x) {
+            const auto offset = buffer.tilingMode == 1 ? (static_cast<std::size_t>(y) * pitch + x) * 4u
+                : (static_cast<std::size_t>(y / 128u) * blocksPerRow + x / 128u) * 65536u + tileOffset(x, y);
+            std::uint32_t word = 0;
+            std::memcpy(&word, source.data() + offset, sizeof(word));
+            // Guest R10/G10/B10/A2 -> Metal B10/G10/R10/A2. Preserve all code bits.
+            const auto native = ((word & 0x000003ffu) << 20u) | (word & 0xc00ffc00u) | ((word >> 20u) & 0x000003ffu);
+            const auto linear = (static_cast<std::size_t>(y) * buffer.width + x) * 4u;
+            std::memcpy(pixels.data() + linear, &native, sizeof(native));
+        }
+    }
+    return pixels;
+}
+
+std::vector<std::byte> ReadDisplayBufferPqHdr(const DisplayBuffer& buffer) {
+    require(DisplayPqHdr(buffer.pixelFormat), "VideoOut: native PQ read requires the exact qualified packed HDR format");
+    std::vector<std::byte> source(DisplayBufferSize(buffer));
+    GuestMemory::Read(buffer.address, source, 65536);
+    return DecodeDisplayBufferPqHdr(buffer, source);
 }
 
 std::vector<std::byte> ReadDisplayBuffer(const DisplayBuffer& buffer) {
