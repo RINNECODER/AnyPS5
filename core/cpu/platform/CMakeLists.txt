@@ -187,6 +187,28 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_platform_kernel_condition
         COMMAND anyps5_platform_kernel_condition_test "${kernelConditionFixture}")
     set_tests_properties(anyps5_platform_kernel_condition PROPERTIES TIMEOUT 60)
+    set(kernelStaticMutexFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-static-mutex.elf")
+    add_custom_command(OUTPUT "${kernelStaticMutexFixture}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+            -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelStaticMutexGuest.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-static-mutex.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-static-mutex-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-static-mutex.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelStaticMutexFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-static-mutex-linked.elf" "${kernelStaticMutexFixture}"
+        DEPENDS fixtures/KernelStaticMutexGuest.c tests/BuildKernelStaticMutexFixture.py
+            tests/BuildKernelMutexThreadsFixture.py ../tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_static_mutex_fixture DEPENDS "${kernelStaticMutexFixture}")
+    add_executable(anyps5_platform_kernel_static_mutex_test tests/KernelStaticMutexTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_static_mutex_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_static_mutex_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_static_mutex_test anyps5_platform_kernel_static_mutex_fixture)
+    add_test(NAME anyps5_platform_kernel_static_mutex
+        COMMAND anyps5_platform_kernel_static_mutex_test "${kernelStaticMutexFixture}")
+    set_tests_properties(anyps5_platform_kernel_static_mutex PROPERTIES TIMEOUT 60)
     set(kernelEventsFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-events.elf")
     add_custom_command(OUTPUT "${kernelEventsFixture}"
         COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
