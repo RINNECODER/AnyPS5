@@ -138,6 +138,19 @@ struct Machine::Impl {
     std::shared_ptr<const void> mappingScope = std::make_shared<const MappingScope>();
     std::uint64_t mappingGeneration = 0;
     std::uint64_t lastBackingIdentity = 0;
+    struct OwnedTransactionFrame {
+        const std::thread::id owner = std::this_thread::get_id();
+        const OwnedMappingSnapshot previous;
+        const OwnedMappingSnapshot candidate;
+        std::atomic<bool> active{true};
+        std::atomic<bool> violation{false};
+        bool started = false, finished = false;
+        OwnedTransactionFrame(OwnedMappingSnapshot before, OwnedMappingSnapshot after)
+            : previous(std::move(before)), candidate(std::move(after)) {}
+    };
+    OwnedMappingTransaction ownedTransaction;
+    std::shared_ptr<OwnedTransactionFrame> activeOwnedTransaction;
+    std::shared_ptr<OwnedTransactionFrame> failedOwnedTransaction;
     std::unordered_map<std::uint64_t, std::function<void(Machine&)>> calls;
     std::vector<std::shared_ptr<SuspendedFrame>> pendingCalls;
     std::vector<std::shared_ptr<SuspendedFrame>> retiredCalls;
@@ -171,10 +184,120 @@ struct Machine::Impl {
         checkOwner();
         if (contextLifetime->running) throw std::logic_error("Guest execution context requires an idle Machine");
     }
-    void checkMappingMutation() const {
+    void checkMappingMutation(bool teardown = false) const {
         checkOwner();
+        if (activeOwnedTransaction) {
+            activeOwnedTransaction->violation.store(true);
+            throw std::logic_error("Owned guest mapping transaction forbids recursive mapping mutation");
+        }
+        if (failedOwnedTransaction && (!teardown || ownedTransaction))
+            throw std::runtime_error("Owned mapping transaction failed; graphics-drained teardown required");
         if (mappingGeneration == std::numeric_limits<std::uint64_t>::max())
             throw std::overflow_error("Guest mapping generation exhausted");
+    }
+    static bool sameOwner(const std::shared_ptr<const void>& left, const std::shared_ptr<const void>& right) {
+        return left.get() == right.get() && !left.owner_before(right) && !right.owner_before(left);
+    }
+    static bool sameView(const OwnedMappingView& left, const OwnedMappingView& right) {
+        return left.Region.Address == right.Region.Address && left.Region.Size == right.Region.Size &&
+            left.Region.Permissions == right.Region.Permissions && left.Region.Borrowed == right.Region.Borrowed &&
+            left.Bytes.data() == right.Bytes.data() && left.Bytes.size() == right.Bytes.size() &&
+            left.Allocation.data() == right.Allocation.data() && left.Allocation.size() == right.Allocation.size() &&
+            left.BackingIdentity == right.BackingIdentity && sameOwner(left.Owner, right.Owner);
+    }
+    static bool sameViews(const OwnedMappingSnapshot& left, const OwnedMappingSnapshot& right) {
+        return sameOwner(left.Scope, right.Scope) && left.Views.size() == right.Views.size() &&
+            std::equal(left.Views.begin(), left.Views.end(), right.Views.begin(), sameView);
+    }
+    OwnedMappingSnapshot ownedSnapshot(const std::vector<Range>& source, const std::vector<Backing>& allocations,
+                                       std::uint64_t generation) const {
+        OwnedMappingSnapshot result{mappingScope, generation, {}};
+        result.Views.reserve(source.size());
+        for (const auto& range : source) {
+            const auto pointer = reinterpret_cast<std::uintptr_t>(range.backing);
+            const auto backing = std::find_if(allocations.begin(), allocations.end(), [&](const auto& value) {
+                const auto begin = reinterpret_cast<std::uintptr_t>(value.pointer);
+                return value.storage && pointer >= begin && pointer - begin <= value.size &&
+                    range.size <= value.size - (pointer - begin);
+            });
+            if (backing != allocations.end())
+                result.Views.push_back({{range.address, range.size, static_cast<Permission>(range.permissions), range.borrowed},
+                    {range.backing, range.size}, {backing->pointer, backing->size}, backing->identity, backing->storage});
+        }
+        std::sort(result.Views.begin(), result.Views.end(), [](const auto& left, const auto& right) {
+            return left.Region.Address < right.Region.Address;
+        });
+        return result;
+    }
+    void transactOwned(const std::vector<Range>& candidateRanges, const std::vector<Backing>& candidateBackings,
+                       std::function<void()> action) {
+        if (!ownedTransaction) { action(); return; }
+        auto previous = ownedSnapshot(ranges, backings, mappingGeneration);
+        auto candidate = ownedSnapshot(candidateRanges, candidateBackings, mappingGeneration + 1);
+        // Runtime-managed external borrowed storage has its own transaction.
+        // A CPU generation change alone must not nest native publication.
+        if (sameViews(previous, candidate)) { action(); return; }
+        // The owned compositor cannot also retire/rebind Runtime-managed
+        // borrowed storage. Such mixed changes need a separate joint candidate.
+        for (const auto& range : ranges) {
+            const auto isOwned = std::any_of(previous.Views.begin(), previous.Views.end(), [&](const auto& view) {
+                return view.Region.Address == range.address;
+            });
+            if (isOwned) continue;
+            auto cursor = range.address;
+            const auto end = range.address + range.size;
+            while (cursor < end) {
+                const auto mapped = std::find_if(candidateRanges.begin(), candidateRanges.end(), [&](const auto& value) {
+                    return cursor >= value.address && cursor - value.address < value.size;
+                });
+                if (mapped == candidateRanges.end() || mapped->permissions != range.permissions ||
+                    mapped->borrowed != range.borrowed ||
+                    reinterpret_cast<std::uintptr_t>(mapped->backing) + (cursor - mapped->address) !=
+                        reinterpret_cast<std::uintptr_t>(range.backing) + (cursor - range.address))
+                    throw std::runtime_error("Owned mapping transaction cannot change mixed external borrowed bindings");
+                cursor = std::min(end, mapped->address + mapped->size);
+            }
+        }
+        auto frame = std::make_shared<OwnedTransactionFrame>(std::move(previous), std::move(candidate));
+        std::function<void()> commit = [frame, action = std::move(action)] {
+            if (std::this_thread::get_id() != frame->owner) {
+                frame->violation.store(true);
+                throw std::logic_error("Owned guest mapping CPU commit requires its owner thread");
+            }
+            if (!frame->active.load() || frame->started || frame->violation.load()) {
+                frame->violation.store(true);
+                throw std::logic_error("Owned guest mapping CPU commit must execute exactly once synchronously");
+            }
+            frame->started = true;
+            action();
+            frame->finished = true;
+        };
+        activeOwnedTransaction = frame;
+        try {
+            ownedTransaction(frame->previous, frame->candidate, commit);
+            if (!frame->finished || frame->violation.load())
+                throw std::logic_error("Owned guest mapping transaction did not commit exactly once synchronously");
+        } catch (...) {
+            frame->active.store(false);
+            activeOwnedTransaction.reset();
+            if (frame->started) {
+                failedOwnedTransaction = frame;
+                requested.store(true);
+                anyps5_qemu_cpu_stop(engine);
+            }
+            throw;
+        }
+        frame->active.store(false);
+        activeOwnedTransaction.reset();
+    }
+    void checkExecutionMutation() const {
+        checkOwner();
+        if (activeOwnedTransaction) {
+            activeOwnedTransaction->violation.store(true);
+            throw std::logic_error("Owned guest mapping transaction forbids recursive guest execution");
+        }
+        if (failedOwnedTransaction)
+            throw std::runtime_error("Owned mapping transaction failed; guest execution is poisoned");
     }
     void checkContext(const Context& context) const {
         checkContextIdle();
@@ -286,19 +409,24 @@ struct Machine::Impl {
         if (newBacking && lastBackingIdentity == std::numeric_limits<std::uint64_t>::max())
             throw std::overflow_error("Guest backing identity exhausted");
         ranges.reserve(ranges.size() + 1);
-        if (newBacking) {
-            backings.reserve(backings.size() + 1);
-            check(anyps5_qemu_cpu_register_backing(engine, allocation, allocationSize, &backingId), "Register modern guest backing");
-        }
-        try {
-            check(anyps5_qemu_cpu_map_alias(engine, address, backingId, offset, memory.size(), permissions), "Map modern guest backing alias");
-        } catch (...) {
-            if (newBacking && anyps5_qemu_cpu_release_backing(engine, backingId)) std::terminate();
-            throw;
-        }
-        ++mappingGeneration;
-        if (newBacking) backings.push_back({allocation, allocationSize, backingId, ++lastBackingIdentity, std::move(storage)});
-        ranges.push_back({address, memory.size(), memory.data(), permissions, borrowed});
+        auto candidateRanges = ranges;
+        candidateRanges.push_back({address, memory.size(), memory.data(), permissions, borrowed});
+        auto candidateBackings = backings;
+        if (newBacking) candidateBackings.push_back({allocation, allocationSize, 0, lastBackingIdentity + 1, std::move(storage)});
+        transactOwned(candidateRanges, candidateBackings, [&] {
+            if (newBacking)
+                check(anyps5_qemu_cpu_register_backing(engine, allocation, allocationSize, &backingId), "Register modern guest backing");
+            try {
+                check(anyps5_qemu_cpu_map_alias(engine, address, backingId, offset, memory.size(), permissions), "Map modern guest backing alias");
+            } catch (...) {
+                if (newBacking && anyps5_qemu_cpu_release_backing(engine, backingId)) std::terminate();
+                throw;
+            }
+            ++mappingGeneration;
+            if (newBacking) { candidateBackings.back().id = backingId; ++lastBackingIdentity; }
+            ranges.swap(candidateRanges);
+            backings.swap(candidateBackings);
+        });
     }
     void refresh() const {
         check(anyps5_qemu_cpu_invalidate(engine), "Invalidate modern translated guest code");
@@ -443,12 +571,14 @@ void Machine::Unmap(std::uint64_t address, std::size_t size) {
     checkRange(address, size);
     impl->checkMapped(address, size);
     auto replacement = impl->withoutRange(address, size);
-    impl->checkMappingMutation();
-    impl->check(anyps5_qemu_cpu_unmap_range(impl->engine, address, size), "Unmap modern guest memory");
-    ++impl->mappingGeneration;
-    impl->ranges.swap(replacement);
-    impl->removeCalls(address, size);
-    impl->releaseUnused();
+    impl->checkMappingMutation(true);
+    impl->transactOwned(replacement, impl->backings, [&] {
+        impl->check(anyps5_qemu_cpu_unmap_range(impl->engine, address, size), "Unmap modern guest memory");
+        ++impl->mappingGeneration;
+        impl->ranges.swap(replacement);
+        impl->removeCalls(address, size);
+        impl->releaseUnused();
+    });
 }
 void Machine::ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory, Permission permissions) {
     checkRange(address, memory.size());
@@ -480,21 +610,24 @@ void Machine::ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory
     impl->checkMappingMutation();
     if (newBacking && impl->lastBackingIdentity == std::numeric_limits<std::uint64_t>::max())
         throw std::overflow_error("Guest backing identity exhausted");
-    if (newBacking) {
-        impl->backings.reserve(impl->backings.size() + 1);
-        impl->check(anyps5_qemu_cpu_register_backing(impl->engine, memory.data(), memory.size(), &backingId), "Register modern replacement backing");
-    }
-    try {
-        impl->check(anyps5_qemu_cpu_replace_alias(impl->engine, address, backingId, offset, memory.size(), bits), "Replace modern guest backing alias");
-    } catch (...) {
-        if (newBacking && anyps5_qemu_cpu_release_backing(impl->engine, backingId)) std::terminate();
-        throw;
-    }
-    ++impl->mappingGeneration;
-    if (newBacking) impl->backings.push_back({memory.data(), memory.size(), backingId, ++impl->lastBackingIdentity, {}});
-    impl->ranges.swap(replacement);
-    impl->removeCalls(address, memory.size());
-    impl->releaseUnused();
+    auto candidateBackings = impl->backings;
+    if (newBacking) candidateBackings.push_back({memory.data(), memory.size(), 0, impl->lastBackingIdentity + 1, {}});
+    impl->transactOwned(replacement, candidateBackings, [&] {
+        if (newBacking)
+            impl->check(anyps5_qemu_cpu_register_backing(impl->engine, memory.data(), memory.size(), &backingId), "Register modern replacement backing");
+        try {
+            impl->check(anyps5_qemu_cpu_replace_alias(impl->engine, address, backingId, offset, memory.size(), bits), "Replace modern guest backing alias");
+        } catch (...) {
+            if (newBacking && anyps5_qemu_cpu_release_backing(impl->engine, backingId)) std::terminate();
+            throw;
+        }
+        ++impl->mappingGeneration;
+        if (newBacking) { candidateBackings.back().id = backingId; ++impl->lastBackingIdentity; }
+        impl->backings.swap(candidateBackings);
+        impl->ranges.swap(replacement);
+        impl->removeCalls(address, memory.size());
+        impl->releaseUnused();
+    });
 }
 void Machine::Protect(std::uint64_t address, std::size_t size, Permission permissions) {
     checkRange(address, size);
@@ -515,9 +648,11 @@ void Machine::Protect(std::uint64_t address, std::size_t size, Permission permis
             replacement.push_back({overlapEnd, static_cast<std::size_t>(rangeEnd - overlapEnd), range.backing + (overlapEnd - range.address), range.permissions, range.borrowed});
     }
     impl->checkMappingMutation();
-    impl->check(anyps5_qemu_cpu_protect_range(impl->engine, address, size, bits), "Protect modern guest memory");
-    ++impl->mappingGeneration;
-    impl->ranges.swap(replacement);
+    impl->transactOwned(replacement, impl->backings, [&] {
+        impl->check(anyps5_qemu_cpu_protect_range(impl->engine, address, size, bits), "Protect modern guest memory");
+        ++impl->mappingGeneration;
+        impl->ranges.swap(replacement);
+    });
 }
 void Machine::ProtectFragment(std::uint64_t address, std::size_t size, Permission permissions) {
     impl->checkOwner();
@@ -542,9 +677,11 @@ void Machine::ProtectFragment(std::uint64_t address, std::size_t size, Permissio
                 range.backing + (begin - range.address), bits, range.borrowed});
     }
     impl->checkMappingMutation();
-    impl->check(anyps5_qemu_cpu_protect_fragment(impl->engine, address, size, bits), "Protect modern guest data fragment");
-    ++impl->mappingGeneration;
-    impl->ranges.swap(replacement);
+    impl->transactOwned(replacement, impl->backings, [&] {
+        impl->check(anyps5_qemu_cpu_protect_fragment(impl->engine, address, size, bits), "Protect modern guest data fragment");
+        ++impl->mappingGeneration;
+        impl->ranges.swap(replacement);
+    });
 }
 std::vector<Mapping> Machine::Mappings() const {
     impl->checkOwner();
@@ -557,27 +694,36 @@ std::vector<Mapping> Machine::Mappings() const {
 }
 OwnedMappingSnapshot Machine::PinOwnedMappings() const {
     impl->checkContextIdle();
-    OwnedMappingSnapshot result{impl->mappingScope, impl->mappingGeneration, {}};
-    result.Views.reserve(impl->ranges.size());
-    for (const auto& range : impl->ranges) {
-        const auto pointer = reinterpret_cast<std::uintptr_t>(range.backing);
-        const auto backing = std::find_if(impl->backings.begin(), impl->backings.end(), [&](const auto& value) {
-            const auto begin = reinterpret_cast<std::uintptr_t>(value.pointer);
-            return value.storage && pointer >= begin && pointer - begin <= value.size &&
-                range.size <= value.size - (pointer - begin);
-        });
-        if (backing == impl->backings.end()) continue;
-        result.Views.push_back({{range.address, range.size, static_cast<Permission>(range.permissions), range.borrowed},
-            {range.backing, range.size}, {backing->pointer, backing->size}, backing->identity, backing->storage});
-    }
-    std::sort(result.Views.begin(), result.Views.end(), [](const auto& left, const auto& right) {
-        return left.Region.Address < right.Region.Address;
-    });
-    return result;
+    return impl->ownedSnapshot(impl->ranges, impl->backings, impl->mappingGeneration);
 }
 std::shared_ptr<const void> Machine::OwnedMappingScope() const {
     impl->checkOwner();
     return impl->mappingScope;
+}
+void Machine::SetOwnedMappingTransaction(OwnedMappingTransaction transaction) {
+    impl->checkOwner();
+    if (impl->activeOwnedTransaction) {
+        impl->activeOwnedTransaction->violation.store(true);
+        throw std::logic_error("Owned guest mapping transaction forbids replacing its active hook");
+    }
+    impl->checkContextIdle();
+    if (impl->failedOwnedTransaction && transaction)
+        throw std::runtime_error("Owned mapping transaction failed; only graphics-drained hook removal is allowed");
+    impl->ownedTransaction = std::move(transaction);
+}
+void Machine::ValidateOwnedMappingCandidate(const OwnedMappingSnapshot& candidate) const {
+    impl->checkOwner();
+    const auto& frame = impl->activeOwnedTransaction;
+    if (!frame || !frame->active.load() || frame->started || frame->violation.load() ||
+        candidate.Generation != frame->candidate.Generation || !Impl::sameViews(candidate, frame->candidate))
+        throw std::invalid_argument("Owned guest mapping candidate is not the exact active staged candidate");
+}
+void Machine::ValidateOwnedMappingCandidate(const OwnedMappingSnapshot& previous,
+                                           const OwnedMappingSnapshot& candidate) const {
+    ValidateOwnedMappingCandidate(candidate);
+    const auto& staged = impl->activeOwnedTransaction->previous;
+    if (previous.Generation != staged.Generation || !Impl::sameViews(previous, staged))
+        throw std::invalid_argument("Owned guest mapping previous snapshot is not the exact active staged snapshot");
 }
 void Machine::ValidateOwnedMappings(const OwnedMappingSnapshot& snapshot) const {
     impl->checkOwner();
@@ -729,7 +875,7 @@ void Machine::AddHostCall(std::uint64_t address, std::function<void(Machine&)> h
     }
 }
 StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t instructionLimit) {
-    impl->checkOwner();
+    impl->checkExecutionMutation();
     if (impl->contextLifetime->running) throw std::logic_error("Guest execution is already running");
     if (!instructionLimit) throw std::invalid_argument("Guest execution requires a nonzero instruction limit");
     impl->retireAbandonedCalls();
@@ -747,7 +893,7 @@ StopReason Machine::Run(std::uint64_t entry, std::uint64_t until, std::uint64_t 
     return RunSlice(entry, until, instructionLimit);
 }
 StopReason Machine::RunSlice(std::uint64_t entry, std::uint64_t until, std::uint64_t instructionLimit) {
-    impl->checkOwner();
+    impl->checkExecutionMutation();
     if (impl->contextLifetime->running) throw std::logic_error("Guest execution is already running");
     if (!instructionLimit) throw std::invalid_argument("Guest execution requires a nonzero instruction limit");
     // A sticky terminal observation never dispatches or resets a guest frame.

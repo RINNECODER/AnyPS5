@@ -84,6 +84,16 @@ public:
     // host callback. Unrelated mapping generations do not invalidate selection.
     std::shared_ptr<const void> OwnedMappingScope() const;
     void ValidateOwnedMappings(const OwnedMappingSnapshot& snapshot) const;
+    using OwnedMappingTransaction = std::function<void(const OwnedMappingSnapshot&, const OwnedMappingSnapshot&,
+                                                       const std::function<void()>&)>;
+    // Install/remove on the idle owner. Remove only after graphics has drained.
+    // A transaction must commit exactly once, synchronously on that owner.
+    void SetOwnedMappingTransaction(OwnedMappingTransaction transaction);
+    // Only the exact private stage of an active, not-yet-committed transaction
+    // is accepted; public snapshot metadata alone cannot authorize a candidate.
+    void ValidateOwnedMappingCandidate(const OwnedMappingSnapshot& candidate) const;
+    void ValidateOwnedMappingCandidate(const OwnedMappingSnapshot& previous,
+                                      const OwnedMappingSnapshot& candidate) const;
     void CheckAccess(std::uint64_t address, std::size_t size, Permission permissions) const;
     void Read(std::uint64_t address, std::span<std::byte> output) const;
     void Write(std::uint64_t address, std::span<const std::byte> input);
