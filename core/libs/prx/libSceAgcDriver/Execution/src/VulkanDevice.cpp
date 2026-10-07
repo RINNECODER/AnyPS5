@@ -1903,6 +1903,9 @@ FrameDumps& Dumps() {
 }
 
 bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
+    // The Vulkan swapchain/detile path has no PQ output contract. Reject before
+    // either linear guest reads or the tiled resident/upload/SDR fallback.
+    require(!DisplayPqHdr(buffer.pixelFormat), "VideoOut: packed PQ HDR presentation requires the native Metal PQ path; Vulkan PQ output is unsupported");
     if (buffer.tilingMode == 1) {
         const auto pixels = ReadDisplayBuffer(buffer);
         return present(buffer.width, buffer.height, true, pixels);
