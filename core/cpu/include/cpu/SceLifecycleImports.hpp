@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cpu/Cpu.hpp>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -15,6 +16,7 @@ public:
     SceLifecycleImports(const SceLifecycleImports&) = delete;
     SceLifecycleImports& operator=(const SceLifecycleImports&) = delete;
     std::optional<std::uint64_t> Resolve(const SceImport& import);
+    void SetProcessExitHandler(std::function<void(int)> handler);
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;

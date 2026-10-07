@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <utility>
 
 namespace Cpu {
 
@@ -13,6 +14,7 @@ struct SceLifecycleImports::Impl {
     Machine& machine;
     const std::uint64_t base;
     std::map<Key, std::uint64_t> gates;
+    std::function<void(int)> processExit;
 
     Impl(Machine& guest, std::uint64_t address) : machine(guest), base(address) {
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
@@ -28,6 +30,7 @@ struct SceLifecycleImports::Impl {
 SceLifecycleImports::SceLifecycleImports(Machine& machine, std::uint64_t gateBase)
     : impl(std::make_shared<Impl>(machine, gateBase)) {}
 SceLifecycleImports::~SceLifecycleImports() = default;
+void SceLifecycleImports::SetProcessExitHandler(std::function<void(int)> handler) { impl->processExit = std::move(handler); }
 
 std::optional<std::uint64_t> SceLifecycleImports::Resolve(const SceImport& import) {
     if (import.Nid != "6Z83sYWFlA8") return std::nullopt;
@@ -45,7 +48,10 @@ std::optional<std::uint64_t> SceLifecycleImports::Resolve(const SceImport& impor
     impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl)](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("SCE lifecycle import runtime has expired");
-        guest.Exit(static_cast<int>(guest.Get(Register::Rdi) & 255));
+        const auto code = static_cast<int>(guest.Get(Register::Rdi) & 255);
+        const auto handler = context->processExit;
+        if (handler) handler(code);
+        else guest.Exit(code);
     });
     impl->gates.emplace(key, gate);
     return gate;

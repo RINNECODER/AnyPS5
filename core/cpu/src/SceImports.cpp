@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace Cpu {
@@ -16,6 +17,10 @@ namespace {
 constexpr std::size_t MaximumTransfer = 16 * 1024 * 1024;
 constexpr std::size_t MaximumString = 1024 * 1024;
 enum class Service { Copy, Move, Set, Length, Compare, Exit };
+
+struct ProcessExitState {
+    std::function<void(int)> handler;
+};
 
 std::vector<char> guestString(Machine& machine, std::uint64_t address) {
     std::vector<char> result;
@@ -33,11 +38,13 @@ std::vector<char> guestString(Machine& machine, std::uint64_t address) {
     throw std::runtime_error("SCE libc string exceeds the supported 1 MiB bound or has no terminator");
 }
 
-void invoke(Machine& machine, Service service) {
+void invoke(Machine& machine, Service service, const std::function<void(int)>& processExit = {}) {
     const auto first = machine.Get(Register::Rdi);
     const auto second = machine.Get(Register::Rsi);
     if (service == Service::Exit) {
-        machine.Exit(static_cast<int>(first & 255));
+        const auto code = static_cast<int>(first & 255);
+        if (processExit) processExit(code);
+        else machine.Exit(code);
         return;
     }
     if (service == Service::Length || service == Service::Compare) {
@@ -83,6 +90,7 @@ struct SceImports::Impl {
     std::size_t nextSlot = 1;
     std::map<std::string, Service> services;
     std::map<Key, std::uint64_t> gates;
+    std::shared_ptr<ProcessExitState> processExit = std::make_shared<ProcessExitState>();
 
     Impl(Machine& value, std::uint64_t address) : machine(value), base(address), exitGate(address) {
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
@@ -116,7 +124,14 @@ struct SceImports::Impl {
         const auto operation = service->second;
         const std::array ret{std::byte{0xc3}};
         machine.Write(gate, ret);
-        machine.AddHostCall(gate, [operation](Machine& cpu) { invoke(cpu, operation); });
+        if (operation == Service::Exit) {
+            machine.AddHostCall(gate, [state = std::weak_ptr<ProcessExitState>(processExit)](Machine& cpu) {
+                const auto context = state.lock();
+                if (!context) throw std::runtime_error("SCE libc process exit import runtime has expired");
+                const auto handler = context->handler;
+                invoke(cpu, Service::Exit, handler);
+            });
+        } else machine.AddHostCall(gate, [operation](Machine& cpu) { invoke(cpu, operation); });
         gates.emplace(key, gate);
         ++nextSlot;
         return gate;
@@ -127,5 +142,6 @@ SceImports::SceImports(Machine& machine, std::uint64_t gateBase) : impl(std::mak
 SceImports::~SceImports() = default;
 std::uint64_t SceImports::Resolve(const SceImport& import) { return impl->resolve(import); }
 std::uint64_t SceImports::ExitGate() const { return impl->exitGate; }
+void SceImports::SetProcessExitHandler(std::function<void(int)> handler) { impl->processExit->handler = std::move(handler); }
 
 }

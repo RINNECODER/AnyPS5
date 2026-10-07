@@ -7,6 +7,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <utility>
 
 namespace Cpu {
 namespace {
@@ -72,6 +73,18 @@ void validateCrt(const SceImageData& data, const std::optional<SceCrtCertificate
 }
 }
 
+GuestPhaseBudget::GuestPhaseBudget(std::uint64_t instructionLimit) : remaining_(instructionLimit) {
+    if (!instructionLimit) throw std::invalid_argument("Guest execution phase requires a nonzero instruction budget");
+}
+std::uint64_t GuestPhaseBudget::Remaining() const noexcept { return remaining_; }
+std::uint64_t GuestPhaseBudget::Consumed() const noexcept { return consumed_; }
+void GuestPhaseBudget::Charge(std::uint64_t instructions) {
+    if (instructions > remaining_ || instructions > UINT64_MAX - consumed_)
+        throw std::runtime_error("Guest execution phase exceeded its instruction budget");
+    remaining_ -= instructions;
+    consumed_ += instructions;
+}
+
 struct SceModules::Impl {
     Machine& machine;
     std::vector<SceModuleRecord> modules;
@@ -79,12 +92,20 @@ struct SceModules::Impl {
     std::vector<std::set<std::size_t>> edges;
     std::vector<std::size_t> order;
     std::shared_ptr<SceTls> tls;
+    struct OwnedTlsTemplate {
+        std::uint64_t moduleId;
+        std::vector<std::byte> initialBytes;
+        std::uint64_t memorySize;
+        std::uint64_t alignment;
+    };
+    std::vector<OwnedTlsTemplate> threadTlsTemplates;
     SceLoadedImage main;
     enum class Phase { Loaded, Initializing, Initialized, Finalizing, Finalized, Failed };
     Phase phase = Phase::Loaded;
     bool mainStarted = false;
     bool mainRunning = false;
     bool terminationRequested = false;
+    std::optional<SceModuleExecutor> executor;
 
     Impl(Machine& guest, const SceModuleFile& executable, std::span<const SceModuleFile> dependencies,
          std::span<const SceHostModule> hostModules, const SceModuleResolver& resolver) : machine(guest), hosts(hostModules.begin(), hostModules.end()) {
@@ -220,10 +241,15 @@ struct SceModules::Impl {
             }, tls.get()));
         for (const auto& module : modules) MapSceImage(machine, module.Image, module.LoadBias);
         for (const auto& moduleWrites : writes) ApplySceRelocations(machine, moduleWrites);
-        for (const auto& module : modules) if (module.TlsModuleId && module.Image.Tls->FileSize) {
-            std::vector<std::byte> bytes(module.Image.Tls->FileSize);
-            machine.Read(SceAddress(module.LoadBias, module.Image.Tls->Address), bytes);
-            machine.Write(tls->TlsBase(module.TlsModuleId), bytes);
+        threadTlsTemplates.reserve(templates.size());
+        for (const auto& module : modules) if (module.TlsModuleId) {
+            const auto& descriptor = *module.Image.Tls;
+            std::vector<std::byte> bytes(descriptor.FileSize);
+            if (!bytes.empty()) {
+                machine.Read(SceAddress(module.LoadBias, descriptor.Address), bytes);
+                machine.Write(tls->TlsBase(module.TlsModuleId), bytes);
+            }
+            threadTlsTemplates.push_back({module.TlsModuleId, std::move(bytes), descriptor.MemorySize, descriptor.Alignment});
         }
         for (const auto& module : modules) ProtectSceImage(machine, module.Image, module.LoadBias);
         const auto& image = modules.front();
@@ -236,6 +262,61 @@ struct SceModules::Impl {
         machine.Map(ReturnGate, bytes.size(), Permission::Read | Permission::Write);
         machine.Write(ReturnGate, bytes);
         machine.Protect(ReturnGate, bytes.size(), Permission::Read | Permission::Execute);
+    }
+
+    std::shared_ptr<SceTls> createThreadTls(std::uint64_t allocationBase) const {
+        if (phase == Phase::Failed || phase == Phase::Finalizing || phase == Phase::Finalized)
+            fail("thread TLS creation requires an active module graph");
+        if (threadTlsTemplates.empty()) return {};
+        std::vector<SceTlsModuleTemplate> templates;
+        templates.reserve(threadTlsTemplates.size());
+        for (const auto& source : threadTlsTemplates)
+            templates.push_back({source.moduleId, source.initialBytes, source.memorySize, source.alignment});
+        return std::make_shared<SceTls>(machine, templates, allocationBase, SceTlsActivation::Deferred);
+    }
+
+    Mapping initialStack() const {
+        if (!main.StackPointer) fail("initial guest stack is not configured");
+        for (const auto& mapping : machine.Mappings()) {
+            const auto required = static_cast<unsigned>(Permission::Read | Permission::Write);
+            if (mapping.Size && main.StackPointer >= mapping.Address &&
+                main.StackPointer - mapping.Address < mapping.Size &&
+                (static_cast<unsigned>(mapping.Permissions) & required) == required)
+                return mapping;
+        }
+        fail("configured initial guest stack has no readable writable mapping");
+    }
+
+    void setExecutor(SceModuleExecutor value) {
+        if (executor || phase != Phase::Loaded || mainStarted)
+            fail("guest executor may be installed only once before dependency initialization");
+        if (value.Owner != &machine || !value.InitialThread || !value.Invoke || !value.RunEntry ||
+            !value.PauseTerminationFromHostCall || !value.PendingControl || !value.CompleteControl)
+            fail("guest executor requires the owner machine, adopted initial identity, and all execution hooks");
+        initialStack();
+        if (machine.Get(Register::Rsp) != main.StackPointer ||
+            machine.Get(Register::FsBase) != (tls ? tls->FsBase() : 0))
+            fail("guest executor requires the configured initial stack and primary TLS to be active");
+        const auto control = value.PendingControl();
+        if (control.Kind != GuestEntryControlKind::None || control.ExitCode)
+            fail("guest executor has pending entry control before initialization");
+        executor = std::move(value);
+    }
+
+    void invokeWithExecutor(GuestModuleCallKind kind, std::uint64_t entry, std::uint64_t args,
+                            std::uint64_t argp, std::uint64_t param, GuestPhaseBudget& budget) {
+        if (!budget.Remaining()) fail("module initializer/finalizer exhausted its phase instruction budget");
+        const auto consumed = budget.Consumed();
+        const auto result = executor->Invoke({kind, entry, ReturnGate, {args, argp, param}}, budget);
+        if (result.Reason == StopReason::Exit) fail("module initializer/finalizer exited the guest instead of returning");
+        if (result.Reason == StopReason::Requested) fail("module initializer/finalizer execution was interrupted");
+        if (result.Reason == StopReason::InstructionLimit) fail("module initializer/finalizer exceeded its phase instruction budget");
+        if (result.Reason != StopReason::Address || !result.ReturnValue)
+            fail("module initializer/finalizer executor did not complete an actual guest return");
+        if (budget.Consumed() == consumed)
+            fail("module initializer/finalizer executor returned without charging guest execution");
+        const auto status = static_cast<std::uint32_t>(*result.ReturnValue);
+        if (status != 0) fail("module initializer/finalizer returned a failure status " + std::to_string(status));
     }
 
     void invoke(std::uint64_t entry, std::uint64_t args, std::uint64_t argp, std::uint64_t param, std::uint64_t budget) {
@@ -269,13 +350,37 @@ struct SceModules::Impl {
         if (!main.StackPointer || !budget) fail("dependency initialization requires configured main entry arguments and a nonzero budget");
         phase = Phase::Initializing;
         try {
-            for (const auto index : order) if (index != 0 && modules[index].Init) invoke(modules[index].Init, args, argp, param, budget);
+            if (executor) {
+                GuestPhaseBudget phaseBudget(budget);
+                for (const auto index : order)
+                    if (index != 0 && modules[index].Init)
+                        invokeWithExecutor(GuestModuleCallKind::Initialize, modules[index].Init, args, argp, param, phaseBudget);
+            } else {
+                for (const auto index : order)
+                    if (index != 0 && modules[index].Init) invoke(modules[index].Init, args, argp, param, budget);
+            }
             phase = Phase::Initialized;
+        } catch (...) { phase = Phase::Failed; throw; }
+    }
+
+    void finalizeWithExecutor(std::uint64_t args, std::uint64_t argp, std::uint64_t param, GuestPhaseBudget& budget) {
+        if (phase != Phase::Initialized) fail("dependency finalization requires successful initialization");
+        phase = Phase::Finalizing;
+        try {
+            for (auto cursor = order.rbegin(); cursor != order.rend(); ++cursor)
+                if (*cursor != 0 && modules[*cursor].Fini)
+                    invokeWithExecutor(GuestModuleCallKind::Finalize, modules[*cursor].Fini, args, argp, param, budget);
+            phase = Phase::Finalized;
         } catch (...) { phase = Phase::Failed; throw; }
     }
 
     void finalize(std::uint64_t args, std::uint64_t argp, std::uint64_t param, std::uint64_t budget) {
         if (phase != Phase::Initialized || !budget) fail("dependency finalization requires successful initialization and a nonzero budget");
+        if (executor) {
+            GuestPhaseBudget phaseBudget(budget);
+            finalizeWithExecutor(args, argp, param, phaseBudget);
+            return;
+        }
         phase = Phase::Finalizing;
         try {
             for (auto cursor = order.rbegin(); cursor != order.rend(); ++cursor)
@@ -287,8 +392,66 @@ struct SceModules::Impl {
     void requestTermination() {
         if (!mainRunning || phase != Phase::Initialized || terminationRequested)
             fail("entry termination callback requires an active initialized main image and may execute only once");
-        terminationRequested = true;
-        machine.RequestStop();
+        if (executor) {
+            executor->PauseTerminationFromHostCall();
+            terminationRequested = true;
+        } else {
+            terminationRequested = true;
+            machine.RequestStop();
+        }
+    }
+
+    StopReason runMainWithExecutor(std::uint64_t entryBudget, std::uint64_t finalizerBudget) {
+        GuestPhaseBudget entryPhase(entryBudget);
+        GuestPhaseBudget finalizerPhase(finalizerBudget);
+        for (;;) {
+            const auto reason = executor->RunEntry(entryPhase);
+            if (reason != StopReason::Paused) {
+                if (reason == StopReason::Requested || reason == StopReason::InstructionLimit) {
+                    // Cancellation or exhaustion never completes a paused call
+                    // or publishes process success. Withdraw retires any token.
+                    phase = Phase::Failed;
+                    return reason;
+                }
+                const auto control = executor->PendingControl();
+                if (control.Kind != GuestEntryControlKind::None || control.ExitCode || terminationRequested)
+                    fail("guest executor returned without its pending entry-control pause");
+                if (reason == StopReason::Exit) {
+                    if (phase != Phase::Finalized)
+                        fail("guest executor exited before dependency finalization control");
+                } else {
+                    phase = Phase::Failed;
+                    fail("guest executor returned an unsupported entry stop reason");
+                }
+                return reason;
+            }
+            const auto control = executor->PendingControl();
+            if (control.Kind == GuestEntryControlKind::TerminationCallback) {
+                if (control.ExitCode || !terminationRequested || machine.Get(Register::Rip) != TerminationGate)
+                    fail("entry termination callback did not pause at its exact guest gate");
+            } else if (control.Kind == GuestEntryControlKind::ProcessExit) {
+                if (!control.ExitCode || terminationRequested)
+                    fail("process exit control requires an exit code and a distinct entry pause");
+            } else fail("guest executor paused without supported entry control");
+            if (phase == Phase::Initialized) finalizeWithExecutor(0, 0, 0, finalizerPhase);
+            else if (phase != Phase::Finalized) fail("entry control requires an initialized or finalized module graph");
+            executor->CompleteControl();
+            const auto retained = executor->PendingControl();
+            if (retained.Kind != GuestEntryControlKind::None || retained.ExitCode)
+                fail("guest executor did not consume its completed entry control");
+            if (control.Kind == GuestEntryControlKind::ProcessExit) {
+                // The runtime commits Machine::Exit only after successful fini.
+                // Its terminal observation must charge zero and preserve the
+                // original entry budget, even when that budget is exhausted.
+                const auto consumed = entryPhase.Consumed();
+                if (executor->RunEntry(entryPhase) != StopReason::Exit ||
+                    entryPhase.Consumed() != consumed || machine.ExitCode() != *control.ExitCode)
+                    fail("guest executor did not commit the exact process exit after finalization");
+                return StopReason::Exit;
+            }
+            terminationRequested = false;
+            if (!entryPhase.Remaining()) { phase = Phase::Failed; return StopReason::InstructionLimit; }
+        }
     }
 
     StopReason runMain(std::uint64_t entryBudget, std::uint64_t finalizerBudget) {
@@ -297,6 +460,7 @@ struct SceModules::Impl {
         mainStarted = mainRunning = true;
         struct Reset { bool& running; ~Reset() { running = false; } } reset{mainRunning};
         try {
+            if (executor) return runMainWithExecutor(entryBudget, finalizerBudget);
             auto reason = machine.Run(main.Entry, 0, entryBudget);
             const auto consumed = machine.LastRunInstructions();
             if (consumed > entryBudget) fail("main execution exceeded its entry instruction budget");
@@ -343,6 +507,18 @@ SceModules::~SceModules() = default;
 SceLoadedImage& SceModules::Main() { return impl->main; }
 std::span<const SceModuleRecord> SceModules::Modules() const { return impl->modules; }
 std::shared_ptr<SceTls> SceModules::Tls() const { return impl->tls; }
+std::shared_ptr<SceTls> SceModules::CreateThreadTls(std::uint64_t allocationBase) const {
+    return impl->createThreadTls(allocationBase);
+}
+SceThreadTlsFactory SceModules::ThreadTlsFactory() const {
+    return [state = std::weak_ptr<Impl>(impl)](std::uint64_t allocationBase) {
+        const auto context = state.lock();
+        if (!context) fail("thread TLS factory graph has expired");
+        return context->createThreadTls(allocationBase);
+    };
+}
+Mapping SceModules::InitialStack() const { return impl->initialStack(); }
+void SceModules::SetExecutor(SceModuleExecutor executor) { impl->setExecutor(std::move(executor)); }
 std::uint64_t SceModules::EntryTerminationGate() const { return TerminationGate; }
 StopReason SceModules::RunMain(std::uint64_t entryBudget, std::uint64_t finalizerBudget) {
     return impl->runMain(entryBudget, finalizerBudget);

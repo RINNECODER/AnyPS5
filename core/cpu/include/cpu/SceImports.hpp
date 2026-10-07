@@ -2,6 +2,7 @@
 
 #include <cpu/Cpu.hpp>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 namespace Cpu {
@@ -16,6 +17,7 @@ public:
     SceImports& operator=(const SceImports&) = delete;
     std::uint64_t Resolve(const SceImport& import);
     std::uint64_t ExitGate() const;
+    void SetProcessExitHandler(std::function<void(int)> handler);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
