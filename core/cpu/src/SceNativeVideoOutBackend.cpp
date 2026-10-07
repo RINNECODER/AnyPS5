@@ -1,4 +1,5 @@
 #include <cpu/SceNativeVideoOutBackend.hpp>
+#include "prx/libSceVideoOut/include/NativeMetalSession.hpp"
 #include "prx/libSceVideoOut/include/VideoOutState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
@@ -440,5 +441,70 @@ SceVideoOutBackend SceNativeVideoOutBackend::GetCallbacks() const {
 std::shared_ptr<VideoOutConfig> SceNativeVideoOutBackend::GetConfig(std::int32_t handle) const { return impl->getConfig(handle); }
 void SceNativeVideoOutBackend::RequestStop() { impl->requestStop(); }
 void SceNativeVideoOutBackend::Shutdown() { impl->shutdown(); }
+
+struct SceNativeGraphicsSession::Impl {
+    std::thread::id mainThread = std::this_thread::get_id();
+    std::unique_ptr<AnyPS5::Host::NativeMetalSession> session;
+    std::unique_ptr<SceNativeVideoOutBackend> videoOut;
+    std::unique_ptr<SceVideoOutImports> imports;
+    bool closed = false;
+    std::exception_ptr shutdownFailure;
+
+    void shutdown() {
+        // Checks main-thread ownership before any gates or worker state change.
+        // Request-close keeps the real layer alive until presentation/GPU drain.
+        require(std::this_thread::get_id() == mainThread, "SCE native graphics session requires the AppKit main thread");
+        if (closed) {
+            if (shutdownFailure) std::rethrow_exception(shutdownFailure);
+            return;
+        }
+        const auto attempt = [&](auto&& operation) {
+            try { operation(); }
+            catch (...) { if (!shutdownFailure) shutdownFailure = std::current_exception(); }
+        };
+        if (session) attempt([&] { session->Window().RequestCloseMainThread(); });
+        imports.reset();
+        if (videoOut) attempt([&] { videoOut->Shutdown(); });
+        videoOut.reset();
+        if (session) attempt([&] { session->ShutdownAfterCpuStoppedMainThread(); });
+        closed = true;
+        if (shutdownFailure) std::rethrow_exception(shutdownFailure);
+    }
+};
+
+SceNativeGraphicsSession::SceNativeGraphicsSession(std::unique_ptr<Impl> state) : impl(std::move(state)) {}
+SceNativeGraphicsSession::~SceNativeGraphicsSession() {
+    try { impl->shutdown(); } catch (...) {}
+}
+
+std::unique_ptr<SceNativeGraphicsSession> SceNativeGraphicsSession::CreateMainThread(
+    Machine& machine, const AnyPS5::Host::NativeMetalSessionConfiguration& configuration,
+    const VideoOutCompletionCallbacks& completion, std::stop_token processStop,
+    std::uint64_t videoOutGateBase) {
+    auto state = std::make_unique<Impl>();
+    state->session = AnyPS5::Host::NativeMetalSession::CreateMainThread(configuration);
+    state->videoOut = std::make_unique<SceNativeVideoOutBackend>(machine,
+        state->session->Window().Presentation(configuration.window.contentWidth, configuration.window.contentHeight),
+        completion, processStop);
+    state->imports = std::make_unique<SceVideoOutImports>(machine, state->videoOut->GetCallbacks(), videoOutGateBase);
+    return std::unique_ptr<SceNativeGraphicsSession>(new SceNativeGraphicsSession(std::move(state)));
+}
+
+AnyPS5::Host::NativeHostWindow& SceNativeGraphicsSession::Window() {
+    require(!impl->closed, "SCE native graphics session is closed");
+    return impl->session->Window();
+}
+AgcDriver::Metal::MetalDriver& SceNativeGraphicsSession::Driver() {
+    require(!impl->closed, "SCE native graphics session is closed");
+    return impl->session->Driver();
+}
+std::uint64_t SceNativeGraphicsSession::ResolveVideoOut(const SceImport& import) {
+    require(!impl->closed && impl->imports != nullptr, "SCE native graphics session is closed");
+    return impl->imports->Resolve(import);
+}
+void SceNativeGraphicsSession::RequestStop() {
+    if (impl->videoOut) impl->videoOut->RequestStop();
+}
+void SceNativeGraphicsSession::ShutdownAfterCpuStoppedMainThread() { impl->shutdown(); }
 
 }

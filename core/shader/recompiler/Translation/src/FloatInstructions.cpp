@@ -161,7 +161,7 @@ bool TranslationContext::vDivFixupF16(const RdnaInstruction& inst) {
     result = IrU32(ir.Select(ir.LogicalOr(bothZero.Value(), bothInf.Value()), ir.Constant(0xfe00u), result.Value()));
     result = IrU32(ir.Select(isNan(1u).Value(), ir.BitwiseOr(bits[1].Value(), ir.Constant(0x0200u)), result.Value()));
     result = IrU32(ir.Select(isNan(2u).Value(), ir.BitwiseOr(bits[2].Value(), ir.Constant(0x0200u)), result.Value()));
-    write16Bits(inst.destination, result);
+    write16Bits(inst.destination, clampF16Bits(inst.destination, result));
     return true;
 }
 
@@ -250,7 +250,7 @@ bool TranslationContext::vLdexpF16(const RdnaInstruction& inst) {
     const IrF16 scaled(ir.Emit(IrOpcode::ConvertF16F32, IrType::F16, {&ir.Emit(IrOpcode::FPMul32, IrType::F32, {&value.Value(), &power})}));
     const IrU32 result(ir.Emit(IrOpcode::ConvertU32U16, IrType::U32, {&ir.Emit(IrOpcode::BitCastU16F16, IrType::U16, {&scaled.Value()})}));
     const IrU1 nan(ir.UGreaterThan(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffu)), ir.Constant(0x7c00u)));
-    write16Bits(inst.destination, IrU32(ir.Select(nan.Value(), ir.BitwiseOr(bits.Value(), ir.Constant(0x200u)), result.Value())));
+    write16Bits(inst.destination, clampF16Bits(inst.destination, IrU32(ir.Select(nan.Value(), ir.BitwiseOr(bits.Value(), ir.Constant(0x200u)), result.Value()))));
     return true;
 }
 
@@ -270,7 +270,7 @@ bool TranslationContext::vFrexpF16(const RdnaInstruction& inst, bool exponent) {
     const IrU32 converted(ir.Emit(IrOpcode::ConvertU32U16, IrType::U32, {&ir.Emit(IrOpcode::BitCastU16F16, IrType::U16, {&half.Value()})}));
     const IrU1 nan(ir.UGreaterThan(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffu)), ir.Constant(0x7c00u)));
     const IrU32 kept(ir.Select(nan.Value(), ir.BitwiseOr(bits.Value(), ir.Constant(0x200u)), bits.Value()));
-    write16Bits(inst.destination, IrU32(ir.Select(special.Value(), kept.Value(), converted.Value())));
+    write16Bits(inst.destination, clampF16Bits(inst.destination, IrU32(ir.Select(special.Value(), kept.Value(), converted.Value()))));
     return true;
 }
 

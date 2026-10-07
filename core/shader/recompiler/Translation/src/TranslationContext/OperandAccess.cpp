@@ -280,6 +280,16 @@ IrF32 TranslationContext::applyF16ResultModifiers(const RdnaOperand& operand, Ir
     return selectF32(positive, limited, zero);
 }
 
+IrU32 TranslationContext::clampF16Bits(const RdnaOperand& operand, IrU32 bits) {
+    if (!operand.clamp) {
+        return bits;
+    }
+    const IrU32 magnitude(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffu)));
+    const IrU1 zero(ir.LogicalOr(ir.UGreaterThan(bits.Value(), ir.Constant(0x7fffu)), ir.UGreaterThan(magnitude.Value(), ir.Constant(0x7c00u))));
+    const IrU32 limited(ir.Select(ir.UGreaterThan(magnitude.Value(), ir.Constant(0x3c00u)), ir.Constant(0x3c00u), bits.Value()));
+    return IrU32(ir.Select(zero.Value(), ir.Constant(0u), limited.Value()));
+}
+
 IrU32 TranslationContext::readScalarCode(std::uint32_t code) {
     if (code < NumScalarRegs) {
         return IrU32(ir.GetScalarReg(static_cast<ScalarReg>(code)));

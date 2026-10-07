@@ -606,6 +606,47 @@ void MetalDriver::RegisterShader(const Shader* shader) {
     impl->shaders = std::move(registry);
 }
 
+void MetalDriver::RegisterShaderWithPublication(std::uint64_t guestHeaderAddress,
+    std::span<const ReadableGuestRange> ranges, const std::function<void()>& publish,
+    const std::function<void()>& rollback) {
+    impl->CheckFailureAndStopping();
+    require(!Impl::OnWorkerThread(), "worker cannot publish a guest shader");
+    require(!ranges.empty() && static_cast<bool>(publish) && static_cast<bool>(rollback),
+        "shader publication requires readable ranges and publication/rollback callbacks");
+    for (;;) {
+        auto gpuLock = impl->LockForGuestCapture();
+        NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
+        for (const auto& range : ranges) {
+            require(range.address != 0 && range.bytes != 0, "readable guest range is null or empty");
+            require(range.bytes <= std::numeric_limits<std::uint64_t>::max() - range.address,
+                "readable guest range overflows");
+            require(NativeGuestMemory::ReadableBorrowedBytes(range.address, range.bytes) == range.bytes,
+                "readable guest range is not fully borrowed");
+        }
+        std::lock_guard lock(impl->mutex);
+        if (impl->failure) std::rethrow_exception(impl->failure);
+        if (impl->stopping) throw DriverStopped{};
+        if (impl->mappingUpdatePending) continue;
+        ReadablePublicationScope publication(impl.get());
+        try {
+            publish();
+            const auto snapshot = DriverDetail::ReadRegisteredShader(guestHeaderAddress);
+            auto registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
+            registry->insert_or_assign(snapshot->codeAddress, snapshot);
+            impl->shaders = std::move(registry);
+        } catch (...) {
+            try { rollback(); }
+            catch (...) {
+                impl->failure = std::current_exception();
+                impl->changed.notify_all();
+                throw;
+            }
+            throw;
+        }
+        return;
+    }
+}
+
 void MetalDriver::RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
     require(output != nullptr, "null video output");
     impl->CheckFailureAndStopping();

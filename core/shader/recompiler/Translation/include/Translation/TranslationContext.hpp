@@ -46,6 +46,7 @@ private:
     void writeRawU32(const RdnaOperand& operand, IrU32 value);
     IrF32 applyF32ResultModifiers(const RdnaOperand& operand, IrF32 value);
     IrF32 applyF16ResultModifiers(const RdnaOperand& operand, IrF32 value);
+    IrU32 clampF16Bits(const RdnaOperand& operand, IrU32 bits);
     void writeOperand(const RdnaOperand& operand, IrValue* value);
     IrU32 packHalf2x16(IrF32 low, IrF32 high);
     void write16Bits(const RdnaOperand& operand, IrU32 value);
@@ -254,6 +255,7 @@ private:
     bool integerDot(const RdnaInstruction& inst, std::uint32_t elementBits, bool sign, bool accumulator);
     bool vCndmaskB32(const RdnaInstruction& inst);
     bool packB16(const RdnaInstruction& inst, bool high0, bool high1);
+    bool vCvtPk16I32(const RdnaInstruction& inst, bool sign);
     void sSubvectorLoop(const RdnaInstruction& inst, bool begin);
     void sSaveexec(const RdnaInstruction& inst, IrOpcode operation, bool negateExec, bool negateSource, bool write64, bool negateResult = false, bool writeResult = false);
     void addU32(const RdnaInstruction& inst, bool vector, bool useCarryIn);
