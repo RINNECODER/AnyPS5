@@ -37,6 +37,19 @@ bool declares(const SceHostModule& host, const SceImport& import) {
             [&](const auto& library) { return library.Name == import.LibraryName && library.Version == import.LibraryVersion; });
 }
 
+bool libcInternalFunction(const SceImport& import, std::uint8_t type) {
+    // SysV Internal ABI: shadPS4 945dbc3cc3eee80ac3e053b438502ed936fa6bb2,
+    // src/core/libraries/libc_internal/{libc_internal_memory,libc_internal_str,libc_internal_io}.cpp;
+    // fpPS4 04cefd43e6fddd1ab033e7980cd356d14c964905,
+    // src/libcinternal/ps4_libscelibcinternal.pas (explicit printf/snprintf guest forwarding, strstr).
+    // Heap/C++ lifetime functions and termination functions are excluded.
+    constexpr std::array nids{"Q3VBxCXhUHs", "8zTFvBIAIN8", "eLdDw6l0-bU", "Ovb2dSJOAuE",
+                              "aesyjrHVWy4", "j4ViWNHEgww", "6sJWiWSRuqk", "hcuQgD53UxM", "viiwFMaNamA"};
+    return type == 2 && import.ModuleName == "libSceLibcInternal" && import.ModuleMajor == 1 &&
+        import.ModuleMinor == 1 && import.LibraryName == "libSceLibcInternal" && import.LibraryVersion == 1 &&
+        std::find(nids.begin(), nids.end(), import.Nid) != nids.end();
+}
+
 bool bareFilename(const std::string& filename) {
     return !filename.empty() && filename != "." && filename != ".." &&
         filename.find_first_of("/\\:\r\n") == std::string::npos;
@@ -108,7 +121,8 @@ struct SceModules::Impl {
     std::optional<SceModuleExecutor> executor;
 
     Impl(Machine& guest, const SceModuleFile& executable, std::span<const SceModuleFile> dependencies,
-         std::span<const SceHostModule> hostModules, const SceModuleResolver& resolver) : machine(guest), hosts(hostModules.begin(), hostModules.end()) {
+         std::span<const SceHostModule> hostModules, const SceModuleResolver& resolver,
+         const std::optional<SceLibcInternalProvider>& libcInternal) : machine(guest), hosts(hostModules.begin(), hostModules.end()) {
         if (dependencies.size() > 510 || hosts.size() > 510) fail("module graph exceeds the supported provider count");
         const auto add = [&](const SceModuleFile& file, bool isMain) {
             auto parsed = ParseSce(file.Path);
@@ -135,6 +149,24 @@ struct SceModules::Impl {
                 !hostFiles.insert(host.Filename).second || files.contains(host.Filename))
                 fail("invalid or ambiguous host module declaration " + host.Filename);
         }
+        std::optional<std::size_t> libcProvider;
+        if (libcInternal) {
+            const auto found = files.find(libcInternal->Filename);
+            if (!bareFilename(libcInternal->Filename) || !libcInternal->SourceSize ||
+                found == files.end() || found->second == 0)
+                fail("missing supplied libc Internal source provider");
+            const auto& image = modules[found->second].Image;
+            if (image.SourceSize != libcInternal->SourceSize || image.SourceSha256 != libcInternal->SourceSha256)
+                fail("libc Internal source identity mismatch");
+            if (std::count_if(image.ExportModules.begin(), image.ExportModules.end(), [](const auto& module) {
+                return module.Name == "libc" && module.Major == 1 && module.Minor == 1;
+            }) != 1) fail("libc Internal target module identity mismatch");
+            libcProvider = found->second;
+        }
+        const auto forwarded = [&](const SceImport& import, std::uint8_t type) {
+            return libcProvider && libcInternalFunction(import, type) &&
+                std::any_of(hosts.begin(), hosts.end(), [&](const auto& host) { return declares(host, import); });
+        };
         edges.resize(modules.size());
         for (std::size_t index = 0; index < modules.size(); ++index) {
             const auto& image = modules[index].Image;
@@ -153,6 +185,9 @@ struct SceModules::Impl {
                 if (matches != 1) fail((matches ? "ambiguous" : "missing") + std::string(" named module/version provider ") + needed.Name);
                 if (provider && *provider != index) edges[index].insert(*provider);
             }
+            for (const auto& symbol : image.Data->Symbols) if (symbol.Import &&
+                forwarded(image.Imports.at(*symbol.Import), symbol.Type) && *libcProvider != index)
+                edges[index].insert(*libcProvider);
         }
         std::vector<unsigned> visited(modules.size());
         const auto visit = [&](const auto& self, std::size_t index) -> void {
@@ -216,6 +251,34 @@ struct SceModules::Impl {
                 unsigned hostMatches = 0;
                 for (const auto& host : hosts) if (declares(host, import)) ++hostMatches;
                 if (value && hostMatches) fail("ambiguous guest/host provider for " + import.Nid);
+                if (!value && forwarded(import, symbol.Type)) {
+                    if (hostMatches != 1) fail("ambiguous libc Internal scope provider for " + import.Nid);
+                    const auto& provider = modules[*libcProvider];
+                    auto target = import;
+                    target.ModuleName = target.LibraryName = "libc";
+                    for (const auto& definition : provider.Image.Exports) {
+                        if (!sameScope(target, definition.Identity)) continue;
+                        if (definition.Type != 2 || (definition.Binding != 1 && definition.Binding != 2) ||
+                            (definition.Visibility != 0 && definition.Visibility != 3) ||
+                            !definition.Section || definition.Section >= 0xff00)
+                            fail("invalid libc Internal target function for " + import.Nid);
+                        if (value) fail("ambiguous libc Internal target export for " + import.Nid);
+                        if (symbol.Size > definition.Size) fail("libc Internal import size exceeds target storage for " + import.Nid);
+                        const auto size = std::max<std::uint64_t>(definition.Size, 1);
+                        if (std::none_of(provider.Image.Segments.begin(), provider.Image.Segments.end(), [&](const auto& segment) {
+                            return (segment.Type == 1 || segment.Type == 0x61000010) && (segment.Flags & 1) &&
+                                definition.Value >= segment.Address && definition.Value - segment.Address < segment.FileSize &&
+                                size <= segment.FileSize - (definition.Value - segment.Address);
+                        })) fail("libc Internal target has no executable file-backed storage for " + import.Nid);
+                        const auto firstPage = definition.Value & ~(PageSize - 1);
+                        const auto lastPage = (definition.Value + size - 1) & ~(PageSize - 1);
+                        if (std::any_of(provider.Image.Data->Relro.begin(), provider.Image.Data->Relro.end(), [&](const auto& relro) {
+                            return relro.MemorySize && firstPage < relro.Address + relro.MemorySize && lastPage >= relro.Address;
+                        })) fail("libc Internal target loses execute permission to RELRO for " + import.Nid);
+                        value = SceSymbolValue{SceAddress(provider.LoadBias, definition.Value), 2, definition.Size, 0, 0};
+                    }
+                    if (!value) fail("missing qualified libc Internal target export for " + import.Nid);
+                }
                 if (!value) {
                     if (hostMatches != 1) fail("unresolved typed import scope/version provider for " + import.Nid);
                     if (!resolver) fail("missing typed host resolver for " + import.Nid);
@@ -495,8 +558,9 @@ struct SceModules::Impl {
 };
 
 SceModules::SceModules(Machine& machine, const SceModuleFile& main, std::span<const SceModuleFile> dependencies,
-                     std::span<const SceHostModule> hosts, const SceModuleResolver& resolver)
-    : impl(std::make_shared<Impl>(machine, main, dependencies, hosts, resolver)) {
+                     std::span<const SceHostModule> hosts, const SceModuleResolver& resolver,
+                     const std::optional<SceLibcInternalProvider>& libcInternal)
+    : impl(std::make_shared<Impl>(machine, main, dependencies, hosts, resolver, libcInternal)) {
     machine.AddHostCall(TerminationGate, [state = std::weak_ptr<Impl>(impl)](Machine&) {
         const auto context = state.lock();
         if (!context) fail("entry termination callback graph has expired");
