@@ -4,7 +4,7 @@ The authoring gate: runtime sources request inner Ninja -j8, so merely bounding
 outer jobs still exceeds the authorized limit. The real generated launcher must
 remove that request without losing target arguments. Existing workflow tests do
 not execute an inner build launcher. CMake's configure wrapper must attach the
-finite fragments after production targets exist, including after return(), and
+finite fragments and the upstream correctness subtree exactly once after production targets exist, including after return(), and
 fail before generation if the native production target is absent. Existing
 CTest XML checks cannot catch a configure-order or activation regression.
 Both controls use the production entry points without a test-only source seam.
@@ -52,7 +52,7 @@ class NativeWorkflowContracts(unittest.TestCase):
                          'Native CMake configuration requires Apple Silicon macOS')
     def test_native_fragments_follow_production_targets_and_fail_closed(self):
         self.assertIsNotNone(shutil.which('cmake'), 'CMake required for this contract control')
-        source = self.root / 'source'
+        source = self.root / 'runtime source with spaces'
         source.mkdir()
         for fragment in ('videoout', 'flip'):
             folder = source / 'core/cpu' / fragment
@@ -60,6 +60,17 @@ class NativeWorkflowContracts(unittest.TestCase):
             (folder / 'CMakeLists.txt').write_text(
                 'if(NOT TARGET anyps5_native_module_runner)\nmessage(FATAL_ERROR "too early")\nendif()\n'
                 'add_test(NAME qualified_' + fragment + ' COMMAND "${CMAKE_COMMAND}" -E true)\n')
+        upstream = source / 'core/shader/recompiler/MetalReplay/UpstreamCorrectness'
+        upstream.mkdir(parents=True)
+        (upstream / 'CMakeLists.txt').write_text(
+            'foreach(required IN ITEMS anyps5_native_module_runner anyps5_metal_native_execution '
+            'anyps5_metal_guest_recompiler anyps5_metal_utilities)\n'
+            'if(NOT TARGET ${required})\n'
+            'message(FATAL_ERROR "upstream attached before native targets")\nendif()\nendforeach()\n'
+            'get_property(visited GLOBAL PROPERTY independent_upstream_attached)\n'
+            'if(visited)\nmessage(FATAL_ERROR "upstream attached more than once")\nendif()\n'
+            'set_property(GLOBAL PROPERTY independent_upstream_attached TRUE)\n'
+            'add_test(NAME qualified_upstream_subtree COMMAND "${CMAKE_COMMAND}" -E true)\n')
         wrapper = self.root / 'native-controls-source'
         wrapper.mkdir()
         shutil.copyfile(TOOLS / 'native_diagnostic_controls.cmake', wrapper / 'CMakeLists.txt')
@@ -67,7 +78,10 @@ class NativeWorkflowContracts(unittest.TestCase):
         for case, runner in (('enabled', native), ('missing-runner', '')):
             (source / 'CMakeLists.txt').write_text(
                 'cmake_minimum_required(VERSION 3.24)\nproject(FiniteControls LANGUAGES NONE)\n'
-                'enable_testing()\nadd_library(anyps5_cpu INTERFACE)\nadd_library(anyps5_cpu_agc INTERFACE)\n' + runner + 'return()\n')
+                'enable_testing()\nadd_library(anyps5_cpu INTERFACE)\nadd_library(anyps5_cpu_agc INTERFACE)\n'
+                'add_library(anyps5_metal_native_execution INTERFACE)\n'
+                'add_library(anyps5_metal_guest_recompiler INTERFACE)\n'
+                'add_library(anyps5_metal_utilities INTERFACE)\n' + runner + 'return()\n')
             build = self.root / case
             result = subprocess.run(['cmake', '-S', wrapper, '-B', build, '-DBUILD_TESTING=ON',
                 '-DANYPS5_CPU_NATIVE_MODULE_RUNNER=ON',
@@ -78,7 +92,8 @@ class NativeWorkflowContracts(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     inventory = json.loads(subprocess.check_output(
                         ['ctest', '--test-dir', build, '--show-only=json-v1'], text=True))
-                    self.assertEqual({t['name'] for t in inventory['tests']}, {'qualified_videoout', 'qualified_flip'})
+                    names = [test['name'] for test in inventory['tests']]
+                    self.assertCountEqual(names, ['qualified_videoout', 'qualified_flip', 'qualified_upstream_subtree'])
                 else:
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn('requires the compiled native runner', result.stdout + result.stderr)

@@ -213,7 +213,10 @@ class NativeCompiledPackaging(PackageFixture):
             'anyps5_sce_videoout_import_tests', 'anyps5_sce_native_videoout_tests',
             'anyps5_cpu_metal_test', 'anyps5_cpu_memory_metal_test', 'anyps5_metal_agc_host_exports',
             'anyps5_guest_thread_tests', 'anyps5_native_module_runner_test',
+            'anyps5_metal_optional_sgpr_replay',
         )]
+        roots += [self.build / 'upstream-correctness' / name for name in (
+            'anyps5_metal_normalized_load_replay', 'anyps5_metal_scalar_termination_replay')]
         roots += [self.build / 'native-videoout' / name for name in (
             'anyps5_cpu_videoout_native_fixture', 'anyps5_cpu_videoout_packed_hdr_fixture',
             'anyps5_cpu_videoout_admission_fixture')]

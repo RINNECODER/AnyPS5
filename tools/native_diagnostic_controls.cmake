@@ -19,3 +19,5 @@ if(NOT BUILD_TESTING OR NOT ANYPS5_CPU_NATIVE_MODULE_RUNNER OR
 endif()
 add_subdirectory("${ANYPS5_DIAGNOSTIC_SOURCE}/core/cpu/videoout" native-videoout)
 add_subdirectory("${ANYPS5_DIAGNOSTIC_SOURCE}/core/cpu/flip" native-flip)
+set(ANYPS5_TEST_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+add_subdirectory("${ANYPS5_DIAGNOSTIC_SOURCE}/core/shader/recompiler/MetalReplay/UpstreamCorrectness" upstream-correctness)

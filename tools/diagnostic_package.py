@@ -283,6 +283,9 @@ def prepare_package(source, build, gpu_source, destination, revisions, run, prof
                   for case in ("native", "contract")]
         roots += [native_agc / ("anyps5_cpu_agc_" + case + "_fixture")
                   for case in ("native", "capability", "target_events")]
+        roots += [build / "tests/anyps5_metal_optional_sgpr_replay",
+                  build / "upstream-correctness/anyps5_metal_normalized_load_replay",
+                  build / "upstream-correctness/anyps5_metal_scalar_termination_replay"]
     original_runner_sha = digest(roots[0]) if native else None
     if native:
         original_capabilities, original_capabilities_sha = capabilities(roots[0], build)
@@ -487,6 +490,11 @@ def prepare_package(source, build, gpu_source, destination, revisions, run, prof
                      ["bin/anyps5_cpu_agc_capability_fixture"],
                      ["bin/anyps5_cpu_agc_native_fixture", utility, *["fixtures/agc/" + name for name in AGC_CALLERS]],
                      ["bin/anyps5_cpu_agc_target_events_fixture", "fixtures/agc/target-agc-events.elf", utility]]
+        commands += [["bin/anyps5_metal_optional_sgpr_replay", mode, utility]
+                     for mode in ("compute", "draw-vertex", "draw-fragment", "required")]
+        commands += [["bin/anyps5_metal_normalized_load_replay"],
+                     ["bin/anyps5_metal_scalar_termination_replay", "native"],
+                     ["bin/anyps5_metal_scalar_termination_replay", "decode"]]
     return {"package": str(destination), "manifest_sha256": digest(destination / "manifest.json"),
             "checksums_sha256": digest(destination / "SHA256SUMS"), "artifacts": files,
             "input_artifacts": inputs, "relocation_commands": commands,
