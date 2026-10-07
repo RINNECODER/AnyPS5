@@ -83,7 +83,7 @@ struct Session {
 
     std::uint64_t call(const char* nid, const std::array<std::uint64_t, 8>& values) {
         arguments(values);
-        return runGate(imports->Resolve(import(nid)));
+        return runGate(imports->ResolvePublicFixture(import(nid)));
     }
 
     std::vector<std::uint8_t> bytes(std::uint64_t address, std::size_t size) {
@@ -154,7 +154,7 @@ void attributeAndRegistration() {
     session.machine.Protect(0x3000,4096,rw);
     session.arguments({0x3008,0,0,0,0,0,0,0},0x4ff8);
     session.machine.Protect(0x5000,4096,Permission::Write);
-    rejects([&] { session.runGate(session.imports->Resolve(import("PjS5uASwcV8"))); }, "permission");
+    rejects([&] { session.runGate(session.imports->ResolvePublicFixture(import("PjS5uASwcV8"))); }, "permission");
     require(session.bytes(0x3008,80) == std::vector<std::uint8_t>(expected.begin(),expected.end()),
             "Unreadable eighth stack argument did not stop setter before output write");
 }
@@ -216,12 +216,12 @@ void failClosedScopes() {
     Session session;
     rejects([&] { session.call("Up36PTk687E",{255,0,0,0,0,0,0,0}); }, "without native backend");
     const auto original = import("uquVH4-Du78");
-    const auto gate = session.imports->Resolve(original);
-    require(session.imports->Resolve(original) == gate,"Full VideoOut identity changed gate");
+    const auto gate = session.imports->ResolvePublicFixture(original);
+    require(session.imports->ResolvePublicFixture(original) == gate,"Full VideoOut identity changed gate");
     auto local = original;
     local.LibraryId = 7;
     local.ModuleId = 11;
-    require(session.imports->Resolve(local) != gate,"VideoOut gate discarded importer-local scope IDs");
+    require(session.imports->ResolvePublicFixture(local) != gate,"VideoOut gate discarded importer-local scope IDs");
     for (unsigned mismatch = 0; mismatch < 5; ++mismatch) {
         auto wrong = original;
         switch (mismatch) {
@@ -231,11 +231,11 @@ void failClosedScopes() {
         case 3: wrong.ModuleMajor = 2; break;
         case 4: wrong.ModuleMinor = 2; break;
         }
-        rejects([&] { session.imports->Resolve(wrong); },"scope/version");
+        rejects([&] { session.imports->ResolvePublicFixture(wrong); },"scope/version");
     }
     auto unknown = original;
     unknown.Nid = "AAAAAAAAAAA";
-    rejects([&] { session.imports->Resolve(unknown); },"import service");
+    rejects([&] { session.imports->ResolvePublicFixture(unknown); },"import service");
     session.machine.CheckAccess(gate,1,Permission::Execute);
     rejects([&] { session.machine.CheckAccess(gate,1,Permission::Write); },"permission");
     session.imports.reset();

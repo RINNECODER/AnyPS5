@@ -86,8 +86,16 @@ void run(id<MTLDevice> device, id<MTLLibrary> library) {
     auto initial = Cpu::BorrowGuestMemoryForMetal({0, {}, {}}, ranges, pinned);
     metal.Configure((__bridge void*)device, (__bridge void*)library, initial.Ranges);
     DriverSession driver;
+    Cpu::SceNativeVideoOutBackend* videoMemoryOwner = nullptr;
     Cpu::GuestMemoryRuntime memory(machine, 1024 * 1024,
-        Cpu::MakeGuestMemoryMetalTransaction(metal, ranges, pinned));
+        [&](const Cpu::GuestMemorySnapshot& before, const Cpu::GuestMemorySnapshot& after, const std::function<void()>& mutateCpu) {
+            auto previous = Cpu::BorrowGuestMemoryForMetal(before, ranges, pinned);
+            auto next = Cpu::BorrowGuestMemoryForMetal(after, ranges, pinned);
+            if (videoMemoryOwner) videoMemoryOwner->MutateBorrowedRanges(next.Ranges, after.Generation, mutateCpu,
+                std::move(previous.Owner), std::move(next.Owner));
+            else metal.MutateBorrowedRanges(next.Ranges, after.Generation, mutateCpu,
+                std::move(previous.Owner), std::move(next.Owner));
+        });
     constexpr std::uint64_t gpuRead = 0x1000800000ULL;
     constexpr std::uint64_t gpuReadWrite = gpuRead + 2 * 65536;
     const auto physical = memory.AllocateDirect(0, 1024 * 1024, 2 * 65536, 65536, 0);
@@ -117,7 +125,10 @@ void run(id<MTLDevice> device, id<MTLLibrary> library) {
     const VideoOutCompletionCallbacks completion{&events, processTime, processTime, flipEvent};
     Cpu::SceVideoOutBackend retiredCallbacks;
     {
-        Cpu::SceNativeVideoOutBackend backend(machine, presentation, completion);
+        auto ownedMappings = Cpu::BorrowGuestMemoryForMetal(memory.Snapshot(), ranges, pinned);
+        Cpu::SceNativeVideoOutBackend backend(machine, presentation, completion, {},
+            {ownedMappings.Ranges, ownedMappings.Owner, memory.Snapshot().Generation});
+        videoMemoryOwner = &backend;
         const auto callbacks = backend.GetCallbacks();
         const auto handle = callbacks.Open(255, 0, 0, std::nullopt);
         require(handle > 0, "Native backend failed to open actual output");
@@ -211,7 +222,8 @@ void run(id<MTLDevice> device, id<MTLLibrary> library) {
             "Native backend did not retire successfully registered groups");
         require(callbacks.Close(handle) == 0, "Native backend failed to unregister its GPU output");
         const auto reopened = callbacks.Open(255, 0, 0, std::nullopt);
-        require(reopened == handle, "Native output reopen changed bus handle");
+        require(reopened > 0 && reopened != handle, "Native output reopen reused a stale opaque handle");
+        rejects([&] { callbacks.GetOutputStatus(handle); }, "invalid output handle", "Stale handle selected reopened output");
         auto replacement = backend.GetConfig(reopened);
         {
             std::lock_guard lock(original->mutex);
@@ -227,6 +239,7 @@ void run(id<MTLDevice> device, id<MTLLibrary> library) {
         retiredCallbacks = callbacks;
         memory.Shutdown();
         backend.Shutdown();
+        videoMemoryOwner = nullptr;
     }
     rejects([&] { retiredCallbacks.Open(255, 0, 0, std::nullopt); }, "expired",
         "Retired native callbacks opened an output after their session ended");

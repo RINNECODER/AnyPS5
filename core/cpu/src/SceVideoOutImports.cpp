@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -14,7 +15,7 @@
 namespace Cpu {
 namespace {
 
-enum class Service { Open, Close, OutputStatus, RegisterBuffers, SetAttribute, FlipRate, Unregister };
+using Service = VideoOutAbiContract;
 
 static_assert(sizeof(SceVideoOutOpenParam) == 24 && offsetof(SceVideoOutOpenParam, Affinity) == 16);
 static_assert(sizeof(SceVideoOutAttribute) == 80 && alignof(SceVideoOutAttribute) == 8);
@@ -68,22 +69,29 @@ void returnInt(Machine& guest, std::int32_t result) {
 
 }
 
-struct SceVideoOutImports::Impl {
+struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImports::Impl> {
     using Key = std::tuple<std::string, std::string, std::uint16_t, std::string, std::uint16_t,
-                           std::uint16_t, std::uint8_t, std::uint8_t>;
+                           std::uint16_t, std::uint8_t, std::uint8_t, bool>;
     Machine& machine;
     SceVideoOutBackend backend;
     std::uint64_t base;
     std::size_t nextSlot = 0;
     std::map<Key, std::uint64_t> gates;
+    std::set<Service> admitted;
     const std::map<std::string, Service> services{
         {"Up36PTk687E", Service::Open}, {"uquVH4-Du78", Service::Close},
         {"utPrVdxio-8", Service::OutputStatus}, {"rKBUtgRrtbk", Service::RegisterBuffers},
         {"PjS5uASwcV8", Service::SetAttribute}, {"CBiu4mCE1DA", Service::FlipRate},
         {"N5KDtkIjjJ4", Service::Unregister}};
 
-    Impl(Machine& guest, SceVideoOutBackend callbacks, std::uint64_t gateBase) :
+    Impl(Machine& guest, SceVideoOutBackend callbacks, std::uint64_t gateBase,
+         std::span<const VideoOutAbiAdmission> admissions) :
         machine(guest), backend(std::move(callbacks)), base(gateBase) {
+        for (const auto& admission : admissions) {
+            if (admission.Evidence.empty() || static_cast<unsigned>(admission.Contract) > static_cast<unsigned>(Service::Unregister))
+                throw std::invalid_argument("SCE VideoOut invalid target admission descriptor");
+            admitted.insert(admission.Contract);
+        }
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("SCE VideoOut gates require a nonzero aligned low canonical guest page");
         std::array<std::byte, 4096> bytes;
@@ -93,7 +101,7 @@ struct SceVideoOutImports::Impl {
         machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
     }
 
-    void invoke(Machine& guest, Service service) {
+    void invoke(Machine& guest, Service service, bool target) {
         const auto first = guest.Get(Register::Rdi);
         const auto second = guest.Get(Register::Rsi);
         const auto third = guest.Get(Register::Rdx);
@@ -102,6 +110,8 @@ struct SceVideoOutImports::Impl {
         const auto sixth = guest.Get(Register::R9);
         switch (service) {
         case Service::Open: {
+            if (target && (signedInt(first) != 255 || signedInt(second) != 0 || signedInt(third) != 0 || fourth))
+                throw std::runtime_error("SCE VideoOut open outside qualified target use");
             std::optional<SceVideoOutOpenParam> param;
             if (fourth) {
                 guest.CheckAccess(fourth, 16, Permission::Read);
@@ -136,7 +146,7 @@ struct SceVideoOutImports::Impl {
             guest.CheckAccess(second, sizeof(SceVideoOutStatus), Permission::Write);
             required(backend.GetOutputStatus, "sceVideoOutGetOutputStatus");
             const auto result = backend.GetOutputStatus(signedInt(first));
-            if (result.Result >= 0) guest.Write(second, std::as_bytes(std::span(&result.Status, 1)));
+            if (result.Result == 0) guest.Write(second, std::as_bytes(std::span(&result.Status, 1)));
             returnInt(guest, result.Result);
             break;
         }
@@ -152,11 +162,18 @@ struct SceVideoOutImports::Impl {
                 throw std::runtime_error("SCE VideoOut invalid buffer category");
             if (stack[1]) throw std::runtime_error("Unsupported SCE VideoOut register buffer option");
             const auto attribute = read<SceVideoOutAttribute>(guest, sixth);
+            if (target && (set != 0 || start != 0 || count != 3 || category != 0 ||
+                attribute.TilingMode != 0 || attribute.PitchInPixel != 0 || attribute.Option != 0 ||
+                attribute.DccControl != 0 || attribute.DccClearColor != 0 ||
+                (attribute.PixelFormat != 0x8000000000000000ULL && attribute.PixelFormat != 0x8000000022000000ULL)))
+                throw std::runtime_error("SCE VideoOut registration outside qualified target use (HDR format 0x8100070422000000 unsupported)");
             alignedAddress(fourth, alignof(SceVideoOutBuffer));
             std::vector<SceVideoOutBuffer> buffers(static_cast<std::size_t>(count));
             guest.CheckAccess(fourth, buffers.size() * sizeof(SceVideoOutBuffer), Permission::Read);
             guest.Read(fourth, std::as_writable_bytes(std::span(buffers)));
             for (const auto& buffer : buffers) {
+                if (target && buffer.MetadataAddress)
+                    throw std::runtime_error("SCE VideoOut target compressed backing is unqualified");
                 if (buffer.Reserved[0] || buffer.Reserved[1])
                     throw std::runtime_error("SCE VideoOut reserved buffer pointers are set");
                 alignedAddress(buffer.DataAddress, 65536);
@@ -167,6 +184,12 @@ struct SceVideoOutImports::Impl {
         }
         case Service::SetAttribute: {
             const auto stack = stackArguments(guest);
+            if (target && (static_cast<std::uint32_t>(third) != 0 ||
+                !static_cast<std::uint32_t>(fourth) || static_cast<std::uint32_t>(fourth) > 16384 ||
+                !static_cast<std::uint32_t>(fifth) || static_cast<std::uint32_t>(fifth) > 16384 || sixth ||
+                static_cast<std::uint32_t>(stack[0]) || stack[1] ||
+                (second != 0x8000000000000000ULL && second != 0x8000000022000000ULL)))
+                throw std::runtime_error("SCE VideoOut attribute outside qualified target use (HDR format 0x8100070422000000 unsupported)");
             alignedAddress(first, alignof(SceVideoOutAttribute));
             guest.CheckAccess(first, sizeof(SceVideoOutAttribute), Permission::Write);
             SceVideoOutAttribute attribute;
@@ -187,6 +210,8 @@ struct SceVideoOutImports::Impl {
             returnInt(guest, backend.SetFlipRate(signedInt(first), signedInt(second)));
             break;
         case Service::Unregister:
+            if (target && signedInt(second) != 0)
+                throw std::runtime_error("SCE VideoOut unregister outside qualified target group");
             if (signedInt(second) < 0 || signedInt(second) >= 4)
                 throw std::runtime_error("SCE VideoOut invalid buffer set index");
             required(backend.UnregisterBuffers, "sceVideoOutUnregisterBuffers");
@@ -194,35 +219,75 @@ struct SceVideoOutImports::Impl {
             break;
         }
     }
+
+    std::uint64_t resolve(const SceImport& import, bool target) {
+        if (import.LibraryName != "libSceVideoOut" || import.ModuleName != "libSceVideoOut" ||
+            import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1 ||
+            (target && (import.LibraryId != 39 || import.ModuleId != 40)))
+            throw std::runtime_error("Unsupported SCE VideoOut import scope/version: " + identity(import));
+        const auto service = services.find(import.Nid);
+        if (service == services.end())
+            throw std::runtime_error("Unsupported SCE VideoOut import service: " + identity(import));
+        if (target) {
+            if (!admitted.contains(service->second))
+                throw std::runtime_error("Unsupported SCE VideoOut target ABI: no qualified admission");
+            switch (service->second) {
+            case Service::Open: required(backend.Open, "sceVideoOutOpen"); break;
+            case Service::Close: required(backend.Close, "sceVideoOutClose"); break;
+            case Service::OutputStatus: required(backend.GetOutputStatus, "sceVideoOutGetOutputStatus"); break;
+            case Service::RegisterBuffers: required(backend.RegisterBuffers, "sceVideoOutRegisterBuffers2"); break;
+            case Service::FlipRate: required(backend.SetFlipRate, "sceVideoOutSetFlipRate"); break;
+            case Service::Unregister: required(backend.UnregisterBuffers, "sceVideoOutUnregisterBuffers"); break;
+            case Service::SetAttribute: break;
+            }
+        }
+        const Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
+                      import.LibraryVersion, import.ModuleMajor, import.ModuleMinor, target};
+        if (const auto found = gates.find(key); found != gates.end()) return found->second;
+        if (nextSlot == 256) throw std::runtime_error("SCE VideoOut import gate page is exhausted");
+        const auto gate = base + nextSlot * 16;
+        const std::array ret{std::byte{0xc3}};
+        machine.Write(gate, ret);
+        machine.AddHostCall(gate, [state = weak_from_this(), operation = service->second, target](Machine& guest) {
+            const auto context = state.lock();
+            if (!context) throw std::runtime_error("Unsupported SCE VideoOut service: runtime has expired");
+            context->invoke(guest, operation, target);
+        });
+        gates.emplace(key, gate);
+        ++nextSlot;
+        return gate;
+    }
 };
 
-SceVideoOutImports::SceVideoOutImports(Machine& machine, SceVideoOutBackend backend, std::uint64_t gateBase) :
-    impl(std::make_shared<Impl>(machine, std::move(backend), gateBase)) {}
+SceVideoOutImports::SceVideoOutImports(Machine& machine, SceVideoOutBackend backend, std::uint64_t gateBase,
+                                     std::span<const VideoOutAbiAdmission> admissions) :
+    impl(std::make_shared<Impl>(machine, std::move(backend), gateBase, admissions)) {}
 SceVideoOutImports::~SceVideoOutImports() = default;
 
-std::uint64_t SceVideoOutImports::Resolve(const SceImport& import) {
-    if (import.LibraryName != "libSceVideoOut" || import.ModuleName != "libSceVideoOut" ||
-        import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1)
-        throw std::runtime_error("Unsupported SCE VideoOut import scope/version: " + identity(import));
-    const auto service = impl->services.find(import.Nid);
-    if (service == impl->services.end())
-        throw std::runtime_error("Unsupported SCE VideoOut import service: " + identity(import));
-    const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
-                        import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
-    if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->nextSlot == 256) throw std::runtime_error("SCE VideoOut import gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
-    const auto operation = service->second;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), operation](Machine& guest) {
-        const auto context = state.lock();
-        if (!context) throw std::runtime_error("Unsupported SCE VideoOut service: runtime has expired");
-        context->invoke(guest, operation);
-    });
-    impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
-    return gate;
+std::span<const VideoOutAbiAdmission> QualifiedVideoOutAdmissionsForImage(std::string_view verifiedSha256) {
+    if (verifiedSha256 != "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397") return {};
+    // Bounded target caller/field inference against the pinned public candidate.
+    // Both 8-bit public display formats are admitted; the observed HDR branch
+    // needs its exact color/scanout semantics and remains explicitly excluded.
+    static constexpr VideoOutAbiAdmission admissions[] = {
+        {Service::Open, "eboot:6d8ecd,959cb4,95a349,Open255/main/index0/null; signed EAX"},
+        {Service::Close, "eboot:6d8f06,959d37,95a3a3,973163,opaque int32 handle; EAX ignored"},
+        {Service::OutputStatus, "eboot:6d8ee2,959cc7,95a398,status48; +0/+4 only on EAX==0"},
+        {Service::RegisterBuffers, "eboot:972f8e,group0/start0/count3/stride32/category0/null"},
+        {Service::SetAttribute, "eboot:972eec,attribute80/u64-format/u32-extent/tiling0/noDCC"},
+        {Service::FlipRate, "eboot:972fa7,helper60->0/30->1/20->2; signed EAX"},
+        {Service::Unregister, "eboot:973158,opaque int32 handle/group0; EAX ignored"}
+    };
+    return admissions;
+}
+
+std::uint64_t SceVideoOutImports::Resolve(const SceImport& import, std::uint8_t symbolType, std::uint64_t symbolSize) {
+    if (symbolType != 2 || symbolSize != 0)
+        throw std::runtime_error("Unsupported SCE VideoOut ELF symbol: observed function type 2 and size zero required");
+    return impl->resolve(import, true);
+}
+std::uint64_t SceVideoOutImports::ResolvePublicFixture(const SceImport& import) {
+    return impl->resolve(import, false);
 }
 
 }

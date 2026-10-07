@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace Cpu {
 
@@ -66,14 +67,28 @@ struct SceVideoOutBackend {
     std::function<std::int32_t(std::int32_t, std::int32_t)> UnregisterBuffers;
 };
 
+// A name or matching NID is not a target ABI qualification. The default is
+// empty; callers verify the source image before selecting this finite profile.
+enum class VideoOutAbiContract { Open, Close, OutputStatus, RegisterBuffers, SetAttribute, FlipRate, Unregister };
+struct VideoOutAbiAdmission {
+    VideoOutAbiContract Contract;
+    std::string_view Evidence;
+};
+std::span<const VideoOutAbiAdmission> QualifiedVideoOutAdmissionsForImage(std::string_view verifiedSha256);
+
 class SceVideoOutImports {
 public:
     explicit SceVideoOutImports(Machine& machine, SceVideoOutBackend backend = {},
-                               std::uint64_t gateBase = 0x7ffdfd000000);
+                               std::uint64_t gateBase = 0x7ffdfd000000,
+                               std::span<const VideoOutAbiAdmission> admissions = {});
     ~SceVideoOutImports();
     SceVideoOutImports(const SceVideoOutImports&) = delete;
     SceVideoOutImports& operator=(const SceVideoOutImports&) = delete;
-    std::uint64_t Resolve(const SceImport& import);
+    // Production always supplies the observed ELF metadata; no FUNC default.
+    std::uint64_t Resolve(const SceImport& import, std::uint8_t symbolType, std::uint64_t symbolSize);
+    // Public candidate ABI only. Synthetic callers use this separate route;
+    // it never qualifies or activates a target consumer.
+    std::uint64_t ResolvePublicFixture(const SceImport& import);
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;
