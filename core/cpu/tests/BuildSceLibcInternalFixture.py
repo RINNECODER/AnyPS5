@@ -6,7 +6,10 @@ import struct
 import sys
 from BuildSceCrtFixture import Elf, nid
 
-FUNCTIONS = ("memcpy", "memset", "strlen", "strcmp", "strncmp", "strncpy", "snprintf", "printf", "strstr")
+FUNCTIONS = ("memcpy", "memset", "strlen", "strcmp", "strncmp", "strncpy", "snprintf", "printf", "strstr",
+             "sceLibcMspaceCreate", "sceLibcMspaceDestroy", "sceLibcMspaceMalloc", "sceLibcMspaceFree",
+             "sceLibcMspaceRealloc", "sceLibcMspaceMallocStats", "__cxa_atexit", "__cxa_finalize", "_ZdlPv",
+             "strncat", "_Stoul", "abort", "__cxa_pure_virtual")
 
 
 def package(path, kind):
@@ -27,12 +30,15 @@ def package(path, kind):
         return original[offset:end].decode("ascii")
     def string(value):
         offset = len(strings); strings.extend(value.encode("ascii") + b"\0"); return offset
-    definitions = ({"_start": 2, "SceInternalMain": 2, "SceInternalAddresses": 1, "SceInternalOutput": 1} if main else
+    definitions = ({"_start": 2, "SceInternalMain": 2, "SceInternalAddresses": 1, "SceInternalOutput": 1, "SceInternalExtraOutput": 1, "SceInternalArenas": 1,
+                       "SceInternalStats": 1, "SceInternalTrace": 1, "SceInternalAbortProbe": 2,
+                       "SceInternalPureProbe": 2, "SceInternalOwnershipProbe": 2} if main else
                    {**dict.fromkeys(FUNCTIONS, 2), "SceInternalInit": 2, "SceInternalFini": 2,
-                    "SceInternalState": 1, "SceInternalPrinted": 1, "SceInternalTwin": 2})
-    if consumer: definitions = {"SceInternalConsumerInit": 2, "SceInternalConsumerState": 1}
+                    "SceInternalState": 1, "SceInternalPrinted": 1, "SceInternalTwin": 2,
+                    "SceInternalExtra": 1, "_Znwm": 2})
+    if consumer: definitions = {"SceInternalConsumerInit": 2, "SceInternalConsumerFini": 2, "SceInternalConsumerState": 1}
     imports = {**dict.fromkeys(FUNCTIONS, 2), "SceInternalState": 1, "SceInternalConsumerState": 1,
-               "6Z83sYWFlA8": 2} if main else {"memcpy": 2} if consumer else {}
+               "6Z83sYWFlA8": 2, "9BcDykPmo1I": 2, "_Znwm": 2} if main else {"memcpy": 2, "__cxa_atexit": 2, "__cxa_finalize": 2} if consumer else {"9BcDykPmo1I": 2}
     seen_definitions, seen_imports, addresses, locations = set(), set(), {}, {}
     for offset in range(24, len(symbols), 24):
         name_offset, info, visibility, section, value, size = struct.unpack_from("<IBBHQQ", symbols, offset)
@@ -48,8 +54,8 @@ def package(path, kind):
                 raise ValueError(f"Unexpected compiled import {name}")
             symbols[offset + 4] = (info & 0xf0) | imports[name]
             seen_imports.add(name)
-            scope = "C" if name == "SceInternalState" else "E" if name == "SceInternalConsumerState" else "D" if name == "6Z83sYWFlA8" else "B"
-        identity = name if name == "6Z83sYWFlA8" else nid(name)
+            scope = "C" if name in ("SceInternalState", "_Znwm") else "E" if name == "SceInternalConsumerState" else "D" if name in ("6Z83sYWFlA8", "9BcDykPmo1I") else "B"
+        identity = name if name in ("6Z83sYWFlA8", "9BcDykPmo1I") else nid(name)
         struct.pack_into("<I", symbols, offset, string(identity + "#" + scope + "#" + scope))
     if seen_definitions != set(definitions) or seen_imports != set(imports):
         raise ValueError("Missing genuine compiled Internal imports/exports")
@@ -80,6 +86,7 @@ def package(path, kind):
     elif consumer:
         identity(1, "libSceLibcInternal", "libSceLibcInternal", False)
     else:
+        identity(3, "libkernel", "libkernel", False)
         # Additional valid library scopes let controls change only memcpy's
         # target identity while retaining initialization and imported state.
         tags += [(0x61000047, (4 << 48) | (1 << 32) | string("other")),
@@ -153,7 +160,7 @@ def build(provider_linked, consumer_linked, main_linked, destination):
     for changed, metadata in ((unsupported_main, mm), (unsupported_provider, pm), (unsupported_consumer, cm)):
         name = struct.unpack_from("<I", changed, metadata["symbols"]["memcpy"])[0]
         offset = metadata["string_base"] + name
-        changed[offset:offset + 11] = b"OJjm-QOIHlI"
+        changed[offset:offset + 11] = nid("sceLibcMspaceCalloc").encode("ascii")
     records.append(emit("matched-unsupported-nid", unsupported_main, unsupported_provider, unsupported_consumer))
     for case, mutation in (("provider-type", "type"), ("provider-ambiguity", "duplicate"),
                            ("provider-storage", "storage"), ("provider-permission", "permission"),
@@ -166,8 +173,10 @@ def build(provider_linked, consumer_linked, main_linked, destination):
         elif mutation == "storage":
             code, = [header for header in pm["headers"] if header[0] == 1 and header[1] & 1]
             code_index = pm["headers"].index(code)
-            struct.pack_into("<Q", changed, pm["phoff"] + code_index * 56 + 40, code[5] + 128)
-            struct.pack_into("<QQ", changed, symbol + 8, code[3] + code[5] + 16, 1)
+            if any(h[0] == 1 and code[3] < h[3] <= code[3] + code[5] for h in pm["headers"]):
+                raise ValueError("No room for independent executable BSS storage control")
+            struct.pack_into("<Q", changed, pm["phoff"] + code_index * 56 + 40, code[5] + 1)
+            struct.pack_into("<QQ", changed, symbol + 8, code[3] + code[5], 1)
         elif mutation in ("library", "version"):
             name = struct.unpack_from("<I", changed, symbol)[0]
             changed[pm["string_base"] + name + 12] = ord('E' if mutation == "library" else 'F')
@@ -185,9 +194,23 @@ def build(provider_linked, consumer_linked, main_linked, destination):
             # only memcpy's typed target points into readable/writable BSS.
             struct.pack_into("<QQ", changed, symbol + 8, provider_addresses["SceInternalState"], 1)
         records.append(emit(case, main, changed))
+    for case, owner, target, field, value in (
+            ("consumer-size", "main", "sceLibcMspaceMalloc", 16, 1 << 32),
+            ("provider-reserved", "provider", "sceLibcMspaceMalloc", 6, 0xfff1),
+            ("provider-visibility", "provider", "sceLibcMspaceMalloc", 5, 2),
+            ("provider-binding", "provider", "sceLibcMspaceMalloc", 4, 0x02)):
+        changed = bytearray(main if owner == "main" else provider)
+        metadata = mm if owner == "main" else pm
+        offset = metadata["symbols"][target] + field
+        struct.pack_into("<" + ("Q" if field == 16 else "H" if field == 6 else "B"), changed, offset, value)
+        records.append(emit(case, changed if owner == "main" else main, changed if owner == "provider" else provider))
     first = [provider_addresses["SceInternalState"], provider_addresses["SceInternalPrinted"],
              main_addresses["SceInternalAddresses"], main_addresses["SceInternalOutput"],
-             *[provider_addresses[name] for name in FUNCTIONS], consumer_addresses["SceInternalConsumerState"]]
+             *[provider_addresses[name] for name in FUNCTIONS[:9]], consumer_addresses["SceInternalConsumerState"],
+             *[provider_addresses[name] for name in FUNCTIONS[9:]],
+             *[main_addresses[name] for name in ("SceInternalExtraOutput", "SceInternalArenas", "SceInternalStats", "SceInternalTrace")],
+             provider_addresses["SceInternalExtra"],
+             *[main_addresses[name] for name in ("SceInternalAbortProbe", "SceInternalPureProbe", "SceInternalOwnershipProbe")]]
     (output / "receipt.txt").write_text(" ".join(map(str, first)) + "\n" + "\n".join(records) + "\n")
     (output / "receipt.json").write_text(json.dumps({"provider_symbol_values": provider_addresses,
         "main_symbol_values": main_addresses, "sources": records,
