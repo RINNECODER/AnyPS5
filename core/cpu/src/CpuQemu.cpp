@@ -575,6 +575,53 @@ OwnedMappingSnapshot Machine::PinOwnedMappings() const {
     });
     return result;
 }
+std::shared_ptr<const void> Machine::OwnedMappingScope() const {
+    impl->checkOwner();
+    return impl->mappingScope;
+}
+void Machine::ValidateOwnedMappings(const OwnedMappingSnapshot& snapshot) const {
+    impl->checkOwner();
+    if (snapshot.Scope != impl->mappingScope || snapshot.Scope.owner_before(impl->mappingScope) ||
+        impl->mappingScope.owner_before(snapshot.Scope))
+        throw std::invalid_argument("Owned guest mapping snapshot belongs to another Machine");
+    for (std::size_t index = 0; index < snapshot.Views.size(); ++index) {
+        const auto& view = snapshot.Views[index];
+        const auto& region = view.Region;
+        if (!region.Size || region.Size > std::numeric_limits<std::uint64_t>::max() - region.Address ||
+            !view.BackingIdentity || !view.Owner || !view.Bytes.data() || view.Bytes.size() != region.Size ||
+            (static_cast<unsigned>(region.Permissions) & ~7u))
+            throw std::invalid_argument("Malformed owned guest mapping view");
+        const auto end = region.Address + region.Size;
+        for (std::size_t previous = 0; previous < index; ++previous) {
+            const auto& other = snapshot.Views[previous].Region;
+            if (region.Address < other.Address + other.Size && other.Address < end)
+                throw std::invalid_argument("Owned guest mapping selection overlaps");
+        }
+        const auto backing = std::find_if(impl->backings.begin(), impl->backings.end(), [&](const auto& value) {
+            return value.storage && value.identity == view.BackingIdentity;
+        });
+        if (backing == impl->backings.end() || view.Owner.get() != backing->storage.get() ||
+            view.Owner.owner_before(backing->storage) || backing->storage.owner_before(view.Owner) ||
+            view.Allocation.data() != backing->pointer || view.Allocation.size() != backing->size)
+            throw std::invalid_argument("Owned guest mapping allocation is retired or does not match its owner");
+        const auto bytes = reinterpret_cast<std::uintptr_t>(view.Bytes.data());
+        const auto begin = reinterpret_cast<std::uintptr_t>(backing->pointer);
+        if (bytes < begin || bytes - begin > backing->size || region.Size > backing->size - (bytes - begin))
+            throw std::invalid_argument("Owned guest mapping view exceeds its allocation");
+        auto cursor = region.Address;
+        while (cursor < end) {
+            const auto mapped = std::find_if(impl->ranges.begin(), impl->ranges.end(), [&](const auto& range) {
+                return cursor >= range.address && cursor - range.address < range.size;
+            });
+            if (mapped == impl->ranges.end() || mapped->permissions != static_cast<unsigned>(region.Permissions) ||
+                mapped->borrowed != region.Borrowed ||
+                reinterpret_cast<std::uintptr_t>(mapped->backing) + (cursor - mapped->address) !=
+                    bytes + (cursor - region.Address))
+                throw std::invalid_argument("Owned guest mapping binding was retired, rebound or changed");
+            cursor = std::min(end, mapped->address + mapped->size);
+        }
+    }
+}
 void Machine::CheckAccess(std::uint64_t address, std::size_t size, Permission permissions) const {
     if (!size) return;
     const auto bits = permissionBits(permissions);

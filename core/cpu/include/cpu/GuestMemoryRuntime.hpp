@@ -33,6 +33,8 @@ struct GuestMemorySnapshot {
     std::uint64_t Generation;
     std::vector<GuestMemoryView> Views;
     std::vector<std::shared_ptr<void>> Owners;
+    std::shared_ptr<const void> Scope{};
+    std::shared_ptr<const void> MachineScope{};
 };
 struct GuestMemoryQuery {
     std::uint64_t Start;

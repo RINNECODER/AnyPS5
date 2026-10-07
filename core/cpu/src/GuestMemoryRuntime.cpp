@@ -12,6 +12,16 @@ constexpr std::uint64_t virtualStart = 0x1000000000;
 constexpr std::uint64_t virtualLimit = 0x0000800000000000;
 constexpr std::uint32_t fixed = 0x10;
 constexpr std::uint32_t noOverwrite = 0x80;
+struct RuntimeScope {};
+
+std::shared_ptr<const void> machineScope(Machine& machine) {
+#if ANYPS5_CPU_MODERN_TCG
+    return machine.OwnedMappingScope();
+#else
+    (void)machine;
+    return {};
+#endif
+}
 
 [[noreturn]] void error(unsigned code, const char* message) { throw GuestMemoryError(code, message); }
 std::uint64_t end(std::uint64_t address, std::uint64_t size) {
@@ -87,6 +97,8 @@ struct GuestMemoryRuntime::Impl {
         std::shared_ptr<Storage> owner;
     };
     Machine& machine;
+    const std::shared_ptr<const void> scope = std::make_shared<const RuntimeScope>();
+    const std::shared_ptr<const void> ownedMachineScope;
     const std::uint64_t capacity;
     Transaction transaction;
     std::vector<Physical> physical;
@@ -107,7 +119,8 @@ struct GuestMemoryRuntime::Impl {
         MutationScope& operator=(const MutationScope&) = delete;
     };
 
-    Impl(Machine& value, std::uint64_t bytes, Transaction callback) : machine(value), capacity(bytes), transaction(std::move(callback)) {
+    Impl(Machine& value, std::uint64_t bytes, Transaction callback)
+        : machine(value), ownedMachineScope(machineScope(value)), capacity(bytes), transaction(std::move(callback)) {
         length(bytes);
         if (bytes > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) error(22, "Invalid guest physical capacity");
         machine.Mappings();
@@ -119,7 +132,7 @@ struct GuestMemoryRuntime::Impl {
     }
     GuestMemorySnapshot snapshot(const std::vector<Region>& mappings, const std::vector<Physical>& allocations,
                                  std::uint64_t value) const {
-        GuestMemorySnapshot result{value, {}, {}};
+        GuestMemorySnapshot result{value, {}, {}, scope, ownedMachineScope};
         result.Views.reserve(mappings.size());
         result.Owners.reserve(mappings.size() + allocations.size());
         for (const auto& region : mappings) if (region.owner) {
@@ -432,7 +445,7 @@ void GuestMemoryRuntime::Shutdown() {
     }
     auto previous = Snapshot();
     if (impl->nextGeneration == std::numeric_limits<std::uint64_t>::max()) throw std::runtime_error("Guest memory generation exhausted");
-    GuestMemorySnapshot next{++impl->nextGeneration, {}, {}};
+    GuestMemorySnapshot next{++impl->nextGeneration, {}, {}, impl->scope, impl->ownedMachineScope};
     struct Invocation { bool active = true, called = false, finished = false; };
     auto invocation = std::make_shared<Invocation>();
     std::function<void()> mutation = [state = impl.get(), merged, invocation] {
