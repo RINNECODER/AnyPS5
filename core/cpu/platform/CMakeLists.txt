@@ -120,4 +120,26 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_platform_kernel_mutex_threads
         COMMAND anyps5_platform_kernel_mutex_threads_test "${kernelMutexFixture}")
     set_tests_properties(anyps5_platform_kernel_mutex_threads PROPERTIES TIMEOUT 30)
+    set(kernelPriorityFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-priority.elf")
+    add_custom_command(OUTPUT "${kernelPriorityFixture}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+            -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelPriorityGuest.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-priority.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-priority-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-priority.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelPriorityFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-priority-linked.elf" "${kernelPriorityFixture}"
+        DEPENDS fixtures/KernelPriorityGuest.c tests/BuildKernelPriorityFixture.py
+            tests/BuildKernelMutexThreadsFixture.py ../tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_priority_fixture DEPENDS "${kernelPriorityFixture}")
+    add_executable(anyps5_platform_kernel_priority_test tests/KernelPriorityTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_priority_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_priority_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_priority_test anyps5_platform_kernel_priority_fixture)
+    add_test(NAME anyps5_platform_kernel_priority
+        COMMAND anyps5_platform_kernel_priority_test "${kernelPriorityFixture}")
+    set_tests_properties(anyps5_platform_kernel_priority PROPERTIES TIMEOUT 30)
 endif()

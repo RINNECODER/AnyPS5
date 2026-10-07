@@ -12,7 +12,7 @@
 namespace Cpu {
 namespace {
 
-enum class Service { Dtors, AtexitCount, AtexitReport, Create, Yield, Join, Self, Equal, Error, Tls, Exit };
+enum class Service { Dtors, AtexitCount, AtexitReport, Create, Yield, Join, Self, Equal, Error, Tls, Exit, AttrInit, AttrDestroy, AttrSetPriority, AttrGetPriority, AttrSetInherit, AttrSetPolicy };
 
 std::string identity(const SceImport& import) {
     return import.Nid + " library=" + import.LibraryName + ":" + std::to_string(import.LibraryVersion) +
@@ -43,6 +43,10 @@ struct SceThreadImports::Impl {
         {"aI+OeCz8xrQ", Service::Self}, {"3PtV6p3QNX4", Service::Equal},
         {"9BcDykPmo1I", Service::Error}, {"vNe1w4diLCs", Service::Tls},
         {"3kg7rT0NQIs", Service::Exit}};
+    const std::map<std::string, Service> priorityServices{
+        {"nsYoNRywwNg", Service::AttrInit}, {"62KCwEMmzcM", Service::AttrDestroy},
+        {"DzES9hQF4f4", Service::AttrSetPriority}, {"FXPWHNk8Of0", Service::AttrGetPriority},
+        {"eXbUSpEaTsA", Service::AttrSetInherit}, {"4+h9EzwKF4I", Service::AttrSetPolicy}};
     std::map<Key, std::uint64_t> gates;
 
     Impl(Machine& guest, const std::shared_ptr<GuestThreads>& runtime, std::uint64_t gateBase)
@@ -103,8 +107,45 @@ struct SceThreadImports::Impl {
             break;
         }
         case Service::Exit: runtime->ExitThreadFromHostCall(first); break;
+        case Service::AttrInit: guest.Set(Register::Rax, runtime->AttributeInit(first)); break;
+        case Service::AttrDestroy: guest.Set(Register::Rax, runtime->AttributeDestroy(first)); break;
+        case Service::AttrSetPriority: guest.Set(Register::Rax, runtime->AttributeSetPriority(first, second)); break;
+        case Service::AttrGetPriority: guest.Set(Register::Rax, runtime->AttributeGetPriority(first, second)); break;
+        case Service::AttrSetInherit:
+            guest.Set(Register::Rax, runtime->AttributeSetInherit(first, static_cast<std::int32_t>(second))); break;
+        case Service::AttrSetPolicy:
+            guest.Set(Register::Rax, runtime->AttributeSetPolicy(first, static_cast<std::int32_t>(second))); break;
         }
     }
+    std::optional<std::uint64_t> resolve(const SceImport& import, std::uint8_t symbolType,
+                                         Service service, std::weak_ptr<Impl> weak) {
+        if (import.LibraryName != "libkernel" || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
+            import.ModuleMajor != 1 || import.ModuleMinor != 1)
+            throw std::runtime_error("Unsupported SCE thread import scope/version: " + identity(import));
+        if (symbolType != 2)
+            throw std::runtime_error("Unsupported SCE thread import symbol type: " + identity(import));
+        const Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
+                            import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
+        if (const auto found = gates.find(key); found != gates.end()) return found->second;
+        if (nextSlot == 256) throw std::runtime_error("SCE thread import gate page is exhausted");
+        const auto gate = base + nextSlot * 16;
+        const std::array ret{std::byte{0xc3}};
+        machine.Write(gate, ret);
+        machine.AddHostCall(gate, [state = std::move(weak), operation = service,
+                                       qualified = identity(import)](Machine& guest) {
+            try {
+                const auto context = state.lock();
+                if (!context) throw std::runtime_error("SCE thread import provider has expired");
+                context->invoke(guest, operation);
+            } catch (const std::exception& error) {
+                throw std::runtime_error("SCE thread import " + qualified + ": " + error.what());
+            }
+        });
+        gates.emplace(key, gate);
+        ++nextSlot;
+        return gate;
+    }
+
 };
 
 SceThreadImports::SceThreadImports(Machine& machine, std::shared_ptr<GuestThreads> threads, std::uint64_t gateBase)
@@ -114,31 +155,37 @@ SceThreadImports::~SceThreadImports() = default;
 std::optional<std::uint64_t> SceThreadImports::Resolve(const SceImport& import, std::uint8_t symbolType) {
     const auto service = impl->services.find(import.Nid);
     if (service == impl->services.end()) return std::nullopt;
-    if (import.LibraryName != "libkernel" || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
-        import.ModuleMajor != 1 || import.ModuleMinor != 1)
-        throw std::runtime_error("Unsupported SCE thread import scope/version: " + identity(import));
-    if (symbolType != 2)
-        throw std::runtime_error("Unsupported SCE thread import symbol type: " + identity(import));
-    const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
-                        import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
-    if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->nextSlot == 256) throw std::runtime_error("SCE thread import gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), operation = service->second,
-                                   qualified = identity(import)](Machine& guest) {
-        try {
-            const auto context = state.lock();
-            if (!context) throw std::runtime_error("SCE thread import provider has expired");
-            context->invoke(guest, operation);
-        } catch (const std::exception& error) {
-            throw std::runtime_error("SCE thread import " + qualified + ": " + error.what());
-        }
-    });
-    impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
-    return gate;
+    return impl->resolve(import, symbolType, service->second, impl);
+}
+
+std::optional<std::uint64_t> SceThreadImports::ResolvePriority(const SceImport& import,
+                                                              std::uint8_t symbolType) {
+    const auto service = impl->priorityServices.find(import.Nid);
+    if (service == impl->priorityServices.end()) return std::nullopt;
+    return impl->resolve(import, symbolType, service->second, impl);
+}
+
+std::optional<std::uint64_t> SceThreadImports::ResolveTargetPriority(const SceImport& import,
+        std::uint8_t symbolType, ThreadPriorityConsumer consumer) {
+    const auto service = impl->priorityServices.find(import.Nid);
+    if (service == impl->priorityServices.end()) return std::nullopt;
+    if (import.LibraryName != "libkernel" || import.ModuleName != "libkernel" ||
+        import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1 || symbolType != 2)
+        throw std::runtime_error("Unsupported target thread priority scope/version/type: " + identity(import));
+    const bool eboot = consumer.Name == "eboot.bin" &&
+        consumer.Sha256 == "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397" &&
+        import.LibraryId == 44 && import.ModuleId == 24;
+    const bool libc = consumer.Name == "libc.prx" &&
+        consumer.Sha256 == "78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f" &&
+        import.LibraryId == 0 && import.ModuleId == 1 && service->second != Service::AttrSetPolicy;
+    const bool web = consumer.Name == "libSceNpCppWebApi.prx" &&
+        consumer.Sha256 == "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9" &&
+        import.LibraryId == 4 && import.ModuleId == 5 &&
+        (service->second == Service::AttrInit || service->second == Service::AttrDestroy ||
+         service->second == Service::AttrSetPriority);
+    if (!eboot && !libc && !web)
+        throw std::runtime_error("Unsupported target thread priority consumer source/import row: " + identity(import));
+    return impl->resolve(import, symbolType, service->second, impl);
 }
 
 }

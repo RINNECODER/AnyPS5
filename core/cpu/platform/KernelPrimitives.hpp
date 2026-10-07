@@ -37,7 +37,10 @@ struct KernelMutexConsumer {
 
 // Engineering qualification for the observed PPSA04203 consumer import rows.
 // The loader must compute the consumer hash from its actual input before calling
-// Resolve. Priority protocols 1/2 and abandoned-owner recovery remain unsupported.
+// Resolve. Protocol 1 uses the actual guest scheduler's live waiter inheritance
+// and effective-priority ordering (FIFO ties). Protocol 2 and abandoned-owner
+// recovery remain unsupported. Direct opaque pointee/copy-slot access is not
+// admitted by these contracts.
 // This selects only the nine mutex contracts, never another component family.
 class TargetKernelMutexes final {
 public:
