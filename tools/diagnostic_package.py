@@ -36,6 +36,32 @@ MANDATORY_FILES = (
     "bin/anyps5_guest_thread_tests", "fixtures/thread-main.elf", "fixtures/ThreadGuest.prx",
 )
 
+# PR85's compiled, bounded production contract. Route claims mean this qualified
+# provider subset is assembled by Main; they do not certify a title's imports.
+NATIVE_RUNNER_CONTRACT = {
+    "enabled": True,
+    "owned_memory": "live staged CPU/Metal publication",
+    "provider_selection": "actual parsed consumer SHA-256, size, scope and ELF symbol",
+    "utility_metallib": "../fixtures/AnyPS5Utilities.metallib relative to engine",
+    "wall_limit_ms": 30000,
+    "idle_limit_ms": 5000,
+    "constraints": "bounded diagnostic profile; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence",
+}
+PLATFORM_CASES = (
+    ("kernel", "kernel-guest.bin"), ("content", "content-guest.bin"),
+    ("network", "network-guest.bin"), ("np", "np-guest.bin"),
+    ("audio", "audio-guest.bin"), ("rtc", "rtc-guest.bin"),
+    ("sce", "sce-platform.elf"), ("kernel_mutex_threads", "kernel-mutex-threads.elf"),
+    ("kernel_priority", "kernel-priority.elf"), ("kernel_round_robin", "kernel-round-robin.elf"),
+    ("kernel_condition", "kernel-condition.elf"), ("kernel_static_mutex", "kernel-static-mutex.elf"),
+    ("kernel_events", "kernel-events.elf"),
+)
+VIDEOOUT_CALLERS = tuple("videoout-" + name + ".bin" for name in
+                        ("open", "status", "close", "attribute", "register", "rate", "unregister"))
+FLIP_CALLERS = tuple("target-flip-" + name + ".bin" for name in ("emit", "wait", "sequence", "submit"))
+AGC_CALLERS = tuple("target-agc-" + name + ".bin" for name in
+                   ("write", "submit", "shader", "dispatch", "acb-write"))
+
 
 def digest(path):
     value = hashlib.sha256()
@@ -55,7 +81,7 @@ def system_library(value):
     return value.startswith(("/usr/lib/", "/System/Library/")) and os.path.normpath(value) == value
 
 
-def prepare_package(source, build, gpu_source, destination, revisions, run):
+def prepare_package(source, build, gpu_source, destination, revisions, run, profile="legacy"):
     """Copy and relocate an exact clean source build into a new package directory.
 
     ``run(name, argv, cwd=None, env=None, timeout=...)`` returns stdout and raises
@@ -67,6 +93,8 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
     are accepted and normalized to schema 2's TCG/Unicorn keys. The returned
     relocation_commands are relative argv lists for caller-owned fixture runs.
     """
+    require(profile in ("legacy", "native"), "Unknown diagnostic package profile")
+    native = profile == "native"
     source, build, gpu_source = (Path(p).resolve() for p in (source, build, gpu_source))
     destination = Path(destination).absolute()
     require(not destination.exists() and not destination.is_symlink(), "Package destination already exists")
@@ -121,12 +149,75 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
         match = re.match(r"([^/#:][^:]*):[^=]+=(.*)$", line)
         if match:
             cache[match[1]] = match[2]
-    require(Path(cache.get("CMAKE_HOME_DIRECTORY", "")).resolve() == source,
-            "CMake build uses a different source directory")
+    wrapper_identity = None
+    if native:
+        for key in ("BUILD_TESTING", "ANYPS5_CPU_RUNTIME_ONLY", "ANYPS5_BUILD_METAL_SHADER_BRIDGE_TESTS"):
+            require(cache.get(key, "").upper() in ("ON", "TRUE", "YES", "1"),
+                    "Native diagnostic cache requires " + key + " enabled")
+        wrapper = build.parent / "native-controls-source"
+        template = Path(__file__).resolve().with_name("native_diagnostic_controls.cmake")
+        wrapper_cmake = wrapper / "CMakeLists.txt"
+        require(wrapper.is_dir() and not wrapper.is_symlink() and wrapper_cmake.is_file()
+                and not wrapper_cmake.is_symlink() and template.is_file(),
+                "Missing native diagnostic wrapper source")
+        template_sha = digest(template)
+        require(digest(wrapper_cmake) == template_sha, "Native diagnostic wrapper content mismatch")
+        require(Path(cache.get("CMAKE_HOME_DIRECTORY", "")).resolve() == wrapper.resolve(),
+                "CMake build uses a different native wrapper directory")
+        require(Path(cache.get("ANYPS5_DIAGNOSTIC_SOURCE", "")).resolve() == source and
+                Path(cache.get("ANYPS5_DIAGNOSTIC_CPU_SOURCE_DIR", "")).resolve() == source / "core/cpu" and
+                Path(cache.get("ANYPS5_DIAGNOSTIC_CPU_BINARY_DIR", "")).resolve() == build / "source/core/cpu",
+                "Native diagnostic wrapper source/build cache mismatch")
+        wrapper_identity = {"directory": str(wrapper.resolve()), "cmake_source_sha256": template_sha,
+                            "trusted_template": str(template)}
+    else:
+        require(Path(cache.get("CMAKE_HOME_DIRECTORY", "")).resolve() == source,
+                "CMake build uses a different source directory")
     require(Path(cache.get("ANYPS5_CPU_METAL_SOURCE_DIR", "")).resolve() == gpu_source,
             "CMake build uses a different GPU source directory")
     require(cache.get("ANYPS5_CPU_BACKEND") == "TCG", "Package requires the modern TCG backend")
     require(cache.get("CMAKE_OSX_ARCHITECTURES") == "arm64", "Build must explicitly target ARM64")
+    runner_flag = cache.get("ANYPS5_CPU_NATIVE_MODULE_RUNNER", "OFF").upper()
+    require(runner_flag in (("ON", "TRUE", "YES", "1") if native else ("OFF", "FALSE", "NO", "0", "")),
+            "CMake native module runner profile mismatch")
+
+    def capabilities(path, working_directory):
+        # Keep ambient dynamic-loader overrides out even when an independent
+        # caller supplies a run implementation other than the workflow Runner.
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("LD_", "DYLD_"))}
+        nonlocal counter
+        counter += 1
+        raw = run(f"package-{counter:03d}-capabilities", [str(path), "--capabilities-json"],
+                  cwd=working_directory, env=environment, timeout=120)
+        try:
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    require(key not in result, "Duplicate compiled capability key: " + key)
+                    result[key] = value
+                return result
+            value = json.loads(raw, object_pairs_hook=unique_object)
+        except (ValueError, TypeError) as error:
+            raise RuntimeError("Malformed compiled native capabilities") from error
+        require(isinstance(value, dict), "Malformed compiled native capabilities")
+        expected = {"schema_version": 1, "host_architecture": "arm64", "guest_architecture": "x86_64",
+                    "backend": "Modern QEMU TCG x86-64 dynamic translation", "cpu_profile": "Haswell",
+                    "ps5_game_runtime_ready": False, "native_module_runner": NATIVE_RUNNER_CONTRACT,
+                    "supported_formats": ["static_elf64_x86_64", "sce_elf64_x86_64"],
+                    "supported_containers": ["plain_self"],
+                    "supported_instruction_families": ["AVX", "AVX2", "F16C", "FMA"],
+                    "runtime_abis": ["linux_sysv", "sce_sysv"], "sce_module_argument": "--sce-module",
+                    "resource_root_argument": "--resource-root"}
+        require(all(key in value and value[key] == wanted and type(value[key]) is type(wanted)
+                    for key, wanted in expected.items()), "Compiled native runner capability contract mismatch")
+        # Python equates bools with ints, so independently constrain the bound
+        # fields and enabled bit before trusting a JSON contract comparison.
+        contract = value["native_module_runner"]
+        require(contract.get("enabled") is True and
+                type(contract.get("wall_limit_ms")) is int and type(contract.get("idle_limit_ms")) is int,
+                "Compiled native runner capability contract mismatch")
+        return value, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def dependencies(path):
         return re.findall(r"^\s*(.+?) \(compatibility version ",
@@ -150,6 +241,9 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
         require(command("architecture", ["lipo", "-archs", path]) == "arm64",
                 "Expected thin ARM64 Mach-O: " + str(path))
         commands = command("load-commands", ["otool", "-l", path])
+        if native:
+            require("cmd LC_DYLD_ENVIRONMENT" not in commands,
+                    "Native artifact embeds a dynamic-loader environment: " + str(path))
         versions = re.findall(r"cmd LC_BUILD_VERSION\n(?:(?!Load command).)*?platform (\d+)\n\s+minos ([0-9.]+)",
                               commands, re.S)
         if versions:
@@ -170,11 +264,29 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
         require(value.startswith("/"), "Unsupported native search path: " + value)
         return Path(value)
 
-    cpu = build / "core/cpu"
-    agc = cpu / "metal-source/core/libs/prx/libSceAgc/libanyps5_metal_agc_host_fixture.dylib"
+    cpu = build / ("source/core/cpu" if native else "core/cpu")
+    metal = cpu / "metal-source"
+    agc = metal / "core/libs/prx/libSceAgc/libanyps5_metal_agc_host_fixture.dylib"
     roots = [cpu / "anyps5_cpu_run", cpu / "anyps5_system_probe"]
     roots += [build / "tests" / name for name in NATIVE_TESTS]
     roots += [agc, cpu / "tcg/libqemu-x86_64-softmmu.dylib"]
+    native_agc = metal / "core/shader/recompiler/MetalReplay/cpu-agc"
+    platform = cpu / "platform"
+    if native:
+        roots += [build / "tests/anyps5_native_module_runner_test"]
+        roots += [platform / ("anyps5_platform_" + case + "_test") for case, _ in PLATFORM_CASES]
+        roots += [platform / ("anyps5_platform_" + case + "_test") for case in
+                  ("registration", "kernel_events_owner", "kernel_events_native", "kernel_condition_timeout")]
+        roots += [build / "native-videoout" / ("anyps5_cpu_videoout_" + case + "_fixture")
+                  for case in ("native", "packed_hdr", "admission")]
+        roots += [build / "native-flip" / ("anyps5_cpu_flip_" + case + "_fixture")
+                  for case in ("native", "contract")]
+        roots += [native_agc / ("anyps5_cpu_agc_" + case + "_fixture")
+                  for case in ("native", "capability", "target_events")]
+    original_runner_sha = digest(roots[0]) if native else None
+    if native:
+        original_capabilities, original_capabilities_sha = capabilities(roots[0], build)
+        require(digest(roots[0]) == original_runner_sha, "Runner changed during build capabilities probe")
     closure, queue = {}, [(path.resolve(), path.resolve(), []) for path in roots]
     while queue:
         image, executable, inherited = queue.pop(0)
@@ -251,6 +363,14 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
                     "Unexpected relocated search paths")
             binaries[relative] = {"original_load_commands": record["metadata"], "packaged_load_commands": after,
                                   "signature": "ad-hoc; codesign --verify --strict returned zero"}
+        for relative, record in binaries.items():
+            image = stage / relative
+            for dependency in record["packaged_load_commands"]["dependencies"]:
+                if system_library(dependency) or dependency == record["packaged_load_commands"]["install_id"]:
+                    continue
+                relocated = expand(dependency, image, image).resolve()
+                require(relocated.is_relative_to(stage.resolve()) and relocated.is_file(),
+                        "Relocated native dependency escapes or is absent: " + dependency)
         for name in FIXTURES:
             copy(cpu / name, "fixtures/" + name)
         for folder in ("sce-crt", "sce-main-lifecycle"):
@@ -262,6 +382,29 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
                     copy(path, "fixtures/" + folder + "/" + str(path.relative_to(cpu / folder)))
         copy(cpu / "metal-source/core/libs/prx/libSceAgcDriver/Graphics/Metal/shaders/AnyPS5Utilities.metallib",
              "fixtures/AnyPS5Utilities.metallib")
+        if native:
+            for _, name in PLATFORM_CASES:
+                copy(platform / name, "fixtures/platform/" + name)
+            for name in ("thread-main.elf", "ThreadGuest.prx", "kernel-condition-timeout-posix.elf",
+                         "kernel-condition-timeout-relative.elf"):
+                copy(platform / name, "fixtures/platform/" + name)
+            for folder, origin, names in (("videoout", build / "native-videoout", VIDEOOUT_CALLERS),
+                                           ("flip", build / "native-flip", FLIP_CALLERS),
+                                           ("agc", native_agc, AGC_CALLERS)):
+                for name in names:
+                    copy(origin / name, "fixtures/" + folder + "/" + name)
+            copy(native_agc / "target-agc-events.elf", "fixtures/agc/target-agc-events.elf")
+            # A relocated --capabilities-json probe uses the same real process
+            # boundary as Main, without executing or mounting any title bytes.
+            before_probe = {str(path.relative_to(stage)): digest(path)
+                            for path in stage.rglob("*") if path.is_file()}
+            packaged_capabilities, packaged_capabilities_sha = capabilities(stage / "bin/anyps5_cpu_run", stage)
+            require(packaged_capabilities == original_capabilities,
+                    "Relocated capabilities differ from compiled build capabilities")
+            require(before_probe == {str(path.relative_to(stage)): digest(path)
+                                     for path in stage.rglob("*") if path.is_file()},
+                    "Package payload changed during relocated capabilities probe")
+            require(digest(roots[0]) == original_runner_sha, "Runner changed after build capabilities probe")
         files = {str(path.relative_to(stage)): {"sha256": digest(path), "size": path.stat().st_size}
                  for path in sorted(stage.rglob("*")) if path.is_file()}
         require(0 < len(files) <= 128 and all(record["size"] <= 268435456 for record in files.values()),
@@ -271,11 +414,25 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
                     "status": "PREPARED; strict acceptance and relocated fixture execution NOT_RUN by adapter",
                     "source_revisions": canonical,
                     "build_identity": {"directory": str(build), "cmake_cache_sha256": cache_bytes_sha,
-                                       "artifact_identity_scope": "Observed copied bytes; caller owns clean build provenance"},
+                                       "artifact_identity_scope": "Observed copied bytes; caller owns clean build provenance",
+                                       "profile": profile},
                     "capability_limits": {"ps5_game_runtime_ready": False, "retail_title_execution_proven": False,
-                                          "main_cli_routes_metal_videoout": False, "main_cli_routes_native_agc": False,
-                                          "metal_evidence_scope": "Native compiled fixtures only"},
+                                          "actual_title_execution": False,
+                                          "main_cli_routes_metal_videoout": native, "main_cli_routes_native_agc": native,
+                                          "metal_evidence_scope": ("Exact compiled bounded native module provider subset; title execution NOT_RUN"
+                                                                   if native else "Native compiled fixtures only")},
                     "binary_load_commands": binaries, "file_inputs": inputs, "files": files}
+        if native:
+            manifest["build_identity"]["native_wrapper"] = wrapper_identity
+            manifest["compiled_capabilities"] = packaged_capabilities
+            manifest["capabilities_validation"] = {
+                "build_runner_original_sha256": original_runner_sha,
+                "packaged_runner_sha256": files["bin/anyps5_cpu_run"]["sha256"],
+                "build_capabilities_stdout_sha256": original_capabilities_sha,
+                "packaged_capabilities_stdout_sha256": packaged_capabilities_sha,
+                "contract": "native_module_runner bounded provider subset matches exactly; original and relocated JSON match",
+                "dynamic_loader_environment": "LD_* and DYLD_* removed",
+            }
         encoded = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         require(len(encoded.encode()) <= 1048576, "Manifest exceeds strict acceptance size limit")
         (stage / "manifest.json").write_text(encoded)
@@ -284,6 +441,9 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
         for record in inputs.values():
             require(digest(record["original_path"]) == record["original_sha256"], "Input changed during packaging")
         require(digest(cache_path) == cache_bytes_sha, "CMake cache changed during packaging")
+        if native:
+            require(digest(wrapper_cmake) == template_sha and digest(template) == template_sha,
+                    "Native diagnostic wrapper changed during packaging")
         check_revisions()
         require(not destination.exists(), "Package destination appeared during preparation")
         stage.rename(destination)
@@ -300,7 +460,35 @@ def prepare_package(source, build, gpu_source, destination, revisions, run):
                 ["bin/anyps5_cpu_memory_metal_test", "fixtures/cpu-memory-metal-homebrew.elf", "fixtures/AnyPS5Utilities.metallib"],
                 ["bin/anyps5_sce_native_videoout_tests", "fixtures/AnyPS5Utilities.metallib"],
                 ["bin/anyps5_metal_agc_host_exports", "lib/libanyps5_metal_agc_host_fixture.dylib"]]
+    if native:
+        utility = "fixtures/AnyPS5Utilities.metallib"
+        commands += [["bin/anyps5_native_module_runner_test", "fixtures/sce-module-main.elf",
+                      "fixtures/SceModuleGuest.prx", utility, case]
+                     for case in ("lifecycle", "close", "initializer-failure", "qualified-rejection")]
+        commands += [["bin/anyps5_cpu_run", "--diagnostics-json", "--sce-module", "fixtures/SceModuleGuest.prx",
+                      "fixtures/sce-module-main.elf", "17", "5", "7", "58", "3366582378"]]
+        commands += [["bin/anyps5_platform_" + case + "_test", "fixtures/platform/" + name]
+                     for case, name in PLATFORM_CASES]
+        commands += [["bin/anyps5_platform_registration_test"],
+                     ["bin/anyps5_platform_kernel_events_owner_test", "fixtures/platform/thread-main.elf",
+                      "fixtures/platform/ThreadGuest.prx"],
+                     ["bin/anyps5_platform_kernel_events_owner_test", "fixtures/thread-main.elf", "fixtures/ThreadGuest.prx"],
+                     ["bin/anyps5_platform_kernel_events_native_test", "fixtures/platform/kernel-events.elf", utility],
+                     ["bin/anyps5_platform_kernel_condition_timeout_test", "fixtures/platform/kernel-condition-timeout-posix.elf",
+                      "fixtures/platform/kernel-condition-timeout-relative.elf"]]
+        video = ["fixtures/videoout/" + name for name in VIDEOOUT_CALLERS]
+        commands += [["bin/anyps5_cpu_videoout_" + case + "_fixture", utility, *video]
+                     for case in ("native", "packed_hdr")]
+        commands += [["bin/anyps5_cpu_videoout_admission_fixture", *video]]
+        flip = ["fixtures/flip/" + name for name in FLIP_CALLERS]
+        commands += [["bin/anyps5_cpu_flip_contract_fixture", *flip],
+                     ["bin/anyps5_cpu_flip_native_fixture", utility, *flip],
+                     ["bin/anyps5_cpu_flip_native_fixture", utility, *flip, "shutdown"],
+                     ["bin/anyps5_cpu_agc_capability_fixture"],
+                     ["bin/anyps5_cpu_agc_native_fixture", utility, *["fixtures/agc/" + name for name in AGC_CALLERS]],
+                     ["bin/anyps5_cpu_agc_target_events_fixture", "fixtures/agc/target-agc-events.elf", utility]]
     return {"package": str(destination), "manifest_sha256": digest(destination / "manifest.json"),
             "checksums_sha256": digest(destination / "SHA256SUMS"), "artifacts": files,
             "input_artifacts": inputs, "relocation_commands": commands,
-            "acceptance_status": "NOT_RUN", "game_runtime_ready": False}
+            "acceptance_status": "NOT_RUN", "profile": profile, "game_runtime_ready": False,
+            "actual_title_execution": False}

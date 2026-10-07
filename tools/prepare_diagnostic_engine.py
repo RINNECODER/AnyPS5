@@ -7,10 +7,11 @@ python3 tools/prepare_diagnostic_engine.py --source <clean AnyPS5 checkout> \
   [--dependency-cache <checkout with pinned submodules>]
 
 Every invocation builds fresh. Existing outputs are rejected, never reused or overwritten.
-Required CPU28, GPU22, integration4, relocation and fresh public acceptance must pass.
+The default legacy profile requires CPU28/GPU22/integration4. --profile native
+requires the declared native inventory, relocation and fresh public acceptance.
 """
 import argparse
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 import hashlib
 import json
 import os
@@ -48,6 +49,69 @@ anyps5_metal_agc_host_exports'''.split())
 INTEGRATION_TESTS = set('''anyps5_cpu_metal_guest anyps5_cpu_memory_metal_guest
 anyps5_sce_videoout_imports anyps5_sce_native_videoout'''.split())
 REQUIRED_TESTS = CPU_TESTS | GPU_TESTS | INTEGRATION_TESTS
+# Native qualification retains every legacy control and requires the merged
+# platform/owned-memory controls plus the native runner and finite fragments.
+# The timeout control requires CPU13's source contract; absent controls fail closed.
+NATIVE_REQUIRED_TESTS = REQUIRED_TESTS | set('''anyps5_sce_libc_internal
+anyps5_cpu_memory_metal_guest_owned anyps5_cpu_memory_metal_guest_composition
+anyps5_owned_memory_metal_mutation anyps5_sce_native_graphics_session
+anyps5_metal_shader_correctness_packed anyps5_metal_shader_correctness_half
+anyps5_metal_shader_correctness_sdwa anyps5_metal_shader_correctness_lds
+anyps5_cpu_agc_native_provider anyps5_cpu_agc_capability anyps5_cpu_agc_target_events
+anyps5_platform_kernel anyps5_platform_content anyps5_platform_network
+anyps5_platform_np anyps5_platform_audio anyps5_platform_rtc
+anyps5_platform_registration anyps5_platform_sce
+anyps5_platform_kernel_mutex_threads anyps5_platform_kernel_priority
+anyps5_platform_kernel_round_robin anyps5_platform_kernel_condition
+anyps5_platform_kernel_static_mutex anyps5_platform_kernel_condition_timeout
+anyps5_platform_kernel_events anyps5_platform_kernel_events_owner
+anyps5_platform_kernel_events_native cpu09_owner_graph
+anyps5_cpu_videoout_native_qualified anyps5_cpu_videoout_packed_hdr
+anyps5_cpu_videoout_admission anyps5_cpu_flip_contract
+anyps5_cpu_flip_native_qualified anyps5_cpu_flip_native_pending_shutdown
+anyps5_native_module_runner_lifecycle anyps5_native_module_runner_close
+anyps5_native_module_runner_initializer-failure
+anyps5_native_module_runner_qualified-rejection anyps5_native_module_runner_cli'''.split())
+
+
+def required_tests(profile):
+    require(profile in ('legacy', 'native'), 'Unknown diagnostic profile')
+    return NATIVE_REQUIRED_TESTS if profile == 'native' else REQUIRED_TESTS
+
+
+def combined_step(profile):
+    return 'combined-native' if profile == 'native' else 'combined54'
+
+
+def bounded_ninja(output):
+    """Cap the owned inner TCG build, whose source currently requests -j8.
+
+    With the outer build at two jobs and the inner at two, at most three
+    compiler commands run concurrently. Queries/targets pass through unchanged.
+    """
+    ninja = shutil.which('ninja')
+    require(ninja is not None, 'Ninja executable missing')
+    target = output / 'bounded-ninja'
+    target.write_text('#!' + sys.executable + '\n' +
+        'import os, sys\n' + 'ninja = ' + repr(ninja) + '\n' +
+        '''args = []
+index = 1
+while index < len(sys.argv):
+    value = sys.argv[index]
+    if value in ('-j', '--jobs'):
+        index += 2
+        continue
+    if value.startswith('-j') or value.startswith('--jobs='):
+        index += 1
+        continue
+    args.append(value)
+    index += 1
+os.execv(ninja, [ninja, '-j', '2', *args])
+''')
+    target.chmod(0o755)
+    return target
+
+
 DEPENDENCIES = ['3rdparty/anyps5-tcg', '3rdparty/unicorn', '3rdparty/SDL2',
                 '3rdparty/SPIRV-Cross', '3rdparty/SPIRV-Headers',
                 '3rdparty/Vulkan-Headers', '3rdparty/glslang']
@@ -242,15 +306,16 @@ def setup_dependencies(run, root, cache):
     return records
 
 
-def artifact_records(build):
+def artifact_records(build, profile='legacy'):
     suffixes = {'.a', '.dylib', '.elf', '.prx', '.bin', '.metallib'}
     paths = [p for p in build.rglob('*') if p.is_file() and
              (p.suffix in suffixes or p.name.startswith('anyps5_') and os.access(p, os.X_OK))]
-    module_object = build / 'core/cpu/CMakeFiles/anyps5_sce_modules_tests.dir/tests/SceModulesTests.cpp.o'
+    cpu = build / ('source/core/cpu' if profile == 'native' else 'core/cpu')
+    module_object = cpu / 'CMakeFiles/anyps5_sce_modules_tests.dir/tests/SceModulesTests.cpp.o'
     require(module_object.is_file(), 'Compiled module control object missing')
     paths.append(module_object)
     for folder in ('sce-crt', 'sce-main-lifecycle'):
-        paths.extend(p for p in (build / 'core/cpu' / folder).rglob('*')
+        paths.extend(p for p in (cpu / folder).rglob('*')
                      if p.is_file() and p.suffix in ('.txt', '.json'))
     return {str(p.relative_to(build)): {'path': str(p), 'sha256': digest(p), 'size': p.stat().st_size}
             for p in sorted(paths)}
@@ -270,6 +335,10 @@ def write_negative_copy(run, package, output, helper, label, mutate, fragment):
 
 def workflow(args, run, receipt):
     source, app, output = args.source.resolve(), args.macps_source.resolve(), args.output.resolve()
+    profile = getattr(args, 'profile', 'legacy')
+    expected_tests = required_tests(profile)
+    receipt['build_profile'] = profile
+    receipt['required_tests'] = sorted(expected_tests)
     engine, gpu, macps, build = [output / n for n in ('engine-source', 'gpu-source', 'macps-source', 'build')]
     with Lease(['git-integration']):
         clone_exact(run, source, engine, args.revision, 'engine')
@@ -289,13 +358,30 @@ def workflow(args, run, receipt):
         [('cmake', ['cmake', '--version']), ('ninja', ['ninja', '--version']),
          ('clang', ['clang', '--version']), ('swift', ['swift', '--version']),
          ('glib', ['pkg-config', '--modversion', 'glib-2.0'])]}
+    ninja_wrapper = bounded_ninja(output)
+    receipt['inner_build_limit'] = {'path': str(ninja_wrapper), 'sha256': digest(ninja_wrapper),
+                                  'outer_jobs': 2, 'inner_jobs': 2, 'maximum_compiler_jobs': 3}
+    configure_source = engine
+    if profile == 'native':
+        controls = Path(__file__).with_name('native_diagnostic_controls.cmake').resolve()
+        configure_source = output / 'native-controls-source'
+        configure_source.mkdir()
+        configured_controls = configure_source / 'CMakeLists.txt'
+        shutil.copyfile(controls, configured_controls)
+        receipt['native_controls_adapter'] = {'path': str(controls), 'sha256': digest(controls),
+            'configured_path': str(configured_controls), 'configured_sha256': digest(configured_controls)}
     with Lease(['tcg-build']):
-        run('configure', ['cmake', '-S', engine, '-B', build, '-G', 'Ninja',
+        configure = ['cmake', '-S', configure_source, '-B', build, '-G', 'Ninja',
             '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DBUILD_TESTING=ON',
             '-DANYPS5_CPU_RUNTIME_ONLY=ON', '-DANYPS5_CPU_BACKEND=TCG',
-            '-DANYPS5_CPU_METAL_SOURCE_DIR=' + str(gpu), '-DANYPS5_BUILD_METAL_SHADER_BRIDGE_TESTS=ON'])
+            '-DANYPS5_CPU_METAL_SOURCE_DIR=' + str(gpu), '-DANYPS5_BUILD_METAL_SHADER_BRIDGE_TESTS=ON',
+            '-DtcgNinja:FILEPATH=' + str(ninja_wrapper),
+            '-DANYPS5_CPU_NATIVE_MODULE_RUNNER=' + ('ON' if profile == 'native' else 'OFF')]
+        if profile == 'native':
+            configure.append('-DANYPS5_DIAGNOSTIC_SOURCE:PATH=' + str(engine))
+        run('configure', configure)
         run('build', ['cmake', '--build', build, '--parallel', '2'], timeout=1800)
-    receipt['build_artifacts'] = artifact_records(build)
+    receipt['build_artifacts'] = artifact_records(build, profile)
     receipt['build_cache_sha256'] = digest(build / 'CMakeCache.txt')
     # Freeze build marker before CPU's separate focused controls; no shared rebuilds.
     (output / 'build-ready.json').write_text(json.dumps({'status': 'BUILT_NOT_VALIDATED',
@@ -303,16 +389,18 @@ def workflow(args, run, receipt):
         'build': str(build), 'cmake_cache_sha256': receipt['build_cache_sha256'], 'artifacts': receipt['build_artifacts'],
         'cpu_native_owner': 'Tools full suite; CPU separate fixed/old/fixed controls'}, indent=2) + '\n')
     inventory = json.loads(run('ctest-inventory', ['ctest', '--test-dir', build, '--show-only=json-v1']))
-    require(len(inventory['tests']) == len(REQUIRED_TESTS) and
-        {t['name'] for t in inventory['tests']} == REQUIRED_TESTS, 'CTest required inventory differs from CPU28/GPU22/integration4')
+    require(len(inventory['tests']) == len(expected_tests) and
+        {t['name'] for t in inventory['tests']} == expected_tests,
+        'CTest required inventory differs from declared ' + profile + ' profile')
     env = dict(os.environ, MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1',
                ANYPS5_NO_SHADER_CACHE='1', APS5_NO_SHADER_CACHE='1')
     with Lease(['tcg-build', 'gpu-validation', 'title-session']):
-        run('combined54', ['ctest', '--test-dir', build, '-T', 'Test', '--no-tests=error',
+        run(combined_step(profile), ['ctest', '--test-dir', build, '-T', 'Test', '--no-tests=error',
             '--output-on-failure', '--parallel', '1'], env=env, timeout=1200)
     tag = (build / 'Testing/TAG').read_text().splitlines()[0]
-    receipt['ctest_results'] = parse_ctest_results(build / 'Testing' / tag / 'Test.xml', REQUIRED_TESTS)
-    package_info = prepare_package(engine, build, gpu, output / 'package', revisions, run)
+    receipt['ctest_results'] = parse_ctest_results(build / 'Testing' / tag / 'Test.xml', expected_tests)
+    with Lease(['tcg-build']) if profile == 'native' else nullcontext():
+        package_info = prepare_package(engine, build, gpu, output / 'package', revisions, run, profile=profile)
     package = Path(package_info['package'])
     receipt['package'] = package_info
     frozen_inputs = {str(Path(r['path']).resolve()): r for r in receipt['build_artifacts'].values()}
@@ -328,6 +416,11 @@ def workflow(args, run, receipt):
 def accept_prepared_package(args, run, receipt):
     """Finish caller-verified prepared bytes; the CLI always prepares a fresh candidate."""
     output = args.output.resolve()
+    profile = getattr(args, 'profile', 'legacy')
+    expected_tests = required_tests(profile)
+    require(receipt.get('build_profile', 'legacy') == profile, 'Build receipt profile mismatch')
+    require(receipt.get('required_tests', sorted(REQUIRED_TESTS)) == sorted(expected_tests),
+            'Build receipt required inventory mismatch')
     engine, gpu, macps, build = [output / n for n in ('engine-source', 'gpu-source', 'macps-source', 'build')]
     env = dict(os.environ, MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1',
                ANYPS5_NO_SHADER_CACHE='1', APS5_NO_SHADER_CACHE='1')
@@ -335,11 +428,18 @@ def accept_prepared_package(args, run, receipt):
     engine_deps, gpu_deps = receipt['dependencies']['engine'], receipt['dependencies']['gpu']
     package_info = receipt['package']
     package = Path(package_info['package'])
-    require(any(c['name'] == 'combined54' and c['exit_code'] == 0 for c in receipt['commands']),
+    require(any(c['name'] == combined_step(profile) and c['exit_code'] == 0 for c in receipt['commands']),
             'Passing combined fixture command missing')
     tag = (build / 'Testing/TAG').read_text().splitlines()[0]
-    parse_ctest_results(build / 'Testing' / tag / 'Test.xml', REQUIRED_TESTS)
+    parse_ctest_results(build / 'Testing' / tag / 'Test.xml', expected_tests)
+    if profile == 'native':
+        controls = receipt['native_controls_adapter']
+        require(digest(controls['path']) == controls['sha256'], 'Native controls adapter changed')
+        require(digest(controls['configured_path']) == controls['configured_sha256'] == controls['sha256'],
+                'Configured native controls adapter changed')
     require(digest(build / 'CMakeCache.txt') == receipt['build_cache_sha256'], 'Build cache changed')
+    wrapper = receipt['inner_build_limit']
+    require(digest(wrapper['path']) == wrapper['sha256'], 'Inner build limiter changed')
     for record in receipt['build_artifacts'].values():
         require(digest(record['path']) == record['sha256'], 'Frozen build artifact changed')
     require(digest(package / 'manifest.json') == package_info['manifest_sha256'], 'Prepared manifest changed')
@@ -411,7 +511,9 @@ def accept_prepared_package(args, run, receipt):
     for record in receipt['build_artifacts'].values():
         require(digest(record['path']) == record['sha256'], 'Build artifact changed after freeze: ' + record['path'])
     receipt.update(status='PASS', package_sealed=True, leases_released=True,
-        failures=[], skips=[], unknowns=['Production Main does not wire NativeMetalSession/AGC providers; game rendering and playability unproven'],
+        failures=[], skips=[], unknowns=[('Native runner implements a qualified diagnostic provider subset; '
+            'actual title execution and playability unproven') if profile == 'native' else
+            'Production Main does not wire NativeMetalSession/AGC providers; game rendering and playability unproven'],
         manual_selection={'action': 'MacPS Settings gear > Choose AnyPS5 Runtime… > select package folder',
             'package': str(package), 'manifest_sha256': package_info['manifest_sha256'],
             'engine_selection_performed': False, 'game_runtime_ready': False})
@@ -425,9 +527,11 @@ def main():
     for name in ('revision', 'macps-revision'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--dependency-cache', type=Path)
+    parser.add_argument('--profile', choices=('legacy', 'native'), default='legacy',
+                        help='Explicit native opt-in; requires the full native source and control contracts')
     args = parser.parse_args()
     receipt = {'schema_version': 1, 'status': 'NOT_RUN', 'commands': [],
-        'title_execution': False, 'app_mutation': False, 'engine_selection': False,
+        'title_execution': False, 'actual_title_execution': False, 'app_mutation': False, 'engine_selection': False,
         'workflow_sha256': digest(Path(__file__)), 'package_adapter_sha256': digest(Path(__file__).with_name('diagnostic_package.py'))}
     output, run = args.output.resolve(), None
     try:
