@@ -286,7 +286,7 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
         [&](const auto& row) { return row.Nid == import.Nid; });
     if ((primitive || condition || event) && (!qualifiedSize(consumer) || type != 2 || size != 0))
         throw std::runtime_error("Unsupported native kernel actual consumer source/type/size");
-    if (const auto address = impl->mutexes->ResolveCondition(import, type, size, {name, hash}))
+    if (const auto address = impl->mutexes->ResolveCondition(import, type, size, {admittedName, hash}))
         return SceResolvedImport{*address, type};
     if (const auto address = impl->mutexes->Resolve(import, functionType, {admittedName, hash}))
         return SceResolvedImport{*address, type};

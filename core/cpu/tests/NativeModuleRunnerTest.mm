@@ -240,6 +240,22 @@ void qualifiedRejections(const char* utility) {
         malformed=libc;malformed.SourceSha256[0]^=std::byte{1};
         rejects([&]{runner.Resolve(malformed,mutex,2,0);},"consumer source/import");
     }
+    // Timed rows are outside the older condition inventory. Correct metadata
+    // must admit first so a forged source size cannot pass via another guard.
+    for(const bool relative:{false,true}) {
+        const auto& actual=relative?libc:source;
+        auto timed=scoped(relative?"BmMjYxmew1w":"27bAgiJmOh0",
+                          relative?"libkernel":"libScePosix");
+        timed.ModuleName="libkernel";timed.LibraryId=relative?0:43;timed.ModuleId=relative?1:24;
+        const auto admitted=runner.Resolve(actual,timed,2,0);
+        require(admitted&&admitted->Address&&admitted->Type==2,
+                relative?"Exact SCE timed-condition metadata rejected":"Exact POSIX timed-condition metadata rejected");
+        for(const auto bytes:{std::uint64_t{0},actual.SourceSize-1,actual.SourceSize+1}) {
+            auto malformed=actual;malformed.SourceSize=bytes;
+            rejects([&]{runner.Resolve(malformed,timed,2,0);},
+                    "Unsupported target kernel condition timeout consumer source/import row");
+        }
+    }
     runner.Shutdown();runner.Shutdown();
 }
 void run(const char* mainPath,const char* dependencyPath,const char* utility,const char* mode) {
