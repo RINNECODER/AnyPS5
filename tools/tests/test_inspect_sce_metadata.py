@@ -131,6 +131,22 @@ class RichMetadataContract(unittest.TestCase):
         _, repeat = self.inspect(self.main)
         self.assertEqual(consumer_path.read_bytes(), repeat.read_bytes())
 
+        # Source filename compatibility is distinct from SCE identity syntax:
+        # '#' is valid in the report's basename contract and must stay valid.
+        allowed = self.root / 'public#dump.bin'
+        encoded = self.main.read_bytes()
+        self.assertEqual(encoded.count(b'missing.prx\0'), 1)
+        allowed.write_bytes(encoded.replace(b'missing.prx\0', b'miss#ng.prx\0'))
+        _, allowed_path = self.inspect(allowed)
+        allowed_report = self.root / 'allowed-source-name-report.json'
+        command[command.index(str(consumer_path))] = str(allowed_path)
+        command[command.index(str(report_path))] = str(allowed_report)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        allowed_data = json.loads(allowed_report.read_text())
+        self.assertEqual(allowed_data['summary'], report['summary'])
+        self.assertEqual([row['filename'] for row in allowed_data['unknown_provider_closure']], ['miss#ng.prx'])
+
     def test_standard_linked_elf_and_plaintext_self_preserve_typed_evidence(self):
         # Ordinary ELF carries public names instead of SCE scoped identities.
         standard, _ = self.inspect(self.root / 'provider.elf')
@@ -236,6 +252,17 @@ class RichMetadataContract(unittest.TestCase):
                 self.assertIn(reason, result.stderr, 'negative control failed for an unrelated guard')
 
     def test_input_existing_output_symlink_and_private_atomic_publication(self):
+        # Contract: every published source path is consumable by the report.
+        # A valid POSIX basename can violate its schema; ordinary fixture names
+        # and existing alias controls do not detect that compatibility gap.
+        for character in (':', '\\', '\r', '\n'):
+            with self.subTest(source_character=repr(character)):
+                invalid_source = self.root / ('public' + character + 'dump.bin')
+                invalid_source.write_bytes(self.main.read_bytes())
+                result, output = self.invoke(invalid_source)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn('source filename incompatible with dependency report', result.stderr)
+                self.assertFalse(output.exists())
         content = b'existing output must survive\n'
         existing = self.root / 'existing-output.json'
         existing.write_bytes(content)

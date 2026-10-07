@@ -176,8 +176,12 @@ def identifier(encoded):
     return value
 
 
+def bare_filename(name):
+    return name not in ('', '.', '..') and not any(c in name for c in '/\\:\r\n')
+
+
 def bare_name(name):
-    return name not in ('', '.', '..') and not any(c in name for c in '/\\:#\r\n')
+    return bare_filename(name) and '#' not in name
 
 
 def parse_metadata(source, path):
@@ -268,9 +272,9 @@ def parse_metadata(source, path):
                                                  for index, value in sorted(result.items())]
     original = [string(value) for tag in (0x61000009, 0x61000041) for value in repeated[tag]]
     require(len(set(original)) <= 1, 'conflicting original filename metadata')
-    require(all(bare_name(name) for name in original), 'invalid original filename')
+    require(all(bare_filename(name) for name in original), 'invalid original filename')
     needed = [string(value) for value in repeated[1]]
-    require(all(bare_name(name) for name in needed), 'invalid DT_NEEDED filename')
+    require(all(bare_filename(name) for name in needed), 'invalid DT_NEEDED filename')
     require(get(11, 0x6100003b) == 24, 'unsupported dynamic symbol entry size')
     if 0x6100003f in tags:
         symsize = tags[0x6100003f]
@@ -337,6 +341,7 @@ def inspect(path):
     path = Path(path)
     require(not path.is_symlink(), 'input symlink unsupported')
     path = path.resolve(strict=True)
+    require(bare_filename(path.name), 'source filename incompatible with dependency report')
     descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     try:
         before = os.fstat(descriptor)

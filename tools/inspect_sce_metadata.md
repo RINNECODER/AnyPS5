@@ -20,6 +20,8 @@ Both SELF magic values accepted by the pinned public `Self.cpp` are supported on
 
 The output filename must be new, its parent must already exist, and it must be outside Git repositories. Existing files, symlinks and hardlinks cannot be overwritten, including aliases of the input. The reader writes a mode `0600` temporary file, flushes it, atomically links it to the new filename without clobbering, and removes the temporary name. Error status `2` leaves no published metadata. A successful receipt contains only the output path, output SHA-256 and import/export counts. Parsing errors do not print source paths, symbol scopes or payload bytes. The source is read with a bounded read and checked for changes during that read. Keep real metadata outside Git; it contains sensitive source paths and dependency identities.
 
+The source basename must satisfy the dependency report's filename contract: it cannot contain `/`, `\`, `:`, CR or LF, or be empty, `.` or `..`. Other source basename characters such as `#` remain allowed. Incompatible names fail before reading or publishing metadata.
+
 Schema version 1 is deterministic for the same resolved input path, source bytes and producer bytes. JSON object keys are sorted; identity and attribute arrays are ordered by numeric ID, filenames are sorted, and dynamic tags and symbol arrays retain input order. Source provenance is the original container, including SELF, rather than a reconstructed ELF hash.
 
 | Field | Contract |
