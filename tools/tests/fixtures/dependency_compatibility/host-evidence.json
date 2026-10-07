@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "source": {
+    "commit": "042b41f4c9a03f65c853872f7f9dd189736225f2",
+    "fixture": "Public synthetic evidence only"
+  },
+  "modules": [],
+  "exports": [],
+  "unknowns": []
+}
