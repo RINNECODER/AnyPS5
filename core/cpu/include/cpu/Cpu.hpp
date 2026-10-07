@@ -80,6 +80,10 @@ public:
     // callers must synchronize publication and retirement with CPU mutations.
     // Borrowed aliases into owned storage are included; external storage is not.
     OwnedMappingSnapshot PinOwnedMappings() const;
+    // Owner-only scope lookup and binding validation also work during an owner
+    // host callback. Unrelated mapping generations do not invalidate selection.
+    std::shared_ptr<const void> OwnedMappingScope() const;
+    void ValidateOwnedMappings(const OwnedMappingSnapshot& snapshot) const;
     void CheckAccess(std::uint64_t address, std::size_t size, Permission permissions) const;
     void Read(std::uint64_t address, std::span<std::byte> output) const;
     void Write(std::uint64_t address, std::span<const std::byte> input);

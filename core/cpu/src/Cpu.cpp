@@ -406,6 +406,16 @@ OwnedMappingSnapshot Machine::PinOwnedMappings() const {
     if (impl->running) throw std::logic_error("Guest backing pin requires an idle Machine");
     throw std::runtime_error("Unicorn owned guest backing pin is unsupported");
 }
+std::shared_ptr<const void> Machine::OwnedMappingScope() const {
+    if (std::this_thread::get_id() != impl->ownerThread)
+        throw std::logic_error("Guest backing scope requires its owner thread");
+    throw std::runtime_error("Unicorn owned guest backing scope is unsupported");
+}
+void Machine::ValidateOwnedMappings(const OwnedMappingSnapshot&) const {
+    if (std::this_thread::get_id() != impl->ownerThread)
+        throw std::logic_error("Guest backing validation requires its owner thread");
+    throw std::runtime_error("Unicorn owned guest backing validation is unsupported");
+}
 void Machine::Read(std::uint64_t address, std::span<std::byte> output) const {
     CheckAccess(address, output.size(), Permission::Read);
     if (!output.empty()) check(uc_mem_read(impl->engine, address, output.data(), output.size()), "Read guest memory");
