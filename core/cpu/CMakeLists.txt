@@ -76,7 +76,7 @@ find_library(cpuCoreAudio CoreAudio REQUIRED)
 target_link_libraries(anyps5_cpu PRIVATE ${cpuAudioToolbox} ${cpuCoreAudio})
 target_compile_definitions(anyps5_cpu PUBLIC ANYPS5_CPU_MODERN_TCG=${cpuModernTcg})
 target_compile_options(anyps5_cpu PRIVATE -Wall -Wextra -Wpedantic)
-option(ANYPS5_CPU_NATIVE_MODULE_RUNNER "Activate the native Metal SCE module runner" OFF)
+option(ANYPS5_CPU_NATIVE_MODULE_RUNNER "Activate the native Metal SCE module runner (requires CMake 3.24)" OFF)
 add_executable(anyps5_cpu_run src/Main.cpp)
 target_compile_definitions(anyps5_cpu_run PRIVATE
     ANYPS5_CPU_NATIVE_MODULE_RUNNER=$<BOOL:${ANYPS5_CPU_NATIVE_MODULE_RUNNER}>)

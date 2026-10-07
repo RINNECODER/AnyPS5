@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
+if(ANYPS5_CPU_NATIVE_MODULE_RUNNER)
+    # Native platform components have a higher floor than the legacy profiles.
+    cmake_minimum_required(VERSION 3.24)
+endif()
 project(Relinker CXX)
 
 set(ANYPS5_TEST_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
