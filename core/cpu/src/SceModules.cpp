@@ -42,9 +42,20 @@ bool libcInternalFunction(const SceImport& import, std::uint8_t type) {
     // src/core/libraries/libc_internal/{libc_internal_memory,libc_internal_str,libc_internal_io}.cpp;
     // fpPS4 04cefd43e6fddd1ab033e7980cd356d14c964905,
     // src/libcinternal/ps4_libscelibcinternal.pas (explicit printf/snprintf guest forwarding, strstr).
-    // Heap/C++ lifetime functions and termination functions are excluded.
+    // CPU06 target-informed extension: exact libc.prx SHA256
+    // 78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f
+    // and WebApi SHA256 38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9.
+    // Mspace wrappers 0xf6f0..0xf9eb and paired caller 0x3065/0x334a;
+    // cxa registry 0x3abb0..0x3af3c and caller DSO 0x588000;
+    // delete/new hooks 0x195080/0x195060; strncat 0x6cc70; _Stoul 0x3ddb0.
+    // Termination 0x48d0/0x356c0 retains guest FS+0x28/int45 behavior;
+    // exception dispatch and downstream platform services remain prerequisites.
+    // These are direct guest routes: no host argument, heap, callback or errno adaptation.
     constexpr std::array nids{"Q3VBxCXhUHs", "8zTFvBIAIN8", "eLdDw6l0-bU", "Ovb2dSJOAuE",
-                              "aesyjrHVWy4", "j4ViWNHEgww", "6sJWiWSRuqk", "hcuQgD53UxM", "viiwFMaNamA"};
+                              "aesyjrHVWy4", "j4ViWNHEgww", "6sJWiWSRuqk", "hcuQgD53UxM", "viiwFMaNamA",
+                              "-hn1tcVHq5Q", "W6SiVSiCDtI", "OJjm-QOIHlI", "Vla-Z+eXlxo",
+                              "gigoVHZvVPE", "mfHdJTIvhuo", "tsvEmnenz48", "H2e8t5ScQGc",
+                              "z+P+xCnWLBk", "kHg45qPC6f0", "zlfEH8FmyUA", "L1SBTkC+Cvw", "zr094EQ39Ww"};
     return type == 2 && import.ModuleName == "libSceLibcInternal" && import.ModuleMajor == 1 &&
         import.ModuleMinor == 1 && import.LibraryName == "libSceLibcInternal" && import.LibraryVersion == 1 &&
         std::find(nids.begin(), nids.end(), import.Nid) != nids.end();

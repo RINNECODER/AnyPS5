@@ -95,7 +95,8 @@ struct SceResolvedImport {
 using SceModuleResolver = std::function<std::optional<SceResolvedImport>(const SceImport&, std::uint8_t)>;
 
 // Opt-in source identity for the supplied guest libc. Only the fixed, ABI-qualified
-// Internal function allowlist can forward to its libc/library-v1 exports.
+// Internal function allowlist can forward to its libc/library-v1 exports. Guest
+// allocator, callback/DSO, errno and exception ownership remains with the provider.
 struct SceLibcInternalProvider {
     std::string Filename;
     std::array<std::byte, 32> SourceSha256{};
