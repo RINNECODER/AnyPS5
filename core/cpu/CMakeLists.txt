@@ -162,6 +162,24 @@ if(BUILD_TESTING)
     add_dependencies(anyps5_sce_main_lifecycle_tests anyps5_sce_main_lifecycle_fixture)
     add_test(NAME anyps5_sce_main_lifecycle COMMAND anyps5_sce_main_lifecycle_tests "${mainLifecycleReceipt}")
     set_tests_properties(anyps5_sce_main_lifecycle PROPERTIES TIMEOUT 60)
+    set(libcInternalDirectory "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal")
+    set(libcInternalReceipt "${libcInternalDirectory}/receipt.txt")
+    add_custom_command(OUTPUT "${libcInternalReceipt}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceLibcInternalGuest.c" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-guest.o"
+        COMMAND "${guestLinker}" -shared -soname SceInternalLibc.prx -init SceInternalInit -fini SceInternalFini -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-guest.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceLibcInternalConsumer.c" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-consumer.o"
+        COMMAND "${guestLinker}" -shared -soname SceInternalConsumer.prx -init SceInternalConsumerInit -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-consumer-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-consumer.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceLibcInternalMain.c" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-main.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/tests/SceLibcInternalStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-start.o"
+        COMMAND "${guestLinker}" -shared -e _start -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-main.o" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-start.o" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-consumer-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-guest-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildSceLibcInternalFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-consumer-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/sce-libc-internal-main-linked.elf" "${libcInternalDirectory}"
+        DEPENDS tests/SceLibcInternalGuest.c tests/SceLibcInternalConsumer.c tests/SceLibcInternalMain.c tests/SceLibcInternalStart.S tests/BuildSceLibcInternalFixture.py tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_sce_libc_internal_fixture ALL DEPENDS "${libcInternalReceipt}")
+    add_test_executable(anyps5_sce_libc_internal_tests tests/SceLibcInternalTests.cpp)
+    target_link_libraries(anyps5_sce_libc_internal_tests PRIVATE anyps5_cpu)
+    add_dependencies(anyps5_sce_libc_internal_tests anyps5_sce_libc_internal_fixture)
+    add_test(NAME anyps5_sce_libc_internal COMMAND anyps5_sce_libc_internal_tests "${libcInternalReceipt}")
+    set_tests_properties(anyps5_sce_libc_internal PROPERTIES TIMEOUT 60)
     add_test_executable(anyps5_cpu_tests tests/CpuTests.cpp)
     target_link_libraries(anyps5_cpu_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_cpu_instructions COMMAND anyps5_cpu_tests)

@@ -94,6 +94,14 @@ struct SceResolvedImport {
 
 using SceModuleResolver = std::function<std::optional<SceResolvedImport>(const SceImport&, std::uint8_t)>;
 
+// Opt-in source identity for the supplied guest libc. Only the fixed, ABI-qualified
+// Internal function allowlist can forward to its libc/library-v1 exports.
+struct SceLibcInternalProvider {
+    std::string Filename;
+    std::array<std::byte, 32> SourceSha256{};
+    std::uint64_t SourceSize = 0;
+};
+
 struct SceModuleRecord {
     SceParsedImage Image;
     std::uint64_t LoadBias = 0;
@@ -107,7 +115,8 @@ public:
     SceModules(Machine& machine, const SceModuleFile& main,
                std::span<const SceModuleFile> dependencies,
                std::span<const SceHostModule> hostModules,
-               const SceModuleResolver& resolver);
+               const SceModuleResolver& resolver,
+               const std::optional<SceLibcInternalProvider>& libcInternal = std::nullopt);
     ~SceModules();
     SceModules(const SceModules&) = delete;
     SceModules& operator=(const SceModules&) = delete;

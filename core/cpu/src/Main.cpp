@@ -177,7 +177,7 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
         {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
-        {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}}},
+        {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}, {"libSceLibcInternal", 0, 1}}},
         {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}},
         {"libSceNpManager.prx", {"libSceNpManager", 0, 1, 1}, {{"libSceNpManager", 0, 1}}},
         {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
@@ -428,6 +428,9 @@ int main(int argc, char** argv) {
 #endif
                     const auto files = ModuleFiles(executable, modulePaths);
                     const auto hosts = HostModules(executable, files);
+                    std::optional<Cpu::SceLibcInternalProvider> libcInternal;
+                    for (const auto& file : files) if (file.Path.filename() == "libc.prx" && file.Crt)
+                        libcInternal = Cpu::SceLibcInternalProvider{"libc.prx", file.Crt->SourceSha256, file.Crt->SourceSize};
                     modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
                         [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
                             if (threadImports) if (const auto address = threadImports->Resolve(import, type))
@@ -440,7 +443,7 @@ int main(int argc, char** argv) {
                             }
                             if (type != 2) return std::nullopt;
                             return Cpu::SceResolvedImport{resolve(import), 2};
-                        });
+                        }, libcInternal);
                     kernelRuntime->SetTls(modules->Tls());
                     bootstrapRuntime->SetProcessParameters(modules->Main().ProcParam ? modules->Main().ProcParam->Address : 0,
                         modules->Main().ProcParam ? modules->Main().ProcParam->FileSize : 0);
