@@ -18,6 +18,10 @@
 #include <cpu/SceThreadImports.hpp>
 #include <cpu/SceAudioOut2Imports.hpp>
 #include <cpu/Self.hpp>
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+#include <cpu/NativeModuleRunner.hpp>
+#include <mach-o/dyld.h>
+#endif
 #include <array>
 #include <csignal>
 #include <fstream>
@@ -31,6 +35,21 @@
 #include <vector>
 
 namespace {
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+std::filesystem::path NativeUtilityMetallib() {
+    std::uint32_t size = 0;
+    (void)_NSGetExecutablePath(nullptr, &size);
+    if (!size) throw std::runtime_error("Cannot obtain native executable path");
+    std::vector<char> path(size);
+    if (_NSGetExecutablePath(path.data(), &size))
+        throw std::runtime_error("Cannot obtain native executable path");
+    const auto executable = std::filesystem::canonical(path.data());
+    const auto utility = executable.parent_path().parent_path() / "fixtures" / "AnyPS5Utilities.metallib";
+    if (!std::filesystem::is_regular_file(utility))
+        throw std::runtime_error("Native module runner missing package utility metallib: " + utility.string());
+    return utility;
+}
+#endif
 constexpr int LaunchFailure = 126;
 enum class ErrorCode {
     InvalidArguments, InputUnavailable, UnsupportedExecutable, LoaderFailure,
@@ -114,9 +133,16 @@ void Capabilities() {
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+        << "\"native_module_runner\":{\"enabled\":true,\"owned_memory\":\"live staged CPU/Metal publication\",\"provider_selection\":\"actual parsed consumer SHA-256, size, scope and ELF symbol\",\"utility_metallib\":\"../fixtures/AnyPS5Utilities.metallib relative to engine\",\"wall_limit_ms\":30000,\"idle_limit_ms\":5000,\"constraints\":\"bounded diagnostic profile; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence\"},"
+#endif
         << "\"sce_thread_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"_sceKernelSetThreadDtors\",\"_sceKernelSetThreadAtexitCount\",\"_sceKernelSetThreadAtexitReport\",\"scePthreadCreate\",\"scePthreadYield\",\"scePthreadJoin\",\"scePthreadSelf\",\"scePthreadEqual\",\"__error\",\"__tls_get_addr\",\"scePthreadExit\"],"
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; cumulative bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; owned attributes; FIFO/priority inheritance and logical RR with 4096-instruction engineering turns; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; affinity, cancellation, detach, once and TSD unsupported\"},"
+#else
         << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; cumulative bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; nullable default attributes only; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; scheduling policies, affinity, cancellation, detach, once and TSD unsupported\"},"
+#endif
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
         << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\",\"shared data pages preserve exact byte permissions; mixed executable permission pages unsupported\"],"
         << "\"unsupported_instruction_families\":[\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
@@ -171,7 +197,11 @@ std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
 }
 
 std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
-                                         const std::vector<Cpu::SceModuleFile>& files) {
+                                         const std::vector<Cpu::SceModuleFile>& files
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                                         , const Cpu::NativeModuleRunner* native
+#endif
+                                         ) {
     std::vector<Cpu::SceHostModule> hosts{
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
         {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
@@ -182,6 +212,9 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libSceNpManager.prx", {"libSceNpManager", 0, 1, 1}, {{"libSceNpManager", 0, 1}}},
         {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
         {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}}};
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+    if (native) native->AddHostModules(hosts);
+#endif
     bool kernelPrx = false, kernelSprx = false;
     const auto neededKernel = [&](const Cpu::SceParsedImage& image) {
         for (const auto& needed : image.NeededFiles) {
@@ -376,13 +409,37 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceAudioOut2Imports> audioRuntime;
         std::unique_ptr<Cpu::SceLibcBootstrapImports> bootstrapRuntime;
         std::unique_ptr<Cpu::SceLifecycleImports> lifecycleRuntime;
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+        // Declared last so graphics drains before all external provider owners
+        // on loader, initializer and entry exceptions as well as normal exit.
+        std::unique_ptr<Cpu::NativeModuleRunner> nativeRuntime;
+#endif
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
         try {
             std::vector<std::string> arguments;
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
             if (sce) {
-                memoryRuntime = std::make_shared<Cpu::GuestMemoryRuntime>(machine, 12ULL << 30);
+#if ANYPS5_CPU_MODERN_TCG
+                if (!modulePaths.empty()) {
+                    threadRuntime = std::make_shared<Cpu::GuestThreads>(machine);
+#if !ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                    threadImports = std::make_unique<Cpu::SceThreadImports>(machine, threadRuntime);
+#endif
+                }
+#endif
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                if (threadRuntime) {
+                    const auto actualMain = Cpu::ParseSce(executable);
+                    Cpu::NativeModuleRunnerConfiguration nativeConfig;
+                    nativeConfig.UtilityMetallib = NativeUtilityMetallib();
+                    nativeRuntime = std::make_unique<Cpu::NativeModuleRunner>(machine, threadRuntime,
+                        Cpu::SceImportConsumer{actualMain.Path, actualMain.SourceSize, actualMain.SourceSha256},
+                        std::move(nativeConfig));
+                    memoryRuntime = nativeRuntime->Memory();
+                } else
+#endif
+                    memoryRuntime = std::make_shared<Cpu::GuestMemoryRuntime>(machine, 12ULL << 30);
                 memoryImports = std::make_unique<Cpu::SceMemoryImports>(machine, memoryRuntime);
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
@@ -416,8 +473,6 @@ int main(int argc, char** argv) {
                     entry = image.Entry;
                 } else {
 #if ANYPS5_CPU_MODERN_TCG
-                    threadRuntime = std::make_shared<Cpu::GuestThreads>(machine);
-                    threadImports = std::make_unique<Cpu::SceThreadImports>(machine, threadRuntime);
                     const auto processExit = [owner = std::weak_ptr<Cpu::GuestThreads>(threadRuntime)](int status) {
                         const auto runtime = owner.lock();
                         if (!runtime) throw std::runtime_error("SCE process exit guest thread runtime has expired");
@@ -427,14 +482,28 @@ int main(int argc, char** argv) {
                     lifecycleRuntime->SetProcessExitHandler(processExit);
 #endif
                     const auto files = ModuleFiles(executable, modulePaths);
-                    const auto hosts = HostModules(executable, files);
+                    const auto hosts = HostModules(executable, files
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                        , nativeRuntime.get()
+#endif
+                        );
                     std::optional<Cpu::SceLibcInternalProvider> libcInternal;
                     for (const auto& file : files) if (file.Path.filename() == "libc.prx" && file.Crt)
                         libcInternal = Cpu::SceLibcInternalProvider{"libc.prx", file.Crt->SourceSha256, file.Crt->SourceSize};
                     modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
-                        [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
-                            if (threadImports) if (const auto address = threadImports->Resolve(import, type))
+                        Cpu::SceModuleResolver{}, libcInternal,
+                        [&](const Cpu::SceImportConsumer& consumer, const auto& import,
+                            std::uint8_t type, std::uint64_t size) -> std::optional<Cpu::SceResolvedImport> {
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                            if (nativeRuntime) if (const auto selected = nativeRuntime->Resolve(consumer, import, type, size))
+                                return selected;
+#endif
+                            if (threadImports) if (const auto address = threadImports->Resolve(import, type)) {
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                                if (size) throw std::runtime_error("Unsupported SCE thread function symbol size");
+#endif
                                 return Cpu::SceResolvedImport{*address, type};
+                            }
                             if (const auto address = bootstrapRuntime->Resolve(import)) {
                                 const std::uint8_t expectedType = import.Nid == "f7uOxY9mM1U" || import.Nid == "djxxOmW6-aw" ? 1 : 2;
                                 if (type != expectedType)
@@ -442,8 +511,11 @@ int main(int argc, char** argv) {
                                 return Cpu::SceResolvedImport{*address, expectedType, expectedType == 1 ? 8u : 0u};
                             }
                             if (type != 2) return std::nullopt;
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                            if (size) return std::nullopt;
+#endif
                             return Cpu::SceResolvedImport{resolve(import), 2};
-                        }, libcInternal);
+                        });
                     kernelRuntime->SetTls(modules->Tls());
                     bootstrapRuntime->SetProcessParameters(modules->Main().ProcParam ? modules->Main().ProcParam->Address : 0,
                         modules->Main().ProcParam ? modules->Main().ProcParam->FileSize : 0);
@@ -454,6 +526,9 @@ int main(int argc, char** argv) {
                         threadRuntime->AdoptInitial({modules->Main().Entry, modules->InitialStack(), modules->Tls(), std::move(factory)});
                         modules->SetExecutor(threadRuntime->ModuleExecutor());
                     }
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                    if (nativeRuntime) nativeRuntime->ActivateBeforeInitializers();
+#endif
                     try { modules->InitializeDependencies(); }
                     catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
                     entry = modules->Main().Entry;
@@ -483,7 +558,11 @@ int main(int argc, char** argv) {
         Cpu::StopReason reason;
         try {
             reason = modules ? modules->RunMain() : machine.Run(entry, 0, 100000000);
-            if (threadRuntime) threadRuntime->Withdraw();
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+            if (nativeRuntime) nativeRuntime->Shutdown();
+            else
+#endif
+                if (threadRuntime) threadRuntime->Withdraw();
         }
         catch (const std::exception& error) {
             code = ExecutionCode(error.what());
