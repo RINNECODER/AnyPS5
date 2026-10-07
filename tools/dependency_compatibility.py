@@ -236,12 +236,12 @@ def build_report(consumer_metadata_paths, host_evidence_path):
                     category, reason = ('missing_provider', 'complete_cpu_resolver_inventory_has_no_nid') if host.get('resolver_inventory_complete') is True else ('unknown', 'declared_host_scope_has_no_qualified_nid_evidence')
                 elif len(exports) > 1:
                     category, reason = 'mismatch', 'ambiguous_host_export_evidence'
+                elif integer(exports[0].get('type')) and exports[0]['type'] != symbol['type']:
+                    category, reason = 'mismatch', 'host_symbol_type_mismatch'
                 elif 'active' in exports[0] and exports[0]['active'] is None:
                     category, reason = 'unknown', 'host_resolver_activation_not_proved'
                 elif exports[0]['qualification'] != 'qualified':
                     category, reason = 'unknown', 'host_abi_contract_not_qualified'
-                elif exports[0]['type'] != symbol['type']:
-                    category, reason = 'mismatch', 'host_symbol_type_mismatch'
                 elif symbol['type'] == 1 and (not exports[0]['size'] or symbol['size'] > exports[0]['size']):
                     category, reason = 'mismatch', 'host_object_storage_size_mismatch'
                 else:

@@ -145,6 +145,13 @@ class DependencyCompatibilityContract(unittest.TestCase):
                 host["exports"][0].update(type=export_type, size=export_size)
                 row = self.main_import(self.report(consumers=[consumer], host=host))
                 self.assertEqual(row["classification"], expected)
+        # Service semantics can be unknown while a recorded resolver type is
+        # definitely incompatible. Guest-export type coverage cannot catch
+        # this separate host qualification-order regression.
+        host = self.host_provider("unknown")
+        host["exports"][0]["type"] = 1
+        row = self.main_import(self.report(consumers=[self.consumer], host=host))
+        self.assertEqual(row["classification"], "mismatch")
 
     def test_static_guest_object_and_tls_identity_do_not_prove_storage(self):
         for symbol_type in (1, 6):
