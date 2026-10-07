@@ -322,6 +322,35 @@ def workflow(args, run, receipt):
             frozen = frozen_inputs.get(str(original))
             require(frozen is not None and frozen['sha256'] == identity['original_sha256'],
                     'Package input was not frozen before suite: ' + str(original))
+    accept_prepared_package(args, run, receipt)
+
+
+def accept_prepared_package(args, run, receipt):
+    """Finish caller-verified prepared bytes; the CLI always prepares a fresh candidate."""
+    output = args.output.resolve()
+    engine, gpu, macps, build = [output / n for n in ('engine-source', 'gpu-source', 'macps-source', 'build')]
+    env = dict(os.environ, MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1',
+               ANYPS5_NO_SHADER_CACHE='1', APS5_NO_SHADER_CACHE='1')
+    revisions = receipt['source_revisions']
+    engine_deps, gpu_deps = receipt['dependencies']['engine'], receipt['dependencies']['gpu']
+    package_info = receipt['package']
+    package = Path(package_info['package'])
+    require(any(c['name'] == 'combined54' and c['exit_code'] == 0 for c in receipt['commands']),
+            'Passing combined fixture command missing')
+    tag = (build / 'Testing/TAG').read_text().splitlines()[0]
+    parse_ctest_results(build / 'Testing' / tag / 'Test.xml', REQUIRED_TESTS)
+    require(digest(build / 'CMakeCache.txt') == receipt['build_cache_sha256'], 'Build cache changed')
+    for record in receipt['build_artifacts'].values():
+        require(digest(record['path']) == record['sha256'], 'Frozen build artifact changed')
+    require(digest(package / 'manifest.json') == package_info['manifest_sha256'], 'Prepared manifest changed')
+    for relative, record in package_info['artifacts'].items():
+        require(digest(package / relative) == record['sha256'], 'Prepared package artifact changed')
+    for role, root in [('AnyPS5', engine), ('GPU', gpu)]:
+        require(clean_revision(root, args.revision) == revisions[role], 'Source changed before acceptance')
+    for root, deps in [(engine, engine_deps), (gpu, gpu_deps)]:
+        for relative, identity in deps.items():
+            require(clean_revision(root / relative, identity['commit']) == identity, 'Dependency changed before acceptance')
+    require(clean_revision(macps, args.macps_revision) == receipt['macps_source'], 'Acceptance source changed')
     scratch = output / 'swift-helper-build'
     with Lease(['tcg-build']):
         run('fresh-LauncherCore', ['swift', 'build', '--package-path', macps, '--scratch-path', scratch,
@@ -329,18 +358,23 @@ def workflow(args, run, receipt):
             '-Xswiftc', '-strict-concurrency=complete', '-Xswiftc', '-warnings-as-errors'], timeout=300)
         binary_dir = Path(run('swift-bin-path', ['swift', 'build', '--package-path', macps,
             '--scratch-path', scratch, '--configuration', 'debug', '--show-bin-path']).strip())
-        helper = output / 'accept-diagnostic-package'
+        helper = run.output / 'accept-diagnostic-package'
         helper_source = Path(__file__).with_name('accept_diagnostic_package.swift')
-        objects = sorted((binary_dir / 'LauncherCore.build').glob('*.o'))
+        combined_object = binary_dir / 'LauncherCore.o'
+        if combined_object.is_file():
+            objects, module_dir = [combined_object], binary_dir
+        else:
+            objects = sorted((binary_dir / 'LauncherCore.build').glob('*.o'))
+            module_dir = binary_dir / 'Modules'
         require(bool(objects), 'Fresh LauncherCore objects missing')
         run('link-fresh-accept-helper', ['swiftc', '-parse-as-library', '-strict-concurrency=complete',
-            '-warnings-as-errors', '-I', binary_dir / 'Modules', helper_source, *objects, '-o', helper])
+            '-warnings-as-errors', '-I', module_dir, helper_source, *objects, '-o', helper])
     receipt['accept_helper'] = {'path': str(helper), 'sha256': digest(helper),
         'adapter_sha256': digest(helper_source), 'macps_commit': args.macps_revision,
         'objects_sha256': {str(p): digest(p) for p in objects}}
-    relocation = output / 'relocated package with spaces'
+    relocation = run.output / 'relocated package with spaces'
     shutil.copytree(package, relocation)
-    unrelated = output / 'unrelated-cwd'
+    unrelated = run.output / 'unrelated-cwd'
     unrelated.mkdir()
     with Lease(['tcg-build', 'gpu-validation', 'title-session']):
         for index, argv in enumerate(package_info['relocation_commands']):
@@ -352,11 +386,11 @@ def workflow(args, run, receipt):
         receipt['strict_acceptance'] = accepted
         rejected = run('reject-wrong-manifest', [helper, relocation, '0' * 64], expected=2)
         require('differs from the saved accepted selection' in rejected, 'Wrong-pin control unrelated failure')
-        write_negative_copy(run, package, output, helper, 'dirty-source',
+        write_negative_copy(run, package, run.output, helper, 'dirty-source',
             lambda _, m: m['source_revisions']['AnyPS5'].update(clean_observed=False), 'lacks a clean source revision')
         libs = [n for n in package_info['artifacts'] if n.startswith('lib/') and 'glib' in n]
         require(len(libs) == 1, 'Required transitive GLib closure control missing')
-        write_negative_copy(run, package, output, helper, 'uncovered-transitive-library',
+        write_negative_copy(run, package, run.output, helper, 'uncovered-transitive-library',
             lambda _, m: m['files'].pop(libs[0]), 'hash-covered')
     require(digest(package / 'manifest.json') == package_info['manifest_sha256'], 'Package manifest changed')
     for relative, identity in package_info['artifacts'].items():
