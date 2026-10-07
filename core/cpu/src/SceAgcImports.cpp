@@ -2,6 +2,7 @@
 #include <cpu/SceElf.hpp>
 #include "SceShaders.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
+#include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -34,7 +35,9 @@ constexpr Binding bindings[] = {
     {"f3dg2CSgRKY", Contract::CreateShaderRelativeHeader96, false},
     {"h9z6+0hEydk", Contract::SuspendPoint, false},
     {"w2rJhmD+dsE", Contract::AddEqEvent, true},
-    {"DL2RXaXOy88", Contract::DeleteEqEvent, true}
+    {"DL2RXaXOy88", Contract::DeleteEqEvent, true},
+    {"YUeqkyT7mEQ", Contract::DcbSetFlipCommandBuffer56, false},
+    {"MWiElSNE8j8", Contract::DcbWaitUntilSafeForRenderingCommandBuffer56, false}
 };
 struct GuestPacket { std::uint64_t Address; std::uint32_t Words; std::uint8_t Flags; std::array<std::uint8_t,3> Reserved; };
 struct GuestCommandBuffer {
@@ -271,6 +274,31 @@ struct SceAgcImports::Impl {
             const std::array words{0xc0031500u, static_cast<std::uint32_t>(b), static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(d), modifier | 0x41u};
             guest.Set(Register::Rax, emit(guest, a, words)); return;
         }
+        case Contract::DcbSetFlipCommandBuffer56: {
+            const auto handle = static_cast<std::uint32_t>(b), mode = static_cast<std::uint32_t>(d);
+            const auto index = signed32(c);
+            if (Policies.contains(operation)) {
+                // This target registers three slots starting at zero; registry
+                // ownership and the selected slot are validated on submission.
+                require(handle > 0 && handle <= std::numeric_limits<std::int32_t>::max() && index >= 0 && index < 3 &&
+                        mode == 1 && e == 0, "flip arguments outside qualified target use");
+            }
+            // This is AnyPS5's source-pinned internal driver encoding. The
+            // imported producer ABI does not establish proprietary packet bytes.
+            const std::array words{AgcDriver::FlipPacketHeader, handle, static_cast<std::uint32_t>(index), mode,
+                static_cast<std::uint32_t>(e), static_cast<std::uint32_t>(e >> 32u)};
+            guest.Set(Register::Rax, emit(guest, a, words)); return;
+        }
+        case Contract::DcbWaitUntilSafeForRenderingCommandBuffer56: {
+            const auto handle = static_cast<std::uint32_t>(b);
+            const auto index = static_cast<std::uint32_t>(c);
+            if (Policies.contains(operation)) {
+                require(handle > 0 && handle <= std::numeric_limits<std::int32_t>::max() && index < 3,
+                        "rendering wait arguments outside qualified target use");
+            }
+            const std::array words{AgcDriver::RenderingWaitPacketHeader, handle, index, 0u};
+            guest.Set(Register::Rax, emit(guest, a, words)); return;
+        }
         case Contract::CreateShaderRelativeHeader96: createShader(guest, a, b, c); return;
         case Contract::SuspendPoint: required(Backend.Suspend); Backend.Suspend(); guest.Set(Register::Rax, 0); return;
         case Contract::AddEqEvent: required(Backend.AddEvent); guest.Set(Register::Rax, static_cast<std::uint32_t>(Backend.AddEvent(a, signed32(b), c))); return;
@@ -295,7 +323,9 @@ SceAgcImports::SceAgcImports(Machine& machine, SceAgcBackend backend,
                 operation == Contract::AcbWriteDataCommandBuffer56)) ||
             (policy == AgcArgumentPolicy::TargetShader && operation == Contract::CreateShaderRelativeHeader96) ||
             (policy == AgcArgumentPolicy::TargetDispatch && operation == Contract::CbDispatchCommandBuffer56) ||
-            (policy == AgcArgumentPolicy::TargetSuspend && operation == Contract::SuspendPoint);
+            (policy == AgcArgumentPolicy::TargetSuspend && operation == Contract::SuspendPoint) ||
+            (policy == AgcArgumentPolicy::TargetFlip && operation == Contract::DcbSetFlipCommandBuffer56) ||
+            (policy == AgcArgumentPolicy::TargetRenderingWait && operation == Contract::DcbWaitUntilSafeForRenderingCommandBuffer56);
         require(valid && !admission.Evidence.empty(), "invalid target ABI admission descriptor");
         require(std::find(contracts.begin(), contracts.end(), operation) == contracts.end(), "duplicate target ABI admission descriptor");
         contracts.push_back(operation);
@@ -326,7 +356,11 @@ std::span<const AgcAbiAdmission> QualifiedAgcAdmissionsForImage(std::string_view
         {Contract::CbDispatchCommandBuffer56, AgcArgumentPolicy::TargetDispatch,
             "target descriptor64/dimensions32/modifier32; bit0 forwarding path, sufficient-capacity cursor56"},
         {Contract::SuspendPoint, AgcArgumentPolicy::TargetSuspend,
-            "target no-argument tail call; source/native queue-zero suspend acceptance boundary only"}
+            "target no-argument tail call; source/native queue-zero suspend acceptance boundary only"},
+        {Contract::DcbSetFlipCommandBuffer56, AgcArgumentPolicy::TargetFlip,
+            "target cursor56/opaque VideoOut handle32/index32 in three registered slots/mode1/arg64=0; source internal six-word encoding and cursor24"},
+        {Contract::DcbWaitUntilSafeForRenderingCommandBuffer56, AgcArgumentPolicy::TargetRenderingWait,
+            "target same cursor56/opaque VideoOut handle32/index32 in three registered slots; source internal four-word reuse wait before flip reservation"}
     };
     return admissions;
 }

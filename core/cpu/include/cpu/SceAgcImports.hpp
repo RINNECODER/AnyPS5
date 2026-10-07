@@ -18,13 +18,14 @@ enum class AgcAbiContract {
     DcbWriteDataCommandBuffer56, AcbWriteDataCommandBuffer56,
     DcbSetShRegisterDirect, DcbSetCxRegisterDirect, DcbSetUcRegisterDirect,
     CbDispatchCommandBuffer56, CreateShaderRelativeHeader96, SuspendPoint,
-    AddEqEvent, DeleteEqEvent
+    AddEqEvent, DeleteEqEvent, DcbSetFlipCommandBuffer56,
+    DcbWaitUntilSafeForRenderingCommandBuffer56
 };
 
 // These policies constrain the admitted target use, independently of the source
 // adapter enum used by synthetic callers. Selection requires the caller to have
 // verified the exact owned image identity before invoking this API.
-enum class AgcArgumentPolicy { SourceContract, TargetPacket20Bit, TargetMemoryWrite, TargetShader, TargetDispatch, TargetSuspend };
+enum class AgcArgumentPolicy { SourceContract, TargetPacket20Bit, TargetMemoryWrite, TargetShader, TargetDispatch, TargetSuspend, TargetFlip, TargetRenderingWait };
 struct AgcAbiAdmission {
     AgcAbiContract Contract;
     AgcArgumentPolicy Policy;
