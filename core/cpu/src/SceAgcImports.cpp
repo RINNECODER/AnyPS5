@@ -301,8 +301,16 @@ struct SceAgcImports::Impl {
         }
         case Contract::CreateShaderRelativeHeader96: createShader(guest, a, b, c); return;
         case Contract::SuspendPoint: required(Backend.Suspend); Backend.Suspend(); guest.Set(Register::Rax, 0); return;
-        case Contract::AddEqEvent: required(Backend.AddEvent); guest.Set(Register::Rax, static_cast<std::uint32_t>(Backend.AddEvent(a, signed32(b), c))); return;
-        case Contract::DeleteEqEvent: required(Backend.DeleteEvent); guest.Set(Register::Rax, static_cast<std::uint32_t>(Backend.DeleteEvent(a, signed32(b)))); return;
+        case Contract::AddEqEvent:
+            if (Policies.contains(operation))
+                require(signed32(b) == 0 && c == 0, "graphics event arguments outside qualified target use");
+            required(Backend.AddEvent);
+            guest.Set(Register::Rax, static_cast<std::uint32_t>(Backend.AddEvent(a, signed32(b), c))); return;
+        case Contract::DeleteEqEvent:
+            if (Policies.contains(operation))
+                require(signed32(b) == 0, "graphics event arguments outside qualified target use");
+            required(Backend.DeleteEvent);
+            guest.Set(Register::Rax, static_cast<std::uint32_t>(Backend.DeleteEvent(a, signed32(b)))); return;
         }
         throw std::runtime_error("SCE AGC: unhandled ABI contract");
     }
@@ -325,7 +333,9 @@ SceAgcImports::SceAgcImports(Machine& machine, SceAgcBackend backend,
             (policy == AgcArgumentPolicy::TargetDispatch && operation == Contract::CbDispatchCommandBuffer56) ||
             (policy == AgcArgumentPolicy::TargetSuspend && operation == Contract::SuspendPoint) ||
             (policy == AgcArgumentPolicy::TargetFlip && operation == Contract::DcbSetFlipCommandBuffer56) ||
-            (policy == AgcArgumentPolicy::TargetRenderingWait && operation == Contract::DcbWaitUntilSafeForRenderingCommandBuffer56);
+            (policy == AgcArgumentPolicy::TargetRenderingWait && operation == Contract::DcbWaitUntilSafeForRenderingCommandBuffer56) ||
+            (policy == AgcArgumentPolicy::TargetGraphicsEvent &&
+                (operation == Contract::AddEqEvent || operation == Contract::DeleteEqEvent));
         require(valid && !admission.Evidence.empty(), "invalid target ABI admission descriptor");
         require(std::find(contracts.begin(), contracts.end(), operation) == contracts.end(), "duplicate target ABI admission descriptor");
         contracts.push_back(operation);
@@ -357,6 +367,10 @@ std::span<const AgcAbiAdmission> QualifiedAgcAdmissionsForImage(std::string_view
             "target descriptor64/dimensions32/modifier32; bit0 forwarding path, sufficient-capacity cursor56"},
         {Contract::SuspendPoint, AgcArgumentPolicy::TargetSuspend,
             "target no-argument tail call; source/native queue-zero suspend acceptance boundary only"},
+        {Contract::AddEqEvent, AgcArgumentPolicy::TargetGraphicsEvent,
+            "target numeric handle64 from CreateEqueue, selector32=0, opaque udata64=0; source graphics filter -14/EV_ADD|EV_CLEAR, genuine owner mailbox required"},
+        {Contract::DeleteEqEvent, AgcArgumentPolicy::TargetGraphicsEvent,
+            "target same numeric handle64/selector32=0 before DeleteEqueue; source owner withdraws subscription and pending receipts, invalid ownership remains fail-closed"},
         {Contract::DcbSetFlipCommandBuffer56, AgcArgumentPolicy::TargetFlip,
             "target cursor56/opaque VideoOut handle32/index32 in three registered slots/mode1/arg64=0; source internal six-word encoding and cursor24"},
         {Contract::DcbWaitUntilSafeForRenderingCommandBuffer56, AgcArgumentPolicy::TargetRenderingWait,
