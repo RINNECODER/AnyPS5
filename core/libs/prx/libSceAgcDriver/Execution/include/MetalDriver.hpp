@@ -37,6 +37,13 @@ public:
     void Shutdown();
     void SuspendPoint();
     void RegisterShader(const Shader* shader);
+    // Publish a staged guest header and capture its immutable registry entry
+    // under one mapping admission. Callbacks may access guest memory but must
+    // not reenter the driver; a failed capture restores the header before the
+    // admission is released. Neither callback may change guest mappings.
+    void RegisterShaderWithPublication(std::uint64_t guestHeaderAddress,
+        std::span<const ReadableGuestRange> ranges, const std::function<void()>& publish,
+        const std::function<void()>& rollback);
     void RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output);
     void UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output);
     void Present(const PresentationWindow& window, const DisplayBuffer* buffer, bool opaque,
