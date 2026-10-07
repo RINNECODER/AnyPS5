@@ -158,6 +158,7 @@ struct GuestThreads::Impl {
     }
     void complete(Record& record, bool status) {
         if (!record.pending) fail("guest host call has no pending operation");
+        machine.ValidateSuspendedCall(record.pending->token);
         if (status) machine.Set(Register::Rax, 0);
         machine.CompleteHostCall(record.pending->token);
         record.pending.reset();
@@ -250,6 +251,7 @@ struct GuestThreads::Impl {
             machine.Set(Register::Rip, args[2]);
             child->context = machine.CaptureContext();
             machine.RestoreContext(saved);
+            machine.ValidateSuspendedCall(parent.pending->token);
             const auto id = child->id;
             auto [position, created] = records.emplace(id, std::move(child));
             if (!created) fail("guest thread identity collision");
@@ -277,6 +279,8 @@ struct GuestThreads::Impl {
     void finishJoin(Record& joiner, Record& target) {
         activate(joiner);
         const auto output = joiner.pending->args[1];
+        if (output) machine.CheckAccess(output, 8, Permission::Write);
+        machine.ValidateSuspendedCall(joiner.pending->token);
         if (output) write64(machine, output, target.result);
         complete(joiner, true);
         ready(joiner);

@@ -54,6 +54,7 @@ struct Session {
     std::uint64_t ReceiptAddress, EventsAddress, LifecycleAddress;
     std::array<std::byte, 16> EdgeGuard;
     unsigned TlsFactoryCalls = 0;
+    std::uint64_t CreateOutputAddress = 0, CreateReturnWordAddress = 0, CreateReturnWord = 0;
     bool ProcessExitObserved = false, ExitBeforeFini = false;
     unsigned ProcessExitCalls = 0;
     int ObservedExitStatus = -1;
@@ -62,7 +63,8 @@ struct Session {
     std::vector<std::byte> ExitFrame;
 
     Session(const std::filesystem::path& main, const std::filesystem::path& guest,
-            unsigned mode = 0, std::uint64_t oracle = ArithmeticResult, bool returnParentTls = false) {
+            unsigned mode = 0, std::uint64_t oracle = ArithmeticResult, bool returnParentTls = false,
+            bool corruptCreateReturn = false) {
         require(std::string_view(Cpu::Machine::Backend()).find("Modern QEMU TCG") != std::string_view::npos,
                 "Translated thread fixture requires native modern TCG");
         const auto processExit = [this, runtime = std::weak_ptr<Cpu::GuestThreads>(Threads)](int status) {
@@ -112,6 +114,16 @@ struct Session {
         if (returnParentTls) factory = [this](std::uint64_t) {
             ++TlsFactoryCalls;
             return Graph->Tls();
+        };
+        if (corruptCreateReturn) factory = [this, original = std::move(factory)](std::uint64_t address) {
+            ++TlsFactoryCalls;
+            CreateOutputAddress = Machine.Get(Cpu::Register::Rdi);
+            CreateReturnWordAddress = Machine.Get(Cpu::Register::Rsp);
+            Machine.Read(CreateReturnWordAddress, std::as_writable_bytes(std::span(&CreateReturnWord, 1)));
+            auto tls = original(address);
+            constexpr std::uint64_t corrupted = 0x1122334455667788ULL;
+            Machine.Write(CreateReturnWordAddress, std::as_bytes(std::span(&corrupted, 1)));
+            return tls;
         };
         Threads->AdoptInitial({Graph->Main().Entry, Graph->InitialStack(), Graph->Tls(), std::move(factory)});
         Graph->SetExecutor(Threads->ModuleExecutor());
@@ -300,45 +312,61 @@ void arithmeticBudgetStop(const std::filesystem::path& main, const std::filesyst
 }
 
 void rejectedFactoryPreservesParent(const std::filesystem::path& main, const std::filesystem::path& guest) {
-    Session session(main, guest, 0, ArithmeticResult, true);
-    const auto before = session.Machine.Mappings();
-    const auto parent = session.Graph->Tls();
-    const auto allocation = parent->Allocation();
-    std::string diagnostic;
-    try { session.Graph->RunMain(2000000, 100000); }
-    catch (const std::exception& error) { diagnostic = error.what(); }
-    require(!diagnostic.empty() && session.TlsFactoryCalls == 1,
-            "Foreign TLS factory did not reject at the actual compiled guest create");
-    require(sameMappings(before, session.Machine.Mappings()),
-            "Rejected TLS factory retired the parent's allocation or leaked child mappings");
-    session.Machine.CheckAccess(allocation.Address, allocation.Size, rw);
-    require(session.Machine.Get(Cpu::Register::FsBase) == parent->FsBase(),
-            "Rejected TLS factory lost the live parent FS context");
-    const auto word = [&](std::uint64_t address) {
-        std::uint64_t value{};
-        session.Machine.Read(address, std::as_writable_bytes(std::span(&value, 1)));
-        return value;
-    };
-    const auto tlsWord = [&](std::size_t module, const char* nid) {
-        const auto& record = session.Graph->Modules()[module];
-        return word(parent->Resolve(record.TlsModuleId, exported(record, nid, 6).Value));
-    };
-    require(tlsWord(0, "GvF-Bi4Awf8") == 0x1122334455667798ULL &&
-            tlsWord(0, "yDUus272Ruw") == 0x22334455667788c9ULL &&
-            tlsWord(0, "VegplOr1lzM") == 7 &&
-            tlsWord(1, "Y4HdaqFKUqM") == 0x8877665544332231ULL &&
-            tlsWord(1, "Y4GBk7lhoKQ") == 7,
-            "Rejected TLS factory destroyed or restored the parent's actual guest TLS mutations");
-    const auto state = session.receipt();
-    std::int32_t error{};
-    session.Machine.Read(state[4], std::as_writable_bytes(std::span(&error, 1)));
-    require(error == 17 && state[2] == parent->FsBase() && state[0] == 1 && state[1] == 0 &&
-            state[7] == 0 && state[9] == 0 && state[10] == 0 && state[11] == 0 && state[13] == 0 &&
-            session.events() == std::array<std::uint64_t, 6>{1, 0, 0, 0, 0, 0},
-            "Rejected TLS factory executed a child, callback, join or ordinary guest completion");
-    session.edgeUnchanged();
-    require(diagnostic.find("guest TLS factory did not return a new owned allocation at the requested address") != std::string::npos,
-            diagnostic.c_str());
+    for (const auto corruptReturn : {false, true}) {
+        Session session(main, guest, 0, ArithmeticResult, !corruptReturn, corruptReturn);
+        const auto before = session.Machine.Mappings();
+        const auto parent = session.Graph->Tls();
+        const auto allocation = parent->Allocation();
+        std::string diagnostic;
+        try { session.Graph->RunMain(2000000, 100000); }
+        catch (const std::exception& error) { diagnostic = error.what(); }
+        require(!diagnostic.empty() && session.TlsFactoryCalls == 1,
+                "Invalid TLS factory continuation did not reject at the actual compiled guest create");
+        if (corruptReturn) {
+            require(session.CreateOutputAddress && session.CreateReturnWordAddress && session.CreateReturnWord,
+                    "Actual TLS factory did not retain the real create output and caller frame");
+            std::array<std::uint64_t, 3> output{};
+            session.Machine.Read(session.CreateOutputAddress - 8, std::as_writable_bytes(std::span(output)));
+            require(output == std::array<std::uint64_t, 3>{0x13579bdf2468ace0ULL, 0, 0xeca86420fdb97531ULL},
+                    "Rejected create published a handle before validating its corrupted caller return word");
+            std::uint64_t returnWord{};
+            session.Machine.Read(session.CreateReturnWordAddress, std::as_writable_bytes(std::span(&returnWord, 1)));
+            require(returnWord == 0x1122334455667788ULL,
+                    "Factory corruption control did not change its actual caller return word");
+            session.Machine.CheckAccess(session.CreateReturnWord, 1, Cpu::Permission::Execute);
+        }
+        require(sameMappings(before, session.Machine.Mappings()),
+                "Rejected TLS factory retired the parent's allocation or leaked child mappings");
+        session.Machine.CheckAccess(allocation.Address, allocation.Size, rw);
+        require(session.Machine.Get(Cpu::Register::FsBase) == parent->FsBase(),
+                "Rejected TLS factory lost the live parent FS context");
+        const auto word = [&](std::uint64_t address) {
+            std::uint64_t value{};
+            session.Machine.Read(address, std::as_writable_bytes(std::span(&value, 1)));
+            return value;
+        };
+        const auto tlsWord = [&](std::size_t module, const char* nid) {
+            const auto& record = session.Graph->Modules()[module];
+            return word(parent->Resolve(record.TlsModuleId, exported(record, nid, 6).Value));
+        };
+        require(tlsWord(0, "GvF-Bi4Awf8") == 0x1122334455667798ULL &&
+                tlsWord(0, "yDUus272Ruw") == 0x22334455667788c9ULL &&
+                tlsWord(0, "VegplOr1lzM") == 7 &&
+                tlsWord(1, "Y4HdaqFKUqM") == 0x8877665544332231ULL &&
+                tlsWord(1, "Y4GBk7lhoKQ") == 7,
+                "Rejected TLS factory destroyed or restored the parent's actual guest TLS mutations");
+        const auto state = session.receipt();
+        std::int32_t error{};
+        session.Machine.Read(state[4], std::as_writable_bytes(std::span(&error, 1)));
+        require(error == 17 && state[2] == parent->FsBase() && state[0] == 1 && state[1] == 0 &&
+                state[7] == 0 && state[9] == 0 && state[10] == 0 && state[11] == 0 && state[13] == 0 &&
+                session.events() == std::array<std::uint64_t, 6>{1, 0, 0, 0, 0, 0},
+                "Rejected TLS factory executed a child, callback, join or ordinary guest completion");
+        session.edgeUnchanged();
+        require(diagnostic.find(corruptReturn ? "return word changed" :
+                    "guest TLS factory did not return a new owned allocation at the requested address") != std::string::npos,
+                diagnostic.c_str());
+    }
 }
 
 void rejectedJoinPreservesChild(const std::filesystem::path& main, const std::filesystem::path& guest) {
@@ -360,6 +388,41 @@ void rejectedJoinPreservesChild(const std::filesystem::path& main, const std::fi
     require(errorStorage == 29, "Rejected join modified or unmapped the child's return buffer");
     require(session.Machine.Get(Cpu::Register::FsBase) == state[2],
             "Rejected join left the child context active instead of its caller");
+    session.edgeUnchanged();
+}
+
+void rejectedJoinPreservesOutput(const std::filesystem::path& main, const std::filesystem::path& guest) {
+    Session session(main, guest, 15);
+    std::string diagnostic;
+    try { session.Graph->RunMain(2000000, 100000); }
+    catch (const std::exception& error) { diagnostic = error.what(); }
+    require(diagnostic.find("return word changed") != std::string::npos,
+            "Corrupted blocked join returned successfully or rejected for an unrelated reason");
+    const auto state = session.receipt();
+    require(state[0] == 5 && state[1] == 0 && state[9] == 1 && state[10] == 0 && state[11] == 0 &&
+            state[12] == ArithmeticResult && state[13] == 0 && state[24] == 0 && state[25] == 0 &&
+            session.events() == std::array<std::uint64_t, 6>{1, 2, 3, 4, 5, 0},
+            "Corrupted blocked join skipped real child completion or published successful parent completion");
+    require(state[31] && state[32] && state[35], "Actual guest writer did not publish its join frame and output addresses");
+    const auto stack = session.Graph->InitialStack();
+    require(state[31] >= stack.Address && state[31] - stack.Address <= stack.Size - 8 &&
+            state[35] >= stack.Address && state[35] - stack.Address <= stack.Size - 24,
+            "Guest corruption control did not target the initial caller's actual stack");
+    const auto mappings = session.Machine.Mappings();
+    require(std::any_of(mappings.begin(), mappings.end(), [&](const auto& mapping) {
+        return (static_cast<unsigned>(mapping.Permissions) & static_cast<unsigned>(Cpu::Permission::Execute)) &&
+            state[32] >= mapping.Address && state[32] - mapping.Address < mapping.Size;
+    }), "Guest corruption control did not replace a real executable join return address");
+    std::uint64_t returnWord{};
+    session.Machine.Read(state[31], std::as_writable_bytes(std::span(&returnWord, 1)));
+    require(returnWord == 0x1122334455667788ULL, "Actual child did not corrupt the blocked join return word");
+    std::array<std::uint64_t, 3> output{};
+    session.Machine.Read(state[35], std::as_writable_bytes(std::span(output)));
+    require(output == std::array<std::uint64_t, 3>{0x1020304050607080ULL, 0xfeedfacefeedfaceULL, 0x8070605040302010ULL},
+            "Rejected corrupted join published its result or modified the caller's output canaries");
+    require(state[18] == 0x11223344556677c4ULL && state[19] == 0x8877665544332260ULL &&
+            state[20] == 15 && state[21] == 44 && state[8] == state[7] && state[7] != state[6],
+            "Corrupted join did not reach actual child finalization on its retained identity and TLS");
     session.edgeUnchanged();
 }
 
@@ -408,6 +471,7 @@ int main(int argc, char** argv) {
         preflightFailures(argv[1], argv[2]);
         rejectedFactoryPreservesParent(argv[1], argv[2]);
         rejectedJoinPreservesChild(argv[1], argv[2]);
+        rejectedJoinPreservesOutput(argv[1], argv[2]);
         std::cout << "PASS actual compiled guest create/yield/blocked join, immutable TLS/errno, arithmetic slices, finalization and preflight\n";
         return 0;
     } catch (const std::exception& error) {

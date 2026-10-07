@@ -429,6 +429,7 @@ Machine::Context Machine::CaptureContext() { impl->rejectContext(); }
 void Machine::SaveContext(Context&) { impl->rejectContext(); }
 void Machine::RestoreContext(const Context&) { impl->rejectContext(); }
 Machine::SuspendedCall Machine::PauseHostCall() { impl->rejectSuspension(); }
+void Machine::ValidateSuspendedCall(const SuspendedCall&) const { impl->rejectSuspension(); }
 void Machine::CompleteHostCall(SuspendedCall&) { impl->rejectSuspension(); }
 StopReason Machine::RunSlice(std::uint64_t, std::uint64_t, std::uint64_t) { impl->rejectSuspension(); }
 void Machine::SetSyscallHandler(std::function<void(Machine&)> handler) { impl->syscall = std::move(handler); }

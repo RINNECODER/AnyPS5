@@ -597,11 +597,11 @@ Machine::SuspendedCall Machine::PauseHostCall() {
     active.paused = std::move(frame);
     return SuspendedCall(std::move(payload));
 }
-void Machine::CompleteHostCall(SuspendedCall& call) {
+void Machine::ValidateSuspendedCall(const SuspendedCall& call) const {
     impl->checkSuspendedCall(call);
     if (impl->exited || impl->requested.load())
         throw std::logic_error("Suspended guest host call cannot complete after terminal stop or exit");
-    auto& frame = *call.payload->frame;
+    const auto& frame = *call.payload->frame;
     if (impl->epoch != frame.epoch || Get(Register::Rip) != frame.gate || Get(Register::Rsp) != frame.stack)
         throw std::logic_error("Suspended guest host call requires its restored caller frame");
     if (!impl->calls.contains(frame.gate)) throw std::logic_error("Suspended guest host-call gate is no longer registered");
@@ -611,8 +611,12 @@ void Machine::CompleteHostCall(SuspendedCall& call) {
     Read(frame.stack, std::as_writable_bytes(std::span(&destination, 1)));
     if (destination != frame.destination) throw std::logic_error("Suspended guest host-call return word changed");
     CheckAccess(destination, 1, Permission::Execute);
+}
+void Machine::CompleteHostCall(SuspendedCall& call) {
+    ValidateSuspendedCall(call);
+    auto& frame = *call.payload->frame;
     Set(Register::Rsp, frame.stack + 8);
-    Set(Register::Rip, destination);
+    Set(Register::Rip, frame.destination);
     frame.completed = true;
     std::erase(impl->pendingCalls, call.payload->frame);
 }

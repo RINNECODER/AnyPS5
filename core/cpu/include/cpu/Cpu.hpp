@@ -72,6 +72,7 @@ public:
     void SaveContext(Context& context);
     void RestoreContext(const Context& context);
     SuspendedCall PauseHostCall();
+    void ValidateSuspendedCall(const SuspendedCall& call) const;
     void CompleteHostCall(SuspendedCall& call);
     void SetSyscallHandler(std::function<void(Machine&)> handler);
     void AddHostCall(std::uint64_t address, std::function<void(Machine&)> handler);

@@ -164,6 +164,12 @@ EXPORT void* ThreadChild(void* argument) {
     for (u64 index = 0; index < 32; ++index)
         if (canary[index] != 0xabcdef0100000000ul + index * 37) ThreadReceipt[1] = 105;
     record(4);
+    if (exitChild == 15) {
+        volatile u64* const returnWord = (volatile u64*)ThreadReceipt[31];
+        if (!returnWord) { ThreadReceipt[1] = 108; return (void*)0; }
+        ThreadReceipt[32] = *returnWord;
+        *returnWord = 0x1122334455667788ul;
+    }
     if (exitChild == 13 || exitChild == 14) {
         ThreadLifecycle[2] = 3;
         if (exitChild == 13) process_exit(23);
@@ -177,6 +183,16 @@ EXPORT void* ThreadChild(void* argument) {
         return (void*)0x1122334455667788ul;
     }
     return (void*)0x8877665544332211ul;
+}
+
+__attribute__((naked, noinline)) static int joinWithPublishedReturn(u64 target, void** output) {
+    __asm__ volatile(
+        "sub $8, %rsp\n"
+        "lea -8(%rsp), %rax\n"
+        "mov %rax, ThreadReceipt+248(%rip)\n"
+        "call \"onNY9Byn-W8\"@PLT\n"
+        "add $8, %rsp\n"
+        "ret\n");
 }
 
 static int number(const char* text, u64* value) {
@@ -215,7 +231,7 @@ EXPORT int SceGuestMain(u64 argc, char** argv) {
     volatile u64 canary[32];
     for (u64 index = 0; index < 32; ++index) canary[index] = 0x1234567800000000ul + index * 41;
     record(1);
-    exitChild = mode == 12 || mode == 13 || mode == 14 ? mode : 0;
+    exitChild = mode >= 12 && mode <= 15 ? mode : 0;
     if (mode == 8) thread_join(thread_self(), (void**)0);
     if (mode == 9) thread_join(0xfedcba9876543210ul, (void**)0);
     volatile struct { u64 before, handle, after; } created = {0x13579bdf2468ace0ul, 0, 0xeca86420fdb97531ul};
@@ -237,7 +253,10 @@ EXPORT int SceGuestMain(u64 argc, char** argv) {
     volatile struct { u64 before; void* result; u64 after; } joined = {
         0x1020304050607080ul, (void*)0xfeedfacefeedfaceul, 0x8070605040302010ul};
     void** joinedOutput = mode == 11 ? (void**)ThreadReceipt[5] : (void**)&joined.result;
-    if (thread_join(created.handle, joinedOutput) != 0) return 88;
+    if (mode == 15) {
+        ThreadReceipt[35] = (u64)&joined;
+        if (joinWithPublishedReturn(created.handle, joinedOutput) != 0) return 88;
+    } else if (thread_join(created.handle, joinedOutput) != 0) return 88;
     if (mode == 10) thread_join(created.handle, (void**)0);
     ThreadReceipt[13] = (u64)joined.result;
     ThreadReceipt[24] = joined.before;
