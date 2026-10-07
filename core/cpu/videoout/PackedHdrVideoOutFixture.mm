@@ -16,6 +16,7 @@
 #include <future>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -83,7 +84,10 @@ struct Caller{
         return m.Get(Cpu::Register::Rax);}
 };
 id<CAMetalDrawable> captured=nil;IMP originalNext=nullptr;bool expectedHdr=true;
+std::mutex frameErrorMutex;std::exception_ptr frameError;
+std::exception_ptr observedFrameError(){std::lock_guard lock(frameErrorMutex);return frameError;}
 id<CAMetalDrawable> nextDrawable(CAMetalLayer* layer,SEL selector){
+    try{
     require(layer.pixelFormat==(expectedHdr?MTLPixelFormatBGR10A2Unorm:MTLPixelFormatBGRA8Unorm),"Native drawable format lost packed ten-bit storage or SDR reset");
     require(layer.wantsExtendedDynamicRangeContent==expectedHdr,"PQ EDR handoff or SDR reset differs");
     if(expectedHdr){const auto space=layer.colorspace;require(space!=nullptr,"Packed PQ layer lost transfer/primaries metadata");
@@ -92,6 +96,12 @@ id<CAMetalDrawable> nextDrawable(CAMetalLayer* layer,SEL selector){
     else require(layer.colorspace==nullptr,"SDR layer retained HDR transfer metadata");
     require(layer.EDRMetadata==nil,"Fixture acquired invented HDR mastering metadata");
     layer.framebufferOnly=NO;captured=reinterpret_cast<id<CAMetalDrawable>(*)(id,SEL)>(originalNext)(layer,selector);return captured;
+    }catch(...){
+        // Metadata assertions occur before the production completion callback.
+        // Preserve their exact failure for the main fixture instead of leaving
+        // its completion future to report an unrelated timeout.
+        std::lock_guard lock(frameErrorMutex);if(!frameError)frameError=std::current_exception();throw;
+    }
 }
 struct Capture{
     CAMetalLayer* layer;Class prior;
@@ -134,12 +144,17 @@ void completed(void* context,VideoOutConfig& config,std::int64_t argument){
     }catch(...){c.done.set_exception(std::current_exception());throw;}
 }
 void present(Cpu::Machine& m,Cpu::SceNativeGraphicsSession& s,Completion& c,std::uint32_t handle,unsigned index){
+    {std::lock_guard lock(frameErrorMutex);frameError=nullptr;}
     c.done=std::promise<void>{};auto finished=c.done.get_future();
     const std::array<std::uint32_t,6> packet{AgcDriver::FlipPacketHeader,handle,index,1,37,0};
     m.Write(Display+3*0x100000+CommandOffset,std::as_bytes(std::span(packet)));
     s.Driver().SubmitCommandBuffer(Display+3*0x100000+CommandOffset,packet.size(),0,0);
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
-    while(finished.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready&&std::chrono::steady_clock::now()<deadline)s.Window().PumpMainThread(std::chrono::milliseconds(1));
+    while(finished.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready&&std::chrono::steady_clock::now()<deadline){
+        if(const auto error=observedFrameError())std::rethrow_exception(error);
+        s.Window().PumpMainThread(std::chrono::milliseconds(1));
+    }
+    if(const auto error=observedFrameError())std::rethrow_exception(error);
     require(finished.wait_for(std::chrono::milliseconds(0))==std::future_status::ready,"No actual packed-PQ frame completion");finished.get();s.Driver().WaitIdle();
 }
 void run(const char* utility,const char* const* files){
