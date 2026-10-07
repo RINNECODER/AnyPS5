@@ -45,6 +45,10 @@ public:
         GuestThreadHandle ActiveThread() const;
         void BlockFromHostCall(std::uint64_t key);
         bool IsWaiting(GuestThreadHandle, std::uint64_t key) const;
+        // Move an exact parked call to another object in the same provider
+        // domain without making it runnable or refreshing its RR quantum.
+        // Condition signaling uses this to await the original mutex owner.
+        bool TransferWait(GuestThreadHandle, std::uint64_t key, std::uint64_t destinationKey);
         // Only inheritance mutexes publish an owner. Zero removes the object;
         // the scheduler derives donations from live blocked calls in this
         // domain rather than accepting provider-supplied waiter priorities.

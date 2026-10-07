@@ -12,6 +12,7 @@ namespace Cpu::Platform {
 // pinned consumer admission below; fixture construction alone admits no target.
 struct KernelPrimitiveImport { std::string_view Nid, Name; };
 std::span<const KernelPrimitiveImport> KernelPrimitiveInventory();
+std::span<const KernelPrimitiveImport> KernelConditionInventory();
 class KernelPrimitives {
 public:
     // Machine must outlive this provider. Destroy only while guest execution is idle;
@@ -47,6 +48,11 @@ public:
     TargetKernelMutexes(Machine&, const std::shared_ptr<GuestThreads>&);
     std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t observedSymbolType,
                                        KernelMutexConsumer);
+    // Shares this exact provider's mutex ownership and wait domain. Only the
+    // pinned untimed condition rows/default attributes are admitted. The caller
+    // must supply the actual imported symbol size; timed/clock rows remain out.
+    std::optional<std::uint64_t> ResolveCondition(const SceImport&, std::uint8_t observedSymbolType,
+                                                std::uint64_t observedSymbolSize, KernelMutexConsumer);
 private:
     KernelPrimitives provider;
 };
