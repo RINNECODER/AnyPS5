@@ -9,6 +9,8 @@
 #include <atomic>
 #include <cstring>
 #include <iostream>
+#include <fstream>
+#include <vector>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -53,13 +55,29 @@ struct Guest {
     Cpu::Machine Machine;
     std::unique_ptr<Cpu::SceAgcImports> Imports;
     explicit Guest(Cpu::SceAgcBackend backend, std::span<const Contract> contracts) {
-        Machine.Map(0x1000,4096,RX); Machine.Map(0x2000,4096,RW); Machine.Map(0x3000,4096,RW);
+        Machine.Map(0x1000,4096,RX); Machine.Map(0x2000,4096,RW); Machine.Map(0x3000,4096,RW); Machine.Map(0x4000,4096,RX);
         // Real x86 indirect GOT call, followed by a stored return and a preserved
         // callee-saved register continuation. Gate RET uses the CPU's real stack.
         constexpr std::array<std::uint8_t,17> caller{
             0xff,0x15,0xfa,0x0f,0,0, 0x48,0x89,0x05,0x03,0x10,0,0, 0x48,0xff,0xc3,0x90};
         Machine.Write(0x1000,std::as_bytes(std::span(caller)));
         Imports=std::make_unique<Cpu::SceAgcImports>(Machine,std::move(backend),contracts);
+    }
+    std::uint64_t compiled(const char* file, std::array<std::uint64_t,6> args) {
+        std::ifstream input(file, std::ios::binary);
+        require(input.good(), "compiled target caller missing");
+        const std::vector<char> bytes((std::istreambuf_iterator<char>(input)), {});
+        require(!bytes.empty() && bytes.size() <= 4096, "compiled target caller outside code-page bound");
+        Machine.Write(0x4000, std::as_bytes(std::span(bytes)));
+        constexpr std::array registers{Cpu::Register::Rdi, Cpu::Register::Rsi, Cpu::Register::Rdx,
+            Cpu::Register::Rcx, Cpu::Register::R8, Cpu::Register::R9};
+        for (std::size_t i=0; i<args.size(); ++i) Machine.Set(registers[i], args[i]);
+        Machine.Set(Cpu::Register::Rsp, 0x3fc8);
+        store(Machine, 0x3fc8, std::uint64_t{0x1011});
+        require(Machine.Run(0x4000, 0x1011, 1000) == Cpu::StopReason::Address,
+                "compiled target caller did not return");
+        require(Machine.Get(Cpu::Register::Rsp) == 0x3fd0, "compiled target caller corrupted stack");
+        return Machine.Get(Cpu::Register::Rax);
     }
     std::uint64_t call(const char* nid, bool driver, std::array<std::uint64_t,8> args={}) {
         constexpr std::array registers{Cpu::Register::Rdi,Cpu::Register::Rsi,Cpu::Register::Rdx,
@@ -92,13 +110,13 @@ void Admission() {
     rejects([&]{guest.Imports->Resolve(identity("unsupported",true),2,0);},"Unsupported SCE AGC service");
 }
 
-void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library) {
+void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers) {
     // TCG aliases require the real complete host-page backing, including on
     // Apple Silicon hosts with 16 KiB pages. Driver-visible ranges stay 4 KiB.
-    alignas(65536) std::array<std::byte,65536> codeBytes{},headerBytes{},builderBytes{};
-    alignas(65536) std::array<std::uint32_t,16384> output{};
+    alignas(65536) std::array<std::byte,65536> codeBytes{},headerBytes{},builderBytes{},targetBuilderBytes{};
+    alignas(65536) std::array<std::uint32_t,16384> output{},targetOutput{};
     codeBytes.fill(std::byte{0x7b}); headerBytes.fill(std::byte{0x7b}); builderBytes.fill(std::byte{0x7b});
-    output.fill(0xdeadbeef);
+    output.fill(0xdeadbeef); targetOutput.fill(0xdeadbeef); targetBuilderBytes.fill(std::byte{0x7b});
     std::memcpy(codeBytes.data()+256,Wave32Code.data(),sizeof(Wave32Code));
     const auto originalCode=codeBytes;
     std::fill_n(headerBytes.begin(),272,std::byte{0});
@@ -107,12 +125,16 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library) {
         AgcDriver::NativeGuestMemory::BorrowedRange{0x500000,std::span(codeBytes).first(4096),false},
         AgcDriver::NativeGuestMemory::BorrowedRange{0x510000,std::as_writable_bytes(std::span(output)).first(4096),true},
         AgcDriver::NativeGuestMemory::BorrowedRange{Header,std::span(headerBytes).first(4096),true},
-        AgcDriver::NativeGuestMemory::BorrowedRange{Builder,std::span(builderBytes).first(4096),true}};
-    const std::array<std::span<std::byte>,4> fullBackings{codeBytes,std::as_writable_bytes(std::span(output)),headerBytes,builderBytes};
+        AgcDriver::NativeGuestMemory::BorrowedRange{Builder,std::span(builderBytes).first(4096),true},
+        AgcDriver::NativeGuestMemory::BorrowedRange{Output-256+0x100000000ull,std::as_writable_bytes(std::span(targetOutput)).first(4096),true},
+        AgcDriver::NativeGuestMemory::BorrowedRange{Builder+0x100000000ull,std::span(targetBuilderBytes).first(4096),true}};
+    const std::array<std::span<std::byte>,6> fullBackings{codeBytes,std::as_writable_bytes(std::span(output)),headerBytes,builderBytes,
+        std::as_writable_bytes(std::span(targetOutput)),targetBuilderBytes};
     AgcDriver::Metal::MetalDriver driver;
     std::atomic<unsigned> interrupts{0};
+    std::atomic<std::uint32_t> lastQueue{UINT32_MAX};
     driver.Configure((__bridge void*)device,(__bridge void*)library,ranges,[&](std::uint32_t queue){
-        require(queue==0x20,"native provider changed compute EOP queue"); ++interrupts;
+        require(queue==0x20 || queue==0,"native provider changed EOP queue"); lastQueue=queue; ++interrupts;
     });
     constexpr std::array contracts{
         Contract::CreateShaderRelativeHeader96,Contract::DcbSetShRegisterDirect,Contract::CbDispatchCommandBuffer56,
@@ -206,7 +228,7 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library) {
         for (std::size_t index=0;index<output.size();++index)
             if ((index<64 || index>=320) && index!=960)
                 require(output[index]==0xdeadbeef,"provider-to-Metal changed output guard");
-        require(output[960]==0xabcdef12 && interrupts==1,"provider did not finish one ordered EOP");
+        require(output[960]==0xabcdef12 && interrupts==1 && lastQueue==0x20,"provider did not finish one ordered EOP");
         require(codeBytes==originalCode && builderBytes==originalBuilder && headerBytes==originalHeader,
                 "native submit changed guest code/header/commands");
         require(guest.call("h9z6+0hEydk",false)==0,"suspend gate return differs");
@@ -267,22 +289,160 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library) {
         require(guest.call("HF3YllT3mXU",true,{0x57,Builder+176,Builder+184,1})==0,"multi ACB return differs");
         driver.WaitIdle();
         require(output[64]==payload[0] && output[65]==payload[1] && interrupts==1,"multi ACB queue/array marshalling differs");
+        // Compiler-produced x86 callers now exercise the independently observed
+        // target shapes. The earlier synthetic controls remain above unchanged.
+        auto sourceImports=std::move(guest.Imports);
+        constexpr auto targetBuilder=Builder+0x100000000ull, targetCommandsAddress=Commands+0x100000000ull;
+        constexpr auto targetDescriptor=targetBuilder+64, targetShaderOutput=targetBuilder+128;
+        const std::array<std::uint32_t,8> targetEop{0xc0064900,0,(1u<<29)|(1u<<24),0x510f00,1,0xabcdef12,0,0};
+        std::copy(builderBytes.begin(),builderBytes.end(),targetBuilderBytes.begin());
+        // Low command memory is a distinct, valid NOP stream. A native pointer
+        // truncation therefore fails the output/EOP oracle, not an unrelated
+        // packet-format guard, and cannot silently use aliased high bytes.
+        std::array<std::uint32_t,76> decoy{}; decoy[0]=0xc04a1000;
+        guest.Machine.Write(Commands,std::as_bytes(std::span(decoy)));
+        constexpr auto targetHash="a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
+        guest.Imports=std::make_unique<Cpu::SceAgcImports>(guest.Machine, Cpu::MakeNativeAgcBackend(driver),
+            Cpu::QualifiedAgcAdmissionsForImage(targetHash), 0x7ffdf3001000);
+        require(Cpu::QualifiedAgcAdmissionsForImage("different-image").empty(), "unknown image gained target admission");
+        rejects([&]{guest.Imports->Resolve(identity("HF3YllT3mXU",true),2,0);},"Unqualified");
+        rejects([&]{guest.Imports->Resolve(identity("pFLArOT53+w",false),2,0);},"Unqualified");
+
+        // Reconstruct the corroborated 304-byte compute geometry from public
+        // types and independent offsets, using our synthetic ISA. No retail
+        // shader or binary bytes are copied. Zero-count sharp tables point one
+        // past the header, as in the inspected target headers.
+        std::fill_n(headerBytes.begin(),304,std::byte{0});
+        store(guest.Machine,Header,std::uint32_t{0x34333231});
+        store(guest.Machine,Header+4,std::uint32_t{0x18});
+        store(guest.Machine,Header+8,std::uint64_t{224-8});
+        store(guest.Machine,Header+32,std::uint64_t{144-32});
+        store(guest.Machine,Header+40,std::uint64_t{96-40});
+        store(guest.Machine,Header+64,std::uint32_t{304});
+        store(guest.Machine,Header+68,static_cast<std::uint32_t>(sizeof(Wave32Code)));
+        store(guest.Machine,Header+76,std::uint32_t{14});
+        store(guest.Machine,Header+88,std::uint16_t{48});
+        store(guest.Machine,Header+92,std::uint8_t{10});
+        store(guest.Machine,Header+112,std::uint32_t{1});
+        for (std::uint32_t i=0;i<10;++i) store(guest.Machine,Header+144+i*8, std::uint32_t{0x20c+i});
+        store(guest.Machine,Header+224,std::uint64_t{280-224});
+        store(guest.Machine,Header+268,std::uint16_t{11});
+        for (std::uint32_t i=0;i<4;++i) store(guest.Machine,Header+232+i*8,std::uint64_t{304-(232+i*8)});
+        const auto relativeTargetHeader=headerBytes;
+        const auto shaderGate=guest.Imports->Resolve(identity("f3dg2CSgRKY",false),2,0);
+        require(guest.compiled(callers[2],{shaderGate,targetShaderOutput,Header,Code})==0,"compiled shader caller return differs");
+        require(load<std::uint64_t>(guest.Machine,targetShaderOutput)==Header &&
+            load<std::uint64_t>(guest.Machine,Header+8)==Header+224 &&
+            load<std::uint64_t>(guest.Machine,Header+224)==Header+280 &&
+            load<std::uint64_t>(guest.Machine,Header+256)==Header+304 &&
+            load<std::uint32_t>(guest.Machine,Header+148)==(Code>>8), "target header304 relative publication differs");
+        require(std::equal(headerBytes.begin()+304,headerBytes.end(),relativeTargetHeader.begin()+304),
+            "target shader publication changed header redzone");
+
+        store(guest.Machine,targetBuilder,targetCommandsAddress); store(guest.Machine,targetBuilder+8,targetBuilder+4096);
+        store(guest.Machine,targetBuilder+16,targetCommandsAddress); store(guest.Machine,targetBuilder+24,targetBuilder+4096);
+        store(guest.Machine,targetBuilder+32,std::uint64_t{0x123456789abcdef0});
+        store(guest.Machine,targetBuilder+40,std::uint64_t{0xfedcba9876543210});
+        store(guest.Machine,targetBuilder+48,std::uint32_t{16});
+        constexpr auto targetDestination=Output+0x800+0x100000000ull;
+        std::array<std::uint32_t,64> zeros{};
+        guest.Machine.Write(targetBuilder+0xc00,std::as_bytes(std::span(zeros)));
+        const auto writeGate=guest.Imports->Resolve(identity("i1jyy49AjXU",false),2,0);
+        const auto preservedDescriptor=targetBuilderBytes;
+        require(guest.compiled(callers[0],{writeGate,targetBuilder,targetDestination,targetBuilder+0xc00})==targetCommandsAddress,
+            "compiled target WRITE_DATA return differs");
+        std::array<std::uint32_t,68> targetPacket{};
+        guest.Machine.Read(targetCommandsAddress,std::as_writable_bytes(std::span(targetPacket)));
+        require(targetPacket[0]==0xc0423700 && targetPacket[1]==0x40100200 &&
+            targetPacket[2]==static_cast<std::uint32_t>(targetDestination) && targetPacket[3]==1 &&
+            std::all_of(targetPacket.begin()+4,targetPacket.end(),[](auto value){return value==0;}) &&
+            load<std::uint64_t>(guest.Machine,targetBuilder+16)==targetCommandsAddress+272,
+            "compiled target WRITE_DATA count64/dst5 oracle differs");
+        require(std::equal(targetBuilderBytes.begin()+32,targetBuilderBytes.begin()+56,preservedDescriptor.begin()+32),
+            "target builder changed callback/userdata/reserved fields");
+        guest.Machine.Write(targetCommandsAddress+272,std::as_bytes(std::span(targetEop)));
+        const auto capturedTargetCommands=std::span(targetBuilderBytes).subspan(256,304);
+        const std::vector<std::byte> targetCommands(capturedTargetCommands.begin(),capturedTargetCommands.end());
+        for (const auto* nid:{"UglJIZjGssM","AhGvpITrf4M"}) {
+            guest.Machine.Write(targetCommandsAddress,targetCommands);
+            std::fill(targetOutput.begin()+576,targetOutput.begin()+640,0xeeeeeeee);
+            const auto expectedInterrupts=interrupts.load()+1;
+            const auto gate=guest.Imports->Resolve(identity(nid,true),2,0);
+            require(guest.compiled(callers[1],{gate,targetCommandsAddress,76})==0,"compiled packet16 submission return differs");
+            // Both the compiled local descriptor and command storage are reused
+            // before WaitIdle. Native capture must already own the command copy.
+            std::fill_n(targetBuilderBytes.begin()+256,304,std::byte{0xcc});
+            driver.WaitIdle();
+            require(std::all_of(targetOutput.begin()+576,targetOutput.begin()+640,[](auto value){return value==0;}) &&
+                targetOutput[575]==0xdeadbeef && targetOutput[640]==0xdeadbeef && targetOutput[960]==0xabcdef12 &&
+                interrupts==expectedInterrupts && lastQueue==0,
+                "target packet snapshot lifetime/output64/EOP differs");
+        }
+        store(guest.Machine,targetBuilder+16,targetCommandsAddress);
+        const auto acbWriteGate=guest.Imports->Resolve(identity("eZ4+17OQz4Q",false),2,0);
+        require(guest.compiled(callers[4],{acbWriteGate,targetBuilder,targetDestination+0x100,targetBuilder+160})==targetCommandsAddress,
+            "compiled target ACB WRITE_DATA return differs");
+        std::array<std::uint32_t,6> targetAcb{};
+        guest.Machine.Read(targetCommandsAddress,std::as_writable_bytes(std::span(targetAcb)));
+        require(targetAcb==std::array{0xc0043700u,0x00100200u,static_cast<std::uint32_t>(targetDestination+0x100),1u,
+            0x12345678u,0x90abcdefu},"target ACB WRITE_DATA packet oracle differs");
+        guest.Machine.Write(targetCommandsAddress+24,std::as_bytes(std::span(targetEop)));
+        store(guest.Machine,targetDescriptor,targetCommandsAddress); store(guest.Machine,targetDescriptor+8,std::uint32_t{14});
+        store(guest.Machine,targetDescriptor+12,std::uint32_t{0xa55af100});
+        require(guest.call("gSRnr79F8tQ",true,{0x20,targetDescriptor})==0,"target ACB WRITE_DATA submit return differs");
+        driver.WaitIdle();
+        require(targetOutput[640]==0x12345678 && targetOutput[641]==0x90abcdef && targetOutput[639]==0 && targetOutput[642]==0xdeadbeef &&
+            interrupts==4 && lastQueue==0x20,"target ACB WRITE_DATA output/EOP differs");
+        store(guest.Machine,targetBuilder+16,targetCommandsAddress);
+        const auto dispatchGate=guest.Imports->Resolve(identity("k3GhuSNmBLU",false),2,0);
+        require(guest.compiled(callers[3],{dispatchGate,targetBuilder,1})==targetCommandsAddress,"compiled dispatch return differs");
+        std::array<std::uint32_t,5> targetDispatch{};
+        guest.Machine.Read(targetCommandsAddress,std::as_writable_bytes(std::span(targetDispatch)));
+        require(targetDispatch==std::array{0xc0031500u,1u,1u,1u,0x41u},"target dispatch modifier1 oracle differs");
+        // Modifier1 proves the target builder's packet contract. The independent
+        // subgroup kernel is wave32, so its numerical run explicitly supplies
+        // wave32|enable. Modifier1 selects wave64 and cannot use wave32 goldens;
+        // this fixture makes no wave64 or proprietary shader execution claim.
+        store(guest.Machine,targetBuilder+16,targetCommandsAddress);
+        require(guest.compiled(callers[3],{dispatchGate,targetBuilder,0x8001})==targetCommandsAddress,
+            "compiled wave32 dispatch return differs");
+        guest.Machine.Read(targetCommandsAddress,std::as_writable_bytes(std::span(targetDispatch)));
+        require(targetDispatch==std::array{0xc0031500u,1u,1u,1u,0x8041u},"compiled wave32 forwarding packet differs");
+        guest.Machine.Write(targetCommandsAddress+20,std::as_bytes(std::span(targetEop)));
+        store(guest.Machine,targetDescriptor,targetCommandsAddress); store(guest.Machine,targetDescriptor+8,std::uint32_t{13});
+        std::fill(output.begin()+64,output.begin()+320,0xeeeeeeee);
+        store(guest.Machine,targetDescriptor+12,std::uint32_t{0xa55af100});
+        require(guest.call("gSRnr79F8tQ",true,{0x20,targetDescriptor})==0,"target ACB packet return differs");
+        driver.WaitIdle();
+        require(lastQueue==0x20 && interrupts==5,"compiled target dispatch did not complete ACB EOP");
+        for (std::uint32_t thread=0;thread<64;++thread) {
+            const auto lane=thread%32;
+            const std::array<std::uint32_t,4> expected{lane,8,thread-lane+3,lane<8 ? 1u:0u};
+            for (std::size_t item=0;item<4;++item)
+                require(output[64+thread*4+item]==expected[item],"target dispatch native subgroup output differs");
+        }
+        store(guest.Machine,targetDescriptor+8,std::uint32_t{0x100000});
+        const auto rejectedBuilder=targetBuilderBytes;
+        rejects([&]{guest.call("UglJIZjGssM",true,{targetDescriptor});},"qualified bound");
+        rejects([&]{guest.call("i1jyy49AjXU",false,{targetBuilder,0,0,targetDestination,targetBuilder+0xc00,64,0,1});},"qualified target memory");
+        rejects([&]{guest.call("k3GhuSNmBLU",false,{targetBuilder,1,1,1,0});},"qualified target forwarding");
+        require(targetBuilderBytes==rejectedBuilder && interrupts==5,"target policy rejection changed guest/native state");
         driver.Shutdown();
     } catch (...) { try { driver.Shutdown(); } catch (...) {} throw; }
-    std::cout << "AGC candidate provider: x86 GOT gates -> guest-relative shader creation/registration -> native Metal, 256 independent subgroup results, guards and one EOP; strict admission and builder rejection passed\n";
+    std::cout << "AGC candidate provider: x86 GOT gates -> guest-relative shader creation/registration -> native Metal, 256 independent subgroup results, guards and one original EOP; compiled target header304/count64/packet16/dispatch1, snapshot lifetime and policy rejections passed\n";
 }
 }
 int main(int argc,char** argv) {
     @autoreleasepool {
         try {
-            require(argc==2,"AGC fixture requires utility metallib path");
+            require(argc==7,"AGC fixture requires utility metallib and five compiled guest callers");
             Admission();
             id<MTLDevice> device=MTLCreateSystemDefaultDevice();require(device!=nil,"Metal device unavailable");
             NSError* error=nil;
             const auto url=[NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]]];
             id<MTLLibrary> library=[device newLibraryWithURL:url error:&error];
             require(library!=nil,error ? error.localizedDescription.UTF8String : "utility library unavailable");
-            NativeRoute(device,library);
+            NativeRoute(device,library,argv+2);
             return 0;
         } catch (const std::exception& error) {std::cerr << error.what() << '\n';return 1;}
     }

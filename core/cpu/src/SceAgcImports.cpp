@@ -91,6 +91,7 @@ struct SceAgcImports::Impl {
     Machine& MachineRef;
     SceAgcBackend Backend;
     std::set<Contract> Admitted;
+    std::map<Contract, AgcArgumentPolicy> Policies;
     std::uint64_t Base;
     std::size_t Slots = 0;
     std::map<Key, std::uint64_t> Gates;
@@ -126,10 +127,12 @@ struct SceAgcImports::Impl {
         return buffer.Up;
     }
 
-    void submit(Machine& guest, std::uint64_t pointer, std::uint32_t queue) {
+    void submit(Machine& guest, std::uint64_t pointer, std::uint32_t queue, Contract operation) {
         required(Backend.Submit);
         const auto packet = read<GuestPacket>(guest, pointer);
         require(!packet.Flags, "nonzero command submission flags are unsupported");
+        if (Policies.contains(operation))
+            require(packet.Words <= 0xfffff, "target packet count outside qualified bound");
         if (packet.Words) {
             address(packet.Address, std::size_t(packet.Words) * 4, 4);
             guest.CheckAccess(packet.Address, std::size_t(packet.Words) * 4, Permission::Read);
@@ -221,10 +224,10 @@ struct SceAgcImports::Impl {
         const auto a=guest.Get(Register::Rdi), b=guest.Get(Register::Rsi), c=guest.Get(Register::Rdx),
             d=guest.Get(Register::Rcx), e=guest.Get(Register::R8), f=guest.Get(Register::R9);
         switch (operation) {
-        case Contract::SubmitDcbPacket16: case Contract::AgrSubmitDcbPacket16: submit(guest, a, 0); return;
+        case Contract::SubmitDcbPacket16: case Contract::AgrSubmitDcbPacket16: submit(guest, a, 0, operation); return;
         case Contract::SubmitAcbPacket16:
             require(static_cast<std::uint32_t>(a) >= 0x20 && static_cast<std::uint32_t>(a) < 0x58, "unsupported compute queue");
-            submit(guest, b, static_cast<std::uint32_t>(a)); return;
+            submit(guest, b, static_cast<std::uint32_t>(a), operation); return;
         case Contract::SubmitMultiDcbs: case Contract::AgrSubmitMultiDcbs: multi(guest, a, b, static_cast<std::uint32_t>(c), 0); return;
         case Contract::SubmitMultiAcbs:
             require(static_cast<std::uint32_t>(a) >= 0x20 && static_cast<std::uint32_t>(a) < 0x58, "unsupported compute queue");
@@ -237,6 +240,10 @@ struct SceAgcImports::Impl {
             const auto dst=static_cast<std::uint8_t>(b), cache=static_cast<std::uint8_t>(c),
                 increment=static_cast<std::uint8_t>(tail[0]), confirm=static_cast<std::uint8_t>(tail[1]);
             const auto count = static_cast<std::uint32_t>(f);
+            if (Policies.contains(operation)) {
+                require((compute ? dst == 2 : dst == 4 || dst == 5) && increment == 0,
+                        "write data controls outside qualified target memory use");
+            }
             require(count && count <= 0x3ffd && dst <= (compute ? 15 : 31) && cache <= 3 && increment <= 1 && confirm <= 1,
                     "invalid write data controls or payload count");
             require((compute || !(d & 3)) && (dst || !confirm), "invalid write data destination");
@@ -260,6 +267,7 @@ struct SceAgcImports::Impl {
         case Contract::CbDispatchCommandBuffer56: {
             const auto modifier=static_cast<std::uint32_t>(e);
             require(!(modifier & ~(0xa038u | 0x41u)), "invalid dispatch modifier");
+            if (Policies.contains(operation)) require(modifier & 1, "dispatch modifier outside qualified target forwarding path");
             const std::array words{0xc0031500u, static_cast<std::uint32_t>(b), static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(d), modifier | 0x41u};
             guest.Set(Register::Rax, emit(guest, a, words)); return;
         }
@@ -274,6 +282,54 @@ struct SceAgcImports::Impl {
 
 SceAgcImports::SceAgcImports(Machine& machine, SceAgcBackend backend, std::span<const Contract> admitted, std::uint64_t base) :
     impl(std::make_shared<Impl>(machine, std::move(backend), admitted, base)) {}
+SceAgcImports::SceAgcImports(Machine& machine, SceAgcBackend backend,
+    std::span<const AgcAbiAdmission> admissions, std::uint64_t base) {
+    std::vector<Contract> contracts;
+    for (const auto& admission : admissions) {
+        const auto policy = admission.Policy;
+        const auto operation = admission.Contract;
+        const bool valid = policy == AgcArgumentPolicy::SourceContract ||
+            (policy == AgcArgumentPolicy::TargetPacket20Bit && (operation == Contract::SubmitDcbPacket16 ||
+                operation == Contract::AgrSubmitDcbPacket16 || operation == Contract::SubmitAcbPacket16)) ||
+            (policy == AgcArgumentPolicy::TargetMemoryWrite && (operation == Contract::DcbWriteDataCommandBuffer56 ||
+                operation == Contract::AcbWriteDataCommandBuffer56)) ||
+            (policy == AgcArgumentPolicy::TargetShader && operation == Contract::CreateShaderRelativeHeader96) ||
+            (policy == AgcArgumentPolicy::TargetDispatch && operation == Contract::CbDispatchCommandBuffer56) ||
+            (policy == AgcArgumentPolicy::TargetSuspend && operation == Contract::SuspendPoint);
+        require(valid && !admission.Evidence.empty(), "invalid target ABI admission descriptor");
+        require(std::find(contracts.begin(), contracts.end(), operation) == contracts.end(), "duplicate target ABI admission descriptor");
+        contracts.push_back(operation);
+    }
+    impl = std::make_shared<Impl>(machine, std::move(backend), contracts, base);
+    for (const auto& admission : admissions)
+        if (admission.Policy != AgcArgumentPolicy::SourceContract) impl->Policies.emplace(admission.Contract, admission.Policy);
+}
+
+std::span<const AgcAbiAdmission> QualifiedAgcAdmissionsForImage(std::string_view verifiedSha256) {
+    if (verifiedSha256 != "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397") return {};
+    // Bounded static target inspection, corroborated by the existing public
+    // builders/backend and independent TCG/Metal fixtures. These descriptions
+    // contain engineering conclusions, never private instruction/binary bytes.
+    static constexpr AgcAbiAdmission admissions[] = {
+        {Contract::SubmitDcbPacket16, AgcArgumentPolicy::TargetPacket20Bit,
+            "target stack packet: pointer64, words32<=0xfffff, flags8=0; native snapshots before return"},
+        {Contract::AgrSubmitDcbPacket16, AgcArgumentPolicy::TargetPacket20Bit,
+            "same target packet branch/return boundary; queue-zero native snapshot route only"},
+        {Contract::SubmitAcbPacket16, AgcArgumentPolicy::TargetPacket20Bit,
+            "target queue32 and stack packet16; native bounded compute queues and snapshot ownership"},
+        {Contract::DcbWriteDataCommandBuffer56, AgcArgumentPolicy::TargetMemoryWrite,
+            "target cursor56 and stack controls; dst4/5 memory, advance0, confirmation bit, capacity checked before writes"},
+        {Contract::AcbWriteDataCommandBuffer56, AgcArgumentPolicy::TargetMemoryWrite,
+            "target cursor56, dst2 memory, advance0, confirmation bit; scalar widths and stack controls corroborated"},
+        {Contract::CreateShaderRelativeHeader96, AgcArgumentPolicy::TargetShader,
+            "target three pointer64 arguments, code256 alignment, field-relative64 metadata; bounded atomic publication"},
+        {Contract::CbDispatchCommandBuffer56, AgcArgumentPolicy::TargetDispatch,
+            "target descriptor64/dimensions32/modifier32; bit0 forwarding path, sufficient-capacity cursor56"},
+        {Contract::SuspendPoint, AgcArgumentPolicy::TargetSuspend,
+            "target no-argument tail call; source/native queue-zero suspend acceptance boundary only"}
+    };
+    return admissions;
+}
 SceAgcImports::~SceAgcImports() = default;
 
 std::uint64_t SceAgcImports::Resolve(const SceImport& import, std::uint8_t symbolType, std::uint64_t symbolSize) {
@@ -284,6 +340,18 @@ std::uint64_t SceAgcImports::Resolve(const SceImport& import, std::uint8_t symbo
     if (import.LibraryName != name || import.ModuleName != name || import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1)
         throw std::runtime_error("Unsupported SCE AGC scope/version: " + identity(import));
     if (!impl->Admitted.contains(binding->Operation)) throw std::runtime_error("Unqualified SCE AGC target ABI contract: " + identity(import));
+    // A qualified ABI cannot manufacture backend capability. In particular,
+    // event imports stay unresolved until the genuine CPU equeue owner exists.
+    switch (binding->Operation) {
+    case Contract::SubmitDcbPacket16: case Contract::AgrSubmitDcbPacket16: case Contract::SubmitAcbPacket16:
+    case Contract::SubmitMultiDcbs: case Contract::AgrSubmitMultiDcbs: case Contract::SubmitMultiAcbs:
+        required(impl->Backend.Submit); break;
+    case Contract::CreateShaderRelativeHeader96: required(impl->Backend.RegisterShader); break;
+    case Contract::SuspendPoint: required(impl->Backend.Suspend); break;
+    case Contract::AddEqEvent: required(impl->Backend.AddEvent); break;
+    case Contract::DeleteEqEvent: required(impl->Backend.DeleteEvent); break;
+    default: break;
+    }
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleId};
     if (const auto found=impl->Gates.find(key); found != impl->Gates.end()) return found->second;
     require(impl->Slots < 256, "import gate page exhausted");
