@@ -60,6 +60,7 @@ struct GuestThreads::Impl {
         std::array<std::uint64_t, 5> args{};
         Machine::SuspendedCall token;
         bool awakened = false;
+        std::function<std::uint32_t()> ownerCompletion;
     };
     struct Record {
         GuestThreadHandle id;
@@ -97,12 +98,16 @@ struct GuestThreads::Impl {
     struct Domain {
         std::function<void(GuestThreadHandle)> stopped;
         std::map<std::uint64_t, GuestThreadHandle> inheritanceOwners;
+        std::function<bool()> ownerPump;
     };
     std::map<std::uint64_t, Domain> waitDomains;
     std::function<std::shared_ptr<SceTls>(std::uint64_t)> tlsFactory;
     std::uint64_t dtors = 0, count = 0, report = 0;
     bool withdrawn = false;
     bool driving = false;
+    bool pumping = false;
+    std::function<void(bool)> ownerBoundary;
+    std::chrono::milliseconds maximumIdleWait{0};
     bool gateMapped = false;
     Phase phase = Phase::None;
     std::optional<StopReason> terminal;
@@ -117,6 +122,12 @@ struct GuestThreads::Impl {
     void checkOwner() const {
         if (std::this_thread::get_id() != owner) fail("runtime requires its owner thread");
         if (withdrawn) fail("runtime was withdrawn");
+    }
+    void checkIdleOwner() const {
+        checkOwner();
+        // CaptureContext checks the actual Machine execution owner and idle
+        // state, rather than treating scheduler bookkeeping as sufficient.
+        auto idle = machine.CaptureContext();
     }
     Record& lookup(GuestThreadHandle id) const {
         const auto found = records.find(id);
@@ -257,6 +268,88 @@ struct GuestThreads::Impl {
         ready(record);
         recomputePriorities();
         return true;
+    }
+    bool wake(std::uint64_t domain, GuestThreadHandle id, std::uint64_t key,
+              std::function<std::uint32_t()> completion) {
+        // Owner host gates may queue a deletion result while the Machine is
+        // running. The deferred completion itself runs only at the validated
+        // idle continuation boundary below, never inside this registration.
+        checkOwner();
+        if (!completion) fail("guest wait owner completion is empty");
+        if (!wake(domain, id, key, 0)) return false;
+        lookup(id).pending->ownerCompletion = std::move(completion);
+        return true;
+    }
+    bool cancelWait(std::uint64_t domain, GuestThreadHandle id, std::uint64_t key) {
+        checkIdleOwner();
+        const auto found = records.find(id);
+        if (found == records.end()) return false;
+        const auto& pending = found->second->pending;
+        if (!pending || pending->kind != Action::Wait ||
+            pending->args[0] != domain || pending->args[1] != key) return false;
+        // Teardown cannot return through a provider gate whose ownership may
+        // be disappearing. Match this call precisely, then fail closed for
+        // the whole execution as other terminal-stop paths already do.
+        machine.RequestStop();
+        cancel(StopReason::Requested);
+        return true;
+    }
+    bool retractWake(std::uint64_t domain, GuestThreadHandle id, std::uint64_t key) {
+        checkIdleOwner();
+        const auto found = records.find(id);
+        if (found == records.end()) return false;
+        auto& record = *found->second;
+        if ((record.state != State::Runnable && record.state != State::Finishing) ||
+            !record.pending || record.pending->kind != Action::Wait ||
+            !record.pending->awakened || record.pending->args[0] != domain ||
+            record.pending->args[1] != key) return false;
+        const auto queued = std::find(runnable.begin(), runnable.end(), id);
+        if (queued == runnable.end()) fail("queued guest wait lacks its runnable continuation");
+        runnable.erase(queued);
+        // Provider reservations can disappear without invalidating the live
+        // queue wait. Retain its original token, saved context, TLS and key;
+        // only the deferred return is withdrawn. A finalizing thread remains
+        // finalizing when a later genuine wake makes it runnable again.
+        record.state = State::BlockedWaiting;
+        record.pending->awakened = false;
+        record.pending->args[2] = 0;
+        record.pending->ownerCompletion = {};
+        recomputePriorities();
+        return true;
+    }
+    void setOwnerPump(std::uint64_t domain, std::function<bool()> pump) {
+        checkIdleOwner();
+        if (driving || pumping) fail("cannot change a guest owner pump during execution");
+        const auto found = waitDomains.find(domain);
+        if (found == waitDomains.end()) fail("guest wait domain was withdrawn");
+        found->second.ownerPump = std::move(pump);
+    }
+    bool pumpOwner(bool waiting) {
+        checkIdleOwner();
+        if (pumping) fail("nested guest owner pumping is unsupported");
+        auto saved = machine.CaptureContext();
+        struct Reset { bool& value; ~Reset() { value = false; } } reset{pumping};
+        pumping = true;
+        try {
+            if (ownerBoundary) ownerBoundary(waiting);
+            machine.RestoreContext(saved);
+            if (const auto stopped = observeStop()) {
+                cancel(*stopped);
+                return false;
+            }
+            bool externalWork = false;
+            for (const auto& [id, domain] : waitDomains) {
+                if (domain.ownerPump) externalWork = domain.ownerPump() || externalWork;
+                if (terminal) break;
+            }
+            machine.RestoreContext(saved);
+            return externalWork;
+        } catch (...) {
+            machine.RestoreContext(saved);
+            machine.RequestStop();
+            cancel(StopReason::Requested);
+            throw;
+        }
     }
     void withdrawWaitDomain(std::uint64_t domain) {
         if (withdrawn) return;
@@ -532,11 +625,39 @@ struct GuestThreads::Impl {
         }
     }
     StopReason drive(GuestPhaseBudget& budget) {
+        std::chrono::steady_clock::duration idleConsumed{};
         for (;;) {
             if (terminal) return *terminal;
             if (const auto stopped = observeStop()) return cancel(*stopped);
             if (!budget.Remaining()) return StopReason::InstructionLimit;
-            if (runnable.empty()) fail("guest wait/join graph has no runnable work and cannot make progress");
+            const auto idleStart = std::chrono::steady_clock::now();
+            const bool wasWaiting = runnable.empty();
+            const bool externalWork = pumpOwner(wasWaiting);
+            if (terminal) return *terminal;
+            if (const auto stopped = observeStop()) return cancel(*stopped);
+            if (runnable.empty()) {
+                if (!externalWork) fail("guest wait/join graph has no runnable work and cannot make progress");
+                if (maximumIdleWait.count() <= 0)
+                    fail("asynchronous guest waits require a finite owner idle cancellation bound");
+                // Do not park the AppKit owner on an unbounded host wait. The
+                // host boundary is serviced on every turn and RequestStop is
+                // observed before and after it. This backoff never charges or
+                // refreshes the cumulative guest instruction budget.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                idleConsumed += std::chrono::steady_clock::now() - idleStart;
+                if (idleConsumed >= maximumIdleWait) {
+                    machine.RequestStop();
+                    return cancel(StopReason::Requested);
+                }
+                continue;
+            }
+            if (wasWaiting) {
+                idleConsumed += std::chrono::steady_clock::now() - idleStart;
+                if (maximumIdleWait.count() > 0 && idleConsumed >= maximumIdleWait) {
+                    machine.RequestStop();
+                    return cancel(StopReason::Requested);
+                }
+            }
             // Stable selection leaves equal-priority FIFO order intact while
             // ABI continuation front insertions cannot outrank donated owners.
             const auto selected = std::min_element(runnable.begin(), runnable.end(), [&](auto left, auto right) {
@@ -552,7 +673,9 @@ struct GuestThreads::Impl {
                     fail("runnable guest wait lacks a matching live wake");
                 try {
                     machine.ValidateSuspendedCall(record.pending->token);
-                    machine.Set(Register::Rax, record.pending->args[2]);
+                    const auto result = record.pending->ownerCompletion
+                        ? record.pending->ownerCompletion() : static_cast<std::uint32_t>(record.pending->args[2]);
+                    machine.Set(Register::Rax, result);
                     complete(record, false);
                 } catch (...) {
                     // Ownership may already be reserved by the provider. A
@@ -592,6 +715,9 @@ struct GuestThreads::Impl {
                     fail("guest callback reached its return sentinel without unwinding its call frame");
                 if (record.initial || (phase == Phase::Module && record.id == moduleOwner)) {
                     record.state = State::Runnable;
+                    pumpOwner(false);
+                    if (terminal) return *terminal;
+                    if (const auto stopped = observeStop()) return cancel(*stopped);
                     return reason;
                 }
                 if (record.finalizing) publishFinished(record);
@@ -603,7 +729,7 @@ struct GuestThreads::Impl {
         Impl& impl;
         Phase previous;
         Execution(Impl& value, Phase selected) : impl(value), previous(value.phase) {
-            value.checkOwner();
+            value.checkIdleOwner();
             if (value.driving) fail("nested public guest execution is unsupported");
             if (!value.initial) fail("guest execution requires an adopted initial thread");
             value.driving = true;
@@ -697,6 +823,7 @@ struct GuestThreads::Impl {
         gateMapped = false;
         active = 0;
         tlsFactory = {};
+        ownerBoundary = {};
         withdrawn = true;
     }
 };
@@ -746,6 +873,23 @@ bool GuestThreads::WaitDomain::Wake(GuestThreadHandle thread, std::uint64_t key,
     if (!state) fail("guest wait domain is empty");
     return state->lock()->wake(state->id, thread, key, result);
 }
+bool GuestThreads::WaitDomain::Wake(GuestThreadHandle thread, std::uint64_t key,
+                                   std::function<std::uint32_t()> completion) {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->wake(state->id, thread, key, std::move(completion));
+}
+bool GuestThreads::WaitDomain::Cancel(GuestThreadHandle thread, std::uint64_t key) {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->cancelWait(state->id, thread, key);
+}
+bool GuestThreads::WaitDomain::RetractWake(GuestThreadHandle thread, std::uint64_t key) {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->retractWake(state->id, thread, key);
+}
+void GuestThreads::WaitDomain::SetOwnerPump(std::function<bool()> pump) {
+    if (!state) fail("guest wait domain is empty");
+    state->lock()->setOwnerPump(state->id, std::move(pump));
+}
 void GuestThreads::WaitDomain::SetInheritanceOwner(std::uint64_t key, GuestThreadHandle owner) {
     if (!state) fail("guest wait domain is empty");
     state->lock()->setInheritanceOwner(state->id, key, owner);
@@ -761,6 +905,15 @@ void GuestThreads::WaitDomain::Withdraw() {
 }
 
 GuestThreads::GuestThreads(Machine& machine) : impl(std::make_shared<Impl>(machine)) {}
+void GuestThreads::CheckIdleOwner() const { impl->checkIdleOwner(); }
+void GuestThreads::SetOwnerBoundary(std::function<void(bool)> callback,
+                                    std::chrono::milliseconds maximumIdleWait) {
+    impl->checkIdleOwner();
+    if (impl->driving || impl->pumping) fail("cannot change a guest owner boundary during execution");
+    if (maximumIdleWait.count() <= 0) fail("guest owner idle cancellation bound must be positive");
+    impl->ownerBoundary = std::move(callback);
+    impl->maximumIdleWait = maximumIdleWait;
+}
 GuestThreads::~GuestThreads() {
     if (!impl->withdrawn) {
         try { impl->withdraw(); }
@@ -899,7 +1052,7 @@ GuestThreads::WaitDomain GuestThreads::CreateWaitDomain(Machine& associatedMachi
     auto state = std::make_unique<WaitDomain::State>();
     state->scheduler = impl;
     state->id = id;
-    impl->waitDomains.emplace(id, Impl::Domain{std::move(callback), {}});
+    impl->waitDomains.emplace(id, Impl::Domain{std::move(callback), {}, {}});
     return WaitDomain(std::move(state));
 }
 void GuestThreads::RegisterThreadDtors(std::uint64_t pc) { impl->registerCallback(impl->dtors, pc); }
