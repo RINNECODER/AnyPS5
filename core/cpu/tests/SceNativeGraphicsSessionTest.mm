@@ -178,9 +178,9 @@ void run(const char* utilityLibrary) {
         return machine.Get(Register::Rax);
     };
     auto call = [&](const char* nid, const std::array<std::uint64_t,8>& args) {
-        return callGate(session->ResolveVideoOut(videoImport(nid)), args);
+        return callGate(session->ResolveVideoOutPublicFixture(videoImport(nid)), args);
     };
-    const auto openGate = session->ResolveVideoOut(videoImport("Up36PTk687E"));
+    const auto openGate = session->ResolveVideoOutPublicFixture(videoImport("Up36PTk687E"));
     const auto handle = callGate(openGate, {255,0,0,0,0,0,0,0});
     require(handle == 1, "Actual guest VideoOut open failed to register native output");
     call("PjS5uASwcV8", {0x3000,0x8000000000000000ULL,1,64,64,0,0,0});
@@ -219,7 +219,7 @@ void run(const char* utilityLibrary) {
     require(retained.expired() && retirement.released && retirement.closed && retirement.drained,
         "Graphics teardown released backing before GPU drain/window close or retained it after shutdown");
     rejects([&] { callGate(openGate,{255,0,0,0,0,0,0,0}); }, "runtime has expired");
-    rejects([&] { session->ResolveVideoOut(videoImport("Up36PTk687E")); }, "session is closed");
+    rejects([&] { session->ResolveVideoOutPublicFixture(videoImport("Up36PTk687E")); }, "session is closed");
     require(completion.count == 1, "Native graphics lifecycle fabricated or repeated a flip completion");
     std::cout << "PASS seven VideoOut guest imports through native session; actual drawable pixel/padding oracle; callback before status; off-main rejection; CPU-joined teardown, gate retirement and idempotence\n";
 }
