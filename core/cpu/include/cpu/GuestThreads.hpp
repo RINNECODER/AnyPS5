@@ -2,6 +2,7 @@
 
 #include <cpu/SceModules.hpp>
 #include <cpu/SceTls.hpp>
+#include <chrono>
 #include <functional>
 #include <memory>
 
@@ -47,6 +48,17 @@ public:
         // Queues completion; the scheduler restores and validates the matching
         // suspended gate before returning guestResult in guest RAX.
         bool Wake(GuestThreadHandle, std::uint64_t key, std::uint32_t guestResult);
+        // Deferred guest writes and provider consumption occur only after the
+        // exact suspended gate has been validated on the idle owner Machine.
+        bool Wake(GuestThreadHandle, std::uint64_t key,
+                  std::function<std::uint32_t()> ownerCompletion);
+        // An exact live or queued wake is abandoned with terminal Requested,
+        // without manufacturing a guest provider return value.
+        bool Cancel(GuestThreadHandle, std::uint64_t key);
+        // Called on the idle persistent owner between slices and on blocked
+        // turns. Return true while external work/deadlines can wake a waiter.
+        // Producers must retain receipts elsewhere; this callback is owner-only.
+        void SetOwnerPump(std::function<bool()>);
         // Call only while guest execution is idle. Pending calls, including
         // already queued wakes, cause a terminal Requested cancellation rather
         // than return through a provider gate that may be about to disappear.
@@ -66,6 +78,13 @@ public:
     GuestThreads& operator=(const GuestThreads&) = delete;
 
     GuestThreadHandle AdoptInitial(GuestInitialThread);
+    // A host/UI boundary hook runs across module initialization, entry and
+    // finalization through the existing executor. The positive wall idle cap
+    // is a diagnostic cancellation policy, never a guest timeout result.
+    // It is cumulative across a drive call, even if runnable work intervenes.
+    void SetOwnerBoundary(std::function<void(bool waiting)>,
+                          std::chrono::milliseconds maximumIdleWait);
+    void CheckIdleOwner() const;
     GuestThreadHandle ActiveThread() const;
     std::shared_ptr<SceTls> ActiveTls() const;
     std::uint64_t ActiveErrnoAddress() const;

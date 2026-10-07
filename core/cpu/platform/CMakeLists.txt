@@ -32,7 +32,7 @@ else()
     set(platformCpuTarget anyps5_cpu)
 endif()
 
-add_library(anyps5_platform_components STATIC KernelPrimitives.cpp ContentServices.cpp
+add_library(anyps5_platform_components STATIC KernelPrimitives.cpp KernelEvents.cpp ContentServices.cpp
     NetworkServices.cpp NpServices.cpp AudioServices.cpp RtcServices.cpp CandidateComponents.cpp)
 target_include_directories(anyps5_platform_components PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" ../include)
 target_compile_features(anyps5_platform_components PUBLIC cxx_std_20)
@@ -142,4 +142,79 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_platform_kernel_priority
         COMMAND anyps5_platform_kernel_priority_test "${kernelPriorityFixture}")
     set_tests_properties(anyps5_platform_kernel_priority PROPERTIES TIMEOUT 30)
+    set(kernelEventsFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-events.elf")
+    add_custom_command(OUTPUT "${kernelEventsFixture}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+            -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelEventsGuest.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-events.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-events-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-events.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelEventsFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-events-linked.elf" "${kernelEventsFixture}"
+        DEPENDS fixtures/KernelEventsGuest.c tests/BuildKernelEventsFixture.py tests/BuildKernelMutexThreadsFixture.py
+            ../tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_events_fixture DEPENDS "${kernelEventsFixture}")
+    add_executable(anyps5_platform_kernel_events_test tests/KernelEventsTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_events_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_events_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_events_test anyps5_platform_kernel_events_fixture)
+    add_test(NAME anyps5_platform_kernel_events
+        COMMAND anyps5_platform_kernel_events_test "${kernelEventsFixture}")
+    set_tests_properties(anyps5_platform_kernel_events PROPERTIES TIMEOUT 30)
+    set(eventsOwnerGuest "${CMAKE_CURRENT_BINARY_DIR}/ThreadGuest.prx")
+    set(eventsOwnerMain "${CMAKE_CURRENT_BINARY_DIR}/thread-main.elf")
+    add_custom_command(OUTPUT "${eventsOwnerGuest}" "${eventsOwnerMain}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -DTHREAD_DEPENDENCY=1
+            -mavx2 -mno-red-zone -O2 -ffreestanding -fPIC -fno-builtin -fno-stack-protector
+            -fno-unwind-tables -fno-asynchronous-unwind-tables
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/ThreadHomebrew.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/thread-dependency.o"
+        COMMAND "${platformGuestLinker}" -shared -soname ThreadGuest.prx -init ThreadDependencyInit
+            -fini ThreadDependencyFini -Bsymbolic --hash-style=sysv -z max-page-size=4096
+            -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/thread-guest-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/thread-dependency.o"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -mavx2 -mno-red-zone
+            -O2 -ffreestanding -fPIC -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/ThreadHomebrew.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/thread-main.o"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/SceStart.S"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/thread-start.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start -Bsymbolic --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro --no-as-needed
+            -o "${CMAKE_CURRENT_BINARY_DIR}/thread-main-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/thread-start.o" "${CMAKE_CURRENT_BINARY_DIR}/thread-main.o"
+            "${CMAKE_CURRENT_BINARY_DIR}/thread-guest-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../fixtures/BuildThreadFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/thread-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/thread-main-linked.elf"
+            "${eventsOwnerGuest}" "${eventsOwnerMain}"
+        DEPENDS ../fixtures/ThreadHomebrew.c ../fixtures/SceStart.S ../fixtures/BuildThreadFixture.py
+            ../tests/BuildSceModulesFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_events_owner_fixture DEPENDS "${eventsOwnerGuest}" "${eventsOwnerMain}")
+    add_executable(anyps5_platform_kernel_events_owner_test tests/KernelEventsOwnerTest.cpp)
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+        target_sources(anyps5_platform_kernel_events_owner_test PRIVATE ../src/SceImports.cpp)
+        target_include_directories(anyps5_platform_kernel_events_owner_test PRIVATE ../../libs/nid/include)
+    endif()
+    target_link_libraries(anyps5_platform_kernel_events_owner_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_events_owner_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_events_owner_test anyps5_platform_kernel_events_owner_fixture)
+    add_test(NAME anyps5_platform_kernel_events_owner
+        COMMAND anyps5_platform_kernel_events_owner_test "${eventsOwnerMain}" "${eventsOwnerGuest}")
+    set_tests_properties(anyps5_platform_kernel_events_owner PROPERTIES TIMEOUT 30)
+    if(TARGET anyps5_cpu_agc AND TARGET anyps5_metal_utilities)
+        enable_language(OBJCXX)
+        get_target_property(eventsUtilityLibrary anyps5_metal_utilities ANYPS5_METALLIB)
+        add_executable(anyps5_platform_kernel_events_native_test tests/KernelEventsNativeTest.mm)
+        target_compile_options(anyps5_platform_kernel_events_native_test PRIVATE -fobjc-arc -Wall -Wextra -Wpedantic)
+        target_link_libraries(anyps5_platform_kernel_events_native_test PRIVATE anyps5_platform_components anyps5_cpu_agc)
+        add_dependencies(anyps5_platform_kernel_events_native_test anyps5_platform_kernel_events_fixture)
+        add_test(NAME anyps5_platform_kernel_events_native
+            COMMAND anyps5_platform_kernel_events_native_test "${kernelEventsFixture}" "${eventsUtilityLibrary}")
+        set_tests_properties(anyps5_platform_kernel_events_native PROPERTIES TIMEOUT 60 RUN_SERIAL TRUE
+            ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
+    endif()
 endif()
