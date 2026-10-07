@@ -1,0 +1,51 @@
+{
+  "container": "plain_self",
+  "elf_os_abi": 9,
+  "elf_abi_version": 2,
+  "import_attributes": [],
+  "normalization_notes": [],
+  "limits": "Public synthetic static metadata; no executable or storage validation.",
+  "path": "/public-fixtures/fixture.prx",
+  "size": 64,
+  "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "elf_type": 65048,
+  "entry": 0,
+  "needed_files": [],
+  "import_modules": [],
+  "import_libraries": [],
+  "export_modules": [
+    {
+      "name": "fixtureModule",
+      "id": 1,
+      "version": 257
+    }
+  ],
+  "export_libraries": [
+    {
+      "name": "fixtureLibrary",
+      "id": 0,
+      "version": 1
+    }
+  ],
+  "imports": [],
+  "exports": [
+    {
+      "nid": "fixtureFunction",
+      "scoped_name": "fixtureFunction#A#B",
+      "library": "fixtureLibrary",
+      "library_id": 0,
+      "library_version": 1,
+      "module": "fixtureModule",
+      "module_id": 1,
+      "module_major": 1,
+      "module_minor": 1,
+      "symbol_index": 2,
+      "type": 2,
+      "binding": 1,
+      "visibility": 0,
+      "section": 1,
+      "value": 256,
+      "size": 4
+    }
+  ]
+}
