@@ -15,6 +15,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     endif()
     add_library(anyps5_platform_machine STATIC ../src/CpuQemu.cpp ../src/SceNpLocalImports.cpp
         ../src/SceElf.cpp ../src/Self.cpp ../src/SceTls.cpp
+        ../src/GuestThreads.cpp ../src/SceThreadImports.cpp ../src/SceModules.cpp ../src/SceLifecycleImports.cpp
         ../../libs/nid/src/NidCompute.cpp ../../libs/nid/src/Sha1.cpp)
     target_include_directories(anyps5_platform_machine PUBLIC ../include
         PRIVATE "${ANYPS5_PLATFORM_TCG_INCLUDE}" ../../libs/nid/include)
@@ -97,4 +98,26 @@ if(BUILD_TESTING)
     add_dependencies(anyps5_platform_sce_test anyps5_platform_sce_fixture)
     add_test(NAME anyps5_platform_sce COMMAND anyps5_platform_sce_test "${scePlatformFixture}")
     set_tests_properties(anyps5_platform_sce PROPERTIES TIMEOUT 30)
+    set(kernelMutexFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-threads.elf")
+    add_custom_command(OUTPUT "${kernelMutexFixture}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+            -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelMutexThreadsGuest.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-threads.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-threads-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-threads.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelMutexThreadsFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-threads-linked.elf" "${kernelMutexFixture}"
+        DEPENDS fixtures/KernelMutexThreadsGuest.c tests/BuildKernelMutexThreadsFixture.py
+            ../tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_mutex_fixture DEPENDS "${kernelMutexFixture}")
+    add_executable(anyps5_platform_kernel_mutex_threads_test tests/KernelMutexThreadsTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_mutex_threads_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_mutex_threads_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_mutex_threads_test anyps5_platform_kernel_mutex_fixture)
+    add_test(NAME anyps5_platform_kernel_mutex_threads
+        COMMAND anyps5_platform_kernel_mutex_threads_test "${kernelMutexFixture}")
+    set_tests_properties(anyps5_platform_kernel_mutex_threads PROPERTIES TIMEOUT 30)
 endif()
