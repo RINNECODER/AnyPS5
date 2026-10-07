@@ -231,7 +231,9 @@ void nativeMutation(const char* utilityLibrary) {
     configuration.initialRangeOwner.reset(); configuration.initialRanges = {}; initial = {};
     std::vector<std::uint64_t> publicationGenerations;
     unsigned actualCpuCommits = 0;
+    unsigned publisherCalls = 0;
     auto publisher = [&](const auto& ranges,auto generation,const auto& commit,auto oldOwner,auto newOwner) {
+        ++publisherCalls;
         { std::lock_guard lock(receiptMutex); publisherEntered = true; receiptChanged.notify_all(); }
         session->MutateBorrowedRanges(ranges,generation,[&] {
             if (producerBlocked) require(completed == 1,"CPU owned mutation ran before accepted native GPU/EOP drain");
@@ -294,6 +296,49 @@ void nativeMutation(const char* utilityLibrary) {
     machine.CheckAccess(Alias + 24,8,Permission::Write);
     machine.Protect(Alias,Page,rw);
     require(runtime.MapFlexible(Dynamic,Page,0x33,0x90) == Dynamic,"Actual shared runtime publication failed");
+    {
+        // The replacement is a genuine external runtime allocation already
+        // admitted by the other publisher. It cannot become a new borrowed
+        // binding at an owned/native-published address via this transaction.
+        const auto external = runtime.Snapshot();
+        require(external.Views.size() == 1 && external.Views.front().Address == Dynamic &&
+            external.Views.front().Bytes.size() == Page && !external.Owners.empty(),
+            "Ownership conversion regression did not obtain the actual runtime external span");
+        constexpr std::uint64_t externalMarker = 0x8899aabbccddeeffULL;
+        machine.Write(Dynamic + 24,std::as_bytes(std::span(&externalMarker,1)));
+        require(word(machine,ChildStack + 24) == 41 && word(machine,Dynamic + 24) == externalMarker,
+            "Ownership conversion regression did not arrange distinct real owned/runtime bytes");
+        const auto ownedBeforeConversion = machine.PinOwnedMappings();
+        const auto& childBefore = at(ownedBeforeConversion,ChildStack);
+        const auto nativeGeneration = compositor.Generation();
+        const auto publications = publicationGenerations.size();
+        const auto publishers = publisherCalls;
+        const auto commits = actualCpuCommits;
+        rejectsAny([&] { machine.ReplaceBorrowed(ChildStack,external.Views.front().Bytes,rw); },
+            "Owned-to-external replacement bypassed atomic ownership admission");
+        const auto ownedAfterConversion = machine.PinOwnedMappings();
+        const auto& childAfter = at(ownedAfterConversion,ChildStack);
+        require(publisherCalls == publishers && actualCpuCommits == commits &&
+            publicationGenerations.size() == publications && compositor.Generation() == nativeGeneration &&
+            ownedAfterConversion.Generation == ownedBeforeConversion.Generation &&
+            !childAfter.Region.Borrowed && childAfter.Region.Permissions == rw &&
+            childAfter.Bytes.data() == childBefore.Bytes.data() &&
+            childAfter.BackingIdentity == childBefore.BackingIdentity &&
+            word(machine,ChildStack + 24) == 41 && word(machine,Dynamic + 24) == externalMarker &&
+            runtime.Snapshot().Generation == external.Generation && runtime.Query(Dynamic).Protection == 0x33,
+            "Rejected ownership conversion changed publisher, CPU/native generation, binding, permission or bytes");
+        machine.CheckAccess(ChildStack,Page,rw);
+        const std::array nativeRead{AgcDriver::Metal::ReadableGuestRange{ChildStack,Page}};
+        session->Driver().WithValidatedReadableRanges(nativeRead,[&] {
+            const auto bytes = AgcDriver::NativeGuestMemory::ContiguousBorrowedRange(ChildStack,Page);
+            std::uint64_t result = 0; std::memcpy(&result,bytes.data() + 24,sizeof(result));
+            require(bytes.data() == childBefore.Bytes.data() && result == 41,
+                "Rejected owned-to-external conversion lost genuine native backing or translated stack bytes");
+            for (std::size_t i = 0; i < bytes.size(); ++i)
+                if (i < 24 || i >= 32) require(bytes[i] == std::byte{0xc3},
+                    "Rejected owned-to-external conversion damaged native owned allocation guards");
+        });
+    }
     const auto beforeMixed = compositor.Generation();
     rejectsAny([&] { machine.Protect(ChildStack,2 * Page,Permission::Read); },"Mixed owned/runtime span bypassed separate atomic publishers");
     machine.CheckAccess(ChildStack,Page,rw); machine.CheckAccess(Dynamic,Page,rw);

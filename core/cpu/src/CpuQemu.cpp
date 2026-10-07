@@ -237,27 +237,44 @@ struct Machine::Impl {
         // Runtime-managed external borrowed storage has its own transaction.
         // A CPU generation change alone must not nest native publication.
         if (sameViews(previous, candidate)) { action(); return; }
-        // The owned compositor cannot also retire/rebind Runtime-managed
-        // borrowed storage. Such mixed changes need a separate joint candidate.
-        for (const auto& range : ranges) {
-            const auto isOwned = std::any_of(previous.Views.begin(), previous.Views.end(), [&](const auto& view) {
-                return view.Region.Address == range.address;
+        // A mixed candidate must preserve external bindings in BOTH directions:
+        // the owned compositor can neither retire nor introduce Runtime storage.
+        const auto backingFor = [](const Range& range, const std::vector<Backing>& allocations) {
+            const auto pointer = reinterpret_cast<std::uintptr_t>(range.backing);
+            return std::find_if(allocations.begin(), allocations.end(), [&](const auto& value) {
+                const auto begin = reinterpret_cast<std::uintptr_t>(value.pointer);
+                return pointer >= begin && pointer - begin <= value.size && range.size <= value.size - (pointer - begin);
             });
-            if (isOwned) continue;
-            auto cursor = range.address;
-            const auto end = range.address + range.size;
-            while (cursor < end) {
-                const auto mapped = std::find_if(candidateRanges.begin(), candidateRanges.end(), [&](const auto& value) {
-                    return cursor >= value.address && cursor - value.address < value.size;
-                });
-                if (mapped == candidateRanges.end() || mapped->permissions != range.permissions ||
-                    mapped->borrowed != range.borrowed ||
-                    reinterpret_cast<std::uintptr_t>(mapped->backing) + (cursor - mapped->address) !=
-                        reinterpret_cast<std::uintptr_t>(range.backing) + (cursor - range.address))
-                    throw std::runtime_error("Owned mapping transaction cannot change mixed external borrowed bindings");
-                cursor = std::min(end, mapped->address + mapped->size);
+        };
+        const auto unchangedExternal = [&](const std::vector<Range>& source, const std::vector<Backing>& sourceBackings,
+                                           const std::vector<Range>& destination, const std::vector<Backing>& destinationBackings) {
+            for (const auto& range : source) {
+                const auto allocation = backingFor(range, sourceBackings);
+                if (allocation == sourceBackings.end())
+                    throw std::logic_error("Owned mapping transaction has an unregistered backing");
+                if (allocation->storage) continue; // Includes borrowed aliases into genuinely owned storage.
+                auto cursor = range.address;
+                const auto end = range.address + range.size;
+                while (cursor < end) {
+                    const auto mapped = std::find_if(destination.begin(), destination.end(), [&](const auto& value) {
+                        return cursor >= value.address && cursor - value.address < value.size;
+                    });
+                    if (mapped == destination.end())
+                        throw std::runtime_error("Owned mapping transaction cannot change mixed external borrowed bindings");
+                    const auto mappedAllocation = backingFor(*mapped, destinationBackings);
+                    if (mappedAllocation == destinationBackings.end() || mappedAllocation->storage ||
+                        mappedAllocation->identity != allocation->identity || mappedAllocation->pointer != allocation->pointer ||
+                        mappedAllocation->size != allocation->size || mapped->permissions != range.permissions ||
+                        mapped->borrowed != range.borrowed ||
+                        reinterpret_cast<std::uintptr_t>(mapped->backing) + (cursor - mapped->address) !=
+                            reinterpret_cast<std::uintptr_t>(range.backing) + (cursor - range.address))
+                        throw std::runtime_error("Owned mapping transaction cannot change mixed external borrowed bindings");
+                    cursor = std::min(end, mapped->address + mapped->size);
+                }
             }
-        }
+        };
+        unchangedExternal(ranges, backings, candidateRanges, candidateBackings);
+        unchangedExternal(candidateRanges, candidateBackings, ranges, backings);
         auto frame = std::make_shared<OwnedTransactionFrame>(std::move(previous), std::move(candidate));
         std::function<void()> commit = [frame, action = std::move(action)] {
             if (std::this_thread::get_id() != frame->owner) {
