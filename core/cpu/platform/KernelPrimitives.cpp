@@ -524,7 +524,7 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
                 m.CheckAccess(pointer, 16, Permission::Read);
                 std::array<std::int64_t, 2> time;
                 m.Read(pointer, std::as_writable_bytes(std::span(time)));
-                if (time[0] < 0 || time[1] < 0 || time[1] >= 1000000000) {
+                if (time[1] < 0 || time[1] >= 1000000000) {
                     m.Set(Register::Rax, static_cast<std::uint32_t>(Invalid));
                     return;
                 }

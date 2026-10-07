@@ -162,6 +162,15 @@ void expired(const char* path,bool relative) {
          r[61]>2 && r[62]==r[33] && !r[80] && !r[81],
          "Zero/expired time failed genuine timed suspension/reacquisition or changed input words");
 }
+void preEpochExpired(const char* path,std::uint64_t seconds) {
+ Session s(path,false,7);s.put(80,seconds);s.put(81,0);finished(s);const auto r=s.receipt();
+ slotGuards(s,r);
+ require(r[60]==60 && r[42]==60 && r[63]==Busy && r[34]==1 && r[35]==2 &&
+         r[61]>2 && r[62]==r[33] && r[80]==seconds && !r[81],
+         "Normalized preepoch time rejected instead of genuine expiration/reacquisition or changed input words");
+ require(r[40] && r[41] && !r[43] && !r[44] && r[106]==1 && r[107]==Busy && r[108]==1 && r[109]==0x1370,
+         "Preepoch timed wait lost suspended ABI, real mutex release or contender ownership");
+}
 void saturated(const char* path,bool relative) {
  Session s(path,relative,0);s.put(80,relative ? 0xffffffffULL : 0x7fffffffffffffffULL);s.put(81,relative ? 0 : 999999999);
  unsigned idle=0;s.threads->SetOwnerBoundary([&](bool waiting){if(waiting) ++idle;},25ms);
@@ -258,7 +267,7 @@ int main(int argc,char** argv) {
    for(unsigned cp:{2,3,4}) directError(path,relative,cp,1,0,0);
    for(unsigned mp:{2,3}) directError(path,relative,1,mp,0,0);
    if(!relative) {
-    directError(path,false,1,1,~0ULL,0);directError(path,false,1,1,0,1000000000);
+    directError(path,false,1,1,0,1000000000);
     directError(path,false,1,1,0,~0ULL);
    }
    slotPointer(path,relative,90,0,"Invalid kernel primitive guest slot");
@@ -271,6 +280,10 @@ int main(int argc,char** argv) {
     context=std::string(relative ? "relative" : "posix")+" pending cancellation kind="+std::to_string(kind);cancellation(path,relative,kind);
     context=std::string(relative ? "relative" : "posix")+" expired queued cancellation kind="+std::to_string(kind);queuedCancellation(path,relative,kind);
    }
+  }
+  for(const auto seconds:{~0ULL,0x8000000000000000ULL}) {
+   context=std::string("posix normalized preepoch expired ABI sec=")+(seconds==~0ULL ? "-1" : "INT64_MIN");
+   preEpochExpired(argv[1],seconds);
   }
   context="relative canonical u32 ignores nonzero upper32 with genuine100ms idle/ABI/reacquire";
   completed(argv[2],true,0,true);

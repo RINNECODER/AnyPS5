@@ -83,13 +83,20 @@ static void* waiter(void* argument) {
  status(scePthreadMutexUnlock(&mutex.value));guard(&mutex);guard(&condition);
  return (void*)(0x1300+role);
 }
+#ifndef RELATIVE_TIMEOUT
+static void* expiry_contender(void* argument) {
+ (void)argument;status(scePthreadMutexLock(&mutex.value));R[106]=1;
+ R[107]=(u32)scePthreadMutexTrylock(&mutex.value);
+ status(scePthreadMutexUnlock(&mutex.value));return (void*)0x1370;
+}
+#endif
 EXPORT int _start(void) {
  R[7]=thread_self();mutex.before=mutex.after=condition.before=condition.after=attribute.before=attribute.after=CANARY;
  status(scePthreadMutexattrInit(&attribute.value));
  status(scePthreadMutexattrSettype(&attribute.value,R[1]==2 ? 2 : 3));
  status(scePthreadMutexInit(&mutex.value,&attribute.value,relocatedLabel));
  R[30]=(u64)&condition.value;R[32]=(u64)&mutex.value;R[33]=mutex.value;
- if(R[1]==6) {
+ if(R[1]==6 || R[1]==7) {
   status(scePthreadMutexLock(&mutex.value));
   struct Slot copy={CANARY,0,CANARY};u64 old=0;
   if(R[90]>=2 && R[90]<=4) {
@@ -105,7 +112,16 @@ EXPORT int _start(void) {
 #ifdef RELATIVE_TIMEOUT
   R[60]=(u32)timed_wait(cp,mp,(u32)R[80]);
 #else
-  R[60]=(u32)timed_wait(cp,mp,(const volatile u64*)R[92]);
+  if(R[1]==7) {
+   u64 id=0;void* result=0;
+   status(thread_create(&id,0,expiry_contender,0,relocatedLabel));thread_yield();R[108]=!R[106];
+   timed_wait_abi(cp,mp,R[92],R);R[60]=R[42];
+   /* Settle the real contender after a wrong early return; host still sees the
+      original result and missing condition publication for a matching fault. */
+   if(R[60]!=60) status(scePthreadMutexUnlock(&mutex.value));
+   status(thread_join(id,&result));R[109]=(u64)result;
+   if(R[60]!=60) status(scePthreadMutexLock(&mutex.value));
+  } else R[60]=(u32)timed_wait(cp,mp,(const volatile u64*)R[92]);
 #endif
   if(R[90]==4) condition.value=old;guard(&copy);
   R[61]=condition.value;R[62]=mutex.value;R[63]=(u32)scePthreadMutexTrylock(&mutex.value);
