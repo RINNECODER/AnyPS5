@@ -92,8 +92,9 @@ void finished(Session& s) {
  require(r[0]==0x54494d4544434f4eULL && !r[4] && !r[5] && !r[6],"Timed guest status/guards/protected payload differs");
  require(r[35]==2,"Timed mutex destroy sentinel differs");
 }
-void completed(const char* path,bool relative,unsigned mode) {
+void completed(const char* path,bool relative,unsigned mode,bool upperBits=false) {
  Session s(path,relative,mode);s.deadline(mode==1 ? 300ms : (mode==0 || mode==3 ? 100ms : 30ms));
+ if(upperBits) {require(relative && mode==0,"Upper32 ABI case requires relative idle mode");s.put(80,0xaabbccdd00000000ULL|100000ULL);}
  unsigned idle=0;const auto start=steady_clock::now();
  s.threads->SetOwnerBoundary([&](bool waiting) {
   if(waiting) ++idle;
@@ -162,7 +163,7 @@ void expired(const char* path,bool relative) {
          "Zero/expired time failed genuine timed suspension/reacquisition or changed input words");
 }
 void saturated(const char* path,bool relative) {
- Session s(path,relative,0);s.put(80,relative ? ~0ULL : 0x7fffffffffffffffULL);s.put(81,relative ? 0 : 999999999);
+ Session s(path,relative,0);s.put(80,relative ? 0xffffffffULL : 0x7fffffffffffffffULL);s.put(81,relative ? 0 : 999999999);
  unsigned idle=0;s.threads->SetOwnerBoundary([&](bool waiting){if(waiting) ++idle;},25ms);
  Cpu::GuestPhaseBudget budget(1000000);
  require(s.threads->RunEntry(budget)==Cpu::StopReason::Requested,"Oversized deadline wrapped into guest timeout or bypassed bounded owner cap");
@@ -271,6 +272,8 @@ int main(int argc,char** argv) {
     context=std::string(relative ? "relative" : "posix")+" expired queued cancellation kind="+std::to_string(kind);queuedCancellation(path,relative,kind);
    }
   }
+  context="relative canonical u32 ignores nonzero upper32 with genuine100ms idle/ABI/reacquire";
+  completed(argv[2],true,0,true);
   context="posix input pointer extent/permission";
   pointerError(argv[1],0x12345000);pointerError(argv[1],0x6ff8);pointerError(argv[1],0x6000,true);
   pointerError(argv[1],~0ULL,false,"Invalid kernel condition timespec span");

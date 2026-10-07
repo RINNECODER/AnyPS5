@@ -3,11 +3,14 @@ typedef unsigned long long u64;
 typedef unsigned int u32;
 #define EXPORT __attribute__((visibility("protected")))
 #ifdef RELATIVE_TIMEOUT
-extern int timed_wait(u64*,u64*,u64);
-#define TIME(role) R[80+(role)*2]
+extern int timed_wait(u64*,u64*,u32);
+#define TIME(role) ((u32)R[80+(role)*2])
+/* Deliberately retain raw upper32 in assembly to test the selected u32 ABI. */
+#define ABI_TIME(role) R[80+(role)*2]
 #else
 extern int timed_wait(u64*,u64*,const volatile u64*);
 #define TIME(role) (&R[80+(role)*2])
+#define ABI_TIME(role) ((u64)TIME(role))
 #endif
 extern int scePthreadMutexInit(u64*,const u64*,const char*);
 extern int scePthreadMutexLock(u64*);
@@ -66,7 +69,7 @@ static void* waiter(void* argument) {
  status(scePthreadMutexLock(&mutex.value));
  if(R[1]==2) status(scePthreadMutexLock(&mutex.value));
  R[12]|=1ULL<<role;
- if(!role) timed_wait_abi(&condition.value,&mutex.value,(u64)TIME(role),R);
+ if(!role) timed_wait_abi(&condition.value,&mutex.value,ABI_TIME(role),R);
  else R[46+role]=(u32)timed_wait(&condition.value,&mutex.value,TIME(role));
  ++R[16+role];R[13]|=1ULL<<role;
  R[48+role]=(u32)scePthreadMutexTrylock(&mutex.value);
@@ -100,7 +103,7 @@ EXPORT int _start(void) {
   u64* mp=R[91]==1 ? &mutex.value : (R[91]==2 || R[91]==3 ? &mutexCopy : (u64*)R[91]);
   if(R[92]==1) R[92]=(u64)&R[80];
 #ifdef RELATIVE_TIMEOUT
-  R[60]=(u32)timed_wait(cp,mp,R[80]);
+  R[60]=(u32)timed_wait(cp,mp,(u32)R[80]);
 #else
   R[60]=(u32)timed_wait(cp,mp,(const volatile u64*)R[92]);
 #endif

@@ -53,7 +53,7 @@ public:
     // Shares this exact provider's mutex ownership and wait domain. Only the
     // pinned untimed/default-attribute rows and two observed timed rows are
     // admitted. Absolute POSIX time is signed seconds/nanoseconds on default
-    // realtime, compared each owner turn; relative SCE time is unsigned64
+    // realtime, compared each owner turn; relative SCE time is unsigned32
     // microseconds on a saturated steady deadline. Both reacquire the same
     // mutex before returning.
     // The caller must supply the actual imported symbol size; clock setters and

@@ -77,7 +77,7 @@ struct Deadline {
         return seconds < nowSeconds || (seconds == nowSeconds && nanoseconds <= nowNanoseconds);
     }
 };
-Deadline relativeDeadline(std::uint64_t microseconds) {
+Deadline relativeDeadline(std::uint32_t microseconds) {
     const auto now = DeadlineClock::now();
     const auto maximum = DeadlineClock::time_point::max();
     const auto roomMicroseconds = std::chrono::duration_cast<std::chrono::microseconds>(maximum - now).count();
@@ -529,7 +529,7 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
                     return;
                 }
                 deadline = Deadline{{}, time[0], time[1]};
-            } else deadline = relativeDeadline(m.Get(Register::Rdx));
+            } else deadline = relativeDeadline(static_cast<std::uint32_t>(m.Get(Register::Rdx)));
             result = state->conditionInvoke(2, m.Get(Register::Rdi), m.Get(Register::Rsi), 0,
                 deadline, op == timeoutBegin ? static_cast<std::uint32_t>(TimedOut) : error(TimedOut));
         } else result = op < mutexCount || op >= conditionEnd
