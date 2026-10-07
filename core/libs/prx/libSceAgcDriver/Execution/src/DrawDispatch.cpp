@@ -58,7 +58,8 @@ DrawDispatchState DecodeDrawDispatch(const QueueState& queue, const DriverDetail
         };
         for (std::uint32_t i = 0; i < userCount; ++i) {
             Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, userDataBase + i);
-            result.userData.push_back(readRegister(queue.shader, userDataBase + i));
+            const auto user = queue.shader.find(userDataBase + i);
+            result.userData.push_back(user == queue.shader.end() ? 0u : user->second);
         }
         return result;
     };
