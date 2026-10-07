@@ -77,20 +77,39 @@ void run(const char* const* files) {
     guest.call(3,attrGate,{Attr,0x8000000000000000ULL,0,1920,1080,0,0,0});
     Cpu::SceVideoOutAttribute attribute;guest.machine.Read(Attr,std::as_writable_bytes(std::span(&attribute,1)));
     require(attribute.Width==1920&&attribute.Height==1080&&attribute.TilingMode==0&&attribute.PixelFormat==0x8000000000000000ULL,"Qualified attribute field bytes differ");
+    guest.call(3,attrGate,{Attr,0x8100070422000000ULL,0,1920,1080,0,0,0});
+    guest.machine.Read(Attr,std::as_writable_bytes(std::span(&attribute,1)));
+    require(attribute.PixelFormat==0x8100070422000000ULL&&attribute.TilingMode==0,
+        "Exact packed PQ format was not preserved by compiled qualified setter");
     const auto attrBefore=attribute;
-    for(const auto args:std::array<std::array<std::uint64_t,8>,2>{{{Attr,0x8100070422000000ULL,0,1920,1080,0,0,0},{Attr,0x8000000000000000ULL,1,1920,1080,0,0,0}}}) {
+    for(const auto args:std::array<std::array<std::uint64_t,8>,4>{{
+        {Attr,0x8100070422000001ULL,0,1920,1080,0,0,0},
+        {Attr,0x8100070522000000ULL,0,1920,1080,0,0,0},
+        {Attr,0x8100060422000000ULL,0,1920,1080,0,0,0},
+        {Attr,0x8000000000000000ULL,1,1920,1080,0,0,0}}}) {
         rejects([&]{guest.call(3,attrGate,args);},"outside qualified target use");
         guest.machine.Read(Attr,std::as_writable_bytes(std::span(&attribute,1)));
         require(std::memcmp(&attribute,&attrBefore,sizeof(attribute))==0,"Unqualified attribute call partially wrote output");
     }
-    unsigned registrations=0;callbacks.RegisterBuffers=[&](auto h,auto group,auto start,auto rows,const auto& a,auto category){
-        require(h==37&&group==0&&start==0&&rows.size()==3&&category==0&&a.Width==1920,"Qualified registration marshalling differs");++registrations;return -71;};
+    unsigned registrations=0;std::uint64_t expectedFormat=0;callbacks.RegisterBuffers=[&](auto h,auto group,auto start,auto rows,const auto& a,auto category){
+        require(h==37&&group==0&&start==0&&rows.size()==3&&category==0&&a.Width==1920&&
+            a.PixelFormat==expectedFormat,"Qualified registration marshalling differs");++registrations;return -71;};
     Cpu::SceVideoOutImports registered(guest.machine,callbacks,0x7ffdfa000000,admissions);
     const auto registerGate=registered.Resolve(identity("rKBUtgRrtbk"),2,0);
     const std::array<Cpu::SceVideoOutBuffer,3> rows{{{0x400000000ULL,0,{}},{0x400100000ULL,0,{}},{0x400200000ULL,0,{}}}};store(guest.machine,Rows,rows);
-    require(static_cast<std::uint32_t>(guest.call(4,registerGate,{37,0,0,Rows,3,Attr,0,0}))==static_cast<std::uint32_t>(-71)&&registrations==1,"Qualified register result differs");
+    for(const auto format:std::array<std::uint64_t,2>{0x8000000000000000ULL,0x8100070422000000ULL}) {
+        auto accepted=attribute;accepted.PixelFormat=format;store(guest.machine,Attr,accepted);expectedFormat=format;
+        require(static_cast<std::uint32_t>(guest.call(4,registerGate,{37,0,0,Rows,3,Attr,0,0}))==static_cast<std::uint32_t>(-71),"Qualified register result differs");
+    }
+    require(registrations==2,"Qualified SDR/PQ registration callback count differs");
+    for(const auto format:std::array<std::uint64_t,3>{0x8100070422000001ULL,0x8100070522000000ULL,0x8100060422000000ULL}) {
+        auto unsupported=attribute;unsupported.PixelFormat=format;store(guest.machine,Attr,unsupported);
+        rejects([&]{guest.call(4,registerGate,{37,0,0,Rows,3,Attr,0,0});},"outside qualified target use");
+        require(registrations==2,"Unknown packed format reached native registration callback");
+    }
+    store(guest.machine,Attr,attribute);
     rejects([&]{guest.call(4,registerGate,{37,0,0,Rows,2,Attr,0,0});},"outside qualified target use");
-    require(registrations==1,"Expanded registration shape reached native callback");
+    require(registrations==2,"Expanded registration shape reached native callback");
 #endif
     std::cout<<"PASS compiled status success-only writes; source/type/scope/default/capability admission; bounded target attribute80/register3\n";
 }

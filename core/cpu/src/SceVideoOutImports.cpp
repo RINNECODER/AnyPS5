@@ -165,8 +165,9 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
             if (target && (set != 0 || start != 0 || count != 3 || category != 0 ||
                 attribute.TilingMode != 0 || attribute.PitchInPixel != 0 || attribute.Option != 0 ||
                 attribute.DccControl != 0 || attribute.DccClearColor != 0 ||
-                (attribute.PixelFormat != 0x8000000000000000ULL && attribute.PixelFormat != 0x8000000022000000ULL)))
-                throw std::runtime_error("SCE VideoOut registration outside qualified target use (HDR format 0x8100070422000000 unsupported)");
+                (attribute.PixelFormat != 0x8000000000000000ULL && attribute.PixelFormat != 0x8000000022000000ULL &&
+                 attribute.PixelFormat != 0x8100070422000000ULL)))
+                throw std::runtime_error("SCE VideoOut registration outside qualified target use");
             alignedAddress(fourth, alignof(SceVideoOutBuffer));
             std::vector<SceVideoOutBuffer> buffers(static_cast<std::size_t>(count));
             guest.CheckAccess(fourth, buffers.size() * sizeof(SceVideoOutBuffer), Permission::Read);
@@ -188,8 +189,8 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
                 !static_cast<std::uint32_t>(fourth) || static_cast<std::uint32_t>(fourth) > 16384 ||
                 !static_cast<std::uint32_t>(fifth) || static_cast<std::uint32_t>(fifth) > 16384 || sixth ||
                 static_cast<std::uint32_t>(stack[0]) || stack[1] ||
-                (second != 0x8000000000000000ULL && second != 0x8000000022000000ULL)))
-                throw std::runtime_error("SCE VideoOut attribute outside qualified target use (HDR format 0x8100070422000000 unsupported)");
+                (second != 0x8000000000000000ULL && second != 0x8000000022000000ULL && second != 0x8100070422000000ULL)))
+                throw std::runtime_error("SCE VideoOut attribute outside qualified target use");
             alignedAddress(first, alignof(SceVideoOutAttribute));
             guest.CheckAccess(first, sizeof(SceVideoOutAttribute), Permission::Write);
             SceVideoOutAttribute attribute;
@@ -267,8 +268,8 @@ SceVideoOutImports::~SceVideoOutImports() = default;
 std::span<const VideoOutAbiAdmission> QualifiedVideoOutAdmissionsForImage(std::string_view verifiedSha256) {
     if (verifiedSha256 != "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397") return {};
     // Bounded target caller/field inference against the pinned public candidate.
-    // Both 8-bit public display formats are admitted; the observed HDR branch
-    // needs its exact color/scanout semantics and remains explicitly excluded.
+    // Admit the two 8-bit formats and exact source-qualified R10G10B10A2 BT.2100 PQ
+    // value. Native PQ scanout preserves packed code values and uses a matching layer.
     static constexpr VideoOutAbiAdmission admissions[] = {
         {Service::Open, "eboot:6d8ecd,959cb4,95a349,Open255/main/index0/null; signed EAX"},
         {Service::Close, "eboot:6d8f06,959d37,95a3a3,973163,opaque int32 handle; EAX ignored"},

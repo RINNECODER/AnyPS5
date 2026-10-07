@@ -27,6 +27,9 @@ struct DisplayBuffer {
 std::size_t DisplayBufferSize(const DisplayBuffer& buffer);
 std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::span<const std::byte> source);
 std::vector<std::byte> ReadDisplayBuffer(const DisplayBuffer& buffer);
+// Preserve packed PQ code values as native BGR10A2 UNORM; no SDR truncation or EOTF.
+std::vector<std::byte> DecodeDisplayBufferPqHdr(const DisplayBuffer& buffer, std::span<const std::byte> source);
+std::vector<std::byte> ReadDisplayBufferPqHdr(const DisplayBuffer& buffer);
 std::array<std::byte, 4> DisplayBufferClearPixel(const DisplayBuffer& buffer, Graphics::DccKeys keys);
 
 }
