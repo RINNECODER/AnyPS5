@@ -89,6 +89,24 @@ void changeImportType(Bytes& bytes, const std::string& nid, unsigned type) {
     }
     throw std::runtime_error("Fixture typed import missing");
 }
+void changeImportSize(Bytes& bytes, std::string_view nid, std::uint64_t symbolSize) {
+    const auto dynlib = get(bytes, program(bytes, 0x61000000) + 8);
+    const auto symbols = dynlib + get(bytes, tag(bytes, 0x61000039) + 8);
+    const auto strings = dynlib + get(bytes, tag(bytes, 0x61000035) + 8);
+    const auto size = get(bytes, tag(bytes, 0x6100003f) + 8);
+    for (auto offset = symbols; offset < symbols + size; offset += 24) {
+        if (get(bytes, offset + 6, 2) || !get(bytes, offset + 4, 1)) continue;
+        const auto name = strings + get(bytes, offset, 4);
+        bool matches = true;
+        for (unsigned index = 0; index < nid.size(); ++index)
+            matches = matches && get(bytes, name + index, 1) == static_cast<unsigned char>(nid[index]);
+        if (matches && get(bytes, name + nid.size(), 1) == '#') {
+            put(bytes, offset + 16, symbolSize);
+            return;
+        }
+    }
+    throw std::runtime_error("Fixture sized import missing");
+}
 std::uint64_t redirectHostObject(Bytes& bytes) {
     const auto dynlib = get(bytes, program(bytes, 0x61000000) + 8);
     const auto symbols = dynlib + get(bytes, tag(bytes, 0x61000039) + 8);
@@ -157,7 +175,8 @@ void mapHostObject(Cpu::Machine& machine) {
 }
 
 void execute(const std::filesystem::path& mainPath, const std::filesystem::path& guestPath, bool wrongOracle,
-             bool contextual = false, bool hostObject = false, bool replaceDependency = false) {
+             bool contextual = false, bool hostObject = false, bool replaceDependency = false,
+             std::uint64_t mainLengthSize = 0) {
     Cpu::Machine machine;
     Cpu::SceImports imports(machine);
     if (hostObject) mapHostObject(machine);
@@ -166,7 +185,7 @@ void execute(const std::filesystem::path& mainPath, const std::filesystem::path&
     unsigned objects = 0, legacyCalls = 0;
     bool replaced = false;
     const Cpu::SceConsumerModuleResolver consumerResolver = contextual
-        ? Cpu::SceConsumerModuleResolver{[&](const auto& consumer, const auto& import, std::uint8_t type)
+        ? Cpu::SceConsumerModuleResolver{[&](const auto& consumer, const auto& import, std::uint8_t type, std::uint64_t size)
                 -> std::optional<Cpu::SceResolvedImport> {
             const auto index = sameConsumer(consumer, expectedSources[0]) ? 0u : 1u;
             require(sameConsumer(consumer, expectedSources[index]), "Host callback received the wrong parsed consumer source");
@@ -190,11 +209,13 @@ void execute(const std::filesystem::path& mainPath, const std::filesystem::path&
             }
             if (hostObject && import.Nid == "OD70jrfOzHM") {
                 require(index == 0 && type == 1, "Host callback lost the main consumer's genuine OBJECT type");
+                require(size == 8, "Host callback lost the imported OBJECT size");
                 ++objects;
                 return Cpu::SceResolvedImport{HostObject, 1, 8};
             }
             require(type == 2, "Host callback lost a genuine FUNC type");
             if (import.Nid == LengthNid) {
+                require(size == (index == 0 ? mainLengthSize : 0), "Host callback lost the imported FUNC size");
                 require(import.LibraryName == "libc" && import.ModuleName == "libc" &&
                         import.LibraryVersion == 1 && import.ModuleMajor == 1 && import.ModuleMinor == 1 &&
                         import.LibraryId == 2 && import.ModuleId == 2,
@@ -292,7 +313,7 @@ void consumerFailures(const std::filesystem::path& mainPath, const std::filesyst
                 if (type == 1) return Cpu::SceResolvedImport{HostObject, 1, 8};
                 return Cpu::SceResolvedImport{imports.Resolve(import), type};
             }, std::nullopt,
-            [&](const auto& consumer, const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+            [&](const auto& consumer, const auto& import, std::uint8_t type, std::uint64_t) -> std::optional<Cpu::SceResolvedImport> {
                 require(sameConsumer(consumer, expectedSources[0]) || sameConsumer(consumer, expectedSources[1]),
                         "Rejection callback received another consumer's source identity");
                 const bool isObject = hostObject && import.Nid == "OD70jrfOzHM";
@@ -337,7 +358,7 @@ void consumerFailures(const std::filesystem::path& mainPath, const std::filesyst
                 ++legacyCalls;
                 return Cpu::SceResolvedImport{imports.Resolve(import), type};
             }, std::nullopt,
-            [&](const auto& consumer, const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+            [&](const auto& consumer, const auto& import, std::uint8_t type, std::uint64_t) -> std::optional<Cpu::SceResolvedImport> {
                 if (consumer.Path == originalGuest.Path) {
                     require(sameConsumer(consumer, changedGuest), "Tampered consumer reused a stale parsed source identity");
                     ++poisonedCalls;
@@ -601,9 +622,14 @@ int main(int argc, char** argv) {
         execute(attributed.main, attributed.guest, false);
         execute(attributed.main, attributed.guest, true);
         execute(attributed.main, attributed.guest, false, true);
+        auto sizedMain = mainBytes;
+        changeImportSize(sizedMain, LengthNid, 17);
+        Input sizedInput(sizedMain, guestBytes);
+        execute(sizedInput.main, sizedInput.guest, false, true, false, false, 17);
         consumerFailures(attributed.main, attributed.guest);
         auto hostObjectMain = mainBytes;
         redirectHostObject(hostObjectMain);
+        changeImportSize(hostObjectMain, "OD70jrfOzHM", 8);
         Input hostObjectInput(hostObjectMain, guestBytes);
         execute(hostObjectInput.main, hostObjectInput.guest, false, true, true);
         consumerFailures(hostObjectInput.main, hostObjectInput.guest, true);
