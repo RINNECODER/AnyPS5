@@ -175,10 +175,10 @@ void cancellation(const char* path, bool corrupt) {
  std::cout << "PASS inherited waiter " << (corrupt ? "corrupt-return cancellation" : "provider withdrawal/replacement") << '\n';
 }
 void unsupported(const char* path) {
- for (unsigned mode : {10U,11U,12U}) {
+ for (unsigned mode : {10U,11U}) {
   Session session(path,mode);
   rejects([&] { session.graph->RunMain(1000000,10000); },
-          mode == 10 ? "priority protocol" : "policies other than FIFO");
+          mode == 10 ? "priority protocol" : "OTHER scheduling policy");
   const auto r=session.state();
   require(r[0] == 0 && r[5] == 0 && r[126] == Canary && r[127] == ~Canary,
           "Unsupported priority behavior published execution or changed redzones");
@@ -187,10 +187,10 @@ void unsupported(const char* path) {
    const auto output=session.address+57*8; session.put(output,0xfeedbeef00000000ULL);
    require(session.threads->AttributeGetPriority(r[55],output) == 0 &&
            session.get(output) == 0xfeedbeef0000012cULL,
-           "Unsupported OTHER/RR mutated stored priority or four-byte output span");
+           "Unsupported OTHER mutated stored priority or four-byte output span");
   }
  }
- std::cout << "PASS unsupported protection2/OTHER/RR before mutation or completion\n";
+ std::cout << "PASS unsupported protection2/OTHER before mutation or completion\n";
 }
 void admission() {
  Cpu::Machine machine; auto threads = std::make_shared<Cpu::GuestThreads>(machine);

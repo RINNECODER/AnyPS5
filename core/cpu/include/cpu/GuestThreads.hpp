@@ -10,11 +10,16 @@ namespace Cpu {
 
 using GuestThreadHandle = std::uint64_t;
 
-// Source-backed SCE FIFO priority policy: lower numbers run first. Initial threads
+// Source-backed SCE FIFO/RR priorities: lower numbers run first. Initial threads
 // use 700; null-attribute creation inheritance is handled by the scheduler.
 inline constexpr std::int32_t GuestThreadPriorityMin = 256;
 inline constexpr std::int32_t GuestThreadPriorityMax = 767;
 inline constexpr std::int32_t GuestThreadPriorityDefault = 700;
+inline constexpr std::int32_t GuestThreadPolicyFifo = 1;
+inline constexpr std::int32_t GuestThreadPolicyRoundRobin = 3;
+// Deterministic translated-instruction bound, not a vendor millisecond quantum
+// or certification of native host real-time scheduling.
+inline constexpr std::uint64_t GuestThreadRoundRobinQuantum = 4096;
 
 struct GuestInitialThread {
     std::uint64_t Entry;
@@ -97,8 +102,9 @@ public:
     std::int32_t EffectivePriority(GuestThreadHandle) const;
     // Owned opaque thread attributes are bound to their original eight-byte
     // guest slot. A sched_param contains one signed four-byte priority. Only
-    // FIFO policy 1 is supported; inherit 4 uses the creating thread's base
-    // priority and explicit 0 uses the attribute's stored priority.
+    // FIFO policy 1 and logical RR policy 3 are supported; inherit 4 uses the
+    // creating thread's base policy/priority and explicit 0 copies both stored
+    // attribute values. Donation never changes inherited policy/priority.
     std::uint32_t AttributeInit(std::uint64_t slot8);
     std::uint32_t AttributeDestroy(std::uint64_t slot8);
     std::uint32_t AttributeSetPriority(std::uint64_t slot8, std::uint64_t parameter4);

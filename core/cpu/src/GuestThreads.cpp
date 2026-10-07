@@ -60,6 +60,7 @@ struct GuestThreads::Impl {
         std::array<std::uint64_t, 5> args{};
         Machine::SuspendedCall token;
         bool awakened = false;
+        bool wakeupQuantumReset = false;
         std::function<std::uint32_t()> ownerCompletion;
     };
     struct Record {
@@ -73,8 +74,10 @@ struct GuestThreads::Impl {
         Mapping stack{};
         std::uint64_t errnoAddress = 0;
         std::uint64_t result = 0;
+        std::int32_t policy = GuestThreadPolicyFifo;
         std::int32_t basePriority = GuestThreadPriorityDefault;
         std::int32_t effectivePriority = GuestThreadPriorityDefault;
+        std::uint64_t quantumRemaining = GuestThreadRoundRobinQuantum;
         std::uint64_t returnStack = 0;
         std::optional<GuestThreadHandle> joiner;
         std::unique_ptr<Pending> pending;
@@ -88,6 +91,7 @@ struct GuestThreads::Impl {
         std::uint64_t token;
         std::int32_t priority = GuestThreadPriorityDefault;
         std::int32_t inherit = 4;
+        std::int32_t policy = GuestThreadPolicyFifo;
     };
     std::map<std::uint64_t, Attribute> attributes;
     std::deque<GuestThreadHandle> runnable;
@@ -185,6 +189,13 @@ struct GuestThreads::Impl {
     }
     void enqueue(Record& record, bool first = false) {
         if (std::find(runnable.begin(), runnable.end(), record.id) != runnable.end()) return;
+        if (record.policy == GuestThreadPolicyRoundRobin && !record.quantumRemaining) {
+            // Exhaustion advances a logical RR turn even when it coincides
+            // with a host action or the end of an owner budget. A mere import
+            // or higher-priority preemption retains an unspent turn.
+            record.quantumRemaining = GuestThreadRoundRobinQuantum;
+            first = false;
+        }
         if (first) runnable.push_front(record.id);
         else runnable.push_back(record.id);
     }
@@ -265,6 +276,15 @@ struct GuestThreads::Impl {
         auto& record = lookup(id);
         record.pending->args[2] = result;
         record.pending->awakened = true;
+        if (!record.pending->wakeupQuantumReset) {
+            // Source-backed sleep/wakeup rule: pinned FreeBSD sched_ule.c
+            // sched_wakeup resets ts_slice before enqueue. A retracted
+            // reservation retains this first reset for the same blocked call;
+            // queue administration cannot repeatedly refresh its quantum.
+            if (record.policy == GuestThreadPolicyRoundRobin)
+                record.quantumRemaining = GuestThreadRoundRobinQuantum;
+            record.pending->wakeupQuantumReset = true;
+        }
         ready(record);
         recomputePriorities();
         return true;
@@ -426,11 +446,15 @@ struct GuestThreads::Impl {
     void create(Record& parent) {
         const auto args = parent.pending->args;
         auto priority = parent.basePriority;
+        auto policy = parent.policy;
         if (args[1]) {
             const auto attr = attribute(args[1]);
             if (!attr)
                 fail("nondefault guest thread attributes are unsupported unless initialized by this scheduler");
-            if (attr->inherit == 0) priority = attr->priority;
+            if (attr->inherit == 0) {
+                priority = attr->priority;
+                policy = attr->policy;
+            }
         }
         if (!tlsFactory) fail("guest thread creation requires a frozen TLS factory");
         machine.CheckAccess(args[0], 8, Permission::Write);
@@ -443,6 +467,7 @@ struct GuestThreads::Impl {
         const auto base = slot();
         auto child = std::make_unique<Record>();
         child->id = HandleBase + nextSlot;
+        child->policy = policy;
         child->basePriority = priority;
         child->effectivePriority = child->basePriority;
         child->owned.reserve(5);
@@ -524,6 +549,10 @@ struct GuestThreads::Impl {
         machine.ValidateSuspendedCall(joiner.pending->token);
         if (output) write64(machine, output, target.result);
         complete(joiner, true);
+        // Joining an already finished target never slept. Only completion of
+        // a genuinely blocked join follows the same wakeup reset as a wait.
+        if (joiner.state == State::BlockedJoining && joiner.policy == GuestThreadPolicyRoundRobin)
+            joiner.quantumRemaining = GuestThreadRoundRobinQuantum;
         ready(joiner);
         retire(target);
         target.state = State::Reaped;
@@ -658,7 +687,7 @@ struct GuestThreads::Impl {
                     return cancel(StopReason::Requested);
                 }
             }
-            // Stable selection leaves equal-priority FIFO order intact while
+            // Stable selection leaves equal-priority queue order intact while
             // ABI continuation front insertions cannot outrank donated owners.
             const auto selected = std::min_element(runnable.begin(), runnable.end(), [&](auto left, auto right) {
                 return lookup(left).effectivePriority < lookup(right).effectivePriority;
@@ -690,21 +719,32 @@ struct GuestThreads::Impl {
             const auto until = phase == Phase::Module && record.id == moduleOwner
                 ? moduleUntil : (record.initial ? 0 : ReturnGate);
             StopReason reason;
+            const auto slice = record.policy == GuestThreadPolicyRoundRobin
+                ? std::min(Quantum, record.quantumRemaining) : Quantum;
+            const auto charge = [&] {
+                const auto instructions = machine.LastRunInstructions();
+                budget.Charge(instructions);
+                if (record.policy == GuestThreadPolicyRoundRobin) {
+                    if (instructions > record.quantumRemaining)
+                        fail("guest RR slice exceeded its remaining instruction quantum");
+                    record.quantumRemaining -= instructions;
+                }
+            };
             try {
-                reason = machine.RunSlice(machine.Get(Register::Rip), until, std::min(Quantum, budget.Remaining()));
+                reason = machine.RunSlice(machine.Get(Register::Rip), until, std::min(slice, budget.Remaining()));
             } catch (...) {
-                budget.Charge(machine.LastRunInstructions());
+                charge();
                 machine.SaveContext(record.context);
                 throw;
             }
-            budget.Charge(machine.LastRunInstructions());
+            charge();
             machine.SaveContext(record.context);
             if (reason == StopReason::Requested || reason == StopReason::Exit) return cancel(reason);
             if (const auto stopped = observeStop()) return cancel(*stopped);
             if (reason == StopReason::InstructionLimit) {
-                // Internal translation slices do not turn guest FIFO into
-                // round-robin scheduling. The current continuation precedes
-                // equal-priority arrivals until it yields, blocks or finishes.
+                // FIFO and an unspent RR turn precede equal-priority arrivals.
+                // enqueue rotates only an exhausted RR turn, preserving any
+                // remainder when the cumulative owner budget ends early.
                 ready(record, true);
                 if (!budget.Remaining()) return reason;
             } else if (reason == StopReason::Paused) {
@@ -1034,11 +1074,13 @@ std::uint32_t GuestThreads::AttributeSetPolicy(std::uint64_t slot8, std::int32_t
     auto attr = impl->attribute(slot8);
     if (!attr) return Invalid;
     if (policy < 1 || policy > 3) return NotSupported;
-    if (policy != 1) fail("guest thread scheduling policies other than FIFO are unsupported");
+    if (policy != GuestThreadPolicyFifo && policy != GuestThreadPolicyRoundRobin)
+        fail("guest thread OTHER scheduling policy is unsupported");
     // Selected public-source engineering contract resets the policy default:
     // shadPS4 945dbc3c pthread_attr.cpp:143-151 and FreeBSD releng9.3
     // b06b7e64 lib/libthr/thread/thr_attr.c:469-485. A nondefault priority
     // is selected by setting the scheduling parameter after the policy.
+    attr->policy = policy;
     attr->priority = GuestThreadPriorityDefault;
     return 0;
 }

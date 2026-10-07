@@ -29,7 +29,8 @@ public:
     // use the source-bound route below, after hashing each actual consumer.
     std::optional<std::uint64_t> ResolvePriority(const SceImport&, std::uint8_t symbolType);
     // Observed PPSA04203 libkernel1/module1.1/STT_FUNC rows only. FIFO1 and
-    // priorities256..767 are supported; OTHER/RR policies fail explicitly.
+    // priorities256..767 and deterministic logical RR3 are supported; OTHER2
+    // fails explicitly. This does not certify the vendor real-time quantum.
     std::optional<std::uint64_t> ResolveTargetPriority(const SceImport&, std::uint8_t symbolType,
                                                        ThreadPriorityConsumer);
 private:

@@ -142,6 +142,29 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_platform_kernel_priority
         COMMAND anyps5_platform_kernel_priority_test "${kernelPriorityFixture}")
     set_tests_properties(anyps5_platform_kernel_priority PROPERTIES TIMEOUT 30)
+    set(kernelRoundRobinFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-round-robin.elf")
+    add_custom_command(OUTPUT "${kernelRoundRobinFixture}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+            -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelRoundRobinGuest.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-round-robin.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-round-robin-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-round-robin.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelRoundRobinFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-round-robin-linked.elf" "${kernelRoundRobinFixture}"
+        DEPENDS fixtures/KernelRoundRobinGuest.c tests/BuildKernelRoundRobinFixture.py
+            tests/BuildKernelPriorityFixture.py tests/BuildKernelMutexThreadsFixture.py
+            ../tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_round_robin_fixture DEPENDS "${kernelRoundRobinFixture}")
+    add_executable(anyps5_platform_kernel_round_robin_test tests/KernelRoundRobinTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_round_robin_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_round_robin_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_round_robin_test anyps5_platform_kernel_round_robin_fixture)
+    add_test(NAME anyps5_platform_kernel_round_robin
+        COMMAND anyps5_platform_kernel_round_robin_test "${kernelRoundRobinFixture}")
+    set_tests_properties(anyps5_platform_kernel_round_robin PROPERTIES TIMEOUT 30)
     set(kernelEventsFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-events.elf")
     add_custom_command(OUTPUT "${kernelEventsFixture}"
         COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
