@@ -37,18 +37,20 @@ void write64(Machine& machine, std::uint64_t address, std::uint64_t value) {
 }
 
 struct GuestThreads::Impl {
-    enum class State { Runnable, Running, BlockedJoining, Finishing, Finished, Reaped, Control, Cancelled };
-    enum class Action { Create, Yield, Join, ExitThread, TerminateEntry, ExitProcess };
+    enum class State { Runnable, Running, BlockedJoining, BlockedWaiting, Finishing, Finished, Reaped, Control, Cancelled };
+    enum class Action { Create, Yield, Join, Wait, ExitThread, TerminateEntry, ExitProcess };
     enum class Phase { None, Entry, Module };
     struct Pending {
         Action kind;
         std::array<std::uint64_t, 5> args{};
         Machine::SuspendedCall token;
+        bool awakened = false;
     };
     struct Record {
         GuestThreadHandle id;
         bool initial = false;
         bool finalizing = false;
+        bool stoppedNotified = false;
         State state = State::Runnable;
         Machine::Context context;
         std::shared_ptr<SceTls> tls;
@@ -68,6 +70,8 @@ struct GuestThreads::Impl {
     GuestThreadHandle initial = 0;
     GuestThreadHandle active = 0;
     std::uint64_t nextSlot = 0;
+    std::uint64_t nextWaitDomain = 1;
+    std::map<std::uint64_t, std::function<void(GuestThreadHandle)>> waitDomains;
     std::function<std::shared_ptr<SceTls>(std::uint64_t)> tlsFactory;
     std::uint64_t dtors = 0, count = 0, report = 0;
     bool withdrawn = false;
@@ -134,6 +138,56 @@ struct GuestThreads::Impl {
     void ready(Record& record, bool first = false) {
         record.state = record.finalizing ? State::Finishing : State::Runnable;
         enqueue(record, first);
+    }
+    void notifyStopped(Record& record) {
+        if (record.stoppedNotified) return;
+        record.stoppedNotified = true;
+        // A notification may change provider state. Copy callbacks so domain
+        // registration lifetime never invalidates iteration.
+        std::vector<std::function<void(GuestThreadHandle)>> callbacks;
+        callbacks.reserve(waitDomains.size());
+        for (const auto& [id, callback] : waitDomains) callbacks.push_back(callback);
+        for (const auto& callback : callbacks) if (callback) callback(record.id);
+    }
+    void cancelRecord(Record& record) {
+        if (record.state == State::Finished || record.state == State::Reaped) return;
+        record.state = State::Cancelled;
+        if (record.pending && record.pending->kind == Action::Wait) record.pending.reset();
+        notifyStopped(record);
+    }
+    bool isWaiting(std::uint64_t domain, GuestThreadHandle id, std::uint64_t key) const {
+        checkOwner();
+        if (!waitDomains.contains(domain)) fail("guest wait domain was withdrawn");
+        const auto found = records.find(id);
+        if (found == records.end()) return false;
+        const auto& record = *found->second;
+        return record.state == State::BlockedWaiting && record.pending &&
+            record.pending->kind == Action::Wait && !record.pending->awakened &&
+            record.pending->args[0] == domain && record.pending->args[1] == key;
+    }
+    bool wake(std::uint64_t domain, GuestThreadHandle id, std::uint64_t key, std::uint32_t result) {
+        if (!isWaiting(domain, id, key)) return false;
+        auto& record = lookup(id);
+        record.pending->args[2] = result;
+        record.pending->awakened = true;
+        ready(record);
+        return true;
+    }
+    void withdrawWaitDomain(std::uint64_t domain) {
+        if (withdrawn) return;
+        checkOwner();
+        if (driving) fail("cannot withdraw a guest wait domain during guest execution");
+        if (!waitDomains.contains(domain)) return;
+        const bool pending = std::any_of(records.begin(), records.end(), [&](const auto& item) {
+            const auto& record = *item.second;
+            return record.pending && record.pending->kind == Action::Wait &&
+                record.pending->args[0] == domain;
+        });
+        if (pending) {
+            machine.RequestStop();
+            cancel(StopReason::Requested);
+        }
+        waitDomains.erase(domain);
     }
     void registerCallback(std::uint64_t& storage, std::uint64_t pc) {
         checkOwner();
@@ -308,6 +362,7 @@ struct GuestThreads::Impl {
     }
     void publishFinished(Record& record) {
         record.state = State::Finished;
+        notifyStopped(record);
         if (record.joiner) finishJoin(lookup(*record.joiner), record);
     }
     void beginFinish(Record& record, std::uint64_t result) {
@@ -333,6 +388,10 @@ struct GuestThreads::Impl {
             ready(record);
             break;
         case Action::Join: join(record); break;
+        case Action::Wait:
+            if (!waitDomains.contains(record.pending->args[0])) fail("guest wait domain was withdrawn before suspension");
+            record.state = State::BlockedWaiting;
+            break;
         case Action::ExitThread: beginFinish(record, record.pending->args[0]); break;
         case Action::TerminateEntry:
         case Action::ExitProcess:
@@ -348,8 +407,7 @@ struct GuestThreads::Impl {
                 // publishing pthread completion, destructors or join results.
                 runnable.clear();
                 for (auto& [id, other] : records)
-                    if (id != record.id && other->state != State::Finished && other->state != State::Reaped)
-                        other->state = State::Cancelled;
+                    if (id != record.id) cancelRecord(*other);
             }
             controlToken.emplace(std::move(record.pending->token));
             record.pending.reset();
@@ -360,8 +418,7 @@ struct GuestThreads::Impl {
     StopReason cancel(StopReason reason) {
         terminal = reason;
         runnable.clear();
-        for (auto& [id, record] : records)
-            if (record->state != State::Finished && record->state != State::Reaped) record->state = State::Cancelled;
+        for (auto& [id, record] : records) cancelRecord(*record);
         return reason;
     }
     std::optional<StopReason> observeStop() {
@@ -384,12 +441,28 @@ struct GuestThreads::Impl {
             if (terminal) return *terminal;
             if (const auto stopped = observeStop()) return cancel(*stopped);
             if (!budget.Remaining()) return StopReason::InstructionLimit;
-            if (runnable.empty()) fail("guest join graph has no runnable work and cannot make progress");
+            if (runnable.empty()) fail("guest wait/join graph has no runnable work and cannot make progress");
             auto& record = lookup(runnable.front());
             runnable.pop_front();
             if (record.state != State::Runnable && record.state != State::Finishing)
                 fail("guest run queue contains an ineligible thread");
             activate(record);
+            if (record.pending && record.pending->kind == Action::Wait) {
+                if (!record.pending->awakened || !waitDomains.contains(record.pending->args[0]))
+                    fail("runnable guest wait lacks a matching live wake");
+                try {
+                    machine.ValidateSuspendedCall(record.pending->token);
+                    machine.Set(Register::Rax, record.pending->args[2]);
+                    complete(record, false);
+                } catch (...) {
+                    // Ownership may already be reserved by the provider. A
+                    // rejected return must abandon every continuation, never
+                    // leave an awakened waiter outside the runnable queue.
+                    machine.RequestStop();
+                    cancel(StopReason::Requested);
+                    throw;
+                }
+            }
             record.state = State::Running;
             const auto until = phase == Phase::Module && record.id == moduleOwner
                 ? moduleUntil : (record.initial ? 0 : ReturnGate);
@@ -511,9 +584,10 @@ struct GuestThreads::Impl {
         controlOwner = moduleOwner = 0;
         runnable.clear();
         for (auto& [id, record] : records) {
+            cancelRecord(*record);
             retire(*record);
-            if (record->state != State::Finished && record->state != State::Reaped) record->state = State::Cancelled;
         }
+        waitDomains.clear();
         records.clear();
         if (gateMapped) machine.Unmap(ReturnGate, PageSize);
         gateMapped = false;
@@ -522,6 +596,57 @@ struct GuestThreads::Impl {
         withdrawn = true;
     }
 };
+
+struct GuestThreads::WaitDomain::State {
+    std::weak_ptr<GuestThreads::Impl> scheduler;
+    std::uint64_t id;
+
+    std::shared_ptr<GuestThreads::Impl> lock() const {
+        auto live = scheduler.lock();
+        if (!live) fail("guest wait domain scheduler has expired");
+        live->checkOwner();
+        if (!live->waitDomains.contains(id)) fail("guest wait domain was withdrawn");
+        return live;
+    }
+};
+
+GuestThreads::WaitDomain::WaitDomain() = default;
+GuestThreads::WaitDomain::WaitDomain(std::unique_ptr<State> value) : state(std::move(value)) {}
+GuestThreads::WaitDomain::~WaitDomain() {
+    try { Withdraw(); }
+    catch (...) { std::terminate(); }
+}
+GuestThreads::WaitDomain::WaitDomain(WaitDomain&&) noexcept = default;
+GuestThreads::WaitDomain& GuestThreads::WaitDomain::operator=(WaitDomain&& other) noexcept {
+    if (this != &other) {
+        try { Withdraw(); }
+        catch (...) { std::terminate(); }
+        state = std::move(other.state);
+    }
+    return *this;
+}
+GuestThreadHandle GuestThreads::WaitDomain::ActiveThread() const {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->current().id;
+}
+void GuestThreads::WaitDomain::BlockFromHostCall(std::uint64_t key) {
+    if (!state) fail("guest wait domain is empty");
+    if (!key) fail("guest wait key is null");
+    state->lock()->queue(Impl::Action::Wait, {state->id, key});
+}
+bool GuestThreads::WaitDomain::IsWaiting(GuestThreadHandle thread, std::uint64_t key) const {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->isWaiting(state->id, thread, key);
+}
+bool GuestThreads::WaitDomain::Wake(GuestThreadHandle thread, std::uint64_t key, std::uint32_t result) {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->wake(state->id, thread, key, result);
+}
+void GuestThreads::WaitDomain::Withdraw() {
+    if (!state) return;
+    if (auto live = state->scheduler.lock()) live->withdrawWaitDomain(state->id);
+    state.reset();
+}
 
 GuestThreads::GuestThreads(Machine& machine) : impl(std::make_shared<Impl>(machine)) {}
 GuestThreads::~GuestThreads() {
@@ -578,6 +703,19 @@ std::int32_t GuestThreads::Equal(GuestThreadHandle left, GuestThreadHandle right
     impl->lookup(left);
     impl->lookup(right);
     return left == right;
+}
+GuestThreads::WaitDomain GuestThreads::CreateWaitDomain(Machine& associatedMachine,
+                                                       std::function<void(GuestThreadHandle)> callback) {
+    impl->checkOwner();
+    if (&associatedMachine != &impl->machine) fail("guest wait domain belongs to another Machine");
+    if (impl->nextWaitDomain == std::numeric_limits<std::uint64_t>::max())
+        fail("guest wait domain identity is exhausted");
+    const auto id = impl->nextWaitDomain++;
+    auto state = std::make_unique<WaitDomain::State>();
+    state->scheduler = impl;
+    state->id = id;
+    impl->waitDomains.emplace(id, std::move(callback));
+    return WaitDomain(std::move(state));
 }
 void GuestThreads::RegisterThreadDtors(std::uint64_t pc) { impl->registerCallback(impl->dtors, pc); }
 void GuestThreads::RegisterThreadAtexitCount(std::uint64_t pc) { impl->registerCallback(impl->count, pc); }

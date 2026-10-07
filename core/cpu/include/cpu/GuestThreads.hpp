@@ -18,6 +18,36 @@ struct GuestInitialThread {
 
 class GuestThreads {
 public:
+    // A provider owns one domain. Its keys must identify provider-local wait
+    // objects and must not be reused while a suspended call still exists.
+    class WaitDomain {
+    public:
+        WaitDomain();
+        ~WaitDomain();
+        WaitDomain(WaitDomain&&) noexcept;
+        WaitDomain& operator=(WaitDomain&&) noexcept;
+        WaitDomain(const WaitDomain&) = delete;
+        WaitDomain& operator=(const WaitDomain&) = delete;
+
+        GuestThreadHandle ActiveThread() const;
+        void BlockFromHostCall(std::uint64_t key);
+        bool IsWaiting(GuestThreadHandle, std::uint64_t key) const;
+        // Queues completion; the scheduler restores and validates the matching
+        // suspended gate before returning guestResult in guest RAX.
+        bool Wake(GuestThreadHandle, std::uint64_t key, std::uint32_t guestResult);
+        // Call only while guest execution is idle. Pending calls, including
+        // already queued wakes, cause a terminal Requested cancellation rather
+        // than return through a provider gate that may be about to disappear.
+        // Safe after scheduler withdrawal/destruction; expired domains cannot
+        // access a replacement scheduler or provider.
+        void Withdraw();
+    private:
+        struct State;
+        std::unique_ptr<State> state;
+        explicit WaitDomain(std::unique_ptr<State>);
+        friend class GuestThreads;
+    };
+
     explicit GuestThreads(Machine&);
     ~GuestThreads();
     GuestThreads(const GuestThreads&) = delete;
@@ -28,6 +58,11 @@ public:
     std::shared_ptr<SceTls> ActiveTls() const;
     std::uint64_t ActiveErrnoAddress() const;
     std::int32_t Equal(GuestThreadHandle, GuestThreadHandle) const;
+    // Called once per thread after normal finalization, or when continuation is
+    // cancelled. Providers can remove waits and poison nonrobust owned objects;
+    // this notification does not imply successful mutex release or acquisition.
+    WaitDomain CreateWaitDomain(Machine& associatedMachine,
+                                std::function<void(GuestThreadHandle)> onThreadStopped);
     void RegisterThreadDtors(std::uint64_t guestPc);
     void RegisterThreadAtexitCount(std::uint64_t guestPc);
     void RegisterThreadAtexitReport(std::uint64_t guestPc);

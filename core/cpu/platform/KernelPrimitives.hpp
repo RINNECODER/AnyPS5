@@ -6,10 +6,10 @@
 #include <span>
 #include <string_view>
 
-namespace Cpu { struct SceImport; }
+namespace Cpu { struct SceImport; class GuestThreads; }
 namespace Cpu::Platform {
-// Public PS4 signatures plus exact PS5 import identity evidence. PS5 caller ABI
-// qualification and blocking scheduler integration remain coordinator gates.
+// Public PS4 contract inventory. Target selection additionally requires the
+// pinned consumer admission below; fixture construction alone admits no target.
 struct KernelPrimitiveImport { std::string_view Nid, Name; };
 std::span<const KernelPrimitiveImport> KernelPrimitiveInventory();
 class KernelPrimitives {
@@ -19,6 +19,8 @@ public:
     // Must identify the active guest thread, never the host thread.
     KernelPrimitives(Machine&, std::function<std::uint64_t()> activeGuestThread,
                      std::uint64_t gateBase = 0x7ffdc1000000);
+    KernelPrimitives(Machine&, const std::shared_ptr<GuestThreads>&,
+                     std::uint64_t gateBase = 0x7ffdc1000000);
     ~KernelPrimitives();
     KernelPrimitives(const KernelPrimitives&) = delete;
     KernelPrimitives& operator=(const KernelPrimitives&) = delete;
@@ -26,5 +28,23 @@ public:
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;
+};
+
+struct KernelMutexConsumer {
+    std::string_view Name;
+    std::string_view Sha256;
+};
+
+// Engineering qualification for the observed PPSA04203 consumer import rows.
+// The loader must compute the consumer hash from its actual input before calling
+// Resolve. Priority protocols 1/2 and abandoned-owner recovery remain unsupported.
+// This selects only the nine mutex contracts, never another component family.
+class TargetKernelMutexes final {
+public:
+    TargetKernelMutexes(Machine&, const std::shared_ptr<GuestThreads>&);
+    std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t observedSymbolType,
+                                       KernelMutexConsumer);
+private:
+    KernelPrimitives provider;
 };
 }
