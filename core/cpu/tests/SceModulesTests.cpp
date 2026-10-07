@@ -15,6 +15,8 @@ namespace {
 using Bytes = std::vector<std::byte>;
 constexpr std::uint64_t MainBias = 0x1000000;
 constexpr std::uint64_t GuestBias = 0x2000000;
+constexpr std::uint64_t HostObject = 0x4000000;
+constexpr std::string_view LengthNid = "j4ViWNHEgww";
 
 void require(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
 Bytes readFile(const std::filesystem::path& path) {
@@ -87,6 +89,32 @@ void changeImportType(Bytes& bytes, const std::string& nid, unsigned type) {
     }
     throw std::runtime_error("Fixture typed import missing");
 }
+std::uint64_t redirectHostObject(Bytes& bytes) {
+    const auto dynlib = get(bytes, program(bytes, 0x61000000) + 8);
+    const auto symbols = dynlib + get(bytes, tag(bytes, 0x61000039) + 8);
+    const auto strings = dynlib + get(bytes, tag(bytes, 0x61000035) + 8);
+    const auto size = get(bytes, tag(bytes, 0x6100003f) + 8);
+    constexpr std::string_view name = "OD70jrfOzHM#B#B";
+    for (auto offset = symbols; offset < symbols + size; offset += 24) {
+        if (get(bytes, offset + 6, 2) || (get(bytes, offset + 4, 1) & 15) != 1) continue;
+        const auto location = strings + get(bytes, offset, 4);
+        bool matches = get(bytes, location + name.size(), 1) == 0;
+        for (unsigned index = 0; index < name.size(); ++index) {
+            const auto value = get(bytes, location + index, 1);
+            matches = matches && (value == static_cast<unsigned char>(name[index]) ||
+                ((index == 12 || index == 14) && value == 'C'));
+        }
+        if (!matches) continue;
+        put(bytes, location + 12, 'C', 1);
+        put(bytes, location + 14, 'C', 1);
+        const auto relocations = dynlib + get(bytes, tag(bytes, 0x6100002f) + 8);
+        const auto relocationSize = get(bytes, tag(bytes, 0x61000031) + 8);
+        for (auto relocation = relocations; relocation < relocations + relocationSize; relocation += 24)
+            if (get(bytes, relocation + 8) == (((offset - symbols) / 24) << 32 | 6)) return get(bytes, relocation);
+        throw std::runtime_error("Compiled OBJECT import lacks a genuine GLOB_DAT relocation");
+    }
+    throw std::runtime_error("Compiled main lacks the dependency counter OBJECT import");
+}
 std::uint64_t word(Cpu::Machine& machine, std::uint64_t address) {
     Bytes bytes(8);
     machine.Read(address, bytes);
@@ -116,15 +144,83 @@ template<class Function> void rejects(Function&& function, const char* expected)
 }
 const std::array hostModules{Cpu::SceHostModule{"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}}};
 
-void execute(const std::filesystem::path& mainPath, const std::filesystem::path& guestPath, bool wrongOracle) {
+bool sameConsumer(const Cpu::SceImportConsumer& consumer, const Cpu::SceParsedImage& expected) {
+    return consumer.Path == expected.Path && consumer.SourceSize == expected.SourceSize &&
+        consumer.SourceSha256 == expected.SourceSha256;
+}
+void mapHostObject(Cpu::Machine& machine) {
+    machine.Map(HostObject, 4096, Cpu::Permission::Read | Cpu::Permission::Write);
+    Bytes value(8);
+    put(value, 0, 1);
+    machine.Write(HostObject, value);
+    machine.Protect(HostObject, 4096, Cpu::Permission::Read);
+}
+
+void execute(const std::filesystem::path& mainPath, const std::filesystem::path& guestPath, bool wrongOracle,
+             bool contextual = false, bool hostObject = false, bool replaceDependency = false) {
     Cpu::Machine machine;
     Cpu::SceImports imports(machine);
+    if (hostObject) mapHostObject(machine);
+    const std::array expectedSources{Cpu::ParseSce(mainPath), Cpu::ParseSce(guestPath)};
+    std::array<unsigned, 2> lengths{};
+    unsigned objects = 0, legacyCalls = 0;
+    bool replaced = false;
+    const Cpu::SceConsumerModuleResolver consumerResolver = contextual
+        ? Cpu::SceConsumerModuleResolver{[&](const auto& consumer, const auto& import, std::uint8_t type)
+                -> std::optional<Cpu::SceResolvedImport> {
+            const auto index = sameConsumer(consumer, expectedSources[0]) ? 0u : 1u;
+            require(sameConsumer(consumer, expectedSources[index]), "Host callback received the wrong parsed consumer source");
+            if (replaceDependency && !replaced) {
+                require(index == 0, "Snapshot control must replace the dependency after main resolution begins");
+                auto changed = readFile(guestPath);
+                const auto& exports = expectedSources[1].Exports;
+                const auto object = std::find_if(exports.begin(), exports.end(), [](const auto& item) {
+                    return item.Identity.Nid == "L+OvOB7GHzo" && item.Type == 1;
+                });
+                require(object != exports.end(), "Snapshot fixture lost its actual compiled object");
+                put(changed, fileOffset(changed, object->Value), 0x76543210);
+                {
+                    std::ofstream stream(guestPath, std::ios::binary | std::ios::trunc);
+                    stream.write(reinterpret_cast<const char*>(changed.data()), changed.size());
+                    require(bool(stream), "Cannot replace dependency during host resolution");
+                }
+                require(Cpu::ParseSce(guestPath).SourceSha256 != expectedSources[1].SourceSha256,
+                        "Snapshot control did not change the on-disk dependency source");
+                replaced = true;
+            }
+            if (hostObject && import.Nid == "OD70jrfOzHM") {
+                require(index == 0 && type == 1, "Host callback lost the main consumer's genuine OBJECT type");
+                ++objects;
+                return Cpu::SceResolvedImport{HostObject, 1, 8};
+            }
+            require(type == 2, "Host callback lost a genuine FUNC type");
+            if (import.Nid == LengthNid) {
+                require(import.LibraryName == "libc" && import.ModuleName == "libc" &&
+                        import.LibraryVersion == 1 && import.ModuleMajor == 1 && import.ModuleMinor == 1 &&
+                        import.LibraryId == 2 && import.ModuleId == 2,
+                        "Shared compiled host function lost its exact scoped identity");
+                ++lengths[index];
+            }
+            return Cpu::SceResolvedImport{imports.Resolve(import), type};
+        }} : Cpu::SceConsumerModuleResolver{};
     const std::array dependencies{Cpu::SceModuleFile{guestPath, GuestBias}};
     Cpu::SceModules graph(machine, {mainPath, MainBias}, dependencies, hostModules,
         [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+            ++legacyCalls;
             require(type == 2, "Fixture unexpectedly requires a host data or TLS service");
             return Cpu::SceResolvedImport{imports.Resolve(import), 2, 0, 0, 0};
-        });
+        }, std::nullopt, consumerResolver);
+    if (contextual)
+        require(!legacyCalls && lengths[0] == 1 && lengths[1] == 1 && objects == unsigned(hostObject),
+                "Source-qualified host resolution reused another consumer's grant or called the legacy resolver");
+    if (hostObject) {
+        auto source = readFile(mainPath);
+        require(word(machine, MainBias + redirectHostObject(source)) == HostObject,
+                "Genuine compiled OBJECT relocation did not select the admitted host storage");
+    }
+    if (replaceDependency)
+        require(replaced && word(machine, object(graph.Modules()[1], "L+OvOB7GHzo")) == 0x10203040,
+                "Admitted consumer identity and mapped guest bytes came from different source snapshots");
     require(graph.Modules().size() == 2 && graph.Tls() && graph.Tls()->ModuleCount() == 2 &&
             graph.Modules()[0].TlsModuleId == 1 && graph.Modules()[1].TlsModuleId == 2 &&
             graph.Modules()[0].Init && graph.Modules()[1].Init && graph.Modules()[1].Fini,
@@ -177,6 +273,81 @@ struct Input {
     }
     ~Input() { std::error_code ignored; std::filesystem::remove_all(directory, ignored); }
 };
+
+void consumerFailures(const std::filesystem::path& mainPath, const std::filesystem::path& guestPath, bool hostObject = false) {
+    const auto mainBytes = readFile(mainPath), guestBytes = readFile(guestPath);
+    const std::array expectedSources{Cpu::ParseSce(mainPath), Cpu::ParseSce(guestPath)};
+    // Each row reaches a genuine host symbol in one consumer; the legacy route
+    // could admit it, so rejection must come from the authoritative callback.
+    for (unsigned target = 0; target < (hostObject ? 1u : 2u); ++target) for (bool wrongType : {false, true}) {
+        Cpu::Machine machine;
+        Cpu::SceImports imports(machine);
+        if (hostObject) mapHostObject(machine);
+        unsigned legacyCalls = 0, denied = 0;
+        const auto existingRanges = machine.Mappings().size();
+        const std::array dependencies{Cpu::SceModuleFile{guestPath, GuestBias}};
+        rejects([&] { Cpu::SceModules graph(machine, {mainPath, MainBias}, dependencies, hostModules,
+            [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                ++legacyCalls;
+                if (type == 1) return Cpu::SceResolvedImport{HostObject, 1, 8};
+                return Cpu::SceResolvedImport{imports.Resolve(import), type};
+            }, std::nullopt,
+            [&](const auto& consumer, const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                require(sameConsumer(consumer, expectedSources[0]) || sameConsumer(consumer, expectedSources[1]),
+                        "Rejection callback received another consumer's source identity");
+                const bool isObject = hostObject && import.Nid == "OD70jrfOzHM";
+                require(type == (isObject ? 1 : 2), "Compiled host import lost its FUNC/OBJECT type");
+                if ((isObject || (!hostObject && import.Nid == LengthNid)) && sameConsumer(consumer, expectedSources[target])) {
+                    ++denied;
+                    if (!wrongType) return std::nullopt;
+                    return isObject ? Cpu::SceResolvedImport{HostObject, 2} : Cpu::SceResolvedImport{imports.Resolve(import), 1, 8};
+                }
+                return Cpu::SceResolvedImport{imports.Resolve(import), type};
+            }); }, "unresolved or wrongly typed host import");
+        require(denied == 1 && !legacyCalls && machine.Mappings().size() == existingRanges &&
+                machine.Get(Cpu::Register::FsBase) == 0,
+                "Consumer rejection fell back to legacy resolution or mutated guest memory/TLS");
+    }
+    if (hostObject) return;
+
+    // Changing unreferenced source bytes preserves the compiled program and
+    // filename, but must invalidate source authority for that dependency.
+    for (bool changeSize : {false, true}) {
+        auto poisoned = guestBytes;
+        if (changeSize) poisoned.push_back(std::byte{0x5a});
+        else poisoned.at(9) ^= std::byte{1}; // Unused ELF identification padding; guest code/data stay unchanged.
+        Input input(mainBytes, guestBytes);
+        const auto originalMain = Cpu::ParseSce(input.main), originalGuest = Cpu::ParseSce(input.guest);
+        {
+            std::ofstream stream(input.guest, std::ios::binary | std::ios::trunc);
+            stream.write(reinterpret_cast<const char*>(poisoned.data()), poisoned.size());
+            require(bool(stream), "Cannot replace same-name consumer fixture");
+        }
+        const auto changedGuest = Cpu::ParseSce(input.guest);
+        require(changedGuest.Path == originalGuest.Path && changedGuest.SourceSha256 != originalGuest.SourceSha256 &&
+                (changeSize ? changedGuest.SourceSize != originalGuest.SourceSize : changedGuest.SourceSize == originalGuest.SourceSize),
+                "Tamper control did not isolate source digest or size under the same filename");
+        execute(input.main, input.guest, false); // Old unqualified owner still admits the poisoned consumer.
+        Cpu::Machine machine;
+        Cpu::SceImports imports(machine);
+        unsigned legacyCalls = 0, poisonedCalls = 0;
+        const std::array dependencies{Cpu::SceModuleFile{input.guest, GuestBias}};
+        rejects([&] { Cpu::SceModules graph(machine, {input.main, MainBias}, dependencies, hostModules,
+            [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                ++legacyCalls;
+                return Cpu::SceResolvedImport{imports.Resolve(import), type};
+            }, std::nullopt,
+            [&](const auto& consumer, const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+                if (consumer.Path == originalGuest.Path) {
+                    require(sameConsumer(consumer, changedGuest), "Tampered consumer reused a stale parsed source identity");
+                    ++poisonedCalls;
+                }
+                if (!sameConsumer(consumer, originalMain) && !sameConsumer(consumer, originalGuest)) return std::nullopt;
+                return Cpu::SceResolvedImport{imports.Resolve(import), type};
+            }); }, "unresolved or wrongly typed host import");
+        require(poisonedCalls == 1 && !legacyCalls, "Changed same-name consumer inherited an earlier host grant");
+    }
+}
 
 struct CrtReceipt {
     std::string Kind;
@@ -429,10 +600,20 @@ int main(int argc, char** argv) {
         Input attributed(mainBytes, guestBytes);
         execute(attributed.main, attributed.guest, false);
         execute(attributed.main, attributed.guest, true);
+        execute(attributed.main, attributed.guest, false, true);
+        consumerFailures(attributed.main, attributed.guest);
+        auto hostObjectMain = mainBytes;
+        redirectHostObject(hostObjectMain);
+        Input hostObjectInput(hostObjectMain, guestBytes);
+        execute(hostObjectInput.main, hostObjectInput.guest, false, true, true);
+        consumerFailures(hostObjectInput.main, hostObjectInput.guest, true);
+        Input snapshotInput(mainBytes, guestBytes);
+        execute(snapshotInput.main, snapshotInput.guest, false, true, false, true);
         const auto receipts = argc == 4 ? crtReceipts(argv[3]) : std::vector<CrtReceipt>{};
         for (const auto& receipt : receipts) executeCrt(receipt);
         invalidGraphs(attributed.main, attributed.guest, receipts);
         std::cout << "PASS compiled SCE module graph calls, objects, TLS, independent prime/Adler results, dependency-only lifecycle, and strict failures\n";
+        std::cout << "PASS per-consumer host FUNC/OBJECT authority, same-name source tampering, strict rejection without fallback, and parsed-snapshot mapping\n";
         if (!receipts.empty())
             std::cout << "PASS original ELF/SELF certification, chunked source identity, compiled CRT ordering, and certificate preflight failures\n";
         return 0;

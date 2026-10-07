@@ -8,6 +8,7 @@ extern __thread volatile u64 SceModuleTlsZero __attribute__((tls_model("initial-
 extern int SceModuleMath(u32, u32, u32*, u32*, u32*);
 extern const u64* SceModuleImportedTlsIndex(void);
 extern const u64* SceModuleMainTlsIndex(void);
+extern u64 strlen(const char*);
 
 EXPORT volatile u64 SceModuleMainInitCount;
 EXPORT volatile u64 SceModuleMainState[11];
@@ -41,7 +42,7 @@ static int number(const char* text, u32* result) {
 }
 
 EXPORT int SceModuleMain(u64 argc, char** argv) {
-    if (argc != 6 || !argv[0] || !*argv[0] || argv[argc]) return 81;
+    if (argc != 6 || !argv[0] || !strlen(argv[0]) || argv[argc]) return 81;
     u32 limit, seed, expectedCount, expectedSum, expectedAdler;
     if (!number(argv[1], &limit) || !number(argv[2], &seed) ||
         !number(argv[3], &expectedCount) || !number(argv[4], &expectedSum) ||
