@@ -1,6 +1,7 @@
 #include <cpu/Cpu.hpp>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <span>
@@ -139,6 +140,9 @@ void ProgressingContinuations() {
             Rejects([&] { unexpected = machine.CaptureContext(); }, "owner thread");
             Rejects([&] { machine.SaveContext(movedA); }, "owner thread");
             Rejects([&] { machine.RestoreContext(movedA); }, "owner thread");
+#if ANYPS5_CPU_MODERN_TCG
+            Rejects([&] { (void)machine.PinOwnedMappings(); }, "owner thread");
+#endif
         } catch (...) { foreignFailure = std::current_exception(); }
     });
     foreign.join();
@@ -150,6 +154,9 @@ void ProgressingContinuations() {
         RejectsUnchanged(running, [&] { unexpected = running.CaptureContext(); }, "idle");
         RejectsUnchanged(running, [&] { running.SaveContext(movedA); }, "idle");
         RejectsUnchanged(running, [&] { running.RestoreContext(movedB); }, "idle");
+#if ANYPS5_CPU_MODERN_TCG
+        RejectsUnchanged(running, [&] { (void)running.PinOwnedMappings(); }, "idle");
+#endif
         running.Set(Register::Rax, 7);
         ++calls;
     });
@@ -192,6 +199,178 @@ void ExpiredAcrossMachines() {
     replacement.RestoreContext(live);
     Require(replacement.Get(Register::Rax) == 91, "Expired context retirement damaged the new Machine's own live context");
 }
+
+#if ANYPS5_CPU_MODERN_TCG
+const Cpu::OwnedMappingView& OwnedView(const Cpu::OwnedMappingSnapshot& snapshot, std::uint64_t address) {
+    for (const auto& view : snapshot.Views)
+        if (view.Region.Address == address) return view;
+    throw std::runtime_error("Owned backing snapshot omitted an expected mapped span");
+}
+
+bool OwnsAddress(const Cpu::OwnedMappingSnapshot& snapshot, std::uint64_t address) {
+    for (const auto& view : snapshot.Views)
+        if (address >= view.Region.Address && address - view.Region.Address < view.Region.Size) return true;
+    return false;
+}
+
+std::uint64_t OwnedWord(std::span<std::byte> bytes, std::size_t offset) {
+    Require(offset <= bytes.size() && sizeof(std::uint64_t) <= bytes.size() - offset,
+        "Owned backing word escaped its mapped span");
+    std::uint64_t value = 0;
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
+    return value;
+}
+
+void OwnedBackingContinuations() {
+    constexpr std::uint64_t data = 0x200004000, alias = 0x300008000, externalAddress = 0x400010000;
+    alignas(16384) std::array<std::byte, 16384> external{};
+    external.fill(std::byte{0xcc});
+    Cpu::OwnedMappingSnapshot retained;
+    std::weak_ptr<void> allocationLifetime;
+    std::weak_ptr<const void> scopeLifetime;
+    {
+        Machine machine;
+        const auto empty = machine.PinOwnedMappings();
+        Require(empty.Scope && empty.Views.empty(), "Idle empty Machine snapshot lacked a scope or invented owned memory");
+        machine.Map(Code, 4096, rx);
+        machine.Map(data, 12288, rw);
+        const auto original = machine.PinOwnedMappings();
+        const auto& originalView = OwnedView(original, data);
+        Require(original.Scope == empty.Scope && original.Generation > empty.Generation &&
+            originalView.Region.Size == 12288 && originalView.Region.Permissions == rw &&
+            !originalView.Region.Borrowed && originalView.Bytes.size() == 12288 && originalView.Owner &&
+            originalView.BackingIdentity != 0 && originalView.Allocation.data() == originalView.Bytes.data() &&
+            originalView.Allocation.size() >= 12288 &&
+            OwnedView(original, Code).BackingIdentity != originalView.BackingIdentity,
+            "Owned mapping snapshot lost current bounds, permissions, allocation owner or distinct backing identity");
+        std::array<std::byte, 12288> guards;
+        guards.fill(std::byte{0xa5});
+        machine.Write(data, guards);
+        Write(machine, data, std::uint64_t{17});
+        constexpr std::array<std::uint8_t, 11> arithmetic{
+            0x48,0x8b,0x07, 0x48,0x83,0xc0,0x04, 0x48,0x89,0x47,0x08};
+        machine.Write(Code, std::as_bytes(std::span(arithmetic)));
+        machine.Set(Register::Rdi, data);
+        Require(machine.Run(Code, Code + arithmetic.size(), 20) == Cpu::StopReason::Address &&
+            machine.Get(Register::Rax) == 21 && Read(machine, data + 8) == 21 &&
+            OwnedWord(originalView.Bytes, 0) == 17 && OwnedWord(originalView.Bytes, 8) == 21,
+            "Pinned loader backing copied bytes instead of observing an actual translated x86 write");
+        const std::uint64_t nativeInput = 98;
+        std::memcpy(originalView.Bytes.data(), &nativeInput, sizeof(nativeInput));
+        Require(machine.Run(Code, Code + arithmetic.size(), 20) == Cpu::StopReason::Address &&
+            machine.Get(Register::Rax) == 102 && Read(machine, data + 8) == 102 &&
+            OwnedWord(originalView.Bytes, 8) == 102,
+            "Actual translated guest did not observe a native write through its pinned allocation");
+        for (std::size_t i = 16; i < originalView.Bytes.size(); ++i)
+            Require(originalView.Bytes[i] == std::byte{0xa5}, "Pinned guest/native coherence damaged an allocation guard");
+        Require(machine.PinOwnedMappings().Generation == original.Generation,
+            "Byte writes or translated execution changed structural mapping generation");
+
+        machine.MapBorrowed(alias, originalView.Bytes.subspan(4096, 4096), rw, originalView.Allocation);
+        const auto aliased = machine.PinOwnedMappings();
+        const auto& aliasView = OwnedView(aliased, alias);
+        Require(aliased.Generation > original.Generation && aliasView.Region.Size == 4096 &&
+            aliasView.Region.Permissions == rw && aliasView.Region.Borrowed && aliasView.Bytes.size() == 4096 &&
+            aliasView.Bytes.data() == originalView.Bytes.data() + 4096 &&
+            aliasView.Allocation.data() == originalView.Allocation.data() &&
+            aliasView.Allocation.size() == originalView.Allocation.size() &&
+            aliasView.BackingIdentity == originalView.BackingIdentity && aliasView.Owner &&
+            !aliasView.Owner.owner_before(originalView.Owner) && !originalView.Owner.owner_before(aliasView.Owner),
+            "Pinned borrowed alias lost actual allocation offset, identity or shared owner");
+        Write(machine, data + 4096, std::uint64_t{38});
+        machine.Set(Register::Rdi, alias);
+        Require(machine.Run(Code, Code + arithmetic.size(), 20) == Cpu::StopReason::Address &&
+            Read(machine, data + 4104) == 42 && OwnedWord(aliasView.Bytes, 8) == 42 &&
+            OwnedWord(originalView.Bytes, 4104) == 42,
+            "Translated borrowed alias did not update its original pinned allocation");
+        for (std::size_t i = 16; i < aliasView.Bytes.size(); ++i)
+            Require(aliasView.Bytes[i] == std::byte{0xa5}, "Borrowed alias write escaped its independently guarded output");
+
+        machine.MapBorrowed(externalAddress, external, rw);
+        const auto withExternal = machine.PinOwnedMappings();
+        Require(withExternal.Generation > aliased.Generation && !OwnsAddress(withExternal, externalAddress) &&
+            OwnedView(withExternal, alias).BackingIdentity == originalView.BackingIdentity,
+            "External borrowed allocation was fabricated as Machine-owned storage");
+        Rejects([&] { machine.Map(data, 4096, rw); }, "overlap");
+        Rejects([&] { machine.Protect(data + 12288, 4096, Permission::Read); }, "Guest access denied");
+        Require(machine.PinOwnedMappings().Generation == withExternal.Generation,
+            "Rejected mapping transaction changed published mapping generation");
+
+        machine.Protect(data, 4096, Permission::Read);
+        const auto protectedPage = machine.PinOwnedMappings();
+        Require(protectedPage.Generation > withExternal.Generation &&
+            OwnedView(protectedPage, data).Region.Size == 4096 &&
+            OwnedView(protectedPage, data).Region.Permissions == Permission::Read &&
+            OwnedView(protectedPage, data).BackingIdentity == originalView.BackingIdentity &&
+            OwnedView(protectedPage, alias).Region.Permissions == rw &&
+            originalView.Region.Size == 12288 && originalView.Region.Permissions == rw,
+            "Protection changed backing identity, peer permissions or a captured snapshot's metadata");
+        Rejects([&] { machine.CheckAccess(data, 1, Permission::Write); }, "Guest access denied");
+        machine.CheckAccess(alias, 4096, Permission::Write);
+        machine.ProtectFragment(data + 4112, 8, Permission::Read);
+        const auto fragment = machine.PinOwnedMappings();
+        const auto& fragmentView = OwnedView(fragment, data + 4112);
+        Require(fragment.Generation > protectedPage.Generation && fragmentView.Region.Size == 8 &&
+            fragmentView.Region.Permissions == Permission::Read && fragmentView.Bytes.size() == 8 &&
+            fragmentView.Bytes.data() == originalView.Bytes.data() + 4112 &&
+            fragmentView.BackingIdentity == originalView.BackingIdentity &&
+            fragmentView.Allocation.size() == originalView.Allocation.size() &&
+            OwnedView(fragment, alias).Region.Permissions == rw,
+            "Fragment protection lost exact pinned interval, actual offset or original allocation identity");
+        Rejects([&] { machine.CheckAccess(data + 4112, 8, Permission::Write); }, "Guest access denied");
+        machine.CheckAccess(data + 4104, 8, Permission::Write);
+        machine.CheckAccess(data + 4120, 8, Permission::Write);
+        machine.Unmap(data + 4096, 4096);
+        const auto split = machine.PinOwnedMappings();
+        Require(split.Generation > fragment.Generation && !OwnsAddress(split, data + 4096) &&
+            OwnedView(split, data).Region.Size == 4096 && OwnedView(split, data + 8192).Region.Size == 4096 &&
+            OwnedView(split, data + 8192).Bytes.data() == originalView.Bytes.data() + 8192 &&
+            OwnedView(split, data + 8192).BackingIdentity == originalView.BackingIdentity &&
+            Read(machine, alias + 8) == 42 && OwnedWord(originalView.Bytes, 4104) == 42,
+            "Partial unmap retained a guest binding or lost split backing/alias bytes");
+        machine.Unmap(data, 4096);
+        machine.Unmap(data + 8192, 4096);
+        machine.Unmap(alias, 4096);
+        const auto retired = machine.PinOwnedMappings();
+        Require(retired.Generation > split.Generation && !OwnsAddress(retired, data) && !OwnsAddress(retired, alias) &&
+            OwnedWord(originalView.Bytes, 8) == 102 && OwnedWord(originalView.Bytes, 4104) == 42,
+            "Last guest unmap freed pinned bytes or kept their guest address bindings");
+        Rejects([&] { machine.CheckAccess(data, 1, Permission::Read); }, "Guest access denied");
+        machine.Map(data, 12288, rw);
+        const auto remapped = machine.PinOwnedMappings();
+        const auto& remappedView = OwnedView(remapped, data);
+        Write(machine, data + 8, std::uint64_t{731});
+        Require(remapped.Generation > retired.Generation &&
+            remappedView.BackingIdentity != originalView.BackingIdentity &&
+            remappedView.Bytes.data() != originalView.Bytes.data() && OwnedWord(remappedView.Bytes, 8) == 731 &&
+            OwnedWord(originalView.Bytes, 8) == 102,
+            "New allocation reused a retired backing identity or overwrote retained original bytes");
+        machine.ReplaceBorrowed(data, std::span(external).first(12288), rw);
+        const auto replaced = machine.PinOwnedMappings();
+        Require(replaced.Generation > remapped.Generation && !OwnsAddress(replaced, data) &&
+            Read(machine, data) == 0xccccccccccccccccULL && OwnedWord(remappedView.Bytes, 8) == 731 &&
+            OwnedWord(originalView.Bytes, 8) == 102,
+            "Replacement published an external owner or invalidated a retained previous allocation");
+        retained = original;
+        allocationLifetime = originalView.Owner;
+        scopeLifetime = original.Scope;
+    }
+    Require(!allocationLifetime.expired() && !scopeLifetime.expired() &&
+        OwnedWord(OwnedView(retained, data).Bytes, 8) == 102 &&
+        OwnedWord(OwnedView(retained, data).Bytes, 4104) == 42 &&
+        OwnedView(retained, data).Bytes[8192] == std::byte{0xa5},
+        "Machine destruction invalidated a retained owner or its independently computed byte oracle");
+    {
+        Machine replacement;
+        const auto newScope = replacement.PinOwnedMappings();
+        Require(newScope.Scope && newScope.Scope != retained.Scope && newScope.Views.empty(),
+            "New Machine inherited a retired scope or retained guest address publication");
+    }
+    retained = {};
+    Require(allocationLifetime.expired() && scopeLifetime.expired(),
+        "Last snapshot retirement leaked an allocation or scope after Machine destruction");
+}
+#endif
 
 constexpr std::uint64_t CallCode = 0x100001000, CallEntry = 0x100001200, CallGate = 0x100003000;
 constexpr std::uint64_t CallReturn = 0x10000120c, CallEnd = 0x100001216;
@@ -433,6 +612,9 @@ int main() {
     try {
         ProgressingContinuations();
         ExpiredAcrossMachines();
+#if ANYPS5_CPU_MODERN_TCG
+        OwnedBackingContinuations();
+#endif
         SuspendedContinuations();
         StickyTerminalSlices(false);
         StickyTerminalSlices(true);

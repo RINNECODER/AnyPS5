@@ -57,6 +57,7 @@ std::size_t hostPageSize() {
     return static_cast<std::size_t>(size);
 }
 struct Free { void operator()(std::byte* value) const { std::free(value); } };
+struct MappingScope {};
 struct ContextLifetime {
     const std::thread::id owner = std::this_thread::get_id();
     std::atomic<AnyPS5QemuCpu*> engine{nullptr};
@@ -126,13 +127,17 @@ struct Machine::Impl {
         std::byte* pointer;
         std::size_t size;
         std::uint64_t id;
-        std::unique_ptr<std::byte, Free> storage;
+        std::uint64_t identity;
+        std::shared_ptr<std::byte> storage;
     };
     AnyPS5QemuCpu* engine = nullptr;
     const std::thread::id owner = std::this_thread::get_id();
     std::shared_ptr<ContextLifetime> contextLifetime = std::make_shared<ContextLifetime>();
     std::vector<Range> ranges;
     std::vector<Backing> backings;
+    std::shared_ptr<const void> mappingScope = std::make_shared<const MappingScope>();
+    std::uint64_t mappingGeneration = 0;
+    std::uint64_t lastBackingIdentity = 0;
     std::unordered_map<std::uint64_t, std::function<void(Machine&)>> calls;
     std::vector<std::shared_ptr<SuspendedFrame>> pendingCalls;
     std::vector<std::shared_ptr<SuspendedFrame>> retiredCalls;
@@ -165,6 +170,11 @@ struct Machine::Impl {
     void checkContextIdle() const {
         checkOwner();
         if (contextLifetime->running) throw std::logic_error("Guest execution context requires an idle Machine");
+    }
+    void checkMappingMutation() const {
+        checkOwner();
+        if (mappingGeneration == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Guest mapping generation exhausted");
     }
     void checkContext(const Context& context) const {
         checkContextIdle();
@@ -242,7 +252,7 @@ struct Machine::Impl {
         }
     }
     void map(std::uint64_t address, std::span<std::byte> memory, unsigned permissions,
-             bool borrowed, std::size_t allocationSize, std::unique_ptr<std::byte, Free> storage = {},
+             bool borrowed, std::size_t allocationSize, std::shared_ptr<std::byte> storage = {},
              std::span<std::byte> fullBacking = {}) {
         checkOwner();
         const auto hostPage = hostPageSize();
@@ -272,6 +282,9 @@ struct Machine::Impl {
         if (newBacking && (allocationSize % hostPage || allocationPointer % hostPage))
             throw std::runtime_error("Modern guest CPU borrowed mapping requires a complete aligned host-page backing or a slice of a registered backing");
         if (offset & 4095) throw std::runtime_error("Modern guest CPU backing aliases require a 4 KiB aligned offset");
+        checkMappingMutation();
+        if (newBacking && lastBackingIdentity == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Guest backing identity exhausted");
         ranges.reserve(ranges.size() + 1);
         if (newBacking) {
             backings.reserve(backings.size() + 1);
@@ -283,7 +296,8 @@ struct Machine::Impl {
             if (newBacking && anyps5_qemu_cpu_release_backing(engine, backingId)) std::terminate();
             throw;
         }
-        if (newBacking) backings.push_back({allocation, allocationSize, backingId, std::move(storage)});
+        ++mappingGeneration;
+        if (newBacking) backings.push_back({allocation, allocationSize, backingId, ++lastBackingIdentity, std::move(storage)});
         ranges.push_back({address, memory.size(), memory.data(), permissions, borrowed});
     }
     void refresh() const {
@@ -399,7 +413,7 @@ void Machine::Map(std::uint64_t address, std::size_t size, Permission permission
     const auto allocationSize = ((size + hostPage - 1) / hostPage) * hostPage;
     void* pointer = nullptr;
     if (posix_memalign(&pointer, hostPage, allocationSize)) throw std::bad_alloc();
-    std::unique_ptr<std::byte, Free> storage(static_cast<std::byte*>(pointer));
+    std::shared_ptr<std::byte> storage(static_cast<std::byte*>(pointer), Free{});
     std::memset(pointer, 0, allocationSize);
     const auto memory = std::span(storage.get(), size);
     impl->map(address, memory, bits, false, allocationSize, std::move(storage));
@@ -429,7 +443,9 @@ void Machine::Unmap(std::uint64_t address, std::size_t size) {
     checkRange(address, size);
     impl->checkMapped(address, size);
     auto replacement = impl->withoutRange(address, size);
+    impl->checkMappingMutation();
     impl->check(anyps5_qemu_cpu_unmap_range(impl->engine, address, size), "Unmap modern guest memory");
+    ++impl->mappingGeneration;
     impl->ranges.swap(replacement);
     impl->removeCalls(address, size);
     impl->releaseUnused();
@@ -461,6 +477,9 @@ void Machine::ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory
     if (newBacking && (memory.size() % hostPage || pointer % hostPage))
         throw std::runtime_error("Modern guest CPU borrowed replacement requires a complete aligned host-page backing or a slice of a registered backing");
     if (offset & 4095) throw std::runtime_error("Modern guest CPU backing aliases require a 4 KiB aligned offset");
+    impl->checkMappingMutation();
+    if (newBacking && impl->lastBackingIdentity == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Guest backing identity exhausted");
     if (newBacking) {
         impl->backings.reserve(impl->backings.size() + 1);
         impl->check(anyps5_qemu_cpu_register_backing(impl->engine, memory.data(), memory.size(), &backingId), "Register modern replacement backing");
@@ -471,7 +490,8 @@ void Machine::ReplaceBorrowed(std::uint64_t address, std::span<std::byte> memory
         if (newBacking && anyps5_qemu_cpu_release_backing(impl->engine, backingId)) std::terminate();
         throw;
     }
-    if (newBacking) impl->backings.push_back({memory.data(), memory.size(), backingId, {}});
+    ++impl->mappingGeneration;
+    if (newBacking) impl->backings.push_back({memory.data(), memory.size(), backingId, ++impl->lastBackingIdentity, {}});
     impl->ranges.swap(replacement);
     impl->removeCalls(address, memory.size());
     impl->releaseUnused();
@@ -494,7 +514,9 @@ void Machine::Protect(std::uint64_t address, std::size_t size, Permission permis
         if (overlapEnd < rangeEnd)
             replacement.push_back({overlapEnd, static_cast<std::size_t>(rangeEnd - overlapEnd), range.backing + (overlapEnd - range.address), range.permissions, range.borrowed});
     }
+    impl->checkMappingMutation();
     impl->check(anyps5_qemu_cpu_protect_range(impl->engine, address, size, bits), "Protect modern guest memory");
+    ++impl->mappingGeneration;
     impl->ranges.swap(replacement);
 }
 void Machine::ProtectFragment(std::uint64_t address, std::size_t size, Permission permissions) {
@@ -519,7 +541,9 @@ void Machine::ProtectFragment(std::uint64_t address, std::size_t size, Permissio
             replacement.push_back({begin, static_cast<std::size_t>(overlapEnd - begin),
                 range.backing + (begin - range.address), bits, range.borrowed});
     }
+    impl->checkMappingMutation();
     impl->check(anyps5_qemu_cpu_protect_fragment(impl->engine, address, size, bits), "Protect modern guest data fragment");
+    ++impl->mappingGeneration;
     impl->ranges.swap(replacement);
 }
 std::vector<Mapping> Machine::Mappings() const {
@@ -529,6 +553,26 @@ std::vector<Mapping> Machine::Mappings() const {
     for (const auto& range : impl->ranges)
         result.push_back({range.address, range.size, static_cast<Permission>(range.permissions), range.borrowed});
     std::sort(result.begin(), result.end(), [](const Mapping& left, const Mapping& right) { return left.Address < right.Address; });
+    return result;
+}
+OwnedMappingSnapshot Machine::PinOwnedMappings() const {
+    impl->checkContextIdle();
+    OwnedMappingSnapshot result{impl->mappingScope, impl->mappingGeneration, {}};
+    result.Views.reserve(impl->ranges.size());
+    for (const auto& range : impl->ranges) {
+        const auto pointer = reinterpret_cast<std::uintptr_t>(range.backing);
+        const auto backing = std::find_if(impl->backings.begin(), impl->backings.end(), [&](const auto& value) {
+            const auto begin = reinterpret_cast<std::uintptr_t>(value.pointer);
+            return value.storage && pointer >= begin && pointer - begin <= value.size &&
+                range.size <= value.size - (pointer - begin);
+        });
+        if (backing == impl->backings.end()) continue;
+        result.Views.push_back({{range.address, range.size, static_cast<Permission>(range.permissions), range.borrowed},
+            {range.backing, range.size}, {backing->pointer, backing->size}, backing->identity, backing->storage});
+    }
+    std::sort(result.Views.begin(), result.Views.end(), [](const auto& left, const auto& right) {
+        return left.Region.Address < right.Region.Address;
+    });
     return result;
 }
 void Machine::CheckAccess(std::uint64_t address, std::size_t size, Permission permissions) const {
