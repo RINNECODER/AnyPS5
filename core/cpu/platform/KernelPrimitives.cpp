@@ -14,7 +14,8 @@
 namespace Cpu::Platform {
 namespace {
 constexpr unsigned mutexCount = 9;
-constexpr std::array<KernelPrimitiveImport, 21> inventory{{
+constexpr unsigned conditionEnd = 21;
+constexpr std::array<KernelPrimitiveImport, 23> inventory{{
     {"cmo1RIYva9o", "scePthreadMutexInit"}, {"upoVrzMHFeE", "scePthreadMutexTrylock"},
     {"tn3VlD0hG60", "scePthreadMutexUnlock"}, {"2Of0f+3mhhE", "scePthreadMutexDestroy"},
     {"F8bUHwAG284", "scePthreadMutexattrInit"}, {"iMp8QpE+XO4", "scePthreadMutexattrSettype"},
@@ -26,7 +27,8 @@ constexpr std::array<KernelPrimitiveImport, 21> inventory{{
     {"waPcxYiR3WA", "scePthreadCondattrDestroy"},
     {"0TyVk4MSLt0", "pthread_cond_init"}, {"RXXqi4CtF8w", "pthread_cond_destroy"},
     {"Op8TBGY5KHg", "pthread_cond_wait"}, {"2MOy+rUfuhQ", "pthread_cond_signal"},
-    {"mkx2fVhNMsg", "pthread_cond_broadcast"}}};
+    {"mkx2fVhNMsg", "pthread_cond_broadcast"},
+    {"7H0iTOciTLo", "pthread_mutex_lock"}, {"2Z+PpY6CaJg", "pthread_mutex_unlock"}}};
 std::atomic<std::uint64_t> nextToken{0xa005000000000003ULL};
 constexpr auto rw = Permission::Read | Permission::Write;
 // Guest Orbis error table, independent of the host's errno numerals.
@@ -56,7 +58,9 @@ void name(Machine& m, std::uint64_t p) {
 }
 }
 std::span<const KernelPrimitiveImport> KernelPrimitiveInventory() { return std::span(inventory).first(mutexCount); }
-std::span<const KernelPrimitiveImport> KernelConditionInventory() { return std::span(inventory).subspan(mutexCount); }
+std::span<const KernelPrimitiveImport> KernelConditionInventory() {
+    return std::span(inventory).subspan(mutexCount, conditionEnd - mutexCount);
+}
 struct KernelPrimitives::Impl {
     struct Attribute { std::uint64_t token; unsigned type = 1; unsigned protocol = 0; };
     struct Mutex {
@@ -84,6 +88,7 @@ struct KernelPrimitives::Impl {
     std::uint64_t base;
     std::map<std::uint64_t, Attribute> attributes;
     std::map<std::uint64_t, Mutex> mutexes;
+    std::set<std::uint64_t> destroyedMutexSlots;
     std::map<std::uint64_t, Condition> conditions;
     std::set<std::uint64_t> destroyedConditionSlots;
     std::map<std::uint64_t, std::uint64_t> conditionAttributes;
@@ -230,10 +235,23 @@ struct KernelPrimitives::Impl {
         if (op == 1 && token == 0) return 0; // Pinned public static initializer destroy preserves zero.
         if (token == 1) return error(Invalid); // Condition destroyed sentinel; mutexes retain their own sentinel 2.
         if (token == 0 && (op == 2 || op == 3 || op == 4)) {
+            if (!waits) throw std::runtime_error("Kernel conditions require the actual guest scheduler");
+            if (op == 2) {
+                // Validate the existing owned mutex before publishing a static
+                // condition. A malformed argument must leave its zero slot intact.
+                const auto mutexToken = read(machine, arg);
+                const auto mutex = mutexes.find(arg);
+                if (mutex == mutexes.end() || mutex->second.token != mutexToken) return error(Invalid);
+                const auto id = thread();
+                if (mutex->second.abandoned)
+                    throw std::runtime_error("Unsupported nonrobust condition mutex owner-exit recovery");
+                if (mutex->second.owner != id) return error(Perm);
+            }
             span(machine, slot, Permission::Write);
             const auto created = nextToken.fetch_add(1);
             condition = conditions.emplace(slot, Condition{created, {}, 0}).first;
-            write(machine, slot, created);
+            try { write(machine, slot, created); }
+            catch (...) { conditions.erase(condition); throw; }
         } else if (condition == conditions.end() || condition->second.token != token) return error(Invalid);
         auto& state = condition->second;
         if (op == 1) {
@@ -335,27 +353,39 @@ struct KernelPrimitives::Impl {
             }
             name(machine, label);
             auto token = nextToken.fetch_add(1);
-            mutexes.emplace(slot, Mutex{token, type, protocol, 0, 0, false, {}}); write(machine, slot, token); return 0;
+            const auto created = mutexes.emplace(slot, Mutex{token, type, protocol, 0, 0, false, {}}).first;
+            try { write(machine, slot, token); }
+            catch (...) { mutexes.erase(created); throw; }
+            destroyedMutexSlots.erase(slot);
+            return 0;
         }
         const auto token = read(machine, slot);
+        auto mutex = mutexes.find(slot);
+        // A live slot overwritten with a static value must not create a second
+        // identity or pass static destroy/unlock shortcuts. Destroyed identities
+        // require explicit Init, even if the guest overwrites the sentinel.
+        if (mutex != mutexes.end() && mutex->second.token != token) return error(Invalid);
+        if (destroyedMutexSlots.contains(slot)) return error(Invalid);
         if (op == 3 && token < 2) return 0; // Upstream static initializer destroy preserves the slot.
         if (token == 2) return error(Invalid);
         if (op == 2 && token < 2) return error(Perm);
-        auto mutex = mutexes.find(slot);
-        if (mutex != mutexes.end() && mutex->second.token != token) return error(Invalid);
         if (token < 2 && (op == 1 || op == 8)) {
             thread(); // Validate scheduler identity before publishing a lazy initializer.
             span(machine, slot, Permission::Write);
             auto created = nextToken.fetch_add(1);
             mutex = mutexes.emplace(slot, Mutex{created, token == 1 ? 4u : 1u, 0, 0, 0, false, {}}).first;
-            write(machine, slot, created);
+            try { write(machine, slot, created); }
+            catch (...) { mutexes.erase(mutex); throw; }
         } else if (mutex == mutexes.end() || mutex->second.token != token) return error(Invalid);
         auto& state = mutex->second;
         if (state.abandoned)
             throw std::runtime_error("Unsupported nonrobust kernel mutex owner-exit recovery");
         if (op == 3) {
             if (state.owner || !state.waiters.empty() || state.conditionUsers) return error(Busy);
-            span(machine, slot, Permission::Write); write(machine, slot, 2);
+            span(machine, slot, Permission::Write);
+            const auto [destroyed, inserted] = destroyedMutexSlots.insert(slot);
+            try { write(machine, slot, 2); }
+            catch (...) { if (inserted) destroyedMutexSlots.erase(destroyed); throw; }
             if (state.protocol == 1) waits->SetInheritanceOwner(state.token, 0);
             mutexes.erase(mutex); return 0;
         }
@@ -414,8 +444,9 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
     constexpr std::array ret{std::byte{0xc3}}; impl->machine.Write(gate, ret);
     impl->machine.AddHostCall(gate, [weak = std::weak_ptr<Impl>(impl), op](Machine& m) {
         auto state = weak.lock(); if (!state) throw std::runtime_error("Kernel primitive provider expired");
-        auto result = op < mutexCount
-            ? state->invoke(op, m.Get(Register::Rdi), m.Get(Register::Rsi), m.Get(Register::Rdx))
+        auto result = op < mutexCount || op >= conditionEnd
+            ? state->invoke(op < mutexCount ? op : (op == conditionEnd ? 8 : 2),
+                m.Get(Register::Rdi), m.Get(Register::Rsi), m.Get(Register::Rdx))
             : state->conditionInvoke(op < 16 ? op - mutexCount : op - 16,
                 m.Get(Register::Rdi), m.Get(Register::Rsi), op < 16 ? m.Get(Register::Rdx) : 0);
         if (op >= 16 && result >= 0x80020000u) result -= 0x80020000u;
@@ -429,14 +460,21 @@ TargetKernelMutexes::TargetKernelMutexes(Machine& machine, const std::shared_ptr
 std::optional<std::uint64_t> TargetKernelMutexes::Resolve(const SceImport& import, std::uint8_t type,
                                                         KernelMutexConsumer source) {
     unsigned op = 0;
-    for (; op < mutexCount; ++op) if (inventory[op].Nid == import.Nid) break;
-    if (op == mutexCount) return std::nullopt;
+    for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
+    if (op == inventory.size() || (op >= mutexCount && op < conditionEnd)) return std::nullopt;
     const bool eboot = source.Name == "eboot.bin" && source.Sha256 ==
         "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
     const bool libc = source.Name == "libc.prx" && source.Sha256 ==
         "78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f";
     const bool web = source.Name == "libSceNpCppWebApi.prx" && source.Sha256 ==
         "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9";
+    if (op >= conditionEnd) {
+        // Only this pinned libc imports the POSIX pair used around its shared
+        // zero-filled static mutex/condition slots. The nine SCE rows stay intact.
+        if (!libc || import.LibraryName != "libkernel" || import.LibraryId != 0 || import.ModuleId != 1)
+            throw std::runtime_error("Unsupported target POSIX static mutex consumer source/import row");
+        return provider.Resolve(import, type);
+    }
     if (!eboot && !(libc && op != 7) && !(web && op != 1 && op != 7))
         throw std::runtime_error("Unsupported target kernel mutex consumer source/import row");
     if ((eboot && (import.LibraryId != 44 || import.ModuleId != 24)) ||
@@ -448,8 +486,8 @@ std::optional<std::uint64_t> TargetKernelMutexes::Resolve(const SceImport& impor
 std::optional<std::uint64_t> TargetKernelMutexes::ResolveCondition(const SceImport& import, std::uint8_t type,
                                                                  std::uint64_t size, KernelMutexConsumer source) {
     unsigned op = mutexCount;
-    for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
-    if (op == inventory.size()) return std::nullopt;
+    for (; op < conditionEnd; ++op) if (inventory[op].Nid == import.Nid) break;
+    if (op == conditionEnd) return std::nullopt;
     const bool eboot = source.Name == "eboot.bin" && source.Sha256 ==
         "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
     const bool libc = source.Name == "libc.prx" && source.Sha256 ==

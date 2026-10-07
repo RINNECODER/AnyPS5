@@ -27,9 +27,11 @@ void KernelProbe(const Gate* g, volatile u64* out, unsigned mode) {
     out[17] = (unsigned)g[8](0x2200, 0, 0);
     out[18] = (unsigned)g[2](0x2200, 0, 0);
     out[19] = (unsigned)g[3](0x2200, 0, 0);
+    // A static initializer belongs to a never-live slot; destroyed slots require Init.
+    mutex = (volatile u64*)0x2240;
     *mutex = 0;
-    out[20] = (unsigned)g[1](0x2200, 0, 0);
-    out[21] = (unsigned)g[2](0x2200, 0, 0);
-    out[22] = (unsigned)g[3](0x2200, 0, 0);
+    out[20] = (unsigned)g[1](0x2240, 0, 0);
+    out[21] = (unsigned)g[2](0x2240, 0, 0);
+    out[22] = (unsigned)g[3](0x2240, 0, 0);
     out[23] = *mutex;
 }

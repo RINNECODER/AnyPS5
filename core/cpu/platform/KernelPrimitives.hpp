@@ -42,7 +42,9 @@ struct KernelMutexConsumer {
 // and effective-priority ordering (FIFO ties). Protocol 2 and abandoned-owner
 // recovery remain unsupported. Direct opaque pointee/copy-slot access is not
 // admitted by these contracts.
-// This selects only the nine mutex contracts, never another component family.
+// Selects the nine SCE mutex contracts and the exact pinned libc POSIX lock/
+// unlock pair. Its observed zero static initializer uses type1/protocol0;
+// that default is public-source engineering inference, not vendor certification.
 class TargetKernelMutexes final {
 public:
     TargetKernelMutexes(Machine&, const std::shared_ptr<GuestThreads>&);
