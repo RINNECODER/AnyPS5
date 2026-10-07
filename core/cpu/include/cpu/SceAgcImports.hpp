@@ -25,7 +25,7 @@ enum class AgcAbiContract {
 // These policies constrain the admitted target use, independently of the source
 // adapter enum used by synthetic callers. Selection requires the caller to have
 // verified the exact owned image identity before invoking this API.
-enum class AgcArgumentPolicy { SourceContract, TargetPacket20Bit, TargetMemoryWrite, TargetShader, TargetDispatch, TargetSuspend, TargetFlip, TargetRenderingWait };
+enum class AgcArgumentPolicy { SourceContract, TargetPacket20Bit, TargetMemoryWrite, TargetShader, TargetDispatch, TargetSuspend, TargetFlip, TargetRenderingWait, TargetGraphicsEvent };
 struct AgcAbiAdmission {
     AgcAbiContract Contract;
     AgcArgumentPolicy Policy;
@@ -46,6 +46,8 @@ struct SceAgcBackend {
     // pinning, graphics filter -14, EV_ADD|EV_CLEAR, count/reset and deletion
     // lifetime belong to that owner. A callback's int32 result is returned in
     // EAX; neither callback may interpret handle/user data as a host pointer.
+    // Metal completion producers publish host mailbox receipts only; the
+    // persistent guest scheduler owner performs event writes and wake delivery.
     std::function<std::int32_t(std::uint64_t, std::int32_t, std::uint64_t)> AddEvent;
     std::function<std::int32_t(std::uint64_t, std::int32_t)> DeleteEvent;
 };
