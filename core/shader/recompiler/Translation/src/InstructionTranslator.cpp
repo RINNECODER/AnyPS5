@@ -96,9 +96,15 @@ void validateFixedFunctionInterpolation(const RdnaProgram& decoded, const Contro
         if (input == PixelInput::PerspectivePullModel) live.insert(base + 2u);
         if (input == PixelInput::PerspectiveCenter || input == PixelInput::LinearCenter) centers.insert(base);
     }
-    const bool hasInterpolation = std::any_of(decoded.instructions.begin(), decoded.instructions.end(), [](const RdnaInstruction& instruction) {
-        return instruction.op == RdnaOpcode::VInterpP1F32 || instruction.op == RdnaOpcode::VInterpP2F32;
-    });
+    std::vector<bool> reachable(decoded.instructions.size(), false);
+    bool hasInterpolation = false;
+    for (const auto& block : cfg.blocks) {
+        for (auto index = block.instructionBegin; index < block.instructionEnd; ++index) {
+            reachable.at(index) = true;
+            const auto op = decoded.instructions[index].op;
+            hasInterpolation |= op == RdnaOpcode::VInterpP1F32 || op == RdnaOpcode::VInterpP2F32;
+        }
+    }
     if (!hasInterpolation && live.empty()) return;
     std::uint32_t pc = 0u;
     const auto fail = [&] {
@@ -115,6 +121,7 @@ void validateFixedFunctionInterpolation(const RdnaProgram& decoded, const Contro
                !operand.sdwaSext && operand.sdwaSel == 6u;
     };
     for (std::size_t index = 0u; index < decoded.instructions.size(); ++index) {
+        if (!reachable[index]) continue;
         const auto& instruction = decoded.instructions[index];
         pc = instruction.programCounter;
         if (index >= entry->instructionEnd && cfg.blocks.size() > 1u && (!live.empty() || !pending.empty())) fail();

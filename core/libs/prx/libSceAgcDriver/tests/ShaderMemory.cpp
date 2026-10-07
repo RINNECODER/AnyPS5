@@ -663,7 +663,9 @@ void verifyPixelInputs() {
         interpolated({0xc8000000u, 0xc8010001u, 0x20101300u}, 0u),
         interpolated({0xc8000000u, 0x93088181u, 0xc8010001u}, 0u),
         interpolated({0xc8000000u, 0x89088181u, 0xc8010001u}, 0u),
-        interpolated({0xc8000000u, 0xbf008181u, 0xc8010001u}, 0u)
+        interpolated({0xc8000000u, 0xbf008181u, 0xc8010001u}, 0u),
+        interpolated({0xc8100000u, 0xc8110001u, 0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u,
+                      0xbf820003u, 0xc8180000u, 0xc8190001u, 0xbefe0380u}, 0x04040404u)
     }) {
         const auto result = compilePixelInputs(shader);
         require(result.fragmentParameters.size() == 1u && result.fragmentParameters[0].location == 0u &&
@@ -820,6 +822,7 @@ void verifyPixelInputs() {
         interpolated({0x7e0002f2u, 0xc8100000u, 0xc8110001u}),
         interpolated({0xc8100000u, 0xbe802480u, 0xc8110001u}),
         interpolated({0xc8100000u, 0x7e1002f2u, 0xbf820000u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xbf820001u, 0xbf800000u, 0xc8110001u}),
         interpolated({0xc8100000u, 0xc8110001u, 0x7e0c0300u}, 0x06060606u),
         interpolated({0x7e0002f9u, 0x00061008u, 0xc8100000u, 0xc8110001u}),
         interpolated({0x7e040280u, 0x7e060280u, 0xc8100000u, 0xd5640008u, 0x00021103u, 0xc8110001u}),
