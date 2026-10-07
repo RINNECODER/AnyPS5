@@ -601,23 +601,35 @@ ShaderRecompiler::ShaderPixelStageInfo twoParameterPixel() {
     return pixel;
 }
 
-std::vector<std::uint32_t> noPerspectiveLocations(std::span<const std::uint32_t> code) {
+ShaderRecompiler::RecompileResult compilePixelInputs(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData = {},
+                                                          const ShaderRecompiler::ShaderPixelStageInfo& pixel = twoParameterPixel(),
+                                                          std::span<const std::uint32_t> capabilities = {}) {
     using namespace ShaderRecompiler;
     RecompileRequest request{};
     request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
     request.context.waveSize = 64;
-    request.context.pixel = twoParameterPixel();
+    request.context.pixel = pixel;
+    request.context.userData = userData;
     request.target.vulkanVersion = 0x00401000u;
     request.target.spirvVersion = 0x00010300u;
     request.target.subgroupSize = 64;
+    request.target.supportedCapabilities = capabilities;
     request.layout.pushConstantSizeBytes = 128;
     request.useCache = false;
-    const auto result = Recompile(request);
+    return Recompile(request);
+}
+
+std::vector<std::uint32_t> noPerspectiveLocations(std::span<const std::uint32_t> code) {
+    const auto result = compilePixelInputs(code);
     const auto& words = result.spirv.Words();
     std::map<std::uint32_t, std::uint32_t> locations;
     std::vector<std::uint32_t> decorated;
     for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
-        if (static_cast<spv::Op>(words[at] & 0xffffu) != spv::OpDecorate) continue;
+        const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+        if (op == spv::OpCapability) require(words[at + 1] != spv::CapabilityFragmentBarycentricKHR, "fixed-function interpolation requires barycentric support");
+        if (op != spv::OpDecorate) continue;
+        require(words[at + 2] != spv::DecorationPerVertexKHR, "fixed-function interpolation exposed per-vertex parameter arrays");
+        if (words[at + 2] == spv::DecorationBuiltIn) require(words[at + 3] != spv::BuiltInBaryCoordKHR && words[at + 3] != spv::BuiltInBaryCoordNoPerspKHR, "fixed-function interpolation exposed raw barycentric inputs");
         if (words[at + 2] == spv::DecorationLocation) locations[words[at + 1]] = words[at + 3];
         if (words[at + 2] == spv::DecorationNoPerspective) decorated.push_back(words[at + 1]);
     }
@@ -636,6 +648,220 @@ void verifyPixelInputs() {
     require(linear.size() == 1u && linear[0] == 1u, "only the parameter interpolated through the linear pair must be NoPerspective");
     static constexpr std::array<std::uint32_t, 7> bothPairs{0xc8100000u, 0xc8110001u, 0xc8140002u, 0xc8150003u, 0xf800180fu, 0x05040504u, 0xbf810000u};
     expectFailure([&] { static_cast<void>(noPerspectiveLocations(bothPairs)); }, "interpolated through both a perspective and a linear I/J pair", "a parameter read through both pairs was given one interpolation");
+
+    const auto interpolated = [](std::initializer_list<std::uint32_t> prefix, std::uint32_t output = 0x04040404u) {
+        std::vector<std::uint32_t> shader(prefix);
+        shader.insert(shader.end(), {0xf800180fu, output, 0xbf810000u});
+        return shader;
+    };
+    const auto scheduled = interpolated({0xc8100000u, 0x7e1002f2u, 0xc8110001u});
+    require(noPerspectiveLocations(scheduled).empty(), "independent ALU changed perspective center interpolation");
+    const auto queued = interpolated({0xc8100000u, 0xc8140100u, 0x7e1002f2u, 0xc8110001u, 0xc8150101u}, 0x05040504u);
+    require(noPerspectiveLocations(queued).empty(), "independent ALU changed queued center interpolation");
+    for (const auto& shader : {
+        interpolated({0xc8000000u, 0xc8010001u}, 0u),
+        interpolated({0xc8000000u, 0xc8010001u, 0x20101300u}, 0u),
+        interpolated({0xc8000000u, 0x93088181u, 0xc8010001u}, 0u),
+        interpolated({0xc8000000u, 0x89088181u, 0xc8010001u}, 0u),
+        interpolated({0xc8000000u, 0xbf008181u, 0xc8010001u}, 0u),
+        interpolated({0xc8100000u, 0xc8110001u, 0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u,
+                      0xbf820003u, 0xc8180000u, 0xc8190001u, 0xbefe0380u}, 0x04040404u)
+    }) {
+        const auto result = compilePixelInputs(shader);
+        require(result.fragmentParameters.size() == 1u && result.fragmentParameters[0].location == 0u &&
+                result.fragmentParameters[0].sourceLocation == 0u && !result.fragmentParameters[0].flat &&
+                !result.fragmentParameters[0].perVertex && !result.fragmentParameters[0].custom,
+                "in-place exported interpolation lost its materialized perspective input");
+        std::map<std::uint32_t, std::uint32_t> locations;
+        std::map<std::uint32_t, std::uint32_t> storage;
+        std::map<std::uint32_t, std::vector<std::uint32_t>> values;
+        const auto& words = result.spirv.Words();
+        for (std::size_t at = 5u; at < words.size(); at += words[at] >> 16u) {
+            const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+            if (op == spv::OpDecorate && words[at + 2u] == spv::DecorationLocation) locations[words[at + 1u]] = words[at + 3u];
+            if (op == spv::OpDecorate) require(words[at + 2u] != spv::DecorationNoPerspective && words[at + 2u] != spv::DecorationFlat,
+                                             "in-place exported perspective interpolation changed its qualifier");
+            if (op == spv::OpVariable) storage[words[at + 2u]] = words[at + 3u];
+        }
+        bool exported = false;
+        for (std::size_t at = 5u; at < words.size(); at += words[at] >> 16u) {
+            const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+            if (op == spv::OpLoad && storage.contains(words[at + 3u]) && storage.at(words[at + 3u]) == spv::StorageClassInput &&
+                locations.contains(words[at + 3u]) && locations.at(words[at + 3u]) == 0u) {
+                values[words[at + 2u]] = {0x3e800000u, 0x3f000000u, 0x3f400000u, 0x3f800000u};
+            }
+            if (op == spv::OpBitcast && values.contains(words[at + 3u])) values[words[at + 2u]] = values.at(words[at + 3u]);
+            if (op == spv::OpCompositeExtract && values.contains(words[at + 3u])) {
+                const auto& source = values.at(words[at + 3u]);
+                require(words[at + 4u] < source.size(), "in-place interpolation extracted an invalid parameter component");
+                values[words[at + 2u]] = {source[words[at + 4u]]};
+            }
+            if (op == spv::OpCompositeConstruct) {
+                std::vector<std::uint32_t> composite;
+                for (std::size_t operand = 3u; operand < (words[at] >> 16u); ++operand) {
+                    if (!values.contains(words[at + operand])) { composite.clear(); break; }
+                    const auto& component = values.at(words[at + operand]);
+                    composite.insert(composite.end(), component.begin(), component.end());
+                }
+                if (!composite.empty()) values[words[at + 2u]] = std::move(composite);
+            }
+            if (op == spv::OpStore && storage.contains(words[at + 1u]) && storage.at(words[at + 1u]) == spv::StorageClassOutput &&
+                locations.contains(words[at + 1u]) && locations.at(words[at + 1u]) == 0u) {
+                require(values.contains(words[at + 2u]) && values.at(words[at + 2u]) == std::vector<std::uint32_t>{0x3e800000u, 0x3e800000u, 0x3e800000u, 0x3e800000u},
+                        "scalar EXP did not export the interpolated component0 to all four channels");
+                exported = true;
+            }
+        }
+        require(exported, "in-place interpolation omitted its materialized output");
+    }
+    for (const auto [instruction, operation] : std::array{
+        std::pair{0x7e000b00u, spv::OpConvertSToF},
+        std::pair{0x7e005500u, spv::OpFDiv},
+        std::pair{0x7e004900u, spv::OpExtInst}
+    }) {
+        const auto result = compilePixelInputs(interpolated({0xc8000000u, 0xc8010001u, instruction}, 0u));
+        require(result.fragmentParameters.size() == 1u && result.fragmentParameters[0].sourceLocation == 0u &&
+                !result.fragmentParameters[0].flat && !result.fragmentParameters[0].perVertex,
+                "a one-word unary operand read the adjacent raw J register");
+        const auto& words = result.spirv.Words();
+        bool retained = false;
+        for (std::size_t at = 5u; at < words.size(); at += words[at] >> 16u) {
+            retained |= static_cast<spv::Op>(words[at] & 0xffffu) == operation;
+        }
+        require(retained, "the exported unary result lost its actual operation");
+    }
+    const std::array<std::uint32_t, 2> float64Capability{1u, static_cast<std::uint32_t>(spv::CapabilityFloat64)};
+    const auto mixedWidth = compilePixelInputs(interpolated({0xc8000000u, 0xc8010001u, 0x7e102100u, 0x7e141f08u}, 0x0a0a0a00u),
+                                               {}, twoParameterPixel(), float64Capability);
+    require(mixedWidth.fragmentParameters.size() == 1u && mixedWidth.fragmentParameters[0].sourceLocation == 0u &&
+            !mixedWidth.fragmentParameters[0].flat && !mixedWidth.fragmentParameters[0].perVertex,
+            "F32/F64 conversion widths read the adjacent raw J register");
+    std::uint32_t conversions = 0u;
+    const auto& mixedWords = mixedWidth.spirv.Words();
+    for (std::size_t at = 5u; at < mixedWords.size(); at += mixedWords[at] >> 16u) {
+        conversions += static_cast<spv::Op>(mixedWords[at] & 0xffffu) == spv::OpFConvert;
+    }
+    require(conversions == 2u, "the mixed-width exported result lost one of its conversions");
+    for (const auto& shader : {
+        interpolated({0xc8000000u, 0xc8010001u, 0x7e101f00u}, 0x08080808u),
+        interpolated({0xc8000000u, 0xc8010001u, 0x3e0200f0u}, 0x01010101u)
+    }) {
+        expectFailure([&] { static_cast<void>(compilePixelInputs(shader)); }, "fixed-function interpolation requires",
+                      "a wide source or implicit accumulator consumed a live raw J register");
+    }
+    auto comparePixel = twoParameterPixel();
+    comparePixel.inputAddr |= PixelInputBit(PixelInput::PositionX);
+    comparePixel.posX = true;
+    const std::array<std::uint32_t, 9> pendingCompare{
+        0x7e140280u, 0x7e160281u, 0xc8180000u, 0x7c0408f0u, 0xc8190001u,
+        0x0210170au, 0xf800180fu, 0x08080806u, 0xbf810000u};
+    const auto compareResult = compilePixelInputs(pendingCompare, {}, comparePixel);
+    require(compareResult.fragmentParameters.size() == 1u && compareResult.fragmentParameters[0].sourceLocation == 0u &&
+            !compareResult.fragmentParameters[0].flat && !compareResult.fragmentParameters[0].perVertex,
+            "a disjoint VCC comparison disrupted pending center interpolation");
+    bool retainedCompare = false;
+    const auto& compareWords = compareResult.spirv.Words();
+    for (std::size_t at = 5u; at < compareWords.size(); at += compareWords[at] >> 16u) {
+        retainedCompare |= static_cast<spv::Op>(compareWords[at] & 0xffffu) == spv::OpFOrdEqual;
+    }
+    require(retainedCompare, "the exported VCC selection lost its actual comparison");
+    auto partialCompare = pendingCompare;
+    partialCompare[3] = 0x7c040cf0u;
+    expectFailure([&] { static_cast<void>(compilePixelInputs(partialCompare, {}, comparePixel)); }, "fixed-function interpolation requires",
+                  "a VCC comparison consumed a pending P1 result");
+    const std::array<std::uint32_t, 12> nsaUserData{
+        0x1000u, (56u << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (9u << 28u), 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u};
+    const std::array<std::uint32_t, 12> disjointNsa{
+        0xc8100000u, 0xc8110001u, 0x7e1002ffu, 0x3f000000u, 0x7e1202ffu, 0x3f000000u,
+        0xf09c0f0au, 0x00400c08u, 0x00000009u, 0xf800180fu, 0x0c0c0c04u, 0xbf810000u};
+    const auto nsaResult = compilePixelInputs(disjointNsa, nsaUserData);
+    require(nsaResult.fragmentParameters.size() == 1u && nsaResult.fragmentParameters[0].sourceLocation == 0u &&
+            !nsaResult.fragmentParameters[0].flat && !nsaResult.fragmentParameters[0].perVertex,
+            "disjoint NSA sampling lost the live interpolated parameter");
+    const auto& nsaWords = nsaResult.spirv.Words();
+    std::uint32_t nsaSamples = 0u;
+    for (std::size_t at = 5u; at < nsaWords.size(); at += nsaWords[at] >> 16u) {
+        if (static_cast<spv::Op>(nsaWords[at] & 0xffffu) == spv::OpImageSampleExplicitLod) ++nsaSamples;
+    }
+    require(nsaSamples == 1u, "disjoint NSA coordinates did not retain their actual texture sample");
+    auto rawNsa = disjointNsa;
+    rawNsa[8] = 0u;
+    expectFailure([&] { static_cast<void>(compilePixelInputs(rawNsa, nsaUserData)); }, "fixed-function interpolation requires",
+                  "a consumed NSA coordinate read a live raw I input");
+    for (const auto& shader : {
+        interpolated({0xc8100000u, 0xbe880381u, 0xc8110001u}, 0x04040404u),
+        interpolated({0xc8100000u, 0xc8110001u, 0xf8000000u, 0u}, 0x04040404u),
+        interpolated({0xc8100000u, 0xc8110001u, 0x7e1002ffu, 0x38003800u, 0x7e1202ffu, 0x38003800u,
+                      0xf800040fu, 0x00000908u}, 0x04040404u)
+    }) {
+        const auto result = compilePixelInputs(shader);
+        require(result.fragmentParameters.size() == 1u && result.fragmentParameters[0].sourceLocation == 0u &&
+                !result.fragmentParameters[0].flat && !result.fragmentParameters[0].perVertex,
+                "disjoint scalar or unused EXP operands changed complete center interpolation");
+    }
+    auto laterCenter = twoParameterPixel();
+    laterCenter.inputAddr |= PixelInputBit(PixelInput::PerspectiveSample);
+    const auto minimum = interpolated({0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u,
+                                       0x1e101503u, 0xc8100404u, 0xc8110405u}, 0x04040404u);
+    const auto minimumResult = compilePixelInputs(minimum, {}, laterCenter);
+    require(minimumResult.fragmentParameters.size() == 1u && minimumResult.fragmentParameters[0].sourceLocation == 1u &&
+            !minimumResult.fragmentParameters[0].flat && !minimumResult.fragmentParameters[0].perVertex,
+            "single-word VMin read the neighboring live center I register");
+    const auto inPlace = interpolated({0xc8000000u, 0xc8010001u, 0x7e080300u});
+    require(noPerspectiveLocations(inPlace).empty(), "in-place center I interpolation was rejected");
+    const auto branchAfterInputs = interpolated({0xc8100000u, 0xc8110001u, 0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u, 0xbf820000u});
+    require(noPerspectiveLocations(branchAfterInputs).empty(), "a branch after complete interpolation and raw input overwrites was rejected");
+    for (const auto& shader : {
+        interpolated({0xc8100000u, 0xc8110001u}, 0u),
+        interpolated({0xc8110001u}),
+        interpolated({0xc8100000u}),
+        interpolated({0xc8100000u, 0xc8110401u}),
+        interpolated({0xc8100000u, 0xc8110101u}),
+        interpolated({0xc8100000u, 0x7e0c0304u, 0xc8110001u}, 0x06060606u),
+        interpolated({0x7e0002f2u, 0xc8100000u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xbe802480u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0x7e1002f2u, 0xbf820000u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xbf820001u, 0xbf800000u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xc8110001u, 0x7e0c0300u}, 0x06060606u),
+        interpolated({0x7e0002f9u, 0x00061008u, 0xc8100000u, 0xc8110001u}),
+        interpolated({0x7e040280u, 0x7e060280u, 0xc8100000u, 0xd5640008u, 0x00021103u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xbefe0380u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0x7c2c10f2u, 0xc8110001u})
+    }) {
+        expectFailure([&] { static_cast<void>(noPerspectiveLocations(shader)); }, "fixed-function interpolation requires", "noncanonical I/J arithmetic was collapsed to a hardware attribute");
+    }
+
+    static constexpr std::array<std::uint32_t, 7> flatCode{0xc8020002u, 0xc8060102u, 0xc80a0202u, 0xc80e0302u, 0xf800180fu, 0x03020100u, 0xbf810000u};
+    RecompileRequest flatRequest{};
+    flatRequest.shader = {ShaderStage::Fragment, 0x30000u, flatCode, 0, {}};
+    flatRequest.context.waveSize = 32u;
+    ShaderPixelStageInfo flatPixel{};
+    flatPixel.wave32 = true;
+    flatPixel.interpolatorCount = 1u;
+    flatPixel.interpolatorSettings[0] = 0x400u;
+    flatPixel.inputAddr = PixelInputBit(PixelInput::PositionX) | PixelInputBit(PixelInput::PositionY);
+    flatPixel.posX = true;
+    flatPixel.posY = true;
+    flatPixel.targetOutputMode[0] = 9u;
+    flatPixel.targetExportMapping[0] = 0xe4u;
+    flatRequest.context.pixel = flatPixel;
+    flatRequest.target.vulkanVersion = 0x00401000u;
+    flatRequest.target.spirvVersion = 0x00010300u;
+    flatRequest.target.subgroupSize = 32u;
+    flatRequest.layout.pushConstantSizeBytes = 128u;
+    flatRequest.useCache = false;
+    const auto flatResult = Recompile(flatRequest);
+    std::map<std::uint32_t, std::uint32_t> flatLocations;
+    std::vector<std::uint32_t> flatDecorated;
+    const auto& flatWords = flatResult.spirv.Words();
+    for (std::size_t at = 5u; at < flatWords.size() && (flatWords[at] >> 16u) != 0u; at += flatWords[at] >> 16u) {
+        if (static_cast<spv::Op>(flatWords[at] & 0xffffu) != spv::OpDecorate) continue;
+        if (flatWords[at + 2u] == spv::DecorationLocation) flatLocations[flatWords[at + 1u]] = flatWords[at + 3u];
+        if (flatWords[at + 2u] == spv::DecorationFlat) flatDecorated.push_back(flatWords[at + 1u]);
+    }
+    require(std::any_of(flatDecorated.begin(), flatDecorated.end(), [&](const auto id) { return flatLocations.contains(id) && flatLocations.at(id) == 0u; }), "flat-only guest interpolation lost its flat location0 input");
+    expectFailure([&] { static_cast<void>(noPerspectiveLocations(flatCode)); }, "fixed-function interpolation requires", "flat interpolation overwrote a live raw I/J input");
 
     static constexpr std::array<std::uint32_t, 1> code{0xbf810000u};
     RecompileRequest request{};

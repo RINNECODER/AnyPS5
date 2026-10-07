@@ -1,9 +1,14 @@
 #include "Translation/InstructionTranslator.hpp"
 #include "Recompiler.hpp"
+#include "RdnaDecoder/RdnaImageOpDecoder.hpp"
 #include "Translation/DispatchInstructions.hpp"
 #include "Translation/TranslationContext.hpp"
 #include <algorithm>
+#include <array>
+#include <iterator>
 #include <limits>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -35,6 +40,160 @@ IrShaderStage toIrShaderStage(ShaderStageKind stage) {
         return IrShaderStage::TessellationEvaluation;
     }
     throw std::runtime_error("InstructionTranslator::Translate unknown shader stage kind");
+}
+
+struct InstructionRegisterAccess {
+    std::set<std::uint32_t> reads;
+    std::set<std::uint32_t> writes;
+    bool writesExec = false;
+};
+
+bool isInactiveDestinationPreservation(const IrValue& value) {
+    if (value.OperandUses().size() != 1u) return false;
+    const auto& use = value.OperandUses().front();
+    const auto* select = use.user;
+    if (use.operand != 2u || select->Opcode() != IrOpcode::SelectU32 ||
+        select->Argument(0u)->Opcode() != IrOpcode::GetExec || select->OperandUses().size() != 1u) return false;
+    const auto& stored = select->OperandUses().front();
+    return stored.operand == 1u && stored.user->Opcode() == IrOpcode::SetVectorRegister &&
+           stored.user->Argument(0u)->Register() == value.Argument(0u)->Register();
+}
+
+InstructionRegisterAccess instructionRegisterAccess(const IrBlock& block, std::list<IrValue*>::const_iterator first) {
+    InstructionRegisterAccess access;
+    const auto& instructions = block.Instructions();
+    for (auto at = first; at != instructions.end(); ++at) {
+        const auto& value = **at;
+        switch (value.Opcode()) {
+        case IrOpcode::GetVectorRegister:
+            if (!isInactiveDestinationPreservation(value)) access.reads.insert(value.Argument(0u)->Register().index);
+            break;
+        case IrOpcode::SetVectorRegister:
+            access.writes.insert(value.Argument(0u)->Register().index);
+            break;
+        case IrOpcode::SetExec:
+        case IrOpcode::SetExecLo:
+        case IrOpcode::SetExecHi:
+            access.writesExec = true;
+            break;
+        default:
+            break;
+        }
+    }
+    return access;
+}
+
+void validateFixedFunctionInterpolation(const RdnaProgram& decoded, const ControlFlowGraph& cfg, const ShaderPixelInputInfo& pixel, const std::vector<InstructionRegisterAccess>& accesses) {
+    std::set<std::uint32_t> live;
+    std::set<std::uint32_t> centers;
+    for (const auto input : {PixelInput::PerspectiveSample, PixelInput::PerspectiveCenter,
+                             PixelInput::PerspectiveCentroid, PixelInput::PerspectivePullModel,
+                             PixelInput::LinearSample, PixelInput::LinearCenter, PixelInput::LinearCentroid}) {
+        const auto base = pixel.psInputVgpr[static_cast<std::size_t>(input)];
+        if (base == ShaderPixelInputInfo::NoPixelInputVgpr) continue;
+        live.insert(base);
+        live.insert(base + 1u);
+        if (input == PixelInput::PerspectivePullModel) live.insert(base + 2u);
+        if (input == PixelInput::PerspectiveCenter || input == PixelInput::LinearCenter) centers.insert(base);
+    }
+    std::vector<bool> reachable(decoded.instructions.size(), false);
+    bool hasInterpolation = false;
+    for (const auto& block : cfg.blocks) {
+        for (auto index = block.instructionBegin; index < block.instructionEnd; ++index) {
+            reachable.at(index) = true;
+            const auto op = decoded.instructions[index].op;
+            hasInterpolation |= op == RdnaOpcode::VInterpP1F32 || op == RdnaOpcode::VInterpP2F32;
+        }
+    }
+    if (!hasInterpolation && live.empty()) return;
+    std::uint32_t pc = 0u;
+    const auto fail = [&] {
+        throw std::runtime_error("fixed-function interpolation requires unmodified center I/J pairs and complete P1/P2 sequences in an unconditional entry block (pc=" + std::to_string(pc) + ")");
+    };
+    const auto entry = std::find_if(cfg.blocks.begin(), cfg.blocks.end(), [&](const BasicBlock& block) { return block.id == cfg.entryBlock; });
+    if (cfg.unsupported || cfg.irreducible || entry == cfg.blocks.end() || entry != cfg.blocks.begin() ||
+        entry->instructionBegin != 0u || entry->instructionEnd == 0u || entry->instructionEnd > decoded.instructions.size() || !entry->predecessors.empty()) fail();
+    struct Pair { std::uint32_t base, attribute, component; };
+    std::map<std::uint32_t, Pair> pending;
+    const auto plain = [](const RdnaOperand& operand) {
+        return !operand.negate && !operand.negateHi && !operand.absolute && !operand.clamp && !operand.omod &&
+               !operand.opSel && !operand.opSelHi && !operand.dpp && !operand.dpp8 && !operand.explicitSdwaDst &&
+               !operand.sdwaSext && operand.sdwaSel == 6u;
+    };
+    for (std::size_t index = 0u; index < decoded.instructions.size(); ++index) {
+        if (!reachable[index]) continue;
+        const auto& instruction = decoded.instructions[index];
+        pc = instruction.programCounter;
+        if (index >= entry->instructionEnd && cfg.blocks.size() > 1u && (!live.empty() || !pending.empty())) fail();
+        if (instruction.op == RdnaOpcode::VInterpMovF32) {
+            if ((!live.empty() || !pending.empty()) && (instruction.destination.kind != RdnaOperandKind::VectorRegister ||
+                !plain(instruction.destination) || live.contains(instruction.destination.reg) || pending.contains(instruction.destination.reg))) fail();
+            continue;
+        }
+        if (instruction.op == RdnaOpcode::VInterpP1F32 || instruction.op == RdnaOpcode::VInterpP2F32) {
+            if (index >= entry->instructionEnd || instruction.source0.kind != RdnaOperandKind::VectorRegister ||
+                instruction.destination.kind != RdnaOperandKind::VectorRegister || !plain(instruction.source0) ||
+                !plain(instruction.source1) || !plain(instruction.source2) || !plain(instruction.destination) || instruction.clampResult ||
+                instruction.source1.value >= 32u || instruction.source1.value >= pixel.inputNum ||
+                instruction.source2.value >= 4u || pixel.InputIsCustom(instruction.source1.value)) fail();
+            if (instruction.op == RdnaOpcode::VInterpP1F32) {
+                if (!centers.contains(instruction.source0.reg) || !live.contains(instruction.source0.reg) ||
+                    !live.contains(instruction.source0.reg + 1u) || pending.contains(instruction.destination.reg) ||
+                    (live.contains(instruction.destination.reg) && instruction.destination.reg != instruction.source0.reg)) fail();
+                pending.emplace(instruction.destination.reg, Pair{instruction.source0.reg, instruction.source1.value, instruction.source2.value});
+            } else {
+                const auto pair = pending.find(instruction.destination.reg);
+                if (pair == pending.end() || instruction.source0.reg != pair->second.base + 1u ||
+                    !live.contains(instruction.source0.reg) || pending.contains(instruction.source0.reg) ||
+                    pair->second.attribute != instruction.source1.value || pair->second.component != instruction.source2.value) fail();
+                pending.erase(pair);
+            }
+            live.erase(instruction.destination.reg);
+            continue;
+        }
+        if (live.empty() && pending.empty()) continue;
+        const bool scalarAlu = IsScalarAluOpcode(instruction.op);
+        const bool vectorFamily = instruction.family == RdnaInstructionFamily::VOP1 || instruction.family == RdnaInstructionFamily::VOP2 ||
+                                  instruction.family == RdnaInstructionFamily::VOP3 || instruction.family == RdnaInstructionFamily::VOP3P ||
+                                  instruction.family == RdnaInstructionFamily::VOPC;
+        const bool indirectVector = instruction.op == RdnaOpcode::VMovrelsB32 || instruction.op == RdnaOpcode::VMovreldB32 ||
+                                    instruction.op == RdnaOpcode::VMovrelsdB32 || instruction.op == RdnaOpcode::VMovrelsd2B32 ||
+                                    instruction.op == RdnaOpcode::VSwaprelB32 || instruction.op == RdnaOpcode::VSwapB32 ||
+                                    instruction.op == RdnaOpcode::VReadfirstlaneB32 || instruction.op == RdnaOpcode::VReadlaneB32 ||
+                                    instruction.op == RdnaOpcode::VWritelaneB32 || instruction.op == RdnaOpcode::VPermlane16B32 ||
+                                    instruction.op == RdnaOpcode::VPermlanex16B32;
+        const bool vectorAlu = vectorFamily && !indirectVector;
+        const bool memory = instruction.family == RdnaInstructionFamily::SMEM || instruction.family == RdnaInstructionFamily::MUBUF ||
+                            instruction.family == RdnaInstructionFamily::MTBUF || instruction.family == RdnaInstructionFamily::FLAT ||
+                            instruction.family == RdnaInstructionFamily::DS || instruction.family == RdnaInstructionFamily::MIMG;
+        if (!scalarAlu && !vectorAlu && !memory && instruction.op != RdnaOpcode::Exp &&
+            instruction.op != RdnaOpcode::SEndpgm && instruction.op != RdnaOpcode::SWaitcnt &&
+            instruction.op != RdnaOpcode::SWaitcntDepctr && instruction.op != RdnaOpcode::SNop) fail();
+        const auto writesExec = [](const RdnaOperand& operand) {
+            return operand.kind == RdnaOperandKind::ExecLo || operand.kind == RdnaOperandKind::ExecHi;
+        };
+        if ((!live.empty() || !pending.empty()) && (writesExec(instruction.destination) || writesExec(instruction.destination2))) fail();
+        const auto& access = accesses.at(index);
+        if (access.writesExec) fail();
+        std::set<std::uint32_t> partials;
+        for (const auto& pair : pending) partials.insert(pair.first);
+        for (const auto reg : access.reads) {
+            if (live.contains(reg) || partials.contains(reg)) fail();
+        }
+        for (const auto reg : access.writes) {
+            if (partials.contains(reg)) fail();
+        }
+        for (const auto& source : {instruction.source0, instruction.source1, instruction.source2, instruction.source3}) {
+            if (source.dpp || source.dpp8) fail();
+        }
+        for (const auto reg : access.writes) {
+            if (!live.contains(reg)) continue;
+            if (!vectorAlu || access.writes.size() != 1u || instruction.destination.kind != RdnaOperandKind::VectorRegister ||
+                instruction.destination.reg != reg || !plain(instruction.destination)) fail();
+            live.erase(reg);
+        }
+    }
+    if (!pending.empty()) fail();
 }
 
 void validateTranslateOptions(const TranslateOptions& options) {
@@ -390,6 +549,9 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
         }
     }
 
+    const bool fixedFunctionInterpolation = options.stage == ShaderStageKind::Pixel && !options.fragmentShaderBarycentricEnabled;
+    std::vector<InstructionRegisterAccess> interpolationAccesses(fixedFunctionInterpolation ? decoded.instructions.size() : 0u);
+
     IrProgram program;
     program.SetWaveSize(options.waveSize);
     program.Resources().stage = toIrShaderStage(options.stage);
@@ -475,10 +637,15 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
                 context.TranslateEmbeddedFetch(instruction, static_cast<std::uint32_t>(resource), embedded->componentCount, options.inputInfo.vertex->resources[resource]);
                 continue;
             }
+            const auto& instructions = blocks[typedIndex]->Instructions();
+            const auto previous = instructions.empty() ? instructions.end() : std::prev(instructions.end());
             context.TranslateInstruction(instruction);
+            if (fixedFunctionInterpolation) interpolationAccesses[index] = instructionRegisterAccess(*blocks[typedIndex], previous == instructions.end() ? instructions.begin() : std::next(previous));
         }
         context.AddBranchCondition(cfgBlock, blockInfos[typedIndex]);
     }
+
+    if (fixedFunctionInterpolation) validateFixedFunctionInterpolation(decoded, cfg, *options.inputInfo.pixel, interpolationAccesses);
 
     program.Metadata().blockInfo = std::move(blockInfos);
     program.BlockOrder() = blocks;
