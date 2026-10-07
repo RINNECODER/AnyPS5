@@ -66,7 +66,7 @@ def elf_headers(data, limit=None):
     programs = [unpack(data, phoff + index * 56, '<IIQQQQQQ') for index in range(phcount)]
     for p in programs:
         require(fits(p[2], p[5], LIMIT), 'program file range overflows or exceeds size limit')
-        require(fits(p[3], p[6], U64) and fits(p[4], p[6], U64), 'program address range overflows uint64')
+        require(fits(p[3], p[6], U64), 'program address range overflows uint64')
         require(not p[1] & ~7, 'unsupported program permissions')
         if p[0] in LOAD_TYPES:
             require(p[5] <= p[6], 'loadable file size exceeds memory size')

@@ -152,6 +152,24 @@ class RichMetadataContract(unittest.TestCase):
         alternative, _ = self.inspect(other)
         self.assertEqual(alternative['imports'], raw['imports'])
 
+        # Contract: ignored ELF physical addresses cannot reject valid metadata.
+        # A parser-wide overflow check is a credible regression; other controls
+        # cover consumed offsets/virtual addresses, not this unused sentinel.
+        sentinel = bytearray(self.main.read_bytes())
+        phoff, = struct.unpack_from('<Q', sentinel, 32)
+        phcount, = struct.unpack_from('<H', sentinel, 56)
+        index = next(i for i in range(phcount)
+                     if struct.unpack_from('<I', sentinel, phoff + i * 56)[0] == 1)
+        struct.pack_into('<Q', sentinel, phoff + index * 56 + 24, (1 << 64) - 1)
+        unused_physical = self.root / 'ignored-physical-address.bin'
+        unused_physical.write_bytes(sentinel)
+        unused_metadata, _ = self.inspect(unused_physical)
+        self.assertEqual(unused_metadata['imports'], raw['imports'])
+        wrapped_physical = self.root / 'ignored-physical-address.self'
+        wrapped_physical.write_bytes(builder.plain_self(sentinel))
+        wrapped_metadata, _ = self.inspect(wrapped_physical)
+        self.assertEqual(wrapped_metadata['imports'], raw['imports'])
+
     def test_malformed_overflow_ambiguity_and_encrypted_self_fail_without_output(self):
         original = self.main.read_bytes()
         layout = self.layout
