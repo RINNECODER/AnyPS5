@@ -602,7 +602,8 @@ ShaderRecompiler::ShaderPixelStageInfo twoParameterPixel() {
 }
 
 ShaderRecompiler::RecompileResult compilePixelInputs(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData = {},
-                                                          const ShaderRecompiler::ShaderPixelStageInfo& pixel = twoParameterPixel()) {
+                                                          const ShaderRecompiler::ShaderPixelStageInfo& pixel = twoParameterPixel(),
+                                                          std::span<const std::uint32_t> capabilities = {}) {
     using namespace ShaderRecompiler;
     RecompileRequest request{};
     request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
@@ -612,6 +613,7 @@ ShaderRecompiler::RecompileResult compilePixelInputs(std::span<const std::uint32
     request.target.vulkanVersion = 0x00401000u;
     request.target.spirvVersion = 0x00010300u;
     request.target.subgroupSize = 64;
+    request.target.supportedCapabilities = capabilities;
     request.layout.pushConstantSizeBytes = 128;
     request.useCache = false;
     return Recompile(request);
@@ -658,7 +660,10 @@ void verifyPixelInputs() {
     require(noPerspectiveLocations(queued).empty(), "independent ALU changed queued center interpolation");
     for (const auto& shader : {
         interpolated({0xc8000000u, 0xc8010001u}, 0u),
-        interpolated({0xc8000000u, 0xc8010001u, 0x20101300u}, 0u)
+        interpolated({0xc8000000u, 0xc8010001u, 0x20101300u}, 0u),
+        interpolated({0xc8000000u, 0x93088181u, 0xc8010001u}, 0u),
+        interpolated({0xc8000000u, 0x89088181u, 0xc8010001u}, 0u),
+        interpolated({0xc8000000u, 0xbf008181u, 0xc8010001u}, 0u)
     }) {
         const auto result = compilePixelInputs(shader);
         require(result.fragmentParameters.size() == 1u && result.fragmentParameters[0].location == 0u &&
@@ -707,6 +712,61 @@ void verifyPixelInputs() {
         }
         require(exported, "in-place interpolation omitted its materialized output");
     }
+    for (const auto [instruction, operation] : std::array{
+        std::pair{0x7e000b00u, spv::OpConvertSToF},
+        std::pair{0x7e005500u, spv::OpFDiv},
+        std::pair{0x7e004900u, spv::OpExtInst}
+    }) {
+        const auto result = compilePixelInputs(interpolated({0xc8000000u, 0xc8010001u, instruction}, 0u));
+        require(result.fragmentParameters.size() == 1u && result.fragmentParameters[0].sourceLocation == 0u &&
+                !result.fragmentParameters[0].flat && !result.fragmentParameters[0].perVertex,
+                "a one-word unary operand read the adjacent raw J register");
+        const auto& words = result.spirv.Words();
+        bool retained = false;
+        for (std::size_t at = 5u; at < words.size(); at += words[at] >> 16u) {
+            retained |= static_cast<spv::Op>(words[at] & 0xffffu) == operation;
+        }
+        require(retained, "the exported unary result lost its actual operation");
+    }
+    const std::array<std::uint32_t, 2> float64Capability{1u, static_cast<std::uint32_t>(spv::CapabilityFloat64)};
+    const auto mixedWidth = compilePixelInputs(interpolated({0xc8000000u, 0xc8010001u, 0x7e102100u, 0x7e141f08u}, 0x0a0a0a00u),
+                                               {}, twoParameterPixel(), float64Capability);
+    require(mixedWidth.fragmentParameters.size() == 1u && mixedWidth.fragmentParameters[0].sourceLocation == 0u &&
+            !mixedWidth.fragmentParameters[0].flat && !mixedWidth.fragmentParameters[0].perVertex,
+            "F32/F64 conversion widths read the adjacent raw J register");
+    std::uint32_t conversions = 0u;
+    const auto& mixedWords = mixedWidth.spirv.Words();
+    for (std::size_t at = 5u; at < mixedWords.size(); at += mixedWords[at] >> 16u) {
+        conversions += static_cast<spv::Op>(mixedWords[at] & 0xffffu) == spv::OpFConvert;
+    }
+    require(conversions == 2u, "the mixed-width exported result lost one of its conversions");
+    for (const auto& shader : {
+        interpolated({0xc8000000u, 0xc8010001u, 0x7e101f00u}, 0x08080808u),
+        interpolated({0xc8000000u, 0xc8010001u, 0x3e0200f0u}, 0x01010101u)
+    }) {
+        expectFailure([&] { static_cast<void>(compilePixelInputs(shader)); }, "fixed-function interpolation requires",
+                      "a wide source or implicit accumulator consumed a live raw J register");
+    }
+    auto comparePixel = twoParameterPixel();
+    comparePixel.inputAddr |= PixelInputBit(PixelInput::PositionX);
+    comparePixel.posX = true;
+    const std::array<std::uint32_t, 9> pendingCompare{
+        0x7e140280u, 0x7e160281u, 0xc8180000u, 0x7c0408f0u, 0xc8190001u,
+        0x0210170au, 0xf800180fu, 0x08080806u, 0xbf810000u};
+    const auto compareResult = compilePixelInputs(pendingCompare, {}, comparePixel);
+    require(compareResult.fragmentParameters.size() == 1u && compareResult.fragmentParameters[0].sourceLocation == 0u &&
+            !compareResult.fragmentParameters[0].flat && !compareResult.fragmentParameters[0].perVertex,
+            "a disjoint VCC comparison disrupted pending center interpolation");
+    bool retainedCompare = false;
+    const auto& compareWords = compareResult.spirv.Words();
+    for (std::size_t at = 5u; at < compareWords.size(); at += compareWords[at] >> 16u) {
+        retainedCompare |= static_cast<spv::Op>(compareWords[at] & 0xffffu) == spv::OpFOrdEqual;
+    }
+    require(retainedCompare, "the exported VCC selection lost its actual comparison");
+    auto partialCompare = pendingCompare;
+    partialCompare[3] = 0x7c040cf0u;
+    expectFailure([&] { static_cast<void>(compilePixelInputs(partialCompare, {}, comparePixel)); }, "fixed-function interpolation requires",
+                  "a VCC comparison consumed a pending P1 result");
     const std::array<std::uint32_t, 12> nsaUserData{
         0x1000u, (56u << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (9u << 28u), 0u, 0u, 0u, 0u,
         0u, 0u, 0u, 0u};
