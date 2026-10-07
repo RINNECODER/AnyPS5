@@ -9,6 +9,8 @@ python3 tools/prepare_diagnostic_engine.py --source <clean AnyPS5 checkout> \
 Every invocation builds fresh. Existing outputs are rejected, never reused or overwritten.
 The default legacy profile requires CPU28/GPU22/integration4. --profile native
 requires the declared native inventory, relocation and fresh public acceptance.
+It builds the explicit --source revision, which must already contain the
+qualified production native runner and condition timeout control.
 """
 import argparse
 from contextlib import AbstractContextManager, nullcontext

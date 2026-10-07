@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -47,6 +48,8 @@ class NativeWorkflowContracts(unittest.TestCase):
         query = json.loads(subprocess.check_output([launcher, '--version'], text=True))
         self.assertEqual(query, ['-j', '2', '--version'])
 
+    @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
+                         'Native CMake configuration requires Apple Silicon macOS')
     def test_native_fragments_follow_production_targets_and_fail_closed(self):
         self.assertIsNotNone(shutil.which('cmake'), 'CMake required for this contract control')
         source = self.root / 'source'

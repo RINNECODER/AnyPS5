@@ -1,5 +1,7 @@
 # Copied unchanged to a fresh external configure source by the native profile.
 # Attach the existing finite fixture fragments after production targets exist.
+# ANYPS5_DIAGNOSTIC_SOURCE is the supplied runtime checkout. It must already
+# contain the qualified runner; this tooling branch carries no runtime commits.
 cmake_minimum_required(VERSION 3.24)
 project(NativeDiagnosticControls LANGUAGES C CXX OBJCXX)
 enable_testing()
