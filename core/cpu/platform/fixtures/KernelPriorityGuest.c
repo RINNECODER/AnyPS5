@@ -142,6 +142,14 @@ static void attribute_controls(void) {
  parameter |= 256; status(attr_priority(&control.value, (const int*)&parameter));
  output = 0xfeedbeef00000000ULL; status(attr_getpriority(&control.value, (int*)&output));
  if (output != 0xfeedbeef00000100ULL) ++r[4];
+ /* Selected pinned SCE/FreeBSD contract: parameter then FIFO resets to700;
+    FIFO then parameter selects256. Both orders execute actual guest PLT calls. */
+ status(attr_policy(&control.value, 1));
+ output = 0xfeedbeef00000000ULL; status(attr_getpriority(&control.value, (int*)&output));
+ if (output != 0xfeedbeef000002bcULL) ++r[4];
+ status(attr_priority(&control.value, (const int*)&parameter));
+ output = 0xfeedbeef00000000ULL; status(attr_getpriority(&control.value, (int*)&output));
+ if (output != 0xfeedbeef00000100ULL) ++r[4];
  parameter = 767; status(attr_priority(&control.value, (const int*)&parameter));
  parameter = 255; r[112] = (u32)attr_priority(&control.value, (const int*)&parameter);
  parameter = 768; r[113] = (u32)attr_priority(&control.value, (const int*)&parameter);

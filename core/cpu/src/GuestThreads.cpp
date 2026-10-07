@@ -882,6 +882,10 @@ std::uint32_t GuestThreads::AttributeSetPolicy(std::uint64_t slot8, std::int32_t
     if (!attr) return Invalid;
     if (policy < 1 || policy > 3) return NotSupported;
     if (policy != 1) fail("guest thread scheduling policies other than FIFO are unsupported");
+    // Selected public-source engineering contract resets the policy default:
+    // shadPS4 945dbc3c pthread_attr.cpp:143-151 and FreeBSD releng9.3
+    // b06b7e64 lib/libthr/thread/thr_attr.c:469-485. A nondefault priority
+    // is selected by setting the scheduling parameter after the policy.
     attr->priority = GuestThreadPriorityDefault;
     return 0;
 }
