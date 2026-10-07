@@ -1,8 +1,10 @@
 #include "Translation/InstructionTranslator.hpp"
 #include "Recompiler.hpp"
+#include "RdnaDecoder/RdnaImageOpDecoder.hpp"
 #include "Translation/DispatchInstructions.hpp"
 #include "Translation/TranslationContext.hpp"
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 #include <set>
@@ -116,7 +118,7 @@ void validateFixedFunctionInterpolation(const RdnaProgram& decoded, const Contro
                                instruction.op == RdnaOpcode::SLshlB32 || instruction.op == RdnaOpcode::SLshrB32;
         const bool singleWordVectorAlu = instruction.op == RdnaOpcode::VMovB32 || instruction.op == RdnaOpcode::VAddF32 ||
                                          instruction.op == RdnaOpcode::VSubF32 || instruction.op == RdnaOpcode::VMulF32 ||
-                                         instruction.op == RdnaOpcode::VMadF32 || instruction.op == RdnaOpcode::VFmaF32 || instruction.op == RdnaOpcode::VMaxF32;
+                                         instruction.op == RdnaOpcode::VMadF32 || instruction.op == RdnaOpcode::VFmaF32 || instruction.op == RdnaOpcode::VMaxF32 || instruction.op == RdnaOpcode::VMinF32;
         const bool vectorFamily = instruction.family == RdnaInstructionFamily::VOP1 || instruction.family == RdnaInstructionFamily::VOP2 ||
                                   instruction.family == RdnaInstructionFamily::VOP3 || instruction.family == RdnaInstructionFamily::VOP3P ||
                                   instruction.family == RdnaInstructionFamily::VOPC;
@@ -141,14 +143,22 @@ void validateFixedFunctionInterpolation(const RdnaProgram& decoded, const Contro
         const auto sourceWidth = instruction.op == RdnaOpcode::Exp ? 1u : width;
         std::set<std::uint32_t> partials;
         for (const auto& pair : pending) partials.insert(pair.first);
-        if (!pending.empty() && (!vectorAlu || instruction.destination.kind != RdnaOperandKind::VectorRegister ||
+        if (!pending.empty() && !scalarAlu && (!vectorAlu || instruction.destination.kind != RdnaOperandKind::VectorRegister ||
                                  overlaps(partials, instruction.destination, width) || overlaps(partials, instruction.destination2, width))) fail();
-        for (const auto& source : {instruction.source0, instruction.source1, instruction.source2, instruction.source3}) {
+        const std::array sources{instruction.source0, instruction.source1, instruction.source2, instruction.source3};
+        const auto sourceCount = instruction.op == RdnaOpcode::Exp ? std::min(instruction.sourceCount, 4u) : 4u;
+        for (std::uint32_t sourceIndex = 0u; sourceIndex < sourceCount; ++sourceIndex) {
+            const auto& source = sources[sourceIndex];
             if ((!live.empty() || !pending.empty()) && (source.dpp || source.dpp8)) fail();
             if (overlaps(live, source, sourceWidth) || overlaps(partials, source, sourceWidth)) fail();
         }
         if (instruction.imageNsaDwordCount != 0u) {
-            for (const auto reg : instruction.imageNsaVectorRegisters) if (live.contains(reg) || partials.contains(reg)) fail();
+            const auto count = std::min(instruction.imageNsaDwordCount * 4u,
+                                        GetRdnaImageAddressDwordCount(instruction.imageSampleFlags, instruction.imageAddressComponents) - 1u);
+            for (std::uint32_t slot = 0u; slot < count; ++slot) {
+                const auto reg = instruction.imageNsaVectorRegisters[slot];
+                if (live.contains(reg) || partials.contains(reg)) fail();
+            }
         }
         for (const auto& destination : {instruction.destination, instruction.destination2}) {
             if (!overlaps(live, destination, width)) continue;

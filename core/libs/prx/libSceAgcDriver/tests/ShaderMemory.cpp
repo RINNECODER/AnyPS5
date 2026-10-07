@@ -601,12 +601,14 @@ ShaderRecompiler::ShaderPixelStageInfo twoParameterPixel() {
     return pixel;
 }
 
-ShaderRecompiler::RecompileResult compilePixelInputs(std::span<const std::uint32_t> code) {
+ShaderRecompiler::RecompileResult compilePixelInputs(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData = {},
+                                                          const ShaderRecompiler::ShaderPixelStageInfo& pixel = twoParameterPixel()) {
     using namespace ShaderRecompiler;
     RecompileRequest request{};
     request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
     request.context.waveSize = 64;
-    request.context.pixel = twoParameterPixel();
+    request.context.pixel = pixel;
+    request.context.userData = userData;
     request.target.vulkanVersion = 0x00401000u;
     request.target.spirvVersion = 0x00010300u;
     request.target.subgroupSize = 64;
@@ -705,11 +707,51 @@ void verifyPixelInputs() {
         }
         require(exported, "in-place interpolation omitted its materialized output");
     }
+    const std::array<std::uint32_t, 12> nsaUserData{
+        0x1000u, (56u << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (9u << 28u), 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u};
+    const std::array<std::uint32_t, 12> disjointNsa{
+        0xc8100000u, 0xc8110001u, 0x7e1002ffu, 0x3f000000u, 0x7e1202ffu, 0x3f000000u,
+        0xf09c0f0au, 0x00400c08u, 0x00000009u, 0xf800180fu, 0x0c0c0c04u, 0xbf810000u};
+    const auto nsaResult = compilePixelInputs(disjointNsa, nsaUserData);
+    require(nsaResult.fragmentParameters.size() == 1u && nsaResult.fragmentParameters[0].sourceLocation == 0u &&
+            !nsaResult.fragmentParameters[0].flat && !nsaResult.fragmentParameters[0].perVertex,
+            "disjoint NSA sampling lost the live interpolated parameter");
+    const auto& nsaWords = nsaResult.spirv.Words();
+    std::uint32_t nsaSamples = 0u;
+    for (std::size_t at = 5u; at < nsaWords.size(); at += nsaWords[at] >> 16u) {
+        if (static_cast<spv::Op>(nsaWords[at] & 0xffffu) == spv::OpImageSampleExplicitLod) ++nsaSamples;
+    }
+    require(nsaSamples == 1u, "disjoint NSA coordinates did not retain their actual texture sample");
+    auto rawNsa = disjointNsa;
+    rawNsa[8] = 0u;
+    expectFailure([&] { static_cast<void>(compilePixelInputs(rawNsa, nsaUserData)); }, "fixed-function interpolation requires",
+                  "a consumed NSA coordinate read a live raw I input");
+    for (const auto& shader : {
+        interpolated({0xc8100000u, 0xbe880381u, 0xc8110001u}, 0x04040404u),
+        interpolated({0xc8100000u, 0xc8110001u, 0xf8000000u, 0u}, 0x04040404u),
+        interpolated({0xc8100000u, 0xc8110001u, 0x7e1002ffu, 0x38003800u, 0x7e1202ffu, 0x38003800u,
+                      0xf800040fu, 0x00000908u}, 0x04040404u)
+    }) {
+        const auto result = compilePixelInputs(shader);
+        require(result.fragmentParameters.size() == 1u && result.fragmentParameters[0].sourceLocation == 0u &&
+                !result.fragmentParameters[0].flat && !result.fragmentParameters[0].perVertex,
+                "disjoint scalar or unused EXP operands changed complete center interpolation");
+    }
+    auto laterCenter = twoParameterPixel();
+    laterCenter.inputAddr |= PixelInputBit(PixelInput::PerspectiveSample);
+    const auto minimum = interpolated({0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u,
+                                       0x1e101503u, 0xc8100404u, 0xc8110405u}, 0x04040404u);
+    const auto minimumResult = compilePixelInputs(minimum, {}, laterCenter);
+    require(minimumResult.fragmentParameters.size() == 1u && minimumResult.fragmentParameters[0].sourceLocation == 1u &&
+            !minimumResult.fragmentParameters[0].flat && !minimumResult.fragmentParameters[0].perVertex,
+            "single-word VMin read the neighboring live center I register");
     const auto inPlace = interpolated({0xc8000000u, 0xc8010001u, 0x7e080300u});
     require(noPerspectiveLocations(inPlace).empty(), "in-place center I interpolation was rejected");
     const auto branchAfterInputs = interpolated({0xc8100000u, 0xc8110001u, 0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u, 0xbf820000u});
     require(noPerspectiveLocations(branchAfterInputs).empty(), "a branch after complete interpolation and raw input overwrites was rejected");
     for (const auto& shader : {
+        interpolated({0xc8100000u, 0xc8110001u}, 0u),
         interpolated({0xc8110001u}),
         interpolated({0xc8100000u}),
         interpolated({0xc8100000u, 0xc8110401u}),
