@@ -95,6 +95,27 @@ bool sameSnapshot(const GuestMemorySnapshot& a, const GuestMemorySnapshot& b) {
     return true;
 }
 
+bool sameOwnedView(const OwnedMappingView& a, const OwnedMappingView& b) {
+    return a.Region.Address == b.Region.Address && a.Region.Size == b.Region.Size &&
+        a.Region.Permissions == b.Region.Permissions && a.Region.Borrowed == b.Region.Borrowed &&
+        a.Bytes.data() == b.Bytes.data() && a.Bytes.size() == b.Bytes.size() &&
+        a.Allocation.data() == b.Allocation.data() && a.Allocation.size() == b.Allocation.size() &&
+        a.BackingIdentity == b.BackingIdentity && sameOwner(a.Owner, b.Owner);
+}
+
+bool sameOwnedSelection(const OwnedMappingSnapshot& a, const OwnedMappingSnapshot& b) {
+    if (!sameOwner(a.Scope, b.Scope) || a.Views.size() != b.Views.size()) return false;
+    // Selection equality intentionally ignores Machine generation: pure external
+    // borrowed changes advance it without changing any selected owned binding.
+    for (const auto& view : a.Views) {
+        const auto found = std::find_if(b.Views.begin(), b.Views.end(), [&](const auto& candidate) {
+            return candidate.Region.Address == view.Region.Address;
+        });
+        if (found == b.Views.end() || !sameOwnedView(view, *found)) return false;
+    }
+    return true;
+}
+
 void validateSpan(std::uint64_t address, std::span<std::byte> bytes) {
     if (!address || bytes.empty() || !bytes.data() ||
         bytes.size() > std::numeric_limits<std::uint64_t>::max() - address ||
@@ -138,6 +159,11 @@ struct PublicationInvocation {
     void RejectReentry() {
         std::lock_guard lock(mutex);
         violated = true;
+    }
+    void CheckClean() {
+        std::lock_guard lock(mutex);
+        if (violated)
+            throw std::logic_error("Compositor publication reentry or callback violation");
     }
     bool Close() {
         std::lock_guard lock(mutex);
@@ -239,13 +265,14 @@ struct GuestMemoryMetalCompositor::Impl {
         return value;
     }
 
-    GuestMemoryMetalMappings Compose(const GuestMemorySnapshot& snapshot) {
+    GuestMemoryMetalMappings Compose(const OwnedMappingSnapshot& ownedSelection,
+        const std::vector<std::uint64_t>& writes, const GuestMemorySnapshot& snapshot) {
         ValidateDynamic(snapshot);
         GuestMemoryMetalMappings result;
-        result.Ranges.reserve(selected.Views.size() + snapshot.Views.size());
-        for (const auto& view : selected.Views)
+        result.Ranges.reserve(ownedSelection.Views.size() + snapshot.Views.size());
+        for (const auto& view : ownedSelection.Views)
             result.Ranges.push_back({view.Region.Address, view.Bytes,
-                std::binary_search(writable.begin(), writable.end(), view.Region.Address),
+                std::binary_search(writes.begin(), writes.end(), view.Region.Address),
                 Identity(ownedIds, view.BackingIdentity)});
         for (const auto& view : snapshot.Views) {
             if (!(view.Protection & 0x30u)) continue;
@@ -260,12 +287,104 @@ struct GuestMemoryMetalCompositor::Impl {
         }
         // Reject overlap even for a CPU-only runtime span: it must not be able
         // to replace a selected owned binding behind a skipped GPU descriptor.
-        for (const auto& dynamic : snapshot.Views) for (const auto& owned : selected.Views)
+        for (const auto& dynamic : snapshot.Views) for (const auto& owned : ownedSelection.Views)
             if (dynamic.Address < owned.Region.Address + owned.Bytes.size() &&
                 owned.Region.Address < dynamic.Address + dynamic.Bytes.size())
                 throw std::invalid_argument("Compositor owned and runtime extents overlap");
-        result.Owner = std::make_shared<CompositeLease>(CompositeLease{selected, snapshot});
+        result.Owner = std::make_shared<CompositeLease>(CompositeLease{ownedSelection, snapshot});
         return result;
+    }
+
+    GuestMemoryMetalMappings Compose(const GuestMemorySnapshot& snapshot) {
+        return Compose(selected, writable, snapshot);
+    }
+
+    struct OwnedSelection {
+        OwnedMappingSnapshot snapshot;
+        std::vector<std::uint64_t> writes;
+    };
+
+    static OwnedSelection Select(const OwnedMappingSnapshot& full, const OwnedSelector& selector) {
+        OwnedSelection result{{full.Scope, full.Generation, {}}, {}};
+        result.snapshot.Views.reserve(full.Views.size());
+        for (const auto& view : full.Views) {
+            const auto access = selector(view);
+            switch (access) {
+                case OwnedGpuAccess::CpuOnly: continue;
+                case OwnedGpuAccess::ReadOnly: break;
+                case OwnedGpuAccess::ReadWrite:
+                    if ((static_cast<unsigned>(view.Region.Permissions) & 3u) != 3u)
+                        throw std::invalid_argument("Compositor owned selector requires a writable CPU view");
+                    result.writes.push_back(view.Region.Address);
+                    break;
+                default: throw std::invalid_argument("Compositor owned selector returned invalid access");
+            }
+            if (!(static_cast<unsigned>(view.Region.Permissions) & 1u))
+                throw std::invalid_argument("Compositor owned selector requires a readable CPU view");
+            validateSpan(view.Region.Address, view.Bytes);
+            result.snapshot.Views.push_back(view);
+        }
+        std::sort(result.writes.begin(), result.writes.end());
+        return result;
+    }
+
+    void ValidateSelection(const OwnedSelection& value) const {
+        if (!sameOwnedSelection(value.snapshot, selected) || value.writes != writable)
+            throw std::invalid_argument("Compositor previous owned selection differs from accepted state");
+    }
+
+    void PublishOwned(const Publisher& publisher, const OwnedSelector& selector,
+        const OwnedMappingSnapshot& previous, const OwnedMappingSnapshot& candidate,
+        const std::function<void()>& commitCpu) {
+        Available();
+        if (!bound) throw std::logic_error("Compositor runtime scope has not been bound");
+        if (!commitCpu) throw std::invalid_argument("Compositor CPU mutation is empty");
+        auto invocation = std::make_shared<PublicationInvocation>();
+        GuestMemoryMetalMappings after;
+        active = invocation; // Also guards selector calls before the publisher.
+        try {
+            machine.ValidateOwnedMappingCandidate(previous, candidate);
+            machine.ValidateOwnedMappings(previous);
+            machine.ValidateOwnedMappings(selected);
+            ValidateSelection(Select(previous, selector));
+            auto nextSelected = Select(candidate, selector);
+            invocation->CheckClean();
+            after = Compose(nextSelected.snapshot, nextSelected.writes, accepted);
+            if (sequence == std::numeric_limits<std::uint64_t>::max())
+                throw std::overflow_error("Compositor publication generation exhausted");
+            invocation->preflight = [this, previous, candidate] {
+                machine.ValidateOwnedMappingCandidate(previous, candidate);
+                machine.ValidateOwnedMappings(selected);
+            };
+            invocation->action = [this, commitCpu, pins = nextSelected.snapshot] {
+                commitCpu();
+                machine.ValidateOwnedMappings(pins);
+            };
+            const std::function<void()> guarded = [invocation] { invocation->Invoke(); };
+            const auto publication = ++sequence;
+            publisher(after.Ranges, publication, guarded, current.Owner, after.Owner);
+            if (!invocation->Close())
+                throw std::logic_error("Compositor CPU mutation must execute exactly once synchronously on its owner thread");
+            // These swaps cannot allocate or call user code. Commit the accepted
+            // selection only after the native session accepted both CPU/Metal.
+            current.Ranges.swap(after.Ranges);
+            current.Owner.swap(after.Owner);
+            selected.Views.swap(nextSelected.snapshot.Views);
+            selected.Scope.swap(nextSelected.snapshot.Scope);
+            selected.Generation = nextSelected.snapshot.Generation;
+            writable.swap(nextSelected.writes);
+            generation = publication;
+        } catch (...) {
+            invocation->Close();
+            if (invocation->Started()) {
+                poisoned = true;
+                terminalPrevious = current.Owner;
+                terminalNext = after.Owner;
+            }
+            active.reset();
+            throw;
+        }
+        active.reset();
     }
 
     void Publish(const Publisher& publisher, const GuestMemorySnapshot& previous,
@@ -348,7 +467,7 @@ GuestMemoryMetalMappings GuestMemoryMetalCompositor::InitialMappings() const {
     impl->Available();
     if (!impl->bound) throw std::logic_error("Compositor runtime scope has not been bound");
     if (impl->generation != 1)
-        throw std::logic_error("Compositor initial mappings are only available before dynamic publication");
+        throw std::logic_error("Compositor initial mappings are only available before later publication");
     impl->machine.ValidateOwnedMappings(impl->selected);
     return impl->initial;
 }
@@ -364,6 +483,35 @@ GuestMemoryRuntime::Transaction GuestMemoryMetalCompositor::MakeTransaction(Publ
     return [this, publisher = std::move(publisher)](const GuestMemorySnapshot& previous,
         const GuestMemorySnapshot& next, const std::function<void()>& mutateCpu) {
         impl->Publish(publisher, previous, next, mutateCpu);
+    };
+}
+
+Machine::OwnedMappingTransaction GuestMemoryMetalCompositor::MakeOwnedTransaction(
+    Publisher publisher, OwnedSelector selector) {
+    impl->Available();
+    if (!impl->bound) throw std::logic_error("Compositor runtime scope has not been bound");
+    if (!publisher) throw std::invalid_argument("Compositor publisher is empty");
+    if (!selector) throw std::invalid_argument("Compositor owned selector is empty");
+    // The only full capture is here, while idle, before installing the hook.
+    // Later callbacks use Machine's private staged proof, including host calls.
+    const auto full = impl->machine.PinOwnedMappings();
+    auto invocation = std::make_shared<PublicationInvocation>();
+    impl->active = invocation;
+    try {
+        impl->ValidateSelection(Impl::Select(full, selector));
+        impl->machine.ValidateOwnedMappings(full);
+        invocation->CheckClean();
+        invocation->Close();
+        impl->active.reset();
+    } catch (...) {
+        invocation->Close();
+        impl->active.reset();
+        throw;
+    }
+    return [this, publisher = std::move(publisher), selector = std::move(selector)](
+        const OwnedMappingSnapshot& previous, const OwnedMappingSnapshot& candidate,
+        const std::function<void()>& commitCpu) {
+        impl->PublishOwned(publisher, selector, previous, candidate, commitCpu);
     };
 }
 
