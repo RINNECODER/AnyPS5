@@ -21,7 +21,10 @@ ComputeDispatchState DecodeComputeDispatch(const QueueState& queue, std::span<co
     result.programAddress = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) |
                             (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
     const auto userCount = (readRegister(queue.shader, 0x213) >> 1u) & 0x1fu;
-    for (std::uint32_t i = 0; i < userCount; ++i) result.userData.push_back(readRegister(queue.shader, 0x240 + i));
+    for (std::uint32_t i = 0; i < userCount; ++i) {
+        const auto user = queue.shader.find(0x240 + i);
+        result.userData.push_back(user == queue.shader.end() ? 0u : user->second);
+    }
     result.compute = Graphics::DecodeComputeStageInfo(queue.shader, noteComputeRegisterRead);
     result.waveSize = (packet[4] & 0x8000u) != 0 ? 32u : 64u;
     result.groups = {packet[1], packet[2], packet[3]};
