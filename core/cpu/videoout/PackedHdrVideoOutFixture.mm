@@ -83,13 +83,14 @@ struct Caller{
         require(m.Run(0x4000,0x1000,1000)==Cpu::StopReason::Address&&m.Get(Cpu::Register::Rsp)==0x5fd0,"Compiled packed-PQ caller did not return");
         return m.Get(Cpu::Register::Rax);}
 };
-id<CAMetalDrawable> captured=nil;IMP originalNext=nullptr;bool expectedHdr=true;
+id<CAMetalDrawable> captured=nil;IMP originalNext=nullptr;bool expectedHdr=true,expectedBlack=false;
 std::mutex frameErrorMutex;std::exception_ptr frameError;
 std::exception_ptr observedFrameError(){std::lock_guard lock(frameErrorMutex);return frameError;}
 id<CAMetalDrawable> nextDrawable(CAMetalLayer* layer,SEL selector){
     try{
     require(layer.pixelFormat==(expectedHdr?MTLPixelFormatBGR10A2Unorm:MTLPixelFormatBGRA8Unorm),"Native drawable format lost packed ten-bit storage or SDR reset");
     require(layer.wantsExtendedDynamicRangeContent==expectedHdr,"PQ EDR handoff or SDR reset differs");
+    require(!expectedBlack||layer.opaque,"Synthetic native black clear lost its opaque contract");
     if(expectedHdr){const auto space=layer.colorspace;require(space!=nullptr,"Packed PQ layer lost transfer/primaries metadata");
         const auto name=CGColorSpaceCopyName(space);const bool matches=name&&CFEqual(name,kCGColorSpaceITUR_2100_PQ);if(name)CFRelease(name);
         require(matches,"Native layer is not the independently named BT2100 PQ colorspace");}
@@ -113,12 +114,12 @@ struct Capture{
     ~Capture(){captured=nil;object_setClass(layer,prior);}
 };
 struct Completion{
-    id<MTLCommandQueue> queue;std::promise<void> done;unsigned frames=0;std::weak_ptr<Backing> owner;
+    id<MTLCommandQueue> queue;std::promise<void> done;unsigned frames=0;std::uint64_t priorCount=0;std::weak_ptr<Backing> owner;
 };
 std::uint64_t clock(void*){return 101;}std::uint64_t counter(void*){return 202;}
 void completed(void* context,VideoOutConfig& config,std::int64_t argument){
     auto& c=*static_cast<Completion*>(context);
-    try{require(argument==37&&config.flipStatus.count==0&&config.flipStatus.flipPendingNum==1&&!c.owner.expired(),"Packed HDR frame completed with wrong lifetime or ticket");
+    try{require(argument==37&&config.flipStatus.count==c.priorCount&&config.flipStatus.flipPendingNum==1&&!c.owner.expired(),"Packed HDR frame completed with wrong lifetime or ticket");
         require(captured!=nil,"Packed HDR native presenter acquired no actual drawable");const auto texture=captured.texture;
         require(texture.width>=Width&&texture.height>=Height&&texture.width%Width==0&&texture.height%Height==0&&texture.width/Width==texture.height/Height,"Drawable scale differs from independent pixel oracle");
         const auto row=(texture.width*4+255)&~NSUInteger{255};
@@ -133,19 +134,19 @@ void completed(void* context,VideoOutConfig& config,std::int64_t argument){
             // Check only the middle four source pixels of each stable 8x8
             // block. Their filter footprint cannot touch another code block;
             // no copied production interpolation algorithm supplies a golden.
-            if(expectedHdr&&(sourceX%8<2||sourceX%8>5||sourceY%8<2||sourceY%8>5))continue;
+            if(expectedHdr&&!expectedBlack&&(sourceX%8<2||sourceX%8>5||sourceY%8<2||sourceY%8>5))continue;
             std::uint32_t actual=0;
             std::memcpy(&actual,static_cast<unsigned char*>(bytes.contents)+y*row+x*4,4);
-            const auto expected=expectedHdr?nativeWord(codes(sourceX,sourceY)):0xff954317u;
+            const auto expected=expectedBlack?0xc0000000u:(expectedHdr?nativeWord(codes(sourceX,sourceY)):0xff954317u);
             require(actual==expected,"Native packed PQ drawable differs from independent full-ten-bit/channel/alpha golden");++checkedPixels;}
             for(NSUInteger b=texture.width*4;b<row;++b)require(static_cast<unsigned char*>(bytes.contents)[y*row+b]==0x35,"Native HDR readback overwrote padding");}
         require(checkedPixels>texture.width*texture.height/8,"Packed PQ drawable oracle checked too few block-interior pixels");
         captured=nil;++c.frames;c.done.set_value();
     }catch(...){c.done.set_exception(std::current_exception());throw;}
 }
-void present(Cpu::Machine& m,Cpu::SceNativeGraphicsSession& s,Completion& c,std::uint32_t handle,unsigned index){
+void present(Cpu::Machine& m,Cpu::SceNativeGraphicsSession& s,Completion& c,std::uint32_t handle,unsigned index,std::uint64_t priorCount=0){
     {std::lock_guard lock(frameErrorMutex);frameError=nullptr;}
-    c.done=std::promise<void>{};auto finished=c.done.get_future();
+    c.priorCount=priorCount;c.done=std::promise<void>{};auto finished=c.done.get_future();
     const std::array<std::uint32_t,6> packet{AgcDriver::FlipPacketHeader,handle,index,1,37,0};
     m.Write(Display+3*0x100000+CommandOffset,std::as_bytes(std::span(packet)));
     s.Driver().SubmitCommandBuffer(Display+3*0x100000+CommandOffset,packet.size(),0,0);
@@ -190,6 +191,14 @@ void run(const char* utility,const char* const* files){
     rejects([&]{AgcDriver::DecodeDisplayBufferPqHdr(tiledDescription,(*owners)[0]->bytes().first(Storage-1));},"invalid display buffer size");
     const auto original=std::vector<std::byte>((*owners)[0]->bytes().begin(),(*owners)[0]->bytes().end());
     present(machine,*session,completion,handle,0);require(std::equal(original.begin(),original.end(),(*owners)[0]->bytes().begin()),"Tiled HDR presentation altered source or tile padding");
+    // Existing synthetic internal BLACK=-2 emits an opaque native clear. This
+    // does not admit negative indices to the qualified target flip producer.
+    // A null-buffer clear must preserve the active packed PQ layer identity.
+    expectedBlack=true;
+    present(machine,*session,completion,handle,static_cast<std::uint32_t>(VIDEO_OUT_BUFFER_INDEX_BLACK),1);
+    require(completion.frames==2&&!completion.owner.expired(),"Synthetic native black clear lost registered owner or second completion");
+    require(std::equal(original.begin(),original.end(),(*owners)[0]->bytes().begin()),"Synthetic black clear altered retained HDR backing");
+    expectedBlack=false;
     require(guest.call(6,"N5KDtkIjjJ4",{handle,0},true)==0&&guest.call(2,"uquVH4-Du78",{handle},true)==0,"Qualified HDR backing did not retire after completion");
     const auto publicHandle=guest.call(0,"Up36PTk687E",{255,0,0,0},false);
     guest.call(3,"PjS5uASwcV8",{Attribute,Format,1,Width,Height,0,0,0},false);
@@ -205,8 +214,8 @@ void run(const char* utility,const char* const* files){
     const auto sdrHandle=guest.call(0,"Up36PTk687E",{255,0,0,0},false);attr.PixelFormat=0x8000000000000000ULL;store(machine,Attribute,attr);
     require(guest.call(4,"rKBUtgRrtbk",{sdrHandle,2,3,Rows,1,Attribute,0,0},false)==0,"SDR reset registration failed");present(machine,*session,completion,sdrHandle,3);
     require(guest.call(6,"N5KDtkIjjJ4",{sdrHandle,2},false)==0&&guest.call(2,"uquVH4-Du78",{sdrHandle},false)==0,"SDR reset registration failed to retire");
-    session->RequestStop();session->ShutdownAfterCpuStoppedMainThread();require(completion.frames==3,"Packed-PQ route fabricated or repeated completion");
-    std::cout<<"PASS compiled exact target HDR tiled registration -> actual BGR10A2 drawable; full ten-bit asymmetric channels/alpha/endpoints; separate public padded linear HDR; source/tile/readback guards; named BT2100 PQ/EDR handoff; same-layer SDR reset; no physical HDR claim\n";
+    session->RequestStop();session->ShutdownAfterCpuStoppedMainThread();require(completion.frames==4,"Packed-PQ route fabricated or repeated completion");
+    std::cout<<"PASS compiled exact target HDR tiled registration -> actual BGR10A2 drawable; full ten-bit asymmetric channels/alpha/endpoints; synthetic internal opaque black retains PQ/EDR; separate public padded linear HDR; source/tile/readback guards; named BT2100 PQ/EDR handoff; same-layer SDR reset; no physical HDR claim\n";
 }
 }
 int main(int argc,const char* argv[]){@autoreleasepool{try{require(argc==9,"Packed HDR fixture requires metallib and seven compiled callers");run(argv[1],argv+2);return 0;}catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}}}

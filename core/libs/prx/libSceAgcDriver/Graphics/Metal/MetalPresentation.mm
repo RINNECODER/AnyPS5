@@ -59,17 +59,20 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
     std::uint32_t height = 0;
     window.getDrawableSize(window.context, &width, &height);
     layer.device = backend.Device();
-    const bool pqHdr = buffer != nullptr && DisplayPqHdr(buffer->pixelFormat);
-    const auto pixelFormat = pqHdr ? MTLPixelFormatBGR10A2Unorm : MTLPixelFormatBGRA8Unorm;
-    CGColorSpaceRef pqColorSpace = pqHdr ? CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ) : nullptr;
-    if (pqHdr && pqColorSpace == nullptr) throw std::runtime_error("Metal cannot create the qualified BT.2100 PQ color space");
-    layer.pixelFormat = pixelFormat;
-    layer.colorspace = pqColorSpace;
-    if (pqColorSpace != nullptr) CGColorSpaceRelease(pqColorSpace);
-    layer.wantsExtendedDynamicRangeContent = pqHdr;
-    // No target mastering/content-light metadata is established. The matching PQ
-    // color space preserves its transfer identity; do not invent tone-map metadata.
-    layer.EDRMetadata = nil;
+    // Bufferless black/blank clears retain the active presentation transfer state.
+    // An actual SDR buffer resets it; a first clear keeps the layer's SDR default.
+    if (buffer != nullptr) {
+        const bool pqHdr = DisplayPqHdr(buffer->pixelFormat);
+        CGColorSpaceRef pqColorSpace = pqHdr ? CGColorSpaceCreateWithName(kCGColorSpaceITUR_2100_PQ) : nullptr;
+        if (pqHdr && pqColorSpace == nullptr) throw std::runtime_error("Metal cannot create the qualified BT.2100 PQ color space");
+        layer.pixelFormat = pqHdr ? MTLPixelFormatBGR10A2Unorm : MTLPixelFormatBGRA8Unorm;
+        layer.colorspace = pqColorSpace;
+        if (pqColorSpace != nullptr) CGColorSpaceRelease(pqColorSpace);
+        layer.wantsExtendedDynamicRangeContent = pqHdr;
+        // No target mastering/content-light metadata is established. The matching PQ
+        // color space preserves its transfer identity; do not invent tone-map metadata.
+        layer.EDRMetadata = nil;
+    }
     layer.framebufferOnly = YES;
     layer.opaque = buffer != nullptr || opaque;
     layer.drawableSize = CGSizeMake(width, height);
@@ -77,7 +80,7 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
     if (width != 0 && height != 0) {
         if (buffer != nullptr) {
             const auto pixels = displayPixels(*buffer);
-            auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat width:buffer->width height:buffer->height mipmapped:NO];
+            auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:buffer->width height:buffer->height mipmapped:NO];
             descriptor.storageMode = MTLStorageModeShared;
             descriptor.usage = MTLTextureUsageShaderRead;
             auto source = [backend.Device() newTextureWithDescriptor:descriptor];
