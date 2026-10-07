@@ -1,6 +1,7 @@
 #include <cpu/GuestThreads.hpp>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <deque>
 #include <limits>
 #include <map>
@@ -21,6 +22,20 @@ constexpr std::uint64_t SlotCount = 256;
 constexpr std::uint64_t ReturnGate = 0x7ff8ffff0000;
 constexpr std::uint64_t HandleBase = 0x4150533500000000;
 constexpr std::uint64_t Quantum = 4096;
+constexpr std::uint32_t Invalid = 0x80020016;
+constexpr std::uint32_t NotSupported = 0x8002002d;
+// Process-wide monotonic identities prevent destroyed slots or replacement
+// schedulers from accepting a previous scheduler's opaque attribute token.
+std::atomic<std::uint64_t> NextAttributeToken{0xa006000000000003ULL};
+
+std::uint64_t attributeToken() {
+    auto value = NextAttributeToken.load();
+    for (;;) {
+        if (value == std::numeric_limits<std::uint64_t>::max())
+            throw std::runtime_error("Translated guest thread attribute identity exhausted");
+        if (NextAttributeToken.compare_exchange_weak(value, value + 1)) return value;
+    }
+}
 
 [[noreturn]] void fail(const char* message) {
     throw std::runtime_error(std::string("Translated guest threads: ") + message);
@@ -57,6 +72,8 @@ struct GuestThreads::Impl {
         Mapping stack{};
         std::uint64_t errnoAddress = 0;
         std::uint64_t result = 0;
+        std::int32_t basePriority = GuestThreadPriorityDefault;
+        std::int32_t effectivePriority = GuestThreadPriorityDefault;
         std::uint64_t returnStack = 0;
         std::optional<GuestThreadHandle> joiner;
         std::unique_ptr<Pending> pending;
@@ -66,12 +83,22 @@ struct GuestThreads::Impl {
     Machine& machine;
     const std::thread::id owner = std::this_thread::get_id();
     std::map<GuestThreadHandle, std::unique_ptr<Record>> records;
+    struct Attribute {
+        std::uint64_t token;
+        std::int32_t priority = GuestThreadPriorityDefault;
+        std::int32_t inherit = 4;
+    };
+    std::map<std::uint64_t, Attribute> attributes;
     std::deque<GuestThreadHandle> runnable;
     GuestThreadHandle initial = 0;
     GuestThreadHandle active = 0;
     std::uint64_t nextSlot = 0;
     std::uint64_t nextWaitDomain = 1;
-    std::map<std::uint64_t, std::function<void(GuestThreadHandle)>> waitDomains;
+    struct Domain {
+        std::function<void(GuestThreadHandle)> stopped;
+        std::map<std::uint64_t, GuestThreadHandle> inheritanceOwners;
+    };
+    std::map<std::uint64_t, Domain> waitDomains;
     std::function<std::shared_ptr<SceTls>(std::uint64_t)> tlsFactory;
     std::uint64_t dtors = 0, count = 0, report = 0;
     bool withdrawn = false;
@@ -101,6 +128,21 @@ struct GuestThreads::Impl {
         checkOwner();
         if (!active) fail("there is no active guest thread");
         return lookup(active);
+    }
+    Attribute* attribute(std::uint64_t slot8) {
+        if (!slot8) return nullptr;
+        if (slot8 > std::numeric_limits<std::uint64_t>::max() - 8)
+            fail("guest thread attribute slot overflows");
+        std::uint64_t token = 0;
+        machine.Read(slot8, std::as_writable_bytes(std::span(&token, 1)));
+        const auto found = attributes.find(slot8);
+        if (found == attributes.end() || found->second.token != token) return nullptr;
+        return &found->second;
+    }
+    void checkParameter(std::uint64_t parameter4, Permission permission) const {
+        if (!parameter4 || parameter4 > std::numeric_limits<std::uint64_t>::max() - 4)
+            fail("guest thread scheduling parameter span is invalid");
+        machine.CheckAccess(parameter4, 4, permission);
     }
     void checkFree(std::uint64_t address, std::uint64_t size) const {
         for (const auto& mapping : machine.Mappings())
@@ -139,6 +181,45 @@ struct GuestThreads::Impl {
         record.state = record.finalizing ? State::Finishing : State::Runnable;
         enqueue(record, first);
     }
+    static bool live(const Record& record) {
+        return record.state != State::Finished && record.state != State::Reaped &&
+               record.state != State::Cancelled;
+    }
+    void recomputePriorities() {
+        // Rebuild from base priorities every time. Monotone propagation then
+        // converges even for cycles, without retaining withdrawn donations.
+        for (auto& [id, record] : records) record->effectivePriority = record->basePriority;
+        bool changed;
+        do {
+            changed = false;
+            for (const auto& [id, waiter] : records) {
+                if (waiter->state != State::BlockedWaiting || !waiter->pending ||
+                    waiter->pending->kind != Action::Wait || waiter->pending->awakened) continue;
+                const auto domain = waitDomains.find(waiter->pending->args[0]);
+                if (domain == waitDomains.end()) continue;
+                const auto ownership = domain->second.inheritanceOwners.find(waiter->pending->args[1]);
+                if (ownership == domain->second.inheritanceOwners.end()) continue;
+                const auto found = records.find(ownership->second);
+                if (found == records.end() || !live(*found->second)) continue;
+                auto& owner = *found->second;
+                if (waiter->effectivePriority < owner.effectivePriority) {
+                    owner.effectivePriority = waiter->effectivePriority;
+                    changed = true;
+                }
+            }
+        } while (changed);
+    }
+    void setInheritanceOwner(std::uint64_t domain, std::uint64_t key, GuestThreadHandle ownerId) {
+        checkOwner();
+        if (!key) fail("guest inheritance key is null");
+        const auto found = waitDomains.find(domain);
+        if (found == waitDomains.end()) fail("guest wait domain was withdrawn");
+        if (ownerId) {
+            if (!live(lookup(ownerId))) fail("guest inheritance owner has stopped");
+            found->second.inheritanceOwners[key] = ownerId;
+        } else found->second.inheritanceOwners.erase(key);
+        recomputePriorities();
+    }
     void notifyStopped(Record& record) {
         if (record.stoppedNotified) return;
         record.stoppedNotified = true;
@@ -146,8 +227,11 @@ struct GuestThreads::Impl {
         // registration lifetime never invalidates iteration.
         std::vector<std::function<void(GuestThreadHandle)>> callbacks;
         callbacks.reserve(waitDomains.size());
-        for (const auto& [id, callback] : waitDomains) callbacks.push_back(callback);
+        for (const auto& [id, domain] : waitDomains) callbacks.push_back(domain.stopped);
         for (const auto& callback : callbacks) if (callback) callback(record.id);
+        for (auto& [id, domain] : waitDomains)
+            std::erase_if(domain.inheritanceOwners, [&](const auto& item) { return item.second == record.id; });
+        recomputePriorities();
     }
     void cancelRecord(Record& record) {
         if (record.state == State::Finished || record.state == State::Reaped) return;
@@ -171,6 +255,7 @@ struct GuestThreads::Impl {
         record.pending->args[2] = result;
         record.pending->awakened = true;
         ready(record);
+        recomputePriorities();
         return true;
     }
     void withdrawWaitDomain(std::uint64_t domain) {
@@ -188,6 +273,7 @@ struct GuestThreads::Impl {
             cancel(StopReason::Requested);
         }
         waitDomains.erase(domain);
+        recomputePriorities();
     }
     void registerCallback(std::uint64_t& storage, std::uint64_t pc) {
         checkOwner();
@@ -246,7 +332,13 @@ struct GuestThreads::Impl {
     }
     void create(Record& parent) {
         const auto args = parent.pending->args;
-        if (args[1]) fail("nondefault guest thread attributes are unsupported");
+        auto priority = parent.basePriority;
+        if (args[1]) {
+            const auto attr = attribute(args[1]);
+            if (!attr)
+                fail("nondefault guest thread attributes are unsupported unless initialized by this scheduler");
+            if (attr->inherit == 0) priority = attr->priority;
+        }
         if (!tlsFactory) fail("guest thread creation requires a frozen TLS factory");
         machine.CheckAccess(args[0], 8, Permission::Write);
         if (overlaps(args[0], 8, {machine.Get(Register::Rsp), 8, Permission::Read, false}))
@@ -258,6 +350,8 @@ struct GuestThreads::Impl {
         const auto base = slot();
         auto child = std::make_unique<Record>();
         child->id = HandleBase + nextSlot;
+        child->basePriority = priority;
+        child->effectivePriority = child->basePriority;
         child->owned.reserve(5);
         auto saved = machine.CaptureContext();
         bool inserted = false;
@@ -391,6 +485,7 @@ struct GuestThreads::Impl {
         case Action::Wait:
             if (!waitDomains.contains(record.pending->args[0])) fail("guest wait domain was withdrawn before suspension");
             record.state = State::BlockedWaiting;
+            recomputePriorities();
             break;
         case Action::ExitThread: beginFinish(record, record.pending->args[0]); break;
         case Action::TerminateEntry:
@@ -442,8 +537,13 @@ struct GuestThreads::Impl {
             if (const auto stopped = observeStop()) return cancel(*stopped);
             if (!budget.Remaining()) return StopReason::InstructionLimit;
             if (runnable.empty()) fail("guest wait/join graph has no runnable work and cannot make progress");
-            auto& record = lookup(runnable.front());
-            runnable.pop_front();
+            // Stable selection leaves equal-priority FIFO order intact while
+            // ABI continuation front insertions cannot outrank donated owners.
+            const auto selected = std::min_element(runnable.begin(), runnable.end(), [&](auto left, auto right) {
+                return lookup(left).effectivePriority < lookup(right).effectivePriority;
+            });
+            auto& record = lookup(*selected);
+            runnable.erase(selected);
             if (record.state != State::Runnable && record.state != State::Finishing)
                 fail("guest run queue contains an ineligible thread");
             activate(record);
@@ -479,6 +579,9 @@ struct GuestThreads::Impl {
             if (reason == StopReason::Requested || reason == StopReason::Exit) return cancel(reason);
             if (const auto stopped = observeStop()) return cancel(*stopped);
             if (reason == StopReason::InstructionLimit) {
+                // Internal translation slices do not turn guest FIFO into
+                // round-robin scheduling. The current continuation precedes
+                // equal-priority arrivals until it yields, blocks or finishes.
                 ready(record, true);
                 if (!budget.Remaining()) return reason;
             } else if (reason == StopReason::Paused) {
@@ -588,6 +691,7 @@ struct GuestThreads::Impl {
             retire(*record);
         }
         waitDomains.clear();
+        attributes.clear();
         records.clear();
         if (gateMapped) machine.Unmap(ReturnGate, PageSize);
         gateMapped = false;
@@ -642,6 +746,14 @@ bool GuestThreads::WaitDomain::Wake(GuestThreadHandle thread, std::uint64_t key,
     if (!state) fail("guest wait domain is empty");
     return state->lock()->wake(state->id, thread, key, result);
 }
+void GuestThreads::WaitDomain::SetInheritanceOwner(std::uint64_t key, GuestThreadHandle owner) {
+    if (!state) fail("guest wait domain is empty");
+    state->lock()->setInheritanceOwner(state->id, key, owner);
+}
+std::int32_t GuestThreads::WaitDomain::EffectivePriority(GuestThreadHandle thread) const {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->lookup(thread).effectivePriority;
+}
 void GuestThreads::WaitDomain::Withdraw() {
     if (!state) return;
     if (auto live = state->scheduler.lock()) live->withdrawWaitDomain(state->id);
@@ -658,6 +770,8 @@ GuestThreads::~GuestThreads() {
 GuestThreadHandle GuestThreads::AdoptInitial(GuestInitialThread initial) {
     impl->checkOwner();
     if (impl->initial || impl->driving) fail("initial guest thread is already adopted or executing");
+    if (initial.BasePriority < GuestThreadPriorityMin || initial.BasePriority > GuestThreadPriorityMax)
+        fail("initial guest priority is outside the qualified FIFO range");
     impl->machine.CheckAccess(initial.Entry, 1, Permission::Execute);
     if (!initial.Stack.Size) fail("initial guest stack is empty");
     impl->machine.CheckAccess(initial.Stack.Address, initial.Stack.Size, Permission::Read | Permission::Write);
@@ -672,6 +786,7 @@ GuestThreadHandle GuestThreads::AdoptInitial(GuestInitialThread initial) {
     record->owned.reserve(1);
     record->id = HandleBase + impl->nextSlot;
     record->initial = true;
+    record->basePriority = record->effectivePriority = initial.BasePriority;
     record->stack = initial.Stack;
     record->tls = std::move(initial.Tls);
     record->errnoAddress = base;
@@ -704,6 +819,72 @@ std::int32_t GuestThreads::Equal(GuestThreadHandle left, GuestThreadHandle right
     impl->lookup(right);
     return left == right;
 }
+std::int32_t GuestThreads::BasePriority(GuestThreadHandle thread) const {
+    impl->checkOwner();
+    return impl->lookup(thread).basePriority;
+}
+std::int32_t GuestThreads::EffectivePriority(GuestThreadHandle thread) const {
+    impl->checkOwner();
+    return impl->lookup(thread).effectivePriority;
+}
+std::uint32_t GuestThreads::AttributeInit(std::uint64_t slot8) {
+    impl->checkOwner();
+    if (!slot8) return Invalid;
+    if (slot8 > std::numeric_limits<std::uint64_t>::max() - 8)
+        fail("guest thread attribute slot overflows");
+    impl->machine.CheckAccess(slot8, 8, Permission::Write);
+    if (impl->attributes.contains(slot8))
+        fail("reinitialization of a live owned guest thread attribute is unsupported");
+    const auto token = attributeToken();
+    const auto position = impl->attributes.emplace(slot8, Impl::Attribute{token}).first;
+    try { write64(impl->machine, slot8, token); }
+    catch (...) { impl->attributes.erase(position); throw; }
+    return 0;
+}
+std::uint32_t GuestThreads::AttributeDestroy(std::uint64_t slot8) {
+    impl->checkOwner();
+    if (!impl->attribute(slot8)) return Invalid;
+    write64(impl->machine, slot8, 0);
+    impl->attributes.erase(slot8);
+    return 0;
+}
+std::uint32_t GuestThreads::AttributeSetPriority(std::uint64_t slot8, std::uint64_t parameter4) {
+    impl->checkOwner();
+    auto attr = impl->attribute(slot8);
+    if (!attr) return Invalid;
+    if (!parameter4) return NotSupported;
+    impl->checkParameter(parameter4, Permission::Read);
+    std::int32_t priority;
+    impl->machine.Read(parameter4, std::as_writable_bytes(std::span(&priority, 1)));
+    if (priority < GuestThreadPriorityMin || priority > GuestThreadPriorityMax) return NotSupported;
+    attr->priority = priority;
+    return 0;
+}
+std::uint32_t GuestThreads::AttributeGetPriority(std::uint64_t slot8, std::uint64_t output4) {
+    impl->checkOwner();
+    const auto attr = impl->attribute(slot8);
+    if (!attr || !output4) return Invalid;
+    impl->checkParameter(output4, Permission::Write);
+    impl->machine.Write(output4, std::as_bytes(std::span(&attr->priority, 1)));
+    return 0;
+}
+std::uint32_t GuestThreads::AttributeSetInherit(std::uint64_t slot8, std::int32_t inherit) {
+    impl->checkOwner();
+    auto attr = impl->attribute(slot8);
+    if (!attr) return Invalid;
+    if (inherit != 0 && inherit != 4) return NotSupported;
+    attr->inherit = inherit;
+    return 0;
+}
+std::uint32_t GuestThreads::AttributeSetPolicy(std::uint64_t slot8, std::int32_t policy) {
+    impl->checkOwner();
+    auto attr = impl->attribute(slot8);
+    if (!attr) return Invalid;
+    if (policy < 1 || policy > 3) return NotSupported;
+    if (policy != 1) fail("guest thread scheduling policies other than FIFO are unsupported");
+    attr->priority = GuestThreadPriorityDefault;
+    return 0;
+}
 GuestThreads::WaitDomain GuestThreads::CreateWaitDomain(Machine& associatedMachine,
                                                        std::function<void(GuestThreadHandle)> callback) {
     impl->checkOwner();
@@ -714,7 +895,7 @@ GuestThreads::WaitDomain GuestThreads::CreateWaitDomain(Machine& associatedMachi
     auto state = std::make_unique<WaitDomain::State>();
     state->scheduler = impl;
     state->id = id;
-    impl->waitDomains.emplace(id, std::move(callback));
+    impl->waitDomains.emplace(id, Impl::Domain{std::move(callback), {}});
     return WaitDomain(std::move(state));
 }
 void GuestThreads::RegisterThreadDtors(std::uint64_t pc) { impl->registerCallback(impl->dtors, pc); }

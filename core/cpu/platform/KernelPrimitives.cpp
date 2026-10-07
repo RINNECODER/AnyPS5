@@ -1,6 +1,7 @@
 #include "KernelPrimitives.hpp"
 #include <cpu/SceElf.hpp>
 #include <cpu/GuestThreads.hpp>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <deque>
@@ -47,10 +48,11 @@ void name(Machine& m, std::uint64_t p) {
 }
 std::span<const KernelPrimitiveImport> KernelPrimitiveInventory() { return inventory; }
 struct KernelPrimitives::Impl {
-    struct Attribute { std::uint64_t token; unsigned type = 1; };
+    struct Attribute { std::uint64_t token; unsigned type = 1; unsigned protocol = 0; };
     struct Mutex {
         std::uint64_t token;
         unsigned type;
+        unsigned protocol;
         std::uint64_t owner = 0;
         unsigned depth = 0;
         bool abandoned = false;
@@ -86,20 +88,41 @@ struct KernelPrimitives::Impl {
         for (auto& [slot, state] : mutexes) {
             std::erase(state.waiters, id);
             // Nonrobust owner death must never silently grant another owner.
-            if (state.owner == id) state.abandoned = true;
+            if (state.owner == id) {
+                state.abandoned = true;
+                if (state.protocol == 1 && waits) waits->SetInheritanceOwner(state.token, 0);
+            }
         }
     }
     void wake(Mutex& state) {
-        while (!state.waiters.empty()) {
-            const auto id = state.waiters.front();
-            state.waiters.pop_front();
-            if (waits && waits->Wake(id, state.token, 0)) {
-                state.owner = id;
-                state.depth = 1;
-                return;
-            }
-        }
         state.owner = 0;
+        state.depth = 0;
+        if (state.protocol == 1) waits->SetInheritanceOwner(state.token, 0);
+        while (!state.waiters.empty()) {
+            // Only suspended calls may acquire. Cancellation and failed
+            // continuation validation must not retain a priority donation.
+            if (waits) std::erase_if(state.waiters, [&](auto id) {
+                return !waits->IsWaiting(id, state.token);
+            });
+            if (state.waiters.empty()) break;
+            auto selected = state.waiters.begin();
+            if (state.protocol == 1) {
+                selected = std::min_element(state.waiters.begin(), state.waiters.end(), [&](auto a, auto b) {
+                    return waits->EffectivePriority(a) < waits->EffectivePriority(b);
+                }); // min_element preserves FIFO for equal effective priority.
+            }
+            const auto id = *selected;
+            state.waiters.erase(selected);
+            // Reserve exclusive ownership before making the selected thread
+            // runnable; a lower-priority contender cannot steal the transfer.
+            state.owner = id;
+            state.depth = 1;
+            if (state.protocol == 1) waits->SetInheritanceOwner(state.token, id);
+            if (waits && waits->Wake(id, state.token, 0)) return;
+            state.owner = 0;
+            state.depth = 0;
+            if (state.protocol == 1) waits->SetInheritanceOwner(state.token, 0);
+        }
     }
     std::uint64_t thread() {
         const auto id = active();
@@ -125,7 +148,10 @@ struct KernelPrimitives::Impl {
             if (op == 7) {
                 const auto protocol = static_cast<std::uint32_t>(arg);
                 if (protocol > 2) return error(Invalid);
-                if (protocol) throw std::runtime_error("Unsupported kernel mutex priority protocol: inheritance/protection are not implemented");
+                if (protocol == 2) throw std::runtime_error("Unsupported kernel mutex priority protocol2 protection");
+                if (protocol == 1 && !waits)
+                    throw std::runtime_error("Unsupported kernel mutex priority protocol1 inheritance: guest scheduler integration required");
+                attr->second.protocol = protocol;
                 return 0;
             }
             span(machine, slot, Permission::Write); write(machine, slot, 0); attributes.erase(attr); return 0;
@@ -133,17 +159,18 @@ struct KernelPrimitives::Impl {
         if (op == 0) {
             span(machine, slot, Permission::Write);
             if (mutexes.contains(slot)) return error(Busy);
-            unsigned type = 1;
+            unsigned type = 1, protocol = 0;
             if (arg) {
                 const auto token = read(machine, arg); auto attr = attributes.find(arg);
                 if (token) {
                     if (attr == attributes.end() || attr->second.token != token) return error(Invalid);
                     type = attr->second.type;
+                    protocol = attr->second.protocol;
                 }
             }
             name(machine, label);
             auto token = nextToken.fetch_add(1);
-            mutexes.emplace(slot, Mutex{token, type, 0, 0, false, {}}); write(machine, slot, token); return 0;
+            mutexes.emplace(slot, Mutex{token, type, protocol, 0, 0, false, {}}); write(machine, slot, token); return 0;
         }
         const auto token = read(machine, slot);
         if (op == 3 && token < 2) return 0; // Upstream static initializer destroy preserves the slot.
@@ -155,7 +182,7 @@ struct KernelPrimitives::Impl {
             thread(); // Validate scheduler identity before publishing a lazy initializer.
             span(machine, slot, Permission::Write);
             auto created = nextToken.fetch_add(1);
-            mutex = mutexes.emplace(slot, Mutex{created, token == 1 ? 4u : 1u, 0, 0, false, {}}).first;
+            mutex = mutexes.emplace(slot, Mutex{created, token == 1 ? 4u : 1u, 0, 0, 0, false, {}}).first;
             write(machine, slot, created);
         } else if (mutex == mutexes.end() || mutex->second.token != token) return error(Invalid);
         auto& state = mutex->second;
@@ -163,7 +190,9 @@ struct KernelPrimitives::Impl {
             throw std::runtime_error("Unsupported nonrobust kernel mutex owner-exit recovery");
         if (op == 3) {
             if (state.owner || !state.waiters.empty()) return error(Busy);
-            span(machine, slot, Permission::Write); write(machine, slot, 2); mutexes.erase(mutex); return 0;
+            span(machine, slot, Permission::Write); write(machine, slot, 2);
+            if (state.protocol == 1) waits->SetInheritanceOwner(state.token, 0);
+            mutexes.erase(mutex); return 0;
         }
         const auto id = thread();
         if (op == 2) {
@@ -185,7 +214,9 @@ struct KernelPrimitives::Impl {
             catch (...) { state.waiters.pop_back(); throw; }
             return 0; // Suspended call is completed by the scheduler only after wake.
         }
-        state.owner = id; state.depth = 1; return 0;
+        state.owner = id; state.depth = 1;
+        if (state.protocol == 1) waits->SetInheritanceOwner(state.token, id);
+        return 0;
     }
 };
 KernelPrimitives::KernelPrimitives(Machine& m, std::function<std::uint64_t()> active, std::uint64_t b)
