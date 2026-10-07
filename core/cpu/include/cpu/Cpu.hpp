@@ -19,6 +19,18 @@ struct Mapping {
     Permission Permissions;
     bool Borrowed;
 };
+struct OwnedMappingView {
+    Mapping Region;
+    std::span<std::byte> Bytes;
+    std::span<std::byte> Allocation;
+    std::uint64_t BackingIdentity;
+    std::shared_ptr<void> Owner;
+};
+struct OwnedMappingSnapshot {
+    std::shared_ptr<const void> Scope;
+    std::uint64_t Generation;
+    std::vector<OwnedMappingView> Views;
+};
 
 class Machine {
 public:
@@ -63,6 +75,11 @@ public:
     void Protect(std::uint64_t address, std::size_t size, Permission permissions);
     void ProtectFragment(std::uint64_t address, std::size_t size, Permission permissions);
     std::vector<Mapping> Mappings() const;
+    // Capture on the idle CPU owner. Descriptors describe this generation;
+    // bytes remain live. Pins retain allocations, not guest address bindings:
+    // callers must synchronize publication and retirement with CPU mutations.
+    // Borrowed aliases into owned storage are included; external storage is not.
+    OwnedMappingSnapshot PinOwnedMappings() const;
     void CheckAccess(std::uint64_t address, std::size_t size, Permission permissions) const;
     void Read(std::uint64_t address, std::span<std::byte> output) const;
     void Write(std::uint64_t address, std::span<const std::byte> input);
