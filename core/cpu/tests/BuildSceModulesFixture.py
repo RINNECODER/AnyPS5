@@ -28,6 +28,8 @@ MAIN_IMPORTS = {name: GUEST_EXPORTS[name] for name in (
     "SceModuleMath", "SceModuleObject", "SceModuleInitCount", "SceModuleFiniCount",
     "SceModuleOrder", "SceModuleTls", "SceModuleTlsZero")}
 MAIN_IMPORTS[EXIT_NID] = 2
+HOST_IMPORTS = {"strlen": 2}
+MAIN_IMPORTS.update(HOST_IMPORTS)
 
 
 def nid(name):
@@ -151,7 +153,7 @@ def package(linked_path, output_path, main):
         return offset
 
     expected_exports = MAIN_EXPORTS if main else GUEST_EXPORTS
-    expected_imports = MAIN_IMPORTS if main else {}
+    expected_imports = MAIN_IMPORTS if main else HOST_IMPORTS
     exports, imports = set(), set()
     for offset in range(0, len(symbols), 24):
         name_offset, info, visibility, section, value, size = struct.unpack_from("<IBBHQQ", symbols, offset)
@@ -172,7 +174,8 @@ def package(linked_path, output_path, main):
                 raise ValueError(f"Unexpected compiled module import: {name}")
             imports.add(name)
             symbols[offset + 4] = (info & 0xf0) | expected_imports[name]
-            scoped_name = EXIT_NID + "#C#C" if name == EXIT_NID else nid(name) + "#B#B"
+            scoped_name = (EXIT_NID if name == EXIT_NID else nid(name)) + (
+                "#C#C" if name == EXIT_NID or name in HOST_IMPORTS else "#B#B")
         struct.pack_into("<I", symbols, offset, new_string(scoped_name))
     if exports != set(expected_exports) or imports != set(expected_imports):
         raise ValueError(f"Missing compiled exports/imports: {set(expected_exports) - exports}, {set(expected_imports) - imports}")
@@ -182,11 +185,13 @@ def package(linked_path, output_path, main):
                 (0x61000047, (1 << 32) | own_name_offset), (0x61000017, 0)]
     if main:
         guest_name_offset = new_string(GUEST_NAME)
-        libc_name_offset = new_string("libc")
-        for identity_id, name_offset in ((1, guest_name_offset), (2, libc_name_offset)):
-            sce_tags += [(0x61000045, (identity_id << 48) | (0x101 << 32) | name_offset),
-                         (0x61000049, (identity_id << 48) | (1 << 32) | name_offset),
-                         (0x61000019, identity_id << 48)]
+        sce_tags += [(0x61000045, (1 << 48) | (0x101 << 32) | guest_name_offset),
+                     (0x61000049, (1 << 48) | (1 << 32) | guest_name_offset),
+                     (0x61000019, 1 << 48)]
+    libc_name_offset = new_string("libc")
+    sce_tags += [(0x61000045, (2 << 48) | (0x101 << 32) | libc_name_offset),
+                 (0x61000049, (2 << 48) | (1 << 32) | libc_name_offset),
+                 (0x61000019, 2 << 48)]
     for value in needed_names:
         sce_tags.append((1, new_string(value)))
     if 14 in tags:

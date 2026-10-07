@@ -12,6 +12,7 @@ EXPORT __thread volatile u64 SceModuleTls __attribute__((aligned(16), tls_model(
 EXPORT __thread u64* volatile SceModuleTlsPointer __attribute__((tls_model("initial-exec"))) = &anchor;
 EXPORT __thread volatile u64 SceModuleTlsZero __attribute__((tls_model("initial-exec")));
 extern const u64* SceModuleTlsIndex(void);
+extern u64 strlen(const char*);
 
 static u64* volatile relocatedAnchor = &anchor;
 static u8 composite[4096];
@@ -39,6 +40,7 @@ EXPORT int SceModuleFini(u64 args, const void* argp, void* param) {
 }
 
 EXPORT int SceModuleMath(u32 limit, u32 seed, u32* count, u32* sum, u32* checksum) {
+    if (strlen("SceModuleGuest") != 14) return 70;
     const u64* tlsIndex = SceModuleTlsIndex();
     if (SceModuleInitCount != 1 || SceModuleFiniCount || SceModuleOrder != 12 ||
         SceModuleObject != 0x10203041ul + limit || SceModuleTls != 0x22334456ul ||

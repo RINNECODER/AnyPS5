@@ -133,7 +133,8 @@ struct SceModules::Impl {
 
     Impl(Machine& guest, const SceModuleFile& executable, std::span<const SceModuleFile> dependencies,
          std::span<const SceHostModule> hostModules, const SceModuleResolver& resolver,
-         const std::optional<SceLibcInternalProvider>& libcInternal) : machine(guest), hosts(hostModules.begin(), hostModules.end()) {
+         const std::optional<SceLibcInternalProvider>& libcInternal,
+         const SceConsumerModuleResolver& consumerResolver) : machine(guest), hosts(hostModules.begin(), hostModules.end()) {
         if (dependencies.size() > 510 || hosts.size() > 510) fail("module graph exceeds the supported provider count");
         const auto add = [&](const SceModuleFile& file, bool isMain) {
             auto parsed = ParseSce(file.Path);
@@ -292,8 +293,11 @@ struct SceModules::Impl {
                 }
                 if (!value) {
                     if (hostMatches != 1) fail("unresolved typed import scope/version provider for " + import.Nid);
-                    if (!resolver) fail("missing typed host resolver for " + import.Nid);
-                    const auto hostValue = resolver(import, symbol.Type);
+                    if (!consumerResolver && !resolver) fail("missing typed host resolver for " + import.Nid);
+                    const auto hostValue = consumerResolver
+                        ? consumerResolver(SceImportConsumer{module.Image.Path, module.Image.Data->SourceSize,
+                            module.Image.Data->SourceSha256}, import, symbol.Type)
+                        : resolver(import, symbol.Type);
                     if (!hostValue || hostValue->Type != symbol.Type) fail("unresolved or wrongly typed host import " + import.Nid);
                     if (symbol.Type == 6) fail("host TLS imports require unsupported external TLS storage");
                     if (!hostValue->Address || hostValue->TlsModuleId || hostValue->TlsOffset ||
@@ -570,8 +574,9 @@ struct SceModules::Impl {
 
 SceModules::SceModules(Machine& machine, const SceModuleFile& main, std::span<const SceModuleFile> dependencies,
                      std::span<const SceHostModule> hosts, const SceModuleResolver& resolver,
-                     const std::optional<SceLibcInternalProvider>& libcInternal)
-    : impl(std::make_shared<Impl>(machine, main, dependencies, hosts, resolver, libcInternal)) {
+                     const std::optional<SceLibcInternalProvider>& libcInternal,
+                     const SceConsumerModuleResolver& consumerResolver)
+    : impl(std::make_shared<Impl>(machine, main, dependencies, hosts, resolver, libcInternal, consumerResolver)) {
     machine.AddHostCall(TerminationGate, [state = std::weak_ptr<Impl>(impl)](Machine&) {
         const auto context = state.lock();
         if (!context) fail("entry termination callback graph has expired");

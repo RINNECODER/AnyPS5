@@ -94,6 +94,19 @@ struct SceResolvedImport {
 
 using SceModuleResolver = std::function<std::optional<SceResolvedImport>(const SceImport&, std::uint8_t)>;
 
+// Source identity of the parsed image whose host import is being resolved.
+// The callback receives a call-scoped const snapshot; retain a copy if needed.
+struct SceImportConsumer {
+    std::filesystem::path Path;
+    std::uint64_t SourceSize = 0;
+    std::array<std::byte, 32> SourceSha256{};
+};
+
+// When supplied, this is authoritative for host imports: rejection does not
+// fall back to SceModuleResolver. A caller may explicitly compose providers.
+using SceConsumerModuleResolver = std::function<std::optional<SceResolvedImport>(
+    const SceImportConsumer&, const SceImport&, std::uint8_t)>;
+
 // Opt-in source identity for the supplied guest libc. Only the fixed, ABI-qualified
 // Internal function allowlist can forward to its libc/library-v1 exports. Guest
 // allocator, callback/DSO, errno and exception ownership remains with the provider.
@@ -117,7 +130,8 @@ public:
                std::span<const SceModuleFile> dependencies,
                std::span<const SceHostModule> hostModules,
                const SceModuleResolver& resolver,
-               const std::optional<SceLibcInternalProvider>& libcInternal = std::nullopt);
+               const std::optional<SceLibcInternalProvider>& libcInternal = std::nullopt,
+               const SceConsumerModuleResolver& consumerResolver = {});
     ~SceModules();
     SceModules(const SceModules&) = delete;
     SceModules& operator=(const SceModules&) = delete;
