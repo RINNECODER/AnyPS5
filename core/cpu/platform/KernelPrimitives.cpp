@@ -7,17 +7,26 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <tuple>
 
 namespace Cpu::Platform {
 namespace {
-constexpr std::array<KernelPrimitiveImport, 9> inventory{{
+constexpr unsigned mutexCount = 9;
+constexpr std::array<KernelPrimitiveImport, 21> inventory{{
     {"cmo1RIYva9o", "scePthreadMutexInit"}, {"upoVrzMHFeE", "scePthreadMutexTrylock"},
     {"tn3VlD0hG60", "scePthreadMutexUnlock"}, {"2Of0f+3mhhE", "scePthreadMutexDestroy"},
     {"F8bUHwAG284", "scePthreadMutexattrInit"}, {"iMp8QpE+XO4", "scePthreadMutexattrSettype"},
     {"smWEktiyyG0", "scePthreadMutexattrDestroy"}, {"1FGvU0i9saQ", "scePthreadMutexattrSetprotocol"},
-    {"9UK1vLZQft4", "scePthreadMutexLock"}}};
+    {"9UK1vLZQft4", "scePthreadMutexLock"},
+    {"2Tb92quprl0", "scePthreadCondInit"}, {"g+PZd2hiacg", "scePthreadCondDestroy"},
+    {"WKAXJ4XBPQ4", "scePthreadCondWait"}, {"kDh-NfxgMtE", "scePthreadCondSignal"},
+    {"JGgj7Uvrl+A", "scePthreadCondBroadcast"}, {"m5-2bsNfv7s", "scePthreadCondattrInit"},
+    {"waPcxYiR3WA", "scePthreadCondattrDestroy"},
+    {"0TyVk4MSLt0", "pthread_cond_init"}, {"RXXqi4CtF8w", "pthread_cond_destroy"},
+    {"Op8TBGY5KHg", "pthread_cond_wait"}, {"2MOy+rUfuhQ", "pthread_cond_signal"},
+    {"mkx2fVhNMsg", "pthread_cond_broadcast"}}};
 std::atomic<std::uint64_t> nextToken{0xa005000000000003ULL};
 constexpr auto rw = Permission::Read | Permission::Write;
 // Guest Orbis error table, independent of the host's errno numerals.
@@ -46,7 +55,8 @@ void name(Machine& m, std::uint64_t p) {
     throw std::runtime_error("Unsupported kernel mutex name exceeding bounded 4096-byte scan");
 }
 }
-std::span<const KernelPrimitiveImport> KernelPrimitiveInventory() { return inventory; }
+std::span<const KernelPrimitiveImport> KernelPrimitiveInventory() { return std::span(inventory).first(mutexCount); }
+std::span<const KernelPrimitiveImport> KernelConditionInventory() { return std::span(inventory).subspan(mutexCount); }
 struct KernelPrimitives::Impl {
     struct Attribute { std::uint64_t token; unsigned type = 1; unsigned protocol = 0; };
     struct Mutex {
@@ -57,6 +67,16 @@ struct KernelPrimitives::Impl {
         unsigned depth = 0;
         bool abandoned = false;
         std::deque<GuestThreadHandle> waiters;
+        unsigned conditionUsers = 0;
+    };
+    struct Condition {
+        std::uint64_t token;
+        std::deque<GuestThreadHandle> waiters;
+        unsigned users = 0;
+    };
+    struct ConditionWait {
+        std::uint64_t conditionSlot, conditionToken, mutexSlot, mutexToken;
+        unsigned mutexDepth;
     };
     using Key = std::tuple<std::string, std::uint16_t, std::uint16_t>;
     Machine& machine;
@@ -64,6 +84,10 @@ struct KernelPrimitives::Impl {
     std::uint64_t base;
     std::map<std::uint64_t, Attribute> attributes;
     std::map<std::uint64_t, Mutex> mutexes;
+    std::map<std::uint64_t, Condition> conditions;
+    std::set<std::uint64_t> destroyedConditionSlots;
+    std::map<std::uint64_t, std::uint64_t> conditionAttributes;
+    std::map<GuestThreadHandle, ConditionWait> conditionWaits;
     std::map<Key, std::uint64_t> gates;
     std::optional<GuestThreads::WaitDomain> waits;
     Impl(Machine& m, std::function<std::uint64_t()> callback, std::uint64_t b)
@@ -85,6 +109,8 @@ struct KernelPrimitives::Impl {
         machine.Unmap(base, 4096);
     }
     void stopped(GuestThreadHandle id) {
+        releaseConditionBinding(id);
+        for (auto& [slot, state] : conditions) std::erase(state.waiters, id);
         for (auto& [slot, state] : mutexes) {
             std::erase(state.waiters, id);
             // Nonrobust owner death must never silently grant another owner.
@@ -93,6 +119,36 @@ struct KernelPrimitives::Impl {
                 if (state.protocol == 1 && waits) waits->SetInheritanceOwner(state.token, 0);
             }
         }
+    }
+    void releaseConditionBinding(GuestThreadHandle id) {
+        const auto binding = conditionWaits.find(id);
+        if (binding == conditionWaits.end()) return;
+        const auto condition = conditions.find(binding->second.conditionSlot);
+        if (condition != conditions.end() && condition->second.token == binding->second.conditionToken)
+            --condition->second.users;
+        const auto mutex = mutexes.find(binding->second.mutexSlot);
+        if (mutex != mutexes.end() && mutex->second.token == binding->second.mutexToken)
+            --mutex->second.conditionUsers;
+        conditionWaits.erase(binding);
+    }
+    std::uint32_t completeCondition(GuestThreadHandle id) {
+        const auto binding = conditionWaits.find(id);
+        if (binding == conditionWaits.end())
+            throw std::runtime_error("Kernel condition wait lost its original binding");
+        const auto& original = binding->second;
+        const auto condition = conditions.find(original.conditionSlot);
+        const auto mutex = mutexes.find(original.mutexSlot);
+        // The scheduler already validated the suspended gate. Validate both
+        // original opaque slots and the reserved owner before returning Wait.
+        if (condition == conditions.end() || condition->second.token != original.conditionToken ||
+            read(machine, original.conditionSlot) != original.conditionToken ||
+            mutex == mutexes.end() || mutex->second.token != original.mutexToken ||
+            read(machine, original.mutexSlot) != original.mutexToken ||
+            mutex->second.abandoned || mutex->second.owner != id || mutex->second.depth != 1)
+            throw std::runtime_error("Kernel condition wait reacquisition identity/ownership rejected");
+        mutex->second.depth = original.mutexDepth;
+        releaseConditionBinding(id);
+        return 0;
     }
     void wake(Mutex& state) {
         state.owner = 0;
@@ -118,7 +174,12 @@ struct KernelPrimitives::Impl {
             state.owner = id;
             state.depth = 1;
             if (state.protocol == 1) waits->SetInheritanceOwner(state.token, id);
-            if (waits && waits->Wake(id, state.token, 0)) return;
+            if (waits) {
+                const bool granted = conditionWaits.contains(id)
+                    ? waits->Wake(id, state.token, [this, id] { return completeCondition(id); })
+                    : waits->Wake(id, state.token, 0);
+                if (granted) return;
+            }
             state.owner = 0;
             state.depth = 0;
             if (state.protocol == 1) waits->SetInheritanceOwner(state.token, 0);
@@ -128,6 +189,110 @@ struct KernelPrimitives::Impl {
         const auto id = active();
         if (!id) throw std::runtime_error("Kernel primitive requires an active guest thread");
         return id;
+    }
+    std::uint32_t conditionInvoke(unsigned op, std::uint64_t slot, std::uint64_t arg, std::uint64_t label) {
+        if (op == 5) {
+            span(machine, slot, Permission::Write);
+            if (conditionAttributes.contains(slot)) return error(Busy);
+            const auto token = nextToken.fetch_add(1);
+            conditionAttributes.emplace(slot, token);
+            write(machine, slot, token);
+            return 0;
+        }
+        if (op == 6) {
+            const auto token = read(machine, slot);
+            const auto attr = conditionAttributes.find(slot);
+            if (attr == conditionAttributes.end() || attr->second != token) return error(Invalid);
+            span(machine, slot, Permission::Write);
+            write(machine, slot, 0);
+            conditionAttributes.erase(attr);
+            return 0;
+        }
+        if (op == 0) {
+            span(machine, slot, Permission::Write);
+            if (conditions.contains(slot)) return error(Busy);
+            if (arg) {
+                const auto token = read(machine, arg);
+                const auto attr = conditionAttributes.find(arg);
+                if (attr == conditionAttributes.end() || attr->second != token) return error(Invalid);
+            }
+            name(machine, label);
+            const auto token = nextToken.fetch_add(1);
+            conditions.emplace(slot, Condition{token, {}, 0});
+            write(machine, slot, token);
+            destroyedConditionSlots.erase(slot);
+            return 0;
+        }
+        const auto token = read(machine, slot);
+        auto condition = conditions.find(slot);
+        if (condition != conditions.end() && condition->second.token != token) return error(Invalid);
+        if (condition == conditions.end() && destroyedConditionSlots.contains(slot)) return error(Invalid);
+        if (op == 1 && token == 0) return 0; // Pinned public static initializer destroy preserves zero.
+        if (token == 1) return error(Invalid); // Condition destroyed sentinel; mutexes retain their own sentinel 2.
+        if (token == 0 && (op == 2 || op == 3 || op == 4)) {
+            span(machine, slot, Permission::Write);
+            const auto created = nextToken.fetch_add(1);
+            condition = conditions.emplace(slot, Condition{created, {}, 0}).first;
+            write(machine, slot, created);
+        } else if (condition == conditions.end() || condition->second.token != token) return error(Invalid);
+        auto& state = condition->second;
+        if (op == 1) {
+            if (state.users) return error(Busy);
+            span(machine, slot, Permission::Write);
+            destroyedConditionSlots.insert(slot);
+            write(machine, slot, 1);
+            conditions.erase(condition);
+            return 0;
+        }
+        if (!waits) throw std::runtime_error("Kernel conditions require the actual guest scheduler");
+        if (op == 2) {
+            const auto mutexToken = read(machine, arg);
+            const auto mutex = mutexes.find(arg);
+            if (mutex == mutexes.end() || mutex->second.token != mutexToken) return error(Invalid);
+            auto& lock = mutex->second;
+            const auto id = thread();
+            if (lock.abandoned) throw std::runtime_error("Unsupported nonrobust condition mutex owner-exit recovery");
+            if (lock.owner != id) return error(Perm);
+            for (const auto& [waiter, binding] : conditionWaits)
+                if (binding.conditionToken == state.token && binding.mutexToken != mutexToken) return error(Invalid);
+            conditionWaits.emplace(id, ConditionWait{slot, state.token, arg, mutexToken, lock.depth});
+            try { state.waiters.push_back(id); }
+            catch (...) { conditionWaits.erase(id); throw; }
+            ++state.users;
+            ++lock.conditionUsers;
+            try { waits->BlockFromHostCall(state.token); }
+            catch (...) { state.waiters.pop_back(); releaseConditionBinding(id); throw; }
+            // One owner executes host gates serially: publication + suspension
+            // + full recursive release is atomic with respect to every guest
+            // signaler. The next guest slice cannot precede this release.
+            wake(lock);
+            return 0;
+        }
+        if (op != 3 && op != 4) throw std::runtime_error("Unknown kernel condition operation");
+        while (!state.waiters.empty()) {
+            const auto id = state.waiters.front();
+            const auto binding = conditionWaits.find(id);
+            if (binding == conditionWaits.end() || !waits->IsWaiting(id, state.token)) {
+                state.waiters.pop_front();
+                continue;
+            }
+            const auto mutex = mutexes.find(binding->second.mutexSlot);
+            if (mutex == mutexes.end() || mutex->second.token != binding->second.mutexToken ||
+                read(machine, binding->second.mutexSlot) != binding->second.mutexToken || mutex->second.abandoned)
+                throw std::runtime_error("Kernel condition signal original mutex identity rejected");
+            auto& lock = mutex->second;
+            lock.waiters.push_back(id);
+            if (!waits->TransferWait(id, state.token, lock.token)) {
+                lock.waiters.pop_back();
+                throw std::runtime_error("Kernel condition signal lost its exact parked wait");
+            }
+            state.waiters.pop_front();
+            // Reacquisition uses the actual mutex queue, priority inheritance,
+            // and reserved ownership. No runnable success precedes ownership.
+            if (!lock.owner) wake(lock);
+            if (op == 3) break; // Explicit condition order is FIFO, independent of mutex priority order.
+        }
+        return 0;
     }
     std::uint32_t invoke(unsigned op, std::uint64_t slot, std::uint64_t arg, std::uint64_t label) {
         if (op == 4) {
@@ -189,7 +354,7 @@ struct KernelPrimitives::Impl {
         if (state.abandoned)
             throw std::runtime_error("Unsupported nonrobust kernel mutex owner-exit recovery");
         if (op == 3) {
-            if (state.owner || !state.waiters.empty()) return error(Busy);
+            if (state.owner || !state.waiters.empty() || state.conditionUsers) return error(Busy);
             span(machine, slot, Permission::Write); write(machine, slot, 2);
             if (state.protocol == 1) waits->SetInheritanceOwner(state.token, 0);
             mutexes.erase(mutex); return 0;
@@ -237,7 +402,9 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
     unsigned op = 0;
     for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
     if (op == inventory.size()) return std::nullopt;
-    if (import.LibraryName != "libkernel" || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
+    const bool posix = op >= 16;
+    if ((import.LibraryName != "libkernel" && !(posix && import.LibraryName == "libScePosix")) ||
+        import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
         import.ModuleMajor != 1 || import.ModuleMinor != 1 || type != 2)
         throw std::runtime_error("Unsupported kernel primitive scope/version/type: " + import.Nid);
     const Impl::Key key{import.Nid, import.LibraryId, import.ModuleId};
@@ -247,7 +414,12 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
     constexpr std::array ret{std::byte{0xc3}}; impl->machine.Write(gate, ret);
     impl->machine.AddHostCall(gate, [weak = std::weak_ptr<Impl>(impl), op](Machine& m) {
         auto state = weak.lock(); if (!state) throw std::runtime_error("Kernel primitive provider expired");
-        m.Set(Register::Rax, state->invoke(op, m.Get(Register::Rdi), m.Get(Register::Rsi), m.Get(Register::Rdx)));
+        auto result = op < mutexCount
+            ? state->invoke(op, m.Get(Register::Rdi), m.Get(Register::Rsi), m.Get(Register::Rdx))
+            : state->conditionInvoke(op < 16 ? op - mutexCount : op - 16,
+                m.Get(Register::Rdi), m.Get(Register::Rsi), op < 16 ? m.Get(Register::Rdx) : 0);
+        if (op >= 16 && result >= 0x80020000u) result -= 0x80020000u;
+        m.Set(Register::Rax, result);
     });
     impl->gates.emplace(key, gate); return gate;
 }
@@ -257,8 +429,8 @@ TargetKernelMutexes::TargetKernelMutexes(Machine& machine, const std::shared_ptr
 std::optional<std::uint64_t> TargetKernelMutexes::Resolve(const SceImport& import, std::uint8_t type,
                                                         KernelMutexConsumer source) {
     unsigned op = 0;
-    for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
-    if (op == inventory.size()) return std::nullopt;
+    for (; op < mutexCount; ++op) if (inventory[op].Nid == import.Nid) break;
+    if (op == mutexCount) return std::nullopt;
     const bool eboot = source.Name == "eboot.bin" && source.Sha256 ==
         "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
     const bool libc = source.Name == "libc.prx" && source.Sha256 ==
@@ -271,6 +443,31 @@ std::optional<std::uint64_t> TargetKernelMutexes::Resolve(const SceImport& impor
         (libc && (import.LibraryId != 0 || import.ModuleId != 1)) ||
         (web && (import.LibraryId != 4 || import.ModuleId != 5)))
         throw std::runtime_error("Unsupported target kernel mutex consumer source/import row IDs");
+    return provider.Resolve(import, type);
+}
+std::optional<std::uint64_t> TargetKernelMutexes::ResolveCondition(const SceImport& import, std::uint8_t type,
+                                                                 std::uint64_t size, KernelMutexConsumer source) {
+    unsigned op = mutexCount;
+    for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
+    if (op == inventory.size()) return std::nullopt;
+    const bool eboot = source.Name == "eboot.bin" && source.Sha256 ==
+        "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
+    const bool libc = source.Name == "libc.prx" && source.Sha256 ==
+        "78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f";
+    const bool web = source.Name == "libSceNpCppWebApi.prx" && source.Sha256 ==
+        "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9";
+    const bool core = op < 14;
+    const bool attrs = op == 14 || op == 15;
+    const bool posix = op >= 16;
+    if (size || type != 2 || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
+        import.ModuleMajor != 1 || import.ModuleMinor != 1 ||
+        !(eboot || (libc && (core || op == 18 || op == 20)) || (web && core)) ||
+        (attrs && !eboot) ||
+        (eboot && (import.LibraryId != (posix ? 43 : 44) || import.ModuleId != 24 ||
+                   import.LibraryName != (posix ? "libScePosix" : "libkernel"))) ||
+        (libc && (import.LibraryId != 0 || import.ModuleId != 1 || import.LibraryName != "libkernel")) ||
+        (web && (import.LibraryId != 4 || import.ModuleId != 5 || import.LibraryName != "libkernel")))
+        throw std::runtime_error("Unsupported target kernel condition consumer source/import row");
     return provider.Resolve(import, type);
 }
 }

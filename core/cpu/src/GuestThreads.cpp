@@ -289,6 +289,14 @@ struct GuestThreads::Impl {
         recomputePriorities();
         return true;
     }
+    bool transferWait(std::uint64_t domain, GuestThreadHandle id, std::uint64_t key,
+                      std::uint64_t destinationKey) {
+        if (!destinationKey) fail("guest wait destination key is null");
+        if (!isWaiting(domain, id, key)) return false;
+        lookup(id).pending->args[1] = destinationKey;
+        recomputePriorities();
+        return true;
+    }
     bool wake(std::uint64_t domain, GuestThreadHandle id, std::uint64_t key,
               std::function<std::uint32_t()> completion) {
         // Owner host gates may queue a deletion result while the Machine is
@@ -908,6 +916,11 @@ void GuestThreads::WaitDomain::BlockFromHostCall(std::uint64_t key) {
 bool GuestThreads::WaitDomain::IsWaiting(GuestThreadHandle thread, std::uint64_t key) const {
     if (!state) fail("guest wait domain is empty");
     return state->lock()->isWaiting(state->id, thread, key);
+}
+bool GuestThreads::WaitDomain::TransferWait(GuestThreadHandle thread, std::uint64_t key,
+                                           std::uint64_t destinationKey) {
+    if (!state) fail("guest wait domain is empty");
+    return state->lock()->transferWait(state->id, thread, key, destinationKey);
 }
 bool GuestThreads::WaitDomain::Wake(GuestThreadHandle thread, std::uint64_t key, std::uint32_t result) {
     if (!state) fail("guest wait domain is empty");

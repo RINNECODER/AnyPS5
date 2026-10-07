@@ -165,6 +165,28 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_platform_kernel_round_robin
         COMMAND anyps5_platform_kernel_round_robin_test "${kernelRoundRobinFixture}")
     set_tests_properties(anyps5_platform_kernel_round_robin PROPERTIES TIMEOUT 30)
+    set(kernelConditionFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition.elf")
+    add_custom_command(OUTPUT "${kernelConditionFixture}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+            -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelConditionGuest.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelConditionFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition-linked.elf" "${kernelConditionFixture}"
+        DEPENDS fixtures/KernelConditionGuest.c tests/BuildKernelConditionFixture.py
+            tests/BuildKernelMutexThreadsFixture.py ../tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_condition_fixture DEPENDS "${kernelConditionFixture}")
+    add_executable(anyps5_platform_kernel_condition_test tests/KernelConditionTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_condition_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_condition_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_condition_test anyps5_platform_kernel_condition_fixture)
+    add_test(NAME anyps5_platform_kernel_condition
+        COMMAND anyps5_platform_kernel_condition_test "${kernelConditionFixture}")
+    set_tests_properties(anyps5_platform_kernel_condition PROPERTIES TIMEOUT 60)
     set(kernelEventsFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-events.elf")
     add_custom_command(OUTPUT "${kernelEventsFixture}"
         COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
