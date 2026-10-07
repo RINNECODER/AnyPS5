@@ -51,8 +51,13 @@ public:
     std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t observedSymbolType,
                                        KernelMutexConsumer);
     // Shares this exact provider's mutex ownership and wait domain. Only the
-    // pinned untimed condition rows/default attributes are admitted. The caller
-    // must supply the actual imported symbol size; timed/clock rows remain out.
+    // pinned untimed/default-attribute rows and two observed timed rows are
+    // admitted. Absolute POSIX time is signed seconds/nanoseconds on default
+    // realtime, compared each owner turn; relative SCE time is unsigned32
+    // microseconds on a saturated steady deadline. Both reacquire the same
+    // mutex before returning.
+    // The caller must supply the actual imported symbol size; clock setters and
+    // arbitrary attributes remain outside this engineering profile.
     std::optional<std::uint64_t> ResolveCondition(const SceImport&, std::uint8_t observedSymbolType,
                                                 std::uint64_t observedSymbolSize, KernelMutexConsumer);
 private:

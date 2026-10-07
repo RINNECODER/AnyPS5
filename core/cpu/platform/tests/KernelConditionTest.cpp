@@ -253,7 +253,9 @@ void targetAdmission() {
   }
  }
  require(admitted==24,"Exact imported condition consumer coverage differs");
- for(const auto nid:{"BmMjYxmew1w","27bAgiJmOh0","AAAAAAAAAAA"})
+ // CPU13 exact timed admissions are owned by KernelConditionTimeoutTest;
+ // retain the older unknown-NID denial without duplicating timed contracts.
+ for(const auto nid:{"AAAAAAAAAAA"})
   require(!target.ResolveCondition(scoped(nid),2,0,consumers[0]),"Unqualified/timed condition row fabricated a gate");
 }
 

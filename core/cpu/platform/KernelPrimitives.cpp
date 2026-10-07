@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <limits>
 #include <map>
@@ -15,7 +16,8 @@ namespace Cpu::Platform {
 namespace {
 constexpr unsigned mutexCount = 9;
 constexpr unsigned conditionEnd = 21;
-constexpr std::array<KernelPrimitiveImport, 23> inventory{{
+constexpr unsigned timeoutBegin = 23;
+constexpr std::array<KernelPrimitiveImport, 25> inventory{{
     {"cmo1RIYva9o", "scePthreadMutexInit"}, {"upoVrzMHFeE", "scePthreadMutexTrylock"},
     {"tn3VlD0hG60", "scePthreadMutexUnlock"}, {"2Of0f+3mhhE", "scePthreadMutexDestroy"},
     {"F8bUHwAG284", "scePthreadMutexattrInit"}, {"iMp8QpE+XO4", "scePthreadMutexattrSettype"},
@@ -28,11 +30,13 @@ constexpr std::array<KernelPrimitiveImport, 23> inventory{{
     {"0TyVk4MSLt0", "pthread_cond_init"}, {"RXXqi4CtF8w", "pthread_cond_destroy"},
     {"Op8TBGY5KHg", "pthread_cond_wait"}, {"2MOy+rUfuhQ", "pthread_cond_signal"},
     {"mkx2fVhNMsg", "pthread_cond_broadcast"},
-    {"7H0iTOciTLo", "pthread_mutex_lock"}, {"2Z+PpY6CaJg", "pthread_mutex_unlock"}}};
+    {"7H0iTOciTLo", "pthread_mutex_lock"}, {"2Z+PpY6CaJg", "pthread_mutex_unlock"},
+    {"27bAgiJmOh0", "pthread_cond_timedwait"},
+    {"BmMjYxmew1w", "scePthreadCondTimedwait"}}};
 std::atomic<std::uint64_t> nextToken{0xa005000000000003ULL};
 constexpr auto rw = Permission::Read | Permission::Write;
 // Guest Orbis error table, independent of the host's errno numerals.
-enum GuestErrno : unsigned { Perm = 1, Deadlock = 11, Busy = 16, Invalid = 22, Again = 35 };
+enum GuestErrno : unsigned { Perm = 1, Deadlock = 11, Busy = 16, Invalid = 22, Again = 35, TimedOut = 60 };
 std::uint32_t error(GuestErrno posix) { return 0x80020000u + posix; }
 void span(Machine& m, std::uint64_t p, Permission permission) {
     if (!p || p > std::numeric_limits<std::uint64_t>::max() - 8)
@@ -55,6 +59,31 @@ void name(Machine& m, std::uint64_t p) {
         std::byte b; m.Read(p + i, std::span(&b, 1)); if (b == std::byte{0}) return;
     }
     throw std::runtime_error("Unsupported kernel mutex name exceeding bounded 4096-byte scan");
+}
+using DeadlineClock = std::chrono::steady_clock;
+struct Deadline {
+    std::optional<DeadlineClock::time_point> relative;
+    std::int64_t seconds = 0, nanoseconds = 0;
+    bool Expired(DeadlineClock::time_point steady, std::chrono::system_clock::time_point realtime) const {
+        if (relative) return *relative <= steady;
+        const auto epoch = realtime.time_since_epoch();
+        auto nowSeconds = std::chrono::duration_cast<std::chrono::seconds>(epoch).count();
+        auto nowNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            epoch - std::chrono::seconds(nowSeconds)).count();
+        if (nowNanoseconds < 0) { --nowSeconds; nowNanoseconds += 1000000000; }
+        // Compare the validated raw fields without multiplying guest seconds.
+        // Absolute realtime waits therefore follow host wall-clock adjustments
+        // and even INT64_MAX seconds cannot overflow a duration conversion.
+        return seconds < nowSeconds || (seconds == nowSeconds && nanoseconds <= nowNanoseconds);
+    }
+};
+Deadline relativeDeadline(std::uint32_t microseconds) {
+    const auto now = DeadlineClock::now();
+    const auto maximum = DeadlineClock::time_point::max();
+    const auto roomMicroseconds = std::chrono::duration_cast<std::chrono::microseconds>(maximum - now).count();
+    if (microseconds > static_cast<std::uint64_t>(roomMicroseconds)) return {maximum};
+    return {now + std::chrono::duration_cast<DeadlineClock::duration>(
+        std::chrono::microseconds(static_cast<std::int64_t>(microseconds)))};
 }
 }
 std::span<const KernelPrimitiveImport> KernelPrimitiveInventory() { return std::span(inventory).first(mutexCount); }
@@ -81,6 +110,9 @@ struct KernelPrimitives::Impl {
     struct ConditionWait {
         std::uint64_t conditionSlot, conditionToken, mutexSlot, mutexToken;
         unsigned mutexDepth;
+        std::uint32_t result = 0;
+        std::optional<Deadline> deadline;
+        std::uint32_t timeoutResult = 0;
     };
     using Key = std::tuple<std::string, std::uint16_t, std::uint16_t>;
     Machine& machine;
@@ -152,8 +184,9 @@ struct KernelPrimitives::Impl {
             mutex->second.abandoned || mutex->second.owner != id || mutex->second.depth != 1)
             throw std::runtime_error("Kernel condition wait reacquisition identity/ownership rejected");
         mutex->second.depth = original.mutexDepth;
+        const auto result = original.result;
         releaseConditionBinding(id);
-        return 0;
+        return result;
     }
     void wake(Mutex& state) {
         state.owner = 0;
@@ -195,7 +228,48 @@ struct KernelPrimitives::Impl {
         if (!id) throw std::runtime_error("Kernel primitive requires an active guest thread");
         return id;
     }
-    std::uint32_t conditionInvoke(unsigned op, std::uint64_t slot, std::uint64_t arg, std::uint64_t label) {
+    void transferCondition(Condition& state, GuestThreadHandle id, std::uint32_t result) {
+        const auto binding = conditionWaits.find(id);
+        if (binding == conditionWaits.end() || !waits->IsWaiting(id, state.token))
+            throw std::runtime_error("Kernel condition transfer lost its exact parked wait");
+        const auto mutex = mutexes.find(binding->second.mutexSlot);
+        if (mutex == mutexes.end() || mutex->second.token != binding->second.mutexToken ||
+            read(machine, binding->second.mutexSlot) != binding->second.mutexToken || mutex->second.abandoned)
+            throw std::runtime_error("Kernel condition transfer original mutex identity rejected");
+        auto& lock = mutex->second;
+        lock.waiters.push_back(id);
+        if (!waits->TransferWait(id, state.token, lock.token)) {
+            lock.waiters.pop_back();
+            throw std::runtime_error("Kernel condition transfer lost its exact parked wait");
+        }
+        std::erase(state.waiters, id);
+        binding->second.result = result;
+        binding->second.deadline.reset();
+        // Reacquisition uses the actual mutex queue, priority inheritance,
+        // and reserved ownership. No runnable result precedes ownership.
+        if (!lock.owner) wake(lock);
+    }
+    bool pumpDeadlines() {
+        const auto now = DeadlineClock::now();
+        const auto realtime = std::chrono::system_clock::now();
+        bool pending = false;
+        for (auto& [slot, state] : conditions) {
+            // Preserve condition FIFO selection when multiple deadlines expire
+            // on the same owner turn; transfer removes exactly this queue entry.
+            const auto parked = state.waiters;
+            for (const auto id : parked) {
+                const auto binding = conditionWaits.find(id);
+                if (binding == conditionWaits.end() || !binding->second.deadline) continue;
+                if (!waits->IsWaiting(id, state.token)) continue;
+                if (binding->second.deadline->Expired(now, realtime))
+                    transferCondition(state, id, binding->second.timeoutResult);
+                else pending = true;
+            }
+        }
+        return pending;
+    }
+    std::uint32_t conditionInvoke(unsigned op, std::uint64_t slot, std::uint64_t arg, std::uint64_t label,
+                                  std::optional<Deadline> deadline = {}, std::uint32_t timeoutResult = 0) {
         if (op == 5) {
             span(machine, slot, Permission::Write);
             if (conditionAttributes.contains(slot)) return error(Busy);
@@ -273,7 +347,8 @@ struct KernelPrimitives::Impl {
             if (lock.owner != id) return error(Perm);
             for (const auto& [waiter, binding] : conditionWaits)
                 if (binding.conditionToken == state.token && binding.mutexToken != mutexToken) return error(Invalid);
-            conditionWaits.emplace(id, ConditionWait{slot, state.token, arg, mutexToken, lock.depth});
+            conditionWaits.emplace(id, ConditionWait{slot, state.token, arg, mutexToken, lock.depth, 0,
+                deadline, timeoutResult});
             try { state.waiters.push_back(id); }
             catch (...) { conditionWaits.erase(id); throw; }
             ++state.users;
@@ -294,20 +369,7 @@ struct KernelPrimitives::Impl {
                 state.waiters.pop_front();
                 continue;
             }
-            const auto mutex = mutexes.find(binding->second.mutexSlot);
-            if (mutex == mutexes.end() || mutex->second.token != binding->second.mutexToken ||
-                read(machine, binding->second.mutexSlot) != binding->second.mutexToken || mutex->second.abandoned)
-                throw std::runtime_error("Kernel condition signal original mutex identity rejected");
-            auto& lock = mutex->second;
-            lock.waiters.push_back(id);
-            if (!waits->TransferWait(id, state.token, lock.token)) {
-                lock.waiters.pop_back();
-                throw std::runtime_error("Kernel condition signal lost its exact parked wait");
-            }
-            state.waiters.pop_front();
-            // Reacquisition uses the actual mutex queue, priority inheritance,
-            // and reserved ownership. No runnable success precedes ownership.
-            if (!lock.owner) wake(lock);
+            transferCondition(state, id, 0);
             if (op == 3) break; // Explicit condition order is FIFO, independent of mutex priority order.
         }
         return 0;
@@ -426,13 +488,17 @@ KernelPrimitives::KernelPrimitives(Machine& m, const std::shared_ptr<GuestThread
     impl->waits.emplace(threads->CreateWaitDomain(m, [weak = std::weak_ptr<Impl>(impl)](GuestThreadHandle id) {
         if (const auto provider = weak.lock()) provider->stopped(id);
     }));
+    impl->waits->SetOwnerPump([weak = std::weak_ptr<Impl>(impl)] {
+        const auto provider = weak.lock();
+        return provider && provider->pumpDeadlines();
+    });
 }
 KernelPrimitives::~KernelPrimitives() = default;
 std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, std::uint8_t type) {
     unsigned op = 0;
     for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
     if (op == inventory.size()) return std::nullopt;
-    const bool posix = op >= 16;
+    const bool posix = op >= 16 && op != timeoutBegin + 1;
     if ((import.LibraryName != "libkernel" && !(posix && import.LibraryName == "libScePosix")) ||
         import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
         import.ModuleMajor != 1 || import.ModuleMinor != 1 || type != 2)
@@ -444,12 +510,34 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
     constexpr std::array ret{std::byte{0xc3}}; impl->machine.Write(gate, ret);
     impl->machine.AddHostCall(gate, [weak = std::weak_ptr<Impl>(impl), op](Machine& m) {
         auto state = weak.lock(); if (!state) throw std::runtime_error("Kernel primitive provider expired");
-        auto result = op < mutexCount || op >= conditionEnd
+        std::uint32_t result;
+        if (op >= timeoutBegin) {
+            std::optional<Deadline> deadline;
+            if (op == timeoutBegin) {
+                const auto pointer = m.Get(Register::Rdx);
+                if (!pointer) {
+                    m.Set(Register::Rax, static_cast<std::uint32_t>(Invalid));
+                    return;
+                }
+                if (pointer > std::numeric_limits<std::uint64_t>::max() - 16)
+                    throw std::runtime_error("Invalid kernel condition timespec span");
+                m.CheckAccess(pointer, 16, Permission::Read);
+                std::array<std::int64_t, 2> time;
+                m.Read(pointer, std::as_writable_bytes(std::span(time)));
+                if (time[1] < 0 || time[1] >= 1000000000) {
+                    m.Set(Register::Rax, static_cast<std::uint32_t>(Invalid));
+                    return;
+                }
+                deadline = Deadline{{}, time[0], time[1]};
+            } else deadline = relativeDeadline(static_cast<std::uint32_t>(m.Get(Register::Rdx)));
+            result = state->conditionInvoke(2, m.Get(Register::Rdi), m.Get(Register::Rsi), 0,
+                deadline, op == timeoutBegin ? static_cast<std::uint32_t>(TimedOut) : error(TimedOut));
+        } else result = op < mutexCount || op >= conditionEnd
             ? state->invoke(op < mutexCount ? op : (op == conditionEnd ? 8 : 2),
                 m.Get(Register::Rdi), m.Get(Register::Rsi), m.Get(Register::Rdx))
             : state->conditionInvoke(op < 16 ? op - mutexCount : op - 16,
                 m.Get(Register::Rdi), m.Get(Register::Rsi), op < 16 ? m.Get(Register::Rdx) : 0);
-        if (op >= 16 && result >= 0x80020000u) result -= 0x80020000u;
+        if (op >= 16 && op != timeoutBegin + 1 && result >= 0x80020000u) result -= 0x80020000u;
         m.Set(Register::Rax, result);
     });
     impl->gates.emplace(key, gate); return gate;
@@ -461,7 +549,7 @@ std::optional<std::uint64_t> TargetKernelMutexes::Resolve(const SceImport& impor
                                                         KernelMutexConsumer source) {
     unsigned op = 0;
     for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
-    if (op == inventory.size() || (op >= mutexCount && op < conditionEnd)) return std::nullopt;
+    if (op == inventory.size() || (op >= mutexCount && op < conditionEnd) || op >= timeoutBegin) return std::nullopt;
     const bool eboot = source.Name == "eboot.bin" && source.Sha256 ==
         "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
     const bool libc = source.Name == "libc.prx" && source.Sha256 ==
@@ -487,7 +575,10 @@ std::optional<std::uint64_t> TargetKernelMutexes::ResolveCondition(const SceImpo
                                                                  std::uint64_t size, KernelMutexConsumer source) {
     unsigned op = mutexCount;
     for (; op < conditionEnd; ++op) if (inventory[op].Nid == import.Nid) break;
-    if (op == conditionEnd) return std::nullopt;
+    if (op == conditionEnd) {
+        for (op = timeoutBegin; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
+        if (op == inventory.size()) return std::nullopt;
+    }
     const bool eboot = source.Name == "eboot.bin" && source.Sha256 ==
         "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
     const bool libc = source.Name == "libc.prx" && source.Sha256 ==
@@ -496,7 +587,17 @@ std::optional<std::uint64_t> TargetKernelMutexes::ResolveCondition(const SceImpo
         "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9";
     const bool core = op < 14;
     const bool attrs = op == 14 || op == 15;
-    const bool posix = op >= 16;
+    const bool posix = op >= 16 && op != timeoutBegin + 1;
+    if (op >= timeoutBegin) {
+        if (size || type != 2 || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
+            import.ModuleMajor != 1 || import.ModuleMinor != 1 ||
+            (op == timeoutBegin && !(eboot && import.LibraryName == "libScePosix" &&
+                import.LibraryId == 43 && import.ModuleId == 24)) ||
+            (op == timeoutBegin + 1 && !(libc && import.LibraryName == "libkernel" &&
+                import.LibraryId == 0 && import.ModuleId == 1)))
+            throw std::runtime_error("Unsupported target kernel condition timeout consumer source/import row");
+        return provider.Resolve(import, type);
+    }
     if (size || type != 2 || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
         import.ModuleMajor != 1 || import.ModuleMinor != 1 ||
         !(eboot || (libc && (core || op == 18 || op == 20)) || (web && core)) ||

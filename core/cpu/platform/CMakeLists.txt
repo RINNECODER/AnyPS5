@@ -209,6 +209,37 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_platform_kernel_static_mutex
         COMMAND anyps5_platform_kernel_static_mutex_test "${kernelStaticMutexFixture}")
     set_tests_properties(anyps5_platform_kernel_static_mutex PROPERTIES TIMEOUT 60)
+    set(kernelConditionTimeoutFixtures)
+    foreach(timeoutKind IN ITEMS posix relative)
+        set(timeoutDefine)
+        if(timeoutKind STREQUAL "relative")
+            set(timeoutDefine -DRELATIVE_TIMEOUT=1)
+        endif()
+        set(timeoutFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition-timeout-${timeoutKind}.elf")
+        list(APPEND kernelConditionTimeoutFixtures "${timeoutFixture}")
+        add_custom_command(OUTPUT "${timeoutFixture}"
+            COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+                -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+                -fno-asynchronous-unwind-tables ${timeoutDefine}
+                -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelConditionTimeoutGuest.c"
+                -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition-timeout-${timeoutKind}.o"
+            COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+                -z max-page-size=4096 -z separate-code -z norelro
+                -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition-timeout-${timeoutKind}-linked.elf"
+                "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition-timeout-${timeoutKind}.o"
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelConditionTimeoutFixture.py"
+                "${CMAKE_CURRENT_BINARY_DIR}/kernel-condition-timeout-${timeoutKind}-linked.elf" "${timeoutFixture}" "${timeoutKind}"
+            DEPENDS fixtures/KernelConditionTimeoutGuest.c tests/BuildKernelConditionTimeoutFixture.py
+                tests/BuildKernelMutexThreadsFixture.py ../tests/BuildSceCrtFixture.py VERBATIM)
+    endforeach()
+    add_custom_target(anyps5_platform_kernel_condition_timeout_fixture DEPENDS ${kernelConditionTimeoutFixtures})
+    add_executable(anyps5_platform_kernel_condition_timeout_test tests/KernelConditionTimeoutTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_condition_timeout_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_condition_timeout_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_condition_timeout_test anyps5_platform_kernel_condition_timeout_fixture)
+    add_test(NAME anyps5_platform_kernel_condition_timeout
+        COMMAND anyps5_platform_kernel_condition_timeout_test ${kernelConditionTimeoutFixtures})
+    set_tests_properties(anyps5_platform_kernel_condition_timeout PROPERTIES TIMEOUT 60)
     set(kernelEventsFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-events.elf")
     add_custom_command(OUTPUT "${kernelEventsFixture}"
         COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
