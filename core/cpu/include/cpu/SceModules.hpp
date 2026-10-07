@@ -103,9 +103,10 @@ struct SceImportConsumer {
 };
 
 // When supplied, this is authoritative for host imports: rejection does not
-// fall back to SceModuleResolver. A caller may explicitly compose providers.
+// fall back to SceModuleResolver. Type and size are the observed imported ELF
+// symbol's values. A caller may explicitly compose providers.
 using SceConsumerModuleResolver = std::function<std::optional<SceResolvedImport>(
-    const SceImportConsumer&, const SceImport&, std::uint8_t)>;
+    const SceImportConsumer&, const SceImport&, std::uint8_t, std::uint64_t)>;
 
 // Opt-in source identity for the supplied guest libc. Only the fixed, ABI-qualified
 // Internal function allowlist can forward to its libc/library-v1 exports. Guest

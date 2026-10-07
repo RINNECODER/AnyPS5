@@ -296,7 +296,7 @@ struct SceModules::Impl {
                     if (!consumerResolver && !resolver) fail("missing typed host resolver for " + import.Nid);
                     const auto hostValue = consumerResolver
                         ? consumerResolver(SceImportConsumer{module.Image.Path, module.Image.Data->SourceSize,
-                            module.Image.Data->SourceSha256}, import, symbol.Type)
+                            module.Image.Data->SourceSha256}, import, symbol.Type, symbol.Size)
                         : resolver(import, symbol.Type);
                     if (!hostValue || hostValue->Type != symbol.Type) fail("unresolved or wrongly typed host import " + import.Nid);
                     if (symbol.Type == 6) fail("host TLS imports require unsupported external TLS storage");
