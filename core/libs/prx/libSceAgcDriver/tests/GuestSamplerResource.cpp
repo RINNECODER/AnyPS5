@@ -181,9 +181,22 @@ void RunGuestSamplerResourceTests() {
     badPreclamp.pointPreclamp = true;
     rejectFields(badPreclamp, "point preclamping");
 
-    Fields badAnisoOverride = base;
-    badAnisoOverride.anisoOverride = true;
-    rejectFields(badAnisoOverride, "anisotropy override");
+    for (std::uint32_t mag = 0; mag < 4u; ++mag) for (std::uint32_t min = 0; min < 4u; ++min) {
+        Fields override = base;
+        override.anisoOverride = true;
+        override.xyMagFilter = mag;
+        override.xyMinFilter = min;
+        if (mag >= 2u || min >= 2u) {
+            rejectFields(override, "anisotropy override");
+        } else {
+            const auto words = pack(override);
+            const auto decoded = DecodeSamplerResource(words);
+            Require(decoded.magFilter == (mag == 0u ? VK_FILTER_NEAREST : VK_FILTER_LINEAR) &&
+                decoded.minFilter == (min == 0u ? VK_FILTER_NEAREST : VK_FILTER_LINEAR), "non-anisotropic override changed XY filtering");
+            Require(!decoded.anisotropyEnable && decoded.maxAnisotropy == 1.0f, "non-anisotropic override enabled anisotropy");
+            Require(decoded.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR && nearlyEqual(decoded.maxLod, 12.0f), "non-anisotropic override changed mip filtering or LOD");
+        }
+    }
 
     Fields badBlendZero = base;
     badBlendZero.blendZeroPrt = true;

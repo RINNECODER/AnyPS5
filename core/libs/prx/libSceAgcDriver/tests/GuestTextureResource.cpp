@@ -254,9 +254,17 @@ void RunGuestTextureResourceTests() {
     const auto compressed = DecodeTextureResource(pack(meta));
     Require(compressed.dccAddress == 0x100 && compressed.dccAlphaOnMsb, "DCC metadata was decoded wrongly");
 
-    Fields badSwizzle = base;
-    badSwizzle.bcSwizzle = 1;
-    rejectFields(badSwizzle, "BC swizzle");
+    Fields borderSwizzle = base;
+    borderSwizzle.bcSwizzle = 4;
+    const auto zyxw = DecodeTextureResource(pack(borderSwizzle));
+    Require(zyxw.baseAddress == (base.base40 << 8u) && zyxw.width == 16 && zyxw.height == 16 &&
+        zyxw.format == 56 && zyxw.dstSelX == 4 && zyxw.dstSelY == 5 && zyxw.dstSelZ == 6 && zyxw.dstSelW == 7,
+        "W-preserving border swizzle changed texture storage or destination selectors");
+    for (const std::uint32_t swizzle : {1u, 2u, 3u, 5u, 6u, 7u}) {
+        Fields badSwizzle = base;
+        badSwizzle.bcSwizzle = swizzle;
+        rejectFields(badSwizzle, "BC swizzle");
+    }
 
     Fields badLevels = base;
     badLevels.baseLevel = 2;
