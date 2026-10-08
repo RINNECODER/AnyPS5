@@ -36,6 +36,47 @@ class NativeWorkflowContracts(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
 
+    def assert_production_registration_inventory(self, group, registration, controls):
+        """Configure real fragments against prerequisite target interfaces, not a build."""
+        source = self.root / (group + '-source')
+        source.mkdir()
+        cpu = TOOLS.parent / 'core/cpu'
+        (source / 'CMakeLists.txt').write_text(
+            'cmake_minimum_required(VERSION 3.24)\n'
+            'project(RegistrationContract LANGUAGES C CXX OBJCXX)\n'
+            'enable_testing()\nset(BUILD_TESTING ON)\nset(cpuModernTcg ON)\n'
+            'find_package(Python3 REQUIRED COMPONENTS Interpreter)\n'
+            'find_program(platformGuestClang NAMES clang REQUIRED)\n'
+            'find_program(platformGuestLinker NAMES ld.lld HINTS /opt/homebrew/opt/lld/bin REQUIRED)\n'
+            'find_library(cpuAppKit AppKit REQUIRED)\n'
+            'foreach(target anyps5_cpu anyps5_native_module_runner)\n'
+            'add_library(${target} INTERFACE)\nendforeach()\n'
+            'add_custom_target(anyps5_sce_module_fixture)\n'
+            'add_custom_target(anyps5_metal_shaders)\n'
+            'add_executable(anyps5_cpu_run "' + (cpu / 'src/Main.cpp').as_posix() + '")\n'
+            'function(add_test_executable target)\n'
+            'set(sources)\nforeach(file IN LISTS ARGN)\n'
+            'if(NOT IS_ABSOLUTE "${file}")\n'
+            'set(file "${CMAKE_CURRENT_SOURCE_DIR}/${file}")\nendif()\n'
+            'list(APPEND sources "${file}")\nendforeach()\n'
+            'add_executable(${target} ${sources})\nendfunction()\n'
+            'set(CMAKE_CURRENT_SOURCE_DIR "' + cpu.as_posix() + '")\n' + registration)
+        build = self.root / (group + '-build')
+        configured = subprocess.run(['cmake', '-S', source, '-B', build],
+                                    capture_output=True, text=True, timeout=60)
+        self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        inventory = json.loads(subprocess.check_output(
+            ['ctest', '--test-dir', build, '--show-only=json-v1'], text=True, timeout=15))
+        names = [test['name'] for test in inventory['tests']]
+        self.assertEqual(len(names), len(set(names)), 'duplicate production registration')
+        for prefix, count in controls.items():
+            self.assertEqual(sum(name.startswith(prefix) for name in names), count,
+                             'production registration group was not activated: ' + prefix)
+        # Check the entire graph, not just the named group or a filtered inventory.
+        self.assertFalse(set(names) - workflow.required_tests('native'),
+                         'registered production controls absent from native qualification: ' +
+                         repr(sorted(set(names) - workflow.required_tests('native'))))
+
     def test_owned_inner_ninja_caps_parallelism_and_preserves_targets(self):
         fake = self.root / 'ninja'
         fake.write_text('#!' + sys.executable + '\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
@@ -49,6 +90,29 @@ class NativeWorkflowContracts(unittest.TestCase):
                 self.assertEqual(value, ['-j', '2', '-C', 'TCG build with spaces', 'libqemu-x86_64-softmmu.dylib'])
         query = json.loads(subprocess.check_output([launcher, '--version'], text=True))
         self.assertEqual(query, ['-j', '2', '--version'])
+
+    @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
+                         'Native CMake configuration requires Apple Silicon macOS')
+    def test_semaphore_registrations_are_required_by_native_qualification(self):
+        """Contract: all registered semaphore controls must enter the manifest.
+
+        Regression: ten platform cases or the runner case are omitted, so the
+        exact native package gate rejects a built candidate. Existing upstream
+        and synthetic-inventory controls never configure these production leaves.
+        Target interfaces supply prerequisites only; no runtime passing is claimed.
+        """
+        cpu = TOOLS.parent / 'core/cpu'
+        cases = (
+            ('semaphore-platform',
+             'add_subdirectory("' + (cpu / 'platform').as_posix() + '" platform)\n',
+             {'anyps5_platform_kernel_semaphore_': 10}),
+            ('semaphore-runner',
+             'include("' + (cpu / 'NativeModuleRunnerTests.cmake').as_posix() + '")\n',
+             {'anyps5_native_semaphore_runner': 1}),
+        )
+        for group, registration, controls in cases:
+            with self.subTest(group=group):
+                self.assert_production_registration_inventory(group, registration, controls)
 
     @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
                          'Native CMake configuration requires Apple Silicon macOS')
