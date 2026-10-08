@@ -64,15 +64,15 @@ namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
 static_assert(sizeof(RecompileResult) == 176, "RecompileResult changed: update EncodeResult and DecodeResult");
-static_assert(sizeof(DescriptorBinding) == 304, "DescriptorBinding changed: update the binding encoder");
+static_assert(sizeof(DescriptorBinding) == 456, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 28, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: update the parameter encoder");
 static_assert(sizeof(CompiledShaderInfo) == 304, "CompiledShaderInfo changed: update the info encoder");
 static_assert(sizeof(ShaderInfo) == 200, "ShaderInfo changed: update the info encoder");
 static_assert(sizeof(BufferResource) == 36, "BufferResource changed: update the info encoder");
 static_assert(sizeof(ImageResource) == 96, "ImageResource changed: update the info encoder");
-static_assert(sizeof(SamplerResource) == 12, "SamplerResource changed: update the info encoder");
-static_assert(sizeof(SampledResourcePair) == 12, "SampledResourcePair changed: update the info encoder");
+static_assert(sizeof(SamplerResource) == 20, "SamplerResource changed: update the info encoder");
+static_assert(sizeof(SampledResourcePair) == 20, "SampledResourcePair changed: update the info encoder");
 static_assert(sizeof(StageInput) == 56, "StageInput changed: update the info encoder");
 static_assert(sizeof(StageOutput) == 48, "StageOutput changed: update the info encoder");
 static_assert(sizeof(IrBindingLayout) == 64, "IrBindingLayout changed: update the layout encoder");
@@ -235,6 +235,139 @@ private:
     bool ok = true;
 };
 
+void encodePixelProof(Writer& out, const PixelSamplerProof& proof) {
+    out.Value(proof.imageSource);
+    out.Value(proof.samplerSource);
+    out.Value(proof.liveUseMask);
+    out.Value(proof.liveUseCount);
+    out.Value(proof.samplerLiveUseCount);
+    for (auto word : proof.imageDescriptor) out.Value(word);
+    for (auto word : proof.samplerDescriptor) out.Value(word);
+}
+void decodePixelProof(Reader& in, PixelSamplerProof& proof) {
+    in.Value(proof.imageSource);
+    in.Value(proof.samplerSource);
+    in.Value(proof.liveUseMask);
+    in.Value(proof.liveUseCount);
+    in.Value(proof.samplerLiveUseCount);
+    for (auto& word : proof.imageDescriptor) in.Value(word);
+    for (auto& word : proof.samplerDescriptor) in.Value(word);
+}
+void encodePixelProofs(Writer& writer, const std::vector<std::vector<PixelSamplerProof>>& proofs) {
+    writer.List(proofs, [](Writer& out, const auto& element) { out.List(element, encodePixelProof); });
+}
+void decodePixelProofs(Reader& reader, std::vector<std::vector<PixelSamplerProof>>& proofs) {
+    reader.List(proofs, 8, [](Reader& in, auto& element) { in.List(element, 68, decodePixelProof); });
+}
+
+bool validPixelBindings(const std::vector<DescriptorBinding>& bindings) {
+    for (const auto& binding : bindings) {
+        if (binding.role != DescriptorRole::GuestSamplers && binding.role != DescriptorRole::GuestImages) continue;
+        const bool sampler = binding.role == DescriptorRole::GuestSamplers;
+        const auto& flags = sampler ? binding.samplerUnnormalized : binding.imageUnnormalized;
+        const auto& proofs = sampler ? binding.samplerPixelProof : binding.imagePixelProof;
+        const auto stride = sampler ? 4u : 8u;
+        if ((!flags.empty() && flags.size() != binding.count) || (!proofs.empty() && proofs.size() != binding.count)) return false;
+        for (std::uint32_t element = 0; element < binding.count; ++element) {
+            const bool bit = sampler && binding.guestDescriptor.size() == binding.count * 4u &&
+                (binding.guestDescriptor[element * 4u] & (1u << 15u)) != 0u;
+            const bool enabled = element < flags.size() && flags[element];
+            const bool nonempty = element < proofs.size() && !proofs[element].empty();
+            if (enabled != nonempty || (sampler && enabled != bit)) return false;
+            if (!enabled) continue;
+            if (binding.resourceSources.size() != binding.count || binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * stride ||
+                binding.kind != (sampler ? DescriptorKind::Sampler : DescriptorKind::SampledImage) ||
+                (sampler && element < binding.samplerDepthCompare.size() && binding.samplerDepthCompare[element]) ||
+                (!sampler && ((element < binding.imageWritten.size() && binding.imageWritten[element]) ||
+                    (element < binding.imageAtomic.size() && binding.imageAtomic[element]) ||
+                    (element < binding.imageDepthCompare.size() && binding.imageDepthCompare[element])))) return false;
+            std::uint64_t uses = 0;
+            std::uint32_t total = 0;
+            for (std::size_t p = 0; p < proofs[element].size(); ++p) {
+                const auto& proof = proofs[element][p];
+                if (proof.liveUseMask != PixelSamplerUse::Qualified || proof.liveUseCount == 0u || proof.samplerLiveUseCount == 0u ||
+                    (proof.samplerDescriptor[0] & (1u << 15u)) == 0u ||
+                    binding.resourceSources[element] != (sampler ? proof.samplerSource : proof.imageSource)) return false;
+                for (std::size_t prior = 0; prior < p; ++prior) {
+                    const auto& previous = proofs[element][prior];
+                    if ((sampler ? previous.imageSource : previous.samplerSource) == (sampler ? proof.imageSource : proof.samplerSource)) return false;
+                }
+                for (std::uint32_t word = 0; word < stride; ++word) {
+                    if (binding.guestDescriptor[element * stride + word] != (sampler ? proof.samplerDescriptor[word] : proof.imageDescriptor[word])) return false;
+                }
+                const DescriptorBinding* counterpart = nullptr;
+                std::uint32_t counterpartElement = 0;
+                for (const auto& other : bindings) {
+                    if (other.role != (sampler ? DescriptorRole::GuestImages : DescriptorRole::GuestSamplers)) continue;
+                    for (std::uint32_t candidate = 0; candidate < other.resourceSources.size(); ++candidate) {
+                        if (other.resourceSources[candidate] != (sampler ? proof.imageSource : proof.samplerSource)) continue;
+                        if (counterpart != nullptr || candidate >= other.count) return false;
+                        counterpart = &other;
+                        counterpartElement = candidate;
+                    }
+                }
+                if (counterpart == nullptr) return false;
+                const auto& peerFlags = sampler ? counterpart->imageUnnormalized : counterpart->samplerUnnormalized;
+                const auto& peerProofs = sampler ? counterpart->imagePixelProof : counterpart->samplerPixelProof;
+                const auto peerStride = sampler ? 8u : 4u;
+                if (peerFlags.size() != counterpart->count || !peerFlags[counterpartElement] ||
+                    peerProofs.size() != counterpart->count ||
+                    counterpart->guestDescriptor.size() != static_cast<std::size_t>(counterpart->count) * peerStride ||
+                    std::count(peerProofs[counterpartElement].begin(), peerProofs[counterpartElement].end(), proof) != 1) return false;
+                for (std::uint32_t word = 0; word < peerStride; ++word) {
+                    if (counterpart->guestDescriptor[counterpartElement * peerStride + word] != (sampler ? proof.imageDescriptor[word] : proof.samplerDescriptor[word])) return false;
+                }
+                if (sampler) {
+                    if (total != 0u && total != proof.samplerLiveUseCount) return false;
+                    total = proof.samplerLiveUseCount;
+                    uses += proof.liveUseCount;
+                }
+            }
+            if (sampler && uses != total) return false;
+        }
+    }
+    return true;
+}
+
+bool validPixelInfo(const CompiledVariant& variant) {
+    if (!validPixelBindings(variant.result.bindings) || !validPixelBindings(variant.bindings.bindings)) return false;
+    const auto& info = variant.info.info;
+    // CompiledVariant normally stores no captured physical bindings: Populate rebinds
+    // each new snapshot. Check the independently encoded live-use summaries here too.
+    std::vector<std::uint64_t> useCounts(info.samplers.size());
+    std::vector<std::uint32_t> useMasks(info.samplers.size());
+    for (const auto& pair : info.sampledPairs) {
+        if (pair.image >= info.images.size() || pair.sampler >= info.samplers.size() ||
+            (pair.liveUseMask & ~(PixelSamplerUse::Qualified | PixelSamplerUse::Unqualified)) != 0u ||
+            pair.liveUseMask == 0u || pair.liveUseCount == 0u) return false;
+        useCounts[pair.sampler] += pair.liveUseCount;
+        useMasks[pair.sampler] |= pair.liveUseMask;
+    }
+    for (std::size_t sampler = 0; sampler < info.samplers.size(); ++sampler) {
+        if (info.samplers[sampler].liveUseCount != useCounts[sampler] ||
+            info.samplers[sampler].liveUseMask != useMasks[sampler]) return false;
+    }
+    for (const auto* physical : {&variant.result.bindings, &variant.bindings.bindings}) {
+        for (const auto& binding : *physical) {
+            if (binding.role != DescriptorRole::GuestSamplers) continue;
+            for (const auto& proofs : binding.samplerPixelProof) {
+                for (const auto& proof : proofs) {
+                    bool matched = false;
+                    for (const auto& pair : info.sampledPairs) {
+                        const auto& image = info.images[pair.image];
+                        const auto& sampler = info.samplers[pair.sampler];
+                        if (image.source == proof.imageSource && sampler.source == proof.samplerSource &&
+                            sampler.liveUseMask == PixelSamplerUse::Qualified && sampler.liveUseCount == proof.samplerLiveUseCount &&
+                            pair.liveUseMask == proof.liveUseMask && pair.liveUseCount == proof.liveUseCount) matched = true;
+                    }
+                    if (!matched) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 void encodeBinding(Writer& writer, const DescriptorBinding& binding) {
     writer.Value(binding.kind);
     writer.Value(binding.role);
@@ -246,6 +379,11 @@ void encodeBinding(Writer& writer, const DescriptorBinding& binding) {
     writer.Value(binding.imageShape.has_value());
     writer.Value(binding.imageShape.value_or(DescriptorImageShape::Image1D));
     writer.Flags(binding.samplerDepthCompare);
+    writer.Values(std::span<const std::uint32_t>(binding.resourceSources));
+    writer.Flags(binding.samplerUnnormalized);
+    writer.Flags(binding.imageUnnormalized);
+    encodePixelProofs(writer, binding.samplerPixelProof);
+    encodePixelProofs(writer, binding.imagePixelProof);
     writer.Flags(binding.imageWritten);
     writer.Flags(binding.imageDepthCompare);
     writer.Flags(binding.imageAtomic);
@@ -265,6 +403,11 @@ void decodeBinding(Reader& reader, DescriptorBinding& binding) {
     const auto shape = reader.Get<DescriptorImageShape>();
     binding.imageShape = hasShape ? std::optional(shape) : std::nullopt;
     reader.Flags(binding.samplerDepthCompare);
+    reader.Values(binding.resourceSources);
+    reader.Flags(binding.samplerUnnormalized);
+    reader.Flags(binding.imageUnnormalized);
+    decodePixelProofs(reader, binding.samplerPixelProof);
+    decodePixelProofs(reader, binding.imagePixelProof);
     reader.Flags(binding.imageWritten);
     reader.Flags(binding.imageDepthCompare);
     reader.Flags(binding.imageAtomic);
@@ -417,6 +560,8 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
     writer.List(info.samplers, [](Writer& out, const SamplerResource& sampler) {
         out.Value(sampler.source);
         out.Value(sampler.firstUsePc);
+        out.Value(sampler.liveUseMask);
+        out.Value(sampler.liveUseCount);
         out.Value(sampler.forcePointFiltering);
         out.Value(sampler.depthCompare);
     });
@@ -424,6 +569,8 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(pair.image);
         out.Value(pair.sampler);
         out.Value(pair.firstUsePc);
+        out.Value(pair.liveUseMask);
+        out.Value(pair.liveUseCount);
     });
     writer.List(info.inputs, [](Writer& out, const StageInput& input) {
         out.Value(input.kind);
@@ -504,16 +651,20 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(image.indirectSearchIterations);
         in.Values(image.indirectResources);
     });
-    reader.List(info.samplers, 10, [](Reader& in, SamplerResource& sampler) {
+    reader.List(info.samplers, 18, [](Reader& in, SamplerResource& sampler) {
         in.Value(sampler.source);
         in.Value(sampler.firstUsePc);
+        in.Value(sampler.liveUseMask);
+        in.Value(sampler.liveUseCount);
         in.Value(sampler.forcePointFiltering);
         in.Value(sampler.depthCompare);
     });
-    reader.List(info.sampledPairs, 12, [](Reader& in, SampledResourcePair& pair) {
+    reader.List(info.sampledPairs, 20, [](Reader& in, SampledResourcePair& pair) {
         in.Value(pair.image);
         in.Value(pair.sampler);
         in.Value(pair.firstUsePc);
+        in.Value(pair.liveUseMask);
+        in.Value(pair.liveUseCount);
     });
     reader.List(info.inputs, 21, [](Reader& in, StageInput& input) {
         in.Value(input.kind);
@@ -833,7 +984,7 @@ void EncodeResult(const RecompileResult& result, std::vector<std::byte>& out) {
 bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result) {
     Reader reader(bytes);
     decodeResult(reader, result);
-    return reader.Done();
+    return reader.Done() && validPixelBindings(result.bindings);
 }
 
 std::vector<std::byte> EncodeEntry(std::span<const std::byte> key, const CompiledVariant& variant) {
@@ -868,7 +1019,7 @@ LoadStatus DecodeEntry(std::span<const std::byte> file, std::span<const std::byt
     decodeResult(reader, decoded.result);
     decodeInfo(reader, decoded.info);
     decodeAllocation(reader, decoded.bindings);
-    if (!reader.Done()) return LoadStatus::Rejected;
+    if (!reader.Done() || !validPixelInfo(decoded)) return LoadStatus::Rejected;
     variant.info = std::move(decoded.info);
     variant.bindings = std::move(decoded.bindings);
     variant.result = std::move(decoded.result);

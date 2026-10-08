@@ -253,6 +253,7 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
                          std::span<const MetalShaderResourceBinding> supplied,
                          std::span<const std::byte> pushConstants,
                          std::span<const id<MTLResource>> indirectResources) {
+    ValidatePixelSamplerBindings(shader.guest.bindings);
     PreparedBindings result;
     std::map<std::pair<std::uint32_t, std::uint32_t>, const MetalShaderResourceBinding*> bindings;
     for (const auto& binding : supplied) {
@@ -365,6 +366,10 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
                     throw std::invalid_argument("Metal shader texel buffer requires a native texture buffer");
                 }
                 validateTexture(texture, *descriptor, i);
+                if (!descriptor->imageUnnormalized.empty() && descriptor->imageUnnormalized[i]) {
+                    ValidatePixelSampledView(texture,
+                        Graphics::DecodeTextureResource(std::span(descriptor->guestDescriptor).subspan(i * 8u, 8)));
+                }
                 result.textures.push_back({*mapping.texture + i, texture});
             }
         }
@@ -374,6 +379,13 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
                 id<MTLSamplerState> sampler = binding.samplers[i];
                 if (sampler == nil || sampler.device != device) {
                     throw std::invalid_argument("Metal shader sampler belongs to a different device or is missing");
+                }
+                if (!descriptor->samplerUnnormalized.empty() && descriptor->samplerUnnormalized[i]) {
+                    const bool compare = i < descriptor->samplerDepthCompare.size() && descriptor->samplerDepthCompare[i];
+                    if (!MetalSampler::MatchesCapturedDescriptor(sampler,
+                        std::span(descriptor->guestDescriptor).subspan(i * 4u, 4), compare, true)) {
+                        throw std::invalid_argument("Metal pixel sampler native identity differs from the captured qualified descriptor");
+                    }
                 }
                 result.samplers.push_back({*mapping.sampler + i, sampler});
             }

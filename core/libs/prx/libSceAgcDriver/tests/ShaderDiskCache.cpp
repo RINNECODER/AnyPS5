@@ -166,8 +166,9 @@ CompiledVariant sampleVariant() {
     image.indirectSearchIterations = 3;
     image.indirectResources = {1, 2, 3};
     info.info.images = {image};
-    info.info.samplers = {{7, 0x10, true, false}};
-    info.info.sampledPairs = {{0, 0, 0x10}};
+    // One surviving unqualified use; the sampler summary must match its pair.
+    info.info.samplers = {{7, 0x10, true, false, PixelSamplerUse::Unqualified, 1u}};
+    info.info.sampledPairs = {{0, 0, 0x10, PixelSamplerUse::Unqualified, 1u}};
     StageInput input{};
     input.kind = StageInputKind::GlobalInvocationId;
     input.location = 2;
@@ -436,15 +437,22 @@ void verifyAcrossProcesses(const char* self) {
     require(std::system(command.c_str()) == 0, "the loading process failed");
 }
 
-void verifyDefaultDirectory(const char* self) {
+void verifyCacheDirectory(const char* self) {
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", "");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
     require(ShaderRecompiler::ShaderCacheDirectory().empty(), "ANYPS5_NO_SHADER_CACHE=1 did not disable the cache");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
+#ifdef __APPLE__
+    // macOS has no /proc/self/exe default; use the supported explicit directory.
+    const auto configured = std::filesystem::absolute(self).parent_path() / "shader_cache";
+    setEnvironment("ANYPS5_SHADER_CACHE_DIR", configured.string());
+    require(ShaderRecompiler::ShaderCacheDirectory() == configured, "the explicit cache directory was not honored");
+#else
     const auto directory = ShaderRecompiler::ShaderCacheDirectory();
     require(directory.filename() == "shader_cache", "the default cache directory is not named shader_cache");
     std::error_code error;
     require(std::filesystem::equivalent(directory.parent_path(), std::filesystem::absolute(self).parent_path(), error) && !error, "the default cache directory is not beside the executable");
+#endif
 }
 
 }
@@ -454,7 +462,7 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--load") return runLoadingProcess();
         const auto directory = std::filesystem::temp_directory_path() / ("aps5-shader-disk-cache-test-" + std::to_string(std::random_device{}()));
         std::filesystem::remove_all(directory);
-        verifyDefaultDirectory(argv[0]);
+        verifyCacheDirectory(argv[0]);
         setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
         setEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.string());
         verifyResultRoundTrip();

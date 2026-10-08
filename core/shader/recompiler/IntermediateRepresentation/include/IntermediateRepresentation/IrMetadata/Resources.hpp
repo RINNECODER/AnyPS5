@@ -2,6 +2,7 @@
 #define CORE_SHADER_RECOMPILIER_INTERMEDIATEREPRESENTATION_INCLUDE_INTERMEDIATEREPRESENTATION_IRMETADATA_RESOURCES_HPP
 
 #include "IntermediateRepresentation/IrMetadata/BufferFormat.hpp"
+#include "IntermediateRepresentation/IrMetadata/ShaderStage.hpp"
 #include "IntermediateRepresentation/IrOpcode.hpp"
 #include "RdnaDecoder/RdnaInstruction.hpp"
 #include <cstdint>
@@ -84,11 +85,27 @@ struct ImageResource {
     bool operator==(const ImageResource& other) const = default;
 };
 
+// This is the same choice of ExplicitLod opcode used by the image emitter. Gradients
+// also use that opcode, but are deliberately excluded from pixel-coordinate proof.
+[[nodiscard]] inline bool IsExplicitLodImageSample(IrShaderStage stage, std::uint32_t flags) {
+    return (flags & (RdnaImageSampleFlagDerivative | RdnaImageSampleFlagLod | RdnaImageSampleFlagLevelZero)) != 0u || stage != IrShaderStage::Pixel;
+}
+namespace PixelSamplerUse {
+inline constexpr std::uint32_t Qualified = 1u;
+inline constexpr std::uint32_t Unqualified = 2u;
+}
+[[nodiscard]] inline bool IsPixelCoordinateSample(IrOpcode opcode, IrShaderStage stage, std::uint32_t flags) {
+    return opcode == IrOpcode::ImageSampleRaw && IsExplicitLodImageSample(stage, flags) &&
+        (flags & ~(RdnaImageSampleFlagLod | RdnaImageSampleFlagLevelZero)) == 0u;
+}
+
 struct SamplerResource {
     std::uint32_t source = 0;
     std::uint32_t firstUsePc = 0;
     bool forcePointFiltering = false;
     bool depthCompare = false;
+    std::uint32_t liveUseMask = 0;
+    std::uint32_t liveUseCount = 0;
 
     bool operator==(const SamplerResource& other) const = default;
 };
@@ -97,6 +114,8 @@ struct SampledResourcePair {
     std::uint32_t image = 0;
     std::uint32_t sampler = 0;
     std::uint32_t firstUsePc = 0;
+    std::uint32_t liveUseMask = 0;
+    std::uint32_t liveUseCount = 0;
 
     bool operator==(const SampledResourcePair& other) const = default;
 };

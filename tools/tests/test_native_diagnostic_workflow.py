@@ -55,8 +55,10 @@ class NativeWorkflowContracts(unittest.TestCase):
     def test_main_upstream_registration_is_required_by_native_qualification(self):
         """Real reachable registrations, not a copied list, must be declared.
 
-        The synthetic attachment control misses new leaf registrations. This
-        configures main's actual upstream subtree with its prerequisite targets;
+        Contract: the native manifest must include reachable upstream controls.
+        Omitting the five pixel-sampler cases makes a built candidate fail the
+        exact package gate. Synthetic attachment/inventory controls miss new
+        leaf registrations. This configures the actual upstream subtree with its prerequisite targets;
         no engine build, dependency cache or fixture execution is needed.
         """
         source = self.root / 'registration-source'
@@ -81,6 +83,8 @@ class NativeWorkflowContracts(unittest.TestCase):
             ['ctest', '--test-dir', build, '--show-only=json-v1'], text=True, timeout=15))
         names = [test['name'] for test in inventory['tests']]
         self.assertTrue(names, 'real upstream graph registered no controls')
+        self.assertEqual(sum(name.startswith('anyps5_metal_pixel_sampler_') for name in names), 5,
+                         'production pixel-sampler registration group was not activated')
         self.assertEqual(len(names), len(set(names)), 'duplicate upstream registration')
         self.assertFalse(set(names) - workflow.required_tests('native'),
                          'registered main controls absent from native qualification: ' +
