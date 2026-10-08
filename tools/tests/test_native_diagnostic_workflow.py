@@ -93,11 +93,36 @@ class NativeWorkflowContracts(unittest.TestCase):
 
     @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
                          'Native CMake configuration requires Apple Silicon macOS')
+    def test_semaphore_registrations_are_required_by_native_qualification(self):
+        """Contract: all registered semaphore controls must enter the manifest.
+
+        Regression: ten platform cases or the runner case are omitted, so the
+        exact native package gate rejects a built candidate. Existing upstream
+        and synthetic-inventory controls never configure these production leaves.
+        Target interfaces supply prerequisites only; no runtime passing is claimed.
+        """
+        cpu = TOOLS.parent / 'core/cpu'
+        cases = (
+            ('semaphore-platform',
+             'add_subdirectory("' + (cpu / 'platform').as_posix() + '" platform)\n',
+             {'anyps5_platform_kernel_semaphore_': 10}),
+            ('semaphore-runner',
+             'include("' + (cpu / 'NativeModuleRunnerTests.cmake').as_posix() + '")\n',
+             {'anyps5_native_semaphore_runner': 1}),
+        )
+        for group, registration, controls in cases:
+            with self.subTest(group=group):
+                self.assert_production_registration_inventory(group, registration, controls)
+
+    @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
+                         'Native CMake configuration requires Apple Silicon macOS')
     def test_main_upstream_registration_is_required_by_native_qualification(self):
         """Real reachable registrations, not a copied list, must be declared.
 
-        The synthetic attachment control misses new leaf registrations. This
-        configures main's actual upstream subtree with its prerequisite targets;
+        Contract: the native manifest must include reachable upstream controls.
+        Omitting the five pixel-sampler cases makes a built candidate fail the
+        exact package gate. Synthetic attachment/inventory controls miss new
+        leaf registrations. This configures the actual upstream subtree with its prerequisite targets;
         no engine build, dependency cache or fixture execution is needed.
         """
         source = self.root / 'registration-source'
@@ -122,6 +147,8 @@ class NativeWorkflowContracts(unittest.TestCase):
             ['ctest', '--test-dir', build, '--show-only=json-v1'], text=True, timeout=15))
         names = [test['name'] for test in inventory['tests']]
         self.assertTrue(names, 'real upstream graph registered no controls')
+        self.assertEqual(sum(name.startswith('anyps5_metal_pixel_sampler_') for name in names), 5,
+                         'production pixel-sampler registration group was not activated')
         self.assertEqual(len(names), len(set(names)), 'duplicate upstream registration')
         self.assertFalse(set(names) - workflow.required_tests('native'),
                          'registered main controls absent from native qualification: ' +

@@ -1,5 +1,6 @@
 # Included by the production native runner branch after its target exists.
 # Reuse linker-produced public SCE module images; no duplicate fixture inventory.
+include("${CMAKE_CURRENT_SOURCE_DIR}/NativeSemaphoreRunnerTests.cmake")
 if(BUILD_TESTING AND cpuModernTcg AND TARGET anyps5_native_module_runner)
     add_test_executable(anyps5_native_module_runner_test tests/NativeModuleRunnerTest.mm)
     target_compile_options(anyps5_native_module_runner_test PRIVATE -fobjc-arc)

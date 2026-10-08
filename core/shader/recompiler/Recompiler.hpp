@@ -304,6 +304,20 @@ enum class DescriptorRole {
     ShaderData
 };
 
+// A live sampler/image association, bound to the exact descriptor capture. Certificates
+// are duplicated in the sampler and image binding so either owner can validate agreement.
+struct PixelSamplerProof {
+    std::uint32_t imageSource = 0;
+    std::uint32_t samplerSource = 0;
+    std::uint32_t liveUseMask = 0;
+    std::uint32_t liveUseCount = 0;
+    std::uint32_t samplerLiveUseCount = 0;
+    std::array<std::uint32_t, 8> imageDescriptor{};
+    std::array<std::uint32_t, 4> samplerDescriptor{};
+
+    bool operator==(const PixelSamplerProof&) const = default;
+};
+
 struct DescriptorBinding {
     DescriptorKind kind;
     DescriptorRole role;
@@ -314,6 +328,11 @@ struct DescriptorBinding {
     bool readOnly = false;
     std::optional<DescriptorImageShape> imageShape;
     std::vector<bool> samplerDepthCompare;
+    std::vector<std::uint32_t> resourceSources;
+    std::vector<bool> samplerUnnormalized;
+    std::vector<bool> imageUnnormalized;
+    std::vector<std::vector<PixelSamplerProof>> samplerPixelProof;
+    std::vector<std::vector<PixelSamplerProof>> imagePixelProof;
     // Guest image elements the shader stores to (or updates atomically); the others are only read.
     std::vector<bool> imageWritten;
     std::vector<bool> imageDepthCompare;

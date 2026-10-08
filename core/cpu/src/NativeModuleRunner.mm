@@ -6,6 +6,7 @@
 #include <cpu/SceNativeVideoOutBackend.hpp>
 #include "KernelEvents.hpp"
 #include "KernelPrimitives.hpp"
+#include "KernelSemaphores.hpp"
 #include "NativeNpIdentity.hpp"
 #include "NativeUriEscape.hpp"
 #include "SceImageData.hpp"
@@ -97,6 +98,7 @@ struct NativeModuleRunner::Impl {
     std::unique_ptr<SceThreadImports> threadImports;
     std::unique_ptr<Platform::TargetKernelMutexes> mutexes;
     std::unique_ptr<Platform::TargetKernelEvents> events;
+    std::unique_ptr<Platform::TargetKernelSemaphores> semaphores;
     std::map<std::filesystem::path, SceParsedImage> serviceConsumers;
     std::unique_ptr<Platform::NativeNpIdentity> npIdentity;
     std::unique_ptr<Platform::NativeUriEscape> uriEscape;
@@ -122,6 +124,7 @@ struct NativeModuleRunner::Impl {
             });
         threadImports = std::make_unique<SceThreadImports>(machine, threads);
         mutexes = std::make_unique<Platform::TargetKernelMutexes>(machine, threads);
+        semaphores = std::make_unique<Platform::TargetKernelSemaphores>(machine, threads);
         const auto hash = qualifiedSize(source) ? sourceHash(source) : std::string{};
         events = std::make_unique<Platform::TargetKernelEvents>(machine, threads,
             Platform::QualifiedKernelEventAdmissionsForImage(hash));
@@ -185,7 +188,8 @@ struct NativeModuleRunner::Impl {
         npIdentity.reset(); uriEscape.reset();
         attempt([&] { threads->Withdraw(); });
         if (events) attempt([&] { events->Provider().Shutdown(); });
-        agc.reset(); events.reset(); mutexes.reset(); threadImports.reset();
+        if (semaphores) attempt([&] { semaphores->Provider().Shutdown(); });
+        agc.reset(); events.reset(); semaphores.reset(); mutexes.reset(); threadImports.reset();
         compositor.reset();
         shutdown = true;
         if (shutdownFailure) std::rethrow_exception(shutdownFailure);
@@ -328,6 +332,12 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
         if (!address) throw std::runtime_error("Unsupported native service retained consumer/import row");
         return SceResolvedImport{*address, type};
     }
+    // Pass the actual parsed importing image's identity. This provider admits
+    // only the four observed semaphore rows for the exact target consumer,
+    // and validates function type/size and full scope before allocating gates.
+    if (const auto address = impl->semaphores->Resolve(import, type, size,
+            {name, hash, consumer.SourceSize}))
+        return SceResolvedImport{*address, type};
     const bool graphicsScope = import.ModuleName == "libSceAgc" || import.ModuleName == "libSceAgcDriver" ||
         import.LibraryName == "libSceAgc" || import.LibraryName == "libSceAgcDriver" ||
         import.ModuleName == "libSceVideoOut" || import.LibraryName == "libSceVideoOut";
