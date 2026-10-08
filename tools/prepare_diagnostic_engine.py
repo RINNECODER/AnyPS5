@@ -157,9 +157,8 @@ def clean_revision(path, commit):
 
 class Lease(AbstractContextManager):
     """Existing mkdir/owner.json/token protocol, with all historical aliases checked."""
-    def __init__(self, names, root=LOCK_ROOT, owner='diagnostic-tools', cleanup=nullcontext):
+    def __init__(self, names, root=LOCK_ROOT, owner='diagnostic-tools'):
         self.names, self.root, self.owner = names, Path(root), owner
-        self.cleanup = cleanup
         self.token, self.held = uuid.uuid4().hex, []
 
     def __enter__(self):
@@ -186,28 +185,27 @@ class Lease(AbstractContextManager):
             raise
 
     def __exit__(self, *_):
-        with self.cleanup():
-            errors = []
-            for p in reversed(self.held):
-                try:
-                    metadata = p / 'owner.json'
-                    if metadata.exists():
-                        owner_record = json.loads(metadata.read_text())
-                        require(isinstance(owner_record, dict) and owner_record.get('token') == self.token,
-                                'Lease ownership changed: ' + p.name)
-                        metadata.unlink()
-                    else:
-                        # Only our just-created empty directory can lack a published owner.
-                        temporary = p / ('owner-' + self.token + '.tmp')
-                        if temporary.exists():
-                            temporary.unlink()
-                    p.rmdir()
-                    ACTIVE_LEASES.pop(str(p), None)
-                except (OSError, ValueError, RuntimeError) as exc:
-                    errors.append(str(exc))
-            self.held.clear()
-            if errors:
-                raise RuntimeError('; '.join(errors))
+        errors = []
+        for p in reversed(self.held):
+            try:
+                metadata = p / 'owner.json'
+                if metadata.exists():
+                    owner_record = json.loads(metadata.read_text())
+                    require(isinstance(owner_record, dict) and owner_record.get('token') == self.token,
+                            'Lease ownership changed: ' + p.name)
+                    metadata.unlink()
+                else:
+                    # Only our just-created empty directory can lack a published owner.
+                    temporary = p / ('owner-' + self.token + '.tmp')
+                    if temporary.exists():
+                        temporary.unlink()
+                p.rmdir()
+                ACTIVE_LEASES.pop(str(p), None)
+            except (OSError, ValueError, RuntimeError) as exc:
+                errors.append(str(exc))
+        self.held.clear()
+        if errors:
+            raise RuntimeError('; '.join(errors))
 
 
 def parse_ctest_results(xml_path, expected_names):
@@ -225,8 +223,8 @@ def parse_ctest_results(xml_path, expected_names):
 
 
 class Runner:
-    def __init__(self, output, receipt, cleanup=nullcontext):
-        self.output, self.receipt, self.cleanup = output, receipt, cleanup
+    def __init__(self, output, receipt, check_cancel=lambda: None):
+        self.output, self.receipt, self.check_cancel = output, receipt, check_cancel
         (output / 'logs').mkdir()
 
     def save(self):
@@ -242,26 +240,38 @@ class Runner:
                        if not k.startswith(('LD_', 'DYLD_'))}
         try:
             with stdout_path.open('wb') as out, stderr_path.open('wb') as err:
+                self.check_cancel()
                 process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out,
                                            stderr=err, start_new_session=True)
                 try:
-                    code = process.wait(timeout=timeout)
-                except BaseException:
-                    # End only this command's owned process group before its lease exits.
-                    with self.cleanup():
+                    deadline = time.monotonic() + timeout
+                    while True:
+                        # TERM only records a request. Raise synchronously here,
+                        # inside the owned command's cleanup boundary.
+                        self.check_cancel()
                         try:
-                            os.killpg(process.pid, signal.SIGTERM)
-                        except ProcessLookupError:
-                            pass
-                        try:
-                            process.wait(timeout=5)
+                            code = process.wait(timeout=max(0, min(0.1, deadline - time.monotonic())))
+                            break
                         except subprocess.TimeoutExpired:
-                            pass
-                        try:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        process.wait()
+                            if time.monotonic() >= deadline:
+                                raise subprocess.TimeoutExpired(argv, timeout)
+                    self.check_cancel()
+                except BaseException:
+                    # No cancellation checks during TERM/KILL/reap or lease
+                    # release: even the first TERM cannot interrupt cleanup.
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
                     raise
         except (OSError, subprocess.TimeoutExpired) as exc:
             failure = str(exc)
@@ -350,7 +360,7 @@ def workflow(args, run, receipt):
     receipt['build_profile'] = profile
     receipt['required_tests'] = sorted(expected_tests)
     engine, gpu, macps, build = [output / n for n in ('engine-source', 'gpu-source', 'macps-source', 'build')]
-    with Lease(['git-integration'], cleanup=run.cleanup):
+    with Lease(['git-integration']):
         clone_exact(run, source, engine, args.revision, 'engine')
         clone_exact(run, source, gpu, args.revision, 'gpu')
         clone_exact(run, app, macps, args.macps_revision, 'macps')
@@ -380,7 +390,7 @@ def workflow(args, run, receipt):
         shutil.copyfile(controls, configured_controls)
         receipt['native_controls_adapter'] = {'path': str(controls), 'sha256': digest(controls),
             'configured_path': str(configured_controls), 'configured_sha256': digest(configured_controls)}
-    with Lease(['tcg-build'], cleanup=run.cleanup):
+    with Lease(['tcg-build']):
         configure = ['cmake', '-S', configure_source, '-B', build, '-G', 'Ninja',
             '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DBUILD_TESTING=ON',
             '-DANYPS5_CPU_RUNTIME_ONLY=ON', '-DANYPS5_CPU_BACKEND=TCG',
@@ -404,12 +414,12 @@ def workflow(args, run, receipt):
         'CTest required inventory differs from declared ' + profile + ' profile')
     env = dict(os.environ, MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1',
                ANYPS5_NO_SHADER_CACHE='1', APS5_NO_SHADER_CACHE='1')
-    with Lease(['tcg-build', 'gpu-validation', 'title-session'], cleanup=run.cleanup):
+    with Lease(['tcg-build', 'gpu-validation', 'title-session']):
         run(combined_step(profile), ['ctest', '--test-dir', build, '-T', 'Test', '--no-tests=error',
             '--output-on-failure', '--parallel', '1'], env=env, timeout=1200)
     tag = (build / 'Testing/TAG').read_text().splitlines()[0]
     receipt['ctest_results'] = parse_ctest_results(build / 'Testing' / tag / 'Test.xml', expected_tests)
-    with Lease(['tcg-build'], cleanup=run.cleanup) if profile == 'native' else nullcontext():
+    with Lease(['tcg-build']) if profile == 'native' else nullcontext():
         package_info = prepare_package(engine, build, gpu, output / 'package', revisions, run, profile=profile)
     package = Path(package_info['package'])
     receipt['package'] = package_info
@@ -462,7 +472,7 @@ def accept_prepared_package(args, run, receipt):
             require(clean_revision(root / relative, identity['commit']) == identity, 'Dependency changed before acceptance')
     require(clean_revision(macps, args.macps_revision) == receipt['macps_source'], 'Acceptance source changed')
     scratch = output / 'swift-helper-build'
-    with Lease(['tcg-build'], cleanup=run.cleanup):
+    with Lease(['tcg-build']):
         run('fresh-LauncherCore', ['swift', 'build', '--package-path', macps, '--scratch-path', scratch,
             '--configuration', 'debug', '--target', 'LauncherCore', '--jobs', '2',
             '-Xswiftc', '-strict-concurrency=complete', '-Xswiftc', '-warnings-as-errors'], timeout=300)
@@ -486,7 +496,7 @@ def accept_prepared_package(args, run, receipt):
     shutil.copytree(package, relocation)
     unrelated = run.output / 'unrelated-cwd'
     unrelated.mkdir()
-    with Lease(['tcg-build', 'gpu-validation', 'title-session'], cleanup=run.cleanup):
+    with Lease(['tcg-build', 'gpu-validation', 'title-session']):
         for index, argv in enumerate(package_info['relocation_commands']):
             relocated_timeout = 180 if Path(argv[0]).name in {
                 'anyps5_metal_normalized_load_replay', 'anyps5_metal_scalar_termination_replay'} else 120
@@ -536,43 +546,31 @@ def accept_prepared_package(args, run, receipt):
 def cli_cancellation():
     """Route TERM through command/lease unwinding only while the CLI runs.
 
-    First TERM is deferred inside TERM/KILL/reap or token-qualified release,
-    even when timeout or SIGINT started cleanup. Repeated TERM is ignored.
-    SIGKILL cannot be made cleanup-safe. Imported helpers retain caller handlers.
+    Every TERM only records a request, including at cleanup entry. Runner
+    checks it at bounded waits; main checks it before reporting PASS. Cleanup
+    never checks it, whatever initiated unwinding. SIGKILL is not cleanup-safe.
+    Imported helpers retain caller handlers.
     """
     previous = signal.getsignal(signal.SIGTERM)
-    requested, pending, protected = False, False, 0
+    requested = False
 
-    def terminate(signum, _frame):
-        nonlocal requested, pending
-        if not requested:
-            requested = True
-            if protected:
-                pending = True
-            else:
-                raise KeyboardInterrupt('Terminated by ' + signal.Signals(signum).name)
+    def terminate(_signum, _frame):
+        nonlocal requested
+        requested = True
 
-    @contextmanager
-    def cleanup():
-        nonlocal protected, pending
-        protected += 1
-        try:
-            yield
-        finally:
-            protected -= 1
-            if not protected and pending:
-                pending = False
-                raise KeyboardInterrupt('Terminated by SIGTERM')
+    def check_cancel():
+        if requested:
+            raise KeyboardInterrupt('Terminated by SIGTERM')
 
     try:
         signal.signal(signal.SIGTERM, terminate)
-        yield cleanup
+        yield check_cancel
     finally:
         signal.signal(signal.SIGTERM, previous)
 
 
 def main():
-    with cli_cancellation() as cleanup:
+    with cli_cancellation() as check_cancel:
         parser = argparse.ArgumentParser(description=__doc__)
         for name in ('source', 'macps-source', 'output'):
             parser.add_argument('--' + name, type=Path, required=True)
@@ -592,8 +590,10 @@ def main():
             require(not any(output.is_relative_to(p.resolve()) for p in (args.source, args.macps_source)), 'Output must be outside source repositories')
             require(not output.exists() and not args.output.is_symlink(), 'Output already exists')
             output.mkdir(parents=True)
-            run = Runner(output, receipt, cleanup=cleanup)
+            check_cancel()
+            run = Runner(output, receipt, check_cancel=check_cancel)
             workflow(args, run, receipt)
+            check_cancel()
             print(json.dumps({'status': 'PASS', 'receipt': str(output / 'receipt.json'),
                              'package': receipt['package']['package']}))
             return 0

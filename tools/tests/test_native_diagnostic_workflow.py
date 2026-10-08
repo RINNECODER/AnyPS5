@@ -110,7 +110,6 @@ class NativeWorkflowContracts(unittest.TestCase):
                         raise RuntimeError('control reached combined-suite boundary')
                     return ''
 
-                run.cleanup = nullcontext
                 with patch.object(workflow, 'required_tests', return_value=expected), \
                      patch.object(workflow, 'clone_exact'), \
                      patch.object(workflow, 'setup_dependencies', return_value=dependencies), \

@@ -225,7 +225,11 @@ class ResultAndLeaseControls(unittest.TestCase):
         return self.workflow.Runner(self.root, receipt), receipt
 
     def test_cli_restores_previous_sigterm_handler_on_success_and_failure(self):
-        """Importing helpers must not install handlers; main owns their scope."""
+        """Helpers retain caller handlers; main restores them on every exit.
+
+        A TERM just before completion must reject PASS even without another
+        command wait. Earlier success/failure/parser cases missed that boundary.
+        """
         previous = signal.getsignal(signal.SIGTERM)
         handler = lambda *_: None
         signal.signal(signal.SIGTERM, handler)
@@ -236,9 +240,9 @@ class ResultAndLeaseControls(unittest.TestCase):
         self.assertIs(signal.getsignal(signal.SIGTERM), handler, 'helper import changed SIGTERM handling')
         source, macps = self.root / 'source', self.root / 'macps'
         revision, app_revision = clean_repository(source), clean_repository(macps)
-        for fail in (False, True):
-            with self.subTest(failure=fail):
-                output = self.root / ('failure' if fail else 'success')
+        for outcome in ('success', 'failure', 'TERM'):
+            with self.subTest(outcome=outcome):
+                output = self.root / outcome
                 argv = [str(SCRIPT), '--source', str(source), '--revision', revision,
                         '--macps-source', str(macps), '--macps-revision', app_revision,
                         '--output', str(output)]
@@ -247,13 +251,20 @@ class ResultAndLeaseControls(unittest.TestCase):
 
                 def exercise(args, run, receipt):
                     active_handlers.append(signal.getsignal(signal.SIGTERM))
-                    if fail:
+                    if outcome == 'failure':
                         raise RuntimeError('controlled workflow failure')
                     receipt['package'] = {'package': str(output / 'package')}
+                    if outcome == 'TERM':
+                        os.kill(os.getpid(), signal.SIGTERM)
 
+                stdout, stderr = io.StringIO(), io.StringIO()
                 with patch.object(sys, 'argv', argv), patch.object(scoped_workflow, 'workflow', exercise), \
-                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                    self.assertEqual(scoped_workflow.main(), int(fail))
+                     redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(scoped_workflow.main(), int(outcome != 'success'))
+                if outcome == 'TERM':
+                    self.assertEqual(stdout.getvalue(), '', 'TERM request published PASS')
+                    self.assertEqual(json.loads(stderr.getvalue())['status'], 'FAILED')
+                    self.assertEqual(json.loads((output / 'receipt.json').read_text())['status'], 'FAILED')
                 self.assertEqual(len(active_handlers), 1)
                 self.assertIsNot(active_handlers[0], handler, 'CLI did not install cancellation handling')
                 self.assertIs(signal.getsignal(signal.SIGTERM), handler)
@@ -271,11 +282,16 @@ class ResultAndLeaseControls(unittest.TestCase):
         also finish under TERM. Regression: first TERM raises inside timeout or
         SIGINT teardown (or release), bypassing KILL/reap or stranding leases.
         Prior coverage always sent TERM first, masking these cancellation holes.
+        Entry-window cases deliver actual TERM before cleanup/release work:
+        the old asynchronous handler escapes before protection is established.
+        Existing shutdown/read handshakes only cover already-entered cleanup.
+        A fixture trace provides scheduling, not a production-only test seam.
         Real CLI/Runner/Lease and process groups own this proof; readiness and
         observation stay in the fixture, without production-only test seams.
         """
         for initiator, target in (('timeout', 'wait'), ('SIGINT', 'wait'),
-                                  ('SIGTERM', 'wait'), ('timeout', 'release')):
+                                  ('SIGTERM', 'wait'), ('timeout', 'release'),
+                                  ('timeout', 'cleanup-entry'), ('timeout', 'lease-entry')):
             with self.subTest(initiator=initiator, target=target):
                 folder = self.root / (initiator + '-' + target)
                 folder.mkdir()
@@ -347,6 +363,30 @@ class ResultAndLeaseControls(unittest.TestCase):
                     pathlib.Path.read_text = release_read
                 return original_exit(lease, *args)
             workflow.Lease.__exit__ = observe_release
+            if {target!r} in ('cleanup-entry', 'lease-entry'):
+                def entry_signal(frame, event, arg):
+                    cleanup_entry = ({target!r} == 'cleanup-entry' and
+                                     frame.f_code is workflow.Runner.__call__.__code__ and
+                                     event == 'line' and
+                                     isinstance(sys.exception(), subprocess.TimeoutExpired) and
+                                     sys.exception().timeout == frame.f_locals.get('timeout'))
+                    lease_entry = ({target!r} == 'lease-entry' and
+                                   frame.f_code is original_exit.__code__ and event == 'line')
+                    if cleanup_entry or lease_entry:
+                        sys.settrace(None)
+                        pids = json.loads((root / 'ready.json').read_text())
+                        states = {{role: subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
+                                  capture_output=True, text=True).stdout.strip()
+                                  for role, pid in pids.items()}}
+                        (root / 'entry-signal.json').write_text(json.dumps({{
+                            'states': states,
+                            'owned_present': (locks / 'tcg-build/owner.json').exists()}}))
+                        # Real delivery in the supervisor's main thread, before
+                        # the original cleanup factory or lease exit body runs.
+                        import os
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    return entry_signal
+                sys.settrace(entry_signal)
             def harmless_workflow(args, run, receipt):
                 # Thread the CLI context when available; retain baseline replay.
                 lease_options = {{'cleanup': run.cleanup}} if hasattr(run, 'cleanup') else {{}}
@@ -384,19 +424,28 @@ class ResultAndLeaseControls(unittest.TestCase):
             pids = json.loads(ready.read_text())
             if initiator != 'timeout':
                 supervisor.send_signal(getattr(signal, initiator))
-            wait_ready(root / 'shutdown-parent.json')
-            wait_ready(root / 'shutdown-child.json')
-            if target == 'release':
-                wait_ready(root / 'release-ready')
+            if target.endswith('entry'):
+                wait_ready(root / 'entry-signal.json')
+                entry = json.loads((root / 'entry-signal.json').read_text())
+                self.assertTrue(entry['owned_present'])
+                if target == 'cleanup-entry':
+                    for state in entry['states'].values():
+                        self.assertTrue(state and not state.startswith('Z'),
+                                        'entry signal did not arrive while owned processes executed')
             else:
-                self.assertIsNone(supervisor.poll(), 'supervisor left cleanup before TERM')
-            # For timeout/SIGINT this is the FIRST external TERM, after both
-            # group members acknowledged shutdown while retaining their leases.
-            supervisor.send_signal(signal.SIGTERM)
-            time.sleep(0.1)  # Separate deliveries; do not rely on coalesced signals.
-            supervisor.send_signal(signal.SIGTERM)
-            if target == 'release':
-                (root / 'release-signaled').touch()
+                wait_ready(root / 'shutdown-parent.json')
+                wait_ready(root / 'shutdown-child.json')
+                if target == 'release':
+                    wait_ready(root / 'release-ready')
+                else:
+                    self.assertIsNone(supervisor.poll(), 'supervisor left cleanup before TERM')
+                # For timeout/SIGINT this is the FIRST external TERM, after both
+                # group members acknowledged shutdown while retaining their leases.
+                supervisor.send_signal(signal.SIGTERM)
+                time.sleep(0.1)  # Separate deliveries; do not rely on coalesced signals.
+                supervisor.send_signal(signal.SIGTERM)
+                if target == 'release':
+                    (root / 'release-signaled').touch()
             output, error = supervisor.communicate(timeout=12)
             self.assertEqual(supervisor.returncode, 1, output + error)
             before = json.loads((root / 'before-release.json').read_text())
