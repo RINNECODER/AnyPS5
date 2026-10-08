@@ -38,6 +38,17 @@ bool overlaps(std::uint64_t begin, std::uint64_t end, std::uint64_t otherBegin, 
     return begin < otherEnd && otherBegin < end;
 }
 
+void validateCommittedImageWrite(std::span<const NativeGuestMemory::BorrowedRange> ranges,
+    std::uint64_t address, std::size_t bytes) {
+    for (const auto& range : ranges) {
+        // Sparse holes may discard stores, but committed read-only bytes must never
+        // be exposed through a writable native view, including staged view upgrades.
+        if (!range.writable && overlaps(address, address + bytes, range.guestAddress, range.guestAddress + range.host.size())) {
+            throw std::invalid_argument("Metal storage texture writes overlap read-only committed guest intervals");
+        }
+    }
+}
+
 bool writtenBuffer(const DescriptorBinding& binding, std::uint32_t i) {
     if ((!binding.bufferWritten.empty() && binding.bufferWritten.size() != binding.count) ||
         (!binding.bufferAtomic.empty() && binding.bufferAtomic.size() != binding.count)) {
@@ -249,6 +260,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
             static_cast<void>(NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, image.texture->GuestBytes(), written));
         }
         if (written) {
+            validateCommittedImageWrite(borrowedRanges, descriptor.baseAddress, image.texture->GuestBytes());
             if (image.original.empty()) {
                 static_cast<void>(NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, image.texture->GuestBytes(), true));
             }
@@ -271,6 +283,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - descriptor.baseAddress) {
         throw std::invalid_argument("Metal texture guest byte range is invalid");
     }
+    if (written) validateCommittedImageWrite(borrowedRanges, descriptor.baseAddress, bytes);
     const bool staged = storage && !std::any_of(borrowedRanges.begin(), borrowedRanges.end(), [&](const auto& range) {
         return descriptor.baseAddress >= range.guestAddress && descriptor.baseAddress - range.guestAddress < range.host.size() &&
             bytes <= range.host.size() - (descriptor.baseAddress - range.guestAddress) && (!written || range.writable);

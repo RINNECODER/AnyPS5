@@ -282,9 +282,11 @@ struct PartiallyCommittedStorageReplay {
         packet = {reinterpret_cast<std::uint32_t*>(Base + 0x50000), static_cast<std::uint32_t>(commands.size()), 0, {}};
     }
 
-    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges) {
+    void AddRanges(std::vector<AgcDriver::NativeGuestMemory::BorrowedRange>& ranges,
+                   std::uint64_t readonlyAddress = Base + 0xc000) {
         ranges.push_back({Base, std::as_writable_bytes(std::span(pages[0]).subspan(GuardWords, PageWords)), true});
-        ranges.push_back({Base + 0x8000, std::as_writable_bytes(std::span(pages[1]).subspan(GuardWords, PageWords)), false});
+        // Keep unmapped store rows genuinely sparse; the read-only neighbor lies outside the captured surface.
+        ranges.push_back({readonlyAddress, std::as_writable_bytes(std::span(pages[1]).subspan(GuardWords, PageWords)), false});
         ranges.push_back({Base + 0x30000, std::as_writable_bytes(std::span(code)), false});
         ranges.push_back({Base + 0x40000, header, false});
         ranges.push_back({Base + 0x50000, std::as_writable_bytes(std::span(commands)), false});
@@ -317,6 +319,34 @@ struct PartiallyCommittedStorageReplay {
             "Partially committed storage changed read-only shader or PM4 memory");
         std::cout << "Public retained ImageStorePacked packed=" << Packed
                   << ": 64 committed texels, unmapped stores, unchanged read-only page and full padding guards passed\n";
+    }
+
+    void RejectReadonlyOverlap(id<MTLDevice> device, id<MTLLibrary> library) {
+        // Preserve the original overlapping page as a negative case, and probe the final 256 surface bytes.
+        for (const auto address : {Base + 0x8000, Texels + 32768 - 256}) {
+            std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges;
+            AddRanges(ranges, address);
+            const auto originalPages = pages;
+            const auto originalCode = code;
+            const auto originalCommands = commands;
+            const auto originalHeader = header;
+            const auto originalPacket = packet;
+            AgcDriver::Metal::MetalDriver driver;
+            driver.Configure((__bridge void*)device, (__bridge void*)library, ranges);
+            driver.RegisterShader(reinterpret_cast<const Shader*>(Base + 0x40000));
+            driver.Submit(reinterpret_cast<const Packet*>(Base + 0x60000), 0x20);
+            bool rejected = false;
+            try { driver.WaitIdle(); } catch (const std::invalid_argument& error) {
+                rejected = std::string(error.what()).find("read-only committed guest intervals") != std::string::npos;
+                if (!rejected) throw;
+            }
+            Require(rejected, "Public ImageStorePacked accepted committed read-only overlap packed=" + std::to_string(Packed));
+            Require(pages == originalPages && code == originalCode && commands == originalCommands && header == originalHeader &&
+                std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
+                "Rejected committed read-only storage overlap published texels or changed guards, shader or PM4 bytes");
+            std::cout << "Public ImageStorePacked packed=" << Packed << " read-only offset=" << address - Base
+                      << ": overlapping writable admission rejected, all guest bytes and guards unchanged\n";
+        }
     }
 };
 
@@ -776,6 +806,8 @@ int main(int argc, char** argv) {
             packedPartialStorage.Run();
             rawSignedStore.Run();
             AgcDriver::Metal::MetalDriver::Get().Shutdown();
+            PartiallyCommittedStorageReplay<>{}.RejectReadonlyOverlap(device, library);
+            PartiallyCommittedStorageReplay<true>{}.RejectReadonlyOverlap(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';
