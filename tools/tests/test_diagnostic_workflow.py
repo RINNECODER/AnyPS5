@@ -8,7 +8,9 @@ and synthetic CTest XML exercises its external result protocol without running
 native tests or adding a production-only test hook.
 """
 
+from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 from unittest.mock import patch
@@ -220,6 +223,173 @@ class ResultAndLeaseControls(unittest.TestCase):
     def runner(self):
         receipt = {"commands": []}
         return self.workflow.Runner(self.root, receipt), receipt
+
+    def test_cli_restores_previous_sigterm_handler_on_success_and_failure(self):
+        """Importing helpers must not install handlers; main owns their scope."""
+        previous = signal.getsignal(signal.SIGTERM)
+        handler = lambda *_: None
+        signal.signal(signal.SIGTERM, handler)
+        self.addCleanup(signal.signal, signal.SIGTERM, previous)
+        spec = importlib.util.spec_from_file_location('scoped_cli_control', SCRIPT)
+        scoped_workflow = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scoped_workflow)
+        self.assertIs(signal.getsignal(signal.SIGTERM), handler, 'helper import changed SIGTERM handling')
+        source, macps = self.root / 'source', self.root / 'macps'
+        revision, app_revision = clean_repository(source), clean_repository(macps)
+        for fail in (False, True):
+            with self.subTest(failure=fail):
+                output = self.root / ('failure' if fail else 'success')
+                argv = [str(SCRIPT), '--source', str(source), '--revision', revision,
+                        '--macps-source', str(macps), '--macps-revision', app_revision,
+                        '--output', str(output)]
+
+                active_handlers = []
+
+                def exercise(args, run, receipt):
+                    active_handlers.append(signal.getsignal(signal.SIGTERM))
+                    if fail:
+                        raise RuntimeError('controlled workflow failure')
+                    receipt['package'] = {'package': str(output / 'package')}
+
+                with patch.object(sys, 'argv', argv), patch.object(scoped_workflow, 'workflow', exercise), \
+                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(scoped_workflow.main(), int(fail))
+                self.assertEqual(len(active_handlers), 1)
+                self.assertIsNot(active_handlers[0], handler, 'CLI did not install cancellation handling')
+                self.assertIs(signal.getsignal(signal.SIGTERM), handler)
+
+    @unittest.skipUnless(os.name == 'posix', 'Owned command groups require POSIX signals')
+    def test_real_sigterm_stops_owned_group_before_token_qualified_lease_release(self):
+        """Real TERM (including another during shutdown) must unwind the CLI.
+
+        Children publish readiness only after installing TERM handlers. They
+        retain execution until the KILL fallback, inspecting lease ownership on
+        TERM. A release observer inspects actual process states before calling
+        the real Lease exit; no global lock directory or engine is used.
+        """
+        locks = self.root / 'private-locks'
+        ready = self.root / 'ready.json'
+        source, macps = self.root / 'source', self.root / 'macps'
+        revision, app_revision = clean_repository(source), clean_repository(macps)
+        foreign = locks / 'foreign-control'
+        foreign.mkdir(parents=True)
+        foreign_bytes = b'{"token":"foreign-untouched","pid":12345}\n'
+        (foreign / 'owner.json').write_bytes(foreign_bytes)
+        child = textwrap.dedent(f'''
+            import json, os, pathlib, signal, time
+            root = pathlib.Path({str(self.root)!r})
+            locks = pathlib.Path({str(locks)!r})
+            def terminate(*_):
+                owners = {{name: json.loads((locks / name / 'owner.json').read_text())['token']
+                          for name in ('tcg-build', 'gpu-validation')}}
+                (root / 'shutdown-child.json').write_text(json.dumps(owners))
+            signal.signal(signal.SIGTERM, terminate)
+            (root / 'child-ready').touch()
+            while True: time.sleep(0.05)
+        ''')
+        command = textwrap.dedent(f'''
+            import json, os, pathlib, signal, subprocess, sys, time
+            root = pathlib.Path({str(self.root)!r})
+            locks = pathlib.Path({str(locks)!r})
+            def terminate(*_):
+                owners = {{name: json.loads((locks / name / 'owner.json').read_text())['token']
+                          for name in ('tcg-build', 'gpu-validation')}}
+                (root / 'shutdown-parent.json').write_text(json.dumps(owners))
+            signal.signal(signal.SIGTERM, terminate)
+            child = subprocess.Popen([sys.executable, '-c', {child!r}])
+            (root / 'group.tmp').write_text(json.dumps({{'group': os.getpid(), 'child': child.pid}}))
+            (root / 'group.tmp').rename(root / 'group.json')
+            while not (root / 'child-ready').exists(): time.sleep(0.01)
+            (root / 'ready.tmp').write_text((root / 'group.json').read_text())
+            (root / 'ready.tmp').rename(root / 'ready.json')
+            while True: time.sleep(0.05)
+        ''')
+        supervisor_code = textwrap.dedent(f'''
+            import json, pathlib, signal, subprocess, sys
+            sys.path.insert(0, {str(SCRIPT.parent)!r})
+            import prepare_diagnostic_engine as workflow
+            root = pathlib.Path({str(self.root)!r})
+            locks = pathlib.Path({str(locks)!r})
+            original_exit = workflow.Lease.__exit__
+            def observe_release(lease, *args):
+                pids = json.loads((root / 'ready.json').read_text())
+                states = {{role: subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)],
+                          capture_output=True, text=True).stdout.strip()
+                          for role, pid in pids.items()}}
+                (root / 'before-release.json').write_text(json.dumps({{
+                    'states': states, 'owned_present': (locks / 'tcg-build/owner.json').exists()}}))
+                return original_exit(lease, *args)
+            workflow.Lease.__exit__ = observe_release
+            def harmless_workflow(args, run, receipt):
+                with workflow.Lease(['tcg-build', 'gpu-validation'], locks) as lease:
+                    receipt['test_owned_token'] = lease.token
+                    (locks / 'gpu-validation/owner.json').write_text('{{"token":"replacement-foreign"}}\\n')
+                    run('package-signal-control', [sys.executable, '-c', {command!r}], timeout=60)
+            workflow.workflow = harmless_workflow
+            sys.argv = [{str(SCRIPT)!r}, '--source', {str(source)!r}, '--revision', {revision!r},
+                        '--macps-source', {str(macps)!r}, '--macps-revision', {app_revision!r},
+                        '--output', {str(self.root / 'output')!r}]
+            sys.exit(workflow.main())
+        ''')
+        supervisor = subprocess.Popen([sys.executable, '-B', '-c', supervisor_code],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        pids = None
+
+        def wait_ready(path):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if path.exists():
+                    return
+                if supervisor.poll() is not None:
+                    break
+                time.sleep(0.01)
+            output, error = supervisor.communicate(timeout=2) if supervisor.poll() is not None else ('', '')
+            self.fail(f'supervisor exited or readiness timed out: {path.name}; '
+                      f'exit={supervisor.poll()}, owned_lease={(locks / "tcg-build").exists()}; '
+                      f'{output}{error}')
+
+        try:
+            wait_ready(ready)
+            pids = json.loads(ready.read_text())
+            supervisor.send_signal(signal.SIGTERM)
+            wait_ready(self.root / 'shutdown-parent.json')
+            wait_ready(self.root / 'shutdown-child.json')
+            # The owned group is still shutting down. TERM again must not abort
+            # the wait/KILL/reap path or release the leases early.
+            supervisor.send_signal(signal.SIGTERM)
+            output, error = supervisor.communicate(timeout=12)
+            self.assertEqual(supervisor.returncode, 1, output + error)
+            before = json.loads((self.root / 'before-release.json').read_text())
+            self.assertTrue(before['owned_present'])
+            self.assertEqual(before['states']['group'], '', 'command leader was not reaped')
+            self.assertTrue(not before['states']['child'] or before['states']['child'].startswith('Z'),
+                            'owned descendant still executing when lease release began')
+            receipt = json.loads((self.root / 'output/receipt.json').read_text())
+            for role in ('parent', 'child'):
+                owners = json.loads((self.root / f'shutdown-{role}.json').read_text())
+                self.assertEqual(owners['tcg-build'], receipt['test_owned_token'])
+                self.assertEqual(owners['gpu-validation'], 'replacement-foreign')
+            self.assertFalse((locks / 'tcg-build').exists(), 'owned lease stranded after TERM')
+            self.assertEqual((locks / 'gpu-validation/owner.json').read_bytes(),
+                             b'{"token":"replacement-foreign"}\n')
+            self.assertEqual((foreign / 'owner.json').read_bytes(), foreign_bytes)
+            self.assertEqual(receipt['status'], 'FAILED')
+            self.assertFalse(receipt['leases_released'], 'foreign token misreported as released')
+            self.assertEqual(receipt['outstanding_leases'],
+                             {str(locks / 'gpu-validation'): receipt['test_owned_token']})
+        finally:
+            # A baseline failure still must not strand the test's owned group.
+            group_record = self.root / 'group.json'
+            if pids is None and group_record.exists():
+                pids = json.loads(group_record.read_text())
+            if pids:
+                try:
+                    os.killpg(pids['group'], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if supervisor.poll() is None:
+                supervisor.kill()
+            supervisor.communicate(timeout=5)
 
     def test_runner_keeps_warning_stderr_out_of_json_stdout(self):
         """Real subprocess output catches the reviewed merged-stream JSON risk."""

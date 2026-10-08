@@ -9,10 +9,12 @@ fail before generation if the native production target is absent. Existing
 CTest XML checks cannot catch a configure-order or activation regression.
 Both controls use the production entry points without a test-only source seam.
 """
+from contextlib import nullcontext
 import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import platform
 import shutil
 import subprocess
@@ -47,6 +49,83 @@ class NativeWorkflowContracts(unittest.TestCase):
                 self.assertEqual(value, ['-j', '2', '-C', 'TCG build with spaces', 'libqemu-x86_64-softmmu.dylib'])
         query = json.loads(subprocess.check_output([launcher, '--version'], text=True))
         self.assertEqual(query, ['-j', '2', '--version'])
+
+    @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
+                         'Native CMake configuration requires Apple Silicon macOS')
+    def test_main_upstream_registration_is_required_by_native_qualification(self):
+        """Real reachable registrations, not a copied list, must be declared.
+
+        The synthetic attachment control misses new leaf registrations. This
+        configures main's actual upstream subtree with its prerequisite targets;
+        no engine build, dependency cache or fixture execution is needed.
+        """
+        source = self.root / 'registration-source'
+        source.mkdir()
+        upstream = TOOLS.parent / 'core/shader/recompiler/MetalReplay/UpstreamCorrectness'
+        (source / 'CMakeLists.txt').write_text(
+            'cmake_minimum_required(VERSION 3.24)\n'
+            'project(RegistrationContract LANGUAGES CXX OBJCXX)\n'
+            'enable_testing()\nset(BUILD_TESTING ON)\n'
+            'function(add_test_executable target)\n'
+            'add_executable(${target} ${ARGN})\nendfunction()\n'
+            'add_library(anyps5_metal_native_execution INTERFACE)\n'
+            'add_library(anyps5_metal_guest_recompiler INTERFACE)\n'
+            'add_library(anyps5_metal_utilities INTERFACE)\n'
+            'set_target_properties(anyps5_metal_utilities PROPERTIES ANYPS5_METALLIB "fixture.metallib")\n'
+            'add_subdirectory("' + upstream.as_posix() + '" upstream-correctness)\n')
+        build = self.root / 'registration-build'
+        configured = subprocess.run(['cmake', '-S', source, '-B', build],
+                                    capture_output=True, text=True, timeout=60)
+        self.assertEqual(configured.returncode, 0, configured.stdout + configured.stderr)
+        inventory = json.loads(subprocess.check_output(
+            ['ctest', '--test-dir', build, '--show-only=json-v1'], text=True, timeout=15))
+        names = [test['name'] for test in inventory['tests']]
+        self.assertTrue(names, 'real upstream graph registered no controls')
+        self.assertEqual(len(names), len(set(names)), 'duplicate upstream registration')
+        self.assertFalse(set(names) - workflow.required_tests('native'),
+                         'registered main controls absent from native qualification: ' +
+                         repr(sorted(set(names) - workflow.required_tests('native'))))
+
+    def test_pre_run_inventory_rejects_missing_extra_and_duplicate_before_execution(self):
+        """Pre-run JSON must fail closed independently of post-run XML checks."""
+        expected = {'cpu_contract', 'native_fixture'}
+        valid = [{'name': name} for name in sorted(expected)]
+        args = SimpleNamespace(source=self.root, macps_source=self.root, output=self.root,
+                               profile='native', revision='a' * 40,
+                               macps_revision='b' * 40, dependency_cache=None)
+        dependencies = {name: {} for name in workflow.DEPENDENCIES}
+        cases = {'valid': valid, 'missing': valid[:1],
+                 'extra': valid + [{'name': 'unexpected'}],
+                 'duplicate': valid + [valid[0]]}
+        for case, tests in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                args.output = Path(folder)
+                executed = []
+
+                def run(name, argv, **kwargs):
+                    executed.append(name)
+                    if name == 'ctest-inventory':
+                        return json.dumps({'tests': tests})
+                    if name == 'combined-native':
+                        raise RuntimeError('control reached combined-suite boundary')
+                    return ''
+
+                with patch.object(workflow, 'required_tests', return_value=expected), \
+                     patch.object(workflow, 'clone_exact'), \
+                     patch.object(workflow, 'setup_dependencies', return_value=dependencies), \
+                     patch.object(workflow, 'clean_revision', return_value={}), \
+                     patch.object(workflow, 'bounded_ninja', return_value=TOOLS / 'prepare_diagnostic_engine.py'), \
+                     patch.object(workflow, 'artifact_records', return_value={}), \
+                     patch.object(workflow, 'digest', return_value='digest'), \
+                     patch.object(workflow, 'Lease', side_effect=lambda *a, **kw: nullcontext()), \
+                     patch.object(workflow.os, 'uname', return_value=SimpleNamespace(machine='arm64')), \
+                     patch.object(workflow, 'prepare_package') as package:
+                    diagnostic = ('control reached combined-suite boundary' if case == 'valid' else
+                                  'CTest required inventory differs from declared native profile')
+                    with self.assertRaisesRegex(RuntimeError, diagnostic):
+                        workflow.workflow(args, run, {})
+                    package.assert_not_called()
+                self.assertEqual('combined-native' in executed, case == 'valid')
 
     @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
                          'Native CMake configuration requires Apple Silicon macOS')

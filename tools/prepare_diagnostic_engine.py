@@ -13,7 +13,7 @@ It builds the explicit --source revision, which must already contain the
 qualified production native runner and condition timeout control.
 """
 import argparse
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -77,7 +77,8 @@ anyps5_native_module_runner_qualified-rejection anyps5_native_module_runner_cli
 anyps5_metal_optional_sgpr_compute anyps5_metal_optional_sgpr_draw-vertex
 anyps5_metal_optional_sgpr_draw-fragment anyps5_metal_optional_sgpr_required
 anyps5_metal_normalized_load_replay anyps5_metal_scalar_termination_native
-anyps5_metal_scalar_termination_decode'''.split())
+anyps5_metal_scalar_termination_decode anyps5_metal_1d_gather_offset_native
+anyps5_metal_1d_gather_offset_rejections'''.split())
 
 
 def required_tests(profile):
@@ -528,6 +529,31 @@ def accept_prepared_package(args, run, receipt):
     run.save()
 
 
+@contextmanager
+def cli_cancellation():
+    """Route TERM through command/lease unwinding only while the CLI runs.
+
+    Further TERM requests cannot interrupt TERM/KILL/reap or token-qualified
+    release after cancellation starts. SIGKILL cannot be made cleanup-safe.
+    Importing Runner or Lease never changes the caller's signal handlers.
+    """
+    previous = signal.getsignal(signal.SIGTERM)
+    requested = False
+
+    def terminate(signum, _frame):
+        nonlocal requested
+        if not requested:
+            requested = True
+            raise KeyboardInterrupt('Terminated by ' + signal.Signals(signum).name)
+
+    try:
+        signal.signal(signal.SIGTERM, terminate)
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+@cli_cancellation()
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('source', 'macps-source', 'output'):
