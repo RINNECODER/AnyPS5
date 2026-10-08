@@ -168,11 +168,15 @@ struct SceAgcImports::Impl {
         required(Backend.RegisterShader);
         address(output, 8, 8);
         guest.CheckAccess(output, 8, Permission::Write);
-        auto shader = read<Shader>(guest, base);
+        // Header bytes may be unaligned; copy into an aligned local value.
+        address(base, sizeof(Shader), 1);
+        guest.CheckAccess(base, sizeof(Shader), Permission::Read);
+        Shader shader{};
+        guest.Read(base, std::as_writable_bytes(std::span(&shader, 1)));
         require(shader.file_header == 0x34333231 && shader.version == 0x18 &&
                 shader.header_size >= sizeof(Shader) && shader.header_size <= 1024 * 1024 &&
                 shader.shader_size && !(shader.shader_size & 3), "invalid relative shader header");
-        address(base, shader.header_size, 8);
+        address(base, shader.header_size, 1);
         address(code, shader.shader_size, 256);
         require(output + 8 <= base || base + shader.header_size <= output, "shader output overlaps header");
         require(code + shader.shader_size <= base || base + shader.header_size <= code, "shader code overlaps header");

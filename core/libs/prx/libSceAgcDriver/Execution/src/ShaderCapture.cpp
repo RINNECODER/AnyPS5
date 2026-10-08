@@ -31,18 +31,18 @@ const Shader nullPixelShader = [] {
 
 std::shared_ptr<const ShaderSnapshot> ReadRegisteredShader(std::uint64_t guestHeaderAddress) {
     Shader header{};
-    GuestMemory::Read(guestHeaderAddress, std::as_writable_bytes(std::span(&header, 1)), alignof(Shader));
+    GuestMemory::Read(guestHeaderAddress, std::as_writable_bytes(std::span(&header, 1)), 1);
     require(header.file_header == 0x34333231u && header.version == 0x18u, "invalid shader header");
     require(header.header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
     require(header.shader_size != 0 && (header.shader_size & 3u) == 0, "invalid shader size");
     const auto codeAddress = reinterpret_cast<std::uintptr_t>(header.code);
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(guestHeaderAddress), header.header_size, alignof(Shader));
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(guestHeaderAddress), header.header_size, 1);
     GuestMemory::CheckRange(reinterpret_cast<const void*>(codeAddress), header.shader_size, 256);
     ShaderSnapshot snapshot{codeAddress, guestHeaderAddress, header.type, {}, {}};
     snapshot.code.resize(header.shader_size / sizeof(std::uint32_t));
     GuestMemory::Read(codeAddress, std::as_writable_bytes(std::span(snapshot.code)), 256);
     snapshot.header.resize(header.header_size);
-    GuestMemory::Read(guestHeaderAddress, snapshot.header, alignof(Shader));
+    GuestMemory::Read(guestHeaderAddress, snapshot.header, 1);
     return std::make_shared<const ShaderSnapshot>(std::move(snapshot));
 }
 
