@@ -117,16 +117,18 @@ private:
 
 FlipRequest::~FlipRequest() {
     if (!reserved) return;
-    std::lock_guard lock(cfg->mutex);
-    if (!terminal) {
-        --cfg->flipStatus.flipPendingNum;
-        --queue->reservations;
-        if (index >= 0) {
-            --cfg->bufferPending[index];
-            cfg->bufferReuse[index].Complete(reuseTicket);
-        }
-        cfg->vblankCond.notify_all();
+    std::unique_lock lock(cfg->mutex);
+    if (terminal) return;
+    --cfg->flipStatus.flipPendingNum;
+    --queue->reservations;
+    if (index >= 0) {
+        --cfg->bufferPending[index];
+        cfg->bufferReuse[index].Complete(reuseTicket);
     }
+    cfg->vblankCond.notify_all();
+    lock.unlock();
+    std::lock_guard queueLock(queue->mutex);
+    queue->changed.notify_all();
 }
 
 void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameTiming) {
