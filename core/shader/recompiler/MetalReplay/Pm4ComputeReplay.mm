@@ -13,6 +13,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <chrono>
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <thread>
 #include <iostream>
 #include <limits>
 #include <span>
@@ -82,6 +87,185 @@ std::array<std::uint32_t, 8> UserData(std::uint64_t input, std::uint64_t output,
     std::copy(in.begin(), in.end(), userData.begin());
     std::copy(out.begin(), out.end(), userData.begin() + 4);
     return userData;
+}
+
+class PublicationFlip final : public AgcDriver::IFlipRequest {
+public:
+    std::atomic<unsigned> ready{0};
+    std::mutex mutex;
+    std::exception_ptr failure;
+    void GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>&) override { ++ready; }
+    void Fail(std::exception_ptr error) noexcept override {
+        std::lock_guard lock(mutex);
+        if (!failure) failure = error;
+    }
+};
+
+class PublicationOutput final : public AgcDriver::IVideoOutput, public AgcDriver::IRenderingWait,
+    public std::enable_shared_from_this<PublicationOutput> {
+public:
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::exception_ptr failure;
+    bool entered = false, awakened = false, retire = false, exited = false;
+    std::vector<std::shared_ptr<PublicationFlip>> flips;
+    std::function<void()> onFailure;
+    std::atomic<bool> checkedCallback{false};
+    std::shared_ptr<AgcDriver::IRenderingWait> CaptureRenderingWait(std::uint32_t index) override {
+        Require(index == 0, "Publication rendering wait references the wrong buffer");
+        return shared_from_this();
+    }
+    std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo&) override {
+        auto flip = std::make_shared<PublicationFlip>();
+        flips.push_back(flip);
+        return flip;
+    }
+    void Wait() override {
+        std::unique_lock lock(mutex);
+        entered = true;
+        changed.notify_all();
+        // The owner takes this same mutex after observing entered: the worker
+        // has actually released it into this wait, not merely been launched.
+        changed.wait(lock, [&] { return failure != nullptr; });
+        awakened = true;
+        changed.notify_all();
+        changed.wait(lock, [&] { return retire; });
+        exited = true;
+        std::rethrow_exception(failure);
+    }
+    void Fail(std::exception_ptr error) noexcept override {
+        {
+            std::lock_guard lock(mutex);
+            if (!failure) failure = error;
+        }
+        changed.notify_all();
+        if (onFailure && !checkedCallback.exchange(true)) onFailure();
+    }
+    void ReleaseWorker() {
+        std::lock_guard lock(mutex);
+        retire = true;
+        changed.notify_all();
+    }
+};
+
+template<class F> std::exception_ptr PublicationError(F&& action) {
+    try { action(); } catch (...) { return std::current_exception(); }
+    return {};
+}
+
+void PublicationFailureReplay(id<MTLDevice> device, id<MTLLibrary> library) {
+    constexpr std::uint64_t CommandsAddress = 0x910000, LabelAddress = 0x920000,
+        HeaderAddress = 0x930000, CodeAddress = 0x940000;
+    // Active graphics submission stalls before its flip and EOP; the second
+    // submission's reservation is pending on that same worker.
+    std::array<std::uint32_t, 18> commands{
+        AgcDriver::RenderingWaitPacketHeader, 7, 0, 0,
+        AgcDriver::FlipPacketHeader, 7, 0, 1, 0, 0,
+        0xc0064900, 0, (1u << 29) | (1u << 24), static_cast<std::uint32_t>(LabelAddress + 4), 0, 1, 0, 0};
+    const auto originalCommands = commands;
+    std::array<std::uint32_t, 3> label{0xcafef00d, 0, 0xdeadbeef};
+    const auto originalLabel = label;
+    std::array<std::uint32_t, 1> code{0xbf810000};
+    Shader header{};
+    header.file_header = 0x34333231;
+    header.version = 0x18;
+    header.code = reinterpret_cast<const volatile void*>(CodeAddress);
+    header.header_size = sizeof(header);
+    header.shader_size = sizeof(code);
+    const auto originalHeader = header;
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 4> ranges{{
+        {CommandsAddress, std::as_writable_bytes(std::span(commands)), false},
+        {LabelAddress, std::as_writable_bytes(std::span(label)), true},
+        {HeaderAddress, std::as_writable_bytes(std::span(&header, 1)), true},
+        {CodeAddress, std::as_writable_bytes(std::span(code)), false}}};
+    const std::array<AgcDriver::Metal::ReadableGuestRange, 2> readable{{
+        {HeaderAddress, sizeof(header)}, {CodeAddress, sizeof(code)}}};
+    const auto publishError = std::make_exception_ptr(std::runtime_error("shader publication failed"));
+    const auto rollbackError = std::make_exception_ptr(std::runtime_error("shader rollback failed"));
+    const auto laterError = std::make_exception_ptr(std::runtime_error("later driver failure"));
+    std::atomic<unsigned> interrupts{0};
+    AgcDriver::Metal::MetalDriver driver;
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges,
+        [&](std::uint32_t) { ++interrupts; });
+    auto retained = std::make_shared<PublicationOutput>();
+    auto registered = std::make_shared<PublicationOutput>();
+    std::exception_ptr callbackAdmission;
+    registered->onFailure = [&] {
+        // Reentry here must see the terminal error, not publication reentry.
+        callbackAdmission = PublicationError([&] { driver.SuspendPoint(); });
+        // A different thread acquiring gpuMutex catches lock retention even
+        // though the mutex is recursive on the publication thread.
+        std::thread gpuProbe([&] { driver.ReleaseWindow(nullptr); });
+        gpuProbe.join();
+    };
+    std::future<std::exception_ptr> drain;
+    try {
+        driver.RegisterVideoOutput(7, retained);
+        driver.RegisterVideoOutput(8, registered);
+        driver.SubmitCommandBuffer(CommandsAddress, commands.size(), 0, 0);
+        {
+            std::unique_lock lock(retained->mutex);
+            Require(retained->changed.wait_for(lock, std::chrono::seconds(5), [&] { return retained->entered; }),
+                "Publication worker never blocked in the actual rendering wait");
+        }
+        driver.SubmitCommandBuffer(CommandsAddress + 4 * sizeof(std::uint32_t), commands.size() - 4, 0, 0);
+        driver.UnregisterVideoOutput(7, retained);
+        Require(retained->flips.size() == 2, "Publication fixture lacks active and pending flip reservations");
+        bool published = false, rolledBack = false;
+        const auto reported = PublicationError([&] {
+            driver.RegisterShaderWithPublication(HeaderAddress, readable,
+                [&] { published = true; std::rethrow_exception(publishError); },
+                [&] { rolledBack = true; std::rethrow_exception(rollbackError); });
+        });
+        Require(published && rolledBack && reported == rollbackError,
+            "Publication did not execute both injected failures and propagate rollback failure");
+        std::cout << "Publication rollback injected after actual rendering-wait entry; starting WaitIdle drain" << std::endl;
+        drain = std::async(std::launch::async, [&] { return PublicationError([&] { driver.WaitIdle(); }); });
+        bool woke;
+        {
+            std::unique_lock lock(retained->mutex);
+            woke = retained->changed.wait_for(lock, std::chrono::seconds(2), [&] { return retained->awakened; });
+        }
+        if (!woke) {
+            // Do not rescue with Shutdown/ReportFailure before observing the
+            // missing wake. Cleanup below rescues and joins the baseline worker.
+            Require(drain.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout,
+                "Publication drain returned early while its rendering worker remained asleep");
+            throw std::runtime_error("Rollback failure omitted output wakeup; WaitIdle remains blocked");
+        }
+        Require(drain.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout,
+            "Publication drain returned before the awakened worker retired");
+        Require(registered->failure == rollbackError && retained->failure == rollbackError &&
+            callbackAdmission == rollbackError, "Publication fanout lost the failure or retained publication/driver locks");
+        Require(retained->flips[1]->failure == rollbackError && retained->flips[1]->ready == 0,
+            "Publication failure did not retire its pending flip without success");
+        Require(PublicationError([&] { driver.SubmitCommandBuffer(CommandsAddress, commands.size(), 0, 0); }) == rollbackError &&
+            PublicationError([&] { driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress)); }) == rollbackError &&
+            PublicationError([&] { driver.SuspendPoint(); }) == rollbackError,
+            "Publication failure admitted new work");
+        retained->ReleaseWorker();
+        Require(drain.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
+            "Publication drain did not finish after rendering-worker retirement");
+        Require(drain.get() == rollbackError && retained->exited,
+            "Publication drain reported success or the wrong terminal failure");
+        driver.ReportFailure(laterError);
+        Require(PublicationError([&] { driver.WaitIdle(); }) == rollbackError &&
+            PublicationError([&] { driver.Shutdown(); }) == rollbackError,
+            "Publication shutdown or later failure replaced the sticky first failure");
+        for (const auto& flip : retained->flips)
+            Require(flip->failure == rollbackError && flip->ready == 0, "Publication failure leaked a flip or reported GPU success");
+        Require(interrupts == 0 && label == originalLabel && commands == originalCommands &&
+            std::memcmp(&header, &originalHeader, sizeof(header)) == 0 && code[0] == 0xbf810000,
+            "Publication failure delivered EOP or changed borrowed memory");
+    } catch (...) {
+        const auto error = std::current_exception();
+        retained->ReleaseWorker();
+        // Shutdown is the existing rescue path even on the unfixed baseline.
+        PublicationError([&] { driver.Shutdown(); });
+        if (drain.valid()) drain.get();
+        std::rethrow_exception(error);
+    }
+    std::cout << "Shader publication rollback failure: registered/retained output wakeup, pending/active flip retirement, closed admission, drained worker and sticky failure passed\n";
 }
 
 void OriginalWave32Subgroup(id<MTLDevice> device, id<MTLLibrary> library) {
@@ -655,11 +839,14 @@ int main(int argc, char** argv) {
             id<MTLDevice> device = MTLCreateSystemDefaultDevice();
             Require(device != nil && [device supportsFamily:MTLGPUFamilyMetal3], "PM4 compute replay requires a Metal 3 device");
             std::cout << "Native PM4 compute replay on " << device.name.UTF8String << '\n';
-            Require(argc == 2, "PM4 replay requires its utility Metal library path");
+            Require(argc == 2 || (argc == 3 && std::string(argv[2]) == "publication-failure"),
+                "PM4 replay requires its utility Metal library path and optional publication-failure mode");
             NSError* error = nil;
             auto url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]]];
             id<MTLLibrary> library = [device newLibraryWithURL:url error:&error];
             Require(library != nil, error ? error.localizedDescription.UTF8String : "PM4 utility library failed to load");
+            PublicationFailureReplay(device, library);
+            if (argc == 3) return 0;
             OriginalSubmitExports(device, library);
             OriginalWave32Subgroup(device, library);
             RetainedSubgroupReplays(device, library);
