@@ -1036,6 +1036,8 @@ enum class RdnaOpcode : std::uint16_t {
     Exp,
     VMulHiI32I24,
     VMulHiU32U24,
+    SCallB64,
+    SSwappcB64,
     Count
 };
 

@@ -219,6 +219,12 @@ void TranslationContext::sGetpcB64(const RdnaInstruction& inst) {
     writeU32Pair(inst.destination, extractU64(pc));
 }
 
+// Same-program static calls use CFG edges; the ISA still writes guest PC+4.
+// Adapted from #1217 (ebosido444-ai), upstream aa277b3818d8cf7bc900bdfee740f318469df349.
+void TranslationContext::sStaticCallB64(const RdnaInstruction& inst) {
+    sGetpcB64(inst);
+}
+
 void TranslationContext::sCselectB32(const RdnaInstruction& inst) {
     const IrU32 trueValue = readU32(sourceAt(inst, 0u));
     const IrU32 falseValue = readU32(sourceAt(inst, 1u));

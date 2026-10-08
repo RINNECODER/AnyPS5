@@ -277,7 +277,7 @@ void verifyNullSwappc() {
     verifyLongBranch("backward long branch", LongBranchBack, 0x24u, 0x08u);
     const std::array<std::uint32_t, 3> call{0xbe8c1f00u, 0xbe8e210cu, 0xbf810000u};
     const std::vector<std::tuple<std::string_view, std::vector<std::uint32_t>, std::string_view>> refused{
-        {"s_swappc_b64 with a return address", {call.begin(), call.end()}, "unsupported SOP1 opcode 33"},
+        {"s_swappc_b64 with a return address", {call.begin(), call.end()}, "unclosable scalar call/return pairing"},
         {"index rewritten after the bound", patched(DwordTableGetpcFirst, 5, {0xbe9203ffu, 0x00000040u}), "unsupported dynamic s_setpc_b64"},
         {"index scaled for two-dword entries", patched(DwordTableGetpcFirst, 7, {0x8f128312u}), "unsupported dynamic s_setpc_b64"},
         {"entry rewritten after the load", patched(DwordTableGetpcFirst, 11, {0xbe8e0380u}), "unsupported dynamic s_setpc_b64"},
@@ -292,9 +292,54 @@ void verifyNullSwappc() {
     }
 }
 
+// Raw guest-word admission cases adapted from #1535 (Sanjaysrinivas),
+// upstream aa277b3818d8cf7bc900bdfee740f318469df349; extend the primary graph owner.
+void verifyStaticScalarCalls(std::string_view only = {}) {
+    const std::vector<std::tuple<std::string_view, std::vector<std::uint32_t>, std::string_view>> refused{
+        {"tuple", {0xbb080001, 0xbf810000, 0xf40c0100, 0xfa000000, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        {"wrong_return", {0xbb080001, 0xbf810000, 0xbe802009, 0xbf810000}, "escapes the constant-offset"},
+        {"fallthrough", {0xbb080002, 0xbf800000, 0xbf800000, 0xbf800000, 0xbe802008, 0xbf810000}, "control flow enters the call region"},
+        {"conditional_fallthrough", {0xbb080002, 0xbf820000, 0xbf840002, 0xbf800000, 0xbe802008, 0xbf810000}, "control flow enters the call region"},
+        {"return_before_target", {0xbb080002, 0xbf810000, 0xbe802008, 0xbf800000, 0xbf810000}, "return precedes the call target"},
+        {"descriptor", {0xbb0a0001, 0xbf810000, 0xe0381000, 0x80020401, 0xbe80200a, 0xbf810000}, "escapes the constant-offset"},
+        {"relative_read", {0xbb080001, 0xbf810000, 0xbe802e00, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        {"invalid_boundary", {0xbb080002, 0xbf810000, 0xbe8003ff, 0, 0xbe802008, 0xbf810000}, "invalid instruction boundary"},
+        {"outside_span", {0xbb080010, 0xbf810000}, "code span bounds"},
+        {"negative_outside_span", {0xbb08fffe, 0xbf810000}, "code span bounds"},
+        {"missing_return", {0xbb080000, 0xbf810000}, "no paired s_setpc_b64 return"},
+        {"odd_link", {0xbb090001, 0xbf810000, 0xbe802009, 0xbf810000}, "ordinary aligned scalar register pair"},
+        {"special_link", {0xbb6a0001, 0xbf810000, 0xbe80206a, 0xbf810000}, "ordinary aligned scalar register pair"},
+        {"link_write", {0xbb080001, 0xbf810000, 0xbe880380, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        {"pair_read", {0xbb080001, 0xbf810000, 0xbe8c0407, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        {"recursive", {0xbb08ffff, 0xbe802008, 0xbf810000}, "recursive scalar call"},
+        {"shared_link", {0xbb080002, 0xbb080001, 0xbf810000, 0xbe802008, 0xbf810000}, "shared with another call"},
+        {"multiple_returns", {0xbb080001, 0xbf810000, 0xbe802008, 0xbe802008, 0xbf810000}, "multiple s_setpc_b64 returns"},
+        {"cross_enter", {0xbb080002, 0xbf820001, 0xbf810000, 0xbf800000, 0xbe802008, 0xbf810000}, "control flow enters the call region"},
+        {"cross_leave", {0xbb080001, 0xbf810000, 0xbf820002, 0xbe802008, 0xbf810000, 0xbf810000}, "control flow leaves the call region"},
+        {"interleave", {0xbb080003, 0xbb0a0003, 0xbf810000, 0xbf800000, 0xbf800000, 0xbf800000, 0xbe802008, 0xbe80200a, 0xbf810000}, "call regions interleave"},
+        {"dynamic_target", {0xbe88210a, 0xbf810000}, "not statically resolvable"},
+        {"entry_into_callee", {0xbf800000, 0xbe802008, 0xbb08fffd, 0xbf810000}, "control flow enters the call region at program entry"},
+        {"branch_into_target_setup", {0xbf850001, 0xbe8a1f00, 0x800a900a, 0xbe88210a, 0xbf820003, 0xbf810000, 0xbf800000, 0xbe802008, 0xbf810000}, "does not start in its block"},
+        {"vector_pair_read", {0xbb080001, 0xbf810000, 0x7e000607, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+    };
+    bool checked = false;
+    for (const auto& [name, code, message] : refused) {
+        if (!only.empty() && only != name) continue;
+        checked = true;
+        const auto error = refusal(code);
+        require(error.find(message) != std::string::npos, std::string(name) + ": expected '" + std::string(message) + "', got '" + error + "'");
+        std::printf("static scalar call guard %.*s PASS: %s\n", static_cast<int>(name.size()), name.data(), error.c_str());
+    }
+    require(checked, "unknown scalar call guard");
+}
+
 }
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string_view(argv[1]) == "--static-call-guard") {
+        try { verifyStaticScalarCalls(argv[2]); return 0; }
+        catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
+    }
     if (argc > 1) {
         int failures = 0;
         for (int i = 1; i < argc; ++i) {
@@ -903,6 +948,7 @@ done:
     }
     try {
         verifyNullSwappc();
+        verifyStaticScalarCalls();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
         ++failures;

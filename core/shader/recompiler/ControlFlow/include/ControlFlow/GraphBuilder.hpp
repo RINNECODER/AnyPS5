@@ -7,13 +7,22 @@
 
 namespace ShaderRecompiler {
 
+struct StaticScalarCall {
+    std::uint32_t callIndex = 0;
+    std::uint32_t linkRegister = 0;
+    std::uint32_t targetIndex = 0;
+    std::uint32_t targetProgramCounter = 0;
+    std::uint32_t returnIndex = 0;
+    std::uint32_t returnTargetProgramCounter = 0;
+};
+
 class GraphBuilder {
 public:
     [[nodiscard]] ControlFlowGraph Build(const RdnaProgram& program) const;
 
 private:
-    [[nodiscard]] std::vector<BasicBlock> splitIntoBlocks(const RdnaProgram& program) const;
-    void linkBlocks(std::vector<BasicBlock>& blocks, const RdnaProgram& program) const;
+    [[nodiscard]] std::vector<BasicBlock> splitIntoBlocks(const RdnaProgram& program, const std::vector<StaticScalarCall>& calls) const;
+    void linkBlocks(std::vector<BasicBlock>& blocks, const RdnaProgram& program, const std::vector<StaticScalarCall>& calls) const;
 };
 
 }
