@@ -1,10 +1,11 @@
-import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+
+from CliDiagnostics import parse_diagnostics
 
 
 runner, main_fixture, module_fixture, linux_fixture = map(lambda value: Path(value).resolve(), sys.argv[1:])
@@ -14,17 +15,16 @@ def run(arguments, cwd):
     result = subprocess.run([str(runner), "--diagnostics-json", *map(str, arguments)],
                             cwd=cwd, capture_output=True, text=True, timeout=20)
     assert result.stdout == "", (result.returncode, result.stdout, result.stderr)
-    events = [json.loads(line) for line in result.stderr.splitlines()]
-    assert events and all(event["schema_version"] == 1 for event in events), events
+    events = parse_diagnostics(result.stderr)
     return result, events
 
 
 def rejected(arguments, cwd, code, message):
     result, events = run(arguments, cwd)
     assert result.returncode == 126, (result.returncode, result.stderr)
-    assert len(events) == 1 and events[0]["event"] == "error", events
-    assert events[0]["code"] == code and events[0]["process_exit"] == 126, events
-    assert message in events[0]["message"], events
+    assert len(events) == 1 and events[0]["event"] == "error", (events, result.stderr)
+    assert events[0]["code"] == code and events[0]["process_exit"] == 126, (events, result.stderr)
+    assert message in events[0]["message"], (events, result.stderr)
 
 
 with tempfile.TemporaryDirectory(prefix="anyps5 module CLI é ") as directory:
@@ -41,12 +41,12 @@ with tempfile.TemporaryDirectory(prefix="anyps5 module CLI é ") as directory:
     for checksum, status in ((3366582378, 0), (3366582379, 77)):
         result, events = run(["--sce-module", module_argument, main, 17, 5, 7, 58, checksum], other_cwd)
         assert result.returncode == status, (status, result.returncode, result.stderr)
-        assert [event["event"] for event in events] == ["startup", "guest_exit"], events
+        assert [event["event"] for event in events] == ["startup", "guest_exit"], (events, result.stderr)
         started, exited = events
-        assert started["executable"] == str(main) and started["entry"] > 0, started
-        assert started["host_architecture"] == "arm64" and started["guest_architecture"] == "x86_64", started
-        assert started["format"] == "sce_elf64_x86_64", started
-        assert exited["exit_code"] == status, exited
+        assert started["executable"] == str(main) and started["entry"] > 0, (started, result.stderr)
+        assert started["host_architecture"] == "arm64" and started["guest_architecture"] == "x86_64", (started, result.stderr)
+        assert started["format"] == "sce_elf64_x86_64", (started, result.stderr)
+        assert exited["exit_code"] == status, (exited, result.stderr)
     print("compiled SCE module CLI: relative dependency from other cwd, spaces, initialized objects/TLS, prime/Adler result and guest exits0/77 PASS")
 
     rejected([main, 17, 5, 7, 58, 3366582378], other_cwd,
