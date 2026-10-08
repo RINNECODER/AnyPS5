@@ -12,6 +12,11 @@ namespace Cpu {
 class GuestThreads;
 class SceNativeGraphicsSession;
 
+struct NativeServiceConsumerProfile {
+    std::array<std::byte, 32> SourceSha256{};
+    std::uint64_t SourceSize = 0;
+};
+
 // This is a bounded diagnostic execution profile, not vendor clock semantics.
 struct NativeModuleRunnerConfiguration {
     std::filesystem::path UtilityMetallib;
@@ -19,6 +24,9 @@ struct NativeModuleRunnerConfiguration {
     std::uint32_t Width = 1280, Height = 720;
     std::chrono::milliseconds MaximumWallTime{30000};
     std::chrono::milliseconds MaximumIdleWait{5000};
+    std::uint32_t SessionUserId = 0x10000000;
+    bool EnableQualifiedServiceConsumers = false;
+    std::optional<NativeServiceConsumerProfile> PublicNpIdentity, PublicUriEscape;
 };
 
 // Construct on the persistent CPU/AppKit main owner before graph relocation.
@@ -34,6 +42,9 @@ public:
     NativeModuleRunner(const NativeModuleRunner&) = delete;
     NativeModuleRunner& operator=(const NativeModuleRunner&) = delete;
     std::shared_ptr<GuestMemoryRuntime> Memory() const;
+    // Retain the real parser snapshot before graph relocation. Dispatch never
+    // rereads its path; the loader callback must match this exact identity.
+    void RegisterParsedConsumer(const SceParsedImage&);
     std::optional<SceResolvedImport> Resolve(const SceImportConsumer&, const SceImport&,
                                             std::uint8_t type, std::uint64_t size);
     // The actual parsed source must have qualified the corresponding providers.

@@ -154,6 +154,35 @@ class NativeWorkflowContracts(unittest.TestCase):
                          'registered main controls absent from native qualification: ' +
                          repr(sorted(set(names) - workflow.required_tests('native'))))
 
+    @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
+                         'Native CMake configuration requires Apple Silicon macOS')
+    def test_service_registrations_are_required_by_native_qualification(self):
+        """Contract: NP, URI and service registrations must enter the manifest.
+
+        Regression: the 2/5/9 real controls are omitted and the exact native
+        package gate rejects a built candidate. Existing upstream and synthetic
+        inventory tests cannot detect additions in these production fragments.
+        Target interfaces supply prerequisites only; no runtime passing is claimed.
+        """
+        cpu = TOOLS.parent / 'core/cpu'
+        cases = (
+            ('np-identity',
+             'add_library(anyps5_platform_components INTERFACE)\n'
+             'include("' + (cpu / 'platform/np-identity/NativeNpIdentity.cmake').as_posix() + '")\n'
+             'anyps5_add_native_np_identity(anyps5_cpu anyps5_platform_components)\n',
+             {'anyps5_native_np_identity_': 2}),
+            ('http-uri',
+             'include("' + (cpu / 'platform/http-uri/NativeUriTests.cmake').as_posix() + '")\n'
+             'anyps5_add_native_uri_tests(anyps5_cpu)\n',
+             {'anyps5_native_uri_': 5}),
+            ('native-services',
+             'include("' + (cpu / 'NativeModuleRunnerTests.cmake').as_posix() + '")\n',
+             {'anyps5_native_service_': 9}),
+        )
+        for group, registration, controls in cases:
+            with self.subTest(group=group):
+                self.assert_production_registration_inventory(group, registration, controls)
+
     def test_pre_run_inventory_rejects_missing_extra_and_duplicate_before_execution(self):
         """Pre-run JSON must fail closed independently of post-run XML checks."""
         expected = {'cpu_contract', 'native_fixture'}

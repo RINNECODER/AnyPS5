@@ -23,6 +23,7 @@
 #include <mach-o/dyld.h>
 #endif
 #include <array>
+#include <charconv>
 #include <csignal>
 #include <fstream>
 #include <filesystem>
@@ -48,6 +49,23 @@ std::filesystem::path NativeUtilityMetallib() {
     if (!std::filesystem::is_regular_file(utility))
         throw std::runtime_error("Native module runner missing package utility metallib: " + utility.string());
     return utility;
+}
+Cpu::NativeServiceConsumerProfile NativeServiceProfile(std::string_view hash, std::string_view size) {
+    Cpu::NativeServiceConsumerProfile profile;
+    if (hash.size() != 64) throw std::runtime_error("Native service public profile requires a SHA256 and positive byte size");
+    const auto hex = [](char c) -> unsigned {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        throw std::runtime_error("Native service public profile requires a hexadecimal SHA256");
+    };
+    for (unsigned i = 0; i < 32; ++i)
+        profile.SourceSha256[i] = static_cast<std::byte>((hex(hash[i * 2]) << 4) | hex(hash[i * 2 + 1]));
+    const auto parsed = std::from_chars(size.data(), size.data() + size.size(), profile.SourceSize);
+    if (parsed.ec != std::errc{} || parsed.ptr != size.data() + size.size() || !profile.SourceSize ||
+        profile.SourceSha256 == std::array<std::byte, 32>{})
+        throw std::runtime_error("Native service public profile requires a SHA256 and positive byte size");
+    return profile;
 }
 #endif
 constexpr int LaunchFailure = 126;
@@ -153,7 +171,8 @@ void Capabilities() {
 }
 
 std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
-                                             const std::vector<std::filesystem::path>& paths) {
+                                             const std::vector<std::filesystem::path>& paths,
+                                             std::vector<Cpu::SceParsedImage>* parsedConsumers = nullptr) {
     constexpr std::uint64_t ceiling = 0x7ffdf0000000;
     std::uint64_t next = 0x1000000;
     const auto extent = [&](const Cpu::SceParsedImage& image, std::uint64_t bias) {
@@ -192,6 +211,7 @@ std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
                 {0x192818, 8, Cpu::SceCrtArrayOwner::DtInit}, {}, {}};
         files.push_back(std::move(file));
         next = extent(image, bias);
+        if (parsedConsumers) parsedConsumers->push_back(image);
     }
     return files;
 }
@@ -350,6 +370,9 @@ int main(int argc, char** argv) {
         bool inspect = false;
         std::filesystem::path resourceRoot;
         std::vector<std::filesystem::path> modulePaths;
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+        std::optional<Cpu::NativeServiceConsumerProfile> publicNpIdentity, publicUriEscape;
+#endif
         if (argc > 1 && std::string_view(argv[1]) == "--capabilities-json") {
             if (argc != 2) throw std::runtime_error("--capabilities-json does not accept executable arguments");
             Capabilities();
@@ -369,7 +392,21 @@ int main(int argc, char** argv) {
                     throw std::runtime_error("--sce-module requires a module path");
                 modulePaths.emplace_back(argv[first + 1]);
                 first += 2;
-            } else if (option == "--resource-root") {
+            }
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+            else if (option == "--native-service-public-profile") {
+                if (argc <= first + 3)
+                    throw std::runtime_error("--native-service-public-profile requires np-identity|http-uri SHA256 SIZE");
+                const std::string_view service(argv[first + 1]);
+                if (service != "np-identity" && service != "http-uri")
+                    throw std::runtime_error("Unsupported native service public profile");
+                auto& profile = service == "np-identity" ? publicNpIdentity : publicUriEscape;
+                if (profile) throw std::runtime_error("Native service public profile may be supplied only once per service");
+                profile = NativeServiceProfile(argv[first + 2], argv[first + 3]);
+                first += 4;
+            }
+#endif
+            else if (option == "--resource-root") {
                 if (argc <= first + 1 || std::string_view(argv[first + 1]).empty() || std::string_view(argv[first + 1]).starts_with('-'))
                     throw std::runtime_error("--resource-root requires a directory path");
                 if (!resourceRoot.empty()) throw std::runtime_error("--resource-root may be supplied only once");
@@ -382,6 +419,10 @@ int main(int argc, char** argv) {
         if (std::string_view(argv[first]).starts_with('-'))
             throw std::runtime_error("Unsupported CLI option: " + std::string(argv[first]));
         executable = argv[first];
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+        if ((publicNpIdentity || publicUriEscape) && (inspect || modulePaths.empty()))
+            throw std::runtime_error("Native service public profiles require a native SCE module graph");
+#endif
         if (inspect) {
             if (!modulePaths.empty()) throw std::runtime_error("--sce-module cannot be combined with --inspect-sce-json");
             if (argc != first + 1) throw std::runtime_error("--inspect-sce-json accepts exactly one executable");
@@ -416,6 +457,7 @@ int main(int argc, char** argv) {
 #endif
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
+        constexpr std::uint32_t sessionUserId = 0x10000000;
         try {
             std::vector<std::string> arguments;
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
@@ -433,9 +475,14 @@ int main(int argc, char** argv) {
                     const auto actualMain = Cpu::ParseSce(executable);
                     Cpu::NativeModuleRunnerConfiguration nativeConfig;
                     nativeConfig.UtilityMetallib = NativeUtilityMetallib();
+                    nativeConfig.SessionUserId = sessionUserId;
+                    nativeConfig.EnableQualifiedServiceConsumers = true;
+                    nativeConfig.PublicNpIdentity = publicNpIdentity;
+                    nativeConfig.PublicUriEscape = publicUriEscape;
                     nativeRuntime = std::make_unique<Cpu::NativeModuleRunner>(machine, threadRuntime,
                         Cpu::SceImportConsumer{actualMain.Path, actualMain.SourceSize, actualMain.SourceSha256},
                         std::move(nativeConfig));
+                    nativeRuntime->RegisterParsedConsumer(actualMain);
                     memoryRuntime = nativeRuntime->Memory();
                 } else
 #endif
@@ -445,7 +492,7 @@ int main(int argc, char** argv) {
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
-                npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine);
+                npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine, sessionUserId);
                 netAddressRuntime = std::make_unique<Cpu::SceNetAddressImports>(machine);
                 commonDialogRuntime = std::make_unique<Cpu::SceCommonDialogImports>(machine, 0x7ffdf2000000);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
@@ -481,7 +528,18 @@ int main(int argc, char** argv) {
                     sceRuntime->SetProcessExitHandler(processExit);
                     lifecycleRuntime->SetProcessExitHandler(processExit);
 #endif
-                    const auto files = ModuleFiles(executable, modulePaths);
+                    std::vector<Cpu::SceParsedImage> parsedConsumers;
+                    const auto files = ModuleFiles(executable, modulePaths,
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                        nativeRuntime ? &parsedConsumers : nullptr
+#else
+                        nullptr
+#endif
+                        );
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                    if (nativeRuntime) for (const auto& parsed : parsedConsumers)
+                        nativeRuntime->RegisterParsedConsumer(parsed);
+#endif
                     const auto hosts = HostModules(executable, files
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                         , nativeRuntime.get()

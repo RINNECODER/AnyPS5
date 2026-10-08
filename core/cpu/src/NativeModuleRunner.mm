@@ -7,6 +7,9 @@
 #include "KernelEvents.hpp"
 #include "KernelPrimitives.hpp"
 #include "KernelSemaphores.hpp"
+#include "NativeNpIdentity.hpp"
+#include "NativeUriEscape.hpp"
+#include "SceImageData.hpp"
 #include "NativeAgcBackend.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libSceVideoOut/include/NativeMetalSession.hpp"
@@ -16,6 +19,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <thread>
 
@@ -95,6 +99,9 @@ struct NativeModuleRunner::Impl {
     std::unique_ptr<Platform::TargetKernelMutexes> mutexes;
     std::unique_ptr<Platform::TargetKernelEvents> events;
     std::unique_ptr<Platform::TargetKernelSemaphores> semaphores;
+    std::map<std::filesystem::path, SceParsedImage> serviceConsumers;
+    std::unique_ptr<Platform::NativeNpIdentity> npIdentity;
+    std::unique_ptr<Platform::NativeUriEscape> uriEscape;
     Completion completion;
     std::unique_ptr<SceNativeGraphicsSession> graphics;
     std::unique_ptr<SceAgcImports> agc;
@@ -107,7 +114,8 @@ struct NativeModuleRunner::Impl {
     Impl(Machine& m, std::shared_ptr<GuestThreads> scheduler, SceImportConsumer mainSource,
          NativeModuleRunnerConfiguration configuration)
         : machine(m), threads(std::move(scheduler)), source(std::move(mainSource)), config(std::move(configuration)) {
-        if (!threads || config.MaximumWallTime.count() <= 0 || config.MaximumIdleWait.count() <= 0)
+        if (!threads || config.MaximumWallTime.count() <= 0 || config.MaximumIdleWait.count() <= 0 ||
+            config.SessionUserId == 0xffffffffu)
             throw std::invalid_argument("Native module runner requires scheduler and positive diagnostic bounds");
         threads->CheckIdleOwner();
         memory = std::make_shared<GuestMemoryRuntime>(machine, 12ULL << 30,
@@ -177,6 +185,7 @@ struct NativeModuleRunner::Impl {
         dispatch->phase = Phase::Drained;
         dispatch->active = {};
         attempt([&] { memory->Shutdown(); });
+        npIdentity.reset(); uriEscape.reset();
         attempt([&] { threads->Withdraw(); });
         if (events) attempt([&] { events->Provider().Shutdown(); });
         if (semaphores) attempt([&] { semaphores->Provider().Shutdown(); });
@@ -234,6 +243,15 @@ NativeModuleRunner::NativeModuleRunner(Machine& machine, std::shared_ptr<GuestTh
     : impl(std::make_unique<Impl>(machine, std::move(threads), std::move(source), std::move(config))) {}
 NativeModuleRunner::~NativeModuleRunner() = default;
 std::shared_ptr<GuestMemoryRuntime> NativeModuleRunner::Memory() const { return impl->memory; }
+void NativeModuleRunner::RegisterParsedConsumer(const SceParsedImage& image) {
+    impl->checkOwner();
+    if (impl->shutdown || impl->dispatch->phase != Impl::Phase::Loading)
+        throw std::runtime_error("Native service consumer registration after loading");
+    if (!image.Data || image.Path.empty() || !image.SourceSize ||
+        image.SourceSize != image.Data->SourceSize || image.SourceSha256 != image.Data->SourceSha256 ||
+        !impl->serviceConsumers.emplace(image.Path, image).second)
+        throw std::runtime_error("Unsupported native service parsed consumer snapshot");
+}
 SceNativeGraphicsSession& NativeModuleRunner::Graphics() {
     impl->checkOwner();
     if (!impl->graphics) throw std::runtime_error("Native module graphics is drained");
@@ -247,11 +265,29 @@ void NativeModuleRunner::Shutdown() { impl->close(); }
 
 void NativeModuleRunner::AddHostModules(std::vector<SceHostModule>& hosts) const {
     impl->checkOwner();
-    if (!qualifiedSize(impl->source) || QualifiedAgcAdmissionsForImage(sourceHash(impl->source)).empty()) return;
-    for (const auto* name : {"libSceAgc", "libSceAgcDriver", "libSceVideoOut"})
-        hosts.push_back({std::string(name) + ".prx", {name, 0, 1, 1}, {{name, 0, 1}}});
-    for (auto& host : hosts) if (host.Module.Name == "libkernel")
-        host.Libraries.push_back({"libScePosix", 0, 1});
+    const auto serviceSource = [&](const char* targetName, const char* publicName, const auto& profile) {
+        return std::any_of(impl->serviceConsumers.begin(), impl->serviceConsumers.end(), [&](const auto& entry) {
+            const auto& image = entry.second;
+            const SceImportConsumer identity{image.Path, image.SourceSize, image.SourceSha256};
+            return (impl->config.EnableQualifiedServiceConsumers && image.Path.filename() == targetName &&
+                    image.SourceContainer == "plain_self" && qualifiedSize(identity)) ||
+                   (profile && image.Path.filename() == publicName && image.SourceContainer == "elf" &&
+                    image.Type == 0xfe10 && image.SourceSize == profile->SourceSize &&
+                    image.SourceSha256 == profile->SourceSha256);
+        });
+    };
+    const auto add = [&](const char* name) {
+        if (std::none_of(hosts.begin(), hosts.end(), [&](const auto& host) { return host.Module.Name == name; }))
+            hosts.push_back({std::string(name) + ".prx", {name, 0, 1, 1}, {{name, 0, 1}}});
+    };
+    if (serviceSource("eboot.bin", "NativeNpIdentityGuest.elf", impl->config.PublicNpIdentity)) add("libSceNpManager");
+    if (serviceSource("libSceNpCppWebApi.prx", "NativeUriGuest.elf", impl->config.PublicUriEscape)) add("libSceHttp");
+    if (qualifiedSize(impl->source) && !QualifiedAgcAdmissionsForImage(sourceHash(impl->source)).empty()) {
+        for (const auto* name : {"libSceAgc", "libSceAgcDriver", "libSceVideoOut"})
+            hosts.push_back({std::string(name) + ".prx", {name, 0, 1, 1}, {{name, 0, 1}}});
+        for (auto& host : hosts) if (host.Module.Name == "libkernel")
+            host.Libraries.push_back({"libScePosix", 0, 1});
+    }
 }
 
 std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportConsumer& consumer,
@@ -261,6 +297,41 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
         throw std::runtime_error("Native module import resolution after shutdown");
     const auto name = consumer.Path.filename().string();
     const auto hash = sourceHash(consumer);
+    if (import.Nid == "XDncXQIJUSk" || import.Nid == "YuOW3dDAKYc") {
+        const auto found = impl->serviceConsumers.find(consumer.Path);
+        if (type != 2 || size || found == impl->serviceConsumers.end() ||
+            found->second.SourceSize != consumer.SourceSize || found->second.SourceSha256 != consumer.SourceSha256)
+            throw std::runtime_error("Unsupported native service actual consumer/type/size");
+        std::optional<std::uint64_t> address;
+        if (import.Nid == "XDncXQIJUSk") {
+            if (!impl->npIdentity) {
+                Platform::NativeNpIdentity::Configuration config;
+                config.EnableQualifiedConsumer = impl->config.EnableQualifiedServiceConsumers;
+                config.SessionUserId = impl->config.SessionUserId;
+                if (impl->config.PublicNpIdentity) {
+                    config.EnablePublicFixtureCandidate = true;
+                    config.PublicFixtureSha256 = impl->config.PublicNpIdentity->SourceSha256;
+                    config.PublicFixtureSize = impl->config.PublicNpIdentity->SourceSize;
+                }
+                impl->npIdentity = std::make_unique<Platform::NativeNpIdentity>(impl->machine, impl->threads, config);
+            }
+            address = impl->npIdentity->Resolve(import, type, size, found->second);
+        } else {
+            if (!impl->uriEscape) {
+                Platform::NativeUriEscape::Configuration config;
+                config.EnableTargetConsumer = impl->config.EnableQualifiedServiceConsumers;
+                if (impl->config.PublicUriEscape) {
+                    config.EnablePublicFixture = true;
+                    config.PublicFixtureSha256 = impl->config.PublicUriEscape->SourceSha256;
+                    config.PublicFixtureSize = impl->config.PublicUriEscape->SourceSize;
+                }
+                impl->uriEscape = std::make_unique<Platform::NativeUriEscape>(impl->machine, impl->threads, config);
+            }
+            address = impl->uriEscape->Resolve(import, type, size, found->second);
+        }
+        if (!address) throw std::runtime_error("Unsupported native service retained consumer/import row");
+        return SceResolvedImport{*address, type};
+    }
     // Pass the actual parsed importing image's identity. This provider admits
     // only the four observed semaphore rows for the exact target consumer,
     // and validates function type/size and full scope before allocating gates.

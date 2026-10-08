@@ -19,3 +19,4 @@ if(BUILD_TESTING AND cpuModernTcg AND TARGET anyps5_native_module_runner)
     set_tests_properties(anyps5_native_module_runner_cli PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE
             ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
 endif()
+include("${CMAKE_CURRENT_SOURCE_DIR}/platform/native-service-integration/NativeServiceIntegrationTests.cmake")
