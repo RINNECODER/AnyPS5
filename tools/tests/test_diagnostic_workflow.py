@@ -257,19 +257,34 @@ class ResultAndLeaseControls(unittest.TestCase):
                 self.assertEqual(len(active_handlers), 1)
                 self.assertIsNot(active_handlers[0], handler, 'CLI did not install cancellation handling')
                 self.assertIs(signal.getsignal(signal.SIGTERM), handler)
+        with patch.object(sys, 'argv', [str(SCRIPT)]), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as exit_status:
+                scoped_workflow.main()
+        self.assertEqual(exit_status.exception.code, 2)
+        self.assertIs(signal.getsignal(signal.SIGTERM), handler, 'parser exit leaked handler')
 
     @unittest.skipUnless(os.name == 'posix', 'Owned command groups require POSIX signals')
     def test_real_sigterm_stops_owned_group_before_token_qualified_lease_release(self):
-        """Real TERM (including another during shutdown) must unwind the CLI.
+        """First/repeated TERM must not interrupt cleanup, whatever started it.
 
-        Children publish readiness only after installing TERM handlers. They
-        retain execution until the KILL fallback, inspecting lease ownership on
-        TERM. A release observer inspects actual process states before calling
-        the real Lease exit; no global lock directory or engine is used.
+        Contract: TERM/KILL/reap precedes token-qualified release, which must
+        also finish under TERM. Regression: first TERM raises inside timeout or
+        SIGINT teardown (or release), bypassing KILL/reap or stranding leases.
+        Prior coverage always sent TERM first, masking these cancellation holes.
+        Real CLI/Runner/Lease and process groups own this proof; readiness and
+        observation stay in the fixture, without production-only test seams.
         """
-        locks = self.root / 'private-locks'
-        ready = self.root / 'ready.json'
-        source, macps = self.root / 'source', self.root / 'macps'
+        for initiator, target in (('timeout', 'wait'), ('SIGINT', 'wait'),
+                                  ('SIGTERM', 'wait'), ('timeout', 'release')):
+            with self.subTest(initiator=initiator, target=target):
+                folder = self.root / (initiator + '-' + target)
+                folder.mkdir()
+                self.exercise_sigterm_cleanup(folder, initiator, target)
+
+    def exercise_sigterm_cleanup(self, root, initiator, target):
+        locks = root / 'private-locks'
+        ready = root / 'ready.json'
+        source, macps = root / 'source', root / 'macps'
         revision, app_revision = clean_repository(source), clean_repository(macps)
         foreign = locks / 'foreign-control'
         foreign.mkdir(parents=True)
@@ -277,7 +292,7 @@ class ResultAndLeaseControls(unittest.TestCase):
         (foreign / 'owner.json').write_bytes(foreign_bytes)
         child = textwrap.dedent(f'''
             import json, os, pathlib, signal, time
-            root = pathlib.Path({str(self.root)!r})
+            root = pathlib.Path({str(root)!r})
             locks = pathlib.Path({str(locks)!r})
             def terminate(*_):
                 owners = {{name: json.loads((locks / name / 'owner.json').read_text())['token']
@@ -289,7 +304,7 @@ class ResultAndLeaseControls(unittest.TestCase):
         ''')
         command = textwrap.dedent(f'''
             import json, os, pathlib, signal, subprocess, sys, time
-            root = pathlib.Path({str(self.root)!r})
+            root = pathlib.Path({str(root)!r})
             locks = pathlib.Path({str(locks)!r})
             def terminate(*_):
                 owners = {{name: json.loads((locks / name / 'owner.json').read_text())['token']
@@ -305,10 +320,10 @@ class ResultAndLeaseControls(unittest.TestCase):
             while True: time.sleep(0.05)
         ''')
         supervisor_code = textwrap.dedent(f'''
-            import json, pathlib, signal, subprocess, sys
+            import json, pathlib, signal, subprocess, sys, time
             sys.path.insert(0, {str(SCRIPT.parent)!r})
             import prepare_diagnostic_engine as workflow
-            root = pathlib.Path({str(self.root)!r})
+            root = pathlib.Path({str(root)!r})
             locks = pathlib.Path({str(locks)!r})
             original_exit = workflow.Lease.__exit__
             def observe_release(lease, *args):
@@ -318,17 +333,33 @@ class ResultAndLeaseControls(unittest.TestCase):
                           for role, pid in pids.items()}}
                 (root / 'before-release.json').write_text(json.dumps({{
                     'states': states, 'owned_present': (locks / 'tcg-build/owner.json').exists()}}))
+                if {target!r} == 'release':
+                    original_read = pathlib.Path.read_text
+                    def release_read(path, *a, **kw):
+                        if path == locks / 'tcg-build/owner.json':
+                            (root / 'release-ready').touch()
+                            deadline = time.monotonic() + 10
+                            while not (root / 'release-signaled').exists():
+                                if time.monotonic() > deadline:
+                                    raise RuntimeError('release signal handshake timed out')
+                                time.sleep(0.01)
+                        return original_read(path, *a, **kw)
+                    pathlib.Path.read_text = release_read
                 return original_exit(lease, *args)
             workflow.Lease.__exit__ = observe_release
             def harmless_workflow(args, run, receipt):
-                with workflow.Lease(['tcg-build', 'gpu-validation'], locks) as lease:
+                # Thread the CLI context when available; retain baseline replay.
+                lease_options = {{'cleanup': run.cleanup}} if hasattr(run, 'cleanup') else {{}}
+                with workflow.Lease(['tcg-build', 'gpu-validation'], locks,
+                                    **lease_options) as lease:
                     receipt['test_owned_token'] = lease.token
                     (locks / 'gpu-validation/owner.json').write_text('{{"token":"replacement-foreign"}}\\n')
-                    run('package-signal-control', [sys.executable, '-c', {command!r}], timeout=60)
+                    run('package-signal-control', [sys.executable, '-c', {command!r}],
+                        timeout={2 if initiator == 'timeout' else 60})
             workflow.workflow = harmless_workflow
             sys.argv = [{str(SCRIPT)!r}, '--source', {str(source)!r}, '--revision', {revision!r},
                         '--macps-source', {str(macps)!r}, '--macps-revision', {app_revision!r},
-                        '--output', {str(self.root / 'output')!r}]
+                        '--output', {str(root / 'output')!r}]
             sys.exit(workflow.main())
         ''')
         supervisor = subprocess.Popen([sys.executable, '-B', '-c', supervisor_code],
@@ -351,22 +382,31 @@ class ResultAndLeaseControls(unittest.TestCase):
         try:
             wait_ready(ready)
             pids = json.loads(ready.read_text())
+            if initiator != 'timeout':
+                supervisor.send_signal(getattr(signal, initiator))
+            wait_ready(root / 'shutdown-parent.json')
+            wait_ready(root / 'shutdown-child.json')
+            if target == 'release':
+                wait_ready(root / 'release-ready')
+            else:
+                self.assertIsNone(supervisor.poll(), 'supervisor left cleanup before TERM')
+            # For timeout/SIGINT this is the FIRST external TERM, after both
+            # group members acknowledged shutdown while retaining their leases.
             supervisor.send_signal(signal.SIGTERM)
-            wait_ready(self.root / 'shutdown-parent.json')
-            wait_ready(self.root / 'shutdown-child.json')
-            # The owned group is still shutting down. TERM again must not abort
-            # the wait/KILL/reap path or release the leases early.
+            time.sleep(0.1)  # Separate deliveries; do not rely on coalesced signals.
             supervisor.send_signal(signal.SIGTERM)
+            if target == 'release':
+                (root / 'release-signaled').touch()
             output, error = supervisor.communicate(timeout=12)
             self.assertEqual(supervisor.returncode, 1, output + error)
-            before = json.loads((self.root / 'before-release.json').read_text())
+            before = json.loads((root / 'before-release.json').read_text())
             self.assertTrue(before['owned_present'])
             self.assertEqual(before['states']['group'], '', 'command leader was not reaped')
             self.assertTrue(not before['states']['child'] or before['states']['child'].startswith('Z'),
                             'owned descendant still executing when lease release began')
-            receipt = json.loads((self.root / 'output/receipt.json').read_text())
+            receipt = json.loads((root / 'output/receipt.json').read_text())
             for role in ('parent', 'child'):
-                owners = json.loads((self.root / f'shutdown-{role}.json').read_text())
+                owners = json.loads((root / f'shutdown-{role}.json').read_text())
                 self.assertEqual(owners['tcg-build'], receipt['test_owned_token'])
                 self.assertEqual(owners['gpu-validation'], 'replacement-foreign')
             self.assertFalse((locks / 'tcg-build').exists(), 'owned lease stranded after TERM')
@@ -379,7 +419,7 @@ class ResultAndLeaseControls(unittest.TestCase):
                              {str(locks / 'gpu-validation'): receipt['test_owned_token']})
         finally:
             # A baseline failure still must not strand the test's owned group.
-            group_record = self.root / 'group.json'
+            group_record = root / 'group.json'
             if pids is None and group_record.exists():
                 pids = json.loads(group_record.read_text())
             if pids:

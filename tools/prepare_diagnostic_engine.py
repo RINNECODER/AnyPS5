@@ -157,8 +157,9 @@ def clean_revision(path, commit):
 
 class Lease(AbstractContextManager):
     """Existing mkdir/owner.json/token protocol, with all historical aliases checked."""
-    def __init__(self, names, root=LOCK_ROOT, owner='diagnostic-tools'):
+    def __init__(self, names, root=LOCK_ROOT, owner='diagnostic-tools', cleanup=nullcontext):
         self.names, self.root, self.owner = names, Path(root), owner
+        self.cleanup = cleanup
         self.token, self.held = uuid.uuid4().hex, []
 
     def __enter__(self):
@@ -185,27 +186,28 @@ class Lease(AbstractContextManager):
             raise
 
     def __exit__(self, *_):
-        errors = []
-        for p in reversed(self.held):
-            try:
-                metadata = p / 'owner.json'
-                if metadata.exists():
-                    owner_record = json.loads(metadata.read_text())
-                    require(isinstance(owner_record, dict) and owner_record.get('token') == self.token,
-                            'Lease ownership changed: ' + p.name)
-                    metadata.unlink()
-                else:
-                    # Only our just-created empty directory can lack a published owner.
-                    temporary = p / ('owner-' + self.token + '.tmp')
-                    if temporary.exists():
-                        temporary.unlink()
-                p.rmdir()
-                ACTIVE_LEASES.pop(str(p), None)
-            except (OSError, ValueError, RuntimeError) as exc:
-                errors.append(str(exc))
-        self.held.clear()
-        if errors:
-            raise RuntimeError('; '.join(errors))
+        with self.cleanup():
+            errors = []
+            for p in reversed(self.held):
+                try:
+                    metadata = p / 'owner.json'
+                    if metadata.exists():
+                        owner_record = json.loads(metadata.read_text())
+                        require(isinstance(owner_record, dict) and owner_record.get('token') == self.token,
+                                'Lease ownership changed: ' + p.name)
+                        metadata.unlink()
+                    else:
+                        # Only our just-created empty directory can lack a published owner.
+                        temporary = p / ('owner-' + self.token + '.tmp')
+                        if temporary.exists():
+                            temporary.unlink()
+                    p.rmdir()
+                    ACTIVE_LEASES.pop(str(p), None)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    errors.append(str(exc))
+            self.held.clear()
+            if errors:
+                raise RuntimeError('; '.join(errors))
 
 
 def parse_ctest_results(xml_path, expected_names):
@@ -223,8 +225,8 @@ def parse_ctest_results(xml_path, expected_names):
 
 
 class Runner:
-    def __init__(self, output, receipt):
-        self.output, self.receipt = output, receipt
+    def __init__(self, output, receipt, cleanup=nullcontext):
+        self.output, self.receipt, self.cleanup = output, receipt, cleanup
         (output / 'logs').mkdir()
 
     def save(self):
@@ -246,19 +248,20 @@ class Runner:
                     code = process.wait(timeout=timeout)
                 except BaseException:
                     # End only this command's owned process group before its lease exits.
-                    try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait()
+                    with self.cleanup():
+                        try:
+                            os.killpg(process.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait()
                     raise
         except (OSError, subprocess.TimeoutExpired) as exc:
             failure = str(exc)
@@ -347,7 +350,7 @@ def workflow(args, run, receipt):
     receipt['build_profile'] = profile
     receipt['required_tests'] = sorted(expected_tests)
     engine, gpu, macps, build = [output / n for n in ('engine-source', 'gpu-source', 'macps-source', 'build')]
-    with Lease(['git-integration']):
+    with Lease(['git-integration'], cleanup=run.cleanup):
         clone_exact(run, source, engine, args.revision, 'engine')
         clone_exact(run, source, gpu, args.revision, 'gpu')
         clone_exact(run, app, macps, args.macps_revision, 'macps')
@@ -377,7 +380,7 @@ def workflow(args, run, receipt):
         shutil.copyfile(controls, configured_controls)
         receipt['native_controls_adapter'] = {'path': str(controls), 'sha256': digest(controls),
             'configured_path': str(configured_controls), 'configured_sha256': digest(configured_controls)}
-    with Lease(['tcg-build']):
+    with Lease(['tcg-build'], cleanup=run.cleanup):
         configure = ['cmake', '-S', configure_source, '-B', build, '-G', 'Ninja',
             '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DBUILD_TESTING=ON',
             '-DANYPS5_CPU_RUNTIME_ONLY=ON', '-DANYPS5_CPU_BACKEND=TCG',
@@ -401,12 +404,12 @@ def workflow(args, run, receipt):
         'CTest required inventory differs from declared ' + profile + ' profile')
     env = dict(os.environ, MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1',
                ANYPS5_NO_SHADER_CACHE='1', APS5_NO_SHADER_CACHE='1')
-    with Lease(['tcg-build', 'gpu-validation', 'title-session']):
+    with Lease(['tcg-build', 'gpu-validation', 'title-session'], cleanup=run.cleanup):
         run(combined_step(profile), ['ctest', '--test-dir', build, '-T', 'Test', '--no-tests=error',
             '--output-on-failure', '--parallel', '1'], env=env, timeout=1200)
     tag = (build / 'Testing/TAG').read_text().splitlines()[0]
     receipt['ctest_results'] = parse_ctest_results(build / 'Testing' / tag / 'Test.xml', expected_tests)
-    with Lease(['tcg-build']) if profile == 'native' else nullcontext():
+    with Lease(['tcg-build'], cleanup=run.cleanup) if profile == 'native' else nullcontext():
         package_info = prepare_package(engine, build, gpu, output / 'package', revisions, run, profile=profile)
     package = Path(package_info['package'])
     receipt['package'] = package_info
@@ -459,7 +462,7 @@ def accept_prepared_package(args, run, receipt):
             require(clean_revision(root / relative, identity['commit']) == identity, 'Dependency changed before acceptance')
     require(clean_revision(macps, args.macps_revision) == receipt['macps_source'], 'Acceptance source changed')
     scratch = output / 'swift-helper-build'
-    with Lease(['tcg-build']):
+    with Lease(['tcg-build'], cleanup=run.cleanup):
         run('fresh-LauncherCore', ['swift', 'build', '--package-path', macps, '--scratch-path', scratch,
             '--configuration', 'debug', '--target', 'LauncherCore', '--jobs', '2',
             '-Xswiftc', '-strict-concurrency=complete', '-Xswiftc', '-warnings-as-errors'], timeout=300)
@@ -483,7 +486,7 @@ def accept_prepared_package(args, run, receipt):
     shutil.copytree(package, relocation)
     unrelated = run.output / 'unrelated-cwd'
     unrelated.mkdir()
-    with Lease(['tcg-build', 'gpu-validation', 'title-session']):
+    with Lease(['tcg-build', 'gpu-validation', 'title-session'], cleanup=run.cleanup):
         for index, argv in enumerate(package_info['relocation_commands']):
             relocated_timeout = 180 if Path(argv[0]).name in {
                 'anyps5_metal_normalized_load_replay', 'anyps5_metal_scalar_termination_replay'} else 120
@@ -533,60 +536,75 @@ def accept_prepared_package(args, run, receipt):
 def cli_cancellation():
     """Route TERM through command/lease unwinding only while the CLI runs.
 
-    Further TERM requests cannot interrupt TERM/KILL/reap or token-qualified
-    release after cancellation starts. SIGKILL cannot be made cleanup-safe.
-    Importing Runner or Lease never changes the caller's signal handlers.
+    First TERM is deferred inside TERM/KILL/reap or token-qualified release,
+    even when timeout or SIGINT started cleanup. Repeated TERM is ignored.
+    SIGKILL cannot be made cleanup-safe. Imported helpers retain caller handlers.
     """
     previous = signal.getsignal(signal.SIGTERM)
-    requested = False
+    requested, pending, protected = False, False, 0
 
     def terminate(signum, _frame):
-        nonlocal requested
+        nonlocal requested, pending
         if not requested:
             requested = True
-            raise KeyboardInterrupt('Terminated by ' + signal.Signals(signum).name)
+            if protected:
+                pending = True
+            else:
+                raise KeyboardInterrupt('Terminated by ' + signal.Signals(signum).name)
+
+    @contextmanager
+    def cleanup():
+        nonlocal protected, pending
+        protected += 1
+        try:
+            yield
+        finally:
+            protected -= 1
+            if not protected and pending:
+                pending = False
+                raise KeyboardInterrupt('Terminated by SIGTERM')
 
     try:
         signal.signal(signal.SIGTERM, terminate)
-        yield
+        yield cleanup
     finally:
         signal.signal(signal.SIGTERM, previous)
 
 
-@cli_cancellation()
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('source', 'macps-source', 'output'):
-        parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('revision', 'macps-revision'):
-        parser.add_argument('--' + name, required=True)
-    parser.add_argument('--dependency-cache', type=Path)
-    parser.add_argument('--profile', choices=('legacy', 'native'), default='legacy',
-                        help='Explicit native opt-in; requires the full native source and control contracts')
-    args = parser.parse_args()
-    receipt = {'schema_version': 1, 'status': 'NOT_RUN', 'commands': [],
-        'title_execution': False, 'actual_title_execution': False, 'app_mutation': False, 'engine_selection': False,
-        'workflow_sha256': digest(Path(__file__)), 'package_adapter_sha256': digest(Path(__file__).with_name('diagnostic_package.py'))}
-    output, run = args.output.resolve(), None
-    try:
-        clean_revision(args.source.resolve(), args.revision)
-        clean_revision(args.macps_source.resolve(), args.macps_revision)
-        require(not any(output.is_relative_to(p.resolve()) for p in (args.source, args.macps_source)), 'Output must be outside source repositories')
-        require(not output.exists() and not args.output.is_symlink(), 'Output already exists')
-        output.mkdir(parents=True)
-        run = Runner(output, receipt)
-        workflow(args, run, receipt)
-        print(json.dumps({'status': 'PASS', 'receipt': str(output / 'receipt.json'),
-                         'package': receipt['package']['package']}))
-        return 0
-    except BaseException as exc:
-        receipt.update(status='FAILED', failure=str(exc), package_sealed=False,
-                       required_checks_complete=False, leases_released=not ACTIVE_LEASES, outstanding_leases=ACTIVE_LEASES.copy())
-        if run:
-            run.save()
-        print(json.dumps(receipt if run is None else {'status': 'FAILED', 'failure': str(exc),
-            'receipt': str(output / 'receipt.json')}), file=sys.stderr)
-        return 1
+    with cli_cancellation() as cleanup:
+        parser = argparse.ArgumentParser(description=__doc__)
+        for name in ('source', 'macps-source', 'output'):
+            parser.add_argument('--' + name, type=Path, required=True)
+        for name in ('revision', 'macps-revision'):
+            parser.add_argument('--' + name, required=True)
+        parser.add_argument('--dependency-cache', type=Path)
+        parser.add_argument('--profile', choices=('legacy', 'native'), default='legacy',
+                            help='Explicit native opt-in; requires the full native source and control contracts')
+        args = parser.parse_args()
+        receipt = {'schema_version': 1, 'status': 'NOT_RUN', 'commands': [],
+            'title_execution': False, 'actual_title_execution': False, 'app_mutation': False, 'engine_selection': False,
+            'workflow_sha256': digest(Path(__file__)), 'package_adapter_sha256': digest(Path(__file__).with_name('diagnostic_package.py'))}
+        output, run = args.output.resolve(), None
+        try:
+            clean_revision(args.source.resolve(), args.revision)
+            clean_revision(args.macps_source.resolve(), args.macps_revision)
+            require(not any(output.is_relative_to(p.resolve()) for p in (args.source, args.macps_source)), 'Output must be outside source repositories')
+            require(not output.exists() and not args.output.is_symlink(), 'Output already exists')
+            output.mkdir(parents=True)
+            run = Runner(output, receipt, cleanup=cleanup)
+            workflow(args, run, receipt)
+            print(json.dumps({'status': 'PASS', 'receipt': str(output / 'receipt.json'),
+                             'package': receipt['package']['package']}))
+            return 0
+        except BaseException as exc:
+            receipt.update(status='FAILED', failure=str(exc), package_sealed=False,
+                           required_checks_complete=False, leases_released=not ACTIVE_LEASES, outstanding_leases=ACTIVE_LEASES.copy())
+            if run:
+                run.save()
+            print(json.dumps(receipt if run is None else {'status': 'FAILED', 'failure': str(exc),
+                'receipt': str(output / 'receipt.json')}), file=sys.stderr)
+            return 1
 
 
 if __name__ == '__main__':
