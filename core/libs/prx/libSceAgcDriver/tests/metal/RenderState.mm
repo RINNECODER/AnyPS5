@@ -1,7 +1,9 @@
 #import <Foundation/Foundation.h>
 #include "MetalRenderState.hpp"
+#include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -289,6 +291,82 @@ void DepthBounds(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary>
     }
 }
 
+void DepthBiasReset(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library) {
+    // Decode a guest draw without writing PA_SU_POLY_OFFSET_CLAMP (0x2df).
+    alignas(256) std::array<std::byte, 2048> colorMemory{};
+    alignas(256) std::array<std::byte, 256> depthMemory{};
+    const auto colorAddress = reinterpret_cast<std::uintptr_t>(colorMemory.data());
+    const auto depthAddress = reinterpret_cast<std::uintptr_t>(depthMemory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 2> ranges{{
+        {colorAddress, colorMemory, true}, {depthAddress, depthMemory, true}
+    }};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    const auto configure = [&](QueueState& guest) {
+        auto& cx = guest.context;
+        guest.userConfig[0x242] = 4;
+        cx[0x2d5] = 0x2000;
+        cx[0x204] = 0x80000;
+        cx[0x205] = 0x1800;
+        cx[0x200] = 0x12; // Depth test LESS, with depth writes disabled.
+        cx[0x010] = 1; // D16, without stencil.
+        cx[0x011] = 0;
+        cx[0x007] = (7u << 16u) | 7u;
+        for (const auto offset : {0x012u, 0x014u}) cx[offset] = static_cast<std::uint32_t>(depthAddress >> 8u);
+        for (const auto offset : {0x01au, 0x01cu}) cx[offset] = static_cast<std::uint32_t>(depthAddress >> 40u);
+        for (const auto offset : {0x2e0u, 0x2e2u}) cx[offset] = 0;
+        for (const auto offset : {0x2e1u, 0x2e3u}) cx[offset] = std::bit_cast<std::uint32_t>(16384.0f);
+        cx[0x8e] = 0xf000;
+        cx[0x8f] = 0xffff;
+        cx[0x1c3] = 4;
+        cx[0x1c5] = 0x9000;
+        constexpr auto stride = 3u * 0xfu;
+        cx[0x318 + stride] = static_cast<std::uint32_t>(colorAddress >> 8u);
+        cx[0x390 + 3] = static_cast<std::uint32_t>(colorAddress >> 40u);
+        cx[0x31b + stride] = 0;
+        cx[0x31c + stride] = 0x8028; // RGBA8 UNORM, clamped.
+        cx[0x31d + stride] = 0;
+        cx[0x3b0 + 3] = (7u << 14u) | 7u;
+        cx[0x3b8 + 3] = 0x09000000;
+        for (const auto offset : {0x10fu, 0x110u, 0x111u, 0x112u}) cx[offset] = std::bit_cast<std::uint32_t>(4.0f);
+        cx[0x113] = std::bit_cast<std::uint32_t>(1.0f);
+        cx[0x114] = 0;
+        cx[0xb5] = std::bit_cast<std::uint32_t>(1.0f);
+    };
+    QueueState guest;
+    configure(guest);
+    const auto initial = Graphics::DecodeState(guest);
+    Require(initial.depthBias && initial.depthBiasConstant == 16384.0f && initial.depthBiasSlope == 0 &&
+            initial.depthBiasClamp == 0, "Initial depth-biased draw did not decode an unclamped default");
+    guest.context[0x2df] = std::bit_cast<std::uint32_t>(0.03125f);
+    const auto explicitClamp = Graphics::DecodeState(guest);
+    Require(explicitClamp.depthBias && explicitClamp.depthBiasClamp == 0.03125f,
+            "Guest-written nonzero depth-bias clamp did not decode");
+    guest.ClearContext();
+    configure(guest);
+    const auto reset = Graphics::DecodeState(guest);
+    Require(reset.depthBias && reset.depthBiasConstant == 16384.0f && reset.depthBiasClamp == 0,
+            "Context reset did not restore the unclamped depth-biased draw");
+    guest.context[0x205] = 0;
+    const auto disabled = Graphics::DecodeState(guest);
+    Require(!disabled.depthBias, "Depth bias remained enabled in the decoded control");
+
+    // D16 bias of 16384 units adds approximately 0.25 to depth 0.375: LESS than
+    // cleared 0.5 fails. A 0.03125 clamp admits the triangle; no bias also admits it.
+    const std::array<Graphics::State, 4> states{initial, explicitClamp, reset, disabled};
+    const std::array<Pixel, 4> expected{{{0, 0, 0, 255}, {255, 0, 0, 255}, {0, 0, 0, 255}, {0, 255, 0, 255}}};
+    for (std::size_t i = 0; i < states.size(); ++i) {
+        const std::array<Draw, 1> draws{{{states[i], {i == 3 ? std::array<float, 4>{0, 1, 0, 1} : std::array<float, 4>{1, 0, 0, 1}, 0.375f}}}};
+        for (const auto pixel : Render(device, queue, library, draws, MTLClearColorMake(0, 0, 0, 1))) {
+            Match(pixel, expected[i], "Decoded initial/explicit/reset/disabled depth bias changed expected native pixels");
+        }
+    }
+    const std::array<Draw, 2> transition{{{explicitClamp, {{1, 0, 0, 1}, 0.375f}}, {reset, {{0, 1, 0, 1}, 0.375f}}}};
+    for (const auto pixel : Render(device, queue, library, transition, MTLClearColorMake(0, 0, 0, 1))) {
+        Match(pixel, {255, 0, 0, 255}, "Reset depth-bias clamp leaked the preceding draw's explicit clamp");
+    }
+    std::cout << "PASS: decoded depth-bias clamp initial=0 explicit=0.03125 reset=0; native 64-pixel outputs initial=black explicit=red reset=black disabled=green transition=red\n";
+}
+
 }
 
 int main() {
@@ -304,6 +382,7 @@ int main() {
             ViewportWinding(device, queue, library);
             ClipDepth(device, queue, library);
             DepthBounds(device, queue, library);
+            DepthBiasReset(device, queue, library);
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {
