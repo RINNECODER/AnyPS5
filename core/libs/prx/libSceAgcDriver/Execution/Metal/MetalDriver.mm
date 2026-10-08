@@ -613,37 +613,47 @@ void MetalDriver::RegisterShaderWithPublication(std::uint64_t guestHeaderAddress
     require(!Impl::OnWorkerThread(), "worker cannot publish a guest shader");
     require(!ranges.empty() && static_cast<bool>(publish) && static_cast<bool>(rollback),
         "shader publication requires readable ranges and publication/rollback callbacks");
-    for (;;) {
-        auto gpuLock = impl->LockForGuestCapture();
-        NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
-        for (const auto& range : ranges) {
-            require(range.address != 0 && range.bytes != 0, "readable guest range is null or empty");
-            require(range.bytes <= std::numeric_limits<std::uint64_t>::max() - range.address,
-                "readable guest range overflows");
-            require(NativeGuestMemory::ReadableBorrowedBytes(range.address, range.bytes) == range.bytes,
-                "readable guest range is not fully borrowed");
-        }
-        std::lock_guard lock(impl->mutex);
-        if (impl->failure) std::rethrow_exception(impl->failure);
-        if (impl->stopping) throw DriverStopped{};
-        if (impl->mappingUpdatePending) continue;
-        ReadablePublicationScope publication(impl.get());
-        try {
-            publish();
-            const auto snapshot = DriverDetail::ReadRegisteredShader(guestHeaderAddress);
-            auto registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
-            registry->insert_or_assign(snapshot->codeAddress, snapshot);
-            impl->shaders = std::move(registry);
-        } catch (...) {
-            try { rollback(); }
-            catch (...) {
-                impl->failure = std::current_exception();
-                impl->changed.notify_all();
+    std::exception_ptr rollbackFailure;
+    try {
+        for (;;) {
+            auto gpuLock = impl->LockForGuestCapture();
+            NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
+            for (const auto& range : ranges) {
+                require(range.address != 0 && range.bytes != 0, "readable guest range is null or empty");
+                require(range.bytes <= std::numeric_limits<std::uint64_t>::max() - range.address,
+                    "readable guest range overflows");
+                require(NativeGuestMemory::ReadableBorrowedBytes(range.address, range.bytes) == range.bytes,
+                    "readable guest range is not fully borrowed");
+            }
+            std::lock_guard lock(impl->mutex);
+            if (impl->failure) std::rethrow_exception(impl->failure);
+            if (impl->stopping) throw DriverStopped{};
+            if (impl->mappingUpdatePending) continue;
+            ReadablePublicationScope publication(impl.get());
+            try {
+                publish();
+                const auto snapshot = DriverDetail::ReadRegisteredShader(guestHeaderAddress);
+                auto registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
+                registry->insert_or_assign(snapshot->codeAddress, snapshot);
+                impl->shaders = std::move(registry);
+            } catch (...) {
+                try { rollback(); }
+                catch (...) {
+                    rollbackFailure = std::current_exception();
+                    // Close admission before releasing capture/publication,
+                    // but defer output callbacks until every lock is released.
+                    if (!impl->failure) impl->failure = rollbackFailure;
+                    throw;
+                }
                 throw;
             }
-            throw;
+            return;
         }
-        return;
+    } catch (...) {
+        // Also wakes submission-retained outputs and retires pending flips.
+        // ReadablePublicationScope and both driver/GPU locks have unwound.
+        if (rollbackFailure) impl->ReportFailure(rollbackFailure);
+        throw;
     }
 }
 
