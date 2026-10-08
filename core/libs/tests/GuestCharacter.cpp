@@ -3,6 +3,7 @@
 #include <clocale>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 extern "C" {
 int APS5_VABI isupper_nid_postfix(int);
 int APS5_VABI islower_nid_postfix(int);
@@ -20,10 +21,13 @@ int APS5_VABI toupper_nid_postfix(int);
 int APS5_VABI tolower_nid_postfix(int);
 const short* APS5_VABI _Getptolower_nid_postfix();
 const short* APS5_VABI _Getptoupper_nid_postfix();
+const char* APS5_VABI setlocale_nid_postfix(int, const char*);
 }
 static void Require(bool value) { if (!value) std::abort(); }
 int main() {
     Require(std::setlocale(LC_CTYPE, "C") != nullptr);
+    Require(std::strcmp(setlocale_nid_postfix(LC_CTYPE, "C"), "C") == 0);
+    Require(setlocale_nid_postfix(-1, "C") == nullptr);
     for (int c = EOF; c <= 255; ++c) {
         Require(bool(isupper_nid_postfix(c)) == bool(std::isupper(c)));
         Require(bool(islower_nid_postfix(c)) == bool(std::islower(c)));
