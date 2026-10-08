@@ -541,6 +541,79 @@ void PhysicalBdaGuards(const Metal::MetalDevice& backend,id<MTLLibrary> library)
     }
 }
 
+void StoragePermissions(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    const auto d=Descriptor();
+    const auto geometry=Graphics::DescribeSurface(d);
+    const auto bytes=geometry.guestBytes;
+    // Initial binding, cached-view upgrade, and upgrade creating a distinct component view.
+    for(unsigned access:{0u,1u,2u}) for(unsigned layout=0;layout<4;++layout) {
+        std::vector<std::byte> allocation(bytes+128,std::byte{0xa5});
+        auto guest=std::span(allocation).subspan(64,bytes);
+        std::fill(guest.begin(),guest.end(),std::byte{0x93});
+        const auto original=allocation;
+        std::array<std::byte,64> neighbor;
+        neighbor.fill(std::byte{0xb7});
+        const auto originalNeighbor=neighbor;
+        std::vector<NativeGuestMemory::BorrowedRange> ranges{
+            {d.baseAddress,guest.first(bytes/2),layout!=0}};
+        if(layout!=3) ranges.push_back({d.baseAddress+bytes/2,guest.subspan(bytes/2),layout!=1});
+        ranges.push_back({d.baseAddress+bytes,neighbor,false});
+        Metal::MetalShaderResources resources(backend,ranges);
+        DescriptorBinding binding{};
+        binding.kind=DescriptorKind::StorageImage; binding.role=DescriptorRole::GuestImages;
+        binding.count=1; binding.imageShape=DescriptorImageShape::Image2D; binding.imageWritten={true};
+        binding.guestDescriptor={static_cast<std::uint32_t>(d.baseAddress>>8),
+            (d.format<<20)|(3u<<30),1u|(7u<<14),0xfacu|(9u<<28),0,0,0,0};
+        MetalBackend::Result shader{}; shader.guest.bindings.push_back(binding);
+        MetalBackend::ResourceMapping mapping{};
+        mapping.count=1; mapping.kind=binding.kind; mapping.role=binding.role; mapping.texture=0; mapping.active=true;
+        shader.resources.push_back(mapping);
+        id<MTLTexture> captured=nil;
+        if(access!=0) {
+            shader.guest.bindings[0].imageWritten={false};
+            shader.guest.bindings[0].readOnly=true;
+            const auto read=resources.Bindings(shader);
+            Require(read.size()==1&&read[0].textures.size()==1,"mixed or sparse storage read binding was rejected");
+            captured=read[0].textures[0];
+            auto output=backend.Buffer(256);
+            auto commands=backend.CommandBuffer();
+            Encode(backend,library,commands,@"read2D",captured,output,MTLSizeMake(8,8,1));
+            backend.Wait(commands);
+            Pixels(output.contents,{147,147,147,147},layout==3?32:64,"staged read lost committed read-only or writable pixels");
+            if(layout==3) Pixels(static_cast<const std::byte*>(output.contents)+128,{0,0,0,0},32,"staged sparse read did not zero missing intervals");
+            shader.guest.bindings[0]=binding;
+            if(access==2) shader.guest.bindings[0].guestDescriptor[3]=(0xfacu&~7u)|6u|(9u<<28);
+        }
+        const std::vector<id<MTLResource>> residency(resources.Residency().begin(),resources.Residency().end());
+        bool rejected=false;
+        std::vector<Metal::MetalShaderResourceBinding> bound;
+        try {bound=resources.Bindings(shader);} catch(const std::invalid_argument& error) {
+            rejected=std::string_view(error.what()).find("read-only committed guest intervals")!=std::string_view::npos;
+            if(!rejected) throw;
+        }
+        if(layout<2) {
+            Require(rejected,access==0?"mixed committed non-DCC writable storage binding was accepted":
+                "mixed committed non-DCC storage read-to-write upgrade was accepted");
+            Require(std::equal(residency.begin(),residency.end(),resources.Residency().begin(),resources.Residency().end()),
+                "rejected storage write mutated residency");
+        } else Require(!rejected&&bound.size()==1&&bound[0].textures.size()==1,"writable split or sparse storage binding was rejected");
+        auto commands=backend.CommandBuffer();
+        // Mutating a retained read view after rejection must not grant host publication permission.
+        auto target=layout<2?captured:bound[0].textures[0];
+        if(target!=nil) Encode(backend,library,commands,@"write2D",target,nil,MTLSizeMake(8,8,1));
+        backend.Wait(commands);
+        Require(allocation==original&&neighbor==originalNeighbor,"storage bytes or guards published before completion");
+        Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"storage permission completion faulted");
+        auto expected=original;
+        if(layout>=2) {
+            const std::array<std::uint8_t,4> color{17,31,73,127};
+            for(unsigned y=0;y<(layout==3?4:8);++y) for(unsigned x=0;x<8;++x)
+                std::memcpy(expected.data()+64+y*geometry.mips[0].pitchBytes+x*4,color.data(),4);
+        }
+        Require(allocation==expected&&neighbor==originalNeighbor,"storage admission or rejected upgrade changed publication permissions, padding, or guards");
+    }
+}
+
 void AccessGuards(const Metal::MetalDevice& backend) {
     auto d=Descriptor();
     const auto bytes=Graphics::DescribeSurface(d).guestBytes;
@@ -579,5 +652,6 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     PhysicalAllowed(backend,library);
     PhysicalGuards(backend);
     PhysicalBdaGuards(backend,library);
+    StoragePermissions(backend,library);
     AccessGuards(backend);
 }
