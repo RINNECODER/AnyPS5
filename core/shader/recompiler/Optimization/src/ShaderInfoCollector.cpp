@@ -426,6 +426,49 @@ void CollectOutputs(const IrProgram& program, ShaderStageInputInfo inputInfo, Sh
 
 }
 
+namespace {
+void CollectLiveSamplerUses(const IrProgram& program, ShaderInfo& info) {
+    // Resource tracking runs before specialization and DCE. Rebuild these associations
+    // from surviving instructions, never from the pre-DCE resource metadata list.
+    info.sampledPairs.clear();
+    for (auto& sampler : info.samplers) {
+        sampler.liveUseMask = 0;
+        sampler.liveUseCount = 0;
+        sampler.depthCompare = false;
+        sampler.forcePointFiltering = false;
+    }
+    for (const auto& block : program.Blocks()) {
+        for (const IrValue* inst : block->Instructions()) {
+            if (!ImageOpcodeInfoOf(inst->Opcode()).needsSampler) continue;
+            const auto flags = inst->Flags<MemoryFlags>();
+            const auto& memory = program.Resources().memoryInfo.at(flags.index);
+            if (memory.planningOnly) continue;
+            auto& sampler = info.samplers.at(memory.sampler);
+            const auto& image = info.images.at(memory.resource);
+            sampler.depthCompare = sampler.depthCompare || image.depthCompare;
+            // Preserve the materializer's point-filter requirement for every surviving
+            // conversion; an eliminated pair cannot change a remaining ordinary sampler.
+            sampler.forcePointFiltering = sampler.forcePointFiltering || image.numericClass == IrTextureNumericClass::Sint ||
+                image.conversionFormat != IrBufferFormat::Invalid || image.depthBits;
+            const auto use = IsPixelCoordinateSample(inst->Opcode(), program.Resources().stage, memory.imageSampleFlags)
+                ? PixelSamplerUse::Qualified : PixelSamplerUse::Unqualified;
+            sampler.liveUseMask |= use;
+            ++sampler.liveUseCount;
+            auto pair = std::ranges::find_if(info.sampledPairs, [&](const auto& candidate) {
+                return candidate.image == memory.resource && candidate.sampler == memory.sampler;
+            });
+            if (pair == info.sampledPairs.end()) {
+                info.sampledPairs.push_back({memory.resource, memory.sampler, flags.pc, use, 1u});
+            } else {
+                pair->firstUsePc = std::min(pair->firstUsePc, flags.pc);
+                pair->liveUseMask |= use;
+                ++pair->liveUseCount;
+            }
+        }
+    }
+}
+}
+
 void ShaderInfoCollector::Collect(IrProgram& program, const ShaderStageInputInfo& inputInfo) const {
     if (!program.Resources().resourceTrackingComplete || program.Metadata().shaderInfoComplete) {
         return Fail(!program.Resources().resourceTrackingComplete ? "shader resources were not tracked" : "shader info already collected");
@@ -435,6 +478,7 @@ void ShaderInfoCollector::Collect(IrProgram& program, const ShaderStageInputInfo
     auto next = program.Info();
     next.inputs.clear();
     next.outputs.clear();
+    CollectLiveSamplerUses(program, next);
     next.hasBitwiseXor = std::ranges::any_of(program.Blocks(), [](const auto& block) {
         return std::ranges::any_of(block->Instructions(), [](const IrValue* inst) {
             return inst->Opcode() == IrOpcode::BitwiseXor32;

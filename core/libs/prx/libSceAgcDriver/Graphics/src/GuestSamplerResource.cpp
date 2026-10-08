@@ -41,7 +41,7 @@ float toSignedLodBias(std::uint32_t raw) {
 
 }
 
-GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words) {
+GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words, bool unnormalizedProven) {
     Require(words.size() == 4, "guest sampler descriptor must contain 4 dwords");
 
     const auto clampX = (words[0] >> 0u) & 0x7u;
@@ -74,7 +74,17 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
 
     const auto borderColorType = (words[3] >> 30u) & 0x3u;
 
-    Require(!forceUnormCoords, "guest sampler descriptor uses unnormalized coordinates which are not implemented");
+    Require(!unnormalizedProven || forceUnormCoords, "guest sampler has a forged unnormalized coordinate proof without FORCE_UNNORMALIZED");
+    Require(!forceUnormCoords || unnormalizedProven, "guest sampler descriptor uses unnormalized coordinates without qualified live-use proof");
+    if (forceUnormCoords) {
+        Require(xyMagFilter == xyMinFilter && xyMagFilter <= 1u, "unnormalized guest sampler requires equal point or linear filters");
+        Require(maxAnisoRatio == 0u && anisoThreshold == 0u && anisoBias == 0u, "unnormalized guest sampler requires anisotropy one");
+        Require(mipFilter == 0u && minLodRaw == 0u && lodBiasRaw == 0u, "unnormalized guest sampler requires no mip filtering and zero minimum LOD and bias");
+        Require(!truncCoord && (words[2] & (1u << 31u)) == 0u, "unnormalized guest sampler does not implement coordinate truncation");
+        Require((clampX == 2u || clampX == 6u) && (clampY == 2u || clampY == 6u) && (clampZ == 2u || clampZ == 6u), "unnormalized guest sampler requires edge or transparent-zero clamp");
+        Require(borderColorType == 0u && (words[3] & 0xfffu) == 0u, "unnormalized guest sampler requires transparent-zero border");
+        Require(depthCompareFunc == 0u, "unnormalized guest sampler does not implement comparison sampling");
+    }
     Require(!forceSrgb, "guest sampler descriptor forces sRGB decoding which is not implemented");
     // TRUNC_COORD picks point-sampled texels by truncation instead of rounding, and the perf fields
     // trade mip/depth precision for speed; Vulkan's nearest filtering already floors, so these only
@@ -117,6 +127,7 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
     }
 
     GuestSamplerResource result{};
+    result.unnormalizedCoordinates = forceUnormCoords;
     result.magFilter = toVkFilter(xyMagFilter);
     result.minFilter = toVkFilter(xyMinFilter);
     result.mipmapMode = mipFilter == 2u ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;

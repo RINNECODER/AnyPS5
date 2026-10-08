@@ -328,6 +328,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
 }
 
 std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const MetalBackend::Result& shader) {
+    ValidatePixelSamplerBindings(shader.guest.bindings);
     std::vector<MetalShaderResourceBinding> result;
     for (const auto& mapping : shader.resources) {
         if (!mapping.active) continue;
@@ -410,6 +411,11 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 const bool written = (i < found->imageWritten.size() && found->imageWritten[i]) || atomic;
                 if (written && !storage) throw std::invalid_argument("Metal draw sampled image has writable metadata");
                 const bool depth = i < found->imageDepthCompare.size() && found->imageDepthCompare[i];
+                const bool pixel = !found->imageUnnormalized.empty() && found->imageUnnormalized[i];
+                // A pixel certificate must not borrow normalized minimum-LOD lowering.
+                if (pixel && (storage || depth || written || Graphics::EffectiveMinLod(descriptor) != 0)) {
+                    throw std::invalid_argument("Metal pixel sampled image cannot use storage, depth, or normalized minimum LOD lowering");
+                }
                 const bool minimumLodLowered = !storage && Graphics::EffectiveMinLod(descriptor) != 0 &&
                     std::any_of(shader.minimumLodImages.begin(), shader.minimumLodImages.end(), [&](const auto& image) {
                         return image.descriptorSet == mapping.descriptorSet && image.binding == mapping.binding && image.element == i;
@@ -428,7 +434,12 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                     view = rawSintStorage ? texture->RawSintStorageView() :
                         storage ? texture->StorageView(atomic) : texture->SampledView();
                 }
+                if (pixel) {
+                    if (view.device != backend.Device()) throw std::invalid_argument("Metal pixel sampled view belongs to a different device");
+                    ValidatePixelSampledView(view, descriptor);
+                }
                 native.textures.push_back(view);
+                if (pixel) resident.push_back(view);
             }
             break;
         }
@@ -441,7 +452,8 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
             }
             for (std::uint32_t i = 0; i < found->count; ++i) {
                 const bool compare = i < found->samplerDepthCompare.size() && found->samplerDepthCompare[i];
-                auto sampler = std::make_shared<MetalSampler>(backend.Device(), std::span(found->guestDescriptor).subspan(i * 4u, 4), compare);
+                const bool pixel = !found->samplerUnnormalized.empty() && found->samplerUnnormalized[i];
+                auto sampler = std::make_shared<MetalSampler>(backend.Device(), std::span(found->guestDescriptor).subspan(i * 4u, 4), compare, pixel);
                 native.samplers.push_back(sampler->Handle());
                 samplers.push_back(std::move(sampler));
             }

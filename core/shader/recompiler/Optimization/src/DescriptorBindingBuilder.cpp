@@ -1,5 +1,6 @@
 #include "Optimization/DescriptorBindingBuilder.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
+#include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <atomic>
@@ -179,6 +180,58 @@ std::vector<std::uint32_t> GuestSamplersDescriptor(const std::vector<std::uint32
     return result;
 }
 
+std::vector<std::vector<PixelSamplerProof>> PixelProofsFor(const ShaderInfo& info, const ResourceSnapshot& snapshot) {
+    std::vector<std::vector<PixelSamplerProof>> result(info.samplers.size());
+    for (std::uint32_t samplerIndex = 0; samplerIndex < info.samplers.size(); ++samplerIndex) {
+        const auto& sampler = info.samplers[samplerIndex];
+        if (samplerIndex >= snapshot.samplers.size()) continue;
+        const auto& descriptor = snapshot.samplers[samplerIndex];
+        if ((descriptor.dwords[0] & (1u << 15u)) == 0u) continue;
+        if (descriptor.dwordCount != 4u) fail("DescriptorBindingBuilder::Populate guest sampler descriptor has an invalid width");
+        if (sampler.liveUseMask != PixelSamplerUse::Qualified || sampler.liveUseCount == 0u || sampler.depthCompare || sampler.forcePointFiltering) {
+            fail("DescriptorBindingBuilder::Populate unnormalized sampler lacks qualified live explicit-LOD use proof");
+        }
+        std::uint64_t uses = 0;
+        for (const auto& pair : info.sampledPairs) {
+            if (pair.sampler != samplerIndex) continue;
+            if (pair.liveUseMask != PixelSamplerUse::Qualified || pair.liveUseCount == 0u) {
+                fail("DescriptorBindingBuilder::Populate unnormalized sampler pair has unqualified live uses");
+            }
+            const auto& image = info.images.at(pair.image);
+            const auto& imageDescriptor = snapshot.images.at(pair.image);
+            if (imageDescriptor.dwordCount != 8u || image.resourceClass != ImageResourceClass::Sampled ||
+                image.numericClass != IrTextureNumericClass::Float ||
+                (image.dimension != RdnaImageDimension::Dim1D && image.dimension != RdnaImageDimension::Dim2D) ||
+                image.mipMode != ImageMipMode::None || image.mipCount != 1u || image.cube || image.r128 || image.depthCompare ||
+                image.depthBits || image.depthUnorm16 || image.packed || image.packedFormat != IrBufferFormat::Invalid ||
+                image.conversionFormat != IrBufferFormat::Invalid || image.emulatedCompare != 0u || image.atomic || image.written ||
+                image.indirectRoot != ImageResource::NoIndirectImage || !image.indirectResources.empty()) {
+                fail("DescriptorBindingBuilder::Populate unnormalized sampler image is not a direct native single-level color view");
+            }
+            const auto& words = imageDescriptor.dwords;
+            const auto type = static_cast<enum ImageType>((words[3] >> 28u) & 0xfu);
+            if ((type != ImageType::Color1D && type != ImageType::Color2D) ||
+                ((words[3] >> 12u) & 0xffu) != 0u || ((words[1] >> 8u) & 0xfffu) != 0u ||
+                (words[4] & 0x1fffu) != 0u || ((words[4] >> 16u) & 0x1fffu) != 0u ||
+                ((words[5] >> 4u) & 0xfu) != 0u) {
+                fail("DescriptorBindingBuilder::Populate unnormalized sampler descriptor is not direct mip0 single-layer with zero minimum LOD");
+            }
+            PixelSamplerProof proof;
+            proof.imageSource = image.source;
+            proof.samplerSource = sampler.source;
+            proof.liveUseMask = pair.liveUseMask;
+            proof.liveUseCount = pair.liveUseCount;
+            proof.samplerLiveUseCount = sampler.liveUseCount;
+            std::copy_n(words.begin(), proof.imageDescriptor.size(), proof.imageDescriptor.begin());
+            std::copy_n(descriptor.dwords.begin(), proof.samplerDescriptor.size(), proof.samplerDescriptor.begin());
+            result[samplerIndex].push_back(proof);
+            uses += pair.liveUseCount;
+        }
+        if (uses != sampler.liveUseCount) fail("DescriptorBindingBuilder::Populate unnormalized sampler live proof counts disagree");
+    }
+    return result;
+}
+
 std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) {
     std::vector<std::uint32_t> result(layout.ShaderDataDwords(), 0u);
     for (std::size_t i = 0; i < layout.userDataRegisters.size(); i++) {
@@ -204,6 +257,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
 }
 
 void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) const {
+    const auto pixelProofs = PixelProofsFor(info, snapshot);
     const IrBindingLayout& layout = allocation.layout;
     const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, userDataBase, snapshot, partialThreads);
 
@@ -242,6 +296,16 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
                 physical.imageWritten.push_back(image.written || image.atomic);
                 physical.imageDepthCompare.push_back(image.depthCompare);
                 physical.imageAtomic.push_back(image.atomic);
+                physical.resourceSources.push_back(image.source);
+                std::vector<PixelSamplerProof> proofs;
+                for (const auto& pair : info.sampledPairs) {
+                    if (pair.image != resource) continue;
+                    for (const auto& proof : pixelProofs.at(pair.sampler)) {
+                        if (proof.imageSource == image.source) proofs.push_back(proof);
+                    }
+                }
+                physical.imageUnnormalized.push_back(!proofs.empty());
+                physical.imagePixelProof.push_back(std::move(proofs));
             }
             break;
         case DescriptorRole::GuestSamplers:
@@ -249,6 +313,10 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             for (std::size_t element = 0; element < logical.resources.size(); ++element) {
                 const auto& sampler = info.samplers.at(logical.resources[element]);
                 physical.samplerDepthCompare.push_back(sampler.depthCompare);
+                physical.resourceSources.push_back(sampler.source);
+                const auto& proofs = pixelProofs.at(logical.resources[element]);
+                physical.samplerUnnormalized.push_back(!proofs.empty());
+                physical.samplerPixelProof.push_back(proofs);
                 if (sampler.forcePointFiltering) {
                     auto& filter = physical.guestDescriptor.at(element * 4u + 2u);
                     const bool mipmapped = ((filter >> 26u) & 3u) != 0u;
