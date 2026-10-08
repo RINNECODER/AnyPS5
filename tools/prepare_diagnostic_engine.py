@@ -13,7 +13,7 @@ It builds the explicit --source revision, which must already contain the
 qualified production native runner and condition timeout control.
 """
 import argparse
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -77,7 +77,8 @@ anyps5_native_module_runner_qualified-rejection anyps5_native_module_runner_cli
 anyps5_metal_optional_sgpr_compute anyps5_metal_optional_sgpr_draw-vertex
 anyps5_metal_optional_sgpr_draw-fragment anyps5_metal_optional_sgpr_required
 anyps5_metal_normalized_load_replay anyps5_metal_scalar_termination_native
-anyps5_metal_scalar_termination_decode'''.split())
+anyps5_metal_scalar_termination_decode anyps5_metal_1d_gather_offset_native
+anyps5_metal_1d_gather_offset_rejections'''.split())
 
 
 def required_tests(profile):
@@ -222,8 +223,8 @@ def parse_ctest_results(xml_path, expected_names):
 
 
 class Runner:
-    def __init__(self, output, receipt):
-        self.output, self.receipt = output, receipt
+    def __init__(self, output, receipt, check_cancel=lambda: None):
+        self.output, self.receipt, self.check_cancel = output, receipt, check_cancel
         (output / 'logs').mkdir()
 
     def save(self):
@@ -239,12 +240,25 @@ class Runner:
                        if not k.startswith(('LD_', 'DYLD_'))}
         try:
             with stdout_path.open('wb') as out, stderr_path.open('wb') as err:
+                self.check_cancel()
                 process = subprocess.Popen(argv, cwd=cwd, env=environment, stdout=out,
                                            stderr=err, start_new_session=True)
                 try:
-                    code = process.wait(timeout=timeout)
+                    deadline = time.monotonic() + timeout
+                    while True:
+                        # TERM only records a request. Raise synchronously here,
+                        # inside the owned command's cleanup boundary.
+                        self.check_cancel()
+                        try:
+                            code = process.wait(timeout=max(0, min(0.1, deadline - time.monotonic())))
+                            break
+                        except subprocess.TimeoutExpired:
+                            if time.monotonic() >= deadline:
+                                raise subprocess.TimeoutExpired(argv, timeout)
+                    self.check_cancel()
                 except BaseException:
-                    # End only this command's owned process group before its lease exits.
+                    # No cancellation checks during TERM/KILL/reap or lease
+                    # release: even the first TERM cannot interrupt cleanup.
                     try:
                         os.killpg(process.pid, signal.SIGTERM)
                     except ProcessLookupError:
@@ -528,39 +542,69 @@ def accept_prepared_package(args, run, receipt):
     run.save()
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('source', 'macps-source', 'output'):
-        parser.add_argument('--' + name, type=Path, required=True)
-    for name in ('revision', 'macps-revision'):
-        parser.add_argument('--' + name, required=True)
-    parser.add_argument('--dependency-cache', type=Path)
-    parser.add_argument('--profile', choices=('legacy', 'native'), default='legacy',
-                        help='Explicit native opt-in; requires the full native source and control contracts')
-    args = parser.parse_args()
-    receipt = {'schema_version': 1, 'status': 'NOT_RUN', 'commands': [],
-        'title_execution': False, 'actual_title_execution': False, 'app_mutation': False, 'engine_selection': False,
-        'workflow_sha256': digest(Path(__file__)), 'package_adapter_sha256': digest(Path(__file__).with_name('diagnostic_package.py'))}
-    output, run = args.output.resolve(), None
+@contextmanager
+def cli_cancellation():
+    """Route TERM through command/lease unwinding only while the CLI runs.
+
+    Every TERM only records a request, including at cleanup entry. Runner
+    checks it at bounded waits; main checks it before reporting PASS. Cleanup
+    never checks it, whatever initiated unwinding. SIGKILL is not cleanup-safe.
+    Imported helpers retain caller handlers.
+    """
+    previous = signal.getsignal(signal.SIGTERM)
+    requested = False
+
+    def terminate(_signum, _frame):
+        nonlocal requested
+        requested = True
+
+    def check_cancel():
+        if requested:
+            raise KeyboardInterrupt('Terminated by SIGTERM')
+
     try:
-        clean_revision(args.source.resolve(), args.revision)
-        clean_revision(args.macps_source.resolve(), args.macps_revision)
-        require(not any(output.is_relative_to(p.resolve()) for p in (args.source, args.macps_source)), 'Output must be outside source repositories')
-        require(not output.exists() and not args.output.is_symlink(), 'Output already exists')
-        output.mkdir(parents=True)
-        run = Runner(output, receipt)
-        workflow(args, run, receipt)
-        print(json.dumps({'status': 'PASS', 'receipt': str(output / 'receipt.json'),
-                         'package': receipt['package']['package']}))
-        return 0
-    except BaseException as exc:
-        receipt.update(status='FAILED', failure=str(exc), package_sealed=False,
-                       required_checks_complete=False, leases_released=not ACTIVE_LEASES, outstanding_leases=ACTIVE_LEASES.copy())
-        if run:
-            run.save()
-        print(json.dumps(receipt if run is None else {'status': 'FAILED', 'failure': str(exc),
-            'receipt': str(output / 'receipt.json')}), file=sys.stderr)
-        return 1
+        signal.signal(signal.SIGTERM, terminate)
+        yield check_cancel
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def main():
+    with cli_cancellation() as check_cancel:
+        parser = argparse.ArgumentParser(description=__doc__)
+        for name in ('source', 'macps-source', 'output'):
+            parser.add_argument('--' + name, type=Path, required=True)
+        for name in ('revision', 'macps-revision'):
+            parser.add_argument('--' + name, required=True)
+        parser.add_argument('--dependency-cache', type=Path)
+        parser.add_argument('--profile', choices=('legacy', 'native'), default='legacy',
+                            help='Explicit native opt-in; requires the full native source and control contracts')
+        args = parser.parse_args()
+        receipt = {'schema_version': 1, 'status': 'NOT_RUN', 'commands': [],
+            'title_execution': False, 'actual_title_execution': False, 'app_mutation': False, 'engine_selection': False,
+            'workflow_sha256': digest(Path(__file__)), 'package_adapter_sha256': digest(Path(__file__).with_name('diagnostic_package.py'))}
+        output, run = args.output.resolve(), None
+        try:
+            clean_revision(args.source.resolve(), args.revision)
+            clean_revision(args.macps_source.resolve(), args.macps_revision)
+            require(not any(output.is_relative_to(p.resolve()) for p in (args.source, args.macps_source)), 'Output must be outside source repositories')
+            require(not output.exists() and not args.output.is_symlink(), 'Output already exists')
+            output.mkdir(parents=True)
+            check_cancel()
+            run = Runner(output, receipt, check_cancel=check_cancel)
+            workflow(args, run, receipt)
+            check_cancel()
+            print(json.dumps({'status': 'PASS', 'receipt': str(output / 'receipt.json'),
+                             'package': receipt['package']['package']}))
+            return 0
+        except BaseException as exc:
+            receipt.update(status='FAILED', failure=str(exc), package_sealed=False,
+                           required_checks_complete=False, leases_released=not ACTIVE_LEASES, outstanding_leases=ACTIVE_LEASES.copy())
+            if run:
+                run.save()
+            print(json.dumps(receipt if run is None else {'status': 'FAILED', 'failure': str(exc),
+                'receipt': str(output / 'receipt.json')}), file=sys.stderr)
+            return 1
 
 
 if __name__ == '__main__':
