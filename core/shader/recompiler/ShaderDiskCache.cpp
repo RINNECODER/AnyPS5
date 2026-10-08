@@ -71,7 +71,7 @@ static_assert(sizeof(CompiledShaderInfo) == 304, "CompiledShaderInfo changed: up
 static_assert(sizeof(ShaderInfo) == 200, "ShaderInfo changed: update the info encoder");
 static_assert(sizeof(BufferResource) == 36, "BufferResource changed: update the info encoder");
 static_assert(sizeof(ImageResource) == 96, "ImageResource changed: update the info encoder");
-static_assert(sizeof(SamplerResource) == 20, "SamplerResource changed: update the info encoder");
+static_assert(sizeof(SamplerResource) == 24, "SamplerResource changed: update the info encoder");
 static_assert(sizeof(SampledResourcePair) == 20, "SampledResourcePair changed: update the info encoder");
 static_assert(sizeof(StageInput) == 56, "StageInput changed: update the info encoder");
 static_assert(sizeof(StageOutput) == 48, "StageOutput changed: update the info encoder");
@@ -344,6 +344,10 @@ bool validPixelInfo(const CompiledVariant& variant) {
         useMasks[pair.sampler] |= pair.liveUseMask;
     }
     for (std::size_t sampler = 0; sampler < info.samplers.size(); ++sampler) {
+        const auto& resource = info.samplers[sampler];
+        if (resource.copyOf != SamplerResource::NoCopy &&
+            (resource.copyOf >= sampler || info.samplers[resource.copyOf].copyOf != SamplerResource::NoCopy ||
+             info.samplers[resource.copyOf].source != resource.source || !resource.forcePointFiltering)) return false;
         if (info.samplers[sampler].liveUseCount != useCounts[sampler] ||
             info.samplers[sampler].liveUseMask != useMasks[sampler]) return false;
     }
@@ -367,6 +371,10 @@ bool validPixelInfo(const CompiledVariant& variant) {
     }
     return true;
 }
+
+// Five u32 fields, two bools, one enum, and twelve u64 list headers.
+// Empty descriptor/proof/flag lists are legal; no entry can be smaller.
+constexpr std::size_t MinimumBindingBytes = 6u * sizeof(std::uint32_t) + 2u * sizeof(std::uint8_t) + 12u * sizeof(std::uint64_t);
 
 void encodeBinding(Writer& writer, const DescriptorBinding& binding) {
     writer.Value(binding.kind);
@@ -449,7 +457,7 @@ void decodeResult(Reader& reader, RecompileResult& result) {
     std::vector<std::uint32_t> words;
     reader.Values(words);
     result.spirv = std::move(words);
-    reader.List(result.bindings, 8, decodeBinding);
+    reader.List(result.bindings, MinimumBindingBytes, decodeBinding);
     std::vector<std::uint8_t> pushConstants;
     reader.Values(pushConstants);
     result.pushConstants.resize(pushConstants.size());
@@ -560,6 +568,7 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
     writer.List(info.samplers, [](Writer& out, const SamplerResource& sampler) {
         out.Value(sampler.source);
         out.Value(sampler.firstUsePc);
+        out.Value(sampler.copyOf);
         out.Value(sampler.liveUseMask);
         out.Value(sampler.liveUseCount);
         out.Value(sampler.forcePointFiltering);
@@ -651,9 +660,10 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(image.indirectSearchIterations);
         in.Values(image.indirectResources);
     });
-    reader.List(info.samplers, 18, [](Reader& in, SamplerResource& sampler) {
+    reader.List(info.samplers, 22, [](Reader& in, SamplerResource& sampler) {
         in.Value(sampler.source);
         in.Value(sampler.firstUsePc);
+        in.Value(sampler.copyOf);
         in.Value(sampler.liveUseMask);
         in.Value(sampler.liveUseCount);
         in.Value(sampler.forcePointFiltering);
@@ -703,7 +713,7 @@ void encodeAllocation(Writer& writer, const BindingAllocationResult& allocation)
 }
 
 void decodeAllocation(Reader& reader, BindingAllocationResult& allocation) {
-    reader.List(allocation.bindings, 8, decodeBinding);
+    reader.List(allocation.bindings, MinimumBindingBytes, decodeBinding);
     decodeLayout(reader, allocation.layout);
     reader.Value(allocation.pushConstantOffsetBytes);
     reader.Value(allocation.pushConstantSizeBytes);

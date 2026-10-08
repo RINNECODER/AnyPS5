@@ -100,12 +100,16 @@ inline constexpr std::uint32_t Unqualified = 2u;
 }
 
 struct SamplerResource {
+    static constexpr std::uint32_t NoCopy = std::numeric_limits<std::uint32_t>::max();
+
     std::uint32_t source = 0;
     std::uint32_t firstUsePc = 0;
     bool forcePointFiltering = false;
     bool depthCompare = false;
     std::uint32_t liveUseMask = 0;
     std::uint32_t liveUseCount = 0;
+    // Compiler-created point copies address the original capture, not an appended slot.
+    std::uint32_t copyOf = NoCopy;
 
     bool operator==(const SamplerResource& other) const = default;
 };

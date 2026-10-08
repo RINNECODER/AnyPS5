@@ -156,11 +156,22 @@ std::vector<std::uint32_t> GuestImagesDescriptor(const std::vector<std::uint32_t
     return result;
 }
 
-std::vector<std::uint32_t> GuestSamplersDescriptor(const std::vector<std::uint32_t>& resources, const ResourceSnapshot& snapshot) {
+std::uint32_t CapturedSamplerIndex(const ShaderInfo& info, std::uint32_t index) {
+    const auto& sampler = info.samplers.at(index);
+    if (sampler.copyOf == SamplerResource::NoCopy) return index;
+    // Apply creates only one-generation copies of earlier, original samplers.
+    if (sampler.copyOf >= index || info.samplers.at(sampler.copyOf).copyOf != SamplerResource::NoCopy ||
+        info.samplers.at(sampler.copyOf).source != sampler.source || !sampler.forcePointFiltering) {
+        fail("DescriptorBindingBuilder::Populate sampler copy identity is invalid");
+    }
+    return sampler.copyOf;
+}
+
+std::vector<std::uint32_t> GuestSamplersDescriptor(const ShaderInfo& info, const std::vector<std::uint32_t>& resources, const ResourceSnapshot& snapshot) {
     std::vector<std::uint32_t> result;
     std::uint32_t dwordCount = 0;
     for (std::size_t i = 0; i < resources.size(); i++) {
-        const std::uint32_t r = resources[i];
+        const std::uint32_t r = CapturedSamplerIndex(info, resources[i]);
         if (r >= snapshot.samplers.size()) {
             fail("DescriptorBindingBuilder::Populate guest sampler index is out of range");
         }
@@ -195,8 +206,9 @@ std::vector<std::vector<PixelSamplerProof>> PixelProofsFor(const ShaderInfo& inf
     std::vector<std::vector<PixelSamplerProof>> result(info.samplers.size());
     for (std::uint32_t samplerIndex = 0; samplerIndex < info.samplers.size(); ++samplerIndex) {
         const auto& sampler = info.samplers[samplerIndex];
-        if (samplerIndex >= snapshot.samplers.size()) continue;
-        const auto& descriptor = snapshot.samplers[samplerIndex];
+        const auto capturedIndex = CapturedSamplerIndex(info, samplerIndex);
+        if (capturedIndex >= snapshot.samplers.size()) continue;
+        const auto& descriptor = snapshot.samplers[capturedIndex];
         if ((descriptor.dwords[0] & (1u << 15u)) == 0u) continue;
         if (descriptor.dwordCount != 4u) fail("DescriptorBindingBuilder::Populate guest sampler descriptor has an invalid width");
         if (IsUnusedSampler(info, samplerIndex)) continue;
@@ -321,7 +333,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             }
             break;
         case DescriptorRole::GuestSamplers:
-            physical.guestDescriptor = GuestSamplersDescriptor(logical.resources, snapshot);
+            physical.guestDescriptor = GuestSamplersDescriptor(info, logical.resources, snapshot);
             for (std::size_t element = 0; element < logical.resources.size(); ++element) {
                 const auto samplerIndex = logical.resources[element];
                 const auto& sampler = info.samplers.at(samplerIndex);

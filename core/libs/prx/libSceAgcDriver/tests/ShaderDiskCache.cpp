@@ -1,5 +1,7 @@
 #include "ShaderDiskCache.hpp"
 #include "ShaderCacheDirectory.hpp"
+#include "Optimization/ResourceProgram.hpp"
+#include "Optimization/RequestMemoryView.hpp"
 #include <array>
 #include <chrono>
 #include <cstdio>
@@ -167,8 +169,9 @@ CompiledVariant sampleVariant() {
     image.indirectResources = {1, 2, 3};
     info.info.images = {image};
     // One surviving unqualified use; the sampler summary must match its pair.
-    info.info.samplers = {{7, 0x10, true, false, PixelSamplerUse::Unqualified, 1u}};
-    info.info.sampledPairs = {{0, 0, 0x10, PixelSamplerUse::Unqualified, 1u}};
+    info.info.samplers = {{7, 0x10, false, false, 0u, 0u},
+        {7, 0x10, true, false, PixelSamplerUse::Unqualified, 1u, 0u}};
+    info.info.sampledPairs = {{0, 1, 0x10, PixelSamplerUse::Unqualified, 1u}};
     StageInput input{};
     input.kind = StageInputKind::GlobalInvocationId;
     input.location = 2;
@@ -194,7 +197,7 @@ CompiledVariant sampleVariant() {
     variant.bindings.layout = info.bindings;
     variant.bindings.pushConstantOffsetBytes = 16;
     variant.bindings.pushConstantSizeBytes = 112;
-    variant.bindings.bindings = {sampleBinding(3)};
+    variant.bindings.bindings = {sampleBinding(3), DescriptorBinding{}};
     variant.bindings.pushConstants = {std::byte{9}, std::byte{8}};
     return variant;
 }
@@ -259,6 +262,25 @@ void verifyResultRoundTrip() {
     ShaderDiskCache::EncodeResult(RecompileResult{}, bytes);
     require(ShaderDiskCache::DecodeResult(bytes, decoded), "an empty result does not decode");
     requireSameResult(RecompileResult{}, decoded, "empty result round trip");
+
+    // Lawful lists of minimum-sized entries still decode, including the empty boundary.
+    for (const std::size_t count : {0u, 1u, 2u, 64u}) {
+        RecompileResult minimal;
+        minimal.bindings.resize(count);
+        bytes.clear();
+        ShaderDiskCache::EncodeResult(minimal, bytes);
+        RecompileResult roundTrip;
+        require(ShaderDiskCache::DecodeResult(bytes, roundTrip), "a minimum-sized binding list does not decode");
+        requireSameResult(minimal, roundTrip, "minimum-sized binding list");
+    }
+    // The declared list fits an eight-byte heuristic but cannot fit actual binding entries.
+    for (const std::uint64_t count : {4096u, 1u}) {
+        bytes.assign(2u * sizeof(std::uint64_t) + static_cast<std::size_t>(count) * 8u, std::byte{0});
+        std::memcpy(bytes.data() + sizeof(std::uint64_t), &count, sizeof(count));
+        RecompileResult malformed;
+        require(!ShaderDiskCache::DecodeResult(bytes, malformed), "an impossible binding count decodes");
+        require(malformed.bindings.empty(), "impossible binding count " + std::to_string(count) + " populated the output list before rejection");
+    }
 }
 
 void verifyEntryRoundTrip() {
@@ -269,6 +291,28 @@ void verifyEntryRoundTrip() {
     CompiledVariant decoded;
     require(ShaderDiskCache::DecodeEntry(file, key, decoded) == ShaderDiskCache::LoadStatus::Loaded, "an encoded entry does not decode");
     requireSameVariant(variant, decoded, "entry round trip");
+
+    // EncodeEntry recomputes the checksum: these reach metadata admission, not hash rejection.
+    for (const std::uint32_t invalidOrigin : {1u, 4096u}) {
+        auto malformed = variant;
+        malformed.info.info.samplers[1].copyOf = invalidOrigin;
+        const auto entry = ShaderDiskCache::EncodeEntry(key, malformed);
+        require(ShaderDiskCache::DecodeEntry(entry, key, decoded) == ShaderDiskCache::LoadStatus::Rejected,
+            "a self-referential or out-of-range sampler copy was admitted");
+    }
+    for (const bool cycle : {false, true}) {
+        auto malformed = variant;
+        if (cycle) malformed.info.info.samplers[0].copyOf = 1u;
+        else malformed.info.info.samplers.push_back({7, 0x10, true, false, 0u, 0u, 1u});
+        const auto entry = ShaderDiskCache::EncodeEntry(key, malformed);
+        require(ShaderDiskCache::DecodeEntry(entry, key, decoded) == ShaderDiskCache::LoadStatus::Rejected,
+            "a sampler copy cycle or copy chain was admitted");
+    }
+    auto previousFormat = file;
+    const std::uint32_t oldFormat = 5u;
+    std::memcpy(previousFormat.data() + sizeof(std::uint32_t), &oldFormat, sizeof(oldFormat));
+    require(ShaderDiskCache::DecodeEntry(previousFormat, key, decoded) == ShaderDiskCache::LoadStatus::Rejected,
+        "a format-5 entry was admitted after sampler-copy serialization changed");
 
     for (std::size_t size = 0; size < file.size(); size += size < 512 ? 1 : 131) {
         CompiledVariant partial;
@@ -412,6 +456,93 @@ struct ComputeRequest {
     }
 };
 
+// #1402 (gjonn, 87323a54): one guest S# shared by signed and ordinary color samples.
+struct SharedSamplerRequest {
+    std::array<std::uint32_t, 16> code{
+        0x34060085u, 0x7e2802ffu, 0x3ef00000u, 0x7e2a02ffu, 0x3f300000u, 0xf09c0f08u, 0x00610a14u, 0xf09c0f08u,
+        0x00640e14u, 0xbf8c3f70u, 0xe0781000u, 0x80000a03u, 0xe0781010u, 0x80000e03u, 0xbf810000u, 0xbf810000u};
+    std::array<std::uint32_t, 24> userData{
+        0x10000000u, 0u, 1024u, 0x01016facu,
+        0x200000u, (21u << 20u) | (3u << 30u), 1u | (7u << 14u), 0x24cu | (9u << 28u), 0u, 0u, 0u, 0u,
+        0x92u, 0x00fff000u, 0x00500000u, 0u,
+        0x300000u, (56u << 20u) | (3u << 30u), 1u | (7u << 14u), 0xfacu | (9u << 28u), 0u, 0u, 0u, 0u};
+    RecompileRequest request{};
+
+    SharedSamplerRequest() {
+        request.shader = {ShaderStage::Compute, 0x22000u, code, 0, {}};
+        request.context.waveSize = 32;
+        request.context.userData = userData;
+        request.context.compute = ShaderComputeStageInfo{{32u, 1u, 1u}, 0u, {true, false, false}, false, 1u};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = 32;
+        request.layout.pushConstantSizeBytes = 128;
+    }
+
+    std::shared_ptr<const RecompileResult> Compile() {
+        RequestMemoryView memory(request.context.memory);
+        const auto capture = CaptureResources(request, memory.MakeRuntime(userData, request.shader.codeAddress));
+        require(capture->snapshot.samplers.size() == 1u, "shared sampler capture must contain only the original S#");
+        return Recompile(request, *capture);
+    }
+
+    void Check(const RecompileResult& result) const {
+        const DescriptorBinding* samplers = nullptr;
+        for (const auto& binding : result.bindings) {
+            if (binding.role == DescriptorRole::GuestSamplers) {
+                require(samplers == nullptr, "shared sampler produced duplicate sampler bindings");
+                samplers = &binding;
+            }
+        }
+        require(samplers != nullptr && samplers->count == 2u && samplers->guestDescriptor.size() == 8u,
+            "shared sampler must bind the original and a point-filtered copy");
+        std::array<std::uint32_t, 4> ordinary;
+        std::copy_n(userData.begin() + 12, 4, ordinary.begin());
+        auto point = ordinary;
+        // Independent physical policy: MIN/MAG point, no mip filter, original other words.
+        point[2] = (point[2] & ~(0xffu << 20u)) | (1u << 24u);
+        require(std::equal(ordinary.begin(), ordinary.end(), samplers->guestDescriptor.begin()),
+            "ordinary float sample lost its original guest S# or bilinear filtering");
+        require(std::equal(point.begin(), point.end(), samplers->guestDescriptor.begin() + 4),
+            "point sampler copy did not derive all words from its original capture");
+        require(samplers->resourceSources.size() == 2u && samplers->resourceSources[0] == samplers->resourceSources[1],
+            "sampler copy lost its source identity");
+        require(samplers->samplerUnnormalized == std::vector<bool>({false, false}), "normalized sampler copy gained pixel proof");
+    }
+};
+
+void verifySharedSampler() {
+    SharedSamplerRequest sample;
+    const auto first = sample.Compile();
+    require(!first->cacheHit, "shared sampler cold compile unexpectedly hit a cache");
+    sample.Check(*first);
+    // Descriptor words are not specialization: fresh captures must rebind both physical slots.
+    sample.userData[12] = 0x49u;
+    sample.userData[13] = 0x007ff000u;
+    sample.userData[15] = 0x1234u;
+    const auto hot = sample.Compile();
+    require(hot->cacheHit && hot->variantId == first->variantId, "fresh sampler words recompiled the shared variant");
+    sample.Check(*hot);
+    auto uncached = sample.request;
+    uncached.useCache = false;
+    requireSameResult(*hot, Recompile(uncached), "shared sampler hot against fresh compile");
+    ShaderDiskCache::Flush();
+
+    // A copy must resolve the original descriptor for pixel proof too. FORCE cannot
+    // certify a signed/point-filtered image merely because its capture has no copied slot.
+    sample.request.useCache = false;
+    sample.userData[12] |= 1u << 15u;
+    bool rejected = false;
+    try {
+        static_cast<void>(sample.Compile());
+    } catch (const std::runtime_error& error) {
+        require(std::string(error.what()).find("unnormalized sampler") != std::string::npos,
+            "shared FORCE sampler failed for an unrelated reason");
+        rejected = true;
+    }
+    require(rejected, "a point sampler copy bypassed the original FORCE descriptor proof");
+}
+
 int runLoadingProcess() {
     ComputeRequest cached(true);
     const auto loaded = Recompile(cached.request);
@@ -421,7 +552,20 @@ int runLoadingProcess() {
     const auto compiled = Recompile(fresh.request);
     requireSameResult(compiled, loaded, "loaded against compiled");
     require(!loaded.spirv.empty(), "the loaded SPIR-V is empty");
-    std::cout << "second process loaded " << loaded.spirv.size() << " SPIR-V words from the disk cache\n";
+    SharedSamplerRequest shared;
+    shared.userData[12] = 0xdbu;
+    shared.userData[13] = 0x003ff000u;
+    shared.userData[15] = 0x5678u;
+    const auto before = ShaderDiskCache::Totals();
+    const auto restored = shared.Compile();
+    const auto after = ShaderDiskCache::Totals();
+    require(after.hits == before.hits + 1u && after.misses == before.misses && after.loadFailures == before.loadFailures,
+        "the second process did not restore the shared sampler variant from disk");
+    shared.Check(*restored);
+    auto freshShared = shared.request;
+    freshShared.useCache = false;
+    requireSameResult(*restored, Recompile(freshShared), "disk-restored shared sampler against fresh capture");
+    std::cout << "second process loaded " << loaded.spirv.size() << " SPIR-V words and rebound the shared sampler copy from disk cache\n";
     return 0;
 }
 
@@ -469,6 +613,7 @@ int main(int argc, char** argv) {
         verifyEntryRoundTrip();
         verifyKeySensitivity();
         verifyStore();
+        verifySharedSampler();
         verifyAcrossProcesses(argv[0]);
         std::error_code error;
         std::filesystem::remove_all(directory, error);
