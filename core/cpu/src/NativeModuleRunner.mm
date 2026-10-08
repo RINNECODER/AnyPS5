@@ -6,6 +6,7 @@
 #include <cpu/SceNativeVideoOutBackend.hpp>
 #include "KernelEvents.hpp"
 #include "KernelPrimitives.hpp"
+#include "KernelSemaphores.hpp"
 #include "NativeAgcBackend.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libSceVideoOut/include/NativeMetalSession.hpp"
@@ -93,6 +94,7 @@ struct NativeModuleRunner::Impl {
     std::unique_ptr<SceThreadImports> threadImports;
     std::unique_ptr<Platform::TargetKernelMutexes> mutexes;
     std::unique_ptr<Platform::TargetKernelEvents> events;
+    std::unique_ptr<Platform::TargetKernelSemaphores> semaphores;
     Completion completion;
     std::unique_ptr<SceNativeGraphicsSession> graphics;
     std::unique_ptr<SceAgcImports> agc;
@@ -114,6 +116,7 @@ struct NativeModuleRunner::Impl {
             });
         threadImports = std::make_unique<SceThreadImports>(machine, threads);
         mutexes = std::make_unique<Platform::TargetKernelMutexes>(machine, threads);
+        semaphores = std::make_unique<Platform::TargetKernelSemaphores>(machine, threads);
         const auto hash = qualifiedSize(source) ? sourceHash(source) : std::string{};
         events = std::make_unique<Platform::TargetKernelEvents>(machine, threads,
             Platform::QualifiedKernelEventAdmissionsForImage(hash));
@@ -176,7 +179,8 @@ struct NativeModuleRunner::Impl {
         attempt([&] { memory->Shutdown(); });
         attempt([&] { threads->Withdraw(); });
         if (events) attempt([&] { events->Provider().Shutdown(); });
-        agc.reset(); events.reset(); mutexes.reset(); threadImports.reset();
+        if (semaphores) attempt([&] { semaphores->Provider().Shutdown(); });
+        agc.reset(); events.reset(); semaphores.reset(); mutexes.reset(); threadImports.reset();
         compositor.reset();
         shutdown = true;
         if (shutdownFailure) std::rethrow_exception(shutdownFailure);
@@ -257,6 +261,12 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
         throw std::runtime_error("Native module import resolution after shutdown");
     const auto name = consumer.Path.filename().string();
     const auto hash = sourceHash(consumer);
+    // Pass the actual parsed importing image's identity. This provider admits
+    // only the four observed semaphore rows for the exact target consumer,
+    // and validates function type/size and full scope before allocating gates.
+    if (const auto address = impl->semaphores->Resolve(import, type, size,
+            {name, hash, consumer.SourceSize}))
+        return SceResolvedImport{*address, type};
     const bool graphicsScope = import.ModuleName == "libSceAgc" || import.ModuleName == "libSceAgcDriver" ||
         import.LibraryName == "libSceAgc" || import.LibraryName == "libSceAgcDriver" ||
         import.ModuleName == "libSceVideoOut" || import.LibraryName == "libSceVideoOut";
