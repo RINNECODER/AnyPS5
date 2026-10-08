@@ -18,6 +18,7 @@
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <cstdarg>
@@ -519,6 +520,36 @@ int APS5_VABI _close_nid_postfix(int descriptor) {
     return close_nid_postfix(descriptor);
 }
 
+}
+
+namespace {
+std::atomic<int> g_hostStandardError{-1};
+
+void PreserveHostStandardError() {
+    if (g_hostStandardError.load() >= 0) return;
+#ifdef _WIN32
+    const int saved = _dup(2);
+#else
+    const int saved = ::dup(2);
+#endif
+    if (saved < 0) throw std::runtime_error("dup2: cannot keep the host standard error");
+    int expected = -1;
+    if (!g_hostStandardError.compare_exchange_strong(expected, saved)) {
+#ifdef _WIN32
+        _close(saved);
+#else
+        ::close(saved);
+#endif
+    }
+}
+}
+
+int File::HostStandardError() {
+    return g_hostStandardError.load();
+}
+
+extern "C" {
+
 int APS5_VABI dup_nid_postfix(int d) {
     if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Duplicate(d);
     if (d < 0) return PosixFailure(GUEST_EBADF);
@@ -552,6 +583,7 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
     if (WithoutParameterHandler([from] { return ::_get_osfhandle(from) == -1 ? -1 : 0; }) != 0) return PosixFailure(GUEST_EBADF);
     if (from == to) return to;
     RejectDirectoryDuplicate(from, __func__);
+    if (to == 2) PreserveHostStandardError();
     if (WithoutParameterHandler([from, to] { return ::_dup2(from, to); }) != 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
     File::ForgetDirectoryDescriptor(to);
     File::ForgetFileLock(to);
@@ -564,6 +596,7 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
         if (::fcntl(from, F_GETFL) < 0) return PosixFailure(GUEST_EBADF);
         return to;
     }
+    if (to == 2) PreserveHostStandardError();
     const int result = ::dup2(from, to);
     if (result < 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
     File::ForgetRandomDevice(to);
