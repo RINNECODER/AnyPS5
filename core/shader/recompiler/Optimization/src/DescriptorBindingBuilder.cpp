@@ -180,6 +180,17 @@ std::vector<std::uint32_t> GuestSamplersDescriptor(const std::vector<std::uint32
     return result;
 }
 
+bool IsUnusedSampler(const ShaderInfo& info, std::uint32_t samplerIndex) {
+    const auto& sampler = info.samplers.at(samplerIndex);
+    if (sampler.liveUseCount != 0u) return false;
+    if (sampler.liveUseMask != 0u || std::ranges::any_of(info.sampledPairs, [&](const auto& pair) {
+            return pair.sampler == samplerIndex;
+        })) {
+        fail("DescriptorBindingBuilder::Populate unused sampler has inconsistent live-use metadata");
+    }
+    return true;
+}
+
 std::vector<std::vector<PixelSamplerProof>> PixelProofsFor(const ShaderInfo& info, const ResourceSnapshot& snapshot) {
     std::vector<std::vector<PixelSamplerProof>> result(info.samplers.size());
     for (std::uint32_t samplerIndex = 0; samplerIndex < info.samplers.size(); ++samplerIndex) {
@@ -188,6 +199,7 @@ std::vector<std::vector<PixelSamplerProof>> PixelProofsFor(const ShaderInfo& inf
         const auto& descriptor = snapshot.samplers[samplerIndex];
         if ((descriptor.dwords[0] & (1u << 15u)) == 0u) continue;
         if (descriptor.dwordCount != 4u) fail("DescriptorBindingBuilder::Populate guest sampler descriptor has an invalid width");
+        if (IsUnusedSampler(info, samplerIndex)) continue;
         if (sampler.liveUseMask != PixelSamplerUse::Qualified || sampler.liveUseCount == 0u || sampler.depthCompare || sampler.forcePointFiltering) {
             fail("DescriptorBindingBuilder::Populate unnormalized sampler lacks qualified live explicit-LOD use proof");
         }
@@ -311,13 +323,23 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         case DescriptorRole::GuestSamplers:
             physical.guestDescriptor = GuestSamplersDescriptor(logical.resources, snapshot);
             for (std::size_t element = 0; element < logical.resources.size(); ++element) {
-                const auto& sampler = info.samplers.at(logical.resources[element]);
-                physical.samplerDepthCompare.push_back(sampler.depthCompare);
+                const auto samplerIndex = logical.resources[element];
+                const auto& sampler = info.samplers.at(samplerIndex);
+                const bool unusedPixel = (physical.guestDescriptor.at(element * 4u) & (1u << 15u)) != 0u &&
+                    IsUnusedSampler(info, samplerIndex);
+                // Keep retained element indices stable without certifying an unused FORCE
+                // descriptor. Only the physical slot is neutralized; capture/memo identity
+                // still contains the original four guest words.
+                if (unusedPixel) {
+                    constexpr std::array<std::uint32_t, 4> normalizedPointEdge{0x92u, 0u, 0u, 0u};
+                    std::copy(normalizedPointEdge.begin(), normalizedPointEdge.end(), physical.guestDescriptor.begin() + element * 4u);
+                }
+                physical.samplerDepthCompare.push_back(unusedPixel ? false : sampler.depthCompare);
                 physical.resourceSources.push_back(sampler.source);
                 const auto& proofs = pixelProofs.at(logical.resources[element]);
                 physical.samplerUnnormalized.push_back(!proofs.empty());
                 physical.samplerPixelProof.push_back(proofs);
-                if (sampler.forcePointFiltering) {
+                if (!unusedPixel && sampler.forcePointFiltering) {
                     auto& filter = physical.guestDescriptor.at(element * 4u + 2u);
                     const bool mipmapped = ((filter >> 26u) & 3u) != 0u;
                     filter = (filter & ~(0xffu << 20u)) | (1u << 24u) | (mipmapped ? 1u << 26u : 0u);

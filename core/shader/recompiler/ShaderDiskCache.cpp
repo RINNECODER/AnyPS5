@@ -339,7 +339,7 @@ bool validPixelInfo(const CompiledVariant& variant) {
     for (const auto& pair : info.sampledPairs) {
         if (pair.image >= info.images.size() || pair.sampler >= info.samplers.size() ||
             (pair.liveUseMask & ~(PixelSamplerUse::Qualified | PixelSamplerUse::Unqualified)) != 0u ||
-            (pair.liveUseMask == 0u) != (pair.liveUseCount == 0u)) return false;
+            pair.liveUseMask == 0u || pair.liveUseCount == 0u) return false;
         useCounts[pair.sampler] += pair.liveUseCount;
         useMasks[pair.sampler] |= pair.liveUseMask;
     }
