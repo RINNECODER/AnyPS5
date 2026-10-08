@@ -73,7 +73,11 @@ anyps5_cpu_videoout_admission anyps5_cpu_flip_contract
 anyps5_cpu_flip_native_qualified anyps5_cpu_flip_native_pending_shutdown
 anyps5_native_module_runner_lifecycle anyps5_native_module_runner_close
 anyps5_native_module_runner_initializer-failure
-anyps5_native_module_runner_qualified-rejection anyps5_native_module_runner_cli'''.split())
+anyps5_native_module_runner_qualified-rejection anyps5_native_module_runner_cli
+anyps5_metal_optional_sgpr_compute anyps5_metal_optional_sgpr_draw-vertex
+anyps5_metal_optional_sgpr_draw-fragment anyps5_metal_optional_sgpr_required
+anyps5_metal_normalized_load_replay anyps5_metal_scalar_termination_native
+anyps5_metal_scalar_termination_decode'''.split())
 
 
 def required_tests(profile):
@@ -480,8 +484,10 @@ def accept_prepared_package(args, run, receipt):
     unrelated.mkdir()
     with Lease(['tcg-build', 'gpu-validation', 'title-session']):
         for index, argv in enumerate(package_info['relocation_commands']):
+            relocated_timeout = 180 if Path(argv[0]).name in {
+                'anyps5_metal_normalized_load_replay', 'anyps5_metal_scalar_termination_replay'} else 120
             run('relocation-' + str(index), [str(relocation / a) if a.startswith(('bin/', 'lib/', 'fixtures/')) else a
-                for a in argv], cwd=unrelated, env=env, timeout=120)
+                for a in argv], cwd=unrelated, env=env, timeout=relocated_timeout)
         accepted = json.loads(run('strict-fresh-accept', [helper, relocation, package_info['manifest_sha256']], cwd=unrelated, timeout=120))
         require(accepted['ps5_game_runtime_ready'] is False and accepted['source_commit'] == args.revision,
                 'Accepted package identity or diagnostic capability mismatch')
