@@ -110,7 +110,10 @@ void Admission() {
     rejects([&]{guest.Imports->Resolve(identity("unsupported",true),2,0);},"Unsupported SCE AGC service");
 }
 
-void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers) {
+void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers, std::size_t headerOffset) {
+    const auto header=Header+headerOffset;
+    const auto headerSize=static_cast<std::uint32_t>(272-headerOffset);
+    std::cout << "AGC native shader header offset " << headerOffset << ": begin" << std::endl;
     // TCG aliases require the real complete host-page backing, including on
     // Apple Silicon hosts with 16 KiB pages. Driver-visible ranges stay 4 KiB.
     alignas(65536) std::array<std::byte,65536> codeBytes{},headerBytes{},builderBytes{},targetBuilderBytes{};
@@ -119,7 +122,7 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers) {
     output.fill(0xdeadbeef); targetOutput.fill(0xdeadbeef); targetBuilderBytes.fill(std::byte{0x7b});
     std::memcpy(codeBytes.data()+256,Wave32Code.data(),sizeof(Wave32Code));
     const auto originalCode=codeBytes;
-    std::fill_n(headerBytes.begin(),272,std::byte{0});
+    std::fill_n(headerBytes.begin()+headerOffset,headerSize,std::byte{0});
     std::fill_n(builderBytes.begin(),144,std::byte{0});
     const std::array ranges{
         AgcDriver::NativeGuestMemory::BorrowedRange{0x500000,std::span(codeBytes).first(4096),false},
@@ -150,44 +153,110 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers) {
     try {
         // Independent 96-byte relative-header layout: pointers encode signed
         // offsets from their own guest field, never from host allocation bytes.
-        store(guest.Machine,Header,std::uint32_t{0x34333231});
-        store(guest.Machine,Header+4,std::uint32_t{0x18});
-        store(guest.Machine,Header+8,std::uint64_t{128-8});
-        store(guest.Machine,Header+32,std::uint64_t{256-32});
-        store(guest.Machine,Header+64,std::uint32_t{272});
-        store(guest.Machine,Header+68,static_cast<std::uint32_t>(sizeof(Wave32Code)));
-        store(guest.Machine,Header+92,std::uint8_t{2});
+        // Metadata stays at independently aligned numeric addresses: moving the
+        // entire payload with the header would test metadata misalignment instead.
+        store(guest.Machine,header,std::uint32_t{0x34333231});
+        store(guest.Machine,header+4,std::uint32_t{0x18});
+        store(guest.Machine,header+8,std::uint64_t{128-headerOffset-8});
+        store(guest.Machine,header+32,std::uint64_t{256-headerOffset-32});
+        store(guest.Machine,header+64,headerSize);
+        store(guest.Machine,header+68,static_cast<std::uint32_t>(sizeof(Wave32Code)));
+        store(guest.Machine,header+92,std::uint8_t{2});
         store(guest.Machine,Header+256,std::uint32_t{0x20c});
         store(guest.Machine,Header+264,std::uint32_t{0x20d});
         const auto preparedHeader=headerBytes;
         const auto preparedBuilder=builderBytes;
-        store(guest.Machine,Header,std::uint32_t{0x12345678});
-        const auto malformedHeader=headerBytes;
-        rejects([&]{guest.call("f3dg2CSgRKY",false,{ShaderOutput,Header,Code});},"invalid relative shader header");
-        require(headerBytes==malformedHeader && builderBytes==preparedBuilder,"malformed shader creation changed guest data");
-        headerBytes=preparedHeader;
-        guest.Machine.Map(0x540000,4096,RW);
-        rejects([&]{guest.call("f3dg2CSgRKY",false,{ShaderOutput,Header,0x540000});},"borrowed");
-        require(headerBytes==preparedHeader && builderBytes==preparedBuilder,"native shader admission failure changed guest header/output");
-        // The production publication boundary must roll back a header if
-        // capture rejects after the callback already wrote guest bytes.
-        auto native=Cpu::MakeNativeAgcBackend(driver);
-        const std::array publicationRanges{Cpu::AgcReadableRange{Header,272},Cpu::AgcReadableRange{Code,sizeof(Wave32Code)}};
-        rejects([&]{native.RegisterShader(Header,publicationRanges,
-            [&]{store(guest.Machine,Header,std::uint32_t{0x12345678});},
-            [&]{guest.Machine.Write(Header,std::span(preparedHeader).first(272));});},"invalid shader header");
-        require(headerBytes==preparedHeader && builderBytes==preparedBuilder,"failed native capture did not roll back published header");
-        rejects([&]{native.RegisterShader(Header,publicationRanges,
-            [&]{driver.SuspendPoint();store(guest.Machine,Header,std::uint32_t{0x12345678});},
-            [&]{guest.Machine.Write(Header,std::span(preparedHeader).first(272));});},"reenter");
-        require(headerBytes==preparedHeader && builderBytes==preparedBuilder,"native callback reentry changed guest data");
-        require(guest.call("f3dg2CSgRKY",false,{ShaderOutput,Header,Code})==0,"shader gate returned error");
-        require(load<std::uint64_t>(guest.Machine,ShaderOutput)==Header &&
-                load<std::uint64_t>(guest.Machine,Header+8)==Header+128 &&
-                load<std::uint64_t>(guest.Machine,Header+32)==Header+256 &&
-                load<std::uint64_t>(guest.Machine,Header+16)==Code &&
+        if (headerOffset==0) {
+            struct Refusal { std::uint64_t output,header,code; const char* reason; };
+            const std::array refusals{
+                Refusal{ShaderOutput+1,header,Code,"misaligned guest address"},
+                Refusal{ShaderOutput,header,Code+4,"misaligned guest address"},
+                Refusal{Header+128,header,Code,"shader output overlaps header"},
+                Refusal{ShaderOutput,header,Header+256,"shader code overlaps header"},
+                Refusal{ShaderOutput,0x550000,Code,"permissions"}};
+            const auto unchanged=[&](const auto& expected){
+                require(headerBytes==expected && builderBytes==preparedBuilder && codeBytes==originalCode &&
+                    std::all_of(output.begin(),output.end(),[](auto value){return value==0xdeadbeef;}),
+                    "rejected shader changed header/code/output/outside-span canaries");
+            };
+            for (const auto& refusal:refusals) {
+                rejects([&]{guest.call("f3dg2CSgRKY",false,{refusal.output,refusal.header,refusal.code});},refusal.reason);
+                unchanged(preparedHeader);
+            }
+            guest.Machine.Protect(0x500000,4096,RW);
+            rejects([&]{guest.call("f3dg2CSgRKY",false,{Code,header,Code});},"shader output overlaps code");
+            unchanged(preparedHeader);
+            guest.Machine.Protect(0x500000,4096,Cpu::Permission::Read);
+            // Independent fixed-field mutations preserve every unrelated input.
+            struct HeaderRefusal { std::size_t field,width; std::uint64_t value; const char* reason; };
+            const std::array headerRefusals{
+                HeaderRefusal{4,4,0x17,"invalid relative shader header"},
+                HeaderRefusal{64,4,95,"invalid relative shader header"},
+                HeaderRefusal{68,4,sizeof(Wave32Code)-1,"invalid relative shader header"},
+                HeaderRefusal{8,8,129-8,"misaligned guest address"},
+                HeaderRefusal{32,8,257-32,"misaligned guest address"},
+                HeaderRefusal{64,4,268,"external shader metadata"}};
+            for (const auto& refusal:headerRefusals) {
+                guest.Machine.Write(header+refusal.field,std::as_bytes(std::span(&refusal.value,1)).first(refusal.width));
+                const auto malformed=headerBytes;
+                rejects([&]{guest.call("f3dg2CSgRKY",false,{ShaderOutput,header,Code});},refusal.reason);
+                unchanged(malformed);
+                headerBytes=preparedHeader;
+            }
+            store(guest.Machine,Header+128,std::uint64_t{189-128});
+            store(guest.Machine,Header+172,std::uint16_t{1});
+            const auto misplacedDirect=headerBytes;
+            rejects([&]{guest.call("f3dg2CSgRKY",false,{ShaderOutput,header,Code});},"misaligned guest address");
+            unchanged(misplacedDirect);
+            headerBytes=preparedHeader;
+            guest.Machine.Protect(Header,4096,Cpu::Permission::Read);
+            rejects([&]{guest.call("f3dg2CSgRKY",false,{ShaderOutput,header,Code});},"permission");
+            unchanged(preparedHeader);
+            guest.Machine.Protect(Header,4096,RW);
+            // Retain the original malformed/admission/publication controls on the
+            // aligned row, so old header guards fail the valid offset4 import below.
+            std::cout << "AGC native shader header offset " << headerOffset << ": malformed relative-header control" << std::endl;
+            store(guest.Machine,header,std::uint32_t{0x12345678});
+            const auto malformedHeader=headerBytes;
+            rejects([&]{guest.call("f3dg2CSgRKY",false,{ShaderOutput,header,Code});},"invalid relative shader header");
+            require(headerBytes==malformedHeader && builderBytes==preparedBuilder,"malformed shader creation changed guest data");
+            headerBytes=preparedHeader;
+            guest.Machine.Map(0x540000,4096,RW);
+            rejects([&]{guest.call("f3dg2CSgRKY",false,{ShaderOutput,header,0x540000});},"borrowed");
+            require(headerBytes==preparedHeader && builderBytes==preparedBuilder,"native shader admission failure changed guest header/output");
+            // The production publication boundary must roll back a header if
+            // capture rejects after the callback already wrote guest bytes.
+            auto native=Cpu::MakeNativeAgcBackend(driver);
+            const std::array publicationRanges{Cpu::AgcReadableRange{header,headerSize},Cpu::AgcReadableRange{Code,sizeof(Wave32Code)}};
+            std::cout << "AGC native shader header offset " << headerOffset << ": capture rollback control" << std::endl;
+            rejects([&]{native.RegisterShader(header,publicationRanges,
+                [&]{store(guest.Machine,header,std::uint32_t{0x12345678});},
+                [&]{guest.Machine.Write(header,std::span(preparedHeader).subspan(headerOffset,headerSize));});},"invalid shader header");
+            require(headerBytes==preparedHeader && builderBytes==preparedBuilder,"failed native capture did not roll back published header");
+            rejects([&]{native.RegisterShader(header,publicationRanges,
+                [&]{driver.SuspendPoint();store(guest.Machine,header,std::uint32_t{0x12345678});},
+                [&]{guest.Machine.Write(header,std::span(preparedHeader).subspan(headerOffset,headerSize));});},"reenter");
+            require(headerBytes==preparedHeader && builderBytes==preparedBuilder,"native callback reentry changed guest data");
+        }
+        std::cout << "AGC native shader header offset " << headerOffset << ": valid numeric import" << std::endl;
+        require(guest.call("f3dg2CSgRKY",false,{ShaderOutput,header,Code})==0,"shader gate returned error");
+        require(load<std::uint64_t>(guest.Machine,ShaderOutput)==header &&
+                load<std::uint64_t>(guest.Machine,header+8)==Header+128 &&
+                load<std::uint64_t>(guest.Machine,header+32)==Header+256 &&
+                load<std::uint64_t>(guest.Machine,header+16)==Code &&
                 load<std::uint32_t>(guest.Machine,Header+260)==(Code>>8),
                 "shader gate did not relocate/patch numeric guest fields");
+        auto expectedHeader=preparedHeader,expectedBuilder=preparedBuilder;
+        const std::uint64_t expectedUser=Header+128,expectedRegisters=Header+256;
+        const auto expectedProgram=static_cast<std::uint32_t>(Code>>8);
+        std::memcpy(expectedHeader.data()+headerOffset+8,&expectedUser,sizeof(expectedUser));
+        std::memcpy(expectedHeader.data()+headerOffset+16,&Code,sizeof(Code));
+        std::memcpy(expectedHeader.data()+headerOffset+32,&expectedRegisters,sizeof(expectedRegisters));
+        std::memcpy(expectedHeader.data()+260,&expectedProgram,sizeof(expectedProgram));
+        std::memcpy(expectedBuilder.data()+128,&header,sizeof(header));
+        require(headerBytes==expectedHeader && builderBytes==expectedBuilder && codeBytes==originalCode &&
+                std::all_of(output.begin(),output.end(),[](auto value){return value==0xdeadbeef;}),
+                "shader publication changed exact header/code/output/outside-span canaries");
         // Initialize the documented candidate command descriptor by byte offset.
         store(guest.Machine,Builder,Commands);store(guest.Machine,Builder+8,Builder+4096);
         store(guest.Machine,Builder+16,Commands);store(guest.Machine,Builder+24,Builder+4096);
@@ -231,6 +300,9 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers) {
         require(output[960]==0xabcdef12 && interrupts==1 && lastQueue==0x20,"provider did not finish one ordered EOP");
         require(codeBytes==originalCode && builderBytes==originalBuilder && headerBytes==originalHeader,
                 "native submit changed guest code/header/commands");
+        std::cout << "AGC native shader header offset " << headerOffset
+            << ": 256 independent subgroup results, exact publication/code/output guards and EOP passed" << std::endl;
+        if (headerOffset!=0) { driver.Shutdown(); return; }
         require(guest.call("h9z6+0hEydk",false)==0,"suspend gate return differs");
 
         // Both writes must be admitted before a builder changes command bytes.
@@ -442,7 +514,7 @@ int main(int argc,char** argv) {
             const auto url=[NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]]];
             id<MTLLibrary> library=[device newLibraryWithURL:url error:&error];
             require(library!=nil,error ? error.localizedDescription.UTF8String : "utility library unavailable");
-            NativeRoute(device,library,argv+2);
+            for (const std::size_t offset:{0,4,1}) NativeRoute(device,library,argv+2,offset);
             return 0;
         } catch (const std::exception& error) {std::cerr << error.what() << '\n';return 1;}
     }
