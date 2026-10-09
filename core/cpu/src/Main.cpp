@@ -26,12 +26,15 @@
 #endif
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <csignal>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -126,7 +129,33 @@ std::string Json(std::string_view value) {
     return result;
 }
 
-void Capabilities() {
+// Game runs are unbounded. Each limit is an opt-in diagnostic cap where 0
+// (the default) means unlimited.
+struct RunLimits {
+    std::optional<std::uint64_t> MaxInstructions, MaxInitInstructions;
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+    std::optional<std::uint64_t> MaxWallMs, MaxIdleMs;
+#endif
+};
+
+void ParseLimit(std::optional<std::uint64_t>& limit, int argc, char** argv, int index,
+                std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max()) {
+    const std::string option(argv[index]);
+    if (limit) throw std::runtime_error(option + " may be supplied only once");
+    if (argc <= index + 1) throw std::runtime_error(option + " requires a non-negative integer (0 = unlimited)");
+    const std::string_view text(argv[index + 1]);
+    std::uint64_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (text.empty() || error != std::errc{} || end != text.data() + text.size() || value > maximum)
+        throw std::runtime_error(option + " requires a non-negative integer (0 = unlimited)");
+    limit = value;
+}
+
+std::uint64_t InstructionBudget(const std::optional<std::uint64_t>& limit) {
+    return limit && *limit ? *limit : Cpu::UnboundedInstructionBudget;
+}
+
+void Capabilities(const RunLimits& limits) {
     std::cout << "{\"schema_version\":1,\"host_architecture\":" << Json(HostArchitecture())
         << ",\"guest_architecture\":\"x86_64\",\"backend\":" << Json(Cpu::Machine::Backend())
         << ",\"supported_formats\":[\"static_elf64_x86_64\",\"sce_elf64_x86_64\"],\"runtime_abi\":\"linux_sysv\",\"runtime_abis\":[\"linux_sysv\",\"sce_sysv\"],\"services\":["
@@ -136,6 +165,8 @@ void Capabilities() {
         << "{\"name\":\"arch_prctl\",\"number\":158,\"constraints\":\"ARCH_SET_FS and ARCH_GET_FS only\"}],"
         << "\"sce_imports\":{\"module\":\"libc\",\"module_version\":\"1.1\",\"library\":\"libc\",\"library_version\":1,"
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
+        << "\"execution_limits\":{\"max_instructions\":" << limits.MaxInstructions.value_or(0)
+        << ",\"max_init_instructions\":" << limits.MaxInitInstructions.value_or(0) << "},"
         << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
         << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
         << "\"sce_memory_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
@@ -156,14 +187,16 @@ void Capabilities() {
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
-        << "\"native_module_runner\":{\"enabled\":true,\"owned_memory\":\"live staged CPU/Metal publication\",\"provider_selection\":\"actual parsed consumer SHA-256, size, scope and ELF symbol\",\"utility_metallib\":\"../fixtures/AnyPS5Utilities.metallib relative to engine\",\"wall_limit_ms\":30000,\"idle_limit_ms\":5000,\"constraints\":\"bounded diagnostic profile; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; offline NP/WebAPI providers only; no retail gameplay evidence\"},"
+        << "\"native_module_runner\":{\"enabled\":true,\"owned_memory\":\"live staged CPU/Metal publication\",\"provider_selection\":\"actual parsed consumer SHA-256, size, scope and ELF symbol\",\"utility_metallib\":\"../fixtures/AnyPS5Utilities.metallib relative to engine\",\"wall_limit_ms\":"
+        << limits.MaxWallMs.value_or(0) << ",\"idle_limit_ms\":" << limits.MaxIdleMs.value_or(0)
+        << ",\"constraints\":\"unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; offline NP/WebAPI providers only; no retail gameplay evidence\"},"
 #endif
         << "\"sce_thread_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"_sceKernelSetThreadDtors\",\"_sceKernelSetThreadAtexitCount\",\"_sceKernelSetThreadAtexitReport\",\"scePthreadCreate\",\"scePthreadYield\",\"scePthreadJoin\",\"scePthreadSelf\",\"scePthreadEqual\",\"__error\",\"__tls_get_addr\",\"scePthreadExit\"],"
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
-        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; cumulative bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; owned attributes; FIFO/priority inheritance and logical RR with 4096-instruction engineering turns; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; affinity, cancellation, detach, once and TSD unsupported\"},"
+        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; optionally bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; owned attributes; FIFO/priority inheritance and logical RR with 4096-instruction engineering turns; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; affinity, cancellation, detach, once and TSD unsupported\"},"
 #else
-        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; cumulative bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; nullable default attributes only; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; scheduling policies, affinity, cancellation, detach, once and TSD unsupported\"},"
+        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; optionally bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; nullable default attributes only; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; scheduling policies, affinity, cancellation, detach, once and TSD unsupported\"},"
 #endif
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
         << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\",\"shared data pages preserve exact byte permissions; mixed executable permission pages unsupported\"],"
@@ -421,14 +454,21 @@ int main(int argc, char** argv) {
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
         std::optional<Cpu::NativeServiceConsumerProfile> publicNpIdentity, publicUriEscape;
 #endif
-        if (argc > 1 && std::string_view(argv[1]) == "--capabilities-json") {
-            if (argc != 2) throw std::runtime_error("--capabilities-json does not accept executable arguments");
-            Capabilities();
-            return 0;
-        }
+        bool capabilities = false;
+        RunLimits limits;
         while (argc > first) {
             const std::string_view option(argv[first]);
-            if (option == "--diagnostics-json") {
+            if (option == "--capabilities-json") {
+                if (capabilities) throw std::runtime_error("--capabilities-json may be supplied only once");
+                capabilities = true;
+                ++first;
+            } else if (option == "--max-instructions") {
+                ParseLimit(limits.MaxInstructions, argc, argv, first);
+                first += 2;
+            } else if (option == "--max-init-instructions") {
+                ParseLimit(limits.MaxInitInstructions, argc, argv, first);
+                first += 2;
+            } else if (option == "--diagnostics-json") {
                 diagnostics = true;
                 ++first;
             } else if (option == "--inspect-sce-json") {
@@ -451,7 +491,13 @@ int main(int argc, char** argv) {
                 first += 2;
             }
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
-            else if (option == "--native-service-public-profile") {
+            else if (option == "--max-wall-ms" || option == "--max-idle-ms") {
+                // Limits are compared against steady_clock nanoseconds; larger values overflow there.
+                ParseLimit(option == "--max-wall-ms" ? limits.MaxWallMs : limits.MaxIdleMs, argc, argv, first,
+                           static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::duration::max()).count()));
+                first += 2;
+            } else if (option == "--native-service-public-profile") {
                 if (argc <= first + 3)
                     throw std::runtime_error("--native-service-public-profile requires np-identity|http-uri SHA256 SIZE");
                 const std::string_view service(argv[first + 1]);
@@ -471,8 +517,17 @@ int main(int argc, char** argv) {
                 first += 2;
             } else break;
         }
+        if (capabilities) {
+            if (argc != first || diagnostics || inspect || !modulePaths.empty() || !resourceRoot.empty()
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                || publicNpIdentity || publicUriEscape
+#endif
+                ) throw std::runtime_error("--capabilities-json accepts only run limit options");
+            Capabilities(limits);
+            return 0;
+        }
         if (argc <= first)
-            throw std::runtime_error("Usage: anyps5_cpu_run [--diagnostics-json] <x86-64.elf> [guest arguments...] or --inspect-sce-json <clean-sce.elf>");
+            throw std::runtime_error("Usage: anyps5_cpu_run [--diagnostics-json] [--max-instructions N] [--max-init-instructions N] <x86-64.elf> [guest arguments...] or --inspect-sce-json <clean-sce.elf>");
         if (std::string_view(argv[first]).starts_with('-'))
             throw std::runtime_error("Unsupported CLI option: " + std::string(argv[first]));
         executable = argv[first];
@@ -481,7 +536,11 @@ int main(int argc, char** argv) {
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
         if ((publicNpIdentity || publicUriEscape) && (inspect || modulePaths.empty()))
             throw std::runtime_error("Native service public profiles require a native SCE module graph");
+        if ((limits.MaxWallMs || limits.MaxIdleMs) && (inspect || modulePaths.empty()))
+            throw std::runtime_error("Native runner wall and idle limits require a native SCE module graph");
 #endif
+        if ((limits.MaxInstructions || limits.MaxInitInstructions) && inspect)
+            throw std::runtime_error("Run limits cannot be combined with --inspect-sce-json");
         if (inspect) {
             if (!modulePaths.empty()) throw std::runtime_error("--sce-module cannot be combined with --inspect-sce-json");
             if (argc != first + 1) throw std::runtime_error("--inspect-sce-json accepts exactly one executable");
@@ -540,6 +599,8 @@ int main(int argc, char** argv) {
                     nativeConfig.EnableQualifiedServiceConsumers = true;
                     nativeConfig.PublicNpIdentity = publicNpIdentity;
                     nativeConfig.PublicUriEscape = publicUriEscape;
+                    nativeConfig.MaximumWallTime = std::chrono::milliseconds(limits.MaxWallMs.value_or(0));
+                    nativeConfig.MaximumIdleWait = std::chrono::milliseconds(limits.MaxIdleMs.value_or(0));
                     nativeRuntime = std::make_unique<Cpu::NativeModuleRunner>(machine, threadRuntime,
                         Cpu::SceImportConsumer{actualMain.Path, actualMain.SourceSize, actualMain.SourceSha256},
                         std::move(nativeConfig));
@@ -658,7 +719,7 @@ int main(int argc, char** argv) {
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                     if (nativeRuntime) nativeRuntime->ActivateBeforeInitializers();
 #endif
-                    try { modules->InitializeDependencies(); }
+                    try { modules->InitializeDependencies(0, 0, 0, InstructionBudget(limits.MaxInitInstructions)); }
                     catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
                     entry = modules->Main().Entry;
                 }
@@ -686,7 +747,9 @@ int main(int argc, char** argv) {
         }
         Cpu::StopReason reason;
         try {
-            reason = modules ? modules->RunMain() : machine.Run(entry, 0, 100000000);
+            const auto entryBudget = InstructionBudget(limits.MaxInstructions);
+            reason = modules ? modules->RunMain(entryBudget, InstructionBudget(limits.MaxInitInstructions))
+                             : machine.Run(entry, 0, entryBudget);
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
             if (nativeRuntime) nativeRuntime->Shutdown();
             else

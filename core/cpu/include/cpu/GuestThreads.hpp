@@ -92,9 +92,10 @@ public:
 
     GuestThreadHandle AdoptInitial(GuestInitialThread);
     // A host/UI boundary hook runs across module initialization, entry and
-    // finalization through the existing executor. The positive wall idle cap
-    // is a diagnostic cancellation policy, never a guest timeout result.
-    // It is cumulative across a drive call, even if runnable work intervenes.
+    // finalization through the existing executor. A positive idle cap is a
+    // diagnostic cancellation policy, never a guest timeout result. It bounds
+    // one continuous idle stretch and resets whenever guest work runs. Zero
+    // disables idle cancellation; the owner still pumps every 1 ms turn.
     void SetOwnerBoundary(std::function<void(bool waiting)>,
                           std::chrono::milliseconds maximumIdleWait);
     void CheckIdleOwner() const;

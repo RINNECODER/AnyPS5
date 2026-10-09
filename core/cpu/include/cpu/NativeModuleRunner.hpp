@@ -17,13 +17,15 @@ struct NativeServiceConsumerProfile {
     std::uint64_t SourceSize = 0;
 };
 
-// This is a bounded diagnostic execution profile, not vendor clock semantics.
+// Game runs are unbounded: zero disables a limit and is the default. Positive
+// limits are opt-in diagnostic cancellation, not vendor clock semantics. The
+// idle limit bounds one continuous idle stretch and resets on guest progress.
 struct NativeModuleRunnerConfiguration {
     std::filesystem::path UtilityMetallib;
     std::string WindowTitle = "MacPS — native diagnostic";
     std::uint32_t Width = 1280, Height = 720;
-    std::chrono::milliseconds MaximumWallTime{30000};
-    std::chrono::milliseconds MaximumIdleWait{5000};
+    std::chrono::milliseconds MaximumWallTime{0};
+    std::chrono::milliseconds MaximumIdleWait{0};
     std::uint32_t SessionUserId = 0x10000000;
     bool EnableQualifiedServiceConsumers = false;
     std::optional<NativeServiceConsumerProfile> PublicNpIdentity, PublicUriEscape;
