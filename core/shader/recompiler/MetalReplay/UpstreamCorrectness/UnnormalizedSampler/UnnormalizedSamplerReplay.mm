@@ -783,17 +783,47 @@ CompiledVariant CompileLateDeadSampler(const RecompileRequest& request, const Re
 }
 void DeadSamplerOwnerRefusals(const CompiledVariant& variant, const ResourceSnapshot& snapshot, unsigned dead, std::span<const std::byte> key) {
     // Distinct dead-slot safety guard: zero-count metadata is admissible only
-    // with zero mask and no sampled pair. Existing live-proof corruption cases
-    // do not exercise the new unused-slot exception.
-    for (const bool pair : {false,true}) {
+    // with a zero mask. Existing live-proof corruption cases do not exercise the
+    // unused-slot exception.
+    {
         auto malformed = variant.info.info;
-        if (pair) malformed.sampledPairs.push_back({0,dead,0,0,0});
-        else malformed.samplers[dead].liveUseMask = 1;
-        Reject(pair ? "unused sampler stale zero-use pair" : "unused sampler inconsistent live mask",
-            "unused sampler has inconsistent live-use metadata",[&] {
-                BindingAllocationResult allocation; static_cast<CompiledBindingLayout&>(allocation) = variant.bindings;
-                DescriptorBindingBuilder{}.Populate(allocation,malformed,variant.info.stage,variant.info.userDataBase,snapshot,{});
-            });
+        malformed.samplers[dead].liveUseMask = 1;
+        Reject("unused sampler inconsistent live mask","unused sampler has inconsistent live-use metadata",[&] {
+            BindingAllocationResult allocation; static_cast<CompiledBindingLayout&>(allocation) = variant.bindings;
+            DescriptorBindingBuilder{}.Populate(allocation,malformed,variant.info.stage,variant.info.userDataBase,snapshot,{});
+        });
+    }
+    // A zero-use pair that still names the dead sampler is admissible (upstream's
+    // verifyUnusedUnnormalizedSampler populates exactly that shape). The pair puts the
+    // dead S# back into the compact heap, flagged unnormalized as upstream requires, but
+    // it must not earn it, or the image it names, a pixel-coordinate certificate.
+    {
+        auto stale = variant.info.info;
+        stale.sampledPairs.push_back({0,dead,0,0,0});
+        const auto populate = [&](const ShaderInfo& info) {
+            BindingAllocationResult allocation; static_cast<CompiledBindingLayout&>(allocation) = variant.bindings;
+            DescriptorBindingBuilder{}.Populate(allocation,info,variant.info.stage,variant.info.userDataBase,snapshot,{});
+            return allocation.bindings;
+        };
+        const auto certificates = [](const auto& bindings) {
+            std::size_t total = 0;
+            for (const auto& b : bindings) {
+                for (const auto& list : b.samplerPixelProof) total += list.size();
+                for (const auto& list : b.imagePixelProof) total += list.size();
+            }
+            return total;
+        };
+        const auto bindings = populate(stale);
+        unsigned deadElements = 0;
+        for (const auto& b : bindings) if (b.role == DescriptorRole::GuestSamplers)
+            for (std::size_t i = 0; i < b.resourceSources.size(); ++i) if (b.resourceSources[i] == stale.samplers[dead].source) {
+                ++deadElements;
+                Require(b.samplerUnnormalized.at(i),"unused sampler stale zero-use pair lost its unnormalized flag");
+                Require(b.samplerPixelProof.at(i).empty(),"unused sampler stale zero-use pair earned a pixel certificate");
+            }
+        Require(deadElements == 1,"unused sampler stale zero-use pair did not bind the dead sampler once");
+        Require(certificates(bindings) == certificates(populate(variant.info.info)),"unused sampler stale zero-use pair changed the certificate count");
+        std::cout << "unused sampler stale zero-use pair PASS populated without a certificate\n";
     }
     auto malformed = variant;
     // Keep count0/mask0 sums consistent, so rejection must cover the serialized
@@ -802,7 +832,7 @@ void DeadSamplerOwnerRefusals(const CompiledVariant& variant, const ResourceSnap
     const auto file = ShaderDiskCache::EncodeEntry(key,malformed); CompiledVariant rejected;
     Require(ShaderDiskCache::DecodeEntry(file,key,rejected) == ShaderDiskCache::LoadStatus::Rejected,
         "CACHE DEAD SAMPLER serialized zero-use sampled pair accepted with consistent mask/count sums");
-    std::cout << "unused sampler owner refusals PASS inconsistent mask/stale pair population and serialized zero-use pair with consistent totals\n";
+    std::cout << "unused sampler owner refusals PASS inconsistent mask population and serialized zero-use pair with consistent totals\n";
 }
 void LateDeadSamplerNative(id<MTLDevice> device, id<MTLLibrary> library, int diskPhase) {
     for (const bool liveSecond : {false,true}) for (const bool pixel : {false,true}) {

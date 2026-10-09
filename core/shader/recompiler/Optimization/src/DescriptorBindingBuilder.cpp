@@ -219,9 +219,10 @@ std::vector<std::vector<PixelSamplerProof>> PixelProofsFor(const ShaderInfo& inf
         const auto& sampler = info.samplers[samplerIndex];
         const auto& descriptor = snapshot.samplers.at(samplerIndex);
         // A flagged S# with no live use (for example one left behind by late DCE) gets no
-        // certificate, but zero uses must mean a zero mask and no sampled pair.
-        if (sampler.liveUseCount == 0u &&
-            (sampler.liveUseMask != 0u || std::ranges::any_of(info.sampledPairs, [&](const auto& pair) { return pair.sampler == samplerIndex; }))) {
+        // certificate, but zero uses must mean a zero mask. A sampled pair that still names
+        // it is admissible (upstream's unused-sampler test relies on that) and earns no
+        // certificate either, because the sampler has no live use to tie it to.
+        if (sampler.liveUseCount == 0u && sampler.liveUseMask != 0u) {
             fail("DescriptorBindingBuilder::Populate unused sampler has inconsistent live-use metadata");
         }
         // Only the plain (not point-filtered) heap element may carry the certificate.
