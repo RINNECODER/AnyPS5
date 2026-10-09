@@ -611,6 +611,7 @@ void verifyLanesOutsideHostSubgroup() {
         request.target.vulkanVersion = 0x00401000u;
         request.target.spirvVersion = 0x00010300u;
         request.target.subgroupSize = subgroupSize;
+        request.target.fragmentShaderBarycentricEnabled = true;
         request.layout.pushConstantSizeBytes = 128;
         request.useCache = false;
         return !Recompile(request).spirv.empty();
