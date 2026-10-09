@@ -10,6 +10,7 @@
 #include "CompiledVariant.hpp"
 #include "PipelineSpecialization.hpp"
 #include "SpirvBackend/SpirvEmitter.hpp"
+#include "SpirvBackend/SpirvSpecialization.hpp"
 #include "Optimization/BindingAllocator.hpp"
 #include "Optimization/DescriptorBindingBuilder.hpp"
 #include "Optimization/ShaderInfoCollector.hpp"
@@ -30,6 +31,7 @@
 #include <functional>
 #include <initializer_list>
 #include <map>
+#include <set>
 #include <filesystem>
 #include <iostream>
 #include <spawn.h>
@@ -645,18 +647,17 @@ void CheckDeadSamplerInfo(const ShaderInfo& info, unsigned dead) {
 }
 template<class Binding> void CheckDeadSamplerBindings(const std::vector<Binding>& bindings, const ShaderInfo& info, unsigned dead, bool pixel) {
     if constexpr (requires(Binding b) { b.samplerPixelProof; b.samplerUnnormalized; b.resourceSources; }) {
+        // Upstream's compact sampler heap binds only S# elements with a sampled pair, so the dead
+        // FORCE_UNNORMALIZED descriptor is left out instead of being neutralized in place.
         unsigned samplerBindings = 0;
         for (const auto& b : bindings) if (b.role == DescriptorRole::GuestSamplers) {
             ++samplerBindings;
-            Require(b.count == 2 && b.guestDescriptor.size() == 8 && b.resourceSources.size() == 2 &&
-                b.samplerUnnormalized.size() == 2 && b.samplerPixelProof.size() == 2,
-                "late-DCE sampler binding lost stable two-slot allocation");
-            Require(b.resourceSources[0] == info.samplers[0].source && b.resourceSources[1] == info.samplers[1].source,
-                "late-DCE sampler descriptor binding order changed");
-            Require(!b.samplerUnnormalized[dead] && b.samplerPixelProof[dead].empty() &&
-                (b.guestDescriptor[dead*4] & (1u<<15u)) == 0,
-                "late-DCE dead sampler was not neutralized for native resource construction");
-            Require(b.samplerUnnormalized[1u-dead] == pixel,
+            Require(b.count == 1 && b.guestDescriptor.size() == 4 && b.resourceSources.size() == 1 &&
+                b.samplerUnnormalized.size() == 1 && b.samplerPixelProof.size() == 1,
+                "late-DCE sampler binding did not compact to the live sampler");
+            Require(b.resourceSources[0] == info.samplers[1u-dead].source && b.resourceSources[0] != info.samplers[dead].source,
+                "late-DCE dead sampler reached the native sampler heap");
+            Require(b.samplerUnnormalized[0] == pixel,
                 "late-DCE surviving sampler coordinate policy changed");
         }
         Require(samplerBindings == 1,"late-DCE sampler binding absent");
@@ -683,7 +684,9 @@ Replay LateDeadSamplerReplay(bool liveSecond, bool pixel) {
     return replay;
 }
 // The captured snapshot's pipeline specialization baked into a prepared artifact, as Recompile
-// materializes it: each OpSpecConstant becomes the OpConstant of its supplied value.
+// materializes it: each OpSpecConstant becomes the OpConstant of its supplied value, the module is
+// folded, and descriptor variables the folded code no longer reads are removed (upstream's compact
+// heaps leave an empty heap unbound, so its variable must not reach the native backend).
 SharedSpirv MaterializeSpecialization(const CompiledShaderArtifact& artifact, const BindingAllocationResult& bindings,
                                       const BindingLayout& layout) {
     std::map<std::uint32_t, std::uint32_t> supplied;
@@ -713,7 +716,36 @@ SharedSpirv MaterializeSpecialization(const CompiledShaderArtifact& artifact, co
             materialized.insert(materialized.end(), words.begin() + cursor, words.begin() + cursor + count);
         }
     }
-    return materialized;
+    materialized = SpecializeSpirv(materialized);
+    std::map<std::uint32_t, std::uint32_t> descriptorVariables;
+    std::set<std::uint32_t> usedDescriptors;
+    for (std::size_t cursor = 5; cursor < materialized.size(); cursor += materialized[cursor] >> 16u) {
+        const auto count = materialized[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(materialized[cursor] & 0xffffu);
+        if (op == spv::OpDecorate && count == 4u && materialized[cursor + 2u] == spv::DecorationBinding) descriptorVariables.emplace(materialized[cursor + 1u], materialized[cursor + 3u]);
+        if ((op == spv::OpAccessChain || op == spv::OpInBoundsAccessChain || op == spv::OpPtrAccessChain || op == spv::OpInBoundsPtrAccessChain ||
+             op == spv::OpLoad || op == spv::OpCopyObject) && count >= 4u) usedDescriptors.insert(materialized[cursor + 3u]);
+    }
+    const auto unused = [&](std::uint32_t id) { return descriptorVariables.contains(id) && !usedDescriptors.contains(id); };
+    std::vector<std::uint32_t> compact(materialized.begin(), materialized.begin() + 5);
+    for (std::size_t cursor = 5; cursor < materialized.size(); cursor += materialized[cursor] >> 16u) {
+        const auto count = materialized[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(materialized[cursor] & 0xffffu);
+        if (op == spv::OpEntryPoint) {
+            const auto start = compact.size();
+            std::size_t interfaceIndex = 3u;
+            for (; interfaceIndex < count; ++interfaceIndex) {
+                const auto word = materialized[cursor + interfaceIndex];
+                if ((word & 0xffu) == 0u || (word & 0xff00u) == 0u || (word & 0xff0000u) == 0u || (word & 0xff000000u) == 0u) { ++interfaceIndex; break; }
+            }
+            compact.insert(compact.end(), materialized.begin() + cursor, materialized.begin() + cursor + interfaceIndex);
+            for (auto index = interfaceIndex; index < count; ++index) if (!unused(materialized[cursor + index])) compact.push_back(materialized[cursor + index]);
+            compact[start] = (static_cast<std::uint32_t>(compact.size() - start) << 16u) | spv::OpEntryPoint;
+        } else if (!((op == spv::OpVariable && unused(materialized[cursor + 2u])) || ((op == spv::OpDecorate || op == spv::OpName) && unused(materialized[cursor + 1u])))) {
+            compact.insert(compact.end(), materialized.begin() + cursor, materialized.begin() + cursor + count);
+        }
+    }
+    return compact;
 }
 CompiledVariant CompileLateDeadSampler(const RecompileRequest& request, const ResourceCapture& capture, unsigned dead) {
     auto program = PrepareResourceProgram(request);
