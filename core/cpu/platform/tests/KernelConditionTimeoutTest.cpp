@@ -33,8 +33,6 @@ struct Session {
  std::unique_ptr<Cpu::Platform::TargetKernelMutexes> mutexes;
  std::unique_ptr<Cpu::SceModules> graph;
  std::uint64_t address=0;std::set<std::uint64_t> gates;bool withdrawn=false,relative;
- static constexpr Cpu::Platform::KernelMutexConsumer Eboot{"eboot.bin","a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397"};
- static constexpr Cpu::Platform::KernelMutexConsumer Libc{"libc.prx","78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f"};
  Session(const char* path,bool rel,unsigned mode):relative(rel) {
   require(std::string(Cpu::Machine::Backend()).find("Modern QEMU TCG")!=std::string::npos,"Timed fixture requires native Modern QEMU TCG");
   mutexes=std::make_unique<Cpu::Platform::TargetKernelMutexes>(machine,threads);
@@ -45,9 +43,9 @@ struct Session {
     rel ? std::vector<Cpu::SceLibraryIdentity>{{"libkernel",0,1}} : std::vector<Cpu::SceLibraryIdentity>{{"libkernel",44,1},{"libScePosix",43,1}}}};
   graph=std::make_unique<Cpu::SceModules>(machine,Cpu::SceModuleFile{path,Bias},std::span<const Cpu::SceModuleFile>{},hosts,
    [&](const Cpu::SceImport& import,std::uint8_t type)->std::optional<Cpu::SceResolvedImport> {
-    require(type==2,"Timed fixture lost linked mandatory function type");const auto consumer=rel ? Libc : Eboot;
-    if(const auto gate=mutexes->Resolve(import,type,consumer)) {gates.insert(*gate);return Cpu::SceResolvedImport{*gate,type};}
-    if(const auto gate=mutexes->ResolveCondition(import,type,0,consumer)) {gates.insert(*gate);return Cpu::SceResolvedImport{*gate,type};}
+    require(type==2,"Timed fixture lost linked mandatory function type");
+    if(const auto gate=mutexes->Resolve(import,type)) {gates.insert(*gate);return Cpu::SceResolvedImport{*gate,type};}
+    if(const auto gate=mutexes->ResolveCondition(import,type,0)) {gates.insert(*gate);return Cpu::SceResolvedImport{*gate,type};}
     if(const auto gate=threadImports.Resolve(import,type)) return Cpu::SceResolvedImport{*gate,type};
     if(const auto gate=lifecycle.Resolve(import)) return Cpu::SceResolvedImport{*gate,type};
     return std::nullopt;
@@ -199,7 +197,7 @@ void cancellation(const char* path,bool relative,unsigned kind) {
          "Timed cancellation fabricated return/slot write");
  if(kind==1) {
   auto row=scoped("g+PZd2hiacg",relative);row.LibraryName="libkernel";if(!relative) row.LibraryId=44;
-  const auto gate=s.mutexes->ResolveCondition(row,2,0,relative ? Session::Libc : Session::Eboot);
+  const auto gate=s.mutexes->ResolveCondition(row,2,0);
   require(gate.has_value(),"Live timed provider destroy gate missing after scheduler withdrawal");
   s.machine.Map(0x71000000,4096,Cpu::Permission::Read|Cpu::Permission::Write);
   s.machine.Map(0x71001000,4096,Cpu::Permission::Read|Cpu::Permission::Execute);
@@ -232,23 +230,23 @@ void queuedCancellation(const char* path,bool relative,unsigned kind) {
 void admission() {
  Cpu::Machine machine;auto threads=std::make_shared<Cpu::GuestThreads>(machine);Cpu::Platform::TargetKernelMutexes target(machine,threads);
  for(bool relative:{false,true}) {
-  const auto consumer=relative ? Session::Libc : Session::Eboot;
   const auto row=scoped(relative ? "BmMjYxmew1w" : "27bAgiJmOh0",relative);
-  require(target.ResolveCondition(row,2,0,consumer).has_value(),"Exact observed timed row rejected");
-  rejects([&]{target.ResolveCondition(row,2,1,consumer);},"consumer source/import row");
-  for(auto type:{0,1,6}) rejects([&]{target.ResolveCondition(row,type,0,consumer);},"consumer source/import row");
-  for(auto wrong:{Cpu::Platform::KernelMutexConsumer{consumer.Name,"unverified"},Cpu::Platform::KernelMutexConsumer{"foreign.prx",consumer.Sha256}})
-   rejects([&]{target.ResolveCondition(row,2,0,wrong);},"consumer source/import row");
-  for(unsigned field=0;field<7;++field) {
+  require(target.ResolveCondition(row,2,0).has_value(),"Timed row rejected");
+  // Import-table ids are per-image; another title's ids are admitted.
+  auto other=row;other.LibraryId=7;other.ModuleId=9;
+  require(target.ResolveCondition(other,2,0).has_value(),"Another image's timed import-table ids were refused");
+  rejects([&]{target.ResolveCondition(row,2,1);},"type/size");
+  for(auto type:{0,1,6}) rejects([&]{target.ResolveCondition(row,type,0);},"type/size");
+  for(unsigned field=0;field<6;++field) {
    auto wrong=row;
    if(field==0) wrong.LibraryName="foreign";
    if(field==1) wrong.ModuleName="foreign";
    if(field==2) wrong.LibraryVersion=2;
    if(field==3) wrong.ModuleMajor=2;
    if(field==4) wrong.ModuleMinor=2;
-   if(field==5) wrong.LibraryId=99;
-   if(field==6) wrong.ModuleId=99;
-   rejects([&]{target.ResolveCondition(wrong,2,0,consumer);},"consumer source/import row");
+   // SCE timed wait is a libkernel export only; POSIX may also come from libScePosix.
+   if(field==5) wrong.LibraryName=relative ? "libScePosix" : "foreign";
+   rejects([&]{target.ResolveCondition(wrong,2,0);},"scope/version");
   }
  }
 }

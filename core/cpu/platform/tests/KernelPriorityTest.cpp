@@ -195,39 +195,30 @@ void unsupported(const char* path) {
 void admission() {
  Cpu::Machine machine; auto threads = std::make_shared<Cpu::GuestThreads>(machine);
  Cpu::SceThreadImports imports(machine,threads);
- using Consumer = Cpu::ThreadPriorityConsumer;
- constexpr Consumer eboot{"eboot.bin","a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397"};
- constexpr Consumer libc{"libc.prx","78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f"};
- constexpr Consumer web{"libSceNpCppWebApi.prx","38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9"};
  constexpr std::array nids{"nsYoNRywwNg","62KCwEMmzcM","DzES9hQF4f4","FXPWHNk8Of0","eXbUSpEaTsA","4+h9EzwKF4I"};
  for (unsigned i=0;i<nids.size();++i) {
   auto row = scoped(nids[i]); require(!imports.Resolve(row,2),"Legacy resolver admitted an opt-in priority family");
   require(imports.ResolvePriority(row,2).has_value(),"Explicit public priority provider rejected fixture contract");
   row.LibraryId=44;row.ModuleId=24;
-  require(imports.ResolveTargetPriority(row,2,eboot).has_value(),"Exact observed eboot priority row rejected");
-  rejects([&]{imports.ResolveTargetPriority(row,2,Consumer{"eboot.bin","unverified"});},"consumer source/import row");
-  rejects([&]{imports.ResolveTargetPriority(row,2,Consumer{"other.bin",eboot.Sha256});},"consumer source/import row");
-  for (const auto type:{0,1,6}) rejects([&]{imports.ResolveTargetPriority(row,type,eboot);},"scope/version/type");
-  for (unsigned field=0;field<7;++field) {
+  require(imports.ResolveTargetPriority(row,2).has_value(),"Target priority row rejected");
+  // Import-table ids are per-image: any title, libc or module row is admitted.
+  for (const auto ids:{std::pair{0,1},std::pair{4,5},std::pair{7,9}}) {
+   auto other=row;other.LibraryId=ids.first;other.ModuleId=ids.second;
+   require(imports.ResolveTargetPriority(other,2).has_value(),"Another image's priority import-table ids were refused");
+  }
+  for (const auto type:{0,1,6}) rejects([&]{imports.ResolveTargetPriority(row,type);},"scope/version/type");
+  for (unsigned field=0;field<5;++field) {
    auto wrong=row;
    if(field==0)wrong.ModuleName="libc";
    if(field==1)wrong.LibraryName="libc";
    if(field==2)wrong.LibraryVersion=2;
    if(field==3)wrong.ModuleMajor=2;
    if(field==4)wrong.ModuleMinor=2;
-   if(field==5)wrong.LibraryId=1;
-   if(field==6)wrong.ModuleId=1;
-   rejects([&]{imports.ResolveTargetPriority(wrong,2,eboot);},field<5?"scope/version/type":"consumer source/import row");
+   rejects([&]{imports.ResolveTargetPriority(wrong,2);},"scope/version/type");
   }
-  auto other=row;other.LibraryId=0;other.ModuleId=1;
-  if(i<5)require(imports.ResolveTargetPriority(other,2,libc).has_value(),"Exact observed libc priority row rejected");
-  else rejects([&]{imports.ResolveTargetPriority(other,2,libc);},"consumer source/import row");
-  other.LibraryId=4;other.ModuleId=5;
-  if(i<3)require(imports.ResolveTargetPriority(other,2,web).has_value(),"Exact observed WebApi priority row rejected");
-  else rejects([&]{imports.ResolveTargetPriority(other,2,web);},"consumer source/import row");
  }
- require(!imports.ResolveTargetPriority(scoped("AAAAAAAAAAA"),2,eboot),"Priority resolver fabricated another family");
- std::cout << "PASS exact priority source/scope/type and negative admission\n";
+ require(!imports.ResolveTargetPriority(scoped("AAAAAAAAAAA"),2),"Priority resolver fabricated another family");
+ std::cout << "PASS title-agnostic priority scope/type and negative admission\n";
 }
 }
 int main(int argc,char**argv) {

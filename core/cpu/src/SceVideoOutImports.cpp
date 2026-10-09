@@ -223,8 +223,7 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
 
     std::uint64_t resolve(const SceImport& import, bool target) {
         if (import.LibraryName != "libSceVideoOut" || import.ModuleName != "libSceVideoOut" ||
-            import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1 ||
-            (target && (import.LibraryId != 39 || import.ModuleId != 40)))
+            import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1)
             throw std::runtime_error("Unsupported SCE VideoOut import scope/version: " + identity(import));
         const auto service = services.find(import.Nid);
         if (service == services.end())
@@ -265,8 +264,8 @@ SceVideoOutImports::SceVideoOutImports(Machine& machine, SceVideoOutBackend back
     impl(std::make_shared<Impl>(machine, std::move(backend), gateBase, admissions)) {}
 SceVideoOutImports::~SceVideoOutImports() = default;
 
-std::span<const VideoOutAbiAdmission> QualifiedVideoOutAdmissionsForImage(std::string_view verifiedSha256) {
-    if (verifiedSha256 != "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397") return {};
+std::span<const VideoOutAbiAdmission> TargetVideoOutAdmissions() {
+    // Title-agnostic: the same call-shape contracts apply to every importing image.
     // Bounded target caller/field inference against the pinned public candidate.
     // Admit the two 8-bit formats and exact source-qualified R10G10B10A2 BT.2100 PQ
     // value. Native PQ scanout preserves packed code values and uses a matching layer.

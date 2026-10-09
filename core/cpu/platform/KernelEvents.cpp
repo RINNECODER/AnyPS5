@@ -389,27 +389,23 @@ void KernelEvents::Shutdown() {
     impl->queues.clear(); impl->live = false;
 }
 
-std::span<const KernelEventAdmission> QualifiedKernelEventAdmissionsForImage(std::string_view hash) {
+std::span<const KernelEventAdmission> TargetKernelEventAdmissions() {
     static constexpr std::array<KernelEventAdmission, 3> admissions{{
         {KernelEventContract::CreateEqueue, "CPU09: public AnyPS5 00901fba CreateEqueue + exact eboot import339/caller0x96645a"},
         {KernelEventContract::DeleteEqueue, "CPU09: public AnyPS5 00901fba DeleteEqueue + exact eboot import374/caller0x966753"},
         {KernelEventContract::WaitEqueue, "CPU09: public AnyPS5 00901fba WaitEqueue + exact eboot import345/callers0x8f728e,0x8fdaa8"}}};
-    if (hash == "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397") return admissions;
-    return {};
+    return admissions;
 }
 TargetKernelEvents::TargetKernelEvents(Machine& m, const std::shared_ptr<GuestThreads>& threads,
                                      std::span<const KernelEventAdmission> selected)
     : provider(m, threads), admissions(selected.begin(), selected.end()) {}
 std::optional<std::uint64_t> TargetKernelEvents::Resolve(const SceImport& import, std::uint8_t type,
-                                                       std::uint64_t size, KernelEventConsumer source) {
+                                                       std::uint64_t size) {
     const auto op = operation(import);
     if (op == inventory.size()) return std::nullopt;
     const auto contract = static_cast<KernelEventContract>(op);
     if (std::none_of(admissions.begin(), admissions.end(), [&](const auto& a) { return a.Contract == contract && !a.Evidence.empty(); }))
         throw std::runtime_error("Target kernel event contract was not selected");
-    if (source.Name != "eboot.bin" || source.Sha256 != "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397" ||
-        import.LibraryId != 44 || import.ModuleId != 24)
-        throw std::runtime_error("Unsupported target kernel event consumer/import row");
     return provider.Resolve(import, type, size);
 }
 }

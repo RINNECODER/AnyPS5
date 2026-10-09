@@ -23,15 +23,15 @@ enum class AgcAbiContract {
 };
 
 // These policies constrain the admitted target use, independently of the source
-// adapter enum used by synthetic callers. Selection requires the caller to have
-// verified the exact owned image identity before invoking this API.
+// adapter enum used by synthetic callers. Admission is by NID, library/module
+// scope, symbol type and size; it never depends on the importing image identity.
 enum class AgcArgumentPolicy { SourceContract, TargetPacket20Bit, TargetMemoryWrite, TargetShader, TargetDispatch, TargetSuspend, TargetFlip, TargetRenderingWait, TargetGraphicsEvent };
 struct AgcAbiAdmission {
     AgcAbiContract Contract;
     AgcArgumentPolicy Policy;
     std::string_view Evidence;
 };
-std::span<const AgcAbiAdmission> QualifiedAgcAdmissionsForImage(std::string_view verifiedSha256);
+std::span<const AgcAbiAdmission> TargetAgcAdmissions();
 
 struct AgcReadableRange { std::uint64_t Address; std::size_t Size; };
 struct SceAgcBackend {

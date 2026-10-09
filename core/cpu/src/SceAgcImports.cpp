@@ -349,8 +349,8 @@ SceAgcImports::SceAgcImports(Machine& machine, SceAgcBackend backend,
         if (admission.Policy != AgcArgumentPolicy::SourceContract) impl->Policies.emplace(admission.Contract, admission.Policy);
 }
 
-std::span<const AgcAbiAdmission> QualifiedAgcAdmissionsForImage(std::string_view verifiedSha256) {
-    if (verifiedSha256 != "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397") return {};
+std::span<const AgcAbiAdmission> TargetAgcAdmissions() {
+    // Title-agnostic: the same contracts apply to every importing image.
     // Bounded static target inspection, corroborated by the existing public
     // builders/backend and independent TCG/Metal fixtures. These descriptions
     // contain engineering conclusions, never private instruction/binary bytes.

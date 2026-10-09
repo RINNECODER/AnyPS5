@@ -25,26 +25,6 @@
 
 namespace Cpu {
 namespace {
-std::string sourceHash(const SceImportConsumer& source) {
-    constexpr char digits[] = "0123456789abcdef";
-    std::string result;
-    result.reserve(64);
-    for (const auto byte : source.SourceSha256) {
-        const auto n = std::to_integer<unsigned>(byte);
-        result.push_back(digits[n >> 4]); result.push_back(digits[n & 15]);
-    }
-    return result;
-}
-bool qualifiedSize(const SceImportConsumer& source) {
-    const auto name = source.Path.filename().string();
-    const auto hash = sourceHash(source);
-    return (name == "eboot.bin" && source.SourceSize == 102560655 && hash ==
-            "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397") ||
-           (name == "libc.prx" && source.SourceSize == 1875018 && hash ==
-            "78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f") ||
-           (name == "libSceNpCppWebApi.prx" && source.SourceSize == 7895047 && hash ==
-            "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9");
-}
 GuestMemoryMetalCompositor::OwnedGpuAccess ownedAccess(const OwnedMappingView& view) {
     const auto permissions = static_cast<unsigned>(view.Region.Permissions);
     if (!(permissions & static_cast<unsigned>(Permission::Read)))
@@ -125,9 +105,10 @@ struct NativeModuleRunner::Impl {
         threadImports = std::make_unique<SceThreadImports>(machine, threads);
         mutexes = std::make_unique<Platform::TargetKernelMutexes>(machine, threads);
         semaphores = std::make_unique<Platform::TargetKernelSemaphores>(machine, threads);
-        const auto hash = qualifiedSize(source) ? sourceHash(source) : std::string{};
+        // Admission is title-agnostic: every profile below is selected for any
+        // importing image and validated per import by NID, scope, type and size.
         events = std::make_unique<Platform::TargetKernelEvents>(machine, threads,
-            Platform::QualifiedKernelEventAdmissionsForImage(hash));
+            Platform::TargetKernelEventAdmissions());
         AnyPS5::Host::NativeMetalSessionConfiguration native;
         native.window = {config.WindowTitle, config.Width, config.Height};
         native.utilityMetallib = config.UtilityMetallib;
@@ -135,7 +116,7 @@ struct NativeModuleRunner::Impl {
         native.eopInterrupt = events->Provider().EopPublisher();
         const VideoOutCompletionCallbacks callbacks{&completion, Completion::time, Completion::time, Completion::flip};
         graphics = SceNativeGraphicsSession::CreateMainThread(machine, native, callbacks, {},
-            0x7ffdfd000000, QualifiedVideoOutAdmissionsForImage(hash));
+            0x7ffdfd000000, TargetVideoOutAdmissions());
         auto backend = MakeNativeAgcBackend(graphics->Driver());
         backend.AddEvent = [this](std::uint64_t handle, std::int32_t id, std::uint64_t user) {
             return events->Provider().AddGraphicsEvent(handle, id, user);
@@ -146,7 +127,7 @@ struct NativeModuleRunner::Impl {
         // Main also owns SceNetAddressImports at the legacy AGC default.
         // Keep this native profile's gate separate from every legacy provider.
         agc = std::make_unique<SceAgcImports>(machine, std::move(backend),
-            QualifiedAgcAdmissionsForImage(hash), 0x7ffdc8000000);
+            TargetAgcAdmissions(), 0x7ffdc8000000);
     }
     ~Impl() {
         try { close(); }
@@ -268,9 +249,8 @@ void NativeModuleRunner::AddHostModules(std::vector<SceHostModule>& hosts) const
     const auto serviceSource = [&](const char* targetName, const char* publicName, const auto& profile) {
         return std::any_of(impl->serviceConsumers.begin(), impl->serviceConsumers.end(), [&](const auto& entry) {
             const auto& image = entry.second;
-            const SceImportConsumer identity{image.Path, image.SourceSize, image.SourceSha256};
             return (impl->config.EnableQualifiedServiceConsumers && image.Path.filename() == targetName &&
-                    image.SourceContainer == "plain_self" && qualifiedSize(identity)) ||
+                    image.SourceContainer == "plain_self") ||
                    (profile && image.Path.filename() == publicName && image.SourceContainer == "elf" &&
                     image.Type == 0xfe10 && image.SourceSize == profile->SourceSize &&
                     image.SourceSha256 == profile->SourceSha256);
@@ -282,12 +262,11 @@ void NativeModuleRunner::AddHostModules(std::vector<SceHostModule>& hosts) const
     };
     if (serviceSource("eboot.bin", "NativeNpIdentityGuest.elf", impl->config.PublicNpIdentity)) add("libSceNpManager");
     if (serviceSource("libSceNpCppWebApi.prx", "NativeUriGuest.elf", impl->config.PublicUriEscape)) add("libSceHttp");
-    if (qualifiedSize(impl->source) && !QualifiedAgcAdmissionsForImage(sourceHash(impl->source)).empty()) {
-        for (const auto* name : {"libSceAgc", "libSceAgcDriver", "libSceVideoOut"})
-            hosts.push_back({std::string(name) + ".prx", {name, 0, 1, 1}, {{name, 0, 1}}});
-        for (auto& host : hosts) if (host.Module.Name == "libkernel")
+    for (const auto* name : {"libSceAgc", "libSceAgcDriver", "libSceVideoOut"}) add(name);
+    for (auto& host : hosts)
+        if (host.Module.Name == "libkernel" && std::none_of(host.Libraries.begin(), host.Libraries.end(),
+                [](const auto& library) { return library.Name == "libScePosix"; }))
             host.Libraries.push_back({"libScePosix", 0, 1});
-    }
 }
 
 std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportConsumer& consumer,
@@ -295,8 +274,6 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
     impl->checkOwner();
     if (impl->shutdown || impl->dispatch->phase == Impl::Phase::Drained)
         throw std::runtime_error("Native module import resolution after shutdown");
-    const auto name = consumer.Path.filename().string();
-    const auto hash = sourceHash(consumer);
     if (import.Nid == "XDncXQIJUSk" || import.Nid == "YuOW3dDAKYc") {
         const auto found = impl->serviceConsumers.find(consumer.Path);
         if (type != 2 || size || found == impl->serviceConsumers.end() ||
@@ -332,19 +309,15 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
         if (!address) throw std::runtime_error("Unsupported native service retained consumer/import row");
         return SceResolvedImport{*address, type};
     }
-    // Pass the actual parsed importing image's identity. This provider admits
-    // only the four observed semaphore rows for the exact target consumer,
-    // and validates function type/size and full scope before allocating gates.
-    if (const auto address = impl->semaphores->Resolve(import, type, size,
-            {name, hash, consumer.SourceSize}))
+    // Kernel and graphics providers are title-agnostic: each validates NID,
+    // full scope, function type and size before allocating gates, for any
+    // importing image (main executable or module).
+    if (const auto address = impl->semaphores->Resolve(import, type, size))
         return SceResolvedImport{*address, type};
     const bool graphicsScope = import.ModuleName == "libSceAgc" || import.ModuleName == "libSceAgcDriver" ||
         import.LibraryName == "libSceAgc" || import.LibraryName == "libSceAgcDriver" ||
         import.ModuleName == "libSceVideoOut" || import.LibraryName == "libSceVideoOut";
     if (graphicsScope) {
-        if (!qualifiedSize(consumer) || name != impl->source.Path.filename().string() ||
-            consumer.SourceSize != impl->source.SourceSize || consumer.SourceSha256 != impl->source.SourceSha256)
-            throw std::runtime_error("Unsupported native graphics actual consumer source");
         if (import.ModuleName == "libSceVideoOut" || import.LibraryName == "libSceVideoOut")
             return SceResolvedImport{impl->graphics->ResolveVideoOut(import, type, size), type};
         return SceResolvedImport{impl->agc->Resolve(import, type, size), type};
@@ -354,8 +327,7 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
     // Invalid size is supplied as an invalid observed type so a recognized row
     // rejects BEFORE allocating its callable gate, while unrelated objects pass.
     const auto functionType = type == 2 && size == 0 ? type : std::uint8_t{0};
-    const auto admittedName = qualifiedSize(consumer) ? name : std::string{};
-    if (const auto address = impl->threadImports->ResolveTargetPriority(import, functionType, {admittedName, hash}))
+    if (const auto address = impl->threadImports->ResolveTargetPriority(import, functionType))
         return SceResolvedImport{*address, type};
     if (const auto address = impl->threadImports->Resolve(import, functionType))
         return SceResolvedImport{*address, type};
@@ -365,13 +337,13 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
         [&](const auto& row) { return row.Nid == import.Nid; });
     const bool event = std::any_of(Platform::KernelEventInventory().begin(), Platform::KernelEventInventory().end(),
         [&](const auto& row) { return row.Nid == import.Nid; });
-    if ((primitive || condition || event) && (!qualifiedSize(consumer) || type != 2 || size != 0))
-        throw std::runtime_error("Unsupported native kernel actual consumer source/type/size");
-    if (const auto address = impl->mutexes->ResolveCondition(import, type, size, {admittedName, hash}))
+    if ((primitive || condition || event) && (type != 2 || size != 0))
+        throw std::runtime_error("Unsupported native kernel import type/size");
+    if (const auto address = impl->mutexes->ResolveCondition(import, type, size))
         return SceResolvedImport{*address, type};
-    if (const auto address = impl->mutexes->Resolve(import, functionType, {admittedName, hash}))
+    if (const auto address = impl->mutexes->Resolve(import, functionType))
         return SceResolvedImport{*address, type};
-    if (const auto address = impl->events->Resolve(import, type, size, {name, hash}))
+    if (const auto address = impl->events->Resolve(import, type, size))
         return SceResolvedImport{*address, type};
     return std::nullopt;
 }

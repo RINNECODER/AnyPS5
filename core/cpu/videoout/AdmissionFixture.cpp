@@ -62,14 +62,17 @@ void run(const char* const* files) {
     guest.machine.Read(Status,after);require(after==sentinel&&statusCalls==2,"Negative status result changed caller output");
 #ifndef GPU07_OLD_ROUTES
     rejects([&]{publicImports.Resolve(identity("utPrVdxio-8"),2,0);},"no qualified admission");
-    const auto admissions=Cpu::QualifiedVideoOutAdmissionsForImage("a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397");
-    require(!admissions.empty()&&Cpu::QualifiedVideoOutAdmissionsForImage("incorrect-image").empty(),"Source-qualified profile selection differs");
+    const auto admissions=Cpu::TargetVideoOutAdmissions();
+    require(!admissions.empty(),"Title-agnostic VideoOut profile is empty");
     Cpu::SceVideoOutImports unavailable(guest.machine,{},0x7ffdfc000000,admissions);
     rejects([&]{unavailable.Resolve(identity("utPrVdxio-8"),2,0);},"without native backend");
     Cpu::SceVideoOutImports target(guest.machine,callbacks,0x7ffdfb000000,admissions);
     for(const auto type:std::array<std::uint8_t,2>{0,1})rejects([&]{target.Resolve(identity("utPrVdxio-8"),type,0);},"ELF symbol");
     rejects([&]{target.Resolve(identity("utPrVdxio-8"),2,8);},"ELF symbol");
-    auto wrong=identity("utPrVdxio-8");wrong.LibraryId=40;rejects([&]{target.Resolve(wrong,2,0);},"scope/version");
+    auto wrong=identity("utPrVdxio-8");wrong.LibraryName="libSceVideoOutForeign";rejects([&]{target.Resolve(wrong,2,0);},"scope/version");
+    // Import-table ids are per-image; any title's ids are admitted.
+    wrong=identity("utPrVdxio-8");wrong.LibraryId=3;wrong.ModuleId=4;
+    require(target.Resolve(wrong,2,0)!=0,"Another image's import-table ids were refused");
     wrong=identity("utPrVdxio-8");wrong.ModuleMinor=2;rejects([&]{target.Resolve(wrong,2,0);},"scope/version");
     statusResult=0;const auto qualifiedStatus=target.Resolve(identity("utPrVdxio-8"),2,0);
     require(guest.call(1,qualifiedStatus,{37,Status})==0&&statusCalls==3,"Qualified status0 was not callable");

@@ -467,7 +467,7 @@ def prepare_package(source, build, gpu_source, destination, revisions, run, prof
         utility = "fixtures/AnyPS5Utilities.metallib"
         commands += [["bin/anyps5_native_module_runner_test", "fixtures/sce-module-main.elf",
                       "fixtures/SceModuleGuest.prx", utility, case]
-                     for case in ("lifecycle", "close", "initializer-failure", "qualified-rejection")]
+                     for case in ("lifecycle", "close", "initializer-failure", "title-agnostic")]
         commands += [["bin/anyps5_cpu_run", "--diagnostics-json", "--sce-module", "fixtures/SceModuleGuest.prx",
                       "fixtures/sce-module-main.elf", "17", "5", "7", "58", "3366582378"]]
         commands += [["bin/anyps5_platform_" + case + "_test", "fixtures/platform/" + name]
