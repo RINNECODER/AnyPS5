@@ -630,6 +630,7 @@ struct SceNativeGraphicsSession::Impl {
         }
         const auto attempt = [&](auto&& operation) {
             try { operation(); }
+            catch (const ProcessShutdown&) {}
             catch (...) { if (!shutdownFailure) shutdownFailure = std::current_exception(); }
         };
         if (session) attempt([&] { session->Window().RequestCloseMainThread(); });
