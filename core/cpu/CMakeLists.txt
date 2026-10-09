@@ -268,6 +268,19 @@ if(BUILD_TESTING)
         add_test(NAME anyps5_platform_service_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/PlatformServiceCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${platformMain}" "${platformGuest}")
         set_tests_properties(anyps5_platform_service_cli PROPERTIES TIMEOUT 30)
     endif()
+    set(lazyImportGuest "${CMAKE_CURRENT_BINARY_DIR}/LazyImportGuest.prx")
+    set(lazyImportMain "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-main.elf")
+    add_custom_command(OUTPUT "${lazyImportGuest}" "${lazyImportMain}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_LAZY_DEPENDENCY=1 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/LazyImportHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-guest.o"
+        COMMAND "${guestLinker}" -shared -soname LazyImportGuest.prx -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-guest.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_LAZY_DEPENDENCY=0 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/LazyImportHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-main.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-start.o"
+        COMMAND "${guestLinker}" -shared -e _start -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-main.o" "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-start.o" "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-guest-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildLazyImportFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/lazy-import-main-linked.elf" "${lazyImportGuest}" "${lazyImportMain}"
+        DEPENDS fixtures/LazyImportHomebrew.c fixtures/SceStart.S tests/BuildLazyImportFixture.py tests/BuildPlatformServiceFixture.py tests/BuildSceModulesFixture.py VERBATIM)
+    add_custom_target(anyps5_lazy_import_fixture ALL DEPENDS "${lazyImportGuest}" "${lazyImportMain}")
+    add_test(NAME anyps5_lazy_import_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/LazyImportCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${lazyImportMain}" "${lazyImportGuest}")
+    set_tests_properties(anyps5_lazy_import_cli PROPERTIES TIMEOUT 60)
     add_test_executable(anyps5_sce_common_dialog_import_tests tests/SceCommonDialogImportsTest.cpp)
     target_link_libraries(anyps5_sce_common_dialog_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_common_dialog_imports COMMAND anyps5_sce_common_dialog_import_tests)
