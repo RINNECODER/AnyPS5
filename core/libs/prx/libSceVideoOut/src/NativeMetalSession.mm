@@ -1,4 +1,5 @@
 #include "prx/libSceVideoOut/include/NativeMetalSession.hpp"
+#include "prx/libc/include/Shutdown.hpp"
 #import <AppKit/AppKit.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -37,6 +38,8 @@ struct NativeMetalSession::Impl {
         }
         const auto attempt = [&](auto&& operation) {
             try { operation(); }
+            // A process stop is the reason for this shutdown, not a failure of it.
+            catch (const ProcessShutdown&) {}
             catch (...) { if (!shutdownFailure) shutdownFailure = std::current_exception(); }
         };
         if (window) attempt([&] { window->RequestCloseMainThread(); });

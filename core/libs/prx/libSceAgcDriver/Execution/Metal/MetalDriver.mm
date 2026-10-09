@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/SubmissionCapture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/SubmissionValidation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
+#include "prx/libc/include/Shutdown.hpp"
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -539,6 +540,18 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
         }
     } catch (const DriverStopped&) {
         const auto error = std::current_exception();
+        for (const auto& [offset, flip] : submission.flips) { static_cast<void>(offset); flip->Fail(error); }
+    } catch (const ProcessShutdown&) {
+        // VideoOut throws this once the process stop fires (RenderingWait::Wait,
+        // FlipRequest::GpuReady). It is a requested stop, not a driver failure:
+        // never make it sticky, or Shutdown() rethrows a non-std::exception.
+        // Stop admission so no caller waits on workers that have exited.
+        const auto error = std::current_exception();
+        {
+            std::lock_guard lock(mutex);
+            stopping = true;
+        }
+        changed.notify_all();
         for (const auto& [offset, flip] : submission.flips) { static_cast<void>(offset); flip->Fail(error); }
     } catch (...) {
         const auto error = std::current_exception();
