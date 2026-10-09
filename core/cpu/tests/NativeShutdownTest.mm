@@ -136,6 +136,14 @@ void run(const char* utility, const std::string& mode) {
     const VideoOutCompletionCallbacks callbacks{&completions, clockTime, clockCounter, flipEvent};
     auto backend = std::make_unique<Cpu::SceNativeVideoOutBackend>(machine, presentation, callbacks,
         std::stop_token{}, Cpu::SceVideoOutMemoryConfiguration{ranges, owners, 23});
+    // On an early failure, free a held presenter before the backend joins it.
+    struct Release {
+        HeldPresentation& state;
+        ~Release() {
+            { std::lock_guard lock(state.mutex); state.released = true; }
+            state.changed.notify_all();
+        }
+    } release{held};
     const auto video = backend->GetCallbacks();
     const auto handle = video.Open(255, 0, 0, std::nullopt);
     require(handle > 0, "Native VideoOut did not open an output");
