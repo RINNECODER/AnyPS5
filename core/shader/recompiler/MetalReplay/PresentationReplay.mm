@@ -531,22 +531,75 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
                 location:location modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
                 windowNumber:window.windowNumber context:nil eventNumber:1 clickCount:1 pressure:pressed ? 1 : 0];
         };
+        // Every event the host pump hands to -[NSApp sendEvent:] is recorded (a local monitor sees exactly those;
+        // AppKit passes copies, so posted input is matched by its fields, not by object identity).
+        struct Dispatched { NSEventType type; NSInteger window; long code; bool repeat; NSInteger data1, data2; };
+        auto dispatched = std::make_shared<std::vector<Dispatched>>();
+        const auto record = [](NSEvent* event) {
+            Dispatched value{event.type, event.windowNumber, -1, false, 0, 0};
+            switch (event.type) {
+            case NSEventTypeKeyDown: case NSEventTypeKeyUp:
+                value.code = event.keyCode; value.repeat = event.isARepeat; break;
+            case NSEventTypeLeftMouseDown: case NSEventTypeLeftMouseUp: case NSEventTypeRightMouseDown:
+            case NSEventTypeRightMouseUp: case NSEventTypeOtherMouseDown: case NSEventTypeOtherMouseUp:
+                value.code = event.buttonNumber; break;
+            case NSEventTypeApplicationDefined:
+                value.data1 = event.data1; value.data2 = event.data2; break;
+            default: break;
+            }
+            return value;
+        };
+        struct MonitorGuard { id monitor; ~MonitorGuard() { if (monitor) [NSEvent removeMonitor:monitor]; } } monitorGuard{
+            [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskAny handler:^NSEvent*(NSEvent* event) {
+                dispatched->push_back(record(event));
+                return event;
+            }]};
+        Require(monitorGuard.monitor != nil, "AppKit dispatch monitor installation failed");
+        const auto isInput = [](NSEventType type) {
+            return type == NSEventTypeKeyDown || type == NSEventTypeKeyUp || type == NSEventTypeFlagsChanged ||
+                type == NSEventTypeLeftMouseDown || type == NSEventTypeLeftMouseUp ||
+                type == NSEventTypeRightMouseDown || type == NSEventTypeRightMouseUp ||
+                type == NSEventTypeOtherMouseDown || type == NSEventTypeOtherMouseUp;
+        };
+        NSInteger postedBatches = 0;
         auto post = [&](NSArray<NSEvent*>* events) {
-            // AppKit can queue its own tracking events (mouse entered/exited after key-window changes) ahead
-            // of the posted input, using up an events.count pump budget. A trailing sentinel shows when every
-            // posted event has been dispatched; the exact drain counts below stay unchanged.
+            // The pump must honour its exact budget: with the posted batch and its sentinel queued, one
+            // PumpMainThread(0ms, n) call dispatches exactly n events. AppKit may queue its own tracking events
+            // (mouse entered/exited after key-window changes) ahead of the posted input inside that budget, so
+            // pumping then continues one event at a time until this batch's sentinel is dispatched. Up to the
+            // sentinel, the dispatched key/mouse input must be exactly the posted batch, in order: nothing lost,
+            // duplicated, reordered or foreign. The translated-event drains below are checked as before.
+            const NSInteger batch = ++postedBatches;
             NSEvent* sentinel = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint
-                modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0x41505335 data2:0];
+                modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0x41505335 data2:batch];
             [NSApp postEvent:sentinel atStart:YES];
             for (NSEvent* event in events.reverseObjectEnumerator) [NSApp postEvent:event atStart:YES];
+            dispatched->clear();
             host->PumpMainThread(0ms, events.count);
-            const auto pending = [] {
-                return [NSApp nextEventMatchingMask:NSEventMaskApplicationDefined untilDate:NSDate.distantPast
-                    inMode:NSDefaultRunLoopMode dequeue:NO] != nil;
+            Require(dispatched->size() == events.count, "Native host pump did not dispatch exactly its event budget");
+            const auto sentinelAt = [&] {
+                for (std::size_t index = 0; index < dispatched->size(); ++index) {
+                    const auto& value = (*dispatched)[index];
+                    if (value.type == NSEventTypeApplicationDefined && value.data1 == 0x41505335 && value.data2 == batch)
+                        return index;
+                }
+                return dispatched->size();
             };
             const auto end = std::chrono::steady_clock::now() + 2s;
-            while (pending() && std::chrono::steady_clock::now() < end) host->PumpMainThread(0ms, 1);
-            Require(!pending(), "Posted AppKit input was not dispatched before its deadline");
+            while (sentinelAt() == dispatched->size() && std::chrono::steady_clock::now() < end)
+                host->PumpMainThread(0ms, 1);
+            const auto sentinelIndex = sentinelAt();
+            Require(sentinelIndex < dispatched->size(), "Posted AppKit input was not dispatched before its deadline");
+            std::vector<Dispatched> input;
+            for (std::size_t index = 0; index < sentinelIndex; ++index)
+                if (isInput((*dispatched)[index].type)) input.push_back((*dispatched)[index]);
+            bool exact = input.size() == events.count;
+            for (std::size_t index = 0; exact && index < input.size(); ++index) {
+                const auto expected = record(events[index]);
+                exact = input[index].type == expected.type && input[index].window == expected.window &&
+                    input[index].code == expected.code && input[index].repeat == expected.repeat;
+            }
+            Require(exact, "AppKit dispatched posted input lost, duplicated, reordered or mixed with foreign input");
         };
         post(@[key(true), key(true, true), mouse(true), key(false)]);
         auto first = drain(3);

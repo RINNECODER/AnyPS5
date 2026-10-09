@@ -343,10 +343,12 @@ std::unique_ptr<NativeHostWindow> NativeHostWindow::CreateMainThread(const Windo
     if (configuration.contentWidth == 0 || configuration.contentHeight == 0 || configuration.title.empty())
         throw std::invalid_argument("Native host window requires a title and positive content extent");
     if (nativeWindowLive) throw std::logic_error("Only one native host window may be live");
+    const auto etiquette = CurrentWindowEtiquette();
+    // Taken before any window state exists, so a lock failure leaves nothing half-created.
+    if (etiquette == WindowEtiquette::UnobtrusiveFocus) AcquireMachineFocusLock();
     auto state = std::make_unique<Impl>();
     state->ownsWindowSlot = true;
     nativeWindowLive = true;
-    const auto etiquette = CurrentWindowEtiquette();
     [NSApplication sharedApplication];
     if (NSApp.activationPolicy == NSApplicationActivationPolicyProhibited)
         [NSApp setActivationPolicy:etiquette == WindowEtiquette::Default ? NSApplicationActivationPolicyRegular
@@ -387,7 +389,6 @@ std::unique_ptr<NativeHostWindow> NativeHostWindow::CreateMainThread(const Windo
         object:NSApp queue:nil usingBlock:^(NSNotification*) { capture(pointer, [](auto& value) { value.focus(value.window.keyWindow); }); }];
     [state->window makeFirstResponder:view];
     ParkUnobtrusively(state->window);
-    if (etiquette == WindowEtiquette::UnobtrusiveFocus) AcquireMachineFocusLock();
     [state->window makeKeyAndOrderFront:nil];
     if (etiquette != WindowEtiquette::Unobtrusive) [NSApp activateIgnoringOtherApps:YES];
     state->size();
