@@ -33,6 +33,8 @@ ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers&
         scratchDwords = agcShader.scratch_size_dw_per_thread;
         if (scratchDwords == 0) throw std::runtime_error("AGC graphics: COMPUTE_PGM_RSRC2.SCRATCH_EN with a zero scratch size");
     }
+    // Debug aid: APS5_LDS_SLACK=<dwords> grows every dispatch's LDS allocation by that much, to tell
+    // whether a program depends on addresses past its declared allocation.
     static const std::uint32_t ldsSlack = [] { const char* text = std::getenv("APS5_LDS_SLACK"); return text ? static_cast<std::uint32_t>(std::strtoul(text, nullptr, 0)) : 0u; }();
     return ShaderRecompiler::ShaderComputeStageInfo{
         {numThreadX, numThreadY, numThreadZ},
