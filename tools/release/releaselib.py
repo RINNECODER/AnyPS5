@@ -36,6 +36,10 @@ class ReleaseError(RuntimeError):
     pass
 
 
+class IncompleteFeed(ReleaseError):
+    """Exactly one of a feed's json/sig assets is published (an interrupted replacement)."""
+
+
 def require(condition, message):
     if not condition:
         raise ReleaseError(message)
@@ -277,20 +281,27 @@ def verified_release_record(github, release):
     return record
 
 
-def read_feed(github, product, channel, channels_release=None):
-    """The currently published feed, verified, or None if it was never published.
+def _published(github, product, channel):
+    """(feed, data, signature) as published, (None, None, None) if never published.
 
-    Raises when the published pair exists but does not verify.
+    Raises IncompleteFeed for a half-published pair and VerificationError for a pair that
+    does not verify; GitHub API failures propagate as plain ReleaseError.
     """
-    release = channels_release if channels_release is not None else github.release(CHANNELS_TAG)
+    release = github.release(CHANNELS_TAG)
     if release is None:
-        return None
+        return None, None, None
     name = "%s-%s.json" % (product, channel)
     data, signature = github.asset_bytes(release, name), github.asset_bytes(release, name + ".sig")
     if data is None and signature is None:
-        return None
-    require(data is not None and signature is not None, "published %s is missing its data or signature" % name)
-    return verify.verify_feed_bytes(name, data, signature)
+        return None, None, None
+    if data is None or signature is None:
+        raise IncompleteFeed("published %s is missing its data or signature" % name)
+    return verify.verify_feed_bytes(name, data, signature), data, signature
+
+
+def read_feed(github, product, channel):
+    """The currently published feed, verified, or None if it was never published."""
+    return _published(github, product, channel)[0]
 
 
 def _journal_path(signer, name):
@@ -324,12 +335,14 @@ class _FeedLock:
 
     def __init__(self, directory):
         self.directory = Path(directory)
-        self.key = str(self.directory.resolve()) if self.directory.exists() else str(self.directory)
 
     def __enter__(self):
         import fcntl
+        import threading
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.key = str(self.directory.resolve())
+        # Reentrant only within one thread; another thread opens its own descriptor and
+        # blocks on flock like another process would.
+        self.key = (str(self.directory.resolve()), threading.get_ident())
         depth = _LOCK_DEPTH.get(self.key)
         if depth:
             _LOCK_DEPTH[self.key] = (depth[0] + 1, depth[1])
@@ -361,16 +374,19 @@ def current_feed(github, signer, product, channel):
     with _FeedLock(signer.state_dir):
         journal = read_journal(signer, product, channel)
         try:
-            published = read_feed(github, product, channel)
-        except (verify.VerificationError, ReleaseError):
+            published, published_data, published_signature = _published(github, product, channel)
+        except (verify.VerificationError, IncompleteFeed):
+            # Only a damaged public pair is repaired from the journal; API errors propagate.
             if journal is None:
                 raise
             published = None
+        if published is not None and (journal is None or published["sequence"] >= journal[0]["sequence"]):
+            if not github.dry_run and (journal is None or published["sequence"] > journal[0]["sequence"]):
+                write_journal(signer, name, published_data, published_signature)  # adopt the newer watermark
+            return published
         if journal is None:
-            return published
+            return None
         feed, data, signature = journal
-        if published is not None and published["sequence"] >= feed["sequence"]:
-            return published
         if not github.dry_run:
             github.ensure_channels_release()
             with tempfile.TemporaryDirectory(prefix="anyps5-feed-repair-") as scratch:

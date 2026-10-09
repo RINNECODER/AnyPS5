@@ -229,6 +229,21 @@ class SequenceTests(SigningFixture):
         self.assertEqual(feed["sequence"], 3)
         self.assertEqual(releaselib.read_feed(github, "engine", "alpha"), feed)
 
+    def test_api_failure_never_triggers_a_repair_upload(self):
+        github = FakeGitHub()
+        for version in ("2026.10.09.1", "2026.10.09.2"):
+            releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record(version), self.work, NOW)
+        other_state = releaselib.Signer(self.key, expected_public_key=self.public, state_dir=self.work / "other")
+        releaselib.publish_feed(github, other_state, "engine", "alpha", self.record("2026.10.09.3"), self.work, NOW)
+        before = dict(github.assets[releaselib.CHANNELS_TAG])  # public 3, this journal still 2
+
+        def unavailable(release, name):
+            raise releaselib.ReleaseError("gh api failed: HTTP 503")
+        github.asset_bytes = unavailable
+        with self.assertRaisesRegex(releaselib.ReleaseError, "503"):
+            releaselib.current_feed(github, self.signer, "engine", "alpha")
+        self.assertEqual(github.assets[releaselib.CHANNELS_TAG], before)
+
     def test_replayed_old_public_feed_cannot_reset_the_sequence(self):
         github = FakeGitHub()
         releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.09.1"), self.work, NOW)
@@ -339,6 +354,21 @@ class PackageArchiveTests(unittest.TestCase):
             (Path(scratch) / "lib" / "a.dylib").write_bytes(b"\0/Users/someone/src/x.cpp\0")
             (Path(scratch) / "clean").write_bytes(b"/private/tmp/anyps5-release/x")
             self.assertEqual(build_package.privacy_scan(scratch, {b"/Users/someone"}), ["lib/a.dylib"])
+
+
+class BuildRetryTests(unittest.TestCase):
+    def test_only_the_relocated_focus_flake_is_retried(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            def receipt(name, stderr):
+                log = Path(scratch) / (name + ".stderr")
+                log.write_text(stderr)
+                ok = {"name": "build", "exit_code": 0, "expected_exit_code": 0}
+                return {"commands": [ok, {"name": name, "exit_code": 1, "expected_exit_code": 0,
+                                          "logs": {"stderr": {"path": str(log)}}}]}
+            self.assertTrue(build_package.focus_flake(receipt("relocation-8", "Actual native idle owner failed to pump AppKit")))
+            self.assertFalse(build_package.focus_flake(receipt("relocation-8", "FAIL wrong guest result")))
+            self.assertFalse(build_package.focus_flake(receipt("combined-native", "failed to pump AppKit")))
+            self.assertFalse(build_package.focus_flake(receipt("strict-fresh-accept", "failed to pump AppKit")))
 
 
 class SmokeStageTests(unittest.TestCase):

@@ -92,6 +92,21 @@ def accept(helper, package, manifest_sha256, cwd):
     return json.loads(result.stdout)
 
 
+FOCUS_FLAKE = ("failed to pump AppKit", "key-window restore did not complete")
+
+
+def focus_flake(receipt):
+    """True only for the documented AppKit focus flake in a relocated fixture run.
+
+    Any other failure (build, CTest, packaging, acceptance) is never retried.
+    """
+    failed = [item for item in receipt.get("commands", []) if item.get("exit_code") != item.get("expected_exit_code")]
+    if len(failed) != 1 or not failed[0]["name"].startswith("relocation-"):
+        return False
+    path = Path(failed[0]["logs"]["stderr"]["path"])
+    return path.is_file() and any(marker in path.read_text(errors="replace") for marker in FOCUS_FLAKE)
+
+
 def failed_log_tail(receipt, log, lines=40):
     """Show the failing command's last output before the work tree is removed (home path redacted)."""
     failed = [item for item in receipt.get("commands", []) if item.get("exit_code") != item.get("expected_exit_code")]
@@ -139,7 +154,7 @@ def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=
         if result.returncode == 0 and receipt.get("status") == "PASS":
             break
         failed_log_tail(receipt, log)
-        releaselib.require(attempt < attempts, "prepare_diagnostic_engine failed: " +
+        releaselib.require(attempt < attempts and focus_flake(receipt), "prepare_diagnostic_engine failed: " +
                            str(receipt.get("failure", "exit %d" % result.returncode)))
     package = Path(receipt["package"]["package"])
     manifest_sha256 = receipt["package"]["manifest_sha256"]
