@@ -253,6 +253,9 @@ if(BUILD_TESTING)
     target_link_libraries(anyps5_sce_system_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_system_imports COMMAND anyps5_sce_system_import_tests)
     set_tests_properties(anyps5_sce_system_imports PROPERTIES TIMEOUT 30)
+    add_test(NAME anyps5_cpu_cli_stop_signals COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/CliStopSignalTest.py" "$<TARGET_FILE:anyps5_cpu_run>")
+    set_tests_properties(anyps5_cpu_cli_stop_signals PROPERTIES TIMEOUT 90)
     set(platformGuest "${CMAKE_CURRENT_BINARY_DIR}/PlatformServiceGuest.prx")
     set(platformMain "${CMAKE_CURRENT_BINARY_DIR}/platform-service-main.elf")
     add_custom_command(OUTPUT "${platformGuest}" "${platformMain}"
