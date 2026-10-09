@@ -7,6 +7,7 @@
 #include "prx/libSceVideoOut/include/BufferMetadata.hpp"
 #include "prx/libSceVideoOut/include/VideoOutState.hpp"
 #include "prx/libSceVideoOut/include/NativeHostWindow.hpp"
+#include "prx/libSceVideoOut/include/UnobtrusiveWindows.hpp"
 #include "prx/libSceVideoOut/include/ControllerSource.hpp"
 #import <GameController/GameController.h>
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
@@ -531,8 +532,21 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
                 windowNumber:window.windowNumber context:nil eventNumber:1 clickCount:1 pressure:pressed ? 1 : 0];
         };
         auto post = [&](NSArray<NSEvent*>* events) {
+            // AppKit can queue its own tracking events (mouse entered/exited after key-window changes) ahead
+            // of the posted input, using up an events.count pump budget. A trailing sentinel shows when every
+            // posted event has been dispatched; the exact drain counts below stay unchanged.
+            NSEvent* sentinel = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint
+                modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0x41505335 data2:0];
+            [NSApp postEvent:sentinel atStart:YES];
             for (NSEvent* event in events.reverseObjectEnumerator) [NSApp postEvent:event atStart:YES];
             host->PumpMainThread(0ms, events.count);
+            const auto pending = [] {
+                return [NSApp nextEventMatchingMask:NSEventMaskApplicationDefined untilDate:NSDate.distantPast
+                    inMode:NSDefaultRunLoopMode dequeue:NO] != nil;
+            };
+            const auto end = std::chrono::steady_clock::now() + 2s;
+            while (pending() && std::chrono::steady_clock::now() < end) host->PumpMainThread(0ms, 1);
+            Require(!pending(), "Posted AppKit input was not dispatched before its deadline");
         };
         post(@[key(true), key(true, true), mouse(true), key(false)]);
         auto first = drain(3);
@@ -698,6 +712,7 @@ void Run(id<MTLDevice> device, id<MTLLibrary> library) {
     layer.frame = window.contentView.bounds;
     window.contentView.wantsLayer = YES;
     window.contentView.layer = layer;
+    AnyPS5::Host::ParkUnobtrusively(window);
     [window orderFront:nil];
     [CATransaction flush];
     WindowContext context{layer};
@@ -788,6 +803,8 @@ int main(int argc, const char* argv[]) {
             auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]]] error:&error];
             Require(library != nil, error.localizedDescription.UTF8String ?: "Utility library load failed");
             setenv("APS5_SYNC_FLIP", "1", 1);
+            // The native host replay asserts real AppKit activation, key-window and focus transitions.
+            AnyPS5::Host::RequireRealFocusForThisProcess();
             Run(device, library);
             return 0;
         } catch (const std::exception& error) {

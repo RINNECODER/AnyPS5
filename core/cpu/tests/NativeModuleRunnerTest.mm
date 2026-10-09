@@ -6,6 +6,7 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceTls.hpp>
 #include "prx/libSceVideoOut/include/NativeMetalSession.hpp"
+#include "prx/libSceVideoOut/include/UnobtrusiveWindows.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include <algorithm>
 #include <array>
@@ -387,6 +388,8 @@ void run(const char* mainPath,const char* dependencyPath,const char* utility,con
 int main(int argc,char** argv) {
     @autoreleasepool {try {
         require(argc==5,"Usage: NativeModuleRunnerTest main.elf dependency.prx utility.metallib lifecycle|close|initializer-failure");
+        // Guest phases assert posted AppKit key input, which a host window only accepts while focused.
+        AnyPS5::Host::RequireRealFocusForThisProcess();
         if(std::string(argv[4])=="qualified-rejection") qualifiedRejections(argv[3]);
         else run(argv[1],argv[2],argv[3],argv[4]);
         std::cout<<"Actual native runner public assembly "<<argv[4]<<" PASS; synthetic public VideoOut route is not target admission/gameplay evidence\n";

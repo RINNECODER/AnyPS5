@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
+#include "prx/libSceVideoOut/include/UnobtrusiveWindows.hpp"
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -131,6 +132,7 @@ void Run(const char* fixture, id<MTLDevice> device, id<MTLLibrary> library) {
     layer.device = device; layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     layer.frame = window.contentView.bounds;
     window.contentView.wantsLayer = YES; window.contentView.layer = layer;
+    AnyPS5::Host::ParkUnobtrusively(window);
     [window orderFront:nil]; [CATransaction flush];
     WindowContext context{layer};
     AgcDriver::PresentationWindow presentation{&context, {}, nullptr, Size, Width, Height, {}, Layer};
