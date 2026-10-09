@@ -392,7 +392,7 @@ void nativeMutation(const char* utilityLibrary) {
     const auto outputAddress = Alias + ComputeOffset;
     const std::array<std::uint32_t,8> users{0,0,0,0,static_cast<std::uint32_t>(outputAddress),
         static_cast<std::uint32_t>((outputAddress >> 32) & 0xffffu) | (4u << 16),
-        ComputeThreads * ComputeResults,0x01016fac};
+        ComputeThreads * ComputeResults,0x11016fac};
     registers(0x207,threads); registers(0x20c,program); registers(0x213,resources); registers(0x240,users);
     const std::array<std::uint32_t,5> direct{0xc0031500,1,1,1,0x8041};
     dispatch.insert(dispatch.end(),direct.begin(),direct.end());

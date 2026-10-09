@@ -182,7 +182,7 @@ void compute(Cpu::Machine& machine,Cpu::NativeModuleRunner& runner) {
     registers(0x213,std::array<std::uint32_t,1>{16});
     const auto output=RuntimeData+4096;
     registers(0x240,std::array<std::uint32_t,8>{0,0,0,0,static_cast<std::uint32_t>(output),
-        static_cast<std::uint32_t>((output>>32)&0xffff)|(4u<<16),256,0x01016fac});
+        static_cast<std::uint32_t>((output>>32)&0xffff)|(4u<<16),256,0x11016fac});
     const std::array<std::uint32_t,5> dispatch{0xc0031500,1,1,1,0x8041};
     packets.insert(packets.end(),dispatch.begin(),dispatch.end());
     machine.Write(Data+4096,std::as_bytes(std::span(packets)));
