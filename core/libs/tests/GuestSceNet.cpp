@@ -379,6 +379,11 @@ int main() {
     CheckUnspecifiedIpv6();
     if (!ipv6Unavailable) CheckIpv6SocketsAreIpv6Only();
 
+    const int closed = sceNetSocket("closed-by-kernel", 2, 2, 17);
+    Require(closed >= 0);
+    Require(close_nid_postfix(closed) == 0);
+    Require(Failed(sceNetSocketClose(closed), 9));
+
     const int listener = sceNetSocket(nullptr, 2, 1, 6);
     Require(listener >= 0);
     std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};

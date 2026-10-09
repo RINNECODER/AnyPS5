@@ -459,6 +459,19 @@ int PollSockets(KernelSocketPoll::Entry* entries, int count, int timeoutMillisec
 
 const bool g_socketPollerRegistered = (KernelSetSocketPoller_nid_no_patch(&PollSockets), true);
 
+extern "C" int APS5_VABI sceNetSocketClose(int s);
+
+bool CloseSocketForKernel(int descriptor, int* error) {
+    {
+        std::lock_guard lk(g_mutex);
+        if (g_socks.count(descriptor) == 0) return false;
+    }
+    *error = sceNetSocketClose(descriptor) == 0 ? 0 : *errno_slot();
+    return true;
+}
+
+const bool g_socketCloserRegistered = (KernelSetSocketCloser_nid_no_patch(&CloseSocketForKernel), true);
+
 int APS5_VABI sceNetInit_nid_postfix(void) {
     std::lock_guard lk(g_mutex);
     g_net_inited = true;
