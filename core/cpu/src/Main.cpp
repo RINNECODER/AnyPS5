@@ -18,6 +18,7 @@
 #include <cpu/SceThreadImports.hpp>
 #include <cpu/SceAudioOut2Imports.hpp>
 #include <cpu/Self.hpp>
+#include "StopSignals.hpp"
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
 #include <cpu/NativeModuleRunner.hpp>
 #include <mach-o/dyld.h>
@@ -72,7 +73,7 @@ constexpr int LaunchFailure = 126;
 enum class ErrorCode {
     InvalidArguments, InputUnavailable, UnsupportedExecutable, LoaderFailure,
     UnsupportedInstruction, UnsupportedService, GuestMemoryFault,
-    ExecutionLimit, ExecutionFailure, HostFailure
+    ExecutionLimit, ExecutionFailure, HostFailure, Interrupted
 };
 
 const char* Code(ErrorCode code) {
@@ -87,6 +88,7 @@ const char* Code(ErrorCode code) {
     case ErrorCode::ExecutionLimit: return "execution_limit";
     case ErrorCode::ExecutionFailure: return "execution_failure";
     case ErrorCode::HostFailure: return "host_failure";
+    case ErrorCode::Interrupted: return "interrupted";
     }
     return "host_failure";
 }
@@ -359,6 +361,25 @@ ErrorCode ExecutionCode(std::string_view message) {
         return ErrorCode::GuestMemoryFault;
     return ErrorCode::ExecutionFailure;
 }
+
+int Failure(bool diagnostics, ErrorCode code, std::string_view message, std::string_view executable,
+            int exitCode = LaunchFailure) {
+    try {
+        if (diagnostics) {
+            std::cerr << "{\"schema_version\":1,\"event\":\"error\",\"code\":" << Json(Code(code))
+                << ",\"message\":" << Json(message) << ",\"executable\":" << Json(executable)
+                << ",\"process_exit\":" << exitCode << "}\n";
+        } else std::cerr << "anyps5_cpu_run: " << message << '\n';
+    } catch (...) {}
+    return exitCode;
+}
+
+// Shell convention for a stop requested by a signal: 128 + signal number.
+int Interrupted(bool diagnostics, std::string_view executable) {
+    const int signal = StopSignal::received.load();
+    return Failure(diagnostics, ErrorCode::Interrupted, std::string("Stopped by ") + StopSignal::Name(signal),
+        executable, 128 + signal);
+}
 }
 
 int main(int argc, char** argv) {
@@ -434,6 +455,8 @@ int main(int argc, char** argv) {
         if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR)
             throw std::runtime_error("Cannot configure standalone CLI SIGPIPE handling");
         Cpu::Machine machine;
+        // Destroyed before the machine and after every runtime owner below.
+        StopSignal::Guard stopSignals(machine);
         std::shared_ptr<Cpu::GuestThreads> threadRuntime;
         std::unique_ptr<Cpu::SceThreadImports> threadImports;
         std::shared_ptr<Cpu::GuestMemoryRuntime> memoryRuntime;
@@ -626,6 +649,7 @@ int main(int argc, char** argv) {
             code = ExecutionCode(error.what());
             throw;
         }
+        if (reason != Cpu::StopReason::Exit && StopSignal::received.load()) return Interrupted(diagnostics, executable);
         if (reason != Cpu::StopReason::Exit) {
             code = reason == Cpu::StopReason::InstructionLimit ? ErrorCode::ExecutionLimit : ErrorCode::ExecutionFailure;
             throw std::runtime_error("Guest did not exit: CPU execution budget or stop reached");
@@ -636,11 +660,14 @@ int main(int argc, char** argv) {
         else std::cerr << "guest_exit=" << exitCode << '\n';
         return exitCode;
     } catch (const std::exception& error) {
-        if (diagnostics) {
-            std::cerr << "{\"schema_version\":1,\"event\":\"error\",\"code\":" << Json(Code(code))
-                << ",\"message\":" << Json(error.what()) << ",\"executable\":" << Json(executable)
-                << ",\"process_exit\":" << LaunchFailure << "}\n";
-        } else std::cerr << "anyps5_cpu_run: " << error.what() << '\n';
-        return LaunchFailure;
+        // A signal-requested stop can surface as a stop-induced failure.
+        if (StopSignal::received.load()) return Interrupted(diagnostics, executable);
+        return Failure(diagnostics, code, error.what(), executable);
+    } catch (...) {
+        // Never std::terminate: report non-std::exception escapes (for
+        // example ProcessShutdown) as a defined failure.
+        if (StopSignal::received.load()) return Interrupted(diagnostics, executable);
+        return Failure(diagnostics, ErrorCode::HostFailure,
+            "Non-standard exception escaped the runtime: " + StopSignal::CurrentExceptionType(), executable);
     }
 }
