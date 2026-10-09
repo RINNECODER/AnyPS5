@@ -141,6 +141,13 @@ int APS5_VABI sceHttpSetAuthEnabled(int id, int enable) {
     return 0;
 }
 
+int APS5_VABI sceHttpSetCookieEnabled(int id, int enable) {
+    (void)id;
+    if (static_cast<uint32_t>(enable) > 1) return ERROR_INVALID_VALUE;
+    if (enable != 0) NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI sceHttpSetAutoRedirect(int id, int enable) {
     (void)id;
     (void)enable;
@@ -169,6 +176,12 @@ int APS5_VABI sceHttpSetNonblock(int id, int enable) {
 int APS5_VABI sceHttpSetRecvTimeOut(int id, uint32_t usec) {
     (void)id;
     (void)usec;
+    return 0;
+}
+
+int APS5_VABI sceHttpSetResponseHeaderMaxSize(int id, uint64_t header_size) {
+    (void)id;
+    (void)header_size;
     return 0;
 }
 
@@ -240,6 +253,11 @@ int APS5_VABI sceHttpReadData(int request_id, void* data, size_t size) {
     (void)data;
     (void)size;
     return ERROR_NETWORK;
+}
+
+int APS5_VABI sceHttpRedirectCacheFlush(int http_ctx_id) {
+    (void)http_ctx_id;
+    return 0;
 }
 
 int APS5_VABI sceHttpSetChunkedTransferEnabled(int id, int enable) {
@@ -345,6 +363,11 @@ int APS5_VABI sceHttpsLoadCert(int http_ctx_id, int num, void* ca_list, void* ce
     return 0;
 }
 
+int APS5_VABI sceHttpsUnloadCert(int http_ctx_id) {
+    (void)http_ctx_id;
+    return 0;
+}
+
 int APS5_VABI sceHttpGetLastErrno(int request_id, int* errno_out) {
     (void)request_id;
     if (errno_out == nullptr) {
@@ -353,4 +376,35 @@ int APS5_VABI sceHttpGetLastErrno(int request_id, int* errno_out) {
     *errno_out = 0;
     return 0;
 }
+
+int APS5_VABI sceHttpsGetSslError(int id, int* err_num, uint32_t* detail) {
+    (void)id;
+    if (err_num == nullptr || detail == nullptr) {
+        return ERROR_INVALID_VALUE;
+    }
+    *err_num = 0;
+    *detail = 0;
+    return 0;
+}
+
+int APS5_VABI sceHttpSetCookieRecvCallback(int id, HttpCookieRecvCallback cbfunc, void* user_arg) {
+    (void)id;
+    (void)cbfunc;
+    (void)user_arg;
+    return 0;
+}
+
+int APS5_VABI sceHttpsSetSslVersion(int id, int ssl_version) {
+    (void)id;
+    (void)ssl_version;
+    return 0;
+}
+
+int APS5_VABI sceHttpSetRedirectCallback(int id, HttpRedirectCallback cbfunc, void* user_arg) {
+    (void)id;
+    (void)cbfunc;
+    (void)user_arg;
+    return 0;
+}
+
 }

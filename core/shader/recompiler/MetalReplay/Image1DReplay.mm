@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "RuntimeAbi.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -70,7 +71,7 @@ struct Replay {
         shader.type = 0;
         std::memcpy(header.data(), &shader, sizeof(shader));
         std::array<std::uint32_t, 16> users{
-            static_cast<std::uint32_t>(base + 0x20100), 0, wave * (Inputs + Results) * 4u, 0x01016fac,
+            static_cast<std::uint32_t>(base + 0x20100), 0, wave * (Inputs + Results) * 4u, 0x31016fac,
             static_cast<std::uint32_t>(TextureAddress >> 8u), (22u << 20u) | (3u << 30u) | (viewFloor << 8u), 1u << 31u,
             0xfacu | (2u << 16u) | (8u << 28u), 0, 2u << 4u, 0, 0,
             0x92u | (aniso ? 4u << 9u : 0u), (4u * 256u) << 12u,
@@ -161,7 +162,7 @@ struct MinimumLodFamilies {
         shader.type = 0;
         std::memcpy(header.data(), &shader, sizeof(shader));
         const std::array<std::uint32_t, 16> users{
-            static_cast<std::uint32_t>(base + 0x20100), 0, Threads * Words * 4, 0x01016fac,
+            static_cast<std::uint32_t>(base + 0x20100), 0, Threads * Words * 4, 0x31016fac,
             static_cast<std::uint32_t>((base + 0x100) >> 8), (22u << 20) | (3u << 30) | (floor << 8), 3u | (15u << 14),
             0xfacu | (4u << 16) | (9u << 28), 0, 4u << 4, 0, 0,
             0x92, (4u * 256u) << 12, (1u << 22) | (2u << 26), 0};
@@ -544,7 +545,7 @@ struct DynamicImageReplay {
             static_cast<std::uint32_t>(Base + 0x20100u), 32u << 16u, 2, 0xfac,
             0x92, (4u * 256u) << 12u, (1u << 22u) | (2u << 26u), 0,
             static_cast<std::uint32_t>(Base + 0x21100u), 16u << 16u, MaterialRecords, 0xfac,
-            static_cast<std::uint32_t>(Base + 0x30100u), 0, Threads * 4u, 0xfac};
+            static_cast<std::uint32_t>(Base + 0x30100u), 0, Threads * 4u, 0x31016fac};
         std::copy(table.begin(), table.end(), srt.begin() + GuardWords);
         Shader shader{};
         shader.file_header = 0x34333231;
@@ -647,9 +648,12 @@ struct DynamicImageReplay {
 };
 
 struct SamplerBankReplay {
-    static constexpr std::uint32_t Threads = 32, Samplers = 32;
+    // As many distinct samplers as one shader may bind: the runtime ABI's sampler heap holds a pair
+    // of native samplers for each guest sampler.
+    static constexpr std::uint32_t Threads = 32, Samplers = ShaderRecompiler::RuntimeAbi::SamplerHeapCapacity / 2u;
     static constexpr std::uint64_t Base = 0x400000;
-    std::vector<std::uint32_t> code{0x34020087, 0x7e0402ff, 0x3f000000, 0x7e060280};
+    // v1 = lane * Samplers * 4 bytes: each lane owns one result word per sampler.
+    std::vector<std::uint32_t> code{0x34020080u | static_cast<std::uint32_t>(std::countr_zero(Samplers * 4u)), 0x7e0402ff, 0x3f000000, 0x7e060280};
     std::array<std::uint32_t, GuardWords + Samplers * 4 + GuardWords> table;
     std::array<std::uint32_t, GuardWords + 832 + GuardWords> texture;
     std::array<std::uint32_t, GuardWords + Threads * Samplers + GuardWords> output;
@@ -685,7 +689,7 @@ struct SamplerBankReplay {
         shader.type = 0;
         std::memcpy(header.data(), &shader, sizeof(shader));
         const std::array<std::uint32_t, 14> users{
-            static_cast<std::uint32_t>(Base + 0x20100), 0, Threads * Samplers * 4, 0x01016fac,
+            static_cast<std::uint32_t>(Base + 0x20100), 0, Threads * Samplers * 4, 0x31016fac,
             static_cast<std::uint32_t>((Base + 0x100) >> 8u), (22u << 20u) | (3u << 30u), 63u | (1u << 31u),
             0xfacu | (8u << 16u) | (8u << 28u), 0, 8u << 4u, 0, 0,
             static_cast<std::uint32_t>(Base + 0x10100), 0};
@@ -721,15 +725,15 @@ struct SamplerBankReplay {
         for (std::size_t word = 0; word < output.size(); ++word) {
             const auto wanted = word >= GuardWords && word < GuardWords + Threads * Samplers ?
                 std::bit_cast<std::uint32_t>(float(((word - GuardWords) % Samplers) * 4u)) : Sentinel;
-            Require(output[word] == wanted, "Public original RDNA 32 sampler identities word=" + std::to_string(word) +
+            Require(output[word] == wanted, "Public original RDNA " + std::to_string(Samplers) + " sampler identities word=" + std::to_string(word) +
                 " actual=" + std::to_string(output[word]) + " expected=" + std::to_string(wanted));
         }
         Require(table == originalTable && texture == originalTexture,
-            "Public 32 sampler identities changed read-only descriptors, texels or padding");
+            "Public sampler bank identities changed read-only descriptors, texels or padding");
         Require(code == originalCode && commands == originalCommands && header == originalHeader &&
             std::memcmp(&packet, &originalPacket, sizeof(packet)) == 0,
-            "Public 32 sampler identities changed read-only shader or PM4 submission memory");
-        std::cout << "Public original RDNA 32 sampler identities: 1024 quarter-LOD results, source padding and guards passed\n";
+            "Public sampler bank identities changed read-only shader or PM4 submission memory");
+        std::cout << "Public original RDNA " << Samplers << " sampler identities: " << Threads * Samplers << " quarter-LOD results, source padding and guards passed\n";
     }
 };
 }

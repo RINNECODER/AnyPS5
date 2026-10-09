@@ -284,7 +284,7 @@ void Fill(std::uint32_t tid, std::uint32_t* words) {
 
 std::array<std::uint32_t, 4> BufferDescriptor(const void* data, std::uint32_t bytes) {
     const auto address = reinterpret_cast<std::uintptr_t>(data);
-    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), bytes, 0x01016facu};
+    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), bytes, 0x31016facu};
 }
 
 std::string Hex(std::uint64_t value) {
@@ -443,7 +443,7 @@ void Replay(id<MTLDevice> device, id<MTLCommandQueue> queue) {
 
 void RejectSubgroupMismatch(id<MTLDevice> device) {
     const std::array<std::uint32_t, 8> userData{
-        0x100000, 0, 16, 0x01016fac, 0x200000, 0, 256, 0x01016fac};
+        0x100000, 0, 16, 0x31016fac, 0x200000, 0, 256, 0x31016fac};
     const auto shader = Compile(device, WaveUniformCode, userData, 0, 64, 64);
     Require(shader.requiresSimdGroups && shader.guest.hostSubgroupSize == 64,
             "Genuine SIMD fixture did not retain its host subgroup compilation contract");

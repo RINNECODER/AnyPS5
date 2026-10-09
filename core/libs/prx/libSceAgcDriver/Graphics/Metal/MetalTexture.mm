@@ -96,6 +96,7 @@ MTLTextureType textureType(Graphics::TextureDimension dimension) {
         case Graphics::TextureDimension::k1D: return MTLTextureType2D;
         case Graphics::TextureDimension::k2D: return MTLTextureType2D;
         case Graphics::TextureDimension::k2DArray:
+        case Graphics::TextureDimension::k1DArray:
         case Graphics::TextureDimension::kCube: return MTLTextureType2DArray;
         case Graphics::TextureDimension::k3D: return MTLTextureType3D;
     }
@@ -185,8 +186,10 @@ void validateDescriptor(const Graphics::GuestTextureResource& descriptor, bool c
     require(Graphics::EffectiveMinLod(descriptor) == 0 || minimumLodLowered, "Metal texture minimum LOD view clamp is not supported");
     require(descriptor.width != 0 && descriptor.height != 0 && descriptor.mipCount != 0 && descriptor.mipCount <= 16, "Metal texture has invalid dimensions or mip count");
     require(descriptor.baseLevel <= descriptor.lastLevel && descriptor.lastLevel < descriptor.mipCount, "Metal texture view mip range lies outside the surface");
-    require(descriptor.dimension != Graphics::TextureDimension::k1D || descriptor.height == 1, "Metal 1D texture has a non-unit height");
-    require(Graphics::XorSwizzleMode(descriptor.tileMode) == 0 || (descriptor.baseAddress & 0xffffu) == 0,
+    require((descriptor.dimension != Graphics::TextureDimension::k1D && descriptor.dimension != Graphics::TextureDimension::k1DArray) ||
+        descriptor.height == 1, "Metal 1D texture has a non-unit height");
+    const bool xor4KB = descriptor.tileMode == Graphics::TextureTileMode::kS4KBX || descriptor.tileMode == Graphics::TextureTileMode::kD4KBX;
+    require(Graphics::XorSwizzleMode(descriptor.tileMode) == 0 || (descriptor.baseAddress & (xor4KB ? 0xfffu : 0xffffu)) == 0,
         "Metal texture XOR base contains an unsupported pipe or bank XOR");
     const auto format = Graphics::ResolveTextureFormat(descriptor.format);
     require(!compare || format == VK_FORMAT_R16_UNORM || format == VK_FORMAT_R32_SFLOAT,
@@ -310,8 +313,8 @@ void MetalTexture::createViews(bool compare) {
 
 bool MetalTexture::CanShareBacking(const Graphics::GuestTextureResource& resource) const {
     const auto& original = backing->descriptor;
-    if (std::tie(original.baseAddress, original.width, original.height, original.depthOrLastArray, original.mipCount, original.tileMode, original.dimension, original.dccAddress, original.dccAlphaOnMsb) !=
-        std::tie(resource.baseAddress, resource.width, resource.height, resource.depthOrLastArray, resource.mipCount, resource.tileMode, resource.dimension, resource.dccAddress, resource.dccAlphaOnMsb)) return false;
+    if (std::tie(original.baseAddress, original.width, original.height, original.depthOrLastArray, original.mipCount, original.tileMode, original.dimension, original.dccAddress, original.dccAlphaOnMsb, original.dccPipeAligned) !=
+        std::tie(resource.baseAddress, resource.width, resource.height, resource.depthOrLastArray, resource.mipCount, resource.tileMode, resource.dimension, resource.dccAddress, resource.dccAlphaOnMsb, resource.dccPipeAligned)) return false;
     const auto originalAllocation = original.allocatedMipCount == 0 ? original.mipCount : original.allocatedMipCount;
     const auto allocation = resource.allocatedMipCount == 0 ? resource.mipCount : resource.allocatedMipCount;
     return originalAllocation == allocation && formatFamily(original.format) == formatFamily(resource.format) &&
@@ -335,7 +338,11 @@ void MetalTexture::transfer(id<MTLBuffer> source, id<MTLBuffer> destination, boo
     std::array<std::uint32_t, 22> constants{elementBytes, 0, descriptor.tileMode == Graphics::TextureTileMode::kLinear ? 0u : 1u, retile ? 1u : 0u};
     if (constants[2] != 0) constants[1] = Graphics::ThinBlockLayout(descriptor.tileMode, elementBytes)[0];
     if (geometry.thick) {
-        const auto mode = descriptor.tileMode == Graphics::TextureTileMode::kStandard4KB ? 0x105u : 0x109u;
+        // Same thick equation choice as the Vulkan TextureDetiler: SW_4KB_S, SW_64KB_S or SW_64KB_S_X.
+        const auto mode = descriptor.tileMode == Graphics::TextureTileMode::kStandard4KB ? 0x105u :
+            descriptor.tileMode == Graphics::TextureTileMode::kStandard64KB ? 0x109u :
+            descriptor.tileMode == Graphics::TextureTileMode::kS64KBX ? 0x119u : 0u;
+        require(mode != 0, "Metal texture thick 3D layout requires SW_4KB_S, SW_64KB_S or SW_64KB_S_X");
         const auto* equation = Graphics::FindTextureSwizzleEquation(mode, elementBytes);
         require(equation != nullptr, "Metal texture has no thick swizzle equation");
         constants[2] = 2;
@@ -343,9 +350,11 @@ void MetalTexture::transfer(id<MTLBuffer> source, id<MTLBuffer> destination, boo
         const auto extent = Graphics::ThickBlockExtent(descriptor.tileMode, elementBytes);
         constants[20] = extent[0];
         constants[21] = extent[1];
-    } else if (Graphics::XorSwizzleMode(descriptor.tileMode) != 0) {
-        const auto* equation = Graphics::FindTextureSwizzleEquation(Graphics::XorSwizzleMode(descriptor.tileMode), elementBytes);
-        require(equation != nullptr, "Metal texture has no XOR swizzle equation");
+    } else if (const auto mode = Graphics::EquationSwizzleMode(descriptor.tileMode); mode != 0) {
+        // The display (D) modes have no XOR but still need their own equation; the S family's standard
+        // offset in TextureDetile.metal would scramble them.
+        const auto* equation = Graphics::FindTextureSwizzleEquation(mode, elementBytes);
+        require(equation != nullptr, "Metal texture has no swizzle equation for its tile mode");
         constants[2] = 2;
         std::copy(equation->bits.begin(), equation->bits.end(), constants.begin() + 4);
     }

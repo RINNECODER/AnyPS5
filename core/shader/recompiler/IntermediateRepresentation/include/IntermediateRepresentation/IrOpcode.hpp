@@ -262,6 +262,8 @@ enum class IrOpcode : std::uint16_t {
     FPSqrt64,
     FPTrigPreop64,
     FPDot2F32F16,
+    FPInterpolateF32,
+    FPInterpolateF16,
     ConvertF32F64,
     ConvertF64F32,
     ConvertF64S32,
@@ -444,8 +446,20 @@ enum class IrOpcode : std::uint16_t {
     ImageAtomicFCmpSwap32,
     ImageAtomicFMin32,
     ImageAtomicFMax32,
+    ImageAtomicSwap64,
+    ImageAtomicIAdd64,
+    ImageAtomicISub64,
+    ImageAtomicUMin64,
+    ImageAtomicUMax64,
+    ImageAtomicSMin64,
+    ImageAtomicSMax64,
+    ImageAtomicAnd64,
+    ImageAtomicOr64,
+    ImageAtomicXor64,
+    ImageAtomicCmpSwap64,
     GetAttribute,
     GetInterpolationParameter,
+    GetInterpolationParameterF16,
     SetAttribute,
     ControlNop,
     Waitcnt,
@@ -512,6 +526,7 @@ struct ExportFlags {
 [[nodiscard]] std::uint32_t SharedComponentCount(IrOpcode opcode);
 [[nodiscard]] AddressOpcodeInfo AddressOpcodeInfoOf(IrOpcode opcode);
 [[nodiscard]] ImageOpcodeInfo ImageOpcodeInfoOf(IrOpcode opcode);
+bool IsImageAtomic64Opcode(IrOpcode opcode);
 [[nodiscard]] std::string_view IrOpcodeName(IrOpcode opcode);
 
 }

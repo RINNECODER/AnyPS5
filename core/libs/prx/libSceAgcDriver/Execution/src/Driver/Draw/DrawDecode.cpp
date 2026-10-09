@@ -6,17 +6,23 @@
 
 namespace AgcDriver::DriverDetail {
 
-std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Submission& submission) {
-    auto decoded = DecodeDrawDispatch(queue, *submission.shaders, NullPixelProgramAddress());
-    auto product = std::make_shared<DrawDecode>();
-    product->state = std::move(decoded.state);
-    product->pixel = std::move(decoded.pixel);
-    product->roles = std::move(decoded.roles);
-    product->programs.reserve(decoded.programs.size());
-    for (auto& program : decoded.programs) {
-        product->programs.push_back({program.binary, program.userDataBase, program.firstUserSgpr,
+void DecodeGraphicsPrograms(DrawDecode& decoded, const QueueState& queue, const ShaderRegistry& registry, bool staticAbi, bool includeFragment) {
+    // The program walk lives in the backend-neutral DecodeDrawPrograms (DrawDispatch.cpp) so the Vulkan
+    // driver, registration-time preparation and the Metal backend decode draws identically.
+    std::vector<DrawDispatchProgram> programs;
+    DecodeDrawPrograms(decoded.state, queue, registry, NullPixelProgramAddress(), staticAbi, includeFragment, programs, decoded.roles);
+    decoded.programs.reserve(decoded.programs.size() + programs.size());
+    for (auto& program : programs) {
+        decoded.programs.push_back({program.binary, program.userDataBase, program.firstUserSgpr,
             std::move(program.userData), program.memory, std::move(program.snapshot), program.codeOffset});
     }
+}
+
+std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Submission& submission) {
+    auto product = std::make_shared<DrawDecode>();
+    product->state = Graphics::DecodeState(queue);
+    DecodeGraphicsPrograms(*product, queue, *submission.shaders, false, true);
+    product->pixel = Graphics::DecodePixelStageInfo(queue.context, Graphics::ExportMappings(product->state), Graphics::PixelProgramSkipped(queue));
     return product;
 }
 

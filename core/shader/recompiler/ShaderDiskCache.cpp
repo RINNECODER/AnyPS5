@@ -2,6 +2,7 @@
 #include "CacheKey.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include "ThreadOwned.hpp"
+#include "Optimization/ResourceMaterializer.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -63,24 +64,25 @@ std::filesystem::path ShaderCacheDirectory() {
 namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
-static_assert(sizeof(RecompileResult) == 176, "RecompileResult changed: update EncodeResult and DecodeResult");
-static_assert(sizeof(DescriptorBinding) == 456, "DescriptorBinding changed: update the binding encoder");
-static_assert(sizeof(VertexAttribute) == 28, "VertexAttribute changed: update the attribute encoder");
+static_assert(sizeof(CompiledShaderArtifact) == 184, "CompiledShaderArtifact changed: update the artifact encoder");
+static_assert(sizeof(ShaderInvocation) == 104, "ShaderInvocation changed: update the invocation encoder");
+static_assert(sizeof(RecompileResult) == 296, "RecompileResult changed: update EncodeResult and DecodeResult");
+static_assert(sizeof(DescriptorBinding) == 520, "DescriptorBinding changed: update the binding encoder");
+static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
+static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
 static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: update the parameter encoder");
-static_assert(sizeof(CompiledShaderInfo) == 304, "CompiledShaderInfo changed: update the info encoder");
-static_assert(sizeof(ShaderInfo) == 200, "ShaderInfo changed: update the info encoder");
-static_assert(sizeof(BufferResource) == 36, "BufferResource changed: update the info encoder");
-static_assert(sizeof(ImageResource) == 96, "ImageResource changed: update the info encoder");
-static_assert(sizeof(SamplerResource) == 20, "SamplerResource changed: update the info encoder");
+static_assert(sizeof(CompiledShaderInfo) == 336, "CompiledShaderInfo changed: update the info encoder");
+static_assert(sizeof(ShaderInfo) == 224, "ShaderInfo changed: update the info encoder");
+static_assert(sizeof(BufferResource) == 32, "BufferResource changed: update the info encoder");
+static_assert(sizeof(ImageResource) == 112, "ImageResource changed: update the info encoder");
+static_assert(sizeof(SamplerResource) == 24, "SamplerResource changed: update the info encoder");
 static_assert(sizeof(SampledResourcePair) == 20, "SampledResourcePair changed: update the info encoder");
 static_assert(sizeof(StageInput) == 56, "StageInput changed: update the info encoder");
 static_assert(sizeof(StageOutput) == 48, "StageOutput changed: update the info encoder");
-static_assert(sizeof(IrBindingLayout) == 64, "IrBindingLayout changed: update the layout encoder");
+static_assert(sizeof(IrBindingLayout) == 72, "IrBindingLayout changed: update the layout encoder");
 static_assert(sizeof(IrDescriptorBinding) == 32, "IrDescriptorBinding changed: update the layout encoder");
-static_assert(sizeof(BindingAllocationResult) == 120, "BindingAllocationResult changed: update the allocation encoder");
-static_assert(sizeof(ResourceSpecialization) == 72, "ResourceSpecialization changed: update BuildKey");
-static_assert(sizeof(ResourceSpecialization::Buffer) == 16, "ResourceSpecialization::Buffer changed: update BuildKey");
-static_assert(sizeof(ResourceSpecialization::Image) == 44, "ResourceSpecialization::Image changed: update BuildKey");
+static_assert(sizeof(BindingAllocationResult) == 152, "BindingAllocationResult changed: update the allocation encoder");
+static_assert(sizeof(CompiledBindingLayout) == 80, "CompiledBindingLayout changed: update the allocation encoder");
 static_assert(sizeof(BindingLayout) == 16, "BindingLayout changed: update BuildKey");
 #endif
 
@@ -273,8 +275,10 @@ bool validPixelBindings(const std::vector<DescriptorBinding>& bindings) {
                 (binding.guestDescriptor[element * 4u] & (1u << 15u)) != 0u;
             const bool enabled = element < flags.size() && flags[element];
             const bool nonempty = element < proofs.size() && !proofs[element].empty();
-            if (enabled != nonempty || (sampler && enabled != bit)) return false;
-            if (!enabled) continue;
+            // ProveUnnormalized flags every bound FORCE_UNNORMALIZED S#; only the native
+            // backend needs a certificate, so a flag without one is valid but never the reverse.
+            if ((nonempty && !enabled) || (sampler && enabled != bit)) return false;
+            if (!nonempty) continue;
             if (binding.resourceSources.size() != binding.count || binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * stride ||
                 binding.kind != (sampler ? DescriptorKind::Sampler : DescriptorKind::SampledImage) ||
                 (sampler && element < binding.samplerDepthCompare.size() && binding.samplerDepthCompare[element]) ||
@@ -330,10 +334,9 @@ bool validPixelBindings(const std::vector<DescriptorBinding>& bindings) {
 }
 
 bool validPixelInfo(const CompiledVariant& variant) {
-    if (!validPixelBindings(variant.result.bindings) || !validPixelBindings(variant.bindings.bindings)) return false;
+    // A cache entry stores no physical bindings: Populate rebinds and re-certifies each
+    // snapshot. Check the encoded live-use summaries the certificates are built from.
     const auto& info = variant.info.info;
-    // CompiledVariant normally stores no captured physical bindings: Populate rebinds
-    // each new snapshot. Check the independently encoded live-use summaries here too.
     std::vector<std::uint64_t> useCounts(info.samplers.size());
     std::vector<std::uint32_t> useMasks(info.samplers.size());
     for (const auto& pair : info.sampledPairs) {
@@ -346,24 +349,6 @@ bool validPixelInfo(const CompiledVariant& variant) {
     for (std::size_t sampler = 0; sampler < info.samplers.size(); ++sampler) {
         if (info.samplers[sampler].liveUseCount != useCounts[sampler] ||
             info.samplers[sampler].liveUseMask != useMasks[sampler]) return false;
-    }
-    for (const auto* physical : {&variant.result.bindings, &variant.bindings.bindings}) {
-        for (const auto& binding : *physical) {
-            if (binding.role != DescriptorRole::GuestSamplers) continue;
-            for (const auto& proofs : binding.samplerPixelProof) {
-                for (const auto& proof : proofs) {
-                    bool matched = false;
-                    for (const auto& pair : info.sampledPairs) {
-                        const auto& image = info.images[pair.image];
-                        const auto& sampler = info.samplers[pair.sampler];
-                        if (image.source == proof.imageSource && sampler.source == proof.samplerSource &&
-                            sampler.liveUseMask == PixelSamplerUse::Qualified && sampler.liveUseCount == proof.samplerLiveUseCount &&
-                            pair.liveUseMask == proof.liveUseMask && pair.liveUseCount == proof.liveUseCount) matched = true;
-                    }
-                    if (!matched) return false;
-                }
-            }
-        }
     }
     return true;
 }
@@ -379,16 +364,18 @@ void encodeBinding(Writer& writer, const DescriptorBinding& binding) {
     writer.Value(binding.imageShape.has_value());
     writer.Value(binding.imageShape.value_or(DescriptorImageShape::Image1D));
     writer.Flags(binding.samplerDepthCompare);
-    writer.Values(std::span<const std::uint32_t>(binding.resourceSources));
-    writer.Flags(binding.samplerUnnormalized);
-    writer.Flags(binding.imageUnnormalized);
-    encodePixelProofs(writer, binding.samplerPixelProof);
-    encodePixelProofs(writer, binding.imagePixelProof);
     writer.Flags(binding.imageWritten);
     writer.Flags(binding.imageDepthCompare);
     writer.Flags(binding.imageAtomic);
+    writer.Flags(binding.imageAtomic64);
     writer.Flags(binding.bufferAtomic);
     writer.Flags(binding.bufferWritten);
+    writer.Flags(binding.samplerUnnormalized);
+    writer.Flags(binding.imageUnnormalized);
+    writer.Values(std::span<const std::uint32_t>(binding.imageSamplers));
+    writer.Values(std::span<const std::uint32_t>(binding.resourceSources));
+    encodePixelProofs(writer, binding.samplerPixelProof);
+    encodePixelProofs(writer, binding.imagePixelProof);
 }
 
 void decodeBinding(Reader& reader, DescriptorBinding& binding) {
@@ -403,30 +390,39 @@ void decodeBinding(Reader& reader, DescriptorBinding& binding) {
     const auto shape = reader.Get<DescriptorImageShape>();
     binding.imageShape = hasShape ? std::optional(shape) : std::nullopt;
     reader.Flags(binding.samplerDepthCompare);
-    reader.Values(binding.resourceSources);
-    reader.Flags(binding.samplerUnnormalized);
-    reader.Flags(binding.imageUnnormalized);
-    decodePixelProofs(reader, binding.samplerPixelProof);
-    decodePixelProofs(reader, binding.imagePixelProof);
     reader.Flags(binding.imageWritten);
     reader.Flags(binding.imageDepthCompare);
     reader.Flags(binding.imageAtomic);
+    reader.Flags(binding.imageAtomic64);
     reader.Flags(binding.bufferAtomic);
     reader.Flags(binding.bufferWritten);
+    reader.Flags(binding.samplerUnnormalized);
+    reader.Flags(binding.imageUnnormalized);
+    reader.Values(binding.imageSamplers);
+    reader.Values(binding.resourceSources);
+    decodePixelProofs(reader, binding.samplerPixelProof);
+    decodePixelProofs(reader, binding.imagePixelProof);
 }
 
-void encodeResult(Writer& writer, const RecompileResult& result) {
+void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
+    writer.Value(result.runtimeAbiVersion);
     writer.Values(std::span<const std::uint32_t>(result.spirv.Words()));
-    writer.List(result.bindings, encodeBinding);
-    writer.Value<std::uint64_t>(result.pushConstants.size());
-    for (const auto byte : result.pushConstants) writer.Value(static_cast<std::uint8_t>(byte));
     writer.Value(result.bdaAbiVersion);
     writer.Value(result.memoryOffsetDword);
-    writer.List(result.vertexAttributes, [](Writer& out, const VertexAttribute& attribute) {
+    writer.Value(result.shaderDataDwords);
+    writer.Value(result.imageMetadataDword);
+    writer.Value(result.runtimeImageCount);
+    writer.Values(std::span<const std::uint32_t>(result.runtimeImageResources));
+    writer.List(result.vertexInputPatches, [](Writer& out, const VertexInputPatch& patch) {
+        out.Value(patch.location);
+        out.Value(patch.word);
+        for (const auto value : patch.values) out.Value(value);
+    });
+    writer.List(result.vertexInputs, [](Writer& out, const VertexInput& attribute) {
         out.Value(attribute.location);
         out.Value(attribute.components);
-        for (const auto field : attribute.resource.fields) out.Value(field);
         out.Value(attribute.fetchIndex);
+        out.Value(attribute.outputMask);
     });
     writer.Value(result.vertexOffsetSgpr);
     writer.Value(result.instanceOffsetSgpr);
@@ -445,22 +441,27 @@ void encodeResult(Writer& writer, const RecompileResult& result) {
     });
 }
 
-void decodeResult(Reader& reader, RecompileResult& result) {
+void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
+    reader.Value(result.runtimeAbiVersion);
     std::vector<std::uint32_t> words;
     reader.Values(words);
     result.spirv = std::move(words);
-    reader.List(result.bindings, 8, decodeBinding);
-    std::vector<std::uint8_t> pushConstants;
-    reader.Values(pushConstants);
-    result.pushConstants.resize(pushConstants.size());
-    if (!pushConstants.empty()) std::memcpy(result.pushConstants.data(), pushConstants.data(), pushConstants.size());
     reader.Value(result.bdaAbiVersion);
     reader.Value(result.memoryOffsetDword);
-    reader.List(result.vertexAttributes, 28, [](Reader& in, VertexAttribute& attribute) {
+    reader.Value(result.shaderDataDwords);
+    reader.Value(result.imageMetadataDword);
+    reader.Value(result.runtimeImageCount);
+    reader.Values(result.runtimeImageResources);
+    reader.List(result.vertexInputPatches, 20, [](Reader& in, VertexInputPatch& patch) {
+        in.Value(patch.location);
+        in.Value(patch.word);
+        for (auto& value : patch.values) in.Value(value);
+    });
+    reader.List(result.vertexInputs, 16, [](Reader& in, VertexInput& attribute) {
         in.Value(attribute.location);
         in.Value(attribute.components);
-        for (auto& field : attribute.resource.fields) in.Value(field);
         in.Value(attribute.fetchIndex);
+        in.Value(attribute.outputMask);
     });
     reader.Value(result.vertexOffsetSgpr);
     reader.Value(result.instanceOffsetSgpr);
@@ -477,8 +478,44 @@ void decodeResult(Reader& reader, RecompileResult& result) {
         in.Value(parameter.perVertex);
         in.Value(parameter.custom);
     });
-    result.cacheHit = false;
     result.variantId = 0;
+}
+
+void encodeInvocation(Writer& writer, const ShaderInvocation& invocation) {
+    writer.List(invocation.specialization, [](Writer& out, const PipelineSpecializationConstant& constant) {
+        out.Value(constant.id);
+        out.Value(constant.value);
+    });
+    writer.List(invocation.bindings, encodeBinding);
+    writer.Value<std::uint64_t>(invocation.pushConstants.size());
+    for (const auto byte : invocation.pushConstants) writer.Value(static_cast<std::uint8_t>(byte));
+    writer.List(invocation.vertexAttributes, [](Writer& out, const VertexAttribute& attribute) {
+        out.Value(attribute.location);
+        out.Value(attribute.components);
+        for (const auto field : attribute.resource.fields) out.Value(field);
+        out.Value(attribute.fetchIndex);
+        out.Value(attribute.formatComponents);
+    });
+}
+
+void decodeInvocation(Reader& reader, ShaderInvocation& invocation) {
+    invocation.specializationId = 0;
+    reader.List(invocation.specialization, 8, [](Reader& in, PipelineSpecializationConstant& constant) {
+        in.Value(constant.id);
+        in.Value(constant.value);
+    });
+    reader.List(invocation.bindings, 8, decodeBinding);
+    std::vector<std::uint8_t> pushConstants;
+    reader.Values(pushConstants);
+    invocation.pushConstants.resize(pushConstants.size());
+    if (!pushConstants.empty()) std::memcpy(invocation.pushConstants.data(), pushConstants.data(), pushConstants.size());
+    reader.List(invocation.vertexAttributes, 32, [](Reader& in, VertexAttribute& attribute) {
+        in.Value(attribute.location);
+        in.Value(attribute.components);
+        for (auto& field : attribute.resource.fields) in.Value(field);
+        in.Value(attribute.fetchIndex);
+        in.Value(attribute.formatComponents);
+    });
 }
 
 void encodeLayout(Writer& writer, const IrBindingLayout& layout) {
@@ -486,6 +523,7 @@ void encodeLayout(Writer& writer, const IrBindingLayout& layout) {
     writer.Value(layout.memoryOffsetDword);
     writer.Value(layout.memoryOffsetCount);
     writer.Value(layout.dispatchThreadLimit);
+    writer.Value(layout.runtimeImageCount);
     writer.Values(std::span<const std::uint32_t>(layout.userDataRegisters));
     writer.List(layout.descriptors, [](Writer& out, const IrDescriptorBinding& descriptor) {
         out.Value(descriptor.kind);
@@ -498,6 +536,7 @@ void decodeLayout(Reader& reader, IrBindingLayout& layout) {
     reader.Value(layout.memoryOffsetDword);
     reader.Value(layout.memoryOffsetCount);
     reader.Value(layout.dispatchThreadLimit);
+    reader.Value(layout.runtimeImageCount);
     reader.Values(layout.userDataRegisters);
     reader.List(layout.descriptors, 12, [](Reader& in, IrDescriptorBinding& descriptor) {
         in.Value(descriptor.kind);
@@ -520,16 +559,15 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(buffer.source);
         out.Value(buffer.firstUsePc);
         out.Value(buffer.maxByteExtent);
-        out.Value(buffer.packedStride);
-        out.Value(buffer.descriptorFormat);
-        out.Value(buffer.descriptorSwizzle);
         out.Value(buffer.imageAlias);
         out.Value(buffer.read);
         out.Value(buffer.written);
         out.Value(buffer.atomic);
         out.Value(buffer.formatted);
+        out.Value(buffer.descriptorFormatted);
+        out.Value(buffer.formattedReadMask);
         out.Value(buffer.scalar);
-        out.Value(buffer.empty);
+        out.Value(buffer.typedAlignment);
     });
     writer.List(info.images, [](Writer& out, const ImageResource& image) {
         out.Value(image.source);
@@ -544,12 +582,20 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(image.read);
         out.Value(image.written);
         out.Value(image.atomic);
+        out.Value(image.atomic64);
         out.Value(image.depthCompare);
         out.Value(image.cube);
         out.Value(image.r128);
+        out.Value(image.srgbDecode);
+        out.Value(image.srgbDecodeCompatible);
+        out.Value(image.srgbDecodeFormats);
         out.Value(image.depthBits);
         out.Value(image.depthUnorm16);
         out.Value(image.packed);
+        out.Value(image.fmaskCompatible);
+        out.Value(image.depthBitsCompatible);
+        out.Value(image.byElements);
+        out.Value(image.byComponents);
         out.Value(image.packedFormat);
         out.Value(image.emulatedCompare);
         out.Value(image.indirectRoot);
@@ -557,13 +603,16 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(image.indirectSearchIterations);
         out.Values(std::span<const std::uint32_t>(image.indirectResources));
     });
+    writer.Value(!info.runtimeImageModes.empty());
     writer.List(info.samplers, [](Writer& out, const SamplerResource& sampler) {
         out.Value(sampler.source);
         out.Value(sampler.firstUsePc);
+        out.Value(sampler.copyOf);
         out.Value(sampler.liveUseMask);
         out.Value(sampler.liveUseCount);
         out.Value(sampler.forcePointFiltering);
         out.Value(sampler.depthCompare);
+        out.Value(sampler.uses);
     });
     writer.List(info.sampledPairs, [](Writer& out, const SampledResourcePair& pair) {
         out.Value(pair.image);
@@ -610,22 +659,21 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
     auto& info = compiled.info;
     reader.Value(info.scratchDwords);
     reader.Value(info.sharedMemoryBytes);
-    reader.List(info.buffers, 34, [](Reader& in, BufferResource& buffer) {
+    reader.List(info.buffers, 27, [](Reader& in, BufferResource& buffer) {
         in.Value(buffer.source);
         in.Value(buffer.firstUsePc);
         in.Value(buffer.maxByteExtent);
-        in.Value(buffer.packedStride);
-        in.Value(buffer.descriptorFormat);
-        in.Value(buffer.descriptorSwizzle);
         in.Value(buffer.imageAlias);
         in.Value(buffer.read);
         in.Value(buffer.written);
         in.Value(buffer.atomic);
         in.Value(buffer.formatted);
+        in.Value(buffer.descriptorFormatted);
+        in.Value(buffer.formattedReadMask);
         in.Value(buffer.scalar);
-        in.Value(buffer.empty);
+        in.Value(buffer.typedAlignment);
     });
-    reader.List(info.images, 63, [](Reader& in, ImageResource& image) {
+    reader.List(info.images, 72, [](Reader& in, ImageResource& image) {
         in.Value(image.source);
         in.Value(image.firstUsePc);
         in.Value(image.resourceClass);
@@ -638,12 +686,20 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(image.read);
         in.Value(image.written);
         in.Value(image.atomic);
+        in.Value(image.atomic64);
         in.Value(image.depthCompare);
         in.Value(image.cube);
         in.Value(image.r128);
+        in.Value(image.srgbDecode);
+        in.Value(image.srgbDecodeCompatible);
+        in.Value(image.srgbDecodeFormats);
         in.Value(image.depthBits);
         in.Value(image.depthUnorm16);
         in.Value(image.packed);
+        in.Value(image.fmaskCompatible);
+        in.Value(image.depthBitsCompatible);
+        in.Value(image.byElements);
+        in.Value(image.byComponents);
         in.Value(image.packedFormat);
         in.Value(image.emulatedCompare);
         in.Value(image.indirectRoot);
@@ -651,13 +707,18 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(image.indirectSearchIterations);
         in.Values(image.indirectResources);
     });
-    reader.List(info.samplers, 18, [](Reader& in, SamplerResource& sampler) {
+    bool preparedImageModes = false;
+    reader.Value(preparedImageModes);
+    if (preparedImageModes) ResourceMaterializer::PrepareImageModes(info);
+    reader.List(info.samplers, 23, [](Reader& in, SamplerResource& sampler) {
         in.Value(sampler.source);
         in.Value(sampler.firstUsePc);
+        in.Value(sampler.copyOf);
         in.Value(sampler.liveUseMask);
         in.Value(sampler.liveUseCount);
         in.Value(sampler.forcePointFiltering);
         in.Value(sampler.depthCompare);
+        in.Value(sampler.uses);
     });
     reader.List(info.sampledPairs, 20, [](Reader& in, SampledResourcePair& pair) {
         in.Value(pair.image);
@@ -693,24 +754,16 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
     decodeLayout(reader, compiled.bindings);
 }
 
-void encodeAllocation(Writer& writer, const BindingAllocationResult& allocation) {
-    writer.List(allocation.bindings, encodeBinding);
+void encodeAllocation(Writer& writer, const CompiledBindingLayout& allocation) {
     encodeLayout(writer, allocation.layout);
     writer.Value(allocation.pushConstantOffsetBytes);
     writer.Value(allocation.pushConstantSizeBytes);
-    writer.Value<std::uint64_t>(allocation.pushConstants.size());
-    for (const auto byte : allocation.pushConstants) writer.Value(static_cast<std::uint8_t>(byte));
 }
 
-void decodeAllocation(Reader& reader, BindingAllocationResult& allocation) {
-    reader.List(allocation.bindings, 8, decodeBinding);
+void decodeAllocation(Reader& reader, CompiledBindingLayout& allocation) {
     decodeLayout(reader, allocation.layout);
     reader.Value(allocation.pushConstantOffsetBytes);
     reader.Value(allocation.pushConstantSizeBytes);
-    std::vector<std::uint8_t> pushConstants;
-    reader.Values(pushConstants);
-    allocation.pushConstants.resize(pushConstants.size());
-    if (!pushConstants.empty()) std::memcpy(allocation.pushConstants.data(), pushConstants.data(), pushConstants.size());
 }
 
 constexpr std::string_view NeutralSwitches[] = {
@@ -929,7 +982,7 @@ std::uint64_t SourceVersion() {
     return Generated::SourceVersion;
 }
 
-void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, const ResourceSpecialization& specialization, std::vector<std::byte>& key) {
+void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, std::vector<std::byte>& key) {
     key.clear();
     Writer writer(key);
     writer.Value(FileMagic);
@@ -945,29 +998,6 @@ void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, c
     writer.Value(request.layout.firstBinding);
     writer.Value(request.layout.pushConstantOffsetBytes);
     writer.Value(request.layout.pushConstantSizeBytes);
-    writer.List(specialization.buffers, [](Writer& out, const ResourceSpecialization::Buffer& buffer) {
-        out.Value(buffer.packedStride);
-        out.Value(buffer.descriptorFormat);
-        out.Value(buffer.descriptorSwizzle);
-        out.Value(buffer.empty);
-    });
-    writer.List(specialization.images, [](Writer& out, const ResourceSpecialization::Image& image) {
-        out.Value(image.numericClass);
-        out.Value(image.dimension);
-        out.Value(image.mipCount);
-        out.Value(image.conversionFormat);
-        out.Value(image.shaderSwizzle);
-        out.Value(image.indirectRoot);
-        out.Value(image.indirectMappingOffset);
-        out.Value(image.indirectSearchIterations);
-        out.Value(image.cube);
-        out.Value(image.fmask);
-        out.Value(image.depthBits);
-        out.Value(image.depthUnorm16);
-        out.Value(image.packedFormat);
-        out.Value(image.emulatedCompare);
-    });
-    writer.Values(std::span<const std::uint32_t>(specialization.boundDescriptors));
     const auto& switches = switchKey();
     key.insert(key.end(), switches.begin(), switches.end());
 }
@@ -978,20 +1008,23 @@ std::string EntryName(std::span<const std::byte> key) {
 
 void EncodeResult(const RecompileResult& result, std::vector<std::byte>& out) {
     Writer writer(out);
-    encodeResult(writer, result);
+    encodeArtifact(writer, result);
+    encodeInvocation(writer, result);
 }
 
 bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result) {
     Reader reader(bytes);
-    decodeResult(reader, result);
-    return reader.Done() && validPixelBindings(result.bindings);
+    decodeArtifact(reader, result);
+    decodeInvocation(reader, result);
+    result.cacheHit = false;
+    return reader.Done() && result.runtimeAbiVersion == RuntimeAbi::Version && validPixelBindings(result.bindings);
 }
 
 std::vector<std::byte> EncodeEntry(std::span<const std::byte> key, const CompiledVariant& variant) {
     std::vector<std::byte> payload;
-    payload.reserve(variant.result.spirv.size() * sizeof(std::uint32_t) + 4096);
+    payload.reserve(variant.artifact.spirv.size() * sizeof(std::uint32_t) + 4096);
     Writer writer(payload);
-    encodeResult(writer, variant.result);
+    encodeArtifact(writer, variant.artifact);
     encodeInfo(writer, variant.info);
     encodeAllocation(writer, variant.bindings);
     const FileHeader header{FileMagic, FormatVersion, SourceVersion(), key.size(), payload.size(), HashBytes(key), HashBytes(payload)};
@@ -1016,13 +1049,13 @@ LoadStatus DecodeEntry(std::span<const std::byte> file, std::span<const std::byt
     if (HashBytes(payload) != header.payloadHash) return LoadStatus::Rejected;
     Reader reader(payload);
     CompiledVariant decoded;
-    decodeResult(reader, decoded.result);
+    decodeArtifact(reader, decoded.artifact);
     decodeInfo(reader, decoded.info);
     decodeAllocation(reader, decoded.bindings);
-    if (!reader.Done() || !validPixelInfo(decoded)) return LoadStatus::Rejected;
+    if (!reader.Done() || decoded.artifact.runtimeAbiVersion != RuntimeAbi::Version || !validPixelInfo(decoded)) return LoadStatus::Rejected;
     variant.info = std::move(decoded.info);
     variant.bindings = std::move(decoded.bindings);
-    variant.result = std::move(decoded.result);
+    variant.artifact = std::move(decoded.artifact);
     return LoadStatus::Loaded;
 }
 

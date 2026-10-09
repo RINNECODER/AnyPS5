@@ -53,12 +53,12 @@ void CheckInterpolantExports(const Library& library) {
 
 void CheckUnimplementedExport(const Library& library) {
     using Function = int (*)();
-    const auto alias = library.Resolve("7Wa3aeJgeVU_nid_no_patch_cut");
-    Require(alias == library.Resolve("sceAgcUnknown_7Wa3aeJgeVU"), "Native stub NID alias resolves incorrectly");
+    const auto alias = library.Resolve("vieBRwlh1Lw_nid_no_patch_cut");
+    Require(alias == library.Resolve("sceAgcUnknown_vieBRwlh1Lw"), "Native stub NID alias resolves incorrectly");
     try {
         reinterpret_cast<Function>(alias)();
     } catch (const std::runtime_error& error) {
-        Require(std::string(error.what()) == "sceAgcUnknown_7Wa3aeJgeVU not implemented",
+        Require(std::string(error.what()) == "sceAgcUnknown_vieBRwlh1Lw not implemented",
                 "Native explicit stub changed its failure contract");
         return;
     }

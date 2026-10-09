@@ -221,6 +221,26 @@ void CheckRejected(const MetalTests::Context& context) {
     invalid([](auto& resource) { resource.anisotropyEnable = true; resource.maxAnisotropy = 17.0f; });
 }
 
+void CheckReduction(const MetalTests::Context& context, const Probe& probe) {
+    auto texture = ColorTexture(context, 2u, false, false);
+    for (std::uint32_t mode = 1u; mode < 3u; ++mode) {
+        for (std::uint32_t filter = 0u; filter < 2u; ++filter) {
+            const std::array<std::uint32_t, 4> words{2u | (2u << 3u) | (2u << 6u) | (mode << 29u), 0u, (filter << 20u) | (filter << 22u) | (1u << 26u), 0u};
+            MetalTests::Require(AgcDriver::Graphics::DecodeSamplerResource(words).reductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT,
+                "Guest min/max reduction sampler fixture did not decode its reduction mode");
+            if (filter == 0u) {
+                MetalSampler sampler(context.device, words);
+                RequirePixel(probe.Sample(sampler.Handle(), texture, {0.75f, 0.25f}), {1, 0, 0, 1}, "Guest nearest min/max reduction sampler selected the wrong texel");
+                continue;
+            }
+            bool rejected = false;
+            try { MetalSampler sampler(context.device, words); }
+            catch (const std::invalid_argument& error) { rejected = std::string(error.what()).find("min/max reduction") != std::string::npos; }
+            MetalTests::Require(rejected, "Guest linear min/max reduction sampler was silently built as a weighted average");
+        }
+    }
+}
+
 }
 
 void RunSamplerResourceTests(const MetalTests::Context& context) {
@@ -229,4 +249,5 @@ void RunSamplerResourceTests(const MetalTests::Context& context) {
     CheckFilters(context, probe);
     CheckCompare(context, probe);
     CheckRejected(context);
+    CheckReduction(context, probe);
 }

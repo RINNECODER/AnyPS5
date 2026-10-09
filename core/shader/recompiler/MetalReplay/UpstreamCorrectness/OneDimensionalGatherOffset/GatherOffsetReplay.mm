@@ -104,8 +104,8 @@ struct Replay {
             input[GuardWords + lane * 4 + 3] = 0;
         }
         users = {
-            std::uint32_t(Base + 0x10100), 0, lanes * 16u, 0x01016fac,
-            std::uint32_t(Base + 0x20100), 0, lanes * 32u, 0x01016fac,
+            std::uint32_t(Base + 0x10100), 0, lanes * 16u, 0x31016fac,
+            std::uint32_t(Base + 0x20100), 0, lanes * 32u, 0x31016fac,
             std::uint32_t((Base + 0x30100) >> 8u), (77u << 20u) | (((width - 1u) & 3u) << 30u),
             (width - 1u) >> 2u, 0xfacu | (8u << 28u), 0, 0, 0, 0,
             std::uint32_t(edge ? 2u : 0u) | (2u << 3u) | (2u << 6u), 0,
@@ -201,8 +201,8 @@ void Native(id<MTLDevice> device, id<MTLLibrary> library) {
         << device.name.UTF8String << "; signed -32..31; poison bits6..31; green RGBA32Float; dyadic centres; width8/16; "
         << "wrap/edge; point/linear; contiguous/NSA; lanes32/64/256. PS5/vendor parity and title reachability unqualified.\n";
 }
-void CompileRejected(id<MTLDevice> device, std::span<const std::uint32_t> code,
-    std::span<const std::uint32_t> users, const char* name, const char* reason) {
+ShaderRecompiler::RecompileResult CompileGather(id<MTLDevice> device, std::span<const std::uint32_t> code,
+    std::span<const std::uint32_t> users) {
     using namespace ShaderRecompiler;
     static constexpr std::array<std::uint32_t, 3> capabilities{
         spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
@@ -216,7 +216,11 @@ void CompileRejected(id<MTLDevice> device, std::span<const std::uint32_t> code,
     const ShaderComputeStageInfo compute{{32, 1, 1}, 0, {true, false, false}, false, 1};
     RecompileRequest request{{ShaderStage::Compute, address, code, 0, {}}, {32, 0, users, compute, {}, {}, regions}, target, {0, 0, 0, 128}};
     request.useCache = false;
-    try { static_cast<void>(Recompile(request)); }
+    return Recompile(request);
+}
+void CompileRejected(id<MTLDevice> device, std::span<const std::uint32_t> code,
+    std::span<const std::uint32_t> users, const char* name, const char* reason) {
+    try { static_cast<void>(CompileGather(device, code, users)); }
     catch (const std::exception& error) {
         Require(std::string(error.what()).find(reason) != std::string::npos,
             std::string(name) + " rejected for unrelated reason: " + error.what());
@@ -241,12 +245,15 @@ void Rejections(id<MTLDevice> device) {
     CompileRejected(device, comparison, comparisonUsers, "comparison", "unsupported 1D gather variant");
     fixture.users[11] = 0xfacu | (12u << 28u);
     const auto array = Program(Offset::Signed, false, 0x57, 4);
-    // Public 1D-array descriptors are rejected before SPIR-V emission; this
-    // owns the reachable API rejection, not the emitter's later array guard.
-    CompileRejected(device, array, fixture.users, "1D-array descriptor boundary",
-        "DescriptorBindingBuilder::Populate 1D array image resources have no descriptor image shape");
+    // 1D-array T#s decode now (shared driver: 1D array textures), so the gather compiles against a
+    // 1D-array image shape instead of stopping at the descriptor boundary.
+    const auto compiled = CompileGather(device, array, fixture.users);
+    Require(std::any_of(compiled.bindings.begin(), compiled.bindings.end(), [](const auto& binding) {
+        return binding.role == ShaderRecompiler::DescriptorRole::GuestImages &&
+            binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image1DArray;
+    }), "1D-array gather lost its 1D-array image shape");
     fixture.users = originalUsers;
-    std::cout << "rejections PASS: non-level-zero/explicit-LOD/horizontal/LOD-clamp/comparison emitter guards; 1D-array descriptor boundary (emitter array guard unreachable); no unsupported native substitution\n";
+    std::cout << "rejections PASS: non-level-zero/explicit-LOD/horizontal/LOD-clamp/comparison emitter guards; 1D-array gather compiles with a 1D-array shape; no unsupported native substitution\n";
 }
 }
 int main(int argc, char** argv) {

@@ -45,6 +45,8 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Graphics/Metal/MetalShaderResources.mm"
     "${agcDriverRoot}/Graphics/Metal/MetalDepthSurface.mm"
     "${agcDriverRoot}/Graphics/Metal/MetalPresentation.mm"
+    "${agcDriverRoot}/Graphics/Metal/MetalDccExtent.cpp"
+    "${agcDriverRoot}/Graphics/Metal/MetalHostExports.cpp"
 )
 target_compile_options(anyps5_metal_native_execution PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 target_compile_definitions(anyps5_metal_native_execution PUBLIC
