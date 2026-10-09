@@ -293,66 +293,109 @@ def read_feed(github, product, channel, channels_release=None):
     return verify.verify_feed_bytes(name, data, signature)
 
 
+def _journal_path(signer, name):
+    return signer.state_dir / (name + ".journal")
+
+
 def read_journal(signer, product, channel):
-    """The last feed this signer published (verified), or None."""
+    """(feed, data, signature) of the last feed this signer committed to publish, or None."""
     name = "%s-%s.json" % (product, channel)
-    path = signer.state_dir / (name + ".journal")
+    path = _journal_path(signer, name)
     if not path.exists():
         return None
     entry = json.loads(path.read_text())
-    return verify.verify_feed_bytes(name, verify.base64.b64decode(entry["data"]), entry["sig"].encode())
+    data, signature = verify.base64.b64decode(entry["data"]), entry["sig"].encode()
+    return verify.verify_feed_bytes(name, data, signature), data, signature
 
 
 def write_journal(signer, name, data, signature):
     """One file per feed, replaced atomically, so the journal pair can never be half-written."""
-    path = signer.state_dir / (name + ".journal")
+    path = _journal_path(signer, name)
     partial = path.with_name(path.name + ".partial")
     partial.write_text(json.dumps({"data": verify.base64.b64encode(data).decode(), "sig": signature.decode()}) + "\n")
     os.replace(partial, path)
 
 
-def current_feed(github, signer, product, channel):
-    """The newest trustworthy feed: the published one or the signer's journal, whichever is later.
-
-    The journal is the durable sequence watermark. It lets a publish recover from a
-    half-replaced public pair (json and sig are separate uploads) and stops a replayed old
-    public feed from resetting the sequence. With no journal, an unverifiable public feed
-    still stops the pipeline.
-    """
-    journal = read_journal(signer, product, channel)
-    try:
-        published = read_feed(github, product, channel)
-    except verify.VerificationError:
-        if journal is None:
-            raise
-        published = None
-    candidates = [feed for feed in (published, journal) if feed is not None]
-    return max(candidates, key=lambda feed: feed["sequence"]) if candidates else None
+_LOCK_DEPTH = {}
 
 
 class _FeedLock:
-    """Machine-wide lock so CI jobs and local runs never allocate sequences concurrently."""
+    """Machine-wide, process-reentrant lock: CI jobs and local runs never allocate sequences concurrently."""
 
     def __init__(self, directory):
         self.directory = Path(directory)
+        self.key = str(self.directory.resolve()) if self.directory.exists() else str(self.directory)
 
     def __enter__(self):
         import fcntl
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.handle = open(self.directory / ".lock", "a")
-        fcntl.flock(self.handle, fcntl.LOCK_EX)
+        self.key = str(self.directory.resolve())
+        depth = _LOCK_DEPTH.get(self.key)
+        if depth:
+            _LOCK_DEPTH[self.key] = (depth[0] + 1, depth[1])
+            return self
+        handle = open(self.directory / ".lock", "a")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        _LOCK_DEPTH[self.key] = (1, handle)
         return self
 
     def __exit__(self, *_):
-        self.handle.close()
+        count, handle = _LOCK_DEPTH[self.key]
+        if count == 1:
+            del _LOCK_DEPTH[self.key]
+            handle.close()
+        else:
+            _LOCK_DEPTH[self.key] = (count - 1, handle)
 
 
-def publish_feed(github, signer, product, channel, record, work, now=None):
-    """Write the next feed for ``channel`` and upload it with its signature. Returns the feed."""
+def current_feed(github, signer, product, channel):
+    """The newest trustworthy feed, repairing the public copy from the signer's journal.
+
+    The journal is written before every upload and is the durable sequence watermark. If
+    the public pair is behind it (an interrupted upload, a missing or mismatched asset, a
+    replayed older feed), the journal's exact bytes are re-uploaded, so a later publish
+    never reuses a sequence and clients see the newest signed feed again. With no journal,
+    an unverifiable public feed stops the pipeline.
+    """
+    name = "%s-%s.json" % (product, channel)
+    with _FeedLock(signer.state_dir):
+        journal = read_journal(signer, product, channel)
+        try:
+            published = read_feed(github, product, channel)
+        except (verify.VerificationError, ReleaseError):
+            if journal is None:
+                raise
+            published = None
+        if journal is None:
+            return published
+        feed, data, signature = journal
+        if published is not None and published["sequence"] >= feed["sequence"]:
+            return published
+        if not github.dry_run:
+            github.ensure_channels_release()
+            with tempfile.TemporaryDirectory(prefix="anyps5-feed-repair-") as scratch:
+                path, sig_path = Path(scratch) / name, Path(scratch) / (name + ".sig")
+                path.write_bytes(data)
+                sig_path.write_bytes(signature)
+                github.upload(CHANNELS_TAG, [path, sig_path])
+            require(read_feed(github, product, channel) == feed, "repair of %s did not read back" % name)
+        return feed
+
+
+def publish_feed(github, signer, product, channel, record, work, now=None, check_previous=None):
+    """Write the next feed for ``channel`` and upload it with its signature. Returns the feed.
+
+    ``check_previous(previous_feed)`` runs under the lock and may raise to refuse publishing
+    on top of what is current at that moment.
+    """
     name = "%s-%s.json" % (product, channel)
     with _FeedLock(signer.state_dir):
         github.ensure_channels_release()
         previous = current_feed(github, signer, product, channel)
+        if previous is not None and previous["release"] == record:
+            return previous  # an earlier attempt already committed this build; current_feed repaired it
+        if check_previous is not None:
+            check_previous(previous)
         feed = feed_document(product, channel, next_sequence(previous, record), record, now or utc_now())
         data = encode_json(feed)
         path, sig_path = Path(work) / name, Path(work) / (name + ".sig")
@@ -360,12 +403,11 @@ def publish_feed(github, signer, product, channel, record, work, now=None):
         sig_path.write_bytes(signer.sign(data))
         verify.verify_feed_bytes(name, path.read_bytes(), sig_path.read_bytes(),
                                  min_sequence=previous["sequence"] + 1 if previous else 1)
+        if not github.dry_run:
+            write_journal(signer, name, path.read_bytes(), sig_path.read_bytes())  # watermark before exposure
         github.upload(CHANNELS_TAG, [path, sig_path])
-        if github.dry_run:
-            return feed
-        write_journal(signer, name, path.read_bytes(), sig_path.read_bytes())
-        published = read_feed(github, product, channel)
-        require(published == feed, "read-back of %s differs from what was uploaded" % name)
+        if not github.dry_run:
+            require(read_feed(github, product, channel) == feed, "read-back of %s differs from what was uploaded" % name)
     return feed
 
 

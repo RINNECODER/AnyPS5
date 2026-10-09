@@ -92,7 +92,21 @@ def accept(helper, package, manifest_sha256, cwd):
     return json.loads(result.stdout)
 
 
-def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=print):
+def failed_log_tail(receipt, log, lines=40):
+    """Show the failing command's last output before the work tree is removed (home path redacted)."""
+    failed = [item for item in receipt.get("commands", []) if item.get("exit_code") != item.get("expected_exit_code")]
+    if not failed:
+        return
+    item = failed[-1]
+    log("prepare_diagnostic_engine command failed: %s (exit %s)" % (item["name"], item["exit_code"]))
+    for stream in ("stdout", "stderr"):
+        path = Path(item["logs"][stream]["path"])
+        if path.is_file():
+            text = path.read_text(errors="replace").replace(str(Path.home()), "~")
+            log("--- %s (last %d lines)\n%s" % (stream, lines, "\n".join(text.splitlines()[-lines:])))
+
+
+def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=print, attempts=3):
     source, work = Path(source).resolve(), Path(work)
     releaselib.require(re.fullmatch(r"[0-9a-f]{40}", commit or "") is not None, "--commit must be a full 40-hex SHA")
     releaselib.require(git(source, "rev-parse", "HEAD") == commit, "source checkout is not at --commit")
@@ -110,15 +124,23 @@ def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=
     macps_commit = git(macps_repo, "rev-parse", macps_revision + "^{commit}")
     subprocess.run(["git", "-C", str(macps), "checkout", "--quiet", "--detach", macps_commit], check=True)
     engine = work / "engine"
-    log(json.dumps({"step": "prepare_diagnostic_engine", "profile": "native", "commit": commit, "macps_commit": macps_commit}))
-    result = subprocess.run([sys.executable, str(tools / "prepare_diagnostic_engine.py"), "--source", str(source),
-                             "--revision", commit, "--macps-source", str(macps), "--macps-revision", macps_commit,
-                             "--output", str(engine), "--dependency-cache", str(source), "--profile", "native"],
-                            cwd=str(work), check=False)
-    receipt_path = engine / "receipt.json"
-    receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
-    releaselib.require(result.returncode == 0 and receipt.get("status") == "PASS",
-                       "prepare_diagnostic_engine failed: " + str(receipt.get("failure", "exit %d" % result.returncode)))
+    for attempt in range(1, attempts + 1):
+        # A second attempt only absorbs the documented AppKit focus flake in relocated window
+        # tests; a real failure fails both fresh builds.
+        releaselib.clean_tree(engine)
+        log(json.dumps({"step": "prepare_diagnostic_engine", "profile": "native", "attempt": attempt,
+                        "commit": commit, "macps_commit": macps_commit}))
+        result = subprocess.run([sys.executable, str(tools / "prepare_diagnostic_engine.py"), "--source", str(source),
+                                 "--revision", commit, "--macps-source", str(macps), "--macps-revision", macps_commit,
+                                 "--output", str(engine), "--dependency-cache", str(source), "--profile", "native"],
+                                cwd=str(work), check=False)
+        receipt_path = engine / "receipt.json"
+        receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
+        if result.returncode == 0 and receipt.get("status") == "PASS":
+            break
+        failed_log_tail(receipt, log)
+        releaselib.require(attempt < attempts, "prepare_diagnostic_engine failed: " +
+                           str(receipt.get("failure", "exit %d" % result.returncode)))
     package = Path(receipt["package"]["package"])
     manifest_sha256 = receipt["package"]["manifest_sha256"]
     releaselib.require(receipt["strict_acceptance"]["source_commit"] == commit, "accepted package is from another commit")

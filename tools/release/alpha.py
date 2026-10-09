@@ -134,7 +134,14 @@ def run(args, log=print):
                                "build release was not published as a prerelease")
             releaselib.require(releaselib.verified_release_record(github, published) == record,
                                "published release.json differs from the signed record")
-        feed = releaselib.publish_feed(github, signer, "engine", "alpha", record, out)
+        def still_descendant(current):
+            # Re-checked under the feed lock: another publisher may have moved alpha during the build.
+            if current is not None and current["release"]["commit"] != previous_commit:
+                status = github.compare(current["release"]["commit"], args.commit)["status"]
+                releaselib.require(status == "ahead", "alpha moved to %s during this build; %s is %s of it"
+                                   % (current["release"]["commit"], args.commit, status))
+
+        feed = releaselib.publish_feed(github, signer, "engine", "alpha", record, out, check_previous=still_descendant)
         if not args.dry_run:
             verify_public(feed_url, feed["sequence"])
         summary(["Published engine alpha `%s` (`%s`), feed sequence %d%s." % (

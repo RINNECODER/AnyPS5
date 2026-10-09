@@ -189,10 +189,31 @@ class SequenceTests(SigningFixture):
         sequences = [releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record(version), self.work,
                                              NOW)["sequence"] for version in ("2026.10.09.1", "2026.10.09.2", "2026.10.10.1")]
         self.assertEqual(sequences, [1, 2, 3])
-        for stale in ("2026.10.10.1", "2026.10.09.3"):
+        for stale in (self.record("2026.10.10.1", commit="c" * 40), self.record("2026.10.09.3")):
             with self.assertRaisesRegex(releaselib.ReleaseError, "not newer"):
-                releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record(stale), self.work, NOW)
+                releaselib.publish_feed(github, self.signer, "engine", "alpha", stale, self.work, NOW)
+        retry = releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.10.1"), self.work, NOW)
+        self.assertEqual(retry["sequence"], 3, "re-publishing the identical build is an idempotent no-op")
         self.assertEqual(releaselib.read_feed(github, "engine", "alpha")["sequence"], 3)
+
+    def test_interrupted_upload_is_repaired_and_its_sequence_never_reused(self):
+        github = FakeGitHub()
+        releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.09.1"), self.work, NOW)
+        real_upload = github.upload
+
+        def lose_signature(tag, paths):  # json replaced, then the job dies before the .sig upload
+            real_upload(tag, paths[:1])
+            del github.assets[tag][Path(paths[1]).name]
+            raise releaselib.ReleaseError("runner lost")
+        github.upload = lose_signature
+        with self.assertRaises(releaselib.ReleaseError):
+            releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.09.2"), self.work, NOW)
+        github.upload = real_upload
+        repaired = releaselib.current_feed(github, self.signer, "engine", "alpha")
+        self.assertEqual((repaired["sequence"], repaired["release"]["version"]), (2, "2026.10.09.2"))
+        self.assertEqual(releaselib.read_feed(github, "engine", "alpha"), repaired)
+        nxt = releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.09.3"), self.work, NOW)
+        self.assertEqual(nxt["sequence"], 3)
 
     def test_half_replaced_public_feed_recovers_from_journal_but_never_without_it(self):
         github = FakeGitHub()
