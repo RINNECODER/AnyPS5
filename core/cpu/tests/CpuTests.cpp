@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -260,6 +261,44 @@ void modernCpuFeatures() {
     code(machine, 0x1120, {0x0f,0x01,0xd0});
     require(machine.Run(0x1120, 0x1123, 10) == StopReason::Address && machine.Get(Register::Rax) == 7 && machine.Get(Register::Rdx) == 0,
             "XGETBV does not enable x87, SSE and YMM state for advertised AVX execution");
+}
+void timeStampCounter() {
+    Machine machine;
+    setup(machine);
+    // Each block reads the counter, spins 1000 iterations, reads it again and
+    // leaves the first value in RBX and the second in RAX (EDX:EAX combined).
+    // RDTSCP first fills ECX with junk so the TSC_AUX write is observable.
+    const auto block = [](const std::vector<std::uint8_t>& read) {
+        std::vector<std::uint8_t> bytes{0xb9,0xef,0xbe,0xad,0xde};               // mov ecx, 0xdeadbeef
+        bytes.insert(bytes.end(), read.begin(), read.end());
+        bytes.insert(bytes.end(), {0x49,0x89,0xc8,                               // mov r8, rcx
+                                   0x48,0xc1,0xe2,0x20, 0x48,0x09,0xd0,          // shl rdx, 32; or rax, rdx
+                                   0x48,0x89,0xc3,                               // mov rbx, rax
+                                   0xb9,0xe8,0x03,0,0, 0xff,0xc9, 0x75,0xfc,      // mov ecx, 1000; dec ecx; jnz
+                                   0xb9,0xef,0xbe,0xad,0xde});
+        bytes.insert(bytes.end(), read.begin(), read.end());
+        bytes.insert(bytes.end(), {0x49,0x89,0xc9,                               // mov r9, rcx
+                                   0x48,0xc1,0xe2,0x20, 0x48,0x09,0xd0});
+        return bytes;
+    };
+    std::uint64_t previous = 0;
+    const std::pair<std::string, std::vector<std::uint8_t>> reads[] = {{"RDTSC", {0x0f,0x31}}, {"RDTSCP", {0x0f,0x01,0xf9}}};
+    for (const auto& [name, read] : reads) {
+        const auto bytes = block(read);
+        machine.Write(0x1000, std::as_bytes(std::span(bytes)));
+        machine.Set(Register::Rbx, 0);
+        require(machine.Run(0x1000, 0x1000 + bytes.size(), 5000) == StopReason::Address,
+                (name + " program did not finish").c_str());
+        const auto first = machine.Get(Register::Rbx);
+        const auto second = machine.Get(Register::Rax);
+        require(first != 0, (name + " returned a zero EDX:EAX counter").c_str());
+        require(first > previous && second > first,
+                (name + " counter did not increase monotonically").c_str());
+        if (name == "RDTSCP")
+            require(machine.Get(Register::R8) == 0 && machine.Get(Register::R9) == 0,
+                    "RDTSCP did not load ECX with the documented TSC_AUX value 0");
+        previous = second;
+    }
 }
 void invalidInstructionDiagnostics() {
     const std::vector<std::vector<std::uint8_t>> encodings{{0x0f,0x20,0xc8}, {0xf0,0x0f,0x08}};
@@ -641,6 +680,7 @@ int main(int argc, const char** argv) {
 #if ANYPS5_CPU_MODERN_TCG
             {"unsupported EVEX", unsupportedVectorEncodings},
             {"AVX/AVX2/F16C/FMA", modernVectors}, {"CPUID/XGETBV", modernCpuFeatures},
+            {"RDTSC/RDTSCP", timeStampCounter},
             {"invalid instruction diagnostics", invalidInstructionDiagnostics},
 #else
             {"unsupported VEX/EVEX", unsupportedVectorEncodings},
