@@ -1641,6 +1641,7 @@ void verifyUnnormalizedSamplers() {
     pixel.target.vulkanVersion = 0x00401000u;
     pixel.target.spirvVersion = 0x00010300u;
     pixel.target.subgroupSize = 64;
+    pixel.target.fragmentShaderBarycentricEnabled = true;
     pixel.layout.pushConstantSizeBytes = 128;
     pixel.useCache = false;
     expectFailure([&] { static_cast<void>(Recompile(pixel)); }, "unnormalized guest sampler is used by an implicit-LOD sample, which is not implemented", "unnormalized samplers: a pixel image_sample was accepted");
