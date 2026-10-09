@@ -54,6 +54,7 @@ const FontWritingStep* APS5_VABI sceFontWritingRefersRenderStep(FontWriting*);
 FontTextCharacter* APS5_VABI sceFontWritingRefersRenderStepCharacter(FontWriting*, const FontWritingLetterStep**);
 const void* APS5_VABI sceFontSelectLibraryFt(int);
 const void* APS5_VABI sceFontSelectRendererFt(int);
+int APS5_VABI sceFontCharacterGetSyllableStringState(const FontTextCharacter*, int*);
 }
 
 static void Check(bool value, int line) {
@@ -369,5 +370,12 @@ int main() {
     Require(allocations == 0);
     Require(sceFontMemoryTerm(&memory) == SCE_FONT_OK);
     Require(sceFontMemoryTerm(&memory) == SCE_FONT_ERROR_INVALID_MEMORY);
+    FontTextCharacter character{};
+    character.characterCode = 'A';
+    int syllableState = -1;
+    Require(sceFontCharacterGetSyllableStringState(&character, &syllableState) == SCE_FONT_OK && syllableState == 0);
+    syllableState = -1;
+    Require(sceFontCharacterGetSyllableStringState(nullptr, &syllableState) == SCE_FONT_ERROR_INVALID_PARAMETER && syllableState == 0);
+    Require(sceFontCharacterGetSyllableStringState(&character, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
     std::filesystem::remove_all(fontRoot);
 }
