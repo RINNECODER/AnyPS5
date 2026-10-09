@@ -12,6 +12,7 @@
 #include <array>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -200,6 +201,70 @@ void compute(Cpu::Machine& machine,Cpu::NativeModuleRunner& runner) {
     }
     for(std::size_t i=0;i<actual.size();++i)if(i<4096||i>=5120)
         require(actual[i]==std::byte{0xa5},"Assembled native dispatch changed shared Runtime byte guards");
+}
+template<class Action> void rejectsAny(Action action,const char* message) {
+    try { action(); } catch(const std::exception&) { return; }
+    throw std::runtime_error(message);
+}
+Cpu::SceImport row(const char* nid,const char* library,const char* module,std::uint16_t libraryId,std::uint16_t moduleId) {
+    Cpu::SceImport i=scoped(nid,library);i.ModuleName=module;i.LibraryId=libraryId;i.ModuleId=moduleId;return i;
+}
+void titleAgnostic(const char* utility) {
+    // Admission is by NID, library/module scope, symbol type and size only.
+    // Every consumer here has a synthetic name/size/hash and import-table ids
+    // that no recorded title uses; none of them may be refused for identity.
+    Cpu::SceImportConsumer source;source.Path="eboot.bin";source.SourceSize=4242;
+    source.SourceSha256.fill(std::byte{0x5a});
+    Cpu::Machine machine;auto threads=std::make_shared<Cpu::GuestThreads>(machine);
+    Cpu::NativeModuleRunnerConfiguration config;config.UtilityMetallib=utility;
+    config.WindowTitle="Native runner title-agnostic admission fixture";config.Width=config.Height=64;
+    Cpu::NativeModuleRunner runner(machine,threads,source,config);
+    std::vector<Cpu::SceHostModule> hosts{{"libkernel.prx",{"libkernel",0,1,1},{{"libkernel",0,1}}}};
+    runner.AddHostModules(hosts);
+    for(const auto* name:{"libSceAgc","libSceAgcDriver","libSceVideoOut"})
+        require(std::any_of(hosts.begin(),hosts.end(),[&](const auto& h){return h.Module.Name==name;}),
+                "Graphics host modules were not offered to an arbitrary title");
+    require(std::any_of(hosts[0].Libraries.begin(),hosts[0].Libraries.end(),[](const auto& l){return l.Name=="libScePosix";}),
+            "libScePosix was not offered to an arbitrary title");
+    auto module=source;module.Path="game_module.prx";module.SourceSize=777;module.SourceSha256.fill(std::byte{0xc3});
+    auto libc=source;libc.Path="libc.prx";libc.SourceSize=1234;libc.SourceSha256.fill(std::byte{0x11});
+    const struct { const Cpu::SceImportConsumer& who; Cpu::SceImport import; const char* what; } admitted[]{
+        {source,row("cmo1RIYva9o","libkernel","libkernel",7,9),"scePthreadMutexInit"},
+        {source,row("2Tb92quprl0","libkernel","libkernel",7,9),"scePthreadCondInit"},
+        {source,row("m5-2bsNfv7s","libkernel","libkernel",7,9),"scePthreadCondattrInit"},
+        {source,row("0TyVk4MSLt0","libScePosix","libkernel",8,9),"pthread_cond_init"},
+        {source,row("27bAgiJmOh0","libScePosix","libkernel",8,9),"pthread_cond_timedwait"},
+        {source,row("D0OdFMjp46I","libkernel","libkernel",7,9),"sceKernelCreateEqueue"},
+        {source,row("fzyMKs9kim0","libkernel","libkernel",7,9),"sceKernelWaitEqueue"},
+        {source,row("188x57JYp0g","libkernel","libkernel",7,9),"sceKernelCreateSema"},
+        {source,row("4+h9EzwKF4I","libkernel","libkernel",7,9),"scePthreadAttrSetschedpolicy"},
+        {source,row("Up36PTk687E","libSceVideoOut","libSceVideoOut",12,13),"sceVideoOutOpen"},
+        {source,row("UglJIZjGssM","libSceAgcDriver","libSceAgcDriver",14,15),"sceAgcDriverSubmitDcb"},
+        {source,row("i1jyy49AjXU","libSceAgc","libSceAgc",16,17),"sceAgcDcbWriteData"},
+        {module,row("uquVH4-Du78","libSceVideoOut","libSceVideoOut",2,3),"sceVideoOutClose from a title prx"},
+        {module,row("1FGvU0i9saQ","libkernel","libkernel",2,3),"scePthreadMutexattrSetprotocol from a title prx"},
+        {libc,row("7H0iTOciTLo","libkernel","libkernel",0,1),"pthread_mutex_lock from another libc"},
+        {libc,row("BmMjYxmew1w","libkernel","libkernel",0,1),"scePthreadCondTimedwait from another libc"},
+    };
+    for(const auto& item:admitted) {
+        std::optional<Cpu::SceResolvedImport> resolved;
+        try { resolved=runner.Resolve(item.who,item.import,2,0); } catch(const std::exception& e) {
+            throw std::runtime_error(std::string("Title-agnostic admission refused ")+item.what+": "+e.what());
+        }
+        require(resolved&&resolved->Address&&resolved->Type==2,item.what);
+        const auto repeated=runner.Resolve(item.who,item.import,2,0);
+        require(repeated&&repeated->Address==resolved->Address,"Repeated title-agnostic admission changed gate identity");
+        // Identity no longer gates admission; the ELF symbol contract still does.
+        rejectsAny([&]{runner.Resolve(item.who,item.import,1,0);},"Non-function symbol admitted");
+        rejectsAny([&]{runner.Resolve(item.who,item.import,2,8);},"Sized symbol admitted");
+        auto badScope=item.import;badScope.ModuleName="libSceFoo";
+        rejectsAny([&]{if(!runner.Resolve(item.who,badScope,2,0)) throw std::runtime_error("unclaimed");},
+                   "Wrong module scope admitted");
+    }
+    require(!runner.Resolve(source,row("AAAAAAAAAAA","libkernel","libkernel",7,9),2,0),
+            "Runner fabricated an unknown kernel import");
+    rejects([&]{runner.Resolve(source,row("not-a-real-nid","libSceVideoOut","libSceVideoOut",12,13),2,0);},"service");
+    runner.Shutdown();runner.Shutdown();
 }
 void qualifiedRejections(const char* utility) {
     // Recorded target certificate only. No private bytes are mapped or executed.
@@ -391,6 +456,7 @@ int main(int argc,char** argv) {
         // Guest phases assert posted AppKit key input, which a host window only accepts while focused.
         AnyPS5::Host::RequireRealFocusForThisProcess();
         if(std::string(argv[4])=="qualified-rejection") qualifiedRejections(argv[3]);
+        else if(std::string(argv[4])=="title-agnostic") titleAgnostic(argv[3]);
         else run(argv[1],argv[2],argv[3],argv[4]);
         std::cout<<"Actual native runner public assembly "<<argv[4]<<" PASS; synthetic public VideoOut route is not target admission/gameplay evidence\n";
         return 0;
