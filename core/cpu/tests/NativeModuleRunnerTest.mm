@@ -14,6 +14,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Authoring gate: actual production assembly is the owner. Component fixtures
@@ -212,6 +213,15 @@ void qualifiedRejections(const char* utility) {
     Cpu::Machine machine;auto threads=std::make_shared<Cpu::GuestThreads>(machine);
     Cpu::NativeModuleRunnerConfiguration config;config.UtilityMetallib=utility;
     config.WindowTitle="Native runner static certificate rejection fixture";config.Width=config.Height=64;
+    // Game runs are unbounded: zero disables the wall and idle caps, and is the default.
+    require(config.MaximumWallTime.count()==0&&config.MaximumIdleWait.count()==0,
+            "Default native runner configuration keeps a wall or idle cap");
+    for(const auto negative:{std::pair{-1,0},std::pair{0,-1}}) {
+        auto bad=config;bad.MaximumWallTime=std::chrono::milliseconds(negative.first);
+        bad.MaximumIdleWait=std::chrono::milliseconds(negative.second);
+        rejects([&]{Cpu::NativeModuleRunner rejected(machine,threads,source,bad);},"non-negative");
+    }
+    config.MaximumWallTime=config.MaximumIdleWait=std::chrono::milliseconds(0);
     Cpu::NativeModuleRunner runner(machine,threads,source,config);
     auto import=scoped("Up36PTk687E","libSceVideoOut");
     rejects([&]{runner.Resolve(source,import,1,0);},"ELF symbol");
@@ -265,6 +275,8 @@ void run(const char* mainPath,const char* dependencyPath,const char* utility,con
     const auto parsed=Cpu::ParseSce(mainPath);const auto source=consumer(parsed);
     Cpu::NativeModuleRunnerConfiguration config;config.UtilityMetallib=utility;
     config.WindowTitle="Native module assembly public fixture";config.Width=config.Height=64;
+    // Tests keep explicit diagnostic bounds so a regression cannot hang CI.
+    config.MaximumWallTime=std::chrono::milliseconds(30000);config.MaximumIdleWait=std::chrono::milliseconds(5000);
     Cpu::NativeModuleRunner runner(machine,threads,source,config);
     require(runner.MappingGeneration()==0&&runner.Memory()->Snapshot().Generation==0,
         "Native assembly was published before graph/entry construction");

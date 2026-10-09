@@ -19,6 +19,7 @@ Cpu::SceImportConsumer consumer(const Cpu::SceParsedImage& image) {
 Cpu::NativeModuleRunnerConfiguration configuration(const Cpu::SceParsedImage& image,const char* utility,bool np) {
     Cpu::NativeModuleRunnerConfiguration c;
     c.UtilityMetallib=utility;c.Width=c.Height=64;c.WindowTitle="Native service public integration";
+    c.MaximumWallTime=std::chrono::milliseconds(30000);c.MaximumIdleWait=std::chrono::milliseconds(5000);
     const Cpu::NativeServiceConsumerProfile p{image.SourceSha256,image.SourceSize};
     if(np)c.PublicNpIdentity=p;else c.PublicUriEscape=p;
     return c;
