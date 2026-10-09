@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 #include <unistd.h>
 
@@ -206,6 +208,33 @@ void tlsGate() {
     session.imports->SetTls(nullptr);
     rejects([&] { session.callGate(gate, 0x3010); }, "before main-module TLS is configured");
 }
+
+#if ANYPS5_CPU_MODERN_TCG
+void tscGates() {
+    Session session;
+    constexpr std::array<std::uint8_t, 9> rdtsc{0x0f, 0x31, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd0};
+    session.machine.Write(0x1040, std::as_bytes(std::span(rdtsc)));
+    const auto guestTsc = [&] {
+        require(session.machine.Run(0x1040, 0x1049, 10) == Cpu::StopReason::Address, "Guest RDTSC did not execute");
+        return session.machine.Get(Register::Rax);
+    };
+    const auto frequency = session.call("1j3S3n-tTW4", 0);
+    require(frequency >= 1000000000ULL && frequency <= 4000000000ULL,
+            "sceKernelGetTscFrequency did not report a plausible PS5 TSC frequency");
+    const auto before = session.call("-2IRUCO--PM", 0);
+    const auto guest = guestTsc();
+    const auto after = session.call("-2IRUCO--PM", 0);
+    require(before < guest && guest < after, "sceKernelReadTsc and guest RDTSC are not one monotonic clock");
+    const auto start = std::chrono::steady_clock::now();
+    const auto first = guestTsc();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    const auto second = guestTsc();
+    const auto elapsed = std::chrono::duration<long double>(std::chrono::steady_clock::now() - start).count();
+    const auto ticks = static_cast<long double>(second - first);
+    require(second > first && ticks >= 0.019L * frequency && ticks <= elapsed * frequency * 1.01L,
+            "Guest RDTSC does not advance at the sceKernelGetTscFrequency rate");
+}
+#endif
 }
 
 int main() {
@@ -213,6 +242,9 @@ int main() {
         fileGates();
         scopedGates();
         tlsGate();
+#if ANYPS5_CPU_MODERN_TCG
+        tscGates();
+#endif
         std::cout << "PASS scoped kernel NID gates, actual x86 SysV file calls, signed errors and TLS pointer dereferences\n";
         return 0;
     } catch (const std::exception& error) {

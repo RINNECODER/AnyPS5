@@ -32,19 +32,12 @@ private:
     std::shared_ptr<Impl> impl;
 };
 
-struct KernelSemaphoreConsumer {
-    std::string_view Name, Sha256;
-    std::uint64_t Size;
-};
-bool IsQualifiedKernelSemaphoreConsumer(KernelSemaphoreConsumer);
-
-// Selection uses the loader's actual parsed source identity on every import.
-// All other consumers have no admissions; fixtures use KernelSemaphores above.
+// Production selection: admits the four semaphore rows for any importing image
+// by NID, libkernel scope/version, symbol type and size.
 class TargetKernelSemaphores {
 public:
     TargetKernelSemaphores(Machine&, const std::shared_ptr<GuestThreads>&);
-    std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t type,
-                                       std::uint64_t size, KernelSemaphoreConsumer);
+    std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t type, std::uint64_t size);
     KernelSemaphores& Provider() { return provider; }
 private:
     KernelSemaphores provider;

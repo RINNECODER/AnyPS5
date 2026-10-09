@@ -7,24 +7,22 @@
 #include <limits>
 #include <map>
 #include <span>
+#include <string>
 #include <string_view>
 #include <stdexcept>
 
 namespace Cpu::Platform {
 namespace {
-constexpr std::uint64_t targetSize = 7895047;
-constexpr std::array targetSha256{
-    std::byte{0x38},std::byte{0xdb},std::byte{0x04},std::byte{0x7f},
-    std::byte{0xd9},std::byte{0xdf},std::byte{0xd2},std::byte{0x7f},
-    std::byte{0xc1},std::byte{0x7d},std::byte{0xfc},std::byte{0x0d},
-    std::byte{0xd2},std::byte{0xcf},std::byte{0xf3},std::byte{0x1a},
-    std::byte{0x2e},std::byte{0x05},std::byte{0x33},std::byte{0xac},
-    std::byte{0x1b},std::byte{0xe2},std::byte{0x35},std::byte{0x0e},
-    std::byte{0x50},std::byte{0x82},std::byte{0xf8},std::byte{0x49},
-    std::byte{0x9f},std::byte{0x59},std::byte{0xc6},std::byte{0xb9}};
+// Minimal SCE scoped-identifier encoding, the inverse of the ELF loader's.
+std::string scopedId(std::uint16_t value) {
+    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+    std::string result;
+    do { result.insert(result.begin(), alphabet[value % 64]); value /= 64; } while (value);
+    return result;
+}
 // The parser retains immutable ELF bytes, but its public Imports vector is
 // editable. Corroborate the encoded identity in the retained symbol table, not
-// just the editable row addressed by Symbol.Import. Both qualified profiles retain
+// just the editable row addressed by Symbol.Import. Both admitted profiles retain
 // SCE import identities; their symbol/string tables may be standard or SCE. No
 // generalized ELF service resolver is introduced here.
 std::optional<std::uint64_t> field(std::span<const std::byte> bytes,
@@ -40,7 +38,7 @@ std::optional<std::uint64_t> sum(std::uint64_t a,std::uint64_t b) {
     if (b > std::numeric_limits<std::uint64_t>::max()-a) return std::nullopt;
     return a+b;
 }
-bool encodedRow(const SceImageData& parsed,std::size_t index,bool target) {
+bool encodedRow(const SceImageData& parsed,std::size_t index,const SceImport& import) {
     const std::span bytes(parsed.Bytes);
     const auto phoff=field(bytes,32,8), phsize=field(bytes,54,2), count=field(bytes,56,2);
     if (!phoff || !phsize || *phsize != 56 || !count || *count > 128) return false;
@@ -111,14 +109,14 @@ bool encodedRow(const SceImageData& parsed,std::size_t index,bool target) {
     };
     bool libraryObserved = false;
     for (const auto library:importedLibraries) {
-        if ((library >> 48) != (target ? 3u : 1u)) continue;
+        if ((library >> 48) != import.LibraryId) continue;
         if (((library >> 32) & 0xffff) != 1 ||
             !matches(library & 0xffffffff,"libSceHttp")) return false;
         libraryObserved = true;
     }
     const auto name=field(bytes,*symbols+index*24,4);
     return libraryObserved && name &&
-           matches(*name,target ? "YuOW3dDAKYc#D#E" : "YuOW3dDAKYc#B#B");
+           matches(*name,import.Nid+"#"+scopedId(import.LibraryId)+"#"+scopedId(import.ModuleId));
 }
 bool sameRow(const SceImport& a,const SceImport& b) {
     return a.Nid == b.Nid && a.LibraryName == b.LibraryName &&
@@ -157,10 +155,11 @@ struct NativeUriEscape::Impl {
             field(consumer.Data->Bytes,16,2) != consumer.Type)
             return false;
         const auto& parsed = *consumer.Data;
+        // Any signed WebApi module version: its source identity is not an
+        // admission input; scope and the retained symbol row are.
         target = configuration.EnableTargetConsumer && consumer.Type == 0xfe18 &&
                  consumer.SourceContainer == "plain_self" &&
-                 consumer.Path.filename() == "libSceNpCppWebApi.prx" &&
-                 parsed.SourceSha256 == targetSha256 && parsed.SourceSize == targetSize;
+                 consumer.Path.filename() == "libSceNpCppWebApi.prx";
         if (target) return true;
         return configuration.EnablePublicFixture && configuration.PublicFixtureSize &&
                configuration.PublicFixtureSha256 != std::array<std::byte,32>{} &&
@@ -169,23 +168,20 @@ struct NativeUriEscape::Impl {
                parsed.SourceSha256 == configuration.PublicFixtureSha256 &&
                parsed.SourceSize == configuration.PublicFixtureSize;
     }
-    bool row(const SceImport& import,const SceParsedImage& consumer,bool target) const {
+    bool row(const SceImport& import,const SceParsedImage& consumer) const {
         const auto& parsed = *consumer.Data;
         bool observedModule = false;
         for (const auto& module:parsed.ImportedModules)
             if (module.Name == import.ModuleName && module.Id == import.ModuleId &&
                 module.Major == 1 && module.Minor == 1) observedModule = true;
         if (!observedModule) return false;
-        const auto begin = target ? 43059u : 0u;
-        const auto end = target ? 43060u : parsed.Symbols.size();
-        if (end > parsed.Symbols.size()) return false;
-        for (std::size_t index=begin;index<end;++index) {
+        for (std::size_t index=0;index<parsed.Symbols.size();++index) {
             const auto& symbol = parsed.Symbols[index];
             if (!symbol.Import || *symbol.Import >= consumer.Imports.size() ||
                 symbol.Type != 2 || symbol.Size || symbol.Section || symbol.Value ||
                 symbol.Binding != 1 || symbol.Visibility != 0) continue;
             if (sameRow(consumer.Imports[*symbol.Import],import) &&
-                encodedRow(parsed,index,target)) return true;
+                encodedRow(parsed,index,import)) return true;
         }
         return false;
     }
@@ -203,8 +199,8 @@ std::optional<std::uint64_t> NativeUriEscape::Resolve(const SceImport& import,
         !impl->source(consumer,target) || import.LibraryName != "libSceHttp" ||
         import.ModuleName != "libSceHttp" || import.LibraryVersion != 1 ||
         import.ModuleMajor != 1 || import.ModuleMinor != 1 ||
-        import.LibraryId != (target ? 3 : 1) || import.ModuleId != (target ? 4 : 1) ||
-        !impl->row(import,consumer,target)) return std::nullopt;
+        (!target && (import.LibraryId != 1 || import.ModuleId != 1)) ||
+        !impl->row(import,consumer)) return std::nullopt;
     const auto owner = impl->threads.lock();
     if (!owner) throw std::runtime_error("Native URI guest scheduler expired");
     owner->CheckIdleOwner();

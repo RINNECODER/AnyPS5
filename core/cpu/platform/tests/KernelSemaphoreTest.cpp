@@ -243,29 +243,31 @@ void admission() {
  std::array<std::byte,4096> originalGateBytes{};
  machine.Read(GatePage,originalGateBytes);
  const auto originalMappingCount=machine.Mappings().size();
- using Consumer=Cpu::Platform::KernelSemaphoreConsumer;
- constexpr Consumer actual{"eboot.bin","a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397",102560655};
  constexpr std::array nids{"188x57JYp0g","R1Jvn8bSCW8","Zxa0VhQVTsk","4czppHBiriw"};
  for(const auto nid:nids){const auto row=scoped(nid);
-  for(unsigned control=0;control<13;++control){auto wrong=row;auto consumer=actual;unsigned type=2;std::uint64_t size=0;
-   if(control==0)consumer.Name="public-semaphore-fixture";if(control==1)consumer.Sha256="unverified";
-   if(control==2)--consumer.Size;if(control==3)type=1;if(control==4)size=8;
-   if(control==5)wrong.LibraryName="foreign";if(control==6)wrong.ModuleName="foreign";
-   if(control==7)wrong.LibraryVersion=2;if(control==8)wrong.ModuleMajor=2;if(control==9)wrong.ModuleMinor=2;
-   if(control==10)wrong.LibraryId=1;if(control==11)wrong.ModuleId=1;if(control==12)type=6;
-   bool denied=false;try{target.Resolve(wrong,type,size,consumer);}catch(const std::exception&){denied=true;}
+  for(unsigned control=0;control<8;++control){auto wrong=row;unsigned type=2;std::uint64_t size=0;
+   if(control==0)type=1;if(control==1)size=8;
+   if(control==2)wrong.LibraryName="foreign";if(control==3)wrong.ModuleName="foreign";
+   if(control==4)wrong.LibraryVersion=2;if(control==5)wrong.ModuleMajor=2;if(control==6)wrong.ModuleMinor=2;
+   if(control==7)type=6;
+   bool denied=false;try{target.Resolve(wrong,type,size);}catch(const std::exception&){denied=true;}
    if(!denied)std::cerr<<"semaphore selector unexpected admission nid="<<nid<<" control="<<control
-                      <<" type="<<type<<" symbol_size="<<size<<" consumer_size="<<consumer.Size<<'\n';
-   require(denied,"Target semaphore source/type/size/scope rejection absent");
+                      <<" type="<<type<<" symbol_size="<<size<<'\n';
+   require(denied,"Target semaphore type/size/scope rejection absent");
    std::array<std::byte,4096> afterGateBytes{};machine.Read(GatePage,afterGateBytes);
    require(afterGateBytes==originalGateBytes && machine.Mappings().size()==originalMappingCount,
            "Invalid selector changed callable gate bytes/mapping before admission");
   }
  }
- for(const auto nid:nids)require(target.Resolve(scoped(nid),2,0,actual).has_value(),"Exact observed semaphore source/import row rejected");
+ for(const auto nid:nids){
+  require(target.Resolve(scoped(nid),2,0).has_value(),"Semaphore row rejected");
+  // Import-table ids are per-image; another title's ids are admitted.
+  auto other=scoped(nid);other.LibraryId=1;other.ModuleId=1;
+  require(target.Resolve(other,2,0).has_value(),"Another image's semaphore import-table ids were refused");
+ }
  for(const auto nid:{"12wOHk8ywb0","4DM06U2BNEY","AAAAAAAAAAA"})
-  require(!target.Resolve(scoped(nid),2,0,actual),"Unobserved Poll/Cancel/unknown NID fabricated callable semaphore gate");
- std::cout<<"PASS native selector only: exact consumer hash/size, four FUNC2 size0 scopes; no title execution\n";
+  require(!target.Resolve(scoped(nid),2,0),"Unobserved Poll/Cancel/unknown NID fabricated callable semaphore gate");
+ std::cout<<"PASS native selector only: title-agnostic four FUNC2 size0 scopes; no title execution\n";
 }
 }
 int main(int argc,char** argv) {

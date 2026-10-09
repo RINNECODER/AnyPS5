@@ -6,19 +6,18 @@
 #include <map>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 namespace Cpu::Platform {
 namespace {
 constexpr std::string_view nid = "XDncXQIJUSk";
 constexpr std::string_view family = "libSceNpManager";
-constexpr std::string_view titleHash = "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
-constexpr std::uint64_t titleSize = 102560655;
-std::array<std::byte,32> digest(std::string_view hex) {
-    std::array<std::byte,32> result{};
-    constexpr std::string_view digits = "0123456789abcdef";
-    for (std::size_t i=0; i<result.size(); ++i)
-        result[i] = std::byte((digits.find(hex[i*2]) << 4) | digits.find(hex[i*2+1]));
+// Minimal SCE scoped-identifier encoding, the inverse of the ELF loader's.
+std::string scopedId(std::uint16_t value) {
+    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+    std::string result;
+    do { result.insert(result.begin(), alphabet[value % 64]); value /= 64; } while (value);
     return result;
 }
 bool same(const SceImport& a, const SceImport& b) {
@@ -132,22 +131,24 @@ struct NativeNpIdentity::Impl {
             row.LibraryVersion!=1 || row.ModuleMajor!=1 || row.ModuleMinor!=1) return false;
         const auto& data=*image.Data;
         if (image.SourceSha256!=data.SourceSha256 || image.SourceSize!=data.SourceSize) return false;
+        // Title-agnostic: any signed main executable, at whatever import-table
+        // ids its own library/module metadata assigns to libSceNpManager.
         const bool title=config.EnableQualifiedConsumer && image.Path.filename()=="eboot.bin" &&
-            image.SourceContainer=="plain_self" && data.SourceSha256==digest(titleHash) && data.SourceSize==titleSize &&
-            row.LibraryId==7 && row.ModuleId==8;
+            image.SourceContainer=="plain_self";
         const bool fixture=config.EnablePublicFixtureCandidate && config.PublicFixtureSize &&
             image.Path.filename()=="NativeNpIdentityGuest.elf" && image.SourceContainer=="elf" && image.Type==0xfe10 &&
             data.SourceSha256==config.PublicFixtureSha256 && data.SourceSize==config.PublicFixtureSize &&
             row.LibraryId==1 && row.ModuleId==1;
         if (!title && !fixture) return false;
+        const auto scoped=std::string(nid)+"#"+scopedId(row.LibraryId)+"#"+scopedId(row.ModuleId);
         try {
             OriginalRows original(data.Bytes);
             for (std::size_t n=0;n<data.Symbols.size();++n) {
                 const auto& symbol=data.Symbols[n];
-                if ((title && n!=241) || !symbol.Import || *symbol.Import>=image.Imports.size() ||
+                if (!symbol.Import || *symbol.Import>=image.Imports.size() ||
                     symbol.Type!=2 || symbol.Size || symbol.Value || symbol.Section || symbol.Binding!=1 || symbol.Visibility ||
                     !same(row,image.Imports[*symbol.Import])) continue;
-                if (original.agrees(n,row,title?"XDncXQIJUSk#H#I":"XDncXQIJUSk#B#B")) return true;
+                if (original.agrees(n,row,scoped)) return true;
             }
         } catch (const std::exception&) { return false; }
         return false;

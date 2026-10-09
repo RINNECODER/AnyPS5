@@ -373,10 +373,8 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers, s
         // packet-format guard, and cannot silently use aliased high bytes.
         std::array<std::uint32_t,76> decoy{}; decoy[0]=0xc04a1000;
         guest.Machine.Write(Commands,std::as_bytes(std::span(decoy)));
-        constexpr auto targetHash="a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
         guest.Imports=std::make_unique<Cpu::SceAgcImports>(guest.Machine, Cpu::MakeNativeAgcBackend(driver),
-            Cpu::QualifiedAgcAdmissionsForImage(targetHash), 0x7ffdf3001000);
-        require(Cpu::QualifiedAgcAdmissionsForImage("different-image").empty(), "unknown image gained target admission");
+            Cpu::TargetAgcAdmissions(), 0x7ffdf3001000);
         rejects([&]{guest.Imports->Resolve(identity("HF3YllT3mXU",true),2,0);},"Unqualified");
         rejects([&]{guest.Imports->Resolve(identity("pFLArOT53+w",false),2,0);},"Unqualified");
 
