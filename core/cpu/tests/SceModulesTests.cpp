@@ -638,8 +638,11 @@ int main(int argc, char** argv) {
         const auto receipts = argc == 4 ? crtReceipts(argv[3]) : std::vector<CrtReceipt>{};
         for (const auto& receipt : receipts) executeCrt(receipt);
         invalidGraphs(attributed.main, attributed.guest, receipts);
+        // stdout is the frozen MacPS EnginePackage.accept keeper contract: exactly the first
+        // and (with a CRT receipt) the certification line. Any other evidence goes to stderr,
+        // or every installed MacPS rejects packages built from this binary.
         std::cout << "PASS compiled SCE module graph calls, objects, TLS, independent prime/Adler results, dependency-only lifecycle, and strict failures\n";
-        std::cout << "PASS per-consumer host FUNC/OBJECT authority, same-name source tampering, strict rejection without fallback, and parsed-snapshot mapping\n";
+        std::cerr << "PASS per-consumer host FUNC/OBJECT authority, same-name source tampering, strict rejection without fallback, and parsed-snapshot mapping\n";
         if (!receipts.empty())
             std::cout << "PASS original ELF/SELF certification, chunked source identity, compiled CRT ordering, and certificate preflight failures\n";
         return 0;

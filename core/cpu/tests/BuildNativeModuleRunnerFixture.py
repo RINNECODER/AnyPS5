@@ -32,8 +32,9 @@ def main():
         dep = root / 'SceModuleGuest.prx'
         shutil.copyfile(main_image, guest)
         shutil.copyfile(module, dep)
-        args = [str(binary), '--diagnostics-json', '--sce-module', str(dep), str(guest),
-                '17', '5', '7', '58', '3366582378']
+        # Game runs are unbounded by default; tests pass explicit diagnostic bounds.
+        args = [str(binary), '--diagnostics-json', '--max-wall-ms', '30000', '--max-idle-ms', '5000',
+                '--sce-module', str(dep), str(guest), '17', '5', '7', '58', '3366582378']
         rejected = subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=20)
         receipt = events(rejected)
         assert rejected.returncode == 126, ('Inactive native profile accepted missing utility', rejected.returncode, rejected.stderr)

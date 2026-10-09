@@ -57,16 +57,15 @@ private:
 
 enum class KernelEventContract { CreateEqueue, DeleteEqueue, WaitEqueue };
 struct KernelEventAdmission { KernelEventContract Contract; std::string_view Evidence; };
-struct KernelEventConsumer { std::string_view Name, Sha256; };
-std::span<const KernelEventAdmission> QualifiedKernelEventAdmissionsForImage(std::string_view verifiedSha256);
-// Empty admission is the production default. Selection must be supplied by the
-// loader after hashing its actual consumer input; no NID-only target admission.
+std::span<const KernelEventAdmission> TargetKernelEventAdmissions();
+// Empty admission denies every contract. The native runner selects the
+// title-agnostic profile; admission never depends on the importing image.
 class TargetKernelEvents {
 public:
     TargetKernelEvents(Machine&, const std::shared_ptr<GuestThreads>&,
                        std::span<const KernelEventAdmission> admissions = {});
     std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t type,
-                                         std::uint64_t size, KernelEventConsumer);
+                                         std::uint64_t size);
     KernelEvents& Provider() { return provider; }
 private:
     KernelEvents provider;

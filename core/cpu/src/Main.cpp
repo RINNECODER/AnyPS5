@@ -5,8 +5,10 @@
 #include <cpu/Runtime.hpp>
 #include <cpu/SceElf.hpp>
 #include <cpu/SceImports.hpp>
+#include <cpu/SceImportStubs.hpp>
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/SceNpLocalImports.hpp>
+#include <cpu/SceNpOfflineImports.hpp>
 #include <cpu/SceNetAddressImports.hpp>
 #include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
@@ -25,12 +27,15 @@
 #endif
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <csignal>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -126,7 +131,33 @@ std::string Json(std::string_view value) {
     return result;
 }
 
-void Capabilities() {
+// Game runs are unbounded. Each limit is an opt-in diagnostic cap where 0
+// (the default) means unlimited.
+struct RunLimits {
+    std::optional<std::uint64_t> MaxInstructions, MaxInitInstructions;
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+    std::optional<std::uint64_t> MaxWallMs, MaxIdleMs;
+#endif
+};
+
+void ParseLimit(std::optional<std::uint64_t>& limit, int argc, char** argv, int index,
+                std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max()) {
+    const std::string option(argv[index]);
+    if (limit) throw std::runtime_error(option + " may be supplied only once");
+    if (argc <= index + 1) throw std::runtime_error(option + " requires a non-negative integer (0 = unlimited)");
+    const std::string_view text(argv[index + 1]);
+    std::uint64_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (text.empty() || error != std::errc{} || end != text.data() + text.size() || value > maximum)
+        throw std::runtime_error(option + " requires a non-negative integer (0 = unlimited)");
+    limit = value;
+}
+
+std::uint64_t InstructionBudget(const std::optional<std::uint64_t>& limit) {
+    return limit && *limit ? *limit : Cpu::UnboundedInstructionBudget;
+}
+
+void Capabilities(const RunLimits& limits) {
     std::cout << "{\"schema_version\":1,\"host_architecture\":" << Json(HostArchitecture())
         << ",\"guest_architecture\":\"x86_64\",\"backend\":" << Json(Cpu::Machine::Backend())
         << ",\"supported_formats\":[\"static_elf64_x86_64\",\"sce_elf64_x86_64\"],\"runtime_abi\":\"linux_sysv\",\"runtime_abis\":[\"linux_sysv\",\"sce_sysv\"],\"services\":["
@@ -136,6 +167,8 @@ void Capabilities() {
         << "{\"name\":\"arch_prctl\",\"number\":158,\"constraints\":\"ARCH_SET_FS and ARCH_GET_FS only\"}],"
         << "\"sce_imports\":{\"module\":\"libc\",\"module_version\":\"1.1\",\"library\":\"libc\",\"library_version\":1,"
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
+        << "\"execution_limits\":{\"max_instructions\":" << limits.MaxInstructions.value_or(0)
+        << ",\"max_init_instructions\":" << limits.MaxInitInstructions.value_or(0) << "},"
         << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\"]},"
         << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
         << "\"sce_memory_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
@@ -148,20 +181,24 @@ void Capabilities() {
         << "\"recognized_unavailable\":[\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceLaunchPlayerDialog\"],"
         << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
         << "\"sce_common_dialog_imports\":{\"module\":\"libSceCommonDialog\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceCommonDialogInitialize\"],\"constraints\":\"session initializer only; repeated initialization returns signed 0x80b80002; dialog operations unsupported\"},"
+        << "\"unresolved_imports\":{\"default\":\"trap_on_call\",\"weak\":\"zero\",\"objects\":\"zeroed_storage\",\"strict_argument\":\"--strict-imports\",\"return_argument\":\"--unresolved-import-return\",\"constraints\":\"static --sce-module graph only; missing DT_NEEDED modules tolerated; each unresolved function import logs and stops the guest when called unless a return value is configured; TLS imports stay strict\"},"
+        << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"initialization and handles succeed; user stays signed out; every network request fails\"},"
         << "\"sce_np_local_imports\":{\"module\":\"libSceNpManager\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNpGetState\"],\"constraints\":\"session-local user and offline state only; no network account or authentication services\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
-        << "\"native_module_runner\":{\"enabled\":true,\"owned_memory\":\"live staged CPU/Metal publication\",\"provider_selection\":\"actual parsed consumer SHA-256, size, scope and ELF symbol\",\"utility_metallib\":\"../fixtures/AnyPS5Utilities.metallib relative to engine\",\"wall_limit_ms\":30000,\"idle_limit_ms\":5000,\"constraints\":\"bounded diagnostic profile; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence\"},"
+        << "\"native_module_runner\":{\"enabled\":true,\"owned_memory\":\"live staged CPU/Metal publication\",\"provider_selection\":\"actual parsed consumer SHA-256, size, scope and ELF symbol\",\"utility_metallib\":\"../fixtures/AnyPS5Utilities.metallib relative to engine\",\"wall_limit_ms\":"
+        << limits.MaxWallMs.value_or(0) << ",\"idle_limit_ms\":" << limits.MaxIdleMs.value_or(0)
+        << ",\"constraints\":\"unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; offline NP/WebAPI providers only; no retail gameplay evidence\"},"
 #endif
         << "\"sce_thread_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"_sceKernelSetThreadDtors\",\"_sceKernelSetThreadAtexitCount\",\"_sceKernelSetThreadAtexitReport\",\"scePthreadCreate\",\"scePthreadYield\",\"scePthreadJoin\",\"scePthreadSelf\",\"scePthreadEqual\",\"__error\",\"__tls_get_addr\",\"scePthreadExit\"],"
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
-        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; cumulative bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; owned attributes; FIFO/priority inheritance and logical RR with 4096-instruction engineering turns; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; affinity, cancellation, detach, once and TSD unsupported\"},"
+        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; optionally bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; owned attributes; FIFO/priority inheritance and logical RR with 4096-instruction engineering turns; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; affinity, cancellation, detach, once and TSD unsupported\"},"
 #else
-        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; cumulative bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; nullable default attributes only; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; scheduling policies, affinity, cancellation, detach, once and TSD unsupported\"},"
+        << "\"constraints\":\"explicit static module graph only; cooperative guest threads on one owner CPU; optionally bounded execution phases and 4096-instruction slices; at most 256 non-reused thread slots; nullable default attributes only; immutable relocated per-thread TLS, errno and guarded stacks; guest dtors before join completion; count/report registrations retained without unproved invocation; scheduling policies, affinity, cancellation, detach, once and TSD unsupported\"},"
 #endif
         << "\"cpu_profile\":\"Haswell\",\"supported_instruction_families\":[\"AVX\",\"AVX2\",\"F16C\",\"FMA\"],"
         << "\"cpu_constraints\":[\"single guest CPU; owner-thread execution and teardown\",\"borrowed backing must cover complete aligned host pages\",\"shared data pages preserve exact byte permissions; mixed executable permission pages unsupported\"],"
@@ -170,6 +207,46 @@ void Capabilities() {
         << "\"cpu_constraints\":[\"mixed permission pages unsupported\"],"
         << "\"unsupported_instruction_families\":[\"AVX\",\"AVX2\",\"AVX-512\",\"XOP\"],\"ps5_game_runtime_ready\":false}\n";
 #endif
+}
+
+void LogImportStub(const Cpu::SceImportStubEvent& event, bool diagnostics) {
+    using Kind = Cpu::SceImportStubEventKind;
+    if (event.Kind == Kind::MissingModule) {
+        if (diagnostics) std::cerr << "{\"schema_version\":1,\"event\":\"missing_module\",\"name\":" << Json(event.Module) << "}\n";
+        else std::cerr << "anyps5_cpu_run: missing module " << event.Module << " (imports bind lazily)\n";
+        return;
+    }
+    const char* binding = event.Binding == Cpu::SceImportStubBinding::WeakZero ? "weak_zero"
+        : event.Binding == Cpu::SceImportStubBinding::ZeroObject ? "zero_object" : "trap";
+    const auto& import = event.Import;
+    if (!diagnostics) {
+        std::cerr << "anyps5_cpu_run: " << (event.Kind == Kind::Called ? "unresolved import called" : "unresolved import bound")
+            << ' ' << (event.Kind == Kind::Called ? (event.ReturnValue ? "return" : "abort") : binding)
+            << " nid=" << import.Nid << " name=" << (event.Name ? *event.Name : "unknown")
+            << " library=" << import.LibraryName << " module=" << import.ModuleName << " consumer=" << event.Consumer;
+        if (event.Kind == Kind::Bound) std::cerr << " reason=" << event.Reason;
+        std::cerr << '\n';
+        return;
+    }
+    std::cerr << "{\"schema_version\":1,\"event\":" << Json(event.Kind == Kind::Called ? "unresolved_import_called" : "unresolved_import")
+        << ",\"consumer\":" << Json(event.Consumer) << ",\"module\":" << Json(import.ModuleName)
+        << ",\"library\":" << Json(import.LibraryName) << ",\"nid\":" << Json(import.Nid)
+        << ",\"name\":" << (event.Name ? Json(*event.Name) : "null");
+    if (event.Kind == Kind::Called) {
+        std::cerr << ",\"action\":" << Json(event.ReturnValue ? "return" : "abort");
+        if (event.ReturnValue) std::cerr << ",\"return_value\":" << *event.ReturnValue;
+    } else std::cerr << ",\"binding\":" << Json(binding) << ",\"reason\":" << Json(event.Reason);
+    std::cerr << "}\n";
+}
+
+std::uint64_t ImportReturnValue(std::string_view text) {
+    const bool hex = text.starts_with("0x") || text.starts_with("0X");
+    if (hex) text.remove_prefix(2);
+    std::uint64_t value = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value, hex ? 16 : 10);
+    if (text.empty() || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+        throw std::runtime_error("--unresolved-import-return requires a decimal or 0x-prefixed 64-bit value");
+    return value;
 }
 
 std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
@@ -233,7 +310,9 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}},
         {"libSceNpManager.prx", {"libSceNpManager", 0, 1, 1}, {{"libSceNpManager", 0, 1}}},
         {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
-        {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}}};
+        {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}},
+        {"libSceNpWebApi.prx", {"libSceNpWebApi", 0, 1, 1}, {{"libSceNpWebApi", 0, 1}}},
+        {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}}};
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
     if (native) native->AddHostModules(hosts);
 #endif
@@ -391,17 +470,26 @@ int main(int argc, char** argv) {
         bool inspect = false;
         std::filesystem::path resourceRoot;
         std::vector<std::filesystem::path> modulePaths;
+        bool strictImports = false;
+        std::optional<std::uint64_t> unresolvedImportReturn;
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
         std::optional<Cpu::NativeServiceConsumerProfile> publicNpIdentity, publicUriEscape;
 #endif
-        if (argc > 1 && std::string_view(argv[1]) == "--capabilities-json") {
-            if (argc != 2) throw std::runtime_error("--capabilities-json does not accept executable arguments");
-            Capabilities();
-            return 0;
-        }
+        bool capabilities = false;
+        RunLimits limits;
         while (argc > first) {
             const std::string_view option(argv[first]);
-            if (option == "--diagnostics-json") {
+            if (option == "--capabilities-json") {
+                if (capabilities) throw std::runtime_error("--capabilities-json may be supplied only once");
+                capabilities = true;
+                ++first;
+            } else if (option == "--max-instructions") {
+                ParseLimit(limits.MaxInstructions, argc, argv, first);
+                first += 2;
+            } else if (option == "--max-init-instructions") {
+                ParseLimit(limits.MaxInitInstructions, argc, argv, first);
+                first += 2;
+            } else if (option == "--diagnostics-json") {
                 diagnostics = true;
                 ++first;
             } else if (option == "--inspect-sce-json") {
@@ -413,9 +501,24 @@ int main(int argc, char** argv) {
                     throw std::runtime_error("--sce-module requires a module path");
                 modulePaths.emplace_back(argv[first + 1]);
                 first += 2;
+            } else if (option == "--strict-imports") {
+                strictImports = true;
+                ++first;
+            } else if (option == "--unresolved-import-return") {
+                if (argc <= first + 1 || std::string_view(argv[first + 1]).starts_with('-'))
+                    throw std::runtime_error("--unresolved-import-return requires a value");
+                if (unresolvedImportReturn) throw std::runtime_error("--unresolved-import-return may be supplied only once");
+                unresolvedImportReturn = ImportReturnValue(argv[first + 1]);
+                first += 2;
             }
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
-            else if (option == "--native-service-public-profile") {
+            else if (option == "--max-wall-ms" || option == "--max-idle-ms") {
+                // Limits are compared against steady_clock nanoseconds; larger values overflow there.
+                ParseLimit(option == "--max-wall-ms" ? limits.MaxWallMs : limits.MaxIdleMs, argc, argv, first,
+                           static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::duration::max()).count()));
+                first += 2;
+            } else if (option == "--native-service-public-profile") {
                 if (argc <= first + 3)
                     throw std::runtime_error("--native-service-public-profile requires np-identity|http-uri SHA256 SIZE");
                 const std::string_view service(argv[first + 1]);
@@ -435,15 +538,30 @@ int main(int argc, char** argv) {
                 first += 2;
             } else break;
         }
+        if (capabilities) {
+            if (argc != first || diagnostics || inspect || !modulePaths.empty() || !resourceRoot.empty()
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                || publicNpIdentity || publicUriEscape
+#endif
+                ) throw std::runtime_error("--capabilities-json accepts only run limit options");
+            Capabilities(limits);
+            return 0;
+        }
         if (argc <= first)
-            throw std::runtime_error("Usage: anyps5_cpu_run [--diagnostics-json] <x86-64.elf> [guest arguments...] or --inspect-sce-json <clean-sce.elf>");
+            throw std::runtime_error("Usage: anyps5_cpu_run [--diagnostics-json] [--max-instructions N] [--max-init-instructions N] <x86-64.elf> [guest arguments...] or --inspect-sce-json <clean-sce.elf>");
         if (std::string_view(argv[first]).starts_with('-'))
             throw std::runtime_error("Unsupported CLI option: " + std::string(argv[first]));
         executable = argv[first];
+        if (unresolvedImportReturn && (strictImports || inspect || modulePaths.empty()))
+            throw std::runtime_error("--unresolved-import-return requires a lazily linked --sce-module graph");
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
         if ((publicNpIdentity || publicUriEscape) && (inspect || modulePaths.empty()))
             throw std::runtime_error("Native service public profiles require a native SCE module graph");
+        if ((limits.MaxWallMs || limits.MaxIdleMs) && (inspect || modulePaths.empty()))
+            throw std::runtime_error("Native runner wall and idle limits require a native SCE module graph");
 #endif
+        if ((limits.MaxInstructions || limits.MaxInitInstructions) && inspect)
+            throw std::runtime_error("Run limits cannot be combined with --inspect-sce-json");
         if (inspect) {
             if (!modulePaths.empty()) throw std::runtime_error("--sce-module cannot be combined with --inspect-sce-json");
             if (argc != first + 1) throw std::runtime_error("--inspect-sce-json accepts exactly one executable");
@@ -466,6 +584,8 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
         std::unique_ptr<Cpu::SceNpLocalImports> npRuntime;
+        std::unique_ptr<Cpu::SceNpOfflineImports> npOfflineRuntime;
+        std::unique_ptr<Cpu::SceImportStubs> importStubs;
         std::unique_ptr<Cpu::SceNetAddressImports> netAddressRuntime;
         std::unique_ptr<Cpu::SceCommonDialogImports> commonDialogRuntime;
         std::unique_ptr<Cpu::SceModules> modules;
@@ -502,6 +622,8 @@ int main(int argc, char** argv) {
                     nativeConfig.EnableQualifiedServiceConsumers = true;
                     nativeConfig.PublicNpIdentity = publicNpIdentity;
                     nativeConfig.PublicUriEscape = publicUriEscape;
+                    nativeConfig.MaximumWallTime = std::chrono::milliseconds(limits.MaxWallMs.value_or(0));
+                    nativeConfig.MaximumIdleWait = std::chrono::milliseconds(limits.MaxIdleMs.value_or(0));
                     nativeRuntime = std::make_unique<Cpu::NativeModuleRunner>(machine, threadRuntime,
                         Cpu::SceImportConsumer{actualMain.Path, actualMain.SourceSize, actualMain.SourceSha256},
                         std::move(nativeConfig));
@@ -516,6 +638,7 @@ int main(int argc, char** argv) {
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine, sessionUserId);
+                npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
                 netAddressRuntime = std::make_unique<Cpu::SceNetAddressImports>(machine);
                 commonDialogRuntime = std::make_unique<Cpu::SceCommonDialogImports>(machine, 0x7ffdf2000000);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
@@ -526,6 +649,7 @@ int main(int argc, char** argv) {
                     if (const auto gate = lifecycleRuntime->Resolve(import)) return *gate;
                     if (const auto gate = memoryImports->Resolve(import)) return *gate;
                     if (const auto gate = commonDialogRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = npOfflineRuntime->Resolve(import)) return *gate;
                     if (const auto gate = npRuntime->Resolve(import)) return *gate;
                     if (const auto gate = netAddressRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
@@ -571,6 +695,14 @@ int main(int argc, char** argv) {
                     std::optional<Cpu::SceLibcInternalProvider> libcInternal;
                     for (const auto& file : files) if (file.Path.filename() == "libc.prx" && file.Crt)
                         libcInternal = Cpu::SceLibcInternalProvider{"libc.prx", file.Crt->SourceSha256, file.Crt->SourceSize};
+                    Cpu::SceLazyImports lazyImports;
+                    if (!strictImports) {
+                        importStubs = std::make_unique<Cpu::SceImportStubs>(machine, Cpu::SceImportStubOptions{
+                            unresolvedImportReturn, [diagnostics](const Cpu::SceImportStubEvent& event) {
+                                LogImportStub(event, diagnostics);
+                            }});
+                        lazyImports = importStubs->Policy();
+                    }
                     modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
                         Cpu::SceModuleResolver{}, libcInternal,
                         [&](const Cpu::SceImportConsumer& consumer, const auto& import,
@@ -596,7 +728,7 @@ int main(int argc, char** argv) {
                             if (size) return std::nullopt;
 #endif
                             return Cpu::SceResolvedImport{resolve(import), 2};
-                        });
+                        }, lazyImports);
                     kernelRuntime->SetTls(modules->Tls());
                     bootstrapRuntime->SetProcessParameters(modules->Main().ProcParam ? modules->Main().ProcParam->Address : 0,
                         modules->Main().ProcParam ? modules->Main().ProcParam->FileSize : 0);
@@ -610,7 +742,7 @@ int main(int argc, char** argv) {
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                     if (nativeRuntime) nativeRuntime->ActivateBeforeInitializers();
 #endif
-                    try { modules->InitializeDependencies(); }
+                    try { modules->InitializeDependencies(0, 0, 0, InstructionBudget(limits.MaxInitInstructions)); }
                     catch (const std::exception& error) { code = ExecutionCode(error.what()); throw; }
                     entry = modules->Main().Entry;
                 }
@@ -638,7 +770,9 @@ int main(int argc, char** argv) {
         }
         Cpu::StopReason reason;
         try {
-            reason = modules ? modules->RunMain() : machine.Run(entry, 0, 100000000);
+            const auto entryBudget = InstructionBudget(limits.MaxInstructions);
+            reason = modules ? modules->RunMain(entryBudget, InstructionBudget(limits.MaxInitInstructions))
+                             : machine.Run(entry, 0, entryBudget);
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
             if (nativeRuntime) nativeRuntime->Shutdown();
             else

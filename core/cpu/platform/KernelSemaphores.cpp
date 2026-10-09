@@ -270,19 +270,11 @@ void KernelSemaphores::Shutdown() {
     for (auto& [key, p] : impl->pending) p.wait->reserved = false;
     impl->pending.clear(); impl->semaphores.clear(); impl->live = false;
 }
-bool IsQualifiedKernelSemaphoreConsumer(KernelSemaphoreConsumer consumer) {
-    return consumer.Name == "eboot.bin" && consumer.Size == 102560655 &&
-        consumer.Sha256 == "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
-}
 TargetKernelSemaphores::TargetKernelSemaphores(Machine& m, const std::shared_ptr<GuestThreads>& threads)
     : provider(m, threads) {}
 std::optional<std::uint64_t> TargetKernelSemaphores::Resolve(const SceImport& import, std::uint8_t type,
-                                                         std::uint64_t size, KernelSemaphoreConsumer consumer) {
+                                                         std::uint64_t size) {
     if (operation(import) == inventory.size()) return std::nullopt;
-    // The exact #s#Y descriptor ids (44/24) are additional scope checks from
-    // the bounded relocation audit, not interchangeable global library ids.
-    if (!IsQualifiedKernelSemaphoreConsumer(consumer) || import.LibraryId != 44 || import.ModuleId != 24)
-        throw std::runtime_error("Unsupported target kernel semaphore consumer/import row");
     scope(import, type, size);
     return provider.Resolve(import, type, size);
 }

@@ -111,7 +111,8 @@ struct GuestThreads::Impl {
     bool driving = false;
     bool pumping = false;
     std::function<void(bool)> ownerBoundary;
-    std::chrono::milliseconds maximumIdleWait{0};
+    // Unset until SetOwnerBoundary; zero then means unlimited continuous idle.
+    std::optional<std::chrono::milliseconds> maximumIdleWait;
     bool gateMapped = false;
     Phase phase = Phase::None;
     std::optional<StopReason> terminal;
@@ -661,6 +662,9 @@ struct GuestThreads::Impl {
             throw;
         }
     }
+    bool idleExpired(std::chrono::steady_clock::duration consumed) const {
+        return maximumIdleWait && maximumIdleWait->count() > 0 && consumed >= *maximumIdleWait;
+    }
     StopReason drive(GuestPhaseBudget& budget) {
         std::chrono::steady_clock::duration idleConsumed{};
         for (;;) {
@@ -674,15 +678,15 @@ struct GuestThreads::Impl {
             if (const auto stopped = observeStop()) return cancel(*stopped);
             if (runnable.empty()) {
                 if (!externalWork) fail("guest wait/join graph has no runnable work and cannot make progress");
-                if (maximumIdleWait.count() <= 0)
-                    fail("asynchronous guest waits require a finite owner idle cancellation bound");
+                if (!maximumIdleWait)
+                    fail("asynchronous guest waits require an owner boundary idle policy");
                 // Do not park the AppKit owner on an unbounded host wait. The
                 // host boundary is serviced on every turn and RequestStop is
                 // observed before and after it. This backoff never charges or
                 // refreshes the cumulative guest instruction budget.
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 idleConsumed += std::chrono::steady_clock::now() - idleStart;
-                if (idleConsumed >= maximumIdleWait) {
+                if (idleExpired(idleConsumed)) {
                     machine.RequestStop();
                     return cancel(StopReason::Requested);
                 }
@@ -690,11 +694,13 @@ struct GuestThreads::Impl {
             }
             if (wasWaiting) {
                 idleConsumed += std::chrono::steady_clock::now() - idleStart;
-                if (maximumIdleWait.count() > 0 && idleConsumed >= maximumIdleWait) {
+                if (idleExpired(idleConsumed)) {
                     machine.RequestStop();
                     return cancel(StopReason::Requested);
                 }
             }
+            // Runnable guest work ends the idle stretch; the cap is per stretch.
+            idleConsumed = {};
             // Stable selection leaves equal-priority queue order intact while
             // ABI continuation front insertions cannot outrank donated owners.
             const auto selected = std::min_element(runnable.begin(), runnable.end(), [&](auto left, auto right) {
@@ -963,7 +969,7 @@ void GuestThreads::SetOwnerBoundary(std::function<void(bool)> callback,
                                     std::chrono::milliseconds maximumIdleWait) {
     impl->checkIdleOwner();
     if (impl->driving || impl->pumping) fail("cannot change a guest owner boundary during execution");
-    if (maximumIdleWait.count() <= 0) fail("guest owner idle cancellation bound must be positive");
+    if (maximumIdleWait.count() < 0) fail("guest owner idle cancellation bound must be non-negative");
     impl->ownerBoundary = std::move(callback);
     impl->maximumIdleWait = maximumIdleWait;
 }

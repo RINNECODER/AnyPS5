@@ -191,9 +191,9 @@ void run(const char* utility, const char* const* paths, bool shutdownCase) {
     auto finished = completion.done.get_future();
     const VideoOutCompletionCallbacks callbacks{&completion, clock, counter, completed};
     auto session = Cpu::SceNativeGraphicsSession::CreateMainThread(machine, configuration, callbacks,
-        {}, 0x7ffdfd000000ULL, Cpu::QualifiedVideoOutAdmissionsForImage(Image));
+        {}, 0x7ffdfd000000ULL, Cpu::TargetVideoOutAdmissions());
     Cpu::SceAgcImports imports(machine, Cpu::MakeNativeAgcBackend(session->Driver()),
-        Cpu::QualifiedAgcAdmissionsForImage(Image));
+        Cpu::TargetAgcAdmissions());
     const auto flip = imports.Resolve(identity(FlipNid), 2, 0);
     const auto wait = imports.Resolve(identity(WaitNid), 2, 0);
     const auto submit = imports.Resolve(identity(SubmitNid, true), 2, 0);

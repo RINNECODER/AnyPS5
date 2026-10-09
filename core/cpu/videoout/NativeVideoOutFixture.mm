@@ -205,7 +205,7 @@ void run(const char* utility,const char* const* callers) {
     auto session=Cpu::SceNativeGraphicsSession::CreateMainThread(machine,configuration,callbacks);
 #else
     auto session=Cpu::SceNativeGraphicsSession::CreateMainThread(machine,configuration,callbacks,{},0x7ffdfd000000,
-        Cpu::QualifiedVideoOutAdmissionsForImage("a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397"));
+        Cpu::TargetVideoOutAdmissions());
 #endif
     auto target=session->Window().Presentation(Width,Height);
     auto layer=(__bridge CAMetalLayer*)target.metalLayer(target.context);

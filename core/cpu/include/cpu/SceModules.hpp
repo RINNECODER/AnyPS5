@@ -3,11 +3,16 @@
 #include <cpu/SceElf.hpp>
 #include <array>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 
 namespace Cpu {
+
+// A budget no guest can exhaust (2^64 - 1 retired instructions). Game runs
+// pass it; the bounded parameter defaults below are for tests and diagnostics.
+inline constexpr std::uint64_t UnboundedInstructionBudget = std::numeric_limits<std::uint64_t>::max();
 
 // One budget is shared by every slice and guest call in an execution phase.
 class GuestPhaseBudget {
@@ -108,6 +113,25 @@ struct SceImportConsumer {
 using SceConsumerModuleResolver = std::function<std::optional<SceResolvedImport>(
     const SceImportConsumer&, const SceImport&, std::uint8_t, std::uint64_t)>;
 
+// An import that no guest module or host provider resolved at load.
+struct SceUnresolvedImport {
+    SceImportConsumer Consumer;
+    SceImport Import;
+    std::uint8_t Type = 0;
+    std::uint64_t Size = 0;
+    bool Weak = false;
+    std::string Reason;
+};
+
+// Opt-in lazy linking. Without Bind every import must resolve at load (strict).
+// With it, missing DT_NEEDED files and modules are tolerated, and each function or
+// object import that nothing provides binds through Bind. Weak imports must bind
+// to address 0; TLS imports stay strict.
+struct SceLazyImports {
+    std::function<SceResolvedImport(const SceUnresolvedImport&)> Bind;
+    std::function<void(const std::string& filename)> MissingModule;
+};
+
 // Opt-in source identity for the supplied guest libc. Only the fixed, ABI-qualified
 // Internal function allowlist can forward to its libc/library-v1 exports. Guest
 // allocator, callback/DSO, errno and exception ownership remains with the provider.
@@ -132,7 +156,8 @@ public:
                std::span<const SceHostModule> hostModules,
                const SceModuleResolver& resolver,
                const std::optional<SceLibcInternalProvider>& libcInternal = std::nullopt,
-               const SceConsumerModuleResolver& consumerResolver = {});
+               const SceConsumerModuleResolver& consumerResolver = {},
+               const SceLazyImports& lazyImports = {});
     ~SceModules();
     SceModules(const SceModules&) = delete;
     SceModules& operator=(const SceModules&) = delete;

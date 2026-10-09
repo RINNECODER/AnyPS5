@@ -8,6 +8,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 // Test-audit contract: actual SCE PLT mutex calls park/resume two GuestThreads with
 // exclusive ownership, exact guest errors and unchanged suspended-call ABI. Removal
@@ -175,39 +176,27 @@ void targetAdmission() {
     Cpu::Machine machine;
     auto threads = std::make_shared<Cpu::GuestThreads>(machine);
     Cpu::Platform::TargetKernelMutexes target(machine, threads);
-    using Consumer = Cpu::Platform::KernelMutexConsumer;
-    constexpr Consumer eboot{"eboot.bin", "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397"};
-    constexpr Consumer libc{"libc.prx", "78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f"};
-    constexpr Consumer web{"libSceNpCppWebApi.prx", "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9"};
     for (const auto& item : Cpu::Platform::KernelPrimitiveInventory()) {
         auto exact = scoped(item.Nid);
         exact.LibraryId = 44; exact.ModuleId = 24;
-        require(target.Resolve(exact, 2, eboot).has_value(), "Observed eboot mutex row rejected");
-        rejects([&] { target.Resolve(exact, 2, Consumer{"eboot.bin", "unverified"}); }, "consumer source/import row");
-        rejects([&] { target.Resolve(exact, 2, Consumer{"other.bin", eboot.Sha256}); }, "consumer source/import row");
-        for (const auto type : {0, 1, 6}) rejects([&] { target.Resolve(exact, type, eboot); }, "scope/version/type");
-        for (unsigned field = 0; field < 7; ++field) {
+        require(target.Resolve(exact, 2).has_value(), "Mutex row rejected");
+        // Import-table ids are per-image: any title, libc or module row is admitted.
+        for (const auto ids : {std::pair{0, 1}, std::pair{4, 5}, std::pair{7, 9}}) {
+            auto other = exact; other.LibraryId = ids.first; other.ModuleId = ids.second;
+            require(target.Resolve(other, 2).has_value(), "Another image's mutex import-table ids were refused");
+        }
+        for (const auto type : {0, 1, 6}) rejects([&] { target.Resolve(exact, type); }, "scope/version/type");
+        for (unsigned field = 0; field < 5; ++field) {
             auto wrong = exact;
             if (field == 0) wrong.ModuleName = "libc";
             if (field == 1) wrong.LibraryName = "libc";
             if (field == 2) wrong.LibraryVersion = 2;
             if (field == 3) wrong.ModuleMajor = 2;
             if (field == 4) wrong.ModuleMinor = 2;
-            if (field == 5) wrong.LibraryId = 1;
-            if (field == 6) wrong.ModuleId = 1;
-            rejects([&] { target.Resolve(wrong, 2, eboot); }, field < 5 ? "scope/version/type" : "consumer source/import row");
+            rejects([&] { target.Resolve(wrong, 2); }, "scope/version/type");
         }
-        auto libcRow = exact; libcRow.LibraryId = 0; libcRow.ModuleId = 1;
-        auto webRow = exact; webRow.LibraryId = 4; webRow.ModuleId = 5;
-        rejects([&] { target.Resolve(exact, 2, libc); }, "consumer source/import row");
-        rejects([&] { target.Resolve(exact, 2, web); }, "consumer source/import row");
-        if (item.Nid == "1FGvU0i9saQ") rejects([&] { target.Resolve(libcRow, 2, libc); }, "consumer source/import row");
-        else require(target.Resolve(libcRow, 2, libc).has_value(), "Observed libc mutex row rejected");
-        if (item.Nid == "upoVrzMHFeE" || item.Nid == "1FGvU0i9saQ")
-            rejects([&] { target.Resolve(webRow, 2, web); }, "consumer source/import row");
-        else require(target.Resolve(webRow, 2, web).has_value(), "Observed WebApi mutex row rejected");
     }
-    require(!target.Resolve(scoped("AAAAAAAAAAA"), 2, eboot), "Target mutex provider fabricated another family");
+    require(!target.Resolve(scoped("AAAAAAAAAAA"), 2), "Target mutex provider fabricated another family");
 }
 }
 int main(int argc, char** argv) {

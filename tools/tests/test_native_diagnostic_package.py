@@ -165,8 +165,8 @@ CAPABILITIES = {
         'enabled': True, 'owned_memory': 'live staged CPU/Metal publication',
         'provider_selection': 'actual parsed consumer SHA-256, size, scope and ELF symbol',
         'utility_metallib': '../fixtures/AnyPS5Utilities.metallib relative to engine',
-        'wall_limit_ms': 30000, 'idle_limit_ms': 5000,
-        'constraints': 'bounded diagnostic profile; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence',
+        'wall_limit_ms': 0, 'idle_limit_ms': 0,
+        'constraints': 'unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence',
     },
 }
 

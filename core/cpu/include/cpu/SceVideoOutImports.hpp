@@ -68,13 +68,13 @@ struct SceVideoOutBackend {
 };
 
 // A name or matching NID is not a target ABI qualification. The default is
-// empty; callers verify the source image before selecting this finite profile.
+// empty; the native runner selects this finite profile for every importing image.
 enum class VideoOutAbiContract { Open, Close, OutputStatus, RegisterBuffers, SetAttribute, FlipRate, Unregister };
 struct VideoOutAbiAdmission {
     VideoOutAbiContract Contract;
     std::string_view Evidence;
 };
-std::span<const VideoOutAbiAdmission> QualifiedVideoOutAdmissionsForImage(std::string_view verifiedSha256);
+std::span<const VideoOutAbiAdmission> TargetVideoOutAdmissions();
 
 class SceVideoOutImports {
 public:

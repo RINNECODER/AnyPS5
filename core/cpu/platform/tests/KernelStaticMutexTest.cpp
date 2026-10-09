@@ -34,7 +34,6 @@ struct Session {
  Cpu::SceThreadImports threadImports{machine,threads};
  Cpu::SceLifecycleImports lifecycle{machine};
  std::unique_ptr<Cpu::Platform::TargetKernelMutexes> mutexes;
- static constexpr Cpu::Platform::KernelMutexConsumer Consumer{"libc.prx","78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f"};
  std::unique_ptr<Cpu::SceModules> graph;
  std::uint64_t receiptAddress=0;
  std::set<std::uint64_t> gates;
@@ -52,10 +51,10 @@ struct Session {
    std::span<const Cpu::SceModuleFile>{},hosts,
    [&](const Cpu::SceImport& import,std::uint8_t type)->std::optional<Cpu::SceResolvedImport> {
     require(type==2,"Linked static mutex import lost mandatory function type");
-    if(const auto gate=mutexes->Resolve(import,type,Consumer)) {
+    if(const auto gate=mutexes->Resolve(import,type)) {
      gates.insert(*gate);return Cpu::SceResolvedImport{*gate,type};
     }
-    if(const auto gate=mutexes->ResolveCondition(import,type,0,Consumer)) {
+    if(const auto gate=mutexes->ResolveCondition(import,type,0)) {
      gates.insert(*gate);return Cpu::SceResolvedImport{*gate,type};
     }
     if(const auto gate=threadImports.Resolve(import,type)) return Cpu::SceResolvedImport{*gate,type};
@@ -149,7 +148,7 @@ void cancellation(const char* path) {
  const auto gates=session.gates;session.mutexes.reset();
  for(const auto gate:gates) rejects([&]{session.machine.CheckAccess(gate,1,Cpu::Permission::Execute);},"Guest access denied");
  session.mutexes=std::make_unique<Cpu::Platform::TargetKernelMutexes>(session.machine,session.threads);
- const auto gate=session.mutexes->Resolve(scoped("7H0iTOciTLo"),2,Session::Consumer);
+ const auto gate=session.mutexes->Resolve(scoped("7H0iTOciTLo"),2);
  require(gate && gates.contains(*gate),"Static cancellation did not reuse retired provider page");
  Cpu::GuestPhaseBudget retry(1000);
  require(session.threads->RunEntry(retry)==Cpu::StopReason::Requested && retry.Consumed()==0 && session.receipt()==before &&
@@ -160,26 +159,23 @@ void cancellation(const char* path) {
 void targetAdmission() {
  Cpu::Machine machine;auto threads=std::make_shared<Cpu::GuestThreads>(machine);
  Cpu::Platform::TargetKernelMutexes target(machine,threads);
- using Consumer=Cpu::Platform::KernelMutexConsumer;
  for(const auto nid:{"7H0iTOciTLo","2Z+PpY6CaJg"}) {
-  const auto row=scoped(nid);require(target.Resolve(row,2,Session::Consumer).has_value(),"Exact libc POSIX mutex row rejected");
-  for(const auto consumer:{Consumer{"libc.prx","unverified"},Consumer{"eboot.bin",Session::Consumer.Sha256},
-      Consumer{"libSceNpCppWebApi.prx",Session::Consumer.Sha256}})
-   rejects([&]{target.Resolve(row,2,consumer);},"consumer source/import row");
-  for(const auto type:{0,1,6}) rejects([&]{target.Resolve(row,type,Session::Consumer);},"scope/version/type");
-  for(unsigned field=0;field<7;++field) {
+  const auto row=scoped(nid);require(target.Resolve(row,2).has_value(),"POSIX mutex row rejected");
+  // Any importing image: other import-table ids and the libScePosix export.
+  auto other=row;other.LibraryId=43;other.ModuleId=24;other.LibraryName="libScePosix";
+  require(target.Resolve(other,2).has_value(),"Another image's POSIX mutex row was refused");
+  for(const auto type:{0,1,6}) rejects([&]{target.Resolve(row,type);},"scope/version/type");
+  for(unsigned field=0;field<5;++field) {
    auto wrong=row;
-   if(field==0) wrong.LibraryName="libScePosix";
+   if(field==0) wrong.LibraryName="libc";
    if(field==1) wrong.ModuleName="libc";
    if(field==2) wrong.LibraryVersion=2;
    if(field==3) wrong.ModuleMajor=2;
    if(field==4) wrong.ModuleMinor=2;
-   if(field==5) wrong.LibraryId=44;
-   if(field==6) wrong.ModuleId=24;
-   rejects([&]{target.Resolve(wrong,2,Session::Consumer);},field>0 && field<5 ? "scope/version/type" : "consumer source/import row");
+   rejects([&]{target.Resolve(wrong,2);},"scope/version/type");
   }
  }
- require(!target.Resolve(scoped("AAAAAAAAAAA"),2,Session::Consumer),"Unknown static mutex NID fabricated gate");
+ require(!target.Resolve(scoped("AAAAAAAAAAA"),2),"Unknown static mutex NID fabricated gate");
 }
 }
 int main(int argc,char** argv) {

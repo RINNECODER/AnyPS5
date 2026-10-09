@@ -2,6 +2,8 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <optional>
+#include <vector>
 
 // Test-audit: actual linked guest park/resume and independently authored byte
 // records detect no-wake, reset, width, lifetime and continuation regressions.
@@ -157,6 +159,57 @@ void memoryAndIdleBound(const char* file) {
     }
     std::cout<<"PASS unmapped initial/revoked deferred guest spans preserve outputs, finite diagnostic idle cap stays cancelable\n";
 }
+// A game idles briefly on every frame. The idle cap measures one continuous
+// idle stretch: two separate 80 ms waits add up to more than the 150 ms cap,
+// but neither stretch reaches it, so the guest must run to its normal exit.
+void continuousIdleBound(const char* file) {
+    using Clock=std::chrono::steady_clock;
+    constexpr auto stretch=std::chrono::milliseconds(80),cap=std::chrono::milliseconds(150);
+    Session s(file,2);unsigned stage=0;auto publish=s.queues->EopPublisher();
+    std::optional<Clock::time_point> since;std::vector<Clock::duration> stretches;
+    s.threads->SetOwnerBoundary([&](bool waiting){
+        s.threads->CheckIdleOwner();
+        const auto now=Clock::now();
+        if(!waiting){since.reset();return;}
+        if(!since)since=now;
+        if(now-*since<stretch)return;
+        const auto r=s.state();
+        if(r[3]==1 && stage==0) {
+            require(s.queues->AddGraphicsEvent(r[2],0x20,User)==0 &&
+                    s.queues->AddGraphicsEvent(r[2],0,~User)==0 &&
+                    s.queues->AddGraphicsEvent(r[2],0x21,0x8877665544332211ULL)==0,
+                    "Idle-stretch subscriptions rejected");
+            publish(0x20);publish(0x20);publish(0x20);publish(0);publish(0);publish(0x21);
+            require(s.queues->AddGraphicsEvent(r[2],0x20,User+1)==0,"Idle-stretch duplicate Add rejected");
+        } else if(r[3]==2 && stage==1) publish(0x20);
+        else return;
+        ++stage;stretches.push_back(now-*since);since.reset();
+    },cap);
+    s.finish(false,"Separate short idle stretches were cancelled as one cumulative idle budget");
+    const auto r=s.state();
+    require(stage==2 && stretches.size()==2 && r[24]==2 && r[26]==1 && r[30]==1,
+            "Idle-stretch guest did not consume both delayed event batches");
+    require(stretches[0]>=stretch && stretches[1]>=stretch && stretches[0]<cap && stretches[1]<cap &&
+            stretches[0]+stretches[1]>=cap,"Idle stretches did not exceed the cap only in total");
+    std::cout<<"PASS idle cap resets on guest progress: two 80 ms waits under a 150 ms continuous idle cap\n";
+}
+// Zero disables idle cancellation. Only the host boundary's own stop ends a
+// guest that waits forever, long after any small idle cap would have fired.
+void unlimitedIdle(const char* file) {
+    using Clock=std::chrono::steady_clock;
+    Session s(file,13);const auto before=s.page;bool stopped=false;
+    std::optional<Clock::time_point> since;
+    s.threads->SetOwnerBoundary([&](bool waiting){
+        s.threads->CheckIdleOwner();
+        if(!waiting){since.reset();return;}
+        if(!since)since=Clock::now();
+        if(!stopped && Clock::now()-*since>=std::chrono::milliseconds(200)){stopped=true;s.machine.RequestStop();}
+    },std::chrono::milliseconds(0));
+    require(s.graph->RunMain(1000000,10000)==Cpu::StopReason::Requested && stopped,
+            "Unlimited idle owner stopped before its host boundary requested it");
+    require(s.page==before && s.state()[5]==0,"Unlimited idle owner stop wrote outputs or resumed the waiter");
+    std::cout<<"PASS zero idle cap is unlimited: only the host boundary stop ends an indefinite wait\n";
+}
 void timeouts(const char* file) {
     Session s(file,1); const auto begin=std::chrono::steady_clock::now();s.finish();
     const auto elapsed=std::chrono::steady_clock::now()-begin;const auto r=s.state();
@@ -230,35 +283,33 @@ void cancellation(const char* file,unsigned mode) {
 }
 void admission() {
     Cpu::Machine m;auto t=std::make_shared<Cpu::GuestThreads>(m);
-    constexpr Cpu::Platform::KernelEventConsumer eboot{"eboot.bin","a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397"};
     {
         Cpu::Platform::TargetKernelEvents target(m,t);
         for(auto nid:{"D0OdFMjp46I","jpFjmgAC5AE","fzyMKs9kim0"}) {
             auto row=scoped(nid);row.LibraryId=44;row.ModuleId=24;
-            rejects([&]{target.Resolve(row,2,0,eboot);},"not selected");
+            rejects([&]{target.Resolve(row,2,0);},"not selected");
         }
     }
-    const auto selected=Cpu::Platform::QualifiedKernelEventAdmissionsForImage(eboot.Sha256);
-    require(selected.size()==3 && Cpu::Platform::QualifiedKernelEventAdmissionsForImage("unknown").empty(),"Source-bound event selection widened");
+    const auto selected=Cpu::Platform::TargetKernelEventAdmissions();
+    require(selected.size()==3,"Title-agnostic event selection changed");
     {
     Cpu::Platform::TargetKernelEvents target(m,t,selected);
     for(auto nid:{"D0OdFMjp46I","jpFjmgAC5AE","fzyMKs9kim0"}) {
         auto row=scoped(nid);row.LibraryId=44;row.ModuleId=24;
-        require(target.Resolve(row,2,0,eboot).has_value(),"Source-bound exact target event rejected");
-        rejects([&]{target.Resolve(row,2,0,{"eboot.bin","unknown"});},"consumer/import row");
-        rejects([&]{target.Resolve(row,2,0,{"other.bin",eboot.Sha256});},"consumer/import row");
-        for(unsigned field=0;field<8;++field) {
+        require(target.Resolve(row,2,0).has_value(),"Selected target event rejected");
+        // Import-table ids are per-image; another title's ids are admitted.
+        auto other=row;other.LibraryId=3;other.ModuleId=5;
+        require(target.Resolve(other,2,0).has_value(),"Another image's event import-table ids were refused");
+        for(unsigned field=0;field<6;++field) {
             auto wrong=row;
             if(field==0)wrong.LibraryName="libc";
             if(field==1)wrong.ModuleName="libc";
             if(field==2)wrong.LibraryVersion=2;
             if(field==3)wrong.ModuleMajor=2;
             if(field==4)wrong.ModuleMinor=2;
-            if(field==5)wrong.LibraryId=0;
-            if(field==6)wrong.ModuleId=1;
-            rejects([&]{target.Resolve(wrong,field==7?1:2,0,eboot);},field==5||field==6?"consumer/import row":"scope/version/type/size");
+            rejects([&]{target.Resolve(wrong,field==5?1:2,0);},"scope/version/type/size");
         }
-        rejects([&]{target.Resolve(row,2,8,eboot);},"scope/version/type/size");
+        rejects([&]{target.Resolve(row,2,8);},"scope/version/type/size");
     }
     target.Provider().Shutdown();t->Withdraw();
     }
@@ -268,7 +319,7 @@ void admission() {
         auto provider=std::make_unique<Cpu::Platform::KernelEvents>(m,scheduler);
         const auto retained=provider->EopPublisher();scheduler.reset();provider.reset();retained(0x20);
     }
-    std::cout<<"PASS default denied, source-bound exact three-route profile, identity/type/size/domain/owner rejection and expired scheduler shutdown\n";
+    std::cout<<"PASS default denied, title-agnostic three-route profile, scope/type/size/domain/owner rejection and expired scheduler shutdown\n";
 }
 }
 int main(int argc,char** argv) {
@@ -278,7 +329,7 @@ int main(int argc,char** argv) {
         if(argc==3){if(std::string(argv[2])=="--queued-delete")queuedDelete(argv[1]);else reservedSubscriptionDelete(argv[1]);return 0;}
         asynchronous(argv[1]);timeouts(argv[1]);capacity(argv[1]);deletedWait(argv[1]);queuedDelete(argv[1]);reservedSubscriptionDelete(argv[1]);subscriptionRace(argv[1]);
         for(unsigned mode:{3U,4U,5U,6U})cancellation(argv[1],mode);
-        memoryAndIdleBound(argv[1]);
+        memoryAndIdleBound(argv[1]);continuousIdleBound(argv[1]);unlimitedIdle(argv[1]);
         admission();
     } catch(const std::exception& error){std::cerr<<"FAIL "<<error.what()<<'\n';return 1;}
 }
