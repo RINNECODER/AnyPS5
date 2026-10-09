@@ -30,7 +30,7 @@ public:
             return _config->failure || _config->closing || !_config->opened ||
                 _config->bufferReuse[_index].IsComplete(_ticket);
         });
-        checkConfig(*_config);
+        _config->CheckAlive();
     }
 };
 
