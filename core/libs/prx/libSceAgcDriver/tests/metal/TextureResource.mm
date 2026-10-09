@@ -288,6 +288,33 @@ void VerifyThick(const MetalTests::Context& context, id<MTLLibrary> probes) {
     Require(readback==guest,"thick 3D texture readback changes guest pixel locations");
 }
 
+void VerifyDisplaySwizzle(const MetalTests::Context& context, id<MTLLibrary> probes) {
+    // SW_256B_D at one byte per element addresses X0 X1 X2 Y1 Y0 Y2 X3 Y3 (AddrLib GFX10), unlike SW_256B_S's
+    // X0 X1 X2 X3 Y0 Y1 Y2 Y3, so these golden offsets fail if the D surface is detiled as S.
+    auto descriptor = Descriptor(TextureDimension::k2D,TextureTileMode::kD256B);
+    descriptor.format = 1;
+    descriptor.width = descriptor.height = 16;
+    descriptor.mipCount = descriptor.allocatedMipCount = 1;
+    descriptor.lastLevel = 0;
+    AgcDriver::Metal::MetalDevice backend(context.device,context.library);
+    MetalTexture texture(backend,descriptor);
+    Require(texture.GuestBytes() == 256,"SW_256B_D 16x16 R8 surface is not one 256-byte block");
+    std::vector<std::byte> guest(256,std::byte{0});
+    struct Point { unsigned x,y,address; };
+    constexpr Point points[]{{1,0,0x01},{0,1,0x10},{0,2,0x08},{8,0,0x40},{4,4,0x24},{3,9,0x93},{6,10,0x8e},{15,15,0xff}};
+    for (unsigned i = 0; i < std::size(points); ++i) guest[points[i].address] = std::byte(40 + 23 * i);
+    texture.Upload(guest);
+    auto output = Probe(context,probes,texture.Texture(),TextureDimension::k2D,0);
+    const auto* bytes = static_cast<const std::uint8_t*>(output.contents);
+    for (unsigned i = 0; i < std::size(points); ++i) {
+        const auto* actual = bytes + (points[i].y * 16 + points[i].x) * 4;
+        Require(actual[0] == 40 + 23 * i && actual[1] == 0 && actual[2] == 0 && actual[3] == 255,"SW_256B_D texture loses independent golden display-swizzle pixels");
+    }
+    std::vector<std::byte> readback(256,std::byte{0xa7});
+    texture.Readback(readback);
+    Require(readback == guest,"SW_256B_D texture readback changes guest pixel locations");
+}
+
 float Srgb(float value) {
     return value <= 0.04045f ? value / 12.92f : std::pow((value + 0.055f) / 1.055f,2.4f);
 }
@@ -488,6 +515,7 @@ void RunTextureResourceTests(const MetalTests::Context& context) {
     VerifyArrayView(context,probes);
     VerifyDecodedDescriptor(context,probes);
     VerifyThick(context,probes);
+    VerifyDisplaySwizzle(context,probes);
     for (unsigned format=169; format<=182; ++format) VerifyCompressed(context,probes,format);
     VerifyCompressed(context,probes,169,TextureDimension::k1D);
     VerifyPacked(context,probes);
