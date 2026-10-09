@@ -23,6 +23,9 @@ env:
   CMAKE_COMMON: >-
     -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=arm64
   CTEST_ARGS: --output-on-failure --timeout 300
+  # Test windows on the shared Mac: no Dock icon, no focus steal, parked in a screen corner.
+  # Tests that verify real AppKit focus still activate, serialized machine-wide.
+  ANYPS5_UNOBTRUSIVE_WINDOWS: "1"
 
 defaults:
   run:
