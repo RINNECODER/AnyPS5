@@ -234,6 +234,12 @@ constexpr MemoryOpcodeInfo dsOpcodes[] = {
     {0x11u, RdnaOpcode::DsCmpstF32, 1, 32, false, false, false},
     {0x14u, RdnaOpcode::DsNop, 1, 32, false, false, false},
     {0x15u, RdnaOpcode::DsAddF32, 1, 32, false, false, false},
+    {0x18u, RdnaOpcode::DsGwsSemaReleaseAll, 1, 32, false, false, false},
+    {0x19u, RdnaOpcode::DsGwsInit, 1, 32, false, false, false},
+    {0x1au, RdnaOpcode::DsGwsSemaV, 1, 32, false, false, false},
+    {0x1bu, RdnaOpcode::DsGwsSemaBr, 1, 32, false, false, false},
+    {0x1cu, RdnaOpcode::DsGwsSemaP, 1, 32, false, false, false},
+    {0x1du, RdnaOpcode::DsGwsBarrier, 1, 32, false, false, false},
     {0x22u, RdnaOpcode::DsRsubRtnU32, 1, 32, false, false, false},
     {0x2cu, RdnaOpcode::DsMskorRtnB32, 1, 32, false, false, false},
     {0x30u, RdnaOpcode::DsCmpstRtnB32, 1, 32, false, false, false},
@@ -277,6 +283,22 @@ constexpr MemoryOpcodeInfo dsOpcodes[] = {
     {0x71u, RdnaOpcode::DsCmpstRtnF64, 2, 32, false, false, false},
     {0x72u, RdnaOpcode::DsMinRtnF64, 2, 32, false, false, false},
     {0x73u, RdnaOpcode::DsMaxRtnF64, 2, 32, false, false, false},
+    {0x80u, RdnaOpcode::DsAddSrc2U32, 1, 32, false, false, false},
+    {0x81u, RdnaOpcode::DsSubSrc2U32, 1, 32, false, false, false},
+    {0x82u, RdnaOpcode::DsRsubSrc2U32, 1, 32, false, false, false},
+    {0x83u, RdnaOpcode::DsIncSrc2U32, 1, 32, false, false, false},
+    {0x84u, RdnaOpcode::DsDecSrc2U32, 1, 32, false, false, false},
+    {0x85u, RdnaOpcode::DsMinSrc2I32, 1, 32, false, false, false},
+    {0x86u, RdnaOpcode::DsMaxSrc2I32, 1, 32, false, false, false},
+    {0x87u, RdnaOpcode::DsMinSrc2U32, 1, 32, false, false, false},
+    {0x88u, RdnaOpcode::DsMaxSrc2U32, 1, 32, false, false, false},
+    {0x89u, RdnaOpcode::DsAndSrc2B32, 1, 32, false, false, false},
+    {0x8au, RdnaOpcode::DsOrSrc2B32, 1, 32, false, false, false},
+    {0x8bu, RdnaOpcode::DsXorSrc2B32, 1, 32, false, false, false},
+    {0x8du, RdnaOpcode::DsWriteSrc2B32, 1, 32, false, false, false},
+    {0x92u, RdnaOpcode::DsMinSrc2F32, 1, 32, false, false, false},
+    {0x93u, RdnaOpcode::DsMaxSrc2F32, 1, 32, false, false, false},
+    {0x95u, RdnaOpcode::DsAddSrc2F32, 1, 32, false, false, false},
     {0x01u, RdnaOpcode::DsSubU32, 1, 32, false, false, false},
     {0x05u, RdnaOpcode::DsMinI32, 1, 32, false, false, false},
     {0x06u, RdnaOpcode::DsMaxI32, 1, 32, false, false, false},
@@ -304,6 +326,8 @@ constexpr MemoryOpcodeInfo dsOpcodes[] = {
     {0x2au, RdnaOpcode::DsOrRtnB32, 1, 32, false, false, false},
     {0x2bu, RdnaOpcode::DsXorRtnB32, 1, 32, false, false, false},
     {0x2du, RdnaOpcode::DsWrxchgRtnB32, 1, 32, false, false, false},
+    {0x2eu, RdnaOpcode::DsWrxchg2RtnB32, 2, 32, false, false, false},
+    {0x2fu, RdnaOpcode::DsWrxchg2st64RtnB32, 2, 32, false, false, false},
     {0x35u, RdnaOpcode::DsSwizzleB32, 1, 32, false, false, false},
     {0x36u, RdnaOpcode::DsReadB32, 1, 32, false, false, false},
     {0x37u, RdnaOpcode::DsRead2B32, 2, 32, false, false, false},
@@ -314,12 +338,16 @@ constexpr MemoryOpcodeInfo dsOpcodes[] = {
     {0x3cu, RdnaOpcode::DsReadU16, 1, 16, false, false, false},
     {0x3du, RdnaOpcode::DsConsume, 1, 32, false, false, false},
     {0x3eu, RdnaOpcode::DsAppend, 1, 32, false, false, false},
+    {0x3fu, RdnaOpcode::DsOrderedCount, 1, 32, false, false, false},
     {0x4du, RdnaOpcode::DsWriteB64, 2, 32, false, false, false},
     {0x4eu, RdnaOpcode::DsWrite2B64, 4, 32, false, false, false},
     {0x4fu, RdnaOpcode::DsWrite2st64B64, 4, 32, false, false, false},
+    {0x6eu, RdnaOpcode::DsWrxchg2RtnB64, 4, 32, false, false, false},
+    {0x6fu, RdnaOpcode::DsWrxchg2st64RtnB64, 4, 32, false, false, false},
     {0x76u, RdnaOpcode::DsReadB64, 2, 32, false, false, false},
     {0x77u, RdnaOpcode::DsRead2B64, 4, 32, false, false, false},
     {0x78u, RdnaOpcode::DsRead2st64B64, 4, 32, false, false, false},
+    {0x7eu, RdnaOpcode::DsCondxchg32RtnB64, 2, 32, false, false, false},
     {0xa0u, RdnaOpcode::DsWriteB8D16Hi, 1, 8, false, false, false},
     {0xa1u, RdnaOpcode::DsWriteB16D16Hi, 1, 16, false, false, false},
     {0xa2u, RdnaOpcode::DsReadU8D16, 1, 8, false, false, false},
@@ -464,6 +492,18 @@ bool isDsWriteOpcode(RdnaOpcode opcode) {
     }
 }
 
+bool isDsGwsOpcode(RdnaOpcode opcode) {
+    switch (opcode) {
+        case RdnaOpcode::DsGwsInit:
+        case RdnaOpcode::DsGwsSemaV:
+        case RdnaOpcode::DsGwsSemaBr:
+        case RdnaOpcode::DsGwsSemaP:
+        case RdnaOpcode::DsGwsSemaReleaseAll:
+        case RdnaOpcode::DsGwsBarrier: return true;
+        default: return false;
+    }
+}
+
 bool isDsAtomicOpcode(RdnaOpcode opcode) {
     switch (opcode) {
         case RdnaOpcode::DsAddU32:
@@ -522,6 +562,7 @@ bool isDsAtomicOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::DsOrRtnB64:
         case RdnaOpcode::DsXorRtnB64:
         case RdnaOpcode::DsWrxchgRtnB64:
+        case RdnaOpcode::DsCondxchg32RtnB64:
         case RdnaOpcode::DsMinRtnF64:
         case RdnaOpcode::DsMaxRtnF64:
             return true;
@@ -529,8 +570,35 @@ bool isDsAtomicOpcode(RdnaOpcode opcode) {
     }
 }
 
+bool isDsSrc2Opcode(RdnaOpcode opcode) {
+    switch (opcode) {
+        case RdnaOpcode::DsAddSrc2U32:
+        case RdnaOpcode::DsSubSrc2U32:
+        case RdnaOpcode::DsRsubSrc2U32:
+        case RdnaOpcode::DsIncSrc2U32:
+        case RdnaOpcode::DsDecSrc2U32:
+        case RdnaOpcode::DsMinSrc2I32:
+        case RdnaOpcode::DsMaxSrc2I32:
+        case RdnaOpcode::DsMinSrc2U32:
+        case RdnaOpcode::DsMaxSrc2U32:
+        case RdnaOpcode::DsAndSrc2B32:
+        case RdnaOpcode::DsOrSrc2B32:
+        case RdnaOpcode::DsXorSrc2B32:
+        case RdnaOpcode::DsWriteSrc2B32:
+        case RdnaOpcode::DsMinSrc2F32:
+        case RdnaOpcode::DsMaxSrc2F32:
+        case RdnaOpcode::DsAddSrc2F32:
+            return true;
+        default: return false;
+    }
+}
+
 std::uint32_t dsSourceCount(RdnaOpcode opcode) {
     switch (opcode) {
+        case RdnaOpcode::DsWrxchg2RtnB32:
+        case RdnaOpcode::DsWrxchg2st64RtnB32:
+        case RdnaOpcode::DsWrxchg2RtnB64:
+        case RdnaOpcode::DsWrxchg2st64RtnB64:
         case RdnaOpcode::DsWrite2B32:
         case RdnaOpcode::DsWrite2st64B32:
         case RdnaOpcode::DsWrite2B64:
@@ -555,7 +623,10 @@ std::uint32_t dsSourceCount(RdnaOpcode opcode) {
         case RdnaOpcode::DsBpermuteB32: return 2u;
         case RdnaOpcode::DsReadAddtidB32:
         case RdnaOpcode::DsConsume:
-        case RdnaOpcode::DsAppend: return 0u;
+        case RdnaOpcode::DsAppend:
+        case RdnaOpcode::DsGwsSemaV:
+        case RdnaOpcode::DsGwsSemaP:
+        case RdnaOpcode::DsGwsSemaReleaseAll: return 0u;
         default: return isDsWriteOpcode(opcode) || isDsAtomicOpcode(opcode) ? 2u : 1u;
     }
 }
@@ -899,8 +970,24 @@ RdnaInstruction DecodeRdnaDs(std::uint32_t programCounter, std::span<const std::
     if (gds && (info.opcode == RdnaOpcode::DsSwizzleB32 || info.opcode == RdnaOpcode::DsBpermuteB32 || info.opcode == RdnaOpcode::DsPermuteB32 || info.opcode == RdnaOpcode::DsWriteAddtidB32 || info.opcode == RdnaOpcode::DsReadAddtidB32)) {
         throw std::runtime_error("DS lane operation is available only for LDS");
     }
+    if (info.opcode == RdnaOpcode::DsWrxchg2RtnB32 || info.opcode == RdnaOpcode::DsWrxchg2st64RtnB32 || info.opcode == RdnaOpcode::DsWrxchg2RtnB64 || info.opcode == RdnaOpcode::DsWrxchg2st64RtnB64) {
+        if (offset0 == offset1) {
+            throw std::runtime_error("DS write exchange of one location through both offsets is not supported");
+        }
+        if (vdst + info.dataDwords > 256u) {
+            throw std::runtime_error("DS write exchange destination register range overflow");
+        }
+    }
     if (info.opcode == RdnaOpcode::DsWriteAddtidB32 && data1 != 0u) {
         throw std::runtime_error("DS write addtid data1 operand is not supported");
+    }
+    if (info.opcode == RdnaOpcode::DsCondxchg32RtnB64) {
+        if (data0 + 2u > 256u) {
+            throw std::runtime_error("DS conditional exchange source register range overflow");
+        }
+        if (vdst + 2u > 256u) {
+            throw std::runtime_error("DS conditional exchange destination register range overflow");
+        }
     }
     if (info.opcode == RdnaOpcode::DsReadAddtidB32 && (data0 != 0u || data1 != 0u)) {
         throw std::runtime_error("DS read addtid data operands are not supported");
@@ -915,18 +1002,24 @@ RdnaInstruction DecodeRdnaDs(std::uint32_t programCounter, std::span<const std::
     applyMemoryInfo(instruction, info);
     setRawWords(instruction, code, wordIndex, 2u);
 
-    if (instruction.op == RdnaOpcode::DsWrite2B32 || instruction.op == RdnaOpcode::DsRead2B32) {
+    if (instruction.op == RdnaOpcode::DsWrite2B32 || instruction.op == RdnaOpcode::DsRead2B32 || instruction.op == RdnaOpcode::DsWrxchg2RtnB32) {
         instruction.memoryOffset = offset0 * 4u;
         instruction.secondaryOffset = offset1 * 4u;
-    } else if (instruction.op == RdnaOpcode::DsWrite2st64B32 || instruction.op == RdnaOpcode::DsRead2st64B32) {
+    } else if (instruction.op == RdnaOpcode::DsWrite2st64B32 || instruction.op == RdnaOpcode::DsRead2st64B32 || instruction.op == RdnaOpcode::DsWrxchg2st64RtnB32) {
         instruction.memoryOffset = offset0 * 256u;
         instruction.secondaryOffset = offset1 * 256u;
-    } else if (instruction.op == RdnaOpcode::DsWrite2B64 || instruction.op == RdnaOpcode::DsRead2B64) {
+    } else if (instruction.op == RdnaOpcode::DsWrite2B64 || instruction.op == RdnaOpcode::DsRead2B64 || instruction.op == RdnaOpcode::DsWrxchg2RtnB64) {
         instruction.memoryOffset = offset0 * 8u;
         instruction.secondaryOffset = offset1 * 8u;
-    } else if (instruction.op == RdnaOpcode::DsWrite2st64B64 || instruction.op == RdnaOpcode::DsRead2st64B64) {
+    } else if (instruction.op == RdnaOpcode::DsWrite2st64B64 || instruction.op == RdnaOpcode::DsRead2st64B64 || instruction.op == RdnaOpcode::DsWrxchg2st64RtnB64) {
         instruction.memoryOffset = offset0 * 512u;
         instruction.secondaryOffset = offset1 * 512u;
+    } else if (isDsSrc2Opcode(instruction.op)) {
+        if ((offset1 & 0x80u) != 0u) {
+            throw std::runtime_error("DS src2 operation with the offset taken from the address is not supported");
+        }
+        instruction.memoryOffset = 0u;
+        instruction.secondaryOffset = signExtend(combinedOffset & 0x7fffu, 15u) * 4u;
     }
 
     instruction.destination = d16Half(vectorRegister(vdst), instruction.op);
@@ -934,6 +1027,9 @@ RdnaInstruction DecodeRdnaDs(std::uint32_t programCounter, std::span<const std::
     instruction.source1 = isDsWriteOpcode(instruction.op) ? d16Half(vectorRegister(data0), instruction.op) : vectorRegister(data0);
     instruction.source2 = vectorRegister(data1);
     instruction.sourceCount = dsSourceCount(instruction.op);
+    if (isDsGwsOpcode(instruction.op)) {
+        instruction.destination.kind = RdnaOperandKind::None;
+    }
     return instruction;
 }
 

@@ -31,6 +31,8 @@ std::vector<std::byte> ReadDisplayBuffer(const DisplayBuffer& buffer);
 std::vector<std::byte> DecodeDisplayBufferPqHdr(const DisplayBuffer& buffer, std::span<const std::byte> source);
 std::vector<std::byte> ReadDisplayBufferPqHdr(const DisplayBuffer& buffer);
 std::array<std::byte, 4> DisplayBufferClearPixel(const DisplayBuffer& buffer, Graphics::DccKeys keys);
+std::size_t DisplayBufferKeyBytes(const DisplayBuffer& buffer);
+Graphics::DccKeys DisplayBufferKeys(const DisplayBuffer& buffer);
 
 }
 

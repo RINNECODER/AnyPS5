@@ -24,7 +24,7 @@ using Row = std::array<std::uint32_t, 4>;
 void Require(bool value, const std::string& message) { if (!value) throw std::runtime_error(message); }
 std::string Hex(std::uint32_t value) { char text[16]; std::snprintf(text, sizeof(text), "0x%08x", value); return text; }
 std::array<std::uint32_t, 4> Descriptor(std::uint32_t address, std::uint32_t bytes) {
-    return {address, 0, bytes, 0x01016facu};
+    return {address, 0, bytes, 0x31016facu};
 }
 MetalBackend::Result Compile(id<MTLDevice> device, std::span<const std::uint32_t> code,
                              std::span<const std::uint32_t> data, std::uint32_t lds = 0) {

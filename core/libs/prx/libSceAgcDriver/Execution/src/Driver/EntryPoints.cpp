@@ -3,6 +3,7 @@
 #else
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #endif
+#include <mutex>
 
 namespace {
 #if defined(ANYPS5_METAL_BACKEND)
@@ -77,6 +78,19 @@ extern "C" void AgcDriverWaitIdle_nid_postfix() {
     InvokeEntry([&] { AgcDriver::WaitIdle(); });
 }
 
+static std::mutex& VulkanLoaderMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+extern "C" void AgcDriverLockVulkanLoader_nid_postfix() {
+    VulkanLoaderMutex().lock();
+}
+
+extern "C" void AgcDriverUnlockVulkanLoader_nid_postfix() {
+    VulkanLoaderMutex().unlock();
+}
+
 extern "C" void AgcDriverShutdown_nid_postfix() {
     AgcDriver::Shutdown();
 }
@@ -111,4 +125,37 @@ extern "C" void AgcDriverReleaseWindow_nid_postfix(void* window) {
 
 extern "C" void AgcDriverReportFailure_nid_postfix(std::exception_ptr error) {
     AgcDriver::ReportFailure(error);
+}
+
+// Ahead-of-time shader artifact preparation. The Vulkan driver resolves and
+// caches prepared pipelines here; the Metal backend compiles its pipelines when
+// a draw or dispatch first uses them, so the exports only need to exist there.
+extern "C" void AgcDriverResolveShaderAbi_nid_postfix(const Shader* shader, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive) {
+#if defined(ANYPS5_METAL_BACKEND)
+    static_cast<void>(shader);
+    static_cast<void>(context);
+    static_cast<void>(primitive);
+#else
+    AgcDriver::DriverDetail::Driver::Get().ResolveShaderAbi(shader, context, primitive);
+#endif
+}
+
+extern "C" void AgcDriverResolveGraphicsAbi_nid_postfix(const Shader* vertex, const Shader* pixel, std::uint32_t primitiveType) {
+#if defined(ANYPS5_METAL_BACKEND)
+    static_cast<void>(vertex);
+    static_cast<void>(pixel);
+    static_cast<void>(primitiveType);
+#else
+    AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsAbi(vertex, pixel, primitiveType);
+#endif
+}
+
+extern "C" void AgcDriverResolveGraphicsStagesAbi_nid_postfix(std::span<const Shader* const> stages, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive) {
+#if defined(ANYPS5_METAL_BACKEND)
+    static_cast<void>(stages);
+    static_cast<void>(context);
+    static_cast<void>(primitive);
+#else
+    AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsStagesAbi(stages, context, primitive);
+#endif
 }

@@ -75,17 +75,24 @@ void checkGpuFault(const BdaAbi::Fault& fault) {
 
 void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
     if (backend == nullptr || submission.shaders == nullptr) throw std::runtime_error("Native Metal compute executor is not configured");
-    const auto decoded = DecodeComputeDispatch(queue, packet);
-    if (std::any_of(decoded.groups.begin(), decoded.groups.end(), [](auto value) { return value == 0; })) return;
+    // Find the registered shader first so the dispatch decodes against its AGC header, as the Vulkan
+    // Driver::dispatch does (SCRATCH_EN takes its per-lane size from the header).
+    const auto programAddress = DecodeComputeProgramAddress(queue.shader);
     std::shared_ptr<const DriverDetail::ShaderSnapshot> captured;
-    auto position = submission.shaders->upper_bound(decoded.programAddress);
+    auto position = submission.shaders->upper_bound(programAddress);
     if (position != submission.shaders->begin()) {
         --position;
         const auto& candidate = position->second;
-        if (decoded.programAddress >= candidate->codeAddress &&
-            decoded.programAddress - candidate->codeAddress < candidate->code.size() * sizeof(std::uint32_t)) {
+        if (programAddress >= candidate->codeAddress &&
+            programAddress - candidate->codeAddress < candidate->code.size() * sizeof(std::uint32_t)) {
             captured = candidate;
         }
+    }
+    const auto decoded = DecodeComputeDispatch(queue, packet,
+        captured != nullptr ? std::span<const std::byte>(captured->header) : std::span<const std::byte>{});
+    if (std::any_of(decoded.groups.begin(), decoded.groups.end(), [](auto value) { return value == 0; })) return;
+    if (decoded.compute.scratchDwords != 0) {
+        throw std::runtime_error("Native Metal compute scratch memory (COMPUTE_PGM_RSRC2.SCRATCH_EN) is not implemented");
     }
     if (captured == nullptr) {
         CompletePriorGpuWorkAndCopyBack();
@@ -102,8 +109,9 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     ShaderMemory capture(memory);
     RecompileRequest request{{ShaderStage::Compute, decoded.programAddress, std::span(snapshot.code).subspan(offset),
         snapshot.headerAddress, snapshot.header},
-        {decoded.waveSize, 0, decoded.userData, decoded.compute, {}, {}, memory}, nativeTarget(nativeDevice),
-        {0, 0, 0, 128}, {}, true};
+        {decoded.waveSize, 0, decoded.userData, decoded.compute, {}, {}, memory,
+            DriverDetail::HeaderFloatMode(snapshot.type, snapshot.headerAddress, snapshot.header)},
+        nativeTarget(nativeDevice), {0, 0, 0, 128}, {}, true};
     const auto resources = capture.Capture(request);
     memory = capture.Regions();
     request.context.memory = memory;
@@ -188,6 +196,10 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             }
             auto request = BuildDrawRecompileRequest(program.binary, program.firstUserSgpr, program.userData,
                 decoded.state, decoded.pixel, vertex, target, pushOffset, direct, memory, linked);
+            // The Vulkan draw sets RegisteredFloatMode here (DrawCapture.cpp); Metal snapshots carry no
+            // registered state, so the same RSRC1 is read from the captured header.
+            request.context.floatMode = DriverDetail::HeaderFloatMode(program.snapshot->type,
+                program.snapshot->headerAddress, program.snapshot->header);
             const auto resources = capture.Capture(request);
             memory = capture.Regions();
             request.context.memory = memory;

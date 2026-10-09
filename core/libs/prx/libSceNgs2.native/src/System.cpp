@@ -13,11 +13,10 @@
 #include "prx/libc/include/General.hpp"
 #include "Ngs2Internal.hpp"
 
-static constexpr std::uint32_t MIN_GRAIN_SAMPLES = 64;
 
 static std::vector<Ngs2System*>& Systems() {
-    static std::vector<Ngs2System*> systems;
-    return systems;
+    static auto* const systems = new std::vector<Ngs2System*>();
+    return *systems;
 }
 
 std::string Ngs2Hex(std::uint32_t value) {
@@ -27,8 +26,8 @@ std::string Ngs2Hex(std::uint32_t value) {
 }
 
 std::recursive_mutex& Ngs2Mutex() {
-    static std::recursive_mutex mutex;
-    return mutex;
+    static auto* const mutex = new std::recursive_mutex();
+    return *mutex;
 }
 
 Ngs2System* Ngs2FindSystem(Ngs2Handle handle) {
@@ -185,6 +184,55 @@ int APS5_VABI sceNgs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t num
     if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
     if (num_samples == 0 || num_samples > system->option.max_grain_samples) APS5_INVALID_ARG_EX;
     system->option.num_grain_samples = num_samples;
+    return SCE_NGS2_OK;
+}
+
+int APS5_VABI sceNgs2SystemSetSampleRate(uintptr_t system_handle, uint32_t sample_rate) {
+    std::lock_guard lock(Ngs2Mutex());
+    auto* system = Ngs2FindSystem(system_handle);
+    if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    if (sample_rate == 0) APS5_INVALID_ARG_EX;
+    for (const auto* rack : system->racks) {
+        for (const auto& voice : rack->voices) {
+            for (const auto& filter : voice.filters) {
+                if (filter.enabled && sample_rate != system->option.sample_rate) {
+                    throw std::runtime_error("NGS2: changing the sample rate under an enabled sampler filter is not implemented");
+                }
+            }
+        }
+    }
+    system->option.sample_rate = sample_rate;
+    return SCE_NGS2_OK;
+}
+
+int APS5_VABI sceNgs2SystemSetUserData(uintptr_t system_handle, uintptr_t user_data) {
+    std::lock_guard lock(Ngs2Mutex());
+    auto* system = Ngs2FindSystem(system_handle);
+    if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    system->userData = user_data;
+    return SCE_NGS2_OK;
+}
+
+int APS5_VABI sceNgs2SystemGetUserData(uintptr_t system_handle, uintptr_t* user_data) {
+    std::lock_guard lock(Ngs2Mutex());
+    const auto* system = Ngs2FindSystem(system_handle);
+    if (system == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    if (user_data == nullptr) APS5_INVALID_ARG_EX;
+    *user_data = system->userData;
+    return SCE_NGS2_OK;
+}
+
+int APS5_VABI sceNgs2SystemLock(uintptr_t system_handle) {
+    Ngs2Mutex().lock();
+    if (Ngs2FindSystem(system_handle) != nullptr) return SCE_NGS2_OK;
+    Ngs2Mutex().unlock();
+    return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+}
+
+int APS5_VABI sceNgs2SystemUnlock(uintptr_t system_handle) {
+    std::lock_guard lock(Ngs2Mutex());
+    if (Ngs2FindSystem(system_handle) == nullptr) return SCE_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+    Ngs2Mutex().unlock();
     return SCE_NGS2_OK;
 }
 

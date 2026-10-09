@@ -2,6 +2,7 @@
 #include "MetalGuestMemory.hpp"
 #include "MetalShaderPipeline.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderCapture.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -170,8 +171,13 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
     appendShaderRegion(memory, checkedHeaderAddress, checkedHeader);
     if (std::any_of(state.groups.begin(), state.groups.end(), [](auto value) { return value == 0; })) return {};
 
+    if (state.compute.scratchDwords != 0) {
+        throw std::invalid_argument("Native Metal compute scratch memory (COMPUTE_PGM_RSRC2.SCRATCH_EN) is not implemented");
+    }
     RecompileRequest request{{ShaderStage::Compute, state.programAddress, checkedCode, checkedHeaderAddress, checkedHeader},
-        {state.waveSize, 0, state.userData, state.compute, {}, {}, memory}, target(device), {0, 0, 0, 128}, {}, true};
+        {state.waveSize, 0, state.userData, state.compute, {}, {}, memory,
+            DriverDetail::HeaderFloatMode(0, checkedHeaderAddress, checkedHeader)},
+        target(device), {0, 0, 0, 128}, {}, true};
     const auto guest = Recompile(request);
     MetalBackend::TargetOptions options;
     if (@available(macOS 15.0, *))
@@ -223,6 +229,20 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
                 }
             }
             break;
+        case DescriptorRole::ShaderData:
+        case DescriptorRole::FlattenedSrt: {
+            // Runtime ABI words the recompiler captured (user data, buffer offsets, flattened SRT):
+            // image records would name heaps this buffer-only adapter never binds.
+            if (found->count != 1 || found->guestDescriptor.empty() ||
+                (found->role == DescriptorRole::ShaderData && guest.runtimeImageCount != 0)) {
+                throw std::invalid_argument("Native Metal compute captured shader data binding is invalid");
+            }
+            const auto bytes = found->guestDescriptor.size() * sizeof(std::uint32_t);
+            id<MTLBuffer> buffer = [device newBufferWithBytes:found->guestDescriptor.data() length:bytes options:MTLResourceStorageModeShared];
+            if (buffer == nil) throw std::runtime_error("Native Metal compute captured shader data allocation failed");
+            native.buffers.push_back({buffer, 0, bytes});
+            break;
+        }
         case DescriptorRole::BdaPagetable:
         case DescriptorRole::FaultBuffer: {
             if (found->count != 1) throw std::invalid_argument("Native Metal BDA descriptors require exactly one buffer");

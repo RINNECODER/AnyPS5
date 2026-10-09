@@ -38,11 +38,17 @@ public:
         std::uint32_t variable;
         std::optional<std::uint32_t> constant;
         std::uint32_t index;
+        // The element is the first element a runtime ABI image record names (a load from the
+        // ShaderData binding), not a TableImageIndex sum: its range is proved when the record is
+        // validated against the bound heap, so uses clamp it to the heap instead of reading a root.
+        bool runtimeRecord = false;
     };
 
     struct ShadowSelection {
         std::uint32_t firstPair;
         std::optional<std::uint32_t> imageIndex;
+        std::uint32_t imageCount = 0;
+        bool runtimeRecord = false;
     };
 
     struct QueryPair {
@@ -51,7 +57,30 @@ public:
         float samplerMin, samplerMax;
         bool nearestMip;
         std::uint32_t samplerSet = 0, samplerBinding = 0, samplerElement = 0;
+        bool runtimeRecord = false;
     };
+
+    // Whether `index` loads one 32-bit word through an access chain into the guest's ShaderData
+    // binding: the first element of a runtime ABI image record. `definitionOf` maps an id to its
+    // defining instruction's words (result type, result id, operands).
+    template<typename DefinitionOf>
+    bool RuntimeImageRecordIndex(const RecompileResult& guest, std::uint32_t index, DefinitionOf&& definitionOf) const {
+        if (guest.runtimeImageCount == 0) return false;
+        const auto* load = definitionOf(index, spv::OpLoad);
+        if (load == nullptr || load->size() < 3) return false;
+        const auto& type = get<spirv_cross::SPIRType>((*load)[0]);
+        if (type.basetype != spirv_cross::SPIRType::UInt || type.width != 32 || type.vecsize != 1 ||
+            type.columns != 1 || !type.array.empty()) return false;
+        const auto* chain = definitionOf((*load)[2], spv::OpAccessChain);
+        if (chain == nullptr || chain->size() < 4) return false;
+        const auto variable = (*chain)[2];
+        const auto descriptorSet = get_decoration(variable, spv::DecorationDescriptorSet);
+        const auto binding = get_decoration(variable, spv::DecorationBinding);
+        return std::any_of(guest.bindings.begin(), guest.bindings.end(), [&](const auto& descriptor) {
+            return descriptor.role == DescriptorRole::ShaderData && descriptor.descriptorSet == descriptorSet &&
+                descriptor.binding == binding;
+        });
+    }
 
     void PrepareMinimumLodCertificate(const RecompileResult& guest) {
         struct Definition { spv::Op op; std::vector<std::uint32_t> words; };
@@ -139,6 +168,12 @@ public:
                 if (constant && !constant->specialization)
                     return DescriptorElement{words[2], constant->scalar(), words[3]};
                 const auto index = definitions.find(words[3]);
+                const auto definitionOf = [&](std::uint32_t id, spv::Op op) -> const std::vector<std::uint32_t>* {
+                    const auto found = definitions.find(id);
+                    return found != definitions.end() && found->second.op == op ? &found->second.words : nullptr;
+                };
+                if (RuntimeImageRecordIndex(guest, words[3], definitionOf))
+                    return DescriptorElement{words[2], {}, words[3], true};
                 if (index == definitions.end() || index->second.op != spv::OpIAdd || index->second.words.size() != 4)
                     return {};
                 const auto& indexWords = index->second.words;
@@ -182,7 +217,7 @@ public:
                 minimumLodCertificateUnresolved = true;
                 continue;
             }
-            if (!resolved->constant && get<spirv_cross::SPIRConstant>(
+            if (!resolved->constant && !resolved->runtimeRecord && get<spirv_cross::SPIRConstant>(
                     definitions.at(resolved->index).words[2]).scalar() >= image->count) {
                 minimumLodCertificateUnresolved = true;
                 continue;
@@ -247,6 +282,11 @@ public:
                 if (constant && !constant->specialization)
                     return {words[2], constant->scalar(), words[3]};
                 if (!allowDynamic) Fail("minimum LOD prototype requires a constant original sampler element");
+                const auto definitionOf = [&](std::uint32_t id, spv::Op op) -> const std::vector<std::uint32_t>* {
+                    const auto found = definitions.find(id);
+                    return found != definitions.end() && found->second.op == op ? &found->second.operands : nullptr;
+                };
+                if (RuntimeImageRecordIndex(guest, words[3], definitionOf)) return {words[2], {}, words[3], true};
                 const auto index = definitions.find(words[3]);
                 if (index == definitions.end() || index->second.op != spv::OpIAdd || index->second.operands.size() != 4)
                     Fail("minimum LOD dynamic image requires original TableImageIndex provenance");
@@ -304,7 +344,7 @@ public:
                 *samplerElement.constant >= sampler.count ||
                 image.guestDescriptor.size() != image.count * 8u || sampler.guestDescriptor.size() != sampler.count * 4u)
                 Fail("minimum LOD final physical descriptor metadata is invalid");
-            if (!imageElement.constant) {
+            if (!imageElement.constant && !imageElement.runtimeRecord) {
                 const auto& indexWords = definitions.at(imageElement.index).operands;
                 if (get<spirv_cross::SPIRConstant>(indexWords[2]).scalar() >= image.count)
                     Fail("minimum LOD TableImageIndex root exceeds the captured physical binding");
@@ -323,6 +363,7 @@ public:
                     pair.relativeViewMinimums.push_back(relativeMin(image, *imageElement.constant));
                 } else {
                     pair.imageIndex = imageElement.index;
+                    pair.runtimeRecord = imageElement.runtimeRecord;
                     for (std::uint32_t i = 0; i < image.count; ++i)
                         pair.relativeViewMinimums.push_back(relativeMin(image, i));
                 }
@@ -381,7 +422,8 @@ public:
             const auto group = groups.find(groupKey(image, sampler, *access.sampler.constant));
             if (!access.image.constant) {
                 if (group == groups.end()) continue;
-                minimumLodPairs.emplace(access.combined, ShadowSelection{group->second, access.image.index});
+                minimumLodPairs.emplace(access.combined,
+                    ShadowSelection{group->second, access.image.index, image.count, access.image.runtimeRecord});
             } else {
                 const auto pair = group != groups.end() ? group->second + *access.image.constant :
                     relativeMin(image, *access.image.constant) != 0.0f ?
@@ -582,7 +624,10 @@ protected:
                 values += QueryNumber(value);
             }
             statement("const array<float, ", pair.relativeViewMinimums.size(), "> ", name, " = {", values, "};");
-            floor = name + "[" + to_expression(*pair.imageIndex) + "]";
+            const auto index = pair.runtimeRecord ?
+                "min(" + to_expression(*pair.imageIndex) + ", " + std::to_string(pair.relativeViewMinimums.size() - 1u) + "u)" :
+                to_expression(*pair.imageIndex);
+            floor = name + "[" + index + "]";
             inherit_expression_dependencies(id, *pair.imageIndex);
         } else {
             floor = QueryNumber(pair.relativeViewMinimums.front());
@@ -691,8 +736,11 @@ protected:
         const auto image = original.image;
         const auto ids = ir.increase_bound_by(2);
         const auto& selection = found->second;
+        const auto imageIndex = !selection.imageIndex ? std::string() : selection.runtimeRecord ?
+            "min(" + to_expression(*selection.imageIndex) + ", " + std::to_string(selection.imageCount - 1u) + "u)" :
+            to_expression(*selection.imageIndex);
         const auto element = selection.imageIndex ?
-            "((" + std::to_string(selection.firstPair) + "u + " + to_expression(*selection.imageIndex) +
+            "((" + std::to_string(selection.firstPair) + "u + " + imageIndex +
                 ") * 2u + " + (*minimumLodChoice ? "1u" : "0u") + ")" :
             std::to_string(selection.firstPair * 2u + (*minimumLodChoice ? 1u : 0u)) + "u";
         emit_op(minimumLodSamplerType, ids, to_expression(minimumLodBank) + "[" + element + "]", true);
@@ -972,6 +1020,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     default: Fail("stage requires unimplemented native Metal scheduling");
     }
     if (guest.spirv.empty()) Fail("empty SPIR-V module");
+    if (guest.runtimeAbiVersion != RuntimeAbi::Version) Fail("guest shader targets an incompatible runtime ABI");
     if (target.mslVersion < 20200) Fail("MSL 2.2 or newer is required");
     if (stage == ShaderStage::Mesh && target.mslVersion < 30000) Fail("mesh shaders require MSL 3.0 or newer");
     if (target.maxBuffers > 31 || target.maxBuffers < 3 || target.maxTextures > 128 || target.maxSamplers > 16)

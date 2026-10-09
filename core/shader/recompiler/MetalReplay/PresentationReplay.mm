@@ -774,7 +774,8 @@ void Run(id<MTLDevice> device, id<MTLLibrary> library) {
     for (auto& bytes : linear) bytes.resize(10u * SourceHeight * 4u);
     std::vector<std::byte> tiled(65536);
     FillTiled(tiled);
-    std::vector<std::byte> keys(256, std::byte{0xff});
+    // The console's DCC of a single-level 4-byte SW_64KB_R_X surface spans whole 512x512 meta blocks.
+    std::vector<std::byte> keys(4096, std::byte{0xff});
     std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges;
     for (std::size_t i = 0; i < linear.size(); ++i) ranges.push_back({0x10000u + i * 0x10000u, linear[i], false});
     ranges.push_back({0x50000, tiled, false});

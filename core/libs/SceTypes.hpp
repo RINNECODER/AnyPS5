@@ -199,12 +199,38 @@ struct FileStat {
     KernelTimespec st_birthtim;
 };
 
-struct ModuleInfo {
-    std::uint64_t size;
-    std::uint64_t info[32];
-    KernelModule handle;
-    std::uint8_t pad[156];
+struct ModuleSegmentInfo {
+    std::uint64_t address;
+    std::uint32_t size;
+    std::int32_t prot;
 };
+
+struct ModuleInfoEx {
+    std::uint64_t st_size;
+    char name[256];
+    KernelModule id;
+    std::uint32_t tls_index;
+    std::uint64_t tls_init_addr;
+    std::uint32_t tls_init_size;
+    std::uint32_t tls_size;
+    std::uint32_t tls_offset;
+    std::uint32_t tls_align;
+    std::uint64_t init_proc_addr;
+    std::uint64_t fini_proc_addr;
+    std::uint64_t reserved1;
+    std::uint64_t reserved2;
+    std::uint64_t eh_frame_hdr_addr;
+    std::uint64_t eh_frame_addr;
+    std::uint32_t eh_frame_hdr_size;
+    std::uint32_t eh_frame_size;
+    ModuleSegmentInfo segments[4];
+    std::uint32_t segment_count;
+    std::uint32_t ref_count;
+};
+static_assert(offsetof(ModuleInfoEx, id) == 0x108);
+static_assert(offsetof(ModuleInfoEx, eh_frame_hdr_addr) == 0x148);
+static_assert(offsetof(ModuleInfoEx, segments) == 0x160);
+static_assert(sizeof(ModuleInfoEx) == 0x1A8);
 
 struct ModuleInfoForUnwind {
     std::uint64_t st_size;
@@ -1193,6 +1219,8 @@ using NetCtlCallback = void (*)(int, void*);
 struct HttpEpoll {};
 using HttpEpollHandle = HttpEpoll*;
 using HttpsCallback = int (*)(int, unsigned int, void* const*, int, void*);
+using HttpRedirectCallback = int (*)(int, std::int32_t, std::int32_t*, const char*, void*);
+using HttpCookieRecvCallback = int (*)(int, const char*, const char*, std::uint64_t, void*);
 
 struct HttpNBEvent { std::uint8_t opaque[64]; };
 
@@ -1217,6 +1245,14 @@ struct Http2AsyncResult {
     void* reserved;
 };
 
+struct Http2AsyncOption {
+    KernelEqueue equeue;
+    int user_event_id;
+    std::uint8_t padding[4];
+    void* user_data;
+    void* reserved;
+};
+
 struct NpTitleId { char data[13]; char pad[3]; };
 struct NpTitleSecret { std::uint8_t data[128]; };
 struct NpContentRestriction { std::uint8_t opaque[128]; };
@@ -1238,6 +1274,10 @@ struct NpEntitlementAccessAddcontEntitlementInfo {
     NpUnifiedEntitlementLabel entitlement_label;
     std::uint32_t package_type;
     std::uint32_t download_status;
+};
+
+struct NpEntitlementAccessEntitlementKey {
+    std::uint8_t data[16];
 };
 
 
@@ -1349,7 +1389,7 @@ struct SaveDataMountInfo {
 };
 
 struct SceSaveDataTitleId { char data[10]; char pad[2]; };
-struct SceSaveDataDirName { char data[33]; char pad[3]; };
+struct SceSaveDataDirName { char data[32]; };
 struct SaveDataSearchInfo { std::uint8_t opaque[128]; };
 struct SaveDataMemoryData { void* buf; std::size_t buf_size; std::size_t offset; };
 
@@ -1703,6 +1743,8 @@ struct SystemGestureTouchEvent { std::uint8_t reserve[168]; };
 
 struct UserServiceLoginUserIdList { int user_id[4]; };
 
+struct UserServiceRegisteredUserIdList { int user_id[16]; };
+
 struct SceUserServiceEvent {
     std::uint32_t event_type;
     int user_id;
@@ -1809,12 +1851,6 @@ struct LibcHeapInfo {
 };
 
 using Info = LibcHeapInfo;
-
-#define VA_ARGS \
-    std::uint64_t rdi, std::uint64_t rsi, std::uint64_t rdx, std::uint64_t rcx, \
-    std::uint64_t r8, std::uint64_t r9, std::uint64_t overflow_arg_area, \
-    __m128 xmm0, __m128 xmm1, __m128 xmm2, __m128 xmm3, \
-    __m128 xmm4, __m128 xmm5, __m128 xmm6, __m128 xmm7, ...
 
 struct Packet {
     std::uint32_t* addr;

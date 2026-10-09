@@ -155,7 +155,7 @@ struct NativeEop {
         0xc0037600,0x207,64,1,1,
         0xc0027600,0x20c,static_cast<std::uint32_t>(CodeAddress>>8),0,
         0xc0017600,0x213,16,
-        0xc0087600,0x240,0,0,0,0,static_cast<std::uint32_t>(ComputeOutput),4u<<16,256,0x01016fac,
+        0xc0087600,0x240,0,0,0,0,static_cast<std::uint32_t>(ComputeOutput),4u<<16,256,0x11016fac,
         0xc0031500,1,1,1,0x8041,
         0xc0064900,0,(1u<<29)|(1u<<24),0x510f00,0,0xabcdef12,0,0};
     AgcDriver::Metal::MetalDriver& driver;

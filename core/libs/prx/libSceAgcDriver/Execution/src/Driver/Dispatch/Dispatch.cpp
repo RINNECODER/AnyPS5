@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
@@ -12,8 +13,9 @@
 namespace AgcDriver::DriverDetail {
 
 void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments) {
-    auto decoded = DecodeComputeDispatch(queue, packet, [](std::uint32_t offset) { Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, offset); });
-    const auto address = decoded.programAddress;
+    PerformanceTimer timing("Driver.Dispatch");
+    const auto noteShaderRead = [](std::uint32_t offset) { Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, offset); };
+    const auto address = DecodeComputeProgramAddress(queue.shader);
     auto it = submission.shaders->upper_bound(address);
     std::shared_ptr<const ShaderSnapshot> registeredShader;
     if (it != submission.shaders->begin()) {
@@ -23,6 +25,9 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     if (!registeredShader) registeredShader = ReadRawComputeShader(address);
     const auto& snapshot = *registeredShader;
     require(snapshot.type == 0, "compute program refers to a non-compute shader");
+    // The shared decoder (also used by the Metal backend) reads unwritten USER_DATA as zero, takes the
+    // scratch size from the registered header and resolves wave size, partial groups and group counts.
+    auto decoded = DecodeComputeDispatch(queue, packet, snapshot.header, noteShaderRead);
     auto& userData = decoded.userData;
     auto compute = decoded.compute;
     std::vector<ShaderRecompiler::MemoryRegion> memory{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}};
@@ -46,7 +51,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         countIndirect(IndirectFillKernel, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - readStart).count());
         packet = resolved;
         indirectArguments = 0;
-        decoded = DecodeComputeDispatch(queue, packet);
+        decoded = DecodeComputeDispatch(queue, packet, snapshot.header, noteShaderRead);
         compute = decoded.compute;
     }
     if (fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
@@ -59,7 +64,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     }
     ShaderRecompiler::RecompileRequest request{
         {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
-        {decoded.waveSize, 0, userData, compute, std::nullopt, std::nullopt, memory},
+        {decoded.waveSize, 0, userData, compute, std::nullopt, std::nullopt, memory, RegisteredFloatMode(snapshot)},
         localDevice->ComputeTarget(decoded.waveSize),
         {0, 0, 0, 128}
     };
@@ -92,13 +97,11 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         if (probeThis) std::fprintf(stderr, "[gpu] probing dispatch %llu of 0x%llx\n", static_cast<unsigned long long>(probeDispatch.second), static_cast<unsigned long long>(address));
     }
 
-    if (FailureMemo() && snapshot.handles->poisoned.load(std::memory_order_relaxed) != 0) {
-        const std::string* poisoned = nullptr;
-        if (SourceHandleFor(snapshot, codeOffset, localDevice->Serial(), request, probeThis, &poisoned) == nullptr && poisoned != nullptr) {
-            pendingDispatchPhases().outcome = DispatchOutcome::SkippedMemo;
-            return;
-        }
-    }
+    struct ProbeScope {
+        bool active;
+        explicit ProbeScope(bool active) : active(active) { if (active) ShaderRecompiler::SetDebugProbeActive(true); }
+        ~ProbeScope() { if (active) ShaderRecompiler::SetDebugProbeActive(false); }
+    } probeScope{probeThis};
     const bool noDispatchCache = noDispatchCacheEnv || probeThis;
     std::uint64_t key = 0xcbf29ce484222325ull;
     const auto mix = [&](std::uint64_t value) {
@@ -173,10 +176,13 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         previous.key = key;
     }
 
-    if (!stampValidate()) mix(reinterpret_cast<std::uintptr_t>(registeredShader.get()));
+    mix(reinterpret_cast<std::uintptr_t>(registeredShader.get()));
     phaseTiming.Phase(PhaseKey);
+    timing.Mark("decode_key_device_setup");
     lookupDispatch(address, submission, key, noDispatchCache, traceCache, profile, memory, phaseTiming, phaseMs, compiledResult, keepVariant, captured, liveWords, dataHit, cached, validated, missedEntry, missedDiffering);
+    timing.Mark("lookup_cache");
     if (cached) {
+        require(keepVariant != nullptr && keepVariant->shader == registeredShader, "dispatch cache belongs to another registered shader");
         captureMs += phaseTiming.Elapsed();
     } else {
         shaderMemory = std::make_shared<ShaderMemory>(memory, &queryPendingWrite, &observePendingWrite, hookWaitCounter());
@@ -184,18 +190,14 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
 
         static const bool dumpShaders = std::getenv("APS5_DUMP_SHADERS") != nullptr;
         try {
+            const auto invocation = InvocationFor(snapshot, codeOffset, request);
+            timing.Mark("prepared_invocation");
 
-            struct ProbeScope {
-                bool active;
-                explicit ProbeScope(bool active) : active(active) { if (active) ShaderRecompiler::SetDebugProbeActive(true); }
-                ~ProbeScope() { if (active) ShaderRecompiler::SetDebugProbeActive(false); }
-            } probeScope{probeThis};
             const auto waitedBefore = traceCapSync() ? Graphics::Recorder::ThreadWaitedMs() : 0.0;
             forgetAtCapture = GuestMemory::ForgetSerial();
-            const auto handle = SourceHandleFor(snapshot, codeOffset, localDevice->Serial(), request, probeThis);
             capture = [&] {
                 const SampledReadScope sampling(evidenceReads);
-                return shaderMemory->Capture(request, handle.get());
+                return shaderMemory->Capture(invocation);
             }();
             captured = shaderMemory->Regions();
             request.context.memory = captured;
@@ -205,10 +207,11 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             if (dumpShaders) static_cast<void>(dumpRequest(address, request));
             const auto started = std::chrono::steady_clock::now();
 
-            static const bool reuseCapture = std::getenv("APS5_NO_CAPTURE_REUSE") == nullptr;
-            bool memoHit = false;
-            compiledResult = reuseCapture ? ShaderRecompiler::Recompile(request, *capture, &memoHit) : std::make_shared<const ShaderRecompiler::RecompileResult>(ShaderRecompiler::Recompile(request));
-            if (compiledResult->cacheHit || memoHit) ++cacheHits;
+
+            timing.Mark("capture_resources");
+            compiledResult = invocation.Materialize(*capture);
+            timing.Mark("materialize");
+            if (compiledResult->cacheHit) ++cacheHits;
             const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
             static double totalMs = 0;
             totalMs += elapsed;
@@ -227,7 +230,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         phaseTiming.Phase(PhaseRecompile);
         insertDispatch(address, key, noDispatchCache, profile, registeredShader, forgetAtCapture, memory, shaderMemory, captured, capture, compiledResult, missedEntry, missedDiffering, attachVariant, phaseTiming);
     }
-    if (verifyDataHits() && dataHit) verifyDataHit(snapshot, codeOffset, localDevice->Serial(), request, memory, address, *keepVariant, liveWords, *compiledResult);
+    if (verifyDataHits() && dataHit) verifyDataHit(snapshot, codeOffset, request, memory, address, *keepVariant, liveWords, *compiledResult);
 
     if (recordQueuedLabelsAfterCapture(submission.queue, captured)) {
         dispatch(queue, packet, submission, indirectArguments);

@@ -28,6 +28,13 @@ struct DrawDispatchState {
     std::vector<ShaderRecompiler::ProgramRole> roles;
 };
 
+// Appends the programs (and their roles) that `state.stages` selects. With staticAbi the user data
+// comes from the registered state alone and merged-stage user-data pointers are not followed; without
+// includeFragment the pixel program is left out (registration-time preparation of the front stages).
+void DecodeDrawPrograms(const Graphics::State& state, const QueueState& queue, const DriverDetail::ShaderRegistry& shaders,
+                        std::uint64_t nullPixelProgramAddress, bool staticAbi, bool includeFragment,
+                        std::vector<DrawDispatchProgram>& programs, std::vector<ShaderRecompiler::ProgramRole>& roles);
+
 DrawDispatchState DecodeDrawDispatch(const QueueState& queue, const DriverDetail::ShaderRegistry& shaders,
                                     std::uint64_t nullPixelProgramAddress = 0);
 
