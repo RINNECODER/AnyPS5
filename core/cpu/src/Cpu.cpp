@@ -506,4 +506,6 @@ void Machine::Exit(int code) {
 void Machine::RequestStop() { impl->requested.store(true); check(uc_emu_stop(impl->engine), "Request guest stop"); }
 int Machine::ExitCode() const { return impl->exitCode; }
 const char* Machine::Backend() { return "Unicorn 2 x86-64 dynamic translation"; }
+std::uint64_t Machine::TscFrequency() { return 0; }
+std::uint64_t Machine::ReadTsc() { throw std::runtime_error("The Unicorn backend has no fixed-rate guest TSC"); }
 }

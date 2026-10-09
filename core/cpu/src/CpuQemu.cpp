@@ -1022,4 +1022,6 @@ void Machine::RequestStop() {
 }
 int Machine::ExitCode() const { return impl->exitCode; }
 const char* Machine::Backend() { return "Modern QEMU TCG x86-64 dynamic translation"; }
+std::uint64_t Machine::TscFrequency() { return ANYPS5_QEMU_TSC_FREQUENCY; }
+std::uint64_t Machine::ReadTsc() { return anyps5_qemu_cpu_read_tsc(); }
 }
