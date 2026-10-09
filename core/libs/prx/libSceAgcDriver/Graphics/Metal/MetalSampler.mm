@@ -96,6 +96,13 @@ MetalSampler::MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerRes
         resource.mipmapMode != VK_SAMPLER_MIPMAP_MODE_NEAREST)) {
         throw std::invalid_argument("Metal pixel sampler requires a captured qualified descriptor and the native pixel filter/LOD contract");
     }
+    // Metal's MTLSamplerDescriptor.reductionMode is documented as ignored unless min, mag and mip filters are all
+    // linear, while the guest decoder only admits min/max reduction with nearest or no mip filtering. A nearest
+    // min/mag footprint is a single texel, where every reduction mode returns the same value.
+    if (resource.reductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT &&
+        (resource.minFilter != VK_FILTER_NEAREST || resource.magFilter != VK_FILTER_NEAREST)) {
+        throw std::invalid_argument("Metal sampler min/max reduction filter is not implemented");
+    }
     if (!std::isfinite(resource.minLod) || !std::isfinite(resource.maxLod) || resource.minLod < 0.0f || resource.maxLod < resource.minLod) {
         throw std::invalid_argument("Metal sampler LOD range is invalid");
     }
