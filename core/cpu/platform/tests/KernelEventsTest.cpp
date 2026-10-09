@@ -283,35 +283,33 @@ void cancellation(const char* file,unsigned mode) {
 }
 void admission() {
     Cpu::Machine m;auto t=std::make_shared<Cpu::GuestThreads>(m);
-    constexpr Cpu::Platform::KernelEventConsumer eboot{"eboot.bin","a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397"};
     {
         Cpu::Platform::TargetKernelEvents target(m,t);
         for(auto nid:{"D0OdFMjp46I","jpFjmgAC5AE","fzyMKs9kim0"}) {
             auto row=scoped(nid);row.LibraryId=44;row.ModuleId=24;
-            rejects([&]{target.Resolve(row,2,0,eboot);},"not selected");
+            rejects([&]{target.Resolve(row,2,0);},"not selected");
         }
     }
-    const auto selected=Cpu::Platform::QualifiedKernelEventAdmissionsForImage(eboot.Sha256);
-    require(selected.size()==3 && Cpu::Platform::QualifiedKernelEventAdmissionsForImage("unknown").empty(),"Source-bound event selection widened");
+    const auto selected=Cpu::Platform::TargetKernelEventAdmissions();
+    require(selected.size()==3,"Title-agnostic event selection changed");
     {
     Cpu::Platform::TargetKernelEvents target(m,t,selected);
     for(auto nid:{"D0OdFMjp46I","jpFjmgAC5AE","fzyMKs9kim0"}) {
         auto row=scoped(nid);row.LibraryId=44;row.ModuleId=24;
-        require(target.Resolve(row,2,0,eboot).has_value(),"Source-bound exact target event rejected");
-        rejects([&]{target.Resolve(row,2,0,{"eboot.bin","unknown"});},"consumer/import row");
-        rejects([&]{target.Resolve(row,2,0,{"other.bin",eboot.Sha256});},"consumer/import row");
-        for(unsigned field=0;field<8;++field) {
+        require(target.Resolve(row,2,0).has_value(),"Selected target event rejected");
+        // Import-table ids are per-image; another title's ids are admitted.
+        auto other=row;other.LibraryId=3;other.ModuleId=5;
+        require(target.Resolve(other,2,0).has_value(),"Another image's event import-table ids were refused");
+        for(unsigned field=0;field<6;++field) {
             auto wrong=row;
             if(field==0)wrong.LibraryName="libc";
             if(field==1)wrong.ModuleName="libc";
             if(field==2)wrong.LibraryVersion=2;
             if(field==3)wrong.ModuleMajor=2;
             if(field==4)wrong.ModuleMinor=2;
-            if(field==5)wrong.LibraryId=0;
-            if(field==6)wrong.ModuleId=1;
-            rejects([&]{target.Resolve(wrong,field==7?1:2,0,eboot);},field==5||field==6?"consumer/import row":"scope/version/type/size");
+            rejects([&]{target.Resolve(wrong,field==5?1:2,0);},"scope/version/type/size");
         }
-        rejects([&]{target.Resolve(row,2,8,eboot);},"scope/version/type/size");
+        rejects([&]{target.Resolve(row,2,8);},"scope/version/type/size");
     }
     target.Provider().Shutdown();t->Withdraw();
     }
@@ -321,7 +319,7 @@ void admission() {
         auto provider=std::make_unique<Cpu::Platform::KernelEvents>(m,scheduler);
         const auto retained=provider->EopPublisher();scheduler.reset();provider.reset();retained(0x20);
     }
-    std::cout<<"PASS default denied, source-bound exact three-route profile, identity/type/size/domain/owner rejection and expired scheduler shutdown\n";
+    std::cout<<"PASS default denied, title-agnostic three-route profile, scope/type/size/domain/owner rejection and expired scheduler shutdown\n";
 }
 }
 int main(int argc,char** argv) {

@@ -22,10 +22,9 @@
 // therefore cannot catch the absent target AddEqEvent admission. This fixture
 // owns translated target AGC admission -> numeric queue -> native EOP -> idle
 // scheduler delivery. General queue scheduling remains owned by CPU09 controls.
-// Profile selection uses the published pinned target identity; the executable
-// under test is an independently authored public guest, never that private file.
+// Profile selection is title-agnostic; the executable under test is an
+// independently authored public guest, never a private title file.
 namespace {
-constexpr std::string_view TargetHash="a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
 constexpr std::uint64_t Bias=0x100000000, PageAddress=0x600000000,
     Output=PageAddress+32, Count=PageAddress+128, Canary=0x1badc0ffeef00d55ULL;
 using State=std::array<std::uint64_t,64>;
@@ -82,7 +81,7 @@ struct Session {
             constexpr std::array source{Cpu::AgcAbiContract::AddEqEvent,Cpu::AgcAbiContract::DeleteEqEvent};
             graphics=std::make_unique<Cpu::SceAgcImports>(machine,std::move(backend),source);
         }else{
-            graphics=std::make_unique<Cpu::SceAgcImports>(machine,std::move(backend),Cpu::QualifiedAgcAdmissionsForImage(TargetHash));
+            graphics=std::make_unique<Cpu::SceAgcImports>(machine,std::move(backend),Cpu::TargetAgcAdmissions());
         }
         const std::array hosts{
             Cpu::SceHostModule{"libkernel.prx",{"libkernel",0,1,1},{{"libkernel",0,1}}},
@@ -263,7 +262,7 @@ struct NativeEop {
 };
 void targetAdmission(){
     Cpu::Machine machine;
-    const auto selected=Cpu::QualifiedAgcAdmissionsForImage(TargetHash);
+    const auto selected=Cpu::TargetAgcAdmissions();
     // AGC gate mappings last for the Machine lifetime, including after their
     // provider expires. Keep these independent admission cases on distinct
     // pages rather than relying on provider destruction to recycle a mapping.
@@ -285,11 +284,6 @@ void targetAdmission(){
         Cpu::SceAgcImports unselected(machine,backend,std::span<const Cpu::AgcAbiContract>{},ControlGateBase+0x1000);
         for(auto nid:{"w2rJhmD+dsE","DL2RXaXOy88"})
             rejects([&]{unselected.Resolve(graphicsRow(nid),2,0);},"Unqualified SCE AGC target ABI contract");
-    }
-    {
-        Cpu::SceAgcImports wrongHash(machine,backend,Cpu::QualifiedAgcAdmissionsForImage("different-owned-image"),ControlGateBase+0x2000);
-        for(auto nid:{"w2rJhmD+dsE","DL2RXaXOy88"})
-            rejects([&]{wrongHash.Resolve(graphicsRow(nid),2,0);},"Unqualified SCE AGC target ABI contract");
     }
     {
         Cpu::SceAgcImports qualified(machine,backend,selected,ControlGateBase+0x3000);

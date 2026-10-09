@@ -468,7 +468,7 @@ def prepare_package(source, build, gpu_source, destination, revisions, run, prof
         utility = "fixtures/AnyPS5Utilities.metallib"
         commands += [["bin/anyps5_native_module_runner_test", "fixtures/sce-module-main.elf",
                       "fixtures/SceModuleGuest.prx", utility, case]
-                     for case in ("lifecycle", "close", "initializer-failure", "qualified-rejection")]
+                     for case in ("lifecycle", "close", "initializer-failure", "title-agnostic")]
         # The diagnostic profile stays bounded by passing its limits explicitly.
         commands += [["bin/anyps5_cpu_run", "--diagnostics-json", "--max-wall-ms", "30000", "--max-idle-ms", "5000",
                       "--sce-module", "fixtures/SceModuleGuest.prx",

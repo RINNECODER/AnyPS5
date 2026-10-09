@@ -114,6 +114,11 @@ public:
     void RequestStop();
     int ExitCode() const;
     static const char* Backend();
+    // The guest time stamp counter that RDTSC/RDTSCP read, and its frequency in Hz.
+    // TscFrequency() is 0 when the backend has no fixed-rate guest TSC; ReadTsc()
+    // then throws. Reads are strictly increasing across threads.
+    static std::uint64_t TscFrequency();
+    static std::uint64_t ReadTsc();
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

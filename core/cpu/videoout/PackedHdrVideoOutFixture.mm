@@ -167,7 +167,7 @@ void run(const char* utility,const char* const* files){
     config.utilityMetallib=utility;config.initialRanges=ranges;config.initialRangeOwner=owners;config.initialGeneration=17;
     Completion completion;completion.owner=(*owners)[0];const VideoOutCompletionCallbacks callbacks{&completion,clock,counter,completed};
     auto session=Cpu::SceNativeGraphicsSession::CreateMainThread(machine,config,callbacks,{},0x7ffdfd000000,
-        Cpu::QualifiedVideoOutAdmissionsForImage("a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397"));
+        Cpu::TargetVideoOutAdmissions());
     const auto target=session->Window().Presentation(Width,Height);auto layer=(__bridge CAMetalLayer*)target.metalLayer(target.context);
     completion.queue=[layer.device newCommandQueue];require(completion.queue!=nil,"Cannot allocate actual native HDR readback queue");Capture capture(layer);Caller guest(machine,*session,files);
     const auto handle=guest.call(0,"Up36PTk687E",{255,0,0,0},true);

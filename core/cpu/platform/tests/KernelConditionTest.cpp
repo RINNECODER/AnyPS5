@@ -36,7 +36,6 @@ struct Session {
     Cpu::SceThreadImports threadImports{machine, threads};
     Cpu::SceLifecycleImports lifecycle{machine};
     std::unique_ptr<Cpu::Platform::TargetKernelMutexes> mutexes;
-    static constexpr Cpu::Platform::KernelMutexConsumer Consumer{"eboot.bin","a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397"};
     std::unique_ptr<Cpu::SceModules> graph;
     std::uint64_t receiptAddress = 0;
     std::set<std::uint64_t> gates;
@@ -55,13 +54,13 @@ struct Session {
                 std::span<const Cpu::SceModuleFile>{}, hosts,
                 [&](const Cpu::SceImport& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
                     require(type == 2, "Actual linked condition import lost its mandatory ELF function type");
-                    if (const auto gate = mutexes->Resolve(import, type, Consumer)) {
+                    if (const auto gate = mutexes->Resolve(import, type)) {
                         gates.insert(*gate); return Cpu::SceResolvedImport{*gate, type};
                     }
-                    if (const auto gate = mutexes->ResolveCondition(import, type, 0, Consumer)) {
+                    if (const auto gate = mutexes->ResolveCondition(import, type, 0)) {
                         gates.insert(*gate); return Cpu::SceResolvedImport{*gate, type};
                     }
-                    if (const auto gate = threadImports.ResolveTargetPriority(import, type, {Consumer.Name,Consumer.Sha256})) return Cpu::SceResolvedImport{*gate,type};
+                    if (const auto gate = threadImports.ResolveTargetPriority(import, type)) return Cpu::SceResolvedImport{*gate,type};
                     if (const auto gate = threadImports.Resolve(import, type)) return Cpu::SceResolvedImport{*gate, type};
                     if (const auto gate = lifecycle.Resolve(import)) return Cpu::SceResolvedImport{*gate, type};
                     return std::nullopt;
@@ -144,7 +143,7 @@ void cancellation(const char* path,unsigned mode=2) {
  const auto gates=session.gates;session.mutexes.reset();
  for(const auto gate:gates) rejects([&]{session.machine.CheckAccess(gate,1,Cpu::Permission::Execute);},"Guest access denied");
  session.mutexes=std::make_unique<Cpu::Platform::TargetKernelMutexes>(session.machine,session.threads);
- const auto replacement=session.mutexes->ResolveCondition(scoped("WKAXJ4XBPQ4"),2,0,Session::Consumer);
+ const auto replacement=session.mutexes->ResolveCondition(scoped("WKAXJ4XBPQ4"),2,0);
  require(replacement && gates.contains(*replacement),"Cancellation control did not reuse retired gate page");
  Cpu::GuestPhaseBudget retry(10000);
  require(session.threads->RunEntry(retry)==Cpu::StopReason::Requested && retry.Consumed()==0,
@@ -161,7 +160,7 @@ void schedulerCancellationCleanup(const char* path) {
  require(session.receipt()==before,"Scheduler cancellation fabricated a condition return");
  // Keep the provider alive: an independent fresh translated Destroy must see
  // no stopped waiter binding. Provider destruction cannot hide leaked users.
- const auto gate=session.mutexes->ResolveCondition(scoped("g+PZd2hiacg"),2,0,Session::Consumer);
+ const auto gate=session.mutexes->ResolveCondition(scoped("g+PZd2hiacg"),2,0);
  require(gate.has_value(),"Live provider condition destroy gate missing after scheduler withdrawal");
  session.machine.Map(0x71000000,4096,Cpu::Permission::Read|Cpu::Permission::Write);
  session.machine.Map(0x71001000,4096,Cpu::Permission::Read|Cpu::Permission::Execute);
@@ -220,43 +219,34 @@ void foreignProvider(const char* path) {
 void targetAdmission() {
  Cpu::Machine machine;auto threads=std::make_shared<Cpu::GuestThreads>(machine);
  Cpu::Platform::TargetKernelMutexes target(machine,threads);
- using Consumer=Cpu::Platform::KernelMutexConsumer;
- const std::array consumers{Session::Consumer,
-  Consumer{"libc.prx","78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f"},
-  Consumer{"libSceNpCppWebApi.prx","38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9"}};
  constexpr std::array<std::string_view,12> nids{"2Tb92quprl0","g+PZd2hiacg","WKAXJ4XBPQ4","kDh-NfxgMtE","JGgj7Uvrl+A",
   "m5-2bsNfv7s","waPcxYiR3WA","0TyVk4MSLt0","RXXqi4CtF8w","Op8TBGY5KHg","2MOy+rUfuhQ","mkx2fVhNMsg"};
  unsigned admitted=0;
+ // Import-table ids are per-image: every row is admitted at any title's ids.
  for(unsigned owner=0;owner!=3;++owner) for(unsigned op=0;op!=nids.size();++op) {
   auto row=scoped(nids[op]);
   const bool posix=op>=7;
-  row.LibraryId=owner==0 ? (posix ? 43 : 44) : (owner==1 ? 0 : 4);
-  row.ModuleId=owner==0 ? 24 : (owner==1 ? 1 : 5);
+  row.LibraryId=owner==0 ? (posix ? 43 : 44) : (owner==1 ? 0 : 7);
+  row.ModuleId=owner==0 ? 24 : (owner==1 ? 1 : 9);
   if(owner==0 && posix) row.LibraryName="libScePosix";
-  const bool observed=owner==0 || (owner==1 && (op<5 || op==9 || op==11)) || (owner==2 && op<5);
-  if(!observed) {rejects([&]{target.ResolveCondition(row,2,0,consumers[owner]);},"consumer source/import row");continue;}
-  require(target.ResolveCondition(row,2,0,consumers[owner]).has_value(),"Exact observed condition row rejected");++admitted;
-  rejects([&]{target.ResolveCondition(row,2,1,consumers[owner]);},"consumer source/import row");
-  for(const auto type:{0,1,6}) rejects([&]{target.ResolveCondition(row,type,0,consumers[owner]);},"consumer source/import row");
-  rejects([&]{target.ResolveCondition(row,2,0,Consumer{consumers[owner].Name,"unverified"});},"consumer source/import row");
-  rejects([&]{target.ResolveCondition(row,2,0,Consumer{"foreign.prx",consumers[owner].Sha256});},"consumer source/import row");
-  for(unsigned field=0;field!=7;++field) {
+  require(target.ResolveCondition(row,2,0).has_value(),"Condition row refused for an arbitrary image");++admitted;
+  rejects([&]{target.ResolveCondition(row,2,1);},"type/size");
+  for(const auto type:{0,1,6}) rejects([&]{target.ResolveCondition(row,type,0);},"type/size");
+  for(unsigned field=0;field!=5;++field) {
    auto wrong=row;
    if(field==0) wrong.LibraryName="foreign";
    if(field==1) wrong.ModuleName="foreign";
    if(field==2) wrong.LibraryVersion=2;
    if(field==3) wrong.ModuleMajor=2;
    if(field==4) wrong.ModuleMinor=2;
-   if(field==5) wrong.LibraryId=99;
-   if(field==6) wrong.ModuleId=99;
-   rejects([&]{target.ResolveCondition(wrong,2,0,consumers[owner]);},"consumer source/import row");
+   rejects([&]{target.ResolveCondition(wrong,2,0);},"scope/version");
   }
  }
- require(admitted==24,"Exact imported condition consumer coverage differs");
+ require(admitted==36,"Condition row coverage differs");
  // CPU13 exact timed admissions are owned by KernelConditionTimeoutTest;
  // retain the older unknown-NID denial without duplicating timed contracts.
  for(const auto nid:{"AAAAAAAAAAA"})
-  require(!target.ResolveCondition(scoped(nid),2,0,consumers[0]),"Unqualified/timed condition row fabricated a gate");
+  require(!target.ResolveCondition(scoped(nid),2,0),"Unknown condition row fabricated a gate");
 }
 
 }

@@ -22,10 +22,8 @@ struct Snapshot {
 };
 void admission(Cpu::Machine& machine, Cpu::SceAgcImports& imports) {
     Cpu::SceAgcImports empty(machine, {}, std::span<const Cpu::AgcAbiAdmission>{}, 0x7ffdf3100000ULL);
-    Cpu::SceAgcImports wrongImage(machine, {}, Cpu::QualifiedAgcAdmissionsForImage("wrong-image"), 0x7ffdf3200000ULL);
     for (const char* nid : {FlipNid, WaitNid}) {
         rejects([&] { empty.Resolve(identity(nid), 2, 0); }, "Unqualified");
-        rejects([&] { wrongImage.Resolve(identity(nid), 2, 0); }, "Unqualified");
         rejects([&] { imports.Resolve(identity(nid), 1, 0); }, "only function");
         rejects([&] { imports.Resolve(identity(nid), 2, 8); }, "only function");
         auto wrong = identity(nid, true);
@@ -46,7 +44,7 @@ void admission(Cpu::Machine& machine, Cpu::SceAgcImports& imports) {
 }
 void run(const char* const* paths) {
     Cpu::Machine machine; Caller caller(machine, paths);
-    Cpu::SceAgcImports imports(machine, {}, Cpu::QualifiedAgcAdmissionsForImage(Image));
+    Cpu::SceAgcImports imports(machine, {}, Cpu::TargetAgcAdmissions());
     admission(machine, imports);
     const auto flip = imports.Resolve(identity(FlipNid), 2, 0);
     const auto wait = imports.Resolve(identity(WaitNid), 2, 0);

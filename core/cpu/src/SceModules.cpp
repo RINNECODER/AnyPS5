@@ -134,7 +134,8 @@ struct SceModules::Impl {
     Impl(Machine& guest, const SceModuleFile& executable, std::span<const SceModuleFile> dependencies,
          std::span<const SceHostModule> hostModules, const SceModuleResolver& resolver,
          const std::optional<SceLibcInternalProvider>& libcInternal,
-         const SceConsumerModuleResolver& consumerResolver) : machine(guest), hosts(hostModules.begin(), hostModules.end()) {
+         const SceConsumerModuleResolver& consumerResolver, const SceLazyImports& lazy)
+        : machine(guest), hosts(hostModules.begin(), hostModules.end()) {
         if (dependencies.size() > 510 || hosts.size() > 510) fail("module graph exceeds the supported provider count");
         const auto add = [&](const SceModuleFile& file, bool isMain) {
             auto parsed = ParseSce(file.Path);
@@ -180,12 +181,16 @@ struct SceModules::Impl {
                 std::any_of(hosts.begin(), hosts.end(), [&](const auto& host) { return declares(host, import); });
         };
         edges.resize(modules.size());
+        std::set<std::string> missingFiles;
         for (std::size_t index = 0; index < modules.size(); ++index) {
             const auto& image = modules[index].Image;
             for (const auto& filename : image.NeededFiles) {
                 if (!bareFilename(filename)) fail("DT_NEEDED requires a declared bare filename: " + filename);
                 if (const auto found = files.find(filename); found != files.end()) edges[index].insert(found->second);
-                else if (!hostFiles.contains(filename)) fail("missing DT_NEEDED provider " + filename);
+                else if (!hostFiles.contains(filename)) {
+                    if (!lazy.Bind) fail("missing DT_NEEDED provider " + filename);
+                    if (lazy.MissingModule && missingFiles.insert(filename).second) lazy.MissingModule(filename);
+                }
             }
             for (const auto& needed : image.Data->ImportedModules) {
                 std::optional<std::size_t> provider;
@@ -194,7 +199,8 @@ struct SceModules::Impl {
                     if (std::any_of(modules[candidate].Image.ExportModules.begin(), modules[candidate].Image.ExportModules.end(),
                         [&](const auto& identity) { return sameModule(needed, identity); })) { provider = candidate; ++matches; }
                 for (const auto& host : hosts) if (sameModule(needed, host.Module)) ++matches;
-                if (matches != 1) fail((matches ? "ambiguous" : "missing") + std::string(" named module/version provider ") + needed.Name);
+                if (matches > 1 || (!matches && !lazy.Bind))
+                    fail((matches ? "ambiguous" : "missing") + std::string(" named module/version provider ") + needed.Name);
                 if (provider && *provider != index) edges[index].insert(*provider);
             }
             for (const auto& symbol : image.Data->Symbols) if (symbol.Import &&
@@ -292,20 +298,46 @@ struct SceModules::Impl {
                     if (!value) fail("missing qualified libc Internal target export for " + import.Nid);
                 }
                 if (!value) {
-                    if (hostMatches != 1) fail("unresolved typed import scope/version provider for " + import.Nid);
-                    if (!consumerResolver && !resolver) fail("missing typed host resolver for " + import.Nid);
-                    const auto hostValue = consumerResolver
-                        ? consumerResolver(SceImportConsumer{module.Image.Path, module.Image.Data->SourceSize,
-                            module.Image.Data->SourceSha256}, import, symbol.Type, symbol.Size)
-                        : resolver(import, symbol.Type);
-                    if (!hostValue || hostValue->Type != symbol.Type) fail("unresolved or wrongly typed host import " + import.Nid);
-                    if (symbol.Type == 6) fail("host TLS imports require unsupported external TLS storage");
-                    if (!hostValue->Address || hostValue->TlsModuleId || hostValue->TlsOffset ||
-                        (symbol.Type == 1 && (!hostValue->Size || symbol.Size > hostValue->Size)))
-                        fail("invalid host import storage for " + import.Nid);
-                    machine.CheckAccess(hostValue->Address, symbol.Type == 2 ? 1 : hostValue->Size,
-                        symbol.Type == 2 ? Permission::Execute : Permission::Read);
-                    value = SceSymbolValue{hostValue->Address, hostValue->Type, hostValue->Size, 0, 0};
+                    const SceImportConsumer consumer{module.Image.Path, module.Image.Data->SourceSize,
+                        module.Image.Data->SourceSha256};
+                    std::optional<SceResolvedImport> hostValue;
+                    std::string unresolved;
+                    if (hostMatches > 1 || (!hostMatches && !lazy.Bind))
+                        fail("unresolved typed import scope/version provider for " + import.Nid);
+                    if (!hostMatches) unresolved = "no provider declares module " + import.ModuleName + " library " + import.LibraryName;
+                    else {
+                        if (!consumerResolver && !resolver) fail("missing typed host resolver for " + import.Nid);
+                        try {
+                            hostValue = consumerResolver ? consumerResolver(consumer, import, symbol.Type, symbol.Size)
+                                                         : resolver(import, symbol.Type);
+                        } catch (const std::exception& error) {
+                            // Lazy linking treats a provider rejection as "not implemented here".
+                            if (!lazy.Bind) throw;
+                            unresolved = error.what();
+                        }
+                        if (!hostValue && unresolved.empty()) unresolved = "host provider does not implement it";
+                        if ((hostValue && hostValue->Type != symbol.Type) || (!hostValue && !lazy.Bind))
+                            fail("unresolved or wrongly typed host import " + import.Nid);
+                    }
+                    if (hostValue) {
+                        if (symbol.Type == 6) fail("host TLS imports require unsupported external TLS storage");
+                        if (!hostValue->Address || hostValue->TlsModuleId || hostValue->TlsOffset ||
+                            (symbol.Type == 1 && (!hostValue->Size || symbol.Size > hostValue->Size)))
+                            fail("invalid host import storage for " + import.Nid);
+                        machine.CheckAccess(hostValue->Address, symbol.Type == 2 ? 1 : hostValue->Size,
+                            symbol.Type == 2 ? Permission::Execute : Permission::Read);
+                        value = SceSymbolValue{hostValue->Address, hostValue->Type, hostValue->Size, 0, 0};
+                    } else {
+                        if (symbol.Type == 6) fail("unresolved TLS import " + import.Nid + ": " + unresolved);
+                        const bool weak = symbol.Binding == 2;
+                        const auto bound = lazy.Bind({consumer, import, symbol.Type, symbol.Size, weak, unresolved});
+                        if (bound.Type != symbol.Type || bound.TlsModuleId || bound.TlsOffset ||
+                            (weak ? bound.Address != 0 : !bound.Address) || (!weak && symbol.Type == 1 && symbol.Size > bound.Size))
+                            fail("invalid lazy import binding for " + import.Nid);
+                        if (!weak) machine.CheckAccess(bound.Address, symbol.Type == 2 ? 1 : std::max<std::uint64_t>(symbol.Size, 1),
+                            symbol.Type == 2 ? Permission::Execute : Permission::Read);
+                        value = SceSymbolValue{bound.Address, bound.Type, bound.Size, 0, 0};
+                    }
                 }
                 resolved[index].push_back(*value);
             }
@@ -575,8 +607,8 @@ struct SceModules::Impl {
 SceModules::SceModules(Machine& machine, const SceModuleFile& main, std::span<const SceModuleFile> dependencies,
                      std::span<const SceHostModule> hosts, const SceModuleResolver& resolver,
                      const std::optional<SceLibcInternalProvider>& libcInternal,
-                     const SceConsumerModuleResolver& consumerResolver)
-    : impl(std::make_shared<Impl>(machine, main, dependencies, hosts, resolver, libcInternal, consumerResolver)) {
+                     const SceConsumerModuleResolver& consumerResolver, const SceLazyImports& lazyImports)
+    : impl(std::make_shared<Impl>(machine, main, dependencies, hosts, resolver, libcInternal, consumerResolver, lazyImports)) {
     machine.AddHostCall(TerminationGate, [state = std::weak_ptr<Impl>(impl)](Machine&) {
         const auto context = state.lock();
         if (!context) fail("entry termination callback graph has expired");

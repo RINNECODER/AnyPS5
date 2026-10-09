@@ -6,7 +6,7 @@ if(BUILD_TESTING AND cpuModernTcg AND TARGET anyps5_native_module_runner)
     target_compile_options(anyps5_native_module_runner_test PRIVATE -fobjc-arc)
     target_link_libraries(anyps5_native_module_runner_test PRIVATE anyps5_native_module_runner "${cpuAppKit}")
     add_dependencies(anyps5_native_module_runner_test anyps5_sce_module_fixture anyps5_metal_shaders)
-    foreach(nativeRunnerCase lifecycle close initializer-failure qualified-rejection)
+    foreach(nativeRunnerCase lifecycle close initializer-failure title-agnostic)
         add_test(NAME anyps5_native_module_runner_${nativeRunnerCase}
             COMMAND anyps5_native_module_runner_test "${sceModuleMain}" "${sceModuleGuest}"
                 "${cpuMetalLibrary}" "${nativeRunnerCase}")
