@@ -1,9 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
-<<<<<<< HEAD
-=======
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
->>>>>>> da9fe3c70 (fix(agc): retire fully released native depth owners)
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
@@ -342,6 +339,8 @@ public:
     VkImageAspectFlags pendingClear = 0;
     float clearDepth = 0.0f;
     std::uint8_t clearStencil = 0;
+    std::uint64_t htileAddress = 0;
+    std::uint64_t htileGeneration = 0;
     const Context context;
     const DepthTarget target;
     const VkFormat hostFormat;
@@ -397,67 +396,6 @@ std::vector<std::unique_ptr<DepthSurface>>& surfaces() {
     return *list;
 }
 
-<<<<<<< HEAD
-=======
-struct PlaneOwner {
-    DepthSurface* surface = nullptr;
-    std::uint64_t serial = 0;
-};
-
-using PlaneOwners = std::map<std::pair<VkDevice, std::uint64_t>, PlaneOwner>;
-
-std::uint64_t planeBinds = 0;
-
-PlaneOwners& depthOwners() {
-    static auto* owners = new PlaneOwners();
-    return *owners;
-}
-
-PlaneOwners& stencilOwners() {
-    static auto* owners = new PlaneOwners();
-    return *owners;
-}
-
-void takePlane(DepthSurface& surface, PlaneOwners& owners, std::uint64_t address, VkImageAspectFlagBits aspect) {
-    auto& entry = owners[{surface.context.device, address}];
-    auto* owner = entry.surface;
-    if (owner != nullptr && owner->active->load(std::memory_order_acquire) && owner != &surface && owner->target.format == surface.target.format && owner->target.samples == surface.target.samples && owner->target.extent.width == surface.target.extent.width && owner->target.extent.height == surface.target.extent.height) {
-        if ((owner->pendingClear & aspect) != 0) surface.pendingClear |= aspect;
-        else surface.CopyAspectFrom(*owner, aspect);
-    }
-    entry = {&surface, ++planeBinds};
-}
-
-void takePlanes(DepthSurface& surface) {
-    takePlane(surface, depthOwners(), surface.target.address, VK_IMAGE_ASPECT_DEPTH_BIT);
-    if (surface.target.stencilAddress != 0) takePlane(surface, stencilOwners(), surface.target.stencilAddress, VK_IMAGE_ASPECT_STENCIL_BIT);
-}
-
-DepthSurface* depthSlice(VkDevice device, std::uint64_t address, const DepthTarget& base) {
-    if (const auto found = depthOwners().find({device, address}); found != depthOwners().end()) {
-        const auto& target = found->second.surface->target;
-        if (found->second.surface->active->load(std::memory_order_acquire) && target.extent.width == base.extent.width && target.extent.height == base.extent.height && target.format == base.format) return found->second.surface;
-    }
-    const auto& list = surfaces();
-    const auto slice = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) { return surface->active->load(std::memory_order_acquire) && surface->context.device == device && !surface->retired && surface->target.address == address && surface->target.extent.width == base.extent.width && surface->target.extent.height == base.extent.height && surface->target.format == base.format; });
-    return slice == list.rend() ? nullptr : slice->get();
-}
-
-DepthSurface* planeSurface(VkDevice device, std::uint64_t address) {
-    const auto depth = depthOwners().find({device, address});
-    const auto stencil = stencilOwners().find({device, address});
-    const bool hasDepth = depth != depthOwners().end() && depth->second.surface->active->load(std::memory_order_acquire);
-    const bool hasStencil = stencil != stencilOwners().end() && stencil->second.surface->active->load(std::memory_order_acquire);
-    if (hasDepth && (!hasStencil || depth->second.serial > stencil->second.serial)) return depth->second.surface;
-    if (hasStencil) return stencil->second.surface;
-    const auto& list = surfaces();
-    const auto found = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) {
-        return surface->active->load(std::memory_order_acquire) && surface->context.device == device && !surface->retired && (surface->target.address == address || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == address));
-    });
-    return found == list.rend() ? nullptr : found->get();
-}
-
->>>>>>> da9fe3c70 (fix(agc): retire fully released native depth owners)
 void retire(DepthSurface& surface) {
     surface.retired = true;
 }
@@ -467,6 +405,49 @@ std::set<std::uint64_t>& clearedHtiles() {
     return *cleared;
 }
 
+bool takeClearedHtile(const DepthTarget& target) {
+    if (target.htileAddress == 0) return false;
+    auto& cleared = clearedHtiles();
+    const auto found = std::find_if(cleared.begin(), cleared.end(), [&](const auto& entry) { return HtileFillCovers(target.htileAddress, target.extent, entry.first, entry.second); });
+    if (found == cleared.end()) return false;
+    cleared.erase(found);
+    return true;
+}
+
+const DepthSurface* drawnDepth = nullptr;
+
+std::atomic<std::uint64_t> surfacesSerial{0};
+
+std::uint32_t expandedHtileWord(std::uint32_t word, bool stencilInHtile, VkImageAspectFlags cleared) {
+    if (!stencilInHtile) return (cleared & VK_IMAGE_ASPECT_DEPTH_BIT) != 0 ? 0xfffc000fu : word;
+    if ((cleared & VK_IMAGE_ASPECT_DEPTH_BIT) != 0) word = (word & 0x3f0u) | 0xfffff00fu;
+    if ((cleared & VK_IMAGE_ASPECT_STENCIL_BIT) != 0) word |= 0x3f0u;
+    return word;
+}
+
+void noteHtileWrites(DepthSurface& surface, const DepthTarget& target) {
+    if (target.htileAddress == 0) return;
+    const auto tiles = static_cast<std::size_t>((target.extent.width + 7u) / 8u) * ((target.extent.height + 7u) / 8u);
+    const auto bytes = tiles * 4u;
+    if (!GuestMemory::Accessible(reinterpret_cast<const void*>(target.htileAddress), bytes, true)) return;
+    const auto collected = GuestMemory::CollectWrites(target.htileAddress, bytes);
+    if (surface.htileAddress == target.htileAddress && surface.htileGeneration != 0 && GuestMemory::UnchangedSince(target.htileAddress, bytes, surface.htileGeneration)) return;
+    std::vector<std::uint32_t> words(tiles);
+    GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(words)), 4);
+    surface.htileAddress = target.htileAddress;
+    surface.htileGeneration = collected;
+    VkImageAspectFlags cleared = VK_IMAGE_ASPECT_DEPTH_BIT | (target.htileStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+    for (const auto word : words) cleared &= HtileFillClears(word, target.htileStencil);
+    if (cleared == 0) return;
+    surface.pendingClear |= cleared;
+    for (auto& word : words) word = expandedHtileWord(word, target.htileStencil, cleared);
+    GuestMemory::Write(target.htileAddress, std::as_bytes(std::span(words)), 4);
+    surface.htileGeneration = GuestMemory::CollectWrites(target.htileAddress, bytes);
+}
+}
+
+std::uint64_t DepthSurfacesSerial() {
+    return surfacesSerial.load(std::memory_order_acquire);
 }
 
 std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel) {
@@ -613,6 +594,7 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target) 
         if (target.samples != 1u) surface->sampling.refusal = "native multisample depth fast-clear transition is not implemented";
         surface->pendingClear |= VK_IMAGE_ASPECT_DEPTH_BIT;
     }
+    noteHtileWrites(*surface, target);
     surface->ApplyFastClear();
     if (!created) surface->written = ++depthWrites;
     surface->NoteMemory();
