@@ -430,15 +430,19 @@ class OwnedTree:
         rows = {}
         for line in result.stdout.splitlines():
             pid, uid, pgid, ppid = map(int, line.split())
-            if uid == os.getuid():
-                item = process_identity(pid)
-                if item is not None:
-                    rows[pid] = item
+            # Membership alone can veto killpg; unrelated host processes need
+            # no birth proof. Even same-user ps can exec setuid between this
+            # snapshot and libproc, making an unrelated PID inaccessible.
+            rows[pid] = {'pid': pid, 'uid': uid, 'pgid': pgid, 'ppid': ppid,
+                         'birth': None, 'stopped': False, 'zombie': False}
+        for pid in self.owned:
+            # Never treat a missing ps row or an unreadable OWNED birth as proof
+            # of exit. Only process_identity's ESRCH/None establishes absence.
+            item = process_identity(pid)
+            if item is None:
+                rows.pop(pid, None)
             else:
-                # Foreign-user group members veto killpg, even when libproc
-                # would not allow reading their birth identity.
-                rows[pid] = {'pid': pid, 'uid': uid, 'pgid': pgid, 'ppid': ppid,
-                             'birth': None, 'stopped': False, 'zombie': False}
+                rows[pid] = item
         return rows
 
     def observe(self):
@@ -453,12 +457,18 @@ class OwnedTree:
             for pid in added:
                 if rows[pid]['uid'] != os.getuid():
                     raise ContainmentFailure(f'owned ancestry crossed user boundary at PID {pid}')
-                # Verify ancestry and birth again, not just a stale ps relationship.
-                item = process_identity(pid)
+                # Establish then recheck birth around parent verification: a
+                # coarse ps relationship alone cannot admit a reused PID.
+                candidate = process_identity(pid)
                 parent = process_identity(rows[pid]['ppid'])
-                if (same_process(rows[pid], item) and item['ppid'] == rows[pid]['ppid']
+                item = process_identity(pid) if candidate is not None else None
+                if item is not None and item['uid'] != os.getuid():
+                    raise ContainmentFailure(f'owned ancestry crossed user boundary at PID {pid}')
+                if (candidate is not None and same_process(candidate, item)
+                        and item['ppid'] == rows[pid]['ppid']
                         and same_process(self.owned[item['ppid']], parent)):
                     self.owned[pid] = item
+                    rows[pid] = item
                     parents.add(pid)
             if not (added & parents):
                 break
