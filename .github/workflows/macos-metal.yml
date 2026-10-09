@@ -1,0 +1,118 @@
+# macOS Apple Silicon CI for the Metal backend, shader bridge and guest CPU runtime.
+# Runs on the self-hosted Apple Silicon runner. The repository is public, so every
+# job refuses pull requests whose head branch lives in another repository: code
+# from forks never executes on the self-hosted machine. A fork PR could edit this
+# file to drop the guard, so the repository also requires maintainer approval
+# before workflows run for any external contributor's pull request.
+name: macOS Metal
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-metal-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_COMMON: >-
+    -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=arm64
+  CTEST_ARGS: --output-on-failure --timeout 300
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cpu-tcg:
+    name: macOS CPU TCG
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Initialize submodules
+        run: git submodule update --init --depth 1 3rdparty/unicorn 3rdparty/anyps5-tcg
+      # Build directories live outside the checkout so incremental builds survive between runs.
+      - name: Select build directory
+        run: echo "BUILD_DIR=$RUNNER_WORKSPACE/ci-build/cpu-tcg" >> "$GITHUB_ENV"
+      - name: Configure
+        run: cmake -S . -B "$BUILD_DIR" $CMAKE_COMMON -DANYPS5_CPU_RUNTIME_ONLY=ON -DANYPS5_CPU_BACKEND=TCG
+      - name: Build
+        run: cmake --build "$BUILD_DIR" --parallel
+      - name: Test
+        run: ctest --test-dir "$BUILD_DIR" $CTEST_ARGS
+
+  native-runner:
+    name: macOS native runner
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Initialize submodules
+        run: >-
+          git submodule update --init --depth 1
+          3rdparty/unicorn 3rdparty/anyps5-tcg 3rdparty/SPIRV-Cross 3rdparty/glslang
+          3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers 3rdparty/SDL2
+      - name: Select build directory
+        run: echo "BUILD_DIR=$RUNNER_WORKSPACE/ci-build/native-runner" >> "$GITHUB_ENV"
+      - name: Configure
+        run: >-
+          cmake -S . -B "$BUILD_DIR" $CMAKE_COMMON
+          -DANYPS5_CPU_RUNTIME_ONLY=ON -DANYPS5_CPU_BACKEND=TCG
+          -DANYPS5_CPU_METAL_SOURCE_DIR="$GITHUB_WORKSPACE" -DANYPS5_CPU_NATIVE_MODULE_RUNNER=ON
+      - name: Build
+        run: cmake --build "$BUILD_DIR" --parallel
+      - name: Test
+        run: ctest --test-dir "$BUILD_DIR" $CTEST_ARGS
+
+  shader-bridge:
+    name: macOS shader bridge
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Initialize submodules
+        run: git submodule update --init --depth 1 3rdparty/SPIRV-Cross 3rdparty/Vulkan-Headers
+      - name: Select build directory
+        run: echo "BUILD_DIR=$RUNNER_WORKSPACE/ci-build/shader-bridge" >> "$GITHUB_ENV"
+      - name: Configure
+        run: >-
+          cmake -S . -B "$BUILD_DIR" $CMAKE_COMMON
+          -DANYPS5_METAL_UTILITIES_ONLY=ON -DANYPS5_METAL_SHADER_BRIDGE=ON
+          -DANYPS5_BUILD_METAL_SHADER_BRIDGE_TESTS=ON
+      - name: Build
+        run: cmake --build "$BUILD_DIR" --parallel
+      - name: Test
+        run: ctest --test-dir "$BUILD_DIR" $CTEST_ARGS
+
+  guest-replay:
+    name: macOS guest replay
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Initialize submodules
+        run: >-
+          git submodule update --init --depth 1
+          3rdparty/SPIRV-Cross 3rdparty/glslang 3rdparty/SPIRV-Headers
+          3rdparty/Vulkan-Headers 3rdparty/SDL2
+      - name: Select build directory
+        run: echo "BUILD_DIR=$RUNNER_WORKSPACE/ci-build/guest-replay" >> "$GITHUB_ENV"
+      - name: Configure
+        run: >-
+          cmake -S . -B "$BUILD_DIR" $CMAKE_COMMON
+          -DANYPS5_METAL_UTILITIES_ONLY=ON -DANYPS5_METAL_SHADER_BRIDGE=ON
+          -DANYPS5_BUILD_METAL_SHADER_BRIDGE_TESTS=ON -DANYPS5_METAL_GUEST_REPLAY=ON
+      - name: Build
+        run: cmake --build "$BUILD_DIR" --parallel
+      - name: Test
+        run: ctest --test-dir "$BUILD_DIR" $CTEST_ARGS
