@@ -107,8 +107,8 @@ class SigningFixture(unittest.TestCase):
         patcher = patch.object(verify, "PUBLIC_KEY_B64", self.public)
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.signer = releaselib.Signer(self.key, expected_public_key=self.public)
         self.work = Path(tempfile.mkdtemp(dir=self.scratch.name))
+        self.signer = releaselib.Signer(self.key, expected_public_key=self.public, state_dir=self.work / "state")
 
     def record(self, version, commit=COMMIT, built_at=NOW - dt.timedelta(days=2)):
         archive = self.work / verify.asset_name("engine", version)
@@ -194,13 +194,31 @@ class SequenceTests(SigningFixture):
                 releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record(stale), self.work, NOW)
         self.assertEqual(releaselib.read_feed(github, "engine", "alpha")["sequence"], 3)
 
-    def test_unverifiable_published_feed_is_never_overwritten(self):
+    def test_half_replaced_public_feed_recovers_from_journal_but_never_without_it(self):
+        github = FakeGitHub()
+        for version in ("2026.10.09.1", "2026.10.09.2"):
+            releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record(version), self.work, NOW)
+        channels = github.assets[releaselib.CHANNELS_TAG]
+        first = releaselib.encode_json(releaselib.feed_document("engine", "alpha", 1, self.record("2026.10.09.1"), NOW))
+        channels["engine-alpha.json"] = first  # json replaced, .sig still the newer one: an interrupted upload
+        stranger = releaselib.Signer(self.key, expected_public_key=self.public, state_dir=self.work / "elsewhere")
+        with self.assertRaises(verify.VerificationError):
+            releaselib.publish_feed(github, stranger, "engine", "alpha", self.record("2026.10.09.3"), self.work, NOW)
+        feed = releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.09.3"), self.work, NOW)
+        self.assertEqual(feed["sequence"], 3)
+        self.assertEqual(releaselib.read_feed(github, "engine", "alpha"), feed)
+
+    def test_replayed_old_public_feed_cannot_reset_the_sequence(self):
         github = FakeGitHub()
         releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.09.1"), self.work, NOW)
-        feed = github.assets[releaselib.CHANNELS_TAG]["engine-alpha.json"]
-        github.assets[releaselib.CHANNELS_TAG]["engine-alpha.json"] = feed.replace(b'"sequence": 1', b'"sequence": 90')
-        with self.assertRaises(verify.VerificationError):
+        old_pair = dict(github.assets[releaselib.CHANNELS_TAG])
+        for version in ("2026.10.09.2", "2026.10.09.3"):
+            releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record(version), self.work, NOW)
+        github.assets[releaselib.CHANNELS_TAG] = old_pair  # authentic sequence-1 pair put back
+        with self.assertRaisesRegex(releaselib.ReleaseError, "not newer"):
             releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.09.2"), self.work, NOW)
+        feed = releaselib.publish_feed(github, self.signer, "engine", "alpha", self.record("2026.10.09.4"), self.work, NOW)
+        self.assertEqual(feed["sequence"], 4)
 
     def test_version_counts_up_per_utc_day(self):
         tags = ["engine-2026.10.09.1", "engine-2026.10.09.2", "engine-2026.10.08.7", "channels"]
@@ -242,6 +260,14 @@ class StablePromotionTests(SigningFixture):
             self.assertIsNone(releaselib.read_feed(self.github, "engine", "stable"), approvers)
         self.assertEqual(self.github.closed, [])
         self.assertTrue(all("not performed" in body for _, body in self.github.comments))
+
+    def test_refuses_a_version_that_is_not_the_current_beta(self):
+        newer = self.record("2026.10.09.3")
+        self.publish_build(self.github, newer)
+        releaselib.publish_feed(self.github, self.signer, "engine", "beta", newer, self.work, NOW)
+        self.assertEqual(self.run_stable(["RINNECODER"]), 0)
+        self.assertIsNone(releaselib.read_feed(self.github, "engine", "stable"))
+        self.assertIn("not the current beta", self.github.comments[-1][1])
 
     def test_open_regression_blocks_stable(self):
         self.github.issues[9] = {"number": 9, "state": "open", "labels": [{"name": "regression"}],

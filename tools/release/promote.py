@@ -19,7 +19,7 @@ regression, open one issue labelled ``release:stable-candidate`` (and close supe
 
 stable: only for an open issue labelled ``release:stable-candidate`` and
 ``release:approved`` whose most recent ``release:approved`` label event was made by
-RINNECODER. Agents must never add ``release:approved``.
+RINNECODER, and only for the build that is currently on beta. Agents must never add ``release:approved``.
 
 A gate that does not hold is a "hold": it is reported and the run exits 0. Anything that
 fails verification (a bad signature, a feed that would go backwards) exits 1.
@@ -70,7 +70,7 @@ def fetch_package(record, scratch, label):
 
 def beta(github, now, args):
     github.ensure_labels()
-    current = releaselib.read_feed(github, "engine", "beta")
+    current = releaselib.current_feed(github, args.signer, "engine", "beta")
     current_version = current["release"]["version"] if current else None
     newer = [(release, record) for release, record in releaselib.engine_releases(github)
              if current is None or releaselib.version_key(record["version"]) > releaselib.version_key(current_version)]
@@ -141,8 +141,8 @@ def candidate_issues(github):
 
 def stable_candidate(github, now, args):
     github.ensure_labels()
-    current_beta = releaselib.read_feed(github, "engine", "beta")
-    current_stable = releaselib.read_feed(github, "engine", "stable")
+    current_beta = releaselib.current_feed(github, args.signer, "engine", "beta")
+    current_stable = releaselib.current_feed(github, args.signer, "engine", "stable")
     if current_beta is None:
         say("No stable candidate: there is no beta yet.")
         return 0
@@ -215,13 +215,14 @@ def stable(github, now, args):
             refusal = "`release:approved` was last added by %s, not @%s" % (actor or "an unknown actor", releaselib.MAINTAINER)
         release = github.release("engine-" + version)
         record = releaselib.verified_release_record(github, release) if release else None
-        current_stable = releaselib.read_feed(github, "engine", "stable")
-        current_beta = releaselib.read_feed(github, "engine", "beta")
+        current_stable = releaselib.current_feed(github, args.signer, "engine", "stable")
+        current_beta = releaselib.current_feed(github, args.signer, "engine", "beta")
         if refusal is None and record is None:
             refusal = "engine-%s has no verified release.json" % version
-        elif refusal is None and (current_beta is None or
-                                  releaselib.version_key(version) > releaselib.version_key(current_beta["release"]["version"])):
-            refusal = "engine %s never reached the beta channel" % version
+        elif refusal is None and (current_beta is None or current_beta["release"] != record):
+            # Only the build that is on beta now passed every beta gate; a version beta
+            # skipped over, or one beta has moved past, is not eligible.
+            refusal = "engine %s is not the current beta" % version
         elif refusal is None and current_stable and \
                 releaselib.version_key(version) <= releaselib.version_key(current_stable["release"]["version"]):
             refusal = "engine %s is not newer than stable %s" % (version, current_stable["release"]["version"])

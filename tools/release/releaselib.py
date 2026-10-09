@@ -108,9 +108,12 @@ def next_sequence(previous_feed, record):
 class Signer:
     """Signs with CryptoKit via signer.swift; the key file is only ever read, never echoed."""
 
-    def __init__(self, key_path=None, expected_public_key=verify.PUBLIC_KEY_B64):
+    def __init__(self, key_path=None, expected_public_key=verify.PUBLIC_KEY_B64, state_dir=None):
         self.key_path = Path(key_path or os.environ.get("ANYPS5_RELEASE_KEY") or DEFAULT_KEY)
         self.expected_public_key = expected_public_key
+        # The feed journal lives with the key, on the only machine that can sign.
+        self.state_dir = Path(state_dir or os.environ.get("ANYPS5_RELEASE_STATE") or
+                              self.key_path.parent.parent / "state" / "release-feeds")
         self._binary = None
 
     def check_key_file(self):
@@ -277,8 +280,7 @@ def verified_release_record(github, release):
 def read_feed(github, product, channel, channels_release=None):
     """The currently published feed, verified, or None if it was never published.
 
-    A feed that exists but fails verification stops the pipeline: it is never overwritten
-    from an unverifiable starting point.
+    Raises when the published pair exists but does not verify.
     """
     release = channels_release if channels_release is not None else github.release(CHANNELS_TAG)
     if release is None:
@@ -291,20 +293,77 @@ def read_feed(github, product, channel, channels_release=None):
     return verify.verify_feed_bytes(name, data, signature)
 
 
+def read_journal(signer, product, channel):
+    """The last feed this signer published (verified), or None."""
+    name = "%s-%s.json" % (product, channel)
+    path = signer.state_dir / (name + ".journal")
+    if not path.exists():
+        return None
+    entry = json.loads(path.read_text())
+    return verify.verify_feed_bytes(name, verify.base64.b64decode(entry["data"]), entry["sig"].encode())
+
+
+def write_journal(signer, name, data, signature):
+    """One file per feed, replaced atomically, so the journal pair can never be half-written."""
+    path = signer.state_dir / (name + ".journal")
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(json.dumps({"data": verify.base64.b64encode(data).decode(), "sig": signature.decode()}) + "\n")
+    os.replace(partial, path)
+
+
+def current_feed(github, signer, product, channel):
+    """The newest trustworthy feed: the published one or the signer's journal, whichever is later.
+
+    The journal is the durable sequence watermark. It lets a publish recover from a
+    half-replaced public pair (json and sig are separate uploads) and stops a replayed old
+    public feed from resetting the sequence. With no journal, an unverifiable public feed
+    still stops the pipeline.
+    """
+    journal = read_journal(signer, product, channel)
+    try:
+        published = read_feed(github, product, channel)
+    except verify.VerificationError:
+        if journal is None:
+            raise
+        published = None
+    candidates = [feed for feed in (published, journal) if feed is not None]
+    return max(candidates, key=lambda feed: feed["sequence"]) if candidates else None
+
+
+class _FeedLock:
+    """Machine-wide lock so CI jobs and local runs never allocate sequences concurrently."""
+
+    def __init__(self, directory):
+        self.directory = Path(directory)
+
+    def __enter__(self):
+        import fcntl
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.handle = open(self.directory / ".lock", "a")
+        fcntl.flock(self.handle, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_):
+        self.handle.close()
+
+
 def publish_feed(github, signer, product, channel, record, work, now=None):
     """Write the next feed for ``channel`` and upload it with its signature. Returns the feed."""
-    github.ensure_channels_release()
-    previous = read_feed(github, product, channel)
-    feed = feed_document(product, channel, next_sequence(previous, record), record, now or utc_now())
-    data = encode_json(feed)
     name = "%s-%s.json" % (product, channel)
-    path, sig_path = Path(work) / name, Path(work) / (name + ".sig")
-    path.write_bytes(data)
-    sig_path.write_bytes(signer.sign(data))
-    verify.verify_feed_bytes(name, path.read_bytes(), sig_path.read_bytes(),
-                             min_sequence=previous["sequence"] + 1 if previous else 1)
-    github.upload(CHANNELS_TAG, [path, sig_path])
-    if not github.dry_run:
+    with _FeedLock(signer.state_dir):
+        github.ensure_channels_release()
+        previous = current_feed(github, signer, product, channel)
+        feed = feed_document(product, channel, next_sequence(previous, record), record, now or utc_now())
+        data = encode_json(feed)
+        path, sig_path = Path(work) / name, Path(work) / (name + ".sig")
+        path.write_bytes(data)
+        sig_path.write_bytes(signer.sign(data))
+        verify.verify_feed_bytes(name, path.read_bytes(), sig_path.read_bytes(),
+                                 min_sequence=previous["sequence"] + 1 if previous else 1)
+        github.upload(CHANNELS_TAG, [path, sig_path])
+        if github.dry_run:
+            return feed
+        write_journal(signer, name, path.read_bytes(), sig_path.read_bytes())
         published = read_feed(github, product, channel)
         require(published == feed, "read-back of %s differs from what was uploaded" % name)
     return feed

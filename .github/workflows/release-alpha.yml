@@ -6,6 +6,9 @@
 # (never a GitHub secret). Runner .env provides ANYPS5_MACPS_REPO (MacPS checkout used for
 # EnginePackage.accept). Code from forks never reaches these jobs: workflow_run is limited
 # to push runs of this repository's main, and the PR preflight keeps the same-repo guard.
+# A fork PR could edit this file to drop that guard, so the repository also requires
+# maintainer approval before any external contributor's workflow runs (approval policy
+# all_external_contributors); never approve a fork run that touches workflows or tools/release.
 name: Engine release (alpha)
 
 on:
@@ -22,6 +25,7 @@ on:
 
 permissions:
   contents: write
+  checks: read
 
 defaults:
   run:

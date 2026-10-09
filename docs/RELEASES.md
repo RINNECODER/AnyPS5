@@ -43,6 +43,8 @@ Public key (base64, raw 32 bytes):
 
 The private key exists only on the maintainer's Mac, as a mode-0600 file outside the repository. Self-hosted runner jobs and local scripts read it from there. It is never committed, printed, uploaded or stored as a GitHub secret.
 
+Sequences are allocated under a machine-wide lock, and the signer keeps a journal of the last feed it published per channel next to its key (`state/release-feeds/`). The journal is the sequence watermark: a replayed old public feed cannot reset the sequence, and a publish interrupted between the `.json` and `.sig` uploads is repaired by the next publish.
+
 The signer, `tools/release/signer.swift`, uses CryptoKit. Every signature is re-checked before upload by the independent RFC 8032 verifier in `verify.py`, and the signer refuses to run with a key whose public half doesn't match the key above.
 
 ## How a package is built
@@ -100,7 +102,7 @@ If a gate fails, the run reports the reason and waits for the next hour.
 - The candidate and the current beta run side by side on the runner, under the shared `title-session` lease.
 - The title dump's location comes only from the runner `.env` (`ANYPS5_E2E_TITLE_DIR`). Its paths and hashes are never committed or logged.
 
-**Regression issues.** A `regression` issue counts against every version up to and including the oldest version it mentions, in the form `YYYY.MM.DD.n`. An issue that mentions no version blocks every promotion. Close the issue, or edit it to name the right version, to unblock.
+**Regression issues.** A `regression` issue counts against the oldest version it mentions, in the form `YYYY.MM.DD.n`, and against every later version, since later builds still carry the regression until it is fixed. Older versions are not blocked. An issue that mentions no version blocks every promotion. Close the issue, or edit it to name the right version, to unblock.
 
 **Stable candidate: `promote.py stable-candidate`.** Once a beta has been on the beta channel for 48 h with no blocking regression, the promoter opens one issue:
 
@@ -115,7 +117,7 @@ When a newer beta arrives, the promoter closes the older candidate issues it ope
 - It is labelled both `release:stable-candidate` and `release:approved`.
 - It was opened by the promoter or the maintainer, and its title and marker match.
 - The most recent `release:approved` label event on it was made by **RINNECODER**.
-- Its version reached beta, is newer than the current stable, and has no blocking regression.
+- Its build is the one currently on beta, is newer than the current stable, and has no blocking regression.
 
 The promoter then writes `engine-stable.json`, marks the build as a full release, and closes the issue with a comment.
 

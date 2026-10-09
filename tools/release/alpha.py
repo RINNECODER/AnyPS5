@@ -7,7 +7,8 @@
 Run by .github/workflows/release-alpha.yml after the macOS Metal workflow passed for a
 push to main, or locally with the same arguments. Steps:
 
-1. Check the signing key matches the published public key (before any long build).
+1. Check the signing key matches the published public key and that the four required
+   macOS checks passed on the commit (before any long build), for every entry point.
 2. Read and verify the current engine-alpha.json. Skip if this commit is already the alpha
    or is not a descendant of it (an older run finishing late must never replace a newer alpha).
 3. Pick the tag ``engine-<YYYY.MM.DD>.<n>`` (n counts up per UTC day).
@@ -91,11 +92,13 @@ def run(args, log=print):
     github = releaselib.GitHub(dry_run=args.dry_run, log=log)
     signer = releaselib.Signer()
     releaselib.require(signer.public_key() == verify.PUBLIC_KEY_B64, "signing key does not match the published public key")
-    previous = releaselib.read_feed(github, "engine", "alpha")
+    previous = releaselib.current_feed(github, signer, "engine", "alpha")
     previous_commit = previous["release"]["commit"] if previous else None
     if previous_commit == args.commit:
         summary(["Alpha skipped: %s is already engine-alpha (%s)." % (args.commit, previous["release"]["version"])])
         return 0
+    missing = github.required_checks_passed(args.commit)
+    releaselib.require(not missing, "required checks have not passed on %s: %s" % (args.commit, ", ".join(missing)))
     if previous_commit is not None:
         status = github.compare(previous_commit, args.commit)["status"]
         if status != "ahead":
@@ -108,18 +111,8 @@ def run(args, log=print):
     tag = "engine-" + version
     work = args.work_root / ("%s-%s" % (version, args.commit[:12]))
     try:
-        if args.prebuilt:
-            info = json.loads((args.prebuilt / "build-info.json").read_text())
-            releaselib.require(info["commit"] == args.commit, "prebuilt package is from another commit")
-            work = args.prebuilt
-            archive = Path(info["zip"])
-            named = archive.with_name(verify.asset_name("engine", version))
-            if archive != named:
-                archive.rename(named)
-            archive = named
-        else:
-            info = build_package.build(args.source, args.commit, args.macps_repo, version, work, log=log)
-            archive = Path(info["zip"])
+        info = build_package.build(args.source, args.commit, args.macps_repo, version, work, log=log)
+        archive = Path(info["zip"])
         out = archive.parent
         record = releaselib.release_record(version, args.commit, releaselib.utc_now(), archive,
                                            info["package_manifest_sha256"],
@@ -151,7 +144,7 @@ def run(args, log=print):
                     record["package_manifest_sha256"], info.get("macps_commit", "?")[:12])])
         return 0
     finally:
-        if not args.keep_work and not args.prebuilt:
+        if not args.keep_work:
             releaselib.clean_tree(work)
 
 
@@ -162,11 +155,10 @@ def main(argv=None):
     parser.add_argument("--macps-repo", type=Path, default=os.environ.get("ANYPS5_MACPS_REPO"))
     parser.add_argument("--work-root", type=Path, default=DEFAULT_WORK_ROOT)
     parser.add_argument("--min-macps", default=None)
-    parser.add_argument("--prebuilt", type=Path, help="reuse a finished build_package.py --work directory")
     parser.add_argument("--keep-work", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="build and sign locally; write nothing to GitHub")
     args = parser.parse_args(argv)
-    if not args.macps_repo and not args.prebuilt:
+    if not args.macps_repo:
         print("--macps-repo or ANYPS5_MACPS_REPO is required", file=sys.stderr)
         return 2
     try:
