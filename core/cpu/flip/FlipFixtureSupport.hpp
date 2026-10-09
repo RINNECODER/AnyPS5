@@ -14,7 +14,6 @@ constexpr auto RW = Cpu::Permission::Read | Cpu::Permission::Write;
 constexpr auto RX = Cpu::Permission::Read | Cpu::Permission::Execute;
 constexpr std::uint64_t Control = 0x100002000ULL, Builder = Control + 256,
     Commands = Control + 4096;
-constexpr const char* Image = "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
 constexpr const char* FlipNid = "YUeqkyT7mEQ";
 constexpr const char* WaitNid = "MWiElSNE8j8";
 constexpr const char* SubmitNid = "UglJIZjGssM";

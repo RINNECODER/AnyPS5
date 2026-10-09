@@ -266,64 +266,6 @@ void titleAgnostic(const char* utility) {
     rejects([&]{runner.Resolve(source,row("not-a-real-nid","libSceVideoOut","libSceVideoOut",12,13),2,0);},"service");
     runner.Shutdown();runner.Shutdown();
 }
-void qualifiedRejections(const char* utility) {
-    // Recorded target certificate only. No private bytes are mapped or executed.
-    // This synthetic metadata boundary proves strict rejection, not the target
-    // caller's runtime behavior or a positive public-image target admission.
-    Cpu::SceImportConsumer source;source.Path="eboot.bin";source.SourceSize=102560655;
-    constexpr char hash[]="a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
-    const auto digit=[](char c){return c<='9'?c-'0':c-'a'+10;};
-    for(unsigned i=0;i<32;++i)source.SourceSha256[i]=static_cast<std::byte>((digit(hash[i*2])<<4)|digit(hash[i*2+1]));
-    Cpu::Machine machine;auto threads=std::make_shared<Cpu::GuestThreads>(machine);
-    Cpu::NativeModuleRunnerConfiguration config;config.UtilityMetallib=utility;
-    config.WindowTitle="Native runner static certificate rejection fixture";config.Width=config.Height=64;
-    Cpu::NativeModuleRunner runner(machine,threads,source,config);
-    auto import=scoped("Up36PTk687E","libSceVideoOut");
-    rejects([&]{runner.Resolve(source,import,1,0);},"ELF symbol");
-    rejects([&]{runner.Resolve(source,import,2,8);},"ELF symbol");
-    auto wrong=source;wrong.SourceSha256[0]^=std::byte{1};
-    rejects([&]{runner.Resolve(wrong,import,2,0);},"actual consumer source");
-    wrong=source;--wrong.SourceSize;
-    rejects([&]{runner.Resolve(wrong,import,2,0);},"actual consumer source");
-    wrong=source;wrong.Path="public-fixture.elf";
-    rejects([&]{runner.Resolve(wrong,import,2,0);},"actual consumer source");
-    auto badScope=import;badScope.LibraryId=0;
-    rejects([&]{runner.Resolve(source,badScope,2,0);},"scope/version");
-    auto unknown=import;unknown.Nid="not-a-real-nid";
-    rejects([&]{runner.Resolve(source,unknown,2,0);},"service");
-    // CPU12's POSIX pair is size-zero in the actual pinned libc image. The
-    // aggregate resolver must also reject fabricated nonzero-size metadata,
-    // because the component's legacy mutex resolver accepts only a type.
-    auto libc=source;libc.Path="libc.prx";libc.SourceSize=1875018;
-    constexpr char libcHash[]="78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f";
-    for(unsigned i=0;i<32;++i)libc.SourceSha256[i]=static_cast<std::byte>((digit(libcHash[i*2])<<4)|digit(libcHash[i*2+1]));
-    for(const auto nid:{"7H0iTOciTLo","2Z+PpY6CaJg"}) {
-        auto mutex=scoped(nid,"libkernel");mutex.LibraryId=0;mutex.ModuleId=1;
-        rejects([&]{runner.Resolve(libc,mutex,1,0);},"scope/version/type");
-        rejects([&]{runner.Resolve(libc,mutex,2,8);},"scope/version/type");
-        auto malformed=libc;--malformed.SourceSize;
-        rejects([&]{runner.Resolve(malformed,mutex,2,0);},"consumer source/import");
-        malformed=libc;malformed.SourceSha256[0]^=std::byte{1};
-        rejects([&]{runner.Resolve(malformed,mutex,2,0);},"consumer source/import");
-    }
-    // Timed rows are outside the older condition inventory. Correct metadata
-    // must admit first so a forged source size cannot pass via another guard.
-    for(const bool relative:{false,true}) {
-        const auto& actual=relative?libc:source;
-        auto timed=scoped(relative?"BmMjYxmew1w":"27bAgiJmOh0",
-                          relative?"libkernel":"libScePosix");
-        timed.ModuleName="libkernel";timed.LibraryId=relative?0:43;timed.ModuleId=relative?1:24;
-        const auto admitted=runner.Resolve(actual,timed,2,0);
-        require(admitted&&admitted->Address&&admitted->Type==2,
-                relative?"Exact SCE timed-condition metadata rejected":"Exact POSIX timed-condition metadata rejected");
-        for(const auto bytes:{std::uint64_t{0},actual.SourceSize-1,actual.SourceSize+1}) {
-            auto malformed=actual;malformed.SourceSize=bytes;
-            rejects([&]{runner.Resolve(malformed,timed,2,0);},
-                    "Unsupported target kernel condition timeout consumer source/import row");
-        }
-    }
-    runner.Shutdown();runner.Shutdown();
-}
 void run(const char* mainPath,const char* dependencyPath,const char* utility,const char* mode) {
     Cpu::Machine machine;
     auto threads=std::make_shared<Cpu::GuestThreads>(machine);
@@ -372,7 +314,9 @@ void run(const char* mainPath,const char* dependencyPath,const char* utility,con
     require(runner.MappingGeneration()==1,"Initial native assembly publication is not generation1");
     nativeWord(runner,object(graph.Modules()[1],"L+OvOB7GHzo"),0x10203040);
     rejects([&]{runner.ActivateBeforeInitializers();},"only once");
-    rejects([&]{runner.Resolve(source,scoped("Up36PTk687E","libSceVideoOut"),2,0);},"actual consumer source");
+    // Title-agnostic: the public fixture's own identity resolves graphics rows.
+    const auto videoOut=runner.Resolve(source,scoped("Up36PTk687E","libSceVideoOut"),2,0);
+    require(videoOut&&videoOut->Address&&videoOut->Type==2,"Public fixture image was refused VideoOut admission");
     require(!runner.Resolve(source,scoped("not-a-real-nid","unclaimed-provider"),2,0),"Unclaimed native import invented a provider");
     const auto tlsExport=std::find_if(graph.Modules()[0].Image.Exports.begin(),graph.Modules()[0].Image.Exports.end(),[](const auto& e){
         return e.Identity.Nid=="rBiIvjUtJbs"&&e.Type==6;
@@ -452,11 +396,10 @@ void run(const char* mainPath,const char* dependencyPath,const char* utility,con
 }
 int main(int argc,char** argv) {
     @autoreleasepool {try {
-        require(argc==5,"Usage: NativeModuleRunnerTest main.elf dependency.prx utility.metallib lifecycle|close|initializer-failure");
+        require(argc==5,"Usage: NativeModuleRunnerTest main.elf dependency.prx utility.metallib lifecycle|close|initializer-failure|title-agnostic");
         // Guest phases assert posted AppKit key input, which a host window only accepts while focused.
         AnyPS5::Host::RequireRealFocusForThisProcess();
-        if(std::string(argv[4])=="qualified-rejection") qualifiedRejections(argv[3]);
-        else if(std::string(argv[4])=="title-agnostic") titleAgnostic(argv[3]);
+        if(std::string(argv[4])=="title-agnostic") titleAgnostic(argv[3]);
         else run(argv[1],argv[2],argv[3],argv[4]);
         std::cout<<"Actual native runner public assembly "<<argv[4]<<" PASS; synthetic public VideoOut route is not target admission/gameplay evidence\n";
         return 0;

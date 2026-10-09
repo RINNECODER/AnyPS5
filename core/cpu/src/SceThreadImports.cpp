@@ -166,25 +166,12 @@ std::optional<std::uint64_t> SceThreadImports::ResolvePriority(const SceImport& 
 }
 
 std::optional<std::uint64_t> SceThreadImports::ResolveTargetPriority(const SceImport& import,
-        std::uint8_t symbolType, ThreadPriorityConsumer consumer) {
+        std::uint8_t symbolType) {
     const auto service = impl->priorityServices.find(import.Nid);
     if (service == impl->priorityServices.end()) return std::nullopt;
     if (import.LibraryName != "libkernel" || import.ModuleName != "libkernel" ||
         import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1 || symbolType != 2)
         throw std::runtime_error("Unsupported target thread priority scope/version/type: " + identity(import));
-    const bool eboot = consumer.Name == "eboot.bin" &&
-        consumer.Sha256 == "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397" &&
-        import.LibraryId == 44 && import.ModuleId == 24;
-    const bool libc = consumer.Name == "libc.prx" &&
-        consumer.Sha256 == "78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f" &&
-        import.LibraryId == 0 && import.ModuleId == 1 && service->second != Service::AttrSetPolicy;
-    const bool web = consumer.Name == "libSceNpCppWebApi.prx" &&
-        consumer.Sha256 == "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9" &&
-        import.LibraryId == 4 && import.ModuleId == 5 &&
-        (service->second == Service::AttrInit || service->second == Service::AttrDestroy ||
-         service->second == Service::AttrSetPriority);
-    if (!eboot && !libc && !web)
-        throw std::runtime_error("Unsupported target thread priority consumer source/import row: " + identity(import));
     return impl->resolve(import, symbolType, service->second, impl);
 }
 

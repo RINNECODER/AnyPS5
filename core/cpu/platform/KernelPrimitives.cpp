@@ -545,68 +545,24 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
 
 TargetKernelMutexes::TargetKernelMutexes(Machine& machine, const std::shared_ptr<GuestThreads>& threads)
     : provider(machine, threads) {}
-std::optional<std::uint64_t> TargetKernelMutexes::Resolve(const SceImport& import, std::uint8_t type,
-                                                        KernelMutexConsumer source) {
+std::optional<std::uint64_t> TargetKernelMutexes::Resolve(const SceImport& import, std::uint8_t type) {
     unsigned op = 0;
     for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
     if (op == inventory.size() || (op >= mutexCount && op < conditionEnd) || op >= timeoutBegin) return std::nullopt;
-    const bool eboot = source.Name == "eboot.bin" && source.Sha256 ==
-        "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
-    const bool libc = source.Name == "libc.prx" && source.Sha256 ==
-        "78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f";
-    const bool web = source.Name == "libSceNpCppWebApi.prx" && source.Sha256 ==
-        "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9";
-    if (op >= conditionEnd) {
-        // Only this pinned libc imports the POSIX pair used around its shared
-        // zero-filled static mutex/condition slots. The nine SCE rows stay intact.
-        if (!libc || import.LibraryName != "libkernel" || import.LibraryId != 0 || import.ModuleId != 1)
-            throw std::runtime_error("Unsupported target POSIX static mutex consumer source/import row");
-        return provider.Resolve(import, type);
-    }
-    if (!eboot && !(libc && op != 7) && !(web && op != 1 && op != 7))
-        throw std::runtime_error("Unsupported target kernel mutex consumer source/import row");
-    if ((eboot && (import.LibraryId != 44 || import.ModuleId != 24)) ||
-        (libc && (import.LibraryId != 0 || import.ModuleId != 1)) ||
-        (web && (import.LibraryId != 4 || import.ModuleId != 5)))
-        throw std::runtime_error("Unsupported target kernel mutex consumer source/import row IDs");
+    // The provider validates libkernel/libScePosix scope, version and symbol type
+    // for every importing image; consumer identity is not an admission input.
     return provider.Resolve(import, type);
 }
 std::optional<std::uint64_t> TargetKernelMutexes::ResolveCondition(const SceImport& import, std::uint8_t type,
-                                                                 std::uint64_t size, KernelMutexConsumer source) {
+                                                                 std::uint64_t size) {
     unsigned op = mutexCount;
     for (; op < conditionEnd; ++op) if (inventory[op].Nid == import.Nid) break;
     if (op == conditionEnd) {
         for (op = timeoutBegin; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
         if (op == inventory.size()) return std::nullopt;
     }
-    const bool eboot = source.Name == "eboot.bin" && source.Sha256 ==
-        "a6df51ec222136f337f86e9be5fa3013417ddc44bc22a6c8d514c0199cf8c397";
-    const bool libc = source.Name == "libc.prx" && source.Sha256 ==
-        "78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f";
-    const bool web = source.Name == "libSceNpCppWebApi.prx" && source.Sha256 ==
-        "38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9";
-    const bool core = op < 14;
-    const bool attrs = op == 14 || op == 15;
-    const bool posix = op >= 16 && op != timeoutBegin + 1;
-    if (op >= timeoutBegin) {
-        if (size || type != 2 || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
-            import.ModuleMajor != 1 || import.ModuleMinor != 1 ||
-            (op == timeoutBegin && !(eboot && import.LibraryName == "libScePosix" &&
-                import.LibraryId == 43 && import.ModuleId == 24)) ||
-            (op == timeoutBegin + 1 && !(libc && import.LibraryName == "libkernel" &&
-                import.LibraryId == 0 && import.ModuleId == 1)))
-            throw std::runtime_error("Unsupported target kernel condition timeout consumer source/import row");
-        return provider.Resolve(import, type);
-    }
-    if (size || type != 2 || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
-        import.ModuleMajor != 1 || import.ModuleMinor != 1 ||
-        !(eboot || (libc && (core || op == 18 || op == 20)) || (web && core)) ||
-        (attrs && !eboot) ||
-        (eboot && (import.LibraryId != (posix ? 43 : 44) || import.ModuleId != 24 ||
-                   import.LibraryName != (posix ? "libScePosix" : "libkernel"))) ||
-        (libc && (import.LibraryId != 0 || import.ModuleId != 1 || import.LibraryName != "libkernel")) ||
-        (web && (import.LibraryId != 4 || import.ModuleId != 5 || import.LibraryName != "libkernel")))
-        throw std::runtime_error("Unsupported target kernel condition consumer source/import row");
+    if (size || type != 2)
+        throw std::runtime_error("Unsupported target kernel condition symbol type/size: " + import.Nid);
     return provider.Resolve(import, type);
 }
 }
