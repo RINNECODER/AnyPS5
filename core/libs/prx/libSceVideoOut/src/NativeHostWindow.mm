@@ -1,4 +1,5 @@
 #include "prx/libSceVideoOut/include/NativeHostWindow.hpp"
+#include "prx/libSceVideoOut/include/UnobtrusiveWindows.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "SDL_scancode.h"
 #include "../src/events/scancodes_darwin.h"
@@ -342,12 +343,16 @@ std::unique_ptr<NativeHostWindow> NativeHostWindow::CreateMainThread(const Windo
     if (configuration.contentWidth == 0 || configuration.contentHeight == 0 || configuration.title.empty())
         throw std::invalid_argument("Native host window requires a title and positive content extent");
     if (nativeWindowLive) throw std::logic_error("Only one native host window may be live");
+    const auto etiquette = CurrentWindowEtiquette();
+    // Taken before any window state exists, so a lock failure leaves nothing half-created.
+    if (etiquette == WindowEtiquette::UnobtrusiveFocus) AcquireMachineFocusLock();
     auto state = std::make_unique<Impl>();
     state->ownsWindowSlot = true;
     nativeWindowLive = true;
     [NSApplication sharedApplication];
     if (NSApp.activationPolicy == NSApplicationActivationPolicyProhibited)
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp setActivationPolicy:etiquette == WindowEtiquette::Default ? NSApplicationActivationPolicyRegular
+                                                                          : NSApplicationActivationPolicyAccessory];
     const auto identity = nextIdentity();
     state->snapshot.window = {identity, identity};
     state->window = [[NSWindow alloc] initWithContentRect:NSMakeRect(80, 80, configuration.contentWidth, configuration.contentHeight)
@@ -383,8 +388,9 @@ std::unique_ptr<NativeHostWindow> NativeHostWindow::CreateMainThread(const Windo
     state->applicationActiveObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidBecomeActiveNotification
         object:NSApp queue:nil usingBlock:^(NSNotification*) { capture(pointer, [](auto& value) { value.focus(value.window.keyWindow); }); }];
     [state->window makeFirstResponder:view];
+    ParkUnobtrusively(state->window);
     [state->window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
+    if (etiquette != WindowEtiquette::Unobtrusive) [NSApp activateIgnoringOtherApps:YES];
     state->size();
     state->focus(state->window.keyWindow && NSApp.active);
     [CATransaction flush];
