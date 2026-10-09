@@ -1,0 +1,102 @@
+# Engine alpha channel: every push to main whose macOS Metal workflow (the four required
+# checks) succeeded is built into a signed engine package and published as
+# engine-<YYYY.MM.DD>.<n> plus the rolling engine-alpha.json feed. See docs/RELEASES.md.
+#
+# Runs only on the self-hosted Apple Silicon runners, which hold the signing key locally
+# (never a GitHub secret). Runner .env provides ANYPS5_MACPS_REPO (MacPS checkout used for
+# EnginePackage.accept). Code from forks never reaches these jobs: workflow_run is limited
+# to push runs of this repository's main, and the PR preflight keeps the same-repo guard.
+# A fork PR could edit this file to drop that guard, so the repository also requires
+# maintainer approval before any external contributor's workflow runs (approval policy
+# all_external_contributors); never approve a fork run that touches workflows or tools/release.
+name: Engine release (alpha)
+
+on:
+  workflow_run:
+    workflows: ["macOS Metal"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/release/**"
+      - "tools/tests/test_release_channels.py"
+      - ".github/workflows/release-*.yml"
+
+permissions:
+  contents: write
+  checks: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    name: Release tooling preflight
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Release tooling tests
+        run: python3 -m unittest discover -s tools/tests -p 'test_release_channels.py' -v
+      - name: Runner can sign and reach MacPS
+        # Prints only the public key derived from the local private key, never the key itself.
+        run: |
+          cd tools/release
+          python3 -c 'import releaselib, verify; s = releaselib.Signer(); p = s.public_key(); print("signing key public half:", p); assert p == verify.PUBLIC_KEY_B64'
+          if [ -z "$ANYPS5_MACPS_REPO" ] || ! git -C "$ANYPS5_MACPS_REPO" rev-parse --verify --quiet HEAD > /dev/null; then
+            echo "ANYPS5_MACPS_REPO is unset or unreadable in the runner .env"; exit 1
+          fi
+          echo "MacPS repository readable"
+          if [ -z "$ANYPS5_E2E_TITLE_DIR" ] || [ ! -r "$ANYPS5_E2E_TITLE_DIR/eboot.bin" ]; then
+            echo "ANYPS5_E2E_TITLE_DIR is unset or unreadable in the runner .env"; exit 1
+          fi
+          echo "title dump readable"
+
+  alpha:
+    name: Publish engine alpha
+    if: >-
+      github.repository == 'RINNECODER/AnyPS5' && (
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'workflow_run' &&
+         github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_branch == 'main' &&
+         github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 240
+    # One alpha at a time so two builds can never race the tag number or feed sequence.
+    concurrency:
+      group: engine-release-alpha
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ANYPS5_UNOBTRUSIVE_WINDOWS: "1"
+      RELEASE_COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Initialize submodules
+        run: >-
+          git submodule update --init --depth 1
+          3rdparty/anyps5-tcg 3rdparty/unicorn 3rdparty/SDL2 3rdparty/SPIRV-Cross
+          3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers 3rdparty/glslang
+      - name: Clean submodules
+        # The package build requires a pristine source tree; checkout only cleans the superproject.
+        run: git submodule foreach --quiet 'git reset --quiet --hard && git clean -qffdx'
+      - name: Release tooling tests
+        run: python3 -m unittest discover -s tools/tests -p 'test_release_channels.py'
+      - name: Build, sign and publish
+        run: >-
+          python3 tools/release/alpha.py --source "$GITHUB_WORKSPACE" --commit "$RELEASE_COMMIT"
+          --work-root "/private/tmp/anyps5-release/run-$GITHUB_RUN_ID"
+      - name: Remove build directories
+        if: always()
+        run: |
+          dir="/private/tmp/anyps5-release/run-$GITHUB_RUN_ID"
+          if [ -e "$dir" ]; then chmod -R u+w "$dir"; rm -rf "$dir"; fi

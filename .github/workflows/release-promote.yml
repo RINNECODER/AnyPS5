@@ -1,0 +1,60 @@
+# Engine beta/stable promotion. See docs/RELEASES.md and tools/release/promote.py.
+#
+# Hourly: promote a 24 h old alpha to beta when the required checks, MacPS acceptance, the
+# local PPSA04203 smoke (title path from the runner .env ANYPS5_E2E_TITLE_DIR, never
+# committed) and the regression gate hold; open a stable-candidate issue for a 48 h old
+# beta; pick up approved candidates.
+# On `issues: labeled` with release:approved by RINNECODER: the stable fast path. The script
+# re-checks the label event's actor through the API. Agents must never add release:approved.
+name: Engine release (promote)
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  checks: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: engine-release-promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote engine channels
+    # Issue text is never interpolated into a command; only the issue number is passed.
+    if: >-
+      github.repository == 'RINNECODER/AnyPS5' && (
+        github.event_name != 'issues' || (
+          github.event.label.name == 'release:approved' &&
+          github.event.sender.login == 'RINNECODER' &&
+          contains(github.event.issue.labels.*.name, 'release:stable-candidate')))
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ANYPS5_UNOBTRUSIVE_WINDOWS: "1"
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Release labels
+        run: python3 tools/release/promote.py labels
+      - name: Stable (approved candidates)
+        run: python3 tools/release/promote.py stable ${ISSUE_NUMBER:+--issue "$ISSUE_NUMBER"}
+      - name: Beta
+        if: github.event_name != 'issues'
+        run: python3 tools/release/promote.py beta
+      - name: Stable candidate issue
+        if: github.event_name != 'issues'
+        run: python3 tools/release/promote.py stable-candidate
