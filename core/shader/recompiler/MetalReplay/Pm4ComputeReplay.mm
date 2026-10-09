@@ -793,6 +793,156 @@ void Pm4DescriptorReplay(id<MTLDevice> device) {
     std::cout << "PM4 oversized thread-count and unaligned descriptor rejection passed\n";
 }
 
+// v_mov_b32 v1, sNaN; v_sqrt_f32 v2, v1; v_lshlrev_b32 v3, 2, v0; buffer_store_dword v2, v3, s[4:7], 0 offen.
+// The recompiler quiets the NaN operand only in IEEE mode, which the registered header's
+// COMPUTE_PGM_RSRC1.IEEE_MODE selects, so the stored bits show which float mode the build used.
+constexpr std::uint32_t SignalingNan = 0x7f812345u;
+constexpr std::array<std::uint32_t, 7> FloatModeCode{
+    0x7e0202ffu, SignalingNan, 0x7e046701u, 0x34060082u, 0xe0701000u, 0x80010203u, 0xbf810000u,
+};
+
+void RegisteredFloatModeReplay(id<MTLDevice> device, id<MTLLibrary> library) {
+    constexpr std::uint32_t Sentinel = 0xdeadbeef, Threads = 64, GuardWords = 64;
+    constexpr std::uint64_t CodeAllocation = 0xa00000, CodeAddress = CodeAllocation + GuardWords * 4,
+        OutputAllocation = 0xa10000, OutputAddress = OutputAllocation + GuardWords * 4,
+        HeaderAllocation = 0xa20000, HeaderAddress = HeaderAllocation + GuardWords * 4,
+        CommandsAllocation = 0xa30000, CommandsAddress = CommandsAllocation + GuardWords * 4,
+        PacketAllocation = 0xa40000, PacketAddress = PacketAllocation + GuardWords * 4, LabelAddress = 0xa50000;
+    struct Case { const char* name; std::uint32_t registers; std::uint32_t rsrc1; std::uint32_t scratch; std::uint32_t expected; };
+    constexpr std::array<Case, 4> cases{{
+        {"IEEE_MODE", 1, 1u << 23u, 0, 0x7fc12345u},
+        {"FLOAT_MODE 0xc0 with DX10_CLAMP", 1, (0xc0u << 12u) | (1u << 21u), 0, SignalingNan},
+        {"no RSRC1 in the header", 0, 0, 0, SignalingNan},
+        {"SCRATCH_EN", 1, 1u << 23u, 4, 0},
+    }};
+    constexpr std::size_t HeaderBytes = sizeof(Shader) + sizeof(ShaderUserData) + sizeof(ShaderRegister);
+    for (const auto& test : cases) {
+        std::array<std::uint32_t, GuardWords * 2 + FloatModeCode.size()> code;
+        code.fill(Sentinel);
+        std::copy(FloatModeCode.begin(), FloatModeCode.end(), code.begin() + GuardWords);
+        std::array<std::uint32_t, GuardWords * 2 + Threads> output;
+        output.fill(Sentinel);
+        auto expectedOutput = output;
+        std::fill_n(expectedOutput.begin() + GuardWords, Threads, test.expected);
+        std::array<std::byte, GuardWords * 8 + HeaderBytes> headerBytes;
+        headerBytes.fill(std::byte{0x7b});
+        std::fill_n(headerBytes.begin() + GuardWords * 4, HeaderBytes, std::byte{0});
+        Shader header{};
+        header.file_header = 0x34333231;
+        header.version = 0x18;
+        header.code = reinterpret_cast<const volatile void*>(CodeAddress);
+        header.user_data = reinterpret_cast<ShaderUserData*>(HeaderAddress + sizeof(Shader));
+        header.sh_registers = reinterpret_cast<ShaderRegister*>(HeaderAddress + sizeof(Shader) + sizeof(ShaderUserData));
+        header.num_sh_registers = static_cast<std::uint8_t>(test.registers);
+        header.scratch_size_dw_per_thread = static_cast<std::uint16_t>(test.scratch);
+        header.header_size = HeaderBytes;
+        header.shader_size = sizeof(FloatModeCode);
+        std::memcpy(headerBytes.data() + GuardWords * 4, &header, sizeof(header));
+        const ShaderRegister rsrc1{0x212, test.rsrc1};
+        std::memcpy(headerBytes.data() + GuardWords * 4 + sizeof(Shader) + sizeof(ShaderUserData), &rsrc1, sizeof(rsrc1));
+        const auto headerSpan = std::span<const std::byte>(headerBytes).subspan(GuardWords * 4, HeaderBytes);
+        std::array<std::uint32_t, 8> userData{};
+        const auto descriptor = Descriptor(OutputAddress, Threads);
+        std::copy(descriptor.begin(), descriptor.end(), userData.begin() + 4);
+        const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+        const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>(CodeAddress >> 8u), 0};
+        const std::array<std::uint32_t, 1> rsrc2{(static_cast<std::uint32_t>(userData.size()) << 1u) | (test.scratch != 0 ? 1u : 0u)};
+        const std::array<std::uint32_t, 4> dispatchPayload{1, 1, 1, 0x8041};
+        const auto dispatch = Packet(0x15, dispatchPayload);
+
+        // MetalComputeDispatch, given the registered header the caller checked.
+        {
+            AgcDriver::QueueState queue;
+            SetShaderRegisters(queue, 0x207, threads);
+            SetShaderRegisters(queue, 0x20c, program);
+            SetShaderRegisters(queue, 0x213, rsrc2);
+            SetShaderRegisters(queue, 0x240, userData);
+            const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 3> ranges{{
+                {CodeAllocation, std::as_writable_bytes(std::span(code)), false},
+                {OutputAllocation, std::as_writable_bytes(std::span(output)), true},
+                {HeaderAllocation, headerBytes, false}}};
+            AgcDriver::Metal::MetalComputeDispatch adapter(device);
+            const auto state = AgcDriver::DecodeComputeDispatch(queue, dispatch, headerSpan);
+            if (test.scratch != 0) {
+                bool rejected = false;
+                try { static_cast<void>(adapter.DispatchSynchronously(state, std::span(code).subspan(GuardWords, FloatModeCode.size()), ranges, HeaderAddress, headerSpan)); }
+                catch (const std::invalid_argument& error) { rejected = std::string(error.what()).find("SCRATCH_EN") != std::string::npos; }
+                Require(rejected && std::all_of(output.begin(), output.end(), [](auto value) { return value == Sentinel; }),
+                    "Metal compute adapter ran a SCRATCH_EN dispatch without refusing it");
+            } else {
+                const auto fault = adapter.DispatchSynchronously(state, std::span(code).subspan(GuardWords, FloatModeCode.size()), ranges, HeaderAddress, headerSpan);
+                Require(fault.state == ShaderRecompiler::BdaAbi::FaultState::Empty, "Float-mode adapter dispatch published a guest GPU fault");
+                Require(output == expectedOutput, std::string("Metal compute adapter ignored the registered header float mode: ") + test.name);
+            }
+        }
+
+        // MetalDriver RegisterShader/Submit, decoding the dispatch against the registered snapshot.
+        output.fill(Sentinel);
+        std::vector<std::uint32_t> words;
+        const auto registers = [&](std::uint32_t first, std::span<const std::uint32_t> values) {
+            std::vector<std::uint32_t> payload{first};
+            payload.insert(payload.end(), values.begin(), values.end());
+            const auto packet = Packet(0x76, payload);
+            words.insert(words.end(), packet.begin(), packet.end());
+        };
+        registers(0x207, threads);
+        registers(0x20c, program);
+        registers(0x213, rsrc2);
+        registers(0x240, userData);
+        words.insert(words.end(), dispatch.begin(), dispatch.end());
+        const std::array<std::uint32_t, 8> eop{
+            0xc0064900, 0, (1u << 29) | (1u << 24), static_cast<std::uint32_t>(LabelAddress + 4), 0, 1, 0, 0};
+        words.insert(words.end(), eop.begin(), eop.end());
+        std::array<std::uint32_t, GuardWords * 2 + 128> commands;
+        commands.fill(Sentinel);
+        Require(words.size() <= 128, "Float-mode commands exceed their guarded allocation");
+        std::copy(words.begin(), words.end(), commands.begin() + GuardWords);
+        std::array<std::byte, GuardWords * 8 + sizeof(::Packet)> packetBytes;
+        packetBytes.fill(std::byte{0x7b});
+        const ::Packet packet{reinterpret_cast<std::uint32_t*>(CommandsAddress), static_cast<std::uint32_t>(words.size()), 0, {}};
+        std::memcpy(packetBytes.data() + GuardWords * 4, &packet, sizeof(packet));
+        std::array<std::uint32_t, 3> label{Sentinel, 0, Sentinel};
+        const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 6> ranges{{
+            {CodeAllocation, std::as_writable_bytes(std::span(code)), false},
+            {OutputAllocation, std::as_writable_bytes(std::span(output)), true},
+            {HeaderAllocation, headerBytes, false},
+            {CommandsAllocation, std::as_writable_bytes(std::span(commands)), false},
+            {PacketAllocation, packetBytes, false},
+            {LabelAddress, std::as_writable_bytes(std::span(label)), true}}};
+        AgcDriver::Metal::MetalDriver driver;
+        driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [](std::uint32_t) {});
+        try {
+            driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
+            if (test.scratch != 0) {
+                std::string reason;
+                try {
+                    driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+                    driver.WaitIdle();
+                } catch (const std::exception& error) { reason = error.what(); }
+                Require(reason.find("Native Metal compute scratch memory") != std::string::npos,
+                    "Metal driver SCRATCH_EN dispatch was not refused with the Metal scratch reason: " + reason);
+                Require(std::all_of(output.begin(), output.end(), [](auto value) { return value == Sentinel; }),
+                    "Metal driver wrote output for a refused SCRATCH_EN dispatch");
+                // The refusal is the driver's sticky failure, which Shutdown reports again.
+                std::string sticky;
+                try { driver.Shutdown(); } catch (const std::exception& error) { sticky = error.what(); }
+                Require(sticky.empty() || sticky == reason, "Metal driver shutdown reported a different failure: " + sticky);
+                continue;
+            } else {
+                driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+                driver.WaitIdle();
+                Require(output == expectedOutput, std::string("Metal driver dispatch ignored the registered header float mode: ") + test.name);
+                Require(label == std::array<std::uint32_t, 3>{Sentinel, 1, Sentinel}, "Float-mode dispatch did not finish its guarded EOP");
+            }
+            driver.Shutdown();
+        } catch (...) {
+            try { driver.Shutdown(); } catch (...) {}
+            throw;
+        }
+    }
+    std::cout << "Registered header float mode: IEEE_MODE NaN quieting, non-IEEE and absent RSRC1 defaults, and SCRATCH_EN refusal passed on the adapter and driver paths\n";
+}
+
 void Pm4BdaReplay(id<MTLDevice> device, bool writable) {
     constexpr std::uint64_t address = 0x400000;
     std::vector<std::uint32_t> memory(16384, 0xcdcdcdcd);
@@ -854,6 +1004,7 @@ int main(int argc, char** argv) {
             Pm4DescriptorReplay(device);
             Pm4BdaReplay(device, true);
             Pm4BdaReplay(device, false);
+            RegisteredFloatModeReplay(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

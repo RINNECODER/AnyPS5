@@ -26,7 +26,8 @@ std::uint64_t DecodeComputeProgramAddress(const Registers& shader);
 
 // `header` is the program's registered AGC shader header; a dispatch with SCRATCH_EN takes its
 // per-lane scratch size from it and is rejected without one. The shader float mode is not decoded
-// here: it comes from the registered shader state (DriverDetail::RegisteredFloatMode).
+// here: it comes from the registered shader state (DriverDetail::RegisteredFloatMode on Vulkan,
+// DriverDetail::HeaderFloatMode on Metal).
 ComputeDispatchState DecodeComputeDispatch(const QueueState& queue, std::span<const std::uint32_t> packet,
                                          std::span<const std::byte> header = {},
                                          void (*noteComputeRegisterRead)(std::uint32_t) = nullptr);

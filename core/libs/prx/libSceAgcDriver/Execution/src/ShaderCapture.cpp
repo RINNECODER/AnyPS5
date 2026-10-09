@@ -90,4 +90,42 @@ std::uint64_t NullPixelProgramAddress() {
     return reinterpret_cast<std::uintptr_t>(nullPixelCode);
 }
 
+std::optional<FloatModeRegister> FloatModeRegisterFor(std::uint8_t type) {
+    switch (type) {
+    case 0: return FloatModeRegister{0x212, 26};
+    case 1: return FloatModeRegister{0x00a, 29};
+    case 2: case 4: case 6: return FloatModeRegister{0x08a, 31};
+    case 5: case 7: return FloatModeRegister{0x10a, 30};
+    default: return std::nullopt;
+    }
+}
+
+ShaderRecompiler::ShaderFloatMode DecodeFloatMode(const FloatModeRegister& reg, std::uint32_t rsrc1) {
+    return {(rsrc1 >> 12u) & 0xffu, ((rsrc1 >> 21u) & 1u) != 0u, ((rsrc1 >> 23u) & 1u) != 0u,
+        ((rsrc1 >> reg.fp16OverflowBit) & 1u) != 0u};
+}
+
+std::optional<ShaderRecompiler::ShaderFloatMode> HeaderFloatMode(std::uint8_t type, std::uint64_t headerAddress,
+    std::span<const std::byte> header) {
+    const auto reg = FloatModeRegisterFor(type);
+    if (!reg || header.size() < sizeof(Shader)) return std::nullopt;
+    Shader fixed;
+    std::memcpy(&fixed, header.data(), sizeof(fixed));
+    if (fixed.num_sh_registers == 0) return std::nullopt;
+    // Same bounds as the registration-time decoder: the array must lie inside the captured header.
+    const auto address = reinterpret_cast<std::uintptr_t>(fixed.sh_registers);
+    require(address >= headerAddress && address - headerAddress <= header.size(), "shader metadata is outside the registered header");
+    const auto offset = static_cast<std::size_t>(address - headerAddress);
+    require(fixed.num_sh_registers <= (header.size() - offset) / sizeof(ShaderRegister), "truncated shader metadata");
+    std::optional<std::uint32_t> rsrc1;
+    for (std::size_t i = 0; i < fixed.num_sh_registers; ++i) {
+        ShaderRegister value;
+        std::memcpy(&value, header.data() + offset + i * sizeof(ShaderRegister), sizeof(value));
+        // A repeated register keeps its last value, as DecodeRegisteredState's insert_or_assign does.
+        if (value.offset == reg->offset) rsrc1 = value.value;
+    }
+    if (!rsrc1) return std::nullopt;
+    return DecodeFloatMode(*reg, *rsrc1);
+}
+
 }

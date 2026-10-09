@@ -2,6 +2,7 @@
 #include "MetalGuestMemory.hpp"
 #include "MetalShaderPipeline.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderCapture.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -170,8 +171,13 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
     appendShaderRegion(memory, checkedHeaderAddress, checkedHeader);
     if (std::any_of(state.groups.begin(), state.groups.end(), [](auto value) { return value == 0; })) return {};
 
+    if (state.compute.scratchDwords != 0) {
+        throw std::invalid_argument("Native Metal compute scratch memory (COMPUTE_PGM_RSRC2.SCRATCH_EN) is not implemented");
+    }
     RecompileRequest request{{ShaderStage::Compute, state.programAddress, checkedCode, checkedHeaderAddress, checkedHeader},
-        {state.waveSize, 0, state.userData, state.compute, {}, {}, memory}, target(device), {0, 0, 0, 128}, {}, true};
+        {state.waveSize, 0, state.userData, state.compute, {}, {}, memory,
+            DriverDetail::HeaderFloatMode(0, checkedHeaderAddress, checkedHeader)},
+        target(device), {0, 0, 0, 128}, {}, true};
     const auto guest = Recompile(request);
     MetalBackend::TargetOptions options;
     if (@available(macOS 15.0, *))
