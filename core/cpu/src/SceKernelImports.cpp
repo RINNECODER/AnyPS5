@@ -14,7 +14,7 @@
 namespace Cpu {
 namespace {
 
-enum class Service { Open, Read, Pread, Lseek, Close, TlsAddress };
+enum class Service { Open, Read, Pread, Lseek, Close, TlsAddress, ReadTsc, TscFrequency };
 
 std::string identity(const SceImport& import) {
     return import.Nid + " library=" + import.LibraryName + ":" + std::to_string(import.LibraryVersion) +
@@ -49,6 +49,11 @@ struct SceKernelImports::Impl {
                  {"sceKernelPread", Service::Pread}, {"sceKernelLseek", Service::Lseek},
                  {"sceKernelClose", Service::Close}, {"__tls_get_addr", Service::TlsAddress}}})
             services.emplace(Nid::ComputeNid(name, "libkernel"), service);
+        // Both read the clock behind guest RDTSC, so guest-visible time agrees.
+        if (Machine::TscFrequency()) {
+            services.emplace(Nid::ComputeNid("sceKernelReadTsc", "libkernel"), Service::ReadTsc);
+            services.emplace(Nid::ComputeNid("sceKernelGetTscFrequency", "libkernel"), Service::TscFrequency);
+        }
         std::array<std::byte, 4096> bytes;
         bytes.fill(std::byte{0xcc});
         machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
@@ -71,6 +76,8 @@ struct SceKernelImports::Impl {
             if (!tls) throw std::runtime_error("SCE __tls_get_addr called before main-module TLS is configured");
             result = static_cast<std::int64_t>(tls->ResolveIndex(first));
             break;
+        case Service::ReadTsc: result = std::bit_cast<std::int64_t>(Machine::ReadTsc()); break;
+        case Service::TscFrequency: result = std::bit_cast<std::int64_t>(Machine::TscFrequency()); break;
         default: throw std::runtime_error("Unsupported SCE kernel import operation");
         }
         guest.Set(Register::Rax, static_cast<std::uint64_t>(result));
