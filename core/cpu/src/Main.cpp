@@ -435,8 +435,10 @@ int main(int argc, char** argv) {
             }
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
             else if (option == "--max-wall-ms" || option == "--max-idle-ms") {
+                // Limits are compared against steady_clock nanoseconds; larger values overflow there.
                 ParseLimit(option == "--max-wall-ms" ? limits.MaxWallMs : limits.MaxIdleMs, argc, argv, first,
-                           static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()));
+                           static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::duration::max()).count()));
                 first += 2;
             } else if (option == "--native-service-public-profile") {
                 if (argc <= first + 3)

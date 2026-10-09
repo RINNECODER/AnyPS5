@@ -65,6 +65,18 @@ if native:
     assert contract["wall_limit_ms"] == 1000 and contract["idle_limit_ms"] == 50, contract
 print("capabilities report unbounded defaults (0) and the effective explicit limits PASS")
 
+if native:
+    # steady_clock counts nanoseconds; a larger millisecond limit overflows when compared
+    # against elapsed time and would stop the guest immediately instead of never.
+    largest_ms = (2**63 - 1) // 1_000_000
+    for option, key in (("--max-wall-ms", "wall_limit_ms"), ("--max-idle-ms", "idle_limit_ms")):
+        assert capabilities(option, largest_ms)["native_module_runner"][key] == largest_ms, option
+        for oversized in (largest_ms + 1, 2**63 - 1):
+            rejected = run(option, oversized, "--capabilities-json")
+            assert rejected.returncode == 126 and rejected.stdout == "", (option, oversized, rejected)
+            assert option + " requires a non-negative integer" in rejected.stderr, (option, oversized, rejected)
+    print("wall and idle limits beyond the steady clock range are rejected PASS")
+
 with tempfile.TemporaryDirectory(prefix="anyps5-run-limits-") as directory:
     guest = Path(directory) / "spin.elf"
     guest.write_bytes(spinning_elf(ITERATIONS))
