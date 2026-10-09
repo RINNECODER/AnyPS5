@@ -31,7 +31,8 @@ int APS5_VABI sceRazorCpuPushMarker(const char* label, uint32_t color, uint32_t 
     return 0;
 }
 
-int APS5_VABI sceRazorCpuNamedSync(void) {
+int APS5_VABI sceRazorCpuNamedSync(const char* label) {
+ (void)label;
  return 0;
 }
 
