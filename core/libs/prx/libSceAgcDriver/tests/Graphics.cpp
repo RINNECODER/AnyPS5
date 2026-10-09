@@ -1019,6 +1019,26 @@ void ReversedComponentOrderTests() {
     }
 }
 
+void Color1555TargetTests() {
+    auto queue = makeState();
+    queue.context[0x31c] = (queue.context[0x31c] & ~((0x1fu << 2u) | (7u << 8u) | (3u << 11u))) | (17u << 2u);
+    const auto state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.colors.size() == 1 && state.colors[0].format == VK_FORMAT_A1R5G5B5_UNORM_PACK16 && state.colors[0].elementBytes == 2 && state.colors[0].componentMapping == 0xc6u, "a 1_5_5_5 target did not render through A1R5G5B5 with X and Z exchanged");
+    Require(AgcDriver::Graphics::ExportMappings(state)[0] == 0xc6u && state.blends[0].colorWriteMask == 0xfu, "a 1_5_5_5 target did not write all four channels through its export mapping");
+    queue.context[0x8e] = 0x1u;
+    Require(AgcDriver::Graphics::DecodeState(queue).blends[0].colorWriteMask == VK_COLOR_COMPONENT_B_BIT, "a 1_5_5_5 target writing only X did not write the A1R5G5B5 channel in its low bits");
+    queue.context[0x8e] = 0xfu;
+    for (std::uint32_t i = 0; i < 4; ++i) queue.context[0x105 + i] = 0;
+    queue.context[0x1e0] = 0x40000504u;
+    const auto blended = AgcDriver::Graphics::DecodeState(queue);
+    Require(blended.blends[0].blendEnable && blended.blends[0].srcColorBlendFactor == VK_BLEND_FACTOR_SRC_ALPHA && blended.blends[0].dstColorBlendFactor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, "alpha blending into a 1_5_5_5 target was not decoded");
+    queue.context[0x1e0] = 0;
+    for (const auto& [number, swap] : {std::pair{1u, 0u}, std::pair{4u, 0u}, std::pair{0u, 1u}}) {
+        queue.context[0x31c] = (queue.context[0x31c] & ~((7u << 8u) | (3u << 11u))) | (number << 8u) | (swap << 11u);
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "unsupported color format 17 number type " + std::to_string(number) + " component swap " + std::to_string(swap));
+    }
+}
+
 void CompactedExportTests() {
     alignas(256) static std::array<std::byte, 1024> slotFourMemory{};
     const auto slotFour = reinterpret_cast<std::uintptr_t>(slotFourMemory.data());
@@ -4441,6 +4461,7 @@ int main(int argc, char** argv) {
         ConservativeRasterizationTests();
         DisabledColorTests();
         OpaqueDestinationAlphaTests();
+        Color1555TargetTests();
         CompactedExportTests();
         ReversedComponentOrderTests();
         ShadersWriteMemoryTests();
