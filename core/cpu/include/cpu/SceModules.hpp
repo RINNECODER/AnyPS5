@@ -3,11 +3,16 @@
 #include <cpu/SceElf.hpp>
 #include <array>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 
 namespace Cpu {
+
+// A budget no guest can exhaust (2^64 - 1 retired instructions). Game runs
+// pass it; the bounded parameter defaults below are for tests and diagnostics.
+inline constexpr std::uint64_t UnboundedInstructionBudget = std::numeric_limits<std::uint64_t>::max();
 
 // One budget is shared by every slice and guest call in an execution phase.
 class GuestPhaseBudget {

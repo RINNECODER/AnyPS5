@@ -36,16 +36,17 @@ MANDATORY_FILES = (
     "bin/anyps5_guest_thread_tests", "fixtures/thread-main.elf", "fixtures/ThreadGuest.prx",
 )
 
-# PR85's compiled, bounded production contract. Route claims mean this qualified
-# provider subset is assembled by Main; they do not certify a title's imports.
+# PR85's compiled production contract, probed without limit flags: game runs are
+# unbounded (0). Route claims mean this qualified provider subset is assembled by
+# Main; they do not certify a title's imports.
 NATIVE_RUNNER_CONTRACT = {
     "enabled": True,
     "owned_memory": "live staged CPU/Metal publication",
     "provider_selection": "actual parsed consumer SHA-256, size, scope and ELF symbol",
     "utility_metallib": "../fixtures/AnyPS5Utilities.metallib relative to engine",
-    "wall_limit_ms": 30000,
-    "idle_limit_ms": 5000,
-    "constraints": "bounded diagnostic profile; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence",
+    "wall_limit_ms": 0,
+    "idle_limit_ms": 0,
+    "constraints": "unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence",
 }
 PLATFORM_CASES = (
     ("kernel", "kernel-guest.bin"), ("content", "content-guest.bin"),
@@ -468,7 +469,9 @@ def prepare_package(source, build, gpu_source, destination, revisions, run, prof
         commands += [["bin/anyps5_native_module_runner_test", "fixtures/sce-module-main.elf",
                       "fixtures/SceModuleGuest.prx", utility, case]
                      for case in ("lifecycle", "close", "initializer-failure", "qualified-rejection")]
-        commands += [["bin/anyps5_cpu_run", "--diagnostics-json", "--sce-module", "fixtures/SceModuleGuest.prx",
+        # The diagnostic profile stays bounded by passing its limits explicitly.
+        commands += [["bin/anyps5_cpu_run", "--diagnostics-json", "--max-wall-ms", "30000", "--max-idle-ms", "5000",
+                      "--sce-module", "fixtures/SceModuleGuest.prx",
                       "fixtures/sce-module-main.elf", "17", "5", "7", "58", "3366582378"]]
         commands += [["bin/anyps5_platform_" + case + "_test", "fixtures/platform/" + name]
                      for case, name in PLATFORM_CASES]

@@ -114,9 +114,9 @@ struct NativeModuleRunner::Impl {
     Impl(Machine& m, std::shared_ptr<GuestThreads> scheduler, SceImportConsumer mainSource,
          NativeModuleRunnerConfiguration configuration)
         : machine(m), threads(std::move(scheduler)), source(std::move(mainSource)), config(std::move(configuration)) {
-        if (!threads || config.MaximumWallTime.count() <= 0 || config.MaximumIdleWait.count() <= 0 ||
+        if (!threads || config.MaximumWallTime.count() < 0 || config.MaximumIdleWait.count() < 0 ||
             config.SessionUserId == 0xffffffffu)
-            throw std::invalid_argument("Native module runner requires scheduler and positive diagnostic bounds");
+            throw std::invalid_argument("Native module runner requires scheduler and non-negative diagnostic bounds");
         threads->CheckIdleOwner();
         memory = std::make_shared<GuestMemoryRuntime>(machine, 12ULL << 30,
             [slot = dispatch](const auto& previous, const auto& candidate, const auto& commit) {
@@ -230,8 +230,8 @@ struct NativeModuleRunner::Impl {
         threads->SetOwnerBoundary([this](bool waiting) {
             graphics->Window().PumpMainThread(waiting ? std::chrono::milliseconds{1} : std::chrono::milliseconds{0}, 256);
             const auto state = graphics->Window().Snapshot();
-            if (!state.open || state.closeRequested ||
-                std::chrono::steady_clock::now() - started >= config.MaximumWallTime) {
+            if (!state.open || state.closeRequested || (config.MaximumWallTime.count() > 0 &&
+                std::chrono::steady_clock::now() - started >= config.MaximumWallTime)) {
                 machine.RequestStop(); graphics->RequestStop();
             }
         }, config.MaximumIdleWait);
