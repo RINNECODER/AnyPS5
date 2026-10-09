@@ -441,6 +441,133 @@ void Replay(id<MTLDevice> device, id<MTLCommandQueue> queue) {
 }
 }
 
+namespace OrderedCompare {
+// Raw guest operands and independent truth values: LG, EQ, LT, unordered NEQ, reversed LT.
+// The F16 words deliberately have nonzero high halves, which are not operands.
+struct Case {
+    const char* name;
+    std::uint32_t a32, b32, a16, b16;
+    std::array<bool, 5> predicate;
+};
+constexpr std::array<Case, 16> Cases{{
+    {"rhs quiet NaN", 0, 0xfffffffe, 0xa5a50000, 0x5a5affff, {false, false, false, true, false}},
+    {"lhs quiet NaN", 0x7fc00001, 0x3f800000, 0xa5a57e01, 0x5a5a3c00, {false, false, false, true, false}},
+    {"rhs signaling NaN", 0x3f800000, 0x7f800001, 0xa5a53c00, 0x5a5a7c01, {false, false, false, true, false}},
+    {"lhs signaling NaN", 0xff800001, 0xbf800000, 0xa5a5fc01, 0x5a5abc00, {false, false, false, true, false}},
+    {"two NaNs", 0x7fc00001, 0xff800001, 0xa5a57e01, 0x5a5afc01, {false, false, false, true, false}},
+    {"positive/negative zero", 0, 0x80000000, 0xa5a50000, 0x5a5a8000, {false, true, false, false, false}},
+    {"negative/positive zero", 0x80000000, 0, 0xa5a58000, 0x5a5a0000, {false, true, false, false, false}},
+    {"equal finite", 0x3f800000, 0x3f800000, 0xa5a53c00, 0x5a5a3c00, {false, true, false, false, false}},
+    {"finite less", 0xbf800000, 0x40000000, 0xa5a5bc00, 0x5a5a4000, {true, false, true, true, false}},
+    {"finite greater", 0x40000000, 0xbf800000, 0xa5a54000, 0x5a5abc00, {true, false, false, true, true}},
+    {"equal positive infinity", 0x7f800000, 0x7f800000, 0xa5a57c00, 0x5a5a7c00, {false, true, false, false, false}},
+    {"equal negative infinity", 0xff800000, 0xff800000, 0xa5a5fc00, 0x5a5afc00, {false, true, false, false, false}},
+    {"opposite infinities", 0xff800000, 0x7f800000, 0xa5a5fc00, 0x5a5a7c00, {true, false, true, true, false}},
+    {"infinity/finite", 0x7f800000, 0x3f800000, 0xa5a57c00, 0x5a5a3c00, {true, false, false, true, true}},
+    {"finite/infinity", 0x3f800000, 0x7f800000, 0xa5a53c00, 0x5a5a7c00, {true, false, true, true, false}},
+    {"negative finite equal", 0xbf800000, 0xbf800000, 0xa5a5bc00, 0x5a5abc00, {false, true, false, false, false}},
+}};
+
+void Replay(id<MTLDevice> device, id<MTLCommandQueue> queue) {
+    constexpr std::uint32_t threads = 64, words = threads * 4, guards = 16;
+    constexpr std::uint32_t sentinel = 0xdeadbeef, prefix = 0x13579bdf, suffix = 0x2468ace0;
+    std::array<std::uint32_t, words + 2 * guards> input{}, initial{};
+    input.fill(prefix);
+    initial.fill(prefix);
+    std::fill(input.end() - guards, input.end(), suffix);
+    std::fill(initial.begin() + guards, initial.end() - guards, sentinel);
+    std::fill(initial.end() - guards, initial.end(), suffix);
+    for (std::uint32_t lane = 0; lane < threads; ++lane) {
+        const auto& row = Cases[lane % Cases.size()];
+        const std::array operands{row.a16, row.b16, row.a32, row.b32};
+        std::copy(operands.begin(), operands.end(), input.begin() + guards + lane * 4);
+    }
+    const auto in = LdsAtomics64::BufferDescriptor(input.data() + guards, words * 4);
+    const auto out = LdsAtomics64::BufferDescriptor(initial.data() + guards, words * 4);
+    std::array<std::uint32_t, 8> userData{};
+    std::copy(in.begin(), in.end(), userData.begin());
+    std::copy(out.begin(), out.end(), userData.begin() + 4);
+    auto inBuffer = [device newBufferWithBytes:input.data() length:sizeof(input) options:MTLResourceStorageModeShared];
+    auto outBuffer = [device newBufferWithBytes:initial.data() length:sizeof(initial) options:MTLResourceStorageModeShared];
+    Require(inBuffer != nil && outBuffer != nil, "Ordered compare buffer allocation failed");
+    // Opcode and operand fragments from the existing VopcCompareTable guest fixture.
+    constexpr std::array<std::uint32_t, 4> f32Opcodes{0x05, 0x02, 0x01, 0x0d};
+    constexpr std::array<std::uint32_t, 4> f16Opcodes{0xcd, 0xca, 0xc9, 0xed};
+    std::uint32_t dispatches = 0, mismatches = 0;
+    for (bool half : {false, true}) for (bool e64 : {false, true})
+    for (bool cmpx : {false, true}) for (bool masked : {false, true})
+    for (std::uint32_t relation = 0; relation < f32Opcodes.size(); ++relation) {
+        const auto opcode = (half ? f16Opcodes : f32Opcodes)[relation] + (cmpx ? 0x10u : 0u);
+        std::vector<std::uint32_t> code{
+            0x34020084, 0x34060084, // v1/v3 = lane * 16 bytes
+            0xe0381000, 0x80000401, 0xbf8c3f70}; // load v[4:7]
+        if (masked) code.insert(code.end(), {0xbefe03ff, 0x55555555}); // incoming EXEC: even lanes only
+        if (cmpx) code.push_back(0x7e3c0281); // v30 = 1; store only predicate-admitted lanes
+        if (e64) {
+            code.push_back(0xd4000000u | (opcode << 16u) | (cmpx ? 0x7eu : 8u));
+            code.push_back(half ? 0x02020905u : 0x02020d07u); // reversed operands, as in original table
+        } else {
+            code.push_back(0x7c000000u | (opcode << 17u) | (half ? 0x0b04u : 0x0f06u));
+        }
+        if (!cmpx) code.insert(code.end(), {0xd501001e, e64 ? 0x00210280u : 0x01a90280u}); // v_cndmask 0/1
+        code.insert(code.end(), {0xe0701000, 0x80011e03, 0xbf810000}); // store v30, end
+        const auto shader = Compile(device, code, userData, 0, 32, 32, threads);
+        MetalComputePipeline pipeline(device, shader);
+        std::vector<MetalShaderResourceBinding> bindings;
+        bool boundInput = false, boundOutput = false;
+        for (const auto& binding : shader.guest.bindings) {
+            Require(binding.role == DescriptorRole::GuestBuffers && binding.guestDescriptor.size() == binding.count * 4u,
+                    "Ordered compare reflection is not a qualified guest buffer");
+            MetalShaderResourceBinding native{binding.descriptorSet, binding.binding};
+            for (std::uint32_t i = 0; i < binding.count; ++i) {
+                const auto descriptor = binding.guestDescriptor.begin() + i * 4u;
+                const bool isInput = std::equal(in.begin(), in.end(), descriptor);
+                const bool isOutput = std::equal(out.begin(), out.end(), descriptor);
+                Require(isInput != isOutput, "Ordered compare reflected an unknown descriptor");
+                boundInput |= isInput;
+                boundOutput |= isOutput;
+                native.buffers.push_back({isInput ? inBuffer : outBuffer, guards * 4, words * 4});
+            }
+            bindings.push_back(std::move(native));
+        }
+        Require(boundInput && boundOutput, "Ordered compare lost an input/output binding");
+        std::memcpy(outBuffer.contents, initial.data(), sizeof(initial));
+        auto commands = [queue commandBuffer];
+        pipeline.Encode(commands, bindings, MTLSizeMake(threads, 1, 1));
+        Wait(commands);
+        Require(std::memcmp(inBuffer.contents, input.data(), sizeof(input)) == 0,
+                "Ordered compare modified its input or allocation guards");
+        const auto* actual = static_cast<const std::uint32_t*>(outBuffer.contents);
+        for (std::uint32_t i = 0; i < guards; ++i)
+            Require(actual[i] == prefix && actual[guards + words + i] == suffix, "Ordered compare overwrote allocation guards");
+        bool reported = false;
+        for (std::uint32_t lane = 0; lane < threads; ++lane) {
+            // e64's reversed operands only change LT. Other predicates are symmetric.
+            const auto& row = Cases[lane % Cases.size()];
+            const bool predicate = row.predicate[relation == 2 && e64 ? 4 : relation];
+            const bool active = !masked || lane % 2 == 0;
+            const auto expected = active && (!cmpx || predicate) ? std::uint32_t(predicate) : sentinel;
+            if (actual[guards + lane * 4] != expected) {
+                ++mismatches;
+                if (!reported) {
+                    std::cerr << "Ordered compare GPU mismatch: " << (half ? "F16 " : "F32 ")
+                              << (e64 ? "e64 " : "e32 ") << (cmpx ? "CMPX " : "CMP ")
+                              << "masked=" << masked << " relation=" << relation << " lane=" << lane << " " << row.name
+                              << " actual=" << LdsAtomics64::Hex(actual[guards + lane * 4])
+                              << " expected=" << LdsAtomics64::Hex(expected) << '\n';
+                    reported = true;
+                }
+            }
+            for (std::uint32_t word = 1; word < 4; ++word)
+                Require(actual[guards + lane * 4 + word] == sentinel, "Ordered compare changed output padding");
+        }
+        ++dispatches;
+    }
+    Require(mismatches == 0, "Ordered compare table has " + std::to_string(mismatches) + " incorrect GPU outputs");
+    std::cout << "RDNA ordered compare table: " << dispatches << " dispatches, F32/F16 e32/e64 CMP/CMPX, NaNs, zeros, finite/infinity, EXEC masks and EQ/LT/NEQ controls passed\n";
+}
+}
+
 void RejectSubgroupMismatch(id<MTLDevice> device) {
     const std::array<std::uint32_t, 8> userData{
         0x100000, 0, 16, 0x01016fac, 0x200000, 0, 256, 0x01016fac};
@@ -472,6 +599,7 @@ int main() {
             BdaReplay(device, queue, false);
             RejectSubgroupMismatch(device);
             LdsAtomics64::Replay(device, queue);
+            OrderedCompare::Replay(device, queue);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

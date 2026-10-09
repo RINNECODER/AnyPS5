@@ -19,12 +19,15 @@ struct SampleParameters {
     std::uint32_t gradients = 0;
 };
 
-GuestSamplerResource Resource(std::uint32_t clamp = 2u, std::uint32_t mag = 0u, std::uint32_t min = 0u, std::uint32_t mip = 1u) {
-    const std::array<std::uint32_t, 4> words{
+std::array<std::uint32_t, 4> Words(std::uint32_t clamp = 2u, std::uint32_t mag = 0u, std::uint32_t min = 0u, std::uint32_t mip = 1u, bool override = false) {
+    return {
         clamp | (clamp << 3u) | (clamp << 6u), 0xfffu << 12u,
-        (mag << 20u) | (min << 22u) | (mip << 26u), 0u
+        (mag << 20u) | (min << 22u) | (mip << 26u) | (override ? 1u << 29u : 0u), 0u
     };
-    return AgcDriver::Graphics::DecodeSamplerResource(words);
+}
+
+GuestSamplerResource Resource(std::uint32_t clamp = 2u, std::uint32_t mag = 0u, std::uint32_t min = 0u, std::uint32_t mip = 1u) {
+    return AgcDriver::Graphics::DecodeSamplerResource(Words(clamp, mag, min, mip));
 }
 
 class Probe {
@@ -127,14 +130,26 @@ void CheckAddressing(const MetalTests::Context& context, const Probe& probe) {
 
 void CheckFilters(const MetalTests::Context& context, const Probe& probe) {
     auto texture = ColorTexture(context, 4u, true, false);
-    for (std::uint32_t filter = 0u; filter < 2u; ++filter) {
-        const Pixel expected = filter == 0u ? Pixel{1, 1, 0, 1} : Pixel{0.5f, 0.5f, 0, 1};
-        RequirePixel(probe.Sample(Resource(2u, filter, 1u - filter), texture, {0.5f, 0.5f, -1.0f, 0.5f, 1u}), expected, "Guest sampler magnification filter selected the wrong pixel blend");
-        RequirePixel(probe.Sample(Resource(2u, 1u - filter, filter), texture, {0.5f, 0.5f, 1.0f, 0.5f, 1u}), expected, "Guest sampler minification filter selected the wrong pixel blend");
+    for (const bool override : {false, true}) for (std::uint32_t mag = 0u; mag < 2u; ++mag) for (std::uint32_t min = 0u; min < 2u; ++min) {
+        const auto words = Words(2u, mag, min, 1u, override);
+        MetalSampler sampler(context.device, words);
+        MetalTests::Require(MetalSampler::MatchesCapturedDescriptor(sampler.Handle(), words, false, false), "Native sampler lost original captured override words");
+        auto toggled = words;
+        toggled[2] ^= 1u << 29u;
+        MetalTests::Require(!MetalSampler::MatchesCapturedDescriptor(sampler.Handle(), toggled, false, false), "Native sampler canonicalized captured override identity");
+        const Pixel magnified = mag == 0u ? Pixel{1, 1, 0, 1} : Pixel{0.5f, 0.5f, 0, 1};
+        const Pixel minified = min == 0u ? Pixel{1, 1, 0, 1} : Pixel{0.5f, 0.5f, 0, 1};
+        RequirePixel(probe.Sample(sampler.Handle(), texture, {0.5f, 0.5f, -1.0f, 0.5f, 1u}), magnified, "Guest sampler magnification filter selected the wrong pixel blend");
+        RequirePixel(probe.Sample(sampler.Handle(), texture, {0.5f, 0.5f, 1.0f, 0.5f, 1u}), minified, "Guest sampler minification filter selected the wrong pixel blend");
+        RequirePixel(probe.Sample(sampler.Handle(), texture, {-1.0f, -1.0f, 0.0f}), {0, 0, 0, 1}, "Guest sampler override changed edge addressing");
     }
     auto levels = ColorTexture(context, 4u, true, true);
-    RequirePixel(probe.Sample(Resource(), levels, {0.5f, 0.5f, 0.25f, 0.5f, 1u}), {1, 0, 0, 1}, "Guest nearest mip filtering selected the wrong level");
-    RequirePixel(probe.Sample(Resource(2u, 0u, 0u, 2u), levels, {0.5f, 0.5f, 0.25f}), {0.75f, 0.25f, 0, 1}, "Guest linear mip filtering lost interpolation");
+    for (const bool override : {false, true}) {
+        MetalSampler nearest(context.device, Words(2u, 0u, 0u, 1u, override));
+        MetalSampler linear(context.device, Words(2u, 0u, 0u, 2u, override));
+        RequirePixel(probe.Sample(nearest.Handle(), levels, {0.5f, 0.5f, 0.25f, 0.5f, 1u}), {1, 0, 0, 1}, "Guest nearest mip filtering selected the wrong level");
+        RequirePixel(probe.Sample(linear.Handle(), levels, {0.5f, 0.5f, 0.25f}), {0.75f, 0.25f, 0, 1}, "Guest linear mip filtering lost interpolation");
+    }
     auto resource = Resource();
     resource.minLod = 1.0f;
     RequirePixel(probe.Sample(resource, levels, {0.5f, 0.5f, -1.0f, 0.5f, 1u}), {0, 1, 0, 1}, "Guest minimum LOD clamp was ignored");

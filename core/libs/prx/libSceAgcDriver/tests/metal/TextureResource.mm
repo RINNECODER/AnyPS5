@@ -1,5 +1,6 @@
 #include "MetalTestSupport.hpp"
 #include "MetalTexture.hpp"
+#include "MetalSampler.hpp"
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -20,6 +21,7 @@ kernel void read2D(texture2d<float, access::read> t [[texture(0)]], device uchar
 kernel void readArray(texture2d_array<float, access::read> t [[texture(0)]], device uchar4* out [[buffer(0)]], constant uint4& shape [[buffer(1)]], uint i [[thread_position_in_grid]]) { uint plane = shape.x * shape.y; out[i] = bytes(t.read(uint2(i % shape.x, (i % plane) / shape.x), i / plane, shape.w)); }
 kernel void read3D(texture3d<float, access::read> t [[texture(0)]], device uchar4* out [[buffer(0)]], constant uint4& shape [[buffer(1)]], uint i [[thread_position_in_grid]]) { uint plane = shape.x * shape.y; out[i] = bytes(t.read(uint3(i % shape.x, (i % plane) / shape.x, i / plane), shape.w)); }
 kernel void sampleView(texture2d<float> t [[texture(0)]], device uchar4* out [[buffer(0)]], uint i [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest); out[i] = bytes(t.sample(s, float2(0.5f), level(0))); }
+kernel void sampleBoundary(texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]], device uchar4* out [[buffer(0)]], uint i [[thread_position_in_grid]]) { float2 uv = i == 0 ? float2(1.5f / 8.0f, 2.5f / 8.0f) : float2(i == 1 ? -1.0f : 2.0f); out[i] = bytes(t.sample(s, uv, level(0))); }
 kernel void sample2D(texture2d<float> t [[texture(0)]], device float4* out [[buffer(0)]], constant uint4& shape [[buffer(1)]], uint i [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized, filter::nearest, mip_filter::nearest); out[i] = t.sample(s, (float2(i % shape.x, i / shape.x) + 0.5f) / float2(shape.xy), level(shape.w)); }
 kernel void sampleArray(texture2d_array<float> t [[texture(0)]], device float4* out [[buffer(0)]], constant uint4& shape [[buffer(1)]], uint i [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized, filter::nearest, mip_filter::nearest); uint plane = shape.x * shape.y; out[i] = t.sample(s, (float2(i % shape.x, (i % plane) / shape.x) + 0.5f) / float2(shape.xy), i / plane, level(shape.w)); }
 kernel void writeArray(texture2d_array<float, access::write> t [[texture(0)]], constant uint4& shape [[buffer(0)]], uint3 p [[thread_position_in_grid]]) { t.write(float4((17 + p.x * 3 + p.y * 7 + p.z * 11 + shape.w * 13) & 255, (31 + p.x * 5 + p.z * 17) & 255, (73 + p.y * 9 + shape.w * 23) & 255, 127) / 255.0f, p.xy, p.z, shape.w); }
@@ -178,16 +180,11 @@ void VerifySurface(const MetalTests::Context& context, id<MTLLibrary> probes, Gu
     Require(readback == guest,"native texture readback changes guest pixels, slice or shared mip tails, or padding");
 }
 
-void VerifyViews(const MetalTests::Context& context, id<MTLLibrary> probes) {
-    auto descriptor = Descriptor(TextureDimension::k2D);
-    descriptor.baseLevel = 1;
-    descriptor.lastLevel = 2;
-    descriptor.dstSelX = 6;
-    descriptor.dstSelY = 4;
-    descriptor.dstSelZ = 1;
-    descriptor.dstSelW = 0;
+void VerifyViews(const MetalTests::Context& context, id<MTLLibrary> probes, std::uint32_t borderSwizzle) {
+    const std::array<std::uint32_t,8> words{1u,(56u<<20)|(3u<<30),1u|(7u<<14),
+        6u|(4u<<3)|(1u<<6)|(1u<<12)|(2u<<16)|(borderSwizzle<<25)|(9u<<28),0u,3u<<4,0u,0u};
     AgcDriver::Metal::MetalDevice backend(context.device,context.library);
-    MetalTexture texture(backend,descriptor);
+    MetalTexture texture(backend,words);
     std::vector<std::byte> guest(texture.GuestBytes(),std::byte{0xa7});
     texture.Upload(guest);
     auto commands = [context.queue commandBuffer];
@@ -236,16 +233,40 @@ void VerifyArrayView(const MetalTests::Context& context, id<MTLLibrary> probes) 
     }
 }
 
-void VerifyDecodedDescriptor(const MetalTests::Context& context, id<MTLLibrary> probes) {
-    const std::array<std::uint32_t,8> words{1u,(56u<<20)|(3u<<30),1u|(7u<<14),4u|(5u<<3)|(6u<<6)|(7u<<9)|(3u<<16)|(9u<<28),0u,3u<<4,0u,0u};
+void VerifyDecodedDescriptor(const MetalTests::Context& context, id<MTLLibrary> probes, std::uint32_t borderSwizzle) {
+    const std::array<std::uint32_t,8> words{1u,(56u<<20)|(3u<<30),1u|(7u<<14),4u|(5u<<3)|(6u<<6)|(7u<<9)|(3u<<16)|(borderSwizzle<<25)|(9u<<28),0u,3u<<4,0u,0u};
     AgcDriver::Metal::MetalDevice backend(context.device,context.library);
     MetalTexture texture(backend,words);
     std::vector<std::byte> guest(texture.GuestBytes(),std::byte{0xa7});
-    const auto pixel=Pixel(1,2,0,0);
+    const std::array<std::uint8_t,4> pixel{17,31,73,127};
     std::memcpy(guest.data()+Address(texture,1,2,0,0),pixel.data(),4);
     texture.Upload(guest);
     auto output=Probe(context,probes,texture.Texture(),TextureDimension::k2D,0);
     Require(std::memcmp(static_cast<const std::byte*>(output.contents)+(2*8+1)*4,pixel.data(),4)==0,"decoded guest descriptor does not produce native texture pixels");
+    constexpr std::array<std::array<std::uint8_t,4>,3> borders{{{0,0,0,0},{0,0,0,255},{255,255,255,255}}};
+    for (std::uint32_t border=0; border<3u; ++border) {
+        const std::array<std::uint32_t,4> samplerWords{4u|(4u<<3)|(4u<<6),0u,0u,border<<30};
+        AgcDriver::Metal::MetalSampler sampler(context.device,samplerWords);
+        auto sampled=context.Buffer(16,0xa7);
+        auto commands=[context.queue commandBuffer];
+        auto encoder=[commands computeCommandEncoder];
+        [encoder setComputePipelineState:Pipeline(context,probes,@"sampleBoundary")];
+        [encoder setTexture:texture.SampledView() atIndex:0];
+        [encoder setSamplerState:sampler.Handle() atIndex:0];
+        [encoder setBuffer:sampled offset:0 atIndex:0];
+        [encoder dispatchThreads:MTLSizeMake(3,1,1) threadsPerThreadgroup:MTLSizeMake(3,1,1)];
+        [encoder endEncoding];
+        [commands commit];
+        [commands waitUntilCompleted];
+        Require(commands.status==MTLCommandBufferStatusCompleted,"decoded border swizzle sampling failed");
+        const auto* bytes=static_cast<const std::uint8_t*>(sampled.contents);
+        Require(std::memcmp(bytes,pixel.data(),4)==0,"border swizzle changed nonuniform interior RGBA texels");
+        for (unsigned i=1; i<3; ++i) Require(std::memcmp(bytes+i*4,borders[border].data(),4)==0,"W-preserving border swizzle changed a predefined border");
+        Require(std::all_of(bytes+12,bytes+16,[](auto value){return value==0xa7;}),"border probe overwrote output guard");
+    }
+    auto readback=std::vector<std::byte>(texture.GuestBytes(),std::byte{0xa7});
+    texture.Readback(readback);
+    Require(readback==guest,"border swizzle changed captured texture bytes or padding");
     bool rejected=false;
     try { texture.Upload(std::span<const std::byte>(guest).first(guest.size()-1)); } catch (const std::runtime_error& error) {
         rejected=std::string_view(error.what()).find("byte extent")!=std::string_view::npos;
@@ -484,9 +505,11 @@ void RunTextureResourceTests(const MetalTests::Context& context) {
         descriptor.lastLevel = 7;
         VerifySurface(context,probes,descriptor,true);
     }
-    VerifyViews(context,probes);
+    for (const std::uint32_t borderSwizzle : {0u,4u}) {
+        VerifyViews(context,probes,borderSwizzle);
+        VerifyDecodedDescriptor(context,probes,borderSwizzle);
+    }
     VerifyArrayView(context,probes);
-    VerifyDecodedDescriptor(context,probes);
     VerifyThick(context,probes);
     for (unsigned format=169; format<=182; ++format) VerifyCompressed(context,probes,format);
     VerifyCompressed(context,probes,169,TextureDimension::k1D);

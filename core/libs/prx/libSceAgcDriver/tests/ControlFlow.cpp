@@ -174,12 +174,12 @@ void verifyRequest(const char* path) {
     std::printf("%s: structured with %zu added blocks, %zu cloned instructions, %zu route variables\n", path, result.addedBlocks, result.clonedInstructions, result.routeVariables);
 }
 
-std::size_t recompile(const std::string& name, std::span<const std::uint32_t> code, std::uint32_t subgroupSize) {
+std::size_t recompile(const std::string& name, std::span<const std::uint32_t> code, std::uint32_t subgroupSize, std::uint64_t codeAddress = 0x20000u) {
     const std::array<std::uint32_t, 4> userData{0x10000000u, 0x00100000u, 0x40u, 0x00027facu};
     const std::array<std::uint32_t, 2> capabilities{1u, 61u};
     const std::array<std::string_view, 1> extensions{"SPV_KHR_storage_buffer_storage_class"};
     RecompileRequest request{};
-    request.shader = {ShaderStage::Compute, 0x20000u, code, 0, {}};
+    request.shader = {ShaderStage::Compute, codeAddress, code, 0, {}};
     request.context.waveSize = 64;
     request.context.userDataBaseRegister = 0;
     request.context.userData = userData;
@@ -277,7 +277,7 @@ void verifyNullSwappc() {
     verifyLongBranch("backward long branch", LongBranchBack, 0x24u, 0x08u);
     const std::array<std::uint32_t, 3> call{0xbe8c1f00u, 0xbe8e210cu, 0xbf810000u};
     const std::vector<std::tuple<std::string_view, std::vector<std::uint32_t>, std::string_view>> refused{
-        {"s_swappc_b64 with a return address", {call.begin(), call.end()}, "unsupported SOP1 opcode 33"},
+        {"s_swappc_b64 with a return address", {call.begin(), call.end()}, "unclosable scalar call/return pairing"},
         {"index rewritten after the bound", patched(DwordTableGetpcFirst, 5, {0xbe9203ffu, 0x00000040u}), "unsupported dynamic s_setpc_b64"},
         {"index scaled for two-dword entries", patched(DwordTableGetpcFirst, 7, {0x8f128312u}), "unsupported dynamic s_setpc_b64"},
         {"entry rewritten after the load", patched(DwordTableGetpcFirst, 11, {0xbe8e0380u}), "unsupported dynamic s_setpc_b64"},
@@ -292,9 +292,83 @@ void verifyNullSwappc() {
     }
 }
 
+// Raw guest-word admission cases adapted from #1535 (Sanjaysrinivas),
+// upstream aa277b3818d8cf7bc900bdfee740f318469df349; extend the primary graph owner.
+void verifyStaticScalarCalls(std::string_view only = {}) {
+    struct RefusedCall {
+        std::string_view name;
+        std::vector<std::uint32_t> code;
+        std::string_view message;
+        std::uint64_t codeAddress = 0; // Nonzero exercises the public recompiler at this guest base.
+    };
+    const std::vector<RefusedCall> refused{
+        {"tuple", {0xbb080001, 0xbf810000, 0xf40c0100, 0xfa000000, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        {"wrong_return", {0xbb080001, 0xbf810000, 0xbe802009, 0xbf810000}, "escapes the constant-offset"},
+        {"fallthrough", {0xbb080002, 0xbf800000, 0xbf800000, 0xbf800000, 0xbe802008, 0xbf810000}, "control flow enters the call region"},
+        {"conditional_fallthrough", {0xbb080002, 0xbf820000, 0xbf840002, 0xbf800000, 0xbe802008, 0xbf810000}, "control flow enters the call region"},
+        {"return_before_target", {0xbb080002, 0xbf810000, 0xbe802008, 0xbf800000, 0xbf810000}, "return precedes the call target"},
+        {"descriptor", {0xbb0a0001, 0xbf810000, 0xe0381000, 0x80020401, 0xbe80200a, 0xbf810000}, "escapes the constant-offset"},
+        {"relative_read", {0xbb080001, 0xbf810000, 0xbe802e00, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        {"invalid_boundary", {0xbb080002, 0xbf810000, 0xbe8003ff, 0, 0xbe802008, 0xbf810000}, "invalid instruction boundary"},
+        {"outside_span", {0xbb080010, 0xbf810000}, "code span bounds"},
+        {"negative_outside_span", {0xbb08fffe, 0xbf810000}, "code span bounds"},
+        {"missing_return", {0xbb080000, 0xbf810000}, "no paired s_setpc_b64 return"},
+        {"odd_link", {0xbb090001, 0xbf810000, 0xbe802009, 0xbf810000}, "ordinary aligned scalar register pair"},
+        {"special_link", {0xbb6a0001, 0xbf810000, 0xbe80206a, 0xbf810000}, "ordinary aligned scalar register pair"},
+        {"link_write", {0xbb080001, 0xbf810000, 0xbe880380, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        {"pair_read", {0xbb080001, 0xbf810000, 0xbe8c0407, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        {"recursive", {0xbb08ffff, 0xbe802008, 0xbf810000}, "recursive scalar call"},
+        {"shared_link", {0xbb080002, 0xbb080001, 0xbf810000, 0xbe802008, 0xbf810000}, "shared with another call"},
+        {"multiple_returns", {0xbb080001, 0xbf810000, 0xbe802008, 0xbe802008, 0xbf810000}, "multiple s_setpc_b64 returns"},
+        {"cross_enter", {0xbb080002, 0xbf820001, 0xbf810000, 0xbf800000, 0xbe802008, 0xbf810000}, "control flow enters the call region"},
+        {"cross_leave", {0xbb080001, 0xbf810000, 0xbf820002, 0xbe802008, 0xbf810000, 0xbf810000}, "control flow leaves the call region"},
+        {"interleave", {0xbb080003, 0xbb0a0003, 0xbf810000, 0xbf800000, 0xbf800000, 0xbf800000, 0xbe802008, 0xbe80200a, 0xbf810000}, "call regions interleave"},
+        {"dynamic_target", {0xbe88210a, 0xbf810000}, "not statically resolvable"},
+        {"entry_into_callee", {0xbf800000, 0xbe802008, 0xbb08fffd, 0xbf810000}, "control flow enters the call region at program entry"},
+        {"branch_into_target_setup", {0xbf850001, 0xbe8a1f00, 0x800a940a, 0x820b800b, 0xbe88210a, 0xbf820003, 0xbf810000, 0xbf800000, 0xbe802008, 0xbf810000}, "does not start in its block"},
+        {"vector_pair_read", {0xbb080001, 0xbf810000, 0x7e000607, 0xbe802008, 0xbf810000}, "escapes the constant-offset"},
+        // VMqsadU32U8 src2 is s[4:7]: only its high pair overlaps the s[6:7] link.
+        {"vector_accumulator_high_pair", {0xbb060001, 0xbf810000, 0xd5750000, 0x00120500, 0xbe802006, 0xbf810000}, "escapes the constant-offset"},
+        // GETPC gives 0xfffffff4; low ADD wraps to 4 without updating the high word.
+        {"short_swappc_guest_carry", {0xbe8a1f00, 0x800a900a, 0xbe88210a, 0xbf820003, 0xbf810000, 0xbf800000, 0xbe802008, 0xbf810000}, "not statically resolvable", 0x00000000fffffff0ull},
+    };
+    bool checked = false;
+    for (const auto& [name, code, message, codeAddress] : refused) {
+        if (!only.empty() && only != name) continue;
+        checked = true;
+        std::string error;
+        if (codeAddress != 0) {
+            try { static_cast<void>(recompile(std::string(name), code, 64u, codeAddress)); }
+            catch (const std::exception& failure) { error = failure.what(); }
+        } else {
+            error = refusal(code);
+        }
+        require(error.find(message) != std::string::npos, std::string(name) + ": expected '" + std::string(message) + "', got '" + error + "'");
+        std::printf("static scalar call guard %.*s PASS: %s\n", static_cast<int>(name.size()), name.data(), error.c_str());
+    }
+    require(checked, "unknown scalar call guard");
+    if (only.empty()) {
+        // The same supported accumulator is legitimate when disjoint from the link.
+        static_cast<void>(verifyGraph("disjoint four-word accumulator", std::array<std::uint32_t, 6>{
+            0xbb080001, 0xbf810000, 0xd5750000, 0x00120500, 0xbe802008, 0xbf810000}));
+        // Full low/high arithmetic remains valid across the same guest boundary.
+        static_cast<void>(recompile("SWAPPC full carry", std::array<std::uint32_t, 9>{
+            0xbe8a1f00, 0x800a940a, 0x820b800b, 0xbe88210a, 0xbf820003,
+            0xbf810000, 0xbf800000, 0xbe802008, 0xbf810000}, 64u, 0xfffffff0ull));
+        static_cast<void>(recompile("SWAPPC full borrow", std::array<std::uint32_t, 8>{
+            0xbf820002, 0xbf800000, 0xbe802008, 0xbe8a1f00,
+            0x808a8c0a, 0x828b800b, 0xbe88210a, 0xbf810000}, 64u, 0xfffffff0ull));
+        std::puts("static scalar call disjoint accumulator and full guest carry/borrow PASS");
+    }
+}
+
 }
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string_view(argv[1]) == "--static-call-guard") {
+        try { verifyStaticScalarCalls(argv[2]); return 0; }
+        catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
+    }
     if (argc > 1) {
         int failures = 0;
         for (int i = 1; i < argc; ++i) {
@@ -903,6 +977,7 @@ done:
     }
     try {
         verifyNullSwappc();
+        verifyStaticScalarCalls();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
         ++failures;

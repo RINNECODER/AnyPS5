@@ -116,7 +116,8 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
             std::fprintf(stderr, "[gpu] texture DCC color transform is ignored (word6=0x%08x word7=0x%08x)\n", words[6], words[7]);
         }
     }
-    Require(bcSwizzle == 0, "guest texture descriptor uses a BC swizzle which is not implemented");
+    // ZYXW preserves alpha and only permutes the equal RGB channels of predefined borders.
+    Require(bcSwizzle == 0u || bcSwizzle == 4u, "guest texture descriptor uses a BC swizzle which is not implemented");
 
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
 

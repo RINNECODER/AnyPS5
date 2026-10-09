@@ -98,7 +98,8 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
     Require(!disableDegamma, "guest sampler descriptor disables degamma which is not implemented");
     Require(lodBiasSec == 0, "guest sampler descriptor uses a secondary LOD bias which is not implemented");
     Require(!pointPreclamp, "guest sampler descriptor uses point preclamping which is not implemented");
-    Require(!anisoOverride, "guest sampler descriptor uses an anisotropy override which is not implemented");
+    // Without anisotropic XY filters there are no taps for ANISO_OVERRIDE to suppress.
+    Require(!anisoOverride || (xyMagFilter <= 1u && xyMinFilter <= 1u), "guest sampler descriptor uses an anisotropy override which is not implemented");
     Require(!blendZeroPrt, "guest sampler descriptor uses PRT blend-zero which is not implemented");
     if (mipFilter > 2u) Require(false, "guest sampler descriptor uses an unknown mip filter " + std::to_string(mipFilter));
 

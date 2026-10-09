@@ -217,16 +217,29 @@ struct SceAudioOut2Imports::Impl {
         if (levelAddress) write(levelAddress, level, 4);
         if (availableAddress) write(availableAddress, available, 4);
     }
-    void portCreate(std::uint64_t contextId, std::uint64_t parameterAddress, std::uint64_t destination) {
+    std::int32_t portCreate(std::uint64_t contextId, std::uint64_t parameterAddress, std::uint64_t destination) {
         auto& owner = context(contextId);
         (void)live(owner);
         const auto bytes = read<64>(parameterAddress);
         const auto format = integer(bytes, 4, 4), user = integer(bytes, 16, 8);
         // Main output only. Object type0x100, pad type6 and spatial routing stay unsupported.
-        if (integer(bytes, 0, 2) != 0 || (format != 0x100 && format != 0x200) ||
-            integer(bytes, 8, 4) != 48000 || integer(bytes, 12, 4) || !zero(std::span(bytes).subspan(24)))
+        if (integer(bytes, 0, 2) != 0 || integer(bytes, 8, 4) != 48000 ||
+            integer(bytes, 12, 4) || !zero(std::span(bytes).subspan(24)))
             fault("port parameters outside float32 main mono/stereo 48000Hz profile");
         if (!users.contains(user)) fault("invalid or stale port user handle");
+        // Negative MAIN format contract from hugodearaujo's PR1820 firmware13.60 measurements.
+        // Upper bits affect neither rejection; valid unsupported PCM/layouts remain fail closed.
+        const auto channels = (format >> 8) & 0xf, sampleType = format & 0x7f;
+        if ((format & 0x80) && channels != 8) {
+            write(destination, std::numeric_limits<std::uint64_t>::max(), 8);
+            return std::bit_cast<std::int32_t>(0x80268001u);
+        }
+        if ((channels != 1 && channels != 2 && channels != 8 && channels != 12) || sampleType > 1) {
+            write(destination, std::numeric_limits<std::uint64_t>::max(), 8);
+            return std::bit_cast<std::int32_t>(0x8026800eu);
+        }
+        if (format != 0x100 && format != 0x200)
+            fault("port parameters outside float32 main mono/stereo 48000Hz profile");
         const auto used = std::count_if(ports.begin(), ports.end(), [contextId](const auto& item) { return item.second.context == contextId; });
         if (static_cast<std::size_t>(used) >= owner.parameters.ports) fault("context main-port capacity exceeded");
         access(destination, 8, Permission::Write);
@@ -234,6 +247,7 @@ struct SceAudioOut2Imports::Impl {
         ports.emplace(id, Port{contextId, user, static_cast<std::uint32_t>(format >> 8)});
         try { write(destination, id, 8); }
         catch (...) { ports.erase(id); throw; }
+        return 0;
     }
     void portState(std::uint64_t id, std::uint64_t destination) {
         const auto& value = port(id);
@@ -336,7 +350,9 @@ struct SceAudioOut2Imports::Impl {
         case Service::ContextCreate: create(a, b, c, guest.Get(Register::Rcx)); break;
         case Service::ContextDestroy: destroy(a); break;
         case Service::QueueLevel: queue(a, b, c); break;
-        case Service::PortCreate: portCreate(a, b, c); break;
+        case Service::PortCreate:
+            guest.Set(Register::Rax, static_cast<std::uint64_t>(std::int64_t(portCreate(a, b, c))));
+            return;
         case Service::PortDestroy: (void)port(a); ports.erase(a); break;
         case Service::PortState: portState(a, b); break;
         case Service::PortAttributes: attributes(a, b, static_cast<std::uint32_t>(c)); break;

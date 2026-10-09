@@ -179,6 +179,8 @@ void guestAudioBoundary() {
     // These bytes come from independently traced conditional actual-title defaults, not SDK labels.
     const std::array<std::uint32_t, 6> defaults{16, 128, 0, 4, 512, 1};
     require(g.get<std::array<std::uint32_t, 6>>(0x5000) == defaults, "Context defaults differ from traced caller profile");
+    // One slot makes a leaked port from any rejected request observable at the next supported creation.
+    g.put(0x5000, std::uint32_t{1});
     for (const auto nid : {"pDmme7Bgm6E", "xywYcRB7nbQ"}) {
         g.sentinel(0x8ffc, 4);
         rejects([&] { g.call(nid, std::string(nid) == "pDmme7Bgm6E" ? 0x5000 : 0x10000000, 0x8ffc); }, "permission");
@@ -196,10 +198,75 @@ void guestAudioBoundary() {
     rejects([&] { g.call("on6ZH7Abo10", user); }, "context handle");
     std::array<std::uint32_t, 16> portParams{}; portParams[0] = 0xbeef0000; portParams[1] = 0x200; portParams[2] = 48000;
     g.put(0x5200, portParams); g.put(0x5210, user);
+    // PR1820 (hugodearaujo) reports firmware13.60 measurements, not our console validation.
+    // Primary real-gate regression: baseline throws, precedence/status/sentinel mutants fail here.
+    // Only negative MAIN formats are admitted; existing fixtures miss this status/output contract.
+    struct Rejection { std::uint32_t format; std::uint64_t status; };
+    constexpr Rejection measured[] = {
+        {0x000,0xffffffff8026800e}, {0x001,0xffffffff8026800e}, {0x080,0xffffffff80268001},
+        {0x102,0xffffffff8026800e}, {0x17f,0xffffffff8026800e}, {0x180,0xffffffff80268001},
+        {0x181,0xffffffff80268001}, {0x1ff,0xffffffff80268001}, {0x202,0xffffffff8026800e},
+        {0x27f,0xffffffff8026800e}, {0x280,0xffffffff80268001}, {0x281,0xffffffff80268001},
+        {0x2ff,0xffffffff80268001}, {0x300,0xffffffff8026800e}, {0x301,0xffffffff8026800e},
+        {0x380,0xffffffff80268001}, {0x400,0xffffffff8026800e}, {0x401,0xffffffff8026800e},
+        {0x500,0xffffffff8026800e}, {0x600,0xffffffff8026800e}, {0x601,0xffffffff8026800e},
+        {0x680,0xffffffff80268001}, {0x700,0xffffffff8026800e}, {0x701,0xffffffff8026800e},
+        {0x780,0xffffffff80268001}, {0x802,0xffffffff8026800e}, {0x87f,0xffffffff8026800e},
+        {0x882,0xffffffff8026800e}, {0x8ff,0xffffffff8026800e}, {0x900,0xffffffff8026800e},
+        {0x901,0xffffffff8026800e}, {0x980,0xffffffff80268001}, {0xa00,0xffffffff8026800e},
+        {0xb00,0xffffffff8026800e}, {0xc02,0xffffffff8026800e}, {0xc7f,0xffffffff8026800e},
+        {0xc80,0xffffffff80268001}, {0xc81,0xffffffff80268001}, {0xd00,0xffffffff8026800e},
+        {0xe00,0xffffffff8026800e}, {0xf00,0xffffffff8026800e}, {0xfff,0xffffffff80268001}
+    };
+    for (const auto test : measured) {
+        for (const auto upper : {0u, 0xfffff000u}) {
+            g.put(0x5204, test.format | upper); g.sentinel(0x5248, 24);
+            require(g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250) == test.status,
+                    "Measured MAIN rejection lost its signed status or branch precedence");
+            require(g.get<std::uint64_t>(0x5250) == UINT64_MAX, "Measured MAIN rejection did not write invalid-port sentinel");
+            g.untouched(0x5248, 8); g.untouched(0x5258, 8);
+        }
+    }
+    for (const auto test : {Rejection{0x280,0xffffffff80268001}, Rejection{0x202,0xffffffff8026800e},
+                            Rejection{0x600,0xffffffff8026800e}, Rejection{0x882,0xffffffff8026800e}}) {
+        for (unsigned bit = 12; bit < 32; ++bit) {
+            g.put(0x5204, test.format | (1u << bit)); g.sentinel(0x5250, 8);
+            require(g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250) == test.status &&
+                    g.get<std::uint64_t>(0x5250) == UINT64_MAX, "An upper format bit changed measured rejection");
+        }
+    }
+    // Rejection is not permission to bypass full output/parameter spans, admission or live context.
+    for (const auto format : {0x280u, 0x202u}) {
+        g.put(0x5204, format);
+        g.sentinel(0x8ffc, 4);
+        rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x8ffc); }, "permission"); g.untouched(0x8ffc, 4);
+        rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x9000); }, "permission");
+        rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0); }, "invalid guest span");
+        for (const auto field : {8u, 12u, 24u}) {
+            g.put(0x5200 + field, std::uint32_t{1}); g.sentinel(0x5250, 8);
+            rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250); }, "main mono/stereo");
+            g.untouched(0x5250, 8); g.put(0x5200 + field, field == 8 ? 48000u : 0u);
+        }
+        g.put(0x5210, UINT64_MAX); g.sentinel(0x5250, 8);
+        rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250); }, "port user handle"); g.untouched(0x5250, 8);
+        g.put(0x5210, user);
+        rejects([&] { g.call("JK2wamZPzwM", user, 0x5200, 0x5250); }, "context handle"); g.untouched(0x5250, 8);
+        g.machine.Protect(0x10000, 4096, Permission::Read);
+        rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250); }, "permission"); g.untouched(0x5250, 8);
+        g.machine.Protect(0x10000, 4096, rw);
+    }
+    rejects([&] { g.call("JK2wamZPzwM", ctx, 0x9ffc, 0x5250); }, "Guest access denied"); g.untouched(0x5250, 8);
+    for (const auto format : {0x101u,0x201u,0x800u,0x801u,0x880u,0x881u,0xc00u,0xc01u,0xfffff200u}) {
+        g.put(0x5204, format); g.sentinel(0x5250, 8);
+        rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250); }, "main mono/stereo"); g.untouched(0x5250, 8);
+    }
+    g.put(0x5204, std::uint32_t{0x200});
     g.sentinel(0x8ffc, 4);
     rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x8ffc); }, "permission"); g.untouched(0x8ffc, 4);
     require(g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250) == 0, "Float stereo main port creation failed");
     const auto port = g.get<std::uint64_t>(0x5250);
+    g.sentinel(0x5250, 8);
+    rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250); }, "capacity"); g.untouched(0x5250, 8);
     rejects([&] { g.call("gatEUKG+Ea4", ctx, 0x5300); }, "port handle");
     g.sentinel(0x8fe0, 32);
     rejects([&] { g.call("gatEUKG+Ea4", port, 0x8fe0); }, "permission"); g.untouched(0x8fe0, 32);
@@ -252,6 +319,8 @@ void guestAudioBoundary() {
     rejects([&] { g.call("gatEUKG+Ea4", port, 0x5300); }, "stale");
     require(g.call("gatEUKG+Ea4", replacement, 0x5300) == 0, "Stale rejection damaged replacement port");
     g.call("on6ZH7Abo10", ctx);
+    g.put(0x5204, std::uint32_t{0x280}); g.sentinel(0x5250, 8);
+    rejects([&] { g.call("JK2wamZPzwM", ctx, 0x5200, 0x5250); }, "stale"); g.untouched(0x5250, 8);
     rejects([&] { g.call("gatEUKG+Ea4", replacement, 0x5300); }, "stale");
     rejects([&] { g.call("aII9h5nli9U", ctx, 1); }, "stale");
     require(g.call("0x6o1VVAYSY", 0x5000, 0x10000, scratch, 0x5110) == 0, "Replacement native context failed");
