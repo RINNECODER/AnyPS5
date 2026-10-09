@@ -33,10 +33,10 @@ ctest --test-dir build-metal --output-on-failure
 
 This mode builds texture detiling, color transfer, mesh arguments, sample counter utilities, texture presentation, and guest-memory mapping. It does not build the guest CPU runtime or the whole renderer. It skips the existing third-party targets, so submodule initialization is unnecessary for this mode. Shader intermediates and `AnyPS5Utilities.metallib` are generated in the build directory.
 
-To also build and test the SPIR-V to Metal shader bridge and native converted-shader pipelines, use CMake 3.24 or newer and initialize its SPIRV-Cross submodule:
+To also build and test the SPIR-V to Metal shader bridge and native converted-shader pipelines, use CMake 3.24 or newer and initialize its SPIRV-Cross and Vulkan-Headers submodules (the guest sampler state types include `vulkan/vulkan.h`):
 
 ```sh
-git submodule update --init 3rdparty/SPIRV-Cross
+git submodule update --init 3rdparty/SPIRV-Cross 3rdparty/Vulkan-Headers
 cmake -S . -B build-metal -G Ninja -DANYPS5_METAL_UTILITIES_ONLY=ON -DANYPS5_METAL_SHADER_BRIDGE=ON -DANYPS5_BUILD_METAL_SHADER_BRIDGE_TESTS=ON -DBUILD_TESTING=ON -DCMAKE_OSX_ARCHITECTURES=arm64
 cmake --build build-metal --parallel
 ctest --test-dir build-metal --output-on-failure
@@ -45,11 +45,13 @@ ctest --test-dir build-metal --output-on-failure
 After configuring the bridge above, enable the existing guest shader frontend replay through Metal with:
 
 ```sh
-git submodule update --init 3rdparty/glslang 3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers
+git submodule update --init 3rdparty/glslang 3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers 3rdparty/SDL2
 cmake -S . -B build-metal -DANYPS5_METAL_GUEST_REPLAY=ON
 cmake --build build-metal --parallel
 ctest --test-dir build-metal --output-on-failure
 ```
+
+SDL2 is required here: the native host window (`core/libs/prx/libSceVideoOut/src/NativeHostWindow.mm`) includes its scancode headers, and without it the build stops with `'SDL_scancode.h' file not found`.
 
 This mode selects Metal at the original AGC submission and presentation entry points. It exercises existing guest vertex, fragment and geometry shaders through native vertex and mesh pipelines, rectangle-list draws through the original generated tessellation stages, registered and raw compute programs, PM4 register and memory packets, independent queues, direct and indirect indexed and nonindexed draws, texture and sampler resources, retained depth attachments, occlusion visibility counts, and native macOS drawables. Initialize `MetalDriver::Configure` with the device, utility library, and borrowed guest ranges before submission; keep the borrowed storage alive through `WaitIdle` and presentation completion. Vulkan-Headers supplies existing state metadata types; no Vulkan runtime is linked. Guest hull and domain shader stages remain unsupported. The guest CPU runtime remains outside this mode.
 
