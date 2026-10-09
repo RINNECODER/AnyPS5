@@ -725,4 +725,10 @@ if(BUILD_TESTING)
         )
         add_test(NAME reloc_table_bounds COMMAND reloc_table_bounds_tests $<TARGET_FILE:relinker>)
     endif()
+
+    set(relinkerTestTemp ${CMAKE_CURRENT_BINARY_DIR}/test-temp)
+    file(MAKE_DIRECTORY ${relinkerTestTemp})
+    get_property(relinkerTests DIRECTORY PROPERTY TESTS)
+    set_tests_properties(${relinkerTests} PROPERTIES ENVIRONMENT_MODIFICATION
+        "TMPDIR=set:${relinkerTestTemp};TEMP=set:${relinkerTestTemp};TMP=set:${relinkerTestTemp}")
 endif()
