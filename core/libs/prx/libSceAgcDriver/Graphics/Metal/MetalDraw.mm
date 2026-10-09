@@ -133,6 +133,7 @@ Graphics::GuestTextureResource colorSurface(const Graphics::ColorTarget& color) 
     surface.dstSelW = 7;
     surface.dccAddress = color.dccAddress;
     surface.dccAlphaOnMsb = color.dccAlphaOnMsb;
+    surface.dccPipeAligned = color.dccPipeAligned;
     return surface;
 }
 

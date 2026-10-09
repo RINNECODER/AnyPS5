@@ -99,7 +99,7 @@ constexpr std::array<std::array<std::uint32_t, 6>, 32> FloatCases{{
 }};
 
 std::array<std::uint32_t, 4> BufferDescriptor(std::uint64_t address, std::uint32_t bytes) {
-    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), bytes, 0x01016facu};
+    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), bytes, 0x31016facu};
 }
 
 std::array<std::uint32_t, 8> TextureDescriptor(std::uint32_t width, std::uint32_t height, std::uint32_t format) {

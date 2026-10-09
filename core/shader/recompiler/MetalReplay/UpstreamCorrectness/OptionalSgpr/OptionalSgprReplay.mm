@@ -55,7 +55,7 @@ AgcDriver::QueueState ComputeQueue(bool complete) {
     AgcDriver::QueueState queue;
     queue.shader = {{0x207, 32}, {0x208, 1}, {0x209, 1},
         {0x20c, ComputeCodeAddress >> 8u}, {0x20d, 0}, {0x213, 16},
-        {0x240, OutputAddress}, {0x241, 16u << 16u}, {0x242, 32}, {0x243, 0x01016fac},
+        {0x240, OutputAddress}, {0x241, 16u << 16u}, {0x242, 32}, {0x243, 0x11016fac},
         {0x245, 0x12345678}, {0x246, 0}};
     if (complete) { queue.shader[0x244] = 0; queue.shader[0x247] = 0; }
     return queue;
@@ -229,17 +229,25 @@ void RequiredRegisters() {
     const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 2> ranges{{
         {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true}}};
     AgcDriver::NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
-    for (const auto offset : {0xc8u, 0xc9u, 0x8bu, 0x008u, 0x009u, 0x00bu}) {
+    // Unwritten graphics program address, resource and user-data registers read as zero (the shared
+    // driver's draw decoding): a missing low address word leaves no registered program to run,
+    // while the high address and resource words decode as their zero values.
+    for (const auto offset : {0xc8u, 0x008u}) {
         auto missing = draw;
         missing.shader.erase(offset);
         Reject([&] { static_cast<void>(AgcDriver::DecodeDrawDispatch(missing, registry)); },
-            "required shader register", "draw required register " + std::to_string(offset));
+            "does not belong to a registered shader", "draw unwritten program address " + std::to_string(offset));
+    }
+    for (const auto offset : {0xc9u, 0x8bu, 0x009u, 0x00bu}) {
+        auto missing = draw;
+        missing.shader.erase(offset);
+        static_cast<void>(AgcDriver::DecodeDrawDispatch(missing, registry));
     }
     auto missing = draw;
     missing.context.erase(0x206);
     Reject([&] { static_cast<void>(AgcDriver::DecodeDrawDispatch(missing, registry)); },
         "missing register in context bank at DWORD 0x206", "draw required viewport register");
-    std::cout << "required: six compute shader/dimension and six graphics shader plus viewport missing-register controls passed\n";
+    std::cout << "required: six compute shader/dimension controls, two unwritten graphics program addresses, four zero-read graphics registers and the viewport control passed\n";
 }
 }
 

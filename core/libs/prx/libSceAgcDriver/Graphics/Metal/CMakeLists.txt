@@ -56,7 +56,13 @@ if(ANYPS5_METAL_SHADER_BRIDGE)
         ../src/TextureTiling.cpp
         ../src/TextureFormat.cpp
     )
+    # TextureFormat.cpp reads the sRGB decode helpers of the recompiler's descriptor formats,
+    # whose IR metadata headers resolve through the recompiler's component include roots.
     target_include_directories(anyps5_metal_utilities PRIVATE "${PROJECT_SOURCE_DIR}/3rdparty/Vulkan-Headers/include")
+    foreach(recompilerComponent IN ITEMS RdnaDecoder ControlFlow IntermediateRepresentation Translation Optimization SpirvBackend)
+        target_include_directories(anyps5_metal_utilities PRIVATE
+            "${PROJECT_SOURCE_DIR}/core/shader/recompiler/${recompilerComponent}/include")
+    endforeach()
     target_compile_definitions(anyps5_metal_utilities PUBLIC ANYPS5_METAL_SHADER_BRIDGE=1)
     target_link_libraries(anyps5_metal_utilities PUBLIC anyps5_metal_shader_bridge)
 endif()

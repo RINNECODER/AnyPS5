@@ -38,3 +38,6 @@
 	path = 3rdparty/anyps5-tcg
 	url = https://github.com/RINNECODER/AnyPS5-TCG.git
 	branch = utm-edition
+[submodule "3rdparty/libjpeg-turbo"]
+	path = 3rdparty/libjpeg-turbo
+	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git

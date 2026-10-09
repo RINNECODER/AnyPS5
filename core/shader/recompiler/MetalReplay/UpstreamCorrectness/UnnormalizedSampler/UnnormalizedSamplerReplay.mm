@@ -6,6 +6,9 @@
 #include "ShaderDiskCache.hpp"
 #include "MetalBackend/MetalShaderBridge.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include "Optimization/ResourceMaterializer.hpp"
+#include "CompiledVariant.hpp"
+#include "PipelineSpecialization.hpp"
 #include "SpirvBackend/SpirvEmitter.hpp"
 #include "Optimization/BindingAllocator.hpp"
 #include "Optimization/DescriptorBindingBuilder.hpp"
@@ -25,6 +28,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <initializer_list>
+#include <map>
 #include <filesystem>
 #include <iostream>
 #include <spawn.h>
@@ -130,8 +135,8 @@ struct Replay {
         label = std::string(height == 1 ? "1D" : "2D") + " " + std::to_string(width) + "x" + std::to_string(height) +
             " lanes=" + std::to_string(lanes) + (edge ? " edge" : " zero") + (linear ? " linear" : " point") +
             (nsa ? " NSA" : " contiguous") + (mixed ? (pixel ? " pixel/normalized" : " normalized/pixel") : pixel ? " pixel" : " normalized");
-        users = {std::uint32_t(Base + 0x10100), 0, lanes * stride * 4u, 0x01016fac,
-            std::uint32_t(Base + 0x20100), 0, lanes * stride * 8u, 0x01016fac,
+        users = {std::uint32_t(Base + 0x10100), 0, lanes * stride * 4u, 0x31016fac,
+            std::uint32_t(Base + 0x20100), 0, lanes * stride * 8u, 0x31016fac,
             std::uint32_t((Base + 0x30100) >> 8u), (77u << 20u) | (((width - 1u) & 3u) << 30u),
             ((width - 1u) >> 2u) | ((height - 1u) << 14u), 0xfacu | ((height == 1 ? 8u : 9u) << 28u), 0, 0, 0, 0};
         for (std::uint32_t pair = 0; pair < (mixed ? 2u : 1u); ++pair) {
@@ -247,6 +252,17 @@ void Reject(const std::string& name, std::string_view reason, const std::functio
     try { action(); } catch (const std::exception& error) {
         Require(std::string(error.what()).find(reason) != std::string::npos, name + " WRONG OWNER/REASON " + error.what());
         std::cout << name << " PASS owner refusal: " << error.what() << '\n'; return;
+    }
+    throw std::runtime_error(name + " accepted an unsupported pixel sampler");
+}
+// A refusal any of whose owners may decline first: the shared recompiler's static runtime image
+// interface and SPIR-V emission now run before descriptor population.
+void Reject(const std::string& name, std::initializer_list<std::string_view> reasons, const std::function<void()>& action) {
+    try { action(); } catch (const std::exception& error) {
+        const std::string what = error.what();
+        Require(std::any_of(reasons.begin(), reasons.end(), [&](auto reason) { return what.find(reason) != std::string::npos; }),
+            name + " WRONG OWNER/REASON " + what);
+        std::cout << name << " PASS owner refusal: " << what << '\n'; return;
     }
     throw std::runtime_error(name + " accepted an unsupported pixel sampler");
 }
@@ -407,12 +423,13 @@ std::vector<std::uint32_t> QualifiedAndOffsetProgram(bool deadOffset) {
 }
 void DeadSourceLimitations(id<MTLDevice> device) {
     Replay original(32,8,4,true,false,false,true,true); const auto dead = QualifiedAndOffsetProgram(true);
+    // The shared static runtime image interface no longer remaps image memory references per
+    // capture, so the retained dead-image s8 placement compiles for both coordinate policies.
     for (const bool pixel : {true,false}) {
         auto users = original.users; users[16] = (users[16] & ~(1u<<15u)) | (pixel ? 1u<<15u : 0u);
-        Reject(std::string("retained dead-image s8 source placement limitation pixel=") + std::to_string(pixel),
-            "ResourceMaterializer::Apply cannot remap an image memory reference", [&] { static_cast<void>(Compile(device,dead,users)); });
+        static_cast<void>(Compile(device,dead,users));
     }
-    std::cout << "dead-image s8 source placement remains unsupported before pixel proof; normalized control has the same stale-metadata refusal\n";
+    std::cout << "dead-image s8 source placement compiles for pixel and normalized controls\n";
 }
 void Rejections(id<MTLDevice> device, id<MTLLibrary> library) {
     Replay fixture(32, 8, 4, true, false, false);
@@ -422,7 +439,10 @@ void Rejections(id<MTLDevice> device, id<MTLLibrary> library) {
         auto users = fixture.users;
         if (opcode == 0x47u) for (auto& word : code) if ((word >> 26u) == 0x3cu) word = (word & ~0xf00u) | 0x200u;
         if (opcode == 0x28u) { users[16] |= 1u << 12u; users[9] = (users[9] & ~(0x1ffu << 20u)) | (22u << 20u); }
-        Reject("live unsupported opcode=" + Hex(opcode), "unnormalized", [&] { static_cast<void>(Compile(device, code, users)); });
+        // SPIR-V emission precedes descriptor population, so the emitter's refusal of a texel offset
+        // that is not a constant owns the offset sample before the unnormalized sampler check.
+        Reject("live unsupported opcode=" + Hex(opcode), opcode == 0x34u ? "has a texel offset that is not a constant" : "unnormalized",
+            [&] { static_cast<void>(Compile(device, code, users)); });
     }
     // Compute image_sample flags0 is intentionally explicitLOD0. Only a real
     // fragment request can exercise the unsupported implicit derivative form.
@@ -435,11 +455,15 @@ void Rejections(id<MTLDevice> device, id<MTLLibrary> library) {
     fragment.useCache = false;
     Reject("implicit fragment sample", "unnormalized", [&] { static_cast<void>(Recompile(fragment)); });
     struct DescriptorCase { const char* name; unsigned word; std::uint32_t clear, set; };
-    const std::array<DescriptorCase, 12> samplerCases{{
-        {"repeat",16,7u,0}, {"mirror",16,7u,1u}, {"opaque border",19,3u<<30u,1u<<30u},
+    const std::array<DescriptorCase, 7> samplerCases{{
+        {"repeat",16,7u,0}, {"mirror",16,7u,1u},
         {"different filters",18,3u<<20u,1u<<20u}, {"anisotropic filter",18,3u<<20u,2u<<20u},
+        {"TRUNC_COORD",16,0,1u<<27u}, {"MC_COORD_TRUNC",16,0,1u<<19u}, {"FORCE_SRGB",16,0,1u<<20u},
+    }};
+    // The shared decoder binds an unnormalized S# with nearest mips, a zero LOD range, no bias and
+    // no anisotropy, so these fields select nothing and the native sampler is built as usual.
+    const std::array<DescriptorCase, 4> ignoredSamplerCases{{
         {"anisotropy ratio with equal point filters",16,0,1u<<9u},
-        {"TRUNC_COORD",16,0,1u<<27u}, {"MC_COORD_TRUNC",18,0,1u<<31u}, {"FORCE_SRGB",16,0,1u<<20u},
         {"mip filtering",18,0,1u<<26u}, {"sampler minLOD",17,0,1u}, {"LOD bias",18,0,1u},
     }};
     AgcDriver::Metal::MetalDevice backend(device, library); const auto ranges = fixture.Ranges();
@@ -452,26 +476,53 @@ void Rejections(id<MTLDevice> device, id<MTLLibrary> library) {
             AgcDriver::Metal::MetalShaderResources resources(backend, ranges); static_cast<void>(resources.Bindings(native));
         });
     }
+    for (const auto& c : ignoredSamplerCases) {
+        auto users = fixture.users; users[c.word] = (users[c.word] & ~c.clear) | c.set;
+        const auto native = MetalBackend::ConvertToMetal(Compile(device, standard, users), ShaderStage::Compute, options);
+        AgcDriver::Metal::MetalShaderResources resources(backend, ranges); static_cast<void>(resources.Bindings(native));
+    }
+    {
+        // The border type matters only where the sampler reads the border (the shared decoder accepts
+        // it otherwise): with clamp-to-border addressing an opaque border has no unnormalized Metal sampler.
+        auto users = fixture.users;
+        users[16] = (users[16] & ~63u) | 6u | (6u << 3u);
+        users[19] = (users[19] & ~(3u << 30u)) | (1u << 30u);
+        Reject("opaque border", "transparent-zero", [&] {
+            const auto native = MetalBackend::ConvertToMetal(Compile(device, standard, users), ShaderStage::Compute, options);
+            AgcDriver::Metal::MetalShaderResources resources(backend, ranges); static_cast<void>(resources.Bindings(native));
+        });
+    }
     const std::array<DescriptorCase, 5> imageCases{{
         {"view minLOD",9,0,1u<<8u}, {"extra mip",11,0,1u<<16u}, {"base level",11,0,(1u<<12u)|(1u<<16u)},
         {"extra layer",12,0,1u}, {"base array",12,0,1u<<16u}}};
     for (const auto& c : imageCases) {
         auto users = fixture.users; users[c.word] = (users[c.word] & ~c.clear) | c.set;
-        Reject(c.name, "unnormalized", [&] { static_cast<void>(Compile(device, standard, users)); });
+        // The shared recompiler leaves the view checks to the driver: the native bindings refuse
+        // the pair before any sampler or view is used.
+        Reject(c.name, "pixel sampler", [&] {
+            const auto native = MetalBackend::ConvertToMetal(Compile(device, standard, users), ShaderStage::Compute, options);
+            AgcDriver::Metal::MetalShaderResources resources(backend, ranges); static_cast<void>(resources.Bindings(native));
+        });
     }
+    const auto nativeBindings = [&](std::span<const std::uint32_t> code, std::span<const std::uint32_t> users) {
+        const auto native = MetalBackend::ConvertToMetal(Compile(device, code, users), ShaderStage::Compute, options);
+        AgcDriver::Metal::MetalShaderResources resources(backend, ranges); static_cast<void>(resources.Bindings(native));
+    };
+    constexpr std::string_view staticInterface = "incompatible with the static runtime image interface";
     for (const auto type : {10u, 11u, 12u, 13u}) {
         auto users = fixture.users; users[11] = (users[11] & ~(15u<<28u)) | (type<<28u);
-        Reject("shape descriptor type=" + std::to_string(type), "unnormalized", [&] { static_cast<void>(Compile(device, standard, users)); });
+        Reject("shape descriptor type=" + std::to_string(type), {"unnormalized", staticInterface, "pixel sampl"},
+            [&] { nativeBindings(standard, users); });
     }
     auto msaaDescriptor = fixture.users; msaaDescriptor[11] = (msaaDescriptor[11] & ~(15u<<28u)) | (14u<<28u) | (1u<<16u); msaaDescriptor[13] = 1u<<4u;
-    Reject("multisampled descriptor binding", "unnormalized", [&] { static_cast<void>(Compile(device, standard, msaaDescriptor)); });
+    Reject("multisampled descriptor binding", {"unnormalized", staticInterface}, [&] { static_cast<void>(Compile(device, standard, msaaDescriptor)); });
     auto packedCode = standard;
     for (auto& word : packedCode) if ((word >> 26u) == 0x3cu) word |= 0x8000u;
-    Reject("reduced-width R128 descriptor", "unnormalized", [&] { static_cast<void>(Compile(device, packedCode, fixture.users)); });
+    Reject("reduced-width R128 descriptor", {"unnormalized", "pixel sampl"}, [&] { nativeBindings(packedCode, fixture.users); });
     auto conversion = fixture.users; conversion[9] = (conversion[9] & ~(0x1ffu<<20u)) | (34u<<20u);
     Reject("conversion sampled image", "unnormalized", [&] { static_cast<void>(Compile(device, standard, conversion)); });
     auto depth = fixture.users; depth[9] = (depth[9] & ~(0x1ffu<<20u)) | (20u<<20u); depth[11] |= 4u<<20u;
-    Reject("depth-bits sampled image", "unnormalized", [&] { static_cast<void>(Compile(device, standard, depth)); });
+    Reject("depth-bits sampled image", {"unnormalized", "pixel sampl"}, [&] { nativeBindings(standard, depth); });
     auto msaaCode = standard;
     for (auto& word : msaaCode) if ((word >> 26u) == 0x3cu) word = (word & ~(7u<<3u)) | (6u<<3u);
     Reject("multisampled sample instruction decoder", "unsupported multisampled MIMG operation", [&] { static_cast<void>(Compile(device, msaaCode, fixture.users)); });
@@ -488,16 +539,18 @@ void Rejections(id<MTLDevice> device, id<MTLLibrary> library) {
     imageTable[8] += 16; // distinct color surface address, same supported shape
     const std::array<std::uint32_t, 12> materials{0,0,0,0, 0,0,0,0, 0,1,0,0};
     const std::array<std::uint32_t, 16> srt{0x3000000,32u<<16u,2,0xfac,
-        0x8092,0,0,0, 0x3010000,16u<<16u,3,0xfac, 0x3020000,0,128,0xfac};
+        0x8092,0,0,0, 0x3010000,16u<<16u,3,0xfac, 0x3020000,0,128,0x31016fac};
     const std::array<std::uint32_t, 2> indirectUsers{0x3030000,0};
     const std::array<MemoryRegion, 4> indirectRegions{{
         {reinterpret_cast<std::uintptr_t>(indirectCode.data()),std::as_bytes(std::span(indirectCode))},
         {0x3000000,std::as_bytes(std::span(imageTable))}, {0x3010000,std::as_bytes(std::span(materials))}, {0x3030000,std::as_bytes(std::span(srt))}}};
     auto indirect = Request(device,indirectCode,indirectUsers,indirectRegions,false);
-    Reject("indirect sampled image binding", "unnormalized", [&] { static_cast<void>(Recompile(indirect)); });
+    Reject("indirect sampled image binding", {"unnormalized", "bindless image table needs image array dynamic indexing"},
+        [&] { static_cast<void>(Recompile(indirect)); });
     Replay pair(32,8,4,true,false,false,true,true);
     auto liveMixed = QualifiedAndOffsetProgram(false);
-    Reject("same sampler live qualified plus offset sample", "unnormalized", [&] { static_cast<void>(Compile(device,liveMixed,pair.users)); });
+    Reject("same sampler live qualified plus offset sample", {"unnormalized", "has a texel offset that is not a constant"},
+        [&] { static_cast<void>(Compile(device,liveMixed,pair.users)); });
     DeadSourceLimitations(device);
     auto deadMixed = QualifiedAndOffsetProgram(true);
     // Preserve the s8 failure above. The supported placement uses T#s0, so a
@@ -629,12 +682,46 @@ Replay LateDeadSamplerReplay(bool liveSecond, bool pixel) {
     replay.label = std::string("fixture-induced posttracking DCE T#s0 ") + (liveSecond ? "dead/live " : "live/dead ") + (pixel ? "pixel" : "normalized");
     return replay;
 }
+// The captured snapshot's pipeline specialization baked into a prepared artifact, as Recompile
+// materializes it: each OpSpecConstant becomes the OpConstant of its supplied value.
+SharedSpirv MaterializeSpecialization(const CompiledShaderArtifact& artifact, const BindingAllocationResult& bindings,
+                                      const BindingLayout& layout) {
+    std::map<std::uint32_t, std::uint32_t> supplied;
+    for (const auto& constant : bindings.specialization)
+        Require(supplied.emplace(constant.id, constant.value).second, "duplicate fixture specialization ID");
+    if (bindings.layout.UsesPushData()) supplied.emplace(PipelineSpecialization::PushDataOffset, layout.pushConstantOffsetBytes / 4u);
+    const auto& words = artifact.spirv.Words();
+    Require(words.size() >= 5u && words[0] == spv::MagicNumber, "fixture artifact is not SPIR-V");
+    std::map<std::uint32_t, std::uint32_t> values;
+    for (std::size_t cursor = 5; cursor < words.size(); cursor += words[cursor] >> 16u) {
+        const auto count = words[cursor] >> 16u;
+        Require(count != 0u && count <= words.size() - cursor, "fixture artifact instruction is truncated");
+        if (static_cast<spv::Op>(words[cursor] & 0xffffu) == spv::OpDecorate && count == 4u && words[cursor + 2u] == spv::DecorationSpecId) {
+            const auto found = supplied.find(words[cursor + 3u]);
+            Require(found != supplied.end(), "fixture specialization value is missing");
+            values.emplace(words[cursor + 1u], found->second);
+        }
+    }
+    std::vector<std::uint32_t> materialized(words.begin(), words.begin() + 5);
+    for (std::size_t cursor = 5; cursor < words.size(); cursor += words[cursor] >> 16u) {
+        const auto count = words[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(words[cursor] & 0xffffu);
+        if (op == spv::OpSpecConstant) {
+            Require(count == 4u && values.contains(words[cursor + 2u]), "fixture specialization constant is invalid");
+            materialized.insert(materialized.end(), {(4u << 16u) | spv::OpConstant, words[cursor + 1u], words[cursor + 2u], values.at(words[cursor + 2u])});
+        } else if (!(op == spv::OpDecorate && count == 4u && words[cursor + 2u] == spv::DecorationSpecId)) {
+            materialized.insert(materialized.end(), words.begin() + cursor, words.begin() + cursor + count);
+        }
+    }
+    return materialized;
+}
 CompiledVariant CompileLateDeadSampler(const RecompileRequest& request, const ResourceCapture& capture, unsigned dead) {
     auto program = PrepareResourceProgram(request);
     Require(program.Info().samplers.size() == 2 && program.Info().sampledPairs.size() == 2,
         "late-DCE source must track TWO LIVE sampler uses before fixture removes a consumer");
     const auto trackedSamplers = program.Info().samplers;
-    ResourceMaterializer{}.Apply(program,capture.specialization);
+    static_cast<void>(capture);
+    ResourceMaterializer{}.ApplyStaticInterface(program);
     std::vector<IrValue*> stores;
     for (auto& block : program.Blocks()) for (IrValue* inst : block->Instructions())
         if (BufferAccessOf(inst->Opcode()) == BufferAccess::Write) stores.push_back(inst);
@@ -650,16 +737,17 @@ CompiledVariant CompileLateDeadSampler(const RecompileRequest& request, const Re
     std::cout << "compiler-owner late-DCE retainedSamplers=2 deadSlot=" << dead << " liveUseCounts="
         << program.Info().samplers[0].liveUseCount << ',' << program.Info().samplers[1].liveUseCount << " livePairs=1 before Populate\n";
     auto allocation = BindingAllocator{}.Allocate(program,request.layout);
-    DescriptorBindingBuilder{}.Populate(allocation,program,capture.snapshot,{});
     const SpirvTargetOptions target{request.target.vulkanVersion,request.target.spirvVersion,request.target.subgroupSize,
-        request.target.bdaAbiVersion,request.target.supportedCapabilities,request.target.supportedExtensions,request.target.nonConstantImageOffsets};
-    RecompileResult result; result.spirv = SpirvEmitter{}.Emit(program,inputs,allocation,target);
-    result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
-    result.memoryOffsetDword = allocation.layout.memoryOffsetDword; result.hostSubgroupSize = 32;
-    // As in compileVariant, store descriptor-free allocation/result; reload
-    // must call the real Populate owner with the captured snapshot again.
-    allocation.bindings.clear(); allocation.pushConstants.clear();
-    return {capture.specialization,request.layout,std::move(program).TakeCompiledInfo(),std::move(allocation),std::move(result)};
+        request.target.bdaAbiVersion,request.target.supportedCapabilities,request.target.supportedExtensions,request.target.nonConstantImageOffsets,
+        request.target.narrowSubgroupClock};
+    // As in compileVariant, the artifact is descriptor-free; materialization must call the real
+    // Populate owner with the captured snapshot.
+    CompiledShaderArtifact artifact; artifact.spirv = SpirvEmitter{}.Emit(program,inputs,allocation,target);
+    artifact.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
+    artifact.memoryOffsetDword = allocation.layout.memoryOffsetDword; artifact.hostSubgroupSize = 32;
+    artifact.shaderDataDwords = allocation.layout.ShaderDataDwords(); artifact.imageMetadataDword = allocation.layout.ImageMetadataDword();
+    artifact.runtimeImageCount = allocation.layout.runtimeImageCount;
+    return {request.layout,std::move(program).TakeCompiledInfo(),static_cast<CompiledBindingLayout&&>(std::move(allocation)),std::move(artifact)};
 }
 void DeadSamplerOwnerRefusals(const CompiledVariant& variant, const ResourceSnapshot& snapshot, unsigned dead, std::span<const std::byte> key) {
     // Distinct dead-slot safety guard: zero-count metadata is admissible only
@@ -671,7 +759,7 @@ void DeadSamplerOwnerRefusals(const CompiledVariant& variant, const ResourceSnap
         else malformed.samplers[dead].liveUseMask = 1;
         Reject(pair ? "unused sampler stale zero-use pair" : "unused sampler inconsistent live mask",
             "unused sampler has inconsistent live-use metadata",[&] {
-                auto allocation = variant.bindings;
+                BindingAllocationResult allocation; static_cast<CompiledBindingLayout&>(allocation) = variant.bindings;
                 DescriptorBindingBuilder{}.Populate(allocation,malformed,variant.info.stage,variant.info.userDataBase,snapshot,{});
             });
     }
@@ -697,7 +785,7 @@ void LateDeadSamplerNative(id<MTLDevice> device, id<MTLLibrary> library, int dis
         // Never masquerade transformed IR as the untouched AGC Recompile key.
         const std::string identity = "UnnormalizedSampler/compiler-owner-fixture-induced-posttracking-DCE/v1";
         const auto identityBytes = std::as_bytes(std::span(identity.data(),identity.size())); key.assign(identityBytes.begin(),identityBytes.end());
-        std::vector<std::byte> productionKey; ShaderDiskCache::BuildKey(request,32,capture->specialization,productionKey);
+        std::vector<std::byte> productionKey; ShaderDiskCache::BuildKey(request,32,productionKey);
         key.insert(key.end(),productionKey.begin(),productionKey.end()); key.push_back(std::byte(dead)); key.push_back(std::byte(pixel));
         const auto before = ShaderDiskCache::Totals(); CompiledVariant variant;
         if (diskPhase != 0) {
@@ -707,13 +795,14 @@ void LateDeadSamplerNative(id<MTLDevice> device, id<MTLLibrary> library, int dis
         if (diskPhase != 2) {
             variant = CompileLateDeadSampler(request,*capture,dead);
             if (diskPhase == 1) { ShaderDiskCache::Store(key,std::make_shared<const CompiledVariant>(variant)); ShaderDiskCache::Flush(); }
-        } else { variant.specialization = capture->specialization; variant.layout = request.layout; }
+        } else variant.layout = request.layout;
         CheckDeadSamplerInfo(variant.info.info,dead);
-        BindingAllocationResult bindings; bindings.layout = variant.bindings.layout;
-        bindings.pushConstantOffsetBytes = variant.bindings.pushConstantOffsetBytes; bindings.pushConstantSizeBytes = variant.bindings.pushConstantSizeBytes;
+        BindingAllocationResult bindings; static_cast<CompiledBindingLayout&>(bindings) = variant.bindings;
         DescriptorBindingBuilder{}.Populate(bindings,variant.info.info,variant.info.stage,variant.info.userDataBase,capture->snapshot,{});
         if (diskPhase == 0 && !liveSecond && !pixel) DeadSamplerOwnerRefusals(variant,capture->snapshot,dead,key);
-        auto guest = variant.result; guest.bindings = std::move(bindings.bindings); guest.pushConstants = std::move(bindings.pushConstants);
+        RecompileResult guest; static_cast<CompiledShaderArtifact&>(guest) = variant.artifact;
+        guest.spirv = MaterializeSpecialization(variant.artifact,bindings,request.layout);
+        guest.bindings = std::move(bindings.bindings); guest.pushConstants = std::move(bindings.pushConstants);
         MetalBackend::TargetOptions options; options.supportsGpuAddresses = options.supportsInt64 = options.supportsSimdGroups = true;
         const auto metal = MetalBackend::ConvertToMetal(guest,ShaderStage::Compute,options);
         AgcDriver::Metal::MetalDevice backend(device,library); const auto ranges = replay.Ranges();
@@ -768,35 +857,35 @@ void Cache(id<MTLDevice> device, id<MTLLibrary> library, const char* executable,
     for (const auto size : {std::size_t(0), bytes.size() / 2, bytes.size() - 1}) {
         RecompileResult rejected; Require(!ShaderDiskCache::DecodeResult(std::span(bytes).first(size), rejected), "truncated result metadata accepted");
     }
-    auto program = PrepareResourceProgram(request); ResourceMaterializer{}.Apply(program, capture->specialization);
+    auto program = PrepareResourceProgram(request); ResourceMaterializer{}.ApplyStaticInterface(program);
     DeadCodeEliminator{}.RemoveIdentities(program); DeadCodeEliminator{}.Eliminate(program);
     const auto inputs = BuildShaderStageInputInfo(ShaderStageKind::Compute, request.context, 32);
     ShaderInfoCollector{}.Collect(program, inputs);
     auto allocation = BindingAllocator{}.Allocate(program, request.layout);
     DescriptorBindingBuilder{}.Populate(allocation, program, capture->snapshot, {});
-    CompiledVariant variant{capture->specialization, request.layout, std::move(program).TakeCompiledInfo(), allocation, *first};
-    std::vector<std::byte> key; ShaderDiskCache::BuildKey(request, 32, capture->specialization, key);
+    CompiledVariant variant{request.layout, std::move(program).TakeCompiledInfo(), allocation, *first};
+    std::vector<std::byte> key; ShaderDiskCache::BuildKey(request, 32, key);
     auto file = ShaderDiskCache::EncodeEntry(key, variant); CompiledVariant restored;
-    // The specialization/layout are supplied by the validated disk key at the
-    // real cache owner. DecodeEntry intentionally decodes only the payload.
-    restored.specialization = capture->specialization; restored.layout = request.layout;
+    // The layout is supplied by the validated disk key at the real cache owner. DecodeEntry
+    // intentionally decodes only the payload. The artifact is descriptor-free: certificates are
+    // rebuilt from the cached info for every snapshot, so the info carries them through the cache.
+    restored.layout = request.layout;
     Require(ShaderDiskCache::DecodeEntry(file, key, restored) == ShaderDiskCache::LoadStatus::Loaded &&
-        restored.info.info == variant.info.info && SameProofs(restored.result.bindings, variant.result.bindings) && SameProofs(restored.bindings.bindings, variant.bindings.bindings),
-        "CACHE PROOF full info/allocation/result roundtrip mismatch");
+        restored.info.info == variant.info.info, "CACHE PROOF full info/allocation/artifact roundtrip mismatch");
     Require(restored.info.stage == variant.info.stage && restored.info.shaderHash == variant.info.shaderHash && restored.info.waveSize == variant.info.waveSize &&
         restored.info.userDataBase == variant.info.userDataBase && restored.info.userDataCount == variant.info.userDataCount &&
         restored.bindings.layout == variant.bindings.layout && restored.bindings.pushConstantOffsetBytes == variant.bindings.pushConstantOffsetBytes &&
-        restored.bindings.pushConstantSizeBytes == variant.bindings.pushConstantSizeBytes && restored.bindings.pushConstants == variant.bindings.pushConstants &&
-        restored.result.pushConstants == variant.result.pushConstants && restored.result.spirv == variant.result.spirv,
+        restored.bindings.pushConstantSizeBytes == variant.bindings.pushConstantSizeBytes &&
+        restored.artifact.spirv.Words() == variant.artifact.spirv.Words(),
         "CACHE PROOF full layout/allocation/content roundtrip mismatch");
-    Require(restored.specialization == variant.specialization && restored.layout.descriptorSet == variant.layout.descriptorSet &&
+    Require(restored.layout.descriptorSet == variant.layout.descriptorSet &&
         restored.layout.firstBinding == variant.layout.firstBinding && restored.layout.pushConstantOffsetBytes == variant.layout.pushConstantOffsetBytes &&
-        restored.layout.pushConstantSizeBytes == variant.layout.pushConstantSizeBytes,"cache validated-key specialization/layout changed during payload decode");
+        restored.layout.pushConstantSizeBytes == variant.layout.pushConstantSizeBytes,"cache validated-key layout changed during payload decode");
     auto old = file; const std::uint32_t oldFormat = 4; std::memcpy(old.data() + 4, &oldFormat, sizeof(oldFormat));
     Require(ShaderDiskCache::DecodeEntry(old, key, restored) == ShaderDiskCache::LoadStatus::Rejected, "old cache format accepted");
     Require(ShaderDiskCache::DecodeEntry(std::span(file).first(file.size()-1), key, restored) == ShaderDiskCache::LoadStatus::Rejected, "truncated cache entry accepted");
     const auto before = ShaderDiskCache::Totals(); ShaderDiskCache::Store(key, std::make_shared<const CompiledVariant>(variant)); ShaderDiskCache::Flush();
-    CompiledVariant loaded; Require(ShaderDiskCache::Load(key, loaded) && SameProofs(loaded.result.bindings, first->bindings), "CACHE PROOF disk load failed certificate match");
+    CompiledVariant loaded; Require(ShaderDiskCache::Load(key, loaded) && loaded.info.info == variant.info.info, "CACHE PROOF disk load failed certificate metadata match");
     auto absentKey = key; absentKey.push_back(std::byte{0x42}); CompiledVariant absent;
     Require(!ShaderDiskCache::Load(absentKey, absent), "disk absent key unexpectedly hit");
     const auto after = ShaderDiskCache::Totals(); Require(after.hits > before.hits && after.misses > before.misses && after.writes > before.writes, "actual disk counters did not record miss/write/hit");

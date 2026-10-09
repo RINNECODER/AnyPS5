@@ -1,5 +1,6 @@
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #if !defined(ANYPS5_METAL_BACKEND)
@@ -51,8 +52,14 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     constexpr auto graphicsWindowFlag = SDL_WINDOW_METAL;
 #else
     constexpr auto graphicsWindowFlag = SDL_WINDOW_VULKAN;
+    // SDL loads and queries the Vulkan loader for a Vulkan window; keep that
+    // from racing the render thread's vkCreateInstance.
+    AgcDriverLockVulkanLoader_nid_postfix();
 #endif
     window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | graphicsWindowFlag | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+#if !defined(ANYPS5_METAL_BACKEND)
+    AgcDriverUnlockVulkanLoader_nid_postfix();
+#endif
     require(window != nullptr, SDL_GetError());
 #if defined(ANYPS5_METAL_BACKEND)
     metalView = SDL_Metal_CreateView(window);

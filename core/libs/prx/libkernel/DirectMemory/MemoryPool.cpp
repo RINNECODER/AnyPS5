@@ -1,5 +1,6 @@
 #include "prx/libkernel/DirectMemory/MemoryPool.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include <algorithm>
 #include <map>
 #include <mutex>
 
@@ -32,18 +33,17 @@ struct PhysicalMemoryPool {
 
     void Free(uint64_t start, size_t len) {
         std::lock_guard<std::mutex> lock(_mutex);
-        ForgetDirectMemory(static_cast<int64_t>(start), len);
-        _mark(start, len, false);
-        const uint64_t end = start + len;
-        auto it = _blocks.upper_bound(start);
-        if (it != _blocks.begin() && std::prev(it)->second.end > start) --it;
-        while (it != _blocks.end() && it->first < end) {
-            const uint64_t blockStart = it->first;
-            const Block block = it->second;
-            it = _blocks.erase(it);
-            if (blockStart < start) _blocks[blockStart] = {start, block.type};
-            if (block.end > end) it = _blocks.emplace(end, Block{block.end, block.type}).first;
-        }
+        _free(start, len);
+    }
+
+    bool CheckedFree(uint64_t start, size_t len) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (start > DIRECT_MEMORY_SIZE || len > DIRECT_MEMORY_SIZE - start) return false;
+        const size_t first = start / PS5_PAGE_SIZE;
+        for (size_t i = 0; i < len / PS5_PAGE_SIZE; ++i)
+            if (!_used[first + i]) return false;
+        _free(start, len);
+        return true;
     }
 
     bool Find(uint64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {
@@ -55,6 +55,21 @@ struct PhysicalMemoryPool {
         *end = static_cast<int64_t>(it->second.end);
         *memoryType = it->second.type;
         return true;
+    }
+
+    void Retype(uint64_t start, size_t len, int memoryType) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        const uint64_t end = start + len;
+        auto it = _blocks.upper_bound(start);
+        if (it != _blocks.begin() && std::prev(it)->second.end > start) --it;
+        while (it != _blocks.end() && it->first < end) {
+            const uint64_t blockStart = it->first;
+            const Block block = it->second;
+            it = _blocks.erase(it);
+            if (blockStart < start) _blocks[blockStart] = {start, block.type};
+            _blocks[std::max(blockStart, start)] = {std::min(block.end, end), memoryType};
+            if (block.end > end) it = _blocks.emplace(end, Block{block.end, block.type}).first;
+        }
     }
 
     size_t FreeRun(uint64_t offset, uint64_t limit) {
@@ -70,6 +85,21 @@ struct PhysicalMemoryPool {
     }
 
 private:
+    void _free(uint64_t start, size_t len) {
+        ForgetDirectMemory(static_cast<int64_t>(start), len);
+        _mark(start, len, false);
+        const uint64_t end = start + len;
+        auto it = _blocks.upper_bound(start);
+        if (it != _blocks.begin() && std::prev(it)->second.end > start) --it;
+        while (it != _blocks.end() && it->first < end) {
+            const uint64_t blockStart = it->first;
+            const Block block = it->second;
+            it = _blocks.erase(it);
+            if (blockStart < start) _blocks[blockStart] = {start, block.type};
+            if (block.end > end) it = _blocks.emplace(end, Block{block.end, block.type}).first;
+        }
+    }
+
     bool _isFree(uint64_t offset, size_t len) const {
         size_t first = offset / PS5_PAGE_SIZE;
         size_t count = len / PS5_PAGE_SIZE;
@@ -103,8 +133,16 @@ void DirectMemoryFree(int64_t start, size_t len) {
     PhysicalMemoryPool::Instance().Free(static_cast<uint64_t>(start), len);
 }
 
+bool DirectMemoryCheckedFree(int64_t start, size_t len) {
+    return PhysicalMemoryPool::Instance().CheckedFree(static_cast<uint64_t>(start), len);
+}
+
 bool DirectMemoryFind(int64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {
     return PhysicalMemoryPool::Instance().Find(static_cast<uint64_t>(offset), findNext, start, end, memoryType);
+}
+
+void DirectMemoryRetype(int64_t start, size_t len, int memoryType) {
+    PhysicalMemoryPool::Instance().Retype(static_cast<uint64_t>(start), len, memoryType);
 }
 
 size_t DirectMemoryFreeRun(uint64_t offset, uint64_t limit) {

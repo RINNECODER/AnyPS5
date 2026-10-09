@@ -66,7 +66,7 @@ void SetShaderRegisters(AgcDriver::QueueState& queue, std::uint32_t first,
 
 std::array<std::uint32_t, 4> Descriptor(std::uint64_t address, std::uint32_t words) {
     return {static_cast<std::uint32_t>(address),
-        static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (4u << 16u), words, 0x01016facu};
+        static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (4u << 16u), words, 0x11016facu};
 }
 
 void Configure(AgcDriver::QueueState& queue, std::uint64_t codeAddress,
@@ -544,7 +544,7 @@ void RetainedSubgroupReplay(id<MTLDevice> device, id<MTLLibrary> library, const 
         const auto count = test.descriptorStrideBytes == 0 ? payload.size_bytes() : payload.size();
         return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address),
             static_cast<std::uint32_t>((address >> 32u) & 0xffffu) | (test.descriptorStrideBytes << 16u),
-            static_cast<std::uint32_t>(count), 0x01016facu};
+            static_cast<std::uint32_t>(count), test.descriptorStrideBytes == 0 ? 0x31016facu : 0x11016facu};
     };
     const auto in = descriptor(InputAddress, test.input), out = descriptor(OutputAddress, test.expected);
     std::array<std::uint32_t, 8> userData{};

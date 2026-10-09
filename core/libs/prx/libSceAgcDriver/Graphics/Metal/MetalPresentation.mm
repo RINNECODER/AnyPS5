@@ -15,7 +15,10 @@ std::vector<std::byte> displayPixels(const DisplayBuffer& buffer) {
     const auto size = DisplayBufferSize(buffer);
     GuestMemory::ReadSiteScope scanout(GuestMemory::ReadSite::Scanout);
     if (buffer.dccAddress == 0) return DisplayPqHdr(buffer.pixelFormat) ? ReadDisplayBufferPqHdr(buffer) : ReadDisplayBuffer(buffer);
-    const auto count = Graphics::DccKeyBytes(size);
+    // Display keys cover the console's metadata extent of a 4-byte SW_64KB_R_X surface, as the
+    // shared driver's DisplayBufferKeyBytes reads them.
+    if (buffer.tilingMode != 0) throw std::runtime_error("Metal scanout: a linear display buffer has no DCC keys");
+    const auto count = Graphics::DccKeyCount(Graphics::TextureTileMode::kR64KBX, 4, buffer.width, buffer.height, size);
     if (count == 0) throw std::runtime_error("Metal scanout DCC metadata has no key bytes");
     std::vector<std::byte> bytes(count);
     GuestMemory::Read(buffer.dccAddress, bytes);

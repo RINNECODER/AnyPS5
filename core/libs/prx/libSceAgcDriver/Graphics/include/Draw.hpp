@@ -29,6 +29,11 @@ struct DrawInputCopy {
 DrawInputCopy CopyDrawInput(const Context& context, Recorder* recorder, std::uint64_t address, std::size_t bytes, std::size_t alignment, Recorder::SnapshotUse use);
 void KeepDrawInput(Recorder* recorder, std::uint64_t address, const DrawInputCopy& copy, Recorder::SnapshotUse use, std::uint32_t derived);
 
+// The mesh program's hidden index buffer V#: the draw's index range, or a null V# (base and size 0)
+// for a non-indexed draw, which ShaderResources binds to its empty placeholder buffer. The Metal
+// path still uses the MeshDraw.hpp overload that points a non-indexed draw at `unreadAddress`.
+std::array<std::uint32_t, 4> MeshIndexBufferDescriptor(const Pm4::DrawParameters& draw);
+
 struct MeshArguments {
     std::uint32_t groups;
     std::uint32_t instances;

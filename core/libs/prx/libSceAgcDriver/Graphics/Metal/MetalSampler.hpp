@@ -24,4 +24,10 @@ private:
 void ValidatePixelSamplerBindings(const std::vector<ShaderRecompiler::DescriptorBinding>& bindings);
 void ValidatePixelSampledView(id<MTLTexture> view, const Graphics::GuestTextureResource& descriptor);
 
+// An empty T# (no base address): the element of a runtime ABI image heap that the snapshot leaves
+// unbound, which the shared driver also leaves unbound.
+[[nodiscard]] inline bool NullImageDescriptor(std::span<const std::uint32_t> words) {
+    return words.size() == 8 && words[0] == 0u && (words[1] & 0xffu) == 0u;
+}
+
 }

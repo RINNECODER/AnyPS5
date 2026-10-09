@@ -1,6 +1,7 @@
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/WindowsMappings.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <iterator>
@@ -17,6 +18,11 @@
 
 namespace GuestArena {
 namespace {
+
+#ifdef _WIN32
+std::atomic<std::uint64_t> commitGeneration{1};
+std::atomic<void (*)(std::uintptr_t, std::size_t, std::uint64_t)> privateMappingObserver{nullptr};
+#endif
 
 constexpr std::uintptr_t ArenaStart = 0x0000000200000000ull;
 constexpr std::uintptr_t SystemReservedStart = 0x00000007FFFFC000ull;
@@ -107,13 +113,19 @@ private:
         GetSystemInfo(&system);
         const std::uintptr_t granularity = system.dwAllocationGranularity;
         const std::uintptr_t end = ApplicationAreaEnd;
+        std::uint32_t retries = 0;
         for (std::uintptr_t cursor = ArenaStart; cursor < end;) {
             MEMORY_BASIC_INFORMATION info{};
             if (VirtualQuery(reinterpret_cast<const void*>(cursor), &info, sizeof(info)) == 0) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "query the guest arena range");
             const auto regionEnd = std::min(end, reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize);
             const auto first = info.State == MEM_FREE ? std::min(regionEnd, alignUp(cursor, granularity)) : regionEnd;
             const auto last = std::max(first, regionEnd & ~(granularity - 1));
-            if (first < last && WindowsMappings::Get().Reserve(reinterpret_cast<void*>(first), last - first) == nullptr) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "reserve the guest arena range");
+            if (first < last && WindowsMappings::Get().Reserve(reinterpret_cast<void*>(first), last - first) == nullptr) {
+                const auto error = GetLastError();
+                if (error == ERROR_INVALID_ADDRESS && ++retries < 64u) continue;
+                throw std::system_error(static_cast<int>(error), std::system_category(), "reserve the guest arena range");
+            }
+            retries = 0;
             if (cursor < first) _holes.emplace_back(cursor, first);
             if (last < regionEnd) _holes.emplace_back(last, regionEnd);
             cursor = regionEnd;
@@ -188,6 +200,16 @@ bool GuestArenaHandleWrite_nid_postfix(std::uintptr_t address) {
     return WindowsMappings::Get().HandleWrite(address);
 }
 
+void GuestArenaPinWritable_nid_postfix(const void* pointer, std::size_t bytes) {
+    if (!Arena::Get().Contains(pointer, bytes)) return;
+    WindowsMappings::Get().Pin(reinterpret_cast<std::uintptr_t>(pointer), bytes);
+}
+
+void GuestArenaUnpinWritable_nid_postfix(const void* pointer, std::size_t bytes) {
+    if (!Arena::Get().Contains(pointer, bytes)) return;
+    WindowsMappings::Get().Unpin(reinterpret_cast<std::uintptr_t>(pointer), bytes);
+}
+
 bool GuestArenaProtection_nid_postfix(std::uintptr_t address, std::uint32_t* protection) {
     return WindowsMappings::Get().Protection(address, protection);
 }
@@ -210,9 +232,21 @@ std::invalid_argument OutsideArena(const char* operation, const void* pointer, s
 
 }
 
+std::uint64_t GuestArenaCommitGeneration_nid_postfix() {
+    return commitGeneration.load(std::memory_order_acquire);
+}
+
+void GuestArenaSetPrivateMappingObserver_nid_postfix(void (*callback)(std::uintptr_t, std::size_t, std::uint64_t)) {
+    privateMappingObserver.store(callback, std::memory_order_release);
+}
+
 void GuestArenaCommit_nid_postfix(void* pointer, std::size_t bytes, std::uint32_t protection, std::size_t granule) {
     if (!Arena::Get().Contains(pointer, bytes)) throw OutsideArena("commit", pointer, bytes);
-    WindowsMappings::Get().Commit(pointer, bytes, protection, granule, Arena::Get().WriteWatched());
+    const auto generation = commitGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const auto created = WindowsMappings::Get().Commit(pointer, bytes, protection, granule, Arena::Get().WriteWatched());
+    if (const auto callback = privateMappingObserver.load(std::memory_order_acquire)) {
+        for (const auto& [address, size] : created) callback(address, size, generation);
+    }
 }
 
 void GuestArenaReset_nid_postfix(void* pointer, std::size_t bytes) {
@@ -256,5 +290,22 @@ void GuestArenaEndHostWrite_nid_postfix(void* pointer, std::size_t bytes) {
     (void)bytes;
 #endif
 }
+
+#ifndef _WIN32
+namespace {
+
+std::atomic<SharedBackingResolver> sharedBackingResolver{nullptr};
+
+}
+
+void GuestArenaSetSharedBacking_nid_postfix(SharedBackingResolver resolver) {
+    sharedBackingResolver.store(resolver, std::memory_order_release);
+}
+
+bool GuestArenaSharedBacking_nid_postfix(std::uintptr_t address, std::size_t bytes, int* file, std::uint64_t* offset) {
+    const auto resolver = sharedBackingResolver.load(std::memory_order_acquire);
+    return resolver != nullptr && resolver(address, bytes, file, offset);
+}
+#endif
 
 }

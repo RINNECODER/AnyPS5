@@ -78,7 +78,7 @@ void CheckReferenceAnchors() {
     std::cout << "Independent exact rational f32 reference agrees with 7 pinned upstream claimed-RDNA anchors; these are source claims, not local RDNA measurements\n";
 }
 std::array<std::uint32_t, 4> Descriptor(std::uint32_t address, std::uint32_t bytes, std::uint32_t format, std::uint32_t swizzle = 0xfac) {
-    return {address, 0, bytes, 0x01000000u | (format << 12) | swizzle};
+    return {address, 0, bytes, 0x31000000u | (format << 12) | swizzle};
 }
 MetalBackend::Result Compile(id<MTLDevice> device, std::span<const std::uint32_t> code, std::span<const std::uint32_t> data) {
     static constexpr std::array<std::uint32_t, 3> capabilities{

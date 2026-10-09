@@ -96,6 +96,7 @@ MTLTextureType textureType(Graphics::TextureDimension dimension) {
         case Graphics::TextureDimension::k1D: return MTLTextureType2D;
         case Graphics::TextureDimension::k2D: return MTLTextureType2D;
         case Graphics::TextureDimension::k2DArray:
+        case Graphics::TextureDimension::k1DArray:
         case Graphics::TextureDimension::kCube: return MTLTextureType2DArray;
         case Graphics::TextureDimension::k3D: return MTLTextureType3D;
     }
@@ -185,7 +186,8 @@ void validateDescriptor(const Graphics::GuestTextureResource& descriptor, bool c
     require(Graphics::EffectiveMinLod(descriptor) == 0 || minimumLodLowered, "Metal texture minimum LOD view clamp is not supported");
     require(descriptor.width != 0 && descriptor.height != 0 && descriptor.mipCount != 0 && descriptor.mipCount <= 16, "Metal texture has invalid dimensions or mip count");
     require(descriptor.baseLevel <= descriptor.lastLevel && descriptor.lastLevel < descriptor.mipCount, "Metal texture view mip range lies outside the surface");
-    require(descriptor.dimension != Graphics::TextureDimension::k1D || descriptor.height == 1, "Metal 1D texture has a non-unit height");
+    require((descriptor.dimension != Graphics::TextureDimension::k1D && descriptor.dimension != Graphics::TextureDimension::k1DArray) ||
+        descriptor.height == 1, "Metal 1D texture has a non-unit height");
     require(Graphics::XorSwizzleMode(descriptor.tileMode) == 0 || (descriptor.baseAddress & 0xffffu) == 0,
         "Metal texture XOR base contains an unsupported pipe or bank XOR");
     const auto format = Graphics::ResolveTextureFormat(descriptor.format);
@@ -310,8 +312,8 @@ void MetalTexture::createViews(bool compare) {
 
 bool MetalTexture::CanShareBacking(const Graphics::GuestTextureResource& resource) const {
     const auto& original = backing->descriptor;
-    if (std::tie(original.baseAddress, original.width, original.height, original.depthOrLastArray, original.mipCount, original.tileMode, original.dimension, original.dccAddress, original.dccAlphaOnMsb) !=
-        std::tie(resource.baseAddress, resource.width, resource.height, resource.depthOrLastArray, resource.mipCount, resource.tileMode, resource.dimension, resource.dccAddress, resource.dccAlphaOnMsb)) return false;
+    if (std::tie(original.baseAddress, original.width, original.height, original.depthOrLastArray, original.mipCount, original.tileMode, original.dimension, original.dccAddress, original.dccAlphaOnMsb, original.dccPipeAligned) !=
+        std::tie(resource.baseAddress, resource.width, resource.height, resource.depthOrLastArray, resource.mipCount, resource.tileMode, resource.dimension, resource.dccAddress, resource.dccAlphaOnMsb, resource.dccPipeAligned)) return false;
     const auto originalAllocation = original.allocatedMipCount == 0 ? original.mipCount : original.allocatedMipCount;
     const auto allocation = resource.allocatedMipCount == 0 ? resource.mipCount : resource.allocatedMipCount;
     return originalAllocation == allocation && formatFamily(original.format) == formatFamily(resource.format) &&

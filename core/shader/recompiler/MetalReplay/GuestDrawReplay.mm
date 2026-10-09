@@ -441,7 +441,7 @@ struct Replay {
         RegisterPacket(commands,0x79,0x24a,zeroBase);
         commands.insert(commands.end(),{0xc0002f00,1});
         const std::array<uint32_t,16> users{
-            static_cast<uint32_t>(OutputAddress),0,Width*Height*8,0x01016fac,
+            static_cast<uint32_t>(OutputAddress),0,Width*Height*8,0x31016fac,
             static_cast<uint32_t>(TextureAddress>>8),(22u<<20)|(3u<<30)|(384u<<8),15u|(31u<<14)|(1u<<31),
             0xfacu|(5u<<16)|(9u<<28),0,5u<<4,0,0,
             0x92u|(1u<<12),(8u*256u)<<12,(1u<<22)|(2u<<26),0};
@@ -589,7 +589,7 @@ struct Replay {
         RegisterPacket(commands,0x79,0x24a,zeroBase);
         commands.insert(commands.end(),{0xc0002f00,1});
         const std::array<uint32_t,16> users{
-            static_cast<uint32_t>(OutputAddress),0,Width*Height*8,0x01016fac,
+            static_cast<uint32_t>(OutputAddress),0,Width*Height*8,0x31016fac,
             static_cast<uint32_t>(TextureAddress>>8),(22u<<20)|(3u<<30)|(384u<<8),15u|(31u<<14)|(1u<<31),
             0xfacu|(5u<<16)|(9u<<28),0,5u<<4,0,0,
             0x92u,(8u*256u)<<12,(1u<<22)|(2u<<26),0};
@@ -1137,7 +1137,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
             const std::array<std::uint32_t, 12> depthUsers{
                 static_cast<std::uint32_t>(depthAddress >> 8u), (guestFormat << 20u) | (3u << 30u),
                 ((Width - 1) >> 2u) | ((Height - 1) << 14u), 0xfacu | (24u << 20u) | (9u << 28u), 0, 0, 0, 0,
-                static_cast<std::uint32_t>(DepthOutputAddress), 0, Width * Height * 4, 0x01016fac};
+                static_cast<std::uint32_t>(DepthOutputAddress), 0, Width * Height * 4, 0x31016fac};
             const std::uint32_t twelveUsers = 24, zero = 0;
             RegisterPacket(reader, 0x76, 0xb, std::span(&twelveUsers, 1));
             RegisterPacket(reader, 0x76, 0xc, depthUsers);

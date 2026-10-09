@@ -225,6 +225,9 @@ void validateTexture(id<MTLTexture> texture, const ShaderRecompiler::DescriptorB
         case ShaderRecompiler::DescriptorImageShape::Image2DArray:
             matches = texture.textureType == MTLTextureType2DArray;
             break;
+        case ShaderRecompiler::DescriptorImageShape::Image1DArray:
+            matches = texture.textureType == MTLTextureType2DArray && texture.height == 1;
+            break;
         case ShaderRecompiler::DescriptorImageShape::ImageCube:
             matches = texture.textureType == MTLTextureTypeCube || texture.textureType == MTLTextureTypeCubeArray;
             break;
@@ -358,6 +361,11 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
             reserveSlots(textureSlots, *mapping.texture, mapping.count, 128);
             for (std::uint32_t i = 0; i < mapping.count; ++i) {
                 id<MTLTexture> texture = binding.textures[i];
+                if (texture == nil && descriptor->role == ShaderRecompiler::DescriptorRole::GuestImages &&
+                    descriptor->guestDescriptor.size() == static_cast<std::size_t>(descriptor->count) * 8u &&
+                    NullImageDescriptor(std::span(descriptor->guestDescriptor).subspan(i * 8u, 8))) {
+                    continue;
+                }
                 if (texture == nil || texture.device != device) {
                     throw std::invalid_argument("Metal shader texture belongs to a different device or is missing");
                 }
@@ -437,8 +445,13 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
         if (!sampler.samplerDepthCompare.empty() && sampler.samplerDepthCompare.size() != sampler.count) {
             throw std::invalid_argument("Metal minimum LOD sampler comparison metadata has the wrong descriptor count");
         }
-        const auto imageResource = Graphics::DecodeTextureResource(std::span(image.guestDescriptor).subspan(pair.imageElement * 8u, 8));
-        const float relative = std::max(0.0f, Graphics::EffectiveMinLod(imageResource) - static_cast<float>(imageResource.baseLevel));
+        // An unbound element of a runtime ABI image heap keeps its pair slots with no view floor.
+        const auto imageWords = std::span(image.guestDescriptor).subspan(pair.imageElement * 8u, 8);
+        float relative = 0.0f;
+        if (!NullImageDescriptor(imageWords)) {
+            const auto imageResource = Graphics::DecodeTextureResource(imageWords);
+            relative = std::max(0.0f, Graphics::EffectiveMinLod(imageResource) - static_cast<float>(imageResource.baseLevel));
+        }
         if (!std::isfinite(pair.relativeViewMin) || pair.relativeViewMin < 0.0f || pair.relativeViewMin != relative) {
             throw std::invalid_argument("Metal minimum LOD recipe differs from its captured image view");
         }

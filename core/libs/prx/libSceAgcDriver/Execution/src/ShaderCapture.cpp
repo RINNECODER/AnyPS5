@@ -29,7 +29,7 @@ const Shader nullPixelShader = [] {
 
 }
 
-std::shared_ptr<const ShaderSnapshot> ReadRegisteredShader(std::uint64_t guestHeaderAddress) {
+ShaderSnapshot ReadRegisteredShaderSnapshot(std::uint64_t guestHeaderAddress) {
     Shader header{};
     GuestMemory::Read(guestHeaderAddress, std::as_writable_bytes(std::span(&header, 1)), 1);
     require(header.file_header == 0x34333231u && header.version == 0x18u, "invalid shader header");
@@ -43,15 +43,23 @@ std::shared_ptr<const ShaderSnapshot> ReadRegisteredShader(std::uint64_t guestHe
     GuestMemory::Read(codeAddress, std::as_writable_bytes(std::span(snapshot.code)), 256);
     snapshot.header.resize(header.header_size);
     GuestMemory::Read(guestHeaderAddress, snapshot.header, 1);
-    return std::make_shared<const ShaderSnapshot>(std::move(snapshot));
+    return snapshot;
 }
 
-std::shared_ptr<const ShaderSnapshot> CaptureNullPixelShader() {
+std::shared_ptr<const ShaderSnapshot> ReadRegisteredShader(std::uint64_t guestHeaderAddress) {
+    return std::make_shared<const ShaderSnapshot>(ReadRegisteredShaderSnapshot(guestHeaderAddress));
+}
+
+ShaderSnapshot NullPixelShaderSnapshot() {
     ShaderSnapshot snapshot{NullPixelProgramAddress(), reinterpret_cast<std::uintptr_t>(&nullPixelShader), nullPixelShader.type, {}, {}};
     snapshot.code.assign(std::begin(nullPixelCode), std::end(nullPixelCode));
     snapshot.header.resize(sizeof(Shader));
     std::memcpy(snapshot.header.data(), &nullPixelShader, sizeof(Shader));
-    return std::make_shared<const ShaderSnapshot>(std::move(snapshot));
+    return snapshot;
+}
+
+std::shared_ptr<const ShaderSnapshot> CaptureNullPixelShader() {
+    return std::make_shared<const ShaderSnapshot>(NullPixelShaderSnapshot());
 }
 
 std::shared_ptr<const ShaderSnapshot> CaptureRawComputeShader(std::uint64_t address, std::size_t contiguousBytes) {

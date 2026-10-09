@@ -49,6 +49,22 @@ bool CaptureSegment(DriverDetail::Submission& submission, std::uint64_t guest, s
         }
         reach(cursor, cursor + count);
         const auto opcode = (header >> 8u) & 0xffu;
+        if (opcode == 0x3fu && count == 14) {
+            // COND_INDIRECT_BUFFER whose comparison always passes: run its first buffer in place of the packet.
+            read(cursor, count);
+            const auto mode = packet[1] & 3u;
+            require(mode == 1u || mode == 2u, "invalid COND_INDIRECT_BUFFER mode");
+            require(((packet[1] >> 8u) & 7u) == 0u, "a COND_INDIRECT_BUFFER with a comparison is not implemented");
+            require(!Pm4::Predicated(header), "a predicated COND_INDIRECT_BUFFER is not implemented");
+            const auto target = static_cast<std::uint64_t>(packet[8] & ~3u) | (static_cast<std::uint64_t>(packet[9] & 0xffffu) << 32u);
+            const std::size_t targetWords = packet[10] & 0xfffffu;
+            if (targetWords != 0 && CaptureSegment(submission, target, targetWords, budget)) {
+                require(guarded.empty(), "a REWIND inside a conditional execution range is not implemented");
+                return true;
+            }
+            cursor += count;
+            continue;
+        }
         if (opcode == 0x3fu) {
             require(count == 4, "invalid INDIRECT_BUFFER size");
             read(cursor, count);

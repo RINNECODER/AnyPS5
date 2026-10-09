@@ -82,10 +82,12 @@ void DecodeContract() {
         Require(instruction.op == RdnaOpcode::SEndpgm && instruction.wordCount == 1 &&
             instruction.rawWords[0] == code[0], "S_SETKILL immediate " + Hex(immediate) + " lost scalar termination");
     }
-    for (const auto opcode : {0x0du, 0x11u, 0x1fu}) {
-        const std::array<std::uint32_t, 2> code{0xbf800000u | (opcode << 16), Endpgm};
-        Reject([&] { static_cast<void>(RdnaInstructionDecoder{}.Decode(code)); },
-            "unsupported SOPP opcode " + std::to_string(opcode), "unsupported halt/code-end opcode");
+    // s_sethalt, s_sendmsghalt and s_code_end decode; the halting forms are refused at translation.
+    struct HaltOpcode { std::uint32_t opcode; RdnaOpcode decoded; };
+    for (const auto [opcode, decoded] : {HaltOpcode{0x0du, RdnaOpcode::SSethalt}, HaltOpcode{0x11u, RdnaOpcode::SSendmsghalt},
+                                        HaltOpcode{0x1fu, RdnaOpcode::SCodeEnd}}) {
+        const std::array<std::uint32_t, 1> code{0xbf800000u | (opcode << 16)};
+        Require(DecodeRdnaInstruction(0, code, 0).op == decoded, "halt/code-end opcode " + std::to_string(opcode) + " decode changed");
     }
     const std::array<std::uint32_t, 1> trap{0xbf920000};
     Require(DecodeRdnaInstruction(0, trap, 0).op == RdnaOpcode::STrap, "existing S_TRAP decode changed");
@@ -115,7 +117,7 @@ void DecodeContract() {
 }
 
 std::array<std::uint32_t, 4> Descriptor(std::uint32_t address, std::uint32_t bytes) {
-    return {address, 0, bytes, 0x01016fac};
+    return {address, 0, bytes, 0x31016fac};
 }
 MetalBackend::Result Compile(id<MTLDevice> device, std::span<const std::uint32_t> code,
     std::span<const std::uint32_t> userData) {

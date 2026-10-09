@@ -1,8 +1,11 @@
 #include "MetalShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
+#include "RuntimeAbi.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include <array>
 #include <cstdio>
+#include <string>
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -31,11 +34,64 @@ auto textureKey(const Graphics::GuestTextureResource& resource, bool compare) {
     return std::tuple(resource.baseAddress, resource.width, resource.height, resource.depthOrLastArray,
         resource.baseArray, resource.mipCount, resource.baseLevel, resource.lastLevel, resource.tileMode,
         resource.dimension, resource.format, resource.dstSelX, resource.dstSelY, resource.dstSelZ,
-        resource.dstSelW, resource.dccAddress, resource.dccAlphaOnMsb, resource.minLod, resource.allocatedMipCount, compare);
+        resource.dstSelW, resource.dccAddress, resource.dccAlphaOnMsb, resource.dccPipeAligned, resource.minLod, resource.allocatedMipCount, compare);
 }
 
 bool overlaps(std::uint64_t begin, std::uint64_t end, std::uint64_t otherBegin, std::uint64_t otherEnd) {
     return begin < otherEnd && otherBegin < end;
+}
+
+// The runtime ABI image records in a shader's ShaderData words name element ranges of the image heaps
+// the shader binds; a dynamic image index reads its element from them, so every record must lie
+// inside its bound heap before the words reach the GPU (as the shared driver's
+// ValidateRuntimeResources requires).
+void validateRuntimeImages(const ShaderRecompiler::RecompileResult& program, std::span<const std::uint32_t> words) {
+    const auto require = [](bool condition, const char* message) {
+        if (!condition) throw std::invalid_argument(std::string("Metal runtime image metadata: ") + message);
+    };
+    ShaderRecompiler::RuntimeAbi::RequireVersion(program.runtimeAbiVersion);
+    constexpr auto bindingCount = static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count);
+    std::array<const ShaderRecompiler::DescriptorBinding*, bindingCount> heaps{};
+    if (program.runtimeImageCount != 0u) {
+        for (const auto& binding : program.bindings) {
+            if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages) continue;
+            auto& heap = heaps[binding.binding % bindingCount];
+            require(heap == nullptr, "duplicate runtime image binding");
+            heap = &binding;
+        }
+    }
+    require(words.size() == program.shaderDataDwords, "invalid compact shader data size");
+    constexpr auto metadataWords = sizeof(ShaderRecompiler::RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t);
+    require(program.imageMetadataDword <= words.size() &&
+        program.runtimeImageCount <= (words.size() - program.imageMetadataDword) / metadataWords, "records exceed shader data");
+    for (const auto index : program.runtimeImageResources) {
+        require(index < program.runtimeImageCount, "record exceeds its compact layout");
+        const auto offset = program.imageMetadataDword + index * metadataWords;
+        const auto kind = words[offset];
+        const auto first = words[offset + 1u];
+        const auto count = words[offset + 2u];
+        require(count != 0u, "record has no descriptor elements");
+        require(kind < heaps.size() && heaps[kind] != nullptr, "record references an unbound image heap");
+        require(first < heaps[kind]->count && count <= heaps[kind]->count - first, "record exceeds its bound heap");
+    }
+}
+
+// The keys an uncompressed store covers after an image write: the console's DCC extent
+// (Graphics::DccKeyCount) for pipe-aligned metadata, else one key per 256 surface bytes. As in the
+// shared driver, metadata that is writable only over the shorter range is not modeled.
+std::size_t storedKeyCount(const Graphics::GuestTextureResource& descriptor, std::size_t bytes) {
+    const auto keys = Graphics::DccKeyBytes(bytes);
+    const auto count = Graphics::DccKeyCount(descriptor, bytes);
+    if (count > std::numeric_limits<std::uint64_t>::max() - descriptor.dccAddress) {
+        throw std::invalid_argument("Metal image DCC metadata range overflows");
+    }
+    if (count == keys || descriptor.dccAddress == 0 ||
+        GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.dccAddress), count, true)) return count;
+    char message[256];
+    std::snprintf(message, sizeof(message),
+        "Metal DCC metadata 0x%llx is not writable over the 0x%zx key bytes of its surface (0x%zx at one per 256 bytes)",
+        static_cast<unsigned long long>(descriptor.dccAddress), count, keys);
+    throw std::runtime_error(message);
 }
 
 void validateCommittedImageWrite(std::span<const NativeGuestMemory::BorrowedRange> ranges,
@@ -154,7 +210,7 @@ MetalBufferBinding MetalShaderResources::Buffer(std::uint64_t address, std::size
     for (const auto& image : images) {
         const auto& descriptor = image.texture->Descriptor();
         const auto begin = descriptor.baseAddress;
-        const auto count = Graphics::DccKeyBytes(image.texture->GuestBytes());
+        const auto count = Graphics::DccKeyCount(descriptor, image.texture->GuestBytes());
         if (writable && descriptor.dccAddress != 0 &&
             (overlaps(address, address + bytes, descriptor.dccAddress, descriptor.dccAddress + count) ||
              physicallyOverlaps(address, address + bytes, descriptor.dccAddress, descriptor.dccAddress + count))) {
@@ -211,7 +267,7 @@ void MetalShaderResources::validateDccWrite(const Graphics::GuestTextureResource
     if (!GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.baseAddress), bytes, true)) {
         throw std::invalid_argument("Metal DCC image writes require a fully writable guest surface");
     }
-    const auto count = Graphics::DccKeyBytes(bytes);
+    const auto count = storedKeyCount(descriptor, bytes);
     if (count == 0) return;
     if (keys == Graphics::DccKeys::Uncompressed && !GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.dccAddress), count, true)) return;
     static_cast<void>(mirror(descriptor.dccAddress, count, true));
@@ -291,7 +347,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     std::vector<ImageRange> writableRanges;
     auto buffer = staged ? stageStorageImage(descriptor.baseAddress, bytes, writableRanges) : mirror(descriptor.baseAddress, bytes, written);
     const auto end = descriptor.baseAddress + bytes;
-    const auto keyCount = Graphics::DccKeyBytes(bytes);
+    const auto keyCount = Graphics::DccKeyCount(descriptor, bytes);
     if (descriptor.dccAddress != 0 && (keyCount > std::numeric_limits<std::uint64_t>::max() - descriptor.dccAddress ||
         overlaps(descriptor.baseAddress, end, descriptor.dccAddress, descriptor.dccAddress + keyCount) ||
         physicallyOverlaps(descriptor.baseAddress, end, descriptor.dccAddress, descriptor.dccAddress + keyCount))) {
@@ -307,8 +363,8 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         const auto& other = image.texture->Descriptor();
         const auto begin = other.baseAddress;
         if (other.dccAddress != 0 &&
-            (overlaps(descriptor.baseAddress, end, other.dccAddress, other.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes())) ||
-             physicallyOverlaps(descriptor.baseAddress, end, other.dccAddress, other.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes())))) {
+            (overlaps(descriptor.baseAddress, end, other.dccAddress, other.dccAddress + Graphics::DccKeyCount(other, image.texture->GuestBytes())) ||
+             physicallyOverlaps(descriptor.baseAddress, end, other.dccAddress, other.dccAddress + Graphics::DccKeyCount(other, image.texture->GuestBytes())))) {
             throw std::invalid_argument("Metal texture native image aliases active DCC metadata");
         }
         if (overlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes()) ||
@@ -380,6 +436,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
             if (found->count != 1 || !mapping.buffer || found->guestDescriptor.empty()) {
                 throw std::invalid_argument("Metal draw captured shader data binding is invalid");
             }
+            if (found->role == DescriptorRole::ShaderData) validateRuntimeImages(shader.guest, found->guestDescriptor);
             const auto bytes = found->guestDescriptor.size() * sizeof(std::uint32_t);
             id<MTLBuffer> buffer = [backend.Device() newBufferWithBytes:found->guestDescriptor.data() length:bytes options:MTLResourceStorageModeShared];
             if (buffer == nil) throw std::runtime_error("Metal draw captured shader data allocation failed");
@@ -400,11 +457,21 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
             }
             if ((!found->imageWritten.empty() && found->imageWritten.size() != found->count) ||
                 (!found->imageAtomic.empty() && found->imageAtomic.size() != found->count) ||
+                (!found->imageAtomic64.empty() && found->imageAtomic64.size() != found->count) ||
                 (!found->imageDepthCompare.empty() && found->imageDepthCompare.size() != found->count)) {
                 throw std::invalid_argument("Metal draw image access metadata has the wrong descriptor count");
             }
+            if (std::find(found->imageAtomic64.begin(), found->imageAtomic64.end(), true) != found->imageAtomic64.end()) {
+                throw std::invalid_argument("Metal 64-bit image atomics are not implemented");
+            }
             std::uint32_t storageMipOffset = 0;
             for (std::uint32_t i = 0; i < found->count; ++i) {
+                if (NullImageDescriptor(std::span(found->guestDescriptor).subspan(i * 8u, 8))) {
+                    // An empty element of a runtime ABI image heap stays unbound, as in the Vulkan driver.
+                    native.textures.push_back(nil);
+                    storageMipOffset = 0;
+                    continue;
+                }
                 auto descriptor = Graphics::DecodeTextureResource(std::span(found->guestDescriptor).subspan(i * 8u, 8));
                 const bool storage = found->kind == DescriptorKind::StorageImage || found->kind == DescriptorKind::StorageTexelBuffer;
                 if (storage) {
@@ -501,8 +568,8 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
                 const auto& descriptor = image.texture->Descriptor();
                 const auto begin = descriptor.baseAddress;
                 if (descriptor.dccAddress != 0 &&
-                    (overlaps(writeBegin, writeEnd, descriptor.dccAddress, descriptor.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes())) ||
-                     physicallyOverlaps(writeBegin, writeEnd, descriptor.dccAddress, descriptor.dccAddress + Graphics::DccKeyBytes(image.texture->GuestBytes())))) {
+                    (overlaps(writeBegin, writeEnd, descriptor.dccAddress, descriptor.dccAddress + Graphics::DccKeyCount(descriptor, image.texture->GuestBytes())) ||
+                     physicallyOverlaps(writeBegin, writeEnd, descriptor.dccAddress, descriptor.dccAddress + Graphics::DccKeyCount(descriptor, image.texture->GuestBytes())))) {
                     throw std::runtime_error("Metal draw BDA writes alias active image DCC metadata");
                 }
                 if (overlaps(writeBegin, writeEnd, begin, begin + image.texture->GuestBytes()) ||
@@ -548,9 +615,9 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
     }
     for (const auto& image : images) {
         const auto& descriptor = image.texture->Descriptor();
-        const auto count = Graphics::DccKeyBytes(image.texture->GuestBytes());
-        if (!image.written || descriptor.dccAddress == 0 || count == 0 ||
-            !GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.dccAddress), count, true)) continue;
+        if (!image.written || descriptor.dccAddress == 0) continue;
+        const auto count = storedKeyCount(descriptor, image.texture->GuestBytes());
+        if (count == 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.dccAddress), count, true)) continue;
         auto buffer = mirror(descriptor.dccAddress, count, true);
         std::memset(static_cast<std::byte*>(buffer.buffer.contents) + buffer.offset, 0xff, count);
         std::vector<std::byte> uncompressed(count, std::byte{0xff});
