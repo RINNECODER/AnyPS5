@@ -2,6 +2,7 @@
 #include <cpu/NativeModuleRunner.hpp>
 #include <cpu/GuestThreads.hpp>
 #include <cpu/SceImports.hpp>
+#include <cpu/ScePadImports.hpp>
 #include <cpu/SceNativeVideoOutBackend.hpp>
 #include <cpu/SceElf.hpp>
 #include <cpu/SceTls.hpp>
@@ -66,8 +67,16 @@ void postKey(NSWindow* w,bool down) {
     require(event!=nil,"Cannot enqueue actual AppKit fixture key event");
     [NSApp postEvent:event atStart:NO];
 }
+std::shared_ptr<Cpu::PadHostInput> attachedPad;
 void assertPumped(Cpu::NativeModuleRunner& runner,const char* phase,bool down) {
     const auto batch=runner.Graphics().Window().DrainEvents();
+    if(attachedPad) {
+        require(std::none_of(batch.events.begin(),batch.events.end(),[](const auto& event) {
+            return std::holds_alternative<::KeyboardInputEvent>(event.payload);
+        })&&attachedPad->Current().State.Sticks[0]==(down?0:128),
+            (std::string("Owner boundary did not drain posted AppKit input into the attached pad in guest phase: ")+phase).c_str());
+        return;
+    }
     require(std::any_of(batch.events.begin(),batch.events.end(),[down](const auto& event) {
         const auto key=std::get_if<::KeyboardInputEvent>(&event.payload);
         return key&&key->keyCode==0x04&&key->pressed==down&&!key->resetKeys&&!key->connectionChange;
@@ -339,6 +348,10 @@ void run(const char* mainPath,const char* dependencyPath,const char* utility,con
     require(runner.Memory()->MapFlexible(RuntimeData,Page,0x33,0x90)==RuntimeData,"Assembly shared Runtime mapping failed");
     std::array<std::byte,Page> guards;guards.fill(std::byte{0xa5});machine.Write(RuntimeData,guards);
     compute(machine,runner);
+    if(std::string(mode)=="pad-input") {
+        attachedPad=std::make_shared<Cpu::PadHostInput>();
+        runner.AttachPadInput(attachedPad);
+    }
     if(std::string(mode)=="initializer-failure") {
         constexpr std::array<std::uint8_t,6> failCode{0xb8,7,0,0,0,0xc3};
         machine.Write(graph.Modules()[1].Init,std::as_bytes(std::span(failCode)));
@@ -408,7 +421,7 @@ void run(const char* mainPath,const char* dependencyPath,const char* utility,con
 }
 int main(int argc,char** argv) {
     @autoreleasepool {try {
-        require(argc==5,"Usage: NativeModuleRunnerTest main.elf dependency.prx utility.metallib lifecycle|close|initializer-failure|title-agnostic");
+        require(argc==5,"Usage: NativeModuleRunnerTest main.elf dependency.prx utility.metallib lifecycle|close|initializer-failure|title-agnostic|pad-input");
         // Guest phases assert posted AppKit key input, which a host window only accepts while focused.
         AnyPS5::Host::RequireRealFocusForThisProcess();
         if(std::string(argv[4])=="title-agnostic") titleAgnostic(argv[3]);

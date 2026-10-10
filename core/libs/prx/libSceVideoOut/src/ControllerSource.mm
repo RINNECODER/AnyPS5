@@ -1,5 +1,6 @@
 #include "prx/libSceVideoOut/include/ControllerSource.hpp"
 #import <Foundation/Foundation.h>
+#import <CoreHaptics/CoreHaptics.h>
 #import <GameController/GameController.h>
 #include <algorithm>
 #include <cmath>
@@ -88,6 +89,10 @@ struct NativeControllerSource::Impl : std::enable_shared_from_this<Impl> {
     id connectedObserver = nil;
     id disconnectedObserver = nil;
     id customizationObserver = nil;
+    GCColor* defaultLight = nil;
+    CHHapticEngine* haptics = nil;
+    id<CHHapticPatternPlayer> rumble = nil;
+    float rumbleLevel{};
     bool previousBackground{};
     bool ownsGlobal{};
 
@@ -98,7 +103,10 @@ struct NativeControllerSource::Impl : std::enable_shared_from_this<Impl> {
     void PublishLocked(ControllerEventKind kind) {
         try {
             if (snapshot.lastSequence == std::numeric_limits<std::uint64_t>::max()) throw std::overflow_error("Controller sequence exhausted");
-            if (events.size() == maximumQueuedEvents) throw std::runtime_error("Controller event queue overflow");
+            if (events.size() == maximumQueuedEvents) {
+                events.pop_front();
+                ++snapshot.droppedEvents;
+            }
             ++snapshot.lastSequence;
             events.push_back({kind, std::chrono::steady_clock::now(), snapshot});
         } catch (...) {
@@ -135,7 +143,51 @@ struct NativeControllerSource::Impl : std::enable_shared_from_this<Impl> {
         PublishLocked(ControllerEventKind::StateChanged);
     }
 
+    void StopRumble() {
+        @try {
+            if (rumble) [rumble stopAtTime:CHHapticTimeImmediate error:nil];
+            if (haptics) [haptics stopWithCompletionHandler:nil];
+        } @catch (NSException*) {}
+        rumble = nil;
+        haptics = nil;
+        rumbleLevel = 0;
+    }
+
+    void ApplyOutput(const ControllerOutput& output) {
+        RequireMainThread();
+        if (!selected) return;
+        @try {
+            if (GCDeviceLight* light = selected.light) {
+                if (output.lightBar) {
+                    const auto& color = *output.lightBar;
+                    light.color = [[GCColor alloc] initWithRed:color[0] / 255.0f green:color[1] / 255.0f blue:color[2] / 255.0f];
+                } else if (defaultLight) light.color = defaultLight;
+            }
+            const float level = std::max(output.largeMotor, output.smallMotor) / 255.0f;
+            if (level == rumbleLevel) return;
+            StopRumble();
+            if (level == 0 || !selected.haptics) return;
+            haptics = [selected.haptics createEngineWithLocality:GCHapticsLocalityDefault];
+            if (!haptics || ![haptics startAndReturnError:nil]) { haptics = nil; return; }
+            CHHapticEventParameter* intensity = [[CHHapticEventParameter alloc]
+                initWithParameterID:CHHapticEventParameterIDHapticIntensity value:level];
+            CHHapticEvent* event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
+                parameters:@[intensity] relativeTime:0 duration:GCHapticDurationInfinite];
+            CHHapticPattern* pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:nil];
+            rumble = pattern ? [haptics createPlayerWithPattern:pattern error:nil] : nil;
+            if (!rumble || ![rumble startAtTime:CHHapticTimeImmediate error:nil]) { StopRumble(); return; }
+            rumbleLevel = level;
+        } @catch (NSException*) {
+            StopRumble();
+        }
+    }
+
     void Detach() {
+        StopRumble();
+        @try {
+            if (selected.light && defaultLight) selected.light.color = defaultLight;
+        } @catch (NSException*) {}
+        defaultLight = nil;
         if (selectedProfile && selectedProfile.valueChangedHandler == installedHandler) {
             selectedProfile.valueChangedHandler = nil;
             selected.handlerQueue = previousQueue;
@@ -160,6 +212,7 @@ struct NativeControllerSource::Impl : std::enable_shared_from_this<Impl> {
         }
         selected = controller;
         selectedProfile = profile;
+        defaultLight = controller.light.color;
         previousQueue = controller.handlerQueue;
         controller.handlerQueue = dispatch_get_main_queue();
         const std::weak_ptr<Impl> weak = shared_from_this();
@@ -302,6 +355,8 @@ NativeControllerSource::~NativeControllerSource() {
 }
 
 void NativeControllerSource::CloseMainThread() { impl->Close(); }
+
+void NativeControllerSource::ApplyOutputMainThread(const ControllerOutput& output) { impl->ApplyOutput(output); }
 
 ControllerEventBatch NativeControllerSource::DrainEvents() {
     std::lock_guard lock(impl->mutex);

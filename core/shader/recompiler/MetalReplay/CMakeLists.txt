@@ -67,6 +67,7 @@ target_link_libraries(anyps5_metal_native_execution PUBLIC
     "${NATIVE_CARBON_FRAMEWORK}"
     "${NATIVE_IOKIT_FRAMEWORK}"
     "${NATIVE_GAMECONTROLLER_FRAMEWORK}"
+    "-framework CoreHaptics"
     anyps5_metal_guest_recompiler
     anyps5_metal_utilities
 )
