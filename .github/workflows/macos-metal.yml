@@ -43,8 +43,8 @@ jobs:
         # Pure file comparison: a drifted tools/diagnostic_package.py contract or a changed
         # core/cpu/src/Main.cpp capability claim fails here in seconds instead of at the alpha
         # packaging gate after a full engine build (#331). Coverage follows this job's existing
-        # fork guard: same-repository PRs and main pushes. A fork PR skips it, and is caught by
-        # the same control in the alpha job, which also runs before that build.
+        # fork guard: same-repository PRs and main pushes run it. A fork PR skips it entirely and
+        # is caught only after merge, by the copy in the alpha job, which runs before that build.
         run: python3 tools/tests/test_native_diagnostic_package.py ContractDriftControls
       - name: Initialize submodules
         run: git submodule update --init --depth 1 3rdparty/unicorn 3rdparty/anyps5-tcg
