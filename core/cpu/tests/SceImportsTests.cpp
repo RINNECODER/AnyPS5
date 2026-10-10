@@ -177,8 +177,40 @@ void memoryFailures() {
     rejects([&] { session.machine.Run(0x1000, 0x1011, 100); }, "permission");
     session.setup("Q3VBxCXhUHs", std::numeric_limits<std::uint64_t>::max() - 1, 0x2000, 4);
     rejects([&] { session.machine.Run(0x1000, 0x1011, 100); }, "overflows");
-    session.setup("8zTFvBIAIN8", 0x2000, 0, 16 * 1024 * 1024 + 1);
-    rejects([&] { session.machine.Run(0x1000, 0x1011, 100); }, "16 MiB");
+    // A transfer whose tail is unmapped is refused before any byte changes, however large.
+    session.machine.Protect(0x3000, 4096, rw);
+    session.machine.Write(0x3000, sentinel);
+    session.setup("8zTFvBIAIN8", 0x3000, 0x55, 64 * 1024 * 1024);
+    rejects([&] { session.machine.Run(0x1000, 0x1011, 100); }, "Guest access denied");
+    require(session.read(0x3000, 4) == std::vector<std::byte>(sentinel.begin(), sentinel.end()),
+            "Large memset with an unmapped tail partially changed guest memory");
+}
+
+// Transfers over 16 MiB are carried out in bounded chunks with no total cap (PLAT-22).
+void largeTransfers() {
+    Session session;
+    constexpr std::uint64_t Base = 0x10000000;
+    constexpr std::uint64_t Other = 0x12000000;
+    constexpr std::size_t Size = 16 * 1024 * 1024 + 4097;
+    session.machine.Map(Base, 24 * 1024 * 1024, rw);
+    session.machine.Map(Other, 24 * 1024 * 1024, rw);
+    std::vector<std::byte> pattern(Size);
+    for (std::size_t index = 0; index < Size; ++index)
+        pattern[index] = static_cast<std::byte>((index * 167 + (index >> 13) * 11 + (index >> 24)) & 255);
+    const std::array tail{std::byte{0xe1}, std::byte{0xe2}};
+    session.machine.Write(Base + Size, tail);
+    require(session.call("8zTFvBIAIN8", Base, 0x15a, Size) == Base, "Large memset returned wrong guest pointer");
+    const auto set = session.read(Base, Size + 2);
+    require(std::all_of(set.begin(), set.begin() + Size, [](std::byte value) { return value == std::byte{0x5a}; }) &&
+            set[Size] == tail[0] && set[Size + 1] == tail[1], "Large memset wrote wrong bytes or past its length");
+    session.machine.Write(Base, pattern);
+    require(session.call("Q3VBxCXhUHs", Other, Base, Size) == Other && session.read(Other, Size) == pattern,
+            "Large memcpy copied wrong bytes");
+    // Overlapping memmove in both directions across chunk boundaries.
+    require(session.call("+P6FRGH4LfA", Base + 3, Base, Size) == Base + 3 && session.read(Base + 3, Size) == pattern,
+            "Large forward-overlapping memmove did not preserve the source");
+    require(session.call("+P6FRGH4LfA", Base, Base + 3, Size) == Base && session.read(Base, Size) == pattern,
+            "Large backward-overlapping memmove did not preserve the source");
 }
 
 void exits() {
@@ -203,6 +235,7 @@ int main() {
         stringCalls();
         scopedBinding();
         memoryFailures();
+        largeTransfers();
         exits();
         std::cout << "PASS scoped SCE NID imports, actual x86 GOT calls, native libc, memory permissions, and exit\n";
         return 0;

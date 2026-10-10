@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <span>
@@ -40,10 +41,10 @@ template<class Function> void rejects(Function&& function, const char* expected)
     throw std::runtime_error(std::string("Missing kernel import rejection: ") + expected);
 }
 
-Cpu::SceImport import(const char* nid) {
+Cpu::SceImport import(const char* nid, const char* library = "libkernel") {
     Cpu::SceImport value;
     value.Nid = nid;
-    value.LibraryName = "libkernel";
+    value.LibraryName = library;
     value.LibraryId = 7;
     value.ModuleName = "libkernel";
     value.ModuleId = 11;
@@ -53,8 +54,17 @@ Cpu::SceImport import(const char* nid) {
     return value;
 }
 
+std::filesystem::path temporaryDirectory(const char* prefix) {
+    std::string pattern = std::string("/tmp/") + prefix + "-XXXXXX";
+    const auto created = ::mkdtemp(pattern.data());
+    if (!created) throw std::runtime_error("Cannot create kernel import fixture directory");
+    return created;
+}
+
 struct Resources {
     std::filesystem::path directory;
+    // Per-title data root for the writable mounts, separate from the resource root.
+    std::filesystem::path data = temporaryDirectory("anyps5-kernel-title-data");
     Resources() {
         std::array<char, 64> pattern{};
         const std::string value = "/tmp/anyps5-kernel-imports-XXXXXX";
@@ -67,13 +77,20 @@ struct Resources {
         stream.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
         require(stream.good(), "Cannot write independent kernel import resource bytes");
     }
-    ~Resources() { std::error_code error; std::filesystem::remove_all(directory, error); }
+    ~Resources() {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+        std::filesystem::remove_all(data, error);
+    }
 };
+
+constexpr std::uint64_t ErrnoAddress = 0x6000;
 
 struct Session {
     Resources resources;
     Cpu::Machine machine;
-    std::unique_ptr<Cpu::SceKernelImports> imports = std::make_unique<Cpu::SceKernelImports>(machine, resources.directory);
+    std::unique_ptr<Cpu::SceKernelImports> imports = std::make_unique<Cpu::SceKernelImports>(
+        machine, resources.directory, Cpu::GuestFilesOptions{resources.data});
 
     Session() {
         machine.Map(0x1000, 4096, rx);
@@ -81,6 +98,8 @@ struct Session {
         machine.Map(0x3000, 4096, rw);
         machine.Map(0x4000, 4096, rw);
         machine.Map(0x5000, 4096, rw);
+        machine.Map(ErrnoAddress, 4096, rw);
+        imports->SetErrnoAddress([] { return ErrnoAddress; });
         constexpr std::array<std::uint8_t, 17> program{
             0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00,
             0x48, 0x89, 0x05, 0x03, 0x10, 0x00, 0x00,
@@ -117,6 +136,23 @@ struct Session {
         return callGate(imports->Resolve(import(nid)), first, second, third, fourth);
     }
 
+    std::uint64_t posix(const char* nid, std::uint64_t first, std::uint64_t second = 0,
+                        std::uint64_t third = 0, std::uint64_t fourth = 0) {
+        return callGate(imports->Resolve(import(nid, "libScePosix")), first, second, third, fourth);
+    }
+
+    void path(std::uint64_t address, const std::string& value) {
+        machine.Write(address, std::as_bytes(std::span(value.c_str(), value.size() + 1)));
+    }
+
+    std::int32_t error() {
+        std::int32_t value = 0;
+        machine.Read(ErrnoAddress, std::as_writable_bytes(std::span(&value, 1)));
+        return value;
+    }
+
+    void setError(std::int32_t value) { machine.Write(ErrnoAddress, std::as_bytes(std::span(&value, 1))); }
+
     std::vector<std::uint8_t> bytes(std::uint64_t address, std::size_t size) {
         std::vector<std::uint8_t> result(size);
         machine.Read(address, std::as_writable_bytes(std::span(result)));
@@ -147,7 +183,88 @@ void fileGates() {
     require(session.call("UK2Tl2DWUns", descriptor) == 0, "Kernel close gate failed");
     require(session.call("UK2Tl2DWUns", descriptor) == 0xffffffff80020009ULL,
             "Kernel close did not sign-extend EBADF into RAX");
-    rejects([&] { session.call("1G3lF1Gg1k8", 0x3000, 2); }, "Unsupported guest /app0 open flags");
+    require(session.call("1G3lF1Gg1k8", 0x3000, 2) == 0xffffffff8002001eULL,
+            "Kernel read-write open of /app0 did not return signed EROFS");
+}
+
+std::string fileContents(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(stream), {}};
+}
+
+// Every filesystem NID the reference title imports, called by actual x86 code through its GOT.
+void filesystemGates() {
+    Session session;
+    constexpr std::uint64_t Failed = 0xffffffffffffffffULL;
+    const auto signedError = [](unsigned value) { return 0xffffffff80020000ULL | value; };
+    // sceKernelStat / sceKernelCheckReachability on the read-only resource root.
+    require(session.call("eV9wAD2riIA", 0x3000, 0x5000) == 0, "sceKernelStat failed on a resource");
+    std::int64_t size = 0;
+    session.machine.Read(0x5048, std::as_writable_bytes(std::span(&size, 1)));
+    require(size == 8, "sceKernelStat did not store st_size at the FreeBSD offset");
+    require(session.call("uWyW3v98sU4", 0x3000) == 0, "sceKernelCheckReachability missed a resource");
+    // Writable /temp0 backed by the title data root.
+    session.path(0x3100, "/temp0/save.bin");
+    const auto descriptor = session.call("1G3lF1Gg1k8", 0x3100, 0x201, 0666);
+    require(descriptor == 4 || descriptor == 3, "sceKernelOpen did not create a /temp0 file");
+    const std::string payload = "SAVE";
+    session.machine.Write(0x5100, std::as_bytes(std::span(payload.data(), payload.size())));
+    require(session.call("4wSze92BhLI", descriptor, 0x5100, 4) == 4, "sceKernelWrite did not write");
+    require(session.call("nKWi-N2HBV4", descriptor, 0x5100, 2, 6) == 2, "sceKernelPwrite did not take its offset from RCX");
+    require(session.call("fTx66l5iWIA", descriptor) == 0, "sceKernelFsync failed");
+    require(session.call("kBwCPsYX-m4", descriptor, 0x5200) == 0, "sceKernelFstat failed");
+    session.machine.Read(0x5248, std::as_writable_bytes(std::span(&size, 1)));
+    require(size == 8, "sceKernelFstat did not see the written size");
+    require(session.call("VW3TVZiM4-E", descriptor, 5) == 0, "sceKernelFtruncate failed");
+    require(session.call("UK2Tl2DWUns", descriptor) == 0, "Kernel close of a written file failed");
+    require(fileContents(session.resources.data / "temp0" / "save.bin") == std::string("SAVE\0", 5),
+            "Kernel write/pwrite/ftruncate produced wrong host bytes");
+    require(!std::filesystem::exists(session.resources.directory / "temp0"), "Writable mount was created in the resource root");
+    // Directories, rename, getdents, unlink and rmdir in /savedata0.
+    session.path(0x3200, "/savedata0/slot");
+    session.path(0x3300, "/savedata0/slot2");
+    require(session.call("1-LFLmRFxxM", 0x3200, 0777) == 0, "sceKernelMkdir failed");
+    require(session.call("1-LFLmRFxxM", 0x3200, 0777) == signedError(17), "Repeated sceKernelMkdir did not return EEXIST");
+    require(session.call("52NcYU9+lEo", 0x3200, 0x3300) == 0, "sceKernelRename failed");
+    session.path(0x3400, "/savedata0");
+    const auto directory = session.call("1G3lF1Gg1k8", 0x3400, 0x20000, 0);
+    require(static_cast<std::int64_t>(directory) > 0, "sceKernelOpen of a mount directory failed");
+    const auto listed = session.call("j2AIqSqJP0w", directory, 0x5400, 1024);
+    require(static_cast<std::int64_t>(listed) > 0, "sceKernelGetdents returned nothing");
+    const auto records = session.bytes(0x5400, listed);
+    const std::string text(records.begin(), records.end());
+    require(text.find(std::string("slot2\0", 6)) != std::string::npos, "sceKernelGetdents did not list the renamed directory");
+    require(session.call("UK2Tl2DWUns", directory) == 0, "Directory close failed");
+    require(session.call("naInUjYt3so", 0x3300) == 0 && !std::filesystem::exists(session.resources.data / "savedata0" / "slot2"),
+            "sceKernelRmdir did not remove the directory");
+    require(session.call("AUXVxWeJU-A", 0x3100) == 0 && !std::filesystem::exists(session.resources.data / "temp0" / "save.bin"),
+            "sceKernelUnlink did not remove the file");
+    require(session.call("AUXVxWeJU-A", 0x3100) == signedError(2), "Repeated sceKernelUnlink did not return ENOENT");
+    // POSIX aliases: -1 plus the FreeBSD errno in the guest errno cell; success leaves errno alone.
+    session.setError(77);
+    session.path(0x3500, "/app0/missing.bin");
+    require(session.posix("E6ao34wPw+U", 0x3500, 0x5000) == Failed && session.error() == 2, "stat did not set ENOENT");
+    require(session.posix("wuCroIGjt2g", 0x3000, 2) == Failed && session.error() == 30, "open of /app0 for writing did not set EROFS");
+    session.setError(77);
+    const auto file = session.call("6c3rCVE-fTU", 0x3000, 0, 0);
+    require(static_cast<std::int64_t>(file) > 0 && session.error() == 77, "_open failed or touched errno on success");
+    require(session.call("DRuBt2pvICk", file, 0x5000, 3) == 3 && session.bytes(0x5000, 3) == std::vector<std::uint8_t>{0, 0x80, 0xff},
+            "_read did not read resource bytes");
+    require(session.call("Oy6IpwgtYOk", file, 1, 0) == 1, "lseek did not reposition");
+    require(session.call("FxVZqBAA7ks", file, 0x5000, 1) == Failed && session.error() == 9, "_write to a read-only descriptor did not set EBADF");
+    require(session.posix("mqQMh1zPPT8", file, 0x5000) == 0, "fstat failed");
+    require(session.posix("bY-PO6JhzhQ", file) == 0, "close failed");
+    require(session.call("NNtFaKJbPt0", file) == Failed && session.error() == 9, "_close of a closed descriptor did not set EBADF");
+    session.path(0x3600, "/temp0/posix");
+    session.path(0x3700, "/temp0/posix2");
+    require(session.call("JGMio+21L4c", 0x3600, 0777) == 0, "mkdir failed");
+    require(session.posix("NN01qLRhiqU", 0x3600, 0x3700) == 0, "rename failed");
+    require(session.posix("c7ZnT7V1B98", 0x3600) == Failed && session.error() == 2, "rmdir of a renamed directory did not set ENOENT");
+    require(session.posix("c7ZnT7V1B98", 0x3700) == 0, "rmdir failed");
+    require(session.call("VAzswvTOCzI", 0x3700) == Failed && session.error() == 2, "unlink of a missing path did not set ENOENT");
+    // Unknown mounts are ENOENT, never EACCES.
+    session.path(0x3800, "/hostfs/etc/passwd");
+    require(session.call("1G3lF1Gg1k8", 0x3800, 0, 0) == signedError(2), "Unknown mount did not return ENOENT");
 }
 
 void scopedGates() {
@@ -305,6 +422,7 @@ void sanitizerGates() {
 int main() {
     try {
         fileGates();
+        filesystemGates();
         scopedGates();
         tlsGate();
         sanitizerGates();

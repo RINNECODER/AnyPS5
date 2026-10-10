@@ -1,5 +1,6 @@
 #include <cpu/Cpu.hpp>
 #include <cpu/ElfLoader.hpp>
+#include <cpu/GuestFiles.hpp>
 #include <cpu/GuestMemoryRuntime.hpp>
 #include <cpu/GuestThreads.hpp>
 #include <cpu/Runtime.hpp>
@@ -26,12 +27,15 @@
 #include <mach-o/dyld.h>
 #endif
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <algorithm>
 #include <limits>
 #include <memory>
@@ -42,6 +46,42 @@
 #include <vector>
 
 namespace {
+// The title ID from sce_sys/param.json when the dump has one, else the resource root's
+// directory name (the launcher stores each title under its ID), as one safe path component.
+std::string TitleName(const std::filesystem::path& resourceRoot) {
+    const auto safe = [](std::string value) {
+        for (auto& character : value) {
+            const auto byte = static_cast<unsigned char>(character);
+            if (!std::isalnum(byte) && byte != '-' && byte != '_' && byte != '.' && byte != ' ' && byte < 0x80) character = '_';
+        }
+        return value.empty() || value == "." || value == ".." ? std::string("default") : value;
+    };
+    std::ifstream parameters(resourceRoot / "sce_sys" / "param.json");
+    const std::string json((std::istreambuf_iterator<char>(parameters)), {});
+    if (const auto key = json.find("\"titleId\""); key != std::string::npos) {
+        const auto open = json.find('"', json.find(':', key));
+        const auto close = open == std::string::npos ? open : json.find('"', open + 1);
+        if (close != std::string::npos && close > open + 1 && close - open <= 33) return safe(json.substr(open + 1, close - open - 1));
+    }
+    std::error_code error;
+    return safe(std::filesystem::weakly_canonical(std::filesystem::absolute(resourceRoot, error), error).filename().string());
+}
+
+// Per-title host directory behind the writable /temp0, /download0 and /savedata0 mounts:
+// --title-data-dir, else ANYPS5_TITLE_DATA_DIR, else the launcher's application-support data
+// directory, TitleData/<title>. An explicit choice that overlaps the game dump is an error
+// (GuestFiles refuses it); a default that would (resource root at or above the home folder)
+// leaves the writable mounts absent instead. Nothing is created until the guest writes.
+std::filesystem::path TitleDataDirectory(const std::filesystem::path& option, const std::filesystem::path& resourceRoot) {
+    if (!option.empty()) return option;
+    if (const char* environment = std::getenv("ANYPS5_TITLE_DATA_DIR"); environment && *environment) return environment;
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return {};
+    auto directory = std::filesystem::path(home) / "Library" / "Application Support" / "AnyPS5Launcher" / "TitleData" /
+                     TitleName(resourceRoot);
+    return Cpu::GuestFiles::Overlaps(directory, resourceRoot) ? std::filesystem::path{} : directory;
+}
+
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
 std::filesystem::path NativeUtilityMetallib() {
     std::uint32_t size = 0;
@@ -169,7 +209,11 @@ void Capabilities(const RunLimits& limits) {
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
         << "\"execution_limits\":{\"max_instructions\":" << limits.MaxInstructions.value_or(0)
         << ",\"max_init_instructions\":" << limits.MaxInitInstructions.value_or(0) << "},"
-        << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\",\"sceKernelIsAddressSanitizerEnabled\",\"sceKernelGetSanitizerMallocReplaceExternal\",\"sceKernelGetSanitizerNewReplaceExternal\"]},"
+        << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"title_data_argument\":\"--title-data-dir\",\"title_data_environment\":\"ANYPS5_TITLE_DATA_DIR\","
+        << "\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"sceKernelWrite\",\"sceKernelPwrite\",\"sceKernelStat\",\"sceKernelFstat\",\"sceKernelGetdents\",\"sceKernelGetdirentries\",\"sceKernelFsync\",\"sceKernelFtruncate\",\"sceKernelMkdir\",\"sceKernelRmdir\",\"sceKernelUnlink\",\"sceKernelRename\",\"sceKernelCheckReachability\",\"__tls_get_addr\",\"sceKernelIsAddressSanitizerEnabled\",\"sceKernelGetSanitizerMallocReplaceExternal\",\"sceKernelGetSanitizerNewReplaceExternal\"],"
+        << "\"posix_libraries\":[\"libkernel\",\"libScePosix\"],\"posix_functions\":[\"open\",\"_open\",\"read\",\"_read\",\"pread\",\"write\",\"_write\",\"pwrite\",\"lseek\",\"close\",\"_close\",\"stat\",\"fstat\",\"_fstat\",\"getdents\",\"getdirentries\",\"fsync\",\"ftruncate\",\"mkdir\",\"rmdir\",\"unlink\",\"rename\"],"
+        << "\"mounts\":{\"/app0\":\"read-only resource root\",\"/temp0\":\"writable title data\",\"/download0\":\"writable title data\",\"/savedata0\":\"writable title data\"},"
+        << "\"constraints\":\"unknown mounts ENOENT; '..' EACCES; host symlinks never followed; performance open flags ignored; transfers of any size in 16 MiB host chunks\"},"
         << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
         << "\"sce_memory_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceKernelGetDirectMemorySize\",\"sceKernelAvailableDirectMemorySize\",\"sceKernelAllocateDirectMemory\",\"sceKernelAllocateMainDirectMemory\",\"sceKernelMapDirectMemory\",\"sceKernelMapFlexibleMemory\",\"sceKernelReserveVirtualRange\",\"sceKernelMprotect\",\"sceKernelVirtualQuery\",\"sceKernelMunmap\",\"sceKernelReleaseDirectMemory\"],"
@@ -186,7 +230,7 @@ void Capabilities(const RunLimits& limits) {
         << "\"sce_np_local_imports\":{\"module\":\"libSceNpManager\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNpGetState\"],\"constraints\":\"session-local user and offline state only; no network account or authentication services\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
-        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0; writable /temp0, /download0, /savedata0 under the per-title data directory; regular files and directories only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
         << "\"native_module_runner\":{\"enabled\":true,\"owned_memory\":\"live staged CPU/Metal publication\",\"provider_selection\":\"actual parsed consumer SHA-256, size, scope and ELF symbol\",\"utility_metallib\":\"../fixtures/AnyPS5Utilities.metallib relative to engine\",\"wall_limit_ms\":"
@@ -469,6 +513,7 @@ int main(int argc, char** argv) {
         int first = 1;
         bool inspect = false;
         std::filesystem::path resourceRoot;
+        std::filesystem::path titleDataDirectory;
         std::vector<std::filesystem::path> modulePaths;
         bool strictImports = false;
         std::optional<std::uint64_t> unresolvedImportReturn;
@@ -536,10 +581,16 @@ int main(int argc, char** argv) {
                 if (!resourceRoot.empty()) throw std::runtime_error("--resource-root may be supplied only once");
                 resourceRoot = argv[first + 1];
                 first += 2;
+            } else if (option == "--title-data-dir") {
+                if (argc <= first + 1 || std::string_view(argv[first + 1]).empty() || std::string_view(argv[first + 1]).starts_with('-'))
+                    throw std::runtime_error("--title-data-dir requires a directory path");
+                if (!titleDataDirectory.empty()) throw std::runtime_error("--title-data-dir may be supplied only once");
+                titleDataDirectory = argv[first + 1];
+                first += 2;
             } else break;
         }
         if (capabilities) {
-            if (argc != first || diagnostics || inspect || !modulePaths.empty() || !resourceRoot.empty()
+            if (argc != first || diagnostics || inspect || !modulePaths.empty() || !resourceRoot.empty() || !titleDataDirectory.empty()
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                 || publicNpIdentity || publicUriEscape
 #endif
@@ -635,7 +686,19 @@ int main(int argc, char** argv) {
                 memoryImports = std::make_unique<Cpu::SceMemoryImports>(machine, memoryRuntime);
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
-                kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
+                {
+                    const auto root = resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot;
+                    kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, root,
+                        Cpu::GuestFilesOptions{TitleDataDirectory(titleDataDirectory, root)});
+                }
+                // POSIX file aliases store errno where the active thread's __error points.
+                // Outside an active guest thread there is no errno cell: the call still returns -1.
+                if (threadRuntime) kernelRuntime->SetErrnoAddress([owner = std::weak_ptr<Cpu::GuestThreads>(threadRuntime)] {
+                    const auto runtime = owner.lock();
+                    if (!runtime) return std::uint64_t{0};
+                    try { return runtime->ActiveErrnoAddress(); }
+                    catch (const std::runtime_error&) { return std::uint64_t{0}; }
+                });
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine, sessionUserId);
                 npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
