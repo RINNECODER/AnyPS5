@@ -2,7 +2,7 @@
 #include <cpu/NativeModuleRunner.hpp>
 #include <cpu/GuestThreads.hpp>
 #include <cpu/SceImports.hpp>
-#include <cpu/SceNpLocalImports.hpp>
+#include <cpu/SceUpstreamPrxBridge.hpp>
 #include <cpu/SceElf.hpp>
 #include <algorithm>
 #include <fstream>
@@ -47,7 +47,7 @@ void compiled(const char* mainPath,const char* depPath,const char* utility,bool 
     runner.RegisterParsedConsumer(image);runner.RegisterParsedConsumer(dep);
     Cpu::SceImports libc(machine);
     libc.SetProcessExitHandler([threads](int status){threads->ProcessExitFromHostCall(status);});
-    Cpu::SceNpLocalImports local(machine,0x10000000);
+    Cpu::SceUpstreamPrxBridge local(machine);
     std::vector<Cpu::SceHostModule> hosts{{"libc.prx",{"libc",0,1,1},{{"libc",0,1}}}};
     runner.AddHostModules(hosts);
     const std::array deps{Cpu::SceModuleFile{depPath,0x2000000}};

@@ -12,7 +12,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     endif()
     # Same light machine sources as retained platform component acceptance;
     # this target never configures/rebuilds TCG or the renderer.
-    add_library(anyps5_uri_machine STATIC ../../src/CpuQemu.cpp ../../src/SceNpLocalImports.cpp
+    add_library(anyps5_uri_machine STATIC ../../src/CpuQemu.cpp
         ../../src/SceElf.cpp ../../src/Self.cpp ../../src/SceTls.cpp
         ../../src/GuestThreads.cpp ../../src/SceThreadImports.cpp ../../src/SceModules.cpp
         ../../src/SceLifecycleImports.cpp ../../../libs/nid/src/NidCompute.cpp ../../../libs/nid/src/Sha1.cpp)
