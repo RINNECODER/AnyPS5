@@ -265,7 +265,8 @@ class NativeWorkflowContracts(unittest.TestCase):
         """The controls merged with #327, #328 and #329 must be part of the alpha gate."""
         for name in ('anyps5_lazy_import_cli', 'anyps5_sce_import_stubs', 'anyps5_cpu_run_limits',
                      'anyps5_cpu_cli_stop_signals', 'anyps5_native_shutdown_gpu-ready',
-                     'anyps5_native_shutdown_rendering-wait'):
+                     'anyps5_native_shutdown_rendering-wait', 'anyps5_kernel_time_cli',
+                     'anyps5_sce_kernel_time_imports'):
             self.assertIn(name, workflow.NATIVE_REQUIRED_TESTS, name)
             self.assertNotIn(name, workflow.REQUIRED_TESTS,
                              name + ' must not gate the legacy package')

@@ -7,6 +7,7 @@
 #include <cpu/SceImports.hpp>
 #include <cpu/SceImportStubs.hpp>
 #include <cpu/SceKernelImports.hpp>
+#include <cpu/SceKernelTimeImports.hpp>
 #include <cpu/SceNpLocalImports.hpp>
 #include <cpu/SceNpOfflineImports.hpp>
 #include <cpu/SceNetAddressImports.hpp>
@@ -170,6 +171,9 @@ void Capabilities(const RunLimits& limits) {
         << "\"execution_limits\":{\"max_instructions\":" << limits.MaxInstructions.value_or(0)
         << ",\"max_init_instructions\":" << limits.MaxInitInstructions.value_or(0) << "},"
         << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\",\"sceKernelIsAddressSanitizerEnabled\",\"sceKernelGetSanitizerMallocReplaceExternal\",\"sceKernelGetSanitizerNewReplaceExternal\"]},"
+        << "\"sce_kernel_time_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"libraries\":[\"libkernel\",\"libScePosix\"],\"library_version\":1,"
+        << "\"functions\":[\"sceKernelUsleep\",\"sceKernelNanosleep\",\"sceKernelSleep\",\"sceKernelGetProcessTime\",\"sceKernelGetProcessTimeCounter\",\"sceKernelGetProcessTimeCounterFrequency\",\"sceKernelGettimeofday\",\"sceKernelGettimezone\",\"sceKernelClockGettime\",\"sceKernelClockGetres\",\"sceKernelConvertUtcToLocaltime\",\"sceKernelConvertLocaltimeToUtc\",\"usleep\",\"nanosleep\",\"_nanosleep\",\"sleep\",\"gettimeofday\",\"clock_gettime\",\"clock_getres\"],"
+        << "\"constraints\":\"sce* in library libkernel only, POSIX aliases in libkernel and libScePosix; console clock is UTC; clock ids 0,1,2,4,5,7-15 (CPU-time clocks report host owner thread/process CPU time); process counter in nanoseconds; with guest threads a sleep parks only its caller until the owner pump reaches its deadline (1 ms idle granularity) and is cancelled by stop or shutdown; single-image runs sleep on the host and end early with EINTR on a stop request\"},"
         << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
         << "\"sce_memory_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceKernelGetDirectMemorySize\",\"sceKernelAvailableDirectMemorySize\",\"sceKernelAllocateDirectMemory\",\"sceKernelAllocateMainDirectMemory\",\"sceKernelMapDirectMemory\",\"sceKernelMapFlexibleMemory\",\"sceKernelReserveVirtualRange\",\"sceKernelMprotect\",\"sceKernelVirtualQuery\",\"sceKernelMunmap\",\"sceKernelReleaseDirectMemory\"],"
@@ -303,7 +307,7 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
                                          ) {
     std::vector<Cpu::SceHostModule> hosts{
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
-        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
+        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}, {"libScePosix", 0, 1}}},
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
         {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
         {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}, {"libSceLibcInternal", 0, 1}}},
@@ -582,6 +586,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::LinuxRuntime> linuxRuntime;
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
+        std::unique_ptr<Cpu::SceKernelTimeImports> timeRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
         std::unique_ptr<Cpu::SceNpLocalImports> npRuntime;
         std::unique_ptr<Cpu::SceNpOfflineImports> npOfflineRuntime;
@@ -610,6 +615,10 @@ int main(int argc, char** argv) {
                     threadRuntime = std::make_shared<Cpu::GuestThreads>(machine);
 #if !ANYPS5_CPU_NATIVE_MODULE_RUNNER
                     threadImports = std::make_unique<Cpu::SceThreadImports>(machine, threadRuntime);
+                    // Lets guest threads park in timed waits (sleeps) while others run, with no idle
+                    // cap (this build has no --max-idle-ms). The native runner installs its own
+                    // boundary that also pumps the window and applies the wall and idle limits.
+                    threadRuntime->SetOwnerBoundary({}, std::chrono::milliseconds{0});
 #endif
                 }
 #endif
@@ -636,6 +645,8 @@ int main(int argc, char** argv) {
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
+                timeRuntime = std::make_unique<Cpu::SceKernelTimeImports>(machine, threadRuntime,
+                    [] { return StopSignal::received.load() != 0; });
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine, sessionUserId);
                 npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
@@ -655,6 +666,7 @@ int main(int argc, char** argv) {
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = timeRuntime->Resolve(import)) return *gate;
                     if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
                     return sceRuntime->Resolve(import);
                 };
