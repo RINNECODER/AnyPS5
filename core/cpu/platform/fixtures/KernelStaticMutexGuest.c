@@ -48,7 +48,10 @@ static void* waiter(void* arg) {
 }
 static void identities(void) {
  u64 copied=shared.mutex, forged=0x1122334455667788ULL;
+ /* A copied handle value names the same mutex (PLAT-06): relock reports deadlock,
+    unlock releases the original, which is then re-owned through its own slot. */
  R[50]=(u32)posix_mutex_lock(&copied); R[51]=(u32)posix_mutex_unlock(&copied);
+ R[87]=(u32)posix_mutex_lock(&shared.mutex);
  R[52]=(u32)posix_mutex_lock(&forged); R[53]=(u32)posix_mutex_unlock(&forged);
  R[54]=copied; R[55]=forged;
 }
@@ -73,9 +76,9 @@ EXPORT int _start(void) {
  if(R[1]==9) posix_cond_wait(&shared.condition,(u64*)0x12345000ULL);
  if(R[1]==10) posix_cond_wait((u64*)0,&shared.mutex);
  if(R[1]==8 || R[1]==11) {
-  u64 copied=shared.mutex;
+  u64 forged=0x1122334455667788ULL;
   if(R[1]==8) status(posix_mutex_unlock(&shared.mutex));
-  R[82]=(u32)posix_cond_wait(&shared.condition,R[1]==8 ? &shared.mutex : &copied);
+  R[82]=(u32)posix_cond_wait(&shared.condition,R[1]==8 ? &shared.mutex : &forged);
   R[83]=shared.condition; R[84]=shared.mutex;
   if(R[1]==8) status(posix_mutex_lock(&shared.mutex));
   status(posix_mutex_unlock(&shared.mutex)); guard(); R[0]=0x524f4c4c4241434bULL; process_exit(0);
@@ -90,7 +93,6 @@ EXPORT int _start(void) {
  for(unsigned turn=0;R[14]!=3 && turn<8;++turn) {++R[86];thread_yield();}
  R[17]=(R[13]==3 && R[14]==3 && R[15]==0);
  status(posix_mutex_lock(&shared.mutex)); R[32]=shared.condition; R[33]=shared.mutex;
- {u64 copied=shared.condition; R[80]=(u32)posix_cond_broadcast(&copied); R[81]=copied;}
  R[59]=(u32)scePthreadMutexDestroy(&shared.mutex);
  R[60]=(u32)scePthreadCondDestroy(&shared.condition);
  if(R[1]==3) for(;;) ++R[89]; /* bounded host cancellation before wake */
@@ -110,13 +112,16 @@ EXPORT int _start(void) {
   void* result=(void*)0xccccccccccccccccULL; status(thread_join(ids[role],&result)); R[46+role]=(u64)result;
  }
  R[24]=payload; R[25]=shared.mutex; R[26]=shared.condition;
+ {u64 copied=shared.condition; R[80]=(u32)posix_cond_broadcast(&copied); R[81]=copied;}
  R[61]=(u32)posix_cond_wait(&shared.condition,&shared.mutex); /* unowned */
  status(scePthreadCondDestroy(&shared.condition)); R[27]=shared.condition;
  R[62]=(u32)posix_cond_broadcast(&shared.condition);
  shared.condition=0; R[63]=(u32)posix_cond_broadcast(&shared.condition); R[69]=shared.condition;
  status(scePthreadMutexDestroy(&shared.mutex)); R[28]=shared.mutex;
  R[70]=(u32)posix_mutex_lock(&shared.mutex); R[71]=(u32)posix_mutex_unlock(&shared.mutex);
+ /* A zeroed slot is a static initializer even where an object was destroyed (PLAT-05). */
  shared.mutex=0; R[72]=(u32)posix_mutex_lock(&shared.mutex); R[73]=shared.mutex;
+ R[88]=(u32)posix_mutex_unlock(&shared.mutex);
  /* Explicit init may deliberately recreate a destroyed slot; old token cannot. */
  shared.mutex=2; status(scePthreadMutexInit(&shared.mutex,0,relocatedLabel)); R[34]=shared.mutex;
  shared.mutex=R[31]; R[74]=(u32)posix_mutex_lock(&shared.mutex); R[75]=(u32)posix_mutex_unlock(&shared.mutex);

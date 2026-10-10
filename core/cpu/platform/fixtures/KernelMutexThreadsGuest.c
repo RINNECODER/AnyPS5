@@ -59,7 +59,7 @@ static void* worker(void* argument) {
     if (r[63] == 4) {
         r[10] = (u32)scePthreadMutexLock((u64*)&mutex);
         r[4] = 1;
-        thread_yield(); /* Parent now blocks; exiting while owning is unsupported. */
+        thread_yield(); /* Parent now blocks; a non-robust owner exits still owning, so it never wakes. */
         r[35] = 1;
         return argument;
     }

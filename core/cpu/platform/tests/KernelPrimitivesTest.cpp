@@ -67,9 +67,11 @@ void check(const std::vector<std::byte>& code) {
     for (unsigned i = 0; i < expected.size(); ++i)
         require(s.get(0x2300 + 8*i) == expected[i], "Independent recursive/default/static lifecycle oracle differs");
     require(s.call(0, 0x2200) == 0, "Reinitialize destroyed mutex failed");
+    const auto first = s.get(0x2200);
+    // Init always overwrites (PLAT-04); it never reports EBUSY for a used slot.
+    require(s.call(0, 0x2200) == 0 && s.get(0x2200) != first, "Mutex re-init did not publish a fresh handle");
     const auto token = s.get(0x2200);
-    require(s.call(0, 0x2200) == 0x80020010 && s.get(0x2200) == token, "Double init replaced an owned mutex token");
-    require(token > 2 && token != 0x2200, "Mutex slot lacks opaque lifecycle token");
+    require(first > 2 && token > 2 && token != 0x2200, "Mutex slot lacks opaque lifecycle token");
     require(s.call(1, 0x2200) == 0, "Guest owner did not acquire mutex");
     s.active = 2;
     require(s.call(2, 0x2200) == 0x80020001, "Foreign guest thread unlocked mutex");
@@ -78,7 +80,7 @@ void check(const std::vector<std::byte>& code) {
     s.active = 1;
     require(s.call(2, 0x2200) == 0 && s.call(3, 0x2200) == 0, "Foreign failure altered ownership");
     s.put(0x2220, token);
-    require(s.call(1, 0x2220) == 0x80020016, "Copied/stale token was admitted at unrelated slot");
+    require(s.call(1, 0x2220) == 0x80020016, "Copy of a destroyed mutex handle was admitted");
     require(s.call(4, 0x2210) == 0, "Attribute reinit failed");
     require(s.call(5, 0x2210, 0) == 0x80020016, "Invalid mutex type admitted");
     rejects([&] { s.call(7, 0x2210, 1); }, "priority protocol");

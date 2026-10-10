@@ -210,6 +210,28 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_platform_kernel_static_mutex
         COMMAND anyps5_platform_kernel_static_mutex_test "${kernelStaticMutexFixture}")
     set_tests_properties(anyps5_platform_kernel_static_mutex PROPERTIES TIMEOUT 60)
+    set(kernelMutexSemanticsFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics.elf")
+    add_custom_command(OUTPUT "${kernelMutexSemanticsFixture}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+            -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelMutexSemanticsGuest.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelMutexSemanticsFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics-linked.elf" "${kernelMutexSemanticsFixture}"
+        DEPENDS fixtures/KernelMutexSemanticsGuest.c tests/BuildKernelMutexSemanticsFixture.py
+            tests/BuildKernelMutexThreadsFixture.py ../tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_mutex_semantics_fixture DEPENDS "${kernelMutexSemanticsFixture}")
+    add_executable(anyps5_platform_kernel_mutex_semantics_test tests/KernelMutexSemanticsTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_mutex_semantics_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_mutex_semantics_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_mutex_semantics_test anyps5_platform_kernel_mutex_semantics_fixture)
+    add_test(NAME anyps5_platform_kernel_mutex_semantics
+        COMMAND anyps5_platform_kernel_mutex_semantics_test "${kernelMutexSemanticsFixture}")
+    set_tests_properties(anyps5_platform_kernel_mutex_semantics PROPERTIES TIMEOUT 60)
     set(kernelConditionTimeoutFixtures)
     foreach(timeoutKind IN ITEMS posix relative)
         set(timeoutDefine)
