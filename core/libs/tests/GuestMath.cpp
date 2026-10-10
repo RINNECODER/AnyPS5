@@ -11,6 +11,10 @@
 #include <initializer_list>
 extern "C" {
 double APS5_VABI atof_nid_postfix(const char*);
+double APS5_VABI strtod_nid_postfix(const char*, char**);
+double APS5_VABI wcstod_nid_postfix(const char16_t*, char16_t**);
+float APS5_VABI wcstof_nid_postfix(const char16_t*, char16_t**);
+long double APS5_VABI wcstold_nid_postfix(const char16_t*, char16_t**);
 float APS5_VABI strtof_nid_postfix(const char*, char**);
 long double APS5_VABI strtold_nid_postfix(const char*, char**);
 std::int64_t APS5_VABI strtol_nid_postfix(const char*, char**, int);
@@ -590,9 +594,35 @@ static void CheckFloatRounding(float value, std::int64_t expected, bool invalid)
     }
 }
 
+void CheckNoConversionIsPositiveZero() {
+    for (const char* text : {"-.", "-", "-x", "-.e1", "-e5", "- 1"}) {
+        char* end = nullptr;
+        const double parsed = strtod_nid_postfix(text, &end);
+        Require(parsed == 0. && !std::signbit(parsed) && end == text);
+        const float parsedFloat = strtof_nid_postfix(text, &end);
+        Require(parsedFloat == 0.f && !std::signbit(parsedFloat) && end == text);
+        const long double parsedLong = strtold_nid_postfix(text, &end);
+        Require(parsedLong == 0.L && !std::signbit(parsedLong) && end == text);
+        Require(!std::signbit(atof_nid_postfix(text)));
+    }
+    char* end = nullptr;
+    const char negativeZero[] = "-0.0x";
+    const double parsed = strtod_nid_postfix(negativeZero, &end);
+    Require(parsed == 0. && std::signbit(parsed) && end == negativeZero + 4);
+    const char16_t wide[] = u"-.";
+    char16_t* wideEnd = nullptr;
+    const double parsedWide = wcstod_nid_postfix(wide, &wideEnd);
+    Require(parsedWide == 0. && !std::signbit(parsedWide) && wideEnd == wide);
+    const float parsedWideFloat = wcstof_nid_postfix(wide, &wideEnd);
+    Require(parsedWideFloat == 0.f && !std::signbit(parsedWideFloat) && wideEnd == wide);
+    const long double parsedWideLong = wcstold_nid_postfix(wide, &wideEnd);
+    Require(parsedWideLong == 0.L && !std::signbit(parsedWideLong) && wideEnd == wide);
+}
+
 int main() {
     CheckFloatClassification();
     CheckMissingClassificationExports();
+    CheckNoConversionIsPositiveZero();
     CheckIntegerConversions();
     CheckExtendedMath();
     Require(atof_nid_postfix(" -12.5tail") == -12.5);
