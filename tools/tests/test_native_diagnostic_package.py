@@ -6,6 +6,7 @@ execution, or production native acceptance. Run compile/execution under the
 caller's canonical tcg-build lease. No production-only seams are introduced.
 """
 import json
+import re
 from pathlib import Path
 import platform
 import shutil
@@ -351,15 +352,21 @@ class NativeCompiledPackaging(PackageFixture):
 class ContractDriftControls(unittest.TestCase):
     """The release contract is a copy of a compiled claim, so it must be checked against the source."""
 
-    def test_contract_claims_are_the_compiled_claims(self):
+    def test_contract_equals_the_compiled_emission(self):
+        """Pin the release contract to the exact capability object Main.cpp emits (#331).
+
+        A substring search would let a shortened contract claim, an extended compiled claim or a
+        renamed key through, so decode the emitted object and compare it field by field.
+        """
         source = (Path(__file__).resolve().parents[2] / 'core' / 'cpu' / 'src' / 'Main.cpp').read_text()
-        checked = 0
-        for key, value in package.NATIVE_RUNNER_CONTRACT.items():
-            if not isinstance(value, str):
-                continue
-            checked += 1
-            self.assertIn(value, source, 'stale release contract claim: ' + key)
-        self.assertGreaterEqual(checked, 4, 'contract lost its textual capability claims')
+        start = source.index('\\"native_module_runner\\":{')
+        region = source[start:source.index('\\"sce_thread_imports\\"', start)]
+        emitted = dict(re.findall(r'\\"(\w+)\\":\\"(.*?)\\"', region, re.S))
+        emitted.update({key: value == 'true' for key, value in
+                        re.findall(r'\\"(\w+)\\":(true|false)', region)})
+        emitted.update({key: int(default) for key, default in
+                        re.findall(r'\\"(\w+)\\":\"\s*<<\s*limits\.\w+\.value_or\((\d+)\)', region)})
+        self.assertEqual(emitted, package.NATIVE_RUNNER_CONTRACT)
 
     def test_capability_mismatch_names_the_offending_claim(self):
         stale = dict(package.NATIVE_RUNNER_CONTRACT, constraints='no WebAPI2 provider')
