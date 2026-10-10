@@ -132,8 +132,11 @@ ShaderRecompiler::RecompileRequest BuildDrawRecompileRequest(
     const ShaderRecompiler::SpirvTarget& target, std::uint32_t pushOffset,
     const Pm4::DrawParameters& drawParameters, std::span<const ShaderRecompiler::MemoryRegion> memory,
     std::span<const ShaderRecompiler::LinkedProgram> linked) {
-    const auto pushLimit = graphics.stages.mesh ? ShaderRecompiler::MeshDrawPushOffsetBytes : Graphics::PipelinePushConstantBytes;
-    require(pushOffset <= pushLimit, "stage push constants exceed the pipeline push constant block");
+    // With pipeline libraries the fragment stage starts at the second slot (StagePushOffset), so the
+    // limit applies within the stage's slot.
+    const auto pushLimit = graphics.stages.mesh ? ShaderRecompiler::MeshDrawPushOffsetBytes : Graphics::PipelinePushSlotBytes;
+    require(pushOffset < Graphics::PipelinePushConstantBytes && pushOffset % Graphics::PipelinePushSlotBytes <= pushLimit,
+            "stage push constants exceed the pipeline push constant block");
     const bool fragment = binary.stage == ShaderRecompiler::ShaderStage::Fragment;
     const auto waveSize = fragment ? graphics.stages.fragmentWaveSize : graphics.stages.vertexWaveSize;
     return {
@@ -142,7 +145,7 @@ ShaderRecompiler::RecompileRequest BuildDrawRecompileRequest(
         target,
         // Each stage's push range stays inside one PipelinePushSlotBytes slot; the binding allocator
         // rejects a range that crosses a slot boundary.
-        {0, 0, pushOffset, (graphics.stages.mesh ? ShaderRecompiler::MeshDrawPushOffsetBytes : Graphics::PipelinePushSlotBytes) - pushOffset % Graphics::PipelinePushSlotBytes},
+        {0, 0, pushOffset, pushLimit - pushOffset % Graphics::PipelinePushSlotBytes},
         ShaderRecompiler::GraphicsCompileContext{firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation,
             {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
     };

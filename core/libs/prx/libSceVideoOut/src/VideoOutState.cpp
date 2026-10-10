@@ -161,6 +161,7 @@ void FlipRequest::Cancel() noexcept {
 void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameTiming) {
     require(frameTiming != nullptr, "missing frame timing");
     timing = frameTiming;
+    bool released = false;
     {
         AgcDriver::PerformanceContext timingContext(timing.get());
         AgcDriver::PerformanceTimer readiness("VideoOut.Readiness");
@@ -170,17 +171,20 @@ void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameT
         std::lock_guard lock(cfg->mutex);
         cfg->CheckAlive();
         if (cfg->Closed()) {
+            // The title closed the port: drop the reservation so producers waiting for room wake.
             ReleaseLocked();
-            return;
+            released = true;
+        } else {
+            require(reserved && !ready && !terminal && cfg->generation == generation, "invalid flip readiness transition");
+            resolveFlipBuffer(*this, *cfg);
+            readiness.Mark("locks_validate");
+            queuedAt = AgcDriver::FrameTiming::Clock::now();
+            queue->requests.push_back(shared_from_this());
+            ready = true;
         }
-        require(reserved && !ready && !terminal && cfg->generation == generation, "invalid flip readiness transition");
-        resolveFlipBuffer(*this, *cfg);
-        readiness.Mark("locks_validate");
-        queuedAt = AgcDriver::FrameTiming::Clock::now();
-        queue->requests.push_back(shared_from_this());
-        ready = true;
     }
     queue->changed.notify_all();
+    if (released) return;
     static const bool syncFlip = std::getenv("APS5_SYNC_FLIP") != nullptr;
     if (!syncFlip) return;
     std::unique_lock lock(cfg->mutex);
@@ -262,14 +266,7 @@ void CompleteFlip(FlipRequest& req, const VideoOutCompletionCallbacks& callbacks
     req.cfg->flipStatus.currentBuffer = req.index;
     req.cfg->width = req.width;
     req.cfg->height = req.height;
-    --req.cfg->flipStatus.flipPendingNum;
-    --req.queue->reservations;
-    if (req.index >= 0) {
-        --req.cfg->bufferPending[req.index];
-        req.cfg->bufferReuse[req.index].Complete(req.reuseTicket);
-    }
-    req.terminal = true;
-    req.cfg->vblankCond.notify_all();
+    req.ReleaseLocked();
     if (timing) timing->Mark("notify_game");
     lock.unlock();
     std::lock_guard queueLock(req.queue->mutex);

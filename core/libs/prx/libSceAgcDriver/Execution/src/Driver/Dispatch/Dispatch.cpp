@@ -62,6 +62,9 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         resolved = ahead.packet;
         packet = resolved;
         indirectArguments = ahead.indirectArguments;
+        // The parked packet may differ from the entry packet (e.g. indirect arguments resolved ahead).
+        decoded = DecodeComputeDispatch(queue, packet, snapshot.header, noteShaderRead);
+        compute = decoded.compute;
     } else if (indirectArguments != 0 && matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) {
 
         recordQueuedLabelsBeforeRead(submission.queue);

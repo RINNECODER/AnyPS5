@@ -450,7 +450,12 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (std::uint64_t{fields[1] & 0xffffu} << 32u);
         std::size_t adjustment = 0;
-        if (!noVertexIndices) {
+        if (!noVertexIndices && Graphics::NullVertexDescriptor(attribute)) {
+            // An all-zero V# fetches zeros (upstream's Vulkan draw binds a zero buffer the same way).
+            auto zero = backend.Buffer(Graphics::DecodeVertexFormat(attribute).bytes);
+            std::memset(zero.contents, 0, zero.length);
+            vertexBuffers.push_back({zero, 0, zero.length});
+        } else if (!noVertexIndices) {
             auto buffer = resources.Buffer(address, Graphics::VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance));
             adjustment = buffer.offset % 4;
             buffer.offset -= adjustment;

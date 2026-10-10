@@ -248,9 +248,10 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
     secondWait = std::async(std::launch::async, [secondFence] { secondFence->Wait(); });
     idle = std::async(std::launch::async, [&driver] { driver.WaitIdle(); });
     {
-        // A flip resolves its buffer when the GPU reaches it (upstream VideoOut contract). The first flip
-        // is GPU-ready before the second (which waits for it), so a re-registration made now must not
-        // reach the first flip's snapshot; it is undone before the second flip resolves.
+        // A flip resolves its buffer when the GPU reaches it (upstream VideoOut contract). This replay
+        // runs with APS5_SYNC_FLIP, so the worker's GpuReady for the first flip blocks until that flip
+        // completes and the second flip cannot resolve yet. A re-registration made now must not reach
+        // the first flip's snapshot; it is undone before the first flip completes.
         std::unique_lock lock(queue->mutex);
         Require(queue->changed.wait_for(lock, 2s, [&] { return !queue->requests.empty(); }),
                 "Original public PM4 flip never entered the ready queue");
