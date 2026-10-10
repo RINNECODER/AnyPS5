@@ -33,22 +33,25 @@ private:
 
 // Title-agnostic engineering profile: rows are admitted by NID, libkernel
 // scope/version, symbol type and size for any importing image. Protocol 1 uses the actual guest scheduler's live waiter inheritance
-// and effective-priority ordering (FIFO ties). Protocol 2 and abandoned-owner
-// recovery remain unsupported. Direct opaque pointee/copy-slot access is not
-// admitted by these contracts.
-// Selects the nine SCE mutex contracts and the POSIX lock/unlock pair. Its observed zero static initializer uses type1/protocol0;
+// and effective-priority ordering (FIFO ties). Protocol 2 remains unsupported.
+// Mutex and condition semantics follow FreeBSD libthr: the guest word holds a
+// handle value (copies name the same object), 0 and 1 (adaptive mutex) are lazy
+// static initializers, 2 (mutex) and 1 (condition) are the destroyed sentinels,
+// init always overwrites, and an owner that exits keeps a non-robust mutex owned.
+// Selects the nine SCE mutex contracts, scePthreadMutexTimedlock and the POSIX
+// lock/unlock pair. The zero static initializer uses type1/protocol0;
 // that default is public-source engineering inference, not vendor certification.
 class TargetKernelMutexes final {
 public:
     TargetKernelMutexes(Machine&, const std::shared_ptr<GuestThreads>&);
     std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t observedSymbolType);
-    // Shares this exact provider's mutex ownership and wait domain. Only the
-    // untimed/default-attribute rows and two timed rows are admitted. Absolute POSIX time is signed seconds/nanoseconds on default
-    // realtime, compared each owner turn; relative SCE time is unsigned32
-    // microseconds on a saturated steady deadline. Both reacquire the same
-    // mutex before returning.
-    // The caller must supply the actual imported symbol size; clock setters and
-    // arbitrary attributes remain outside this engineering profile.
+    // Shares this exact provider's mutex ownership and wait domain. Condition
+    // rows, the two timed waits and the two condattr clock setters are admitted.
+    // Absolute POSIX time is signed seconds/nanoseconds on the condition's clock
+    // (realtime by default, or monotonic via setclock), compared each owner turn;
+    // relative SCE time is unsigned32 microseconds on a saturated steady
+    // deadline. Both reacquire the same mutex before returning.
+    // The caller must supply the actual imported symbol size.
     std::optional<std::uint64_t> ResolveCondition(const SceImport&, std::uint8_t observedSymbolType,
                                                 std::uint64_t observedSymbolSize);
 private:

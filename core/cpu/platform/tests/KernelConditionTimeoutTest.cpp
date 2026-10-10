@@ -102,7 +102,7 @@ void completed(const char* path,bool relative,unsigned mode,bool upperBits=false
  const unsigned count=mode==3 ? 2 : 1;
  require(r[14]==1 && r[15]==1 && r[12]==((1ULL<<count)-1) && r[13]==r[12],
          "Timed wait returned early or failed to release same owned mutex");
- require(r[20]==Busy && r[21]==Busy && r[34]==1 && r[23]==r[31] && r[24]==r[33],
+ require(r[20]==Busy && r[21]==Busy && r[34]==1 && r[23]==(mode==4 ? 1 : r[31]) && r[24]==r[33],
          "Timed binding lost live destroy busy, original slot identity or sentinel");
  require(r[40] && r[41] && !r[43] && !r[44],"Timed suspended return stack/callee-saved ABI differs");
  require(r[42]==(mode==1 || mode==3 ? 0 : s.timeout()),"POSIX positive errno or relative SCE timeout differs");
@@ -112,7 +112,7 @@ void completed(const char* path,bool relative,unsigned mode,bool upperBits=false
  }
  if(mode==3) require(r[47]==s.timeout(),"Second competing waiter lost deadline after first signal");
  if(mode==1 || mode==3 || mode==4) require(!r[18],"Signal or deadline returned while original mutex still owned by parent");
- if(mode==4) require(r[22]==Busy,"Expired queued reacquisition dropped live condition binding");
+ if(mode==4) require(r[22]==0,"Condition destroy returned busy after its expired waiter moved to the mutex queue (PLAT-15)");
  if(mode==2) require(r[52]==0 && r[53]==Busy && r[54]==Perm,"Timed recursive depth was not restored through full release/reacquire");
  for(unsigned i=80;i<84;++i) require(r[i]==input[i],"Timed input-only argument was overwritten");
  if(mode==0 || mode==3) require(idle>0 && steady_clock::now()-start>=15ms && steady_clock::now()-start<1000ms,
@@ -124,6 +124,15 @@ void directError(const char* path,bool relative,unsigned cp,unsigned mp,std::uin
          "Timed invalid input changed slots, unlocked owned mutex or fabricated a wait");
  if(cp==1) require(!r[61] && !r[34],"Invalid timed call published a static zero condition");
  require(r[80]==sec && r[81]==nano,"Invalid timed call overwrote input words");
+}
+// A copied handle value names the same live object (PLAT-06): the call is a
+// genuine zero-time wait that expires and reacquires the owned mutex.
+void copiedHandle(const char* path,bool relative,unsigned cp,unsigned mp) {
+ Session s(path,relative,6);s.put(90,cp);s.put(91,mp);s.put(80,0);s.put(81,0);finished(s);const auto r=s.receipt();
+ slotGuards(s,r);
+ require(r[60]==s.timeout() && r[63]==Busy && r[62]==r[33] && r[34]==1 && r[35]==2 && !r[80] && !r[81],
+         "Copied condition or mutex handle was not admitted as the same object");
+ require(cp==2 ? r[61]==r[31] : (r[61]>2 && r[61]!=r[33]),"Copied-handle wait changed the condition identity");
 }
 void pointerError(const char* path,std::uint64_t pointer,bool unreadable=false,const char* diagnostic="Guest access denied") {
  Session s(path,false,6);s.put(92,pointer);
@@ -262,8 +271,10 @@ int main(int argc,char** argv) {
     completed(path,relative,mode);
    }
    context=std::string(relative ? "relative" : "posix")+" input rollback";
-   for(unsigned cp:{2,3,4}) directError(path,relative,cp,1,0,0);
-   for(unsigned mp:{2,3}) directError(path,relative,1,mp,0,0);
+   for(unsigned cp:{3,4}) directError(path,relative,cp,1,0,0);
+   directError(path,relative,1,3,0,0);
+   context=std::string(relative ? "relative" : "posix")+" copied handles";
+   copiedHandle(path,relative,2,1);copiedHandle(path,relative,1,2);
    if(!relative) {
     directError(path,false,1,1,0,1000000000);
     directError(path,false,1,1,0,~0ULL);

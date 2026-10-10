@@ -5,19 +5,26 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <deque>
 #include <limits>
 #include <map>
 #include <set>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <tuple>
+#include <variant>
 
 namespace Cpu::Platform {
 namespace {
 constexpr unsigned mutexCount = 9;
 constexpr unsigned conditionEnd = 21;
 constexpr unsigned timeoutBegin = 23;
-constexpr std::array<KernelPrimitiveImport, 25> inventory{{
+constexpr unsigned mutexTimedlock = 25;
+constexpr unsigned conditionSetclock = 26;
+constexpr unsigned posixConditionSetclock = 27;
+constexpr std::array<KernelPrimitiveImport, 28> inventory{{
     {"cmo1RIYva9o", "scePthreadMutexInit"}, {"upoVrzMHFeE", "scePthreadMutexTrylock"},
     {"tn3VlD0hG60", "scePthreadMutexUnlock"}, {"2Of0f+3mhhE", "scePthreadMutexDestroy"},
     {"F8bUHwAG284", "scePthreadMutexattrInit"}, {"iMp8QpE+XO4", "scePthreadMutexattrSettype"},
@@ -32,12 +39,22 @@ constexpr std::array<KernelPrimitiveImport, 25> inventory{{
     {"mkx2fVhNMsg", "pthread_cond_broadcast"},
     {"7H0iTOciTLo", "pthread_mutex_lock"}, {"2Z+PpY6CaJg", "pthread_mutex_unlock"},
     {"27bAgiJmOh0", "pthread_cond_timedwait"},
-    {"BmMjYxmew1w", "scePthreadCondTimedwait"}}};
+    {"BmMjYxmew1w", "scePthreadCondTimedwait"},
+    {"IafI2PxcPnQ", "scePthreadMutexTimedlock"},
+    {"c-bxj027czs", "scePthreadCondattrSetclock"}, {"EjllaAqAPZo", "pthread_condattr_setclock"}}};
+// POSIX rows return positive errno values and may also be exported by libScePosix.
+bool posixRow(unsigned op) { return (op >= 16 && op <= timeoutBegin) || op == posixConditionSetclock; }
+bool mutexRow(unsigned op) { return op < mutexCount || op == conditionEnd || op == conditionEnd + 1 || op == mutexTimedlock; }
 std::atomic<std::uint64_t> nextToken{0xa005000000000003ULL};
 constexpr auto rw = Permission::Read | Permission::Write;
 // Guest Orbis error table, independent of the host's errno numerals.
 enum GuestErrno : unsigned { Perm = 1, Deadlock = 11, Busy = 16, Invalid = 22, Again = 35, TimedOut = 60 };
 std::uint32_t error(GuestErrno posix) { return 0x80020000u + posix; }
+// libthr sentinels stored in the guest handle word. Anything else is a handle
+// value: copies of it name the same object, wherever the copy lives.
+constexpr std::uint64_t mutexDestroyed = 2, conditionDestroyed = 1;
+// Guest clock ids (FreeBSD numbering); condition deadlines use one of two bases.
+constexpr unsigned realtimeClock = 0, monotonicClock = 4;
 void span(Machine& m, std::uint64_t p, Permission permission) {
     if (!p || p > std::numeric_limits<std::uint64_t>::max() - 8)
         throw std::runtime_error("Invalid kernel primitive guest slot");
@@ -61,20 +78,41 @@ void name(Machine& m, std::uint64_t p) {
     throw std::runtime_error("Unsupported kernel mutex name exceeding bounded 4096-byte scan");
 }
 using DeadlineClock = std::chrono::steady_clock;
+struct Timespec { std::int64_t seconds = 0, nanoseconds = 0; };
+Timespec realtimeNow() {
+    const auto epoch = std::chrono::system_clock::now().time_since_epoch();
+    Timespec now{std::chrono::duration_cast<std::chrono::seconds>(epoch).count(), 0};
+    now.nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(epoch - std::chrono::seconds(now.seconds)).count();
+    if (now.nanoseconds < 0) { --now.seconds; now.nanoseconds += 1000000000; }
+    return now;
+}
+// The guest's monotonic clock family reads the host CLOCK_MONOTONIC base.
+Timespec monotonicNow() {
+    timespec value{};
+    if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) throw std::runtime_error("Host monotonic clock unavailable");
+    return {static_cast<std::int64_t>(value.tv_sec), static_cast<std::int64_t>(value.tv_nsec)};
+}
+// Each clock is read at most once per owner turn, and only when a deadline needs it.
+class Clocks {
+public:
+    DeadlineClock::time_point Steady() { if (!steady) steady = DeadlineClock::now(); return *steady; }
+    const Timespec& Realtime() { if (!realtime) realtime = realtimeNow(); return *realtime; }
+    const Timespec& Monotonic() { if (!monotonic) monotonic = monotonicNow(); return *monotonic; }
+private:
+    std::optional<DeadlineClock::time_point> steady;
+    std::optional<Timespec> realtime, monotonic;
+};
 struct Deadline {
     std::optional<DeadlineClock::time_point> relative;
     std::int64_t seconds = 0, nanoseconds = 0;
-    bool Expired(DeadlineClock::time_point steady, std::chrono::system_clock::time_point realtime) const {
-        if (relative) return *relative <= steady;
-        const auto epoch = realtime.time_since_epoch();
-        auto nowSeconds = std::chrono::duration_cast<std::chrono::seconds>(epoch).count();
-        auto nowNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            epoch - std::chrono::seconds(nowSeconds)).count();
-        if (nowNanoseconds < 0) { --nowSeconds; nowNanoseconds += 1000000000; }
+    unsigned clock = realtimeClock; // Base of an absolute deadline.
+    bool Expired(Clocks& now) const {
+        if (relative) return *relative <= now.Steady();
+        const auto& base = clock == monotonicClock ? now.Monotonic() : now.Realtime();
         // Compare the validated raw fields without multiplying guest seconds.
         // Absolute realtime waits therefore follow host wall-clock adjustments
         // and even INT64_MAX seconds cannot overflow a duration conversion.
-        return seconds < nowSeconds || (seconds == nowSeconds && nanoseconds <= nowNanoseconds);
+        return seconds < base.seconds || (seconds == base.seconds && nanoseconds <= base.nanoseconds);
     }
 };
 Deadline relativeDeadline(std::uint32_t microseconds) {
@@ -85,46 +123,59 @@ Deadline relativeDeadline(std::uint32_t microseconds) {
     return {now + std::chrono::duration_cast<DeadlineClock::duration>(
         std::chrono::microseconds(static_cast<std::int64_t>(microseconds)))};
 }
+// libthr accepts CLOCK_REALTIME, CLOCK_VIRTUAL, CLOCK_PROF and CLOCK_MONOTONIC.
+// The two process CPU-time clocks have no guest clock here to measure a
+// deadline against, so they are refused rather than silently mismeasured.
+std::optional<unsigned> conditionClock(std::uint32_t id) {
+    if (id == realtimeClock || id == monotonicClock) return id;
+    return std::nullopt;
+}
 }
 std::span<const KernelPrimitiveImport> KernelPrimitiveInventory() { return std::span(inventory).first(mutexCount); }
 std::span<const KernelPrimitiveImport> KernelConditionInventory() {
     return std::span(inventory).subspan(mutexCount, conditionEnd - mutexCount);
 }
 struct KernelPrimitives::Impl {
-    struct Attribute { std::uint64_t token; unsigned type = 1; unsigned protocol = 0; };
+    // Every object is keyed by its handle value. `home` is the slot that last
+    // published it, used only to retire an idle object its own slot re-inits.
+    struct Attribute { std::uint64_t home; unsigned type = 1; unsigned protocol = 0; };
+    struct ConditionAttribute { std::uint64_t home; unsigned clock = realtimeClock; };
     struct Mutex {
-        std::uint64_t token;
+        std::uint64_t token, home;
         unsigned type;
         unsigned protocol;
+        // A non-robust owner that exits keeps ownership: lockers queue, trylock
+        // and destroy report EBUSY, and the scheduler reports the hang.
         std::uint64_t owner = 0;
         unsigned depth = 0;
-        bool abandoned = false;
         std::deque<GuestThreadHandle> waiters;
         unsigned conditionUsers = 0;
     };
     struct Condition {
-        std::uint64_t token;
+        std::uint64_t token, home;
+        unsigned clock = realtimeClock;
         std::deque<GuestThreadHandle> waiters;
-        unsigned users = 0;
+        unsigned users = 0; // Waiters still parked on this condition (not yet moved to the mutex).
     };
     struct ConditionWait {
-        std::uint64_t conditionSlot, conditionToken, mutexSlot, mutexToken;
+        std::uint64_t conditionToken, mutexToken;
         unsigned mutexDepth;
         std::uint32_t result = 0;
         std::optional<Deadline> deadline;
         std::uint32_t timeoutResult = 0;
+        bool transferred = false; // Signalled or expired; now waits only for the mutex.
     };
+    struct MutexWait { std::uint64_t token; Deadline deadline; std::uint32_t timeoutResult; };
     using Key = std::tuple<std::string, std::uint16_t, std::uint16_t>;
     Machine& machine;
     std::function<std::uint64_t()> active;
     std::uint64_t base;
     std::map<std::uint64_t, Attribute> attributes;
     std::map<std::uint64_t, Mutex> mutexes;
-    std::set<std::uint64_t> destroyedMutexSlots;
     std::map<std::uint64_t, Condition> conditions;
-    std::set<std::uint64_t> destroyedConditionSlots;
-    std::map<std::uint64_t, std::uint64_t> conditionAttributes;
+    std::map<std::uint64_t, ConditionAttribute> conditionAttributes;
     std::map<GuestThreadHandle, ConditionWait> conditionWaits;
+    std::map<GuestThreadHandle, MutexWait> mutexWaits;
     std::map<Key, std::uint64_t> gates;
     std::optional<GuestThreads::WaitDomain> waits;
     Impl(Machine& m, std::function<std::uint64_t()> callback, std::uint64_t b)
@@ -147,24 +198,22 @@ struct KernelPrimitives::Impl {
     }
     void stopped(GuestThreadHandle id) {
         releaseConditionBinding(id);
-        for (auto& [slot, state] : conditions) std::erase(state.waiters, id);
-        for (auto& [slot, state] : mutexes) {
+        mutexWaits.erase(id);
+        for (auto& [token, state] : conditions) std::erase(state.waiters, id);
+        for (auto& [token, state] : mutexes) {
             std::erase(state.waiters, id);
-            // Nonrobust owner death must never silently grant another owner.
-            if (state.owner == id) {
-                state.abandoned = true;
-                if (state.protocol == 1 && waits) waits->SetInheritanceOwner(state.token, 0);
-            }
+            // Non-robust owner exit keeps the dead owner; it can no longer
+            // receive a priority donation.
+            if (state.owner == id && state.protocol == 1 && waits) waits->SetInheritanceOwner(state.token, 0);
         }
     }
     void releaseConditionBinding(GuestThreadHandle id) {
         const auto binding = conditionWaits.find(id);
         if (binding == conditionWaits.end()) return;
-        const auto condition = conditions.find(binding->second.conditionSlot);
-        if (condition != conditions.end() && condition->second.token == binding->second.conditionToken)
-            --condition->second.users;
-        const auto mutex = mutexes.find(binding->second.mutexSlot);
-        if (mutex != mutexes.end() && mutex->second.token == binding->second.mutexToken)
+        if (!binding->second.transferred)
+            if (const auto condition = conditions.find(binding->second.conditionToken); condition != conditions.end())
+                --condition->second.users;
+        if (const auto mutex = mutexes.find(binding->second.mutexToken); mutex != mutexes.end())
             --mutex->second.conditionUsers;
         conditionWaits.erase(binding);
     }
@@ -173,16 +222,11 @@ struct KernelPrimitives::Impl {
         if (binding == conditionWaits.end())
             throw std::runtime_error("Kernel condition wait lost its original binding");
         const auto& original = binding->second;
-        const auto condition = conditions.find(original.conditionSlot);
-        const auto mutex = mutexes.find(original.mutexSlot);
-        // The scheduler already validated the suspended gate. Validate both
-        // original opaque slots and the reserved owner before returning Wait.
-        if (condition == conditions.end() || condition->second.token != original.conditionToken ||
-            read(machine, original.conditionSlot) != original.conditionToken ||
-            mutex == mutexes.end() || mutex->second.token != original.mutexToken ||
-            read(machine, original.mutexSlot) != original.mutexToken ||
-            mutex->second.abandoned || mutex->second.owner != id || mutex->second.depth != 1)
-            throw std::runtime_error("Kernel condition wait reacquisition identity/ownership rejected");
+        // The condition may already be destroyed and its memory reused: after
+        // the transfer the waiter depends only on its reserved mutex ownership.
+        const auto mutex = mutexes.find(original.mutexToken);
+        if (!original.transferred || mutex == mutexes.end() || mutex->second.owner != id || mutex->second.depth != 1)
+            throw std::runtime_error("Kernel condition wait reacquisition ownership rejected");
         mutex->second.depth = original.mutexDepth;
         const auto result = original.result;
         releaseConditionBinding(id);
@@ -196,7 +240,9 @@ struct KernelPrimitives::Impl {
             // Only suspended calls may acquire. Cancellation and failed
             // continuation validation must not retain a priority donation.
             if (waits) std::erase_if(state.waiters, [&](auto id) {
-                return !waits->IsWaiting(id, state.token);
+                if (waits->IsWaiting(id, state.token)) return false;
+                mutexWaits.erase(id);
+                return true;
             });
             if (state.waiters.empty()) break;
             auto selected = state.waiters.begin();
@@ -207,6 +253,7 @@ struct KernelPrimitives::Impl {
             }
             const auto id = *selected;
             state.waiters.erase(selected);
+            mutexWaits.erase(id);
             // Reserve exclusive ownership before making the selected thread
             // runnable; a lower-priority contender cannot steal the transfer.
             state.owner = id;
@@ -228,13 +275,29 @@ struct KernelPrimitives::Impl {
         if (!id) throw std::runtime_error("Kernel primitive requires an active guest thread");
         return id;
     }
+    // Init overwrites the slot (libthr never reports EBUSY). The object the slot
+    // last published is dropped only when idle; copies of it become stale.
+    void retireMutex(std::uint64_t slot, std::uint64_t old) {
+        const auto found = mutexes.find(old);
+        if (found != mutexes.end() && found->second.home == slot && !found->second.owner &&
+            found->second.waiters.empty() && !found->second.conditionUsers)
+            mutexes.erase(found);
+    }
+    void retireCondition(std::uint64_t slot, std::uint64_t old) {
+        const auto found = conditions.find(old);
+        if (found != conditions.end() && found->second.home == slot && !found->second.users && found->second.waiters.empty())
+            conditions.erase(found);
+    }
+    template<class Map> static void retireAttribute(Map& map, std::uint64_t slot, std::uint64_t old) {
+        const auto found = map.find(old);
+        if (found != map.end() && found->second.home == slot) map.erase(found);
+    }
     void transferCondition(Condition& state, GuestThreadHandle id, std::uint32_t result) {
         const auto binding = conditionWaits.find(id);
-        if (binding == conditionWaits.end() || !waits->IsWaiting(id, state.token))
+        if (binding == conditionWaits.end() || binding->second.transferred || !waits->IsWaiting(id, state.token))
             throw std::runtime_error("Kernel condition transfer lost its exact parked wait");
-        const auto mutex = mutexes.find(binding->second.mutexSlot);
-        if (mutex == mutexes.end() || mutex->second.token != binding->second.mutexToken ||
-            read(machine, binding->second.mutexSlot) != binding->second.mutexToken || mutex->second.abandoned)
+        const auto mutex = mutexes.find(binding->second.mutexToken);
+        if (mutex == mutexes.end())
             throw std::runtime_error("Kernel condition transfer original mutex identity rejected");
         auto& lock = mutex->second;
         lock.waiters.push_back(id);
@@ -245,15 +308,25 @@ struct KernelPrimitives::Impl {
         std::erase(state.waiters, id);
         binding->second.result = result;
         binding->second.deadline.reset();
+        binding->second.transferred = true;
+        --state.users;
         // Reacquisition uses the actual mutex queue, priority inheritance,
         // and reserved ownership. No runnable result precedes ownership.
         if (!lock.owner) wake(lock);
     }
     bool pumpDeadlines() {
-        const auto now = DeadlineClock::now();
-        const auto realtime = std::chrono::system_clock::now();
+        // Visit only conditions with a parked timed waiter: idle and leaked
+        // objects never cost a scheduler turn.
+        std::set<std::uint64_t> timed;
+        for (const auto& [id, binding] : conditionWaits)
+            if (binding.deadline && !binding.transferred) timed.insert(binding.conditionToken);
+        if (timed.empty() && mutexWaits.empty()) return false;
+        Clocks now;
         bool pending = false;
-        for (auto& [slot, state] : conditions) {
+        for (const auto token : timed) {
+            const auto condition = conditions.find(token);
+            if (condition == conditions.end()) continue;
+            auto& state = condition->second;
             // Preserve condition FIFO selection when multiple deadlines expire
             // on the same owner turn; transfer removes exactly this queue entry.
             const auto parked = state.waiters;
@@ -261,27 +334,55 @@ struct KernelPrimitives::Impl {
                 const auto binding = conditionWaits.find(id);
                 if (binding == conditionWaits.end() || !binding->second.deadline) continue;
                 if (!waits->IsWaiting(id, state.token)) continue;
-                if (binding->second.deadline->Expired(now, realtime))
+                if (binding->second.deadline->Expired(now))
                     transferCondition(state, id, binding->second.timeoutResult);
                 else pending = true;
             }
         }
+        for (auto wait = mutexWaits.begin(); wait != mutexWaits.end();) {
+            const auto id = wait->first;
+            const auto [token, deadline, result] = wait->second;
+            if (!deadline.Expired(now)) { pending = true; ++wait; continue; }
+            wait = mutexWaits.erase(wait);
+            // Expire only the exact queued timed lock, never a later wait of the same thread.
+            const auto mutex = mutexes.find(token);
+            if (mutex != mutexes.end() && !conditionWaits.contains(id) && std::erase(mutex->second.waiters, id) &&
+                waits->IsWaiting(id, token))
+                waits->Wake(id, token, result);
+        }
         return pending;
+    }
+    // Resolves a mutex handle for a condition wait: static initializers are
+    // never owned (EPERM), the destroyed sentinel and forged values are EINVAL.
+    std::variant<std::uint32_t, Mutex*> ownedMutex(std::uint64_t pointer) {
+        const auto token = read(machine, pointer);
+        if (token < mutexDestroyed) return error(Perm);
+        const auto mutex = mutexes.find(token);
+        if (mutex == mutexes.end()) return error(Invalid);
+        if (mutex->second.owner != thread()) return error(Perm);
+        return &mutex->second;
     }
     std::uint32_t conditionInvoke(unsigned op, std::uint64_t slot, std::uint64_t arg, std::uint64_t label,
                                   std::optional<Deadline> deadline = {}, std::uint32_t timeoutResult = 0) {
         if (op == 5) {
             span(machine, slot, Permission::Write);
-            if (conditionAttributes.contains(slot)) return error(Busy);
+            const auto old = read(machine, slot);
             const auto token = nextToken.fetch_add(1);
-            conditionAttributes.emplace(slot, token);
-            write(machine, slot, token);
+            conditionAttributes.emplace(token, ConditionAttribute{slot});
+            try { write(machine, slot, token); }
+            catch (...) { conditionAttributes.erase(token); throw; }
+            retireAttribute(conditionAttributes, slot, old);
             return 0;
         }
-        if (op == 6) {
-            const auto token = read(machine, slot);
-            const auto attr = conditionAttributes.find(slot);
-            if (attr == conditionAttributes.end() || attr->second != token) return error(Invalid);
+        if (op == 6 || op == 7) {
+            const auto attr = conditionAttributes.find(read(machine, slot));
+            if (attr == conditionAttributes.end()) return error(Invalid);
+            if (op == 7) {
+                const auto clock = conditionClock(static_cast<std::uint32_t>(arg));
+                if (!clock) return error(Invalid);
+                attr->second.clock = *clock;
+                return 0;
+            }
             span(machine, slot, Permission::Write);
             write(machine, slot, 0);
             conditionAttributes.erase(attr);
@@ -289,66 +390,62 @@ struct KernelPrimitives::Impl {
         }
         if (op == 0) {
             span(machine, slot, Permission::Write);
-            if (conditions.contains(slot)) return error(Busy);
+            unsigned clock = realtimeClock;
             if (arg) {
-                const auto token = read(machine, arg);
-                const auto attr = conditionAttributes.find(arg);
-                if (attr == conditionAttributes.end() || attr->second != token) return error(Invalid);
+                const auto attr = conditionAttributes.find(read(machine, arg));
+                if (attr == conditionAttributes.end()) return error(Invalid);
+                clock = attr->second.clock;
             }
             name(machine, label);
+            const auto old = read(machine, slot);
             const auto token = nextToken.fetch_add(1);
-            conditions.emplace(slot, Condition{token, {}, 0});
-            write(machine, slot, token);
-            destroyedConditionSlots.erase(slot);
+            conditions.emplace(token, Condition{token, slot, clock, {}, 0});
+            try { write(machine, slot, token); }
+            catch (...) { conditions.erase(token); throw; }
+            retireCondition(slot, old);
             return 0;
         }
         const auto token = read(machine, slot);
-        auto condition = conditions.find(slot);
-        if (condition != conditions.end() && condition->second.token != token) return error(Invalid);
-        if (condition == conditions.end() && destroyedConditionSlots.contains(slot)) return error(Invalid);
-        if (op == 1 && token == 0) return 0; // Pinned public static initializer destroy preserves zero.
-        if (token == 1) return error(Invalid); // Condition destroyed sentinel; mutexes retain their own sentinel 2.
-        if (token == 0 && (op == 2 || op == 3 || op == 4)) {
+        if (token == conditionDestroyed) return error(Invalid);
+        std::map<std::uint64_t, Condition>::iterator condition;
+        if (token == 0) {
+            // Static initializer: destroy preserves it, every other use lazily
+            // initializes. A rejected wait argument leaves the zero slot intact.
+            if (op == 1) return 0;
             if (!waits) throw std::runtime_error("Kernel conditions require the actual guest scheduler");
             if (op == 2) {
-                // Validate the existing owned mutex before publishing a static
-                // condition. A malformed argument must leave its zero slot intact.
-                const auto mutexToken = read(machine, arg);
-                const auto mutex = mutexes.find(arg);
-                if (mutex == mutexes.end() || mutex->second.token != mutexToken) return error(Invalid);
-                const auto id = thread();
-                if (mutex->second.abandoned)
-                    throw std::runtime_error("Unsupported nonrobust condition mutex owner-exit recovery");
-                if (mutex->second.owner != id) return error(Perm);
+                const auto owned = ownedMutex(arg);
+                if (const auto rejected = std::get_if<std::uint32_t>(&owned)) return *rejected;
             }
             span(machine, slot, Permission::Write);
             const auto created = nextToken.fetch_add(1);
-            condition = conditions.emplace(slot, Condition{created, {}, 0}).first;
+            condition = conditions.emplace(created, Condition{created, slot, realtimeClock, {}, 0}).first;
             try { write(machine, slot, created); }
             catch (...) { conditions.erase(condition); throw; }
-        } else if (condition == conditions.end() || condition->second.token != token) return error(Invalid);
+        } else {
+            condition = conditions.find(token);
+            if (condition == conditions.end()) return error(Invalid);
+        }
         auto& state = condition->second;
         if (op == 1) {
-            if (state.users) return error(Busy);
+            if (state.users || !state.waiters.empty()) return error(Busy);
             span(machine, slot, Permission::Write);
-            destroyedConditionSlots.insert(slot);
-            write(machine, slot, 1);
+            write(machine, slot, conditionDestroyed);
             conditions.erase(condition);
             return 0;
         }
         if (!waits) throw std::runtime_error("Kernel conditions require the actual guest scheduler");
         if (op == 2) {
-            const auto mutexToken = read(machine, arg);
-            const auto mutex = mutexes.find(arg);
-            if (mutex == mutexes.end() || mutex->second.token != mutexToken) return error(Invalid);
-            auto& lock = mutex->second;
+            const auto owned = ownedMutex(arg);
+            if (const auto rejected = std::get_if<std::uint32_t>(&owned)) return *rejected;
+            auto& lock = *std::get<Mutex*>(owned);
             const auto id = thread();
-            if (lock.abandoned) throw std::runtime_error("Unsupported nonrobust condition mutex owner-exit recovery");
-            if (lock.owner != id) return error(Perm);
             for (const auto& [waiter, binding] : conditionWaits)
-                if (binding.conditionToken == state.token && binding.mutexToken != mutexToken) return error(Invalid);
-            conditionWaits.emplace(id, ConditionWait{slot, state.token, arg, mutexToken, lock.depth, 0,
-                deadline, timeoutResult});
+                if (!binding.transferred && binding.conditionToken == state.token && binding.mutexToken != lock.token)
+                    return error(Invalid);
+            // An absolute deadline is measured on the condition's own clock.
+            if (deadline && !deadline->relative) deadline->clock = state.clock;
+            conditionWaits.emplace(id, ConditionWait{state.token, lock.token, lock.depth, 0, deadline, timeoutResult});
             try { state.waiters.push_back(id); }
             catch (...) { conditionWaits.erase(id); throw; }
             ++state.users;
@@ -374,17 +471,23 @@ struct KernelPrimitives::Impl {
         }
         return 0;
     }
-    std::uint32_t invoke(unsigned op, std::uint64_t slot, std::uint64_t arg, std::uint64_t label) {
+    // Mutex ops: 0 init, 1 trylock, 2 unlock, 3 destroy, 4 attr init, 5 settype,
+    // 6 attr destroy, 7 setprotocol, 8 lock, 9 timed lock.
+    std::uint32_t invoke(unsigned op, std::uint64_t slot, std::uint64_t arg, std::uint64_t label,
+                         std::optional<Deadline> deadline = {}) {
         if (op == 4) {
             span(machine, slot, Permission::Write);
-            if (attributes.contains(slot)) return error(Busy);
-            auto token = nextToken.fetch_add(1);
-            attributes.emplace(slot, Attribute{token}); write(machine, slot, token); return 0;
+            const auto old = read(machine, slot);
+            const auto token = nextToken.fetch_add(1);
+            attributes.emplace(token, Attribute{slot});
+            try { write(machine, slot, token); }
+            catch (...) { attributes.erase(token); throw; }
+            retireAttribute(attributes, slot, old);
+            return 0;
         }
         if (op == 5 || op == 6 || op == 7) {
-            const auto token = read(machine, slot);
-            auto attr = attributes.find(slot);
-            if (attr == attributes.end() || attr->second.token != token) return error(Invalid);
+            const auto attr = attributes.find(read(machine, slot));
+            if (attr == attributes.end()) return error(Invalid);
             if (op == 5) {
                 const auto type = static_cast<std::uint32_t>(arg);
                 if (type < 1 || type > 4) return error(Invalid);
@@ -403,52 +506,47 @@ struct KernelPrimitives::Impl {
         }
         if (op == 0) {
             span(machine, slot, Permission::Write);
-            if (mutexes.contains(slot)) return error(Busy);
             unsigned type = 1, protocol = 0;
             if (arg) {
-                const auto token = read(machine, arg); auto attr = attributes.find(arg);
-                if (token) {
-                    if (attr == attributes.end() || attr->second.token != token) return error(Invalid);
-                    type = attr->second.type;
-                    protocol = attr->second.protocol;
-                }
+                // A non-null attribute must name a live attribute; zero,
+                // destroyed and forged values are EINVAL, never the default.
+                const auto attr = attributes.find(read(machine, arg));
+                if (attr == attributes.end()) return error(Invalid);
+                type = attr->second.type;
+                protocol = attr->second.protocol;
             }
             name(machine, label);
-            auto token = nextToken.fetch_add(1);
-            const auto created = mutexes.emplace(slot, Mutex{token, type, protocol, 0, 0, false, {}}).first;
+            const auto old = read(machine, slot);
+            const auto token = nextToken.fetch_add(1);
+            mutexes.emplace(token, Mutex{token, slot, type, protocol, 0, 0, {}, 0});
             try { write(machine, slot, token); }
-            catch (...) { mutexes.erase(created); throw; }
-            destroyedMutexSlots.erase(slot);
+            catch (...) { mutexes.erase(token); throw; }
+            retireMutex(slot, old);
             return 0;
         }
         const auto token = read(machine, slot);
-        auto mutex = mutexes.find(slot);
-        // A live slot overwritten with a static value must not create a second
-        // identity or pass static destroy/unlock shortcuts. Destroyed identities
-        // require explicit Init, even if the guest overwrites the sentinel.
-        if (mutex != mutexes.end() && mutex->second.token != token) return error(Invalid);
-        if (destroyedMutexSlots.contains(slot)) return error(Invalid);
-        if (op == 3 && token < 2) return 0; // Upstream static initializer destroy preserves the slot.
-        if (token == 2) return error(Invalid);
-        if (op == 2 && token < 2) return error(Perm);
-        if (token < 2 && (op == 1 || op == 8)) {
+        if (token == mutexDestroyed) return error(Invalid);
+        std::map<std::uint64_t, Mutex>::iterator mutex;
+        if (token < mutexDestroyed) {
+            // Static initializers 0 (default) and 1 (adaptive): destroy keeps the
+            // slot, unlock has no owner, acquisition lazily initializes.
+            if (op == 3) return 0;
+            if (op == 2) return error(Perm);
             thread(); // Validate scheduler identity before publishing a lazy initializer.
             span(machine, slot, Permission::Write);
-            auto created = nextToken.fetch_add(1);
-            mutex = mutexes.emplace(slot, Mutex{created, token == 1 ? 4u : 1u, 0, 0, 0, false, {}}).first;
+            const auto created = nextToken.fetch_add(1);
+            mutex = mutexes.emplace(created, Mutex{created, slot, token == 1 ? 4u : 1u, 0, 0, 0, {}, 0}).first;
             try { write(machine, slot, created); }
             catch (...) { mutexes.erase(mutex); throw; }
-        } else if (mutex == mutexes.end() || mutex->second.token != token) return error(Invalid);
+        } else {
+            mutex = mutexes.find(token);
+            if (mutex == mutexes.end()) return error(Invalid);
+        }
         auto& state = mutex->second;
-        if (state.abandoned)
-            throw std::runtime_error("Unsupported nonrobust kernel mutex owner-exit recovery");
         if (op == 3) {
             if (state.owner || !state.waiters.empty() || state.conditionUsers) return error(Busy);
             span(machine, slot, Permission::Write);
-            const auto [destroyed, inserted] = destroyedMutexSlots.insert(slot);
-            try { write(machine, slot, 2); }
-            catch (...) { if (inserted) destroyedMutexSlots.erase(destroyed); throw; }
-            if (state.protocol == 1) waits->SetInheritanceOwner(state.token, 0);
+            write(machine, slot, mutexDestroyed);
             mutexes.erase(mutex); return 0;
         }
         const auto id = thread();
@@ -464,12 +562,16 @@ struct KernelPrimitives::Impl {
             }
             if (op == 1) return error(Busy);
             if (state.owner == id && (state.type == 1 || state.type == 4)) return error(Deadlock);
+            if (deadline) { Clocks now; if (deadline->Expired(now)) return error(TimedOut); }
             if (!waits)
                 throw std::runtime_error("Unsupported contended kernel mutex lock: guest wait/wake scheduler integration required");
             state.waiters.push_back(id);
-            try { waits->BlockFromHostCall(state.token); }
-            catch (...) { state.waiters.pop_back(); throw; }
-            return 0; // Suspended call is completed by the scheduler only after wake.
+            try {
+                if (deadline) mutexWaits.insert_or_assign(id, MutexWait{state.token, *deadline, error(TimedOut)});
+                waits->BlockFromHostCall(state.token);
+            }
+            catch (...) { state.waiters.pop_back(); mutexWaits.erase(id); throw; }
+            return 0; // Suspended call is completed by the scheduler only after wake or expiry.
         }
         state.owner = id; state.depth = 1;
         if (state.protocol == 1) waits->SetInheritanceOwner(state.token, id);
@@ -498,8 +600,7 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
     unsigned op = 0;
     for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
     if (op == inventory.size()) return std::nullopt;
-    const bool posix = op >= 16 && op != timeoutBegin + 1;
-    if ((import.LibraryName != "libkernel" && !(posix && import.LibraryName == "libScePosix")) ||
+    if ((import.LibraryName != "libkernel" && !(posixRow(op) && import.LibraryName == "libScePosix")) ||
         import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
         import.ModuleMajor != 1 || import.ModuleMinor != 1 || type != 2)
         throw std::runtime_error("Unsupported kernel primitive scope/version/type: " + import.Nid);
@@ -510,34 +611,38 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
     constexpr std::array ret{std::byte{0xc3}}; impl->machine.Write(gate, ret);
     impl->machine.AddHostCall(gate, [weak = std::weak_ptr<Impl>(impl), op](Machine& m) {
         auto state = weak.lock(); if (!state) throw std::runtime_error("Kernel primitive provider expired");
+        const auto rdi = m.Get(Register::Rdi), rsi = m.Get(Register::Rsi), rdx = m.Get(Register::Rdx);
         std::uint32_t result;
-        if (op >= timeoutBegin) {
-            std::optional<Deadline> deadline;
-            if (op == timeoutBegin) {
-                const auto pointer = m.Get(Register::Rdx);
-                if (!pointer) {
-                    m.Set(Register::Rax, static_cast<std::uint32_t>(Invalid));
-                    return;
-                }
-                if (pointer > std::numeric_limits<std::uint64_t>::max() - 16)
-                    throw std::runtime_error("Invalid kernel condition timespec span");
-                m.CheckAccess(pointer, 16, Permission::Read);
-                std::array<std::int64_t, 2> time;
-                m.Read(pointer, std::as_writable_bytes(std::span(time)));
-                if (time[1] < 0 || time[1] >= 1000000000) {
-                    m.Set(Register::Rax, static_cast<std::uint32_t>(Invalid));
-                    return;
-                }
-                deadline = Deadline{{}, time[0], time[1]};
-            } else deadline = relativeDeadline(static_cast<std::uint32_t>(m.Get(Register::Rdx)));
-            result = state->conditionInvoke(2, m.Get(Register::Rdi), m.Get(Register::Rsi), 0,
-                deadline, op == timeoutBegin ? static_cast<std::uint32_t>(TimedOut) : error(TimedOut));
-        } else result = op < mutexCount || op >= conditionEnd
-            ? state->invoke(op < mutexCount ? op : (op == conditionEnd ? 8 : 2),
-                m.Get(Register::Rdi), m.Get(Register::Rsi), m.Get(Register::Rdx))
-            : state->conditionInvoke(op < 16 ? op - mutexCount : op - 16,
-                m.Get(Register::Rdi), m.Get(Register::Rsi), op < 16 ? m.Get(Register::Rdx) : 0);
-        if (op >= 16 && op != timeoutBegin + 1 && result >= 0x80020000u) result -= 0x80020000u;
+        if (op == timeoutBegin) {
+            if (!rdx) {
+                m.Set(Register::Rax, static_cast<std::uint32_t>(Invalid));
+                return;
+            }
+            if (rdx > std::numeric_limits<std::uint64_t>::max() - 16)
+                throw std::runtime_error("Invalid kernel condition timespec span");
+            m.CheckAccess(rdx, 16, Permission::Read);
+            std::array<std::int64_t, 2> time;
+            m.Read(rdx, std::as_writable_bytes(std::span(time)));
+            if (time[1] < 0 || time[1] >= 1000000000) {
+                m.Set(Register::Rax, static_cast<std::uint32_t>(Invalid));
+                return;
+            }
+            // The condition's clock is applied once the condition is resolved.
+            result = state->conditionInvoke(2, rdi, rsi, 0, Deadline{{}, time[0], time[1]},
+                                            static_cast<std::uint32_t>(TimedOut));
+        } else if (op == timeoutBegin + 1) {
+            result = state->conditionInvoke(2, rdi, rsi, 0, relativeDeadline(static_cast<std::uint32_t>(rdx)),
+                                            error(TimedOut));
+        } else if (op == mutexTimedlock) {
+            result = state->invoke(9, rdi, 0, 0, relativeDeadline(static_cast<std::uint32_t>(rsi)));
+        } else if (op == conditionSetclock || op == posixConditionSetclock) {
+            result = state->conditionInvoke(7, rdi, rsi, 0);
+        } else if (mutexRow(op)) {
+            result = state->invoke(op < mutexCount ? op : (op == conditionEnd ? 8 : 2), rdi, rsi, rdx);
+        } else {
+            result = state->conditionInvoke(op < 16 ? op - mutexCount : op - 16, rdi, rsi, op < 16 ? rdx : 0);
+        }
+        if (posixRow(op) && result >= 0x80020000u) result -= 0x80020000u;
         m.Set(Register::Rax, result);
     });
     impl->gates.emplace(key, gate); return gate;
@@ -548,19 +653,16 @@ TargetKernelMutexes::TargetKernelMutexes(Machine& machine, const std::shared_ptr
 std::optional<std::uint64_t> TargetKernelMutexes::Resolve(const SceImport& import, std::uint8_t type) {
     unsigned op = 0;
     for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
-    if (op == inventory.size() || (op >= mutexCount && op < conditionEnd) || op >= timeoutBegin) return std::nullopt;
+    if (op == inventory.size() || !mutexRow(op)) return std::nullopt;
     // The provider validates libkernel/libScePosix scope, version and symbol type
     // for every importing image; consumer identity is not an admission input.
     return provider.Resolve(import, type);
 }
 std::optional<std::uint64_t> TargetKernelMutexes::ResolveCondition(const SceImport& import, std::uint8_t type,
                                                                  std::uint64_t size) {
-    unsigned op = mutexCount;
-    for (; op < conditionEnd; ++op) if (inventory[op].Nid == import.Nid) break;
-    if (op == conditionEnd) {
-        for (op = timeoutBegin; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
-        if (op == inventory.size()) return std::nullopt;
-    }
+    unsigned op = 0;
+    for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
+    if (op == inventory.size() || mutexRow(op)) return std::nullopt;
     if (size || type != 2)
         throw std::runtime_error("Unsupported target kernel condition symbol type/size: " + import.Nid);
     return provider.Resolve(import, type);
