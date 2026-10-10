@@ -6,6 +6,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -14,7 +15,7 @@
 
 namespace Cpu {
 namespace {
-constexpr std::size_t MaximumTransfer = 16 * 1024 * 1024;
+constexpr std::uint64_t TransferChunk = 16 * 1024 * 1024;
 constexpr std::size_t MaximumString = 1024 * 1024;
 enum class Service { Copy, Move, Set, Length, Compare, Exit };
 
@@ -57,18 +58,33 @@ void invoke(Machine& machine, Service service, const std::function<void(int)>& p
         return;
     }
     const auto length = machine.Get(Register::Rdx);
-    if (length > MaximumTransfer) throw std::runtime_error("SCE libc memory transfer exceeds the supported 16 MiB bound");
     if (length != 0) {
+        // Both ranges are checked before the first byte moves, so a fault changes nothing.
         machine.CheckAccess(first, length, Permission::Write);
-        std::vector<std::byte> destination(length);
-        if (service == Service::Set) std::memset(destination.data(), static_cast<unsigned char>(second), destination.size());
-        else {
-            std::vector<std::byte> source(length);
-            machine.Read(second, source);
-            if (service == Service::Copy) std::memcpy(destination.data(), source.data(), source.size());
-            else std::memmove(destination.data(), source.data(), source.size());
+        if (service != Service::Set) machine.CheckAccess(second, length, Permission::Read);
+        // Any length moves through one bounded host buffer. Each chunk is read before it is
+        // written; copying backwards when the destination starts inside the source keeps
+        // overlapping memmove (and memcpy, which shares it) exact.
+        std::vector<std::byte> buffer(static_cast<std::size_t>(std::min<std::uint64_t>(length, TransferChunk)));
+        if (service == Service::Set) {
+            std::fill(buffer.begin(), buffer.end(), static_cast<std::byte>(second & 255));
+            for (std::uint64_t offset = 0; offset < length; offset += buffer.size())
+                machine.Write(first + offset, std::span(buffer).first(static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(), length - offset))));
+        } else if (first > second && first - second < length) {
+            for (std::uint64_t end = length; end;) {
+                const auto size = static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(), end));
+                end -= size;
+                machine.Read(second + end, std::span(buffer).first(size));
+                machine.Write(first + end, std::span(buffer).first(size));
+            }
+        } else {
+            for (std::uint64_t offset = 0; offset < length;) {
+                const auto size = static_cast<std::size_t>(std::min<std::uint64_t>(buffer.size(), length - offset));
+                machine.Read(second + offset, std::span(buffer).first(size));
+                machine.Write(first + offset, std::span(buffer).first(size));
+                offset += size;
+            }
         }
-        machine.Write(first, destination);
     }
     machine.Set(Register::Rax, first);
 }
