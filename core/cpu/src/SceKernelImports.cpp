@@ -23,10 +23,11 @@ enum class Service { Open, Read, Pread, Lseek, Close, TlsAddress, ReadTsc, TscFr
 // the prx side reports "no sanitizer installed"; libc then keeps its own allocator and
 // operator new/delete. The storage is writable because the getter hands out the caller's
 // registration table, exactly like the static object in libkernel System/src/Sanitizer.cpp.
-constexpr std::uint64_t MallocReplaceBytes = 120;  // uint64 size + 14 entry points
-constexpr std::uint64_t NewReplaceBytes = 104;     // uint64 size + 12 entry points
-constexpr std::uint64_t NewReplaceOffset = 0x80;   // 8-byte aligned after MallocReplace
-constexpr std::uint64_t ReplacementOffset = 0x1000; // one page past the gate page
+// MallocReplace is uint64 size + 13 entry points, NewReplace is uint64 size + 12.
+constexpr std::uint64_t MallocReplaceBytes = 112;
+constexpr std::uint64_t NewReplaceBytes = 104;
+constexpr std::uint64_t NewReplaceOffset = MallocReplaceBytes;   // 8-byte aligned after it
+constexpr std::uint64_t ReplacementOffset = 0x1000;              // one page past the gate page
 
 std::string identity(const SceImport& import) {
     return import.Nid + " library=" + import.LibraryName + ":" + std::to_string(import.LibraryVersion) +

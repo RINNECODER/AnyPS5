@@ -1,9 +1,11 @@
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/SceElf.hpp>
 #include <cpu/SceTls.hpp>
+#include <SceTypes.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -86,6 +88,8 @@ struct Session {
         machine.Write(0x1000, std::as_bytes(std::span(program)));
         constexpr std::array<std::uint8_t, 3> dereference{0x48, 0x8b, 0x00};
         machine.Write(0x1020, std::as_bytes(std::span(dereference)));
+        constexpr std::array<std::uint8_t, 3> store{0x48, 0x89, 0x10};
+        machine.Write(0x1030, std::as_bytes(std::span(store)));
         const std::string path = "/app0/data.bin";
         machine.Write(0x3000, std::as_bytes(std::span(path.c_str(), path.size() + 1)));
     }
@@ -238,6 +242,10 @@ void tscGates() {
 }
 
 void sanitizerGates() {
+    // The CPU runtime's tables must carry the size the prx ABI structure actually has.
+    static_assert(sizeof(void*) == 8);
+    static_assert(sizeof(MallocReplace) == 112 && sizeof(NewReplace) == 104);
+    static_assert(offsetof(MallocReplace, malloc) == 24 && offsetof(NewReplace, new_p) == 8);
     Session session;
     // libc.prx of the reference title imports sceKernelGetSanitizerNewReplaceExternal while its
     // dependencies initialise, so an unregistered libkernel sanitizer NID stops the whole title in
@@ -247,6 +255,8 @@ void sanitizerGates() {
     const auto newTable = session.call("bnZxYgAFeA0", 0);
     require(mallocTable && newTable && mallocTable != newTable,
             "Sanitizer replacement getters did not return distinct guest tables");
+    require(newTable - mallocTable == sizeof(MallocReplace),
+            "Sanitizer replacement tables are not laid out at the mirrored structure boundaries");
     require(mallocTable == session.call("py6L8jiVAN8", 0) && newTable == session.call("bnZxYgAFeA0", 0),
             "Sanitizer replacement tables changed identity between calls");
     const auto words = [&](std::uint64_t address, std::size_t count) {
@@ -254,11 +264,20 @@ void sanitizerGates() {
         session.machine.Read(address, std::as_writable_bytes(std::span(values)));
         return values;
     };
+    // A real guest store through the returned pointer, not a host-side write: the getter hands
+    // out the caller's registration table, so the page must be guest-writable (review finding).
+    const auto storeWord = [&](std::uint64_t address, std::uint64_t value) {
+        session.machine.Set(Register::Rsp, 0x4ff0);
+        session.machine.Set(Register::Rax, address);
+        session.machine.Set(Register::Rdx, value);
+        require(session.machine.Run(0x1030, 0x1033, 10) == Cpu::StopReason::Address,
+                "Actual x86 guest store through the sanitizer replacement table did not reach its stop");
+    };
     // MallocReplace and NewReplace start with their own size, then only null entry points, which
     // is how the prx side reports "no sanitizer installed" so libc keeps its allocator.
-    const auto malloc = words(mallocTable, 15);
-    const auto replacement = words(newTable, 13);
-    require(malloc.front() == 120 && replacement.front() == 104,
+    const auto malloc = words(mallocTable, sizeof(MallocReplace) / 8);
+    const auto replacement = words(newTable, sizeof(NewReplace) / 8);
+    require(malloc.front() == sizeof(MallocReplace) && replacement.front() == sizeof(NewReplace),
             "Sanitizer replacement tables lost their own size field");
     require(std::all_of(malloc.begin() + 1, malloc.end(), [](std::uint64_t value) { return value == 0; }) &&
             std::all_of(replacement.begin() + 1, replacement.end(), [](std::uint64_t value) { return value == 0; }),
@@ -266,17 +285,20 @@ void sanitizerGates() {
     // The size field must be readable by real guest x86 through the returned pointer.
     session.callGate(session.imports->Resolve(import("py6L8jiVAN8")), 0);
     require(session.machine.Run(0x1020, 0x1023, 10) == Cpu::StopReason::Address &&
-            session.machine.Get(Register::Rax) == 120,
+            session.machine.Get(Register::Rax) == sizeof(MallocReplace),
             "Actual x86 caller could not dereference the returned malloc replacement size");
-    // The getter hands out the caller's registration table, matching the mutable static in
-    // libkernel System/src/Sanitizer.cpp, but that data must never be executable gate storage.
+    // Registration data is writable guest storage, never executable gate storage.
+    session.machine.CheckAccess(mallocTable, sizeof(MallocReplace), rw);
+    session.machine.CheckAccess(newTable, sizeof(NewReplace), rw);
     rejects([&] { session.machine.CheckAccess(mallocTable, 1, Permission::Execute); }, "permission");
     rejects([&] { session.machine.CheckAccess(newTable, 1, Permission::Execute); }, "permission");
-    constexpr std::uint64_t hook = 0x1000;
-    session.machine.Write(mallocTable + 8, std::as_bytes(std::span(&hook, 1)));
-    require(words(mallocTable, 2)[1] == hook, "Sanitizer replacement table did not accept guest registration");
-    const std::array<std::uint64_t, 1> clear{0};
-    session.machine.Write(mallocTable + 8, std::as_bytes(std::span(clear)));
+    const auto hookSlot = mallocTable + offsetof(MallocReplace, malloc);
+    storeWord(hookSlot, 0x1000);
+    require(words(mallocTable, sizeof(MallocReplace) / 8)[offsetof(MallocReplace, malloc) / 8] == 0x1000,
+            "Sanitizer replacement table did not accept an actual guest registration store");
+    storeWord(hookSlot, 0);
+    require(words(mallocTable, sizeof(MallocReplace) / 8)[offsetof(MallocReplace, malloc) / 8] == 0,
+            "Sanitizer replacement registration could not be cleared by the guest");
     require(session.call("jh+8XiK4LeE", 0) == 0, "Sanitizer state changed after replacement registration");
 }
 
