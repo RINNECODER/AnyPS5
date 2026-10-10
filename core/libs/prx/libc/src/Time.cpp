@@ -17,6 +17,9 @@
 
 namespace {
 
+constexpr const char* WEEKDAY_NAMES[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+constexpr const char* MONTH_NAMES[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+constexpr std::size_t ASCTIME_SIZE = sizeof("Sun Jan-2147483648 -2147483648:-2147483648:-2147483648 -2147483648\n");
 constexpr std::int64_t SECONDS_PER_DAY = 86400;
 constexpr std::int64_t DAYS_FROM_MARCH_TO_YEAR_END = 306;
 
@@ -328,8 +331,12 @@ size_t APS5_VABI libc_strftime_nid_postfix(char* str, size_t count, const char* 
 }
 
 char* APS5_VABI asctime_nid_postfix(const GuestTm* timeptr) {
-    const std::tm host = toHostTm(*timeptr);
-    return std::asctime(&host);
+    static thread_local char result[ASCTIME_SIZE];
+    const char* weekday = timeptr->tm_wday >= 0 && timeptr->tm_wday < 7 ? WEEKDAY_NAMES[timeptr->tm_wday] : "???";
+    const char* month = timeptr->tm_mon >= 0 && timeptr->tm_mon < 12 ? MONTH_NAMES[timeptr->tm_mon] : "???";
+    std::snprintf(result, sizeof(result), "%s %s%3d %.2d:%.2d:%.2d %lld\n", weekday, month, timeptr->tm_mday,
+        timeptr->tm_hour, timeptr->tm_min, timeptr->tm_sec, 1900LL + timeptr->tm_year);
+    return result;
 }
 
 char* APS5_VABI ctime_nid_postfix(const int64_t* timer) {

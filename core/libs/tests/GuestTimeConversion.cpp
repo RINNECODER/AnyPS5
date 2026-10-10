@@ -19,6 +19,7 @@ GuestTm* APS5_VABI libc_localtime_nid_postfix(const std::int64_t*);
 GuestTm* APS5_VABI localtime_nid_postfix(const std::int64_t*);
 GuestTm* APS5_VABI gmtime_s_nid_postfix(const std::int64_t*, GuestTm*);
 GuestTm* APS5_VABI localtime_s_nid_postfix(const std::int64_t*, GuestTm*);
+char* APS5_VABI asctime_nid_postfix(const GuestTm*);
 std::int64_t APS5_VABI mktime_nid_postfix(GuestTm*);
 std::size_t APS5_VABI strftime_nid_postfix(char*, std::size_t, const char*, const GuestTm*);
 void APS5_VABI tzset_nid_postfix(void);
@@ -66,6 +67,17 @@ static void CheckConcurrent(Converter convert, BufferedConverter buffered, const
     Require(matches, name);
     const std::int64_t invalid = std::numeric_limits<std::int64_t>::max();
     Require(convert(&invalid) == nullptr, "Unrepresentable time was accepted");
+}
+
+static GuestTm UtcTime(std::int64_t timer) {
+    GuestTm utc{};
+    Require(gmtime_s_nid_postfix(&timer, &utc) == &utc, "UTC conversion failed");
+    return utc;
+}
+
+static void CheckAsctime(const GuestTm& brokenDown, const char* expected) {
+    const char* text = asctime_nid_postfix(&brokenDown);
+    Require(text != nullptr && std::strcmp(text, expected) == 0, "asctime did not format the broken-down time");
 }
 
 struct UtcCase {
@@ -201,6 +213,14 @@ int main() {
     const std::int64_t underflow = std::numeric_limits<std::int64_t>::min();
     GuestTm scratch{};
     Require(gmtime_s_nid_postfix(&underflow, &scratch) == nullptr, "Unrepresentable negative time was accepted");
+
+    CheckAsctime(UtcTime(0), "Thu Jan  1 00:00:00 1970\n");
+    CheckAsctime(UtcTime(-2208988801), "Sun Dec 31 23:59:59 1899\n");
+    CheckAsctime(UtcTime(-30610224000), "Wed Jan  1 00:00:00 1000\n");
+    GuestTm pastMonthEnd = UtcTime(983404800);
+    pastMonthEnd.tm_mon = 1;
+    pastMonthEnd.tm_mday = 29;
+    CheckAsctime(pastMonthEnd, "Thu Feb 29 00:00:00 2001\n");
 
     const std::int64_t epoch = 0;
     GuestTm local{};
