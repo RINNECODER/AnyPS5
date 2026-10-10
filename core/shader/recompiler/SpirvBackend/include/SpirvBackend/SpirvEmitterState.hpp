@@ -124,6 +124,10 @@ struct SpirvEmitterState {
     std::uint32_t bdaNoteWriteFunction = 0;
     std::array<std::uint32_t, 2> bdaByteWriteFunctions {};
     std::uint32_t bdaFaultFunction = 0;
+    std::uint32_t bdaCacheBegin = 0;
+    std::uint32_t bdaCacheEnd = 0;
+    std::uint32_t bdaCacheBase = 0;
+    std::uint32_t bdaCachePermissions = 0;
     bool nativeF16ModesEmitted = false;
     bool f16DenormPreserveEmitted = false;
     std::uint32_t dot2F32F16Function = 0;
