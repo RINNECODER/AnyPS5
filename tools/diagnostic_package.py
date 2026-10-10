@@ -36,9 +36,40 @@ MANDATORY_FILES = (
     "bin/anyps5_guest_thread_tests", "fixtures/thread-main.elf", "fixtures/ThreadGuest.prx",
 )
 
+# Names every compiled claim that disagrees with the checked-in contract.
+def capability_mismatches(value, expected):
+    """Name every compiled claim that disagrees with the checked-in contract.
+
+    The release gate used to say only "contract mismatch", so a stale claim (the WebAPI2 constraint
+    text drifted when the offline providers landed) meant reproducing the whole package step to find
+    one string.
+    """
+    diffs = []
+    for key, wanted in expected.items():
+        if key not in value:
+            diffs.append(f"{key}=absent")
+            continue
+        got = value[key]
+        if type(got) is not type(wanted):
+            diffs.append(f"{key}=wrong type")
+        elif isinstance(wanted, dict):
+            for inner, inner_wanted in wanted.items():
+                if inner not in got:
+                    diffs.append(f"{key}.{inner}=absent")
+                elif got[inner] != inner_wanted:
+                    diffs.append(f"{key}.{inner}={got[inner]!r}")
+            for inner in got:
+                if inner not in wanted:
+                    diffs.append(f"{key}.{inner}=unexpected")
+        elif got != wanted:
+            diffs.append(f"{key}={got!r}")
+    return diffs
+
+
 # PR85's compiled production contract, probed without limit flags: game runs are
 # unbounded (0). Route claims mean this qualified provider subset is assembled by
-# Main; they do not certify a title's imports.
+# Main; they do not certify a title's imports. Each textual claim here must appear
+# verbatim in core/cpu/src/Main.cpp, which the tools suite checks.
 NATIVE_RUNNER_CONTRACT = {
     "enabled": True,
     "owned_memory": "live staged CPU/Metal publication",
@@ -46,7 +77,7 @@ NATIVE_RUNNER_CONTRACT = {
     "utility_metallib": "../fixtures/AnyPS5Utilities.metallib relative to engine",
     "wall_limit_ms": 0,
     "idle_limit_ms": 0,
-    "constraints": "unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence",
+    "constraints": "unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; offline NP/WebAPI providers only; no retail gameplay evidence",
 }
 PLATFORM_CASES = (
     ("kernel", "kernel-guest.bin"), ("content", "content-guest.bin"),
@@ -210,8 +241,10 @@ def prepare_package(source, build, gpu_source, destination, revisions, run, prof
                     "supported_instruction_families": ["AVX", "AVX2", "F16C", "FMA"],
                     "runtime_abis": ["linux_sysv", "sce_sysv"], "sce_module_argument": "--sce-module",
                     "resource_root_argument": "--resource-root"}
-        require(all(key in value and value[key] == wanted and type(value[key]) is type(wanted)
-                    for key, wanted in expected.items()), "Compiled native runner capability contract mismatch")
+        mismatches = capability_mismatches(value, expected)
+        detail = ": " + ", ".join(mismatches) if mismatches else ""
+        require(not mismatches,
+            "Compiled native runner capability contract mismatch" + detail)
         # Python equates bools with ints, so independently constrain the bound
         # fields and enabled bit before trusting a JSON contract comparison.
         contract = value["native_module_runner"]

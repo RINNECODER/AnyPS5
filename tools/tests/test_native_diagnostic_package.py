@@ -166,7 +166,7 @@ CAPABILITIES = {
         'provider_selection': 'actual parsed consumer SHA-256, size, scope and ELF symbol',
         'utility_metallib': '../fixtures/AnyPS5Utilities.metallib relative to engine',
         'wall_limit_ms': 0, 'idle_limit_ms': 0,
-        'constraints': 'unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence',
+        'constraints': 'unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; offline NP/WebAPI providers only; no retail gameplay evidence',
     },
 }
 
@@ -346,6 +346,35 @@ class NativeCompiledPackaging(PackageFixture):
                     self.assertFalse(list(self.root.glob('.diagnostic-package-*')))
                 finally:
                     target.write_bytes(original)
+
+
+class ContractDriftControls(unittest.TestCase):
+    """The release contract is a copy of a compiled claim, so it must be checked against the source."""
+
+    def test_contract_claims_are_the_compiled_claims(self):
+        source = (Path(__file__).resolve().parents[2] / 'core' / 'cpu' / 'src' / 'Main.cpp').read_text()
+        checked = 0
+        for key, value in package.NATIVE_RUNNER_CONTRACT.items():
+            if not isinstance(value, str):
+                continue
+            checked += 1
+            self.assertIn(value, source, 'stale release contract claim: ' + key)
+        self.assertGreaterEqual(checked, 4, 'contract lost its textual capability claims')
+
+    def test_capability_mismatch_names_the_offending_claim(self):
+        stale = dict(package.NATIVE_RUNNER_CONTRACT, constraints='no WebAPI2 provider')
+        expected = {'native_module_runner': package.NATIVE_RUNNER_CONTRACT}
+        self.assertEqual(package.capability_mismatches({'native_module_runner': stale}, expected),
+                         ["native_module_runner.constraints='no WebAPI2 provider'"])
+        extra = dict(stale, extra='x')
+        self.assertEqual(package.capability_mismatches({'native_module_runner': extra}, expected)[1],
+                         'native_module_runner.extra=unexpected')
+        self.assertEqual(package.capability_mismatches({'native_module_runner': {}}, expected)[0],
+                         'native_module_runner.enabled=absent')
+        self.assertEqual(package.capability_mismatches({'a': 1}, {'a': True}), ['a=wrong type'])
+        self.assertEqual(package.capability_mismatches({'a': 1, 'b': 2}, {'a': 1, 'b': 3}), ['b=2'])
+        self.assertEqual(package.capability_mismatches(
+            {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT)}, expected), [])
 
 
 if __name__ == '__main__':
