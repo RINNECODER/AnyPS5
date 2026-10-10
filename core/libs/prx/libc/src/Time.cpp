@@ -254,11 +254,12 @@ int64_t APS5_VABI _Xtime_get_ticks_nid_postfix() {
 }
 
 double APS5_VABI libc_difftime_nid_postfix(int64_t time1, int64_t time0) {
-    return std::difftime(static_cast<std::time_t>(time1), static_cast<std::time_t>(time0));
+    if (time1 >= time0) return static_cast<double>(static_cast<uint64_t>(time1) - static_cast<uint64_t>(time0));
+    return -static_cast<double>(static_cast<uint64_t>(time0) - static_cast<uint64_t>(time1));
 }
 
 double APS5_VABI difftime_nid_postfix(int64_t time1, int64_t time0) {
-    return std::difftime(static_cast<std::time_t>(time1), static_cast<std::time_t>(time0));
+    return libc_difftime_nid_postfix(time1, time0);
 }
 
 GuestTm* APS5_VABI libc_gmtime_nid_postfix(const int64_t* timer) {
