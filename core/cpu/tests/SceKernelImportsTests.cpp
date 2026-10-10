@@ -237,15 +237,59 @@ void tscGates() {
 #endif
 }
 
+void sanitizerGates() {
+    Session session;
+    // libc.prx of the reference title imports sceKernelGetSanitizerNewReplaceExternal while its
+    // dependencies initialise, so an unregistered libkernel sanitizer NID stops the whole title in
+    // dependency init. These NIDs are the SHA1 form of the names (tools/nid_names.py).
+    require(session.call("jh+8XiK4LeE", 0) == 0, "sceKernelIsAddressSanitizerEnabled claimed an active sanitizer");
+    const auto mallocTable = session.call("py6L8jiVAN8", 0);
+    const auto newTable = session.call("bnZxYgAFeA0", 0);
+    require(mallocTable && newTable && mallocTable != newTable,
+            "Sanitizer replacement getters did not return distinct guest tables");
+    require(mallocTable == session.call("py6L8jiVAN8", 0) && newTable == session.call("bnZxYgAFeA0", 0),
+            "Sanitizer replacement tables changed identity between calls");
+    const auto words = [&](std::uint64_t address, std::size_t count) {
+        std::vector<std::uint64_t> values(count);
+        session.machine.Read(address, std::as_writable_bytes(std::span(values)));
+        return values;
+    };
+    // MallocReplace and NewReplace start with their own size, then only null entry points, which
+    // is how the prx side reports "no sanitizer installed" so libc keeps its allocator.
+    const auto malloc = words(mallocTable, 15);
+    const auto replacement = words(newTable, 13);
+    require(malloc.front() == 120 && replacement.front() == 104,
+            "Sanitizer replacement tables lost their own size field");
+    require(std::all_of(malloc.begin() + 1, malloc.end(), [](std::uint64_t value) { return value == 0; }) &&
+            std::all_of(replacement.begin() + 1, replacement.end(), [](std::uint64_t value) { return value == 0; }),
+            "Sanitizer replacement tables published non-null hook entry points");
+    // The size field must be readable by real guest x86 through the returned pointer.
+    session.callGate(session.imports->Resolve(import("py6L8jiVAN8")), 0);
+    require(session.machine.Run(0x1020, 0x1023, 10) == Cpu::StopReason::Address &&
+            session.machine.Get(Register::Rax) == 120,
+            "Actual x86 caller could not dereference the returned malloc replacement size");
+    // The getter hands out the caller's registration table, matching the mutable static in
+    // libkernel System/src/Sanitizer.cpp, but that data must never be executable gate storage.
+    rejects([&] { session.machine.CheckAccess(mallocTable, 1, Permission::Execute); }, "permission");
+    rejects([&] { session.machine.CheckAccess(newTable, 1, Permission::Execute); }, "permission");
+    constexpr std::uint64_t hook = 0x1000;
+    session.machine.Write(mallocTable + 8, std::as_bytes(std::span(&hook, 1)));
+    require(words(mallocTable, 2)[1] == hook, "Sanitizer replacement table did not accept guest registration");
+    const std::array<std::uint64_t, 1> clear{0};
+    session.machine.Write(mallocTable + 8, std::as_bytes(std::span(clear)));
+    require(session.call("jh+8XiK4LeE", 0) == 0, "Sanitizer state changed after replacement registration");
+}
+
 int main() {
     try {
         fileGates();
         scopedGates();
         tlsGate();
+        sanitizerGates();
 #if ANYPS5_CPU_MODERN_TCG
         tscGates();
 #endif
-        std::cout << "PASS scoped kernel NID gates, actual x86 SysV file calls, signed errors and TLS pointer dereferences\n";
+        std::cout << "PASS scoped kernel NID gates, actual x86 SysV file calls, signed errors, TLS and sanitizer replacement tables\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';

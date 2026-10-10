@@ -14,7 +14,19 @@
 namespace Cpu {
 namespace {
 
-enum class Service { Open, Read, Pread, Lseek, Close, TlsAddress, ReadTsc, TscFrequency };
+enum class Service { Open, Read, Pread, Lseek, Close, TlsAddress, ReadTsc, TscFrequency,
+                     SanitizerDisabled, MallocReplace, NewReplace };
+
+// Guest-visible sanitizer replacement tables, mirroring the prx ABI structures in
+// core/libs/SceTypes.hpp (MallocReplace, NewReplace): one leading uint64 size field
+// followed by the replacement entry points. All entry points stay null, which is how
+// the prx side reports "no sanitizer installed"; libc then keeps its own allocator and
+// operator new/delete. The storage is writable because the getter hands out the caller's
+// registration table, exactly like the static object in libkernel System/src/Sanitizer.cpp.
+constexpr std::uint64_t MallocReplaceBytes = 120;  // uint64 size + 14 entry points
+constexpr std::uint64_t NewReplaceBytes = 104;     // uint64 size + 12 entry points
+constexpr std::uint64_t NewReplaceOffset = 0x80;   // 8-byte aligned after MallocReplace
+constexpr std::uint64_t ReplacementOffset = 0x1000; // one page past the gate page
 
 std::string identity(const SceImport& import) {
     return import.Nid + " library=" + import.LibraryName + ":" + std::to_string(import.LibraryVersion) +
@@ -36,6 +48,7 @@ struct SceKernelImports::Impl {
     GuestFiles files;
     std::shared_ptr<SceTls> tls;
     std::uint64_t base;
+    std::uint64_t replacements = 0;
     std::size_t nextSlot = 0;
     std::map<std::string, Service> services;
     std::map<Key, std::uint64_t> gates;
@@ -44,10 +57,13 @@ struct SceKernelImports::Impl {
         machine(guest), files(guest, resourceRoot), base(gateBase) {
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("SCE kernel import gates require a nonzero aligned low canonical guest page");
-        for (const auto& [name, service] : std::array<std::pair<const char*, Service>, 6>{{
+        for (const auto& [name, service] : std::array<std::pair<const char*, Service>, 9>{{
                  {"sceKernelOpen", Service::Open}, {"sceKernelRead", Service::Read},
                  {"sceKernelPread", Service::Pread}, {"sceKernelLseek", Service::Lseek},
-                 {"sceKernelClose", Service::Close}, {"__tls_get_addr", Service::TlsAddress}}})
+                 {"sceKernelClose", Service::Close}, {"__tls_get_addr", Service::TlsAddress},
+                 {"sceKernelIsAddressSanitizerEnabled", Service::SanitizerDisabled},
+                 {"sceKernelGetSanitizerMallocReplaceExternal", Service::MallocReplace},
+                 {"sceKernelGetSanitizerNewReplaceExternal", Service::NewReplace}}})
             services.emplace(Nid::ComputeNid(name, "libkernel"), service);
         // Both read the clock behind guest RDTSC, so guest-visible time agrees.
         if (Machine::TscFrequency()) {
@@ -59,6 +75,17 @@ struct SceKernelImports::Impl {
         machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
         machine.Write(base, bytes);
         machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
+        std::array<std::byte, 4096> tables{};
+        tables.fill(std::byte{});
+        const auto putSize = [&](std::uint64_t offset, std::uint64_t value) {
+            for (unsigned index = 0; index < 8; ++index)
+                tables[offset + index] = static_cast<std::byte>(value >> (8 * index));
+        };
+        putSize(0, MallocReplaceBytes);
+        putSize(NewReplaceOffset, NewReplaceBytes);
+        replacements = base + ReplacementOffset;
+        machine.Map(replacements, tables.size(), Permission::Read | Permission::Write);
+        machine.Write(replacements, std::as_bytes(std::span(tables)));
     }
 
     void invoke(Machine& guest, Service service) {
@@ -78,6 +105,9 @@ struct SceKernelImports::Impl {
             break;
         case Service::ReadTsc: result = std::bit_cast<std::int64_t>(Machine::ReadTsc()); break;
         case Service::TscFrequency: result = std::bit_cast<std::int64_t>(Machine::TscFrequency()); break;
+        case Service::SanitizerDisabled: result = 0; break;
+        case Service::MallocReplace: result = static_cast<std::int64_t>(replacements); break;
+        case Service::NewReplace: result = static_cast<std::int64_t>(replacements + NewReplaceOffset); break;
         default: throw std::runtime_error("Unsupported SCE kernel import operation");
         }
         guest.Set(Register::Rax, static_cast<std::uint64_t>(result));
