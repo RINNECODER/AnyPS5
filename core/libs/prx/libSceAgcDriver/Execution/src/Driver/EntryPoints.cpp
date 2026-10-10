@@ -57,7 +57,12 @@ void UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOut
 }
 
 void AttachWindow(const PresentationWindow& window) {
+#if defined(ANYPS5_METAL_BACKEND)
+    // The Metal backend binds the window's layer on the first present.
+    static_cast<void>(window);
+#else
     DriverDetail::Driver::Get().AttachWindow(window);
+#endif
 }
 
 void PresentClear(const PresentationWindow& window, bool opaque, void (*gpuReady)(void*), void* context) {

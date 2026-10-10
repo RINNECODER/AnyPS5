@@ -276,7 +276,8 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         const std::array<std::uint32_t, MeshDrawPushBytes / 4> words{
             draw.indexCount, draw.firstVertex, draw.firstInstance, draw.indexed ? draw.indexSize : 0u,
             static_cast<std::uint32_t>(argumentAddress), static_cast<std::uint32_t>(argumentAddress >> 32u)};
-        static_assert(MeshDrawPushOffsetBytes + MeshDrawPushBytes == Graphics::PipelinePushConstantBytes);
+        // Upstream places the mesh draw words at the end of the first push slot.
+        static_assert(MeshDrawPushOffsetBytes + MeshDrawPushBytes == Graphics::PipelinePushSlotBytes);
         std::memcpy(pushConstants.data() + MeshDrawPushOffsetBytes, words.data(), sizeof(words));
     }
     auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
