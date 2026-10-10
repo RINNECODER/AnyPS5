@@ -39,12 +39,12 @@ void run(const char* publicImage, const char* utility) {
     other.SourceSha256.fill(std::byte{0x5a});
     const auto mappingsBefore = machine.Mappings().size();
     std::vector<std::uint64_t> gates;
-    for (const auto* nid : {"188x57JYp0g", "R1Jvn8bSCW8", "Zxa0VhQVTsk", "4czppHBiriw"}) {
+    for (const auto* nid : {"188x57JYp0g", "R1Jvn8bSCW8", "Zxa0VhQVTsk", "4czppHBiriw", "12wOHk8ywb0", "4DM06U2BNEY"}) {
         const auto import = semaphore(nid);
         const auto accepted = runner.Resolve(actual, import, 2, 0);
         require(accepted && accepted->Address && accepted->Type == 2 && accepted->Size == 0,
                 "Semaphore import from the parsed public image failed native routing");
-        for (const auto gate : gates) require(gate != accepted->Address, "Four contracts reused one callable gate");
+        for (const auto gate : gates) require(gate != accepted->Address, "Two semaphore contracts reused one callable gate");
         gates.push_back(accepted->Address);
         const auto repeated = runner.Resolve(other, import, 2, 0);
         require(repeated && repeated->Address == accepted->Address, "Another image's same row changed live gate identity");
@@ -68,8 +68,7 @@ void run(const char* publicImage, const char* utility) {
         gates.push_back(moved->Address);
     }
     require(machine.Mappings().size() == mappingsBefore, "Semaphore selection allocated new provider mappings");
-    for (const auto* unknown : {"12wOHk8ywb0", "4DM06U2BNEY", "unknown-semaphore"})
-        require(!runner.Resolve(actual, semaphore(unknown), 2, 0), "Unqualified Poll/Cancel or unknown import claimed");
+    require(!runner.Resolve(actual, semaphore("unknown-semaphore"), 2, 0), "Unknown semaphore import claimed");
     runner.Shutdown(); runner.Shutdown();
     for (const auto gate : gates)
         denied([&] { machine.CheckAccess(gate, 1, Cpu::Permission::Execute); }, "Shutdown retained semaphore callable mapping");
