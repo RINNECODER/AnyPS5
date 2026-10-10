@@ -95,6 +95,9 @@ anyps5_metal_pixel_sampler_native anyps5_metal_pixel_sampler_mixed
 anyps5_metal_pixel_sampler_rejections anyps5_metal_pixel_sampler_cache
 anyps5_metal_pixel_sampler_dead_sampler
 anyps5_metal_scalar_termination_decode anyps5_metal_1d_gather_offset_native
+anyps5_lazy_import_cli anyps5_sce_import_stubs anyps5_cpu_run_limits
+anyps5_cpu_cli_stop_signals anyps5_native_shutdown_gpu-ready
+anyps5_native_shutdown_rendering-wait
 anyps5_metal_1d_gather_offset_rejections'''.split())
 
 
@@ -426,9 +429,18 @@ def workflow(args, run, receipt):
         'build': str(build), 'cmake_cache_sha256': receipt['build_cache_sha256'], 'artifacts': receipt['build_artifacts'],
         'cpu_native_owner': 'Tools full suite; CPU separate fixed/old/fixed controls'}, indent=2) + '\n')
     inventory = json.loads(run('ctest-inventory', ['ctest', '--test-dir', build, '--show-only=json-v1']))
-    require(len(inventory['tests']) == len(expected_tests) and
-        {t['name'] for t in inventory['tests']} == expected_tests,
-        'CTest required inventory differs from declared ' + profile + ' profile')
+    discovered = [test['name'] for test in inventory['tests']]
+    discovered_set = set(discovered)
+    # Name the difference: a test-adding PR should make the next drift a one-line fix
+    # instead of leaving the release job with an unexplained failure.
+    missing = sorted(expected_tests - discovered_set)
+    unexpected = sorted(discovered_set - expected_tests)
+    duplicates = sorted(name for name in discovered_set if discovered.count(name) > 1)
+    require(len(discovered) == len(expected_tests) and not missing and not unexpected and not duplicates,
+        'CTest required inventory differs from declared ' + profile + ' profile'
+        + ': missing from build=' + (', '.join(missing) or 'none')
+        + '; not declared=' + (', '.join(unexpected) or 'none')
+        + '; duplicated=' + (', '.join(duplicates) or 'none'))
     env = dict(os.environ, MTL_DEBUG_LAYER='1', MTL_SHADER_VALIDATION='1',
                ANYPS5_NO_SHADER_CACHE='1', APS5_NO_SHADER_CACHE='1')
     with Lease(['tcg-build', 'gpu-validation', 'title-session']):
