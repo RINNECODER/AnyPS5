@@ -359,11 +359,20 @@ class ContractDriftControls(unittest.TestCase):
         renamed key through, so decode the emitted object and compare it field by field. The decode
         is deliberately strict: an expression form it does not recognise leaves the key undecoded,
         which fails the coverage assertion instead of passing silently.
+
+        This is the early, pre-build guard for text drift between the two copies of a claim. The
+        authority remains the packaging gate in diagnostic_package.py, which compares the contract
+        against the JSON the compiled binary actually emits, so a limit default changed away from
+        the emission site is caught there (and named) rather than here.
         """
         source = (Path(__file__).resolve().parents[2] / 'core' / 'cpu' / 'src' / 'Main.cpp').read_text()
         marker = '\\"native_module_runner\\":{'
         start = source.index(marker) + len(marker)
         region = source[start:source.index('\\"sce_thread_imports\\"', start)]
+        # Every backslash must belong to an escaped quote. A \u escape or an escaped backslash in a
+        # key would hide that field from the coverage check below, so refuse such a claim outright.
+        self.assertEqual(region.count('\\'), len(re.findall(r'\\"', region)),
+                         'capability emission contains an escape this control cannot decode')
         key = r'\\"([^\\]+?)\\":'
         keys = re.findall(key, region)
         self.assertEqual(len(keys), len(set(keys)), 'capability emission repeats a claim key')
@@ -398,6 +407,14 @@ class ContractDriftControls(unittest.TestCase):
         self.assertEqual(package.capability_mismatches(
             {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT, enabled=1)}, expected),
             ['native_module_runner.enabled=wrong type'])
+        # A limit default changed away from the emission site still reaches the packaging gate,
+        # which must name it instead of reporting a bare mismatch.
+        self.assertEqual(package.capability_mismatches(
+            {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT, wall_limit_ms=1000)}, expected),
+            ['native_module_runner.wall_limit_ms=1000'])
+        self.assertEqual(package.capability_mismatches(
+            {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT, **{'new-claim': 1})}, expected),
+            ['native_module_runner.new-claim=unexpected'])
         self.assertEqual(package.capability_mismatches({'a': 1, 'b': 2}, {'a': 1, 'b': 3}), ['b=2'])
         self.assertEqual(package.capability_mismatches(
             {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT)}, expected), [])
