@@ -160,7 +160,48 @@ template<class Function> void rejects(Function&& function, const char* expected)
     }
     throw std::runtime_error(std::string("Missing module graph rejection: ") + expected);
 }
+// Real PS5 images pack the next segment of a module against the tail page of the
+// previous one, so the highest writable segment of the compiled guest fixture ends
+// inside a page. That address is the first byte of the shared boundary page.
+constexpr std::uint64_t GuestPageSize = 4096;
+std::uint64_t guestBoundaryAddress(const Bytes& bytes) {
+    std::uint64_t end = 0;
+    for (unsigned index = 0; index < get(bytes, 56, 2); ++index) {
+        const auto header = get(bytes, 32) + index * 56;
+        const auto memory = get(bytes, header + 40);
+        if (get(bytes, header, 4) != 1 || !memory) continue;
+        end = std::max(end, get(bytes, header + 16) + memory);
+    }
+    require(end && end % GuestPageSize, "Compiled guest fixture must end mid-page for the shared boundary control");
+    return end;
+}
+// Append one more PT_LOAD to the copied fixture. The packaged fixture ends with its
+// program header table, so a new entry is genuine loader input rather than a mock.
+void appendGuestLoad(Bytes& bytes, std::uint64_t address, std::uint64_t memory, std::uint32_t flags,
+                     std::uint64_t offset, std::uint64_t file) {
+    const auto tail = get(bytes, 32) + get(bytes, 56, 2) * 56;
+    require(tail == bytes.size(), "Compiled guest fixture must end with its program header table");
+    const auto entries = get(bytes, 56, 2) + 1;
+    bytes.resize(tail + 56);
+    put(bytes, 56, entries, 2);
+    put(bytes, tail, 1, 4);
+    put(bytes, tail + 4, flags, 4);
+    put(bytes, tail + 8, offset);
+    put(bytes, tail + 16, address);
+    put(bytes, tail + 32, file);
+    put(bytes, tail + 40, memory);
+}
 const std::array hostModules{Cpu::SceHostModule{"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}}};
+void boundaryGraph(Cpu::Machine& machine, Cpu::SceImports& imports, const std::filesystem::path& mainPath,
+                   const std::filesystem::path& guestPath) {
+    const std::array dependencies{Cpu::SceModuleFile{guestPath, GuestBias}};
+    const Cpu::SceModules graph(machine, {mainPath, MainBias}, dependencies, hostModules,
+        [&](const auto& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+            require(type == 2, "Fixture unexpectedly requires a host data or TLS service");
+            return Cpu::SceResolvedImport{imports.Resolve(import), 2, 0, 0, 0};
+        });
+    require(graph.Modules().size() == 2, "Shared boundary graph lost the compiled dependency");
+}
 
 bool sameConsumer(const Cpu::SceImportConsumer& consumer, const Cpu::SceParsedImage& expected) {
     return consumer.Path == expected.Path && consumer.SourceSize == expected.SourceSize &&
@@ -294,6 +335,74 @@ struct Input {
     }
     ~Input() { std::error_code ignored; std::filesystem::remove_all(directory, ignored); }
 };
+
+void boundaryPageSharing(const std::filesystem::path& mainPath, const std::filesystem::path& guestPath) {
+    const auto mainBytes = readFile(mainPath), guestBytes = readFile(guestPath);
+    const auto boundary = guestBoundaryAddress(guestBytes);
+    const auto backing = boundary % GuestPageSize;
+    auto variant = [&](std::uint64_t address, std::uint64_t memory, std::uint32_t flags, std::uint64_t file) {
+        auto bytes = guestBytes;
+        appendGuestLoad(bytes, address, memory, flags, address % GuestPageSize, file);
+        return bytes;
+    };
+    // Same permissions on both sides of the boundary page: no fragment protection is
+    // needed, so this acceptance case must pass on every machine, not only on TCG.
+    // Without it the Unicorn branch would only assert a profile rejection that happens
+    // before the validator, and restoring the old blanket page rejection would pass.
+    const Input backed(mainBytes, variant(boundary, 0x100, 6, 0x40));
+    {
+        Cpu::Machine machine;
+        Cpu::SceImports imports(machine);
+        boundaryGraph(machine, imports, backed.main, backed.guest);
+        const Bytes source = readFile(backed.guest);
+        Bytes actual(0x40);
+        machine.CheckAccess(GuestBias + boundary, 0x100, Cpu::Permission::Read | Cpu::Permission::Write);
+        machine.Read(GuestBias + boundary, actual);
+        require(std::equal(actual.begin(), actual.end(), source.begin() + backing),
+                "Shared boundary page did not receive the second segment's own file bytes");
+        Bytes zeros(0x20);
+        machine.Read(GuestBias + boundary + 0x40, zeros);
+        require(std::all_of(zeros.begin(), zeros.end(), [](std::byte byte) { return byte == std::byte{}; }),
+                "Shared boundary page lost the second segment's zero-filled memory tail");
+    }
+    const Input overlapping(mainBytes, variant(boundary - 8, 0x40, 6, 0x40));
+    {
+        Cpu::Machine machine;
+        Cpu::SceImports imports(machine);
+        const auto existingRanges = machine.Mappings().size();
+        rejects([&] { boundaryGraph(machine, imports, overlapping.main, overlapping.guest); }, "overlapping logical PT_LOAD ranges");
+        require(machine.Mappings().size() == existingRanges,
+                "Byte-overlapping module segments reached guest storage before rejection");
+    }
+#if ANYPS5_CPU_MODERN_TCG
+    // A split of read/write and no-access inside one page needs fragment protection.
+    const Input reserve(mainBytes, variant(boundary, 0x100, 0, 0));
+    execute(reserve.main, reserve.guest, false);
+    {
+        Cpu::Machine machine;
+        Cpu::SceImports imports(machine);
+        boundaryGraph(machine, imports, reserve.main, reserve.guest);
+        const auto writable = GuestBias + boundary - 8;
+        machine.CheckAccess(writable, 8, Cpu::Permission::Read | Cpu::Permission::Write);
+        const Bytes pattern(8, std::byte{0xa7});
+        machine.Write(writable, pattern);
+        require(word(machine, writable) == 0xa7a7a7a7a7a7a7a7ull,
+                "Previous segment lost its writable tail inside a shared boundary page");
+        bool denied = false;
+        try { machine.CheckAccess(GuestBias + boundary, 8, Cpu::Permission::Read); }
+        catch (const std::exception& error) {
+            denied = std::string(error.what()).find("Guest access denied") != std::string::npos;
+        }
+        require(denied, "Shared boundary page left a zero-permission reserve segment accessible");
+    }
+#else
+    const Input reserve(mainBytes, variant(boundary, 0x100, 0, 0));
+    Cpu::Machine machine;
+    Cpu::SceImports imports(machine);
+    rejects([&] { boundaryGraph(machine, imports, reserve.main, reserve.guest); },
+            "exact shared guest data page permissions are unsupported");
+#endif
+}
 
 void consumerFailures(const std::filesystem::path& mainPath, const std::filesystem::path& guestPath, bool hostObject = false) {
     const auto mainBytes = readFile(mainPath), guestBytes = readFile(guestPath);
@@ -635,6 +744,7 @@ int main(int argc, char** argv) {
         consumerFailures(hostObjectInput.main, hostObjectInput.guest, true);
         Input snapshotInput(mainBytes, guestBytes);
         execute(snapshotInput.main, snapshotInput.guest, false, true, false, true);
+        boundaryPageSharing(attributed.main, attributed.guest);
         const auto receipts = argc == 4 ? crtReceipts(argv[3]) : std::vector<CrtReceipt>{};
         for (const auto& receipt : receipts) executeCrt(receipt);
         invalidGraphs(attributed.main, attributed.guest, receipts);

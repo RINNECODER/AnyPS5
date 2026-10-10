@@ -218,15 +218,30 @@ struct SceModules::Impl {
         };
         visit(visit, 0);
         if (order.size() != modules.size()) fail("supplied guest dependency is not reachable from the main image");
-        std::map<std::uint64_t, std::uint64_t> ranges;
-        for (const auto& module : modules) for (const auto& segment : module.Image.Segments) {
+        // Page-rounded guest mappings must have exactly one owning module, because a
+        // page is mapped and protected once. Two segments of the same module may share
+        // a boundary page: real titles pack the next segment against the tail of the
+        // previous one without page padding. Their bytes still may not overlap, and any
+        // permission split that the host cannot enforce inside one page is already a
+        // profile blocker rejected by RequireSceProfile above.
+        struct MappingRange {
+            std::size_t Module;
+            std::uint64_t PageBegin, PageEnd, ByteBegin, ByteEnd;
+        };
+        std::vector<MappingRange> ranges;
+        for (std::size_t index = 0; index < modules.size(); ++index) for (const auto& segment : modules[index].Image.Segments) {
             if (segment.Type != 1 && segment.Type != 0x61000010) continue;
-            const auto begin = SceAddress(module.LoadBias, segment.Address & ~(PageSize - 1));
-            const auto end = SceAddress(module.LoadBias, (segment.Address + segment.MemorySize + PageSize - 1) & ~(PageSize - 1));
-            const auto next = ranges.lower_bound(begin);
-            if ((next != ranges.end() && next->first < end) || (next != ranges.begin() && std::prev(next)->second > begin))
+            const auto bias = modules[index].LoadBias;
+            ranges.push_back({index, SceAddress(bias, segment.Address & ~(PageSize - 1)),
+                SceAddress(bias, (segment.Address + segment.MemorySize + PageSize - 1) & ~(PageSize - 1)),
+                SceAddress(bias, segment.Address), SceAddress(bias, segment.Address + segment.MemorySize)});
+        }
+        for (std::size_t left = 0; left < ranges.size(); ++left) for (std::size_t right = left + 1; right < ranges.size(); ++right) {
+            const auto& first = ranges[left];
+            const auto& second = ranges[right];
+            if (first.PageBegin >= second.PageEnd || second.PageBegin >= first.PageEnd) continue;
+            if (first.Module != second.Module || (first.ByteBegin < second.ByteEnd && second.ByteBegin < first.ByteEnd))
                 fail("guest module mapping ranges overlap");
-            ranges.emplace(begin, end);
         }
         std::vector<SceTlsModuleTemplate> templates;
         for (auto& module : modules) if (module.Image.Tls) {
