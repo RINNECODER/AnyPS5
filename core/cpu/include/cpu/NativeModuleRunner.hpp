@@ -10,6 +10,7 @@
 
 namespace Cpu {
 class GuestThreads;
+class PadHostInput;
 class SceNativeGraphicsSession;
 
 struct NativeServiceConsumerProfile {
@@ -53,6 +54,8 @@ public:
     // Guest-supplied provider precedence remains SceModules' responsibility.
     void AddHostModules(std::vector<SceHostModule>&) const;
     void ActivateBeforeInitializers();
+    // Every owner pump then drains window and controller input into this pad.
+    void AttachPadInput(std::shared_ptr<PadHostInput>);
     std::uint64_t MappingGeneration() const;
     SceNativeGraphicsSession& Graphics();
     void Shutdown();

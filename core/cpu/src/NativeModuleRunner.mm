@@ -1,6 +1,7 @@
 #include <cpu/NativeModuleRunner.hpp>
 #include <cpu/GuestMemoryMetal.hpp>
 #include <cpu/GuestThreads.hpp>
+#include <cpu/NativePadInput.hpp>
 #include <cpu/SceAgcImports.hpp>
 #include <cpu/SceThreadImports.hpp>
 #include <cpu/SceNativeVideoOutBackend.hpp>
@@ -20,6 +21,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 
@@ -87,6 +89,11 @@ struct NativeModuleRunner::Impl {
     std::unique_ptr<SceAgcImports> agc;
     // Retained until graphics is drained, including all failed candidate owners.
     std::unique_ptr<GuestMemoryMetalCompositor> compositor;
+    std::unique_ptr<AnyPS5::Host::NativeControllerSource> controller;
+    std::shared_ptr<PadHostInput> pad;
+    NativePadInput padInput;
+    std::uint64_t appliedPadOutput = 0;
+    AnyPS5::Host::ControllerIdentity appliedController{};
     std::chrono::steady_clock::time_point started;
     bool hookInstalled = false, shutdown = false;
     std::exception_ptr shutdownFailure;
@@ -152,6 +159,11 @@ struct NativeModuleRunner::Impl {
             try { operation(); } catch (...) { if (!shutdownFailure) shutdownFailure = std::current_exception(); }
         };
         machine.RequestStop();
+        if (controller) {
+            attempt([&] { controller->CloseMainThread(); });
+            controller.reset();
+        }
+        pad.reset();
         if (graphics) {
             attempt([&] { graphics->RequestStop(); });
             // On this persistent main owner shutdown joins producers before
@@ -180,6 +192,44 @@ struct NativeModuleRunner::Impl {
             if (!graphics) throw std::runtime_error("Native graphics publication after drain");
             graphics->MutateBorrowedRanges(ranges, generation, commit, std::move(oldOwner), std::move(newOwner));
         };
+    }
+    // The controller is optional: any GameController failure falls back to keyboard and mouse.
+    void dropController(const char* phase) noexcept {
+        try {
+            try { throw; }
+            catch (const std::exception& error) {
+                std::cerr << "Native controller source " << phase << " failed, keyboard and mouse only: "
+                          << std::string_view(error.what()).substr(0, 1024) << '\n';
+            } catch (...) {
+                std::cerr << "Native controller source " << phase << " failed, keyboard and mouse only\n";
+            }
+        } catch (...) {}
+        if (controller) {
+            try { controller->CloseMainThread(); } catch (...) {}
+            controller.reset();
+        }
+        if (pad) pad->DisconnectController();
+    }
+    void pumpInput() {
+        if (!pad) return;
+        const auto window = graphics->Window().DrainEvents();
+        std::optional<AnyPS5::Host::ControllerEventBatch> batch;
+        if (controller) {
+            try { batch = controller->DrainEvents(); }
+            catch (...) { dropController("drain"); }
+        }
+        padInput.Apply(window, batch ? &*batch : nullptr, *pad);
+        if (!batch || !batch->after.connected) return;
+        const auto output = pad->Output();
+        if (output.Sequence == appliedPadOutput && batch->after.controller == appliedController) return;
+        AnyPS5::Host::ControllerOutput applied;
+        if (output.LightBarValid) applied.lightBar = output.LightBar;
+        applied.largeMotor = output.LargeMotor;
+        applied.smallMotor = output.SmallMotor;
+        try { controller->ApplyOutputMainThread(applied); }
+        catch (...) { dropController("output"); return; }
+        appliedPadOutput = output.Sequence;
+        appliedController = batch->after.controller;
     }
     void activate() {
         checkOwner();
@@ -210,6 +260,7 @@ struct NativeModuleRunner::Impl {
         started = std::chrono::steady_clock::now();
         threads->SetOwnerBoundary([this](bool waiting) {
             graphics->Window().PumpMainThread(waiting ? std::chrono::milliseconds{1} : std::chrono::milliseconds{0}, 256);
+            pumpInput();
             const auto state = graphics->Window().Snapshot();
             if (!state.open || state.closeRequested || (config.MaximumWallTime.count() > 0 &&
                 std::chrono::steady_clock::now() - started >= config.MaximumWallTime)) {
@@ -242,6 +293,15 @@ std::uint64_t NativeModuleRunner::MappingGeneration() const {
     return impl->compositor ? impl->compositor->Generation() : 0;
 }
 void NativeModuleRunner::ActivateBeforeInitializers() { impl->activate(); }
+void NativeModuleRunner::AttachPadInput(std::shared_ptr<PadHostInput> input) {
+    impl->checkOwner();
+    if (impl->shutdown) throw std::runtime_error("Native pad input attached after shutdown");
+    impl->pad = std::move(input);
+    if (impl->pad && !impl->controller) {
+        try { impl->controller = AnyPS5::Host::NativeControllerSource::CreateMainThread(); }
+        catch (...) { impl->dropController("open"); }
+    }
+}
 void NativeModuleRunner::Shutdown() { impl->close(); }
 
 void NativeModuleRunner::AddHostModules(std::vector<SceHostModule>& hosts) const {
