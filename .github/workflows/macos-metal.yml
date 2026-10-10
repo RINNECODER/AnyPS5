@@ -39,6 +39,14 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
+      - name: Release capability contract matches the compiled claim
+        # Pure file comparison: a drifted tools/diagnostic_package.py contract or a changed
+        # core/cpu/src/Main.cpp capability claim fails here in seconds instead of at the alpha
+        # packaging gate after a full engine build (#331). Coverage follows this job's existing
+        # fork guard: same-repository PRs and main pushes run it. A fork PR skips it; after merge
+        # the main-push run of this job checks it, and that gate is what admits the alpha job,
+        # which repeats the control before building.
+        run: python3 tools/tests/test_native_diagnostic_package.py ContractDriftControls
       - name: Initialize submodules
         run: git submodule update --init --depth 1 3rdparty/unicorn 3rdparty/anyps5-tcg
       # Build directories live outside the checkout so incremental builds survive between runs.

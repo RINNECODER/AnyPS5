@@ -91,6 +91,9 @@ jobs:
         run: git submodule foreach --quiet 'git reset --quiet --hard && git clean -qffdx'
       - name: Release tooling tests
         run: python3 -m unittest discover -s tools/tests -p 'test_release_channels.py'
+      - name: Capability contract matches the compiled claim
+        # Fails in seconds instead of after the engine build when a capability claim drifts (#331).
+        run: python3 tools/tests/test_native_diagnostic_package.py ContractDriftControls
       - name: Build, sign and publish
         run: >-
           python3 tools/release/alpha.py --source "$GITHUB_WORKSPACE" --commit "$RELEASE_COMMIT"

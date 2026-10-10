@@ -6,6 +6,7 @@ execution, or production native acceptance. Run compile/execution under the
 caller's canonical tcg-build lease. No production-only seams are introduced.
 """
 import json
+import re
 from pathlib import Path
 import platform
 import shutil
@@ -166,7 +167,7 @@ CAPABILITIES = {
         'provider_selection': 'actual parsed consumer SHA-256, size, scope and ELF symbol',
         'utility_metallib': '../fixtures/AnyPS5Utilities.metallib relative to engine',
         'wall_limit_ms': 0, 'idle_limit_ms': 0,
-        'constraints': 'unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; no WebAPI2 provider; no retail gameplay evidence',
+        'constraints': 'unbounded game profile by default; 0 means unlimited; idle limit bounds one continuous idle stretch; qualified provider subset only; high CPU owned stack/TLS are GPU read-only under written-page ABI; offline NP/WebAPI providers only; no retail gameplay evidence',
     },
 }
 
@@ -346,6 +347,77 @@ class NativeCompiledPackaging(PackageFixture):
                     self.assertFalse(list(self.root.glob('.diagnostic-package-*')))
                 finally:
                     target.write_bytes(original)
+
+
+class ContractDriftControls(unittest.TestCase):
+    """The release contract is a copy of a compiled claim, so it must be checked against the source."""
+
+    def test_contract_equals_the_compiled_emission(self):
+        """Pin the release contract to the exact capability object Main.cpp emits (#331).
+
+        A substring search would let a shortened contract claim, an extended compiled claim or a
+        renamed key through, so decode the emitted object and compare it field by field. The decode
+        is deliberately strict: an expression form it does not recognise leaves the key undecoded,
+        which fails the coverage assertion instead of passing silently.
+
+        This is the early, pre-build guard for text drift between the two copies of a claim. The
+        authority remains the packaging gate in diagnostic_package.py, which compares the contract
+        against the JSON the compiled binary actually emits, so a limit default changed away from
+        the emission site is caught there (and named) rather than here.
+        """
+        source = (Path(__file__).resolve().parents[2] / 'core' / 'cpu' / 'src' / 'Main.cpp').read_text()
+        marker = '\\"native_module_runner\\":{'
+        start = source.index(marker) + len(marker)
+        region = source[start:source.index('\\"sce_thread_imports\\"', start)]
+        # Every backslash must belong to an escaped quote. A \u escape or an escaped backslash in a
+        # key would hide that field from the coverage check below, so refuse such a claim outright.
+        self.assertEqual(region.count('\\'), len(re.findall(r'\\"', region)),
+                         'capability emission contains an escape this control cannot decode')
+        key = r'\\"([^\\]+?)\\":'
+        keys = re.findall(key, region)
+        self.assertEqual(len(keys), len(set(keys)), 'capability emission repeats a claim key')
+        emitted = dict(re.findall(key + r'\\"(.*?)\\"', region, re.S))
+        emitted.update({name: value == 'true' for name, value in re.findall(key + r'(true|false)', region)})
+        limit_options = {'wall_limit_ms': 'MaxWallMs', 'idle_limit_ms': 'MaxIdleMs'}
+        for name, option, default in re.findall(
+                key + r'"\s*<<\s*limits\.(\w+)\.value_or\((\d+)\)\s*<<\s*"', region):
+            self.assertEqual(limit_options.get(name), option,
+                             'limit claim is not bound to its own execution limit option: ' + name)
+            emitted[name] = int(default)
+        self.assertEqual(emitted, package.NATIVE_RUNNER_CONTRACT)
+        # A field the decode does not understand (a number, null, array or punctuated key) would
+        # silently vanish from the comparison above, so require it to account for every emitted key.
+        self.assertEqual(set(keys), set(emitted),
+                         'capability emission contains a field this control cannot decode')
+        # Python equates True with 1, so pin each claim's type as well as its value.
+        for name, claimed in package.NATIVE_RUNNER_CONTRACT.items():
+            self.assertIs(type(emitted[name]), type(claimed), 'capability claim type drifted: ' + name)
+
+    def test_capability_mismatch_names_the_offending_claim(self):
+        stale = dict(package.NATIVE_RUNNER_CONTRACT, constraints='no WebAPI2 provider')
+        expected = {'native_module_runner': package.NATIVE_RUNNER_CONTRACT}
+        self.assertEqual(package.capability_mismatches({'native_module_runner': stale}, expected),
+                         ["native_module_runner.constraints='no WebAPI2 provider'"])
+        extra = dict(stale, extra='x')
+        self.assertEqual(package.capability_mismatches({'native_module_runner': extra}, expected)[1],
+                         'native_module_runner.extra=unexpected')
+        self.assertEqual(package.capability_mismatches({'native_module_runner': {}}, expected)[0],
+                         'native_module_runner.enabled=absent')
+        self.assertEqual(package.capability_mismatches({'a': 1}, {'a': True}), ['a=wrong type'])
+        self.assertEqual(package.capability_mismatches(
+            {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT, enabled=1)}, expected),
+            ['native_module_runner.enabled=wrong type'])
+        # A limit default changed away from the emission site still reaches the packaging gate,
+        # which must name it instead of reporting a bare mismatch.
+        self.assertEqual(package.capability_mismatches(
+            {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT, wall_limit_ms=1000)}, expected),
+            ['native_module_runner.wall_limit_ms=1000'])
+        self.assertEqual(package.capability_mismatches(
+            {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT, **{'new-claim': 1})}, expected),
+            ['native_module_runner.new-claim=unexpected'])
+        self.assertEqual(package.capability_mismatches({'a': 1, 'b': 2}, {'a': 1, 'b': 3}), ['b=2'])
+        self.assertEqual(package.capability_mismatches(
+            {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT)}, expected), [])
 
 
 if __name__ == '__main__':
