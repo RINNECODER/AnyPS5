@@ -23,6 +23,22 @@
 #include <string>
 #include <vector>
 
+// AppKit hands activation out on its own schedule, and an accessory test process can lose it when
+// another app activates mid-test. Re-requesting activation inside an event-driven wait restores the
+// genuine key-window state; it never fakes one. `activateIgnoringOtherApps:` is deprecated on macOS 14,
+// where plain `activate` does the job (#189 tracks removing the older path entirely).
+static void ActivateForFocusTest() {
+    // Activation is asynchronous, so re-requesting it on every 10 ms pump would only flood the window
+    // server while the answer is still in flight. Both call sites run on the main thread.
+    static std::chrono::steady_clock::time_point lastRequest{};
+    const auto now = std::chrono::steady_clock::now();
+    if (lastRequest.time_since_epoch().count() != 0 &&
+        now - lastRequest < std::chrono::milliseconds(200)) return;
+    lastRequest = now;
+    if (@available(macOS 14, *)) [NSApp activate];
+    else [NSApp activateIgnoringOtherApps:YES];
+}
+
 @interface ReplayMetalLayer : CAMetalLayer
 @property(nonatomic, strong) id<CAMetalDrawable> recordedDrawable;
 @property(nonatomic) NSUInteger acquisitionCount;
@@ -431,9 +447,17 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
         for (NSWindow* candidate in NSApp.windows)
             if ([candidate.title isEqualToString:@"AnyPS5 native host event replay"]) window = candidate;
         Require(window != nil, "Native host did not own an actual AppKit window");
-        const auto deadline = std::chrono::steady_clock::now() + 2s;
-        while (!host->Snapshot().focused && std::chrono::steady_clock::now() < deadline)
-            host->PumpMainThread(10ms);
+        // AppKit can hand out activation late on a loaded machine, and an accessory test process can
+        // be left inactive when another app activates, so focus is waited for with a real assertion
+        // instead of being silently skipped (#138). The predicate stays the genuine one.
+        {
+            const auto focusDeadline = std::chrono::steady_clock::now() + 10s;
+            while (!host->Snapshot().focused && std::chrono::steady_clock::now() < focusDeadline) {
+                host->PumpMainThread(10ms);
+                if (!NSApp.isActive) ActivateForFocusTest();
+            }
+            Require(host->Snapshot().focused, "Native host never received real AppKit focus");
+        }
         {
             auto notifications = std::make_shared<std::array<bool, 3>>();
             struct Notifications {
@@ -451,11 +475,32 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
             notices.restore = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidDeminiaturizeNotification
                 object:window queue:nil usingBlock:^(NSNotification*) { (*notifications)[2] = true; }];
             auto pumpUntil = [&](auto completed, const std::string& operation) {
-                const auto end = std::chrono::steady_clock::now() + 2s;
+                // Window-server transitions for a real AppKit window are not guaranteed inside 2 s on
+                // a busy host; the deadline only bounds the wait, the predicate itself is unchanged.
+                const auto end = std::chrono::steady_clock::now() + 10s;
                 while (!completed() && std::chrono::steady_clock::now() < end) host->PumpMainThread(10ms);
                 Require(completed(), "Actual AppKit " + operation + " did not complete before its deadline");
             };
+            auto pumpUntilActive = [&](auto completed, const std::string& operation) {
+                const auto end = std::chrono::steady_clock::now() + 10s;
+                while (!completed() && std::chrono::steady_clock::now() < end) {
+                    host->PumpMainThread(10ms);
+                    if (!NSApp.isActive) ActivateForFocusTest();
+                }
+                Require(completed(), "Actual AppKit " + operation + " did not complete before its deadline");
+            };
             auto extent = [&](NSSize points, bool zero, const std::string& operation) {
+                // AppKit can deliver the resize/deminiaturize notification before the content view and
+                // its backing have settled, so wait for the real geometry instead of asserting at the
+                // instant of the notification. The assertion below is unchanged.
+                const auto settle = std::chrono::steady_clock::now() + 10s;
+                while (std::chrono::steady_clock::now() < settle) {
+                    const auto settled = [window.contentView convertRectToBacking:NSMakeRect(0, 0, points.width, points.height)];
+                    if (NSEqualSizes(window.contentView.bounds.size, points) &&
+                        settled.size.width == points.width * window.backingScaleFactor &&
+                        settled.size.height == points.height * window.backingScaleFactor) break;
+                    host->PumpMainThread(10ms);
+                }
                 const auto backing = [window.contentView convertRectToBacking:NSMakeRect(0, 0, points.width, points.height)];
                 Require(NSEqualSizes(window.contentView.bounds.size, points) &&
                         backing.size.width == points.width * window.backingScaleFactor &&
@@ -490,7 +535,7 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
             pumpUntil([&] { return (*notifications)[0]; }, "original extent restore");
             extent(originalSize, false, "original extent restore");
             [window makeKeyAndOrderFront:nil];
-            pumpUntil([&] { return window.keyWindow && NSApp.keyWindow == window; }, "key-window restore");
+            pumpUntilActive([&] { return window.keyWindow && NSApp.keyWindow == window; }, "key-window restore");
             std::cout << "PASS: actual native resize, minimize and restore publish independent backing extents to worker snapshots and presentation callbacks\n";
         }
         host->PumpMainThread(0ms);

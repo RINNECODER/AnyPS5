@@ -11,6 +11,7 @@ if(BUILD_TESTING AND cpuModernTcg AND TARGET anyps5_native_module_runner)
             COMMAND anyps5_native_module_runner_test "${sceModuleMain}" "${sceModuleGuest}"
                 "${cpuMetalLibrary}" "${nativeRunnerCase}")
         set_tests_properties(anyps5_native_module_runner_${nativeRunnerCase} PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE
+            RESOURCE_LOCK appkit_focus LABELS gui
             ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
     endforeach()
     add_test(NAME anyps5_native_module_runner_cli COMMAND "${Python3_EXECUTABLE}"
