@@ -1843,7 +1843,23 @@ void DepthStencilTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "writable stencil plane");
     Require(AgcDriver::Graphics::DrawRejection(queue, false).find("writable stencil plane") != std::string::npos, "precheck accepted clear without a stencil plane");
     queue.context[0x010] = 0;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "writable stencil plane");
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(!state.depth && !state.depthTest && !state.depthWrite && !state.stencilTest && state.colors.size() == 2, "clear flags without depth/stencil planes changed color-only rendering");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "precheck rejected clear flags without depth/stencil planes");
+    queue = makeState();
+    queue.context[0x010] = 0x80000180;
+    queue.context[0x011] = 0x20000180;
+    queue.context[0x200] = 0x776;
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    const auto colorOnly = AgcDriver::Graphics::DecodeState(queue);
+    for (const auto control : {1u, 2u, 3u}) {
+        queue.context[0x000] = control;
+        state = AgcDriver::Graphics::DecodeState(queue);
+        Require(!state.depth && !state.depthTest && !state.depthWrite && !state.stencilTest, "stale clear flags enabled absent depth/stencil planes");
+        Require(state.color.address == colorOnly.color.address && state.blends[0].colorWriteMask == colorOnly.blends[0].colorWriteMask && state.viewport.minDepth == colorOnly.viewport.minDepth && state.viewport.maxDepth == colorOnly.viewport.maxDepth, "stale clear flags changed color writes or viewport depth");
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "precheck rejected a color-only draw with stale clear flags: " + AgcDriver::Graphics::DrawRejection(queue, false));
+    }
     queue = makeState();
     queue.context[0x31b] = 1u << 26u;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "mip exceeds");

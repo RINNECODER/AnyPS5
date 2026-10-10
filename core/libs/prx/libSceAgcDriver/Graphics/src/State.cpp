@@ -963,7 +963,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         const auto renderControl = find(cx, 0x000);
         const bool clear = renderControl != cx.end() && (renderControl->second & 3u) != 0;
         const auto tests = planeTests(cx, depthControl);
-        if (clear || (tests != 0 && depthSurfaceBound(cx))) {
+        if ((clear || tests != 0) && depthSurfaceBound(cx)) {
             decodeDepth(cx, depthControl, result);
         } else if (depthPassThrough(depthControl) || ((depthControl & 0xbu) != 0 && (tests == 0 || depthPlanesAbsent(cx)))) {
             static bool reported = false;
@@ -1530,11 +1530,11 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
         const auto renderControl = find(cx, 0x000);
         const bool depthClear = renderControl != cx.end() && (renderControl->second & 1u) != 0;
         const bool stencilClear = renderControl != cx.end() && (renderControl->second & 2u) != 0;
-        if (stencilClear) {
+        if (stencilClear && !depthPlanesAbsent(cx)) {
             std::uint32_t stencil = 0, view = 0;
             if ((value(cx, 0x011, stencil) && (stencil & 1u) == 0) || (value(cx, 0x002, view) && (view & 0x02000000u) != 0)) return require(false, "stencil clear requires a writable stencil plane");
         }
-        if (depthClear) {
+        if (depthClear && !depthPlanesAbsent(cx)) {
             std::uint32_t z = 0, view = 0;
             if ((value(cx, 0x010, z) && (z & 3u) == 0) || (value(cx, 0x002, view) && (view & 0x01000000u) != 0)) return require(false, "depth clear requires a writable depth plane");
         }
