@@ -78,6 +78,10 @@ constexpr int NET_SOL_SOCKET = 0xFFFF;
 constexpr int NET_SO_SNDTIMEO = 0x1005;
 constexpr int NET_SO_RCVTIMEO = 0x1006;
 constexpr int NET_SO_NBIO = 0x1200;
+constexpr int NET_SO_REUSEADDR = 0x4;
+constexpr int NET_SO_BROADCAST = 0x20;
+constexpr int NET_SO_SNDBUF = 0x1001;
+constexpr int NET_SO_RCVBUF = 0x1002;
 constexpr int NET_MSG_PEEK = 0x2;
 constexpr int NET_MSG_TRUNC = 0x10;
 constexpr int NET_UIO_MAXIOV = 1024;
@@ -471,6 +475,19 @@ bool CloseSocketForKernel(int descriptor, int* error) {
 }
 
 const bool g_socketCloserRegistered = (KernelSetSocketCloser_nid_no_patch(&CloseSocketForKernel), true);
+
+extern "C" int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval, uint32_t optlen);
+
+bool SetSocketOptionForKernel(int descriptor, int level, int option, const void* value, std::uint32_t length, int* error) {
+    {
+        std::lock_guard lk(g_mutex);
+        if (g_socks.count(descriptor) == 0) return false;
+    }
+    *error = sceNetSetsockopt(descriptor, level, option, value, length) == 0 ? 0 : *errno_slot();
+    return true;
+}
+
+const bool g_socketOptionSetterRegistered = (KernelSetSocketOptionSetter_nid_no_patch(&SetSocketOptionForKernel), true);
 
 int APS5_VABI sceNetInit_nid_postfix(void) {
     std::lock_guard lk(g_mutex);
@@ -875,6 +892,10 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
         if (::setsockopt(socket.native->value, SOL_SOCKET, native_option, &timeout, sizeof(timeout)) != 0)
             return fail(native_error());
 #endif
+    } else if (optname == NET_SO_REUSEADDR || optname == NET_SO_BROADCAST || optname == NET_SO_SNDBUF || optname == NET_SO_RCVBUF) {
+        const int native_option = optname == NET_SO_REUSEADDR ? SO_REUSEADDR : optname == NET_SO_BROADCAST ? SO_BROADCAST : optname == NET_SO_SNDBUF ? SO_SNDBUF : SO_RCVBUF;
+        if (::setsockopt(socket.native->value, SOL_SOCKET, native_option, reinterpret_cast<const char*>(&value), sizeof(value)) != 0)
+            return fail(native_error());
     } else {
         return fail(NET_EOPNOTSUPP);
     }
