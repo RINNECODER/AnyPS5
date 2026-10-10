@@ -23,6 +23,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -914,20 +915,17 @@ void RegisteredFloatModeReplay(id<MTLDevice> device, id<MTLLibrary> library) {
         try {
             driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
             if (test.scratch != 0) {
-                std::string reason;
-                try {
-                    driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
-                    driver.WaitIdle();
-                } catch (const std::exception& error) { reason = error.what(); }
-                Require(reason.find("Native Metal compute scratch memory") != std::string::npos,
-                    "Metal driver SCRATCH_EN dispatch was not refused with the Metal scratch reason: " + reason);
+                // The refusal skips this dispatch only (#289): the EOP after it still lands
+                // and the driver stays usable, so Shutdown reports no failure.
+                driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+                driver.WaitIdle();
+                const auto skipped = driver.SkippedWork();
+                Require(skipped.dispatches == 1 && skipped.reasons.size() == 1 &&
+                    skipped.reasons[0].what.find("Native Metal compute scratch memory") != std::string::npos,
+                    "Metal driver SCRATCH_EN dispatch was not refused with the Metal scratch reason");
                 Require(std::all_of(output.begin(), output.end(), [](auto value) { return value == Sentinel; }),
                     "Metal driver wrote output for a refused SCRATCH_EN dispatch");
-                // The refusal is the driver's sticky failure, which Shutdown reports again.
-                std::string sticky;
-                try { driver.Shutdown(); } catch (const std::exception& error) { sticky = error.what(); }
-                Require(sticky.empty() || sticky == reason, "Metal driver shutdown reported a different failure: " + sticky);
-                continue;
+                Require(label == std::array<std::uint32_t, 3>{Sentinel, 1, Sentinel}, "Refused SCRATCH_EN dispatch stopped its guarded EOP");
             } else {
                 driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
                 driver.WaitIdle();
@@ -941,6 +939,191 @@ void RegisteredFloatModeReplay(id<MTLDevice> device, id<MTLLibrary> library) {
         }
     }
     std::cout << "Registered header float mode: IEEE_MODE NaN quieting, non-IEEE and absent RSRC1 defaults, and SCRATCH_EN refusal passed on the adapter and driver paths\n";
+}
+
+// One unsupported dispatch must not end the session (#289): the driver skips the
+// packet, records why, and runs the rest of the command buffer, its EOP and
+// later submissions. Two failure kinds sit between valid dispatches: a program
+// whose code does not translate, and a SCRATCH_EN dispatch Metal refuses.
+void FailSoftDispatchReplay(id<MTLDevice> device, id<MTLLibrary> library) {
+    constexpr std::uint32_t Sentinel = 0xdeadbeef, Threads = 64, Expected = 0x7fc12345u;
+    constexpr std::uint64_t GoodCodeAddress = 0xb00000, ScratchCodeAddress = 0xb10000, BadCodeAddress = 0xb20000,
+        GoodHeaderAddress = 0xb40000, ScratchHeaderAddress = 0xb50000, BadHeaderAddress = 0xb60000,
+        OutputAddress = 0xb80000, CommandsAddress = 0xb90000, PacketAddress = 0xba0000, LabelAddress = 0xbb0000;
+    constexpr std::size_t HeaderBytes = sizeof(Shader) + sizeof(ShaderUserData) + sizeof(ShaderRegister);
+    // Top six bits 0x3f select no RDNA instruction family, so this program cannot be translated.
+    constexpr std::array<std::uint32_t, 2> UntranslatableCode{0xffffffffu, 0xbf810000u};
+    auto goodCode = FloatModeCode, scratchCode = FloatModeCode;
+    auto badCode = UntranslatableCode;
+    const auto makeHeader = [&](std::uint64_t headerAddress, std::uint64_t codeAddress, std::uint32_t codeBytes, std::uint16_t scratch) {
+        std::array<std::byte, HeaderBytes> bytes{};
+        Shader header{};
+        header.file_header = 0x34333231;
+        header.version = 0x18;
+        header.code = reinterpret_cast<const volatile void*>(codeAddress);
+        header.user_data = reinterpret_cast<ShaderUserData*>(headerAddress + sizeof(Shader));
+        header.sh_registers = reinterpret_cast<ShaderRegister*>(headerAddress + sizeof(Shader) + sizeof(ShaderUserData));
+        header.num_sh_registers = 1;
+        header.scratch_size_dw_per_thread = scratch;
+        header.header_size = HeaderBytes;
+        header.shader_size = codeBytes;
+        std::memcpy(bytes.data(), &header, sizeof(header));
+        const ShaderRegister rsrc1{0x212, 1u << 23u};
+        std::memcpy(bytes.data() + sizeof(Shader) + sizeof(ShaderUserData), &rsrc1, sizeof(rsrc1));
+        return bytes;
+    };
+    auto goodHeader = makeHeader(GoodHeaderAddress, GoodCodeAddress, sizeof(goodCode), 0);
+    auto scratchHeader = makeHeader(ScratchHeaderAddress, ScratchCodeAddress, sizeof(scratchCode), 4);
+    auto badHeader = makeHeader(BadHeaderAddress, BadCodeAddress, sizeof(badCode), 0);
+    std::array<std::uint32_t, Threads> output;
+    std::array<std::uint32_t, 8> userData{};
+    const auto descriptor = Descriptor(OutputAddress, Threads);
+    std::copy(descriptor.begin(), descriptor.end(), userData.begin() + 4);
+    std::vector<std::uint32_t> words;
+    const auto registers = [&](std::uint32_t first, std::span<const std::uint32_t> values) {
+        std::vector<std::uint32_t> payload{first};
+        payload.insert(payload.end(), values.begin(), values.end());
+        const auto packet = Packet(0x76, payload);
+        words.insert(words.end(), packet.begin(), packet.end());
+    };
+    const auto dispatch = [&](std::uint64_t codeAddress, bool scratch) {
+        const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>(codeAddress >> 8u), 0};
+        const std::array<std::uint32_t, 1> rsrc2{(static_cast<std::uint32_t>(userData.size()) << 1u) | (scratch ? 1u : 0u)};
+        registers(0x20c, program);
+        registers(0x213, rsrc2);
+        const std::array<std::uint32_t, 4> payload{1, 1, 1, 0x8041};
+        const auto packet = Packet(0x15, payload);
+        words.insert(words.end(), packet.begin(), packet.end());
+    };
+    const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+    registers(0x207, threads);
+    registers(0x240, userData);
+    dispatch(BadCodeAddress, false);
+    dispatch(ScratchCodeAddress, true);
+    dispatch(GoodCodeAddress, false);
+    const std::size_t eopValueWord = words.size() + 5;
+    const std::array<std::uint32_t, 8> eop{
+        0xc0064900, 0, (1u << 29) | (1u << 24), static_cast<std::uint32_t>(LabelAddress + 4), 0, 1, 0, 0};
+    words.insert(words.end(), eop.begin(), eop.end());
+    std::vector<std::uint32_t> commands = words;
+    const ::Packet packet{reinterpret_cast<std::uint32_t*>(CommandsAddress), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    std::array<std::byte, sizeof(::Packet)> packetBytes;
+    std::memcpy(packetBytes.data(), &packet, sizeof(packet));
+    std::array<std::uint32_t, 3> label{Sentinel, 0, Sentinel};
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 9> ranges{{
+        {GoodCodeAddress, std::as_writable_bytes(std::span(goodCode)), false},
+        {ScratchCodeAddress, std::as_writable_bytes(std::span(scratchCode)), false},
+        {BadCodeAddress, std::as_writable_bytes(std::span(badCode)), false},
+        {GoodHeaderAddress, goodHeader, false},
+        {ScratchHeaderAddress, scratchHeader, false},
+        {BadHeaderAddress, badHeader, false},
+        {OutputAddress, std::as_writable_bytes(std::span(output)), true},
+        {CommandsAddress, std::as_writable_bytes(std::span(commands)), false},
+        {PacketAddress, packetBytes, false}}};
+    std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> allRanges(ranges.begin(), ranges.end());
+    allRanges.push_back({LabelAddress, std::as_writable_bytes(std::span(label)), true});
+    std::atomic<std::uint32_t> interrupts{0};
+    AgcDriver::Metal::MetalDriver driver;
+    driver.Configure((__bridge void*)device, (__bridge void*)library, allRanges, [&](std::uint32_t queue) {
+        Require(queue == 0x20, "Fail-soft dispatch EOP arrived from the wrong queue");
+        interrupts.fetch_add(1);
+    });
+    try {
+        driver.RegisterShader(reinterpret_cast<const Shader*>(GoodHeaderAddress));
+        driver.RegisterShader(reinterpret_cast<const Shader*>(ScratchHeaderAddress));
+        driver.RegisterShader(reinterpret_cast<const Shader*>(BadHeaderAddress));
+        const auto findReason = [](const AgcDriver::Metal::SkippedWorkDiagnostics& skipped, std::string_view text) {
+            return std::find_if(skipped.reasons.begin(), skipped.reasons.end(), [&](const auto& reason) {
+                return reason.kind == "dispatch" && reason.what.find(text) != std::string::npos;
+            });
+        };
+        for (std::uint32_t round = 1; round <= 2; ++round) {
+            output.fill(Sentinel);
+            commands[eopValueWord] = round;
+            driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+            driver.WaitIdle();
+            Require(std::all_of(output.begin(), output.end(), [](auto value) { return value == Expected; }),
+                "A skipped dispatch stopped the valid dispatch after it in the same command buffer");
+            Require(label == std::array<std::uint32_t, 3>{Sentinel, round, Sentinel} && interrupts.load() == round,
+                "A skipped dispatch stopped the command buffer's EOP label or interrupt");
+            const auto skipped = driver.SkippedWork();
+            Require(skipped.dispatches == 2 * round && skipped.draws == 0 && skipped.unlistedReasons == 0,
+                "Fail-soft dispatch counters disagree with the two skipped dispatches per submission");
+            Require(skipped.reasons.size() == 2, "Fail-soft dispatch did not group repeated skips by reason");
+            const auto untranslatable = findReason(skipped, "unknown RDNA instruction family");
+            const auto scratch = findReason(skipped, "Native Metal compute scratch memory");
+            Require(untranslatable != skipped.reasons.end() && untranslatable->count == round,
+                "Fail-soft dispatch did not record the untranslatable program");
+            Require(scratch != skipped.reasons.end() && scratch->count == round,
+                "Fail-soft dispatch did not record the refused SCRATCH_EN dispatch");
+        }
+        driver.Shutdown();
+    } catch (...) {
+        try { driver.Shutdown(); } catch (...) {}
+        throw;
+    }
+    std::cout << "Fail-soft dispatch: untranslatable and SCRATCH_EN dispatches skipped and counted; later dispatches, EOP and resubmission ran\n";
+}
+
+// The other side of #289: a dispatch whose work already ran on the GPU and faulted
+// (a BDA store into read-only memory) is not skipped. It stays the driver's sticky
+// failure, its EOP never lands, and it is not counted as skipped work.
+void StickyGpuFaultReplay(id<MTLDevice> device, id<MTLLibrary> library) {
+    constexpr std::uint64_t DataAddress = 0x400000, CodeAddress = 0x500000, CommandsAddress = 0x600000,
+        PacketAddress = 0x610000, LabelAddress = 0x620000;
+    std::vector<std::uint32_t> memory(16384, 0xcdcdcdcd);
+    for (std::uint32_t word = 0; word < 768; ++word) memory[word] = 0x51000000u + word * 0x00010203u;
+    const auto initial = memory;
+    auto code = VccBaseCode;
+    std::vector<std::uint32_t> commands;
+    const auto registers = [&](std::uint32_t first, std::span<const std::uint32_t> values) {
+        std::vector<std::uint32_t> payload{first};
+        payload.insert(payload.end(), values.begin(), values.end());
+        const auto packet = Packet(0x76, payload);
+        commands.insert(commands.end(), packet.begin(), packet.end());
+    };
+    const std::array<std::uint32_t, 3> threads{64, 1, 1};
+    const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>(CodeAddress >> 8u), 0};
+    const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(DataAddress), 0};
+    const std::array<std::uint32_t, 1> rsrc2{static_cast<std::uint32_t>(userData.size()) << 1u};
+    registers(0x207, threads);
+    registers(0x20c, program);
+    registers(0x213, rsrc2);
+    registers(0x240, userData);
+    const std::array<std::uint32_t, 4> payload{1, 1, 1, 0x8041};
+    const auto dispatch = Packet(0x15, payload);
+    commands.insert(commands.end(), dispatch.begin(), dispatch.end());
+    const std::array<std::uint32_t, 8> eop{
+        0xc0064900, 0, (1u << 29) | (1u << 24), static_cast<std::uint32_t>(LabelAddress + 4), 0, 1, 0, 0};
+    commands.insert(commands.end(), eop.begin(), eop.end());
+    const ::Packet packet{reinterpret_cast<std::uint32_t*>(CommandsAddress), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    std::array<std::byte, sizeof(::Packet)> packetBytes;
+    std::memcpy(packetBytes.data(), &packet, sizeof(packet));
+    std::array<std::uint32_t, 3> label{0xdeadbeef, 0, 0xdeadbeef};
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 5> ranges{{
+        {DataAddress, std::as_writable_bytes(std::span(memory)), false},
+        {CodeAddress, std::as_writable_bytes(std::span(code)), false},
+        {CommandsAddress, std::as_writable_bytes(std::span(commands)), false},
+        {PacketAddress, packetBytes, false},
+        {LabelAddress, std::as_writable_bytes(std::span(label)), true}}};
+    std::atomic<std::uint32_t> interrupts{0};
+    AgcDriver::Metal::MetalDriver driver;
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t) { interrupts.fetch_add(1); });
+    std::string reason;
+    try {
+        driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+        driver.WaitIdle();
+    } catch (const std::exception& error) { reason = error.what(); }
+    std::string sticky;
+    try { driver.Shutdown(); } catch (const std::exception& error) { sticky = error.what(); }
+    Require(reason.find("Native Metal guest GPU access failed") != std::string::npos,
+        "A faulted dispatch was not the driver's sticky failure: " + reason);
+    Require(sticky == reason, "Shutdown did not report the sticky GPU fault again: " + sticky);
+    Require(interrupts.load() == 0 && label[1] == 0, "A faulted dispatch still delivered its EOP");
+    Require(memory == initial, "A faulted dispatch modified read-only guest memory");
+    const auto skipped = driver.SkippedWork();
+    Require(skipped.dispatches == 0 && skipped.draws == 0 && skipped.reasons.empty(), "A GPU fault was counted as skipped work");
+    std::cout << "Sticky GPU fault: a dispatch that faulted on the GPU stays the driver failure, without EOP or a skip count\n";
 }
 
 void Pm4BdaReplay(id<MTLDevice> device, bool writable) {
@@ -1005,6 +1188,8 @@ int main(int argc, char** argv) {
             Pm4BdaReplay(device, true);
             Pm4BdaReplay(device, false);
             RegisteredFloatModeReplay(device, library);
+            FailSoftDispatchReplay(device, library);
+            StickyGpuFaultReplay(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

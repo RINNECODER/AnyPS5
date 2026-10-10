@@ -1,4 +1,5 @@
 #include "MetalComputeDispatch.hpp"
+#include "MetalDevice.hpp"
 #include "MetalGuestMemory.hpp"
 #include "MetalShaderPipeline.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
@@ -267,20 +268,22 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
         grid[axis] = static_cast<NSUInteger>(threads);
     }
     id<MTLCommandBuffer> commands = [queue commandBuffer];
-    if (commands == nil) throw std::runtime_error("Native Metal compute dispatch command creation failed");
+    if (commands == nil) throw MetalGpuExecutionError("Native Metal compute dispatch command creation failed");
     pipeline.Encode(commands, bindings, MTLSizeMake(grid[0], grid[1], grid[2]), {}, resident);
     [commands commit];
     [commands waitUntilCompleted];
     if (commands.status != MTLCommandBufferStatusCompleted) {
         const char* error = commands.error.localizedDescription.UTF8String;
-        throw std::runtime_error(std::string("Native Metal compute execution failed: ") + (error == nullptr ? "unknown GPU error" : error));
+        throw MetalGpuExecutionError(std::string("Native Metal compute execution failed: ") + (error == nullptr ? "unknown GPU error" : error));
     }
-    const auto fault = snapshot.CompleteAndCopyDirtyPagesToBorrowedHost(commands);
-    for (const auto& write : copyBack) {
-        std::memcpy(write.host.data(), static_cast<const std::byte*>(write.binding.buffer.contents) + write.binding.offset,
-                    write.host.size());
-    }
-    return fault;
+    return CompleteCommittedWork([&] {
+        const auto fault = snapshot.CompleteAndCopyDirtyPagesToBorrowedHost(commands);
+        for (const auto& write : copyBack) {
+            std::memcpy(write.host.data(), static_cast<const std::byte*>(write.binding.buffer.contents) + write.binding.offset,
+                        write.host.size());
+        }
+        return fault;
+    });
 }
 
 }

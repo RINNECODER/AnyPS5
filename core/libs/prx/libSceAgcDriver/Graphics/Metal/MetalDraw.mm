@@ -580,7 +580,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             BdaAbi::Fault fault{};
             std::memcpy(&fault, static_cast<const std::byte*>(binding->buffers[0].buffer.contents) + binding->buffers[0].offset, sizeof(fault));
             faultFound = true;
-            if (fault.state != BdaAbi::FaultState::Empty) return resources.Complete(commands);
+            if (fault.state != BdaAbi::FaultState::Empty) return CompleteCommittedWork([&] { return resources.Complete(commands); });
         }
         if (!faultFound) throw std::runtime_error("Metal rectangle control requires its original fault buffer");
     }
@@ -599,7 +599,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     }
     auto commands = backend.CommandBuffer();
     auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
-    if (encoder == nil) throw std::runtime_error("Metal draw render encoder allocation failed");
+    if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
     try {
         if (meshPath) {
             meshPipeline->Bind(encoder, vertexBindings, fragmentBindings,
@@ -636,7 +636,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     }
     backend.Wait(commands);
     if (sampleCounter != nil) samplesPassed.store(sampleTotal(sampleCounter), std::memory_order_release);
-    return resources.Complete(commands);
+    return CompleteCommittedWork([&] { return resources.Complete(commands); });
 }
 
 }
