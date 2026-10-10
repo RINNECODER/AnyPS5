@@ -7,8 +7,8 @@
 #include <cpu/SceImports.hpp>
 #include <cpu/SceImportStubs.hpp>
 #include <cpu/SceKernelImports.hpp>
-#include <cpu/SceNpLocalImports.hpp>
 #include <cpu/SceNpOfflineImports.hpp>
+#include <cpu/SceUpstreamPrxBridge.hpp>
 #include <cpu/SceNetAddressImports.hpp>
 #include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
@@ -182,8 +182,8 @@ void Capabilities(const RunLimits& limits) {
         << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
         << "\"sce_common_dialog_imports\":{\"module\":\"libSceCommonDialog\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceCommonDialogInitialize\"],\"constraints\":\"session initializer only; repeated initialization returns signed 0x80b80002; dialog operations unsupported\"},"
         << "\"unresolved_imports\":{\"default\":\"trap_on_call\",\"weak\":\"zero\",\"objects\":\"zeroed_storage\",\"strict_argument\":\"--strict-imports\",\"return_argument\":\"--unresolved-import-return\",\"constraints\":\"static --sce-module graph only; missing DT_NEEDED modules tolerated; each unresolved function import logs and stops the guest when called unless a return value is configured; TLS imports stay strict\"},"
-        << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"initialization and handles succeed; user stays signed out; every network request fails\"},"
-        << "\"sce_np_local_imports\":{\"module\":\"libSceNpManager\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNpGetState\"],\"constraints\":\"session-local user and offline state only; no network account or authentication services\"},"
+        << "\"sce_upstream_prx_bridge\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi2\",\"libSceNpAuth\",\"libSceNpEntitlementAccess\"],\"module_version\":\"1.1\",\"library_version\":1,\"constraints\":\"upstream core/libs/prx exports with hand-checked descriptors only; guest buffers copied in and out; user stays signed out; entitlements from ANYPS5_ENTITLEMENTS or anyps5-entitlements.ini beside the engine, none otherwise\"},"
+        << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"exports the upstream bridge does not cover (libSceNpWebApi, callback registration); initialization and handles succeed; user stays signed out; every network request fails\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
@@ -313,6 +313,9 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}},
         {"libSceNpWebApi.prx", {"libSceNpWebApi", 0, 1, 1}, {{"libSceNpWebApi", 0, 1}}},
         {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}}};
+    for (const auto module : Cpu::SceUpstreamPrxBridge::Modules())
+        if (std::none_of(hosts.begin(), hosts.end(), [&](const auto& host) { return host.Module.Name == module; }))
+            hosts.push_back({std::string(module) + ".prx", {std::string(module), 0, 1, 1}, {{std::string(module), 0, 1}}});
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
     if (native) native->AddHostModules(hosts);
 #endif
@@ -583,7 +586,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
-        std::unique_ptr<Cpu::SceNpLocalImports> npRuntime;
+        std::unique_ptr<Cpu::SceUpstreamPrxBridge> upstreamPrxRuntime;
         std::unique_ptr<Cpu::SceNpOfflineImports> npOfflineRuntime;
         std::unique_ptr<Cpu::SceImportStubs> importStubs;
         std::unique_ptr<Cpu::SceNetAddressImports> netAddressRuntime;
@@ -600,7 +603,7 @@ int main(int argc, char** argv) {
 #endif
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
-        constexpr std::uint32_t sessionUserId = 0x10000000;
+        [[maybe_unused]] constexpr std::uint32_t sessionUserId = 0x10000000;
         try {
             std::vector<std::string> arguments;
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
@@ -637,7 +640,7 @@ int main(int argc, char** argv) {
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
-                npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine, sessionUserId);
+                upstreamPrxRuntime = std::make_unique<Cpu::SceUpstreamPrxBridge>(machine);
                 npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
                 netAddressRuntime = std::make_unique<Cpu::SceNetAddressImports>(machine);
                 commonDialogRuntime = std::make_unique<Cpu::SceCommonDialogImports>(machine, 0x7ffdf2000000);
@@ -649,8 +652,8 @@ int main(int argc, char** argv) {
                     if (const auto gate = lifecycleRuntime->Resolve(import)) return *gate;
                     if (const auto gate = memoryImports->Resolve(import)) return *gate;
                     if (const auto gate = commonDialogRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = upstreamPrxRuntime->Resolve(import)) return *gate;
                     if (const auto gate = npOfflineRuntime->Resolve(import)) return *gate;
-                    if (const auto gate = npRuntime->Resolve(import)) return *gate;
                     if (const auto gate = netAddressRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
