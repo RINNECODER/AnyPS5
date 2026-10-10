@@ -126,7 +126,7 @@ struct SceMemoryImports::Impl {
                 if (fourth < 72) throw GuestMemoryError(22, "Guest virtual query information is too small");
                 checkOutput(third, 72);
                 const auto flags = static_cast<std::uint32_t>(second);
-                if (flags & ~1u) throw std::runtime_error("Unsupported guest memory virtual query flags");
+                if (flags & ~1u) throw GuestMemoryError(22, "Unsupported guest memory virtual query flags");
                 const auto bytes = memory->Query(first, flags != 0).Serialize();
                 machine.Write(third, bytes);
                 break;
