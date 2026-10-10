@@ -255,6 +255,8 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_guest_files COMMAND anyps5_guest_files_tests)
     add_test_executable(anyps5_sce_kernel_import_tests tests/SceKernelImportsTests.cpp)
     target_link_libraries(anyps5_sce_kernel_import_tests PRIVATE anyps5_cpu)
+    # The sanitizer replacement tables must agree with the prx ABI structures they mirror.
+    target_include_directories(anyps5_sce_kernel_import_tests PRIVATE "${PROJECT_SOURCE_DIR}/core/libs")
     add_test(NAME anyps5_sce_kernel_imports COMMAND anyps5_sce_kernel_import_tests)
     set_tests_properties(anyps5_sce_tls anyps5_guest_files anyps5_sce_kernel_imports PROPERTIES TIMEOUT 30)
     add_test_executable(anyps5_sce_user_import_tests tests/SceUserImportsTest.cpp)
