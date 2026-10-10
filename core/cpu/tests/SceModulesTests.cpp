@@ -345,26 +345,10 @@ void boundaryPageSharing(const std::filesystem::path& mainPath, const std::files
         appendGuestLoad(bytes, address, memory, flags, address % GuestPageSize, file);
         return bytes;
     };
-#if ANYPS5_CPU_MODERN_TCG
-    const Input reserve(mainBytes, variant(boundary, 0x100, 0, 0));
-    execute(reserve.main, reserve.guest, false);
-    {
-        Cpu::Machine machine;
-        Cpu::SceImports imports(machine);
-        boundaryGraph(machine, imports, reserve.main, reserve.guest);
-        const auto writable = GuestBias + boundary - 8;
-        machine.CheckAccess(writable, 8, Cpu::Permission::Read | Cpu::Permission::Write);
-        const Bytes pattern(8, std::byte{0xa7});
-        machine.Write(writable, pattern);
-        require(word(machine, writable) == 0xa7a7a7a7a7a7a7a7ull,
-                "Previous segment lost its writable tail inside a shared boundary page");
-        bool denied = false;
-        try { machine.CheckAccess(GuestBias + boundary, 8, Cpu::Permission::Read); }
-        catch (const std::exception& error) {
-            denied = std::string(error.what()).find("Guest access denied") != std::string::npos;
-        }
-        require(denied, "Shared boundary page left a zero-permission reserve segment accessible");
-    }
+    // Same permissions on both sides of the boundary page: no fragment protection is
+    // needed, so this acceptance case must pass on every machine, not only on TCG.
+    // Without it the Unicorn branch would only assert a profile rejection that happens
+    // before the validator, and restoring the old blanket page rejection would pass.
     const Input backed(mainBytes, variant(boundary, 0x100, 6, 0x40));
     {
         Cpu::Machine machine;
@@ -389,6 +373,27 @@ void boundaryPageSharing(const std::filesystem::path& mainPath, const std::files
         rejects([&] { boundaryGraph(machine, imports, overlapping.main, overlapping.guest); }, "overlapping logical PT_LOAD ranges");
         require(machine.Mappings().size() == existingRanges,
                 "Byte-overlapping module segments reached guest storage before rejection");
+    }
+#if ANYPS5_CPU_MODERN_TCG
+    // A split of read/write and no-access inside one page needs fragment protection.
+    const Input reserve(mainBytes, variant(boundary, 0x100, 0, 0));
+    execute(reserve.main, reserve.guest, false);
+    {
+        Cpu::Machine machine;
+        Cpu::SceImports imports(machine);
+        boundaryGraph(machine, imports, reserve.main, reserve.guest);
+        const auto writable = GuestBias + boundary - 8;
+        machine.CheckAccess(writable, 8, Cpu::Permission::Read | Cpu::Permission::Write);
+        const Bytes pattern(8, std::byte{0xa7});
+        machine.Write(writable, pattern);
+        require(word(machine, writable) == 0xa7a7a7a7a7a7a7a7ull,
+                "Previous segment lost its writable tail inside a shared boundary page");
+        bool denied = false;
+        try { machine.CheckAccess(GuestBias + boundary, 8, Cpu::Permission::Read); }
+        catch (const std::exception& error) {
+            denied = std::string(error.what()).find("Guest access denied") != std::string::npos;
+        }
+        require(denied, "Shared boundary page left a zero-permission reserve segment accessible");
     }
 #else
     const Input reserve(mainBytes, variant(boundary, 0x100, 0, 0));
