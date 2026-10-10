@@ -26,6 +26,7 @@ fixture.IMPORTS = {
     "thread_join": ("onNY9Byn-W8", "libkernel", 1, "B"),
     "thread_self": ("aI+OeCz8xrQ", "libkernel", 1, "B"),
     "process_exit": ("6Z83sYWFlA8", "libkernel", 1, "B"),
+    "vblank_wait": ("j6RaAUlaLv0", "libSceVideoOut", 3, "D"),
 }
 fixture.EXPORTS = {"_start": 2, "KernelEventsReceipt": 1}
 if __name__ == "__main__":

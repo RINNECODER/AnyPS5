@@ -35,7 +35,8 @@ public:
     SceNativeVideoOutBackend(Machine& machine, const AgcDriver::PresentationWindow& window,
                              const VideoOutCompletionCallbacks& completion,
                              std::stop_token processStop = {},
-                             const SceVideoOutMemoryConfiguration& memory = {});
+                             const SceVideoOutMemoryConfiguration& memory = {},
+                             SceVideoOutEventSink events = {});
     ~SceNativeVideoOutBackend();
     SceNativeVideoOutBackend(const SceNativeVideoOutBackend&) = delete;
     SceNativeVideoOutBackend& operator=(const SceNativeVideoOutBackend&) = delete;
@@ -62,7 +63,8 @@ public:
         Machine& machine, const AnyPS5::Host::NativeMetalSessionConfiguration& configuration,
         const VideoOutCompletionCallbacks& completion, std::stop_token processStop = {},
         std::uint64_t videoOutGateBase = 0x7ffdfd000000,
-        std::span<const VideoOutAbiAdmission> admissions = {});
+        std::span<const VideoOutAbiAdmission> admissions = {},
+        SceVideoOutEventSink events = {});
     ~SceNativeGraphicsSession();
     SceNativeGraphicsSession(const SceNativeGraphicsSession&) = delete;
     SceNativeGraphicsSession& operator=(const SceNativeGraphicsSession&) = delete;

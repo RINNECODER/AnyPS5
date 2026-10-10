@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include <array>
 #include <atomic>
@@ -42,10 +43,21 @@ void rejectVideoOutMappingReentry() {
     require(videoOutMappingCallbackContext == nullptr, "SCE VideoOut mapping callback reentry is unsupported");
 }
 
-void noEventRegistrations(const VideoOutConfig& config) {
-    require(config.flipEvents.empty() && config.vblankEvents.empty() && config.preVblankEvents.empty() &&
-            config.outputModeEvents.empty(), "Unsupported SCE VideoOut event registration in native adapter");
-}
+static_assert(VideoOutError::InvalidValue == VIDEO_OUT_ERROR_INVALID_VALUE &&
+              VideoOutError::InvalidHandle == VIDEO_OUT_ERROR_INVALID_HANDLE &&
+              VideoOutError::InvalidIndex == VIDEO_OUT_ERROR_INVALID_INDEX &&
+              VideoOutError::SlotOccupied == VIDEO_OUT_ERROR_SLOT_OCCUPIED &&
+              VideoOutError::ResourceBusy == VIDEO_OUT_ERROR_RESOURCE_BUSY &&
+              VideoOutError::FlipQueueFull == VIDEO_OUT_ERROR_FLIP_QUEUE_FULL &&
+              VideoOutError::InvalidCategory == VIDEO_OUT_ERROR_INVALID_CATEGORY &&
+              VideoOutError::InvalidEventQueue == VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE &&
+              VideoOutError::UnavailableOutputMode == VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE);
+static_assert(VideoOutEventFlip == VIDEO_OUT_EVENT_FLIP && VideoOutEventVblank == VIDEO_OUT_EVENT_VBLANK);
+static_assert(sizeof(SceVideoOutFlipStatus) == sizeof(VideoOutFlipStatus) &&
+              offsetof(SceVideoOutFlipStatus, FlipPendingNum) == offsetof(VideoOutFlipStatus, flipPendingNum) &&
+              offsetof(SceVideoOutFlipStatus, SubmitProcessTimeCounter) == offsetof(VideoOutFlipStatus, submitProcessTimeCounter));
+static_assert(sizeof(SceVideoOutVblankStatus) == sizeof(VideoOutVblankStatus) &&
+              offsetof(SceVideoOutVblankStatus, Flags) == offsetof(VideoOutVblankStatus, flags));
 
 }
 
@@ -67,6 +79,10 @@ struct SceNativeVideoOutBackend::Impl {
     Machine& machine;
     AgcDriver::PresentationWindow window;
     VideoOutCompletionCallbacks completion;
+    // Forwards each completed flip to the owner's callback, then to the equeue.
+    VideoOutCompletionCallbacks presented;
+    SceVideoOutEventSink events;
+    std::atomic<std::uint64_t> cpuFlipSerial{0};
     std::stop_source stop;
     std::shared_ptr<FlipQueue> queue = std::make_shared<FlipQueue>();
     mutable std::mutex stateMutex;
@@ -97,8 +113,9 @@ struct SceNativeVideoOutBackend::Impl {
     std::exception_ptr shutdownFailure;
 
     Impl(Machine& guest, const AgcDriver::PresentationWindow& target,
-         const VideoOutCompletionCallbacks& callbacks, const SceVideoOutMemoryConfiguration& memory) :
-        machine(guest), window(target), completion(callbacks),
+         const VideoOutCompletionCallbacks& callbacks, const SceVideoOutMemoryConfiguration& memory,
+         SceVideoOutEventSink sink) :
+        machine(guest), window(target), completion(callbacks), events(std::move(sink)),
         mappings(memory.Ranges.begin(), memory.Ranges.end()), mappingOwner(memory.Owner), mappingGeneration(memory.Generation) {
         require(mappings.empty() || mappingOwner != nullptr, "SCE VideoOut mappings require genuine backing ownership");
         AgcDriver::NativeGuestMemory::BorrowedRangesScope validated(mappings);
@@ -108,6 +125,24 @@ struct SceNativeVideoOutBackend::Impl {
                 "Unsupported SCE VideoOut native window: missing Metal layer");
         require(completion.processTime && completion.processTimeCounter && completion.flipEvent,
                 "Unsupported SCE VideoOut native completion: missing clock or event dispatch");
+        presented = {this, &Impl::processTime,
+                     &Impl::processTimeCounter, &Impl::flipCompleted};
+    }
+    static std::uint64_t processTime(void* context) {
+        const auto& outer = static_cast<Impl*>(context)->completion;
+        return outer.processTime(outer.context);
+    }
+    static std::uint64_t processTimeCounter(void* context) {
+        const auto& outer = static_cast<Impl*>(context)->completion;
+        return outer.processTimeCounter(outer.context);
+    }
+    // Runs under the config mutex from CompleteFlip. open() makes a port's
+    // generation equal to its opaque handle, so the generation names the output.
+    static void flipCompleted(void* context, VideoOutConfig& config, std::int64_t argument) {
+        auto& self = *static_cast<Impl*>(context);
+        self.completion.flipEvent(self.completion.context, config, argument);
+        if (self.events.Publish)
+            self.events.Publish(static_cast<std::int32_t>(config.generation), VIDEO_OUT_EVENT_FLIP, argument);
     }
 
     void start(std::stop_token processStop) {
@@ -131,13 +166,20 @@ struct SceNativeVideoOutBackend::Impl {
     }
 
     std::shared_ptr<VideoOutConfig> getConfig(std::int32_t handle) const {
+        auto config = find(handle);
+        require(config != nullptr, "SCE VideoOut invalid output handle");
+        return config;
+    }
+
+    // Null for a handle that was never opened or is already closed.
+    std::shared_ptr<VideoOutConfig> find(std::int32_t handle) const {
         checkQueue();
         std::shared_ptr<VideoOutConfig> config;
         {
             std::lock_guard lock(stateMutex);
-            require(handle > 0 && configs.contains(handle),
-                    "SCE VideoOut invalid output handle");
-            config = configs.at(handle);
+            const auto found = configs.find(handle);
+            if (handle <= 0 || found == configs.end()) return nullptr;
+            config = found->second;
         }
         std::lock_guard lock(config->mutex);
         config->Check();
@@ -147,17 +189,15 @@ struct SceNativeVideoOutBackend::Impl {
     std::int32_t open(std::int32_t user, std::int32_t bus, std::int32_t index,
                       const std::optional<SceVideoOutOpenParam>& param) {
         rejectMappingReentry();
-        require((user == 0 || user == 255) && bus >= 0 && bus <= 2 && index == 0,
-                "SCE VideoOut invalid open user, bus or index");
-        if (param) {
-            require(param->FirstWord == 16 && param->SetPriority <= 1 && param->SetAffinity <= 1,
-                    "SCE VideoOut invalid open parameters");
-            require(!param->SetPriority && !param->SetAffinity,
-                    "Unsupported SCE VideoOut native service thread priority or affinity");
-        }
+        if (!((user == 0 || user == 255) && bus >= 0 && bus <= 2 && index == 0))
+            return VIDEO_OUT_ERROR_INVALID_VALUE;
+        // Host presentation threads have no guest priority or affinity; a valid
+        // request is accepted and has no further effect.
+        if (param && (param->FirstWord != 16 || param->SetPriority > 1 || param->SetAffinity > 1))
+            return VIDEO_OUT_ERROR_INVALID_VALUE;
         std::lock_guard lock(stateMutex);
         checkQueue();
-        require(ports[bus] == 0, "SCE VideoOut output port is already open");
+        if (ports[bus] != 0) return VIDEO_OUT_ERROR_RESOURCE_BUSY;
         const auto numericHandle = nextHandle.fetch_add(1);
         require(numericHandle <= static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()),
                 "SCE VideoOut opaque handle space exhausted");
@@ -194,12 +234,11 @@ struct SceNativeVideoOutBackend::Impl {
         std::unique_lock mappingLock(mappingMutex);
         std::unique_lock lock(stateMutex);
         checkQueue();
-        require(handle > 0 && outputs.contains(handle), "SCE VideoOut invalid close handle");
+        if (handle <= 0 || !outputs.contains(handle)) return VIDEO_OUT_ERROR_INVALID_HANDLE;
         const auto config = configs.at(handle);
         {
             std::lock_guard configLock(config->mutex);
             config->Check();
-            noEventRegistrations(*config);
             require(config->flipStatus.flipPendingNum == 0,
                     "SCE VideoOut cannot close an output with a pending flip");
             config->closing = true; // Stop new reservation before driver removal.
@@ -295,7 +334,8 @@ struct SceNativeVideoOutBackend::Impl {
     }
 
     SceVideoOutStatusResult status(std::int32_t handle) const {
-        const auto config = getConfig(handle);
+        const auto config = find(handle);
+        if (!config) return {VIDEO_OUT_ERROR_INVALID_HANDLE, {}};
         std::lock_guard lock(config->mutex);
         config->Check();
         SceVideoOutStatus output;
@@ -310,15 +350,23 @@ struct SceNativeVideoOutBackend::Impl {
                                  std::span<const SceVideoOutBuffer> rows,
                                  const SceVideoOutAttribute& attribute, std::int32_t category) {
         rejectMappingReentry();
-        require(set >= 0 && set < VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX && start >= 0 &&
-                start < VIDEO_OUT_BUFFER_NUM_MAX && !rows.empty() && rows.size() <= VIDEO_OUT_BUFFER_NUM_MAX &&
-                rows.size() <= static_cast<std::size_t>(VIDEO_OUT_BUFFER_NUM_MAX - start),
-                "SCE VideoOut invalid buffer set, slot or count");
-        require(category == VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED ||
-                category == VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_COMPRESSED,
-                "SCE VideoOut invalid buffer category");
+        if (!(set >= 0 && set < VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX && start >= 0 &&
+              start < VIDEO_OUT_BUFFER_NUM_MAX && !rows.empty() && rows.size() <= VIDEO_OUT_BUFFER_NUM_MAX &&
+              rows.size() <= static_cast<std::size_t>(VIDEO_OUT_BUFFER_NUM_MAX - start)))
+            return VIDEO_OUT_ERROR_INVALID_VALUE;
+        if (category != VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_UNCOMPRESSED &&
+            category != VIDEO_OUT_BUFFER_ATTRIBUTE_CATEGORY_COMPRESSED)
+            return VIDEO_OUT_ERROR_INVALID_CATEGORY;
         std::lock_guard mappingLock(mappingMutex);
-        const auto config = getConfig(handle);
+        const auto config = find(handle);
+        if (!config) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+        {
+            // Occupancy is an SCE result; it is rechecked under publication below.
+            std::lock_guard lock(config->mutex);
+            if (config->groups[set].occupied) return VIDEO_OUT_ERROR_INVALID_INDEX;
+            for (std::size_t index = 0; index < rows.size(); ++index)
+                if (config->buffers[start + index].Occupied()) return VIDEO_OUT_ERROR_SLOT_OCCUPIED;
+        }
         BufferAttributeGroup group{nativeAttribute(attribute), category, true};
         std::array<VideoOutBuffer, VIDEO_OUT_BUFFER_NUM_MAX> validated{};
         using MetalDriver = AgcDriver::Metal::MetalDriver;
@@ -366,8 +414,9 @@ struct SceNativeVideoOutBackend::Impl {
     }
 
     std::int32_t flipRate(std::int32_t handle, std::int32_t rate) {
-        require(rate >= 0 && rate <= 2, "SCE VideoOut invalid flip rate");
-        const auto config = getConfig(handle);
+        if (rate < 0 || rate > 2) return VIDEO_OUT_ERROR_INVALID_VALUE;
+        const auto config = find(handle);
+        if (!config) return VIDEO_OUT_ERROR_INVALID_HANDLE;
         std::lock_guard lock(config->mutex);
         config->Check();
         config->flipRate = rate;
@@ -376,13 +425,14 @@ struct SceNativeVideoOutBackend::Impl {
 
     std::int32_t unregisterBuffers(std::int32_t handle, std::int32_t set) {
         rejectMappingReentry();
-        require(set >= 0 && set < VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX, "SCE VideoOut invalid buffer set index");
+        if (set < 0 || set >= VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX) return VIDEO_OUT_ERROR_INVALID_INDEX;
         Registration retired;
         std::unique_lock mappingLock(mappingMutex);
-        const auto config = getConfig(handle);
+        const auto config = find(handle);
+        if (!config) return VIDEO_OUT_ERROR_INVALID_HANDLE;
         std::unique_lock lock(config->mutex);
         config->Check();
-        require(config->groups[set].occupied, "SCE VideoOut buffer attribute set is not registered");
+        if (!config->groups[set].occupied) return VIDEO_OUT_ERROR_INVALID_INDEX;
         for (std::size_t index = 0; index < config->buffers.size(); ++index)
             if (config->buffers[index].groupIndex == set)
                 require(config->bufferPending[index] == 0, "SCE VideoOut cannot unregister a buffer with a pending flip");
@@ -392,6 +442,120 @@ struct SceNativeVideoOutBackend::Impl {
         if (found != registrations.end()) { retired = std::move(found->second); registrations.erase(found); }
         lock.unlock(); mappingLock.unlock();
         return 0;
+    }
+
+    // CPU flip: no GPU work precedes it, so it is ready as soon as it is reserved.
+    std::int32_t submitFlip(std::int32_t handle, std::int32_t index, std::int32_t mode, std::int64_t argument) {
+        rejectMappingReentry();
+        if (mode < VIDEO_OUT_FLIP_MODE_VSYNC || mode > 6) return VIDEO_OUT_ERROR_INVALID_VALUE;
+        if (index < VIDEO_OUT_BUFFER_INDEX_BLACK || index >= VIDEO_OUT_BUFFER_NUM_MAX) return VIDEO_OUT_ERROR_INVALID_INDEX;
+        const auto config = find(handle);
+        if (!config) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+        std::shared_ptr<AgcDriver::IVideoOutput> output;
+        {
+            std::lock_guard lock(stateMutex);
+            const auto found = outputs.find(handle);
+            if (found == outputs.end()) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+            output = found->second;
+        }
+        {
+            std::lock_guard lock(config->mutex);
+            config->Check();
+            if (index >= 0 && !config->buffers[index].Occupied()) return VIDEO_OUT_ERROR_INVALID_INDEX;
+        }
+        if (queue->reservations.load() >= VIDEO_OUT_FLIP_QUEUE_CAPACITY) return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
+        auto flip = output->Reserve({static_cast<std::uint32_t>(handle), index, static_cast<std::uint32_t>(mode), argument});
+        require(flip != nullptr, "SCE VideoOut output returned a null flip reservation");
+        const auto serial = ++cpuFlipSerial;
+        auto frame = std::make_shared<AgcDriver::FrameTiming>(serial);
+        const auto now = AgcDriver::FrameTiming::Clock::now();
+        frame->IncludeSubmission(serial, now, now, now, true);
+        frame->SetFlip(serial, 0, now, now);
+        flip->GpuReady(frame);
+        return 0;
+    }
+
+    SceVideoOutFlipStatusResult flipStatus(std::int32_t handle) const {
+        const auto config = find(handle);
+        if (!config) return {VIDEO_OUT_ERROR_INVALID_HANDLE, {}};
+        std::lock_guard lock(config->mutex);
+        config->Check();
+        return {0, std::bit_cast<SceVideoOutFlipStatus>(config->flipStatus)};
+    }
+
+    SceVideoOutVblankStatusResult vblankStatus(std::int32_t handle) const {
+        const auto config = find(handle);
+        if (!config) return {VIDEO_OUT_ERROR_INVALID_HANDLE, {}};
+        std::lock_guard lock(config->mutex);
+        config->Check();
+        return {0, std::bit_cast<SceVideoOutVblankStatus>(config->vblankStatus)};
+    }
+
+    SceVideoOutResolutionStatusResult resolutionStatus(std::int32_t handle) const {
+        const auto config = find(handle);
+        if (!config) return {VIDEO_OUT_ERROR_INVALID_HANDLE, {}};
+        std::lock_guard lock(config->mutex);
+        config->Check();
+        SceVideoOutResolutionStatus status;
+        status.FullWidth = status.PaneWidth = config->width;
+        status.FullHeight = status.PaneHeight = config->height;
+        status.RefreshRate = config->outputMode == VIDEO_OUT_OUTPUT_MODE_119_88HZ
+            ? VIDEO_OUT_REFRESH_RATE_119_88HZ : VIDEO_OUT_REFRESH_RATE_59_94HZ;
+        status.ScreenSizeInInch = 50.0f;
+        return {0, status};
+    }
+
+    // Returns after the next vblank of this output. With an equeue sink the
+    // guest thread parks in the scheduler; otherwise this host call blocks.
+    std::int32_t waitVblank(std::int32_t handle) {
+        rejectMappingReentry();
+        const auto config = find(handle);
+        if (!config) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+        if (events.WaitVblank) return events.WaitVblank(handle);
+        std::unique_lock lock(config->mutex);
+        config->Check();
+        const auto count = config->vblankStatus.count;
+        config->vblankCond.wait(lock, config->shutdownToken, [&] {
+            return !config->opened || config->closing || config->failure || config->vblankStatus.count != count;
+        });
+        config->Check();
+        return 0;
+    }
+
+    std::int32_t flipPending(std::int32_t handle) const {
+        const auto config = find(handle);
+        if (!config) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+        std::lock_guard lock(config->mutex);
+        config->Check();
+        return config->flipStatus.flipPendingNum;
+    }
+
+    // Only the default mode is available on the native window.
+    std::int32_t configureOutput(std::int32_t handle, std::uint64_t mode) {
+        const auto config = find(handle);
+        if (!config) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+        if (mode != VIDEO_OUT_OUTPUT_MODE_DEFAULT) return VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE;
+        std::lock_guard lock(config->mutex);
+        config->Check();
+        config->outputMode = mode;
+        return 0;
+    }
+
+    // The native window has no TV safe area; margins are accepted for an open port.
+    std::int32_t windowMargins(std::int32_t handle, std::int32_t, std::int32_t) const {
+        return find(handle) ? 0 : VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+
+    std::int32_t addEvent(std::uint64_t queue, std::int32_t handle, std::int32_t kind, std::uint64_t udata) {
+        if (!find(handle)) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+        if (!events.Add) return VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE;
+        return events.Add(queue, handle, kind, udata);
+    }
+
+    std::int32_t deleteEvent(std::uint64_t queue, std::int32_t handle, std::int32_t kind) {
+        if (!find(handle)) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+        if (!events.Delete) return VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE;
+        return events.Delete(queue, handle, kind);
     }
 
     std::map<std::int32_t, std::shared_ptr<VideoOutConfig>> snapshotConfigs() const {
@@ -453,7 +617,7 @@ struct SceNativeVideoOutBackend::Impl {
                         AgcDriverPresentClear_nid_postfix(target, request->index == VIDEO_OUT_BUFFER_INDEX_BLACK,
                                                         gpuReady, request.get());
                     }
-                    CompleteFlip(*request, completion);
+                    CompleteFlip(*request, presented);
                 } catch (...) {
                     if (!cancelled(*request)) {
                         request->Fail(std::current_exception());
@@ -496,12 +660,13 @@ struct SceNativeVideoOutBackend::Impl {
                 for (const auto& [handle, config] : snapshot) if (config) {
                     std::lock_guard lock(config->mutex);
                     if (!config->opened || config->closing || config->failure) continue;
-                    noEventRegistrations(*config);
                     require(config->vblankStatus.count != std::numeric_limits<std::uint64_t>::max(),
                             "SCE VideoOut vblank counter overflow");
                     ++config->vblankStatus.count;
                     config->vblankStatus.processTime = completion.processTime(completion.context);
                     config->vblankStatus.processTimeCounter = completion.processTimeCounter(completion.context);
+                    if (events.Publish)
+                        events.Publish(handle, VIDEO_OUT_EVENT_VBLANK, static_cast<std::int64_t>(config->vblankStatus.count));
                     config->vblankCond.notify_all();
                 }
             }
@@ -574,8 +739,9 @@ struct SceNativeVideoOutBackend::Impl {
 
 SceNativeVideoOutBackend::SceNativeVideoOutBackend(Machine& machine, const AgcDriver::PresentationWindow& window,
                                                  const VideoOutCompletionCallbacks& completion,
-                                                 std::stop_token processStop, const SceVideoOutMemoryConfiguration& memory) :
-    impl(std::make_shared<Impl>(machine, window, completion, memory)) {
+                                                 std::stop_token processStop, const SceVideoOutMemoryConfiguration& memory,
+                                                 SceVideoOutEventSink events) :
+    impl(std::make_shared<Impl>(machine, window, completion, memory, std::move(events))) {
     impl->start(processStop);
 }
 
@@ -599,6 +765,24 @@ SceVideoOutBackend SceNativeVideoOutBackend::GetCallbacks() const {
     };
     callbacks.SetFlipRate = [context](auto handle, auto rate) { return context()->flipRate(handle, rate); };
     callbacks.UnregisterBuffers = [context](auto handle, auto set) { return context()->unregisterBuffers(handle, set); };
+    callbacks.SubmitFlip = [context](auto handle, auto index, auto mode, auto argument) {
+        return context()->submitFlip(handle, index, mode, argument);
+    };
+    callbacks.GetFlipStatus = [context](auto handle) { return context()->flipStatus(handle); };
+    callbacks.GetVblankStatus = [context](auto handle) { return context()->vblankStatus(handle); };
+    callbacks.GetResolutionStatus = [context](auto handle) { return context()->resolutionStatus(handle); };
+    callbacks.WaitVblank = [context](auto handle) { return context()->waitVblank(handle); };
+    callbacks.IsFlipPending = [context](auto handle) { return context()->flipPending(handle); };
+    callbacks.ConfigureOutput = [context](auto handle, auto mode) { return context()->configureOutput(handle, mode); };
+    callbacks.SetWindowModeMargins = [context](auto handle, auto top, auto bottom) {
+        return context()->windowMargins(handle, top, bottom);
+    };
+    callbacks.AddEvent = [context](auto queue, auto handle, auto kind, auto udata) {
+        return context()->addEvent(queue, handle, kind, udata);
+    };
+    callbacks.DeleteEvent = [context](auto queue, auto handle, auto kind) {
+        return context()->deleteEvent(queue, handle, kind);
+    };
     return callbacks;
 }
 
@@ -651,13 +835,14 @@ SceNativeGraphicsSession::~SceNativeGraphicsSession() {
 std::unique_ptr<SceNativeGraphicsSession> SceNativeGraphicsSession::CreateMainThread(
     Machine& machine, const AnyPS5::Host::NativeMetalSessionConfiguration& configuration,
     const VideoOutCompletionCallbacks& completion, std::stop_token processStop,
-    std::uint64_t videoOutGateBase, std::span<const VideoOutAbiAdmission> admissions) {
+    std::uint64_t videoOutGateBase, std::span<const VideoOutAbiAdmission> admissions, SceVideoOutEventSink events) {
     auto state = std::make_unique<Impl>();
     state->session = AnyPS5::Host::NativeMetalSession::CreateMainThread(configuration);
     state->videoOut = std::make_unique<SceNativeVideoOutBackend>(machine,
         state->session->Window().Presentation(configuration.window.contentWidth, configuration.window.contentHeight),
         completion, processStop, SceVideoOutMemoryConfiguration{
-            configuration.initialRanges, configuration.initialRangeOwner, configuration.initialGeneration});
+            configuration.initialRanges, configuration.initialRangeOwner, configuration.initialGeneration},
+        std::move(events));
     state->imports = std::make_unique<SceVideoOutImports>(machine, state->videoOut->GetCallbacks(), videoOutGateBase, admissions);
     return std::unique_ptr<SceNativeGraphicsSession>(new SceNativeGraphicsSession(std::move(state)));
 }

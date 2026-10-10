@@ -250,8 +250,10 @@ void run(const char* utility,const char* const* callers) {
     rejects([&]{guest.call(4,"rKBUtgRrtbk",{handle,2,3,Buffers,2,Attribute,0,0});},"readable guest range");
     require(guest.call(4,"rKBUtgRrtbk",{handle,2,3,Buffers,1,Attribute,0,0})==0,
         "Failed second row partially published first slot or group");
-    rejects([&]{guest.call(4,"rKBUtgRrtbk",{handle,1,3,Buffers,1,Attribute,0,0});},"slot is occupied");
-    rejects([&]{guest.call(4,"rKBUtgRrtbk",{handle,2,4,Buffers,1,Attribute,0,0});},"set is occupied");
+    require(static_cast<std::uint32_t>(guest.call(4,"rKBUtgRrtbk",{handle,1,3,Buffers,1,Attribute,0,0}))==0x80290010u,
+        "Occupied slot did not return SCE_VIDEO_OUT_ERROR_SLOT_OCCUPIED");
+    require(static_cast<std::uint32_t>(guest.call(4,"rKBUtgRrtbk",{handle,2,4,Buffers,1,Attribute,0,0}))==0x8029000au,
+        "Occupied attribute set did not return SCE_VIDEO_OUT_ERROR_INVALID_INDEX");
     require(guest.call(5,"CBiu4mCE1DA",{handle,0})==0,"Compiled flip-rate return differs");
     std::array<std::byte,64> statusGuard; statusGuard.fill(std::byte{0x9d}); machine.Write(Status-8,statusGuard);
     machine.Protect(Control+4096,4096,Cpu::Permission::Read);
@@ -264,7 +266,8 @@ void run(const char* utility,const char* const* callers) {
     require(load<std::uint64_t>(machine,Status-8)==0x9d9d9d9d9d9d9d9dULL &&
         load<std::uint64_t>(machine,Status+48)==0x9d9d9d9d9d9d9d9dULL,"Status changed adjacent guards");
     const auto statusBefore=load<Cpu::SceVideoOutStatus>(machine,Status);
-    rejects([&]{guest.call(1,"utPrVdxio-8",{0x7fffffff,Status});},"handle");
+    require(static_cast<std::uint32_t>(guest.call(1,"utPrVdxio-8",{0x7fffffff,Status}))==0x8029000bu,
+        "Unknown handle status did not return SCE_VIDEO_OUT_ERROR_INVALID_HANDLE");
     const auto statusAfter=load<Cpu::SceVideoOutStatus>(machine,Status);
     require(std::memcmp(&statusBefore,&statusAfter,sizeof(statusBefore))==0,
         "Invalid handle modified status output before success");
@@ -326,10 +329,12 @@ void run(const char* utility,const char* const* callers) {
     }
     require(guest.call(6,"N5KDtkIjjJ4",{handle,2})==0 && guest.call(2,"uquVH4-Du78",{handle})==0,
         "Compiled unregister/close failed after presentation");
-    rejects([&]{guest.call(5,"CBiu4mCE1DA",{handle,0});},"handle");
+    require(static_cast<std::uint32_t>(guest.call(5,"CBiu4mCE1DA",{handle,0}))==0x8029000bu,
+        "Closed handle flip rate did not return SCE_VIDEO_OUT_ERROR_INVALID_HANDLE");
     const auto reopened=guest.call(0,"Up36PTk687E",{255,0,0,0});
     require(reopened!=handle,"Reopened output reused a retired opaque handle");
-    rejects([&]{guest.call(6,"N5KDtkIjjJ4",{handle,2});},"handle");
+    require(static_cast<std::uint32_t>(guest.call(6,"N5KDtkIjjJ4",{handle,2}))==0x8029000bu,
+        "Closed handle unregister did not return SCE_VIDEO_OUT_ERROR_INVALID_HANDLE");
     require(guest.call(2,"uquVH4-Du78",{reopened})==0,"Reopened output failed to close");
     const std::array surviving{augmented[1]};
     mutate(*session,surviving,20,[&]{machine.Unmap(Display,65536);},owners,replacement);

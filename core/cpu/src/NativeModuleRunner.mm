@@ -56,8 +56,8 @@ struct NativeModuleRunner::Impl {
     };
     struct Completion {
         std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-        // No target flip-event subscription is admitted. These are bounded host
-        // ordering receipts, never a fabricated guest event or guest-memory write.
+        // Bounded host ordering receipts. Guest flip/vblank events reach the
+        // kernel equeue through the VideoOut event sink, not through this hook.
         std::atomic<std::uint64_t> flipReceipts{0};
         static std::uint64_t time(void* context) {
             auto& c = *static_cast<Completion*>(context);
@@ -115,8 +115,20 @@ struct NativeModuleRunner::Impl {
         native.initialGeneration = 0;
         native.eopInterrupt = events->Provider().EopPublisher();
         const VideoOutCompletionCallbacks callbacks{&completion, Completion::time, Completion::time, Completion::flip};
+        SceVideoOutEventSink videoEvents;
+        videoEvents.Add = [this](std::uint64_t queue, std::int32_t handle, std::int32_t kind, std::uint64_t user) {
+            return events->Provider().AddVideoOutEvent(queue, handle, kind, user) ? 0 : VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE;
+        };
+        videoEvents.Delete = [this](std::uint64_t queue, std::int32_t handle, std::int32_t kind) {
+            return events->Provider().DeleteVideoOutEvent(queue, handle, kind) ? 0 : VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE;
+        };
+        videoEvents.Publish = events->Provider().VideoOutPublisher();
+        videoEvents.WaitVblank = [this](std::int32_t handle) {
+            events->Provider().WaitVideoOutVblank(handle);
+            return 0; // the scheduler returns the parked call's result
+        };
         graphics = SceNativeGraphicsSession::CreateMainThread(machine, native, callbacks, {},
-            0x7ffdfd000000, TargetVideoOutAdmissions());
+            0x7ffdfd000000, TargetVideoOutAdmissions(), std::move(videoEvents));
         auto backend = MakeNativeAgcBackend(graphics->Driver());
         backend.AddEvent = [this](std::uint64_t handle, std::int32_t id, std::uint64_t user) {
             return events->Provider().AddGraphicsEvent(handle, id, user);
