@@ -21,6 +21,8 @@ constexpr std::array<KernelEventImport, 3> inventory{{
 constexpr std::uint32_t Badf = 0x80020009u, Fault = 0x8002000eu, Invalid = 0x80020016u,
                         Timedout = 0x8002003cu;
 constexpr std::size_t MaxQueues = 1024, MaxSubscriptions = 4096;
+// Source filters: AGC graphics EOP and VideoOut flip/vblank completions.
+constexpr std::int16_t GraphicsFilter = -14, VideoOutFilter = -13;
 // Process-wide nonrecycled numeric identities keep a foreign provider's queue
 // and a removed/recreated queue distinct, independently of host allocations.
 std::atomic<std::uint64_t> nextQueue{0x0c09000000000001ULL};
@@ -70,6 +72,9 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
         std::int64_t count = 0;
         std::uint64_t reservedKey = 0;
         bool live = true; // producer reads only under mailbox lock
+        std::int16_t filter = GraphicsFilter;
+        std::int32_t output = 0;  // VideoOut handle; producer reads under mailbox lock
+        std::int64_t payload = 0; // latest VideoOut flip argument or vblank count
     };
     struct Wait {
         GuestThreadHandle thread;
@@ -89,13 +94,37 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
         std::shared_ptr<Queue> queue;
         std::shared_ptr<Subscription> subscription;
         std::int64_t count;
+        std::int64_t payload = 0;
     };
     struct Mailbox {
         std::mutex mutex;
         bool live = true, overflow = false;
         std::vector<std::shared_ptr<Subscription>> subscriptions;
         std::vector<Receipt> receipts;
+        std::map<std::int32_t, std::uint64_t> vblanks; // published vblanks per VideoOut output
         Mailbox() { subscriptions.reserve(MaxSubscriptions); receipts.reserve(MaxSubscriptions); }
+        // Producer side, under mutex: coalesce one completion per matching subscription.
+        template<class TMatch> void publish(TMatch&& matches, std::int64_t payload) {
+            if (!live) return;
+            for (const auto& s : subscriptions) {
+                if (!s->live || !matches(*s)) continue;
+                const auto q = s->queue.lock(); if (!q || !q->live) continue;
+                const auto found = std::find_if(receipts.begin(), receipts.end(), [&](const auto& r) { return r.subscription == s; });
+                if (found != receipts.end()) {
+                    if (found->count == std::numeric_limits<std::int64_t>::max()) overflow = true;
+                    else { ++found->count; found->payload = payload; }
+                } else {
+                    if (receipts.size() >= MaxSubscriptions) { overflow = true; return; }
+                    receipts.push_back({q, s, 1, payload});
+                }
+            }
+        }
+    };
+    struct VblankWait {
+        GuestThreadHandle thread;
+        std::uint64_t key;
+        std::int32_t output;
+        std::uint64_t seen; // mailbox vblank count when the wait began
     };
     using Key = std::tuple<std::string, std::uint16_t, std::uint16_t>;
     Machine& machine;
@@ -104,6 +133,7 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
     std::shared_ptr<Mailbox> mailbox = std::make_shared<Mailbox>();
     std::map<std::uint64_t, std::shared_ptr<Queue>> queues;
     std::map<Key, std::uint64_t> gates;
+    std::vector<VblankWait> vblankWaits;
     std::uint64_t base, nextWait = 1;
     bool live = true;
     Impl(Machine& m, const std::shared_ptr<GuestThreads>& t, std::uint64_t b)
@@ -138,6 +168,53 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
                 for (auto& s : w->reserved) if (s->reservedKey == w->key) s->reservedKey = 0;
             std::erase_if(q->waiting, [&](const auto& w) { return w->thread == id; });
         }
+        std::erase_if(vblankWaits, [&](const auto& w) { return w.thread == id; });
+    }
+    // Wakes parked WaitVblank calls once their output reported a later vblank.
+    bool pumpVblanks() {
+        if (vblankWaits.empty()) return false;
+        std::map<std::int32_t, std::uint64_t> published;
+        {
+            std::lock_guard lock(mailbox->mutex);
+            published = mailbox->vblanks;
+        }
+        for (auto it = vblankWaits.begin(); it != vblankWaits.end();) {
+            const auto found = published.find(it->output);
+            if (!waits->IsWaiting(it->thread, it->key)) { it = vblankWaits.erase(it); continue; }
+            if (found != published.end() && found->second > it->seen) {
+                waits->Wake(it->thread, it->key, std::uint32_t{0});
+                it = vblankWaits.erase(it);
+                continue;
+            }
+            ++it;
+        }
+        return !vblankWaits.empty();
+    }
+    // Graphics records carry the coalesced count as data. VideoOut records use
+    // the source encoding: data = tsc[11:0] | min(count,15)<<12 | payload[47:0]<<16
+    // and fflags = min(count,15), so GetEventCount/GetEventData decode them.
+    static KernelEventRecord record(const Subscription& s) {
+        if (s.filter == VideoOutFilter) {
+            const auto counter = static_cast<std::uint64_t>(std::min<std::int64_t>(s.count, 15));
+            const auto tsc = static_cast<std::uint64_t>(Clock::now().time_since_epoch().count()) & 0xfffu;
+            const auto data = tsc | (counter << 12u) | ((static_cast<std::uint64_t>(s.payload) & 0xffffffffffffULL) << 16u);
+            return {static_cast<std::uint64_t>(static_cast<std::int64_t>(s.id)), VideoOutFilter, 0x1,
+                    static_cast<std::uint32_t>(counter), static_cast<std::int64_t>(data), s.udata};
+        }
+        return {static_cast<std::uint64_t>(static_cast<std::int64_t>(s.id)), GraphicsFilter, 0x21, 0, s.count, s.udata};
+    }
+    std::shared_ptr<Subscription> find(const Queue& q, std::int16_t filter, std::int32_t id) const {
+        for (const auto& s : q.subscriptions) if (s->filter == filter && s->id == id) return s;
+        return nullptr;
+    }
+    void remove(Queue& q, const std::shared_ptr<Subscription>& s) {
+        {
+            std::lock_guard lock(mailbox->mutex);
+            s->live = false;
+            std::erase(mailbox->subscriptions, s);
+            std::erase_if(mailbox->receipts, [&](const auto& r) { return r.subscription == s; });
+        }
+        std::erase(q.subscriptions, s);
     }
     std::vector<std::shared_ptr<Subscription>> available(const Queue& q, std::int32_t capacity) {
         std::vector<std::shared_ptr<Subscription>> result;
@@ -163,8 +240,7 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
         for (const auto& s : w->reserved) {
             if (!s->live || (w->queued && s->reservedKey != w->key) || s->count < 1)
                 throw std::runtime_error("Deleted or invalid kernel event reservation");
-            records.push_back({static_cast<std::uint64_t>(static_cast<std::int64_t>(s->id)), -14, 0x21, 0,
-                               s->count, s->udata});
+            records.push_back(record(*s));
         }
         // Revalidate the entire original capacity and count before any write.
         // For parked calls the scheduler already validated the return token.
@@ -227,7 +303,7 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
             // Host calls already own Machine execution; deliver's idle check is
             // intentionally reserved for deferred continuations, so write here.
             std::vector<KernelEventRecord> records;
-            for (const auto& s : w->reserved) records.push_back({static_cast<std::uint64_t>(static_cast<std::int64_t>(s->id)), -14, 0x21, 0, s->count, s->udata});
+            for (const auto& s : w->reserved) records.push_back(record(*s));
             m.Write(events, std::as_bytes(std::span(records)));
             write(m, out, static_cast<std::int32_t>(records.size()));
             for (auto& s : w->reserved) s->count = 0;
@@ -257,8 +333,9 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
             if (count > std::numeric_limits<std::int64_t>::max() - r.count)
                 throw std::runtime_error("Kernel event pending counter overflow");
             count += r.count;
+            if (r.subscription->filter == VideoOutFilter) r.subscription->payload = r.payload;
         }
-        bool external = false;
+        bool external = state->pumpVblanks();
         for (const auto& [handle, q] : state->queues) {
             const auto waiting = q->waiting;
             for (const auto& w : waiting) {
@@ -327,7 +404,7 @@ std::int32_t KernelEvents::AddGraphicsEvent(std::uint64_t handle, std::int32_t i
     if (found == impl->queues.end()) throw std::runtime_error("AGC graphics subscription has invalid event queue");
     const auto q = found->second;
     std::lock_guard lock(impl->mailbox->mutex);
-    for (const auto& s : q->subscriptions) if (s->id == id) { s->udata = udata; return 0; }
+    if (const auto s = impl->find(*q, GraphicsFilter, id)) { s->udata = udata; return 0; }
     if (impl->mailbox->subscriptions.size() >= MaxSubscriptions)
         throw std::runtime_error("Kernel event owned subscription bound exhausted");
     auto s = std::make_shared<Impl::Subscription>(); s->queue = q; s->id = id; s->udata = udata;
@@ -338,35 +415,73 @@ std::int32_t KernelEvents::DeleteGraphicsEvent(std::uint64_t handle, std::int32_
     const auto found = impl->queues.find(handle);
     if (found == impl->queues.end()) throw std::runtime_error("AGC graphics deletion has invalid event queue");
     const auto q = found->second;
-    const auto it = std::find_if(q->subscriptions.begin(), q->subscriptions.end(), [&](const auto& s) { return s->id == id; });
-    if (it == q->subscriptions.end()) throw std::runtime_error("AGC graphics event is not registered");
-    const auto s = *it;
+    const auto s = impl->find(*q, GraphicsFilter, id);
+    if (!s) throw std::runtime_error("AGC graphics event is not registered");
+    impl->remove(*q, s);
+    return 0;
+}
+bool KernelEvents::AddVideoOutEvent(std::uint64_t handle, std::int32_t output, std::int32_t kind, std::uint64_t udata) {
+    impl->owner(false);
+    const auto found = impl->queues.find(handle);
+    if (found == impl->queues.end()) return false;
+    const auto q = found->second;
+    std::lock_guard lock(impl->mailbox->mutex);
+    if (const auto s = impl->find(*q, VideoOutFilter, kind)) { s->udata = udata; s->output = output; return true; }
+    if (impl->mailbox->subscriptions.size() >= MaxSubscriptions)
+        throw std::runtime_error("Kernel event owned subscription bound exhausted");
+    auto s = std::make_shared<Impl::Subscription>();
+    s->queue = q; s->id = kind; s->udata = udata; s->filter = VideoOutFilter; s->output = output;
+    q->subscriptions.push_back(s); impl->mailbox->subscriptions.push_back(std::move(s)); return true;
+}
+bool KernelEvents::DeleteVideoOutEvent(std::uint64_t handle, std::int32_t output, std::int32_t kind) {
+    impl->owner(false);
+    const auto found = impl->queues.find(handle);
+    if (found == impl->queues.end()) return false;
+    // Deleting an absent registration is success, as in the source (ENOENT -> 0);
+    // another output's registration of the same kind is left in place.
+    const auto s = impl->find(*found->second, VideoOutFilter, kind);
+    bool owned = false;
+    if (s) {
+        std::lock_guard lock(impl->mailbox->mutex);
+        owned = s->output == output;
+    }
+    if (owned) impl->remove(*found->second, s);
+    return true;
+}
+void KernelEvents::WaitVideoOutVblank(std::int32_t output) {
+    impl->owner(false);
+    Impl::VblankWait wait{impl->waits->ActiveThread(), 0, output, 0};
+    if (!wait.thread) throw std::runtime_error("VideoOut vblank wait requires an active guest thread");
+    if (impl->nextWait == std::numeric_limits<std::uint64_t>::max())
+        throw std::runtime_error("Kernel event wait identity exhausted");
+    wait.key = impl->nextWait++;
     {
         std::lock_guard lock(impl->mailbox->mutex);
-        s->live = false;
-        std::erase(impl->mailbox->subscriptions, s);
-        std::erase_if(impl->mailbox->receipts, [&](const auto& r) { return r.subscription == s; });
+        const auto found = impl->mailbox->vblanks.find(output);
+        wait.seen = found == impl->mailbox->vblanks.end() ? 0 : found->second;
     }
-    q->subscriptions.erase(it);
-    return 0;
+    impl->vblankWaits.push_back(wait);
+    try { impl->waits->BlockFromHostCall(wait.key); }
+    catch (...) { impl->vblankWaits.pop_back(); throw; }
 }
 std::function<void(std::uint32_t)> KernelEvents::EopPublisher() const {
     const auto box = impl->mailbox;
     return [box](std::uint32_t queueId) {
         std::lock_guard lock(box->mutex);
+        box->publish([&](const Impl::Subscription& s) {
+            return s.filter == GraphicsFilter && static_cast<std::uint32_t>(s.id) == queueId;
+        }, 0);
+    };
+}
+std::function<void(std::int32_t, std::int32_t, std::int64_t)> KernelEvents::VideoOutPublisher() const {
+    const auto box = impl->mailbox;
+    return [box](std::int32_t output, std::int32_t kind, std::int64_t payload) {
+        std::lock_guard lock(box->mutex);
         if (!box->live) return;
-        for (const auto& s : box->subscriptions) {
-            if (!s->live || static_cast<std::uint32_t>(s->id) != queueId) continue;
-            const auto q = s->queue.lock(); if (!q || !q->live) continue;
-            const auto found = std::find_if(box->receipts.begin(), box->receipts.end(), [&](const auto& r) { return r.subscription == s; });
-            if (found != box->receipts.end()) {
-                if (found->count == std::numeric_limits<std::int64_t>::max()) box->overflow = true;
-                else ++found->count;
-            } else {
-                if (box->receipts.size() >= MaxSubscriptions) { box->overflow = true; return; }
-                box->receipts.push_back({q, s, 1});
-            }
-        }
+        if (kind == 1) ++box->vblanks[output]; // also feeds parked WaitVblank calls
+        box->publish([&](const Impl::Subscription& s) {
+            return s.filter == VideoOutFilter && s.output == output && s.id == kind;
+        }, payload);
     };
 }
 void KernelEvents::Shutdown() {
@@ -386,6 +501,7 @@ void KernelEvents::Shutdown() {
         }
         impl->mailbox->subscriptions.clear(); impl->mailbox->receipts.clear();
     }
+    impl->vblankWaits.clear();
     impl->queues.clear(); impl->live = false;
 }
 

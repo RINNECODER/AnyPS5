@@ -44,9 +44,23 @@ public:
                                          std::uint64_t symbolSize = 0);
     std::int32_t AddGraphicsEvent(std::uint64_t handle, std::int32_t id, std::uint64_t udata);
     std::int32_t DeleteGraphicsEvent(std::uint64_t handle, std::int32_t id);
+    // EVFILT_VIDEO_OUT (-13) subscriptions. The ident is the VideoOut event
+    // kind (0 flip, 1 vblank); output is the opaque VideoOut handle whose
+    // completions feed it. A re-add replaces udata/output, as in kqueue. Both
+    // return false when queue is not a live queue of this provider.
+    bool AddVideoOutEvent(std::uint64_t queue, std::int32_t output, std::int32_t kind, std::uint64_t udata);
+    // Removes the queue's registration of kind only when output owns it.
+    bool DeleteVideoOutEvent(std::uint64_t queue, std::int32_t output, std::int32_t kind);
+    // sceVideoOutWaitVblank: call only from a guest host call. Parks the
+    // calling guest thread (other guest threads keep running) until the next
+    // vblank that VideoOutPublisher reports for output; it then returns 0.
+    void WaitVideoOutVblank(std::int32_t output);
     // Retains host mailbox/subscription receipts, never Machine access. Safe to
     // retain after shutdown. Completed EOPs coalesce per live subscription.
     std::function<void(std::uint32_t)> EopPublisher() const;
+    // Same retained-mailbox contract for VideoOut flip/vblank completions;
+    // payload is the flip argument or vblank count delivered in event data.
+    std::function<void(std::int32_t output, std::int32_t kind, std::int64_t payload)> VideoOutPublisher() const;
     // Call after the executor returns, while Machine is idle. During a drive
     // owner hook request Machine stop instead, then withdraw at this boundary.
     void Shutdown();
