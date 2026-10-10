@@ -248,6 +248,14 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
     secondWait = std::async(std::launch::async, [secondFence] { secondFence->Wait(); });
     idle = std::async(std::launch::async, [&driver] { driver.WaitIdle(); });
     {
+        // A flip resolves its buffer when the GPU reaches it (upstream VideoOut contract). The first flip
+        // is GPU-ready before the second (which waits for it), so a re-registration made now must not
+        // reach the first flip's snapshot; it is undone before the second flip resolves.
+        std::unique_lock lock(queue->mutex);
+        Require(queue->changed.wait_for(lock, 2s, [&] { return !queue->requests.empty(); }),
+                "Original public PM4 flip never entered the ready queue");
+    }
+    {
         std::lock_guard lock(cfg->mutex);
         Require(cfg->flipStatus.flipPendingNum == 2 && cfg->bufferPending[0] == 2 && queue->reservations == 2,
                 "Original public flip submission did not reserve both pending tickets");
@@ -280,6 +288,11 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
         Require(request->ready && !request->terminal && request->reuseTicket == i + 1 &&
                 request->buffer.dataAddress == 0x10000 && request->group.attribute.width == 8,
                 "Original reserved flip lost its buffer snapshot or reuse ticket");
+        if (i == 0) {
+            std::lock_guard lock(cfg->mutex);
+            cfg->buffers[0].dataAddress = 0x10000;
+            cfg->groups[0].attribute.width = 8;
+        }
         auto pacing = std::async(std::launch::async, [request] { WaitForFlipVblank(*request); });
         Cleanup pacingCleanup{output, &stop};
         Require(pacing.wait_for(75ms) == std::future_status::timeout,
@@ -378,15 +391,25 @@ void ReplayOriginalFlipState(AgcDriver::Metal::MetalDriver& driver, WindowContex
             std::equal(packetGolden.begin(), packetGolden.end(), std::as_bytes(std::span(packets)).begin()),
             "Original VideoOut integration changed borrowed pixels, packet bytes, or callback count");
     AgcDriverUnregisterVideoOutput_nid_postfix(Handle, output);
+    // Upstream contract: closing the port releases a captured wait on a still-pending ticket without
+    // failing the waiter (the GPU must not fault because the title closed its port).
+    {
+        std::lock_guard lock(cfg->mutex);
+        static_cast<void>(cfg->bufferReuse[0].Reserve());
+    }
+    const auto pendingFence = output->CaptureRenderingWait(0);
+    auto pendingWait = std::async(std::launch::async, [pendingFence] { pendingFence->Wait(); });
+    Require(pendingWait.wait_for(50ms) == std::future_status::timeout,
+            "Original captured wait retired a ticket that is still pending");
     {
         std::lock_guard lock(cfg->mutex);
         cfg->closing = true;
         cfg->opened = false;
         cfg->vblankCond.notify_all();
     }
-    bool closed = false;
-    try { firstFence->Wait(); } catch (const std::exception& error) { closed = std::string(error.what()).find("closed") != std::string::npos; }
-    Require(closed, "Original captured wait ignored its closed VideoOut owner lifecycle");
+    Require(pendingWait.wait_for(2s) == std::future_status::ready,
+            "Original captured wait ignored its closed VideoOut owner lifecycle");
+    pendingWait.get();
     cleanup.done = true;
     std::cout << "PASS: public PM4 original VideoOut reservation, immutable metadata, sync readiness, paced actual drawable pixels, completion callbacks, global queue room and captured ticket retirement\n";
 }
