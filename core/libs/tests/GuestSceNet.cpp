@@ -148,6 +148,24 @@ static void CheckEmptyEpoll() {
     }
 }
 
+static void CheckReceiveTimeout(int receiver, int sender, const std::array<std::uint8_t, 16>& address) {
+    const int timeout = 50000;
+    Require(sceNetSetsockopt(receiver, 0xffff, 0x1006, &timeout, sizeof(timeout)) == 0);
+    char buffer[8]{};
+    std::array<std::uint8_t, 16> source{};
+    std::uint32_t size = source.size();
+    NetIovec in[] = {{buffer, sizeof(buffer)}};
+    NetMsghdr receive{source.data(), static_cast<std::uint32_t>(source.size()), in, 1, nullptr, 0, 0};
+    Require(Failed(sceNetRecv(receiver, buffer, sizeof(buffer), 0), 35));
+    Require(Failed(sceNetRecvfrom(receiver, buffer, sizeof(buffer), 0, source.data(), &size), 35));
+    Require(Failed(sceNetRecvmsg(receiver, &receive, 0), 35));
+    const char datagram[] = "late";
+    Require(sceNetSendto(sender, datagram, sizeof(datagram), 0, address.data(), address.size()) == sizeof(datagram));
+    Require(sceNetRecv(receiver, buffer, sizeof(buffer), 0) == sizeof(datagram) && std::strcmp(buffer, datagram) == 0);
+    const int disabled = 0;
+    Require(sceNetSetsockopt(receiver, 0xffff, 0x1006, &disabled, sizeof(disabled)) == 0);
+}
+
 static void CheckMessages(int receiver, int sender, const std::array<std::uint8_t, 16>& address) {
     char head[] = "scatter ";
     char tail[] = "gather";
@@ -486,6 +504,7 @@ int main() {
     Require(stdio_readable[0] == 0 && stdio_writable[0] == 6);
     stdio_readable[0] = 1;
     Require(select_nid_postfix(1, stdio_readable, nullptr, nullptr, poll_now) == 0 && stdio_readable[0] == 0);
+    CheckReceiveTimeout(udp_receiver, udp_sender, address);
     CheckMessages(udp_receiver, udp_sender, address);
     Require(sceNetSocketClose(udp_sender) == 0);
     Require(sceNetSocketClose(udp_receiver) == 0);

@@ -365,6 +365,15 @@ std::int64_t message_length(const NetMsghdr* message) {
     return static_cast<std::int64_t>(total);
 }
 
+int receive_error(const Sock& socket) {
+#ifdef _WIN32
+    if (WSAGetLastError() == WSAETIMEDOUT && socket.type != NET_SOCK_STREAM && socket.rcv_timeout_us > 0) return NET_EAGAIN;
+#else
+    (void)socket;
+#endif
+    return native_error();
+}
+
 }  // namespace
 
 extern "C" {
@@ -659,7 +668,7 @@ int64_t APS5_VABI sceNetRecv(int s, void* buf, size_t len, int flags) {
 #ifdef _WIN32
     if (result < 0 && socket.type == NET_SOCK_DGRAM && WSAGetLastError() == WSAEMSGSIZE) return static_cast<int64_t>(len);
 #endif
-    return result >= 0 ? result : fail(native_error());
+    return result >= 0 ? result : fail(receive_error(socket));
 }
 
 int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* from, uint32_t* fromlen) {
@@ -684,7 +693,7 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
 #ifdef _WIN32
     if (result < 0 && socket.type == NET_SOCK_DGRAM && WSAGetLastError() == WSAEMSGSIZE) result = static_cast<int>(len);
 #endif
-    if (result < 0) return fail(native_error());
+    if (result < 0) return fail(receive_error(socket));
     if (from && !native_to_guest_address(peer, from, fromlen)) return fail(NET_EAFNOSUPPORT);
     return result;
 }
@@ -772,7 +781,7 @@ int64_t APS5_VABI sceNetRecvmsg(int s, NetMsghdr* msg, int flags) {
         flags == NET_MSG_PEEK ? MSG_PEEK : 0, reinterpret_cast<sockaddr*>(&peer), &peer_length);
     if (received < 0) {
 #ifdef _WIN32
-        if (!datagram || WSAGetLastError() != WSAEMSGSIZE) return fail(native_error());
+        if (!datagram || WSAGetLastError() != WSAEMSGSIZE) return fail(receive_error(socket));
         received = static_cast<std::int64_t>(buffer.size());
 #else
         return fail(native_error());
