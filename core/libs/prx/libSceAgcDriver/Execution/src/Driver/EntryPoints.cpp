@@ -56,6 +56,10 @@ void UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOut
     BackendDriver::Get().UnregisterVideoOutput(handle, output);
 }
 
+void AttachWindow(const PresentationWindow& window) {
+    DriverDetail::Driver::Get().AttachWindow(window);
+}
+
 void PresentClear(const PresentationWindow& window, bool opaque, void (*gpuReady)(void*), void* context) {
     BackendDriver::Get().Present(window, nullptr, opaque, gpuReady, context);
 }
@@ -109,6 +113,10 @@ extern "C" void AgcDriverRegisterVideoOutput_nid_postfix(std::uint32_t handle, c
 
 extern "C" void AgcDriverUnregisterVideoOutput_nid_postfix(std::uint32_t handle, const std::shared_ptr<AgcDriver::IVideoOutput>& output) {
     AgcDriver::UnregisterVideoOutput(handle, output);
+}
+
+extern "C" void AgcDriverAttachWindow_nid_postfix(const AgcDriver::PresentationWindow& window) {
+    AgcDriver::AttachWindow(window);
 }
 
 extern "C" void AgcDriverPresentClear_nid_postfix(const AgcDriver::PresentationWindow& window, bool opaque, void (*gpuReady)(void*), void* context) {

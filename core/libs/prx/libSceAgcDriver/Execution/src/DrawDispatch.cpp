@@ -46,8 +46,8 @@ void DecodeDrawPrograms(const Graphics::State& state, const QueueState& queue, c
         require(address - snapshot.codeAddress < snapshot.code.size() * sizeof(std::uint32_t), "graphics program is outside registered shader code");
         require((address - snapshot.codeAddress) % sizeof(std::uint32_t) == 0, "graphics entry point is not dword aligned");
         require(snapshot.type == type, "graphics program refers to an incompatible shader binary type");
-        Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, rsrc2);
-        const auto resources = nullPixel && !queue.shader.contains(rsrc2) ? 0u : ReadGraphicsRegister(queue.shader, rsrc2);
+        if (!nullPixel) Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, rsrc2);
+        const auto resources = nullPixel ? 0u : ReadGraphicsRegister(queue.shader, rsrc2);
         const auto userCount = ((resources >> 1u) & 0x1fu) | (((resources >> 27u) & 1u) << 5u);
         require(userCount <= 32, "graphics user SGPR count exceeds the register bank");
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
@@ -140,7 +140,9 @@ ShaderRecompiler::RecompileRequest BuildDrawRecompileRequest(
         binary,
         {waveSize, firstUserSgpr, userData, std::nullopt, fragment ? std::optional(pixel) : std::nullopt, vertexInfo, memory},
         target,
-        {0, 0, pushOffset, pushLimit - pushOffset},
+        // Each stage's push range stays inside one PipelinePushSlotBytes slot; the binding allocator
+        // rejects a range that crosses a slot boundary.
+        {0, 0, pushOffset, (graphics.stages.mesh ? ShaderRecompiler::MeshDrawPushOffsetBytes : Graphics::PipelinePushSlotBytes) - pushOffset % Graphics::PipelinePushSlotBytes},
         ShaderRecompiler::GraphicsCompileContext{firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation,
             {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
     };
@@ -148,16 +150,13 @@ ShaderRecompiler::RecompileRequest BuildDrawRecompileRequest(
 
 void FoldDrawOffsets(const ShaderRecompiler::RecompileResult& main, std::uint32_t firstUserSgpr,
                      std::span<const std::uint32_t> userData, Pm4::DrawParameters& parameters) {
-    static const bool indxOffsetSkipFold = std::getenv("APS5_INDX_OFFSET_SKIP_FOLD") != nullptr;
-    static const bool indexedOffsetFold = std::getenv("APS5_NO_INDEXED_OFFSET_FOLD") == nullptr;
-    if (parameters.indexed && !indexedOffsetFold) return;
     const auto userWord = [&](std::int32_t sgpr) {
         require(sgpr >= 0 && static_cast<std::uint32_t>(sgpr) >= firstUserSgpr, "invalid draw offset SGPR");
         const auto index = static_cast<std::uint32_t>(sgpr) - firstUserSgpr;
         require(index < userData.size(), "draw offset SGPR exceeds user data");
         return userData[index];
     };
-    if (main.vertexOffsetSgpr >= 0 && (parameters.firstVertex == 0 || !indxOffsetSkipFold)) {
+    if (main.vertexOffsetSgpr >= 0) {
         const auto offset = userWord(main.vertexOffsetSgpr);
         require(offset <= std::numeric_limits<std::uint32_t>::max() - parameters.firstVertex, "draw vertex offset overflow");
         parameters.firstVertex += offset;

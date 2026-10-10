@@ -440,20 +440,24 @@ struct SceNativeVideoOutBackend::Impl {
                     queue->requests.pop_front();
                 }
                 try {
-                    WaitForFlipVblank(*request);
-                    auto target = window;
-                    target.width = request->width;
-                    target.height = request->height;
-                    target.timing = request->timing;
-                    const auto gpuReady = +[](void* context) { MarkFlipGpuComplete(*static_cast<FlipRequest*>(context)); };
-                    if (request->index >= 0) {
-                        const auto display = DescribeVideoOutBuffer(request->buffer, request->group);
-                        AgcDriverPresentBuffer_nid_postfix(target, display, gpuReady, request.get());
-                    } else {
-                        AgcDriverPresentClear_nid_postfix(target, request->index == VIDEO_OUT_BUFFER_INDEX_BLACK,
-                                                        gpuReady, request.get());
+                    // false: the title closed the port and the flip was released unpresented.
+                    if (WaitForFlipVblank(*request)) {
+                        auto target = window;
+                        target.width = request->width;
+                        target.height = request->height;
+                        target.timing = request->timing;
+                        const auto gpuReady = +[](void* context) { MarkFlipGpuComplete(*static_cast<FlipRequest*>(context)); };
+                        if (request->index >= 0 && !request->unregistered) {
+                            const auto display = DescribeVideoOutBuffer(request->buffer, request->group);
+                            AgcDriverPresentBuffer_nid_postfix(target, display, gpuReady, request.get());
+                        } else {
+                            // An index the title never registered presents black, as upstream VideoOut does.
+                            AgcDriverPresentClear_nid_postfix(target,
+                                request->unregistered || request->index == VIDEO_OUT_BUFFER_INDEX_BLACK,
+                                gpuReady, request.get());
+                        }
+                        CompleteFlip(*request, completion);
                     }
-                    CompleteFlip(*request, completion);
                 } catch (...) {
                     if (!cancelled(*request)) {
                         request->Fail(std::current_exception());
