@@ -359,7 +359,8 @@ class ContractDriftControls(unittest.TestCase):
         renamed key through, so decode the emitted object and compare it field by field.
         """
         source = (Path(__file__).resolve().parents[2] / 'core' / 'cpu' / 'src' / 'Main.cpp').read_text()
-        start = source.index('\\"native_module_runner\\":{')
+        marker = '\\"native_module_runner\\":{'
+        start = source.index(marker) + len(marker)
         region = source[start:source.index('\\"sce_thread_imports\\"', start)]
         emitted = dict(re.findall(r'\\"(\w+)\\":\\"(.*?)\\"', region, re.S))
         emitted.update({key: value == 'true' for key, value in
@@ -367,6 +368,13 @@ class ContractDriftControls(unittest.TestCase):
         emitted.update({key: int(default) for key, default in
                         re.findall(r'\\"(\w+)\\":\"\s*<<\s*limits\.\w+\.value_or\((\d+)\)', region)})
         self.assertEqual(emitted, package.NATIVE_RUNNER_CONTRACT)
+        # A field the decode does not understand (a number, null or array) would silently vanish
+        # from the comparison above, so require the decode to account for every emitted key.
+        self.assertEqual(set(re.findall(r'\\"(\w+)\\":', region)), set(emitted),
+                         'capability emission contains a field this control cannot decode')
+        # Python equates True with 1, so pin each claim's type as well as its value.
+        for key, claimed in package.NATIVE_RUNNER_CONTRACT.items():
+            self.assertIs(type(emitted[key]), type(claimed), 'capability claim type drifted: ' + key)
 
     def test_capability_mismatch_names_the_offending_claim(self):
         stale = dict(package.NATIVE_RUNNER_CONTRACT, constraints='no WebAPI2 provider')
