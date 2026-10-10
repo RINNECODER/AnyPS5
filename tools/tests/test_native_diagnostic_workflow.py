@@ -224,6 +224,52 @@ class NativeWorkflowContracts(unittest.TestCase):
                     package.assert_not_called()
                 self.assertEqual('combined-native' in executed, case == 'valid')
 
+    def test_inventory_failure_names_the_differing_tests(self):
+        """A drifted native profile must say which controls differ, not just that it failed."""
+        expected = {'cpu_contract', 'native_fixture'}
+        valid = [{'name': name} for name in sorted(expected)]
+        cases = {
+            'missing': (valid[:1], 'missing from build=native_fixture', 'not declared=none'),
+            'extra': (valid + [{'name': 'anyps5_lazy_import_cli'}],
+                      'not declared=anyps5_lazy_import_cli', 'missing from build=none'),
+            'duplicate': (valid + [valid[0]], 'duplicated=cpu_contract', 'not declared=none'),
+        }
+        args = SimpleNamespace(source=self.root, macps_source=self.root, output=self.root,
+                               profile='native', revision='a' * 40,
+                               macps_revision='b' * 40, dependency_cache=None)
+        dependencies = {name: {} for name in workflow.DEPENDENCIES}
+        for case, (tests, required_text, second_text) in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                args.output = Path(folder)
+
+                def run(name, argv, **kwargs):
+                    if name == 'ctest-inventory':
+                        return json.dumps({'tests': tests})
+                    return ''
+
+                with patch.object(workflow, 'required_tests', return_value=expected), \
+                     patch.object(workflow, 'clone_exact'), \
+                     patch.object(workflow, 'setup_dependencies', return_value=dependencies), \
+                     patch.object(workflow, 'clean_revision', return_value={}), \
+                     patch.object(workflow, 'bounded_ninja', return_value=TOOLS / 'prepare_diagnostic_engine.py'), \
+                     patch.object(workflow, 'artifact_records', return_value={}), \
+                     patch.object(workflow, 'digest', return_value='digest'), \
+                     patch.object(workflow, 'Lease', side_effect=lambda *a, **kw: nullcontext()), \
+                     patch.object(workflow.os, 'uname', return_value=SimpleNamespace(machine='arm64')), \
+                     patch.object(workflow, 'prepare_package'):
+                    with self.assertRaisesRegex(RuntimeError, required_text) as failure:
+                        workflow.workflow(args, run, {})
+                    self.assertIn(second_text, str(failure.exception))
+
+    def test_lazy_import_and_shutdown_controls_are_declared_native_controls(self):
+        """The controls merged with #327, #328 and #329 must be part of the alpha gate."""
+        for name in ('anyps5_lazy_import_cli', 'anyps5_sce_import_stubs', 'anyps5_cpu_run_limits',
+                     'anyps5_cpu_cli_stop_signals', 'anyps5_native_shutdown_gpu-ready',
+                     'anyps5_native_shutdown_rendering-wait'):
+            self.assertIn(name, workflow.NATIVE_REQUIRED_TESTS, name)
+            self.assertNotIn(name, workflow.REQUIRED_TESTS,
+                             name + ' must not gate the legacy package')
+
     @unittest.skipUnless(platform.system() == 'Darwin' and platform.machine() == 'arm64',
                          'Native CMake configuration requires Apple Silicon macOS')
     def test_native_fragments_follow_production_targets_and_fail_closed(self):
