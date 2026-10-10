@@ -56,6 +56,8 @@ def capability_mismatches(value, expected):
             for inner, inner_wanted in wanted.items():
                 if inner not in got:
                     diffs.append(f"{key}.{inner}=absent")
+                elif type(got[inner]) is not type(inner_wanted):
+                    diffs.append(f"{key}.{inner}=wrong type")
                 elif got[inner] != inner_wanted:
                     diffs.append(f"{key}.{inner}={got[inner]!r}")
             for inner in got:

@@ -356,25 +356,33 @@ class ContractDriftControls(unittest.TestCase):
         """Pin the release contract to the exact capability object Main.cpp emits (#331).
 
         A substring search would let a shortened contract claim, an extended compiled claim or a
-        renamed key through, so decode the emitted object and compare it field by field.
+        renamed key through, so decode the emitted object and compare it field by field. The decode
+        is deliberately strict: an expression form it does not recognise leaves the key undecoded,
+        which fails the coverage assertion instead of passing silently.
         """
         source = (Path(__file__).resolve().parents[2] / 'core' / 'cpu' / 'src' / 'Main.cpp').read_text()
         marker = '\\"native_module_runner\\":{'
         start = source.index(marker) + len(marker)
         region = source[start:source.index('\\"sce_thread_imports\\"', start)]
-        emitted = dict(re.findall(r'\\"(\w+)\\":\\"(.*?)\\"', region, re.S))
-        emitted.update({key: value == 'true' for key, value in
-                        re.findall(r'\\"(\w+)\\":(true|false)', region)})
-        emitted.update({key: int(default) for key, default in
-                        re.findall(r'\\"(\w+)\\":\"\s*<<\s*limits\.\w+\.value_or\((\d+)\)', region)})
+        key = r'\\"([^\\]+?)\\":'
+        keys = re.findall(key, region)
+        self.assertEqual(len(keys), len(set(keys)), 'capability emission repeats a claim key')
+        emitted = dict(re.findall(key + r'\\"(.*?)\\"', region, re.S))
+        emitted.update({name: value == 'true' for name, value in re.findall(key + r'(true|false)', region)})
+        limit_options = {'wall_limit_ms': 'MaxWallMs', 'idle_limit_ms': 'MaxIdleMs'}
+        for name, option, default in re.findall(
+                key + r'"\s*<<\s*limits\.(\w+)\.value_or\((\d+)\)\s*<<\s*"', region):
+            self.assertEqual(limit_options.get(name), option,
+                             'limit claim is not bound to its own execution limit option: ' + name)
+            emitted[name] = int(default)
         self.assertEqual(emitted, package.NATIVE_RUNNER_CONTRACT)
-        # A field the decode does not understand (a number, null or array) would silently vanish
-        # from the comparison above, so require the decode to account for every emitted key.
-        self.assertEqual(set(re.findall(r'\\"(\w+)\\":', region)), set(emitted),
+        # A field the decode does not understand (a number, null, array or punctuated key) would
+        # silently vanish from the comparison above, so require it to account for every emitted key.
+        self.assertEqual(set(keys), set(emitted),
                          'capability emission contains a field this control cannot decode')
         # Python equates True with 1, so pin each claim's type as well as its value.
-        for key, claimed in package.NATIVE_RUNNER_CONTRACT.items():
-            self.assertIs(type(emitted[key]), type(claimed), 'capability claim type drifted: ' + key)
+        for name, claimed in package.NATIVE_RUNNER_CONTRACT.items():
+            self.assertIs(type(emitted[name]), type(claimed), 'capability claim type drifted: ' + name)
 
     def test_capability_mismatch_names_the_offending_claim(self):
         stale = dict(package.NATIVE_RUNNER_CONTRACT, constraints='no WebAPI2 provider')
@@ -387,6 +395,9 @@ class ContractDriftControls(unittest.TestCase):
         self.assertEqual(package.capability_mismatches({'native_module_runner': {}}, expected)[0],
                          'native_module_runner.enabled=absent')
         self.assertEqual(package.capability_mismatches({'a': 1}, {'a': True}), ['a=wrong type'])
+        self.assertEqual(package.capability_mismatches(
+            {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT, enabled=1)}, expected),
+            ['native_module_runner.enabled=wrong type'])
         self.assertEqual(package.capability_mismatches({'a': 1, 'b': 2}, {'a': 1, 'b': 3}), ['b=2'])
         self.assertEqual(package.capability_mismatches(
             {'native_module_runner': dict(package.NATIVE_RUNNER_CONTRACT)}, expected), [])
