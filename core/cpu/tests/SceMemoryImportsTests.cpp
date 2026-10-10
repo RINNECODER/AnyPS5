@@ -20,6 +20,8 @@ constexpr std::uint64_t capacity = 8 * page;
 constexpr std::uint64_t fault = 0xffffffff8002000eULL;
 constexpr std::uint64_t invalid = 0xffffffff80020016ULL;
 constexpr std::uint64_t exists = 0xffffffff80020011ULL;
+constexpr std::uint64_t busy = 0xffffffff80020010ULL;        // errno 16 EBUSY
+constexpr std::uint64_t unsupported = 0xffffffff8002002dULL; // errno 45 ENOTSUP/EOPNOTSUPP
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -177,7 +179,8 @@ void mappedAliasesAndQuery() {
             "VirtualQuery failed to check the full cross-page output span");
     require(session.call("rVjRvHJ0X6c", {address,0,0x3100,71}) == invalid,
             "VirtualQuery did not sign-extend short-object EINVAL");
-    rejects([&] { session.call("rVjRvHJ0X6c", {address,2,0x3100,72}); }, "Unsupported guest memory virtual query flags");
+    require(session.call("rVjRvHJ0X6c", {address,2,0x3100,72}) == invalid,
+            "VirtualQuery with unsupported flags escaped as a host exception instead of signed EINVAL");
     session.write(0x3020, alias);
     require(session.call("L-Q3LEjIbgA", {0x3020,page,3,0x90,0xc000,0}) == 0,
             "MapDirect alias lost the fifth physical offset argument");
@@ -188,7 +191,8 @@ void mappedAliasesAndQuery() {
             "Mprotect did not use low32 protection argument");
     rejects([&] { session.store(alias, 7); }, "protected write");
     require(session.load(address + page) == 0x1122334455667788ULL, "Mprotect changed the permissions or bytes of a retained peer alias");
-    rejects([&] { session.call("MBuItvba6z8", {0x8000,2*page}); }, "Unsupported guest memory");
+    require(session.call("MBuItvba6z8", {0x8000,2*page}) == busy,
+            "Release of a mapped physical allocation escaped as a host exception instead of signed EBUSY");
     require(session.load(alias) == 0x1122334455667788ULL, "Unsupported live release silently removed its physical aliases");
     require(session.call("cQke9UuBQOk", {alias,page}) == 0 && session.call("cQke9UuBQOk", {address,2*page}) == 0 &&
             session.call("MBuItvba6z8", {0x8000,2*page}) == 0, "Unmap/release gates failed to retire both physical aliases");
@@ -208,8 +212,9 @@ void flexibleReservedAndScope() {
     session.write(0x3010, flexible);
     require(session.call("IWIBBdTHit4", {0x3010,page,3,0x90}) == exists && session.load(flexible) == 0x1234,
             "No-overwrite flexible gate did not return signed EEXIST without changing existing data");
-    rejects([&] { session.call("IWIBBdTHit4", {0x3010,page,0x40,0}); }, "Unsupported guest memory");
-    rejects([&] { session.call("IWIBBdTHit4", {0x3010,page,3,2}); }, "Unsupported guest memory");
+    require(session.call("IWIBBdTHit4", {0x3010,page,0x40,0}) == invalid &&
+            session.call("IWIBBdTHit4", {0x3010,page,3,2}) == invalid,
+            "Unsupported protection bits or mapping flags escaped as a host exception instead of signed EINVAL");
     require(session.load(flexible) == 0x1234, "Unsupported flags or protections changed the old mapping");
     session.write(0x3020, reserved);
     require(session.call("7oxv3PPCumo", {0x3020,page,0x90,0x10000}) == 0 && session.read<std::uint64_t>(0x3020) == reserved,
@@ -217,7 +222,8 @@ void flexibleReservedAndScope() {
     session.write(0x3010, reserved);
     require(session.call("IWIBBdTHit4", {0x3010,page,3,0x90}) == exists,
             "No-overwrite mapping incorrectly treated a real guest reservation as free");
-    rejects([&] { session.call("IWIBBdTHit4", {0x3010,page,3,0x10}); }, "Unsupported guest memory");
+    require(session.call("IWIBBdTHit4", {0x3010,page,3,0x10}) == unsupported,
+            "Fixed replacement over a real reservation escaped as a host exception instead of signed ENOTSUP");
     require(session.call("cQke9UuBQOk", {reserved,page}) == 0 && session.call("cQke9UuBQOk", {flexible,page}) == 0,
             "Munmap gate did not retire flexible memory and a real reservation");
     const auto qualified = import("pO96TwzOm5E");
@@ -245,12 +251,42 @@ void flexibleReservedAndScope() {
 }
 }
 
+void unsupportedRequestsReachTheGuest() {
+    // #216: an unsupported but legal memory request must arrive as a signed SCE kernel error so the
+    // title can handle it. This is what stopped the reference test title inside dependency
+    // initialisation: libc.prx asked for protection bits 0xF2 and the exception escaped the gate.
+    Session session;
+    constexpr std::uint64_t address = 0x1000000000;
+    session.write(0x3010, address);
+    const auto before = session.transactions;
+    require(session.call("rTXw65xmLIA", {0, capacity, page, 3, 0, 0x3020}) == invalid &&
+            session.transactions == before,
+            "sceKernelAllocateDirectMemory with memory type 3 aborted the run instead of returning EINVAL");
+    require(session.call("L-Q3LEjIbgA", {0x3010, page, 3, 0x1000, 0x8000, 0}) == invalid &&
+            session.transactions == before,
+            "sceKernelMapDirectMemory with an unsupported flag bit aborted the run instead of returning EINVAL");
+    require(session.call("rVjRvHJ0X6c", {address, 2, 0x3100, 72}) == invalid &&
+            session.transactions == before,
+            "sceKernelVirtualQuery with flags 2 aborted the run instead of returning EINVAL");
+    // The exact live request from the reference title's libc.prx, and its low32 marshalling rule.
+    require(session.call("vSMAm3cxYTY", {address, page, 0xF2}) == invalid &&
+            session.transactions == before,
+            "sceKernelMprotect with the title's 0xF2 protection bits aborted the run instead of EINVAL");
+    require(session.call("vSMAm3cxYTY", {address, page, 0xabcdef01000000f2ULL}) == invalid &&
+            session.transactions == before,
+            "the 0xF2 protection request lost its low32 marshalling or mutated guest memory");
+    // No host abort means no lost state: the same gate still serves a supported request.
+    require(session.call("pO96TwzOm5E") == capacity && session.transactions == before,
+            "memory gates stopped answering after an unsupported request was converted to an error code");
+}
+
 int main() {
     try {
         allocationAndOutputGates();
         mappedAliasesAndQuery();
         flexibleReservedAndScope();
-        std::cout << "PASS typed memory NID gates, actual x86 SysV calls, full signed errors, checked outputs, 72-byte query and synchronous aliases\n";
+        unsupportedRequestsReachTheGuest();
+        std::cout << "PASS typed memory NID gates, actual x86 SysV calls, full signed errors, checked outputs, 72-byte query, synchronous aliases and unsupported requests returned as SCE error codes\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';

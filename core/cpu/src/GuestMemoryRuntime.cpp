@@ -41,14 +41,17 @@ std::uint64_t aligned(std::uint64_t value, std::uint64_t align) {
     return (value + align - 1) & ~(align - 1);
 }
 Permission permissions(std::uint32_t protection) {
-    if (protection & ~0x37u) throw std::runtime_error("Unsupported guest memory protection bits: " + std::to_string(protection));
+    // EINVAL, not a host abort: mprotect/mmap with a protection combination this kernel
+    // cannot express is a request the guest can handle.
+    if (protection & ~0x37u) throw GuestMemoryError(22, "Unsupported guest memory protection bits: " + std::to_string(protection));
     const auto cpu = protection & 7;
     return static_cast<Permission>(cpu | ((cpu & 2) ? 1 : 0));
 }
 void flags(std::uint32_t value) {
-    if (value & ~(fixed | noOverwrite)) throw std::runtime_error("Unsupported guest memory mapping flags: " + std::to_string(value));
+    if (value & ~(fixed | noOverwrite))
+        throw GuestMemoryError(22, "Unsupported guest memory mapping flags: " + std::to_string(value));
     if ((value & noOverwrite) && !(value & fixed))
-        throw std::runtime_error("Unsupported guest memory no-overwrite placement without fixed address");
+        throw GuestMemoryError(22, "Unsupported guest memory no-overwrite placement without fixed address");
 }
 bool overlaps(std::uint64_t a, std::uint64_t b, std::uint64_t c, std::uint64_t d) { return a < d && c < b; }
 struct Storage {
@@ -215,7 +218,8 @@ struct GuestMemoryRuntime::Impl {
                     const auto own = std::any_of(regions.begin(), regions.end(), [&](const Region& region) {
                         return overlaps(cursor, cursor + size, region.first, region.last);
                     });
-                    if (own && !(placement & noOverwrite)) throw std::runtime_error("Unsupported guest memory fixed replacement policy");
+                    if (own && !(placement & noOverwrite))
+                        throw GuestMemoryError(45, "Unsupported guest memory fixed replacement policy");
                     error(17, "Guest memory address is occupied");
                 }
                 cursor = aligned(range.second, align);
@@ -274,7 +278,7 @@ std::uint64_t GuestMemoryRuntime::AllocateDirect(std::int64_t start, std::int64_
                                                 std::uint64_t align, std::int32_t type) {
     impl->live(); Impl::MutationScope mutation(impl->transactionInProgress);
     length(bytes); align = alignment(align);
-    if (type != 0 && type != 12) throw std::runtime_error("Unsupported guest memory type: " + std::to_string(type));
+    if (type != 0 && type != 12) throw GuestMemoryError(22, "Unsupported guest memory type: " + std::to_string(type));
     const auto bounds = impl->search(start, stop, align);
     auto cursor = bounds.first;
     for (const auto& block : impl->physical) {
@@ -358,7 +362,7 @@ void GuestMemoryRuntime::Protect(std::uint64_t address, std::uint64_t bytes, std
     auto affected = impl->covered(first, stop);
     auto candidate = Impl::remove(impl->regions, first, stop);
     for (auto& region : affected) {
-        if (!region.owner) throw std::runtime_error("Unsupported guest memory protection of uncommitted reservation");
+        if (!region.owner) throw GuestMemoryError(45, "Unsupported guest memory protection of uncommitted reservation");
         region.protection = protection; region.identity = ++impl->nextIdentity; candidate.push_back(region);
     }
     Impl::sort(candidate);
@@ -383,7 +387,7 @@ void GuestMemoryRuntime::ReleaseDirect(std::int64_t physical, std::uint64_t byte
     const auto first = static_cast<std::uint64_t>(physical), stop = end(first, bytes);
     for (const auto& region : impl->regions) if (region.kind == Impl::Kind::Direct &&
         overlaps(first, stop, region.physical, region.physical + region.last - region.first))
-        throw std::runtime_error("Unsupported guest memory release of mapped physical allocation");
+        throw GuestMemoryError(16, "Unsupported guest memory release of mapped physical allocation");
     auto cursor = first; std::vector<Impl::Physical> candidate;
     candidate.reserve(impl->physical.size() + 1);
     for (const auto& block : impl->physical) {
