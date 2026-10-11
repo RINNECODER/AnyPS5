@@ -808,7 +808,6 @@ bool StorageFormatAvailable(const Context& context, std::uint32_t guestFormat) {
     }
 }
 
-// Integer formats take integer clear values; the DCC clear codes are only mapped for the others.
 bool IntegerFormat(VkFormat format) {
     switch (format) {
         case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
@@ -823,9 +822,12 @@ bool IntegerFormat(VkFormat format) {
     }
 }
 
-// The clear value a DCC clear code stands for, for non-integer formats.
 bool ClearColorFor(VkFormat format, DccKeys keys, VkClearColorValue& clear) {
-    if (IntegerFormat(format)) return false;
+    if (IntegerFormat(format)) {
+        if (keys != DccKeys::Clear0000) return false;
+        clear.uint32[0] = clear.uint32[1] = clear.uint32[2] = clear.uint32[3] = 0u;
+        return true;
+    }
     switch (keys) {
         case DccKeys::Clear0000: clear.float32[0] = clear.float32[1] = clear.float32[2] = clear.float32[3] = 0.0f; return true;
         case DccKeys::Clear0001: clear.float32[0] = clear.float32[1] = clear.float32[2] = 0.0f; clear.float32[3] = 1.0f; return true;
