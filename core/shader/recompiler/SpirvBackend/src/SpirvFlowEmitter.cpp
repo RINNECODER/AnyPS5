@@ -656,6 +656,7 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::SharedSrc2U64: return Invoke(EmitSharedSrc2U64, ctx, inst);
         case IrOpcode::DataAppend: return Invoke(EmitDataAppend, ctx, inst);
         case IrOpcode::DataConsume: return Invoke(EmitDataConsume, ctx, inst);
+        case IrOpcode::DataOrderedCount: return Invoke(EmitDataOrderedCount, ctx, inst);
         case IrOpcode::SwizzleU32: return Invoke(EmitSwizzleU32, ctx, inst);
         case IrOpcode::ImageQueryDimensions: return Invoke(EmitImageQueryDimensions, ctx, inst);
         case IrOpcode::ImageQueryLod: return Invoke(EmitImageQueryLod, ctx, inst);
