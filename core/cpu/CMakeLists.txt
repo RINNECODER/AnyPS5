@@ -337,6 +337,8 @@ if(BUILD_TESTING)
     add_custom_target(anyps5_many_imports_fixture ALL DEPENDS "${manyImportsGuest}" "${manyImportsMain}")
     add_test(NAME anyps5_many_imports_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ManyImportsCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${manyImportsMain}" "${manyImportsGuest}")
     set_tests_properties(anyps5_many_imports_cli PROPERTIES TIMEOUT 120)
+    add_test(NAME anyps5_guest_thread_dump_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/GuestThreadDumpCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${manyImportsMain}" "${manyImportsGuest}")
+    set_tests_properties(anyps5_guest_thread_dump_cli PROPERTIES TIMEOUT 120)
     set(npBridgeGuest "${CMAKE_CURRENT_BINARY_DIR}/UpstreamNpBridgeGuest.prx")
     set(npBridgeMain "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-main.elf")
     add_custom_command(OUTPUT "${npBridgeGuest}" "${npBridgeMain}"

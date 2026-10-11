@@ -3,12 +3,16 @@
 #include <array>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace Cpu {
 namespace {
 constexpr std::uint64_t PageSize = 4096;
 constexpr std::uint64_t SlotSize = 16;
+// Guest threads share their scheduler's host thread, so the cell names the import the
+// running guest thread entered last. One store per call; read only by stall diagnostics.
+thread_local std::uint64_t lastEntry = 0;
 // Slot 0 is the shared gate; the last slot must stay within JMP rel32 reach of it.
 constexpr std::size_t MaximumCapacity = 0x7fffffff / SlotSize - 1;
 constexpr std::uint64_t AddressLimit = 0x7ffffffff000;
@@ -76,6 +80,7 @@ SceHostTrampolines::SceHostTrampolines(Machine& machine, std::uint64_t base, std
                                          " in the " + context->name + " host entry table");
             // Copy: a handler may add trampolines and reallocate the table.
             const auto handler = context->handlers[index - 1];
+            lastEntry = context->base + index * SlotSize;
             handler(guest);
         });
     } catch (...) {
@@ -121,6 +126,7 @@ void SceHostTrampolines::Release() {
     impl->handlers.clear();
 }
 
+std::uint64_t SceHostTrampolines::TakeLastEntry() noexcept { return std::exchange(lastEntry, 0); }
 std::size_t SceHostTrampolines::Size() const { return impl->handlers.size(); }
 std::size_t SceHostTrampolines::Capacity() const { return impl->capacity; }
 
