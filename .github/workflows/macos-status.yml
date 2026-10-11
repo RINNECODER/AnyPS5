@@ -6,6 +6,10 @@ name: macOS status
 on:
   push:
     branches: [main]
+  # Refresh the channel badges once a release is published or promoted, not only on the next push.
+  workflow_run:
+    workflows: ["Engine release (alpha)", "Engine release (promote)"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -19,7 +23,7 @@ concurrency:
 
 jobs:
   status:
-    if: github.repository == 'RINNECODER/AnyPS5'
+    if: github.repository == 'RINNECODER/AnyPS5' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     runs-on: [self-hosted, anyps5-metal]
     environment:
       name: github-pages
