@@ -186,7 +186,7 @@ void Capabilities(const RunLimits& limits) {
         << "\"sce_np_local_imports\":{\"module\":\"libSceNpManager\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNpGetState\"],\"constraints\":\"session-local user and offline state only; no network account or authentication services\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
-        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT lifecycle derived from each module's own DT_INIT/DT_FINI and preinit/init/fini arrays for any build; DT_INIT/DT_FINI own their arrays, otherwise the loader runs them; main owns its initializer and arrays\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
         << "\"native_module_runner\":{\"enabled\":true,\"owned_memory\":\"live staged CPU/Metal publication\",\"provider_selection\":\"actual parsed consumer SHA-256, size, scope and ELF symbol\",\"utility_metallib\":\"../fixtures/AnyPS5Utilities.metallib relative to engine\",\"wall_limit_ms\":"
@@ -251,8 +251,10 @@ std::uint64_t ImportReturnValue(std::string_view text) {
 
 std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
                                              const std::vector<std::filesystem::path>& paths,
-                                             std::vector<Cpu::SceParsedImage>* parsedConsumers = nullptr) {
+                                             std::vector<Cpu::SceParsedImage>* parsedConsumers = nullptr,
+                                             std::optional<Cpu::SceLibcInternalProvider>* libcInternal = nullptr) {
     constexpr std::uint64_t ceiling = 0x7ffdf0000000;
+    unsigned libcCandidates = 0;
     std::uint64_t next = 0x1000000;
     const auto extent = [&](const Cpu::SceParsedImage& image, std::uint64_t bias) {
         auto end = bias;
@@ -279,16 +281,14 @@ std::vector<Cpu::SceModuleFile> ModuleFiles(const std::filesystem::path& main,
         if (alignment >= ceiling || next > ceiling - alignment)
             throw std::runtime_error("SCE module placement alignment exceeds the supported guest address range");
         const auto bias = (next + alignment - 1) & ~(alignment - 1);
-        Cpu::SceModuleFile file{path, bias};
-        constexpr std::array<std::byte, 32> libcSource{
-            std::byte{0x78}, std::byte{0xa0}, std::byte{0x80}, std::byte{0xfd}, std::byte{0xec}, std::byte{0xcc}, std::byte{0x28}, std::byte{0xf2},
-            std::byte{0xaa}, std::byte{0x76}, std::byte{0x35}, std::byte{0x6e}, std::byte{0x97}, std::byte{0xf8}, std::byte{0x2a}, std::byte{0x35},
-            std::byte{0xb3}, std::byte{0xba}, std::byte{0x09}, std::byte{0xde}, std::byte{0xba}, std::byte{0x84}, std::byte{0x08}, std::byte{0xdf},
-            std::byte{0xce}, std::byte{0x27}, std::byte{0xdb}, std::byte{0x28}, std::byte{0xfa}, std::byte{0x0c}, std::byte{0xe6}, std::byte{0x7f}};
-        if (image.SourceSize == 1875018 && image.SourceSha256 == libcSource)
-            file.Crt = Cpu::SceCrtCertificate{libcSource, 1875018, 0x10, 0x114cb0,
-                {0x192818, 8, Cpu::SceCrtArrayOwner::DtInit}, {}, {}};
-        files.push_back(std::move(file));
+        files.push_back({path, bias});
+        // Whichever supplied module exports libc is the libSceLibcInternal forwarding target.
+        if (libcInternal && std::any_of(image.ExportModules.begin(), image.ExportModules.end(), [](const auto& module) {
+            return module.Name == "libc" && module.Major == 1 && module.Minor == 1;
+        })) {
+            if (libcCandidates++) libcInternal->reset();
+            else *libcInternal = Cpu::SceLibcInternalProvider{path.filename().string(), image.SourceSha256, image.SourceSize};
+        }
         next = extent(image, bias);
         if (parsedConsumers) parsedConsumers->push_back(image);
     }
@@ -676,13 +676,14 @@ int main(int argc, char** argv) {
                     lifecycleRuntime->SetProcessExitHandler(processExit);
 #endif
                     std::vector<Cpu::SceParsedImage> parsedConsumers;
+                    std::optional<Cpu::SceLibcInternalProvider> libcInternal;
                     const auto files = ModuleFiles(executable, modulePaths,
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
-                        nativeRuntime ? &parsedConsumers : nullptr
+                        nativeRuntime ? &parsedConsumers : nullptr,
 #else
-                        nullptr
+                        nullptr,
 #endif
-                        );
+                        &libcInternal);
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                     if (nativeRuntime) for (const auto& parsed : parsedConsumers)
                         nativeRuntime->RegisterParsedConsumer(parsed);
@@ -692,9 +693,6 @@ int main(int argc, char** argv) {
                         , nativeRuntime.get()
 #endif
                         );
-                    std::optional<Cpu::SceLibcInternalProvider> libcInternal;
-                    for (const auto& file : files) if (file.Path.filename() == "libc.prx" && file.Crt)
-                        libcInternal = Cpu::SceLibcInternalProvider{"libc.prx", file.Crt->SourceSha256, file.Crt->SourceSize};
                     Cpu::SceLazyImports lazyImports;
                     if (!strictImports) {
                         importStubs = std::make_unique<Cpu::SceImportStubs>(machine, Cpu::SceImportStubOptions{
