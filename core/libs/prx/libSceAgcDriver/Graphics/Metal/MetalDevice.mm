@@ -42,7 +42,7 @@ id<MTLBuffer> MetalDevice::Buffer(std::size_t bytes) const {
 id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
     id<MTLCommandBuffer> commands = [queue commandBuffer];
     if (commands == nil) {
-        throw std::runtime_error("Metal command buffer creation failed");
+        throw MetalGpuExecutionError("Metal command buffer creation failed");
     }
     return commands;
 }
@@ -124,7 +124,7 @@ void MetalDevice::Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArra
     }
     id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
     if (encoder == nil) {
-        throw std::runtime_error("Metal compute command encoder creation failed");
+        throw MetalGpuExecutionError("Metal compute command encoder creation failed");
     }
     [encoder setComputePipelineState:state];
     for (NSUInteger i = 0; i < buffers.count; ++i) {
@@ -144,10 +144,10 @@ void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
     }
     [commands waitUntilCompleted];
     if (commands.status == MTLCommandBufferStatusError) {
-        throw std::runtime_error(errorMessage("Metal GPU execution failed", commands.error));
+        throw MetalGpuExecutionError(errorMessage("Metal GPU execution failed", commands.error));
     }
     if (commands.status != MTLCommandBufferStatusCompleted) {
-        throw std::runtime_error("Metal command buffer did not complete");
+        throw MetalGpuExecutionError("Metal command buffer did not complete");
     }
 }
 
