@@ -188,6 +188,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceHttp>")
     endif()
 
+    add_test_executable(guest_signin_dialog_tests tests/GuestSigninDialog.cpp)
+    target_include_directories(guest_signin_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_signin_dialog_tests PRIVATE libSceSigninDialog libc)
+    configure_windows_unwind(guest_signin_dialog_tests)
+    add_test(NAME guest_signin_dialog COMMAND guest_signin_dialog_tests)
+    if(WIN32)
+        set_tests_properties(guest_signin_dialog PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSigninDialog>")
+    endif()
+
     add_test_executable(guest_rudp_status_tests tests/GuestRudpStatus.cpp)
     target_include_directories(guest_rudp_status_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_rudp_status_tests PRIVATE libSceRudp libc)
