@@ -13,7 +13,7 @@ if(BUILD_TESTING)
             ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
     endforeach()
     set_tests_properties(anyps5_metal_pixel_sampler_cache PROPERTIES
-        ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=0;ANYPS5_SHADER_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/pixel-sampler-cache")
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=0;APS5_NO_SHADER_CACHE=0;ANYPS5_SHADER_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/pixel-sampler-cache")
     add_test(NAME anyps5_metal_pixel_sampler_dead_sampler
         COMMAND anyps5_metal_pixel_sampler_replay "${pixelSamplerUtilityLibrary}" dead-sampler)
     set_tests_properties(anyps5_metal_pixel_sampler_dead_sampler PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE

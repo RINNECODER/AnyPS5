@@ -894,7 +894,7 @@ void DeadSampler(id<MTLDevice> device, id<MTLLibrary> library, const char* execu
     const auto* configured = std::getenv("ANYPS5_SHADER_CACHE_DIR");
     const auto parent = configured != nullptr ? std::filesystem::path(configured) : std::filesystem::temp_directory_path();
     const auto childDirectory = parent/("dead-sampler-process-"+std::to_string(getpid())); std::filesystem::create_directories(childDirectory);
-    Require(setenv("ANYPS5_NO_SHADER_CACHE","0",1) == 0 && setenv("ANYPS5_SHADER_CACHE_DIR",childDirectory.c_str(),1) == 0,"dead sampler child cache environment failed");
+    Require(setenv("ANYPS5_NO_SHADER_CACHE","0",1) == 0 && setenv("APS5_NO_SHADER_CACHE","0",1) == 0 && setenv("ANYPS5_SHADER_CACHE_DIR",childDirectory.c_str(),1) == 0,"dead sampler child cache environment failed");
     SpawnCachePhase(executable,utility,"dead-sampler-cold"); SpawnCachePhase(executable,utility,"dead-sampler-hit");
 }
 void Cache(id<MTLDevice> device, id<MTLLibrary> library, const char* executable, const char* utility) {
