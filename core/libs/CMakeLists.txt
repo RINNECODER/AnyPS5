@@ -359,4 +359,14 @@ if(BUILD_TESTING)
         set_tests_properties(guest_posix_random PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libScePosixForWebKit>")
     endif()
+
+    add_test_executable(guest_acm_tests tests/GuestAcm.cpp)
+    target_include_directories(guest_acm_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_acm_tests PRIVATE libSceAcm libc)
+    configure_windows_unwind(guest_acm_tests)
+    add_test(NAME guest_acm COMMAND guest_acm_tests)
+    if(WIN32)
+        set_tests_properties(guest_acm PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAcm>")
+    endif()
 endif()
