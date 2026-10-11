@@ -20,8 +20,13 @@ static constexpr int SCE_KERNEL_ERROR_EPERM = 0x80020001;
 static constexpr int SCE_KERNEL_ERROR_ESRCH = 0x80020003;
 static constexpr int SCE_KERNEL_ERROR_EBUSY = 0x80020010;
 
+static std::uint32_t RemainingCommandBytes(const Apr::CommandBufferObject& buffer) {
+    if (buffer.offset > buffer.size) throw std::invalid_argument("AMPR: command buffer offset exceeds bound memory");
+    return buffer.size - buffer.offset;
+}
+
 static int Append(Apr::CommandBufferObject* buffer, const void* command, uint32_t bytes) {
-    if (!buffer->base || bytes > buffer->size - buffer->offset) return SCE_AMPR_ERROR_BUFFER_FULL;
+    if (!buffer->base || bytes > RemainingCommandBytes(*buffer)) return SCE_AMPR_ERROR_BUFFER_FULL;
     std::memcpy(buffer->base + buffer->offset, command, bytes);
     buffer->offset += bytes;
     ++buffer->numCommands;
@@ -87,7 +92,7 @@ static std::uint64_t NopBytes(std::uint32_t dwords) {
 static int AppendNop(Apr::CommandBufferObject* buffer, std::uint32_t dwords, const std::uint32_t* data) {
     if (!buffer) return SCE_KERNEL_ERROR_EINVAL;
     const std::uint64_t bytes = NopBytes(dwords);
-    if (!buffer->base || bytes > buffer->size - buffer->offset) return SCE_AMPR_ERROR_BUFFER_FULL;
+    if (!buffer->base || bytes > RemainingCommandBytes(*buffer)) return SCE_AMPR_ERROR_BUFFER_FULL;
     const Apr::CommandHeader header{Apr::Opcode::Nop, static_cast<std::uint32_t>(bytes)};
     std::uint8_t* destination = buffer->base + buffer->offset;
     std::memset(destination, 0, bytes);
@@ -110,7 +115,7 @@ static std::uint64_t MeasureMarker(const char* text) {
 static int AppendMarker(Apr::CommandBufferObject* buffer, Apr::Opcode opcode, const char* text) {
     if (!buffer || !text) return SCE_KERNEL_ERROR_EINVAL;
     const std::uint64_t bytes = MarkerBytes(text);
-    if (!buffer->base || bytes > buffer->size - buffer->offset) return SCE_AMPR_ERROR_BUFFER_FULL;
+    if (!buffer->base || bytes > RemainingCommandBytes(*buffer)) return SCE_AMPR_ERROR_BUFFER_FULL;
     const Apr::MarkerCommand command{{opcode, static_cast<std::uint32_t>(bytes)}};
     std::uint8_t* destination = buffer->base + buffer->offset;
     std::memset(destination, 0, bytes);
@@ -137,7 +142,7 @@ static bool ValidMap(std::uint64_t address, std::uint64_t directOffset, std::uin
 static constexpr std::int64_t AmmMeasureInvalid = SCE_KERNEL_ERROR_EINVAL;
 
 static int AppendAmm(Apr::CommandBufferObject* buffer, const void* command, std::uint32_t bytes) {
-    if (bytes > buffer->size - buffer->offset) return SCE_KERNEL_ERROR_EBUSY;
+    if (bytes > RemainingCommandBytes(*buffer)) return SCE_KERNEL_ERROR_EBUSY;
     return Append(buffer, command, bytes);
 }
 
@@ -181,7 +186,7 @@ static constexpr std::int32_t PrtAllocationMask = 1019;
 
 static int RecordPrt(Apr::CommandBufferObject* buffer, const void* command, std::uint32_t bytes) {
     if (!buffer) return SCE_KERNEL_ERROR_EINVAL;
-    if (bytes > buffer->size - buffer->offset) return SCE_KERNEL_ERROR_EBUSY;
+    if (bytes > RemainingCommandBytes(*buffer)) return SCE_KERNEL_ERROR_EBUSY;
     if (!buffer->base) return SCE_KERNEL_ERROR_EPERM;
     return Append(buffer, command, bytes);
 }
