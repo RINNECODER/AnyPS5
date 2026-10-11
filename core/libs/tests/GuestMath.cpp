@@ -32,6 +32,7 @@ double APS5_VABI trunc_nid_postfix(double);
 double APS5_VABI ceil_nid_postfix(double);
 double APS5_VABI fma_nid_postfix(double, double, double);
 long double APS5_VABI acosl_nid_postfix(long double);
+long double APS5_VABI asinl_nid_postfix(long double);
 long double APS5_VABI frexpl_nid_postfix(long double, int*);
 struct LibcFloatConstant { std::uint32_t bits[4]; };
 extern LibcFloatConstant _FInf_nid_postfix;
@@ -201,6 +202,49 @@ static void CheckFmodErrno() {
     (void)fmod_nid_postfix(1.0, 0.0);
     Require(errno == 0);
     Require(fmod_nid_postfix(1e300, 3.0) == std::fmod(1e300, 3.0));
+}
+
+static long double MakeExtended(std::uint64_t mantissa, std::uint16_t signExponent) {
+    unsigned char bytes[sizeof(long double)]{};
+    std::memcpy(bytes, &mantissa, 8);
+    std::memcpy(bytes + 8, &signExponent, 2);
+    long double value = 0;
+    std::memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+static void CheckAsinl() {
+    const struct { std::uint64_t inputMantissa; std::uint16_t inputSignExponent; std::uint64_t outputMantissa; std::uint16_t outputSignExponent; } cases[] = {
+        {0, 0x0000, 0, 0x0000}, {0, 0x8000, 0, 0x8000},
+        {0x8000000000000000ull, 0x3fd7, 0x8000000000000000ull, 0x3fd7}, {0x8000000000000000ull, 0xbfd7, 0x8000000000000000ull, 0xbfd7},
+        {0x8000000000000000ull, 0x3ffd, 0x815f4e705c3e68f3ull, 0x3ffd}, {0x8000000000000000ull, 0xbffd, 0x815f4e705c3e68f3ull, 0xbffd},
+        {0xcccccccccccccccdull, 0x3ffb, 0xcd2493b01bc41e02ull, 0x3ffb},
+        {0x8000000000000000ull, 0x3ffe, 0x860a91c16b9b2c23ull, 0x3ffe}, {0x8000000000000000ull, 0xbffe, 0x860a91c16b9b2c23ull, 0xbffe},
+        {0xc000000000000000ull, 0xbffe, 0xd91a98ae3406e041ull, 0xbffe}, {0xe666666666666666ull, 0x3ffe, 0x8f549b82fd0b8fa3ull, 0x3fff},
+        {0xf333333333333333ull, 0x3ffe, 0xa06a08acf9a04f78ull, 0x3fff}, {0xfd70a3d70a3d70a4ull, 0xbffe, 0xb6f1e3799ea8ecc3ull, 0xbfff},
+        {0xffffffffffffffffull, 0x3ffe, 0xc90fdaa16c63cf01ull, 0x3fff},
+        {0x8000000000000000ull, 0x3fff, 0xc90fdaa22168c235ull, 0x3fff}, {0x8000000000000000ull, 0xbfff, 0xc90fdaa22168c235ull, 0xbfff},
+    };
+    for (const auto& test : cases) {
+        *__error_nid_postfix() = 12345;
+        const long double result = asinl_nid_postfix(MakeExtended(test.inputMantissa, test.inputSignExponent));
+        if (!ExtendedBits(result, test.outputMantissa, test.outputSignExponent) || *__error_nid_postfix() != 12345) {
+            std::fprintf(stderr, "Guest asinl failed for %016llx:%04x\n", static_cast<unsigned long long>(test.inputMantissa), test.inputSignExponent);
+            std::abort();
+        }
+    }
+    Require(std::fabs(asinl_nid_postfix(0.5L) - 0.523598775598298873077107230547L) <= 0x1p-64L);
+    const long double domainErrors[] = {
+        1.5L, -2.0L, MakeExtended(0x8000000000000001ull, 0x3fff), MakeExtended(0x8000000000000001ull, 0xbfff),
+        std::numeric_limits<long double>::max(), std::numeric_limits<long double>::infinity(), -std::numeric_limits<long double>::infinity(),
+        std::numeric_limits<long double>::quiet_NaN(),
+    };
+    for (const long double input : domainErrors) {
+        std::feclearexcept(FE_ALL_EXCEPT);
+        *__error_nid_postfix() = 0;
+        Require(std::isnan(asinl_nid_postfix(input)) && *__error_nid_postfix() == EDOM && std::fetestexcept(FE_INVALID) != 0);
+    }
+    *__error_nid_postfix() = 0;
 }
 
 static void CheckIntegerConversions() {
@@ -594,6 +638,7 @@ int main() {
     CheckExp2Errno();
     CheckExactOperations();
     CheckLongDouble();
+    CheckAsinl();
     Require(scalbn_nid_postfix(0.75, -2) == 0.1875);
     Require(scalbnf_nid_postfix(0.75f, 4) == 12.f);
     Require(nextafterf_nid_postfix(1.f, 2.f) == 0x1.000002p0f && nextafterf_nid_postfix(1.f, 0.f) == 0x1.fffffep-1f);

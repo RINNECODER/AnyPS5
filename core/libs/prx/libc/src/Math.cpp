@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 
 #include "prx/libc/include/General.hpp"
@@ -76,6 +77,52 @@ float SinhfExp(float x) {
     const float y = 1.0f - ((low - (x * c) / (2.0f - c)) - high);
     if (k == 128) return y * 2.0f * 0x1p127f;
     return y * std::bit_cast<float>(static_cast<std::uint32_t>(0x7f + k) << 23);
+}
+
+static_assert(std::numeric_limits<long double>::digits == 64, "guest long double is the x87 80-bit format");
+
+struct ExtendedParts {
+    std::uint64_t mantissa;
+    std::uint16_t signExponent;
+};
+
+ExtendedParts SplitExtended(long double value) {
+    unsigned char bytes[sizeof(long double)];
+    std::memcpy(bytes, &value, sizeof(value));
+    ExtendedParts parts;
+    std::memcpy(&parts.mantissa, bytes, sizeof(parts.mantissa));
+    std::memcpy(&parts.signExponent, bytes + sizeof(parts.mantissa), sizeof(parts.signExponent));
+    return parts;
+}
+
+long double ClearLowMantissaWord(long double value) {
+    unsigned char bytes[sizeof(long double)];
+    std::memcpy(bytes, &value, sizeof(value));
+    std::memset(bytes, 0, sizeof(std::uint32_t));
+    std::memcpy(&value, bytes, sizeof(value));
+    return value;
+}
+
+constexpr long double AsinNumeratorCoefficients[] = {
+    1.66666666666666666631e-01L, -4.16313987993683104320e-01L, 3.69068046323246813704e-01L, -1.36213932016738603108e-01L,
+    1.78324189708471965733e-02L, -2.19216428382605211588e-04L, -7.10526623669075243183e-06L,
+};
+constexpr long double AsinDenominatorCoefficients[] = {
+    -2.94788392796209867269e+00L, 3.27309890266528636716e+00L, -1.68285799854822427013e+00L, 3.90699412641738801874e-01L,
+    -3.14365703596053263322e-02L,
+};
+constexpr long double HalfPiHigh = 1.57079632679489661926e+00L;
+constexpr long double HalfPiLow = -2.50827880633416601173e-20L;
+constexpr long double QuarterPiHigh = 7.85398163397448309628e-01L;
+
+long double AsinNumerator(long double t) {
+    const auto& p = AsinNumeratorCoefficients;
+    return t * (p[0] + t * (p[1] + t * (p[2] + t * (p[3] + t * (p[4] + t * (p[5] + t * p[6]))))));
+}
+
+long double AsinDenominator(long double t) {
+    const auto& q = AsinDenominatorCoefficients;
+    return 1.0L + t * (q[0] + t * (q[1] + t * (q[2] + t * (q[3] + t * q[4]))));
 }
 
 }
@@ -152,6 +199,36 @@ double APS5_VABI trunc_nid_postfix(double x) { return std::trunc(x); }
 double APS5_VABI ceil_nid_postfix(double x) { return std::ceil(x); }
 double APS5_VABI fma_nid_postfix(double x, double y, double z) { return std::fma(x, y, z); }
 long double APS5_VABI acosl_nid_postfix(long double x) { return std::acos(x); }
+
+long double APS5_VABI asinl_nid_postfix(long double x) {
+    const ExtendedParts parts = SplitExtended(x);
+    const int exponent = parts.signExponent & 0x7fff;
+    if (exponent >= 0x3fff) {
+        if (exponent == 0x3fff && (parts.mantissa & 0x7fffffffffffffffull) == 0) return x * HalfPiHigh + x * HalfPiLow;
+        std::feraiseexcept(FE_INVALID);
+        errno = EDOM;
+        return (x - x) / (x - x);
+    }
+    if (exponent < 0x3ffe) {
+        if (exponent < 0x3fff - 32 && 1.0e300L + x > 1.0L) return x;
+        const long double t = x * x;
+        return x + x * (AsinNumerator(t) / AsinDenominator(t));
+    }
+    const long double t = (1.0L - std::fabs(x)) * 0.5L;
+    const long double p = AsinNumerator(t);
+    const long double q = AsinDenominator(t);
+    const long double s = std::sqrt(t);
+    long double result;
+    if ((parts.mantissa >> 32) >= 0xf3333333u) {
+        result = HalfPiHigh - (2.0L * (s + s * (p / q)) - HalfPiLow);
+    } else {
+        const long double w = ClearLowMantissaWord(s);
+        const long double c = (t - w * w) / (s + w);
+        const long double r = p / q;
+        result = QuarterPiHigh - ((2.0L * s * r - (HalfPiLow - 2.0L * c)) - (QuarterPiHigh - 2.0L * w));
+    }
+    return (parts.signExponent & 0x8000) != 0 ? -result : result;
+}
 
 long double APS5_VABI frexpl_nid_postfix(long double x, int* exponent) {
     if (!std::isfinite(x)) return x;
