@@ -14,6 +14,8 @@ namespace AgcDriver::Metal {
 
 class MetalDepthSurfaceCache;
 class MetalDepthSurface;
+class MetalColorSurface;
+class MetalMultisampleExpander;
 class MetalGuestHostAliases;
 
 class MetalDraw {
@@ -40,6 +42,8 @@ private:
     std::unique_ptr<MetalDepthSurfaceCache> depthCache;
     std::unique_ptr<MetalGuestHostAliases> hostAliases;
     std::vector<std::shared_ptr<MetalDepthSurface>> depthSurfaces;
+    std::vector<std::shared_ptr<MetalColorSurface>> colorSurfaces;
+    std::unique_ptr<MetalMultisampleExpander> multisampleExpander;
     std::mutex drawMutex;
     id<MTLBuffer> sampleCounter = nil;
     id<MTLBuffer> sampleTarget = nil;

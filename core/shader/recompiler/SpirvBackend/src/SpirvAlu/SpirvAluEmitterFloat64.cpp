@@ -247,10 +247,6 @@ std::uint32_t SoftLess(SpirvEmitterState& state, F64Bits lhs, F64Bits rhs) {
     return SoftAny(state, highLess, SoftAll(state, highEqual, Binary(state, spv::OpULessThan, TypeBool(state), a.low, b.low)));
 }
 
-std::uint32_t SoftUnsupported(const char* instruction) {
-    throw std::runtime_error(std::string(instruction) + " needs the Float64 capability, which the device lacks");
-}
-
 std::uint32_t NanResult(SpirvEmitterState& state, std::uint32_t value, std::initializer_list<std::uint32_t> inputs) {
     const auto cls = Classify(state, FromF64(state, value));
     auto result = SelectBits(state, cls.nan, {ConstantU32(state, 0u), ConstantU32(state, 0xfff80000u)}, cls.bits);
@@ -785,7 +781,6 @@ std::uint32_t EmitFPSqrt64(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitFPTrigPreop64(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
-    if (!NativeFloat64(state)) SoftUnsupported("v_trig_preop_f64");
     static constexpr std::array<std::uint32_t, 40> TwoOverPi{
         0xa2f9836eu, 0x4e441529u, 0xfc2757d1u, 0xf534ddc0u, 0xdb629599u, 0x3c439041u, 0xfe5163abu, 0xdebbc561u,
         0xb7246e3au, 0x424dd2e0u, 0x06492eeau, 0x09d1921cu, 0xfe1deb1cu, 0xb129a73eu, 0xe88235f5u, 0x2ebb4484u,
@@ -822,13 +817,38 @@ std::uint32_t EmitFPTrigPreop64(SpirvEmitterState& state, std::uint32_t arg0, st
     const auto first = load(word);
     const auto second = load(Binary(state, spv::OpIAdd, TypeU32(state), word, ConstantU32(state, 1u)));
     const auto third = load(Binary(state, spv::OpIAdd, TypeU32(state), word, ConstantU32(state, 2u)));
+    const auto large = Binary(state, spv::OpUGreaterThanEqual, TypeBool(state), exponent, ConstantU32(state, 1968u));
+    const auto bias = Select(state, TypeU32(state), large, ConstantU32(state, 1023u + 600u - 53u + 128u), ConstantU32(state, 1023u + 600u - 53u));
+    const auto scaleExponent = Binary(state, spv::OpISub, TypeU32(state), bias, shift);
+    if (!NativeFloat64(state)) {
+        // The result is exactly M * 2^(scaleExponent - 1623), where M is the 53-bit table segment
+        // (32 high bits, 21 low bits). Normalize M as the integer pair H:L and place its leading one at
+        // bit 52; results below the f64 normal range flush to zero like the other soft f64 paths.
+        const auto upper = funnel(first, second);
+        const auto lower = SoftOpK(state, spv::OpShiftRightLogical, funnel(second, third), 11u);
+        const auto h = SoftOpK(state, spv::OpShiftRightLogical, upper, 11u);
+        const auto l = SoftOp(state, spv::OpBitwiseOr, SoftOpK(state, spv::OpShiftLeftLogical, upper, 21u), lower);
+        const auto highSet = SoftTest(state, spv::OpINotEqual, h, 0u);
+        const auto msb = SoftPick(state, highSet, SoftOpK(state, spv::OpIAdd, Glsl(state, TypeU32(state), GLSLstd450FindUMsb, h), 32u),
+            Glsl(state, TypeU32(state), GLSLstd450FindUMsb, l));
+        const auto steps = SoftOp(state, spv::OpISub, ConstantU32(state, 52u), msb);
+        const auto masked = SoftOpK(state, spv::OpBitwiseAnd, steps, 31u);
+        const auto narrowShift = SoftTest(state, spv::OpULessThan, steps, 32u);
+        const auto carry = SoftPick(state, SoftTest(state, spv::OpIEqual, masked, 0u), ConstantU32(state, 0u),
+            SoftOp(state, spv::OpShiftRightLogical, l, SoftOpK(state, spv::OpBitwiseAnd, SoftOp(state, spv::OpISub, ConstantU32(state, 32u), masked), 31u)));
+        const auto shiftedLow = SoftOp(state, spv::OpShiftLeftLogical, l, masked);
+        const auto normalHigh = SoftPick(state, narrowShift, SoftOp(state, spv::OpBitwiseOr, SoftOp(state, spv::OpShiftLeftLogical, h, masked), carry), shiftedLow);
+        const auto normalLow = SoftPick(state, narrowShift, shiftedLow, ConstantU32(state, 0u));
+        const auto biased = SoftOpK(state, spv::OpISub, SoftOp(state, spv::OpIAdd, msb, scaleExponent), 600u);
+        const F64Bits result{normalLow, SoftOp(state, spv::OpBitwiseOr, SoftOpK(state, spv::OpShiftLeftLogical, biased, 20u), SoftOpK(state, spv::OpBitwiseAnd, normalHigh, 0xfffffu))};
+        const auto zero = SoftAny(state, SoftAll(state, SoftTest(state, spv::OpIEqual, h, 0u), SoftTest(state, spv::OpIEqual, l, 0u)),
+            Binary(state, spv::OpSLessThanEqual, TypeBool(state), Unary(state, spv::OpBitcast, TypeI32(state), biased), ConstantI32(state, 0)));
+        return Join(state, SelectBits(state, zero, F64Bits{ConstantU32(state, 0u), ConstantU32(state, 0u)}, result));
+    }
     const auto high = Unary(state, spv::OpConvertUToF, TypeF64(state), funnel(first, second));
     const auto low = Unary(state, spv::OpConvertUToF, TypeF64(state), Binary(state, spv::OpShiftRightLogical, TypeU32(state), funnel(second, third), ConstantU32(state, 11u)));
     const auto mantissa = Exact(state, spv::OpFAdd, Exact(state, spv::OpFMul, high, ConstantF64(state, 0x4140000000000000ull)), low);
 
-    const auto large = Binary(state, spv::OpUGreaterThanEqual, TypeBool(state), exponent, ConstantU32(state, 1968u));
-    const auto bias = Select(state, TypeU32(state), large, ConstantU32(state, 1023u + 600u - 53u + 128u), ConstantU32(state, 1023u + 600u - 53u));
-    const auto scaleExponent = Binary(state, spv::OpISub, TypeU32(state), bias, shift);
     const auto scale = ToF64(state, Join(state, {ConstantU32(state, 0u), Binary(state, spv::OpShiftLeftLogical, TypeU32(state), scaleExponent, ConstantU32(state, 20u))}));
     return FromF64(state, Exact(state, spv::OpFMul, Exact(state, spv::OpFMul, mantissa, scale), ConstantF64(state, 0x1a70000000000000ull)));
 }

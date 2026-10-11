@@ -6,6 +6,10 @@
 namespace AgcDriver::Metal {
 
 [[nodiscard]] MTLPixelFormat RenderPixelFormat(VkFormat format);
+// The texture a color attachment of `format` renders through. Guest color surfaces are typed by their
+// memory layout (a COMP_SWAP_ALT 8_8_8_8 target is RGBA8 memory written as BGRA), so a same-size
+// attachment format renders through a pixel format view of the surface; other mismatches throw.
+[[nodiscard]] id<MTLTexture> ColorAttachmentView(id<MTLTexture> texture, MTLPixelFormat format);
 [[nodiscard]] MTLPrimitiveType PrimitiveType(const Graphics::State& state);
 void ConfigureRenderPipelineDescriptor(MTLRenderPipelineDescriptor* descriptor, const Graphics::State& state);
 void ConfigureRenderPipelineDescriptor(MTLMeshRenderPipelineDescriptor* descriptor, const Graphics::State& state);

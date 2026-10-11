@@ -258,6 +258,14 @@ void Double(id<MTLDevice> device, id<MTLCommandQueue> queue) {
     F64Case(device, queue, "f32 to f64", 0xd590000a, 0x02010104, {{{0x3f800000, 0x00000000, 0x00000000, 0xcafebeef}, {0xc0700000, 0x00000000, 0x00000000, 0xcafebeef}, {0x3f000000, 0x00000000, 0x00000000, 0xcafebeef}, {0x7f800000, 0x00000000, 0x00000000, 0xcafebeef}, {0x00000000, 0x00000000, 0x00000000, 0xcafebeef}, {0x41380000, 0x00000000, 0x00000000, 0xcafebeef}, {0x3f800002, 0x00000000, 0x00000000, 0xcafebeef}, {0x80000000, 0x00000000, 0x00000000, 0xcafebeef}}}, {{{0x00000000, 0x3ff00000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0xc00e0000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x3fe00000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x7ff00000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x00000000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x40270000, 0xcafebeef, 0xcafebeef}, {0x40000000, 0x3ff00000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x80000000, 0xcafebeef, 0xcafebeef}}});
     F64Case(device, queue, "f16 dot2 f32 accumulate", 0xcc13400a, 0x1c1a0b04, {{{0x40003c00, 0x44004200, 0x3f000000, 0xcafebeef}, {0x34003800, 0x44004000, 0x3f800000, 0xcafebeef}, {0x3c00bc00, 0x3c003c00, 0x00000000, 0xcafebeef}, {0x42004000, 0xbc00bc00, 0x40a00000, 0xcafebeef}, {0x00000000, 0x47004700, 0xc0200000, 0xcafebeef}, {0x41003e00, 0x40004000, 0x00000000, 0xcafebeef}, {0x44004400, 0x38003400, 0xbf800000, 0xcafebeef}, {0x3c004800, 0x38003000, 0x3e800000, 0xcafebeef}}}, {{{0x41380000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x40400000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x00000000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x00000000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0xc0200000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x41000000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x40000000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x3fe00000, 0xcafebeef, 0xcafebeef, 0xcafebeef}}});
 }
+// v_trig_preop_f64 v[10:11], v[4:5], v6 returns the 53 bits of 2/pi starting at bit
+// segment * 53 + max(exponent - 1077, 0), scaled by 2^-(start + 53) (and 2^128 for exponents
+// >= 1968). Expected words are those exact doubles; rows cover the libm segments 0-2, leading
+// zero bits in the segment, a huge exponent, NaN input and a segment index that wraps at 32.
+void TrigPreop(id<MTLDevice> device, id<MTLCommandQueue> queue) {
+    F64Case(device, queue, "f64 trig preop", 0xd574000a, 0x00020d04, {{{0x00000000, 0x3ff00000, 0x00000000, 0xcafebeef}, {0x00000000, 0x3ff00000, 0x00000001, 0xcafebeef}, {0x00000000, 0x43800000, 0x00000000, 0xcafebeef}, {0x00000000, 0x46300000, 0x00000001, 0xcafebeef}, {0x00000000, 0x7b000000, 0x00000000, 0xcafebeef}, {0x00000000, 0x7ff80000, 0x00000021, 0xcafebeef}, {0x12345678, 0x40091eb8, 0x00000003, 0xcafebeef}, {0x00000000, 0x44500000, 0x00000002, 0xcafebeef}}},
+        {{{0x6dc9c882, 0x3fe45f30, 0xcafebeef, 0xcafebeef}, {0x9d5f47d4, 0x3c94a7f0, 0xcafebeef, 0xcafebeef}, {0x727220a8, 0x3f87cc1b, 0xcafebeef, 0xcafebeef}, {0xc0db6295, 0x39b534dd, 0xcafebeef, 0xcafebeef}, {0x3f669e5f, 0x10374f46, 0xcafebeef, 0xcafebeef}, {0x9f78a529, 0x07f3d073, 0xcafebeef, 0xcafebeef}, {0x041fe516, 0x35f3c439, 0xcafebeef, 0xcafebeef}, {0xb3278840, 0x37eb6c52, 0xcafebeef, 0xcafebeef}}});
+}
 // image_load on a 2D MSAA descriptor reads one sample: the bridge must declare texture2d_ms and
 // pass the fragment index to read(coord, sample). Each sample holds x * 100 + y * 10 + sample.
 void Multisample(id<MTLDevice> device, id<MTLCommandQueue> queue) {
@@ -334,12 +342,13 @@ int main(int argc, char** argv) {
             auto queue = [device newCommandQueue];
             Require(queue != nil, "No Metal command queue available");
             const std::string mode = argc > 1 ? argv[1] : "all";
-            Require(mode == "all" || mode == "packed" || mode == "half" || mode == "sdwa" || mode == "lds" || mode == "f64" || mode == "msaa", "Unknown shader correctness mode");
+            Require(mode == "all" || mode == "packed" || mode == "half" || mode == "sdwa" || mode == "lds" || mode == "f64" || mode == "f64_trig_preop" || mode == "msaa", "Unknown shader correctness mode");
             if (mode == "all" || mode == "packed") Packed(device, queue);
             if (mode == "all" || mode == "half") Half(device, queue);
             if (mode == "all" || mode == "sdwa") Sdwa(device, queue);
             if (mode == "all" || mode == "lds") Lds(device, queue);
             if (mode == "all" || mode == "f64") Double(device, queue);
+            if (mode == "all" || mode == "f64_trig_preop") TrigPreop(device, queue);
             if (mode == "all" || mode == "msaa") Multisample(device, queue);
             std::cout << "Native shader correctness " << mode << " passed on " << device.name.UTF8String << '\n';
             return 0;

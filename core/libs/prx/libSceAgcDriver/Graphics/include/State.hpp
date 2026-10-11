@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include "Recompiler.hpp"
 
@@ -57,6 +58,11 @@ struct ColorTarget {
     std::uint32_t exportIndex = 0;
     bool uintExport = false;
     std::uint32_t pipeBankXor = 0;
+    // CB_COLOR_ATTRIB NUM_SAMPLES and NUM_FRAGMENTS. A target with several fragments renders into a
+    // resident 2D multisample Metal texture; one fragment (including EQAA's 1-fragment targets) is
+    // an ordinary guest-memory surface.
+    std::uint32_t coverageSamples = 1;
+    std::uint32_t samples = 1;
 };
 
 struct DepthTarget {
@@ -122,6 +128,9 @@ std::array<ShaderRecompiler::ColorExportPacking, 8> ExportPackings(const State& 
 ColorTarget DecodeColorBuffer(const Registers& context, std::uint32_t slot);
 std::size_t CmaskBytes(std::uint32_t width, std::uint32_t height);
 std::uint32_t ColorWriteMask(const Registers& context);
+// The one sample count a draw's attachments render at (see State.cpp); throws for color targets whose
+// fragment count is neither one nor that count.
+std::uint32_t AttachmentSampleCount(std::uint32_t rasterSamples, std::uint32_t depthSamples, std::span<const ColorTarget> colors);
 
 struct ColorMetadataPass {
     enum class Mode { EliminateFastClear, DccDecompress };
