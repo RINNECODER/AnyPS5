@@ -31,6 +31,7 @@ add_library(anyps5_metal_utilities STATIC
     MetalDevice.mm
     MetalPresenter.mm
     MetalGuestMemory.mm
+    MetalPipelineCache.mm
     "${CMAKE_CURRENT_SOURCE_DIR}/../../Execution/src/AspectFit.cpp"
 )
 target_compile_options(anyps5_metal_utilities PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
@@ -88,5 +89,7 @@ if(BUILD_TESTING)
     endif()
     add_dependencies(metal_utility_tests anyps5_metal_shaders)
     add_test(NAME metal_utility_tests COMMAND metal_utility_tests "${metalLibrary}")
-    set_tests_properties(metal_utility_tests PROPERTIES TIMEOUT 120)
+    # The binary-archive test points the disk cache at a temporary directory itself; nothing else may
+    # write pipelines into the per-user cache.
+    set_tests_properties(metal_utility_tests PROPERTIES TIMEOUT 120 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
 endif()

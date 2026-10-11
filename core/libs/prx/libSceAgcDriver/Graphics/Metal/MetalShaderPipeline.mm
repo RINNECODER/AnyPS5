@@ -1,5 +1,6 @@
 #include "MetalShaderPipeline.hpp"
 #include "MetalDevice.hpp"
+#include "MetalPipelineCache.hpp"
 #include <algorithm>
 #include "MetalSampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
@@ -48,30 +49,16 @@ id<MTLFunction> compile(id<MTLDevice> device, const ShaderResult& shader, MTLFun
         (shader.stage != stage && !capture && !evaluation)) {
         throw std::invalid_argument("Converted Metal shader reflection has the wrong pipeline stage");
     }
-    NSString* source = [[NSString alloc] initWithBytes:shader.source.data() length:shader.source.size()
-                                            encoding:NSUTF8StringEncoding];
-    NSString* entryPoint = [[NSString alloc] initWithBytes:shader.entryPoint.data() length:shader.entryPoint.size()
-                                                encoding:NSUTF8StringEncoding];
-    if (source == nil || entryPoint == nil || shader.entryPoint.find('\0') != std::string::npos) {
+    if (shader.entryPoint.find('\0') != std::string::npos) {
         throw std::invalid_argument("Metal converted shader source and entry point must be valid UTF-8");
     }
-    MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
     if (@available(macOS 15.0, *)) {
-        options.mathMode = MTLMathModeSafe;
-        if (shader.requiresWorkgroupAtomicFences) {
-            if (![device supportsFamily:MTLGPUFamilyApple1])
-                throw std::invalid_argument("Workgroup acquire/release fences require an Apple Silicon device");
-            options.languageVersion = MTLLanguageVersion3_2;
-        }
+        if (shader.requiresWorkgroupAtomicFences && ![device supportsFamily:MTLGPUFamilyApple1])
+            throw std::invalid_argument("Workgroup acquire/release fences require an Apple Silicon device");
     } else {
         throw std::runtime_error("Converted Metal shader pipelines require macOS 15 or later");
     }
-    NSError* error = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:source options:options error:&error];
-    if (library == nil) {
-        throw std::runtime_error(errorMessage("Converted Metal shader compilation failed", error));
-    }
-    id<MTLFunction> function = [library newFunctionWithName:entryPoint];
+    id<MTLFunction> function = CachedShaderFunction(device, shader.source, shader.entryPoint, shader.requiresWorkgroupAtomicFences);
     if (function == nil || function.functionType != type) {
         throw std::invalid_argument("Converted Metal shader entry point has the wrong stage or is missing");
     }
@@ -675,11 +662,11 @@ MetalRectKernelPipeline::MetalRectKernelPipeline(id<MTLDevice> device, ShaderRes
     samplerFunction = samplerBankFunction(device, this->shader, descriptor.computeFunction);
     descriptor.stageInputDescriptor = captureInputs;
     NSError* error = nil;
-    MTLComputePipelineReflection* reflection = nil;
-    pipeline = [device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionBindingInfo reflection:&reflection error:&error];
+    const auto created = CachedComputePipelineState(device, descriptor, &error);
+    pipeline = created.state;
     if (pipeline == nil) throw std::runtime_error(errorMessage("Converted Metal rectangle kernel creation failed", error));
-    if (reflection == nil) throw std::runtime_error("Metal rectangle kernel did not return native binding reflection");
-    bufferAlignments = nativeBufferAlignments(reflection.bindings);
+    if (created.reflection == nil) throw std::runtime_error("Metal rectangle kernel did not return native binding reflection");
+    bufferAlignments = nativeBufferAlignments(created.reflection.bindings);
     if (pipeline.threadExecutionWidth == 0 || pipeline.threadExecutionWidth > pipeline.maxTotalThreadsPerThreadgroup ||
         pipeline.threadExecutionWidth > device.maxThreadsPerThreadgroup.width) {
         throw std::invalid_argument("Metal rectangle kernel has an invalid native threadgroup width");
@@ -736,14 +723,15 @@ MetalComputePipeline::MetalComputePipeline(id<MTLDevice> device, ShaderResult sh
     id<MTLFunction> function = compile(device, this->shader, MTLFunctionTypeKernel);
     samplerFunction = samplerBankFunction(device, this->shader, function);
     NSError* error = nil;
-    MTLComputePipelineReflection* reflection = nil;
-    pipeline = [device newComputePipelineStateWithFunction:function options:MTLPipelineOptionBindingInfo
-                                               reflection:&reflection error:&error];
+    auto descriptor = [MTLComputePipelineDescriptor new];
+    descriptor.computeFunction = function;
+    const auto created = CachedComputePipelineState(device, descriptor, &error);
+    pipeline = created.state;
     if (pipeline == nil) {
         throw std::runtime_error(errorMessage("Converted Metal compute pipeline creation failed", error));
     }
-    if (reflection == nil) throw std::runtime_error("Metal compute pipeline did not return native binding reflection");
-    bufferAlignments = nativeBufferAlignments(reflection.bindings);
+    if (created.reflection == nil) throw std::runtime_error("Metal compute pipeline did not return native binding reflection");
+    bufferAlignments = nativeBufferAlignments(created.reflection.bindings);
     if (this->shader.requiresSimdGroups && this->shader.guest.hostSubgroupSize != 0 &&
         this->shader.guest.hostSubgroupSize != pipeline.threadExecutionWidth) {
         throw std::invalid_argument("Converted Metal compute subgroup width differs from the guest compilation contract");
@@ -814,15 +802,14 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
     native.fragmentFunction = compile(device, this->fragment, MTLFunctionTypeFragment);
     fragmentSamplerFunction = samplerBankFunction(device, this->fragment, native.fragmentFunction);
     NSError* error = nil;
-    MTLRenderPipelineReflection* reflection = nil;
-    pipeline = [device newRenderPipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
-                                                reflection:&reflection error:&error];
+    const auto created = CachedRenderPipelineState(device, native, &error);
+    pipeline = created.state;
     if (pipeline == nil) {
         throw std::runtime_error(errorMessage("Converted Metal render pipeline creation failed", error));
     }
-    if (reflection == nil) throw std::runtime_error("Metal render pipeline did not return native binding reflection");
-    vertexBufferAlignments = nativeBufferAlignments(reflection.vertexBindings);
-    fragmentBufferAlignments = nativeBufferAlignments(reflection.fragmentBindings);
+    if (created.reflection == nil) throw std::runtime_error("Metal render pipeline did not return native binding reflection");
+    vertexBufferAlignments = nativeBufferAlignments(created.reflection.vertexBindings);
+    fragmentBufferAlignments = nativeBufferAlignments(created.reflection.fragmentBindings);
 }
 
 const ShaderResult& MetalRenderPipeline::VertexReflection() const {
@@ -895,13 +882,12 @@ MetalMeshPipeline::MetalMeshPipeline(id<MTLDevice> device, ShaderResult mesh,
     fragmentSamplerFunction = samplerBankFunction(device, this->fragment, native.fragmentFunction);
     native.maxTotalThreadsPerMeshThreadgroup = static_cast<NSUInteger>(count);
     NSError* error = nil;
-    MTLRenderPipelineReflection* reflection = nil;
-    pipeline = [device newRenderPipelineStateWithMeshDescriptor:native options:MTLPipelineOptionBindingInfo
-                                                   reflection:&reflection error:&error];
+    const auto created = CachedMeshPipelineState(device, native, &error);
+    pipeline = created.state;
     if (pipeline == nil) throw std::runtime_error(errorMessage("Converted Metal mesh pipeline creation failed", error));
-    if (reflection == nil) throw std::runtime_error("Metal mesh pipeline did not return native binding reflection");
-    meshBufferAlignments = nativeBufferAlignments(reflection.meshBindings);
-    fragmentBufferAlignments = nativeBufferAlignments(reflection.fragmentBindings);
+    if (created.reflection == nil) throw std::runtime_error("Metal mesh pipeline did not return native binding reflection");
+    meshBufferAlignments = nativeBufferAlignments(created.reflection.meshBindings);
+    fragmentBufferAlignments = nativeBufferAlignments(created.reflection.fragmentBindings);
     if (this->mesh.requiresSimdGroups && this->mesh.guest.hostSubgroupSize != pipeline.meshThreadExecutionWidth) {
         throw std::invalid_argument("Converted Metal mesh subgroup width differs from the guest compilation contract");
     }

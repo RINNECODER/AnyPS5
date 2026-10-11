@@ -32,10 +32,9 @@
 
 namespace ShaderRecompiler {
 
-std::filesystem::path ShaderCacheDirectory() {
-    const char* disabled = std::getenv("ANYPS5_NO_SHADER_CACHE");
-    if (disabled != nullptr && *disabled != '\0' && std::strcmp(disabled, "0") != 0) return {};
 #ifdef _WIN32
+std::filesystem::path ShaderCacheDirectory() {
+    if (ShaderCacheDisabledBy("ANYPS5_NO_SHADER_CACHE") || ShaderCacheDisabledBy("APS5_NO_SHADER_CACHE")) return {};
     const wchar_t* directory = _wgetenv(L"ANYPS5_SHADER_CACHE_DIR");
     if (directory != nullptr && *directory != L'\0') return std::filesystem::path(directory);
     std::wstring executable(MAX_PATH, L'\0');
@@ -49,15 +48,8 @@ std::filesystem::path ShaderCacheDirectory() {
         executable.resize(executable.size() * 2);
     }
     return std::filesystem::path(executable).parent_path() / "shader_cache";
-#else
-    const char* directory = std::getenv("ANYPS5_SHADER_CACHE_DIR");
-    if (directory != nullptr && *directory != '\0') return std::filesystem::path(directory);
-    std::error_code error;
-    const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
-    if (error) return {};
-    return executable.parent_path() / "shader_cache";
-#endif
 }
+#endif
 
 }
 

@@ -1070,11 +1070,19 @@ void verifyCacheDirectory(const char* self) {
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
     require(ShaderRecompiler::ShaderCacheDirectory().empty(), "ANYPS5_NO_SHADER_CACHE=1 did not disable the cache");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "0");
+    setEnvironment("APS5_NO_SHADER_CACHE", "1");
+    require(ShaderRecompiler::ShaderCacheDirectory().empty(), "APS5_NO_SHADER_CACHE=1 did not disable the cache");
+    setEnvironment("APS5_NO_SHADER_CACHE", "0");
 #ifdef __APPLE__
-    // macOS has no /proc/self/exe default; use the supported explicit directory.
+    // macOS keeps the cache in the per-user Caches folder (an app bundle beside the executable is read-only).
+    const char* home = std::getenv("HOME");
+    require(home != nullptr && *home != '\0', "the macOS cache test requires HOME");
+    const auto expected = std::filesystem::path(home) / "Library" / "Caches" / "AnyPS5" / "shader_cache";
+    require(ShaderRecompiler::ShaderCacheDirectory() == expected, "the default macOS cache directory is not ~/Library/Caches/AnyPS5/shader_cache");
     const auto configured = std::filesystem::absolute(self).parent_path() / "shader_cache";
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", configured.string());
     require(ShaderRecompiler::ShaderCacheDirectory() == configured, "the explicit cache directory was not honored");
+    setEnvironment("ANYPS5_SHADER_CACHE_DIR", "");
 #else
     const auto directory = ShaderRecompiler::ShaderCacheDirectory();
     require(directory.filename() == "shader_cache", "the default cache directory is not named shader_cache");

@@ -1,5 +1,6 @@
 #include "MetalShaderBridge.hpp"
 #include "../BdaAbi.hpp"
+#include "BoundedCache.hpp"
 #include <spirv_msl.hpp>
 #include <algorithm>
 #include <limits>
@@ -984,7 +985,7 @@ std::uint32_t DescriptorCount(const spirv_cross::CompilerMSL& compiler,
 }
 }
 
-Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
+static Result ConvertToMetalUncached(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
     switch (target.rectListMode) {
     case RectListMode::None:
     case RectListMode::VertexCapture:
@@ -1503,4 +1504,172 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         Fail("specialized or missing compute workgroup dimensions require an explicit dispatch specialization contract");
     return result;
 }
+
+namespace {
+
+#if defined(__APPLE__) && defined(__aarch64__) && defined(_LIBCPP_VERSION)
+// A new field in any of these must be added to ConversionKey below, or a cached conversion could be
+// returned for inputs that differ only in that field.
+static_assert(sizeof(TargetOptions) == 120, "TargetOptions changed: update ConversionKey");
+static_assert(sizeof(InterfaceMember) == 32, "InterfaceMember changed: update ConversionKey");
+static_assert(sizeof(DescriptorBinding) == 400, "DescriptorBinding changed: update ConversionKey");
+static_assert(sizeof(PixelSamplerProof) == 68, "PixelSamplerProof changed: update ConversionKey");
+static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update ConversionKey");
+#endif
+
+void WriteBits(CacheKeyWriter& key, const std::vector<bool>& bits) {
+    key.Value<std::uint64_t>(bits.size());
+    for (const bool bit : bits) key.Bool(bit);
+}
+
+template<class T>
+void WriteWords(CacheKeyWriter& key, const std::vector<T>& words) {
+    key.Bytes(words.data(), words.size() * sizeof(T));
+}
+
+void WriteProofs(CacheKeyWriter& key, const std::vector<std::vector<PixelSamplerProof>>& proofs) {
+    key.Value<std::uint64_t>(proofs.size());
+    for (const auto& element : proofs) {
+        key.Value<std::uint64_t>(element.size());
+        for (const auto& proof : element) {
+            key.Value(proof.imageSource);
+            key.Value(proof.samplerSource);
+            key.Value(proof.liveUseMask);
+            key.Value(proof.liveUseCount);
+            key.Value(proof.samplerLiveUseCount);
+            for (const auto word : proof.imageDescriptor) key.Value(word);
+            for (const auto word : proof.samplerDescriptor) key.Value(word);
+        }
+    }
+}
+
+// The exact conversion input: every target option, the stage, and every guest field ConvertToMetalUncached
+// (and the classifiers it includes) reads. Guest fields it never reads stay out so that, for example, a
+// relabeled variant still hits; the returned Result then carries the caller's guest.
+std::string ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
+    CacheKeyWriter key;
+    key.Value(stage);
+    key.Value(target.mslVersion);
+    key.Value(target.maxBuffers);
+    key.Value(target.maxTextures);
+    key.Value(target.maxSamplers);
+    key.Value(target.pushConstantBuffer);
+    key.Value(target.bufferSizesBuffer);
+    key.Value(target.pushConstantOffsetBytes);
+    key.Value(target.vertexBufferCount);
+    key.Bool(target.supportsWorkgroupAtomicFences);
+    key.Bool(target.supportsInt64);
+    key.Bool(target.supportsGpuAddresses);
+    key.Bool(target.supportsSimdGroups);
+    key.Bool(target.samplerArgumentBuffer);
+    key.Bool(target.supportsArgumentBuffersTier2);
+    key.Value(target.maxArgumentBufferSamplers);
+    key.Bool(target.flipVertexY);
+    key.Bool(target.fixupClipSpace);
+    key.Value(target.rectListMode);
+    key.Value(target.rectListIndexSize);
+    key.Bool(target.rectListInputLayout.has_value());
+    if (target.rectListInputLayout) {
+        const auto& layout = *target.rectListInputLayout;
+        key.Value(layout.stride);
+        key.Value(layout.alignment);
+        key.Value<std::uint64_t>(layout.members.size());
+        for (const auto& member : layout.members) {
+            key.Bool(member.location.has_value());
+            key.Value(member.location.value_or(0));
+            key.Bool(member.builtin.has_value());
+            key.Value(member.builtin.value_or(0));
+            key.Value(member.components);
+            key.Value(member.width);
+            key.Value(member.offset);
+            key.Value(member.bytes);
+        }
+    }
+    const auto& slots = target.rectListBuffers;
+    key.Value(slots.output);
+    key.Value(slots.input);
+    key.Value(slots.factors);
+    key.Value(slots.indirect);
+    key.Value(slots.indices);
+
+    WriteWords(key, guest.spirv.Words());
+    key.Value(guest.runtimeAbiVersion);
+    key.Value(guest.bdaAbiVersion);
+    key.Value(guest.runtimeImageCount);
+    WriteWords(key, guest.pushConstants);
+    key.Value<std::uint64_t>(guest.vertexAttributes.size());
+    for (const auto& attribute : guest.vertexAttributes) {
+        key.Value(attribute.location);
+        key.Value(attribute.components);
+        for (const auto field : attribute.resource.fields) key.Value(field);
+        key.Value(attribute.fetchIndex);
+        key.Value(attribute.formatComponents);
+    }
+    key.Value<std::uint64_t>(guest.bindings.size());
+    for (const auto& binding : guest.bindings) {
+        key.Value(binding.kind);
+        key.Value(binding.role);
+        key.Value(binding.descriptorSet);
+        key.Value(binding.binding);
+        key.Value(binding.count);
+        WriteWords(key, binding.guestDescriptor);
+        key.Bool(binding.readOnly);
+        key.Bool(binding.imageShape.has_value());
+        if (binding.imageShape) key.Value(*binding.imageShape);
+        WriteBits(key, binding.samplerDepthCompare);
+        WriteWords(key, binding.resourceSources);
+        WriteProofs(key, binding.samplerPixelProof);
+        WriteProofs(key, binding.imagePixelProof);
+        WriteBits(key, binding.imageWritten);
+        WriteBits(key, binding.imageDepthCompare);
+        WriteBits(key, binding.imageAtomic);
+        WriteBits(key, binding.imageAtomic64);
+        WriteBits(key, binding.bufferAtomic);
+        WriteBits(key, binding.bufferWritten);
+        WriteBits(key, binding.samplerUnnormalized);
+        WriteBits(key, binding.imageUnnormalized);
+        WriteWords(key, binding.imageSamplers);
+        WriteBits(key, binding.bufferRead);
+    }
+    return key.Take();
+}
+
+std::size_t ResultBytes(const Result& result) {
+    return sizeof(Result) + result.source.size() + result.entryPoint.size() + result.pushConstantData.size() +
+        result.resources.size() * sizeof(ResourceMapping) + result.capabilities.size() * sizeof(std::uint32_t) +
+        result.minimumLodPairs.size() * sizeof(MinimumLodPair) + result.minimumLodImages.size() * sizeof(MinimumLodImage) +
+        result.capturedSamplerRequirements.size() * sizeof(CapturedSamplerRequirement) + result.extensions.size() * 32u +
+        (result.rectList ? sizeof(RectListInfo) + 256u : 0u);
+}
+
+BoundedCache<Result>& ConversionCache() {
+    static BoundedCache<Result> cache(4096, std::size_t{256} << 20);
+    return cache;
+}
+
+}
+
+Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
+    auto key = ConversionKey(guest, stage, target);
+    if (auto cached = ConversionCache().Find(key)) {
+        cached->guest = guest;
+        return std::move(*cached);
+    }
+    auto result = ConvertToMetalUncached(guest, stage, target);
+    auto stored = result;
+    stored.guest = {};
+    const auto bytes = ResultBytes(stored);
+    ConversionCache().Insert(std::move(key), std::move(stored), bytes);
+    return result;
+}
+
+ConversionCacheStatistics GetConversionCacheStatistics() {
+    const auto counters = ConversionCache().Counters();
+    return {counters.hits, counters.misses, counters.entries, counters.bytes};
+}
+
+void ClearConversionCache() {
+    ConversionCache().Clear();
+}
+
 }

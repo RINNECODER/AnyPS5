@@ -16,7 +16,8 @@ public:
         std::span<const std::uint32_t> words, bool compareEnable, bool unnormalizedQualified);
 
 private:
-    MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerResource& resource, bool captured);
+    // `identity` is the captured guest descriptor identity (nil for an uncaptured sampler).
+    MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerResource& resource, NSData* identity);
     id<MTLSamplerState> sampler;
 };
 
