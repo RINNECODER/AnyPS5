@@ -120,7 +120,7 @@ if(BUILD_TESTING)
     target_compile_options(anyps5_metal_shader_correctness_replay PRIVATE -fobjc-arc)
     target_link_libraries(anyps5_metal_shader_correctness_replay PRIVATE
         anyps5_metal_guest_recompiler anyps5_metal_utilities)
-    foreach(correctnessMode IN ITEMS packed half sdwa lds)
+    foreach(correctnessMode IN ITEMS packed half sdwa lds f64)
         add_test(NAME anyps5_metal_shader_correctness_${correctnessMode}
             COMMAND anyps5_metal_shader_correctness_replay "${correctnessMode}")
         set_tests_properties(anyps5_metal_shader_correctness_${correctnessMode} PROPERTIES
