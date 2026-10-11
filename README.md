@@ -12,7 +12,7 @@ Apple Silicon PS5 runtime: QEMU/TCG guest CPU, native HLE system libraries, and 
 ## Get it
 
 - **Engine releases:** signed engine packages are published on the [releases page](https://github.com/RINNECODER/AnyPS5/releases) and announced through the channel feeds (`engine-alpha.json`, `engine-beta.json`, `engine-stable.json` on the [channels release](https://github.com/RINNECODER/AnyPS5/releases/tag/channels)).
-- **MacPS:** the macOS launcher app, maintained separately in [MacPS](https://github.com/RINNECODER/MacPS), installs and updates engines automatically.
+- **MacPS:** MacPS, a separate macOS launcher app, installs and updates engines automatically.
 - **Build from source:** see the [macOS Metal backend section](docs/dev/BUILD.md#macos-metal-backend) of the build instructions; the exact flags used in CI are in [macos-metal.yml](.github/workflows/macos-metal.yml).
 
 ### Release channels
