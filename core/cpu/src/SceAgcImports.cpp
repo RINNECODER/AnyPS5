@@ -2,6 +2,7 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceHostTrampolines.hpp>
 #include "SceShaders.hpp"
+#include "AgcUpstreamBuilders.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include <algorithm>
@@ -39,7 +40,22 @@ constexpr Binding bindings[] = {
     {"w2rJhmD+dsE", Contract::AddEqEvent, true},
     {"DL2RXaXOy88", Contract::DeleteEqEvent, true},
     {"YUeqkyT7mEQ", Contract::DcbSetFlipCommandBuffer56, false},
-    {"MWiElSNE8j8", Contract::DcbWaitUntilSafeForRenderingCommandBuffer56, false}
+    {"MWiElSNE8j8", Contract::DcbWaitUntilSafeForRenderingCommandBuffer56, false},
+    {"57labkp+rSQ", Contract::DcbAcquireMem, false},
+    {"KT-hTp-Ch14", Contract::AcbAcquireMem, false},
+    {"wr23dPKyWc0", Contract::CbReleaseMem, false},
+    {"VmW0Tdpy420", Contract::DcbWaitRegMem, false},
+    {"htn36gPnBk4", Contract::AcbWaitRegMem, false},
+    {"1rZSWUv1IRc", Contract::DcbCopyData, false},
+    {"qzMN2XKGA4k", Contract::AcbCopyData, false},
+    {"WmAc2MEj6Io", Contract::DcbDmaData, false},
+    {"-RnpfpxIhec", Contract::AcbDmaData, false},
+    {"1-gUn1PI4Sw", Contract::DcbAtomicMem, false},
+    {"XKKuA6VkSRc", Contract::AcbAtomicMem, false},
+    {"BIPexNBSGog", Contract::DcbCondExec, false},
+    {"qyM2bxYFPAk", Contract::AcbCondExec, false},
+    {"n2fD4A+pb+g", Contract::CbSetShRegisterRangeDirect, false},
+    {"MDLD5Ly94Xk", Contract::CbSetUcRegisterRangeDirect, false}
 };
 struct GuestPacket { std::uint64_t Address; std::uint32_t Words; std::uint8_t Flags; std::array<std::uint8_t,3> Reserved; };
 struct GuestCommandBuffer {
@@ -49,6 +65,12 @@ struct GuestCommandBuffer {
 static_assert(sizeof(GuestPacket) == 16 && sizeof(GuestCommandBuffer) == 56);
 static_assert(sizeof(Shader) == 96 && offsetof(Shader, header_size) == 64 && offsetof(Shader, type) == 90);
 static_assert(std::endian::native == std::endian::little);
+constexpr std::uint32_t MaxSubmissionWords = 0xfffff, MaxMultiSubmissions = 1024;
+// SCE_KERNEL_ERROR_EINVAL; the exact AGC driver code for these refusals is unverified.
+constexpr std::uint32_t InvalidArgument = 0x80020016u;
+// Pm4::Validate accepts a DISPATCH_DIRECT modifier only when
+// (modifier & ~0xa024) == 0x41; the builder always ORs in 0x41.
+constexpr std::uint32_t DispatchModifierMask = 0xa024u | 0x41u;
 
 void require(bool valid, const char* reason) {
     if (!valid) throw std::runtime_error(std::string("SCE AGC: ") + reason);
@@ -91,14 +113,20 @@ std::string identity(const SceImport& import) {
 }
 }
 
-struct SceAgcImports::Impl {
+struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
     using Key = std::tuple<std::string, std::string, std::uint16_t, std::uint16_t>;
+    // A builder suspended in its guest growth callback, keyed by the stack slot
+    // the callback's return lands on at the resume gate.
+    struct Growth { Contract Operation; std::array<std::uint64_t, 6> Arguments; std::uint64_t Stack; };
     Machine& MachineRef;
     SceAgcBackend Backend;
     std::set<Contract> Admitted;
     std::map<Contract, AgcArgumentPolicy> Policies;
     std::optional<SceHostTrampolines> Trampolines;
     std::map<Key, std::uint64_t> Gates;
+    std::optional<std::uint64_t> ResumeGate;
+    std::map<std::uint64_t, Growth> PendingGrowth;
+    bool Resuming = false;
     Impl(Machine& machine, SceAgcBackend backend, std::span<const Contract> admitted, std::uint64_t base) :
         MachineRef(machine), Backend(std::move(backend)), Admitted(admitted.begin(), admitted.end()) {
         require(base && !(base & 4095) && base < 0x7ffffffff000, "gates require aligned low canonical guest page");
@@ -108,13 +136,22 @@ struct SceAgcImports::Impl {
         Trampolines.emplace(MachineRef, base, SceHostTrampolines::DefaultCapacity, "SCE Agc import");
     }
 
-    std::uint64_t emit(Machine& guest, std::uint64_t bufferAddress, std::span<const std::uint32_t> words) {
+    // Writes one builder packet and returns its guest address in RAX. Exhaustion
+    // mirrors upstream Agc::Command::Reserve: call the guest growth callback once
+    // with (buffer, words + reserved, user data), then re-check the capacity. A
+    // refused, unusable or insufficient growth returns a null packet.
+    void emit(Machine& guest, std::uint64_t bufferAddress, std::span<const std::uint32_t> words, Contract operation) {
         const auto buffer = read<GuestCommandBuffer>(guest, bufferAddress);
         require(((buffer.Bottom | buffer.Top | buffer.Up | buffer.Down) & 3) == 0 && buffer.Bottom &&
                 buffer.Bottom <= buffer.Up && buffer.Up <= buffer.Down && buffer.Down <= buffer.Top,
                 "invalid command buffer cursor bounds");
-        require(words.size() <= 0x4001 && (buffer.Down - buffer.Up) / 4 >= words.size() + buffer.ReservedWords,
-                "command buffer exhausted; guest allocation callbacks are unsupported");
+        require(words.size() <= 0x4001, "command packet exceeds the maximum size");
+        const auto needed = words.size() + std::uint64_t{buffer.ReservedWords};
+        if ((buffer.Down - buffer.Up) / 4 < needed) {
+            if (Resuming || !buffer.Callback || needed > std::numeric_limits<std::uint32_t>::max() || !grow(guest, bufferAddress, buffer, static_cast<std::uint32_t>(needed), operation))
+                guest.Set(Register::Rax, 0);
+            return;
+        }
         // Validate both writes before modifying either. Only the cursor changes,
         // so guest callback, user data, reserved words and padding stay intact.
         address(buffer.Up, words.size_bytes(), 4);
@@ -124,7 +161,52 @@ struct SceAgcImports::Impl {
                 "command output overlaps command buffer descriptor");
         guest.Write(buffer.Up, std::as_bytes(words));
         write(guest, bufferAddress + offsetof(GuestCommandBuffer, Up), buffer.Up + words.size_bytes());
-        return buffer.Up;
+        guest.Set(Register::Rax, buffer.Up);
+    }
+
+    // Turns this gate's return into callback(buffer, words, user data) whose own
+    // return lands on the resume gate. Argument registers are kept host-side;
+    // stack arguments stay untouched above the original RSP.
+    bool grow(Machine& guest, std::uint64_t bufferAddress, const GuestCommandBuffer& buffer, std::uint32_t words,
+              Contract operation) {
+        const auto stack = guest.Get(Register::Rsp);
+        if (stack < 4096) return false;
+        // Below the red zone; [frame] is popped into RIP, so the callback is
+        // entered with RSP = frame + 8, the SysV call-entry alignment.
+        const auto frame = (stack - 128 - 16) & ~std::uint64_t{15};
+        try {
+            guest.CheckAccess(buffer.Callback, 1, Permission::Execute);
+            guest.CheckAccess(frame, 16, Permission::Read | Permission::Write);
+        } catch (const std::exception&) { return false; }
+        if (!ResumeGate) ResumeGate = Trampolines->Add([weak=weak_from_this()](Machine& resumed) {
+            const auto state = weak.lock();
+            require(static_cast<bool>(state), "import runtime expired");
+            state->resume(resumed);
+        });
+        const std::array<std::uint64_t, 2> call{buffer.Callback, *ResumeGate};
+        guest.Write(frame, std::as_bytes(std::span(call)));
+        PendingGrowth.insert_or_assign(frame + 16, Growth{operation, {guest.Get(Register::Rdi), guest.Get(Register::Rsi),
+            guest.Get(Register::Rdx), guest.Get(Register::Rcx), guest.Get(Register::R8), guest.Get(Register::R9)}, stack});
+        guest.Set(Register::Rsp, frame);
+        guest.Set(Register::Rdi, bufferAddress);
+        guest.Set(Register::Rsi, words);
+        guest.Set(Register::Rdx, buffer.UserData);
+        return true;
+    }
+
+    void resume(Machine& guest) {
+        const auto found = PendingGrowth.find(guest.Get(Register::Rsp));
+        require(found != PendingGrowth.end(), "command buffer growth resumed without a pending callback");
+        const auto growth = found->second;
+        PendingGrowth.erase(found);
+        const bool granted = (guest.Get(Register::Rax) & 0xff) != 0; // C bool: only AL is defined
+        constexpr std::array registers{Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9};
+        for (std::size_t index = 0; index < registers.size(); ++index) guest.Set(registers[index], growth.Arguments[index]);
+        guest.Set(Register::Rsp, growth.Stack);
+        if (!granted) { guest.Set(Register::Rax, 0); return; }
+        Resuming = true;
+        struct Clear { bool& Value; ~Clear() { Value = false; } } clear{Resuming};
+        invoke(guest, growth.Operation);
     }
 
     void submit(Machine& guest, std::uint64_t pointer, std::uint32_t queue, Contract operation) {
@@ -132,7 +214,7 @@ struct SceAgcImports::Impl {
         const auto packet = read<GuestPacket>(guest, pointer);
         require(!packet.Flags, "nonzero command submission flags are unsupported");
         if (Policies.contains(operation))
-            require(packet.Words <= 0xfffff, "target packet count outside qualified bound");
+            require(packet.Words <= MaxSubmissionWords, "target packet count outside qualified bound");
         if (packet.Words) {
             address(packet.Address, std::size_t(packet.Words) * 4, 4);
             guest.CheckAccess(packet.Address, std::size_t(packet.Words) * 4, Permission::Read);
@@ -144,7 +226,9 @@ struct SceAgcImports::Impl {
     void multi(Machine& guest, std::uint64_t addresses, std::uint64_t sizes, std::uint32_t count, std::uint32_t queue) {
         if (!count) { guest.Set(Register::Rax, 0); return; }
         required(Backend.Submit);
-        require(count <= 1024, "multi submission count outside supported bound");
+        // Count and per-entry word bounds fail with an SCE code before any entry
+        // is submitted; the entry bound matches the single-submit packet bound.
+        if (count > MaxMultiSubmissions) { guest.Set(Register::Rax, InvalidArgument); return; }
         address(addresses, std::size_t(count) * 8, 8);
         address(sizes, std::size_t(count) * 4, 4);
         guest.CheckAccess(addresses, std::size_t(count) * 8, Permission::Read);
@@ -153,6 +237,10 @@ struct SceAgcImports::Impl {
         std::vector<std::uint32_t> lengths(count);
         guest.Read(addresses, std::as_writable_bytes(std::span(pointers)));
         guest.Read(sizes, std::as_writable_bytes(std::span(lengths)));
+        if (std::any_of(lengths.begin(), lengths.end(), [](auto words) { return words > MaxSubmissionWords; })) {
+            guest.Set(Register::Rax, InvalidArgument);
+            return;
+        }
         for (std::size_t index=0; index<count; ++index) if (lengths[index]) {
             address(pointers[index], std::size_t(lengths[index]) * 4, 4);
             guest.CheckAccess(pointers[index], std::size_t(lengths[index]) * 4, Permission::Read);
@@ -224,10 +312,106 @@ struct SceAgcImports::Impl {
         guest.Set(Register::Rax, 0);
     }
 
+    // Runs an upstream libSceAgc builder against a host scratch buffer, then
+    // emits its words to the guest buffer exactly as the hand-written builders do.
+    template<class Builder> void build(Machine& guest, std::uint64_t bufferAddress, Contract operation, Builder&& builder) {
+        Scratch.resize(0x4001); // one maximum-size packet; only emitted words are read back
+        CommandBuffer host{Scratch.data(), Scratch.data() + Scratch.size(), Scratch.data(), Scratch.data() + Scratch.size(),
+                           nullptr, nullptr, 0};
+        require(builder(&host) == Scratch.data(), "upstream builder did not emit at the command cursor");
+        emit(guest, bufferAddress, std::span<const std::uint32_t>(Scratch.data(), host.cursor_up), operation);
+    }
+    std::vector<std::uint32_t> Scratch;
+
+    // Register ranges are the one builder input upstream dereferences: snapshot
+    // the bounded guest values first. Invalid counts reach upstream's own check.
+    void registerRange(Machine& guest, Contract operation, std::uint64_t buffer, std::uint32_t offset, std::uint64_t values,
+                       std::uint32_t count) {
+        std::vector<std::uint32_t> snapshot(count && count <= 0x3fff ? count : 0);
+        // Null values are valid upstream (zero placeholders patched later).
+        if (!snapshot.empty() && values) {
+            address(values, snapshot.size() * 4, 4);
+            guest.CheckAccess(values, snapshot.size() * 4, Permission::Read);
+            guest.Read(values, std::as_writable_bytes(std::span(snapshot)));
+        }
+        const auto* host = snapshot.empty() || !values ? reinterpret_cast<const std::uint32_t*>(values) : snapshot.data();
+        build(guest, buffer, operation, [&](CommandBuffer* cb) {
+            return operation == Contract::CbSetShRegisterRangeDirect ? sceAgcCbSetShRegisterRangeDirect(cb, offset, host, count)
+                                                                     : sceAgcCbSetUcRegisterRangeDirect(cb, offset, host, count);
+        });
+    }
+
     void invoke(Machine& guest, Contract operation) {
         const auto a=guest.Get(Register::Rdi), b=guest.Get(Register::Rsi), c=guest.Get(Register::Rdx),
             d=guest.Get(Register::Rcx), e=guest.Get(Register::R8), f=guest.Get(Register::R9);
+        // SysV integer argument `index` (from zero); seventh and later are on the caller's stack.
+        const auto arg = [&](std::size_t index) {
+            const auto stack = guest.Get(Register::Rsp);
+            require(stack <= UINT64_MAX - 8 * (index - 5), "stack argument overflow");
+            return read<std::uint64_t>(guest, stack + 8 * (index - 5));
+        };
+        const auto u8 = [](std::uint64_t value) { return static_cast<std::uint8_t>(value); };
+        const auto u16 = [](std::uint64_t value) { return static_cast<std::uint16_t>(value); };
+        const auto u32 = [](std::uint64_t value) { return static_cast<std::uint32_t>(value); };
+        const auto ptr = [](std::uint64_t value) { return reinterpret_cast<const volatile void*>(value); };
         switch (operation) {
+        case Contract::DcbAcquireMem:
+            build(guest, a, operation, [&](CommandBuffer* cb) { return sceAgcDcbAcquireMem(cb, u8(b), u32(c), u32(d), ptr(e), f, u32(arg(6))); });
+            return;
+        case Contract::AcbAcquireMem:
+            build(guest, a, operation, [&](CommandBuffer* cb) { return sceAgcAcbAcquireMem(cb, u32(b), ptr(c), d, u32(e)); });
+            return;
+        case Contract::CbReleaseMem:
+            build(guest, a, operation, [&](CommandBuffer* cb) {
+                return sceAgcCbReleaseMem(cb, u8(b), u16(c), u8(d), u8(e), reinterpret_cast<const volatile Label*>(f),
+                    u8(arg(6)), arg(7), u16(arg(8)), u16(arg(9)), u8(arg(10)), u32(arg(11)));
+            });
+            return;
+        case Contract::DcbWaitRegMem:
+            build(guest, a, operation, [&](CommandBuffer* cb) {
+                return sceAgcDcbWaitRegMem(cb, u8(b), u8(c), u8(d), u8(e), ptr(f), arg(6), arg(7), u32(arg(8)));
+            });
+            return;
+        case Contract::AcbWaitRegMem:
+            build(guest, a, operation, [&](CommandBuffer* cb) {
+                return sceAgcAcbWaitRegMem(cb, u8(b), u8(c), u8(d), ptr(e), f, arg(6), u32(arg(7)));
+            });
+            return;
+        case Contract::DcbCopyData: case Contract::AcbCopyData: {
+            const auto copy = operation == Contract::DcbCopyData ? sceAgcDcbCopyData : sceAgcAcbCopyData;
+            build(guest, a, operation, [&](CommandBuffer* cb) {
+                return copy(cb, u8(b), u8(c), d, u8(e), u8(f), arg(6), u8(arg(7)), u8(arg(8)));
+            });
+            return;
+        }
+        case Contract::DcbDmaData:
+            build(guest, a, operation, [&](CommandBuffer* cb) {
+                return sceAgcDcbDmaData(cb, u8(b), u8(c), u8(d), e, u8(f), u8(arg(6)), arg(7), u32(arg(8)),
+                    u8(arg(9)), u8(arg(10)), u8(arg(11)));
+            });
+            return;
+        case Contract::AcbDmaData:
+            build(guest, a, operation, [&](CommandBuffer* cb) {
+                return sceAgcAcbDmaData(cb, u8(b), u8(c), d, u8(e), u8(f), arg(6), u32(arg(7)), u8(arg(8)), u8(arg(9)));
+            });
+            return;
+        case Contract::DcbAtomicMem: case Contract::AcbAtomicMem: {
+            const auto atomic = operation == Contract::DcbAtomicMem ? sceAgcDcbAtomicMem : sceAgcAcbAtomicMem;
+            build(guest, a, operation, [&](CommandBuffer* cb) {
+                return atomic(cb, u8(b), u8(c), u8(d), ptr(e), f, arg(6), u16(arg(7)));
+            });
+            return;
+        }
+        case Contract::DcbCondExec: case Contract::AcbCondExec: {
+            const auto condition = operation == Contract::DcbCondExec ? sceAgcDcbCondExec : sceAgcAcbCondExec;
+            build(guest, a, operation, [&](CommandBuffer* cb) {
+                return condition(cb, reinterpret_cast<const volatile std::uint32_t*>(b), u32(c));
+            });
+            return;
+        }
+        case Contract::CbSetShRegisterRangeDirect: case Contract::CbSetUcRegisterRangeDirect:
+            registerRange(guest, operation, a, u32(b), c, u32(d));
+            return;
         case Contract::SubmitDcbPacket16: case Contract::AgrSubmitDcbPacket16: submit(guest, a, 0, operation); return;
         case Contract::SubmitAcbPacket16:
             require(static_cast<std::uint32_t>(a) >= 0x20 && static_cast<std::uint32_t>(a) < 0x58, "unsupported compute queue");
@@ -259,21 +443,21 @@ struct SceAgcImports::Impl {
                 (std::uint32_t(increment) << 16) | (std::uint32_t(confirm) << 20) | (std::uint32_t(cache) << 25);
             words[2]=static_cast<std::uint32_t>(d); words[3]=static_cast<std::uint32_t>(d >> 32);
             guest.Read(e, std::as_writable_bytes(std::span(words).subspan(4)));
-            guest.Set(Register::Rax, emit(guest, a, words)); return;
+            emit(guest, a, words, operation); return;
         }
         case Contract::DcbSetShRegisterDirect: case Contract::DcbSetCxRegisterDirect: case Contract::DcbSetUcRegisterDirect: {
             const auto offset=static_cast<std::uint32_t>(b), value=static_cast<std::uint32_t>(b >> 32);
             require(offset <= 0xffff, "invalid direct register offset");
             const auto opcode = operation == Contract::DcbSetShRegisterDirect ? 0x76u : operation == Contract::DcbSetCxRegisterDirect ? 0x69u : 0x79u;
             const std::array words{0xc0010000u | (opcode << 8), offset, value};
-            guest.Set(Register::Rax, emit(guest, a, words)); return;
+            emit(guest, a, words, operation); return;
         }
         case Contract::CbDispatchCommandBuffer56: {
             const auto modifier=static_cast<std::uint32_t>(e);
-            require(!(modifier & ~(0xa038u | 0x41u)), "invalid dispatch modifier");
+            require(!(modifier & ~DispatchModifierMask), "invalid dispatch modifier");
             if (Policies.contains(operation)) require(modifier & 1, "dispatch modifier outside qualified target forwarding path");
             const std::array words{0xc0031500u, static_cast<std::uint32_t>(b), static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(d), modifier | 0x41u};
-            guest.Set(Register::Rax, emit(guest, a, words)); return;
+            emit(guest, a, words, operation); return;
         }
         case Contract::DcbSetFlipCommandBuffer56: {
             const auto handle = static_cast<std::uint32_t>(b), mode = static_cast<std::uint32_t>(d);
@@ -288,7 +472,7 @@ struct SceAgcImports::Impl {
             // imported producer ABI does not establish proprietary packet bytes.
             const std::array words{AgcDriver::FlipPacketHeader, handle, static_cast<std::uint32_t>(index), mode,
                 static_cast<std::uint32_t>(e), static_cast<std::uint32_t>(e >> 32u)};
-            guest.Set(Register::Rax, emit(guest, a, words)); return;
+            emit(guest, a, words, operation); return;
         }
         case Contract::DcbWaitUntilSafeForRenderingCommandBuffer56: {
             const auto handle = static_cast<std::uint32_t>(b);
@@ -298,7 +482,7 @@ struct SceAgcImports::Impl {
                         "rendering wait arguments outside qualified target use");
             }
             const std::array words{AgcDriver::RenderingWaitPacketHeader, handle, index, 0u};
-            guest.Set(Register::Rax, emit(guest, a, words)); return;
+            emit(guest, a, words, operation); return;
         }
         case Contract::CreateShaderRelativeHeader96: createShader(guest, a, b, c); return;
         case Contract::SuspendPoint: required(Backend.Suspend); Backend.Suspend(); guest.Set(Register::Rax, 0); return;
@@ -375,7 +559,31 @@ std::span<const AgcAbiAdmission> TargetAgcAdmissions() {
         {Contract::DcbSetFlipCommandBuffer56, AgcArgumentPolicy::TargetFlip,
             "target cursor56/opaque VideoOut handle32/index32 in three registered slots/mode1/arg64=0; source internal six-word encoding and cursor24"},
         {Contract::DcbWaitUntilSafeForRenderingCommandBuffer56, AgcArgumentPolicy::TargetRenderingWait,
-            "target same cursor56/opaque VideoOut handle32/index32 in three registered slots; source internal four-word reuse wait before flip reservation"}
+            "target same cursor56/opaque VideoOut handle32/index32 in three registered slots; source internal four-word reuse wait before flip reservation"},
+        // Source-contract admissions: arguments are validated by the builder or
+        // submit path itself and failures return SCE codes or null packets.
+        {Contract::SubmitMultiDcbs, AgcArgumentPolicy::SourceContract,
+            "pointer64[] and words32[] arrays, count<=1024, each entry words<=0xfffff, SCE error before any submission"},
+        {Contract::AgrSubmitMultiDcbs, AgcArgumentPolicy::SourceContract, "same multi-submit arrays and bounds; queue zero"},
+        {Contract::SubmitMultiAcbs, AgcArgumentPolicy::SourceContract, "queue32 in 0x20..0x57 plus the multi-submit arrays and bounds"},
+        {Contract::DcbSetShRegisterDirect, AgcArgumentPolicy::SourceContract, "cursor56 and packed offset16/value32; three-word packet"},
+        {Contract::DcbSetCxRegisterDirect, AgcArgumentPolicy::SourceContract, "cursor56 and packed offset16/value32; three-word packet"},
+        {Contract::DcbSetUcRegisterDirect, AgcArgumentPolicy::SourceContract, "cursor56 and packed offset16/value32; three-word packet"},
+        {Contract::DcbAcquireMem, AgcArgumentPolicy::SourceContract, "upstream builder; engine/cbDbOp/gcr bit checks, poll on stack"},
+        {Contract::AcbAcquireMem, AgcArgumentPolicy::SourceContract, "upstream builder; compute engine acquire"},
+        {Contract::CbReleaseMem, AgcArgumentPolicy::SourceContract, "upstream builder; six stack arguments, selector and label checks"},
+        {Contract::DcbWaitRegMem, AgcArgumentPolicy::SourceContract, "upstream builder; three stack arguments, compare/size checks"},
+        {Contract::AcbWaitRegMem, AgcArgumentPolicy::SourceContract, "upstream builder; two stack arguments, compare/size checks"},
+        {Contract::DcbCopyData, AgcArgumentPolicy::SourceContract, "upstream builder; three stack arguments"},
+        {Contract::AcbCopyData, AgcArgumentPolicy::SourceContract, "upstream builder; three stack arguments"},
+        {Contract::DcbDmaData, AgcArgumentPolicy::SourceContract, "upstream builder; six stack arguments"},
+        {Contract::AcbDmaData, AgcArgumentPolicy::SourceContract, "upstream builder; four stack arguments"},
+        {Contract::DcbAtomicMem, AgcArgumentPolicy::SourceContract, "upstream builder; two stack arguments, address alignment by op"},
+        {Contract::AcbAtomicMem, AgcArgumentPolicy::SourceContract, "upstream builder; two stack arguments, address alignment by op"},
+        {Contract::DcbCondExec, AgcArgumentPolicy::SourceContract, "upstream builder; aligned address, dwords<=0x3fff"},
+        {Contract::AcbCondExec, AgcArgumentPolicy::SourceContract, "upstream builder; aligned address, dwords<=0x3fff"},
+        {Contract::CbSetShRegisterRangeDirect, AgcArgumentPolicy::SourceContract, "upstream builder; bounded guest value snapshot"},
+        {Contract::CbSetUcRegisterRangeDirect, AgcArgumentPolicy::SourceContract, "upstream builder; bounded guest value snapshot"}
     };
     return admissions;
 }

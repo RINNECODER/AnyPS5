@@ -1,9 +1,16 @@
 # Included by the native Metal build after both runtime libraries exist.
 if(TARGET anyps5_cpu AND TARGET anyps5_metal_native_execution)
+    # Upstream libSceAgc builders that encode packets into a host scratch
+    # command buffer; SceAgcImports copies the words into guest memory.
+    set(agcUpstream "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceAgc")
     add_library(anyps5_cpu_agc STATIC
         "${PROJECT_SOURCE_DIR}/core/cpu/src/SceAgcImports.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/NativeAgcBackend.cpp"
-        "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceAgc/Shader/src/ShaderUtils.cpp")
+        "${agcUpstream}/Shader/src/ShaderUtils.cpp"
+        "${agcUpstream}/Command/src/Packet.cpp" "${agcUpstream}/Command/src/Memory.cpp"
+        "${agcUpstream}/Command/src/Control.cpp" "${agcUpstream}/DcbFlow/src/Memory.cpp"
+        "${agcUpstream}/DcbFlow/src/Sync.cpp" "${agcUpstream}/Acb/src/Memory.cpp" "${agcUpstream}/Acb/src/Sync.cpp"
+        "${agcUpstream}/Cb/src/Sync.cpp" "${agcUpstream}/Cb/src/Registers.cpp")
     target_compile_features(anyps5_cpu_agc PUBLIC cxx_std_20)
     target_compile_options(anyps5_cpu_agc PRIVATE -Wall -Wextra -Wpedantic)
     target_include_directories(anyps5_cpu_agc PUBLIC
@@ -44,6 +51,12 @@ if(TARGET anyps5_cpu AND TARGET anyps5_metal_native_execution)
         target_link_libraries(anyps5_cpu_agc_capability_fixture PRIVATE anyps5_cpu_agc)
         add_test(NAME anyps5_cpu_agc_capability COMMAND anyps5_cpu_agc_capability_fixture)
         set_tests_properties(anyps5_cpu_agc_capability PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE)
+        add_executable(anyps5_cpu_agc_builder_fixture "${CMAKE_CURRENT_LIST_DIR}/AgcBuilderFixture.cpp")
+        target_compile_features(anyps5_cpu_agc_builder_fixture PRIVATE cxx_std_20)
+        target_compile_options(anyps5_cpu_agc_builder_fixture PRIVATE -Wall -Wextra -Wpedantic)
+        target_link_libraries(anyps5_cpu_agc_builder_fixture PRIVATE anyps5_cpu_agc)
+        add_test(NAME anyps5_cpu_agc_builder COMMAND anyps5_cpu_agc_builder_fixture)
+        set_tests_properties(anyps5_cpu_agc_builder PROPERTIES TIMEOUT 30)
         # The direct CPU+Metal build does not define platform components. Use
         # the actual existing event provider source in this focused fixture,
         # preserving both direct-build support and wrapper target ordering.
