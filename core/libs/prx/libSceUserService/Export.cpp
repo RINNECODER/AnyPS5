@@ -121,10 +121,14 @@ int APS5_VABI sceUserServiceGetLoginUserIdList(UserServiceLoginUserIdList* user_
 }
 
 int APS5_VABI sceUserServiceGetUserName(int user_id, char* name, size_t size) {
- if (name == nullptr || user_id != USER_SERVICE_INITIAL_USER_ID) {
+ if (name == nullptr) {
   return USER_SERVICE_ERROR_INVALID_ARGUMENT;
  }
+ if (user_id != USER_SERVICE_INITIAL_USER_ID) {
+  return USER_SERVICE_ERROR_UNKNOWN_USER;
+ }
  if (size < USER_SERVICE_MAX_USER_NAME_LENGTH + 1) {
+  std::memset(name, 0, size);
   return USER_SERVICE_ERROR_BUFFER_TOO_SHORT;
  }
  std::strncpy(name, USER_SERVICE_INITIAL_USER_NAME, size);
