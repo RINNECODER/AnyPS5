@@ -432,6 +432,16 @@ int main() {
     const auto dangling = root / "dangling";
     std::filesystem::create_symlink("missing.txt", dangling);
     Require(lstat_nid_postfix(dangling.string().c_str(), &linkStatus) == 0 && (linkStatus.st_mode & 0170000) == 0120000);
+    constexpr int noFollow = 0x100;
+    Require(sceKernelOpen(link.string().c_str(), noFollow, 0) == static_cast<int>(0x8002001Fu));
+    Require(open_nid_postfix(link.string().c_str(), noFollow, 0) == -1 && *__error_nid_postfix() == 31);
+    Require(open_nid_postfix(dangling.string().c_str(), noFollow | 0x201, 0600) == -1 && *__error_nid_postfix() == 31);
+    Require(!std::filesystem::exists(root / "missing.txt"));
+    Require(open_nid_postfix(dangling.string().c_str(), noFollow | 0xA01, 0600) == -1 && *__error_nid_postfix() == 17);
+    const int followed = open_nid_postfix(link.string().c_str(), 0, 0);
+    Require(followed >= 0 && close_nid_postfix(followed) == 0);
+    const int plain = open_nid_postfix(presentName.c_str(), noFollow, 0);
+    Require(plain >= 0 && close_nid_postfix(plain) == 0);
     Require(stat_nid_postfix(dangling.string().c_str(), &status) == -1 && *__error_nid_postfix() == 2);
     Require(lstat_nid_postfix((root / "present.txt" / "child").string().c_str(), &linkStatus) == -1 && *__error_nid_postfix() == 20);
     const auto viaMissing = rootName + "/missing/../present.txt";
