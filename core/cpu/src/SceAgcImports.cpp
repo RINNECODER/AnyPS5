@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+extern "C" int APS5_VABI sceAgcUnknownCreateInterpolantMapping(ShaderRegister* regs, const Shader* gs, const Shader* ps);
 extern "C" int APS5_VABI sceAgcGetGsOversubscription(ShaderRegister* regs, const Shader* gs, std::uint32_t budget, float factor);
 
 namespace Cpu {
@@ -788,6 +789,43 @@ struct AgcGenericBindings {
         result(guest, status);
     }
 
+    // sceAgcUnknownCreateInterpolantMapping (dbOlWdppb4o): the split-f16 variant of
+    // sceAgcCreateInterpolantMapping_0100. Upstream reads ps->input_semantics and the
+    // gs->output_semantics table (the Metal stage ABI resolvers are no-ops), so those two
+    // tables are copied to host memory and every other guest pointer is cleared.
+    struct SemanticStage {
+        Shader Header{};
+        std::vector<ShaderSemantic> Semantics;
+        const Shader* Load(Machine& guest, std::uint64_t at, bool inputs) {
+            if (!at) return nullptr;
+            Header = read<Shader>(guest, at);
+            const auto table = numeric(inputs ? Header.input_semantics : Header.output_semantics);
+            const std::uint32_t count = inputs ? Header.num_input_semantics : Header.num_output_semantics;
+            Header.user_data = nullptr; Header.code = nullptr; Header.cx_registers = nullptr; Header.sh_registers = nullptr;
+            Header.specials = nullptr; Header.input_semantics = nullptr; Header.output_semantics = nullptr;
+            // More than 32 inputs is refused by upstream before it reads the table.
+            if (table && count && (!inputs || count <= 32)) {
+                Semantics.resize(count);
+                address(table, count * sizeof(ShaderSemantic), alignof(ShaderSemantic));
+                guest.CheckAccess(table, count * sizeof(ShaderSemantic), Permission::Read);
+                guest.Read(table, std::as_writable_bytes(std::span(Semantics)));
+                (inputs ? Header.input_semantics : Header.output_semantics) = Semantics.data();
+            }
+            return &Header;
+        }
+    };
+    static void createInterpolantMapping(Impl&, Machine& guest, Contract) {
+        const auto regsAt = arg(guest, 0);
+        auto regs = registers<32>(guest, regsAt, false);
+        require(regs.has_value(), "interpolant mapping registers are null");
+        SemanticStage gs, ps;
+        const auto* gsShader = gs.Load(guest, arg(guest, 1), false);
+        const auto* psShader = ps.Load(guest, arg(guest, 2), true);
+        const auto status = sceAgcUnknownCreateInterpolantMapping(regs->data(), gsShader, psShader);
+        if (status == 0) store(guest, regsAt, regs);
+        result(guest, status);
+    }
+
     // NotImplemented upstream exports: upstream logs and returns zero (or null),
     // so the guest sees exactly that.
     static void notImplemented(Impl&, Machine& guest, Contract) { guest.Set(Register::Rax, 0); }
@@ -1063,6 +1101,7 @@ struct AgcGenericBindings {
             {"wRbq6ZjNop4", Contract::UpstreamShader, &registerDefaults<true>},
             {"D9sr1xGUriE", Contract::UpstreamShader, &createPrimState},
             {"Y3ymLfZ1384", Contract::UpstreamShader, &updatePrimState},
+            {"dbOlWdppb4o", Contract::UpstreamShader, &createInterpolantMapping},
             {"vieBRwlh1Lw", Contract::UpstreamStub, &notImplemented},  // upstream sceAgcUnknown_vieBRwlh1Lw
             {"zARR5aCmkoY", Contract::UpstreamStub, &notImplemented},  // upstream sceAgcDcbA_zARR5aCmkoY
             {"LtTouSCZjHM", Contract::UpstreamCb, &builder<sceAgcSetNop>},  // sceAgcCbNop

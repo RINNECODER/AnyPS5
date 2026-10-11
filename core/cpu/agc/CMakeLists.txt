@@ -24,6 +24,7 @@ if(TARGET anyps5_cpu AND TARGET anyps5_metal_native_execution)
         "${agcUpstream}/Patch/src/IndirectRegisters.cpp" "${agcUpstream}/Patch/src/Jump.cpp" "${agcUpstream}/Patch/src/Nop.cpp"
         "${agcUpstream}/Patch/src/QueueEndOfPipeAction.cpp" "${agcUpstream}/Patch/src/Rewind.cpp" "${agcUpstream}/Patch/src/WaitRegMem.cpp"
         "${agcUpstream}/Misc/src/RegisterDefaults.cpp" "${agcUpstream}/Shader/src/PrimState.cpp"
+        "${agcUpstream}/Shader/src/InterpolantMapping.cpp"
         "${agcUpstream}/Misc/src/ShaderFusion.cpp" "${agcUpstream}/Shader/src/GsOversubscription.cpp"
         "${PROJECT_SOURCE_DIR}/core/cpu/src/upstream-prx/AgcDriver.cpp")
     target_compile_features(anyps5_cpu_agc PUBLIC cxx_std_20)
