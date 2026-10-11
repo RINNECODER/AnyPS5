@@ -101,7 +101,6 @@ GuestDirectoryEntry* ReadEntry(Directory& directory) {
       catch (const std::filesystem::filesystem_error&) { errno = 5; return nullptr; }
 }
 }
-}
 
 extern "C" {
 void* APS5_VABI opendir_nid_postfix(const char* path) {

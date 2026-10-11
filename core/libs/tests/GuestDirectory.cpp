@@ -78,6 +78,13 @@ int main() {
         nullEntryThrows = true;
     }
     Require(nullEntryThrows);
+    bool nullResultThrows = false;
+    try {
+        readdir_r_nid_postfix(directory, &buffer, nullptr);
+    } catch (const std::invalid_argument&) {
+        nullResultThrows = true;
+    }
+    Require(nullResultThrows);
     Require(closedir_nid_postfix(directory) == 0);
     Require(opendir_nid_postfix((root / "missing").string().c_str()) == nullptr);
     Require(*__error_nid_postfix() == 2);
