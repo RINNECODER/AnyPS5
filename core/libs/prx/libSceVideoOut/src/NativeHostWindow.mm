@@ -10,6 +10,8 @@
 #include <IOKit/hidsystem/ev_keymap.h>
 #include <atomic>
 #include <cmath>
+#include <deque>
+#include <iterator>
 #include <exception>
 #include <limits>
 #include <mutex>
@@ -20,6 +22,7 @@ namespace AnyPS5::Host {
 namespace {
 
 bool nativeWindowLive = false;
+constexpr std::size_t maximumPendingEvents = 4096;
 
 void requireMainThread() {
     if (![NSThread isMainThread]) throw std::logic_error("Native host window requires the AppKit main thread");
@@ -52,12 +55,12 @@ bool modifierPressed(NSUInteger flags, NSUInteger target, NSUInteger other, NSUI
 struct HostWindowState {
     mutable std::mutex mutex;
     WindowSnapshot snapshot;
-    std::vector<InputEvent> pending;
+    std::deque<InputEvent> pending;
     std::exception_ptr failure;
     std::thread::id consumer;
     bool hasConsumer = false;
     bool ownsWindowSlot = false;
-    double wheelX = 0, wheelY = 0;
+    double wheelX = 0, wheelY = 0, pointerX = 0, pointerY = 0;
     NSWindow* window = nil;
     CAMetalLayer* layer = nil;
     id windowDelegate = nil;
@@ -77,8 +80,12 @@ struct HostWindowState {
 
     template<class T> void append(T payload) {
         check();
-        if (pending.size() >= 65536 || snapshot.lastSequence == std::numeric_limits<std::uint64_t>::max())
-            throw std::overflow_error("Native host input event queue or sequence exhausted");
+        if (snapshot.lastSequence == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Native host input event sequence exhausted");
+        if (pending.size() == maximumPendingEvents) {
+            pending.pop_front();
+            ++snapshot.droppedEvents;
+        }
         const auto sequence = snapshot.lastSequence + 1;
         pending.push_back({snapshot.window, sequence, std::chrono::steady_clock::now(), std::move(payload)});
         snapshot.lastSequence = sequence;
@@ -103,7 +110,7 @@ struct HostWindowState {
         append(mouse);
         snapshot.heldKeys.fill(false);
         snapshot.heldMouseButtons = 0;
-        wheelX = wheelY = 0;
+        wheelX = wheelY = pointerX = pointerY = 0;
     }
 
     void focus(bool focused) {
@@ -172,7 +179,7 @@ struct HostWindowState {
         key(static_cast<std::uint16_t>(code), pressed);
     }
 
-    static std::int32_t scrollDelta(double value, double& residual) {
+    static std::int32_t residualDelta(double value, double& residual) {
         if ((value > 0 && residual < 0) || (value < 0 && residual > 0)) residual = 0;
         residual += value;
         const auto result = integerDelta(std::trunc(residual));
@@ -190,8 +197,8 @@ struct HostWindowState {
         case NSEventTypeLeftMouseDragged:
         case NSEventTypeRightMouseDragged:
         case NSEventTypeOtherMouseDragged:
-            input.x = integerDelta(event.deltaX);
-            input.y = integerDelta(event.deltaY);
+            input.x = residualDelta(event.deltaX, pointerX);
+            input.y = residualDelta(event.deltaY, pointerY);
             break;
         case NSEventTypeLeftMouseDown:
         case NSEventTypeLeftMouseUp:
@@ -210,8 +217,8 @@ struct HostWindowState {
                 x = x > 0 ? std::ceil(x) : std::floor(x);
                 y = y > 0 ? std::ceil(y) : std::floor(y);
             }
-            input.tilt = scrollDelta(x, wheelX);
-            input.wheel = scrollDelta(y, wheelY);
+            input.tilt = residualDelta(x, wheelX);
+            input.wheel = residualDelta(y, wheelY);
             if (event.isDirectionInvertedFromDevice) {
                 if (input.tilt == std::numeric_limits<std::int32_t>::min() || input.wheel == std::numeric_limits<std::int32_t>::min())
                     throw std::overflow_error("Native host wheel inversion exceeds the input representation");
@@ -487,7 +494,8 @@ EventBatch NativeHostWindow::DrainEvents() {
     if (impl->hasConsumer && impl->consumer != current) throw std::logic_error("Native host events require one CPU consumer");
     impl->consumer = current;
     impl->hasConsumer = true;
-    EventBatch result{std::move(impl->pending), impl->snapshot};
+    EventBatch result{{std::make_move_iterator(impl->pending.begin()), std::make_move_iterator(impl->pending.end())},
+                      impl->snapshot};
     impl->pending.clear();
     return result;
 }
