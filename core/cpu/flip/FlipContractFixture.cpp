@@ -75,6 +75,15 @@ void run(const char* const* paths) {
         rejects([&] { caller.call(section, section == Caller::Wait ? wait : flip, args); }, reason);
         before.unchanged(machine);
     };
+    // Exhaustion mirrors upstream Agc::Command::Reserve: the guest growth
+    // callback is tried once and a refused or unusable one yields a null packet
+    // (no throw) with the descriptor, callbacks and packet guards untouched.
+    const auto atomicNullPacket = [&](Caller::Section section, std::array<std::uint64_t, 8> args) {
+        const Snapshot before(machine);
+        require(caller.call(section, section == Caller::Wait ? wait : flip, args) == 0,
+            "Exhausted command buffer without a usable growth callback did not return a null packet");
+        before.unchanged(machine);
+    };
     for (const auto& invalid : std::array<std::array<std::uint64_t, 8>, 8>{{
         {Builder, 0, 0, 1, 0}, {Builder, 0x80000000, 0, 1, 0},
         {Builder, 17, 0xffffffff, 1, 0}, {Builder, 17, 3, 1, 0},
@@ -89,9 +98,9 @@ void run(const char* const* paths) {
     for (const auto section : {Caller::Emit, Caller::Wait}) {
         const std::array<std::uint64_t, 8> args{Builder, 17, 0, 1, 0};
         builder(machine, Commands, Commands + (section == Caller::Emit ? 20 : 12), 0);
-        atomicFailure(section, args, "command buffer exhausted");
+        atomicNullPacket(section, args);
         builder(machine, Commands, Commands + (section == Caller::Emit ? 24 : 16), 1);
-        atomicFailure(section, args, "command buffer exhausted");
+        atomicNullPacket(section, args);
         builder(machine); auto misaligned = args; misaligned[0] = Builder + 1;
         atomicFailure(section, misaligned, "misaligned");
         machine.Protect(Commands, 4096, Cpu::Permission::Read);
