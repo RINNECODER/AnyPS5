@@ -255,13 +255,11 @@ static void CheckPowfSpecialValue() {
 
 static void CheckAcosfErrno() {
     errno = 0;
-    (void)acosf_nid_postfix(2.0f);
+    Require(std::bit_cast<std::uint32_t>(acosf_nid_postfix(2.0f)) == 0xffc00000u);
     Require(errno == 0);
-    errno = 0;
-    (void)acosf_nid_postfix(-2.0f);
+    Require(std::bit_cast<std::uint32_t>(acosf_nid_postfix(-2.0f)) == 0xffc00000u);
     Require(errno == 0);
-    errno = 0;
-    (void)acosf_nid_postfix(0.5f);
+    Require(std::bit_cast<std::uint32_t>(acosf_nid_postfix(0.5f)) == 0x3f860a92u);
     Require(errno == 0);
 }
 
