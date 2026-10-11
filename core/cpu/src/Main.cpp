@@ -11,8 +11,10 @@
 #include <cpu/SceKernelTimeImports.hpp>
 #include <cpu/SceNpOfflineImports.hpp>
 #include <cpu/ScePadImports.hpp>
+#include <cpu/SceLeafSystemImports.hpp>
 #include <cpu/SceUpstreamPrxBridge.hpp>
 #include <cpu/SceNetAddressImports.hpp>
+#include <cpu/SceJsonImports.hpp>
 #include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
 #include <cpu/SceLifecycleImports.hpp>
@@ -236,7 +238,8 @@ void Capabilities(const RunLimits& limits) {
         << "\"constraints\":\"virtual console settings: English US, DD/MM/YYYY, 24-hour, UTC, no summertime, parental control off, Cross enter button, AnyPS5 name; unknown integer IDs read 0; idle status; no system events; SDR 100-nit HDR luminance; no player dialog UI\"},"
         << "\"sce_common_dialog_imports\":{\"module\":\"libSceCommonDialog\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceCommonDialogInitialize\"],\"constraints\":\"session initializer only; repeated initialization returns signed 0x80b80002; dialog operations unsupported\"},"
         << "\"unresolved_imports\":{\"default\":\"trap_on_call\",\"weak\":\"zero\",\"objects\":\"zeroed_storage\",\"strict_argument\":\"--strict-imports\",\"return_argument\":\"--unresolved-import-return\",\"constraints\":\"static --sce-module graph only; missing DT_NEEDED modules tolerated; each unresolved function import logs and stops the guest when called unless a return value is configured; TLS imports stay strict\"},"
-        << "\"sce_upstream_prx_bridge\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi2\",\"libSceNpAuth\",\"libSceNpEntitlementAccess\"],\"module_version\":\"1.1\",\"library_version\":1,\"constraints\":\"upstream core/libs/prx exports with hand-checked descriptors only; guest buffers copied in and out; user stays signed out; entitlements from ANYPS5_ENTITLEMENTS or anyps5-entitlements.ini beside the engine, none otherwise\"},"
+        << "\"sce_upstream_prx_bridge\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi2\",\"libSceNpAuth\",\"libSceNpEntitlementAccess\",\"libSceSysmodule\",\"libSceAcm\",\"libSceMouse\",\"libSceConvertKeycode\",\"libSceNetCtl\",\"libSceSystemGesture\",\"libSceNpGameIntent\",\"libSceIme\",\"libSceMsgDialog\",\"libSceErrorDialog\",\"libSceSigninDialog\",\"libSceNpCommerce\",\"libScePlayerInvitationDialog\",\"libSceNpUniversalDataSystem\",\"libSceNpTrophy2\",\"libSceRtc\"],\"module_version\":\"1.1\",\"library_version\":1,\"constraints\":\"upstream core/libs/prx exports with hand-checked descriptors only; guest buffers copied in and out; user stays signed out; entitlements from ANYPS5_ENTITLEMENTS or anyps5-entitlements.ini beside the engine, none otherwise\"},"
+        << "\"sce_leaf_system_imports\":{\"modules\":[\"libSceAppContentUtil\",\"libSceImeDialog\",\"libSceSaveDataDialog\",\"libSceSaveData_native\",\"libSceSystemGesture\",\"libSceIme\",\"libSceNpUniversalDataSystem\",\"libSceAcm\",\"libSceNpAuth\"],\"constraints\":\"exports the upstream bridge cannot take (nested guest pointers, callbacks, floats, objects upstream allocates, NotImplemented upstream bodies); dialogs finish at once with the default result; headless: no touch, keyboard or IME panel; add-on content never entitled; save data mounts (sceSaveDataMount3) unsupported\"},"
         << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"exports the upstream bridge does not cover (libSceNpWebApi, callback registration); initialization and handles succeed; user stays signed out; every network request fails\"},"
         << "\"sce_pad_imports\":{\"module\":\"libScePad\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"scePadInit\",\"scePadOpen\",\"scePadOpenExt\",\"scePadGetHandle\",\"scePadClose\",\"scePadRead\",\"scePadReadState\",\"scePadGetControllerInformation\",\"scePadSetLightBar\",\"scePadResetLightBar\",\"scePadSetVibration\",\"scePadSetMotionSensorState\"],\"constraints\":\"one virtual pad per port; native runner feeds GameController input, or keyboard and mouse when no controller is connected; 64-sample drop-oldest read queue; no motion or touch-coordinate sensors\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
@@ -365,13 +368,25 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}},
         {"libSceNpManager.prx", {"libSceNpManager", 0, 1, 1}, {{"libSceNpManager", 0, 1}}},
         {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
+        {"libSceJson.prx", {"libSceJson", 0, 1, 1}, {{"libSceJson2", 0, 1}, {"libSceJson", 0, 1}}},
         {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}},
         {"libSceNpWebApi.prx", {"libSceNpWebApi", 0, 1, 1}, {{"libSceNpWebApi", 0, 1}}},
         {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}},
         {"libScePad.prx", {"libScePad", 0, 1, 1}, {{"libScePad", 0, 1}}}};
-    for (const auto module : Cpu::SceUpstreamPrxBridge::Modules())
-        if (std::none_of(hosts.begin(), hosts.end(), [&](const auto& host) { return host.Module.Name == module; }))
-            hosts.push_back({std::string(module) + ".prx", {std::string(module), 0, 1, 1}, {{std::string(module), 0, 1}}});
+    // Modules the upstream bridge and the leaf native provider serve. Several libraries may share
+    // one module; a module/library pair both providers serve is declared once.
+    auto upstreamHosts = Cpu::SceUpstreamPrxBridge::Hosts();
+    for (auto& host : Cpu::SceLeafSystemImports::Hosts()) upstreamHosts.push_back(std::move(host));
+    for (const auto& served : upstreamHosts) {
+        const auto module = std::find_if(hosts.begin(), hosts.end(), [&](const auto& host) {
+            return host.Module.Name == served.Module && host.Module.Major == served.Major && host.Module.Minor == served.Minor; });
+        if (module == hosts.end()) {
+            hosts.push_back({served.File, {served.Module, 0, static_cast<std::uint8_t>(served.Major), static_cast<std::uint8_t>(served.Minor)}, {{served.Library, 0, 1}}});
+        } else if (std::none_of(module->Libraries.begin(), module->Libraries.end(),
+                       [&](const auto& library) { return library.Name == served.Library; })) {
+            module->Libraries.push_back({served.Library, 0, 1});
+        }
+    }
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
     if (native) native->AddHostModules(hosts);
 #endif
@@ -652,9 +667,11 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
         std::unique_ptr<Cpu::SceUpstreamPrxBridge> upstreamPrxRuntime;
         std::unique_ptr<Cpu::SceNpOfflineImports> npOfflineRuntime;
+        std::unique_ptr<Cpu::SceLeafSystemImports> leafSystemRuntime;
         std::unique_ptr<Cpu::ScePadImports> padRuntime;
         std::unique_ptr<Cpu::SceImportStubs> importStubs;
         std::unique_ptr<Cpu::SceNetAddressImports> netAddressRuntime;
+        std::unique_ptr<Cpu::SceJsonImports> jsonRuntime;
         std::unique_ptr<Cpu::SceCommonDialogImports> commonDialogRuntime;
         std::unique_ptr<Cpu::SceModules> modules;
         std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
@@ -730,11 +747,13 @@ int main(int argc, char** argv) {
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 upstreamPrxRuntime = std::make_unique<Cpu::SceUpstreamPrxBridge>(machine);
                 npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
+                leafSystemRuntime = std::make_unique<Cpu::SceLeafSystemImports>(machine);
                 padRuntime = std::make_unique<Cpu::ScePadImports>(machine);
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                 if (nativeRuntime) nativeRuntime->AttachPadInput(padRuntime->Input());
 #endif
                 netAddressRuntime = std::make_unique<Cpu::SceNetAddressImports>(machine);
+                jsonRuntime = std::make_unique<Cpu::SceJsonImports>(machine);
                 commonDialogRuntime = std::make_unique<Cpu::SceCommonDialogImports>(machine, 0x7ffdf2000000);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
                 audioRuntime = std::make_unique<Cpu::SceAudioOut2Imports>(machine);
@@ -746,8 +765,10 @@ int main(int argc, char** argv) {
                     if (const auto gate = commonDialogRuntime->Resolve(import)) return *gate;
                     if (const auto gate = upstreamPrxRuntime->Resolve(import)) return *gate;
                     if (const auto gate = npOfflineRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = leafSystemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = padRuntime->Resolve(import)) return *gate;
                     if (const auto gate = netAddressRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = jsonRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;

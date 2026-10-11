@@ -23,7 +23,12 @@ enum class AgcAbiContract {
     // Builders encoded by the linked upstream libSceAgc implementation.
     DcbAcquireMem, AcbAcquireMem, CbReleaseMem, DcbWaitRegMem, AcbWaitRegMem,
     DcbCopyData, AcbCopyData, DcbDmaData, AcbDmaData, DcbAtomicMem, AcbAtomicMem,
-    DcbCondExec, AcbCondExec, CbSetShRegisterRangeDirect, CbSetUcRegisterRangeDirect
+    DcbCondExec, AcbCondExec, CbSetShRegisterRangeDirect, CbSetUcRegisterRangeDirect,
+    // Families of upstream libSceAgc builders, patchers and size queries. Guest
+    // pointers are never dereferenced by the host; the bridge marshals every
+    // memory operand and runs the upstream encoder on host-side copies.
+    UpstreamPacketSizes, UpstreamPatches, UpstreamMarkers, UpstreamRegisters, UpstreamDraw,
+    UpstreamAcb, UpstreamCb, UpstreamDcb, UpstreamPacketInfo
 };
 
 // These policies constrain the admitted target use, independently of the source
@@ -72,6 +77,7 @@ public:
     std::uint64_t Resolve(const SceImport& import, std::uint8_t symbolType, std::uint64_t symbolSize);
 private:
     struct Impl;
+    friend struct AgcGenericBindings;
     std::shared_ptr<Impl> impl;
 };
 }

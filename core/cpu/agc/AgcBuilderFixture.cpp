@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -280,6 +281,153 @@ void Builders() {
     require(guest.up() == Small, "refused builder advanced the cursor");
     std::cout << "builders: " << cases.size() << " upstream builders marshal register/stack arguments and match upstream packets\n";
 }
+
+using Oracle = std::function<std::uint32_t*(CommandBuffer*)>;
+std::vector<std::uint32_t> encode(const Oracle& oracle) {
+    std::array<std::uint32_t, 0x4100> scratch{};
+    CommandBuffer host{scratch.data(), scratch.data() + scratch.size(), scratch.data(), scratch.data() + scratch.size(),
+                       nullptr, nullptr, 0};
+    require(oracle(&host) == scratch.data(), "upstream oracle did not emit at the cursor");
+    return {scratch.data(), host.cursor_up};
+}
+const volatile std::uint32_t* word(std::uint64_t value) { return reinterpret_cast<const volatile std::uint32_t*>(value); }
+const std::uint32_t* plainWord(std::uint64_t value) { return reinterpret_cast<const std::uint32_t*>(value); }
+const volatile ShaderRegister* registerTable(std::uint64_t value) { return reinterpret_cast<const volatile ShaderRegister*>(value); }
+// One representative per family. The guest caller supplies numeric addresses
+// that no host code may dereference (they are unmapped on the host); the
+// emitted guest words and cursor must equal the upstream encoder's output.
+void Families() {
+    Guest guest(Cpu::TargetAgcAdmissions());
+    struct Case { const char* Nid; std::vector<std::uint64_t> Args; Oracle Encode; };
+    const std::vector<Case> cases{
+        {"Yw0jKSqop+E", {3, 0}, [](CommandBuffer* b) { return sceAgcDcbDrawIndexAuto(b, 3, 0); }},
+        {"q88lQ+GP5Yk", {6, 0x7000, 0}, [](CommandBuffer* b) { return sceAgcDcbDrawIndex(b, 6, pointer(0x7000), 0); }},
+        {"B+aG9DUnTKA", {4, 9, 0}, [](CommandBuffer* b) { return sceAgcDcbDrawIndexOffset(b, 4, 9, 0); }},
+        {"ypVBz4uPKcQ", {16, 1, 8, 0x7100, 20, 0},
+            [](CommandBuffer* b) { return sceAgcDcbDrawIndexIndirectMulti(b, 16, 1, 8, pointer(0x7100), 20, 0); }},
+        {"l4fM9K-Lyks", {0x7200}, [](CommandBuffer* b) { return sceAgcDcbSetIndexBuffer(b, 0x7200); }},
+        {"tSBxhAPyytQ", {4}, [](CommandBuffer* b) { return sceAgcDcbSetNumInstances(b, 4); }},
+        {"-KRzWekV120", {1, 2, 1}, [](CommandBuffer* b) { return sceAgcDcbSetIndexSize_0600(b, 1, 2, 1); }},
+        {"xSAR0LTcRKM", {0, 0, 0x7500, 8}, [](CommandBuffer* b) { return sceAgcDcbJump(b, 0, 0, plainWord(0x7500), 8); }},
+        {"zfcxg-ewMK8", {0}, [](CommandBuffer* b) { return sceAgcDcbRewind(b, 0); }},
+        {"CtB+A9-VxO0", {16, 0}, [](CommandBuffer* b) { return sceAgcDcbDispatchIndirect(b, 16, 0); }},
+        {"qj7QZpgr9Uw", {0}, [](CommandBuffer* b) { return sceAgcDcbContextStateOp_0100(b, 0); }},
+        {"-HOOCn0JY48", {0x7c00, 3}, [](CommandBuffer* b) { return sceAgcDcbSetShRegistersIndirect(b, registerTable(0x7c00), 3); }},
+        {"e1DFTg+Sd8U", {0, 0x7500, 8}, [](CommandBuffer* b) { return sceAgcAcbJump(b, 0, plainWord(0x7500), 8); }},
+        {"j3EtxFkSIhQ", {0x7600, 0}, [](CommandBuffer* b) { return sceAgcAcbDispatchIndirect(b, pointer(0x7600), 0); }},
+        {"7toV+elXqNM", {3, 1, 0x7a00, 0x55, 0x7b00, 1, 0xff},
+            [](CommandBuffer* b) { return sceAgcCbCondWrite(b, 3, 1, pointer(0x7a00), 0x55, pointer(0x7b00), 1, 0xff); }},
+        {"K2mciNVxUCE", {6}, [](CommandBuffer* b) { return sceAgcSetNop(b, 6); }},
+    };
+    // Every generic upstream binding resolves under the target admissions.
+    constexpr std::array generic{
+    "23LRUSvYu1M", "BfBDZGbti7A", "t7PlZ9nt5Lc", "bxGoVxpdSPQ", "JOWmDrl+j20", "yUBESvCCJ4I", "TGEZzUWLbrc",
+    "nNlUtdDDvZ0", "GBCh3zCihoU", "UQGTw4xRlcM", "H6vHS5cidSA", "p9tI+yTvx68", "C4l9fB17t8w", "43WJ08sSugE",
+    "idlaArvdXEs", "Lkf86B98qPc", "V++UgBtQhn0", "s+VGAMDQ0AQ", "n8vgpaQg6dA", "Y-5vneiBtzk", "w6Dj1VJt5qY",
+    "w1KFAHVqpaU", "7toV+elXqNM", "UZbQjYAwwXM", "03RZmELWWzw", "qj7QZpgr9Uw", "xSAR0LTcRKM", "-HOOCn0JY48",
+    "ZvwO9euwYzc", "hvUfkUIQcOE", "CtB+A9-VxO0", "Yw0jKSqop+E", "q88lQ+GP5Yk", "B+aG9DUnTKA", "1q1titRBL6o",
+    "kUlvghKs-mA", "ypVBz4uPKcQ", "t1vNu082-jM", "Rlx+bykm0r0", "aJf+j5yntiU", "vuSXe69VILM", "RmaJwLtc8rY",
+    "-KRzWekV120", "l4fM9K-Lyks", "8N2tmT3jmC8", "tSBxhAPyytQ", "u2T2DiA5hRI", "zfcxg-ewMK8", "jt3pl7EN17o",
+    "TRO721eVt4g", "bbFueFP+J4k", "QhCbS4X9Rl8", "+kSrjIVxKFE", "H7uZqCoNuWk", "G0jrLdvEqDw", "JrtiDtKeS38",
+    "q4VuU-QsLOE", "j3EtxFkSIhQ", "xAeBOa0A3kk", "DwICrVxerkY", "szG7hz2yEhA", "cpCILPya5Zk", "e1DFTg+Sd8U",
+    "cFazmnXpJOE", "6mFxkVqdmbQ", "K2mciNVxUCE", "Abendgtz+3o", "uZW-mqsxkrM", "FuVbkyKlf+s", "hL7C0IRpWZI",
+    "QhPDD513V0w", "1DeUNpRIDDA", "aP1Ki9G3++4", "-vnlTPPXPrw", "1tB0xkLNjcw", "oz6zQq1JwCE", "ou16V5hh5sg",
+    "VEGu4dixjUg", "b5u0Jzm8TF8", "2ccJz9LQI+w", "zg6u-N6Otxs", "w8HVkEeXPv8", "WrdP9Zxx3lQ", "6ee9Hd3EWXQ",
+    "qMlfB1ZhMDc", "cxPZ4Wgvdj8", "pYoKs3lPy88", "r98I08t+LOg", "mStuvI0zOtc", "mR9j7+SfM34", "rUuVjyR+Rd4",
+    "9S4noWrUI0s", "MMlmJAL7N5w", "ca4KPvp0qLQ", "j4emHHndCPY", "mljzuGDZRQ4", "6DFuRKT4C9w", "+u6dKSLWM2o",
+    "QIXCsbipds0", "XN+Iuu7XsM8", "yheJGN-ay+A", "vLrBL8DQiz8", "KjPeVduz6jU", "F8NLhWvFemI", "CbQh3DKMSno",
+    "da1Sm8-QDoU", "PxKWV2fVAps", "0ZOG0jc9nRg", "ozKzBP4aki4", "eCjKaqeeQ5s", "M0ttm8h7SKA", "hcIxS8pmXF4",
+    "b-oySn+G2tE", "ewobAQeMo5k", "whb1RL7K4Ss", "fPSCdQxgpSw", "6lNcCp+fxi4", "eAy8eGNsCuU", "n485EBnIWmk",
+    "J8YCgfKAMQs", "0fWWK5uG9rQ", "vcmNN+AAXnY", "y5K5tPktiL8", "vRoArM9zaIk", "GXBlM-ekzrI", "Ikfdt-rIqCE",
+    "MlEw1feXcjg", "EJBA4dbmvfg", "3KDcnM3lrcU", "tmy-+rBpspY", "d-6uF9sZDIU", "k-JpyR2dYAM", "fRG-JOH5+sI",
+    "3ZWa3AoyWZQ", "YWTKOju587o", "T9fjQIINoeE", "ORWsxIbk4TE", "cdDRpqcFGbU", "eWaWyFegzgQ", "d4NZIlguzv0",
+    "ziVA3whp3p4", "z2duB-hHQSM", "Qrj4c+61z4A", "7nOoijNPvEU", "IxYiarKlXxM", "nCUgItdN2ms",
+    };
+    for (const auto* nid : generic)
+        require(guest.Imports->Resolve(identity(nid, false), 2, 0) != 0, std::string(nid) + " did not resolve");
+    std::size_t builders = 0;
+    for (const auto& item : cases) {
+        std::vector<std::uint64_t> args{Descriptor};
+        args.insert(args.end(), item.Args.begin(), item.Args.end());
+        guest.buffer(Small, Small + 4096, 0, 0);
+        require(guest.call(item.Nid, false, args) == Small, std::string(item.Nid) + " did not return its packet address");
+        const auto expected = encode(item.Encode);
+        require(guest.up() == Small + expected.size() * 4, std::string(item.Nid) + " cursor advance differs from upstream");
+        std::vector<std::uint32_t> emitted(expected.size());
+        guest.Machine.Read(Small, std::as_writable_bytes(std::span(emitted)));
+        require(emitted == expected, std::string(item.Nid) + " packet differs from upstream");
+        ++builders;
+    }
+    // Pure size queries, including ones that take arguments.
+    require(guest.call("6ee9Hd3EWXQ", false, std::array<std::uint64_t, 0>{}) == sceAgcDcbDrawIndexGetSize(), "draw size differs");
+    require(guest.call("H6vHS5cidSA", false, std::array<std::uint64_t, 1>{0}) == sceAgcDcbContextStateOpGetSize(0), "state op size differs");
+    require(guest.call("t7PlZ9nt5Lc", false, std::array<std::uint64_t, 1>{0xffffffff00000007ULL}) == sceAgcCbNopGetSize(7), "nop size differs");
+    // Strings and register tables are snapshotted from guest memory.
+    const char text[] = "agc marker";
+    guest.Machine.Write(Data, std::as_bytes(std::span(text)));
+    guest.buffer(Small, Small + 4096, 0, 0);
+    require(guest.call("+kSrjIVxKFE", false, std::array<std::uint64_t, 3>{Descriptor, Data, 0xff00ff00}) == Small, "marker did not return its packet");
+    auto expected = encode([&](CommandBuffer* b) { return sceAgcDcbPushMarker(b, text, 0xff00ff00); });
+    std::vector<std::uint32_t> emitted(expected.size());
+    guest.Machine.Read(Small, std::as_writable_bytes(std::span(emitted)));
+    require(emitted == expected && guest.up() == Small + expected.size() * 4, "push marker packet differs from upstream");
+    guest.buffer(Small, Small + 4096, 0, 0);
+    guest.call("H7uZqCoNuWk", false, std::array<std::uint64_t, 1>{Descriptor});
+    expected = encode([](CommandBuffer* b) { return sceAgcDcbPopMarker(b); });
+    emitted.resize(expected.size());
+    guest.Machine.Read(Small, std::as_writable_bytes(std::span(emitted)));
+    require(emitted == expected, "pop marker packet differs from upstream");
+    const std::array<ShaderRegister, 2> registers{{{0x2c0c, 0x11}, {0x2c0d, 0x22}}};
+    guest.Machine.Write(Data, std::as_bytes(std::span(registers)));
+    guest.buffer(Small, Small + 4096, 0, 0);
+    require(guest.call("UZbQjYAwwXM", false, std::array<std::uint64_t, 3>{Descriptor, Data, 2}) == Small, "register table did not return its packet");
+    expected = encode([&](CommandBuffer* b) { return sceAgcCbSetShRegistersDirect(b, registers.data(), 2); });
+    emitted.resize(expected.size());
+    guest.Machine.Read(Small, std::as_writable_bytes(std::span(emitted)));
+    require(emitted == expected, "direct register table packet differs from upstream");
+    guest.buffer(Small, Small + 4096, 0, 0);
+    rejects([&] { guest.call("UZbQjYAwwXM", false, std::array<std::uint64_t, 3>{Descriptor, Data, 0x4000}); }, "invalid direct register count");
+    require(guest.up() == Small, "refused marshalled builder advanced the cursor");
+
+    // Patchers edit the packet in guest memory exactly as upstream edits a host packet.
+    const auto wait = encode([](CommandBuffer* b) { return sceAgcDcbWaitRegMem(b, 1, 3, 5, 1, pointer(0x9100), 0x55, 0xff, 0x100); });
+    const auto patched = [&](const char* nid, std::vector<std::uint64_t> args, const std::vector<std::uint32_t>& packet,
+                             const std::function<int(std::uint32_t*)>& oracle) {
+        guest.Machine.Write(Data, std::as_bytes(std::span(packet)));
+        args.insert(args.begin(), Data);
+        require(guest.call(nid, false, args) == 0, std::string(nid) + " patch failed");
+        auto host = packet;
+        require(oracle(host.data()) == 0, "upstream patch oracle failed");
+        std::vector<std::uint32_t> after(packet.size());
+        guest.Machine.Read(Data, std::as_writable_bytes(std::span(after)));
+        require(after == host && after != packet, std::string(nid) + " patched packet differs from upstream");
+    };
+    patched("3KDcnM3lrcU", {0x9200}, wait, [](std::uint32_t* c) { return sceAgcWaitRegMemPatchAddress(c, pointer(0x9200)); });
+    patched("7nOoijNPvEU", {0x12345678ULL}, wait, [](std::uint32_t* c) { return sceAgcWaitRegMemPatchReference(c, 0x12345678ULL); });
+    const auto cond = encode([](CommandBuffer* b) { return sceAgcDcbCondExec(b, word(0x9804), 0x20); });
+    // The conditional range is relative to the packet: the oracle sees the same distance.
+    patched("ORWsxIbk4TE", {Data + 0x100}, cond, [](std::uint32_t* c) {
+        return sceAgcCondExecPatchSetEnd(c, word(reinterpret_cast<std::uintptr_t>(c) + 0x100)); });
+    const auto indirect = encode([](CommandBuffer* b) { return sceAgcDcbSetCxRegistersIndirect(b, registerTable(0x7c00), 2); });
+    patched("d-6uF9sZDIU", {3}, indirect, [](std::uint32_t* c) { return sceAgcSetCxRegIndirectPatchAddRegisters(c, 3); });
+    // Upstream still refuses a patch of the wrong packet type, leaving it untouched.
+    guest.Machine.Write(Data, std::as_bytes(std::span(cond)));
+    rejects([&] { guest.call("3KDcnM3lrcU", false, std::array<std::uint64_t, 2>{Data, 0x9200}); }, "");
+    require(load<std::array<std::uint32_t, 2>>(guest.Machine, Data) == std::array{cond[0], cond[1]}, "refused patch modified the packet");
+
+    // Packet inspection: sizes and payload pointers are reported in guest terms.
+    guest.Machine.Write(Data, std::as_bytes(std::span(wait)));
+    require(guest.call("Lkf86B98qPc", false, std::array<std::uint64_t, 1>{Data}) == ((wait[0] >> 16) & 0x3fffu) + 2u, "packet size differs");
+    require(guest.call("V++UgBtQhn0", false, std::array<std::uint64_t, 3>{Data + 0x100, Data, 1}) == 0 &&
+            load<std::uint64_t>(guest.Machine, Data + 0x100) == Data + 8, "payload address was not translated to the guest packet");
+    require(guest.call("s+VGAMDQ0AQ", false, std::array<std::uint64_t, 3>{Data + 0x100, Data, 1}) == 0 &&
+            load<std::array<std::uint64_t, 2>>(guest.Machine, Data + 0x100) == std::array<std::uint64_t, 2>{Data + 8, ((wait[0] >> 14) & 0xfffcu)},
+            "payload range was not translated to the guest packet");
+    store(guest.Machine, Data + 0x100, std::uint8_t{0xff});
+    require(guest.call("BfBDZGbti7A", false, std::array<std::uint64_t, 1>{Data + 0x100}) == 0 &&
+            load<std::uint8_t>(guest.Machine, Data + 0x100) == 0, "trinity query did not write the guest flag");
+    std::cout << "families: " << generic.size() << " bindings resolve; " << builders << " builders, markers, register tables, patchers, sizes and packet queries match upstream\n";
+}
 }
 
 int main() {
@@ -288,6 +436,7 @@ int main() {
         MultiBound();
         DispatchMask();
         Builders();
+        Families();
         return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }
