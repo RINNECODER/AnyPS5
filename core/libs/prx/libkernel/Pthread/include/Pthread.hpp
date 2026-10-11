@@ -131,6 +131,9 @@ struct PthreadPrivate {
 #elif !defined(_WIN32)
     clockid_t hostCpuClock{};
     bool hostCpuClockBound = false;
+    void* guestStack = nullptr;
+    std::size_t guestStackBytes = 0;
+    int hostTid = 0;
 #endif
     std::mutex nameLock;
     std::string name;
