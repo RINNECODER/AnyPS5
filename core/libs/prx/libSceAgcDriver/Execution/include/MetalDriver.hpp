@@ -5,15 +5,37 @@
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace AgcDriver::Metal {
 
 struct ReadableGuestRange {
     std::uint64_t address;
     std::size_t bytes;
+};
+
+// Draw and dispatch packets the driver skipped instead of failing the session:
+// unsupported state, shader translation and pipeline failures before the packet's
+// GPU work is committed. Device loss, command-buffer errors, GPU faults and guest
+// writes into read-only memory stay sticky and are not counted here.
+struct SkippedWorkDiagnostics {
+    struct Reason {
+        std::string kind;  // "draw" or "dispatch"
+        std::string what;  // first line of the error, truncated
+        std::uint64_t count = 0;
+    };
+    std::uint64_t draws = 0;
+    std::uint64_t dispatches = 0;
+    // The first MaxReasons distinct reasons in the order they were first seen.
+    std::vector<Reason> reasons;
+    // Skips whose reason arrived after MaxReasons distinct reasons were recorded.
+    std::uint64_t unlistedReasons = 0;
+    static constexpr std::size_t MaxReasons = 64;
 };
 
 class MetalDriver {
@@ -50,6 +72,7 @@ public:
                  void (*gpuReady)(void*), void* context);
     void ReleaseWindow(void* window);
     void ReportFailure(std::exception_ptr error);
+    [[nodiscard]] SkippedWorkDiagnostics SkippedWork() const;
 
 private:
     struct CommandBufferSubmission {

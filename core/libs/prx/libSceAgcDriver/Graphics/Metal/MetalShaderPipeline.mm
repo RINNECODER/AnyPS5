@@ -1,4 +1,5 @@
 #include "MetalShaderPipeline.hpp"
+#include "MetalDevice.hpp"
 #include <algorithm>
 #include "MetalSampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
@@ -718,7 +719,7 @@ void MetalRectKernelPipeline::Encode(id<MTLCommandBuffer> commands, std::span<co
         }
     }
     auto encoder = [commands computeCommandEncoder];
-    if (encoder == nil) throw std::runtime_error("Metal rectangle compute encoder allocation failed");
+    if (encoder == nil) throw MetalGpuExecutionError("Metal rectangle compute encoder allocation failed");
     [encoder setComputePipelineState:pipeline];
     if (capture) [encoder setStageInRegion:region];
     bindCompute(encoder, shader, prepared);
@@ -774,7 +775,7 @@ void MetalComputePipeline::Encode(id<MTLCommandBuffer> commands,
         throw std::invalid_argument("Converted Metal compute grid must contain complete reflected workgroups");
     }
     id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
-    if (encoder == nil) throw std::runtime_error("Converted Metal compute encoder creation failed");
+    if (encoder == nil) throw MetalGpuExecutionError("Converted Metal compute encoder creation failed");
     [encoder setComputePipelineState:pipeline];
     bindCompute(encoder, shader, prepared);
     for (id<MTLResource> resource : indirectResources) {
