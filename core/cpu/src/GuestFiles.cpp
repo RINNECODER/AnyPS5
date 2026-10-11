@@ -10,6 +10,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
@@ -28,6 +29,7 @@ constexpr std::uint64_t maxCount = static_cast<std::uint64_t>(std::numeric_limit
 constexpr std::size_t maxPath = 1024;
 constexpr std::size_t maxComponent = 255;
 constexpr std::size_t maxDescriptors = 1024;
+constexpr std::ptrdiff_t builtinMounts = 4;
 
 // FreeBSD open(2) flags as the guest passes them.
 constexpr std::uint32_t guestAccessMode = 0x3, guestWriteOnly = 0x1, guestReadWrite = 0x2;
@@ -118,10 +120,13 @@ struct OpenFile {
 };
 
 struct Mount {
-    const char* name;
+    std::string name;
     bool writable;
     std::filesystem::path host;  // empty: not configured
     Descriptor root;
+    // A save-data binding (sceSaveDataMount3) replaces host; unbinding restores this default.
+    std::filesystem::path defaultHost = {};
+    bool bound = false;
 };
 
 // A resolved guest path: the directory that holds the final component, opened without following
@@ -192,7 +197,7 @@ bool within(const std::filesystem::path& child, const std::filesystem::path& par
 
 struct GuestFiles::Impl {
     Machine& machine;
-    std::array<Mount, 4> mounts;
+    std::vector<Mount> mounts;
     std::unordered_map<std::int32_t, OpenFile> descriptors;
     std::int32_t nextDescriptor = 3;
     // One host bounce buffer, grown to at most one chunk and reused by every transfer.
@@ -205,18 +210,23 @@ struct GuestFiles::Impl {
     }
 
     Impl(Machine& guest, const std::filesystem::path& resourceRoot, const GuestFilesOptions& options) : machine(guest),
-        mounts{Mount{"app0", false, resourceRoot, Descriptor{}},
-               Mount{"temp0", true, {}, Descriptor{}},
-               Mount{"download0", true, {}, Descriptor{}},
-               Mount{"savedata0", true, {}, Descriptor{}}} {
+        mounts{} {
+        for (const auto* name : {"app0", "temp0", "download0", "savedata0"})
+            mounts.push_back(Mount{name, std::string_view(name) != "app0", {}, Descriptor{}});
+        mounts[0].host = resourceRoot;
         mounts[0].root = Descriptor(::open(resourceRoot.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
         if (mounts[0].root.value < 0) throw std::runtime_error("Cannot open guest /app0 resource root: native errno " + std::to_string(errno));
         if (!options.TitleDataRoot.empty()) {
             if (Overlaps(options.TitleDataRoot, resourceRoot))
                 throw std::runtime_error("Guest title data directory must not be inside the resource root (the game dump is read-only), "
                                          "and the resource root must not be inside a writable mount");
-            for (auto& mount : mounts) if (mount.writable) mount.host = options.TitleDataRoot / mount.name;
+            for (auto& mount : mounts) if (mount.writable) mount.defaultHost = mount.host = options.TitleDataRoot / mount.name;
         }
+    }
+
+    Mount* named(std::string_view name) {
+        const auto found = std::find_if(mounts.begin(), mounts.end(), [&](const Mount& mount) { return mount.name == name; });
+        return found == mounts.end() ? nullptr : &*found;
     }
 
     std::int64_t readPath(std::uint64_t address, std::string& path) const {
@@ -499,7 +509,7 @@ struct GuestFiles::Impl {
 
 bool GuestFiles::Overlaps(const std::filesystem::path& titleDataRoot, const std::filesystem::path& resourceRoot) {
     if (within(titleDataRoot, resourceRoot)) return true;
-    for (const auto* mount : {"temp0", "download0", "savedata0"})
+    for (const auto* mount : {"temp0", "download0", "savedata0", "SaveData"})
         if (within(resourceRoot, titleDataRoot / mount)) return true;
     return false;
 }
@@ -620,6 +630,69 @@ std::int64_t GuestFiles::Rename(std::uint64_t from, std::uint64_t to) {
     if (const auto error = impl->requireDirectory(source)) return error;
     if (const auto error = impl->requireDirectory(target)) return error;
     return ::renameat(source.parent, source.leaf.c_str(), target.parent, target.leaf.c_str()) < 0 ? nativeError(errno) : 0;
+}
+
+std::int64_t GuestFiles::Truncate(std::uint64_t path, std::int64_t length) {
+    if (length < 0) return kernelError(Invalid);
+    return impl->mutate(path, false, kernelError(IsDirectory), [length](int parent, const char* leaf) {
+        Descriptor file(::openat(parent, leaf, O_WRONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK));
+        if (file.value < 0) return -1;
+        return ::ftruncate(file.value, static_cast<off_t>(length));
+    });
+}
+
+std::int64_t GuestFiles::Utimes(std::uint64_t path, std::uint64_t times) {
+    // FreeBSD struct timeval[2]: access then modification, each { int64 tv_sec; int64 tv_usec; }.
+    std::array<timespec, 2> values{timespec{0, UTIME_NOW}, timespec{0, UTIME_NOW}};
+    if (times) {
+        std::array<std::int64_t, 4> raw{};
+        if (times > std::numeric_limits<std::uint64_t>::max() - sizeof(raw)) return kernelError(Fault);
+        try {
+            impl->machine.CheckAccess(times, sizeof(raw), Permission::Read);
+            impl->machine.Read(times, std::as_writable_bytes(std::span(raw)));
+        } catch (const std::runtime_error&) { return kernelError(Fault); }
+        for (std::size_t index = 0; index < 2; ++index) {
+            const auto microseconds = raw[index * 2 + 1];
+            if (microseconds < 0 || microseconds >= 1000000) return kernelError(Invalid);
+            values[index] = timespec{static_cast<time_t>(raw[index * 2]), static_cast<long>(microseconds * 1000)};
+        }
+    }
+    Location location;
+    if (const auto error = impl->resolve(path, location)) return error;
+    if (!location.mount->writable) return kernelError(ReadOnly);
+    if (const auto error = impl->requireDirectory(location)) return error;
+    const int result = location.leaf.empty() ? ::futimens(location.parent, values.data()) :
+        ::utimensat(location.parent, location.leaf.c_str(), values.data(), AT_SYMLINK_NOFOLLOW);
+    return result < 0 ? nativeError(errno) : 0;
+}
+
+bool GuestFiles::BindMount(std::string_view name, const std::filesystem::path& host) {
+    if (name.empty() || name.size() > maxComponent || name.find('/') != std::string_view::npos || name == "app0" || host.empty())
+        return false;
+    auto* mount = impl->named(name);
+    if (!mount) {
+        impl->mounts.push_back(Mount{std::string(name), true, {}, Descriptor{}});
+        mount = &impl->mounts.back();
+    }
+    if (!mount->writable) return false;
+    mount->host = host;
+    mount->root = Descriptor{};
+    mount->bound = true;
+    return true;
+}
+
+bool GuestFiles::UnbindMount(std::string_view name) {
+    auto* mount = impl->named(name);
+    if (!mount || !mount->bound) return false;
+    // Mounts past the four built-in ones exist only while bound.
+    if (const auto index = mount - impl->mounts.data(); index >= builtinMounts) {
+        impl->mounts.erase(impl->mounts.begin() + index);
+        return true;
+    }
+    mount->host = mount->defaultHost;
+    mount->root = Descriptor{};
+    mount->bound = false;
+    return true;
 }
 
 std::int64_t GuestFiles::CheckReachability(std::uint64_t path) {

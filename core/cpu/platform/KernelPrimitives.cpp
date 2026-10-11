@@ -16,6 +16,7 @@
 #include <string>
 #include <tuple>
 #include <variant>
+#include <vector>
 
 namespace Cpu::Platform {
 namespace {
@@ -182,6 +183,18 @@ struct KernelPrimitives::Impl {
     std::map<std::uint64_t, Attribute> attributes;
     std::map<std::uint64_t, Mutex> mutexes;
     std::map<std::uint64_t, Condition> conditions;
+    // Mutex and condition handles are guest addresses of zeroed provider-owned objects: retail
+    // libc dereferences the handle it gets back from init (it sets flag bits in the object), as
+    // it would with libthr's heap objects. The object bytes are the guest's; the provider keeps
+    // its state host-side, keyed by the address. A freed object is reused only after many
+    // later frees, so a stale copy of a destroyed handle stays invalid; each provider instance
+    // starts at its own offset, so a replacement provider never republishes a withdrawn handle.
+    static constexpr std::uint64_t objectArenaOffset = 0x800000, objectArenaSize = 0x800000;
+    static constexpr std::uint64_t objectSize = 128, objectChunk = 0x10000;
+    static constexpr std::size_t objectQuarantine = 1024;
+    static inline std::atomic<std::uint64_t> instances{0};
+    std::uint64_t objectArena = 0, objectMapped = 0, objectNext = 0;
+    std::deque<std::uint64_t> freeObjects;
     std::map<std::uint64_t, ConditionAttribute> conditionAttributes;
     std::map<GuestThreadHandle, ConditionWait> conditionWaits;
     std::map<GuestThreadHandle, MutexWait> mutexWaits;
@@ -196,11 +209,39 @@ struct KernelPrimitives::Impl {
             if (mapping.Address < base + 4096 && base < mapping.Address + mapping.Size)
                 throw std::invalid_argument("Kernel primitive gate page already mapped");
         trampolines.emplace(m, base, SceHostTrampolines::DefaultCapacity, "Kernel primitive");
+        objectArena = base + objectArenaOffset;
+        objectNext = instances.fetch_add(1) % 256 * objectSize;
     }
     ~Impl() {
         // Cancel pending calls before removing the gate they were suspended in.
         if (waits) waits->Withdraw();
         trampolines->Release();
+        if (objectMapped) machine.Unmap(objectArena, objectMapped);
+    }
+    std::uint64_t objectToken() {
+        std::uint64_t address;
+        if (freeObjects.size() > objectQuarantine) {
+            address = freeObjects.front();
+            freeObjects.pop_front();
+        } else {
+            if (objectNext + objectSize > objectArenaSize) throw std::runtime_error("Kernel primitive object arena exhausted");
+            while (objectNext + objectSize > objectMapped) {
+                const auto chunk = objectArena + objectMapped;
+                for (const auto& mapping : machine.Mappings())
+                    if (mapping.Address < chunk + objectChunk && chunk < mapping.Address + mapping.Size)
+                        throw std::runtime_error("Kernel primitive object arena overlaps a guest mapping");
+                machine.Map(chunk, objectChunk, Permission::Read | Permission::Write);
+                objectMapped += objectChunk;
+            }
+            address = objectArena + objectNext;
+            objectNext += objectSize;
+        }
+        const std::array<std::byte, objectSize> zero{};
+        machine.Write(address, zero);
+        return address;
+    }
+    void releaseObject(std::uint64_t token) {
+        if (token >= objectArena && token < objectArena + objectNext) freeObjects.push_back(token);
     }
     void stopped(GuestThreadHandle id) {
         releaseConditionBinding(id);
@@ -286,13 +327,17 @@ struct KernelPrimitives::Impl {
     void retireMutex(std::uint64_t slot, std::uint64_t old) {
         const auto found = mutexes.find(old);
         if (found != mutexes.end() && found->second.home == slot && !found->second.owner &&
-            found->second.waiters.empty() && !found->second.conditionUsers)
+            found->second.waiters.empty() && !found->second.conditionUsers) {
+            releaseObject(old);
             mutexes.erase(found);
+        }
     }
     void retireCondition(std::uint64_t slot, std::uint64_t old) {
         const auto found = conditions.find(old);
-        if (found != conditions.end() && found->second.home == slot && !found->second.users && found->second.waiters.empty())
+        if (found != conditions.end() && found->second.home == slot && !found->second.users && found->second.waiters.empty()) {
+            releaseObject(old);
             conditions.erase(found);
+        }
     }
     template<class Map> static void retireAttribute(Map& map, std::uint64_t slot, std::uint64_t old) {
         const auto found = map.find(old);
@@ -404,7 +449,7 @@ struct KernelPrimitives::Impl {
             }
             name(machine, label);
             const auto old = read(machine, slot);
-            const auto token = nextToken.fetch_add(1);
+            const auto token = objectToken();
             conditions.emplace(token, Condition{token, slot, clock, {}, 0});
             try { write(machine, slot, token); }
             catch (...) { conditions.erase(token); throw; }
@@ -424,7 +469,7 @@ struct KernelPrimitives::Impl {
                 if (const auto rejected = std::get_if<std::uint32_t>(&owned)) return *rejected;
             }
             span(machine, slot, Permission::Write);
-            const auto created = nextToken.fetch_add(1);
+            const auto created = objectToken();
             condition = conditions.emplace(created, Condition{created, slot, realtimeClock, {}, 0}).first;
             try { write(machine, slot, created); }
             catch (...) { conditions.erase(condition); throw; }
@@ -437,6 +482,7 @@ struct KernelPrimitives::Impl {
             if (state.users || !state.waiters.empty()) return error(Busy);
             span(machine, slot, Permission::Write);
             write(machine, slot, conditionDestroyed);
+            releaseObject(condition->first);
             conditions.erase(condition);
             return 0;
         }
@@ -523,7 +569,7 @@ struct KernelPrimitives::Impl {
             }
             name(machine, label);
             const auto old = read(machine, slot);
-            const auto token = nextToken.fetch_add(1);
+            const auto token = objectToken();
             mutexes.emplace(token, Mutex{token, slot, type, protocol, 0, 0, {}, 0});
             try { write(machine, slot, token); }
             catch (...) { mutexes.erase(token); throw; }
@@ -540,7 +586,7 @@ struct KernelPrimitives::Impl {
             if (op == 2) return error(Perm);
             thread(); // Validate scheduler identity before publishing a lazy initializer.
             span(machine, slot, Permission::Write);
-            const auto created = nextToken.fetch_add(1);
+            const auto created = objectToken();
             mutex = mutexes.emplace(created, Mutex{created, slot, token == 1 ? 4u : 1u, 0, 0, 0, {}, 0}).first;
             try { write(machine, slot, created); }
             catch (...) { mutexes.erase(mutex); throw; }
@@ -553,6 +599,7 @@ struct KernelPrimitives::Impl {
             if (state.owner || !state.waiters.empty() || state.conditionUsers) return error(Busy);
             span(machine, slot, Permission::Write);
             write(machine, slot, mutexDestroyed);
+            releaseObject(mutex->first);
             mutexes.erase(mutex); return 0;
         }
         const auto id = thread();

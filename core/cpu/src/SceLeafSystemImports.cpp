@@ -2,8 +2,10 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceHostTrampolines.hpp>
 #include <nid/NidCompute.hpp>
+#include <algorithm>
 #include <array>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <stdexcept>
@@ -45,6 +47,20 @@ constexpr std::int32_t SaveDataDialogModeProgressBar = 5;
 constexpr std::uint64_t SaveDataDialogModeOffset = 52;
 
 constexpr std::int32_t SaveDataNotInitialized = -2137063423;
+// Mount3/Umount2 after upstream libSceSaveData.native: SDK codes 0x809F0000 + 3 BUSY,
+// 4 NOT_MOUNTED, 7 EXISTS, 8 NOT_FOUND, 0xB INTERNAL, 0xC MOUNT_FULL.
+constexpr std::int32_t SaveDataBusy = -2137063421;
+constexpr std::int32_t SaveDataNotMounted = -2137063420;
+constexpr std::int32_t SaveDataExists = -2137063417;
+constexpr std::int32_t SaveDataNotFound = -2137063416;
+constexpr std::int32_t SaveDataInternal = -2137063413;
+constexpr std::int32_t SaveDataMountFull = -2137063412;
+constexpr std::uint32_t SaveDataModeRdonly = 1, SaveDataModeRdwr = 2, SaveDataModeCreate = 4, SaveDataModeCreate2 = 32;
+constexpr std::size_t SaveDataMountSlots = 16;
+constexpr std::size_t SaveDataMountPointSize = 16;
+constexpr std::size_t SaveDataDirNameSize = 32;
+constexpr std::size_t SaveDataMount3Size = 80;        // SceTypes.hpp SaveDataMount3
+constexpr std::size_t SaveDataMountResultSize = 64;   // SceTypes.hpp SaveDataMountResult
 
 constexpr std::int32_t NpInvalidArgument = Error(0x80550003);
 constexpr std::int32_t NpSignedOut = Error(0x80550006);
@@ -122,6 +138,67 @@ struct SceLeafSystemImports::Impl {
     std::int32_t saveDataDialogStatus = DialogNone;
     int saveDataInitializations = 0;
     std::int32_t transactionCounter = 1;
+    SceSaveDataStorage saveData;
+    // Mount point "/savedataN" for slot N while mounted, with the host directory it maps to.
+    std::array<std::filesystem::path, SaveDataMountSlots> saveSlots;
+
+    std::int32_t saveDataMount3(Machine& guest) {
+        constexpr std::string_view name = "sceSaveDataMount3";
+        if (!argument(guest, 0) || !argument(guest, 1)) Fault(name, "null argument");
+        const auto mount = fetch(guest, argument(guest, 0), SaveDataMount3Size, name);
+        const auto field = [&](std::size_t offset, auto value) {
+            std::memcpy(&value, mount.data() + offset, sizeof(value));
+            return value;
+        };
+        const auto directory = field(8, std::uint64_t{});
+        if (!directory) Fault(name, "null argument");
+        putZero(guest, argument(guest, 1), SaveDataMountResultSize, name);
+        const auto mode = field(32, std::uint32_t{});
+        const bool create = mode & SaveDataModeCreate, create2 = mode & SaveDataModeCreate2;
+        const bool open = !create && !create2 && (mode & (SaveDataModeRdonly | SaveDataModeRdwr));
+        if (!create && !create2 && !open) Fault(name, "unknown mount_mode");
+        const auto raw = fetch(guest, directory, SaveDataDirNameSize, name);
+        const auto* text = reinterpret_cast<const char*>(raw.data());
+        const auto* end = static_cast<const char*>(std::memchr(text, '\0', raw.size()));
+        if (!end) Fault(name, "unterminated directory name");
+        const std::string dirName(text, end);
+        if (dirName.empty() || dirName == "." || dirName == ".." || dirName.find_first_of("/\\:") != std::string::npos)
+            Fault(name, "invalid directory name");
+        if (saveData.Root.empty() || !saveData.Bind) return SaveDataInternal;
+        const auto real = saveData.Root / dirName;
+        for (const auto& used : saveSlots) if (used == real) return SaveDataBusy;
+        std::error_code error;
+        const bool exists = std::filesystem::is_directory(real, error);
+        if (create && exists) return SaveDataExists;
+        if (open && !exists) return SaveDataNotFound;
+        const auto slot = std::find_if(saveSlots.begin(), saveSlots.end(), [](const auto& used) { return used.empty(); });
+        if (slot == saveSlots.end()) return SaveDataMountFull;
+        if ((create || create2) && !std::filesystem::create_directories(real, error) && error) return SaveDataInternal;
+        const auto mountName = "savedata" + std::to_string(slot - saveSlots.begin());
+        if (!saveData.Bind(mountName, real)) return SaveDataInternal;
+        *slot = real;
+        std::array<std::byte, SaveDataMountPointSize> point{};
+        const auto guestPoint = "/" + mountName;
+        std::memcpy(point.data(), guestPoint.data(), guestPoint.size());
+        put(guest, argument(guest, 1), point, name);
+        putValue(guest, argument(guest, 1) + 28, (create || (create2 && !exists)) ? 1u : 0u, name);
+        return 0;
+    }
+
+    std::int32_t saveDataUmount2(Machine& guest) {
+        constexpr std::string_view name = "sceSaveDataUmount2";
+        if (!argument(guest, 1)) Fault(name, "null mount_point");
+        const auto raw = fetch(guest, argument(guest, 1), SaveDataMountPointSize, name);
+        const auto* text = reinterpret_cast<const char*>(raw.data());
+        const std::string point(text, strnlen(text, raw.size()));
+        for (std::size_t slot = 0; slot < saveSlots.size(); ++slot) {
+            if (saveSlots[slot].empty() || point != "/savedata" + std::to_string(slot)) continue;
+            if (saveData.Unbind) saveData.Unbind(point.substr(1));
+            saveSlots[slot].clear();
+            return 0;
+        }
+        return SaveDataNotMounted;
+    }
     std::uint64_t nextToken = UdsTokenBase;
 
     std::uint64_t token() { return nextToken += 0x10; }
@@ -210,8 +287,10 @@ struct SceLeafSystemImports::Impl {
             {&SaveDataDialog, "sceSaveDataDialogUpdateStatus", [](Impl& self, Machine&) -> std::int32_t {
                 return self.saveDataDialogStatus; }},
 
-            // libSceSaveData: initialisation, commit and prepare only. Mount3/Umount2 need the
-            // save-directory aliasing of GuestFiles and are not served.
+            // libSceSaveData: Mount3 creates or opens <save root>/<dirName> and binds it to the
+            // guest mount point /savedataN (slot N) in the guest file layer; Umount2 unbinds it.
+            {&SaveData, "sceSaveDataMount3", [](Impl& self, Machine& guest) { return self.saveDataMount3(guest); }},
+            {&SaveData, "sceSaveDataUmount2", [](Impl& self, Machine& guest) { return self.saveDataUmount2(guest); }},
             {&SaveData, "sceSaveDataInitialize3", [](Impl& self, Machine&) -> std::int32_t {
                 ++self.saveDataInitializations;
                 return 0; }},
@@ -263,6 +342,8 @@ struct SceLeafSystemImports::Impl {
 SceLeafSystemImports::SceLeafSystemImports(Machine& machine, std::uint64_t gateBase)
     : impl(std::make_shared<Impl>(machine, gateBase)) {}
 SceLeafSystemImports::~SceLeafSystemImports() = default;
+
+void SceLeafSystemImports::SetSaveDataStorage(SceSaveDataStorage storage) { impl->saveData = std::move(storage); }
 
 std::vector<SceUpstreamHost> SceLeafSystemImports::Hosts() {
     std::vector<SceUpstreamHost> hosts;

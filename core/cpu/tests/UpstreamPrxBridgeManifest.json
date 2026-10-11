@@ -1338,6 +1338,13 @@
         ],
         "signature": "int(const void* init)"
       },
+      "sceSaveDataMount3": {
+        "nid": "ZP4e7rlzOUk",
+        "returns": [
+          "rc"
+        ],
+        "signature": "int(const SaveDataMount3* mount, SaveDataMountResult* mount_result)"
+      },
       "sceSaveDataPrepare": {
         "nid": "sDCBrmc61XU",
         "returns": [
@@ -1353,6 +1360,13 @@
           "SAVE_DATA_OK"
         ],
         "signature": "int()"
+      },
+      "sceSaveDataUmount2": {
+        "nid": "uW4vfTwMQVo",
+        "returns": [
+          "rc"
+        ],
+        "signature": "int(uint32_t mode, const SaveDataMountPoint* mount_point)"
       }
     },
     "skipped": {
@@ -1369,7 +1383,6 @@
       "sceSaveDataGetParam": "not imported by the target title; audit before bridging",
       "sceSaveDataGetSaveDataMemory2": "not imported by the target title; audit before bridging",
       "sceSaveDataLoadIcon": "not imported by the target title; audit before bridging",
-      "sceSaveDataMount3": "maps a save directory into the guest file system; needs GuestFiles save aliasing, not served yet",
       "sceSaveDataSaveIcon": "not imported by the target title; audit before bridging",
       "sceSaveDataSaveIconByPath": "not imported by the target title; audit before bridging",
       "sceSaveDataSetParam": "not imported by the target title; audit before bridging",
@@ -1377,8 +1390,7 @@
       "sceSaveDataSetupSaveDataMemory2": "not imported by the target title; audit before bridging",
       "sceSaveDataSyncSaveDataMemory": "not imported by the target title; audit before bridging",
       "sceSaveDataTransferringMount": "not imported by the target title; audit before bridging",
-      "sceSaveDataTransferringMountPs4": "not imported by the target title; audit before bridging",
-      "sceSaveDataUmount2": "releases a save mount; not served until sceSaveDataMount3 is"
+      "sceSaveDataTransferringMountPs4": "not imported by the target title; audit before bridging"
     }
   },
   "libSceSigninDialog": {
@@ -1444,7 +1456,7 @@
     },
     "native": {},
     "skipped": {
-      "sceSysmoduleGetModuleInfoForUnwind": "reads /proc/self/maps of the host process; host mappings say nothing about the guest",
+      "sceSysmoduleGetModuleInfoForUnwind": "reads /proc/self/maps of the host process; served from the guest module graph by platform KernelThreadExtras",
       "sceSysmoduleIsLoaded": "not imported by the target title; audit before bridging",
       "sceSysmoduleLoadModuleInternal": "not imported by the target title; audit before bridging",
       "sceSysmoduleLoadModuleInternalWithArg": "not imported by the target title; audit before bridging",

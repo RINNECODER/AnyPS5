@@ -18,7 +18,8 @@ namespace Cpu {
 namespace {
 
 enum class Service { Open, Read, Pread, Lseek, Close, Write, Pwrite, Stat, Fstat, Getdents, Getdirentries,
-                     Fsync, Ftruncate, Mkdir, Rmdir, Unlink, Rename, CheckReachability,
+                     Fsync, Ftruncate, Mkdir, Rmdir, Unlink, Rename, CheckReachability, Truncate, Utimes,
+                     AioSubmitRead, AioWait, AioWaitMany, AioDelete, AioCancel,
                      TlsAddress, ReadTsc, TscFrequency, SanitizerDisabled, MallocReplace, NewReplace };
 
 // sceKernel* functions return 0x8002xxxx error codes. Their POSIX aliases return -1 and store
@@ -47,6 +48,21 @@ constexpr std::array<std::pair<const char*, Service>, 22> posixServices{{
     {"fstat", Service::Fstat}, {"_fstat", Service::Fstat}, {"getdents", Service::Getdents},
     {"getdirentries", Service::Getdirentries}, {"fsync", Service::Fsync}, {"ftruncate", Service::Ftruncate},
     {"mkdir", Service::Mkdir}, {"rmdir", Service::Rmdir}, {"unlink", Service::Unlink}, {"rename", Service::Rename}}};
+
+// Rows whose NIDs are not the plain hash of their name (upstream exports them with a
+// _nid_postfix spelling), plus the asynchronous I/O rows, bound by NID.
+constexpr std::array<std::pair<const char*, Service>, 7> nidServices{{
+    {"WlyEA-sLDf0", Service::Truncate}, {"0Cq8ipKr9n0", Service::Utimes},
+    {"HgX7+AORI58", Service::AioSubmitRead}, {"KOF-oJbQVvc", Service::AioWait}, {"lgK+oIWkJyA", Service::AioWaitMany},
+    {"5TgME6AYty4", Service::AioDelete}, {"fR521KIGgb8", Service::AioCancel}}};
+
+// Asynchronous I/O after upstream libkernel Aio/src/Aio.cpp: every request runs to completion
+// inside the submit call, so a wait never blocks. Request ids are 1..511 and recycle.
+constexpr std::int32_t AioProcessing = 2, AioCompleted = 3, AioAborted = 4, AioMaxQueues = 512, AioIdNumMax = 128;
+constexpr std::uint32_t AioWaitAnd = 1, AioWaitOr = 2;
+constexpr std::uint64_t AioRequestSize = 40;  // int64 offset, size_t nbyte, void* buf, result*, int32 fd
+constexpr std::int64_t KernelEfault = std::bit_cast<std::int32_t>(0x8002000Eu);
+constexpr std::int64_t KernelEinval = std::bit_cast<std::int32_t>(0x80020016u);
 
 // Guest-visible sanitizer replacement tables, mirroring the prx ABI structures in
 // core/libs/SceTypes.hpp (MallocReplace, NewReplace): one leading uint64 size field
@@ -85,6 +101,89 @@ struct SceKernelImports::Impl {
     std::map<std::string, Binding> services;
     std::map<Key, std::uint64_t> gates;
     std::function<std::uint64_t()> errnoAddress;
+    std::array<std::int32_t, AioMaxQueues> aioStates{};
+    std::int32_t aioNext = 1;
+
+    bool writable(std::uint64_t address, std::uint64_t size) {
+        if (!address || address > std::numeric_limits<std::uint64_t>::max() - size) return false;
+        try { machine.CheckAccess(address, size, Permission::Read | Permission::Write); }
+        catch (const std::runtime_error&) { return false; }
+        return true;
+    }
+    template<class T> T load(std::uint64_t address) {
+        T value{};
+        machine.Read(address, std::as_writable_bytes(std::span(&value, 1)));
+        return value;
+    }
+    template<class T> void store(std::uint64_t address, T value) {
+        machine.Write(address, std::as_bytes(std::span(&value, 1)));
+    }
+    static bool aioValid(std::int32_t id) { return id > 0 && id < AioMaxQueues; }
+
+    std::int64_t aioSubmitRead(std::uint64_t requests, std::int32_t size, std::uint64_t id) {
+        if (!requests || !id) return KernelEfault;
+        if (size <= 0) return KernelEinval;
+        if (static_cast<std::uint64_t>(size) > std::numeric_limits<std::uint64_t>::max() / AioRequestSize ||
+            !writable(requests, AioRequestSize * static_cast<std::uint64_t>(size)) || !writable(id, 4))
+            return KernelEfault;
+        for (std::int32_t index = 0; index < size; ++index)
+            if (!writable(load<std::uint64_t>(requests + AioRequestSize * index + 24), 16)) return KernelEfault;
+        const std::int32_t queue = aioNext;
+        aioNext = aioNext + 1 == AioMaxQueues ? 1 : aioNext + 1;
+        bool aborted = false;
+        for (std::int32_t index = 0; index < size; ++index) {
+            const auto request = requests + AioRequestSize * index;
+            const auto offset = load<std::int64_t>(request);
+            const auto count = load<std::uint64_t>(request + 8);
+            const auto buffer = load<std::uint64_t>(request + 16);
+            const auto result = load<std::uint64_t>(request + 24);
+            const auto fd = load<std::int32_t>(request + 32);
+            const auto done = files.Pread(fd, buffer, count, offset);
+            store<std::int64_t>(result, done);
+            store<std::uint32_t>(result + 8, done < 0 ? AioAborted : AioCompleted);
+            aborted = aborted || done < 0;
+        }
+        aioStates[queue] = aborted ? AioAborted : AioCompleted;
+        store<std::int32_t>(id, queue);
+        return 0;
+    }
+
+    std::int64_t aioWait(std::int32_t id, std::uint64_t state) {
+        if (!writable(state, 4)) return KernelEfault;
+        if (!aioValid(id)) return KernelEinval;
+        store<std::int32_t>(state, aioStates[id]);
+        return 0;
+    }
+
+    std::int64_t aioWaitMany(std::uint64_t ids, std::int32_t count, std::uint64_t states, std::uint32_t mode) {
+        if (!ids || !states) return KernelEfault;
+        if (count < 0) return KernelEinval;
+        if (count > AioIdNumMax) throw std::runtime_error("sceKernelAioWaitRequests: more than 128 ids per batch is not modelled");
+        if (count && (!writable(ids, 4ULL * count) || !writable(states, 4ULL * count))) return KernelEfault;
+        for (std::int32_t index = 0; index < count; ++index)
+            if (!aioValid(load<std::int32_t>(ids + 4ULL * index))) return KernelEinval;
+        if (mode != AioWaitAnd && mode != AioWaitOr) throw std::runtime_error("sceKernelAioWaitRequests: unsupported wait mode");
+        for (std::int32_t index = 0; index < count; ++index)
+            store<std::int32_t>(states + 4ULL * index, aioStates[load<std::int32_t>(ids + 4ULL * index)]);
+        return 0;
+    }
+
+    std::int64_t aioDelete(std::int32_t id, std::uint64_t output) {
+        if (!writable(output, 4)) return KernelEfault;
+        if (!aioValid(id)) return KernelEinval;
+        aioStates[id] = AioAborted;
+        store<std::int32_t>(output, 0);
+        return 0;
+    }
+
+    std::int64_t aioCancel(std::int32_t id, std::uint64_t state) {
+        if (!writable(state, 4)) return KernelEfault;
+        if (id == 0) { store<std::int32_t>(state, AioProcessing); return 0; }
+        if (!aioValid(id)) return KernelEinval;
+        aioStates[id] = AioAborted;
+        store<std::int32_t>(state, AioAborted);
+        return 0;
+    }
 
     Impl(Machine& guest, const std::filesystem::path& resourceRoot, GuestFilesOptions options, std::uint64_t base) :
         machine(guest), files(guest, resourceRoot, std::move(options)),
@@ -95,6 +194,7 @@ struct SceKernelImports::Impl {
             services.emplace(Nid::ComputeNid(name, "libkernel"), Binding{service, Convention::Kernel});
         for (const auto& [name, service] : posixServices)
             services.emplace(Nid::ComputeNid(name, "libkernel"), Binding{service, Convention::Posix});
+        for (const auto& [nid, service] : nidServices) services.emplace(nid, Binding{service, Convention::Kernel});
         for (const auto& [name, service] : std::array<std::pair<const char*, Service>, 4>{{
                  {"__tls_get_addr", Service::TlsAddress},
                  {"sceKernelIsAddressSanitizerEnabled", Service::SanitizerDisabled},
@@ -158,6 +258,13 @@ struct SceKernelImports::Impl {
         case Service::Unlink: result = files.Unlink(first); break;
         case Service::Rename: result = files.Rename(first, second); break;
         case Service::CheckReachability: result = files.CheckReachability(first); break;
+        case Service::Truncate: result = files.Truncate(first, std::bit_cast<std::int64_t>(second)); break;
+        case Service::Utimes: result = files.Utimes(first, second); break;
+        case Service::AioSubmitRead: result = aioSubmitRead(first, signedInt(second), fourth); break;
+        case Service::AioWait: result = aioWait(signedInt(first), second); break;
+        case Service::AioWaitMany: result = aioWaitMany(first, signedInt(second), third, static_cast<std::uint32_t>(fourth)); break;
+        case Service::AioDelete: result = aioDelete(signedInt(first), second); break;
+        case Service::AioCancel: result = aioCancel(signedInt(first), second); break;
         case Service::TlsAddress:
             if (!tls) throw std::runtime_error("SCE __tls_get_addr called before main-module TLS is configured");
             result = static_cast<std::int64_t>(tls->ResolveIndex(first));
@@ -202,6 +309,7 @@ std::uint64_t SceKernelImports::Resolve(const SceImport& import) {
     return gate;
 }
 
+GuestFiles& SceKernelImports::Files() { return impl->files; }
 void SceKernelImports::SetTls(std::shared_ptr<SceTls> tls) { impl->tls = std::move(tls); }
 void SceKernelImports::SetErrnoAddress(std::function<std::uint64_t()> provider) { impl->errnoAddress = std::move(provider); }
 

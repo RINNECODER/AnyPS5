@@ -4,12 +4,14 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string_view>
 
 namespace Cpu {
 
 // Guest filesystem. Every guest path lives under a mount:
 //   /app0                          read-only, the title's resource root
 //   /temp0, /download0, /savedata0 writable, subdirectories of TitleDataRoot (created by the first write)
+//   /savedataN                     bound by BindMount to a save directory (sceSaveDataMount3)
 // Unknown mounts are ENOENT. Paths are walked one component at a time with O_NOFOLLOW from the
 // mount's own directory descriptor, so neither ".." (rejected with EACCES) nor a host symlink can
 // reach outside a mount root. Results follow the libkernel convention: a non-negative value, or a
@@ -51,6 +53,15 @@ public:
     std::int64_t Unlink(std::uint64_t path);
     std::int64_t Rename(std::uint64_t from, std::uint64_t to);
     std::int64_t CheckReachability(std::uint64_t path);
+    // Path forms of Ftruncate and utimes (times: two FreeBSD timevals, or 0 for now).
+    std::int64_t Truncate(std::uint64_t path, std::int64_t length);
+    std::int64_t Utimes(std::uint64_t path, std::uint64_t times);
+    // Save data: makes the writable guest mount "/<name>" (a single path component, never app0)
+    // resolve to host, replacing its current directory. Descriptors already open stay valid.
+    bool BindMount(std::string_view name, const std::filesystem::path& host);
+    // Drops a BindMount: a built-in mount returns to its title data directory, any other
+    // mount disappears (ENOENT). False when name is not bound.
+    bool UnbindMount(std::string_view name);
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

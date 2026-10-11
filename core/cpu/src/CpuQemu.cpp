@@ -1001,7 +1001,8 @@ StopReason Machine::RunSlice(std::uint64_t entry, std::uint64_t until, std::uint
             std::ostringstream message;
             message << "Guest " << ((result.error_code & 1) ? "protected " : "unmapped ")
                 << ((result.error_code & 16) ? "instruction fetch" : ((result.error_code & 2) ? "write" : "read"))
-                << " at 0x" << std::hex << result.address << " (vector " << std::dec << result.vector << ")";
+                << " at 0x" << std::hex << result.address << " (vector " << std::dec << result.vector << ", rip 0x"
+                << std::hex << result.rip << ")";
             throw std::runtime_error(message.str());
         }
         case ANYPS5_QEMU_UNSUPPORTED: {

@@ -6,6 +6,8 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <span>
+#include <utility>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -162,6 +164,33 @@ void module(const char* path) {
     require(std::string(name) == "kernel-thread-ex", "Module name differs");
     require(r[17] == 0 && r[18] == 1, "Module information for unwind differs");
     require(r[20] == Search && r[21] == Fault && r[22] == Invalid, "Module information errors differ");
+    // sceSysmoduleGetModuleInfoForUnwind answers from the same guest module graph as the
+    // libkernel row, only inside the libSceSysmodule scope.
+    Cpu::SceImport kernelRow{"RpQJJVKTiFM", "libkernel", 0, "libkernel", 0, 1, 1, 1};
+    Cpu::SceImport sysmoduleRow{"4fU5yvOkVG4", "libSceSysmodule", 0, "libSceSysmodule", 0, 1, 1, 1};
+    const auto kernelGate = s.extras->Resolve(kernelRow, 2, 0), sysmoduleGate = s.extras->Resolve(sysmoduleRow, 2, 0);
+    require(kernelGate && sysmoduleGate && *sysmoduleGate != *kernelGate, "libSceSysmodule unwind row did not resolve");
+    sysmoduleRow.ModuleName = "libkernel";
+    require(!s.extras->Resolve(sysmoduleRow, 2, 0), "libSceSysmodule unwind row resolved outside its own module");
+    constexpr std::uint64_t Code = 0x60000000, Stack = Code + 0x1000, Output = Code + 0x2000;
+    s.machine.Map(Code, 0x1000, Cpu::Permission::Read | Cpu::Permission::Execute);
+    s.machine.Map(Stack, 0x3000, Cpu::Permission::Read | Cpu::Permission::Write);
+    constexpr std::array<std::uint8_t, 7> call{0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00, 0x90};  // call [rip+0x1000-6]
+    s.machine.Write(Code, std::as_bytes(std::span(call)));
+    const auto unwind = [&](std::uint64_t gate, std::uint64_t address, std::uint64_t output) {
+        s.machine.Write(Code + 0x1000, std::as_bytes(std::span(&gate, 1)));
+        s.machine.Set(Cpu::Register::Rdi, address); s.machine.Set(Cpu::Register::Rsi, 0);
+        s.machine.Set(Cpu::Register::Rdx, output); s.machine.Set(Cpu::Register::Rsp, Stack + 0xff0);
+        require(s.machine.Run(Code, Code + 6, 100) == Cpu::StopReason::Address, "Unwind gate did not return");
+        std::array<std::byte, 0x130> bytes{};
+        if (output) s.machine.Read(output, bytes);
+        return std::pair{s.machine.Get(Cpu::Register::Rax), bytes};
+    };
+    const auto [kernelStatus, kernelInfo] = unwind(*kernelGate, first + 0x10, Output);
+    const auto [sysmoduleStatus, sysmoduleInfo] = unwind(*sysmoduleGate, first + 0x10, Output + 0x200);
+    require(kernelStatus == 0 && sysmoduleStatus == 0 && kernelInfo == sysmoduleInfo,
+            "libSceSysmodule unwind record differs from sceKernelGetModuleInfoForUnwind");
+    require(unwind(*sysmoduleGate, 0x10, Output).first == Search, "libSceSysmodule unwind found an unmapped address");
     std::cout << "PASS module information from the loaded image\n";
 }
 void debug(const char* path) {

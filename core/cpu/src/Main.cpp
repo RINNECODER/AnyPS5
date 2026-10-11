@@ -219,7 +219,7 @@ void Capabilities(const RunLimits& limits) {
         << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"title_data_argument\":\"--title-data-dir\",\"title_data_environment\":\"ANYPS5_TITLE_DATA_DIR\","
         << "\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"sceKernelWrite\",\"sceKernelPwrite\",\"sceKernelStat\",\"sceKernelFstat\",\"sceKernelGetdents\",\"sceKernelGetdirentries\",\"sceKernelFsync\",\"sceKernelFtruncate\",\"sceKernelMkdir\",\"sceKernelRmdir\",\"sceKernelUnlink\",\"sceKernelRename\",\"sceKernelCheckReachability\",\"__tls_get_addr\",\"sceKernelIsAddressSanitizerEnabled\",\"sceKernelGetSanitizerMallocReplaceExternal\",\"sceKernelGetSanitizerNewReplaceExternal\"],"
         << "\"posix_libraries\":[\"libkernel\",\"libScePosix\"],\"posix_functions\":[\"open\",\"_open\",\"read\",\"_read\",\"pread\",\"write\",\"_write\",\"pwrite\",\"lseek\",\"close\",\"_close\",\"stat\",\"fstat\",\"_fstat\",\"getdents\",\"getdirentries\",\"fsync\",\"ftruncate\",\"mkdir\",\"rmdir\",\"unlink\",\"rename\"],"
-        << "\"mounts\":{\"/app0\":\"read-only resource root\",\"/temp0\":\"writable title data\",\"/download0\":\"writable title data\",\"/savedata0\":\"writable title data\"},"
+        << "\"mounts\":{\"/app0\":\"read-only resource root\",\"/temp0\":\"writable title data\",\"/download0\":\"writable title data\",\"/savedata0\":\"writable title data\",\"/savedataN\":\"save directory bound by sceSaveDataMount3\"},"
         << "\"constraints\":\"unknown mounts ENOENT; '..' EACCES; host symlinks never followed; performance open flags ignored; transfers of any size in 16 MiB host chunks\"},"
         << "\"sce_kernel_time_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"libraries\":[\"libkernel\",\"libScePosix\"],\"library_version\":1,"
         << "\"functions\":[\"sceKernelUsleep\",\"sceKernelNanosleep\",\"sceKernelSleep\",\"sceKernelGetProcessTime\",\"sceKernelGetProcessTimeCounter\",\"sceKernelGetProcessTimeCounterFrequency\",\"sceKernelGettimeofday\",\"sceKernelGettimezone\",\"sceKernelClockGettime\",\"sceKernelClockGetres\",\"sceKernelConvertUtcToLocaltime\",\"sceKernelConvertLocaltimeToUtc\",\"usleep\",\"nanosleep\",\"_nanosleep\",\"sleep\",\"gettimeofday\",\"clock_gettime\",\"clock_getres\"],"
@@ -242,7 +242,7 @@ void Capabilities(const RunLimits& limits) {
         << "\"sce_common_dialog_imports\":{\"module\":\"libSceCommonDialog\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceCommonDialogInitialize\"],\"constraints\":\"session initializer only; repeated initialization returns signed 0x80b80002; dialog operations unsupported\"},"
         << "\"unresolved_imports\":{\"default\":\"trap_on_call\",\"weak\":\"zero\",\"objects\":\"zeroed_storage\",\"strict_argument\":\"--strict-imports\",\"return_argument\":\"--unresolved-import-return\",\"constraints\":\"static --sce-module graph only; missing DT_NEEDED modules tolerated; each unresolved function import logs and stops the guest when called unless a return value is configured; TLS imports stay strict\"},"
         << "\"sce_upstream_prx_bridge\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi2\",\"libSceNpAuth\",\"libSceNpEntitlementAccess\",\"libSceSysmodule\",\"libSceAcm\",\"libSceMouse\",\"libSceConvertKeycode\",\"libSceNetCtl\",\"libSceSystemGesture\",\"libSceNpGameIntent\",\"libSceIme\",\"libSceMsgDialog\",\"libSceErrorDialog\",\"libSceSigninDialog\",\"libSceNpCommerce\",\"libScePlayerInvitationDialog\",\"libSceNpUniversalDataSystem\",\"libSceNpTrophy2\",\"libSceRtc\"],\"module_version\":\"1.1\",\"library_version\":1,\"constraints\":\"upstream core/libs/prx exports with hand-checked descriptors only; guest buffers copied in and out; user stays signed out; entitlements from ANYPS5_ENTITLEMENTS or anyps5-entitlements.ini beside the engine, none otherwise\"},"
-        << "\"sce_leaf_system_imports\":{\"modules\":[\"libSceAppContentUtil\",\"libSceImeDialog\",\"libSceSaveDataDialog\",\"libSceSaveData_native\",\"libSceSystemGesture\",\"libSceIme\",\"libSceNpUniversalDataSystem\",\"libSceAcm\",\"libSceNpAuth\"],\"constraints\":\"exports the upstream bridge cannot take (nested guest pointers, callbacks, floats, objects upstream allocates, NotImplemented upstream bodies); dialogs finish at once with the default result; headless: no touch, keyboard or IME panel; add-on content never entitled; save data mounts (sceSaveDataMount3) unsupported\"},"
+        << "\"sce_leaf_system_imports\":{\"modules\":[\"libSceAppContentUtil\",\"libSceImeDialog\",\"libSceSaveDataDialog\",\"libSceSaveData_native\",\"libSceSystemGesture\",\"libSceIme\",\"libSceNpUniversalDataSystem\",\"libSceAcm\",\"libSceNpAuth\"],\"constraints\":\"exports the upstream bridge cannot take (nested guest pointers, callbacks, floats, objects upstream allocates, NotImplemented upstream bodies); dialogs finish at once with the default result; headless: no touch, keyboard or IME panel; add-on content never entitled; save data mounts (sceSaveDataMount3) map <title data>/SaveData/<dirName> to /savedataN\"},"
         << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"exports the upstream bridge does not cover (libSceNpWebApi, callback registration); initialization and handles succeed; user stays signed out; every network request fails\"},"
         << "\"sce_pad_imports\":{\"module\":\"libScePad\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"scePadInit\",\"scePadOpen\",\"scePadOpenExt\",\"scePadGetHandle\",\"scePadClose\",\"scePadRead\",\"scePadReadState\",\"scePadGetControllerInformation\",\"scePadSetLightBar\",\"scePadResetLightBar\",\"scePadSetVibration\",\"scePadSetMotionSensorState\"],\"constraints\":\"one virtual pad per port; native runner feeds GameController input, or keyboard and mouse when no controller is connected; 64-sample drop-oldest read queue; no motion or touch-coordinate sensors\"},"
         << "\"sce_net_imports\":{\"modules\":[\"libSceNet\",\"libSceHttp2\",\"libSceSsl\",\"libkernel\"],\"constraints\":\"BSD sockets with explicit PS5 sockaddr/errno/option conversion; guest memory only through Machine Read/Write; libSceHttp2 and libSceSsl are offline (requests fail with the console's network error); libHttpServer.Prospero is declared but exports nothing\"},"
@@ -762,11 +762,9 @@ int main(int argc, char** argv) {
                     });
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
-                {
-                    const auto root = resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot;
-                    kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, root,
-                        Cpu::GuestFilesOptions{TitleDataDirectory(titleDataDirectory, root)});
-                }
+                const auto guestRoot = resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot;
+                const auto titleData = TitleDataDirectory(titleDataDirectory, guestRoot);
+                kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, guestRoot, Cpu::GuestFilesOptions{titleData});
                 // POSIX file aliases store errno where the active thread's __error points.
                 // Outside an active guest thread there is no errno cell: the call still returns -1.
                 if (threadRuntime) kernelRuntime->SetErrnoAddress([owner = std::weak_ptr<Cpu::GuestThreads>(threadRuntime)] {
@@ -781,6 +779,12 @@ int main(int argc, char** argv) {
                 upstreamPrxRuntime = std::make_unique<Cpu::SceUpstreamPrxBridge>(machine);
                 npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
                 leafSystemRuntime = std::make_unique<Cpu::SceLeafSystemImports>(machine);
+                // Save directories live beside the writable mounts: <title data>/SaveData/<dirName>.
+                if (!titleData.empty())
+                    leafSystemRuntime->SetSaveDataStorage({titleData / "SaveData",
+                        [files = &kernelRuntime->Files()](const std::string& mount, const std::filesystem::path& host) {
+                            return files->BindMount(mount, host); },
+                        [files = &kernelRuntime->Files()](const std::string& mount) { return files->UnbindMount(mount); }});
                 padRuntime = std::make_unique<Cpu::ScePadImports>(machine);
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                 if (nativeRuntime) nativeRuntime->AttachPadInput(padRuntime->Input());
