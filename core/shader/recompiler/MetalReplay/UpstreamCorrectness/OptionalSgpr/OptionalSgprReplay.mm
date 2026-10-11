@@ -107,7 +107,7 @@ AgcDriver::DriverDetail::ShaderRegistry Registry() {
         snapshot->headerAddress = 0;
         snapshot->type = type;
         snapshot->code.assign(code.begin(), code.end());
-        registry.emplace(address, std::move(snapshot));
+        registry[address].push_back(std::move(snapshot));
     };
     append(VertexCodeAddress, 2, VertexCode);
     append(FragmentCodeAddress, 1, FragmentCode);
@@ -230,7 +230,7 @@ void RequiredRegisters() {
         {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true}}};
     AgcDriver::NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
     // Unwritten graphics program address, resource and user-data registers read as zero (the shared
-    // driver's draw decoding): a missing low address word leaves no registered program to run,
+    // driver's draw decoding): a missing low address word resolves to an address outside the registered shader code,
     // while the high address and resource words decode as their zero values.
     // An unwritten pixel program address (0x008) is the null pixel program, which the shared driver
     // accepts only for draws that write no color; this draw writes color, so it is refused for that.
@@ -238,7 +238,7 @@ void RequiredRegisters() {
         auto missing = draw;
         missing.shader.erase(offset);
         Reject([&] { static_cast<void>(AgcDriver::DecodeDrawDispatch(missing, registry)); },
-            offset == 0x008u ? "a draw without a pixel program writes color" : "does not belong to a registered shader",
+            offset == 0x008u ? "a draw without a pixel program writes color" : "outside registered shader code",
             "draw unwritten program address " + std::to_string(offset));
     }
     for (const auto offset : {0xc9u, 0x8bu, 0x009u, 0x00bu}) {
