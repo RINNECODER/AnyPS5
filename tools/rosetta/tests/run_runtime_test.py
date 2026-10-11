@@ -23,7 +23,7 @@ CFLAGS = ["--target=x86_64-unknown-linux-gnu", "-O2", "-fPIC", "-ffreestanding",
           # %fs:0 plus an offset, the form the relinker's macOS TLS stubs accept.
           "-mno-tls-direct-seg-refs"]
 LDFLAGS = ["-shared", "-Bsymbolic", "--hash-style=sysv", "-z", "max-page-size=4096", "-z", "separate-code", "-z", "norelro"]
-KERNEL_IMPORTS = ["scePthreadCreate", "scePthreadJoin", "sceKernelLoadStartModule", "sceKernelDlsym",
+KERNEL_IMPORTS = ["scePthreadCreate", "scePthreadJoin", "scePthreadCancel","sceKernelLoadStartModule", "sceKernelDlsym",
                   "sceKernelGetModuleInfoFromAddr"]
 
 

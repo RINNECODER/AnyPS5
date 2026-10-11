@@ -19,7 +19,9 @@ Guest modules: <title>/sce_module/*.prx, <resource>/sce_module/*.prx and, for a
 launcher title directory, <title>/*.prx are preloaded like sce_module; the
 resource root's top-level *.prx are relinked as deferred modules for
 sceKernelLoadStartModule. Imports that no x86_64 library exports are bound to
-logging stubs (DYLD_INSERT_LIBRARIES) that return 0.
+logging stubs (DYLD_INSERT_LIBRARIES) that return 0. Library functions that
+exist but are not implemented log once and return 0 as well
+(ANYPS5_UNIMPLEMENTED=continue) unless --abort-on-unimplemented is passed.
 """
 import argparse
 import hashlib
@@ -256,6 +258,8 @@ def layout(args, cache, out, resource):
 
 def run(args, out, prepared):
     environment = dict(os.environ)
+    if not args.abort_on_unimplemented:
+        environment.setdefault("ANYPS5_UNIMPLEMENTED", "continue")
     log_path = Path(args.log).resolve()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     command = ["arch", "-x86_64"]
@@ -316,6 +320,8 @@ def main():
     parser.add_argument("--wall", type=float, default=600)
     parser.add_argument("--log", help="run log (default <cache>/<sha>/run.log)")
     parser.add_argument("--relink", action="store_true")
+    parser.add_argument("--abort-on-unimplemented", action="store_true",
+                        help="let library functions that are not implemented throw (default: log once and return 0)")
     parser.add_argument("guest_args", nargs="*")
     args = parser.parse_args()
     if args.build:

@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 namespace AgcDriver::Metal {
 namespace Abi = ShaderRecompiler::BdaAbi;
@@ -20,6 +22,25 @@ id<MTLBuffer> sharedBuffer(id<MTLDevice> device, std::size_t bytes) {
     if (buffer == nil || buffer.contents == nullptr) throw std::runtime_error("Metal guest buffer allocation failed");
     if (buffer.gpuAddress == 0) throw std::runtime_error("Metal guest buffer has no GPU address");
     return buffer;
+}
+
+// Whether any page of [begin, end) is mapped from a file (a guest image's segments). Wiring such
+// pages for a no-copy buffer broke later execution of the image under Rosetta (SIGBUS without an
+// address on a call into the image), so file-backed components are copied instead; they are small.
+bool fileBacked(std::uintptr_t begin, std::uintptr_t end) {
+    for (auto cursor = begin; cursor < end;) {
+        mach_vm_address_t region = cursor;
+        mach_vm_size_t size = 0;
+        vm_region_extended_info_data_t info{};
+        mach_msg_type_number_t count = VM_REGION_EXTENDED_INFO_COUNT;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &region, &size, VM_REGION_EXTENDED_INFO, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS)
+            return true;
+        if (region >= end) return false;
+        if (info.external_pager != 0) return true;
+        cursor = region + size;
+    }
+    return false;
 }
 }
 
@@ -57,7 +78,7 @@ id<MTLBuffer> MetalGuestHostAliases::alias(std::uintptr_t begin, std::uintptr_t 
         return entry.buffer;
     }
     id<MTLBuffer> buffer = nil;
-    if (last - first <= device.maxBufferLength) {
+    if (last - first <= device.maxBufferLength && !fileBacked(first, last)) {
         buffer = [device newBufferWithBytesNoCopy:reinterpret_cast<void*>(first) length:last - first
                                           options:MTLResourceStorageModeShared deallocator:nil];
         if (buffer != nil && (buffer.contents != reinterpret_cast<void*>(first) || buffer.gpuAddress == 0 ||

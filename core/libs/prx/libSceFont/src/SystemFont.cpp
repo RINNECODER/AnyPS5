@@ -1,7 +1,3 @@
-#ifdef __APPLE__
-#include <limits.h>
-#include <mach-o/dyld.h>
-#endif
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -10,6 +6,8 @@
 #include <system_error>
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #endif
 
 #include "prx/libSceFont/include/FontInternal.hpp"
@@ -96,7 +94,7 @@ std::filesystem::path ExecutableDirectory() {
     if (length == 0 || length == MAX_PATH) throw std::runtime_error("libSceFont: cannot locate the executable");
     return std::filesystem::path(module).parent_path();
 #elif defined(__APPLE__)
-    char executable[PATH_MAX];
+    char executable[4096];
     std::uint32_t size = sizeof(executable);
     if (_NSGetExecutablePath(executable, &size) != 0) throw std::runtime_error("libSceFont: cannot locate the executable");
     return std::filesystem::path(executable).parent_path();

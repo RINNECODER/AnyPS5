@@ -6,6 +6,8 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <dlfcn.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <sys/mman.h>
 #include <algorithm>
 #include <cstring>
@@ -53,10 +55,26 @@ DirectState& State() {
     return *state;
 }
 
+// The largest power of two that is at most half the device's buffer limit: every borrowed range
+// becomes one Metal buffer (a no-copy alias or a copy), and the alignment padding needs headroom.
+std::uint64_t MetalRangeLimit() {
+    static const std::uint64_t limit = [] {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        const std::uint64_t half = device != nil ? device.maxBufferLength / 2 : 0;
+        std::uint64_t chunk = std::uint64_t{1} << 28;
+        while (chunk <= half / 2) chunk *= 2;
+        return chunk;
+    }();
+    return limit;
+}
+
 Ranges IdentityRanges() {
     Ranges result;
     for (const auto& range : GuestAllocations::GuestAllocationsAcquire_nid_postfix()) {
-        if (range->address == 0 || range->bytes == 0) continue;
+        // Only GPU-mapped memory is GPU-visible, as on the console. CPU-only ranges (the image's
+        // code and data, CPU heaps) would be copied or wired for every submission; checks of
+        // host-side structures fall back to the host page check below.
+        if (range->address == 0 || range->bytes == 0 || !range->gpu) continue;
         if (range->bytes > std::numeric_limits<std::uint64_t>::max() - range->address)
             throw std::runtime_error("Rosetta direct path: guest allocation overflows the address space");
         if (!result.empty()) {
@@ -71,6 +89,7 @@ Ranges IdentityRanges() {
         auto* host = reinterpret_cast<std::byte*>(static_cast<std::uintptr_t>(range->address));
         result.push_back({range->address, {host, range->bytes}, range->writable});
     }
+    result = SplitBorrowedRanges(result, MetalRangeLimit());
     // The staging buffer is a fresh host mapping, so it never overlaps a guest allocation.
     const auto staging = reinterpret_cast<std::uint64_t>(State().staging);
     const auto position = std::lower_bound(result.begin(), result.end(), staging,
@@ -125,6 +144,23 @@ void Configure(DirectState& state, MetalDriver& driver, const std::shared_ptr<co
 
 }
 
+std::vector<NativeGuestMemory::BorrowedRange> SplitBorrowedRanges(const std::vector<NativeGuestMemory::BorrowedRange>& ranges, std::uint64_t limit) {
+    if (limit == 0 || (limit & (limit - 1)) != 0) throw std::invalid_argument("Rosetta direct path: range limit must be a power of two");
+    std::vector<NativeGuestMemory::BorrowedRange> result;
+    result.reserve(ranges.size());
+    for (const auto& range : ranges) {
+        std::uint64_t offset = 0;
+        while (offset < range.host.size()) {
+            const auto address = range.guestAddress + offset;
+            const auto boundary = (address & ~(limit - 1)) + limit;
+            const auto bytes = std::min<std::uint64_t>(range.host.size() - offset, boundary - address);
+            result.push_back({address, range.host.subspan(offset, bytes), range.writable});
+            offset += bytes;
+        }
+    }
+    return result;
+}
+
 std::shared_ptr<const std::vector<NativeGuestMemory::BorrowedRange>> DirectGuestRanges() {
     auto& state = State();
     std::lock_guard lock(state.rangesMutex);
@@ -171,8 +207,35 @@ MetalDriver& DirectDriver() {
 
 }
 
+namespace {
+
+// Whether every page of [address, address + bytes) is mapped with the needed access.
+bool HostAccessible(std::uint64_t address, std::size_t bytes, bool writable) {
+    const auto end = address + bytes;
+    for (auto cursor = address; cursor < end;) {
+        mach_vm_address_t region = cursor;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS)
+            return false;
+        if (region > cursor || (info.protection & VM_PROT_READ) == 0 || (writable && (info.protection & VM_PROT_WRITE) == 0)) return false;
+        cursor = region + size;
+    }
+    return true;
+}
+
+}
+
 // libSceVideoOut validates guest buffers through this export (upstream defines it next to the
-// Vulkan driver's guest memory, which this build does not link).
+// Vulkan driver's guest memory, which this build does not link). Guest pointers are host pointers
+// here, so structures outside the guest allocations (on guest thread stacks, which are host thread
+// stacks on this path) pass when the process can access them, as upstream's page check does.
 extern "C" void AgcDriverCheckGuestMemory_nid_postfix(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
-    AgcDriver::GuestMemory::CheckRange(pointer, bytes, alignment, writable);
+    try {
+        AgcDriver::GuestMemory::CheckRange(pointer, bytes, alignment, writable);
+    } catch (const std::out_of_range&) {
+        if (!HostAccessible(reinterpret_cast<std::uint64_t>(pointer), bytes, writable)) throw;
+    }
 }
