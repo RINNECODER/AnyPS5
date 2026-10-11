@@ -313,8 +313,9 @@ GuestTm* APS5_VABI gmtime_nid_postfix(const int64_t* timer) {
 
 int64_t APS5_VABI libc_mktime_nid_postfix(GuestTm* timeptr) {
     std::tm host = toHostTm(*timeptr);
+    host.tm_wday = -1;
     const std::time_t t = std::mktime(&host);
-    if (t == static_cast<std::time_t>(-1)) return -1;
+    if (t == static_cast<std::time_t>(-1) && host.tm_wday == -1) return -1;
     const int64_t time = static_cast<int64_t>(t);
     localtime_s_nid_postfix(&time, timeptr);
     return time;
