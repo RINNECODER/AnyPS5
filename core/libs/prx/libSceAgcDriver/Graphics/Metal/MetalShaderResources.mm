@@ -292,7 +292,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     }
     const auto format = Graphics::ResolveTextureFormat(descriptor.format);
     if (written && (format == VK_FORMAT_R5G6B5_UNORM_PACK16 || format == VK_FORMAT_A1R5G5B5_UNORM_PACK16 ||
-        format == VK_FORMAT_R4G4B4A4_UNORM_PACK16)) {
+        format == VK_FORMAT_R4G4B4A4_UNORM_PACK16 || format == VK_FORMAT_B4G4R4A4_UNORM_PACK16)) {
         throw std::invalid_argument("Metal packed 16-bit textures do not support native storage or render writes");
     }
     if (atomic && (format != VK_FORMAT_R32_UINT && format != VK_FORMAT_R32_SINT && format != VK_FORMAT_R32_SFLOAT)) {

@@ -464,7 +464,7 @@ void VerifyCompressed(const MetalTests::Context& context, id<MTLLibrary> probes,
 
 void VerifyPacked(const MetalTests::Context& context, id<MTLLibrary> probes) {
     struct Case { unsigned format; std::array<std::uint16_t,3> pixels; };
-    constexpr std::array<Case,3> cases{{{133,{0xf800,0x07e0,0x001f}},{134,{0xfc00,0x83e0,0x801f}},{136,{0xf00f,0x0f0f,0x00ff}}}};
+    constexpr std::array<Case,3> cases{{{133,{0xf800,0x07e0,0x001f}},{134,{0xfc00,0x83e0,0x801f}},{136,{0xf00f,0xf0f0,0xff00}}}};
     constexpr std::array<std::array<float,4>,3> colors{{{1,0,0,1},{0,1,0,1},{0,0,1,1}}};
     AgcDriver::Metal::MetalDevice backend(context.device,context.library);
     for (const auto& test : cases) {

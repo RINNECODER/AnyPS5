@@ -61,6 +61,8 @@ MTLPixelFormat pixelFormat(std::uint32_t format) {
         case VK_FORMAT_R5G6B5_UNORM_PACK16: return MTLPixelFormatB5G6R5Unorm;
         case VK_FORMAT_A1R5G5B5_UNORM_PACK16: return MTLPixelFormatBGR5A1Unorm;
         case VK_FORMAT_R4G4B4A4_UNORM_PACK16: return MTLPixelFormatABGR4Unorm;
+        // Guest format 136 keeps R in bits 3:0 and A in 15:12; the view swizzle below reorders ABGR4 channels.
+        case VK_FORMAT_B4G4R4A4_UNORM_PACK16: return MTLPixelFormatABGR4Unorm;
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return MTLPixelFormatBC1_RGBA;
         case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: return MTLPixelFormatBC1_RGBA_sRGB;
         case VK_FORMAT_BC2_UNORM_BLOCK: return MTLPixelFormatBC2_RGBA;
@@ -79,7 +81,11 @@ MTLPixelFormat pixelFormat(std::uint32_t format) {
     }
 }
 
-MTLTextureSwizzle swizzle(std::uint8_t selector) {
+MTLTextureSwizzle swizzle(std::uint8_t selector, std::uint32_t guestFormat) {
+    if (guestFormat == 136 && selector >= 4 && selector <= 7) {
+        constexpr MTLTextureSwizzle reordered[4]{MTLTextureSwizzleAlpha, MTLTextureSwizzleBlue, MTLTextureSwizzleGreen, MTLTextureSwizzleRed};
+        return reordered[selector - 4u];
+    }
     switch (selector) {
         case 0: return MTLTextureSwizzleZero;
         case 1: return MTLTextureSwizzleOne;
@@ -111,7 +117,7 @@ bool atomicFormat(std::uint32_t format) {
 bool packed16(std::uint32_t format) {
     const auto native = Graphics::ResolveTextureFormat(format);
     return native == VK_FORMAT_R5G6B5_UNORM_PACK16 || native == VK_FORMAT_A1R5G5B5_UNORM_PACK16 ||
-        native == VK_FORMAT_R4G4B4A4_UNORM_PACK16;
+        native == VK_FORMAT_R4G4B4A4_UNORM_PACK16 || native == VK_FORMAT_B4G4R4A4_UNORM_PACK16;
 }
 
 MTLPixelFormat storageFormat(std::uint32_t format) {
@@ -297,7 +303,7 @@ void MetalTexture::createViews(bool compare) {
     if (compare) {
         sampledView = [backing->texture newTextureViewWithPixelFormat:nativeFormat textureType:nativeType levels:levels slices:slices];
     } else {
-        const auto components = MTLTextureSwizzleChannelsMake(swizzle(descriptor.dstSelX), swizzle(descriptor.dstSelY), swizzle(descriptor.dstSelZ), swizzle(descriptor.dstSelW));
+        const auto components = MTLTextureSwizzleChannelsMake(swizzle(descriptor.dstSelX, descriptor.format), swizzle(descriptor.dstSelY, descriptor.format), swizzle(descriptor.dstSelZ, descriptor.format), swizzle(descriptor.dstSelW, descriptor.format));
         sampledView = [backing->texture newTextureViewWithPixelFormat:nativeFormat textureType:nativeType levels:levels slices:slices swizzle:components];
     }
     require(sampledView != nil, "Metal cannot create the guest texture mip, array, or swizzle view");

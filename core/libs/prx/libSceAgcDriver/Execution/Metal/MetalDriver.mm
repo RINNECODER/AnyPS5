@@ -137,7 +137,8 @@ void MetalDriver::Configure(void* device, void* library,
     auto draw = std::make_unique<MetalDraw>(nativeDevice, nativeLibrary);
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>();
     auto nullPixel = DriverDetail::CaptureNullPixelShader();
-    registry->emplace(nullPixel->codeAddress, std::move(nullPixel));
+    const auto nullPixelAddress = nullPixel->codeAddress;
+    (*registry)[nullPixelAddress] = {std::move(nullPixel)};
     impl->ranges = std::move(captured);
     impl->rangeGeneration = initialGeneration;
     impl->nativeDevice = nativeDevice;
@@ -206,12 +207,15 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
             if (visible) {
                 changed.insert(changed.end(), removed.begin(), removed.end());
                 registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
-                std::erase_if(*registry, [&](const auto& entry) {
-                    const auto& snapshot = *entry.second;
-                    if (snapshot.codeAddress == DriverDetail::NullPixelProgramAddress()) return false;
-                    return overlapsMappings(snapshot.codeAddress, snapshot.code.size() * sizeof(std::uint32_t), changed) ||
-                        overlapsMappings(snapshot.headerAddress, snapshot.header.size(), changed);
-                });
+                for (auto& entry : *registry) {
+                    std::erase_if(entry.second, [&](const auto& snapshotPointer) {
+                        const auto& snapshot = *snapshotPointer;
+                        if (snapshot.codeAddress == DriverDetail::NullPixelProgramAddress()) return false;
+                        return overlapsMappings(snapshot.codeAddress, snapshot.code.size() * sizeof(std::uint32_t), changed) ||
+                            overlapsMappings(snapshot.headerAddress, snapshot.header.size(), changed);
+                    });
+                }
+                std::erase_if(*registry, [](const auto& entry) { return entry.second.empty(); });
                 impl->draw->InvalidateBorrowedRanges(changed);
             }
             if (impl->rangeOwner) releasedOwners.push_back(impl->rangeOwner);
@@ -665,7 +669,8 @@ void MetalDriver::RegisterShader(const Shader* shader) {
     impl->WaitForMappingAdmission(lock);
     require(generation == impl->rangesRevision, "borrowed ranges changed while shader was captured");
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
-    registry->insert_or_assign(snapshot->codeAddress, std::move(snapshot));
+    const auto snapshotAddress = snapshot->codeAddress;
+    (*registry)[snapshotAddress] = {std::move(snapshot)};
     impl->shaders = std::move(registry);
 }
 
@@ -697,7 +702,7 @@ void MetalDriver::RegisterShaderWithPublication(std::uint64_t guestHeaderAddress
                 publish();
                 const auto snapshot = DriverDetail::ReadRegisteredShader(guestHeaderAddress);
                 auto registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
-                registry->insert_or_assign(snapshot->codeAddress, snapshot);
+                (*registry)[snapshot->codeAddress] = {snapshot};
                 impl->shaders = std::move(registry);
             } catch (...) {
                 try { rollback(); }

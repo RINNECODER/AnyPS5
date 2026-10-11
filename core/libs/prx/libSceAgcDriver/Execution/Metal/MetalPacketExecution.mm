@@ -172,15 +172,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     // Driver::dispatch does (SCRATCH_EN takes its per-lane size from the header).
     const auto programAddress = DecodeComputeProgramAddress(queue.shader);
     std::shared_ptr<const DriverDetail::ShaderSnapshot> captured;
-    auto position = submission.shaders->upper_bound(programAddress);
-    if (position != submission.shaders->begin()) {
-        --position;
-        const auto& candidate = position->second;
-        if (programAddress >= candidate->codeAddress &&
-            programAddress - candidate->codeAddress < candidate->code.size() * sizeof(std::uint32_t)) {
-            captured = candidate;
-        }
-    }
+    captured = DriverDetail::RegisteredProgram(*submission.shaders, programAddress, {0});
     const auto decoded = DecodeComputeDispatch(queue, packet,
         captured != nullptr ? std::span<const std::byte>(captured->header) : std::span<const std::byte>{});
     if (std::any_of(decoded.groups.begin(), decoded.groups.end(), [](auto value) { return value == 0; })) return;

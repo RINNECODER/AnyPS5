@@ -1,6 +1,7 @@
 #if defined(ANYPS5_METAL_BACKEND)
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #else
+#include "prx/libSceAgcDriver/Execution/include/ThreadPriority.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #endif
 #include <mutex>
@@ -81,6 +82,15 @@ void ReportFailure(std::exception_ptr error) {
     BackendDriver::Get().ReportFailure(error);
 }
 
+}
+
+extern "C" void AgcDriverRaiseWorkerThreadPriority_nid_postfix(const char* role) {
+#if defined(ANYPS5_METAL_BACKEND)
+    // macOS has no RLIMIT_RTTIME or SCHED_RESET_ON_FORK path; the Linux priority policy does not apply.
+    static_cast<void>(role);
+#else
+    AgcDriver::RaiseWorkerThreadPriority(role);
+#endif
 }
 
 extern "C" void AgcDriverWaitIdle_nid_postfix() {

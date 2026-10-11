@@ -794,6 +794,7 @@
     },
     "native": {},
     "skipped": {
+      "sceNpGetSandboxInfo": "NotImplemented upstream",
       "sceNpGetUserIdByAccountId": "NotImplemented upstream; hand-written in SceNpOfflineImports",
       "sceNpRegisterGamePresenceCallback": "callback; NotImplemented upstream; hand-written in SceNpOfflineImports",
       "sceNpRegisterNpReachabilityStateCallback": "callback; hand-written in SceNpOfflineImports",
@@ -1452,6 +1453,15 @@
   },
   "libSceSystemGesture": {
     "bridged": {
+      "sceSystemGestureAppendTouchRecognizer": {
+        "nid": "1MMK0W-kMgA",
+        "returns": [
+          "0",
+          "0x80d10002",
+          "0x80d10003"
+        ],
+        "signature": "int(int32_t gesture_handle, SystemGestureTouchRecognizer* recognizer)"
+      },
       "sceSystemGestureClose": {
         "nid": "j4yXIA2jJ68",
         "returns": [
@@ -1503,37 +1513,33 @@
         ],
         "signature": "int32_t(int32_t input_type, const void* param)"
       },
-      "sceSystemGestureUpdatePrimitiveTouchRecognizer": {
-        "nid": "GgFMb22sbbI",
-        "returns": [
-          "gesture_handle == 1 ? 0 : 0x80d10003"
-        ],
-        "signature": "int(int32_t gesture_handle, const void* param)"
-      }
-    },
-    "native": {
-      "sceSystemGestureAppendTouchRecognizer": {
-        "nid": "1MMK0W-kMgA",
-        "returns": [
-          "0"
-        ],
-        "signature": "int(int32_t gesture_handle, SystemGestureTouchRecognizer* recognizer)"
-      },
       "sceSystemGestureRemoveTouchRecognizer": {
         "nid": "ELvBVG-LKT0",
         "returns": [
-          "0"
+          "0",
+          "0x80d10002",
+          "0x80d10003"
         ],
         "signature": "int(int32_t gesture_handle, SystemGestureTouchRecognizer* recognizer)"
       },
       "sceSystemGestureUpdateAllTouchRecognizer": {
         "nid": "wPJGwI2RM2I",
         "returns": [
-          "0"
+          "0",
+          "0x80d10003"
         ],
         "signature": "int(int32_t gesture_handle)"
+      },
+      "sceSystemGestureUpdatePrimitiveTouchRecognizer": {
+        "nid": "GgFMb22sbbI",
+        "returns": [
+          "0",
+          "0x80d10003"
+        ],
+        "signature": "int(int32_t gesture_handle, const void* param)"
       }
     },
+    "native": {},
     "skipped": {
       "sceSystemGestureGetPrimitiveTouchEventByIndex": "NotImplemented upstream",
       "sceSystemGestureGetPrimitiveTouchEventByPrimitiveID": "NotImplemented upstream",

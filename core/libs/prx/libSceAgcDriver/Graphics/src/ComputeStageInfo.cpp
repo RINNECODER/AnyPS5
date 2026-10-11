@@ -20,9 +20,9 @@ ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers&
         }
         return found->second;
     };
-    const auto numThreadX = read(0x207);
-    const auto numThreadY = read(0x208);
-    const auto numThreadZ = read(0x209);
+    const auto numThreadX = read(0x207) & 0xffffu;
+    const auto numThreadY = read(0x208) & 0xffffu;
+    const auto numThreadZ = read(0x209) & 0xffffu;
     if (numThreadX == 0 || numThreadY == 0 || numThreadZ == 0) throw std::runtime_error("AGC graphics: COMPUTE_NUM_THREAD_X/Y/Z must be nonzero");
     const auto rsrc2 = read(0x213);
     std::uint32_t scratchDwords = 0;
