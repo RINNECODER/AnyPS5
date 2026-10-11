@@ -3,9 +3,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace AgcDriver::NativeGuestMemory {
+
+// A guest write targets memory the guest mapped read-only: a memory-protection
+// fault, the bind-time twin of a GPU permission fault. The Metal driver keeps it
+// sticky instead of skipping the packet, so such writes are never dropped silently.
+class ReadOnlyWriteError : public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
+};
 
 struct BorrowedRange {
     std::uint64_t guestAddress;

@@ -67,7 +67,7 @@ MetalDepthSurface::MetalDepthSurface(const MetalDevice& backend, const Graphics:
     }
     auto commands = backend.CommandBuffer();
     auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
-    if (encoder == nil) throw std::runtime_error("Metal depth initial clear encoder creation failed");
+    if (encoder == nil) throw MetalGpuExecutionError("Metal depth initial clear encoder creation failed");
     [encoder endEncoding];
     backend.Wait(commands);
 }
