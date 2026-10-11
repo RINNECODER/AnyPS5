@@ -370,6 +370,7 @@ void Machine::ProtectFragment(std::uint64_t address, std::size_t size, Permissio
     checkMapped(impl->engine, address & ~std::uint64_t{4095}, 4096, 0);
     throw std::runtime_error("Unicorn exact guest data fragment protection is unsupported");
 }
+CodeCacheStats Machine::CodeCache() const { return {}; }
 std::vector<Mapping> Machine::Mappings() const {
     if (std::this_thread::get_id() != impl->ownerThread)
         throw std::logic_error("Guest CPU mapping inventory requires its owner thread");
