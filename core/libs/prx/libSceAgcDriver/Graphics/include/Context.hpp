@@ -5,7 +5,9 @@
 #define VK_NO_PROTOTYPES
 #endif
 #include <vulkan/vulkan.h>
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -192,6 +194,26 @@ struct Context {
             if ((mask & (1u << i)) != 0 && (memory.memoryTypes[i].propertyFlags & flags) == flags) return i;
         }
         throw std::runtime_error("AGC graphics: required Vulkan memory type is unavailable");
+    }
+
+    VkResult AllocateDeviceMemory(std::uint32_t mask, VkDeviceSize bytes, VkDeviceMemory* memoryOut, const char* what) const {
+        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocation.allocationSize = bytes;
+        allocation.memoryTypeIndex = MemoryType(mask, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        const auto allocate = Function<PFN_vkAllocateMemory>("vkAllocateMemory");
+        auto result = allocate(device, &allocation, nullptr, memoryOut);
+        if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY) return result;
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+            if ((mask & (1u << i)) == 0 || (memory.memoryHeaps[memory.memoryTypes[i].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) continue;
+            allocation.memoryTypeIndex = i;
+            result = allocate(device, &allocation, nullptr, memoryOut);
+            static std::atomic<std::uint64_t> fallbacks{0}, fallbackBytes{0};
+            const auto count = fallbacks.fetch_add(1) + 1;
+            const auto total = fallbackBytes.fetch_add(bytes) + bytes;
+            if (count <= 5 || (count & (count - 1)) == 0) std::fprintf(stderr, "[gpu] %s: device memory exhausted, %llu bytes placed in host memory type %u (%s); %llu such allocations, %llu MiB\n", what, static_cast<unsigned long long>(bytes), i, result == VK_SUCCESS ? "ok" : "failed", static_cast<unsigned long long>(count), static_cast<unsigned long long>(total >> 20u));
+            return result;
+        }
+        return result;
     }
 };
 
