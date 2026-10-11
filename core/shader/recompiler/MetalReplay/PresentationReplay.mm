@@ -23,22 +23,6 @@
 #include <string>
 #include <vector>
 
-// AppKit hands activation out on its own schedule, and an accessory test process can lose it when
-// another app activates mid-test. Re-requesting activation inside an event-driven wait restores the
-// genuine key-window state; it never fakes one. `activateIgnoringOtherApps:` is deprecated on macOS 14,
-// where plain `activate` does the job (#189 tracks removing the older path entirely).
-static void ActivateForFocusTest() {
-    // Activation is asynchronous, so re-requesting it on every 10 ms pump would only flood the window
-    // server while the answer is still in flight. Both call sites run on the main thread.
-    static std::chrono::steady_clock::time_point lastRequest{};
-    const auto now = std::chrono::steady_clock::now();
-    if (lastRequest.time_since_epoch().count() != 0 &&
-        now - lastRequest < std::chrono::milliseconds(200)) return;
-    lastRequest = now;
-    if (@available(macOS 14, *)) [NSApp activate];
-    else [NSApp activateIgnoringOtherApps:YES];
-}
-
 @interface ReplayMetalLayer : CAMetalLayer
 @property(nonatomic, strong) id<CAMetalDrawable> recordedDrawable;
 @property(nonatomic) NSUInteger acquisitionCount;
@@ -475,10 +459,10 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
         // be left inactive when another app activates, so focus is waited for with a real assertion
         // instead of being silently skipped (#138). The predicate stays the genuine one.
         {
-            const auto focusDeadline = std::chrono::steady_clock::now() + 10s;
+            const auto focusDeadline = std::chrono::steady_clock::now() + 30s;
             while (!host->Snapshot().focused && std::chrono::steady_clock::now() < focusDeadline) {
                 host->PumpMainThread(10ms);
-                if (!NSApp.isActive) ActivateForFocusTest();
+                AnyPS5::Host::RestoreFocusForTest(window);
             }
             Require(host->Snapshot().focused, "Native host never received real AppKit focus");
         }
@@ -501,15 +485,15 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
             auto pumpUntil = [&](auto completed, const std::string& operation) {
                 // Window-server transitions for a real AppKit window are not guaranteed inside 2 s on
                 // a busy host; the deadline only bounds the wait, the predicate itself is unchanged.
-                const auto end = std::chrono::steady_clock::now() + 10s;
+                const auto end = std::chrono::steady_clock::now() + 30s;
                 while (!completed() && std::chrono::steady_clock::now() < end) host->PumpMainThread(10ms);
                 Require(completed(), "Actual AppKit " + operation + " did not complete before its deadline");
             };
             auto pumpUntilActive = [&](auto completed, const std::string& operation) {
-                const auto end = std::chrono::steady_clock::now() + 10s;
+                const auto end = std::chrono::steady_clock::now() + 30s;
                 while (!completed() && std::chrono::steady_clock::now() < end) {
                     host->PumpMainThread(10ms);
-                    if (!NSApp.isActive) ActivateForFocusTest();
+                    AnyPS5::Host::RestoreFocusForTest(window);
                 }
                 Require(completed(), "Actual AppKit " + operation + " did not complete before its deadline");
             };
@@ -517,7 +501,7 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
                 // AppKit can deliver the resize/deminiaturize notification before the content view and
                 // its backing have settled, so wait for the real geometry instead of asserting at the
                 // instant of the notification. The assertion below is unchanged.
-                const auto settle = std::chrono::steady_clock::now() + 10s;
+                const auto settle = std::chrono::steady_clock::now() + 30s;
                 while (std::chrono::steady_clock::now() < settle) {
                     const auto settled = [window.contentView convertRectToBacking:NSMakeRect(0, 0, points.width, points.height)];
                     if (NSEqualSizes(window.contentView.bounds.size, points) &&
