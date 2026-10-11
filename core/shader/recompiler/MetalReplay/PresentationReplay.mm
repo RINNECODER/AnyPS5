@@ -529,7 +529,12 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
                 Require(NSEqualSizes(window.contentView.bounds.size, points) &&
                         backing.size.width == points.width * window.backingScaleFactor &&
                         backing.size.height == points.height * window.backingScaleFactor,
-                        "Actual AppKit " + operation + " content/backing geometry differs");
+                        "Actual AppKit " + operation + " content/backing geometry differs: expected " +
+                        std::to_string(points.width) + "x" + std::to_string(points.height) + " points, content " +
+                        std::to_string(window.contentView.bounds.size.width) + "x" +
+                        std::to_string(window.contentView.bounds.size.height) + ", backing " +
+                        std::to_string(backing.size.width) + "x" + std::to_string(backing.size.height) +
+                        ", scale " + std::to_string(window.backingScaleFactor));
                 const auto width = zero ? 0u : static_cast<std::uint32_t>(backing.size.width);
                 const auto height = zero ? 0u : static_cast<std::uint32_t>(backing.size.height);
                 const auto observed = std::async(std::launch::async, [&] {
