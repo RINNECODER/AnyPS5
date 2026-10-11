@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SceTypes.hpp"
+#include "SceShaders.hpp"
 #include "prx/libSceAgc/Misc/include/PacketInfo.hpp"
 #include <cstdint>
 
@@ -192,4 +193,22 @@ int APS5_VABI sceAgcSetShRegIndirectPatchSetAddress(std::uint32_t* cmd, const vo
 int APS5_VABI sceAgcWaitRegMemPatchReference(std::uint32_t* cmd, std::uint64_t reference);
 int APS5_VABI sceAgcDmaDataPatchSetDstAddressOrOffset(std::uint32_t* cmd, std::uint64_t address);
 int APS5_VABI sceAgcSetShRegIndirectPatchSetNumRegisters(std::uint32_t* cmd, std::uint32_t numRegs);
+int APS5_VABI sceAgcBranchPatchSetThenTarget_0300(std::uint32_t* cmd, std::uint8_t cachePolicy, const volatile std::uint32_t* target, std::uint32_t sizeInDwords);
+int APS5_VABI sceAgcBranchPatchSetElseTarget_0300(std::uint32_t* cmd, std::uint8_t cachePolicy, const volatile std::uint32_t* target, std::uint32_t sizeInDwords);
+int APS5_VABI sceAgcAcquireMemSetEngine(std::uint32_t* cmd, std::uint32_t engine);
+// Marker spans: the text is `length` bytes, not NUL-terminated.
+std::uint32_t* APS5_VABI sceAgcDcbSetMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
+std::uint32_t* APS5_VABI sceAgcDcbPushMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
+std::uint32_t* APS5_VABI sceAgcAcbSetMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
+std::uint32_t* APS5_VABI sceAgcAcbPushMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
+std::uint32_t APS5_VABI sceAgcDcbBeginOcclusionQueryGetSize(std::uint8_t type);
+std::uint32_t APS5_VABI sceAgcDcbEndOcclusionQueryGetSize();
+int APS5_VABI sceAgcSetShaderInstrumentation(std::uint32_t flags);
+std::uint32_t APS5_VABI sceAgcGetShaderInstrumentation();
+// Shader helpers: they read Shader/special-register structs and write register
+// pairs, so the bridge passes host copies (see SceAgcImports.cpp).
+void* APS5_VABI sceAgcGetRegisterDefaults2(std::uint32_t version);
+void* APS5_VABI sceAgcGetRegisterDefaults2Internal(std::uint32_t version);
+int APS5_VABI sceAgcCreatePrimState(ShaderRegister* cxRegs, ShaderRegister* ucRegs, const Shader* hs, const Shader* gs, std::uint32_t primType);
+int APS5_VABI sceAgcUpdatePrimState(ShaderRegister* cxRegs, ShaderRegister* ucRegs, std::uint32_t primType);
 }
