@@ -102,6 +102,18 @@ bool Contains(const dl_phdr_info& image, std::uintptr_t begin, std::uint64_t siz
     return false;
 }
 
+// PT_DYNAMIC lives in a PT_LOAD without PF_R in PS5 executables, which the relinked image maps
+// without access; only read it when a readable segment covers it.
+bool Readable(const dl_phdr_info& image, std::uintptr_t begin, std::uint64_t size) {
+    for (std::uint16_t i = 0; i < image.dlpi_phnum; ++i) {
+        const auto& header = image.dlpi_phdr[i];
+        if (header.p_type != PT_LOAD || (header.p_flags & PF_R) == 0) continue;
+        const std::uintptr_t start = image.dlpi_addr + header.p_vaddr;
+        if (begin >= start && begin - start <= header.p_memsz && size <= header.p_memsz - (begin - start)) return true;
+    }
+    return false;
+}
+
 std::string ImageName(const dl_phdr_info& image) {
     std::string path = image.dlpi_name ? image.dlpi_name : "";
     if (path.empty()) {
@@ -148,7 +160,7 @@ void Fill(const dl_phdr_info& image, TInfo& info) {
                 info.eh_frame_hdr_size = ToU32(header.p_memsz, "eh_frame_hdr size");
                 info.eh_frame_addr = tables.frames;
                 info.eh_frame_size = ToU32(tables.framesSize + TerminatorSize, "eh_frame size");
-            } else if (header.p_type == PT_DYNAMIC) {
+            } else if (header.p_type == PT_DYNAMIC && Readable(image, address, header.p_memsz)) {
                 for (const auto* entry = reinterpret_cast<const ElfW(Dyn)*>(address); entry->d_tag != DT_NULL; ++entry) {
                     if (entry->d_tag == DT_INIT) info.init_proc_addr = image.dlpi_addr + entry->d_un.d_ptr;
                     else if (entry->d_tag == DT_FINI) info.fini_proc_addr = image.dlpi_addr + entry->d_un.d_ptr;

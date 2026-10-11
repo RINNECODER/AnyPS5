@@ -13,6 +13,7 @@ extern void ModuleTlsSet(u64 value);
 typedef struct { u64 st_size; char name[256]; int id; char rest[0x200]; } ModuleInfoEx;
 extern int scePthreadCreate(void** thread, const void* attr, void* (*entry)(void*), void* arg, const char* name);
 extern int scePthreadJoin(void* thread, void** value);
+extern int scePthreadCancel(void* thread);
 extern int sceKernelLoadStartModule(const char* path, u64 args, const void* argp, u32 flags, const void* option, int* result);
 extern int sceKernelDlsym(int handle, const char* symbol, void** address);
 extern int sceKernelGetModuleInfoFromAddr(u64 address, int flags, ModuleInfoEx* info);
@@ -85,5 +86,9 @@ EXPORT int GuestMain(u64 argc, char** argv) {
         for (u64 other = 0; other < index; ++other)
             if (mainTlsAddresses[index] == mainTlsAddresses[other]) return 32;
     if (mainTls != 0x700 + Threads || ModuleTlsGet() != 0x800 + Threads) return 33;
+    // A joined thread's handle is stale: cancelling it is ESRCH, not a use of freed memory.
+    if (scePthreadCancel(threads[0]) != (int)0x80020003) return 34;
+    // The executable's PT_DYNAMIC is only read when a readable PT_LOAD covers it.
+    if (sceKernelGetModuleInfoFromAddr((u64)GuestMain, 2, &info) != 0) return 35;
     return 0;
 }

@@ -726,9 +726,16 @@ void APS5_VABI scePthreadYield() {
 
 int APS5_VABI scePthreadCancel(Pthread thread) {
     if (!thread) return SCE_KERNEL_ERROR_ESRCH;
-    thread->cancelPending.store(true);
-    for (;;) {
+    // Titles cancel threads they have already joined. Like libthr, answer ESRCH for a handle that
+    // is no longer a live thread instead of touching freed memory; holding the registry lock keeps
+    // a live thread from being freed while it is woken.
+    auto& registry = CpuClocks();
+    for (bool first = true;; first = false) {
         {
+            std::lock_guard live(registry.lock);
+            if (std::none_of(registry.threads.begin(), registry.threads.end(), [&](const auto& entry) { return entry.second == thread; }))
+                return first ? SCE_KERNEL_ERROR_ESRCH : SCE_OK;
+            if (first) thread->cancelPending.store(true);
             std::lock_guard lock(thread->cancelLock);
             if (!thread->cancelWait) return SCE_OK;
             thread->cancelWait->NotifyAll();
