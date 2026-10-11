@@ -71,9 +71,7 @@ LIBRARIES = {
 NATIVE_PROVIDER = "core/cpu/src/SceLeafSystemImports.cpp"
 SCOPE_BUILDER = "core/cpu/tests/BuildLeafSystemLibsFixture.py"
 SKIP_REASONS = {
-    "sceSysmoduleGetModuleInfoForUnwind": "reads /proc/self/maps of the host process; host mappings say nothing about the guest",
-    "sceSaveDataMount3": "maps a save directory into the guest file system; needs GuestFiles save aliasing, not served yet",
-    "sceSaveDataUmount2": "releases a save mount; not served until sceSaveDataMount3 is",
+    "sceSysmoduleGetModuleInfoForUnwind": "reads /proc/self/maps of the host process; served from the guest module graph by platform KernelThreadExtras",
 }
 FORK_PROVIDERS = ("core/cpu/src/SceNpOfflineImports.cpp", NATIVE_PROVIDER)
 

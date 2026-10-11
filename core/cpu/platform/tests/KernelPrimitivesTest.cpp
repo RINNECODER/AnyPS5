@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "KernelPrimitives.hpp"
 #include <cpu/SceElf.hpp>
 #include <array>
@@ -72,6 +73,15 @@ void check(const std::vector<std::byte>& code) {
     require(s.call(0, 0x2200) == 0 && s.get(0x2200) != first, "Mutex re-init did not publish a fresh handle");
     const auto token = s.get(0x2200);
     require(first > 2 && token > 2 && token != 0x2200, "Mutex slot lacks opaque lifecycle token");
+    // Retail libc ORs flag bits into the object an initialized handle names (libthr heap objects),
+    // so the handle is a zeroed, writable guest object; guest writes there change no state.
+    std::array<std::byte, 128> object{};
+    s.machine.CheckAccess(token, object.size(), Permission::Read | Permission::Write);
+    s.machine.Read(token, object);
+    require(std::all_of(object.begin(), object.end(), [](std::byte b) { return b == std::byte{0}; }),
+            "Mutex handle does not name a zeroed guest object");
+    const std::uint32_t libcFlag = 0x100;
+    s.machine.Write(token + 32, std::as_bytes(std::span(&libcFlag, 1)));
     require(s.call(1, 0x2200) == 0, "Guest owner did not acquire mutex");
     s.active = 2;
     require(s.call(2, 0x2200) == 0x80020001, "Foreign guest thread unlocked mutex");

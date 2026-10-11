@@ -79,6 +79,7 @@ constexpr std::array<KernelThreadExtraImport, 65> inventory{{
     {"32KQRUK13kI", "sceCoredumpWriteUserString"}, {"DoKHmUw1yiQ", "sceCoredumpAttachUserMemoryFile"},
     {"+YX0z-GUSNw", "sceCoredumpAttachMemoryRegion"}}};
 static_assert(inventory.size() == static_cast<std::size_t>(Op::PosixBegin) + posixOps.size() + coredumpRows);
+constexpr KernelThreadExtraImport sysmoduleUnwind{"4fU5yvOkVG4", "sceSysmoduleGetModuleInfoForUnwind"};
 constexpr unsigned coredumpFirst = inventory.size() - coredumpRows;
 std::uint64_t posixResult(std::uint64_t code) {
     return code >= 0x80020000u && code < 0x80020100u ? code - 0x80020000u : code;
@@ -953,6 +954,23 @@ KernelThreadExtras::KernelThreadExtras(Machine& m, const std::shared_ptr<GuestTh
 KernelThreadExtras::~KernelThreadExtras() = default;
 void KernelThreadExtras::SetModuleSource(ModuleSource source) { impl->modules = std::move(source); }
 std::optional<std::uint64_t> KernelThreadExtras::Resolve(const SceImport& import, std::uint8_t type, std::uint64_t size) {
+    // libSceSysmodule's unwind lookup takes the same (address, flags, info) arguments and fills
+    // the same 0x130-byte record as sceKernelGetModuleInfoForUnwind, from the guest module graph.
+    if (import.Nid == sysmoduleUnwind.Nid) {
+        if (import.LibraryName != "libSceSysmodule" || import.ModuleName != "libSceSysmodule" ||
+            import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1)
+            return std::nullopt;
+        if (type != 2 || size != 0)
+            throw std::runtime_error("Unsupported kernel thread extras symbol type/size: " + import.Nid);
+        if (const auto found = impl->gates.find(import.Nid); found != impl->gates.end()) return found->second;
+        const auto gate = impl->trampolines.Add([weak = std::weak_ptr<Impl>(impl)](Machine& m) {
+            const auto state = weak.lock();
+            if (!state) throw std::runtime_error("Kernel thread extras provider expired");
+            m.Set(Register::Rax, state->invoke(Op::ModuleForUnwind, m));
+        });
+        impl->gates.emplace(import.Nid, gate);
+        return gate;
+    }
     unsigned op = 0;
     for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
     if (op == inventory.size()) return std::nullopt;

@@ -26,6 +26,8 @@ public:
     // Where POSIX aliases (open, read, stat, ...) store errno: the active guest thread's cell,
     // the same one __error returns. Without a provider they still return -1 but store nothing.
     void SetErrnoAddress(std::function<std::uint64_t()> provider);
+    // The guest file layer behind these imports, for providers that bind mounts (save data).
+    GuestFiles& Files();
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;
