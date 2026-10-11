@@ -58,6 +58,9 @@ public:
     void ActivateBeforeInitializers();
     // Every owner pump then drains window and controller input into this pad.
     void AttachPadInput(std::shared_ptr<PadHostInput>);
+    // Signals an EVFILT_USER event on a guest equeue from a guest host call (queue, event id, data);
+    // returns 0, or a guest errno value when the queue or event does not exist.
+    int TriggerUserEvent(std::uint64_t queue, std::int32_t id, std::uint64_t data);
     // Loaded module records for sceKernelGetModuleInfoFromAddr/ForUnwind,
     // queried when the guest calls them (the graph may be built after this runner).
     void SetModuleSource(std::function<std::span<const SceModuleRecord>()>);
