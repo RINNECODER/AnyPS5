@@ -46,6 +46,8 @@ public:
     // pump, so a blocked WaitEqueue never stalls other guest threads.
     std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t symbolType,
                                          std::uint64_t symbolSize = 0);
+    // Signals an EVFILT_USER subscription from a guest host call; 0, or the guest errno value on failure.
+    std::int32_t TriggerUserEvent(std::uint64_t queue, std::int32_t id, std::uint64_t data);
     std::int32_t AddGraphicsEvent(std::uint64_t handle, std::int32_t id, std::uint64_t udata);
     std::int32_t DeleteGraphicsEvent(std::uint64_t handle, std::int32_t id);
     // EVFILT_VIDEO_OUT (-13) subscriptions. The ident is the VideoOut event
