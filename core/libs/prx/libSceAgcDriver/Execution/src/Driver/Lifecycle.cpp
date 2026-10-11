@@ -55,6 +55,8 @@ void Driver::stop() {
 }
 
 Driver::Driver() {
+    // Driver teardown uses the write tracker; initialize it before this function-local static completes.
+    static_cast<void>(GuestMemory::TrackerGeneration());
     ShaderMemory::SetWaitedMsProvider(&Graphics::Recorder::ThreadWaitedMs);
     try {
         LibcRegisterShutdown_nid_postfix([] { Driver::Get().Shutdown(); });
