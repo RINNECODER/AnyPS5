@@ -328,12 +328,13 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
     void registerRange(Machine& guest, Contract operation, std::uint64_t buffer, std::uint32_t offset, std::uint64_t values,
                        std::uint32_t count) {
         std::vector<std::uint32_t> snapshot(count && count <= 0x3fff ? count : 0);
-        if (!snapshot.empty()) {
+        // Null values are valid upstream (zero placeholders patched later).
+        if (!snapshot.empty() && values) {
             address(values, snapshot.size() * 4, 4);
             guest.CheckAccess(values, snapshot.size() * 4, Permission::Read);
             guest.Read(values, std::as_writable_bytes(std::span(snapshot)));
         }
-        const auto* host = snapshot.empty() ? reinterpret_cast<const std::uint32_t*>(values) : snapshot.data();
+        const auto* host = snapshot.empty() || !values ? reinterpret_cast<const std::uint32_t*>(values) : snapshot.data();
         build(guest, buffer, operation, [&](CommandBuffer* cb) {
             return operation == Contract::CbSetShRegisterRangeDirect ? sceAgcCbSetShRegisterRangeDirect(cb, offset, host, count)
                                                                      : sceAgcCbSetUcRegisterRangeDirect(cb, offset, host, count);
