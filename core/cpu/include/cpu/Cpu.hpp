@@ -27,6 +27,12 @@ struct OwnedMappingView {
     std::uint64_t BackingIdentity;
     std::shared_ptr<void> Owner;
 };
+// Translated-code cache diagnostics (zero on backends that do not translate).
+struct CodeCacheStats {
+    std::uint64_t FullFlushes;        // whole-cache flushes
+    std::uint64_t CodeInvalidations;  // precise invalidations that hit translated code
+    std::uint64_t Translations;       // blocks translated so far
+};
 struct OwnedMappingSnapshot {
     std::shared_ptr<const void> Scope;
     std::uint64_t Generation;
@@ -82,6 +88,8 @@ public:
     void Protect(std::uint64_t address, std::size_t size, Permission permissions);
     void ProtectFragment(std::uint64_t address, std::size_t size, Permission permissions);
     std::vector<Mapping> Mappings() const;
+    // Owner thread only.
+    CodeCacheStats CodeCache() const;
     // Capture on the idle CPU owner. Descriptors describe this generation;
     // bytes remain live. Pins retain allocations, not guest address bindings:
     // callers must synchronize publication and retirement with CPU mutations.
