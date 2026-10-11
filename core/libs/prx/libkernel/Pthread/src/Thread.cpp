@@ -646,7 +646,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
 }
 
 int APS5_VABI scePthreadJoin(Pthread thread, void** retval) {
-    if (!thread) throw std::runtime_error("scePthreadJoin: null thread");
+    if (!thread) return SCE_KERNEL_ERROR_EINVAL;
     if (thread->_detached) return SCE_KERNEL_ERROR_EINVAL;
     if (thread == CurrentGuestState().current) return SCE_KERNEL_ERROR_EDEADLK;
     ThreadCancel::Check();
@@ -669,7 +669,7 @@ int APS5_VABI scePthreadJoin(Pthread thread, void** retval) {
 }
 
 int APS5_VABI scePthreadDetach(Pthread thread) {
-    if (!thread) throw std::runtime_error("scePthreadDetach: null thread");
+    if (!thread) return SCE_KERNEL_ERROR_EINVAL;
     if (thread->_detached) return SCE_KERNEL_ERROR_EINVAL;
     thread->_detached = true;
 #ifdef _WIN32
