@@ -136,7 +136,7 @@ EXPORT __attribute__((noreturn)) void _start(void) {
    R[84]=(u32)sema_signal((u32)sema.value,1);R[85]=(u32)sema_wait(sema.value^0x100000000ULL,1,0);
    R[86]=(u32)sema_delete((u32)sema.value);
    u64 invalid=0xfeedbeefdeadbeefULL;
-   R[87]=(u32)sema_create(&invalid,relocatedLabel,1,0,3,0);R[88]=(u32)sema_create(&invalid,relocatedLabel,0,0,3,(void*)1);
+   R[87]=(u32)sema_create(&invalid,relocatedLabel,3,0,3,0);R[88]=(u32)sema_create(&invalid,relocatedLabel,0,0,3,(void*)1);
    R[89]=invalid;R[93]=(u32)sema_create(&invalid,relocatedLabel,0,-1,3,0);
    R[94]=(u32)sema_create(&invalid,relocatedLabel,0,4,3,0);R[95]=(u32)sema_create(&invalid,relocatedLabel,0,0,0,0);
   }

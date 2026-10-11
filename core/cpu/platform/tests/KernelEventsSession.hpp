@@ -4,6 +4,7 @@
 #include <cpu/SceAgcImports.hpp>
 #include <cpu/SceLifecycleImports.hpp>
 #include <cpu/SceThreadImports.hpp>
+#include <cpu/SceVideoOutImports.hpp>
 #include <array>
 #include <cstring>
 #include <iostream>
@@ -34,6 +35,7 @@ struct Session {
     Cpu::SceLifecycleImports lifecycle{machine};
     std::unique_ptr<Cpu::Platform::KernelEvents> queues;
     std::unique_ptr<Cpu::SceAgcImports> graphics;
+    std::unique_ptr<Cpu::SceVideoOutImports> videoOut;
     std::unique_ptr<Cpu::SceModules> graph;
     alignas(65536) std::array<std::byte,65536> page{};
     std::uint64_t address=0;
@@ -60,22 +62,29 @@ struct Session {
         };
         const std::array sourceContracts{Cpu::AgcAbiContract::DeleteEqEvent};
         graphics=std::make_unique<Cpu::SceAgcImports>(machine,std::move(eventBackend),sourceContracts);
+        // sceVideoOutWaitVblank as the native runner routes it: parked in this provider.
+        Cpu::SceVideoOutBackend videoBackend;
+        videoBackend.WaitVblank=[this](std::int32_t output){ queues->WaitVideoOutVblank(output); return 0; };
+        videoOut=std::make_unique<Cpu::SceVideoOutImports>(machine,std::move(videoBackend));
         const std::array hosts{
             Cpu::SceHostModule{"libkernel.prx",{"libkernel",0,1,1},{{"libkernel",0,1}}},
-            Cpu::SceHostModule{"libSceAgcDriver.prx",{"libSceAgcDriver",0,1,1},{{"libSceAgcDriver",0,1}}}};
+            Cpu::SceHostModule{"libSceAgcDriver.prx",{"libSceAgcDriver",0,1,1},{{"libSceAgcDriver",0,1}}},
+            Cpu::SceHostModule{"libSceVideoOut.prx",{"libSceVideoOut",0,1,1},{{"libSceVideoOut",0,1}}}};
         graph=std::make_unique<Cpu::SceModules>(machine,Cpu::SceModuleFile{path,Bias},
             std::span<const Cpu::SceModuleFile>{},hosts,
             [&](const auto& row,std::uint8_t type)->std::optional<Cpu::SceResolvedImport>{
                 require(type==2,"Event fixture lost genuine linked STT_FUNC");
                 if(row.ModuleName=="libSceAgcDriver")
                     return Cpu::SceResolvedImport{graphics->Resolve(row,type,0),type};
+                if(row.ModuleName=="libSceVideoOut")
+                    return Cpu::SceResolvedImport{videoOut->ResolvePublicFixture(row),type};
                 if(const auto gate=queues->Resolve(row,type)) return Cpu::SceResolvedImport{*gate,type};
                 if(const auto gate=imports.Resolve(row,type)) return Cpu::SceResolvedImport{*gate,type};
                 if(const auto gate=lifecycle.Resolve(row)) return Cpu::SceResolvedImport{*gate,type};
                 return std::nullopt;
             });
         const auto& image=graph->Modules()[0].Image;
-        require(image.Imports.size()==9 && image.NeededFiles.empty() && image.Tls,
+        require(image.Imports.size()==10 && image.NeededFiles.empty() && image.Tls,
                 "Event fixture import/TLS graph differs");
         require(std::set<std::uint32_t>(image.RelocationTypes.begin(),image.RelocationTypes.end())==
                 std::set<std::uint32_t>{7,8},"Event fixture lacks genuine PLT/RELATIVE relocations");
@@ -95,7 +104,7 @@ struct Session {
         },std::chrono::milliseconds(500));
         graph->SetExecutor(threads->ModuleExecutor()); graph->InitializeDependencies();
     }
-    ~Session() { graphics.reset(); queues.reset(); if(!withdrawn)threads->Withdraw(); }
+    ~Session() { videoOut.reset(); graphics.reset(); queues.reset(); if(!withdrawn)threads->Withdraw(); }
     void withdraw(){threads->Withdraw();withdrawn=true;}
     State state() const { State r{};machine.Read(address,std::as_writable_bytes(std::span(r)));return r; }
     void put(std::uint64_t p,std::uint64_t value) { machine.Write(p,std::as_bytes(std::span(&value,1))); }

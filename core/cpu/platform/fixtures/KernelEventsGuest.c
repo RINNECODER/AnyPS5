@@ -11,7 +11,9 @@ extern void thread_yield(void);
 extern int thread_join(u64, void**);
 extern u64 thread_self(void);
 extern __attribute__((noreturn)) void process_exit(int);
+extern int vblank_wait(int);
 __asm__(".type queue_create,@function\n.type queue_delete,@function\n.type queue_wait,@function\n.type graphics_delete,@function\n"
+        ".type vblank_wait,@function\n"
         ".type thread_create,@function\n.type thread_yield,@function\n.type thread_join,@function\n"
         ".type thread_self,@function\n.type process_exit,@function\n");
 EXPORT volatile u64 KernelEventsReceipt[160];
@@ -75,7 +77,15 @@ EXPORT int _start(void) {
         r[49] = (u32)queue_wait(r[2], (void*)(r[6]+4080), 2, count, (const u32*)&r[22]);
         process_exit(12);
     }
-    if (r[1] == 1) {
+    if(r[1] == 16) {
+        /* sceVideoOutWaitVblank parks only this thread; the child keeps running. */
+        r[31] = (u32)thread_create(&child, 0, worker, (void*)0x5566778899aabbccULL, relocated_name);
+        r[3] = 4;
+        r[54] = (u32)vblank_wait((int)r[55]);
+        r[5] = 1;
+        r[56] = r[8];
+        r[35] = (u32)thread_join(child, &payload); r[36] = (u64)payload;
+    } else if (r[1] == 1) {
         r[17] = (u32)queue_wait(r[2], out, 2, count, (const u32*)&r[20]);
         r[18] = *(u32*)count;
         r[20] = 0xfeedbeef00001388ULL; /* 5000 microseconds, upper guard immutable. */

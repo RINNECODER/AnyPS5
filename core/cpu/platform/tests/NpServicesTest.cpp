@@ -1,6 +1,5 @@
 #include "../NpServices.hpp"
 #include <cpu/SceElf.hpp>
-#include <cpu/SceNpLocalImports.hpp>
 #include <array>
 #include <fstream>
 #include <iostream>
@@ -41,9 +40,8 @@ std::vector<std::byte> read(Cpu::Machine& machine, std::uint64_t address, std::s
 // untouched identity output, CALL/RET continuation, and provider page cleanup.
 // Regression: resolving the wrong scope, inventing an identity/success, writing
 // an offline buffer, returning the wrong signed error, or leaking an owned gate.
-// Existing SceNpLocalImportsTest rejects this NID and cannot execute this branch.
 // No production test seam: Resolve and the real Machine guest execution API only.
-void exercise(const char* path, bool baseline) {
+void exercise(const char* path) {
     std::ifstream stream(path, std::ios::binary);
     require(bool(stream), "Cannot read compiled x86 guest flat text");
     const std::vector<char> source{std::istreambuf_iterator<char>(stream), {}};
@@ -56,12 +54,6 @@ void exercise(const char* path, bool baseline) {
     machine.Map(0x6000, 4096, rw);
     const std::vector<std::byte> sentinel(64, std::byte{0xa7});
     machine.Write(0x6000, sentinel);
-    if (baseline) {
-        Cpu::SceNpLocalImports previous(machine);
-        // Must fail at missing old service, before any candidate implementation.
-        (void)previous.Resolve(qualified()).value();
-        throw std::runtime_error("Baseline unexpectedly resolved missing NP query");
-    }
     auto services = std::make_unique<Cpu::Platform::NpServices>(machine);
     const auto original = qualified();
     const auto gate = services->Resolve(original, 2).value();
@@ -135,8 +127,8 @@ void exercise(const char* path, bool baseline) {
 }
 int main(int argc, char** argv) {
     try {
-        require(argc >= 2, "Usage: NpServicesTest <flat-x86-text> [--baseline]");
-        exercise(argv[1], argc >= 3 && std::string(argv[2]) == "--baseline");
+        require(argc >= 2, "Usage: NpServicesTest <flat-x86-text>");
+        exercise(argv[1]);
         std::cout << "PASS compiled x86 offline NP query, untouched output, exact scope/type and owned gate cleanup\n";
         return 0;
     } catch (const std::exception& e) {

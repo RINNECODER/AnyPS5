@@ -17,7 +17,7 @@ using Cpu::Register;
 constexpr auto rw = Permission::Read | Permission::Write;
 constexpr auto rx = Permission::Read | Permission::Execute;
 constexpr std::uint64_t parameterError = 0xffffffff80a10003ULL;
-constexpr std::uint64_t unavailable = 0xffffffff80a10002ULL;
+constexpr std::uint64_t noEvent = 0xffffffff80a10004ULL;
 void require(bool condition, const char* message) { if (!condition) throw std::runtime_error(message); }
 template<class Function> void rejects(Function&& function, const char* expected) {
     try { function(); }
@@ -59,19 +59,6 @@ struct Session {
     std::uint64_t call(const char* nid, std::uint64_t first = 0, std::uint64_t second = 0, std::uint64_t third = 0) {
         return callGate(gate(nid), first, second, third);
     }
-    void callerFailureBranch(std::uint64_t address, std::uint64_t pointer, bool negative) {
-        require(callGate(address, pointer, pointer, pointer) == unavailable,
-                "Unavailable system service did not return its full signed error to the guest");
-        // Exercise the observed nonzero/negative error policy through native x86 branches.
-        // Launch uses TEST/SETE in the title; JNE exercises its equivalent nonzero predicate here.
-        // EBX distinguishes the success path (0x44) from the error continuation (0x66).
-        const std::array<std::uint8_t, 16> branch{
-            0x85, 0xc0, std::uint8_t(negative ? 0x78 : 0x75), 0x07,
-            0xbb, 0x44, 0, 0, 0, 0xeb, 0x05, 0xbb, 0x66, 0, 0, 0};
-        machine.Write(0x1040, std::as_bytes(std::span(branch)));
-        require(machine.Run(0x1040, 0x1050, 100) == Cpu::StopReason::Address && machine.Get(Register::Rbx) == 0x66,
-                "Guest EAX branch did not enter the unavailable-service failure continuation");
-    }
     std::vector<std::uint8_t> bytes(std::uint64_t address, std::size_t count) {
         std::vector<std::uint8_t> result(count);
         machine.Read(address, std::as_writable_bytes(std::span(result))); return result;
@@ -82,30 +69,29 @@ struct Session {
     }
 };
 
-// Contract: declared English/UTC/summertime profile marshals LE integers atomically, with signed parameter errors.
-// Regression: native-width writes, invented unknown-ID success, or writing before the complete span is checked.
-// Existing user/kernel tests do not cover system profile IDs; this is the public x86 gate boundary without mocks.
+// Contract: the virtual console profile answers every integer ID with four LE bytes and OK, including
+// ENTER_BUTTON_ASSIGN (1000 -> Cross) and DATE/TIME_FORMAT/PARENTAL; unknown IDs read as 0 like upstream.
+// Regression: a host exception for an ID nearly every title queries at boot, native-width writes, or writing
+// before the complete span is checked. This is the public x86 gate boundary without mocks.
 void integerParameters() {
     Session session;
-    for (const auto [id, expected] : std::array<std::pair<std::uint64_t, std::uint8_t>, 3>{{{1, 1}, {4, 0}, {5, 0}}}) {
+    for (const auto [id, expected] : std::array<std::pair<std::uint64_t, std::uint8_t>, 10>{{
+             {1, 1}, {2, 1}, {3, 1}, {4, 0}, {5, 0}, {7, 0}, {1000, 1}, {6, 0}, {999, 0}, {0xffffffff00000001ULL, 1}}}) {
         session.fill(0x3000, 8);
-        require(session.call("fZo48un7LK4", id, 0x3001) == 0, "Supported integer profile parameter failed");
+        require(session.call("fZo48un7LK4", id, 0x3001) == 0, "Integer profile parameter did not return OK");
         require(session.bytes(0x3000, 6) == std::vector<std::uint8_t>{0xa7, expected, 0, 0, 0, 0xa7},
-                "Integer output was not exactly four little-endian bytes at an unaligned guest address");
+                "Integer output was not the profile value as four little-endian bytes at an unaligned guest address");
     }
     session.fill(0x6ffe, 2);
-    require(session.call("fZo48un7LK4", 1, 0x6ffe) == parameterError, "Integer output accepted an unmapped suffix");
+    require(session.call("fZo48un7LK4", 1000, 0x6ffe) == parameterError, "Integer output accepted an unmapped suffix");
     require(session.bytes(0x6ffe, 2) == std::vector<std::uint8_t>(2, 0xa7), "Integer output partially wrote before unmapped suffix");
     session.machine.Map(0x7000, 4096, Permission::Read); session.fill(0x6ffe, 4);
     for (const auto address : std::array<std::uint64_t, 5>{0, 0x9000, 0x7000, 0x6ffe, std::numeric_limits<std::uint64_t>::max() - 1}) {
         require(session.call("fZo48un7LK4", 1, address) == parameterError, "Bad integer span lost signed parameter error");
         require(session.bytes(0x6ffe, 4) == std::vector<std::uint8_t>(4, 0xa7), "Rejected integer span changed valid bytes");
     }
-    session.fill(0x3000, 8);
-    rejects([&] { session.call("fZo48un7LK4", 2, 0x3000); }, "Unsupported SCE system service integer parameter");
-    require(session.bytes(0x3000, 8) == std::vector<std::uint8_t>(8, 0xa7), "Unknown integer ID fabricated output");
     session.machine.Protect(0x7000, 4096, rw);
-    require(session.call("fZo48un7LK4", 1, 0x6ffe) == 0 && session.bytes(0x6ffe, 4) == std::vector<std::uint8_t>{1, 0, 0, 0},
+    require(session.call("fZo48un7LK4", 1000, 0x6ffe) == 0 && session.bytes(0x6ffe, 4) == std::vector<std::uint8_t>{1, 0, 0, 0},
             "Integer output rejected adjacent writable guest mappings");
 }
 
@@ -152,27 +138,50 @@ void stringParameters() {
             session.bytes(0x1000000 + maximum - 1, 1) == std::vector<std::uint8_t>{0xa7}, "Maximum name capacity clobbered caller tail");
 }
 
-// Contract: unavailable status/event/HDR/launch return a signed error without touching guest arguments or outputs.
-// Regression: throwing aborts the real caller's error continuation, dereferencing invalid arguments faults, or success invents readiness.
-// The previous exception assertions could not prove guest error branches; initialization ABI remains explicitly unsupported.
-void restrictedServicesAndLifetime() {
+// Contract: GetStatus zeroes the full 136-byte status and returns OK; ReceiveEvent returns the signed NO_EVENT
+// code without touching its buffer; HDR reports SDR reference white (100/100/0 nits as LE floats); the player
+// dialog initializer and launcher accept a non-null parameter. Every null pointer returns the signed parameter
+// error, and unwritable outputs are rejected before any byte is written.
+// Regression: per-frame GetStatus == OK checks taking error paths, ReceiveEvent reporting a hard failure instead
+// of "no event", or the dialog initializer aborting the host process.
+void statusEventsAndDialogs() {
     Session session;
     const auto splash = session.gate("Vo5V8KAwCmk");
     require(session.callGate(splash) == 0 && session.callGate(splash) == 0, "Hide splash was not idempotent success");
-    for (const auto [nid, negative] : std::array<std::pair<const char*, bool>, 4>{{
-             {"uaieF+glFPs", false}, {"rPo6tV8D9bM", false}, {"656LMQSrg6U", true}, {"mPpPxv5CZt4", false}}}) {
-        const auto gate = session.gate(nid);
-        session.machine.CheckAccess(gate, 1, Permission::Execute);
+    struct Output { const char* nid; std::vector<std::uint8_t> expected; };
+    const std::vector<Output> outputs{
+        {"rPo6tV8D9bM", std::vector<std::uint8_t>(136, 0)},
+        {"mPpPxv5CZt4", {0, 0, 0xc8, 0x42, 0, 0, 0xc8, 0x42, 0, 0, 0, 0}}};
+    for (const auto& output : outputs) {
+        const auto size = output.expected.size();
         session.fill(0x3000, 256);
-        for (const auto pointer : std::array<std::uint64_t, 4>{0x3000, 0, 0x9000, std::numeric_limits<std::uint64_t>::max() - 1}) {
-            session.callerFailureBranch(gate, pointer, negative);
-            require(session.bytes(0x3000, 256) == std::vector<std::uint8_t>(256, 0xa7), "Unavailable service changed guest output");
-        }
+        require(session.call(output.nid, 0x3003) == 0, "Status/HDR query did not return OK");
+        require(session.bytes(0x3003, size) == output.expected, "Status/HDR output differs from the independent ABI oracle");
+        require(session.bytes(0x3002, 1) == std::vector<std::uint8_t>{0xa7} &&
+                session.bytes(0x3003 + size, 1) == std::vector<std::uint8_t>{0xa7}, "Status/HDR wrote outside its declared span");
+        const std::uint64_t boundary = 0x7000 - size / 2;
+        session.fill(boundary, size / 2);
+        for (const auto address : std::array<std::uint64_t, 4>{0, boundary, 0x9000, std::numeric_limits<std::uint64_t>::max() - 1})
+            require(session.call(output.nid, address) == parameterError, "Bad status/HDR span lost signed parameter error");
+        require(session.bytes(boundary, size / 2) == std::vector<std::uint8_t>(size / 2, 0xa7),
+                "Status/HDR partially wrote before rejecting an unmapped suffix");
     }
+    // Native x86 consumers branch on the sign of EAX: NO_EVENT is negative and must reach the "no event" path.
     session.fill(0x3000, 256);
-    rejects([&] { session.call("m5CYKX20wfg", 0x3000); },
-            "Unsupported SCE system service invocation: sceSystemServiceInitializePlayerDialogParam");
-    require(session.bytes(0x3000, 256) == std::vector<std::uint8_t>(256, 0xa7), "Unsupported dialog initializer changed guest output");
+    require(session.call("656LMQSrg6U", 0x3000) == noEvent, "ReceiveEvent did not return signed NO_EVENT");
+    require(session.bytes(0x3000, 256) == std::vector<std::uint8_t>(256, 0xa7), "ReceiveEvent changed its event buffer");
+    const std::array<std::uint8_t, 16> branch{
+        0x85, 0xc0, 0x78, 0x07, 0xbb, 0x44, 0, 0, 0, 0xeb, 0x05, 0xbb, 0x66, 0, 0, 0};
+    session.machine.Write(0x1040, std::as_bytes(std::span(branch)));
+    require(session.machine.Run(0x1040, 0x1050, 100) == Cpu::StopReason::Address && session.machine.Get(Register::Rbx) == 0x66,
+            "Guest EAX sign branch did not take the no-event continuation");
+    require(session.call("656LMQSrg6U", 0) == parameterError, "Null event buffer lost signed parameter error");
+    for (const auto nid : {"m5CYKX20wfg", "uaieF+glFPs"}) {
+        session.fill(0x3000, 256);
+        require(session.call(nid, 0x3000) == 0, "Player dialog parameter call did not return OK");
+        require(session.bytes(0x3000, 256) == std::vector<std::uint8_t>(256, 0xa7), "Player dialog call changed its parameter");
+        require(session.call(nid, 0) == parameterError, "Null player dialog parameter lost signed parameter error");
+    }
     // Distinct resolver ownership: preserve qualified local-ID cache and leave unrelated namespaces to other resolvers.
     const auto original = qualified("Vo5V8KAwCmk");
     require(session.imports->Resolve(original).value() == splash, "Qualified system gate cache changed function address");
@@ -200,8 +209,8 @@ void restrictedServicesAndLifetime() {
 }
 int main() {
     try {
-        integerParameters(); stringParameters(); restrictedServicesAndLifetime();
-        std::cout << "PASS actual x86 system-service gates, fixed profile ABI, capacity safety and explicit restrictions\n";
+        integerParameters(); stringParameters(); statusEventsAndDialogs();
+        std::cout << "PASS actual x86 system-service gates, console profile defaults, status/event/HDR ABI, capacity safety and scope\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
 }

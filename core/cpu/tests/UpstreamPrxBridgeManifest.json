@@ -1,0 +1,522 @@
+{
+  "libSceNpAuth": {
+    "bridged": {
+      "sceNpAuthAbortRequest": {
+        "nid": "cE7wIsqXdZ8",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int req_id)"
+      },
+      "sceNpAuthCreateAsyncRequest": {
+        "nid": "N+mr7GjTvr8",
+        "returns": [
+          "g_nextRequest.fetch_add(1, std::memory_order_relaxed)"
+        ],
+        "signature": "int(const void* param)"
+      },
+      "sceNpAuthDeleteRequest": {
+        "nid": "H8wG9Bk-nPc",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int req_id)"
+      },
+      "sceNpAuthGetAuthorizationCodeV3": {
+        "nid": "KI4dHLlTNl0",
+        "returns": [
+          "0x80550003",
+          "0x80550006"
+        ],
+        "signature": "int(int req_id, const void* param, void* auth_code, int* issuer_id)"
+      },
+      "sceNpAuthPollAsync": {
+        "nid": "gjSyfzSsDcE",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int req_id, int* result)"
+      }
+    },
+    "skipped": {
+      "sceNpAuthCreateRequest": "NotImplemented upstream",
+      "sceNpAuthGetIdTokenV3": "NotImplemented upstream",
+      "sceNpAuthWaitAsync": "NotImplemented upstream"
+    }
+  },
+  "libSceNpEntitlementAccess": {
+    "bridged": {
+      "sceNpEntitlementAccessAbortRequest": {
+        "nid": "HFcQl9TMcFQ",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpEntitlementAccessDeleteRequest": {
+        "nid": "Z0eQj8m7XA8",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpEntitlementAccessGenerateTransactionId": {
+        "nid": "IQtb-TaIjSM",
+        "returns": [
+          "0x80550006",
+          "0x80558003"
+        ],
+        "signature": "int(void* transaction_id)"
+      },
+      "sceNpEntitlementAccessGetAddcontEntitlementInfo": {
+        "nid": "xddD23+8TfQ",
+        "returns": [
+          "0",
+          "0x80558003",
+          "0x80558007"
+        ],
+        "signature": "int(uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label, NpEntitlementAccessAddcontEntitlementInfo* info)"
+      },
+      "sceNpEntitlementAccessGetAddcontEntitlementInfoList": {
+        "nid": "TFyU+KFBv54",
+        "returns": [
+          "0",
+          "0x80558003"
+        ],
+        "signature": "int(uint32_t service_label, NpEntitlementAccessAddcontEntitlementInfo* list, uint32_t list_num, uint32_t* hit_num)"
+      },
+      "sceNpEntitlementAccessGetEntitlementKey": {
+        "nid": "5LiMEPuW0DQ",
+        "returns": [
+          "0x817d0002",
+          "0x817d0007"
+        ],
+        "signature": "int(uint32_t serviceLabel, const NpUnifiedEntitlementLabel* entitlementLabel, NpEntitlementAccessEntitlementKey* key)"
+      },
+      "sceNpEntitlementAccessGetSkuFlag": {
+        "nid": "lPDO62PpJIA",
+        "returns": [
+          "0",
+          "0x80558003"
+        ],
+        "signature": "int(uint32_t* sku_flag)"
+      },
+      "sceNpEntitlementAccessInitialize": {
+        "nid": "jO8DM8oyego",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(const NpEntitlementAccessInitParam* init_param, NpEntitlementAccessBootParam* boot_param)"
+      },
+      "sceNpEntitlementAccessPollConsumeEntitlement": {
+        "nid": "69u+XqsoNd0",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int()"
+      },
+      "sceNpEntitlementAccessPollServiceEntitlementInfoList": {
+        "nid": "aFv8qms6XTM",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int()"
+      },
+      "sceNpEntitlementAccessPollUnifiedEntitlementInfoList": {
+        "nid": "nAEqawEZG5s",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int()"
+      },
+      "sceNpEntitlementAccessRequestConsumeServiceEntitlement": {
+        "nid": "Aqae0TjLvQU",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int()"
+      },
+      "sceNpEntitlementAccessRequestConsumeUnifiedEntitlement": {
+        "nid": "eOxGbG3sPb0",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int()"
+      },
+      "sceNpEntitlementAccessRequestServiceEntitlementInfoList": {
+        "nid": "brbRxzr7qyI",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int()"
+      },
+      "sceNpEntitlementAccessRequestUnifiedEntitlementInfoList": {
+        "nid": "uCZf2L27th8",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int()"
+      }
+    },
+    "skipped": {
+      "sceNpEntitlementAccessGetPftFlag": "NotImplemented upstream",
+      "sceNpEntitlementAccessPollServiceEntitlementInfo": "NotImplemented upstream",
+      "sceNpEntitlementAccessPollUnifiedEntitlementInfo": "NotImplemented upstream",
+      "sceNpEntitlementAccessRequestServiceEntitlementInfo": "NotImplemented upstream",
+      "sceNpEntitlementAccessRequestUnifiedEntitlementInfo": "NotImplemented upstream"
+    }
+  },
+  "libSceNpManager": {
+    "bridged": {
+      "sceNpAbortRequest": {
+        "nid": "OzKvTvg3ZYU",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int req_id)"
+      },
+      "sceNpCheckCallback": {
+        "nid": "3Zl8BePTh9Y",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpCheckNpAvailability": {
+        "nid": "2rsFmlGWleQ",
+        "returns": [
+          "0x80550003",
+          "0x80550007"
+        ],
+        "signature": "int(int req_id, const NpOnlineId* online_id)"
+      },
+      "sceNpCheckNpReachability": {
+        "nid": "KfGZg2y73oM",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int(int req_id, int user_id)"
+      },
+      "sceNpCheckPremium": {
+        "nid": "O80NrhUOPGY",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int(int req_id, const NpCheckPremiumParameter* param, NpCheckPremiumResult* result)"
+      },
+      "sceNpCreateAsyncRequest": {
+        "nid": "eiqMCt9UshI",
+        "returns": [
+          "AddRequest()"
+        ],
+        "signature": "int(const NpCreateAsyncRequestParameter* param)"
+      },
+      "sceNpCreateRequest": {
+        "nid": "GpLQDNKICac",
+        "returns": [
+          "AddRequest()"
+        ],
+        "signature": "int()"
+      },
+      "sceNpDeleteRequest": {
+        "nid": "S7QTn72PrDw",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int req_id)"
+      },
+      "sceNpGetAccountAge": {
+        "nid": "+4DegjBqV1g",
+        "returns": [
+          "0x80550003",
+          "0x80550006"
+        ],
+        "signature": "int(int req_id, int user_id, uint8_t* age)"
+      },
+      "sceNpGetAccountCountryA": {
+        "nid": "JT+t00a3TxA",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int(int user_id, void* country_code)"
+      },
+      "sceNpGetAccountIdA": {
+        "nid": "rbknaUjpqWo",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int(int user_id, uint64_t* account_id)"
+      },
+      "sceNpGetAccountLanguage2": {
+        "nid": "3Tcz5bNCfZQ",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int(int req_id, int user_id, void* language)"
+      },
+      "sceNpGetNpId": {
+        "nid": "p-o74CnoNzY",
+        "returns": [
+          "0x80550003",
+          "0x80550006"
+        ],
+        "signature": "int(int user_id, NpId* np_id)"
+      },
+      "sceNpGetNpReachabilityState": {
+        "nid": "e-ZuhGEoeC4",
+        "returns": [
+          "0",
+          "0x80550003"
+        ],
+        "signature": "int(int user_id, uint32_t* state)"
+      },
+      "sceNpGetOnlineId": {
+        "nid": "XDncXQIJUSk",
+        "returns": [
+          "0x80550006"
+        ],
+        "signature": "int(int user_id, NpOnlineId* online_id)"
+      },
+      "sceNpGetState": {
+        "nid": "eQH7nWPcAgc",
+        "returns": [
+          "0",
+          "0x80550003"
+        ],
+        "signature": "int(int user_id, uint32_t* state)"
+      },
+      "sceNpHasSignedUp": {
+        "nid": "Oad3rvY-NJQ",
+        "returns": [
+          "0",
+          "0x80550003"
+        ],
+        "signature": "int(int user_id, bool* has_signed_up)"
+      },
+      "sceNpNotifyPremiumFeature": {
+        "nid": "P6piso307SE",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(const void* param)"
+      },
+      "sceNpPollAsync": {
+        "nid": "uqcPJLWL08M",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int req_id, int* result)"
+      },
+      "sceNpSetNpTitleId": {
+        "nid": "Ec63y59l9tw",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(const NpTitleId* title_id, const NpTitleSecret* title_secret)"
+      },
+      "sceNpSetTimeout": {
+        "nid": "-QglDeRr8D8",
+        "returns": [
+          "0x80550003",
+          "liveRequests.count(reqId) ? 0 : 0x80550014",
+          "timeout != 0 && timeout < minimum"
+        ],
+        "signature": "int(int reqId, int32_t resolveRetry, uint32_t resolveTimeout, uint32_t connTimeout, uint32_t sendTimeout, uint32_t recvTimeout)"
+      },
+      "sceNpUnregisterPremiumEventCallback": {
+        "nid": "-Rjp3-YViXc",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpUnregisterStateCallback": {
+        "nid": "mjjTXh+NHWY",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpUnregisterStateCallbackA": {
+        "nid": "M3wFXbYQtAA",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int callback_id)"
+      }
+    },
+    "skipped": {
+      "sceNpGetUserIdByAccountId": "NotImplemented upstream; hand-written in SceNpOfflineImports",
+      "sceNpRegisterGamePresenceCallback": "callback; NotImplemented upstream; hand-written in SceNpOfflineImports",
+      "sceNpRegisterNpReachabilityStateCallback": "callback; hand-written in SceNpOfflineImports",
+      "sceNpRegisterPlusEventCallback": "callback; hand-written in SceNpOfflineImports",
+      "sceNpRegisterPremiumEventCallback": "callback; hand-written in SceNpOfflineImports",
+      "sceNpRegisterStateCallback": "callback; hand-written in SceNpOfflineImports",
+      "sceNpRegisterStateCallbackA": "callback; hand-written in SceNpOfflineImports",
+      "sceNpSetContentRestriction": "NotImplemented upstream; hand-written in SceNpOfflineImports",
+      "sceNpUnregisterNpReachabilityStateCallback": "shares registration state with sceNpRegisterNpReachabilityStateCallback; hand-written in SceNpOfflineImports"
+    }
+  },
+  "libSceNpWebApi2": {
+    "bridged": {
+      "sceNpWebApi2AbortRequest": {
+        "nid": "zpiPsH7dbFQ",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int64_t request_id)"
+      },
+      "sceNpWebApi2AddHttpRequestHeader": {
+        "nid": "egOOvrnF6mI",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int64_t request_id, const char* field_name, const char* value)"
+      },
+      "sceNpWebApi2CheckTimeout": {
+        "nid": "3Tt9zL3tkoc",
+        "returns": [],
+        "signature": "void()"
+      },
+      "sceNpWebApi2CreateRequest": {
+        "nid": "3EI-OSJ65Xc",
+        "returns": [
+          "0",
+          "0x80553402"
+        ],
+        "signature": "int(int user_context_id, const char* api_group, const char* path, const char* method, const void* content_parameter, int64_t* request_id)"
+      },
+      "sceNpWebApi2CreateUserContext": {
+        "nid": "sk54bi6FtYM",
+        "returns": [
+          "g_nextHandle.fetch_add(1, std::memory_order_relaxed)"
+        ],
+        "signature": "int(int lib_ctx_id, int user_id)"
+      },
+      "sceNpWebApi2DeleteRequest": {
+        "nid": "vvzWO-DvG1s",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int64_t request_id)"
+      },
+      "sceNpWebApi2DeleteUserContext": {
+        "nid": "9X9+cneTGUU",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int user_context_id)"
+      },
+      "sceNpWebApi2GetHttpResponseHeaderValue": {
+        "nid": "hksbskNToEA",
+        "returns": [
+          "0x80553406"
+        ],
+        "signature": "int(int64_t request_id, const char* field_name, char* value, size_t value_size)"
+      },
+      "sceNpWebApi2GetHttpResponseHeaderValueLength": {
+        "nid": "HwP3aM+c85c",
+        "returns": [
+          "0x80553406"
+        ],
+        "signature": "int(int64_t request_id, const char* field_name, size_t* value_length)"
+      },
+      "sceNpWebApi2Initialize": {
+        "nid": "+o9816YQhqQ",
+        "returns": [
+          "g_nextHandle.fetch_add(1, std::memory_order_relaxed)"
+        ],
+        "signature": "int(int lib_http_ctx_id, size_t pool_size)"
+      },
+      "sceNpWebApi2PushEventCreateFilter": {
+        "nid": "MsaFhR+lPE4",
+        "returns": [
+          "g_nextHandle.fetch_add(1, std::memory_order_relaxed)"
+        ],
+        "signature": "int(int lib_ctx_id, int handle_id, const char* np_service_name, uint32_t np_service_label, const void* filter_param, size_t filter_param_num)"
+      },
+      "sceNpWebApi2PushEventCreateHandle": {
+        "nid": "WV1GwM32NgY",
+        "returns": [
+          "g_nextHandle.fetch_add(1, std::memory_order_relaxed)"
+        ],
+        "signature": "int(int lib_ctx_id)"
+      },
+      "sceNpWebApi2PushEventCreatePushContext": {
+        "nid": "NNVf18SlbT8",
+        "returns": [
+          "0x80553406"
+        ],
+        "signature": "int()"
+      },
+      "sceNpWebApi2PushEventDeleteFilter": {
+        "nid": "KJdPcOGmK58",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpWebApi2PushEventDeleteHandle": {
+        "nid": "fIATVMo4Y1w",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int lib_ctx_id, int handle_id)"
+      },
+      "sceNpWebApi2PushEventDeletePushContext": {
+        "nid": "QafxeZM3WK4",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int user_context_id, const void* push_context_id)"
+      },
+      "sceNpWebApi2PushEventStartPushContextCallback": {
+        "nid": "AAj9X+4aGYA",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpWebApi2PushEventUnregisterCallback": {
+        "nid": "hOnIlcGrO6g",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpWebApi2PushEventUnregisterPushContextCallback": {
+        "nid": "PmyrbbJSFz0",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpWebApi2ReadData": {
+        "nid": "OOY9+ObfKec",
+        "returns": [
+          "0x80553406"
+        ],
+        "signature": "int(int64_t request_id, void* data, size_t size)"
+      },
+      "sceNpWebApi2SendRequest": {
+        "nid": "lQOCF84lvzw",
+        "returns": [
+          "0x80553406"
+        ],
+        "signature": "int(int64_t request_id, const void* data, size_t data_size, NpWebApi2ResponseInformationOption* response_info_option)"
+      },
+      "sceNpWebApi2Terminate": {
+        "nid": "bEvXpcEk200",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int lib_ctx_id)"
+      }
+    },
+    "skipped": {
+      "sceNpWebApi2PushEventRegisterCallback": "callback; hand-written in SceNpOfflineImports",
+      "sceNpWebApi2PushEventRegisterPushContextCallback": "callback registration (declared without parameters upstream); hand-written in SceNpOfflineImports",
+      "sceNpWebApi2SetRequestTimeout": "NotImplemented upstream; hand-written in SceNpOfflineImports"
+    }
+  }
+}
