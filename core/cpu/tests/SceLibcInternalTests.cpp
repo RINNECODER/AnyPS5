@@ -2,6 +2,7 @@
 #include <cpu/GuestThreads.hpp>
 #include <cpu/SceThreadImports.hpp>
 #include <cpu/SceModules.hpp>
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <iostream>
@@ -158,6 +159,45 @@ void graph(const Receipt& receipt, const std::string& name, unsigned policy = 0,
     rejects([&] { modules.FinalizeDependencies(); }, "successful initialization");
     std::cout << "PASS 22 actual x86 Internal relocations to supplied guest destinations, independent byte/varargs and lifecycle oracles\n";
 }
+// A libc build that lacks one forwarded target still loads under lazy linking: that import
+// binds like any other unimplemented import, and every other Internal route still forwards.
+void lazyMissingTarget(const Receipt& receipt) {
+    Cpu::Machine machine;
+    Cpu::SceLifecycleImports lifecycle(machine);
+    auto threads = std::make_shared<Cpu::GuestThreads>(machine);
+    Cpu::SceThreadImports kernel(machine, threads);
+    const auto root = receipt.Root / "provider-library";
+    const std::array dependencies{Cpu::SceModuleFile{root / "SceInternalConsumer.prx", ConsumerBias},
+                                 Cpu::SceModuleFile{root / "SceInternalLibc.prx", GuestBias}};
+    const std::array hosts{
+        Cpu::SceHostModule{"libkernel.prx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
+        Cpu::SceHostModule{"libSceLibcInternal.sprx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternal", 0, 1}}}};
+    auto resolver = [&](const Cpu::SceImport& import, std::uint8_t type) -> std::optional<Cpu::SceResolvedImport> {
+        if (import.ModuleName != "libkernel") return std::nullopt;
+        auto address = kernel.Resolve(import, type);
+        if (!address) address = lifecycle.Resolve(import);
+        return address ? std::optional(Cpu::SceResolvedImport{*address, type}) : std::nullopt;
+    };
+    constexpr std::uint64_t Trap = 0x500000000;
+    machine.Map(Trap, 4096, Cpu::Permission::Read | Cpu::Permission::Execute);
+    std::vector<std::string> bound;
+    Cpu::SceLazyImports lazy{[&](const Cpu::SceUnresolvedImport& missing) {
+        bound.push_back(missing.Import.ModuleName + ":" + missing.Import.Nid);
+        return Cpu::SceResolvedImport{missing.Weak ? 0 : Trap, missing.Type};
+    }, {}};
+    const auto identity = receipt.Cases.at("provider-library");
+    Cpu::SceModules modules(machine, {root / "SceInternalMain.elf", MainBias}, dependencies, hosts, resolver,
+        Cpu::SceLibcInternalProvider{"SceInternalLibc.prx", identity.Digest, identity.Size}, {}, lazy);
+    require(!bound.empty() && std::all_of(bound.begin(), bound.end(), [](const auto& entry) {
+        return entry == "libSceLibcInternal:Q3VBxCXhUHs";
+    }), "Only the import whose libc target is absent may bind lazily");
+    const auto actual = words<22>(machine, MainBias + receipt.Addresses[2]);
+    for (unsigned i = 0; i < actual.size(); ++i)
+        require(actual[i] == Trap || actual[i] == GuestBias + receipt.Addresses[i < 9 ? 4 + i : 14 + i - 9],
+                "A present libc Internal target stopped forwarding");
+    require(std::count(actual.begin(), actual.end(), Trap) == 1, "Exactly the missing target must bind lazily");
+    std::cout << "PASS lazy binding of a forwarded import whose libc build lacks the target\n";
+}
 }
 int main(int argc, char** argv) {
     try {
@@ -193,6 +233,7 @@ int main(int argc, char** argv) {
             std::pair{"provider-library", "missing qualified libc Internal target export"},
             std::pair{"provider-library-version", "missing qualified libc Internal target export"}})
             rejects([&] { graph(receipt, name); }, reason);
+        lazyMissingTarget(receipt);
 #endif
         return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }

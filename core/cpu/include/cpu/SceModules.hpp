@@ -59,28 +59,15 @@ struct SceModuleExecutor {
     std::function<void()> CompleteControl;
 };
 
-enum class SceCrtArrayOwner { Unsupported, DtInit, DtFini };
-
-struct SceCrtArrayContract {
-    std::uint64_t Address = 0;
-    std::uint64_t Size = 0;
-    SceCrtArrayOwner Owner = SceCrtArrayOwner::Unsupported;
-};
-
-struct SceCrtCertificate {
-    std::array<std::byte, 32> SourceSha256{};
-    std::uint64_t SourceSize = 0;
-    std::uint64_t Init = 0;
-    std::uint64_t Fini = 0;
-    SceCrtArrayContract Preinit;
-    SceCrtArrayContract InitArray;
-    SceCrtArrayContract FiniArray;
-};
-
 struct SceModuleFile {
     std::filesystem::path Path;
     std::uint64_t LoadBias = 0;
-    std::optional<SceCrtCertificate> Crt = std::nullopt;
+};
+
+// A relocated DT_PREINIT_ARRAY, DT_INIT_ARRAY or DT_FINI_ARRAY: Count 8-byte slots at Address.
+struct SceCrtArray {
+    std::uint64_t Address = 0;
+    std::uint64_t Count = 0;
 };
 
 struct SceHostModule {
@@ -132,21 +119,36 @@ struct SceLazyImports {
     std::function<void(const std::string& filename)> MissingModule;
 };
 
-// Opt-in source identity for the supplied guest libc. Only the fixed, ABI-qualified
-// Internal function allowlist can forward to its libc/library-v1 exports. Guest
-// allocator, callback/DSO, errno and exception ownership remains with the provider.
+// The supplied guest libc, whichever build the title ships; the identity guards against
+// the file changing between selection and load. Only the fixed, ABI-qualified Internal
+// function allowlist forwards, and only to targets that this libc exports from libc/library
+// v1. A target this build lacks is an ordinary unresolved import (lazy binding) or a load
+// failure (strict). Guest allocator, callback/DSO, errno and exception ownership remains
+// with the provider.
 struct SceLibcInternalProvider {
     std::string Filename;
     std::array<std::byte, 32> SourceSha256{};
     std::uint64_t SourceSize = 0;
 };
 
+// CRT lifecycle, derived from each image's own dynamic tags (no per-build data):
+// - A dependency's DT_INIT/DT_FINI is its SCE CRT entry, which runs the module's own
+//   preinit/init arrays and fini array (as a retail libc.prx DT_INIT does). The loader
+//   calls DT_INIT in dependency order and DT_FINI in reverse with (args, argp, param).
+// - A dependency without DT_INIT gets its DT_PREINIT_ARRAY then DT_INIT_ARRAY entries
+//   called in order by the loader; one without DT_FINI gets its DT_FINI_ARRAY entries
+//   called in reverse. Null and -1 slots are skipped, as the SCE CRT does.
+// - The main image's entry CRT owns its own initializer and arrays; they are only
+//   bounds-checked.
 struct SceModuleRecord {
     SceParsedImage Image;
     std::uint64_t LoadBias = 0;
     std::uint64_t TlsModuleId = 0;
     std::uint64_t Init = 0;
     std::uint64_t Fini = 0;
+    SceCrtArray Preinit;
+    SceCrtArray InitArray;
+    SceCrtArray FiniArray;
 };
 
 class SceModules {
