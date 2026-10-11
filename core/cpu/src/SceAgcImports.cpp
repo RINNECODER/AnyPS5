@@ -890,9 +890,12 @@ struct AgcGenericBindings {
         address(regsAt, 2 * sizeof(ShaderRegister), 4);
         guest.CheckAccess(regsAt, 2 * sizeof(ShaderRegister), Permission::Write);
         const auto budget = conv<std::uint32_t>(arg(guest, 2));
+        // A partial budget needs the gs registers and the xmm0 factor, neither of which is bridged:
+        // refuse rather than hand the guest the zero-budget registers as if they were its answer.
+        require(budget == 0 || budget == std::numeric_limits<std::uint32_t>::max(),
+                "sceAgcGetGsOversubscription: partial budgets need the gs shader and float factor, which are not bridged");
         std::array<ShaderRegister, 2> regs{};
-        const auto status = sceAgcGetGsOversubscription(regs.data(), nullptr,
-            budget == std::numeric_limits<std::uint32_t>::max() ? budget : 0u, 0.0f);
+        const auto status = sceAgcGetGsOversubscription(regs.data(), nullptr, budget, 0.0f);
         if (status == 0) write(guest, regsAt, regs);
         result(guest, status);
     }
