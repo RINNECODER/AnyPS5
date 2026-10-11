@@ -269,12 +269,6 @@ private:
         }
     }
 
-    // A descriptor source that every path of the program reaches stays active; one that is used
-    // only behind a conditional branch can be left out when the branch condition is evaluable at
-    // capture time (see EvaluateRuntimeSourcesImpl), so a descriptor the untaken path would read
-    // as another resource kind is not validated. The edges are the structured terminators of the
-    // block metadata; a block whose terminator is not a plain or conditional branch keeps all of
-    // its CFG successors, so no source is ever dropped for a path the walk cannot decide.
     void PlanResourceControlFlow() {
         const auto& order = m_program.BlockOrder();
         const auto& info = m_program.Metadata().blockInfo;
