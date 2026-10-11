@@ -65,6 +65,16 @@ ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers&
     return DecodeComputeStageInfo(shader, header, [](std::uint32_t offset) { NoteRegisterRead(RegisterBank::Shader, offset); });
 }
 
+ShaderRecompiler::ShaderPixelStageInfo DefaultUnexportedInputs(ShaderRecompiler::ShaderPixelStageInfo pixel, std::span<const std::uint32_t> parameterExports) {
+    for (std::uint32_t input = 0; input < pixel.interpolatorCount && input < pixel.interpolatorSettings.size(); ++input) {
+        auto& setting = pixel.interpolatorSettings[input];
+        if ((setting & 0x20u) != 0u || std::ranges::find(parameterExports, setting & 0x1fu) != parameterExports.end()) continue;
+        setting = (setting & ~0x700u) | 0x20u;
+        if ((setting & 0x80000u) != 0u) setting = (setting & ~0x600000u) | 0x100000u;
+    }
+    return pixel;
+}
+
 ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& context, const std::array<std::uint8_t, 8>& exportMappings, bool nullProgram) {
     const auto inControl = nullProgram ? 0u : read(context, spiPsInControl, RegisterBank::Context);
     const auto inputNum = inControl & 0x3Fu;

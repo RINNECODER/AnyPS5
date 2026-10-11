@@ -769,6 +769,28 @@ void HeaderlessVertexStageTests() {
     expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeVertexStageInfo(truncated, 0x1000, userData)); }, "smaller than the fixed AGC header");
 }
 
+void UnexportedPixelInputTests() {
+    ShaderRecompiler::ShaderPixelStageInfo pixel{};
+    pixel.interpolatorCount = 5;
+    pixel.interpolatorSettings[0] = 0x000u;
+    pixel.interpolatorSettings[1] = 0x401u;
+    pixel.interpolatorSettings[2] = 0x302u;
+    pixel.interpolatorSettings[3] = 0x123u;
+    pixel.interpolatorSettings[4] = 0x680004u;
+    pixel.interpolatorSettings[5] = 0x005u;
+    const std::array<std::uint32_t, 1> exported{0u};
+    const auto adjusted = AgcDriver::Graphics::DefaultUnexportedInputs(pixel, exported);
+    Require(adjusted.interpolatorSettings[0] == 0x000u, "an input of an exported parameter was changed");
+    Require(adjusted.interpolatorSettings[1] == 0x021u, "a flat input of an unexported parameter did not read zero");
+    Require(adjusted.interpolatorSettings[2] == 0x022u, "an input of an unexported parameter did not read zero");
+    Require(adjusted.interpolatorSettings[3] == 0x123u, "an input that already reads its default value was changed");
+    Require(adjusted.interpolatorSettings[4] == 0x180024u, "an FP16 input of an unexported parameter did not read zero in both halves");
+    Require(adjusted.interpolatorSettings[5] == 0x005u, "a setting past SPI_PS_IN_CONTROL's input count was changed");
+    const std::array<std::uint32_t, 5> all{0u, 1u, 2u, 4u, 5u};
+    const auto unchanged = AgcDriver::Graphics::DefaultUnexportedInputs(pixel, all);
+    Require(std::ranges::equal(unchanged.interpolatorSettings, pixel.interpolatorSettings), "inputs of exported parameters were changed");
+}
+
 void PixelInputLayoutTests() {
     using ShaderRecompiler::PixelInput;
     using ShaderRecompiler::PixelInputVgpr;
@@ -4382,6 +4404,7 @@ int main(int argc, char** argv) {
         NggVertexWorkgroupTests();
         TuningFieldTests();
         PixelInputLayoutTests();
+        UnexportedPixelInputTests();
         ColorPipeBankXorTests();
         HeaderlessVertexStageTests();
         HiddenUserWordVertexTablesTests();
