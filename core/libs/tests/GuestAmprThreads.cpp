@@ -408,6 +408,44 @@ static void TestPadLaunchMany() {
     }
 }
 
+static unsigned APS5_VABI PadGoImmediate(TestPad* pad) {
+    const auto local = pad->target;
+    local.order->store(local.beforeRelease);
+    _ZNSt4_Pad8_ReleaseEv_nid_postfix(pad);
+    while (!local.destroyed->load()) std::this_thread::yield();
+    local.order->store(local.afterRelease);
+    return local.exitCode;
+}
+
+static void TestPadConcurrentLaunch() {
+    constexpr int Count = 4;
+    constexpr std::array<unsigned (APS5_VABI*)(TestPad*), 1> immediateVtable{PadGoImmediate};
+    std::atomic<int> ready{0};
+    std::array<std::thread, Count> parents;
+    for (int index = 0; index < Count; ++index) {
+        parents[index] = std::thread([&, index] {
+            std::atomic<int> order{0};
+            std::atomic<bool> destroyed{false};
+            TestPad pad;
+            ConstructPad(pad, order, destroyed, index, 0x80000000u + index);
+            pad.vtable = immediateVtable.data();
+            ready.fetch_add(1);
+            while (ready.load() != Count) std::this_thread::yield();
+            Pthread thread = nullptr;
+            _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(&pad, &thread);
+            Require(thread != nullptr && pad.started && order.load() == 2 * index + 1);
+            _ZNSt4_PadD2Ev_nid_postfix(&pad);
+            std::memset(&pad, 0xcd, sizeof(pad));
+            destroyed = true;
+            int code = 0;
+            Require(_Thrd_join_nid_postfix(thread, &code) == ThrdSuccess);
+            Require(static_cast<unsigned>(code) == 0x80000000u + index);
+            Require(order.load() == 2 * index + 2);
+        });
+    }
+    for (auto& parent : parents) parent.join();
+}
+
 struct ForeignDestroy {
     TestPad* pad;
     bool rejected;
@@ -447,6 +485,7 @@ static void TestPadErrors() {
 int main() {
     TestPadLaunch();
     TestPadLaunchMany();
+    TestPadConcurrentLaunch();
     TestPadErrors();
     TestThreadJoin();
     TestThreadSleep();
