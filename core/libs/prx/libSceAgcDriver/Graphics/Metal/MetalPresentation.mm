@@ -1,4 +1,5 @@
 #include "MetalPresentation.hpp"
+#include "FrameCapture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DisplayFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
@@ -76,10 +77,17 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
         // color space preserves its transfer identity; do not invent tone-map metadata.
         layer.EDRMetadata = nil;
     }
-    layer.framebufferOnly = YES;
+    auto& frameCapture = FrameCapture::Shared();
+    // Readback of the window drawable needs a sampleable texture; only when capture is enabled.
+    layer.framebufferOnly = frameCapture.Enabled() ? NO : YES;
     layer.opaque = buffer != nullptr || opaque;
     layer.drawableSize = CGSizeMake(width, height);
     auto commands = backend.CommandBuffer();
+    auto ticket = frameCapture.Begin(window.width, window.height);
+    bool captureEncoded = false;
+    // A throw before the readback is encoded must not wedge the single in-flight slot.
+    struct Slot { FrameCapture& capture; bool active; const bool& encoded; ~Slot() { if (active && !encoded) capture.Abandon(); } }
+        slot{frameCapture, ticket.has_value(), captureEncoded};
     if (width != 0 && height != 0) {
         if (buffer != nullptr) {
             const auto pixels = displayPixels(*buffer);
@@ -89,7 +97,13 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
             auto source = [backend.Device() newTextureWithDescriptor:descriptor];
             if (source == nil) throw std::runtime_error("Metal cannot allocate the decoded scanout texture");
             [source replaceRegion:MTLRegionMake2D(0, 0, buffer->width, buffer->height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:buffer->width * 4u];
-            static_cast<void>(presenter.Present(commands, source, layer));
+            if (layer.device != backend.Device()) throw std::invalid_argument("Metal presentation requires a layer on its device");
+            id<CAMetalDrawable> drawable = [layer nextDrawable];
+            if (drawable != nil) {
+                presenter.Encode(commands, source, drawable.texture);
+                [commands presentDrawable:drawable];
+                if (ticket) { frameCapture.Encode(commands, drawable.texture, *ticket); captureEncoded = true; }
+            }
         } else {
             id<CAMetalDrawable> drawable = [layer nextDrawable];
             if (drawable != nil) {
@@ -102,6 +116,7 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
                 if (encoder == nil) throw std::runtime_error("Metal cannot encode a display clear");
                 [encoder endEncoding];
                 [commands presentDrawable:drawable];
+                if (ticket) { frameCapture.Encode(commands, drawable.texture, *ticket); captureEncoded = true; }
             }
         }
     }

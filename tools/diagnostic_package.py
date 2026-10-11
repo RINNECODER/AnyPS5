@@ -314,7 +314,7 @@ def prepare_package(source, build, gpu_source, destination, revisions, run, prof
         roots += [platform / ("anyps5_platform_" + case + "_test") for case in
                   ("registration", "kernel_events_owner", "kernel_events_native", "kernel_condition_timeout")]
         roots += [build / "native-videoout" / ("anyps5_cpu_videoout_" + case + "_fixture")
-                  for case in ("native", "packed_hdr", "admission")]
+                  for case in ("native", "packed_hdr", "frame_capture", "admission")]
         roots += [build / "native-flip" / ("anyps5_cpu_flip_" + case + "_fixture")
                   for case in ("native", "contract")]
         roots += [native_agc / ("anyps5_cpu_agc_" + case + "_fixture")

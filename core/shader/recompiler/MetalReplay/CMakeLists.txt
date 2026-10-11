@@ -45,6 +45,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Graphics/Metal/MetalShaderResources.mm"
     "${agcDriverRoot}/Graphics/Metal/MetalDepthSurface.mm"
     "${agcDriverRoot}/Graphics/Metal/MetalPresentation.mm"
+    "${agcDriverRoot}/Graphics/Metal/FrameCapture.mm"
     "${agcDriverRoot}/Graphics/Metal/MetalDccExtent.cpp"
     "${agcDriverRoot}/Graphics/Metal/MetalHostExports.cpp"
 )
@@ -68,6 +69,8 @@ target_link_libraries(anyps5_metal_native_execution PUBLIC
     "${NATIVE_IOKIT_FRAMEWORK}"
     "${NATIVE_GAMECONTROLLER_FRAMEWORK}"
     "-framework CoreHaptics"
+    "-framework ImageIO"
+    "-framework CoreGraphics"
     anyps5_metal_guest_recompiler
     anyps5_metal_utilities
 )

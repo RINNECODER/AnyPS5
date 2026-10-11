@@ -387,6 +387,20 @@ class SmokeStageTests(unittest.TestCase):
         for text, stage in cases:
             self.assertEqual(smoke.classify(text)[0], stage, text)
 
+    def test_frame_summary_boot_visible_verdict(self):
+        def captured(ratio, colors, flip=0):
+            return json.dumps({"schema_version": 1, "event": "frame_captured", "flip_index": flip, "ms": 5,
+                               "nonblack_ratio": ratio, "distinct_colors": colors})
+        presented = json.dumps({"schema_version": 1, "event": "frames_presented", "count": 90, "since_ms": 30000})
+        blank = smoke.frame_summary("\n".join([captured(0.0, 1), presented]))
+        self.assertEqual((blank["frames_presented"], blank["boot_visible"]), (90, False))
+        self.assertFalse(smoke.frame_summary(captured(0.9, 7))["boot_visible"])
+        self.assertFalse(smoke.frame_summary(captured(0.05, 8))["boot_visible"])
+        shown = smoke.frame_summary("\n".join([captured(0.0, 1), captured(0.4, 12, 3)]))
+        self.assertTrue(shown["boot_visible"])
+        self.assertEqual((shown["last_nonblack_ratio"], shown["last_distinct_colors"]), (0.4, 12))
+        self.assertEqual(smoke.frame_summary("")["frames_presented"], 0)
+
     def test_redaction_removes_title_paths(self):
         title = Path(tempfile.gettempdir()) / "Games" / "TITLE"
         self.assertEqual(smoke.redact("cannot open " + str(title) + "/eboot.bin", title), "cannot open <title>/eboot.bin")
