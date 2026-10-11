@@ -7,8 +7,10 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <chrono>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 
@@ -182,28 +184,36 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
     }
     bool callbackStarted = false;
     try {
-        WaitIdle();
-        std::unique_lock gpuLock(impl->gpuMutex);
+        // #293: diff first. Only a change to the GPU-visible set needs the GPU at
+        // all; only a removed or altered range lets accepted work drain first.
+        std::vector<NativeGuestMemory::BorrowedRange> removed, changed;
+        {
+            std::lock_guard lock(impl->mutex);
+            removed = changedMappings(impl->ranges, replacement);
+            changed = changedMappings(replacement, impl->ranges);
+        }
+        const bool visible = !removed.empty() || !changed.empty();
+        if (!removed.empty()) impl->AwaitMappingDrain();
+        // Workers touch guest memory only with gpuMutex held and re-borrow the
+        // ranges when rangesRevision moves, so holding it is enough to swap them.
+        std::unique_lock<std::recursive_mutex> gpuLock;
+        if (visible) gpuLock = std::unique_lock(impl->gpuMutex);
         std::shared_ptr<DriverDetail::ShaderRegistry> registry;
         {
             std::lock_guard lock(impl->mutex);
             if (impl->failure) std::rethrow_exception(impl->failure);
             if (impl->stopping) throw DriverStopped{};
-            require(impl->accepted == impl->completed &&
-                std::none_of(impl->workers.begin(), impl->workers.end(), [](const auto& item) {
-                    return item.second.active || !item.second.pending.empty();
-                }), "borrowed range replacement requires drained submissions");
-            auto changed = changedMappings(impl->ranges, replacement);
-            auto added = changedMappings(replacement, impl->ranges);
-            changed.insert(changed.end(), added.begin(), added.end());
-            registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
-            std::erase_if(*registry, [&](const auto& entry) {
-                const auto& snapshot = *entry.second;
-                if (snapshot.codeAddress == DriverDetail::NullPixelProgramAddress()) return false;
-                return overlapsMappings(snapshot.codeAddress, snapshot.code.size() * sizeof(std::uint32_t), changed) ||
-                    overlapsMappings(snapshot.headerAddress, snapshot.header.size(), changed);
-            });
-            impl->draw->InvalidateBorrowedRanges(changed);
+            if (visible) {
+                changed.insert(changed.end(), removed.begin(), removed.end());
+                registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
+                std::erase_if(*registry, [&](const auto& entry) {
+                    const auto& snapshot = *entry.second;
+                    if (snapshot.codeAddress == DriverDetail::NullPixelProgramAddress()) return false;
+                    return overlapsMappings(snapshot.codeAddress, snapshot.code.size() * sizeof(std::uint32_t), changed) ||
+                        overlapsMappings(snapshot.headerAddress, snapshot.header.size(), changed);
+                });
+                impl->draw->InvalidateBorrowedRanges(changed);
+            }
             if (impl->rangeOwner) releasedOwners.push_back(impl->rangeOwner);
             if (previousOwner) releasedOwners.push_back(std::move(previousOwner));
             if (nextOwner) releasedOwners.push_back(nextOwner);
@@ -217,15 +227,18 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
             std::lock_guard lock(impl->mutex);
             if (impl->failure) std::rethrow_exception(impl->failure);
             if (impl->stopping) throw DriverStopped{};
-            impl->shaders = std::move(registry);
-            impl->ranges = std::move(replacement);
+            if (visible) {
+                impl->shaders = std::move(registry);
+                impl->ranges = std::move(replacement);
+                ++impl->rangesRevision;
+            }
             impl->rangeGeneration = generation;
             impl->rangeOwner = std::move(nextOwner);
             releasedOwners.swap(impl->retainedRangeOwners);
             impl->mappingUpdatePending = false;
             impl->mappingUpdateThread = {};
         }
-        gpuLock.unlock();
+        if (gpuLock.owns_lock()) gpuLock.unlock();
         mappingLock.unlock();
         impl->changed.notify_all();
     } catch (...) {
@@ -401,7 +414,7 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
     std::uint64_t generation = 0;
     {
         auto gpuLock = impl->LockForGuestCapture();
-        generation = impl->rangeGeneration;
+        generation = impl->rangesRevision;
         NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
         if (guestPacketAddress) {
             Packet guestDescriptor{};
@@ -416,7 +429,7 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
     {
         std::unique_lock lock(impl->mutex);
         impl->WaitForMappingAdmission(lock);
-        require(generation == impl->rangeGeneration, "borrowed ranges changed while submission was captured");
+        require(generation == impl->rangesRevision, "borrowed ranges changed while submission was captured");
         require(impl->accepted != std::numeric_limits<std::uint64_t>::max() && impl->eventSerial != std::numeric_limits<std::uint64_t>::max(), "submission serial overflow");
         submission.serial = impl->accepted + 1;
         impl->ReserveOutputs(submission);
@@ -466,6 +479,43 @@ void MetalDriver::Impl::NoteWaitBlocked(std::uint32_t queue, std::uint64_t addre
 }
 
 void MetalDriver::Impl::NotifyLabelStore() { changed.notify_all(); }
+
+bool MetalDriver::Impl::GpuParkedOnHost() const {
+    bool parked = false;
+    for (const auto& [id, worker] : workers) {
+        static_cast<void>(id);
+        if (worker.active && !worker.running) { parked = true; continue; }
+        if (worker.active || !worker.pending.empty()) return false;
+    }
+    return parked;
+}
+
+// #293: a change that removes or alters a GPU-visible range first lets accepted
+// work drain, so work submitted before an unmap still sees the old mapping. It
+// never waits on a GPU that waits on the CPU: once every unfinished queue is
+// parked on a host-satisfied wait (WAIT_REG_MEM, rewind, RenderingWait), more
+// waiting would deadlock this guest thread, so the change proceeds and the parked
+// work resumes on the new mapping. The wait is bounded for the same reason; going
+// on early is safe because workers re-borrow ranges under gpuMutex.
+void MetalDriver::Impl::AwaitMappingDrain() {
+    constexpr auto limit = std::chrono::seconds(2);
+    std::unique_lock lock(mutex);
+    const auto target = accepted;
+    const bool settled = changed.wait_for(lock, limit, [&] {
+        return failure || stopping || completed >= target || GpuParkedOnHost();
+    });
+    if (failure || stopping || completed >= target) return;
+    static std::atomic<unsigned> reports{0};
+    if (reports.fetch_add(1) >= 8) return;
+    if (settled) {
+        std::fprintf(stderr, "[agc] mapping change did not wait for GPU work parked on a CPU-written wait "
+            "(queue0 label 0x%llx); the work resumes on the new mapping\n", static_cast<unsigned long long>(queue0Awaited));
+    } else {
+        std::fprintf(stderr, "[agc] mapping change waited %lld ms for %llu GPU submissions to drain; proceeding, "
+            "the work resumes on the new mapping\n", static_cast<long long>(std::chrono::milliseconds(limit).count()),
+            static_cast<unsigned long long>(target - completed));
+    }
+}
 void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack() { std::lock_guard lock(gpuMutex); }
 
 void MetalDriver::Impl::DeliverEopInterrupt(std::uint32_t queue) {
@@ -607,13 +657,13 @@ void MetalDriver::RegisterShader(const Shader* shader) {
     std::uint64_t generation = 0;
     {
         auto gpuLock = impl->LockForGuestCapture();
-        generation = impl->rangeGeneration;
+        generation = impl->rangesRevision;
         NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
         snapshot = DriverDetail::ReadRegisteredShader(reinterpret_cast<std::uintptr_t>(shader));
     }
     std::unique_lock lock(impl->mutex);
     impl->WaitForMappingAdmission(lock);
-    require(generation == impl->rangeGeneration, "borrowed ranges changed while shader was captured");
+    require(generation == impl->rangesRevision, "borrowed ranges changed while shader was captured");
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
     registry->insert_or_assign(snapshot->codeAddress, std::move(snapshot));
     impl->shaders = std::move(registry);
@@ -815,6 +865,7 @@ void MetalDriver::Impl::ExecuteRewindTail(const Submission& stalled, QueueState&
             std::uint32_t control = 0;
             {
                 std::lock_guard gpuLock(gpuMutex);
+                NativeGuestMemory::BorrowedRangesScope current(ranges);
                 GuestMemory::Read(controlAddress, std::as_writable_bytes(std::span(&control, 1)), 4);
             }
             if ((control & 0x80000000u) != 0) break;
@@ -830,6 +881,7 @@ void MetalDriver::Impl::ExecuteRewindTail(const Submission& stalled, QueueState&
     tail.queue = stalled.queue;
     {
         std::lock_guard gpuLock(gpuMutex);
+        NativeGuestMemory::BorrowedRangesScope current(ranges);
         CaptureSubmissionCommands(tail, tailAddress, stalled.rewindWords);
         ValidateSubmission(tail, tailAddress);
     }
