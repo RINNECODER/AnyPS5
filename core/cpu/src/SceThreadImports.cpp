@@ -1,6 +1,7 @@
 #include <cpu/SceThreadImports.hpp>
 #include <cpu/GuestThreads.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <array>
 #include <limits>
 #include <map>
@@ -34,8 +35,7 @@ struct SceThreadImports::Impl {
                            std::uint16_t, std::uint8_t, std::uint8_t>;
     Machine& machine;
     std::weak_ptr<GuestThreads> threads;
-    const std::uint64_t base;
-    std::size_t nextSlot = 0;
+    SceHostTrampolines trampolines;
     const std::map<std::string, Service> services{
         {"rNhWz+lvOMU", Service::Dtors}, {"pB-yGZ2nQ9o", Service::AtexitCount},
         {"WhCc1w3EhSI", Service::AtexitReport}, {"6UgtwV+0zb4", Service::Create},
@@ -50,24 +50,18 @@ struct SceThreadImports::Impl {
     std::map<Key, std::uint64_t> gates;
 
     Impl(Machine& guest, const std::shared_ptr<GuestThreads>& runtime, std::uint64_t gateBase)
-        : machine(guest), threads(runtime), base(gateBase) {
+        : machine(guest), threads(runtime),
+          trampolines(guest, checkedBase(guest, runtime, gateBase), SceHostTrampolines::DefaultCapacity, "SCE thread import") {}
+
+    static std::uint64_t checkedBase(Machine& guest, const std::shared_ptr<GuestThreads>& runtime, std::uint64_t base) {
         if (!runtime) throw std::invalid_argument("SCE thread imports require a guest thread runtime");
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("SCE thread import gates require a nonzero aligned low canonical guest page");
-        for (const auto& mapping : machine.Mappings()) {
+        for (const auto& mapping : guest.Mappings()) {
             if (mapping.Address < base + 4096 && base < mapping.Address + mapping.Size)
                 throw std::invalid_argument("SCE thread import gate page is already mapped");
         }
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        try {
-            machine.Write(base, bytes);
-            machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
-        } catch (...) {
-            machine.Unmap(base, bytes.size());
-            throw;
-        }
+        return base;
     }
 
     void invoke(Machine& guest, Service service) {
@@ -127,11 +121,7 @@ struct SceThreadImports::Impl {
         const Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                             import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
         if (const auto found = gates.find(key); found != gates.end()) return found->second;
-        if (nextSlot == 256) throw std::runtime_error("SCE thread import gate page is exhausted");
-        const auto gate = base + nextSlot * 16;
-        const std::array ret{std::byte{0xc3}};
-        machine.Write(gate, ret);
-        machine.AddHostCall(gate, [state = std::move(weak), operation = service,
+        const auto gate = trampolines.Add([state = std::move(weak), operation = service,
                                        qualified = identity(import)](Machine& guest) {
             try {
                 const auto context = state.lock();
@@ -142,7 +132,6 @@ struct SceThreadImports::Impl {
             }
         });
         gates.emplace(key, gate);
-        ++nextSlot;
         return gate;
     }
 

@@ -1,5 +1,6 @@
 #include <cpu/SceLibcBootstrapImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -14,6 +15,8 @@ namespace {
 
 enum class Service { ProcessParameters, HeapRegistration, TraceInfo, StackGuard, ProgramName };
 constexpr std::size_t pageSize = 4096;
+// The data page sits just past the 1 MiB the gate trampolines reserve.
+constexpr std::uint64_t dataOffset = (SceHostTrampolines::DefaultCapacity + 1) * 16;
 constexpr std::size_t guardOffset = 0;
 constexpr std::size_t programPointerOffset = 8;
 constexpr std::size_t programStringOffset = 16;
@@ -67,9 +70,8 @@ struct SceLibcBootstrapImports::Impl {
     using Key = std::tuple<std::string, std::string, std::uint16_t, std::string, std::uint16_t,
                            std::uint16_t, std::uint8_t, std::uint8_t>;
     Machine& machine;
-    const std::uint64_t base;
     const std::uint64_t dataBase;
-    std::size_t nextSlot = 0;
+    std::optional<SceHostTrampolines> trampolines;
     std::map<Key, std::uint64_t> gates;
     mutable std::mutex stateMutex;
     std::optional<std::pair<std::uint64_t, std::size_t>> processSpan;
@@ -79,10 +81,10 @@ struct SceLibcBootstrapImports::Impl {
         {"NWtTN10cJzE", Service::TraceInfo}, {"f7uOxY9mM1U", Service::StackGuard},
         {"djxxOmW6-aw", Service::ProgramName}};
 
-    Impl(Machine& guest, const std::string& name, std::uint64_t gateBase) :
-        machine(guest), base(gateBase), dataBase(gateBase + pageSize) {
-        if (!base || (base & (pageSize - 1)) || base >= 0x7fffffffe000)
-            throw std::invalid_argument("SCE libc bootstrap requires two nonzero aligned low canonical guest pages");
+    Impl(Machine& guest, const std::string& name, std::uint64_t base) :
+        machine(guest), dataBase(base + dataOffset) {
+        if (!base || (base & (pageSize - 1)) || base > 0x7ffffffff000 - dataOffset - pageSize)
+            throw std::invalid_argument("SCE libc bootstrap requires a nonzero aligned low canonical gate and data range");
         if (name.size() > 255 || name.find('\0') != std::string::npos || !validUtf8(name))
             throw std::invalid_argument("SCE libc bootstrap program name requires at most 255 UTF-8 bytes without NUL");
         std::array<std::byte, pageSize> data{};
@@ -93,12 +95,9 @@ struct SceLibcBootstrapImports::Impl {
         writeInteger(data, programPointerOffset, dataBase + programStringOffset, 8);
         for (std::size_t index = 0; index < name.size(); ++index)
             data[programStringOffset + index] = std::byte(static_cast<unsigned char>(name[index]));
-        std::array<std::byte, pageSize> code;
-        code.fill(std::byte{0xcc});
-        machine.Map(base, 2 * pageSize, Permission::Read | Permission::Write);
-        machine.Write(base, code);
+        trampolines.emplace(machine, base, SceHostTrampolines::DefaultCapacity, "SCE libc bootstrap import");
+        machine.Map(dataBase, pageSize, Permission::Read | Permission::Write);
         machine.Write(dataBase, data);
-        machine.Protect(base, pageSize, Permission::Read | Permission::Execute);
     }
 
     void access(std::uint64_t address, std::size_t size, Permission permission) const {
@@ -184,17 +183,12 @@ std::optional<std::uint64_t> SceLibcBootstrapImports::Resolve(const SceImport& i
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto gate = impl->gates.find(key); gate != impl->gates.end()) return gate->second;
-    if (impl->nextSlot == pageSize / 16) throw std::runtime_error("SCE libc bootstrap gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), service](Machine& guest) {
+    const auto gate = impl->trampolines->Add([state = std::weak_ptr<Impl>(impl), service](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("SCE libc bootstrap runtime has expired");
         context->invoke(guest, service);
     });
     impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
     return gate;
 }
 

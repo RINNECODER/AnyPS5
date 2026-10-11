@@ -1,5 +1,6 @@
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <array>
 #include <bit>
 #include <limits>
@@ -53,23 +54,15 @@ struct SceUserImports::Impl {
     using Key = std::tuple<std::string, std::string, std::uint16_t, std::string, std::uint16_t,
                            std::uint16_t, std::uint8_t, std::uint8_t>;
     Machine& machine;
-    const std::uint64_t base;
+    SceHostTrampolines trampolines;
     bool initialized = false;
-    std::size_t nextSlot = 0;
     const std::map<std::string, Service> services{
         {"j3YMu1MVNNo", Service::Initialize}, {"CdWp0oHWGr0", Service::InitialUser},
         {"fPhymKNvK-A", Service::LoginUsers}, {"1xxcMiGu2fo", Service::UserName}};
     std::map<Key, std::uint64_t> gates;
 
-    Impl(Machine& guest, std::uint64_t gateBase) : machine(guest), base(gateBase) {
-        if (!base || (base & 4095) || base >= 0x7ffffffff000)
-            throw std::invalid_argument("SCE user import gates require a nonzero aligned low canonical guest page");
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
-    }
+    Impl(Machine& guest, std::uint64_t base)
+        : machine(guest), trampolines(guest, base, SceHostTrampolines::DefaultCapacity, "SCE user import") {}
 
     bool accessible(std::uint64_t address, std::size_t size, Permission permission) const {
         if (!address || size > std::numeric_limits<std::uint64_t>::max() - address) return false;
@@ -144,17 +137,12 @@ std::optional<std::uint64_t> SceUserImports::Resolve(const SceImport& import) {
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->nextSlot == 256) throw std::runtime_error("SCE user import gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), operation = service->second](Machine& guest) {
+    const auto gate = impl->trampolines.Add([state = std::weak_ptr<Impl>(impl), operation = service->second](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("SCE user import runtime has expired");
         context->invoke(guest, operation);
     });
     impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
     return gate;
 }
 

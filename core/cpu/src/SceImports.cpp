@@ -1,5 +1,6 @@
 #include <cpu/SceImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <nid/NidCompute.hpp>
 #include <algorithm>
 #include <array>
@@ -84,28 +85,18 @@ std::string identity(const SceImport& import) {
 struct SceImports::Impl {
     using Key = std::tuple<std::string, std::string, std::uint16_t, std::string, std::uint16_t,
                            std::uint16_t, std::uint8_t, std::uint8_t>;
-    Machine& machine;
-    std::uint64_t base;
+    SceHostTrampolines gates;
     std::uint64_t exitGate;
-    std::size_t nextSlot = 1;
     std::map<std::string, Service> services;
-    std::map<Key, std::uint64_t> gates;
+    std::map<Key, std::uint64_t> bound;
     std::shared_ptr<ProcessExitState> processExit = std::make_shared<ProcessExitState>();
 
-    Impl(Machine& value, std::uint64_t address) : machine(value), base(address), exitGate(address) {
-        if (!base || (base & 4095) || base >= 0x7ffffffff000)
-            throw std::invalid_argument("SCE import gates require a nonzero aligned low canonical guest page");
+    Impl(Machine& machine, std::uint64_t base) : gates(machine, base, SceHostTrampolines::DefaultCapacity, "SCE libc import") {
         for (const auto& [name, service] : std::array<std::pair<const char*, Service>, 6>{{
                  {"memcpy", Service::Copy}, {"memmove", Service::Move}, {"memset", Service::Set},
                  {"strlen", Service::Length}, {"strcmp", Service::Compare}, {"exit", Service::Exit}}})
             services.emplace(Nid::ComputeNid(name, "libc"), service);
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        bytes[0] = std::byte{0xc3};
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
-        machine.AddHostCall(exitGate, [](Machine&) {
+        exitGate = gates.Add([](Machine&) {
             throw std::runtime_error("Unsupported SCE entry termination callback: exact guest callback semantics are not implemented");
         });
     }
@@ -118,22 +109,17 @@ struct SceImports::Impl {
         if (service == services.end()) throw std::runtime_error("Unsupported SCE import service: " + identity(import));
         const Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                       import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
-        if (const auto found = gates.find(key); found != gates.end()) return found->second;
-        if (nextSlot == 256) throw std::runtime_error("SCE import gate page is exhausted");
-        const auto gate = base + nextSlot * 16;
+        if (const auto found = bound.find(key); found != bound.end()) return found->second;
         const auto operation = service->second;
-        const std::array ret{std::byte{0xc3}};
-        machine.Write(gate, ret);
-        if (operation == Service::Exit) {
-            machine.AddHostCall(gate, [state = std::weak_ptr<ProcessExitState>(processExit)](Machine& cpu) {
-                const auto context = state.lock();
-                if (!context) throw std::runtime_error("SCE libc process exit import runtime has expired");
-                const auto handler = context->handler;
-                invoke(cpu, Service::Exit, handler);
-            });
-        } else machine.AddHostCall(gate, [operation](Machine& cpu) { invoke(cpu, operation); });
-        gates.emplace(key, gate);
-        ++nextSlot;
+        const auto gate = operation == Service::Exit
+            ? gates.Add([state = std::weak_ptr<ProcessExitState>(processExit)](Machine& cpu) {
+                  const auto context = state.lock();
+                  if (!context) throw std::runtime_error("SCE libc process exit import runtime has expired");
+                  const auto handler = context->handler;
+                  invoke(cpu, Service::Exit, handler);
+              })
+            : gates.Add([operation](Machine& cpu) { invoke(cpu, operation); });
+        bound.emplace(key, gate);
         return gate;
     }
 };

@@ -1,6 +1,7 @@
 #include <cpu/SceMemoryImports.hpp>
 #include <cpu/GuestMemoryRuntime.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <nid/NidCompute.hpp>
 #include <array>
 #include <bit>
@@ -34,13 +35,12 @@ struct SceMemoryImports::Impl {
                            std::uint16_t, std::uint8_t, std::uint8_t>;
     Machine& machine;
     std::shared_ptr<GuestMemoryRuntime> memory;
-    const std::uint64_t base;
-    std::size_t nextSlot = 0;
+    std::optional<SceHostTrampolines> trampolines;
     std::map<std::string, Service> services;
     std::map<Key, std::uint64_t> gates;
 
-    Impl(Machine& guest, std::shared_ptr<GuestMemoryRuntime> runtime, std::uint64_t gateBase) :
-        machine(guest), memory(std::move(runtime)), base(gateBase) {
+    Impl(Machine& guest, std::shared_ptr<GuestMemoryRuntime> runtime, std::uint64_t base) :
+        machine(guest), memory(std::move(runtime)) {
         if (!memory) throw std::invalid_argument("SCE memory imports require a guest memory runtime");
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("SCE memory import gates require a nonzero aligned low canonical guest page");
@@ -52,11 +52,7 @@ struct SceMemoryImports::Impl {
                  {"sceKernelVirtualQuery", Service::Query}, {"sceKernelMunmap", Service::Unmap},
                  {"sceKernelReleaseDirectMemory", Service::Release}}})
             services.emplace(Nid::ComputeNid(name, "libkernel"), service);
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
+        trampolines.emplace(machine, base, SceHostTrampolines::DefaultCapacity, "SCE memory import");
     }
 
     void checkOutput(std::uint64_t address, std::size_t size, bool input = false) const {
@@ -155,17 +151,12 @@ std::optional<std::uint64_t> SceMemoryImports::Resolve(const SceImport& import) 
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->nextSlot == 256) throw std::runtime_error("SCE memory import gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), operation = service->second](Machine& guest) {
+    const auto gate = impl->trampolines->Add([state = std::weak_ptr<Impl>(impl), operation = service->second](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("SCE memory import runtime has expired");
         context->invoke(guest, operation);
     });
     impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
     return gate;
 }
 

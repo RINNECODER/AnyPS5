@@ -124,7 +124,9 @@ Cpu::SceImport exitImport() {
 }
 
 void cumulativeEntryBudget(const Inputs& inputs) {
-    for (const auto budget : {7ULL, 8ULL, 13ULL}) {
+    // The kernel exit import is a host trampoline: MOV R11D and JMP to the shared gate
+    // are the two instructions before the gate itself, so the exit takes fifteen.
+    for (const auto budget : {7ULL, 8ULL, 15ULL}) {
         Session session(inputs);
         const auto gate = session.KernelExit.Resolve(exitImport());
         require(bool(gate), "Instruction budget fixture requires typed kernel exit");
@@ -140,9 +142,9 @@ void cumulativeEntryBudget(const Inputs& inputs) {
         const auto reason = session.Modules->RunMain(budget, 100000);
         require(state(session.Machine, session.State)[8] == 1,
                 "Entry budget test did not finalize dependency at the deferred pause");
-        if (budget == 13) {
+        if (budget == 15) {
             require(reason == Cpu::StopReason::Exit && session.Machine.ExitCode() == 0,
-                    "Exact cumulative entry budget did not permit the literal thirteen-instruction exit");
+                    "Exact cumulative entry budget did not permit the literal fifteen-instruction exit");
         } else {
             require(reason == Cpu::StopReason::InstructionLimit,
                     "Resumed main received a fresh instruction budget instead of the remaining entry budget");

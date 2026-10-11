@@ -1,5 +1,6 @@
 #include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <array>
 #include <bit>
 #include <map>
@@ -25,20 +26,12 @@ struct SceCommonDialogImports::Impl {
     using Key = std::tuple<std::string, std::string, std::uint16_t, std::string, std::uint16_t,
                            std::uint16_t, std::uint8_t, std::uint8_t>;
     Machine& machine;
-    const std::uint64_t base;
+    SceHostTrampolines trampolines;
     bool initialized = false;
-    std::size_t nextSlot = 0;
     std::map<Key, std::uint64_t> gates;
 
-    Impl(Machine& guest, std::uint64_t gateBase) : machine(guest), base(gateBase) {
-        if (!base || (base & 4095) || base >= 0x7ffffffff000)
-            throw std::invalid_argument("SCE common dialog import gates require a nonzero aligned low canonical guest page");
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
-    }
+    Impl(Machine& guest, std::uint64_t base)
+        : machine(guest), trampolines(guest, base, SceHostTrampolines::DefaultCapacity, "SCE common dialog import") {}
 
     void initialize(Machine& guest) {
         const auto result = initialized ? alreadyInitialized : std::int64_t{0};
@@ -62,17 +55,12 @@ std::optional<std::uint64_t> SceCommonDialogImports::Resolve(const SceImport& im
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->nextSlot == 256) throw std::runtime_error("SCE common dialog import gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl)](Machine& guest) {
+    const auto gate = impl->trampolines.Add([state = std::weak_ptr<Impl>(impl)](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("SCE common dialog import runtime has expired");
         context->initialize(guest);
     });
     impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
     return gate;
 }
 
