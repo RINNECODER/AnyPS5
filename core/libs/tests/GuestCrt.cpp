@@ -31,6 +31,7 @@ std::size_t APS5_VABI mbstowcs_nid_postfix(std::uint16_t* dest, const char* src,
 char* APS5_VABI strtok_s_nid_postfix(char* str, const char* delim, char** context);
 int APS5_VABI __fpclassifyd_nid_postfix(double value);
 unsigned __int128 APS5_VABI __udivti3_nid_postfix(unsigned __int128 dividend, unsigned __int128 divisor);
+__int128 APS5_VABI __divti3_nid_postfix(__int128 dividend, __int128 divisor);
 SonyLconv* APS5_VABI localeconv_nid_postfix(void);
 int APS5_VABI sceAmprFpclassifyd(double value);
 }
@@ -79,6 +80,29 @@ int main() {
     bool trapped = false;
     try {
         SonyUdivti3(1, 0);
+    } catch (const std::exception&) {
+        trapped = true;
+    }
+    Require(trapped);
+
+    Require(__divti3_nid_postfix(100, 3) == 33);
+    Require(__divti3_nid_postfix(-100, 3) == -33);
+    Require(__divti3_nid_postfix(100, -3) == -33);
+    Require(__divti3_nid_postfix(-100, -3) == 33);
+    Require(SonyDivti3(0, 5) == 0);
+    const __int128 large = (__int128)1 << 100;
+    Require(SonyDivti3(large, 3) == large / 3);
+    Require(SonyDivti3(-large, 3) == -(large / 3));
+    Require(SonyDivti3(large, -3) == -(large / 3));
+    Require(SonyDivti3(-large, -3) == large / 3);
+    const __int128 minimum = (__int128)((unsigned __int128)1 << 127);
+    const __int128 maximum = (__int128)(((unsigned __int128)1 << 127) - 1);
+    Require(SonyDivti3(minimum, 1) == minimum);
+    Require(SonyDivti3(minimum, -1) == minimum);
+    Require(SonyDivti3(maximum, -1) == -maximum);
+    trapped = false;
+    try {
+        SonyDivti3(1, 0);
     } catch (const std::exception&) {
         trapped = true;
     }

@@ -195,6 +195,19 @@ inline unsigned __int128 SonyUdivti3(unsigned __int128 dividend, unsigned __int1
     return quotient;
 }
 
+inline __int128 SonyDivti3(__int128 dividend, __int128 divisor) {
+    if (divisor == 0) throw std::runtime_error("__divti3: integer divide by zero");
+    const bool negative = (dividend < 0) != (divisor < 0);
+    const unsigned __int128 magnitudeDividend = dividend < 0
+        ? (unsigned __int128)0 - (unsigned __int128)dividend
+        : (unsigned __int128)dividend;
+    const unsigned __int128 magnitudeDivisor = divisor < 0
+        ? (unsigned __int128)0 - (unsigned __int128)divisor
+        : (unsigned __int128)divisor;
+    const unsigned __int128 magnitude = SonyUdivti3(magnitudeDividend, magnitudeDivisor);
+    return (__int128)(negative ? (unsigned __int128)0 - magnitude : magnitude);
+}
+
 }
 
 #endif
