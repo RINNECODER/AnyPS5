@@ -45,7 +45,7 @@ std::string FoldFilename(std::string name) {
 
 std::string ModuleStem(std::string name, const bool windows) {
     if (windows) name = FoldFilename(std::move(name));
-    for (const std::string_view suffix : {".debug_prx", ".sprx", ".prx"}) {
+    for (const std::string_view suffix : {".debug_prx", ".suprx", ".sprx", ".prx"}) {
         if (name.size() > suffix.size() && name.ends_with(suffix)) return name.substr(0, name.size() - suffix.size());
     }
     return {};
