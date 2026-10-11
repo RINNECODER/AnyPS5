@@ -43,6 +43,7 @@
 #endif
 
 extern "C" int* APS5_VABI __error_nid_postfix();
+extern "C" int APS5_VABI stat_nid_postfix(const char* path, FileStat* sb);
 
 namespace {
 
@@ -156,6 +157,37 @@ std::int64_t toGuestLimit(rlim_t value) {
     return static_cast<std::int64_t>(value);
 }
 #endif
+
+constexpr int guestNoEntry = 2;
+constexpr int guestAccess = 13;
+constexpr int guestNotDirectory = 20;
+constexpr std::size_t guestPathMax = 1024;
+constexpr std::size_t guestArgumentMax = 262144;
+constexpr std::uint16_t guestFileType = 0170000;
+constexpr std::uint16_t guestRegularFile = 0100000;
+
+std::size_t addStringSpace(std::size_t space, const char* const* strings) {
+    for (; strings != nullptr && *strings != nullptr; ++strings)
+        space += std::strlen(*strings) + 1;
+    return space;
+}
+
+int executableError(const char* function, const char* path, const char* const* arguments, const char* const* environment) {
+    if (arguments == nullptr || path == nullptr)
+        return guestFault;
+    if (strnlen(path, guestPathMax) == guestPathMax)
+        throw std::runtime_error(std::string(function) + ": path of PATH_MAX bytes or more");
+    if (addStringSpace(addStringSpace(0, arguments), environment) > guestArgumentMax)
+        throw std::runtime_error(std::string(function) + ": arguments and environment exceed ARG_MAX");
+    FileStat status{};
+    if (stat_nid_postfix(path, &status) != 0) {
+        const int error = *__error_nid_postfix();
+        if (error != guestNoEntry && error != guestNotDirectory)
+            throw std::runtime_error(std::string(function) + ": unsupported lookup error " + std::to_string(error));
+        return error;
+    }
+    return (status.st_mode & guestFileType) == guestRegularFile ? 0 : guestAccess;
+}
 
 }
 
@@ -343,9 +375,20 @@ int APS5_VABI execvp_nid_postfix(const char* file, char* const* arguments) {
     return -1;
 }
 
+int APS5_VABI execve_nid_postfix(const char* path, char* const* arguments, char* const* environment) {
+    if (const int error = executableError("execve", path, arguments, environment)) {
+        *__error_nid_postfix() = error;
+        return -1;
+    }
+    NotImplemented_nid_no_patch("execve: executable replacement");
+    return -1;
+}
+
 int APS5_VABI execv_nid_postfix(const char* path, char* const* arguments) {
-    (void)path;
-    (void)arguments;
+    if (const int error = executableError("execv", path, arguments, environ_nid_postfix)) {
+        *__error_nid_postfix() = error;
+        return -1;
+    }
     NotImplemented_nid_no_patch("execv: executable replacement");
     return -1;
 }
