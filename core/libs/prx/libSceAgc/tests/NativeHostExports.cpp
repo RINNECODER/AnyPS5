@@ -29,11 +29,13 @@ struct Library {
 
 void CheckInterpolantExports(const Library& library) {
     using Function = int (*)(ShaderRegister*, const Shader*, const Shader*);
+    // HV4j+E0MBHE is the NID of the name sceAgcCreateInterpolantMapping_0100 itself (upstream names the
+    // export after its NID), so it needs no alias; dbOlWdppb4o is still an explicit alias.
     for (const auto& names : std::array<std::array<const char*, 2>, 2>{{
-             {"HV4j+E0MBHE_nid_no_patch_cut", "sceAgcCreateInterpolantMapping"},
+             {"sceAgcCreateInterpolantMapping_0100", nullptr},
              {"dbOlWdppb4o_nid_no_patch_cut", "sceAgcUnknownCreateInterpolantMapping"}}}) {
         const auto alias = library.Resolve(names[0]);
-        Require(alias == library.Resolve(names[1]), "Native NID alias does not resolve to its public function");
+        Require(names[1] == nullptr || alias == library.Resolve(names[1]), "Native NID alias does not resolve to its public function");
         struct Guarded {
             std::uint64_t before;
             std::array<ShaderRegister, 32> registers;
