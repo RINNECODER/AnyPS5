@@ -24,6 +24,60 @@ std::int64_t RoundToInt64(TFloat value) {
     return static_cast<std::int64_t>(rounded);
 }
 
+float SinhfExpm1(float x) {
+    constexpr float Ln2High = 6.9313812256e-01f, Ln2Low = 9.0580006145e-06f, InverseLn2 = 1.4426950216e+00f;
+    constexpr float Q1 = -3.3333212137e-2f, Q2 = 1.5807170421e-3f;
+    const std::uint32_t magnitude = std::bit_cast<std::uint32_t>(x);
+    int k = 0;
+    float c = 0.0f;
+    if (magnitude > 0x3eb17218u) {
+        float high;
+        float low;
+        if (magnitude < 0x3f851592u) {
+            high = x - Ln2High;
+            low = Ln2Low;
+            k = 1;
+        } else {
+            k = static_cast<int>(InverseLn2 * x + 0.5f);
+            const float t = static_cast<float>(k);
+            high = x - t * Ln2High;
+            low = t * Ln2Low;
+        }
+        x = high - low;
+        c = (high - x) - low;
+    }
+    const float halfX = 0.5f * x;
+    const float halfSquare = x * halfX;
+    const float r1 = 1.0f + halfSquare * (Q1 + halfSquare * Q2);
+    const float t = 3.0f - r1 * halfX;
+    float e = halfSquare * ((r1 - t) / (6.0f - x * t));
+    if (k == 0) return x - (x * e - halfSquare);
+    e = x * (e - c) - c;
+    e -= halfSquare;
+    if (k == 1) {
+        if (x < -0.25f) return -2.0f * (e - (x + 0.5f));
+        return 1.0f + 2.0f * (x - e);
+    }
+    const float twoPowK = std::bit_cast<float>(static_cast<std::uint32_t>(0x7f + k) << 23);
+    const float oneMinusTwoPowMinusK = std::bit_cast<float>(0x3f800000u - (0x1000000u >> k));
+    return (oneMinusTwoPowMinusK - (e - x)) * twoPowK;
+}
+
+float SinhfExp(float x) {
+    constexpr float Ln2High = 6.9314575195e-01f, Ln2Low = 1.4286067653e-06f, InverseLn2 = 1.4426950216e+00f;
+    constexpr float P1 = 1.6666625440e-1f, P2 = -2.7667332906e-3f;
+    const int k = static_cast<int>(InverseLn2 * x + 0.5f);
+    const float kFloat = static_cast<float>(k);
+    const float high = x - kFloat * Ln2High;
+    const float low = kFloat * Ln2Low;
+    x = high - low;
+    const float t = x * x;
+    const float c = x - t * (P1 + t * P2);
+    const float y = 1.0f - ((low - (x * c) / (2.0f - c)) - high);
+    if (k == 128) return y * 2.0f * 0x1p127f;
+    return y * std::bit_cast<float>(static_cast<std::uint32_t>(0x7f + k) << 23);
+}
+
 }
 
 extern "C" {
@@ -125,6 +179,27 @@ double APS5_VABI cos_nid_postfix(double x) { return std::cos(x); }
 double APS5_VABI sinh_nid_postfix(double x) { return std::sinh(x); }
 double APS5_VABI cosh_nid_postfix(double x) { return std::cosh(x); }
 float APS5_VABI coshf_nid_postfix(float x) { return std::cosh(x); }
+
+float APS5_VABI sinhf_nid_postfix(float x) {
+    const std::uint32_t magnitude = std::bit_cast<std::uint32_t>(x) & 0x7fffffffu;
+    if (magnitude >= 0x7f800000u) return x + x;
+    const float half = std::signbit(x) ? -0.5f : 0.5f;
+    const float absolute = std::fabs(x);
+    if (magnitude < 0x41100000u) {
+        if (magnitude < 0x39800000u && 1.0e37f + x > 1.0f) return x;
+        const float t = SinhfExpm1(absolute);
+        if (magnitude < 0x3f800000u) return half * (2.0f * t - t * t / (t + 1.0f));
+        return half * (t + t / (t + 1.0f));
+    }
+    if (magnitude < 0x42b17217u) return half * SinhfExp(absolute);
+    if (magnitude <= 0x42b2d4fcu) {
+        const float w = SinhfExp(0.5f * absolute);
+        return half * w * w;
+    }
+    errno = ERANGE;
+    return x * 1.0e37f;
+}
+
 double APS5_VABI asinh_nid_postfix(double x) { return std::asinh(x); }
 float APS5_VABI asinhf_nid_postfix(float x) { return std::asinh(x); }
 double APS5_VABI acosh_nid_postfix(double x) { return std::acosh(x); }

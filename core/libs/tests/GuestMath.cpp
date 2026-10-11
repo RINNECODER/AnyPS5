@@ -70,6 +70,7 @@ std::div_t APS5_VABI div_nid_postfix(int, int);
 double APS5_VABI sinh_nid_postfix(double);
 double APS5_VABI cosh_nid_postfix(double);
 float APS5_VABI coshf_nid_postfix(float);
+float APS5_VABI sinhf_nid_postfix(float);
 double APS5_VABI asinh_nid_postfix(double);
 float APS5_VABI asinhf_nid_postfix(float);
 double APS5_VABI acosh_nid_postfix(double);
@@ -419,6 +420,38 @@ static void CheckHyperbolic() {
     Require(Near(acosh_nid_postfix(1e300), 691.4686750787736, 1e-15));
 }
 
+static void CheckSinhf() {
+    const float infinity = std::numeric_limits<float>::infinity();
+    const struct { std::uint32_t input; std::uint32_t output; } cases[] = {
+        {0x00000000u, 0x00000000u}, {0x80000000u, 0x80000000u}, {0x00000001u, 0x00000001u}, {0x39000000u, 0x39000000u},
+        {0x3e800000u, 0x3e815667u}, {0xbf000000u, 0xbf056680u}, {0x3f800000u, 0x3f966cfeu}, {0xbf800000u, 0xbf966cfeu},
+        {0x40000000u, 0x40681e7bu}, {0x41100000u, 0x457d38acu}, {0xc1a00000u, 0xcd675844u}, {0x42b17217u, 0x7effff84u},
+        {0x42b20000u, 0x7f28e166u}, {0xc2b20000u, 0xff28e166u}, {0x42b2d4fcu, 0x7f7fffecu},
+        {0x7f800000u, 0x7f800000u}, {0xff800000u, 0xff800000u},
+    };
+    for (const auto& test : cases) {
+        *__error_nid_postfix() = 12345;
+        const float result = sinhf_nid_postfix(std::bit_cast<float>(test.input));
+        if (std::bit_cast<std::uint32_t>(result) != test.output || *__error_nid_postfix() != 12345) {
+            std::fprintf(stderr, "Guest sinhf failed for %08x\n", test.input);
+            std::abort();
+        }
+    }
+    Require(std::isnan(sinhf_nid_postfix(std::numeric_limits<float>::quiet_NaN())) && *__error_nid_postfix() == 12345);
+    Require(Near(sinhf_nid_postfix(1.f), 1.1752011936438014, 1e-6) && Near(sinhf_nid_postfix(-2.f), -3.626860407847019, 1e-6));
+    Require(Near(sinhf_nid_postfix(0.25f), 0.25261231680816831, 1e-6) && Near(sinhf_nid_postfix(20.f), 242582597.70489514, 1e-6));
+    for (const std::uint32_t input : {0x42b2d4fdu, 0x42c80000u, 0x7f7fffffu}) {
+        for (const std::uint32_t sign : {0u, 0x80000000u}) {
+            std::feclearexcept(FE_ALL_EXCEPT);
+            *__error_nid_postfix() = 0;
+            const float result = sinhf_nid_postfix(std::bit_cast<float>(input | sign));
+            Require(result == (sign != 0 ? -infinity : infinity) && *__error_nid_postfix() == ERANGE);
+            Require(std::fetestexcept(FE_OVERFLOW) != 0);
+        }
+    }
+    *__error_nid_postfix() = 0;
+}
+
 static void CheckFloatClassification() {
     Require(_FInf_nid_postfix.bits[0] == 0x7f800000u && _FNan_nid_postfix.bits[0] == 0x7fc00000u);
     for (int word = 1; word < 4; ++word) Require(_FInf_nid_postfix.bits[word] == 0 && _FNan_nid_postfix.bits[word] == 0);
@@ -643,6 +676,7 @@ int main() {
     Require(std::isinf(__powisf2_nid_postfix(-0.0f, -3)) && std::signbit(__powisf2_nid_postfix(-0.0f, -3)));
     Require(__powisf2_nid_postfix(2.0f, -127) == 0x1p-127f);
     CheckHyperbolic();
+    CheckSinhf();
     CheckHypotSpecialValue();
     CheckFmodErrno();
 }
