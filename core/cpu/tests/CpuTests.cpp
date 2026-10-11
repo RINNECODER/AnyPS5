@@ -1,10 +1,13 @@
 #include <cpu/Cpu.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -244,6 +247,50 @@ void modernVectors() {
     require(machine.Run(0x1140, 0x114e, 10) == StopReason::Address && read<std::array<std::uint16_t,8>>(machine, 0x3260) == halves,
             "F16C single-to-half conversion disagrees with independently specified half encodings");
 }
+// Zen 2 extensions QEMU TCG implements but the Haswell base model leaves disabled
+// (so they would raise #UD): ADX, RDSEED, SHA, CLFLUSHOPT and CLWB; plus RDRAND,
+// whose entropy source must be open for CF=1.
+std::uint32_t sha256Sigma0(std::uint32_t x) { return std::rotr(x, 7) ^ std::rotr(x, 18) ^ (x >> 3); }
+void zen2Extensions() {
+    Machine machine;
+    setup(machine);
+    code(machine, 0x1100, {0x0f,0xa2});
+    machine.Set(Register::Rax, 7);
+    machine.Set(Register::Rcx, 0);
+    require(machine.Run(0x1100, 0x1102, 10) == StopReason::Address, "Guest CPUID leaf 7 did not execute");
+    constexpr std::uint64_t rdseed = 1ULL << 18, adx = 1ULL << 19, clflushopt = 1ULL << 23, clwb = 1ULL << 24, sha = 1ULL << 29;
+    require((machine.Get(Register::Rbx) & (rdseed | adx | clflushopt | clwb | sha)) == (rdseed | adx | clflushopt | clwb | sha),
+            "CPUID leaf 7 does not advertise the Zen 2 RDSEED/ADX/CLFLUSHOPT/CLWB/SHA extensions");
+    // stc; adcx rax, rbx; adox rcx, rdx
+    machine.Set(Register::Rflags, 2);
+    machine.Set(Register::Rax, ~0ULL); machine.Set(Register::Rbx, 1);
+    machine.Set(Register::Rcx, 5); machine.Set(Register::Rdx, 7);
+    code(machine, 0x1120, {0xf9, 0x66,0x48,0x0f,0x38,0xf6,0xc3, 0xf3,0x48,0x0f,0x38,0xf6,0xca});
+    require(machine.Run(0x1120, 0x112d, 10) == StopReason::Address && machine.Get(Register::Rax) == 1 &&
+            (machine.Get(Register::Rflags) & 1) && machine.Get(Register::Rcx) == 12 && !(machine.Get(Register::Rflags) & 0x800),
+            "ADCX/ADOX carry chains differ");
+    // rdseed rax / rdrand rax: CF=1 reports a value from the host entropy source.
+    for (const std::uint8_t modrm : {0xf8, 0xf0}) {
+        machine.Set(Register::Rflags, 2);
+        code(machine, 0x1140, {0x48,0x0f,0xc7,modrm});
+        require(machine.Run(0x1140, 0x1144, 10) == StopReason::Address && (machine.Get(Register::Rflags) & 1),
+                "RDSEED/RDRAND did not deliver a value");
+    }
+    // movdqu xmm0,[rdi]; movdqu xmm1,[rdi+16]; sha256msg1 xmm0,xmm1; movdqu [rdi+32],xmm0
+    const std::array<std::uint32_t, 8> words{0x61626380, 0x00000000, 0x80000000, 0x12345678,
+                                             0xdeadbeef, 0x0badf00d, 0x01234567, 0x89abcdef};
+    write(machine, 0x3000, words);
+    machine.Set(Register::Rdi, 0x3000);
+    code(machine, 0x1160, {0xf3,0x0f,0x6f,0x07, 0xf3,0x0f,0x6f,0x4f,0x10, 0x0f,0x38,0xcc,0xc1, 0xf3,0x0f,0x7f,0x47,0x20});
+    require(machine.Run(0x1160, 0x1172, 10) == StopReason::Address, "SHA256MSG1 did not execute");
+    const auto schedule = read<std::array<std::uint32_t, 4>>(machine, 0x3020);
+    for (unsigned i = 0; i < 4; ++i)
+        require(schedule[i] == words[i] + sha256Sigma0(words[i + 1]), "SHA256MSG1 message schedule differs");
+    // clflushopt [rdi]; clwb [rdi]: write-back hints leave memory intact.
+    code(machine, 0x1180, {0x66,0x0f,0xae,0x3f, 0x66,0x0f,0xae,0x37});
+    require(machine.Run(0x1180, 0x1188, 10) == StopReason::Address && read<std::uint32_t>(machine, 0x3000) == words[0],
+            "CLFLUSHOPT/CLWB did not execute as cache write-back hints");
+}
 void modernCpuFeatures() {
     Machine machine;
     setup(machine);
@@ -318,7 +365,13 @@ void invalidInstructionDiagnostics() {
         bool rejected = false;
         try { machine.Run(0x1100, 0x1100 + program.size(), 20); }
         catch (const std::exception& error) {
-            require(std::string(error.what()) == "Unsupported guest instruction at 0x1100", error.what());
+            // The diagnostic names the 16 guest bytes at RIP so the encoding can be identified.
+            std::ostringstream expected;
+            expected << "Unsupported guest instruction at 0x1100 (bytes:" << std::hex << std::setfill('0');
+            for (std::size_t index = 0; index < 16; ++index)
+                expected << ' ' << std::setw(2) << unsigned{index < program.size() ? program[index] : 0u};
+            expected << ')';
+            require(std::string(error.what()) == expected.str(), error.what());
             rejected = true;
         }
         require(rejected, "Invalid control-register or LOCK encoding executed without an unsupported-instruction diagnostic");
@@ -680,6 +733,7 @@ int main(int argc, const char** argv) {
 #if ANYPS5_CPU_MODERN_TCG
             {"unsupported EVEX", unsupportedVectorEncodings},
             {"AVX/AVX2/F16C/FMA", modernVectors}, {"CPUID/XGETBV", modernCpuFeatures},
+            {"Zen 2 ADX/RDSEED/RDRAND/SHA/CLFLUSHOPT/CLWB", zen2Extensions},
             {"RDTSC/RDTSCP", timeStampCounter},
             {"invalid instruction diagnostics", invalidInstructionDiagnostics},
 #else

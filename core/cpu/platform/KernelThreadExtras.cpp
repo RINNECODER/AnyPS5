@@ -725,6 +725,17 @@ struct KernelThreadExtras::Impl {
         if (!name) return error(Fault);
         if (const auto status = writeResult(result)) return status;
         const auto found = findModule(*name);
+        if (!found) {
+            // A title-loaded module absent from the --sce-module graph: name it, since the
+            // title usually continues and fails much later on the missing handle.
+            std::cerr << "{\"schema_version\":1,\"event\":\"module_load_failed\",\"path\":\"";
+            for (const unsigned char c : *name) {
+                if (c == '"' || c == '\\') std::cerr << '\\' << c;
+                else if (c < 0x20) std::cerr << "\\u00" << "0123456789abcdef"[c >> 4] << "0123456789abcdef"[c & 15];
+                else std::cerr << c;
+            }
+            std::cerr << "\",\"error\":" << error(NoEntry) << "}\n";
+        }
         return found ? static_cast<std::uint32_t>(*found) : error(NoEntry);
     }
     std::uint32_t stopUnload(std::int32_t handle, std::uint64_t result) {
@@ -914,7 +925,21 @@ struct KernelThreadExtras::Impl {
             // debugger; without one the caller continues.
             std::cerr << "{\"schema_version\":1,\"event\":\"kernel_debug_exception\",\"release_mode\":"
                       << (op == Op::DebugRaiseRelease ? "true" : "false") << ",\"code\":" << static_cast<std::uint32_t>(rdi)
-                      << ",\"parameter\":" << static_cast<std::uint32_t>(rsi) << "}\n";
+                      << ",\"parameter\":" << static_cast<std::uint32_t>(rsi);
+            {
+                // Return address plus the frame-pointer chain identify which guest code raised it.
+                const auto rsp = m.Get(Register::Rsp);
+                if (span(m, rsp, 8, Permission::Read)) std::cerr << ",\"return_address\":" << load<std::uint64_t>(m, rsp);
+                std::cerr << ",\"frames\":[";
+                auto frame = m.Get(Register::Rbp);
+                for (int depth = 0; depth < 12 && span(m, frame, 16, Permission::Read); ++depth) {
+                    std::cerr << (depth ? "," : "") << load<std::uint64_t>(m, frame + 8);
+                    const auto next = load<std::uint64_t>(m, frame);
+                    if (next <= frame) break;
+                    frame = next;
+                }
+                std::cerr << "]}\n";
+            }
             return 0;
         case Op::DebugCppInfo: return 0;
         case Op::LoadStart: return loadStart(rdi, m.Get(Register::R9));

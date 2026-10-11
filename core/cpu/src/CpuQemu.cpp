@@ -1,6 +1,7 @@
 #include <cpu/Cpu.hpp>
 #include <qemu/anyps5-cpu.h>
 #include <algorithm>
+#include <iomanip>
 #include <array>
 #include <atomic>
 #include <cstdlib>
@@ -378,6 +379,20 @@ struct Machine::Impl {
             }
             cursor = std::min(end, found->address + found->size);
         }
+    }
+    // Host-side copy of up to 16 mapped bytes at a guest address, for diagnostics only.
+    std::string instructionBytes(std::uint64_t address) const {
+        std::ostringstream text;
+        text << std::hex << std::setfill('0');
+        for (std::uint64_t index = 0; index < 16; ++index) {
+            std::byte value{};
+            try {
+                checkMapped(address + index, 1);
+                transfer(address + index, &value, 1, false);
+            } catch (const std::exception&) { break; }
+            text << (index ? " " : "") << std::setw(2) << std::to_integer<unsigned>(value);
+        }
+        return text.str();
     }
     void transfer(std::uint64_t address, std::byte* bytes, std::size_t size, bool write) const {
         while (size) {
@@ -1012,6 +1027,10 @@ StopReason Machine::RunSlice(std::uint64_t entry, std::uint64_t until, std::uint
             else if (result.vector == 13) message << "Unsupported guest privileged service instruction";
             else message << "Unsupported guest interrupt " << result.vector;
             message << " at 0x" << std::hex << result.rip;
+            if (result.vector == 6) {
+                const auto bytes = impl->instructionBytes(result.rip);
+                if (!bytes.empty()) message << " (bytes: " << bytes << ")";
+            }
             throw std::runtime_error(message.str());
         }
         default:
