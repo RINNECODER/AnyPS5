@@ -21,8 +21,29 @@
 #include <filesystem>
 #else
 #include <dlfcn.h>
-#include <link.h>
 #include <unistd.h>
+#ifdef __APPLE__
+// Darwin has no <link.h>: libc.prx emulates dl_iterate_phdr from the ELF program
+// headers the relinker embeds, and the image identity is the Mach-O header address.
+#include "prx/libc/include/specifics/linux/ElfTypes.hpp"
+#include <mach-o/dyld.h>
+constexpr std::uint32_t PT_DYNAMIC = 2;
+constexpr std::uint32_t PT_TLS = 7;
+constexpr std::uint32_t PF_R = 4;
+constexpr std::int64_t DT_NULL = 0;
+constexpr std::int64_t DT_INIT = 12;
+constexpr std::int64_t DT_FINI = 13;
+struct Elf64_Dyn {
+    std::int64_t d_tag;
+    union {
+        std::uint64_t d_val;
+        std::uint64_t d_ptr;
+    } d_un;
+};
+#define ElfW(type) Elf64_##type
+#else
+#include <link.h>
+#endif
 #endif
 
 extern "C" std::int32_t ModuleIdForImage_nid_no_patch(const void* native);
@@ -85,9 +106,15 @@ std::string ImageName(const dl_phdr_info& image) {
     std::string path = image.dlpi_name ? image.dlpi_name : "";
     if (path.empty()) {
         char executable[4096];
+#ifdef __APPLE__
+        std::uint32_t size = sizeof(executable);
+        if (_NSGetExecutablePath(executable, &size) != 0) throw std::runtime_error("sceKernelGetModuleInfoFromAddr: cannot resolve the executable path");
+        path.assign(executable);
+#else
         const auto length = ::readlink("/proc/self/exe", executable, sizeof(executable) - 1);
         if (length < 0) throw std::runtime_error("sceKernelGetModuleInfoFromAddr: cannot resolve the executable path");
         path.assign(executable, static_cast<std::size_t>(length));
+#endif
     }
     return ModuleName(path.substr(path.find_last_of('/') + 1));
 }
@@ -95,7 +122,11 @@ std::string ImageName(const dl_phdr_info& image) {
 template<typename TInfo>
 void Fill(const dl_phdr_info& image, TInfo& info) {
     SetName(info, ImageName(image));
+#ifdef __APPLE__
+    if constexpr (Extended<TInfo>) info.tls_index = 0; // guest TLS is not tracked per image on Darwin
+#else
     if constexpr (Extended<TInfo>) info.tls_index = ToU32(image.dlpi_tls_modid, "TLS module index");
+#endif
     for (std::uint16_t i = 0; i < image.dlpi_phnum; ++i) {
         const auto& header = image.dlpi_phdr[i];
         const std::uintptr_t address = image.dlpi_addr + header.p_vaddr;
@@ -155,9 +186,15 @@ std::vector<GuestImage> GuestImages() {
     std::vector<GuestImage> images;
     for (const auto address : addresses) {
         Dl_info symbol{};
+#ifdef __APPLE__
+        if (!dladdr(reinterpret_cast<const void*>(address), &symbol) || !symbol.dli_fbase)
+            throw std::runtime_error("sceKernelGetModuleList: no image header for a loaded image");
+        const void* native = symbol.dli_fbase;
+#else
         link_map* native = nullptr;
         if (!dladdr1(reinterpret_cast<const void*>(address), &symbol, reinterpret_cast<void**>(&native), RTLD_DL_LINKMAP) || !native)
             throw std::runtime_error("sceKernelGetModuleList: no link map for a loaded image");
+#endif
         images.push_back({native, address});
     }
     return images;
@@ -282,9 +319,15 @@ int APS5_VABI sceKernelGetModuleInfoFromAddr(std::uint64_t address, int flags, M
     if (!Fill(static_cast<std::uintptr_t>(address), result)) return SCE_KERNEL_ERROR_ESRCH;
 #else
     Dl_info symbol{};
+#ifdef __APPLE__
+    if (!dladdr(reinterpret_cast<const void*>(address), &symbol) || !symbol.dli_fbase)
+        return SCE_KERNEL_ERROR_ESRCH;
+    const void* native = symbol.dli_fbase;
+#else
     link_map* native = nullptr;
     if (!dladdr1(reinterpret_cast<const void*>(address), &symbol, reinterpret_cast<void**>(&native), RTLD_DL_LINKMAP) || !native)
         return SCE_KERNEL_ERROR_ESRCH;
+#endif
     ImageSearch<ModuleInfoEx> search{static_cast<std::uintptr_t>(address), &result, false};
     dl_iterate_phdr(FindImage<ModuleInfoEx>, &search);
     if (!search.found) return SCE_KERNEL_ERROR_ESRCH;

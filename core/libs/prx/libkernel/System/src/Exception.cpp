@@ -19,6 +19,10 @@
 #include <cstdlib>
 #include <system_error>
 #include <pthread.h>
+#ifdef __APPLE__
+#define _XOPEN_SOURCE 700 // Darwin guards <ucontext.h> behind it
+#define _DARWIN_C_SOURCE 1
+#endif
 #include <ucontext.h>
 #include <unistd.h>
 #endif
@@ -306,6 +310,60 @@ bool RaiseOn(Pthread thread, GuestExceptionHandler handler, int signum) {
 constexpr int HostSignal = SIGUSR1;
 constexpr std::size_t FxsaveRegisterBytes = 416;
 
+#if defined(__APPLE__)
+// Darwin delivers a pointer to __darwin_mcontext64 {__es, __ss, __fs}. The float state
+// from __fpu_fcw onwards is laid out exactly like the 512-byte FXSAVE image the guest
+// expects. Darwin does not expose the stack segment selector, so ss reads as 0.
+void FromHost(const mcontext_t& host, GuestMcontext& m) {
+    const auto& g = host->__ss;
+    m.rdi = g.__rdi;
+    m.rsi = g.__rsi;
+    m.rdx = g.__rdx;
+    m.rcx = g.__rcx;
+    m.r8 = g.__r8;
+    m.r9 = g.__r9;
+    m.rax = g.__rax;
+    m.rbx = g.__rbx;
+    m.rbp = g.__rbp;
+    m.r10 = g.__r10;
+    m.r11 = g.__r11;
+    m.r12 = g.__r12;
+    m.r13 = g.__r13;
+    m.r14 = g.__r14;
+    m.r15 = g.__r15;
+    m.rip = g.__rip;
+    m.rsp = g.__rsp;
+    m.rflags = g.__rflags;
+    m.cs = g.__cs & 0xffffu;
+    m.ss = 0;
+    m.len = sizeof(GuestMcontext);
+    static_assert(FxsaveRegisterBytes <= sizeof(m.fpstate));
+    std::memcpy(m.fpstate, &host->__fs.__fpu_fcw, FxsaveRegisterBytes);
+}
+
+void ToHost(const GuestMcontext& m, mcontext_t& host) {
+    auto& g = host->__ss;
+    g.__rdi = m.rdi;
+    g.__rsi = m.rsi;
+    g.__rdx = m.rdx;
+    g.__rcx = m.rcx;
+    g.__r8 = m.r8;
+    g.__r9 = m.r9;
+    g.__rax = m.rax;
+    g.__rbx = m.rbx;
+    g.__rbp = m.rbp;
+    g.__r10 = m.r10;
+    g.__r11 = m.r11;
+    g.__r12 = m.r12;
+    g.__r13 = m.r13;
+    g.__r14 = m.r14;
+    g.__r15 = m.r15;
+    g.__rip = m.rip;
+    g.__rsp = m.rsp;
+    g.__rflags = m.rflags;
+    std::memcpy(&host->__fs.__fpu_fcw, m.fpstate, FxsaveRegisterBytes);
+}
+#else
 void FromHost(const mcontext_t& host, GuestMcontext& m) {
     const auto* g = host.gregs;
     m.rdi = g[REG_RDI];
@@ -355,6 +413,7 @@ void ToHost(const GuestMcontext& m, mcontext_t& host) {
     g[REG_EFL] = static_cast<greg_t>(m.rflags);
     if (host.fpregs != nullptr) std::memcpy(host.fpregs, m.fpstate, FxsaveRegisterBytes);
 }
+#endif
 
 void Deliver(int, siginfo_t*, void* context) {
     const auto handler = Handler(RaisedSignal);

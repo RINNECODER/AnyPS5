@@ -124,7 +124,10 @@ struct PthreadPrivate {
     std::atomic<KernelCpumask> affinity{DEFAULT_THREAD_AFFINITY};
     std::atomic<int> priority{DEFAULT_THREAD_PRIORITY};
     int cpuClockThread = 0;
-#ifndef _WIN32
+#ifdef __APPLE__
+    unsigned hostMachThread = 0; // mach_port_t; Darwin has no per-thread CPU clockid
+    bool hostCpuClockBound = false;
+#elif !defined(_WIN32)
     clockid_t hostCpuClock{};
     bool hostCpuClockBound = false;
 #endif

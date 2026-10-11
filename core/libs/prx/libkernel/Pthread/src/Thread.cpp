@@ -27,6 +27,9 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 #endif
 
 static constexpr int SCE_OK = 0;
@@ -87,6 +90,10 @@ static bool HostStackLimits(std::uintptr_t* low, std::uintptr_t* high) {
     GetCurrentThreadStackLimits(&lowLimit, &highLimit);
     *low = lowLimit;
     *high = highLimit;
+#elif defined(__APPLE__)
+    const pthread_t self = pthread_self();
+    *high = reinterpret_cast<std::uintptr_t>(pthread_get_stackaddr_np(self));
+    *low = *high - pthread_get_stacksize_np(self);
 #else
     pthread_attr_t attr;
     if (pthread_getattr_np(pthread_self(), &attr) != 0)
@@ -210,11 +217,19 @@ PthreadPrivate::~PthreadPrivate() {
     auto& registry = CpuClocks();
     std::lock_guard lock(registry.lock);
     registry.threads.erase(cpuClockThread);
+#ifdef __APPLE__
+    if (hostCpuClockBound) mach_port_deallocate(mach_task_self(), hostMachThread);
+#endif
 }
 
 static void BindHostCpuClock(PthreadPrivate* self) {
 #ifdef _WIN32
     (void)self;
+#elif defined(__APPLE__)
+    auto& registry = CpuClocks();
+    std::lock_guard lock(registry.lock);
+    self->hostMachThread = mach_thread_self();
+    self->hostCpuClockBound = true;
 #else
     clockid_t clock{};
     const int error = pthread_getcpuclockid(pthread_self(), &clock);
@@ -266,6 +281,19 @@ bool GuestThreadCpuNanos(int cpuClockThread, std::uint64_t* nanos) {
         return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
     };
     *nanos = (toTicks(user) + toTicks(kernel)) * 100ULL;
+#elif defined(__APPLE__)
+    if (!thread->hostCpuClockBound) {
+        *nanos = 0;
+        return true;
+    }
+    thread_basic_info_data_t info{};
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(thread->hostMachThread, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&info), &count) != KERN_SUCCESS)
+        throw std::runtime_error("Querying guest thread CPU time");
+    const auto toNanos = [](const time_value_t& time) {
+        return static_cast<std::uint64_t>(time.seconds) * 1000000000ULL + static_cast<std::uint64_t>(time.microseconds) * 1000ULL;
+    };
+    *nanos = toNanos(info.user_time) + toNanos(info.system_time);
 #else
     if (!thread->hostCpuClockBound) {
         *nanos = 0;
