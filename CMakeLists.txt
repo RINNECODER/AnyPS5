@@ -76,6 +76,12 @@ if(ANYPS5_METAL_UTILITIES_ONLY)
     return()
 endif()
 
+option(ANYPS5_ROSETTA_LIBS "Build the system libraries as x86_64 macOS libs/<name>.prx for Rosetta direct execution, plus the relinker" OFF)
+if(ANYPS5_ROSETTA_LIBS)
+    include(cmake/RosettaLibs.cmake)
+    return()
+endif()
+
 if(NOT APPLE)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
 endif()
