@@ -13,6 +13,7 @@
 #include <cpu/ScePadImports.hpp>
 #include <cpu/SceUpstreamPrxBridge.hpp>
 #include <cpu/SceNetAddressImports.hpp>
+#include <cpu/SceJsonImports.hpp>
 #include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
 #include <cpu/SceLifecycleImports.hpp>
@@ -365,6 +366,7 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}},
         {"libSceNpManager.prx", {"libSceNpManager", 0, 1, 1}, {{"libSceNpManager", 0, 1}}},
         {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
+        {"libSceJson.prx", {"libSceJson", 0, 1, 1}, {{"libSceJson2", 0, 1}, {"libSceJson", 0, 1}}},
         {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}},
         {"libSceNpWebApi.prx", {"libSceNpWebApi", 0, 1, 1}, {{"libSceNpWebApi", 0, 1}}},
         {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}},
@@ -655,6 +657,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::ScePadImports> padRuntime;
         std::unique_ptr<Cpu::SceImportStubs> importStubs;
         std::unique_ptr<Cpu::SceNetAddressImports> netAddressRuntime;
+        std::unique_ptr<Cpu::SceJsonImports> jsonRuntime;
         std::unique_ptr<Cpu::SceCommonDialogImports> commonDialogRuntime;
         std::unique_ptr<Cpu::SceModules> modules;
         std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
@@ -735,6 +738,7 @@ int main(int argc, char** argv) {
                 if (nativeRuntime) nativeRuntime->AttachPadInput(padRuntime->Input());
 #endif
                 netAddressRuntime = std::make_unique<Cpu::SceNetAddressImports>(machine);
+                jsonRuntime = std::make_unique<Cpu::SceJsonImports>(machine);
                 commonDialogRuntime = std::make_unique<Cpu::SceCommonDialogImports>(machine, 0x7ffdf2000000);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
                 audioRuntime = std::make_unique<Cpu::SceAudioOut2Imports>(machine);
@@ -748,6 +752,7 @@ int main(int argc, char** argv) {
                     if (const auto gate = npOfflineRuntime->Resolve(import)) return *gate;
                     if (const auto gate = padRuntime->Resolve(import)) return *gate;
                     if (const auto gate = netAddressRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = jsonRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
