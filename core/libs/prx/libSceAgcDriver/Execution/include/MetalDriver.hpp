@@ -46,6 +46,9 @@ public:
     MetalDriver(const MetalDriver&) = delete;
     MetalDriver& operator=(const MetalDriver&) = delete;
     static MetalDriver& Get();
+    // Whether the calling thread is one of the driver's queue workers (which may not configure
+    // the driver or replace its borrowed ranges).
+    static bool OnDriverWorkerThread();
     void Configure(void* nativeDevice, void* nativeLibrary,
         std::span<const NativeGuestMemory::BorrowedRange> ranges, EopInterrupt eopInterrupt = {},
         std::uint64_t initialGeneration = 0);

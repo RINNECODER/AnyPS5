@@ -7,7 +7,6 @@ endif()
 # Graphics comes with the Metal backend (design doc phase 3); media decoders
 # need the ffmpeg, LibAtrac9, freetype and libjpeg-turbo submodules.
 set(ANYPS5_ROSETTA_EXCLUDED_LIBS
-    libSceAgc libSceAgcDriver libSceVideoOut
     libSceAjm.native libSceAudiodec libSceAudiodec.native libSceAvPlayer libSceAvPlayer.native libSceOpusDec libSceVideodec2 libSceVdecsw
     libSceNgs2 libSceNgs2.native libSceFont libSceFont.native libSceFont-module libSceFontFt libSceFontFt-module
     libSceJpegDec libSceJpegEnc libScePngDec libScePngEnc libSceZlib)
@@ -55,6 +54,8 @@ add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libc ${CMAKE_BINARY_DIR}/rosett
 target_include_directories(libc PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT})
 set(ANYPS5_ROSETTA_TARGETS libc)
 
+include(${CMAKE_SOURCE_DIR}/cmake/RosettaGraphics.cmake)
+
 file(GLOB ANYPS5_ROSETTA_LIB_DIRS LIST_DIRECTORIES true ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/*)
 foreach(LIB_DIR ${ANYPS5_ROSETTA_LIB_DIRS})
     get_filename_component(LIB_NAME ${LIB_DIR} NAME)
@@ -65,7 +66,9 @@ foreach(LIB_DIR ${ANYPS5_ROSETTA_LIB_DIRS})
         message(STATUS "Rosetta libs: ${LIB_NAME} excluded (dependencies not built for x86_64 yet)")
         continue()
     endif()
-    if(EXISTS ${LIB_DIR}/CMakeLists.txt)
+    if(LIB_NAME IN_LIST ANYPS5_ROSETTA_METAL_LIBS)
+        # Defined on the Metal backend by cmake/RosettaGraphics.cmake.
+    elseif(EXISTS ${LIB_DIR}/CMakeLists.txt)
         add_subdirectory(${LIB_DIR} ${CMAKE_BINARY_DIR}/rosetta/prx/${LIB_NAME})
     else()
         add_library(${LIB_NAME} SHARED EXCLUDE_FROM_ALL ${LIB_DIR}/Export.cpp)
@@ -127,8 +130,9 @@ foreach(LIB_NAME ${ANYPS5_ROSETTA_TARGETS})
 endforeach()
 
 add_custom_target(rosetta_libs ALL)
-add_dependencies(rosetta_libs ${ANYPS5_ROSETTA_PATCHED} relinker)
+add_dependencies(rosetta_libs ${ANYPS5_ROSETTA_PATCHED} relinker rosetta_metallib)
 
 if(BUILD_TESTING)
     add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/tests/direct_memory_darwin ${CMAKE_BINARY_DIR}/rosetta/tests/direct_memory_darwin)
+    anyps5_rosetta_graphics_tests()
 endif()

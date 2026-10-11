@@ -193,7 +193,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Initialize submodules
-        run: git submodule update --init --depth 1 3rdparty/SDL2
+        # SDL2 for the input/audio libraries; the rest for the Metal graphics libraries.
+        run: git submodule update --init --depth 1 3rdparty/SDL2 3rdparty/SPIRV-Cross 3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers 3rdparty/glslang
       - name: Select build directory
         run: echo "BUILD_DIR=$RUNNER_WORKSPACE/ci-build/rosetta-libs" >> "$GITHUB_ENV"
       - name: Configure
@@ -208,7 +209,7 @@ jobs:
           # The build directory persists between runs; never test a stale binary.
           rm -f "$BUILD_DIR/tests/direct_memory_darwin_tests"
           set +e
-          cmake --build "$BUILD_DIR" --parallel --target rosetta_libs direct_memory_darwin_tests -- -k 0 > "$BUILD_DIR/build.log" 2>&1
+          cmake --build "$BUILD_DIR" --parallel --target rosetta_libs direct_memory_darwin_tests metal_utility_tests rosetta_direct_graphics_tests -- -k 0 > "$BUILD_DIR/build.log" 2>&1
           status=$?
           set -e
           tail -n 3 "$BUILD_DIR/build.log"
@@ -238,3 +239,7 @@ jobs:
             exit 1
           fi
           arch -x86_64 "$BUILD_DIR/tests/direct_memory_darwin_tests"
+      - name: Test Metal graphics under Rosetta
+        # metal_utility_tests and the direct-path clear + flip (they need libc and libkernel to link).
+        if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
+        run: ctest --test-dir "$BUILD_DIR" -R 'metal_utility_tests|rosetta_direct_graphics' --output-on-failure --timeout 120

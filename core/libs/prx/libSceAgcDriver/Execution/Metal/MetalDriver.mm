@@ -116,6 +116,7 @@ bool& MetalDriver::Impl::OnWorkerThread() {
 MetalDriver::MetalDriver() : impl(std::make_unique<Impl>()) {}
 MetalDriver::~MetalDriver() { impl->Stop(); }
 MetalDriver& MetalDriver::Get() { static MetalDriver driver; return driver; }
+bool MetalDriver::OnDriverWorkerThread() { return Impl::OnWorkerThread(); }
 
 void MetalDriver::Configure(void* device, void* library,
     std::span<const NativeGuestMemory::BorrowedRange> ranges, EopInterrupt interrupt, std::uint64_t initialGeneration) {

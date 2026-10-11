@@ -1,5 +1,9 @@
 #if defined(ANYPS5_METAL_BACKEND)
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
+#if defined(ANYPS5_ROSETTA_DIRECT)
+#include "prx/libSceAgcDriver/Execution/Metal/DirectDriver.hpp"
+#include <stdexcept>
+#endif
 #else
 #include "prx/libSceAgcDriver/Execution/include/ThreadPriority.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
@@ -7,7 +11,12 @@
 #include <mutex>
 
 namespace {
-#if defined(ANYPS5_METAL_BACKEND)
+#if defined(ANYPS5_METAL_BACKEND) && defined(ANYPS5_ROSETTA_DIRECT)
+// Rosetta direct path: the driver configures itself on first use and borrows guest memory as identity ranges.
+struct BackendDriver {
+    static AgcDriver::Metal::MetalDriver& Get() { return AgcDriver::Metal::DirectDriver(); }
+};
+#elif defined(ANYPS5_METAL_BACKEND)
 using BackendDriver = AgcDriver::Metal::MetalDriver;
 #else
 using BackendDriver = AgcDriver::DriverDetail::Driver;
@@ -30,7 +39,13 @@ void InvokeEntry(Operation&& operation) {
 namespace AgcDriver {
 
 void Submit(const Packet* packet, std::uint32_t queue) {
+#if defined(ANYPS5_METAL_BACKEND) && defined(ANYPS5_ROSETTA_DIRECT)
+    // Descriptors and host-built command words (VideoOut's flip packet) live outside guest memory.
+    if (packet == nullptr) throw std::invalid_argument("AGC driver: null submission packet");
+    InvokeEntry([&] { AgcDriver::Metal::DirectSubmit(*packet, queue); });
+#else
     InvokeEntry([&] { BackendDriver::Get().Submit(packet, queue); });
+#endif
 }
 
 void WaitIdle() {
