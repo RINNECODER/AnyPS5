@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "SceShaders.hpp"
+#include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
 #include "CacheKey.hpp"
 #include "Optimization/ResourceProgram.hpp"
@@ -721,6 +722,43 @@ void ColorPipeBankXorTests() {
         const auto color = AgcDriver::Graphics::DecodeState(queue).color;
         Require(color.tileMode == AgcDriver::Graphics::ColorTileMode::D4KBX && color.address == block + 0x3000u && color.pipeBankXor == pipeBankXor, "a SW_4KB_D_X color base did not split into its 4 KiB block base and pipe/bank XOR " + std::to_string(pipeBankXor));
     }
+}
+
+void HiddenUserWordVertexTablesTests() {
+    constexpr std::size_t userDataOffset = 288;
+    constexpr std::size_t directOffset = 352;
+    constexpr std::size_t semanticOffset = 384;
+    static std::vector<std::byte> header(semanticOffset + sizeof(ShaderSemantic));
+    static std::array<std::uint32_t, 4> bufferTable{0x1000u, 0x20000u, 64u, 0x3000u};
+    static std::array<std::uint32_t, 1> attribTable{(0x2cu << 5u)};
+    std::array<std::uint16_t, ShaderRegs::AGC_DIRECT_RESOURCE_TYPE_COUNT> direct{};
+    direct.fill(ShaderRegs::AGC_ILLEGAL_DIRECT_OFFSET);
+    direct[static_cast<std::size_t>(ShaderRegs::AgcDirectResourceType::PtrVertexBufferTable)] = 4;
+    direct[static_cast<std::size_t>(ShaderRegs::AgcDirectResourceType::PtrVertexAttribDescTable)] = 6;
+    std::memcpy(header.data() + directOffset, direct.data(), sizeof(direct));
+    ShaderSemantic semantic{};
+    semantic.size_in_elements = 1;
+    std::memcpy(header.data() + semanticOffset, &semantic, sizeof(semantic));
+    ShaderUserData userData{};
+    userData.direct_resource_offset = reinterpret_cast<std::uint16_t*>(header.data() + directOffset);
+    userData.direct_resource_count = ShaderRegs::AGC_DIRECT_RESOURCE_TYPE_COUNT;
+    std::memcpy(header.data() + userDataOffset, &userData, sizeof(userData));
+    Shader shader{};
+    shader.user_data = reinterpret_cast<ShaderUserData*>(header.data() + userDataOffset);
+    shader.input_semantics = reinterpret_cast<ShaderSemantic*>(header.data() + semanticOffset);
+    shader.num_input_semantics = 1;
+    std::memcpy(header.data(), &shader, sizeof(shader));
+    const auto headerAddress = reinterpret_cast<std::uintptr_t>(header.data());
+    const auto low = [](const void* pointer) { return static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(pointer)); };
+    const auto high = [](const void* pointer) { return static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(pointer) >> 32u); };
+    const std::array<std::uint32_t, 8> registers{0x31016facu, 0x7efff390u, 0x100002u, 0x49u, low(bufferTable.data()), high(bufferTable.data()), low(attribTable.data()), high(attribTable.data())};
+    std::vector<std::uint32_t> merged(8, 0u);
+    merged.insert(merged.end(), registers.begin(), registers.end());
+    const auto info = AgcDriver::Graphics::DecodeVertexStageInfo(header, headerAddress, merged, nullptr, false, 8);
+    Require(info.fetchEmbedded && info.fetchBufferReg == 4u && info.fetchAttribReg == 6u && info.resourcesNum == 1 && info.resources[0].fields[0] == 0x1000u && info.resources[0].fields[2] == 64u, "a merged program's vertex tables were not read past its eight hidden user words");
+    expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeVertexStageInfo(header, headerAddress, merged, nullptr, false, 0)); }, "null vertex attribute table");
+    const auto plain = AgcDriver::Graphics::DecodeVertexStageInfo(header, headerAddress, registers, nullptr, false, 0);
+    Require(plain.fetchEmbedded && plain.fetchBufferReg == 4u && plain.resourcesNum == 1 && plain.resources[0].fields[0] == 0x1000u, "a vertex program's tables moved");
 }
 
 void HeaderlessVertexStageTests() {
@@ -4346,6 +4384,7 @@ int main(int argc, char** argv) {
         PixelInputLayoutTests();
         ColorPipeBankXorTests();
         HeaderlessVertexStageTests();
+        HiddenUserWordVertexTablesTests();
         ComputeScratchTests();
         shaderUserDataTailPaddingTests();
         InitialContextTests();
