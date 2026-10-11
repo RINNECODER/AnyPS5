@@ -15,6 +15,10 @@ set(ANYPS5_ROSETTA_EXCLUDED_LIBS
 # Imported by titles but without a source directory in core/libs/prx.
 set(ANYPS5_ROSETTA_SOURCELESS_LIBS libHttpServer.Prospero)
 
+# libc.prx defines the guest's __stack_chk_guard and ld64 binds the host stack
+# protector's ___stack_chk_guard to it; the NID patcher then renames that export
+# and dyld cannot load the libraries. Covers SDL2 (linked into libSceAudioOut).
+add_compile_options(-fno-stack-protector)
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
 set(SDL_STATIC_PIC ON CACHE BOOL "" FORCE)
@@ -78,6 +82,8 @@ foreach(LIB_DIR ${ANYPS5_ROSETTA_LIB_DIRS})
         set_target_properties(${LIB_NAME} PROPERTIES LINK_OPTIONS "${LIB_LINK_OPTIONS}")
     endif()
     if(LIB_NAME STREQUAL "libkernel")
+        # Fork-only start, TLS and fault hooks the relinked Mach-O binds to (design doc phase 2).
+        target_sources(${LIB_NAME} PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libkernel/Darwin/GuestRuntime.cpp)
         target_link_libraries(${LIB_NAME} PRIVATE libc)
     else()
         target_link_libraries(${LIB_NAME} PRIVATE libkernel libc)
@@ -131,4 +137,5 @@ add_dependencies(rosetta_libs ${ANYPS5_ROSETTA_PATCHED} relinker)
 
 if(BUILD_TESTING)
     add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/tests/direct_memory_darwin ${CMAKE_BINARY_DIR}/rosetta/tests/direct_memory_darwin)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/tools/rosetta/tests ${CMAKE_BINARY_DIR}/rosetta/tests/runtime)
 endif()

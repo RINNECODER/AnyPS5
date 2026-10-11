@@ -3,11 +3,14 @@
 
 #ifdef _WIN32
 #define APS5_ASM_FUNCTION(name) ".globl " name "\n.def " name "; .scl 2; .type 32; .endef\n" name ":\n"
+#define APS5_ASM_SYMBOL(name) name
 #elif defined(__APPLE__)
 // Mach-O: C symbols carry a leading underscore and there is no .type directive.
 #define APS5_ASM_FUNCTION(name) ".globl _" name "\n_" name ":\n"
+#define APS5_ASM_SYMBOL(name) "_" name
 #else
 #define APS5_ASM_FUNCTION(name) ".globl " name "\n.type " name ", @function\n" name ":\n"
+#define APS5_ASM_SYMBOL(name) name
 #endif
 
 #endif

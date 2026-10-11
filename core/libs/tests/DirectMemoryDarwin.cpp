@@ -99,15 +99,29 @@ void HintSkipsRefusedRange() {
     DoMunmap(address, Length);
 }
 
-void FixedInRefusedRangeFails() {
+void FixedInRefusedRangeRelocates() {
+    constexpr std::uintptr_t Shift = RefusedEnd - RefusedStart;
     std::int64_t phys = -1;
     Check(DirectMemoryAlloc(0, DIRECT_MEMORY_SIZE, Length, Length, 0, &phys) == 0, "allocate for the refused-range check");
-    void* direct = reinterpret_cast<void*>(RefusedStart + 0x200000000ull);
-    Check(DoMapDirect(&direct, Length, ProtCpuReadWrite, MapFixed, phys, 0) == SCE_KERNEL_ERROR_ENOMEM, "fixed direct mapping in the refused range fails with ENOMEM");
-    void* anonymous = reinterpret_cast<void*>(RefusedEnd - Length);
-    Check(DoMapAnon(&anonymous, Length, ProtCpuReadWrite, MapFixed) == SCE_KERNEL_ERROR_ENOMEM, "fixed flexible mapping in the refused range fails with ENOMEM");
-    void* reserved = reinterpret_cast<void*>(RefusedStart - PS5_PAGE_SIZE);
-    Check(DoReserveVirtual(&reserved, 2 * PS5_PAGE_SIZE, MapFixed, 0) == SCE_KERNEL_ERROR_ENOMEM, "fixed reservation straddling the refused range fails with ENOMEM");
+    const auto directWanted = RefusedStart + 0x200000000ull;
+    void* direct = reinterpret_cast<void*>(directWanted);
+    Check(DoMapDirect(&direct, Length, ProtCpuReadWrite, MapFixed, phys, 0) == 0, "fixed direct mapping in the refused range is relocated");
+    Check(reinterpret_cast<std::uintptr_t>(direct) == directWanted + Shift, "relocated direct mapping is returned through addr, above the refused range");
+    Bytes(direct)[0] = 5;
+    Check(Bytes(direct)[0] == 5, "relocated direct mapping is writable");
+    const auto anonymousWanted = RefusedEnd - Length;
+    void* anonymous = reinterpret_cast<void*>(anonymousWanted);
+    Check(DoMapAnon(&anonymous, Length, ProtCpuReadWrite, MapFixed) == 0, "fixed flexible mapping in the refused range is relocated");
+    Check(reinterpret_cast<std::uintptr_t>(anonymous) == anonymousWanted + Shift, "relocated flexible mapping keeps the same shift");
+    const auto reservedWanted = RefusedStart + 0x300000000ull;
+    void* reserved = reinterpret_cast<void*>(reservedWanted);
+    Check(DoReserveVirtual(&reserved, 2 * PS5_PAGE_SIZE, MapFixed, 0) == 0, "fixed reservation in the refused range is relocated");
+    Check(reinterpret_cast<std::uintptr_t>(reserved) == reservedWanted + Shift, "relocated reservation keeps the same shift");
+    void* straddling = reinterpret_cast<void*>(RefusedStart - PS5_PAGE_SIZE);
+    Check(DoReserveVirtual(&straddling, 2 * PS5_PAGE_SIZE, MapFixed, 0) == SCE_KERNEL_ERROR_ENOMEM, "fixed reservation running into the refused range fails with ENOMEM");
+    DoMunmap(direct, Length);
+    DoMunmap(anonymous, Length);
+    DoMunmap(reserved, 2 * PS5_PAGE_SIZE);
     DirectMemoryFree(phys, Length);
 }
 
@@ -126,7 +140,7 @@ int main() {
     Run("allocate, map fixed and alias", AllocateMapFixedAndAlias);
     Run("no-overwrite keeps host mapping", NoOverwriteKeepsHostMapping);
     Run("hint skips refused range", HintSkipsRefusedRange);
-    Run("fixed in refused range fails", FixedInRefusedRangeFails);
+    Run("fixed in refused range relocates", FixedInRefusedRangeRelocates);
     if (g_failures != 0) {
         std::fprintf(stderr, "%d direct memory check(s) failed\n", g_failures);
         return 1;
