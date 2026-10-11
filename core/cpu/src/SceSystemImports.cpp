@@ -1,5 +1,6 @@
 #include <cpu/SceSystemImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <limits>
@@ -17,7 +18,11 @@ enum class Service {
 };
 
 constexpr std::int64_t parameterError = std::bit_cast<std::int32_t>(0x80a10003u);
-constexpr std::int64_t unavailableError = std::bit_cast<std::int32_t>(0x80a10002u);
+constexpr std::int64_t noEvent = std::bit_cast<std::int32_t>(0x80a10004u);
+// SceSystemServiceStatus: event count, three flags and reserved bytes, padded to 136 bytes.
+constexpr std::size_t statusSize = 136;
+// SDR reference white for max full-frame and max tone-map luminance, 0 nits minimum.
+constexpr float sdrReferenceWhiteNits = 100.0f;
 constexpr std::uint64_t minimumNameCapacity = 65;
 constexpr std::uint64_t maximumNameCapacity = 16 * 1024 * 1024;
 constexpr std::array systemName{
@@ -70,17 +75,39 @@ struct SceSystemImports::Impl {
         return true;
     }
 
-    std::int64_t paramGetInt(std::uint64_t param, std::uint64_t destination) {
-        const auto id = static_cast<std::uint32_t>(param);
-        std::uint32_t value;
+    // Virtual console profile: English (US), DD/MM/YYYY, 24-hour clock, UTC, no summertime, parental
+    // control off and Cross as the enter button. Unknown IDs read as 0, as on the upstream HLE library.
+    static std::uint32_t profileValue(std::uint32_t id) {
         switch (id) {
-        case 1: value = 1; break;
-        case 4: case 5: value = 0; break;
-        default:
-            throw std::runtime_error("Unsupported SCE system service integer parameter: " + std::to_string(id));
+        case 1: return 1;     // LANG: English (US)
+        case 2: return 1;     // DATE_FORMAT: DD/MM/YYYY
+        case 3: return 1;     // TIME_FORMAT: 24-hour
+        case 1000: return 1;  // ENTER_BUTTON_ASSIGN: Cross
+        default: return 0;    // TIME_ZONE, SUMMERTIME, GAME_PARENTAL_LEVEL and unknown IDs
         }
-        const auto bytes = integer(value);
+    }
+
+    std::int64_t paramGetInt(std::uint64_t param, std::uint64_t destination) {
+        const auto bytes = integer(profileValue(static_cast<std::uint32_t>(param)));
         if (!writable(destination, bytes.size())) return parameterError;
+        machine.Write(destination, bytes);
+        return 0;
+    }
+
+    std::int64_t getStatus(std::uint64_t destination) {
+        if (!writable(destination, statusSize)) return parameterError;
+        const std::array<std::byte, statusSize> status{};
+        machine.Write(destination, status);
+        return 0;
+    }
+
+    std::int64_t hdrToneMapLuminance(std::uint64_t destination) {
+        constexpr std::size_t size = 12;
+        if (!writable(destination, size)) return parameterError;
+        const auto white = integer(std::bit_cast<std::uint32_t>(sdrReferenceWhiteNits));
+        std::array<std::byte, size> bytes{};
+        std::copy(white.begin(), white.end(), bytes.begin());
+        std::copy(white.begin(), white.end(), bytes.begin() + 4);
         machine.Write(destination, bytes);
         return 0;
     }
@@ -98,23 +125,21 @@ struct SceSystemImports::Impl {
     }
 
     void invoke(Machine& guest, Service service) {
+        const auto first = guest.Get(Register::Rdi);
+        std::int64_t result = 0;
         switch (service) {
-        case Service::GetStatus:
-        case Service::ReceiveEvent:
-        case Service::GetHdrToneMapLuminance:
-        case Service::LaunchPlayerDialog:
-            guest.Set(Register::Rax, static_cast<std::uint64_t>(unavailableError));
-            return;
+        case Service::ParamGetInt: result = paramGetInt(first, guest.Get(Register::Rsi)); break;
+        case Service::ParamGetString:
+            result = paramGetString(first, guest.Get(Register::Rsi), guest.Get(Register::Rdx)); break;
+        case Service::HideSplashScreen: break;
+        case Service::GetStatus: result = getStatus(first); break;
+        // No system events are ever queued; the caller's buffer is left untouched.
+        case Service::ReceiveEvent: result = first ? noEvent : parameterError; break;
+        case Service::GetHdrToneMapLuminance: result = hdrToneMapLuminance(first); break;
+        // The player dialog parameter is opaque here and no dialog UI exists; both accept any non-null parameter.
         case Service::InitializePlayerDialogParam:
-            throw std::runtime_error("Unsupported SCE system service invocation: sceSystemServiceInitializePlayerDialogParam");
-        default: break;
+        case Service::LaunchPlayerDialog: result = first ? 0 : parameterError; break;
         }
-        std::int64_t result;
-        if (service == Service::ParamGetInt)
-            result = paramGetInt(guest.Get(Register::Rdi), guest.Get(Register::Rsi));
-        else if (service == Service::ParamGetString)
-            result = paramGetString(guest.Get(Register::Rdi), guest.Get(Register::Rsi), guest.Get(Register::Rdx));
-        else result = 0;
         guest.Set(Register::Rax, static_cast<std::uint64_t>(result));
     }
 };

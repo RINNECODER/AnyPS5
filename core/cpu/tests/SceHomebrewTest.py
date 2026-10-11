@@ -129,12 +129,24 @@ with tempfile.TemporaryDirectory(prefix="anyps5-sce-unsupported-open-") as direc
                                   "1000", "91", *map(str, expected), "unsupported-flags",
                                   str(len(resource_bytes)), str(zlib.adler32(resource_bytes)), str(memory_oracle(91))],
                                  capture_output=True, text=True, timeout=20)
-    assert resource_path.read_bytes() == resource_bytes, "Unsupported guest open changed actual resource bytes"
-assert unsupported.returncode == 126 and unsupported.stdout == "", (unsupported.returncode, unsupported.stdout, unsupported.stderr)
+    assert resource_path.read_bytes() == resource_bytes, "Read-write guest open changed actual resource bytes"
+    assert sorted(path.name for path in Path(directory).iterdir()) == ["resource.bin"], "Guest open created files in the resource root"
+# O_RDWR on read-only /app0 is an EROFS return value, not a fatal service error: the guest continues to its own exit.
+assert unsupported.returncode == 103 and unsupported.stdout == "", (unsupported.returncode, unsupported.stdout, unsupported.stderr)
 events = [json.loads(line) for line in unsupported.stderr.splitlines()]
-assert [event["event"] for event in events] == ["startup", "error"], events
-assert events[1]["code"] == "unsupported_service" and "Unsupported guest /app0 open flags" in events[1]["message"], events
-print("compiler-produced unsupported write-open: accurate CLI service classification and unchanged resource PASS")
+assert [event["event"] for event in events] == ["startup", "guest_exit"], events
+print("compiler-produced read-write open of /app0: EROFS returned to the guest, unchanged resource root PASS")
+
+with tempfile.TemporaryDirectory(prefix="anyps5-sce-title-data-") as directory:
+    (Path(directory) / "resource.bin").write_bytes(resource_bytes)
+    nested = subprocess.run([runner, "--diagnostics-json", "--resource-root", directory,
+                             "--title-data-dir", str(Path(directory) / "saves"), fixture,
+                             "1000", "91", *map(str, expected), "import",
+                             str(len(resource_bytes)), str(zlib.adler32(resource_bytes)), str(memory_oracle(91))],
+                            capture_output=True, text=True, timeout=20)
+    assert not (Path(directory) / "saves").exists(), "Title data directory was created inside the resource root"
+assert nested.returncode == 126 and "inside the resource root" in nested.stderr, (nested.returncode, nested.stderr)
+print("title data directory inside the resource root: refused before the guest runs PASS")
 
 for arguments in ((1, 91, *expected, "callback"), (4096, 91, *expected, "callback"),
                   (1000, 256, *expected, "callback"), ("abc", 91, *expected, "callback"),
