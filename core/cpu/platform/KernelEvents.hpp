@@ -40,6 +40,10 @@ public:
     KernelEvents& operator=(const KernelEvents&) = delete;
     // Explicit synthetic/source-contract provider; this API is not target
     // selection. Target callers must pass the separately qualified wrapper.
+    // Guest filters: EVFILT_USER (level and EV_CLEAR edge), EVFILT_TIMER
+    // (periodic, EV_CLEAR, data counts expirations) and EVFILT_HRTIMER (one
+    // shot), plus the GetEvent* record accessors. Timers fire from the owner
+    // pump, so a blocked WaitEqueue never stalls other guest threads.
     std::optional<std::uint64_t> Resolve(const SceImport&, std::uint8_t symbolType,
                                          std::uint64_t symbolSize = 0);
     std::int32_t AddGraphicsEvent(std::uint64_t handle, std::int32_t id, std::uint64_t udata);
@@ -55,7 +59,11 @@ private:
     std::shared_ptr<Impl> impl;
 };
 
-enum class KernelEventContract { CreateEqueue, DeleteEqueue, WaitEqueue };
+// Order matches KernelEventInventory().
+enum class KernelEventContract {
+    CreateEqueue, DeleteEqueue, WaitEqueue, AddUserEvent, AddUserEventEdge, TriggerUserEvent,
+    DeleteUserEvent, AddTimerEvent, DeleteTimerEvent, AddHRTimerEvent, DeleteHRTimerEvent,
+    GetEventId, GetEventFilter, GetEventData, GetEventUserData, GetEventFflags, GetEventError };
 struct KernelEventAdmission { KernelEventContract Contract; std::string_view Evidence; };
 std::span<const KernelEventAdmission> TargetKernelEventAdmissions();
 // Empty admission denies every contract. The native runner selects the

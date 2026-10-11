@@ -24,7 +24,7 @@ const BorrowedRange& Find(std::uint64_t address, bool writable) {
     if (address >= End(found->guestAddress, found->host.size()))
         throw std::out_of_range("Native guest memory address is not borrowed");
     if (writable && !found->writable)
-        throw std::invalid_argument("Native guest memory range is read-only");
+        throw ReadOnlyWriteError("Native guest memory range is read-only");
     return *found;
 }
 

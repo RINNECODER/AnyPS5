@@ -12,8 +12,9 @@ struct KernelSemaphoreImport { std::string_view Nid, Name; };
 std::span<const KernelSemaphoreImport> KernelSemaphoreInventory();
 
 // Explicit engineering provider: opaque guest64 identity, signed low32 counts,
-// attr0 priority snapshot, null options and indefinite null-timeout waits.
-// This is not a universal firmware ABI. Poll/Cancel and timed waits are unknown.
+// attr 0/2 base-priority snapshot or attr 1 strict FIFO (no barging), null
+// options, Poll (EBUSY), Cancel (ECANCELED) and indefinite or microsecond
+// timed waits that write the remaining time back (ETIMEDOUT on expiry).
 class KernelSemaphores {
 public:
     // Machine and GuestThreads must outlive this owner-only provider.
@@ -32,7 +33,7 @@ private:
     std::shared_ptr<Impl> impl;
 };
 
-// Production selection: admits the four semaphore rows for any importing image
+// Production selection: admits the six semaphore rows for any importing image
 // by NID, libkernel scope/version, symbol type and size.
 class TargetKernelSemaphores {
 public:

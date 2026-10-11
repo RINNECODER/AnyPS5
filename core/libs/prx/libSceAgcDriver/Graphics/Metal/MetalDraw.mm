@@ -276,7 +276,8 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         const std::array<std::uint32_t, MeshDrawPushBytes / 4> words{
             draw.indexCount, draw.firstVertex, draw.firstInstance, draw.indexed ? draw.indexSize : 0u,
             static_cast<std::uint32_t>(argumentAddress), static_cast<std::uint32_t>(argumentAddress >> 32u)};
-        static_assert(MeshDrawPushOffsetBytes + MeshDrawPushBytes == Graphics::PipelinePushConstantBytes);
+        // Upstream places the mesh draw words at the end of the first push slot.
+        static_assert(MeshDrawPushOffsetBytes + MeshDrawPushBytes == Graphics::PipelinePushSlotBytes);
         std::memcpy(pushConstants.data() + MeshDrawPushOffsetBytes, words.data(), sizeof(words));
     }
     auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
@@ -449,7 +450,12 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (std::uint64_t{fields[1] & 0xffffu} << 32u);
         std::size_t adjustment = 0;
-        if (!noVertexIndices) {
+        if (!noVertexIndices && Graphics::NullVertexDescriptor(attribute)) {
+            // An all-zero V# fetches zeros (upstream's Vulkan draw binds a zero buffer the same way).
+            auto zero = backend.Buffer(Graphics::DecodeVertexFormat(attribute).bytes);
+            std::memset(zero.contents, 0, zero.length);
+            vertexBuffers.push_back({zero, 0, zero.length});
+        } else if (!noVertexIndices) {
             auto buffer = resources.Buffer(address, Graphics::VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance));
             adjustment = buffer.offset % 4;
             buffer.offset -= adjustment;
@@ -580,7 +586,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             BdaAbi::Fault fault{};
             std::memcpy(&fault, static_cast<const std::byte*>(binding->buffers[0].buffer.contents) + binding->buffers[0].offset, sizeof(fault));
             faultFound = true;
-            if (fault.state != BdaAbi::FaultState::Empty) return resources.Complete(commands);
+            if (fault.state != BdaAbi::FaultState::Empty) return CompleteCommittedWork([&] { return resources.Complete(commands); });
         }
         if (!faultFound) throw std::runtime_error("Metal rectangle control requires its original fault buffer");
     }
@@ -599,7 +605,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     }
     auto commands = backend.CommandBuffer();
     auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
-    if (encoder == nil) throw std::runtime_error("Metal draw render encoder allocation failed");
+    if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
     try {
         if (meshPath) {
             meshPipeline->Bind(encoder, vertexBindings, fragmentBindings,
@@ -636,7 +642,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     }
     backend.Wait(commands);
     if (sampleCounter != nil) samplesPassed.store(sampleTotal(sampleCounter), std::memory_order_release);
-    return resources.Complete(commands);
+    return CompleteCommittedWork([&] { return resources.Complete(commands); });
 }
 
 }
