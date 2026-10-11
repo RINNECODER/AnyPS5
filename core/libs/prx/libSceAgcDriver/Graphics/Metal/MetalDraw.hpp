@@ -31,6 +31,11 @@ public:
     void DumpSamplesSynchronously(std::uint64_t guestAddress);
     [[nodiscard]] ShaderRecompiler::MeshTargetLimits MeshLimits() const;
     [[nodiscard]] ShaderRecompiler::TessellationTargetLimits TessellationLimits() const;
+    // Depth/stencil and multisampled color surfaces stay resident here and never reach guest
+    // memory. Returns the view a guest image descriptor of such a surface binds (nil when the
+    // address is not one), so compute dispatches read what the draws rendered; throws when the
+    // descriptor is incompatible with the resident surface.
+    [[nodiscard]] id<MTLTexture> ResidentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare);
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault DrawSynchronously(
         const Graphics::State& state, const Pm4::DrawParameters& draw,
         std::span<const Graphics::CompiledShader> shaders,
@@ -38,6 +43,7 @@ public:
         std::optional<std::array<std::uint32_t, 5>> meshArguments = std::nullopt);
 
 private:
+    [[nodiscard]] id<MTLTexture> residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const;
     MetalDevice backend;
     std::unique_ptr<MetalDepthSurfaceCache> depthCache;
     std::unique_ptr<MetalGuestHostAliases> hostAliases;
