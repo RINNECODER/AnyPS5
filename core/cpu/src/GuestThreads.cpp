@@ -16,6 +16,11 @@ namespace Cpu {
 namespace {
 constexpr std::uint64_t PageSize = 4096;
 constexpr std::uint64_t StackSize = 1024 * 1024;
+constexpr std::uint64_t MinimumStackSize = 16 * 1024;
+// A slot keeps at least 8 MiB for errno and the thread's TLS instance.
+constexpr std::uint64_t MaximumStackExtent = 24 * 1024 * 1024;
+constexpr std::uint64_t DefaultAffinity = 0x1fff;
+constexpr std::size_t NameCapacity = 32;
 constexpr std::uint64_t ArenaBase = 0x7ff900000000;
 constexpr std::uint64_t SlotSize = 32 * 1024 * 1024;
 constexpr std::uint64_t SlotCount = 256;
@@ -23,6 +28,8 @@ constexpr std::uint64_t ReturnGate = 0x7ff8ffff0000;
 constexpr std::uint64_t HandleBase = 0x4150533500000000;
 constexpr std::uint64_t Quantum = 4096;
 constexpr std::uint32_t Invalid = 0x80020016;
+constexpr std::uint32_t Search = 0x80020003;
+constexpr std::uint32_t Deadlock = 0x8002000b;
 constexpr std::uint32_t NotSupported = 0x8002002d;
 // Process-wide monotonic identities prevent destroyed slots or replacement
 // schedulers from accepting a previous scheduler's opaque attribute token.
@@ -82,6 +89,12 @@ struct GuestThreads::Impl {
         std::optional<GuestThreadHandle> joiner;
         std::unique_ptr<Pending> pending;
         std::vector<Mapping> owned;
+        std::int32_t reportedPolicy = GuestThreadPolicyFifo;
+        std::uint64_t stackSize = StackSize, guardSize = PageSize, stackAddress = 0;
+        std::uint64_t affinity = DefaultAffinity;
+        std::string name;
+        bool detached = false;
+        bool cancelRequested = false;
     };
 
     Machine& machine;
@@ -92,12 +105,17 @@ struct GuestThreads::Impl {
         std::int32_t priority = GuestThreadPriorityDefault;
         std::int32_t inherit = 4;
         std::int32_t policy = GuestThreadPolicyFifo;
+        std::uint64_t stackSize = StackSize, guardSize = PageSize, stackAddress = 0;
+        std::uint64_t affinity = DefaultAffinity;
+        std::int32_t detachState = 0;
     };
     std::map<std::uint64_t, Attribute> attributes;
     std::deque<GuestThreadHandle> runnable;
     GuestThreadHandle initial = 0;
     GuestThreadHandle active = 0;
     std::uint64_t nextSlot = 0;
+    std::uint64_t nextHandle = 0;
+    std::uint64_t exitHook = 0;
     std::uint64_t nextWaitDomain = 1;
     struct Domain {
         std::function<void(GuestThreadHandle)> stopped;
@@ -152,6 +170,7 @@ struct GuestThreads::Impl {
         std::uint64_t token = 0;
         machine.Read(slot8, std::as_writable_bytes(std::span(&token, 1)));
         const auto found = attributes.find(slot8);
+        // A copied or stale slot is not the owned attribute: callers report EINVAL.
         if (found == attributes.end() || found->second.token != token) return nullptr;
         return &found->second;
     }
@@ -169,6 +188,11 @@ struct GuestThreads::Impl {
         const auto address = ArenaBase + SlotSize * nextSlot++;
         checkFree(address, SlotSize);
         return address;
+    }
+    Record* find(GuestThreadHandle id) const {
+        const auto found = records.find(id);
+        if (found == records.end() || found->second->state == State::Reaped) return nullptr;
+        return found->second.get();
     }
     void map(Record& record, std::uint64_t address, std::size_t size, Permission permissions) {
         machine.Map(address, size, permissions);
@@ -426,6 +450,19 @@ struct GuestThreads::Impl {
         record.pending.reset();
         machine.SaveContext(record.context);
     }
+    std::string boundedName(std::uint64_t address) const {
+        std::string value;
+        if (!address) return value;
+        for (std::uint64_t offset = 0; offset + 1 < NameCapacity; ++offset) {
+            if (offset > std::numeric_limits<std::uint64_t>::max() - address) break;
+            machine.CheckAccess(address + offset, 1, Permission::Read);
+            char c{};
+            machine.Read(address + offset, std::as_writable_bytes(std::span(&c, 1)));
+            if (!c) break;
+            value.push_back(c);
+        }
+        return value;
+    }
     void checkName(std::uint64_t address) const {
         if (!address) return;
         for (std::uint64_t offset = 0; offset != 256; ++offset) {
@@ -455,15 +492,25 @@ struct GuestThreads::Impl {
     void create(Record& parent) {
         const auto args = parent.pending->args;
         auto priority = parent.basePriority;
-        auto policy = parent.policy;
+        auto policy = parent.reportedPolicy;
+        Attribute defaults{0};
+        const Attribute* attr = &defaults;
         if (args[1]) {
-            const auto attr = attribute(args[1]);
+            attr = attribute(args[1]);
             if (!attr)
                 fail("nondefault guest thread attributes are unsupported unless initialized by this scheduler");
             if (attr->inherit == 0) {
                 priority = attr->priority;
                 policy = attr->policy;
             }
+        }
+        const auto guard = (std::max(attr->guardSize, PageSize) + PageSize - 1) & ~(PageSize - 1);
+        const auto stackSize = (attr->stackSize + PageSize - 1) & ~(PageSize - 1);
+        if (stackSize + guard > MaximumStackExtent) fail("guest thread stack exceeds its allocation slot");
+        if (attr->stackAddress) {
+            if (attr->stackAddress > std::numeric_limits<std::uint64_t>::max() - attr->stackSize)
+                fail("guest thread caller stack overflows");
+            machine.CheckAccess(attr->stackAddress, attr->stackSize, Permission::Read | Permission::Write);
         }
         if (!tlsFactory) fail("guest thread creation requires a frozen TLS factory");
         machine.CheckAccess(args[0], 8, Permission::Write);
@@ -475,25 +522,44 @@ struct GuestThreads::Impl {
         if (machine.Get(Register::GsBase)) fail("guest child GS inheritance is unsupported outside the zero-GS contract");
         const auto base = slot();
         auto child = std::make_unique<Record>();
-        child->id = HandleBase + nextSlot;
-        child->policy = policy;
+        child->id = HandleBase + ++nextHandle;
+        // SCHED_OTHER is time-sharing: it is scheduled as round robin and
+        // reported as OTHER.
+        child->reportedPolicy = policy;
+        child->policy = policy == GuestThreadPolicyFifo ? policy : GuestThreadPolicyRoundRobin;
+        child->stackSize = attr->stackAddress ? attr->stackSize : stackSize;
+        child->guardSize = attr->guardSize;
+        child->stackAddress = attr->stackAddress;
+        child->affinity = attr->affinity;
+        child->detached = attr->detachState == 1;
+        child->name = boundedName(args[4]);
         child->basePriority = priority;
         child->effectivePriority = child->basePriority;
         child->owned.reserve(5);
         auto saved = machine.CaptureContext();
         bool inserted = false;
         try {
-            map(*child, base, PageSize, static_cast<Permission>(0));
-            child->stack = {base + PageSize, StackSize, Permission::Read | Permission::Write, false};
-            map(*child, child->stack.Address, child->stack.Size, child->stack.Permissions);
-            map(*child, base + PageSize + StackSize, PageSize, static_cast<Permission>(0));
-            child->errnoAddress = base + StackSize + 2 * PageSize;
+            // [guard][stack][guard][errno][TLS ...]; a caller-supplied stack
+            // leaves its reserved range unmapped.
+            map(*child, base, guard, static_cast<Permission>(0));
+            if (attr->stackAddress)
+                child->stack = {attr->stackAddress, attr->stackSize, Permission::Read | Permission::Write, true};
+            else {
+                child->stack = {base + guard, stackSize, Permission::Read | Permission::Write, false};
+                map(*child, child->stack.Address, child->stack.Size, child->stack.Permissions);
+            }
+            map(*child, base + guard + stackSize, PageSize, static_cast<Permission>(0));
+            child->errnoAddress = base + guard + stackSize + PageSize;
             map(*child, child->errnoAddress, PageSize, Permission::Read | Permission::Write);
+            // TLS starts on a 2 MiB boundary (its block alignment), as it did
+            // with the fixed 1 MiB stack.
+            constexpr std::uint64_t TlsAlignment = 2 * 1024 * 1024;
+            const auto tlsAddress = (child->errnoAddress + PageSize + TlsAlignment - 1) & ~(TlsAlignment - 1);
             const auto previousMappings = machine.Mappings();
-            child->tls = tlsFactory(base + 2 * StackSize);
+            child->tls = tlsFactory(tlsAddress);
             if (child->tls) {
                 const auto allocation = child->tls->Allocation();
-                if (allocation.Address != base + 2 * StackSize || !allocation.Size ||
+                if (allocation.Address != tlsAddress || !allocation.Size ||
                     allocation.Size % PageSize || allocation.Size > std::numeric_limits<std::uint64_t>::max() - allocation.Address ||
                     allocation.Borrowed || std::any_of(previousMappings.begin(), previousMappings.end(), [&](const Mapping& mapping) {
                         return overlaps(allocation.Address, allocation.Size, mapping);
@@ -503,7 +569,7 @@ struct GuestThreads::Impl {
                     return mapping.Address == allocation.Address && mapping.Size == allocation.Size &&
                         !mapping.Borrowed && mapping.Permissions == allocation.Permissions;
                 })) fail("guest TLS factory allocation does not match its new mapped extent");
-                if (allocation.Size > SlotSize - 2 * StackSize || allocation.Permissions != (Permission::Read | Permission::Write)) {
+                if (allocation.Size > SlotSize - (tlsAddress - base) || allocation.Permissions != (Permission::Read | Permission::Write)) {
                     machine.Unmap(allocation.Address, allocation.Size);
                     child->tls.reset();
                     fail("guest TLS instance exceeds its thread allocation slot");
@@ -518,7 +584,7 @@ struct GuestThreads::Impl {
             machine.Set(Register::GsBase, 0);
             if (child->tls) child->tls->Activate();
             else machine.Set(Register::FsBase, 0);
-            const auto stack = child->stack.Address + child->stack.Size - 8;
+            const auto stack = ((child->stack.Address + child->stack.Size) & ~std::uint64_t{15}) - 8;
             child->returnStack = stack + 8;
             write64(machine, stack, ReturnGate);
             machine.Set(Register::Rsp, stack);
@@ -589,17 +655,23 @@ struct GuestThreads::Impl {
         record.state = State::Finished;
         notifyStopped(record);
         if (record.joiner) finishJoin(lookup(*record.joiner), record);
+        else if (record.detached) {
+            retire(record);
+            record.state = State::Reaped;
+        }
     }
     void beginFinish(Record& record, std::uint64_t result) {
         if (record.initial) fail("initial process thread cannot use pthread completion");
         if (record.finalizing) fail("thread exit during its finalizer is unsupported");
         record.result = result;
         record.pending.reset();
-        if (!dtors) {
+        // A provider exit hook (TSD destructors) runs first and chains to dtors.
+        const auto finalizer = exitHook ? exitHook : dtors;
+        if (!finalizer) {
             publishFinished(record);
             return;
         }
-        record.returnStack = callFrame(dtors, ReturnGate, {});
+        record.returnStack = callFrame(finalizer, ReturnGate, {});
         record.finalizing = true;
         machine.SaveContext(record.context);
         ready(record, true);
@@ -996,7 +1068,7 @@ GuestThreadHandle GuestThreads::AdoptInitial(GuestInitialThread initial) {
     const auto base = impl->slot();
     auto record = std::make_unique<Impl::Record>();
     record->owned.reserve(1);
-    record->id = HandleBase + impl->nextSlot;
+    record->id = HandleBase + ++impl->nextHandle;
     record->initial = true;
     record->basePriority = record->effectivePriority = initial.BasePriority;
     record->stack = initial.Stack;
@@ -1045,8 +1117,8 @@ std::uint32_t GuestThreads::AttributeInit(std::uint64_t slot8) {
     if (slot8 > std::numeric_limits<std::uint64_t>::max() - 8)
         fail("guest thread attribute slot overflows");
     impl->machine.CheckAccess(slot8, 8, Permission::Write);
-    if (impl->attributes.contains(slot8))
-        fail("reinitialization of a live owned guest thread attribute is unsupported");
+    // Reinitializing a live slot (a reused stack attr) overwrites it.
+    impl->attributes.erase(slot8);
     const auto token = attributeToken();
     const auto position = impl->attributes.emplace(slot8, Impl::Attribute{token}).first;
     try { write64(impl->machine, slot8, token); }
@@ -1093,8 +1165,6 @@ std::uint32_t GuestThreads::AttributeSetPolicy(std::uint64_t slot8, std::int32_t
     auto attr = impl->attribute(slot8);
     if (!attr) return Invalid;
     if (policy < 1 || policy > 3) return NotSupported;
-    if (policy != GuestThreadPolicyFifo && policy != GuestThreadPolicyRoundRobin)
-        fail("guest thread OTHER scheduling policy is unsupported");
     // Selected public-source engineering contract resets the policy default:
     // shadPS4 945dbc3c pthread_attr.cpp:143-151 and FreeBSD releng9.3
     // b06b7e64 lib/libthr/thread/thr_attr.c:469-485. A nondefault priority
@@ -1103,6 +1173,169 @@ std::uint32_t GuestThreads::AttributeSetPolicy(std::uint64_t slot8, std::int32_t
     attr->priority = GuestThreadPriorityDefault;
     return 0;
 }
+std::uint32_t GuestThreads::AttributeSet(std::uint64_t slot8, GuestThreadAttributeField field, std::uint64_t value) {
+    impl->checkOwner();
+    auto attr = impl->attribute(slot8);
+    if (!attr) return Invalid;
+    switch (field) {
+    case GuestThreadAttributeField::StackSize:
+        if (value < MinimumStackSize || value > MaximumStackExtent - PageSize) return Invalid;
+        attr->stackSize = value; return 0;
+    case GuestThreadAttributeField::StackAddress: attr->stackAddress = value; return 0;
+    case GuestThreadAttributeField::GuardSize:
+        if (value > MaximumStackExtent / 2) return Invalid;
+        attr->guardSize = value; return 0;
+    case GuestThreadAttributeField::DetachState:
+        if (value != 0 && value != 1) return Invalid;
+        attr->detachState = static_cast<std::int32_t>(value); return 0;
+    case GuestThreadAttributeField::Affinity: attr->affinity = value; return 0;
+    case GuestThreadAttributeField::Policy: return AttributeSetPolicy(slot8, static_cast<std::int32_t>(value));
+    case GuestThreadAttributeField::Inherit: return AttributeSetInherit(slot8, static_cast<std::int32_t>(value));
+    }
+    return Invalid;
+}
+std::uint32_t GuestThreads::AttributeGet(std::uint64_t slot8, GuestThreadAttributeField field, std::uint64_t output) {
+    impl->checkOwner();
+    const auto attr = impl->attribute(slot8);
+    if (!attr || !output) return Invalid;
+    std::uint64_t wide = 0;
+    std::int32_t narrow = 0;
+    bool isWide = true;
+    switch (field) {
+    case GuestThreadAttributeField::StackSize: wide = attr->stackSize; break;
+    case GuestThreadAttributeField::StackAddress: wide = attr->stackAddress; break;
+    case GuestThreadAttributeField::GuardSize: wide = attr->guardSize; break;
+    case GuestThreadAttributeField::Affinity: wide = attr->affinity; break;
+    case GuestThreadAttributeField::DetachState: narrow = attr->detachState; isWide = false; break;
+    case GuestThreadAttributeField::Policy: narrow = attr->policy; isWide = false; break;
+    case GuestThreadAttributeField::Inherit: narrow = attr->inherit; isWide = false; break;
+    }
+    const std::size_t width = isWide ? 8 : 4;
+    if (output > std::numeric_limits<std::uint64_t>::max() - width) return Invalid;
+    impl->machine.CheckAccess(output, width, Permission::Write);
+    if (isWide) impl->machine.Write(output, std::as_bytes(std::span(&wide, 1)));
+    else impl->machine.Write(output, std::as_bytes(std::span(&narrow, 1)));
+    return 0;
+}
+std::uint32_t GuestThreads::AttributeFromThread(GuestThreadHandle thread, std::uint64_t slot8) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    auto attr = impl->attribute(slot8);
+    if (!attr) return Invalid;
+    attr->priority = record->basePriority;
+    attr->policy = record->reportedPolicy;
+    attr->inherit = 0;
+    attr->stackSize = record->stackSize;
+    attr->guardSize = record->guardSize;
+    attr->stackAddress = record->stackAddress ? record->stackAddress : record->stack.Address;
+    attr->affinity = record->affinity;
+    attr->detachState = record->detached ? 1 : 0;
+    return 0;
+}
+std::uint32_t GuestThreads::Detach(GuestThreadHandle thread) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    if (record->initial || record->detached || record->joiner) return Invalid;
+    record->detached = true;
+    if (record->state == Impl::State::Finished) {
+        impl->retire(*record);
+        record->state = Impl::State::Reaped;
+    }
+    return 0;
+}
+std::uint32_t GuestThreads::SetPriority(GuestThreadHandle thread, std::int32_t priority) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    if (priority < GuestThreadPriorityMin || priority > GuestThreadPriorityMax) return Invalid;
+    record->basePriority = priority;
+    impl->recomputePriorities();
+    return 0;
+}
+std::uint32_t GuestThreads::GetPriority(GuestThreadHandle thread, std::uint64_t output4) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    if (!output4 || output4 > std::numeric_limits<std::uint64_t>::max() - 4) return Invalid;
+    impl->machine.CheckAccess(output4, 4, Permission::Write);
+    impl->machine.Write(output4, std::as_bytes(std::span(&record->basePriority, 1)));
+    return 0;
+}
+std::uint32_t GuestThreads::SetAffinity(GuestThreadHandle thread, std::uint64_t mask) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    record->affinity = mask;
+    return 0;
+}
+std::uint32_t GuestThreads::GetAffinity(GuestThreadHandle thread, std::uint64_t output8) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    if (!output8 || output8 > std::numeric_limits<std::uint64_t>::max() - 8) return Invalid;
+    impl->machine.CheckAccess(output8, 8, Permission::Write);
+    impl->machine.Write(output8, std::as_bytes(std::span(&record->affinity, 1)));
+    return 0;
+}
+std::uint32_t GuestThreads::Rename(GuestThreadHandle thread, std::uint64_t name) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    if (!name) return Invalid;
+    record->name = impl->boundedName(name);
+    return 0;
+}
+std::uint32_t GuestThreads::GetName(GuestThreadHandle thread, std::uint64_t output) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    if (!output || output > std::numeric_limits<std::uint64_t>::max() - NameCapacity) return Invalid;
+    impl->machine.CheckAccess(output, record->name.size() + 1, Permission::Write);
+    impl->machine.Write(output, std::as_bytes(std::span(record->name.c_str(), record->name.size() + 1)));
+    return 0;
+}
+std::int32_t GuestThreads::ThreadId(GuestThreadHandle thread) const {
+    impl->checkOwner();
+    impl->lookup(thread);
+    return static_cast<std::int32_t>(0x10000 + (thread - HandleBase));
+}
+std::uint32_t GuestThreads::Cancel(GuestThreadHandle thread) {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record || !impl->live(*record)) return Search;
+    if (record->initial) return Invalid;
+    record->cancelRequested = true;
+    return 0;
+}
+bool GuestThreads::CancelRequested() const {
+    return impl->current().cancelRequested;
+}
+std::uint32_t GuestThreads::JoinCheck(GuestThreadHandle thread) const {
+    impl->checkOwner();
+    const auto record = impl->find(thread);
+    if (!record) return Search;
+    if (thread == impl->active) return Deadlock;
+    if (record->initial || record->detached || record->joiner || record->state == Impl::State::Cancelled) return Invalid;
+    return 0;
+}
+std::uint32_t GuestThreads::CreateCheck(std::uint64_t attr) const {
+    impl->checkOwner();
+    if (!attr) return 0;
+    const auto value = impl->attribute(attr);
+    if (!value) return Invalid;
+    const auto guard = (std::max(value->guardSize, PageSize) + PageSize - 1) & ~(PageSize - 1);
+    if (((value->stackSize + PageSize - 1) & ~(PageSize - 1)) + guard > MaximumStackExtent) return Invalid;
+    if (value->stackAddress) {
+        if (value->stackAddress > std::numeric_limits<std::uint64_t>::max() - value->stackSize) return Invalid;
+        try { impl->machine.CheckAccess(value->stackAddress, value->stackSize, Permission::Read | Permission::Write); }
+        catch (const std::exception&) { return Invalid; }
+    }
+    return 0;
+}
+void GuestThreads::SetThreadExitHook(std::uint64_t pc) { impl->registerCallback(impl->exitHook, pc); }
+std::uint64_t GuestThreads::ThreadDtors() const { impl->checkOwner(); return impl->dtors; }
 GuestThreads::WaitDomain GuestThreads::CreateWaitDomain(Machine& associatedMachine,
                                                        std::function<void(GuestThreadHandle)> callback) {
     impl->checkOwner();

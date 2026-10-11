@@ -798,6 +798,11 @@ int main(int argc, char** argv) {
                             }});
                         lazyImports = importStubs->Policy();
                     }
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                    if (nativeRuntime) nativeRuntime->SetModuleSource([&modules]() -> std::span<const Cpu::SceModuleRecord> {
+                        return modules ? modules->Modules() : std::span<const Cpu::SceModuleRecord>{};
+                    });
+#endif
                     modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
                         Cpu::SceModuleResolver{}, libcInternal,
                         [&](const Cpu::SceImportConsumer& consumer, const auto& import,

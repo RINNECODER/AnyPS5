@@ -25,7 +25,10 @@ constexpr unsigned timeoutBegin = 23;
 constexpr unsigned mutexTimedlock = 25;
 constexpr unsigned conditionSetclock = 26;
 constexpr unsigned posixConditionSetclock = 27;
-constexpr std::array<KernelPrimitiveImport, 28> inventory{{
+// POSIX names of SCE mutex rows 0, 1, 3, 4, 5, 6 and 7 (same objects, errno results).
+constexpr unsigned posixMutexBegin = 28;
+constexpr std::array<unsigned, 7> posixMutexOps{0, 1, 3, 4, 5, 6, 7};
+constexpr std::array<KernelPrimitiveImport, 35> inventory{{
     {"cmo1RIYva9o", "scePthreadMutexInit"}, {"upoVrzMHFeE", "scePthreadMutexTrylock"},
     {"tn3VlD0hG60", "scePthreadMutexUnlock"}, {"2Of0f+3mhhE", "scePthreadMutexDestroy"},
     {"F8bUHwAG284", "scePthreadMutexattrInit"}, {"iMp8QpE+XO4", "scePthreadMutexattrSettype"},
@@ -42,10 +45,16 @@ constexpr std::array<KernelPrimitiveImport, 28> inventory{{
     {"27bAgiJmOh0", "pthread_cond_timedwait"},
     {"BmMjYxmew1w", "scePthreadCondTimedwait"},
     {"IafI2PxcPnQ", "scePthreadMutexTimedlock"},
-    {"c-bxj027czs", "scePthreadCondattrSetclock"}, {"EjllaAqAPZo", "pthread_condattr_setclock"}}};
+    {"c-bxj027czs", "scePthreadCondattrSetclock"}, {"EjllaAqAPZo", "pthread_condattr_setclock"},
+    {"ttHNfU+qDBU", "pthread_mutex_init"}, {"K-jXhbt2gn4", "pthread_mutex_trylock"},
+    {"ltCfaGr2JGE", "pthread_mutex_destroy"}, {"dQHWEsJtoE4", "pthread_mutexattr_init"},
+    {"mDmgMOGVUqg", "pthread_mutexattr_settype"}, {"HF7lK46xzjY", "pthread_mutexattr_destroy"},
+    {"5txKfcMUAok", "pthread_mutexattr_setprotocol"}}};
 // POSIX rows return positive errno values and may also be exported by libScePosix.
-bool posixRow(unsigned op) { return (op >= 16 && op <= timeoutBegin) || op == posixConditionSetclock; }
-bool mutexRow(unsigned op) { return op < mutexCount || op == conditionEnd || op == conditionEnd + 1 || op == mutexTimedlock; }
+bool posixRow(unsigned op) { return (op >= 16 && op <= timeoutBegin) || op == posixConditionSetclock || op >= posixMutexBegin; }
+bool mutexRow(unsigned op) {
+    return op < mutexCount || op == conditionEnd || op == conditionEnd + 1 || op == mutexTimedlock || op >= posixMutexBegin;
+}
 std::atomic<std::uint64_t> nextToken{0xa005000000000003ULL};
 // Guest Orbis error table, independent of the host's errno numerals.
 enum GuestErrno : unsigned { Perm = 1, Deadlock = 11, Busy = 16, Invalid = 22, Again = 35, TimedOut = 60 };
@@ -631,6 +640,9 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
             result = state->invoke(9, rdi, 0, 0, relativeDeadline(static_cast<std::uint32_t>(rsi)));
         } else if (op == conditionSetclock || op == posixConditionSetclock) {
             result = state->conditionInvoke(7, rdi, rsi, 0);
+        } else if (op >= posixMutexBegin) {
+            // pthread_mutex_init has no name argument.
+            result = state->invoke(posixMutexOps[op - posixMutexBegin], rdi, rsi, 0);
         } else if (mutexRow(op)) {
             result = state->invoke(op < mutexCount ? op : (op == conditionEnd ? 8 : 2), rdi, rsi, rdx);
         } else {

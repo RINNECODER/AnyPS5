@@ -33,7 +33,7 @@ else()
     set(platformCpuTarget anyps5_cpu)
 endif()
 
-add_library(anyps5_platform_components STATIC KernelPrimitives.cpp KernelEvents.cpp KernelSemaphores.cpp KernelEventFlags.cpp ContentServices.cpp
+add_library(anyps5_platform_components STATIC KernelPrimitives.cpp KernelEvents.cpp KernelSemaphores.cpp KernelEventFlags.cpp KernelThreadExtras.cpp ContentServices.cpp
     NetworkServices.cpp NpServices.cpp AudioServices.cpp RtcServices.cpp CandidateComponents.cpp)
 target_include_directories(anyps5_platform_components PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" ../include)
 target_compile_features(anyps5_platform_components PUBLIC cxx_std_20)
@@ -81,6 +81,7 @@ if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     include("${CMAKE_CURRENT_SOURCE_DIR}/tests/KernelSemaphoreRegistration.cmake")
     include("${CMAKE_CURRENT_SOURCE_DIR}/tests/KernelSyncRegistration.cmake")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/tests/KernelThreadExtrasRegistration.cmake")
     set(scePlatformFixture "${CMAKE_CURRENT_BINARY_DIR}/sce-platform.elf")
     add_custom_command(OUTPUT "${scePlatformFixture}"
         COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC

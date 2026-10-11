@@ -175,22 +175,20 @@ void cancellation(const char* path, bool corrupt) {
  std::cout << "PASS inherited waiter " << (corrupt ? "corrupt-return cancellation" : "provider withdrawal/replacement") << '\n';
 }
 void unsupported(const char* path) {
- for (unsigned mode : {10U,11U}) {
-  Session session(path,mode);
-  rejects([&] { session.graph->RunMain(1000000,10000); },
-          mode == 10 ? "priority protocol" : "OTHER scheduling policy");
+ {
+  Session session(path,10);
+  rejects([&] { session.graph->RunMain(1000000,10000); }, "priority protocol");
   const auto r=session.state();
   require(r[0] == 0 && r[5] == 0 && r[126] == Canary && r[127] == ~Canary,
           "Unsupported priority behavior published execution or changed redzones");
-  if(mode != 10) {
-   require(r[55] && r[56] && session.get(r[55]) == r[56], "Unsupported policy changed opaque attribute token");
-   const auto output=session.address+57*8; session.put(output,0xfeedbeef00000000ULL);
-   require(session.threads->AttributeGetPriority(r[55],output) == 0 &&
-           session.get(output) == 0xfeedbeef0000012cULL,
-           "Unsupported OTHER mutated stored priority or four-byte output span");
-  }
  }
- std::cout << "PASS unsupported protection2/OTHER before mutation or completion\n";
+ // SCHED_OTHER is accepted as time-sharing (#281): the guest continues to its normal exit.
+ Session other(path,11);
+ const auto reason=other.graph->RunMain(1000000,10000);
+ const auto r=other.state();
+ require(reason == Cpu::StopReason::Exit && other.machine.ExitCode() == 0 && r[0] == 0x5052494f52495459ULL &&
+         r[4] == 0 && r[126] == Canary && r[127] == ~Canary, "SCHED_OTHER attribute policy did not complete as time-sharing");
+ std::cout << "PASS unsupported protection2 before mutation; OTHER accepted as time-sharing\n";
 }
 void admission() {
  Cpu::Machine machine; auto threads = std::make_shared<Cpu::GuestThreads>(machine);
