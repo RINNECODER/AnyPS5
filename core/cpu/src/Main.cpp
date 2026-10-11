@@ -172,8 +172,14 @@ void Capabilities(const RunLimits& limits) {
         << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\",\"sceKernelIsAddressSanitizerEnabled\",\"sceKernelGetSanitizerMallocReplaceExternal\",\"sceKernelGetSanitizerNewReplaceExternal\"]},"
         << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
         << "\"sce_memory_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
-        << "\"functions\":[\"sceKernelGetDirectMemorySize\",\"sceKernelAvailableDirectMemorySize\",\"sceKernelAllocateDirectMemory\",\"sceKernelAllocateMainDirectMemory\",\"sceKernelMapDirectMemory\",\"sceKernelMapFlexibleMemory\",\"sceKernelReserveVirtualRange\",\"sceKernelMprotect\",\"sceKernelVirtualQuery\",\"sceKernelMunmap\",\"sceKernelReleaseDirectMemory\"],"
-        << "\"constraints\":\"virtual 12 GiB direct address capacity; demand-backed 16 KiB extents; direct types 0/12; protection mask 0x37 with raw query metadata; fixed non-overwriting maps 0x90; unsupported flags fail explicitly\"},"
+        << "\"functions\":[\"sceKernelGetDirectMemorySize\",\"sceKernelAvailableDirectMemorySize\",\"sceKernelAllocateDirectMemory\",\"sceKernelAllocateMainDirectMemory\",\"sceKernelMapDirectMemory\",\"sceKernelMapFlexibleMemory\",\"sceKernelReserveVirtualRange\",\"sceKernelMprotect\",\"sceKernelVirtualQuery\",\"sceKernelMunmap\",\"sceKernelReleaseDirectMemory\","
+        << "\"sceKernelMapNamedFlexibleMemory\",\"sceKernelMapNamedSystemFlexibleMemory\",\"sceKernelMapNamedDirectMemory\",\"sceKernelMapDirectMemory2\","
+        << "\"sceKernelBatchMap\",\"sceKernelBatchMap2\",\"sceKernelMemoryPoolExpand\",\"sceKernelMemoryPoolReserve\",\"sceKernelMemoryPoolCommit\","
+        << "\"sceKernelMemoryPoolDecommit\",\"sceKernelMemoryPoolGetBlockStats\",\"sceKernelMemoryPoolBatch\",\"sceKernelDirectMemoryQuery\",\"sceKernelGetDirectMemoryType\","
+        << "\"sceKernelAvailableFlexibleMemorySize\",\"sceKernelConfiguredFlexibleMemorySize\",\"sceKernelReleaseFlexibleMemory\","
+        << "\"sceKernelCheckedReleaseDirectMemory\",\"sceKernelMtypeprotect\",\"sceKernelSetVirtualRangeName\",\"sceKernelQueryMemoryProtection\","
+        << "\"sceKernelMlock\",\"sceKernelMunlock\",\"sceKernelMmap\",\"mmap\",\"munmap\",\"mprotect\",\"mlock\",\"munlock\"],"
+        << "\"constraints\":\"virtual 12 GiB direct address capacity; demand-backed 16 KiB extents; every nonnegative direct memory type; protection mask 0x3F7 with raw query metadata; fixed maps replace runtime mappings and fill reservations, NO_OVERWRITE refuses committed memory; MAP_ALIGNED and NO_COALESCE; 448 MiB flexible budget; release unmaps live aliases; largest-gap available size; munmap rounds and skips holes; anonymous POSIX mmap only, errno on the active guest thread; pools account 64 KiB blocks\"},"
         << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
         << "\"sce_system_imports\":{\"module\":\"libSceSystemService\",\"module_version\":\"1.1\",\"library_version\":1,"
@@ -633,6 +639,11 @@ int main(int argc, char** argv) {
 #endif
                     memoryRuntime = std::make_shared<Cpu::GuestMemoryRuntime>(machine, 12ULL << 30);
                 memoryImports = std::make_unique<Cpu::SceMemoryImports>(machine, memoryRuntime);
+                if (threadRuntime)
+                    memoryImports->SetErrnoLocation([owner = std::weak_ptr<Cpu::GuestThreads>(threadRuntime)]() -> std::uint64_t {
+                        const auto runtime = owner.lock();
+                        return runtime ? runtime->ActiveErrnoAddress() : 0;
+                    });
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
                 kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);

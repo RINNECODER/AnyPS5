@@ -36,7 +36,7 @@ GuestMemoryMetalMappings BorrowGuestMemoryForMetal(const GuestMemorySnapshot& sn
     result.Ranges.reserve(pinnedRanges.size() + snapshot.Views.size());
     result.Ranges.insert(result.Ranges.end(), pinnedRanges.begin(), pinnedRanges.end());
     for (const auto& view : snapshot.Views) {
-        if (view.Protection & ~0x37u)
+        if (view.Protection & ~0x3f7u)
             throw std::invalid_argument("Unsupported Metal guest memory protection bits");
         const auto gpu = view.Protection & 0x30u;
         if (gpu == 0x20u)
@@ -240,7 +240,7 @@ struct GuestMemoryMetalCompositor::Impl {
         extents.reserve(snapshot.Views.size());
         for (const auto& view : snapshot.Views) {
             validateSpan(view.Address, view.Bytes);
-            if (!view.Identity || view.Protection & ~0x37u ||
+            if (!view.Identity || view.Protection & ~0x3f7u ||
                 view.PhysicalOffset > std::numeric_limits<std::uint64_t>::max() - view.Bytes.size())
                 throw std::invalid_argument("Invalid compositor runtime snapshot metadata");
             if ((view.Protection & 0x30u) == 0x20u)
