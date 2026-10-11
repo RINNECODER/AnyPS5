@@ -59,6 +59,7 @@ int APS5_VABI sceKernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry*, int, i
 int APS5_VABI sceKernelVirtualQuery(const void*, int, VirtualQueryInfo*, std::uint64_t);
 int APS5_VABI sceKernelSetVirtualRangeName(const void*, std::uint64_t, const char*);
 int APS5_VABI sceKernelClearVirtualRangeName(const void*, std::uint64_t);
+int APS5_VABI sceKernelGetPageTableStats(int*, int*, int*, int*);
 int APS5_VABI sceKernelAllocateDirectMemory(std::int64_t, std::int64_t, std::size_t, std::size_t, int, std::int64_t*);
 int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
 int APS5_VABI sceKernelEnableDmemAliasing();
@@ -111,6 +112,18 @@ static void CheckReleaseFlexibleMemory() {
     Require(sceKernelMapFlexibleMemory(&again, length, 3, 0x90) == 0 && again == mapped);
     Require(static_cast<volatile unsigned char*>(again)[length - 1] == 0);
     Require(sceKernelMunmap(again, length) == 0);
+}
+
+static void CheckPageTableStats() {
+    int cpuTotal = -1, cpuAvailable = -1, gpuTotal = -1, gpuAvailable = -1;
+    Require(sceKernelGetPageTableStats(&cpuTotal, &cpuAvailable, &gpuTotal, &gpuAvailable) == 0);
+    Require(cpuTotal > 0 && gpuTotal > 0);
+    Require(cpuAvailable >= 0 && cpuAvailable <= cpuTotal);
+    Require(gpuAvailable >= 0 && gpuAvailable <= gpuTotal);
+    Require(sceKernelGetPageTableStats(nullptr, &cpuAvailable, &gpuTotal, &gpuAvailable) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sceKernelGetPageTableStats(&cpuTotal, nullptr, &gpuTotal, &gpuAvailable) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sceKernelGetPageTableStats(&cpuTotal, &cpuAvailable, nullptr, &gpuAvailable) == SCE_KERNEL_ERROR_EFAULT);
+    Require(sceKernelGetPageTableStats(&cpuTotal, &cpuAvailable, &gpuTotal, nullptr) == SCE_KERNEL_ERROR_EFAULT);
 }
 
 static void CheckNamedAndHintedMappings() {
@@ -1871,6 +1884,7 @@ int main() {
     CheckSceKernelMmap();
     CheckVirtualQueryPartialMunmap();
     CheckMunmapOverUnmappedPages();
+    CheckPageTableStats();
     CheckNamedAndHintedMappings();
     CheckInternalNamedFlexibleMapping();
     CheckGuestModuleUsesFlexibleMemory();

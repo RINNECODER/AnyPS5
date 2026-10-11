@@ -397,11 +397,12 @@ int APS5_VABI sceKernelClearVirtualRangeName(const void* addr, uint64_t len) {
 }
 
 int APS5_VABI sceKernelGetPageTableStats(int* cpu_total, int* cpu_available, int* gpu_total, int* gpu_available) {
- (void)cpu_total;
- (void)cpu_available;
- (void)gpu_total;
- (void)gpu_available;
- NotImplemented_nid_no_patch(__func__);
+ if (!cpu_total || !cpu_available || !gpu_total || !gpu_available) return SCE_KERNEL_ERROR_EFAULT;
+ constexpr int pageTableEntries = static_cast<int>((4ull << 30) / (2ull << 20));
+ *cpu_total = pageTableEntries;
+ *cpu_available = pageTableEntries;
+ *gpu_total = pageTableEntries;
+ *gpu_available = pageTableEntries;
  return 0;
 }
 
