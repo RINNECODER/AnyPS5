@@ -4,6 +4,7 @@
 #include <cpu/SceAgcImports.hpp>
 #include <cpu/SceThreadImports.hpp>
 #include <cpu/SceNativeVideoOutBackend.hpp>
+#include "KernelEventFlags.hpp"
 #include "KernelEvents.hpp"
 #include "KernelPrimitives.hpp"
 #include "KernelSemaphores.hpp"
@@ -79,6 +80,7 @@ struct NativeModuleRunner::Impl {
     std::unique_ptr<Platform::TargetKernelMutexes> mutexes;
     std::unique_ptr<Platform::TargetKernelEvents> events;
     std::unique_ptr<Platform::TargetKernelSemaphores> semaphores;
+    std::unique_ptr<Platform::KernelEventFlags> eventFlags;
     std::map<std::filesystem::path, SceParsedImage> serviceConsumers;
     std::unique_ptr<Platform::NativeNpIdentity> npIdentity;
     std::unique_ptr<Platform::NativeUriEscape> uriEscape;
@@ -105,6 +107,7 @@ struct NativeModuleRunner::Impl {
         threadImports = std::make_unique<SceThreadImports>(machine, threads);
         mutexes = std::make_unique<Platform::TargetKernelMutexes>(machine, threads);
         semaphores = std::make_unique<Platform::TargetKernelSemaphores>(machine, threads);
+        eventFlags = std::make_unique<Platform::KernelEventFlags>(machine, threads);
         // Admission is title-agnostic: every profile below is selected for any
         // importing image and validated per import by NID, scope, type and size.
         events = std::make_unique<Platform::TargetKernelEvents>(machine, threads,
@@ -170,7 +173,8 @@ struct NativeModuleRunner::Impl {
         attempt([&] { threads->Withdraw(); });
         if (events) attempt([&] { events->Provider().Shutdown(); });
         if (semaphores) attempt([&] { semaphores->Provider().Shutdown(); });
-        agc.reset(); events.reset(); semaphores.reset(); mutexes.reset(); threadImports.reset();
+        if (eventFlags) attempt([&] { eventFlags->Shutdown(); });
+        agc.reset(); events.reset(); semaphores.reset(); eventFlags.reset(); mutexes.reset(); threadImports.reset();
         compositor.reset();
         shutdown = true;
         if (shutdownFailure) std::rethrow_exception(shutdownFailure);
@@ -313,6 +317,9 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
     // full scope, function type and size before allocating gates, for any
     // importing image (main executable or module).
     if (const auto address = impl->semaphores->Resolve(import, type, size))
+        return SceResolvedImport{*address, type};
+    // Event flags validate libkernel scope, FUNC type and size per row.
+    if (const auto address = impl->eventFlags->Resolve(import, type, size))
         return SceResolvedImport{*address, type};
     const bool graphicsScope = import.ModuleName == "libSceAgc" || import.ModuleName == "libSceAgcDriver" ||
         import.LibraryName == "libSceAgc" || import.LibraryName == "libSceAgcDriver" ||
