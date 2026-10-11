@@ -5,6 +5,9 @@
 
 namespace File {
 
+enum class FcntlArgument { None, Int, Pointer };
+
+FcntlArgument FcntlArgumentOf(int command);
 int Fcntl(int fd, int command, std::intptr_t argument);
 int DuplicateFrom(int fd, int start);
 void RememberDescriptor(int fd, int openFlags);
