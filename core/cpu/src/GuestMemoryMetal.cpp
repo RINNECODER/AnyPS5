@@ -222,11 +222,11 @@ struct GuestMemoryMetalCompositor::Impl {
         if (std::this_thread::get_id() != owner)
             throw std::logic_error("Compositor must be used on its owner thread");
     }
-    void Available() const {
+    void Available(const char* reentry = "Compositor publication reentry is forbidden") const {
         CheckOwner();
         if (active) {
             active->RejectReentry();
-            throw std::logic_error("Compositor publication reentry is forbidden");
+            throw std::logic_error(reentry);
         }
         if (poisoned) throw std::runtime_error("Compositor publication poisoned; graphics shutdown required");
     }
@@ -336,7 +336,9 @@ struct GuestMemoryMetalCompositor::Impl {
     void PublishOwned(const Publisher& publisher, const OwnedSelector& selector,
         const OwnedMappingSnapshot& previous, const OwnedMappingSnapshot& candidate,
         const std::function<void()>& commitCpu) {
-        Available();
+        // Name the nested kind: an owned Machine mapping change issued from inside
+        // another publication's CPU commit (e.g. a runtime commit) is the usual cause.
+        Available("Compositor publication reentry is forbidden: owned mapping change inside an active publication");
         if (!bound) throw std::logic_error("Compositor runtime scope has not been bound");
         if (!commitCpu) throw std::invalid_argument("Compositor CPU mutation is empty");
         auto invocation = std::make_shared<PublicationInvocation>();
