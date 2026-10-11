@@ -705,7 +705,8 @@ std::uint32_t EmitFPTrunc64(SpirvEmitterState& state, std::uint32_t arg0) {
 std::uint32_t EmitFPFract64(SpirvEmitterState& state, std::uint32_t arg0) {
     if (!NativeFloat64(state)) {
         const auto fraction = Split(state, SoftFloatOp(state, spv::OpFSub, arg0, Join(state, SoftRoundBits(state, arg0, false))));
-        const auto overflow = SoftTest(state, spv::OpUGreaterThanEqual, fraction.high, 0x3ff00000u);
+        // Only finite results in [1, 2) clamp; NaN (NaN or infinite input) must pass through.
+        const auto overflow = Binary(state, spv::OpULessThan, TypeBool(state), SoftOpK(state, spv::OpISub, fraction.high, 0x3ff00000u), ConstantU32(state, 0x00100000u));
         return Join(state, SelectBits(state, overflow, F64Bits{ConstantU32(state, 0xffffffffu), ConstantU32(state, 0x3fefffffu)}, fraction));
     }
     const auto value = ToF64(state, arg0);
