@@ -487,6 +487,11 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
         if (descriptor.dwordCount != 8u) {
             throw std::runtime_error("image descriptor has an invalid width");
         }
+        const auto activity = plan.descriptorSources.size() + i;
+        if (activity < activeSources.size() && activeSources[activity] == 0u) {
+            descriptor = DescriptorValue{};
+            descriptor.dwordCount = 8u;
+        }
         if (!validImageDescriptor(descriptor, image.r128) && !nullImageDescriptor(descriptor)) {
             throw std::runtime_error("runtime image descriptor is invalid");
         }

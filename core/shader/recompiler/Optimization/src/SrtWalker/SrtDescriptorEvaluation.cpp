@@ -64,12 +64,15 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
     Evaluator evaluator(program, runtime, cleanFlatSlots, &cleanEvaluator);
     std::vector<std::uint8_t> active;
     if (evaluateFlat) {
-        active.assign(program.descriptorSources.size(), 1u);
+        active.assign(program.descriptorSources.size() + program.info.images.size(), 1u);
     }
     if (evaluateFlat && !program.controlFlow.empty()) {
         for (const auto& block : program.controlFlow) {
             for (const auto source : block.sources) {
                 active.at(source) = 0u;
+            }
+            for (const auto image : block.images) {
+                active.at(program.descriptorSources.size() + image) = 0u;
             }
         }
         std::vector<std::uint8_t> visited(program.controlFlow.size());
@@ -84,6 +87,9 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
             const auto& block = program.controlFlow[index];
             for (const auto source : block.sources) {
                 active[source] = 1u;
+            }
+            for (const auto image : block.images) {
+                active[program.descriptorSources.size() + image] = 1u;
             }
             std::uint32_t condition = 0;
             bool cleanEvaluable = false;
