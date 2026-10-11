@@ -303,6 +303,31 @@ int APS5_VABI waitpid_nid_postfix(int pid, int* status, int options) {
     return -1;
 }
 
+int APS5_VABI setrlimit_nid_postfix(int resource, const GuestResourceLimit* limit) {
+    if (limit == nullptr) {
+        *__error_nid_postfix() = guestFault;
+        return -1;
+    }
+    if (resource < 0 || resource >= guestRlimitCount) {
+        *__error_nid_postfix() = guestInvalid;
+        return -1;
+    }
+
+    GuestResourceLimit requested = *limit;
+    if (requested.rlim_cur < 0)
+        requested.rlim_cur = guestRlimitInfinity;
+    if (requested.rlim_max < 0)
+        requested.rlim_max = guestRlimitInfinity;
+    if (requested.rlim_cur > requested.rlim_max)
+        requested.rlim_cur = requested.rlim_max;
+
+    GuestResourceLimit current{};
+    getrlimit_nid_postfix(resource, &current);
+    if (requested.rlim_cur != current.rlim_cur || requested.rlim_max != current.rlim_max)
+        throw std::runtime_error("setrlimit: changing the limit of resource " + std::to_string(resource) + " is not supported");
+    return 0;
+}
+
 int APS5_VABI wait_nid_postfix(int* status) {
     return waitpid_nid_postfix(-1, status, 0);
 }
