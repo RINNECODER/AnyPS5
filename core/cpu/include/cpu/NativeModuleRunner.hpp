@@ -3,6 +3,8 @@
 #include <cpu/GuestMemoryRuntime.hpp>
 #include <cpu/SceModules.hpp>
 #include <chrono>
+#include <functional>
+#include <span>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -56,6 +58,9 @@ public:
     void ActivateBeforeInitializers();
     // Every owner pump then drains window and controller input into this pad.
     void AttachPadInput(std::shared_ptr<PadHostInput>);
+    // Loaded module records for sceKernelGetModuleInfoFromAddr/ForUnwind,
+    // queried when the guest calls them (the graph may be built after this runner).
+    void SetModuleSource(std::function<std::span<const SceModuleRecord>()>);
     std::uint64_t MappingGeneration() const;
     SceNativeGraphicsSession& Graphics();
     void Shutdown();

@@ -17,6 +17,12 @@ inline constexpr std::int32_t GuestThreadPriorityMax = 767;
 inline constexpr std::int32_t GuestThreadPriorityDefault = 700;
 inline constexpr std::int32_t GuestThreadPolicyFifo = 1;
 inline constexpr std::int32_t GuestThreadPolicyRoundRobin = 3;
+// SCHED_OTHER is accepted and scheduled as time-sharing (round robin).
+inline constexpr std::int32_t GuestThreadPolicyOther = 2;
+
+// Thread attribute fields beyond scheduling. Sizes and addresses are 8-byte
+// guest values; detach state and policy/inherit are 4-byte signed values.
+enum class GuestThreadAttributeField { StackSize, StackAddress, GuardSize, DetachState, Affinity, Policy, Inherit };
 // Deterministic translated-instruction bound, not a vendor millisecond quantum
 // or certification of native host real-time scheduling.
 inline constexpr std::uint64_t GuestThreadRoundRobinQuantum = 4096;
@@ -116,6 +122,31 @@ public:
     std::uint32_t AttributeGetPriority(std::uint64_t slot8, std::uint64_t output4);
     std::uint32_t AttributeSetInherit(std::uint64_t slot8, std::int32_t inherit);
     std::uint32_t AttributeSetPolicy(std::uint64_t slot8, std::int32_t policy);
+    // Return SCE error codes (EINVAL/ESRCH/EDEADLK), never host aborts.
+    std::uint32_t AttributeSet(std::uint64_t slot8, GuestThreadAttributeField, std::uint64_t value);
+    std::uint32_t AttributeGet(std::uint64_t slot8, GuestThreadAttributeField, std::uint64_t output);
+    // pthread_attr_get_np: copies a live thread's attributes into an owned attribute.
+    std::uint32_t AttributeFromThread(GuestThreadHandle, std::uint64_t slot8);
+    std::uint32_t Detach(GuestThreadHandle);
+    std::uint32_t SetPriority(GuestThreadHandle, std::int32_t priority);
+    std::uint32_t GetPriority(GuestThreadHandle, std::uint64_t output4);
+    std::uint32_t SetAffinity(GuestThreadHandle, std::uint64_t mask);
+    std::uint32_t GetAffinity(GuestThreadHandle, std::uint64_t output8);
+    std::uint32_t Rename(GuestThreadHandle, std::uint64_t name);
+    // Writes the NUL-terminated name into a 32-byte guest buffer.
+    std::uint32_t GetName(GuestThreadHandle, std::uint64_t output32);
+    std::int32_t ThreadId(GuestThreadHandle) const;
+    // Deferred cancellation: the request is observed by the target at Testcancel.
+    std::uint32_t Cancel(GuestThreadHandle);
+    bool CancelRequested() const;
+    // Validation that runs before a join is queued; nonzero is the guest result.
+    std::uint32_t JoinCheck(GuestThreadHandle) const;
+    // Validation that runs before a creation is queued; nonzero is the guest result.
+    std::uint32_t CreateCheck(std::uint64_t nullableAttrSlot8) const;
+    // A provider-owned guest routine that every finishing created thread runs
+    // first (e.g. TSD destructors). It must chain to ThreadDtors() itself.
+    void SetThreadExitHook(std::uint64_t guestPc);
+    std::uint64_t ThreadDtors() const;
     // Called once per thread after normal finalization, or when continuation is
     // cancelled. Providers can remove waits and poison nonrobust owned objects;
     // this notification does not imply successful mutex release or acquisition.

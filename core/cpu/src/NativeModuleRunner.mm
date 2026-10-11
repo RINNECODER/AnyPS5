@@ -9,6 +9,7 @@
 #include "KernelEvents.hpp"
 #include "KernelPrimitives.hpp"
 #include "KernelSemaphores.hpp"
+#include "KernelThreadExtras.hpp"
 #include "NativeNpIdentity.hpp"
 #include "NativeUriEscape.hpp"
 #include "SceImageData.hpp"
@@ -83,6 +84,7 @@ struct NativeModuleRunner::Impl {
     std::unique_ptr<Platform::TargetKernelEvents> events;
     std::unique_ptr<Platform::TargetKernelSemaphores> semaphores;
     std::unique_ptr<Platform::KernelEventFlags> eventFlags;
+    std::unique_ptr<Platform::KernelThreadExtras> threadExtras;
     std::map<std::filesystem::path, SceParsedImage> serviceConsumers;
     std::unique_ptr<Platform::NativeNpIdentity> npIdentity;
     std::unique_ptr<Platform::NativeUriEscape> uriEscape;
@@ -115,6 +117,7 @@ struct NativeModuleRunner::Impl {
         mutexes = std::make_unique<Platform::TargetKernelMutexes>(machine, threads);
         semaphores = std::make_unique<Platform::TargetKernelSemaphores>(machine, threads);
         eventFlags = std::make_unique<Platform::KernelEventFlags>(machine, threads);
+        threadExtras = std::make_unique<Platform::KernelThreadExtras>(machine, threads);
         // Admission is title-agnostic: every profile below is selected for any
         // importing image and validated per import by NID, scope, type and size.
         events = std::make_unique<Platform::TargetKernelEvents>(machine, threads,
@@ -198,7 +201,7 @@ struct NativeModuleRunner::Impl {
         if (events) attempt([&] { events->Provider().Shutdown(); });
         if (semaphores) attempt([&] { semaphores->Provider().Shutdown(); });
         if (eventFlags) attempt([&] { eventFlags->Shutdown(); });
-        agc.reset(); events.reset(); semaphores.reset(); eventFlags.reset(); mutexes.reset(); threadImports.reset();
+        agc.reset(); events.reset(); semaphores.reset(); eventFlags.reset(); threadExtras.reset(); mutexes.reset(); threadImports.reset();
         compositor.reset();
         shutdown = true;
         if (shutdownFailure) std::rethrow_exception(shutdownFailure);
@@ -309,6 +312,11 @@ std::uint64_t NativeModuleRunner::MappingGeneration() const {
     return impl->compositor ? impl->compositor->Generation() : 0;
 }
 void NativeModuleRunner::ActivateBeforeInitializers() { impl->activate(); }
+void NativeModuleRunner::SetModuleSource(std::function<std::span<const SceModuleRecord>()> source) {
+    impl->checkOwner();
+    if (impl->shutdown) throw std::runtime_error("Native module source set after shutdown");
+    impl->threadExtras->SetModuleSource(std::move(source));
+}
 void NativeModuleRunner::AttachPadInput(std::shared_ptr<PadHostInput> input) {
     impl->checkOwner();
     if (impl->shutdown) throw std::runtime_error("Native pad input attached after shutdown");
@@ -392,6 +400,9 @@ std::optional<SceResolvedImport> NativeModuleRunner::Resolve(const SceImportCons
         return SceResolvedImport{*address, type};
     // Event flags validate libkernel scope, FUNC type and size per row.
     if (const auto address = impl->eventFlags->Resolve(import, type, size))
+        return SceResolvedImport{*address, type};
+    // Rwlocks, once, TSD, SyncOnAddress, module information and debug rows.
+    if (const auto address = impl->threadExtras->Resolve(import, type, size))
         return SceResolvedImport{*address, type};
     const bool graphicsScope = import.ModuleName == "libSceAgc" || import.ModuleName == "libSceAgcDriver" ||
         import.LibraryName == "libSceAgc" || import.LibraryName == "libSceAgcDriver" ||

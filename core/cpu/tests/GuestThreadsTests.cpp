@@ -431,9 +431,30 @@ void preflightFailures(const std::filesystem::path& main, const std::filesystem:
     constexpr std::array cases{
         Case{2, "callback PC is null", true}, Case{3, "registration is duplicated", true},
         Case{4, "permissions 4", true}, Case{5, "permissions 2", true},
-        Case{6, "attributes are unsupported", true}, Case{7, "permissions 2", false},
-        Case{8, "cannot join itself", true}, Case{9, "unknown or retired guest thread handle", true},
-        Case{10, "unknown or retired guest thread handle", false}};
+        Case{7, "permissions 2", false}};
+    // CPU-14: a non-owned attribute (6), joining itself (8), an unknown handle (9)
+    // and a second join (10) return SCE errors to the guest instead of aborting.
+    for (const unsigned mode : {8U, 9U, 10U}) {
+        Session session(main, guest, mode);
+        require(session.Graph->RunMain(2000000, 100000) == Cpu::StopReason::Exit && session.Machine.ExitCode() == 0,
+                "Rejected join aborted the host instead of returning an SCE error to the guest");
+        const auto state = session.receipt();
+        require(state[9] == 1 && state[10] == 0 && state[11] == 0, "Rejected join replayed or skipped child finalization");
+    }
+    {
+        Session session(main, guest, 6);
+        const auto before = session.Machine.Mappings();
+        std::string failure;
+        try { session.Graph->RunMain(2000000, 100000); }
+        catch (const std::exception& error) { failure = error.what(); }
+        // thread_create returned EINVAL, so the guest main returned early and the
+        // fixture's own finalizer reports that path (status 92).
+        require(failure.find("failure status 92") != std::string::npos,
+                failure.empty() ? "Non-owned attribute reached ordinary guest completion" : failure.c_str());
+        const auto state = session.receipt();
+        require(sameMappings(before, session.Machine.Mappings()) && state[7] == 0 && state[9] == 0,
+                "Rejected attribute published or executed a child");
+    }
     for (const auto& value : cases) {
         Session session(main, guest, value.Mode);
         const auto before = session.Machine.Mappings();
