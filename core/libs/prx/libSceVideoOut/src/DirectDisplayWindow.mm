@@ -86,10 +86,19 @@ void CreateWindow(const std::shared_ptr<DirectWindow>& state) {
         }
     });
     dispatch_source_set_timer(pump, dispatch_time(DISPATCH_TIME_NOW, 0), 4 * NSEC_PER_MSEC, NSEC_PER_MSEC);
-    std::lock_guard lock(state->mutex);
-    state->window = std::move(window);
-    state->pump = pump;
-    dispatch_resume(pump);
+    {
+        std::lock_guard lock(state->mutex);
+        if (!state->destroyed) {
+            state->window = std::move(window);
+            state->pump = pump;
+            dispatch_resume(pump);
+            return;
+        }
+    }
+    // Destroy ran while the window was being created: nobody else owns it, so close it here.
+    dispatch_source_cancel(pump);
+    dispatch_resume(pump);  // a suspended source must be resumed before it is released
+    CloseWindow(std::move(window));
 }
 
 // Main queue only.
