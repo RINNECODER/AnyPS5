@@ -19,6 +19,7 @@
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -47,7 +48,11 @@ namespace {
 
 constexpr int sceInvalidArgument = static_cast<int>(0x80020016u);
 constexpr int errnoNoChild = 10;
+constexpr int errnoBadAddress = 14;
 constexpr int errnoInvalidArgument = 22;
+constexpr int freebsdGroupsMax = 1023;
+std::mutex supplementaryGroupsMutex;
+std::vector<std::uint32_t> supplementaryGroups{0};
 constexpr unsigned freebsdWaitOptions = 0x8000003Fu;
 
 std::atomic<std::uint32_t> gpoBits{0};
@@ -520,6 +525,57 @@ int APS5_VABI setegid_nid_postfix(std::uint32_t egid) {
     if (egid != 0)
         throw std::runtime_error("setegid: unsupported group id " + std::to_string(egid));
     return 0;
+}
+
+int APS5_VABI setuid_nid_postfix(std::uint32_t uid) {
+    if (uid != 0)
+        throw std::runtime_error("setuid: unsupported user id " + std::to_string(uid));
+    return 0;
+}
+
+int APS5_VABI setreuid_nid_postfix(std::uint32_t ruid, std::uint32_t euid) {
+    constexpr std::uint32_t unchanged = 0xffffffffu;
+    if (ruid != 0 && ruid != unchanged)
+        throw std::runtime_error("setreuid: unsupported real user id " + std::to_string(ruid));
+    if (euid != 0 && euid != unchanged)
+        throw std::runtime_error("setreuid: unsupported effective user id " + std::to_string(euid));
+    return 0;
+}
+
+int APS5_VABI setgroups_nid_postfix(int count, const std::uint32_t* groups) {
+    if (count < 0 || count > freebsdGroupsMax) {
+        *__error_nid_postfix() = errnoInvalidArgument;
+        return -1;
+    }
+    if (count > 0 && groups == nullptr) {
+        *__error_nid_postfix() = errnoBadAddress;
+        return -1;
+    }
+    if (count > 0 && groups[0] != 0)
+        throw std::runtime_error("setgroups: unsupported effective group id " + std::to_string(groups[0]));
+    std::lock_guard lock(supplementaryGroupsMutex);
+    if (count == 0) {
+        supplementaryGroups.resize(1);
+        return 0;
+    }
+    supplementaryGroups.assign(groups, groups + count);
+    return 0;
+}
+
+int APS5_VABI getgroups_nid_postfix(int capacity, std::uint32_t* groups) {
+    std::lock_guard lock(supplementaryGroupsMutex);
+    const int count = static_cast<int>(supplementaryGroups.size());
+    if (capacity == 0) return count;
+    if (capacity < count) {
+        *__error_nid_postfix() = errnoInvalidArgument;
+        return -1;
+    }
+    if (groups == nullptr) {
+        *__error_nid_postfix() = errnoBadAddress;
+        return -1;
+    }
+    std::copy(supplementaryGroups.begin(), supplementaryGroups.end(), groups);
+    return count;
 }
 
 }
