@@ -490,7 +490,7 @@ void _ammMap(const Apr::AmmMapCommand& command, bool direct) {
     const std::lock_guard lock(state.lock);
     _ammCheckRange(state, command.address, command.size);
     _reserve(command.address, command.size);
-    _forgetPages(state, command.address, command.size, true);
+    _forgetPages(state, command.address, command.size);
     _clearPrt(state, command.address, command.size);
     const auto physical = direct ? command.directOffset : _takePoolPages(state, command.size);
     try {
