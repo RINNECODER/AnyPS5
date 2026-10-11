@@ -23,6 +23,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -49,12 +50,16 @@ void Require(bool condition, const std::string& reason) {
 }
 
 SpirvTarget Target(id<MTLDevice> device) {
-    static constexpr std::array<std::uint32_t, 3> capabilities{
-        spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    static constexpr std::array<std::uint32_t, 4> capabilities{
+        spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
+        spv::CapabilityFragmentBarycentricKHR};
     static constexpr std::array<std::string_view, 2> extensions{
         "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     const auto maximum = device.maxThreadsPerThreadgroup;
-    return {0x00401000, 0x00010300, 32, BdaAbi::Version, capabilities, extensions, false,
+    // Like the native target: barycentric weights ([[barycentric_coord]]) where the device has them,
+    // but never fragmentShaderBarycentricEnabled, since MSL has no per-vertex fragment inputs.
+    const auto supported = std::span(capabilities).first(device.supportsShaderBarycentricCoordinates ? 4u : 3u);
+    return {0x00401000, 0x00010300, 32, BdaAbi::Version, supported, extensions, false,
             {static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(maximum.height), static_cast<std::uint32_t>(maximum.depth)},
             static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(device.maxThreadgroupMemoryLength), {}, {}};
 }
@@ -93,11 +98,12 @@ struct ShaderPair {
     std::uint32_t fragmentPush;
 };
 
-ShaderPair Compile(id<MTLDevice> device, std::span<const std::uint32_t> fragmentCode, std::uint32_t vertices) {
+ShaderPair Compile(id<MTLDevice> device, std::span<const std::uint32_t> fragmentCode, std::uint32_t vertices,
+    const ShaderPixelStageInfo& pixel = PixelInfo(), std::span<const std::uint32_t> vertexCode = VertexCode) {
     const std::array<std::uint32_t, 4> vertexUserData{
         static_cast<std::uint32_t>(VertexAddress), 16u << 16u, vertices, 0x01016fac};
-    const std::array<MemoryRegion, 1> vertexMemory{{{0x500000, std::as_bytes(std::span(VertexCode))}}};
-    RecompileRequest vertex{{ShaderStage::Vertex, 0x500000, VertexCode, 0, {}},
+    const std::array<MemoryRegion, 1> vertexMemory{{{0x500000, std::as_bytes(vertexCode)}}};
+    RecompileRequest vertex{{ShaderStage::Vertex, 0x500000, vertexCode, 0, {}},
         {32, 0, vertexUserData, {}, {}, ShaderVertexStageInfo{}, vertexMemory}, Target(device), {0, 0, 0, 64}, {}};
     vertex.useCache = false;
     auto vertexResult = Recompile(vertex);
@@ -105,7 +111,7 @@ ShaderPair Compile(id<MTLDevice> device, std::span<const std::uint32_t> fragment
     const std::array<std::uint32_t, 8> fragmentUserData{};
     const std::array<MemoryRegion, 1> fragmentMemory{{{0x600000, std::as_bytes(fragmentCode)}}};
     RecompileRequest fragment{{ShaderStage::Fragment, 0x600000, fragmentCode, 0, {}},
-        {32, 0, fragmentUserData, {}, PixelInfo(), {}, fragmentMemory}, Target(device), {0, 0, fragmentPush, 128u - fragmentPush}, {}};
+        {32, 0, fragmentUserData, {}, pixel, {}, fragmentMemory}, Target(device), {0, 0, fragmentPush, 128u - fragmentPush}, {}};
     fragment.useCache = false;
     return {std::move(vertexResult), Recompile(fragment), fragmentPush};
 }
@@ -1873,6 +1879,141 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
     }
 }
 
+// Fixed-function interpolation (no per-vertex inputs on Metal): the shapes compilers emit around
+// v_interp_p1/p2 (an s_wqm prologue, a v_cmpx alpha test, branches, GFX10 scalar control ops and
+// reuse of dead I/J VGPRs) must compile and draw exactly what the canonical P1/P2 sequence draws.
+constexpr std::array<std::uint32_t, 8> ParameterVertexCode{
+    0xe0382000, 0x80000005, 0xbf8c3f70, 0xf80008cf, 0x03020100, 0xf800020f, 0x03020100, 0xbf810000,
+};
+
+ShaderPixelStageInfo InterpolatedPixelInfo() {
+    ShaderPixelStageInfo pixel{};
+    pixel.interpolatorCount = 1;
+    pixel.wave32 = true;
+    pixel.inputAddr = PixelInputBit(PixelInput::PerspectiveCenter);
+    pixel.hasPerspectiveCenterVgpr = true;
+    pixel.targetOutputMode[0] = 9;
+    pixel.targetExportMapping.fill(0xe4);
+    return pixel;
+}
+
+std::vector<std::byte> DrawInterpolated(id<MTLDevice> device, id<MTLLibrary> library, std::span<const std::uint32_t> code, bool& emulated,
+    const ShaderPixelStageInfo& pixel = InterpolatedPixelInfo(), std::vector<std::uint32_t>* decorations = nullptr) {
+    std::vector<std::array<float, 4>> vertices(Triangle.begin(), Triangle.end());
+    std::vector<std::byte> pixels(Width * Height * 4, std::byte{0x40});
+    const auto compiled = Compile(device, code, static_cast<std::uint32_t>(vertices.size()), pixel, ParameterVertexCode);
+    emulated = compiled.fragment.barycentricEmulation.active;
+    const auto& words = compiled.fragment.spirv.Words();
+    for (std::size_t at = 5; decorations != nullptr && at < words.size(); at += words[at] >> 16u) {
+        if ((words[at] & 0xffffu) == spv::OpDecorate) decorations->push_back(words[at + 2]);
+    }
+    const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
+        {ShaderStage::Vertex, &compiled.vertex, 0}, {ShaderStage::Fragment, &compiled.fragment, compiled.fragmentPush}}};
+    std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
+        {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAddress, pixels, true}};
+    AgcDriver::Pm4::DrawParameters draw{};
+    draw.indexCount = 3;
+    draw.instanceCount = 1;
+    draw.indexed = false;
+    AgcDriver::Metal::MetalDraw adapter(device, library);
+    Require(adapter.DrawSynchronously(State(), draw, shaders, ranges).state == BdaAbi::FaultState::Empty,
+        "Interpolated guest draw published a GPU memory fault");
+    return pixels;
+}
+
+void DrawInterpolation(id<MTLDevice> device, id<MTLLibrary> library) {
+    using Code = std::vector<std::uint32_t>;
+    const Code interpolate{0xc8080000, 0xc8090001, 0xc80c0100, 0xc80d0101, 0xc8100200, 0xc8110201, 0xc8140300, 0xc8150301};
+    const Code exportColor{0xf800180f, 0x05040302, 0xbf810000};
+    const auto join = [](std::initializer_list<Code> parts) {
+        Code code;
+        for (const auto& part : parts) code.insert(code.end(), part.begin(), part.end());
+        return code;
+    };
+    bool emulated = true;
+    const auto reference = DrawInterpolated(device, library, join({interpolate, exportColor}), emulated);
+    Require(!emulated, "Canonical P1/P2 interpolation left host interpolation");
+    for (std::uint32_t y = 0; y < Height; ++y) {
+        for (std::uint32_t x = 0; x < Width; ++x) {
+            const auto red = std::to_integer<int>(reference[(y * Width + x) * 4]);
+            const auto expected = std::clamp((x + 0.5) / Width * 2.0 - 1.0, 0.0, 1.0) * 255.0;
+            Require(std::abs(red - expected) <= 1.5 && std::to_integer<int>(reference[(y * Width + x) * 4 + 3]) == 255,
+                "Canonical P1/P2 interpolation drew the wrong parameter at pixel " + std::to_string(x) + "," + std::to_string(y));
+        }
+    }
+    const Code head(interpolate.begin(), interpolate.begin() + 4), tail(interpolate.begin() + 4, interpolate.end());
+    const std::array<std::pair<const char*, Code>, 6> shapes{{
+        {"s_wqm_b64 exec prologue", join({{0xbefe0a7e}, interpolate, exportColor})},
+        {"s_wqm_b32 exec_lo prologue", join({{0xbefe097e}, interpolate, exportColor})},
+        {"v_cmpx alpha test after interpolation", join({interpolate, {0x7c2804f4}, exportColor})},
+        {"s_branch between interpolations", join({head, {0xbf820000}, tail, exportColor})},
+        {"GFX10 scalar control ops between P1 and P2", join({{0xc8080000, 0xbfa10001, 0xbfa00003, 0xbf8f0001, 0xbe821f00},
+            Code(interpolate.begin() + 1, interpolate.end()), exportColor})},
+        {"64-bit ALU and v_interp_mov into dead I/J VGPRs", join({interpolate, {0xd6ff0000, 0x02020880, 0xc8020002}, exportColor})},
+    }};
+    for (const auto& [name, code] : shapes) {
+        std::vector<std::byte> pixels;
+        try {
+            pixels = DrawInterpolated(device, library, code, emulated);
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string("Fixed-function interpolation rejected ") + name + ": " + error.what());
+        }
+        Require(!emulated, std::string("Fixed-function interpolation left host interpolation for ") + name);
+        Require(pixels == reference, std::string("Fixed-function interpolation drew differently with ") + name);
+    }
+    // Centroid and per-sample pairs keep host interpolation at their own location. The triangle covers
+    // the single-sampled target, so both draw what the center draws.
+    for (const auto& [name, input, decoration] : std::array{
+        std::tuple{"perspective centroid", PixelInput::PerspectiveCentroid, spv::DecorationCentroid},
+        std::tuple{"perspective sample", PixelInput::PerspectiveSample, spv::DecorationSample},
+        std::tuple{"linear centroid", PixelInput::LinearCentroid, spv::DecorationCentroid},
+        std::tuple{"linear sample", PixelInput::LinearSample, spv::DecorationSample}}) {
+        auto pixel = InterpolatedPixelInfo();
+        pixel.inputAddr = PixelInputBit(input);
+        pixel.hasPerspectiveCenterVgpr = false;
+        pixel.perspectiveCentroid = input == PixelInput::PerspectiveCentroid;
+        pixel.linearCentroid = input == PixelInput::LinearCentroid;
+        std::vector<std::uint32_t> decorations;
+        std::vector<std::byte> pixels;
+        try {
+            pixels = DrawInterpolated(device, library, join({interpolate, exportColor}), emulated, pixel, &decorations);
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string("Fixed-function interpolation rejected the ") + name + " pair: " + error.what());
+        }
+        Require(!emulated && std::ranges::count(decorations, static_cast<std::uint32_t>(decoration)) == 1,
+            std::string("The ") + name + " pair did not decorate its host-interpolated parameter");
+        Require(pixels == reference, std::string("The ") + name + " pair drew differently from the center");
+    }
+    // Raw I/J read as data alongside a host interpolation: Metal reads them from [[barycentric_coord]].
+    const Code raw{0x7e0c0300, 0x7e0e0301, 0xc8080000, 0xc8090001, 0xf800180f, 0x02020706, 0xbf810000};
+    if (!device.supportsShaderBarycentricCoordinates) {
+        bool rejected = false;
+        try {
+            static_cast<void>(DrawInterpolated(device, library, raw, emulated));
+        } catch (const std::exception& error) {
+            rejected = std::string(error.what()).find("barycentric") != std::string::npos;
+        }
+        Require(rejected, "A raw I/J read without Metal barycentric coordinates was not rejected");
+        std::cout << "Fixed-function interpolation: " << shapes.size() << " shapes and centroid/sample pairs matched the canonical draw; raw I/J rejected without barycentric coordinates\n";
+        return;
+    }
+    const auto weights = DrawInterpolated(device, library, raw, emulated);
+    Require(!emulated, "Raw I/J reads on Metal requested geometry-stage emulation");
+    // J follows the vertex 2 axis, whose direction in rows the canonical draw's attr.y shows.
+    const bool upward = std::to_integer<int>(reference[1]) > 0;
+    for (std::uint32_t y = 0; y < Height; ++y) {
+        for (std::uint32_t x = 0; x < Width; ++x) {
+            const auto* pixel = &weights[(y * Width + x) * 4];
+            const double i = (x + 0.5) / (2.0 * Width);
+            const double j = (upward ? Height - y - 0.5 : y + 0.5) / (2.0 * Height);
+            Require(std::abs(std::to_integer<int>(pixel[0]) - i * 255.0) <= 1.5 && std::abs(std::to_integer<int>(pixel[1]) - j * 255.0) <= 1.5 &&
+                    pixel[2] == reference[(y * Width + x) * 4] && pixel[3] == reference[(y * Width + x) * 4],
+                "Raw I/J from [[barycentric_coord]] did not match the AMD vertex 1/2 weights at pixel " + std::to_string(x) + "," + std::to_string(y));
+        }
+    }
+    std::cout << "Fixed-function interpolation: " << shapes.size() << " shapes and centroid/sample pairs matched the canonical draw; raw I/J read [[barycentric_coord]]\n";
+}
+
 }
 
 int main(int argc, const char* argv[]) {
@@ -1890,6 +2031,7 @@ int main(int argc, const char* argv[]) {
             DrawGuest(device, library, false, true);
             DrawGuest(device, library, false, true, true);
             DrawSubmittedGuest(device, library);
+            DrawInterpolation(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

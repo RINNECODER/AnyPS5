@@ -270,6 +270,21 @@ void DefineInputs(SpirvEmitterState& state) {
             if (!flat && !input.perVertex && PixelParameterIsLinear(state, input.location)) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationNoPerspective);
             }
+            if (!flat && !input.perVertex) {
+                switch (ShaderPixelInputInfo::InputSampling(input.location, state.program.Metadata())) {
+                case ShaderPixelInputInfo::Sampling::Center:
+                    break;
+                case ShaderPixelInputInfo::Sampling::Centroid:
+                    state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationCentroid);
+                    break;
+                case ShaderPixelInputInfo::Sampling::Sample:
+                    state.module.EmitCapability(spv::CapabilitySampleRateShading);
+                    state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationSample);
+                    break;
+                case ShaderPixelInputInfo::Sampling::Mixed:
+                    throw std::runtime_error("SPIR-V module emission failed: pixel parameter " + std::to_string(input.location) + " is interpolated at two different locations");
+                }
+            }
             state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationLocation, location);
         } else if (emulated && (input.kind == StageInputKind::BaryCoordSmooth || input.kind == StageInputKind::BaryCoordNoPerspective)) {
             const bool linear = input.kind == StageInputKind::BaryCoordNoPerspective;

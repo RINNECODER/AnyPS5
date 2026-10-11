@@ -78,10 +78,18 @@ void TranslationContext::vInterpP2F32(const RdnaInstruction& inst) {
             return base != ShaderPixelInputInfo::NoPixelInputVgpr && inst.source0.reg == base + 1u;
         };
         const auto bit = 1u << inst.source1.value;
-        if (readsPair(PixelInput::LinearCenter) || readsPair(PixelInput::LinearCentroid)) {
-            program.Metadata().pixelLinearInputs |= bit;
-        } else if (readsPair(PixelInput::PerspectiveCenter) || readsPair(PixelInput::PerspectiveCentroid)) {
-            program.Metadata().pixelPerspectiveInputs |= bit;
+        auto& metadata = program.Metadata();
+        if (readsPair(PixelInput::LinearCenter) || readsPair(PixelInput::LinearCentroid) || readsPair(PixelInput::LinearSample)) {
+            metadata.pixelLinearInputs |= bit;
+        } else if (readsPair(PixelInput::PerspectiveCenter) || readsPair(PixelInput::PerspectiveCentroid) || readsPair(PixelInput::PerspectiveSample)) {
+            metadata.pixelPerspectiveInputs |= bit;
+        }
+        if (readsPair(PixelInput::PerspectiveCentroid) || readsPair(PixelInput::LinearCentroid)) {
+            metadata.pixelCentroidInputs |= bit;
+        } else if (readsPair(PixelInput::PerspectiveSample) || readsPair(PixelInput::LinearSample)) {
+            metadata.pixelSampleInputs |= bit;
+        } else if (readsPair(PixelInput::PerspectiveCenter) || readsPair(PixelInput::LinearCenter)) {
+            metadata.pixelCenterInputs |= bit;
         }
     }
     ir.Emit(IrOpcode::InterpolateHostP2, IrType::Void, {&ir.Constant(inst.source1.value), &ir.Constant(inst.source2.value), readOperand(inst.source0, IrType::F32), readOperand(inst.destination, IrType::F32), &ir.GetExec()});

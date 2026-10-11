@@ -253,6 +253,9 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         else throw std::invalid_argument("Metal draw requires one rasterization and one fragment program");
     }
     if (vertex == nullptr || fragment == nullptr) throw std::invalid_argument("Metal draw vertex or fragment program is missing");
+    if (fragment->program->barycentricEmulation.active) {
+        throw std::invalid_argument("Metal draw pixel shader needs per-vertex barycentric inputs, which Metal has no geometry stage to emulate");
+    }
     if (rectPath && (control == nullptr || evaluation == nullptr)) throw std::invalid_argument("Metal rectangle draw requires the original generated control and evaluation programs");
     auto pushConstants = Graphics::AssemblePushConstants(shaders);
     id<MTLBuffer> meshArgumentBuffer = nil;

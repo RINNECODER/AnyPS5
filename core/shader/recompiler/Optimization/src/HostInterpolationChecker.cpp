@@ -82,12 +82,13 @@ bool exact(const IrValue& inst, const IrProgram& program, const ShaderPixelInput
     const auto* partial = partialOf(inst);
     if (partial->Opcode() != IrOpcode::InterpolateHostP1 || !sameParameter(inst, *partial)) return false;
     const auto& metadata = program.Metadata();
+    if (ShaderPixelInputInfo::InputSampling(inst.Argument(0)->Resolve()->ImmediateU32(), metadata) == ShaderPixelInputInfo::Sampling::Mixed) return false;
     const auto kind = pixel.InputIsLinear(inst.Argument(0)->Resolve()->ImmediateU32(), metadata.pixelLinearInputs, metadata.pixelPerspectiveInputs) ? StageInputKind::BaryCoordNoPerspective : StageInputKind::BaryCoordSmooth;
     return isBarycentric(*lookThrough(partial->Argument(2)), kind, 0u) && isBarycentric(*lookThrough(inst.Argument(2)), kind, 1u);
 }
 
 bool sharesSlots(const IrProgram& program, const ShaderPixelInputInfo& pixel) {
-    constexpr std::uint32_t unassigned = 3u;
+    constexpr std::uint32_t unassigned = ~0u;
     std::array<std::uint32_t, 32> interpolation {};
     interpolation.fill(unassigned);
     const auto& metadata = program.Metadata();
@@ -96,7 +97,8 @@ bool sharesSlots(const IrProgram& program, const ShaderPixelInputInfo& pixel) {
             if (inst->Opcode() != IrOpcode::GetAttribute && inst->Opcode() != IrOpcode::GetInterpolationParameter) continue;
             const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
             if (input >= pixel.inputNum || pixel.InputIsDefault(input)) continue;
-            const auto mode = pixel.InputIsFlat(input) ? 2u : pixel.InputIsLinear(input, metadata.pixelLinearInputs, metadata.pixelPerspectiveInputs) ? 1u : 0u;
+            const auto mode = pixel.InputIsFlat(input) ? 2u : (pixel.InputIsLinear(input, metadata.pixelLinearInputs, metadata.pixelPerspectiveInputs) ? 1u : 0u) |
+                                                                (static_cast<std::uint32_t>(ShaderPixelInputInfo::InputSampling(input, metadata)) << 2u);
             auto& slot = interpolation[pixel.InputSlot(input)];
             if (slot != unassigned && slot != mode) return true;
             slot = mode;
@@ -107,7 +109,7 @@ bool sharesSlots(const IrProgram& program, const ShaderPixelInputInfo& pixel) {
 
 }
 
-bool HostInterpolationChecker::Lower(IrProgram& program, const ShaderPixelInputInfo& pixel) const {
+bool HostInterpolationChecker::Lower(IrProgram& program, const ShaderPixelInputInfo& pixel, bool barycentricWeights) const {
     std::vector<IrValue*> selects;
     for (const auto& block : program.Blocks()) {
         for (const IrValue* inst : block->Instructions()) {
@@ -133,7 +135,7 @@ bool HostInterpolationChecker::Lower(IrProgram& program, const ShaderPixelInputI
     if (MaskedSelectEliminator{}.Eliminate(program).removedSelects != 0u) DeadCodeEliminator{}.Eliminate(program);
     for (const auto& block : program.Blocks()) {
         for (const IrValue* inst : block->Instructions()) {
-            if (isBarycentric(*inst) || inst->Opcode() == IrOpcode::InterpolateHostP1) return false;
+            if ((!barycentricWeights && isBarycentric(*inst)) || inst->Opcode() == IrOpcode::InterpolateHostP1) return false;
         }
     }
     return true;

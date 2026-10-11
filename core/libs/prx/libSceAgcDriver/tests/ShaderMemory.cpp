@@ -1655,8 +1655,8 @@ void verifyPixelInputs() {
         interpolated({0xc8000000u, 0xc8010001u, 0x7e101f00u}, 0x08080808u),
         interpolated({0xc8000000u, 0xc8010001u, 0x3e0200f0u}, 0x01010101u)
     }) {
-        expectFailure([&] { static_cast<void>(compilePixelInputs(shader)); }, "fixed-function interpolation requires",
-                      "a wide source or implicit accumulator consumed a live raw J register");
+        require(compilePixelInputs(shader, {}, twoParameterPixel(), float64Capability).barycentricEmulation.active,
+                "a wide source or implicit accumulator that read a raw J register kept host interpolation");
     }
     auto comparePixel = twoParameterPixel();
     comparePixel.inputAddr |= PixelInputBit(PixelInput::PositionX);
@@ -1676,8 +1676,8 @@ void verifyPixelInputs() {
     require(retainedCompare, "the exported VCC selection lost its actual comparison");
     auto partialCompare = pendingCompare;
     partialCompare[3] = 0x7c040cf0u;
-    expectFailure([&] { static_cast<void>(compilePixelInputs(partialCompare, {}, comparePixel)); }, "fixed-function interpolation requires",
-                  "a VCC comparison consumed a pending P1 result");
+    require(compilePixelInputs(partialCompare, {}, comparePixel).barycentricEmulation.active,
+            "a VCC comparison that consumed a pending P1 result kept host interpolation");
     const std::array<std::uint32_t, 12> nsaUserData{
         0x1000u, (56u << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (9u << 28u), 0u, 0u, 0u, 0u,
         0u, 0u, 0u, 0u};
@@ -1696,8 +1696,15 @@ void verifyPixelInputs() {
     require(nsaSamples == 1u, "disjoint NSA coordinates did not retain their actual texture sample");
     auto rawNsa = disjointNsa;
     rawNsa[8] = 0u;
-    expectFailure([&] { static_cast<void>(compilePixelInputs(rawNsa, nsaUserData)); }, "fixed-function interpolation requires",
-                  "a consumed NSA coordinate read a live raw I input");
+    require(compilePixelInputs(rawNsa, nsaUserData).barycentricEmulation.active,
+            "an NSA coordinate that read a raw I register kept host interpolation");
+    // Sampling into the I/J VGPRs once interpolation is complete keeps host interpolation (SHD-03).
+    auto reuseNsa = disjointNsa;
+    reuseNsa[7] = 0x00400008u;
+    reuseNsa[10] = 0x00000004u;
+    const auto reuseResult = compilePixelInputs(reuseNsa, nsaUserData);
+    require(!reuseResult.barycentricEmulation.active && reuseResult.fragmentParameters.size() == 1u && reuseResult.fragmentParameters[0].sourceLocation == 0u,
+            "an NSA sample into the dead I/J VGPRs left host interpolation");
     for (const auto& shader : {
         interpolated({0xc8100000u, 0xbe880381u, 0xc8110001u}, 0x04040404u),
         interpolated({0xc8100000u, 0xc8110001u, 0xf8000000u, 0u}, 0x04040404u),
@@ -1721,6 +1728,10 @@ void verifyPixelInputs() {
     require(noPerspectiveLocations(inPlace).empty(), "in-place center I interpolation was rejected");
     const auto branchAfterInputs = interpolated({0xc8100000u, 0xc8110001u, 0x7e000280u, 0x7e020280u, 0x7e040280u, 0x7e060280u, 0xbf820000u});
     require(noPerspectiveLocations(branchAfterInputs).empty(), "a branch after complete interpolation and raw input overwrites was rejected");
+    // Raw I/J reads, P2 without its P1, mismatched pairs and P1 results read by live code need the
+    // barycentric weights; a branch between P1 and P2 or a dead read of P1 does not (merge-base parity).
+    constexpr std::array<bool, 15> needsWeights{true, true, true, true, true, true, true, true, false, false, true, true, false, true, true};
+    std::size_t noncanonical = 0u;
     for (const auto& shader : {
         interpolated({0xc8100000u, 0xc8110001u}, 0u),
         interpolated({0xc8110001u}),
@@ -1738,7 +1749,25 @@ void verifyPixelInputs() {
         interpolated({0xc8100000u, 0xbefe0380u, 0xc8110001u}),
         interpolated({0xc8100000u, 0x7c2c10f2u, 0xc8110001u})
     }) {
-        expectFailure([&] { static_cast<void>(noPerspectiveLocations(shader)); }, "fixed-function interpolation requires", "noncanonical I/J arithmetic was collapsed to a hardware attribute");
+        const auto result = compilePixelInputs(shader);
+        require(result.barycentricEmulation.active == needsWeights.at(noncanonical++),
+                "noncanonical I/J arithmetic was collapsed to a hardware attribute, or canonical interpolation left it");
+    }
+    // Shapes compilers emit around complete P1/P2 sequences keep host interpolation (SHD-01, SHD-02, SHD-04):
+    // an s_wqm prologue (with the saved EXEC), a v_cmpx alpha test, a branch while I/J are live, GFX10
+    // scalar control ops between P1 and P2, and 64-bit ALU or v_interp_mov results in the dead I/J VGPRs.
+    for (const auto& shader : {
+        interpolated({0xbefe0a7eu, 0xc8100000u, 0xc8110001u}),
+        interpolated({0xbe80047eu, 0xbefe0a7eu, 0xc8100000u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xc8110001u, 0x7c2808f4u}),
+        interpolated({0xc8100000u, 0xc8110001u, 0xbf820000u}),
+        interpolated({0xc8100000u, 0xbfa10001u, 0xbfa00003u, 0xbf8f0001u, 0xbe821f00u, 0xc8110001u}),
+        interpolated({0xc8100000u, 0xc8110001u, 0xd6ff0000u, 0x02020880u, 0xc8020002u})
+    }) {
+        const auto result = compilePixelInputs(shader);
+        require(!result.barycentricEmulation.active && result.fragmentParameters.size() == 1u && result.fragmentParameters[0].sourceLocation == 0u &&
+                !result.fragmentParameters[0].flat && !result.fragmentParameters[0].perVertex,
+                "a canonical P1/P2 shape around EXEC, branches, scalar control or dead I/J reuse left host interpolation");
     }
 
     static constexpr std::array<std::uint32_t, 7> flatCode{0xc8020002u, 0xc8060102u, 0xc80a0202u, 0xc80e0302u, 0xf800180fu, 0x03020100u, 0xbf810000u};
@@ -1770,7 +1799,7 @@ void verifyPixelInputs() {
         if (flatWords[at + 2u] == spv::DecorationFlat) flatDecorated.push_back(flatWords[at + 1u]);
     }
     require(std::any_of(flatDecorated.begin(), flatDecorated.end(), [&](const auto id) { return flatLocations.contains(id) && flatLocations.at(id) == 0u; }), "flat-only guest interpolation lost its flat location0 input");
-    expectFailure([&] { static_cast<void>(noPerspectiveLocations(flatCode)); }, "fixed-function interpolation requires", "flat interpolation overwrote a live raw I/J input");
+    require(compilePixelInputs(flatCode).barycentricEmulation.active, "v_interp_mov of an interpolated input's P0 kept host interpolation");
 
     static constexpr std::array<std::uint32_t, 1> code{0xbf810000u};
     RecompileRequest request{};

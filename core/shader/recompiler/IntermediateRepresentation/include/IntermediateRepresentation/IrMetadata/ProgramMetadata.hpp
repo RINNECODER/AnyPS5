@@ -19,6 +19,10 @@ struct IrProgramMetadata {
     std::vector<ExportInfo> exportInfo;
     std::uint32_t pixelLinearInputs = 0;
     std::uint32_t pixelPerspectiveInputs = 0;
+    // The location of the I/J pair each host-interpolated parameter (bit) was read through.
+    std::uint32_t pixelCenterInputs = 0;
+    std::uint32_t pixelCentroidInputs = 0;
+    std::uint32_t pixelSampleInputs = 0;
     bool barycentricEmulation = false;
     std::vector<IrValue*> dynamicReads;
     bool shaderInfoComplete = false;

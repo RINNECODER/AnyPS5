@@ -214,7 +214,10 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
         }
     };
     simplify();
-    if (stageKind == ShaderStageKind::Pixel && !translateOptions.fragmentShaderBarycentricEnabled && !HostInterpolationChecker{}.Lower(program, *inputInfo.pixel)) {
+    // A target without per-vertex fragment inputs that still lists FragmentBarycentricKHR (Metal's
+    // [[barycentric_coord]]) keeps host interpolation and reads raw I/J from the weights.
+    const bool barycentricWeights = std::ranges::find(request.target.supportedCapabilities, static_cast<std::uint32_t>(spv::CapabilityFragmentBarycentricKHR)) != request.target.supportedCapabilities.end();
+    if (stageKind == ShaderStageKind::Pixel && !translateOptions.fragmentShaderBarycentricEnabled && !HostInterpolationChecker{}.Lower(program, *inputInfo.pixel, barycentricWeights)) {
         translateOptions.fragmentShaderBarycentricEnabled = true;
         program = translator.Translate(decoded, cfg, translateOptions);
         program.Metadata().barycentricEmulation = true;
