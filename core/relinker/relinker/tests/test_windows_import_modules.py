@@ -394,6 +394,24 @@ def main():
                 log = output.parent / 'anyps5.log'
                 assert log.is_file() and message in log.read_text(errors='replace'), (name, log.exists())
 
+            result, output = convert('gui-success-log', 'a.prx', guest_owner='b.prx', windows_gui=True)
+            assert result.returncode == 0, result.stderr
+            log = output.parent / 'anyps5.log'
+            log.write_text('stale previous run', encoding='utf-8')
+            run_status = exit_code_without_standard_handles(output)
+            assert run_status == 11, hex(run_status)
+            content = log.read_text(errors='replace')
+            assert 'Transferring control to ELF entry point' in content, content
+            assert 'stale previous run' not in content, content
+
+            result, output = convert('gui-log-create-denied', 'a.prx', guest_owner='b.prx', windows_gui=True)
+            assert result.returncode == 0, result.stderr
+            log = output.parent / 'anyps5.log'
+            log.mkdir()
+            run_status = exit_code_without_standard_handles(output)
+            assert run_status == 11, hex(run_status)
+            assert log.is_dir()
+
         result, output = convert('missing-symbol', 'a.prx', 'absent#A#B')
         assert result.returncode == 0, result.stderr
         if os.name == 'nt':
