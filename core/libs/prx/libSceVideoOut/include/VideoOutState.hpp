@@ -104,6 +104,7 @@ struct VideoOutConfig {
     int busType = VIDEO_OUT_BUS_TYPE_MAIN;
     bool opened = false;
     bool closing = false;
+    bool ps4 = false;
     std::exception_ptr failure;
     std::stop_token shutdownToken;
     explicit VideoOutConfig(std::stop_token token) : shutdownToken(token) {}
