@@ -42,14 +42,10 @@ bool libcInternalFunction(const SceImport& import, std::uint8_t type) {
     // src/core/libraries/libc_internal/{libc_internal_memory,libc_internal_str,libc_internal_io}.cpp;
     // fpPS4 04cefd43e6fddd1ab033e7980cd356d14c964905,
     // src/libcinternal/ps4_libscelibcinternal.pas (explicit printf/snprintf guest forwarding, strstr).
-    // CPU06 target-informed extension: exact libc.prx SHA256
-    // 78a080fdeccc28f2aa76356e97f82a35b3ba09deba8408dfce27db28fa0ce67f
-    // and WebApi SHA256 38db047fd9dfd27fc17dfc0dd2cff31a2e0533ac1be2350e5082f8499f59c6b9.
-    // Mspace wrappers 0xf6f0..0xf9eb and paired caller 0x3065/0x334a;
-    // cxa registry 0x3abb0..0x3af3c and caller DSO 0x588000;
-    // delete/new hooks 0x195080/0x195060; strncat 0x6cc70; _Stoul 0x3ddb0.
-    // Termination 0x48d0/0x356c0 retains guest FS+0x28/int45 behavior;
-    // exception dispatch and downstream platform services remain prerequisites.
+    // CPU06 extension, first observed in one title's libc/WebApi pair: Mspace wrappers,
+    // the cxa registry, delete/new hooks, strncat and _Stoul. Termination retains guest
+    // FS+0x28/int45 behavior; exception dispatch and downstream platform services remain
+    // prerequisites. The routes are keyed by NID and scope only, never by libc build.
     // These are direct guest routes: no host argument, heap, callback or errno adaptation.
     constexpr std::array nids{"Q3VBxCXhUHs", "8zTFvBIAIN8", "eLdDw6l0-bU", "Ovb2dSJOAuE",
                               "aesyjrHVWy4", "j4ViWNHEgww", "6sJWiWSRuqk", "hcuQgD53UxM", "viiwFMaNamA",
@@ -72,28 +68,11 @@ void writeWord(Machine& machine, std::uint64_t address, std::uint64_t value) {
     machine.Write(address, bytes);
 }
 
-void validateCrt(const SceImageData& data, const std::optional<SceCrtCertificate>& certificate, bool isMain) {
-    if (!certificate) {
-        if (data.PreinitArray.Size || data.InitArray.Size || data.FiniArray.Size)
-            fail("unsupported CRT-array ownership for the generic module profile");
-        return;
-    }
-    if (isMain) fail("main executable CRT certification is unsupported");
-    const auto& crt = *certificate;
-    if (crt.SourceSize != data.SourceSize || crt.SourceSha256 != data.SourceSha256)
-        fail("CRT certificate source identity mismatch");
-    if (crt.Init != data.Init || crt.Fini != data.Fini)
-        fail("CRT certificate layout mismatch");
-    const auto array = [&](const SceImageData::Array& actual, const SceCrtArrayContract& expected,
-                           SceCrtArrayOwner owner, std::uint64_t entry) {
-        if (actual.Address != expected.Address || actual.Size != expected.Size)
-            fail("CRT certificate layout mismatch");
-        if (actual.Size ? expected.Owner != owner || !entry : expected.Owner != SceCrtArrayOwner::Unsupported)
-            fail("CRT certificate array owner mismatch");
-    };
-    array(data.PreinitArray, crt.Preinit, SceCrtArrayOwner::DtInit, data.Init);
-    array(data.InitArray, crt.InitArray, SceCrtArrayOwner::DtInit, data.Init);
-    array(data.FiniArray, crt.FiniArray, SceCrtArrayOwner::DtFini, data.Fini);
+// The parser already requires each array to be 8-byte aligned, whole slots, and inside
+// readable file-backed storage of its own image.
+SceCrtArray crtArray(const SceImageData::Array& array, std::uint64_t bias) {
+    if (!array.Size) return {};
+    return {SceAddress(bias, array.Address), array.Size / 8};
 }
 }
 
@@ -141,13 +120,14 @@ struct SceModules::Impl {
             auto parsed = ParseSce(file.Path);
             if (isMain ? parsed.Type == 0xfe18 : parsed.Type != 0xfe18)
                 fail(isMain ? "main image must be an executable" : "dependency image must be an SCE shared module");
-            validateCrt(*parsed.Data, file.Crt, isMain);
             RequireSceProfile(parsed, GraphRequirements);
             ValidateSceMapping(parsed, file.LoadBias);
-            const auto& data = *parsed.Data;
+            const auto data = parsed.Data;
             modules.push_back({std::move(parsed), file.LoadBias, 0,
-                data.Init ? SceAddress(file.LoadBias, data.Init) : 0,
-                data.Fini ? SceAddress(file.LoadBias, data.Fini) : 0});
+                data->Init ? SceAddress(file.LoadBias, data->Init) : 0,
+                data->Fini ? SceAddress(file.LoadBias, data->Fini) : 0,
+                crtArray(data->PreinitArray, file.LoadBias), crtArray(data->InitArray, file.LoadBias),
+                crtArray(data->FiniArray, file.LoadBias)});
         };
         add(executable, true);
         for (const auto& file : dependencies) add(file, false);
@@ -310,7 +290,9 @@ struct SceModules::Impl {
                         })) fail("libc Internal target loses execute permission to RELRO for " + import.Nid);
                         value = SceSymbolValue{SceAddress(provider.LoadBias, definition.Value), 2, definition.Size, 0, 0};
                     }
-                    if (!value) fail("missing qualified libc Internal target export for " + import.Nid);
+                    // Another libc build may lack this target: lazy linking treats it like any
+                    // other unimplemented import below; strict linking rejects the graph.
+                    if (!value && !lazy.Bind) fail("missing qualified libc Internal target export for " + import.Nid);
                 }
                 if (!value) {
                     const SceImportConsumer consumer{module.Image.Path, module.Image.Data->SourceSize,
@@ -428,8 +410,9 @@ struct SceModules::Impl {
         executor = std::move(value);
     }
 
+    // DT_INIT/DT_FINI return a status; CRT array callbacks are void, so their RAX is not one.
     void invokeWithExecutor(GuestModuleCallKind kind, std::uint64_t entry, std::uint64_t args,
-                            std::uint64_t argp, std::uint64_t param, GuestPhaseBudget& budget) {
+                            std::uint64_t argp, std::uint64_t param, GuestPhaseBudget& budget, bool statusResult) {
         if (!budget.Remaining()) fail("module initializer/finalizer exhausted its phase instruction budget");
         const auto consumed = budget.Consumed();
         const auto result = executor->Invoke({kind, entry, ReturnGate, {args, argp, param}}, budget);
@@ -441,10 +424,11 @@ struct SceModules::Impl {
         if (budget.Consumed() == consumed)
             fail("module initializer/finalizer executor returned without charging guest execution");
         const auto status = static_cast<std::uint32_t>(*result.ReturnValue);
-        if (status != 0) fail("module initializer/finalizer returned a failure status " + std::to_string(status));
+        if (statusResult && status != 0) fail("module initializer/finalizer returned a failure status " + std::to_string(status));
     }
 
-    void invoke(std::uint64_t entry, std::uint64_t args, std::uint64_t argp, std::uint64_t param, std::uint64_t budget) {
+    void invoke(std::uint64_t entry, std::uint64_t args, std::uint64_t argp, std::uint64_t param, std::uint64_t budget,
+                bool statusResult) {
         constexpr std::array savedRegisters{Register::Rax, Register::Rbx, Register::Rcx, Register::Rdx, Register::Rsi, Register::Rdi,
             Register::Rbp, Register::Rsp, Register::R8, Register::R9, Register::R10, Register::R11, Register::R12, Register::R13,
             Register::R14, Register::R15, Register::Rip, Register::Rflags};
@@ -466,8 +450,35 @@ struct SceModules::Impl {
         if (reason == StopReason::InstructionLimit) fail("module initializer/finalizer exceeded its execution budget");
         if (machine.Get(Register::Rsp) != stack + 8) fail("module initializer/finalizer returned with an invalid guest stack");
         const auto status = static_cast<std::uint32_t>(machine.Get(Register::Rax));
-        if (status != 0) fail("module initializer/finalizer returned a failure status " + std::to_string(status));
+        if (statusResult && status != 0) fail("module initializer/finalizer returned a failure status " + std::to_string(status));
         for (std::size_t index = 0; index < saved.size(); ++index) machine.Set(savedRegisters[index], saved[index]);
+    }
+
+    // Calls each live slot of a relocated CRT array. Slots are read when reached, as the
+    // guest CRT reads them, so an earlier callback's writes are observed.
+    template<class Call> void runCrtArray(const SceCrtArray& array, bool reverse, const Call& call) {
+        for (std::uint64_t index = 0; index < array.Count; ++index) {
+            const auto slot = array.Address + 8 * (reverse ? array.Count - 1 - index : index);
+            std::uint64_t entry = 0;
+            machine.CheckAccess(slot, 8, Permission::Read);
+            machine.Read(slot, std::as_writable_bytes(std::span(&entry, 1)));
+            if (!entry || entry == UINT64_MAX) continue;
+            try { machine.CheckAccess(entry, 1, Permission::Execute); }
+            catch (const std::exception&) { fail("CRT array entry " + std::to_string(entry) + " is not executable guest code"); }
+            call(entry, false);
+        }
+    }
+
+    // See SceModuleRecord: DT_INIT/DT_FINI own their module's arrays; without them the loader runs the arrays.
+    template<class Call> void initializeModule(const SceModuleRecord& module, const Call& call) {
+        if (module.Init) return call(module.Init, true);
+        runCrtArray(module.Preinit, false, call);
+        runCrtArray(module.InitArray, false, call);
+    }
+
+    template<class Call> void finalizeModule(const SceModuleRecord& module, const Call& call) {
+        if (module.Fini) return call(module.Fini, true);
+        runCrtArray(module.FiniArray, true, call);
     }
 
     void initialize(std::uint64_t args, std::uint64_t argp, std::uint64_t param, std::uint64_t budget) {
@@ -477,12 +488,15 @@ struct SceModules::Impl {
         try {
             if (executor) {
                 GuestPhaseBudget phaseBudget(budget);
-                for (const auto index : order)
-                    if (index != 0 && modules[index].Init)
-                        invokeWithExecutor(GuestModuleCallKind::Initialize, modules[index].Init, args, argp, param, phaseBudget);
+                const auto call = [&](std::uint64_t entry, bool statusResult) {
+                    invokeWithExecutor(GuestModuleCallKind::Initialize, entry, args, argp, param, phaseBudget, statusResult);
+                };
+                for (const auto index : order) if (index != 0) initializeModule(modules[index], call);
             } else {
-                for (const auto index : order)
-                    if (index != 0 && modules[index].Init) invoke(modules[index].Init, args, argp, param, budget);
+                const auto call = [&](std::uint64_t entry, bool statusResult) {
+                    invoke(entry, args, argp, param, budget, statusResult);
+                };
+                for (const auto index : order) if (index != 0) initializeModule(modules[index], call);
             }
             phase = Phase::Initialized;
         } catch (...) { phase = Phase::Failed; throw; }
@@ -492,9 +506,11 @@ struct SceModules::Impl {
         if (phase != Phase::Initialized) fail("dependency finalization requires successful initialization");
         phase = Phase::Finalizing;
         try {
+            const auto call = [&](std::uint64_t entry, bool statusResult) {
+                invokeWithExecutor(GuestModuleCallKind::Finalize, entry, args, argp, param, budget, statusResult);
+            };
             for (auto cursor = order.rbegin(); cursor != order.rend(); ++cursor)
-                if (*cursor != 0 && modules[*cursor].Fini)
-                    invokeWithExecutor(GuestModuleCallKind::Finalize, modules[*cursor].Fini, args, argp, param, budget);
+                if (*cursor != 0) finalizeModule(modules[*cursor], call);
             phase = Phase::Finalized;
         } catch (...) { phase = Phase::Failed; throw; }
     }
@@ -508,8 +524,11 @@ struct SceModules::Impl {
         }
         phase = Phase::Finalizing;
         try {
+            const auto call = [&](std::uint64_t entry, bool statusResult) {
+                invoke(entry, args, argp, param, budget, statusResult);
+            };
             for (auto cursor = order.rbegin(); cursor != order.rend(); ++cursor)
-                if (*cursor != 0 && modules[*cursor].Fini) invoke(modules[*cursor].Fini, args, argp, param, budget);
+                if (*cursor != 0) finalizeModule(modules[*cursor], call);
             phase = Phase::Finalized;
         } catch (...) { phase = Phase::Failed; throw; }
     }
