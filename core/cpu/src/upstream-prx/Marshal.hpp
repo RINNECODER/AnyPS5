@@ -14,6 +14,12 @@
 //   In              const T*: T is copied from guest memory into a host temporary
 //   Out             T*: copy-in, call, write back only if the host changed it
 //   OutArray<N>     T*: like Out, for parameter N's count of T elements
+//   Ignored         any pointer the upstream body only discards or logs: the host receives nullptr
+//   InBytes<N>      const void*: N guest bytes copied in (nullptr stays nullptr)
+//   OutBytes<N>     void*: copy-in, call, write back N bytes only if the host changed them
+//   InString<C>     const char*: NUL-terminated guest string of fewer than C bytes, copied in
+//   OutString<C>    char*: the upstream body writes a NUL-terminated string of fewer than C
+//                   bytes into a host buffer; only the string and its NUL are written back
 //
 // Not expressible, so such exports stay hand-written: nested pointers, function
 // pointers, floating point, returned pointers and stack arguments (more than six).
@@ -42,6 +48,11 @@ struct Opaque {};
 struct In {};
 struct Out {};
 template <std::size_t CountArgument> struct OutArray {};
+struct Ignored {};
+template <std::size_t Size> struct InBytes {};
+template <std::size_t Size> struct OutBytes {};
+template <std::size_t Capacity> struct InString {};
+template <std::size_t Capacity> struct OutString {};
 
 // Guest (x86-64 SysV) size of a pointee the bridge copies. Integers are implicit;
 // specialise for a struct only after checking it holds no pointers and has the same
@@ -53,7 +64,16 @@ template <class T> struct GuestLayout {
 
 using Thunk = void (*)(Machine&, std::string_view);
 struct Export { std::string_view Name; Thunk Call; };
-struct Library { std::string_view Name; std::span<const Export> Exports; };
+// Name is the importing module's name. LibraryName (empty: same as Name) is the import library,
+// File (empty: Name + ".prx") the module file titles list in DT_NEEDED.
+struct Library {
+    std::string_view Name;
+    std::span<const Export> Exports;
+    std::string_view LibraryName{};
+    std::string_view File{};
+    std::uint16_t ModuleMajor = 1;
+    std::uint16_t ModuleMinor = 1;
+};
 
 namespace Detail {
 
@@ -176,7 +196,10 @@ template <std::size_t CountArgument, class Parameters, std::size_t Index> struct
     void Load(Machine& guest, const Raw& raw, std::string_view function) {
         if (!raw[Index]) return;
         // Same truncation as the count parameter's own I32/I64 slot, so host and copy agree.
-        const auto requested = static_cast<std::uint64_t>(static_cast<Count>(raw[CountArgument]));
+        const auto typed = static_cast<Count>(raw[CountArgument]);
+        // A negative signed count copies nothing; the upstream body sees the same negative value.
+        std::uint64_t requested = static_cast<std::uint64_t>(typed);
+        if constexpr (std::is_signed_v<Count>) if (typed < 0) requested = 0;
         if (requested > MaximumArrayBytes / sizeof(T)) Fault(function, Index, "array count exceeds the bridge copy limit");
         count = static_cast<std::size_t>(requested);
         // A non-null guest pointer stays non-null for the host even when the count is zero.
@@ -192,6 +215,77 @@ template <std::size_t CountArgument, class Parameters, std::size_t Index> struct
     }
 };
 
+template <class Parameters, std::size_t Index> struct Slot<Ignored, Parameters, Index> {
+    using P = std::tuple_element_t<Index, Parameters>;
+    static_assert(std::is_pointer_v<P>, "Ignored needs a pointer parameter");
+    void Load(Machine&, const Raw&, std::string_view) {}
+    P Get() const { return nullptr; }
+    void Store(Machine&) const {}
+};
+template <std::size_t Size, class Parameters, std::size_t Index> struct Slot<InBytes<Size>, Parameters, Index> {
+    using P = std::tuple_element_t<Index, Parameters>;
+    static_assert(std::is_same_v<P, const void*>, "InBytes needs a const void* parameter");
+    std::array<std::byte, Size> value{};
+    bool present = false;
+    void Load(Machine& guest, const Raw& raw, std::string_view function) {
+        if (!raw[Index]) return;
+        CopyIn(guest, raw[Index], value.data(), Size, Permission::Read, function, Index);
+        present = true;
+    }
+    P Get() const { return present ? value.data() : nullptr; }
+    void Store(Machine&) const {}
+};
+template <std::size_t Size, class Parameters, std::size_t Index> struct Slot<OutBytes<Size>, Parameters, Index> {
+    using P = std::tuple_element_t<Index, Parameters>;
+    static_assert(std::is_same_v<P, void*>, "OutBytes needs a void* parameter");
+    std::array<std::byte, Size> value{};
+    std::array<std::byte, Size> before{};
+    std::uint64_t address = 0;
+    void Load(Machine& guest, const Raw& raw, std::string_view function) {
+        if (!raw[Index]) return;
+        CopyIn(guest, raw[Index], value.data(), Size, Permission::Read | Permission::Write, function, Index);
+        before = value;
+        address = raw[Index];
+    }
+    P Get() { return address ? value.data() : nullptr; }
+    void Store(Machine& guest) const {
+        if (address && value != before) guest.Write(address, std::span<const std::byte>(value));
+    }
+};
+template <std::size_t Capacity, class Parameters, std::size_t Index> struct Slot<InString<Capacity>, Parameters, Index> {
+    using P = std::tuple_element_t<Index, Parameters>;
+    static_assert(std::is_same_v<P, const char*>, "InString needs a const char* parameter");
+    std::array<char, Capacity> value{};
+    bool present = false;
+    void Load(Machine& guest, const Raw& raw, std::string_view function) {
+        if (!raw[Index]) return;
+        for (std::size_t offset = 0; offset < Capacity; ++offset) {
+            CopyIn(guest, raw[Index] + offset, &value[offset], 1, Permission::Read, function, Index);
+            if (!value[offset]) { present = true; return; }
+        }
+        Fault(function, Index, "is not a NUL-terminated string shorter than " + std::to_string(Capacity) + " bytes");
+    }
+    P Get() const { return present ? value.data() : nullptr; }
+    void Store(Machine&) const {}
+};
+template <std::size_t Capacity, class Parameters, std::size_t Index> struct Slot<OutString<Capacity>, Parameters, Index> {
+    using P = std::tuple_element_t<Index, Parameters>;
+    static_assert(std::is_same_v<P, char*>, "OutString needs a char* parameter");
+    std::array<char, Capacity> value{};
+    std::uint64_t address = 0;
+    std::string_view function;
+    void Load(Machine&, const Raw& raw, std::string_view name) { address = raw[Index]; function = name; }
+    P Get() { return address ? value.data() : nullptr; }
+    void Store(Machine& guest) const {
+        if (!address) return;
+        const auto length = std::strlen(value.data()) + 1;
+        if (length >= Capacity) Fault(function, Index, "string exceeds the audited capacity");
+        if (length == 1) return;
+        try { guest.CheckAccess(address, length, Permission::Write); }
+        catch (const std::exception& error) { Fault(function, Index, std::string("is not a writable guest buffer: ") + error.what()); }
+        guest.Write(address, std::as_bytes(std::span(value.data(), length)));
+    }
+};
 template <auto Function, class R, class Parameters, class... Specs, std::size_t... Index>
 void Invoke(Machine& guest, std::string_view name, std::index_sequence<Index...>) {
     Raw raw{};

@@ -75,12 +75,18 @@ set(sceNidNames "${CMAKE_CURRENT_BINARY_DIR}/generated/SceNidNames.inc")
 add_custom_command(OUTPUT "${sceNidNames}"
     COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/generate_sce_nid_names.py" "${PROJECT_SOURCE_DIR}/core/libs/prx" "${sceNidNames}"
     DEPENDS "${PROJECT_SOURCE_DIR}/tools/generate_sce_nid_names.py" "${PROJECT_SOURCE_DIR}/tools/nid_names.py" ${sceNidNameSources} VERBATIM)
-target_sources(anyps5_cpu PRIVATE src/SceHostTrampolines.cpp src/SceImportStubs.cpp src/SceNpOfflineImports.cpp src/ScePadImports.cpp "${sceNidNames}")
+target_sources(anyps5_cpu PRIVATE src/SceHostTrampolines.cpp src/SceImportStubs.cpp src/SceNpOfflineImports.cpp src/SceLeafSystemImports.cpp src/ScePadImports.cpp "${sceNidNames}")
 # Upstream core/libs/prx NP exports compiled for this host; each translation unit
 # includes one upstream Export.cpp next to its hand-checked bridge descriptors.
 add_library(anyps5_upstream_prx_objects OBJECT
     src/upstream-prx/NpManager.cpp src/upstream-prx/NpWebApi2.cpp
     src/upstream-prx/NpAuth.cpp src/upstream-prx/NpEntitlementAccess.cpp
+    src/upstream-prx/Sysmodule.cpp src/upstream-prx/Acm.cpp src/upstream-prx/Mouse.cpp
+    src/upstream-prx/ConvertKeycode.cpp src/upstream-prx/NetCtl.cpp src/upstream-prx/SystemGesture.cpp
+    src/upstream-prx/NpGameIntent.cpp src/upstream-prx/Ime.cpp src/upstream-prx/MsgDialog.cpp
+    src/upstream-prx/ErrorDialog.cpp src/upstream-prx/SigninDialog.cpp src/upstream-prx/NpCommerce.cpp
+    src/upstream-prx/PlayerInvitationDialog.cpp src/upstream-prx/NpUniversalDataSystem.cpp
+    src/upstream-prx/NpTrophy2.cpp src/upstream-prx/Rtc.cpp src/upstream-prx/LeafLayout.cpp
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libc/src/NotImplemented.cpp")
 target_include_directories(anyps5_upstream_prx_objects PRIVATE include "${PROJECT_SOURCE_DIR}/core/libs")
 # Upstream's libc header declares C-linkage functions returning C++ types.
@@ -340,6 +346,19 @@ if(BUILD_TESTING)
     add_custom_target(anyps5_upstream_np_bridge_fixture ALL DEPENDS "${npBridgeGuest}" "${npBridgeMain}")
     add_test(NAME anyps5_upstream_np_bridge_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/UpstreamNpBridgeCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${npBridgeMain}" "${npBridgeGuest}")
     set_tests_properties(anyps5_upstream_np_bridge_cli PROPERTIES TIMEOUT 90)
+    set(leafLibsGuest "${CMAKE_CURRENT_BINARY_DIR}/LeafSystemLibsGuest.prx")
+    set(leafLibsMain "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-main.elf")
+    add_custom_command(OUTPUT "${leafLibsGuest}" "${leafLibsMain}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_BRIDGE_DEPENDENCY=1 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/LeafSystemLibsHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-guest.o"
+        COMMAND "${guestLinker}" -shared -soname LeafSystemLibsGuest.prx -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-guest.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_BRIDGE_DEPENDENCY=0 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/LeafSystemLibsHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-main.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-start.o"
+        COMMAND "${guestLinker}" -shared -e _start -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-main.o" "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-start.o" "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-guest-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildLeafSystemLibsFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/leaf-system-libs-main-linked.elf" "${leafLibsGuest}" "${leafLibsMain}"
+        DEPENDS fixtures/LeafSystemLibsHomebrew.c fixtures/SceStart.S tests/BuildLeafSystemLibsFixture.py tests/BuildPlatformServiceFixture.py tests/BuildSceModulesFixture.py VERBATIM)
+    add_custom_target(anyps5_leaf_system_libs_fixture ALL DEPENDS "${leafLibsGuest}" "${leafLibsMain}")
+    add_test(NAME anyps5_leaf_system_libs_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/LeafSystemLibsCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${leafLibsMain}" "${leafLibsGuest}")
+    set_tests_properties(anyps5_leaf_system_libs_cli PROPERTIES TIMEOUT 90)
     add_test(NAME anyps5_upstream_prx_bridge_drift COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/UpstreamPrxBridgeDriftTest.py" "${PROJECT_SOURCE_DIR}")
     set_tests_properties(anyps5_upstream_prx_bridge_drift PROPERTIES TIMEOUT 30)
     if(ANYPS5_CPU_BACKEND STREQUAL "TCG")
