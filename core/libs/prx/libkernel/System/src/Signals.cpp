@@ -199,6 +199,9 @@ extern "C" int APS5_VABI getitimer_nid_postfix(int which, GuestItimerval* output
             result.value.tv_sec = micros / 1000000;
             result.value.tv_usec = micros % 1000000;
         }
+        const auto interval = alarms.interval.count();
+        result.interval.tv_sec = interval / 1000000;
+        result.interval.tv_usec = interval % 1000000;
     }
     *output = result;
     return 0;

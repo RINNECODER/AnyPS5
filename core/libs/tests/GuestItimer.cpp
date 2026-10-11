@@ -22,6 +22,7 @@ using Handler = void (APS5_VABI *)(int);
 using TerminateHandler = void (*)();
 extern "C" {
 int APS5_VABI setitimer_nid_postfix(int, const GuestItimerval*, GuestItimerval*);
+int APS5_VABI getitimer_nid_postfix(int, GuestItimerval*);
 unsigned int APS5_VABI GuestAlarm_nid_no_patch(unsigned int);
 Handler APS5_VABI signal_nid_postfix(int, Handler);
 int* APS5_VABI __error_nid_postfix();
@@ -130,6 +131,10 @@ int main() {
     const GuestItimerval repeating{{2, 500000}, {20, 0}};
     Require(setitimer_nid_postfix(0, &repeating, &previous) == 0, "re-arming ITIMER_REAL failed");
     Require(Micros(previous.interval) == 0 && Micros(previous.value) > 0 && Micros(previous.value) <= second, "re-arming did not return the previous value");
+    GuestItimerval queried{{11, 22}, {33, 44}};
+    Require(getitimer_nid_postfix(0, &queried) == 0, "getitimer failed");
+    Require(Micros(queried.interval) == 2500000 && Micros(queried.value) > 19000000 && Micros(queried.value) <= 20000000,
+        "getitimer did not report the setitimer interval");
     const GuestItimerval zero{{0, 0}, {0, 0}};
     Require(setitimer_nid_postfix(0, &zero, &previous) == 0, "disarming ITIMER_REAL failed");
     Require(Micros(previous.interval) == 2500000 && Micros(previous.value) > 19000000 && Micros(previous.value) <= 20000000,
