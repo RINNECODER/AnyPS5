@@ -4,6 +4,11 @@ function(add_jpeg_decoder target runtimeTarget)
     endif()
 
     include(ExternalProject)
+    set(jpeg_turbo_apple_args)
+    if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+        # The external project is configured from scratch; without this it builds for the host architecture.
+        list(APPEND jpeg_turbo_apple_args -DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES})
+    endif()
     if(NOT TARGET jpeg_turbo_external)
         set(jpeg_turbo_prefix "${CMAKE_BINARY_DIR}/libjpeg-turbo")
         if(WIN32)
@@ -34,6 +39,7 @@ function(add_jpeg_decoder target runtimeTarget)
                 -DCMAKE_C_VISIBILITY_PRESET=hidden
                 -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON
                 -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+                ${jpeg_turbo_apple_args}
                 -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
                 -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
                 -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER}
