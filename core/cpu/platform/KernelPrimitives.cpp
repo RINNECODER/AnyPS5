@@ -1,5 +1,6 @@
 #include "KernelPrimitives.hpp"
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <cpu/GuestThreads.hpp>
 #include <algorithm>
 #include <array>
@@ -34,7 +35,6 @@ constexpr std::array<KernelPrimitiveImport, 25> inventory{{
     {"27bAgiJmOh0", "pthread_cond_timedwait"},
     {"BmMjYxmew1w", "scePthreadCondTimedwait"}}};
 std::atomic<std::uint64_t> nextToken{0xa005000000000003ULL};
-constexpr auto rw = Permission::Read | Permission::Write;
 // Guest Orbis error table, independent of the host's errno numerals.
 enum GuestErrno : unsigned { Perm = 1, Deadlock = 11, Busy = 16, Invalid = 22, Again = 35, TimedOut = 60 };
 std::uint32_t error(GuestErrno posix) { return 0x80020000u + posix; }
@@ -117,7 +117,7 @@ struct KernelPrimitives::Impl {
     using Key = std::tuple<std::string, std::uint16_t, std::uint16_t>;
     Machine& machine;
     std::function<std::uint64_t()> active;
-    std::uint64_t base;
+    std::optional<SceHostTrampolines> trampolines;
     std::map<std::uint64_t, Attribute> attributes;
     std::map<std::uint64_t, Mutex> mutexes;
     std::set<std::uint64_t> destroyedMutexSlots;
@@ -127,23 +127,20 @@ struct KernelPrimitives::Impl {
     std::map<GuestThreadHandle, ConditionWait> conditionWaits;
     std::map<Key, std::uint64_t> gates;
     std::optional<GuestThreads::WaitDomain> waits;
-    Impl(Machine& m, std::function<std::uint64_t()> callback, std::uint64_t b)
-        : machine(m), active(std::move(callback)), base(b) {
+    Impl(Machine& m, std::function<std::uint64_t()> callback, std::uint64_t base)
+        : machine(m), active(std::move(callback)) {
         if (!active) throw std::invalid_argument("Kernel primitives need active guest thread identity");
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("Invalid kernel primitive gate page");
         for (const auto& mapping : m.Mappings())
             if (mapping.Address < base + 4096 && base < mapping.Address + mapping.Size)
                 throw std::invalid_argument("Kernel primitive gate page already mapped");
-        std::array<std::byte, 4096> bytes; bytes.fill(std::byte{0xcc});
-        m.Map(base, bytes.size(), rw);
-        try { m.Write(base, bytes); m.Protect(base, bytes.size(), Permission::Read | Permission::Execute); }
-        catch (...) { m.Unmap(base, bytes.size()); throw; }
+        trampolines.emplace(m, base, SceHostTrampolines::DefaultCapacity, "Kernel primitive");
     }
     ~Impl() {
-        // Cancel pending calls before removing the page they would return from.
+        // Cancel pending calls before removing the gate they were suspended in.
         if (waits) waits->Withdraw();
-        machine.Unmap(base, 4096);
+        trampolines->Release();
     }
     void stopped(GuestThreadHandle id) {
         releaseConditionBinding(id);
@@ -505,10 +502,7 @@ std::optional<std::uint64_t> KernelPrimitives::Resolve(const SceImport& import, 
         throw std::runtime_error("Unsupported kernel primitive scope/version/type: " + import.Nid);
     const Impl::Key key{import.Nid, import.LibraryId, import.ModuleId};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->gates.size() >= 256) throw std::runtime_error("Kernel primitive gate page exhausted");
-    const auto gate = impl->base + impl->gates.size() * 16;
-    constexpr std::array ret{std::byte{0xc3}}; impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [weak = std::weak_ptr<Impl>(impl), op](Machine& m) {
+    const auto gate = impl->trampolines->Add([weak = std::weak_ptr<Impl>(impl), op](Machine& m) {
         auto state = weak.lock(); if (!state) throw std::runtime_error("Kernel primitive provider expired");
         std::uint32_t result;
         if (op >= timeoutBegin) {

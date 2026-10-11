@@ -1,5 +1,6 @@
 #include <cpu/SceNetAddressImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <arpa/inet.h>
 #include <array>
 #include <cstring>
@@ -59,22 +60,14 @@ struct SceNetAddressImports::Impl {
     using Key = std::tuple<std::string, std::string, std::uint16_t, std::string, std::uint16_t,
                            std::uint16_t, std::uint8_t, std::uint8_t>;
     Machine& machine;
-    const std::uint64_t base;
-    std::size_t nextSlot = 0;
+    SceHostTrampolines trampolines;
     const std::map<std::string, Service> services{
         {"9T2pDF2Ryqg", Service::Htonl}, {"iWQWrwiSt8A", Service::Htons},
         {"9vA2aW+CHuA", Service::InetNtop}, {"8Kcp5d-q1Uo", Service::InetPton}};
     std::map<Key, std::uint64_t> gates;
 
-    Impl(Machine& guest, std::uint64_t gateBase) : machine(guest), base(gateBase) {
-        if (!base || (base & 4095) || base >= 0x7ffffffff000)
-            throw std::invalid_argument("SCE network address import gates require a nonzero aligned low canonical guest page");
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
-    }
+    Impl(Machine& guest, std::uint64_t base)
+        : machine(guest), trampolines(guest, base, SceHostTrampolines::DefaultCapacity, "SCE network address import") {}
 
     void invoke(Machine& guest, Service service) {
         const auto first = guest.Get(Register::Rdi);
@@ -149,17 +142,12 @@ std::optional<std::uint64_t> SceNetAddressImports::Resolve(const SceImport& impo
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->nextSlot == 256) throw std::runtime_error("SCE network address import gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), operation = service->second](Machine& guest) {
+    const auto gate = impl->trampolines.Add([state = std::weak_ptr<Impl>(impl), operation = service->second](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("SCE network address import runtime has expired");
         context->invoke(guest, operation);
     });
     impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
     return gate;
 }
 

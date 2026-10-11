@@ -325,6 +325,9 @@ struct SceModules::Impl {
                         try {
                             hostValue = consumerResolver ? consumerResolver(consumer, import, symbol.Type, symbol.Size)
                                                          : resolver(import, symbol.Type);
+                        } catch (const HostCapacityError&) {
+                            // A full host table is a host limit, never a reason to trap an implemented import.
+                            throw;
                         } catch (const std::exception& error) {
                             // Lazy linking treats a provider rejection as "not implemented here".
                             if (!lazy.Bind) throw;

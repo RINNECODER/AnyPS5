@@ -1,5 +1,6 @@
 #include <cpu/SceAgcImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include "SceShaders.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -95,20 +97,15 @@ struct SceAgcImports::Impl {
     SceAgcBackend Backend;
     std::set<Contract> Admitted;
     std::map<Contract, AgcArgumentPolicy> Policies;
-    std::uint64_t Base;
-    std::size_t Slots = 0;
+    std::optional<SceHostTrampolines> Trampolines;
     std::map<Key, std::uint64_t> Gates;
     Impl(Machine& machine, SceAgcBackend backend, std::span<const Contract> admitted, std::uint64_t base) :
-        MachineRef(machine), Backend(std::move(backend)), Admitted(admitted.begin(), admitted.end()), Base(base) {
+        MachineRef(machine), Backend(std::move(backend)), Admitted(admitted.begin(), admitted.end()) {
         require(base && !(base & 4095) && base < 0x7ffffffff000, "gates require aligned low canonical guest page");
         for (auto contract : Admitted)
             require(std::any_of(std::begin(bindings), std::end(bindings), [contract](const auto& row) { return row.Operation == contract; }),
                     "unknown ABI admission contract");
-        std::array<std::byte,4096> trap;
-        trap.fill(std::byte{0xcc});
-        MachineRef.Map(Base, trap.size(), Permission::Read | Permission::Write);
-        MachineRef.Write(Base, trap);
-        MachineRef.Protect(Base, trap.size(), Permission::Read | Permission::Execute);
+        Trampolines.emplace(MachineRef, base, SceHostTrampolines::DefaultCapacity, "SCE Agc import");
     }
 
     std::uint64_t emit(Machine& guest, std::uint64_t bufferAddress, std::span<const std::uint32_t> words) {
@@ -406,16 +403,12 @@ std::uint64_t SceAgcImports::Resolve(const SceImport& import, std::uint8_t symbo
     }
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleId};
     if (const auto found=impl->Gates.find(key); found != impl->Gates.end()) return found->second;
-    require(impl->Slots < 256, "import gate page exhausted");
-    const auto gate = impl->Base + impl->Slots * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->MachineRef.Write(gate, ret);
-    impl->MachineRef.AddHostCall(gate, [weak=std::weak_ptr<Impl>(impl), operation=binding->Operation](Machine& guest) {
+    const auto gate = impl->Trampolines->Add([weak=std::weak_ptr<Impl>(impl), operation=binding->Operation](Machine& guest) {
         const auto state=weak.lock();
         require(static_cast<bool>(state), "import runtime expired");
         state->invoke(guest, operation);
     });
-    impl->Gates.emplace(key, gate); ++impl->Slots;
+    impl->Gates.emplace(key, gate);
     return gate;
 }
 }

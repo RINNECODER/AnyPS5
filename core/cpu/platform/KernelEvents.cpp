@@ -1,6 +1,7 @@
 #include "KernelEvents.hpp"
 #include <cpu/GuestThreads.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -104,10 +105,11 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
     std::shared_ptr<Mailbox> mailbox = std::make_shared<Mailbox>();
     std::map<std::uint64_t, std::shared_ptr<Queue>> queues;
     std::map<Key, std::uint64_t> gates;
-    std::uint64_t base, nextWait = 1;
+    std::optional<SceHostTrampolines> trampolines;
+    std::uint64_t nextWait = 1;
     bool live = true;
-    Impl(Machine& m, const std::shared_ptr<GuestThreads>& t, std::uint64_t b)
-        : machine(m), threads(t), base(b) {
+    Impl(Machine& m, const std::shared_ptr<GuestThreads>& t, std::uint64_t base)
+        : machine(m), threads(t) {
         if (!t) throw std::invalid_argument("Kernel events require a persistent guest scheduler");
         t->CheckIdleOwner();
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
@@ -115,12 +117,9 @@ struct KernelEvents::Impl : std::enable_shared_from_this<KernelEvents::Impl> {
         for (const auto& mapping : m.Mappings())
             if (mapping.Address < base + 4096 && base < mapping.Address + mapping.Size)
                 throw std::invalid_argument("Kernel event gate page already mapped");
-        std::array<std::byte, 4096> bytes; bytes.fill(std::byte{0xcc});
-        m.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        try { m.Write(base, bytes); m.Protect(base, bytes.size(), Permission::Read | Permission::Execute); }
-        catch (...) { m.Unmap(base, bytes.size()); throw; }
+        trampolines.emplace(m, base, SceHostTrampolines::DefaultCapacity, "Kernel event");
     }
-    ~Impl() { machine.Unmap(base, 4096); }
+    ~Impl() { trampolines->Release(); }
     std::shared_ptr<GuestThreads> scheduler() const {
         auto t = threads.lock();
         if (!t) throw std::runtime_error("Kernel event scheduler expired");
@@ -312,10 +311,7 @@ std::optional<std::uint64_t> KernelEvents::Resolve(const SceImport& import, std:
         throw std::runtime_error("Unsupported kernel event scope/version/type/size: " + import.Nid);
     const Impl::Key key{import.Nid, import.LibraryId, import.ModuleId};
     if (const auto it = impl->gates.find(key); it != impl->gates.end()) return it->second;
-    if (impl->gates.size() >= 256) throw std::runtime_error("Kernel event gate page exhausted");
-    const auto gate = impl->base + impl->gates.size() * 16;
-    constexpr std::array ret{std::byte{0xc3}}; impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [weak = std::weak_ptr<Impl>(impl), op](Machine& m) {
+    const auto gate = impl->trampolines->Add([weak = std::weak_ptr<Impl>(impl), op](Machine& m) {
         auto state = weak.lock(); if (!state) throw std::runtime_error("Kernel event provider expired");
         m.Set(Register::Rax, state->invoke(op, m));
     });

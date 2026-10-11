@@ -1,5 +1,6 @@
 #include "ContentServices.hpp"
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <bit>
 #include <limits>
 #include <map>
@@ -17,7 +18,8 @@ struct ContentServices::Impl {
     std::optional<ContentAbi> abi;
     std::uint64_t base;
     std::map<Key, std::uint64_t> gates;
-    bool mapped = false;
+    // Mapped on the first resolved import.
+    std::optional<SceHostTrampolines> trampolines;
 
     Impl(Machine& machine, std::weak_ptr<const InstalledContentRecord> record,
          std::optional<ContentAbi> abi, std::uint64_t base)
@@ -37,8 +39,8 @@ struct ContentServices::Impl {
     ~Impl() {
         // Session ownership requires the Machine to remain alive and idle during provider teardown.
         // Unmap also removes this page's native host-call registrations.
-        if (mapped) {
-            try { machine.Unmap(base, 4096); }
+        if (trampolines) {
+            try { trampolines->Release(); }
             catch (...) { /* Destructors cannot propagate a failed runtime teardown. */ }
         }
     }
@@ -88,23 +90,13 @@ std::optional<std::uint64_t> ContentServices::Resolve(const SceImport& import, s
     if (impl->record.expired()) throw std::runtime_error("Content installed-record owner has expired");
     const Impl::Key key{import.Nid, import.LibraryId, import.ModuleId};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->gates.size() >= 256) throw std::runtime_error("Content gate page exhausted");
-    bool createdPage = false;
+    bool createdTable = false;
+    if (!impl->trampolines) {
+        impl->trampolines.emplace(impl->machine, impl->base, SceHostTrampolines::DefaultCapacity, "Content");
+        createdTable = true;
+    }
     try {
-        if (!impl->mapped) {
-            std::array<std::byte, 4096> page;
-            page.fill(std::byte{0xcc});
-            impl->machine.Map(impl->base, page.size(), Permission::Read | Permission::Write);
-            // Record ownership immediately so all subsequent setup failures release the new page.
-            impl->mapped = true;
-            createdPage = true;
-            impl->machine.Write(impl->base, page);
-            impl->machine.Protect(impl->base, page.size(), Permission::Read | Permission::Execute);
-        }
-        const auto gate = impl->base + impl->gates.size() * 16;
-        constexpr std::array ret{std::byte{0xc3}};
-        impl->machine.Write(gate, ret);
-        impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl)](Machine& guest) {
+        const auto gate = impl->trampolines->Add([state = std::weak_ptr<Impl>(impl)](Machine& guest) {
             const auto service = state.lock();
             if (!service) throw std::runtime_error("Content service owner has expired");
             service->invoke(guest);
@@ -112,9 +104,10 @@ std::optional<std::uint64_t> ContentServices::Resolve(const SceImport& import, s
         impl->gates.emplace(key, gate);
         return gate;
     } catch (...) {
-        if (createdPage) {
-            impl->machine.Unmap(impl->base, 4096);
-            impl->mapped = false;
+        // Release a table this call created so a failed first import leaves nothing mapped.
+        if (createdTable) {
+            impl->trampolines->Release();
+            impl->trampolines.reset();
         }
         throw;
     }

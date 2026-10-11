@@ -14,8 +14,10 @@ namespace {
 constexpr std::pair<std::string_view, std::string_view> NidNames[] = {
 #include "SceNidNames.inc"
 };
-constexpr std::size_t TrapCapacity = 8192;
-constexpr std::uint64_t ObjectCapacity = 1 << 20;
+// Zeroed object storage starts at 1 MiB and doubles up to 64 MiB of the 128 MiB
+// between ObjectBase and the next host table.
+constexpr std::uint64_t ObjectChunk = 1 << 20;
+constexpr std::uint64_t ObjectCapacity = 64 * ObjectChunk;
 constexpr std::uint64_t ObjectLimit = 64 * 1024;
 
 std::string identity(const SceImport& import) {
@@ -39,10 +41,11 @@ struct SceImportStubs::Impl {
     SceHostTrampolines traps;
     std::map<Key, SceResolvedImport> bound;
     std::uint64_t objectsUsed = 0;
-    bool objectsMapped = false;
+    std::uint64_t objectsMapped = 0;
 
     Impl(Machine& guest, SceImportStubOptions value)
-        : machine(guest), options(std::move(value)), traps(guest, options.GateBase, TrapCapacity) {
+        : machine(guest), options(std::move(value)),
+          traps(guest, options.GateBase, SceHostTrampolines::DefaultCapacity, "SCE unresolved import trap") {
         if (!options.ObjectBase || (options.ObjectBase & 4095) || options.ObjectBase >= 0x7ffffffff000)
             throw std::invalid_argument("SCE import stubs require a nonzero aligned low canonical object page");
     }
@@ -68,11 +71,18 @@ struct SceImportStubs::Impl {
 
     std::uint64_t object(std::uint64_t size) {
         const auto bytes = (std::max<std::uint64_t>(size, 8) + 15) & ~std::uint64_t{15};
-        if (size > ObjectLimit || bytes > ObjectCapacity - objectsUsed)
-            throw std::runtime_error("Unsupported SCE unresolved object import exceeds zeroed stub storage");
-        if (!objectsMapped) {
-            machine.Map(options.ObjectBase, ObjectCapacity, Permission::Read | Permission::Write);
-            objectsMapped = true;
+        if (size > ObjectLimit)
+            throw std::runtime_error("Unsupported SCE unresolved object import exceeds the 64 KiB zeroed stub object limit");
+        if (bytes > objectsMapped - objectsUsed) {
+            if (objectsMapped == ObjectCapacity)
+                throw HostCapacityError("SCE unresolved object import storage is full: all " +
+                    std::to_string(ObjectCapacity >> 20) + " MiB of zeroed stub objects are bound");
+            // Objects never straddle two guest mappings. Doubling the mapped size keeps
+            // the storage to a few mappings, each at least one chunk, so the object fits.
+            const auto grow = std::min(std::max(objectsMapped, ObjectChunk), ObjectCapacity - objectsMapped);
+            machine.Map(options.ObjectBase + objectsMapped, grow, Permission::Read | Permission::Write);
+            objectsUsed = objectsMapped;
+            objectsMapped += grow;
         }
         const auto address = options.ObjectBase + objectsUsed;
         objectsUsed += bytes;

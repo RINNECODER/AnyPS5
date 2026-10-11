@@ -1,5 +1,6 @@
 #include <cpu/SceNpLocalImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <array>
 #include <bit>
 #include <limits>
@@ -28,21 +29,16 @@ struct SceNpLocalImports::Impl {
                            std::uint16_t, std::uint8_t, std::uint8_t>;
     Machine& machine;
     const std::uint32_t userId;
-    const std::uint64_t base;
-    std::size_t nextSlot = 0;
+    std::optional<SceHostTrampolines> trampolines;
     std::map<Key, std::uint64_t> gates;
 
-    Impl(Machine& guest, std::uint32_t sessionUserId, std::uint64_t gateBase) :
-        machine(guest), userId(sessionUserId), base(gateBase) {
+    Impl(Machine& guest, std::uint32_t sessionUserId, std::uint64_t base) :
+        machine(guest), userId(sessionUserId) {
         if (userId == 0xffffffffu)
             throw std::invalid_argument("SCE local NP requires a valid session user");
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("SCE local NP import gates require a nonzero aligned low canonical guest page");
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
+        trampolines.emplace(machine, base, SceHostTrampolines::DefaultCapacity, "SCE local NP import");
     }
 
     bool writable(std::uint64_t address) const {
@@ -81,17 +77,12 @@ std::optional<std::uint64_t> SceNpLocalImports::Resolve(const SceImport& import)
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->nextSlot == 256) throw std::runtime_error("SCE local NP import gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl)](Machine& guest) {
+    const auto gate = impl->trampolines->Add([state = std::weak_ptr<Impl>(impl)](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("SCE local NP import runtime has expired");
         context->getState(guest);
     });
     impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
     return gate;
 }
 

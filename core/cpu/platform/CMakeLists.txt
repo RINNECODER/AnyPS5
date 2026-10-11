@@ -16,6 +16,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     add_library(anyps5_platform_machine STATIC ../src/CpuQemu.cpp ../src/SceNpLocalImports.cpp
         ../src/SceElf.cpp ../src/Self.cpp ../src/SceTls.cpp
         ../src/GuestThreads.cpp ../src/SceThreadImports.cpp ../src/SceModules.cpp ../src/SceLifecycleImports.cpp
+        ../src/SceHostTrampolines.cpp
         ../../libs/nid/src/NidCompute.cpp ../../libs/nid/src/Sha1.cpp)
     target_include_directories(anyps5_platform_machine PUBLIC ../include
         PRIVATE "${ANYPS5_PLATFORM_TCG_INCLUDE}" ../../libs/nid/include)

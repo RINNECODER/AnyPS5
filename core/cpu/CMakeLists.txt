@@ -298,6 +298,21 @@ if(BUILD_TESTING)
     add_custom_target(anyps5_lazy_import_fixture ALL DEPENDS "${lazyImportGuest}" "${lazyImportMain}")
     add_test(NAME anyps5_lazy_import_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/LazyImportCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${lazyImportMain}" "${lazyImportGuest}")
     set_tests_properties(anyps5_lazy_import_cli PROPERTIES TIMEOUT 60)
+    set(manyImportsSource "${CMAKE_CURRENT_BINARY_DIR}/many-imports.c")
+    set(manyImportsGuest "${CMAKE_CURRENT_BINARY_DIR}/ManyImportsGuest.prx")
+    set(manyImportsMain "${CMAKE_CURRENT_BINARY_DIR}/many-imports-main.elf")
+    add_custom_command(OUTPUT "${manyImportsGuest}" "${manyImportsMain}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildManyImportsFixture.py" source "${manyImportsSource}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_MANY_DEPENDENCY=1 -c "${manyImportsSource}" -o "${CMAKE_CURRENT_BINARY_DIR}/many-imports-guest.o"
+        COMMAND "${guestLinker}" -shared -soname ManyImportsGuest.prx -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/many-imports-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/many-imports-guest.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_MANY_DEPENDENCY=0 -c "${manyImportsSource}" -o "${CMAKE_CURRENT_BINARY_DIR}/many-imports-main.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/many-imports-start.o"
+        COMMAND "${guestLinker}" -shared -e _start -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/many-imports-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/many-imports-main.o" "${CMAKE_CURRENT_BINARY_DIR}/many-imports-start.o" "${CMAKE_CURRENT_BINARY_DIR}/many-imports-guest-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildManyImportsFixture.py" package "${CMAKE_CURRENT_BINARY_DIR}/many-imports-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/many-imports-main-linked.elf" "${manyImportsGuest}" "${manyImportsMain}"
+        DEPENDS fixtures/SceStart.S tests/BuildManyImportsFixture.py tests/BuildPlatformServiceFixture.py tests/BuildSceModulesFixture.py VERBATIM)
+    add_custom_target(anyps5_many_imports_fixture ALL DEPENDS "${manyImportsGuest}" "${manyImportsMain}")
+    add_test(NAME anyps5_many_imports_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/ManyImportsCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${manyImportsMain}" "${manyImportsGuest}")
+    set_tests_properties(anyps5_many_imports_cli PROPERTIES TIMEOUT 120)
     add_test_executable(anyps5_sce_common_dialog_import_tests tests/SceCommonDialogImportsTest.cpp)
     target_link_libraries(anyps5_sce_common_dialog_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_common_dialog_imports COMMAND anyps5_sce_common_dialog_import_tests)

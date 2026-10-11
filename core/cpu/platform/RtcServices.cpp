@@ -1,5 +1,6 @@
 #include "RtcServices.hpp"
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <bit>
 #include <chrono>
 #include <cstdio>
@@ -37,24 +38,16 @@ bool adjust(std::uint64_t tick, int minutes, std::uint64_t& output) {
 struct RtcServices::Impl {
     using Key = std::tuple<std::string, std::uint16_t, std::uint16_t>;
     Machine& machine;
-    std::uint64_t base;
+    std::optional<SceHostTrampolines> trampolines;
     std::map<Key, std::uint64_t> gates;
-    Impl(Machine& guest, std::uint64_t address) : machine(guest), base(address) {
+    Impl(Machine& guest, std::uint64_t base) : machine(guest) {
         if (!base || (base & 4095) || base > 0x7fffffffe000ULL)
             throw std::invalid_argument("RTC gate base must be a canonical aligned guest page");
-        machine.Map(base, 4096, Permission::Read | Permission::Write);
-        std::array<std::byte, 4096> code; code.fill(std::byte{0xcc});
-        try {
-            machine.Write(base, code);
-            machine.Protect(base, 4096, Permission::Read | Permission::Execute);
-        } catch (...) {
-            machine.Unmap(base, 4096);
-            throw;
-        }
+        trampolines.emplace(machine, base, SceHostTrampolines::DefaultCapacity, "RTC");
     }
     ~Impl() {
-        // Unmap also removes the Machine host-call registrations for this owned page.
-        try { machine.Unmap(base, 4096); } catch (...) { }
+        // Unmap also removes the Machine host-call registrations for this owned table.
+        try { trampolines->Release(); } catch (...) { }
     }
     bool accessible(std::uint64_t address, std::size_t bytes, Permission mode) const {
         if (!address || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
@@ -168,10 +161,7 @@ std::optional<std::uint64_t> RtcServices::Resolve(const SceImport& import, std::
     if (import.Nid != Nids[0] && import.Nid != Nids[1]) throw std::runtime_error("Unsupported RTC NID");
     const Impl::Key key{import.Nid, import.LibraryId, import.ModuleId};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->gates.size() == 256) throw std::runtime_error("RTC gate page exhausted");
-    const auto gate = impl->base + impl->gates.size() * 16;
-    constexpr std::array code{std::byte{0xc3}}; impl->machine.Write(gate, code);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), formatting = import.Nid == Nids[0]](Machine& guest) {
+    const auto gate = impl->trampolines->Add([state = std::weak_ptr<Impl>(impl), formatting = import.Nid == Nids[0]](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("RTC runtime expired");
         context->invoke(guest, formatting);

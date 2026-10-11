@@ -156,6 +156,32 @@ void scopedBinding() {
     rejects([&] { session.imports.Resolve(wrong); }, "Unsupported SCE import service");
 }
 
+// Every importer numbers its own libraries, so one libc service gets a gate per scope.
+// More scopes than one page of gates, and than the TCG engine's 256 host gates, still bind.
+void manyScopedGates() {
+    Session session;
+    std::vector<std::uint64_t> gates;
+    for (std::uint16_t id = 1; id <= 1200; ++id) {
+        auto scoped = import("j4ViWNHEgww");
+        scoped.LibraryId = id;
+        gates.push_back(session.imports.Resolve(scoped));
+    }
+    std::vector<std::uint64_t> unique = gates;
+    std::sort(unique.begin(), unique.end());
+    require(std::adjacent_find(unique.begin(), unique.end()) == unique.end(), "Distinct import scopes shared one gate");
+    auto repeated = import("j4ViWNHEgww");
+    repeated.LibraryId = 1000;
+    require(session.imports.Resolve(repeated) == gates[999], "Repeated scope on a grown gate page changed its address");
+    constexpr std::array text{std::byte{'g'}, std::byte{'a'}, std::byte{'t'}, std::byte{'e'}, std::byte{0}};
+    session.machine.Write(0x3000, text);
+    for (const auto index : {0, 255, 256, 1199}) {
+        session.setup("j4ViWNHEgww", 0x3000);
+        session.machine.Write(0x2000, std::as_bytes(std::span(&gates[index], 1)));
+        require(session.machine.Run(0x1000, 0x1011, 100) == Cpu::StopReason::Address &&
+                session.machine.Get(Register::Rax) == 4, "A gate beyond the first page did not reach its service");
+    }
+}
+
 void memoryFailures() {
     Session session;
     constexpr std::array sentinel{std::byte{0x17}, std::byte{0xa4}, std::byte{0x2f}, std::byte{0x8e}};
@@ -202,6 +228,7 @@ int main() {
         memoryCalls();
         stringCalls();
         scopedBinding();
+        manyScopedGates();
         memoryFailures();
         exits();
         std::cout << "PASS scoped SCE NID imports, actual x86 GOT calls, native libc, memory permissions, and exit\n";
