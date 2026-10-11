@@ -384,19 +384,22 @@ def main():
         assert not output.exists()
 
         if os.name == 'nt':
-            for name, owner, symbol, expected in [
-                    ('missing-symbol-gui', 'a.prx', 'absent#A#B', 0xc0000139),
-                    ('missing-dependency-gui', 'missing.prx', 'shared#A#B', 0xc0000135)]:
+            for name, owner, symbol, expected, message in [
+                    ('missing-symbol-gui', 'a.prx', 'absent#A#B', 0xc0000139, 'unresolved ELF import absent'),
+                    ('missing-dependency-gui', 'missing.prx', 'shared#A#B', 0xc0000135, 'Failed to load module')]:
                 result, output = convert(name, owner, symbol, windows_gui=True)
                 assert result.returncode == 0, result.stderr
                 run_status = exit_code_without_standard_handles(output)
                 assert run_status == expected, (name, hex(run_status), hex(expected))
+                log = output.parent / 'anyps5.log'
+                assert log.is_file() and message in log.read_text(errors='replace'), (name, log.exists())
 
         result, output = convert('missing-symbol', 'a.prx', 'absent#A#B')
         assert result.returncode == 0, result.stderr
         if os.name == 'nt':
             run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
             assert run.returncode != 0 and 'unresolved ELF import absent' in run.stderr, (run.returncode, run.stderr)
+            assert not (output.parent / 'anyps5.log').exists()
         result, output = convert('wrong-provider', 'c.prx')
         assert result.returncode == 0, result.stderr
         if os.name == 'nt':
