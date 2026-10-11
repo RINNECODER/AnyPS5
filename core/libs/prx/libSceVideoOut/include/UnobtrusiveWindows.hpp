@@ -14,6 +14,7 @@
 // "focus" for it; it never runs without activation.
 #import <AppKit/AppKit.h>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cstdlib>
 #include <stdexcept>
@@ -39,6 +40,30 @@ inline WindowEtiquette CurrentWindowEtiquette() {
 
 inline void RequireRealFocusForThisProcess() {
     if (CurrentWindowEtiquette() == WindowEtiquette::Unobtrusive) setenv("ANYPS5_UNOBTRUSIVE_WINDOWS", "focus", 1);
+}
+
+// Tests that verify real AppKit focus run on a shared, logged-in desktop where another app (or the user)
+// can take activation at any time. Re-requesting it inside an event-driven wait restores genuine key-window
+// state; it never fakes one. Activation is asynchronous, so requests are rate limited to one per 200 ms.
+// Main thread only.
+inline void RequestActivationForFocusTest() {
+    static std::chrono::steady_clock::time_point lastRequest{};
+    const auto now = std::chrono::steady_clock::now();
+    if (lastRequest.time_since_epoch().count() != 0 && now - lastRequest < std::chrono::milliseconds(200)) return;
+    lastRequest = now;
+    // Plain `activate` is cooperative on macOS 14+: while another app is frontmost and does not yield, it is
+    // silently refused, so the forced form is issued as well (still honoured for an app that asked for it).
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [NSApp activateIgnoringOtherApps:YES];
+#pragma clang diagnostic pop
+}
+
+// One step of regaining real focus for `window`: activation while the process is inactive, otherwise (active
+// but the window lost key status, e.g. another app took and returned activation) make the window key again.
+inline void RestoreFocusForTest(NSWindow* window) {
+    if (!NSApp.isActive) RequestActivationForFocusTest();
+    else if (window != nil && !window.isKeyWindow) [window makeKeyAndOrderFront:nil];
 }
 
 // Held until process exit; the kernel releases it even if the test crashes or is killed by a timeout.
