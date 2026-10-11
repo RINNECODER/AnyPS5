@@ -2,6 +2,7 @@
 
 #include <cpu/Cpu.hpp>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -18,6 +19,9 @@ public:
     SceMemoryImports(const SceMemoryImports&) = delete;
     SceMemoryImports& operator=(const SceMemoryImports&) = delete;
     std::optional<std::uint64_t> Resolve(const SceImport& import);
+    // Where the POSIX aliases (mmap, munmap, mprotect, mlock, munlock) store errno: the active
+    // guest thread's errno slot. Without it they still return -1 but leave errno untouched.
+    void SetErrnoLocation(std::function<std::uint64_t()> location);
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;
