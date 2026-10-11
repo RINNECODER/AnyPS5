@@ -15,6 +15,8 @@
 #include <string>
 #include <vector>
 
+extern "C" int APS5_VABI sceAgcUnknownCreateInterpolantMapping(ShaderRegister* regs, const Shader* gs, const Shader* ps);
+
 // The register defaults data is a header of static tables; its bank layout is
 // the oracle for the pointer tables published into guest memory.
 namespace Oracle {
@@ -110,7 +112,7 @@ constexpr std::pair<const char*, bool> Ported[] = {
     {"rI9lNAXPMIw", true}, {"M9yBzRKkjPc", true}, {"F0ZXt5q0ZTA", true}, {"uJziRsODk1c", true}, {"ls4jfY576lw", true},
     {"emP3ckeS2uo", true}, {"F0Y42t-3e18", true}, {"pWLG7WOpVcw", true}, {"U9ueyEhSkF4", true}, {"AOLcoIkQDgM", true},
     {"2JtWUUiYBXs", false}, {"wRbq6ZjNop4", false}, {"RTpj-tIlvZc", false}, {"SwI6QxqwAC0", false}, {"D9sr1xGUriE", false},
-    {"Y3ymLfZ1384", false}, {"BYcSvEsINWU", false}, {"N7M3+N-sBCw", false}, {"8Kly1JrJUlw", false}, {"pxx-GoOSdw4", false},
+    {"Y3ymLfZ1384", false}, {"dbOlWdppb4o", false}, {"BYcSvEsINWU", false}, {"N7M3+N-sBCw", false}, {"8Kly1JrJUlw", false}, {"pxx-GoOSdw4", false},
     {"ms1xVoZ-Vwc", false}, {"P1CugZ99Uzc", false}, {"7Wa3aeJgeVU", false}, {"rP5xLdOf26k", false}, {"W0WEyog0f74", false},
     {"ebixW91gpPw", false}, {"GPbUp9jXQa8", false},
     {"AAeX-U5-P3M", false}, {"OQTgEXyihvA", false}, {"T6xuVw0KUJo", false}, {"ICkECTBxrMw", false}, {"6nths4DHNrs", false},
@@ -320,6 +322,48 @@ void PrimState() {
     require(guest.status("D9sr1xGUriE", false, {0, 0, 0, 0, 4}) == 0, "CreatePrimState without outputs must succeed");
 }
 
+// dbOlWdppb4o: the guest copies only the ps input and gs output semantic tables; the registers must
+// match upstream run on host copies, including the f16-high-only split.
+void InterpolantMapping() {
+    Guest guest;
+    std::array<ShaderSemantic, 3> inputs{};
+    inputs[0].semantic = 1; inputs[0].size_in_elements = 4; inputs[0].is_f16 = 2;
+    inputs[1].semantic = 2; inputs[1].size_in_elements = 4;
+    inputs[2].semantic = 7; inputs[2].size_in_elements = 2; inputs[2].is_f16 = 1;
+    std::array<ShaderSemantic, 2> outputs{};
+    outputs[0].semantic = 2; outputs[0].hardware_mapping = 1; outputs[0].size_in_elements = 4;
+    outputs[1].semantic = 1; outputs[1].hardware_mapping = 3; outputs[1].size_in_elements = 4; outputs[1].is_f16 = 2;
+    Shader ps{}, gs{};
+    ps.input_semantics = inputs.data(); ps.num_input_semantics = 3;
+    gs.output_semantics = outputs.data(); gs.num_output_semantics = 2;
+    std::array<ShaderRegister, 32> expected{};
+    require(sceAgcUnknownCreateInterpolantMapping(expected.data(), &gs, &ps) == 0, "host oracle refused the interpolant semantics");
+
+    constexpr std::uint64_t PsAt = Data, GsAt = Data + 0x100, InAt = Data + 0x200, OutAt = Data + 0x240, RegsAt = Data + 0x400;
+    auto guestPs = ps; guestPs.input_semantics = reinterpret_cast<ShaderSemantic*>(std::uintptr_t{InAt});
+    auto guestGs = gs; guestGs.output_semantics = reinterpret_cast<ShaderSemantic*>(std::uintptr_t{OutAt});
+    store(guest.Machine, PsAt, guestPs); store(guest.Machine, GsAt, guestGs);
+    store(guest.Machine, InAt, inputs); store(guest.Machine, OutAt, outputs);
+    require(guest.status("dbOlWdppb4o", false, {RegsAt, GsAt, PsAt}) == 0, "interpolant mapping refused the synthetic stages");
+    const auto actual = load<std::array<ShaderRegister, 32>>(guest.Machine, RegsAt);
+    require(std::memcmp(&actual, &expected, sizeof(expected)) == 0, "interpolant mapping registers differ from upstream");
+
+    // No pixel inputs: identity interpolants, no gs required.
+    std::array<ShaderRegister, 32> identity{};
+    Shader bare{};
+    require(sceAgcUnknownCreateInterpolantMapping(identity.data(), nullptr, &bare) == 0, "host oracle refused empty inputs");
+    store(guest.Machine, PsAt, bare);
+    require(guest.status("dbOlWdppb4o", false, {RegsAt, 0, PsAt}) == 0, "interpolant mapping refused empty inputs");
+    require(load<std::array<ShaderRegister, 32>>(guest.Machine, RegsAt)[5].value == identity[5].value, "identity interpolants differ");
+
+    // Upstream refuses more than 32 inputs; the guest must not trap or read the table.
+    bare.num_input_semantics = 33;
+    store(guest.Machine, PsAt, bare);
+    bool refused = false;
+    try { static_cast<void>(guest.status("dbOlWdppb4o", false, {RegsAt, 0, PsAt})); } catch (const std::exception&) { refused = true; }
+    require(refused, "33 interpolant inputs must be refused");
+}
+
 // Exports upstream implements as NotImplemented stubs: the guest sees upstream's zero.
 void Stubs() {
     Guest guest;
@@ -419,6 +463,7 @@ int main() {
         Builders();
         RegisterDefaults();
         PrimState();
+        InterpolantMapping();
         Stubs();
         ShaderHalves();
         GsOversubscription();

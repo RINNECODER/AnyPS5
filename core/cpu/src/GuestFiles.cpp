@@ -641,6 +641,15 @@ std::int64_t GuestFiles::Truncate(std::uint64_t path, std::int64_t length) {
     });
 }
 
+std::int64_t GuestFiles::Chmod(std::uint64_t path, std::uint16_t mode) {
+    return impl->mutate(path, false, kernelError(ReadOnly), [mode](int parent, const char* leaf) {
+        struct stat existing {};
+        if (::fstatat(parent, leaf, &existing, AT_SYMLINK_NOFOLLOW) < 0) return -1;
+        const mode_t owner = S_ISDIR(existing.st_mode) ? S_IRWXU : (S_IRUSR | S_IWUSR);
+        return ::fchmodat(parent, leaf, static_cast<mode_t>(mode & 07777) | owner, 0);
+    });
+}
+
 std::int64_t GuestFiles::Utimes(std::uint64_t path, std::uint64_t times) {
     // FreeBSD struct timeval[2]: access then modification, each { int64 tv_sec; int64 tv_usec; }.
     std::array<timespec, 2> values{timespec{0, UTIME_NOW}, timespec{0, UTIME_NOW}};

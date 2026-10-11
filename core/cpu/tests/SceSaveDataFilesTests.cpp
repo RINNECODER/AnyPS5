@@ -234,6 +234,25 @@ void pathRows() {
     require(session.kernelCall("0Cq8ipKr9n0", 0x3000, 0xdead0000) == Efault, "Unmapped times accepted");
     session.text(0x3000, "/app0/data.bin");
     require(session.kernelCall("0Cq8ipKr9n0", 0x3000, 0) == Erofs, "sceKernelUtimes touched the read-only resource root");
+
+    // sceKernelChmod: the host mode follows the guest's, but the owner keeps read/write.
+    session.text(0x3000, "/temp0/file");
+    require(session.kernelCall("fgIsQ10xYVA", 0x3000, 0640) == 0 && ::stat((session.titleData / "temp0" / "file").c_str(), &status) == 0 &&
+            (status.st_mode & 07777) == 0640, "sceKernelChmod did not set the host mode");
+    require(session.kernelCall("fgIsQ10xYVA", 0x3000, 0) == 0 && ::stat((session.titleData / "temp0" / "file").c_str(), &status) == 0 &&
+            (status.st_mode & 0600) == 0600, "sceKernelChmod locked the title out of its own file");
+    session.text(0x3000, "/temp0/missing");
+    require(session.kernelCall("fgIsQ10xYVA", 0x3000, 0600) == Enoent, "Chmod of a missing file did not report ENOENT");
+    session.text(0x3000, "/app0/data.bin");
+    require(session.kernelCall("fgIsQ10xYVA", 0x3000, 0777) == Erofs, "sceKernelChmod touched the read-only resource root");
+    require(session.kernelCall("fgIsQ10xYVA", 0, 0600) != 0, "Null chmod path accepted");
+
+    // sceKernelInternalMemoryGetModuleSegmentInfo: libc enables its internal-memory mode only when the
+    // first qword is nonzero, so the answer is an all-zero record and success.
+    session.put<std::uint64_t>(0x7100, ~0ULL); session.put<std::uint64_t>(0x7108, ~0ULL);
+    require(session.kernelCall("-YTW+qXc3CQ", 0x7100, 0) == 0, "Module segment info failed");
+    require(session.get<std::uint64_t>(0x7100) == 0 && session.get<std::uint64_t>(0x7108) == 0, "Module segment info was not the empty record");
+    require(session.kernelCall("-YTW+qXc3CQ", 0xdead0000, 0) == Efault, "Unmapped segment info record accepted");
 }
 
 void asyncReads() {

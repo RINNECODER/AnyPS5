@@ -18,7 +18,7 @@ namespace Cpu {
 namespace {
 
 enum class Service { Open, Read, Pread, Lseek, Close, Write, Pwrite, Stat, Fstat, Getdents, Getdirentries,
-                     Fsync, Ftruncate, Mkdir, Rmdir, Unlink, Rename, CheckReachability, Truncate, Utimes,
+                     Fsync, Ftruncate, Mkdir, Rmdir, Unlink, Rename, CheckReachability, Truncate, Utimes, Chmod, ModuleSegmentInfo,
                      AioSubmitRead, AioWait, AioWaitMany, AioDelete, AioCancel,
                      TlsAddress, ReadTsc, TscFrequency, SanitizerDisabled, MallocReplace, NewReplace };
 
@@ -51,7 +51,8 @@ constexpr std::array<std::pair<const char*, Service>, 22> posixServices{{
 
 // Rows whose NIDs are not the plain hash of their name (upstream exports them with a
 // _nid_postfix spelling), plus the asynchronous I/O rows, bound by NID.
-constexpr std::array<std::pair<const char*, Service>, 7> nidServices{{
+constexpr std::array<std::pair<const char*, Service>, 9> nidServices{{
+    {"fgIsQ10xYVA", Service::Chmod}, {"-YTW+qXc3CQ", Service::ModuleSegmentInfo},
     {"WlyEA-sLDf0", Service::Truncate}, {"0Cq8ipKr9n0", Service::Utimes},
     {"HgX7+AORI58", Service::AioSubmitRead}, {"KOF-oJbQVvc", Service::AioWait}, {"lgK+oIWkJyA", Service::AioWaitMany},
     {"5TgME6AYty4", Service::AioDelete}, {"fR521KIGgb8", Service::AioCancel}}};
@@ -260,6 +261,16 @@ struct SceKernelImports::Impl {
         case Service::CheckReachability: result = files.CheckReachability(first); break;
         case Service::Truncate: result = files.Truncate(first, std::bit_cast<std::int64_t>(second)); break;
         case Service::Utimes: result = files.Utimes(first, second); break;
+        case Service::Chmod: result = files.Chmod(first, static_cast<std::uint16_t>(second)); break;
+        case Service::ModuleSegmentInfo:
+            // sceKernelInternalMemoryGetModuleSegmentInfo(out): libc init reads two qwords from out and
+            // enables its internal-memory mode only when the first is nonzero. Retail has no such
+            // segment, so report the empty record (all zero) rather than leaving the caller's stack.
+            if (!writable(first, 16)) { result = KernelEfault; break; }
+            store<std::uint64_t>(first, 0);
+            store<std::uint64_t>(first + 8, 0);
+            result = 0;
+            break;
         case Service::AioSubmitRead: result = aioSubmitRead(first, signedInt(second), fourth); break;
         case Service::AioWait: result = aioWait(signedInt(first), second); break;
         case Service::AioWaitMany: result = aioWaitMany(first, signedInt(second), third, static_cast<std::uint32_t>(fourth)); break;

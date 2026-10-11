@@ -56,6 +56,9 @@ public:
     // Path forms of Ftruncate and utimes (times: two FreeBSD timevals, or 0 for now).
     std::int64_t Truncate(std::uint64_t path, std::int64_t length);
     std::int64_t Utimes(std::uint64_t path, std::uint64_t times);
+    // Path chmod. The owner bits stay set on the host (rw for files, rwx for directories) so a title
+    // cannot lock itself out of its own data; read-only mounts are EROFS.
+    std::int64_t Chmod(std::uint64_t path, std::uint16_t mode);
     // Save data: makes the writable guest mount "/<name>" (a single path component, never app0)
     // resolve to host, replacing its current directory. Descriptors already open stay valid.
     bool BindMount(std::string_view name, const std::filesystem::path& host);
