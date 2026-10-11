@@ -9,9 +9,9 @@
 #include <cpu/SceImportStubs.hpp>
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/SceKernelTimeImports.hpp>
-#include <cpu/SceNpLocalImports.hpp>
 #include <cpu/SceNpOfflineImports.hpp>
 #include <cpu/ScePadImports.hpp>
+#include <cpu/SceUpstreamPrxBridge.hpp>
 #include <cpu/SceNetAddressImports.hpp>
 #include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
@@ -230,9 +230,9 @@ void Capabilities(const RunLimits& limits) {
         << "\"constraints\":\"virtual console settings: English US, DD/MM/YYYY, 24-hour, UTC, no summertime, parental control off, Cross enter button, AnyPS5 name; unknown integer IDs read 0; idle status; no system events; SDR 100-nit HDR luminance; no player dialog UI\"},"
         << "\"sce_common_dialog_imports\":{\"module\":\"libSceCommonDialog\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceCommonDialogInitialize\"],\"constraints\":\"session initializer only; repeated initialization returns signed 0x80b80002; dialog operations unsupported\"},"
         << "\"unresolved_imports\":{\"default\":\"trap_on_call\",\"weak\":\"zero\",\"objects\":\"zeroed_storage\",\"strict_argument\":\"--strict-imports\",\"return_argument\":\"--unresolved-import-return\",\"constraints\":\"static --sce-module graph only; missing DT_NEEDED modules tolerated; each unresolved function import logs and stops the guest when called unless a return value is configured; TLS imports stay strict\"},"
-        << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"initialization and handles succeed; user stays signed out; every network request fails\"},"
+        << "\"sce_upstream_prx_bridge\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi2\",\"libSceNpAuth\",\"libSceNpEntitlementAccess\"],\"module_version\":\"1.1\",\"library_version\":1,\"constraints\":\"upstream core/libs/prx exports with hand-checked descriptors only; guest buffers copied in and out; user stays signed out; entitlements from ANYPS5_ENTITLEMENTS or anyps5-entitlements.ini beside the engine, none otherwise\"},"
+        << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"exports the upstream bridge does not cover (libSceNpWebApi, callback registration); initialization and handles succeed; user stays signed out; every network request fails\"},"
         << "\"sce_pad_imports\":{\"module\":\"libScePad\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"scePadInit\",\"scePadOpen\",\"scePadOpenExt\",\"scePadGetHandle\",\"scePadClose\",\"scePadRead\",\"scePadReadState\",\"scePadGetControllerInformation\",\"scePadSetLightBar\",\"scePadResetLightBar\",\"scePadSetVibration\",\"scePadSetMotionSensorState\"],\"constraints\":\"one virtual pad per port; native runner feeds GameController input, or keyboard and mouse when no controller is connected; 64-sample drop-oldest read queue; no motion or touch-coordinate sensors\"},"
-        << "\"sce_np_local_imports\":{\"module\":\"libSceNpManager\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNpGetState\"],\"constraints\":\"session-local user and offline state only; no network account or authentication services\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0; writable /temp0, /download0, /savedata0 under the per-title data directory; regular files and directories only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
@@ -363,6 +363,9 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libSceNpWebApi.prx", {"libSceNpWebApi", 0, 1, 1}, {{"libSceNpWebApi", 0, 1}}},
         {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}},
         {"libScePad.prx", {"libScePad", 0, 1, 1}, {{"libScePad", 0, 1}}}};
+    for (const auto module : Cpu::SceUpstreamPrxBridge::Modules())
+        if (std::none_of(hosts.begin(), hosts.end(), [&](const auto& host) { return host.Module.Name == module; }))
+            hosts.push_back({std::string(module) + ".prx", {std::string(module), 0, 1, 1}, {{std::string(module), 0, 1}}});
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
     if (native) native->AddHostModules(hosts);
 #endif
@@ -641,7 +644,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
         std::unique_ptr<Cpu::SceKernelTimeImports> timeRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
-        std::unique_ptr<Cpu::SceNpLocalImports> npRuntime;
+        std::unique_ptr<Cpu::SceUpstreamPrxBridge> upstreamPrxRuntime;
         std::unique_ptr<Cpu::SceNpOfflineImports> npOfflineRuntime;
         std::unique_ptr<Cpu::ScePadImports> padRuntime;
         std::unique_ptr<Cpu::SceImportStubs> importStubs;
@@ -659,7 +662,7 @@ int main(int argc, char** argv) {
 #endif
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
-        constexpr std::uint32_t sessionUserId = 0x10000000;
+        [[maybe_unused]] constexpr std::uint32_t sessionUserId = 0x10000000;
         try {
             std::vector<std::string> arguments;
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
@@ -714,7 +717,7 @@ int main(int argc, char** argv) {
                 timeRuntime = std::make_unique<Cpu::SceKernelTimeImports>(machine, threadRuntime,
                     [] { return StopSignal::received.load() != 0; });
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
-                npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine, sessionUserId);
+                upstreamPrxRuntime = std::make_unique<Cpu::SceUpstreamPrxBridge>(machine);
                 npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
                 padRuntime = std::make_unique<Cpu::ScePadImports>(machine);
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
@@ -730,9 +733,9 @@ int main(int argc, char** argv) {
                     if (const auto gate = lifecycleRuntime->Resolve(import)) return *gate;
                     if (const auto gate = memoryImports->Resolve(import)) return *gate;
                     if (const auto gate = commonDialogRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = upstreamPrxRuntime->Resolve(import)) return *gate;
                     if (const auto gate = npOfflineRuntime->Resolve(import)) return *gate;
                     if (const auto gate = padRuntime->Resolve(import)) return *gate;
-                    if (const auto gate = npRuntime->Resolve(import)) return *gate;
                     if (const auto gate = netAddressRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;

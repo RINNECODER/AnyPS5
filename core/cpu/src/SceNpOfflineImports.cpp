@@ -13,16 +13,16 @@
 namespace Cpu {
 namespace {
 
-// libSceNpManager and libSceNpWebApi2 follow the upstream HLE exports
-// (core/libs/prx/libSceNpManager, core/libs/prx/libSceNpWebApi2).
+// SceUpstreamPrxBridge serves the libSceNpManager and libSceNpWebApi2 exports it has
+// descriptors for, straight from upstream core/libs/prx. This table keeps only what the
+// bridge cannot take: callback registration, exports NotImplemented upstream, and
+// libSceNpWebApi, which has no upstream export yet.
 constexpr std::uint32_t NpInvalidArgument = 0x80550003;
 constexpr std::uint32_t NpSignedOut = 0x80550006;
 constexpr std::uint32_t NpCallbackAlreadyRegistered = 0x80550008;
 constexpr std::uint32_t NpCallbackNotRegistered = 0x80550009;
-constexpr std::uint32_t WebApi2InvalidArgument = 0x80553402;
-constexpr std::uint32_t WebApi2Unavailable = 0x80553406;
-// libSceNpWebApi has no upstream export yet; its codes sit in the same table as
-// WebApi2's at 0x805529xx (INVALID_ARGUMENT 02, NOT_SIGNED_IN 07).
+// libSceNpWebApi codes sit in the same table as WebApi2's at 0x805529xx
+// (INVALID_ARGUMENT 02, NOT_SIGNED_IN 07).
 constexpr std::uint32_t WebApiInvalidArgument = 0x80552902;
 constexpr std::uint32_t WebApiNotSignedIn = 0x80552907;
 
@@ -67,40 +67,14 @@ struct SceNpOfflineImports::Impl {
         const auto signedOut = [](Impl&, Machine&) -> std::uint32_t { return NpSignedOut; };
         const auto newHandle = [](Impl& self, Machine&) -> std::uint32_t { return self.handle(); };
         const auto callback = [](Impl&, Machine& guest) -> std::uint32_t { return argument(guest, 0) ? 0 : NpInvalidArgument; };
-        const auto webApi2Unavailable = [](Impl&, Machine&) -> std::uint32_t { return WebApi2Unavailable; };
         const auto webApiNotSignedIn = [](Impl&, Machine&) -> std::uint32_t { return WebApiNotSignedIn; };
         // CreateRequest(context, apiGroup, path, method, content, int64_t* requestId)
-        const auto createRequest = [](std::uint32_t invalid) {
-            return [invalid](Impl& self, Machine& guest) -> std::uint32_t {
-                const auto request = static_cast<std::int64_t>(self.handle());
-                return store(guest, argument(guest, 5), request) ? 0 : invalid;
-            };
+        const auto createRequest = [](Impl& self, Machine& guest) -> std::uint32_t {
+            const auto request = static_cast<std::int64_t>(self.handle());
+            return store(guest, argument(guest, 5), request) ? 0 : WebApiInvalidArgument;
         };
         const std::initializer_list<Function> table{
-            {Library::NpManager, "sceNpAbortRequest", ok},
-            {Library::NpManager, "sceNpCheckCallback", ok},
-            {Library::NpManager, "sceNpCheckNpAvailability", signedOut},
-            {Library::NpManager, "sceNpCheckNpReachability", signedOut},
-            {Library::NpManager, "sceNpCheckPremium", signedOut},
-            {Library::NpManager, "sceNpCreateAsyncRequest", newHandle},
-            {Library::NpManager, "sceNpCreateRequest", newHandle},
-            {Library::NpManager, "sceNpDeleteRequest", ok},
-            {Library::NpManager, "sceNpGetAccountAge", [](Impl&, Machine& guest) -> std::uint32_t {
-                return argument(guest, 2) ? NpSignedOut : NpInvalidArgument; }},
-            {Library::NpManager, "sceNpGetAccountCountryA", signedOut},
-            {Library::NpManager, "sceNpGetAccountIdA", signedOut},
-            {Library::NpManager, "sceNpGetAccountLanguage2", signedOut},
-            {Library::NpManager, "sceNpGetNpId", [](Impl&, Machine& guest) -> std::uint32_t {
-                return argument(guest, 1) ? NpSignedOut : NpInvalidArgument; }},
-            {Library::NpManager, "sceNpGetNpReachabilityState", [](Impl&, Machine& guest) -> std::uint32_t {
-                return store(guest, argument(guest, 1), std::uint32_t{0}) ? 0 : NpInvalidArgument; }},
-            {Library::NpManager, "sceNpGetOnlineId", signedOut},
             {Library::NpManager, "sceNpGetUserIdByAccountId", signedOut},
-            {Library::NpManager, "sceNpHasSignedUp", [](Impl&, Machine& guest) -> std::uint32_t {
-                return store(guest, argument(guest, 1), std::uint8_t{0}) ? 0 : NpInvalidArgument; }},
-            {Library::NpManager, "sceNpPollAsync", [](Impl&, Machine& guest) -> std::uint32_t {
-                if (const auto result = argument(guest, 1)) store(guest, result, NpSignedOut);
-                return 0; }},
             {Library::NpManager, "sceNpRegisterGamePresenceCallback", ok},
             {Library::NpManager, "sceNpRegisterNpReachabilityStateCallback", [](Impl& self, Machine& guest) -> std::uint32_t {
                 const auto function = argument(guest, 0);
@@ -118,43 +92,16 @@ struct SceNpOfflineImports::Impl {
             {Library::NpManager, "sceNpRegisterStateCallbackA", [](Impl&, Machine& guest) -> std::uint32_t {
                 return argument(guest, 0) ? 1 : NpInvalidArgument; }},
             {Library::NpManager, "sceNpSetContentRestriction", ok},
-            {Library::NpManager, "sceNpSetNpTitleId", ok},
-            {Library::NpManager, "sceNpNotifyPremiumFeature", ok},
-            {Library::NpManager, "sceNpUnregisterStateCallback", ok},
-            {Library::NpManager, "sceNpUnregisterStateCallbackA", ok},
-            {Library::NpManager, "sceNpUnregisterPremiumEventCallback", ok},
 
-            {Library::WebApi2, "sceNpWebApi2AbortRequest", ok},
-            {Library::WebApi2, "sceNpWebApi2AddHttpRequestHeader", ok},
-            {Library::WebApi2, "sceNpWebApi2CheckTimeout", ok},
-            {Library::WebApi2, "sceNpWebApi2CreateRequest", createRequest(WebApi2InvalidArgument)},
-            {Library::WebApi2, "sceNpWebApi2CreateUserContext", newHandle},
-            {Library::WebApi2, "sceNpWebApi2DeleteRequest", ok},
-            {Library::WebApi2, "sceNpWebApi2DeleteUserContext", ok},
-            {Library::WebApi2, "sceNpWebApi2GetHttpResponseHeaderValue", webApi2Unavailable},
-            {Library::WebApi2, "sceNpWebApi2GetHttpResponseHeaderValueLength", webApi2Unavailable},
-            {Library::WebApi2, "sceNpWebApi2Initialize", newHandle},
-            {Library::WebApi2, "sceNpWebApi2PushEventCreateFilter", newHandle},
-            {Library::WebApi2, "sceNpWebApi2PushEventCreateHandle", newHandle},
-            {Library::WebApi2, "sceNpWebApi2PushEventDeleteHandle", ok},
-            {Library::WebApi2, "sceNpWebApi2PushEventDeletePushContext", ok},
             {Library::WebApi2, "sceNpWebApi2PushEventRegisterCallback", newHandle},
-            {Library::WebApi2, "sceNpWebApi2ReadData", webApi2Unavailable},
-            {Library::WebApi2, "sceNpWebApi2SendRequest", webApi2Unavailable},
-            {Library::WebApi2, "sceNpWebApi2Terminate", ok},
-            {Library::WebApi2, "sceNpWebApi2PushEventCreatePushContext", webApi2Unavailable},
-            {Library::WebApi2, "sceNpWebApi2PushEventDeleteFilter", ok},
             {Library::WebApi2, "sceNpWebApi2PushEventRegisterPushContextCallback", newHandle},
-            {Library::WebApi2, "sceNpWebApi2PushEventStartPushContextCallback", ok},
-            {Library::WebApi2, "sceNpWebApi2PushEventUnregisterCallback", ok},
-            {Library::WebApi2, "sceNpWebApi2PushEventUnregisterPushContextCallback", ok},
             {Library::WebApi2, "sceNpWebApi2SetRequestTimeout", ok},
 
             {Library::WebApi, "sceNpWebApiInitialize", newHandle},
             {Library::WebApi, "sceNpWebApiTerminate", ok},
             {Library::WebApi, "sceNpWebApiCreateContextA", newHandle},
             {Library::WebApi, "sceNpWebApiDeleteContext", ok},
-            {Library::WebApi, "sceNpWebApiCreateRequest", createRequest(WebApiInvalidArgument)},
+            {Library::WebApi, "sceNpWebApiCreateRequest", createRequest},
             {Library::WebApi, "sceNpWebApiDeleteRequest", ok},
             {Library::WebApi, "sceNpWebApiAbortRequest", ok},
             {Library::WebApi, "sceNpWebApiAddHttpRequestHeader", ok},
@@ -162,6 +109,7 @@ struct SceNpOfflineImports::Impl {
             {Library::WebApi, "sceNpWebApiSendRequest", webApiNotSignedIn},
             {Library::WebApi, "sceNpWebApiSendRequest2", webApiNotSignedIn},
             {Library::WebApi, "sceNpWebApiReadData", webApiNotSignedIn},
+
         };
         for (const auto& function : table)
             if (!functions.emplace(Nid::ComputeNid(std::string(function.Name), ""), function).second)
