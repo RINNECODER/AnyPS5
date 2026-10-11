@@ -4,6 +4,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Equeue/Equeue.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Equeue/src/EventAccessors.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/DescriptorControl.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Equeue/src/Kqueue.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/DirectoryDescriptor.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/FileLock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/NativeStat.cpp
@@ -1000,6 +1001,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_dup PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_dup PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_kqueue_tests ${LIBS_INCLUDE_DIR}/tests/GuestKqueue.cpp)
+    target_include_directories(guest_kqueue_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_kqueue_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_kqueue_tests)
+    add_test(NAME guest_kqueue COMMAND guest_kqueue_tests)
+    set_tests_properties(guest_kqueue PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_kqueue PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_socket_event_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketEvents.cpp)
