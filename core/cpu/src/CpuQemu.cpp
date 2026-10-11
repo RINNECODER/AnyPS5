@@ -142,6 +142,9 @@ struct Machine::Impl {
     std::shared_ptr<const void> mappingScope = std::make_shared<const MappingScope>();
     std::uint64_t mappingGeneration = 0;
     std::uint64_t lastBackingIdentity = 0;
+    // Executable borrowed spans, rebuilt only when the mapping generation changes.
+    std::uint64_t borrowedCodeGeneration = std::numeric_limits<std::uint64_t>::max();
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> borrowedCode;
     struct OwnedTransactionFrame {
         const std::thread::id owner = std::this_thread::get_id();
         const OwnedMappingSnapshot previous;
@@ -463,8 +466,20 @@ struct Machine::Impl {
             backings.swap(candidateBackings);
         });
     }
-    void refresh() const {
-        check(anyps5_qemu_cpu_invalidate(engine), "Invalidate modern translated guest code");
+    void invalidateBorrowedCode() {
+        if (borrowedCodeGeneration != mappingGeneration) {
+            borrowedCode.clear();
+            for (const auto& range : ranges) {
+                if (!range.borrowed || !(range.permissions & static_cast<unsigned>(Permission::Execute))) continue;
+                if (!borrowedCode.empty() && borrowedCode.back().first + borrowedCode.back().second == range.address)
+                    borrowedCode.back().second += range.size;
+                else borrowedCode.emplace_back(range.address, range.size);
+            }
+            borrowedCodeGeneration = mappingGeneration;
+        }
+        // Pages without translated code cost one dirty-bitmap check in the engine.
+        for (const auto& [address, size] : borrowedCode)
+            check(anyps5_qemu_cpu_invalidate_range(engine, address, size), "Invalidate borrowed executable guest code");
     }
     std::vector<Range> withoutRange(std::uint64_t address, std::size_t size) const {
         std::vector<Range> result;
@@ -718,6 +733,11 @@ void Machine::ProtectFragment(std::uint64_t address, std::size_t size, Permissio
         impl->ranges.swap(replacement);
     });
 }
+CodeCacheStats Machine::CodeCache() const {
+    AnyPS5QemuCodeStats stats{};
+    impl->check(anyps5_qemu_cpu_code_stats(impl->engine, &stats), "Read modern guest code-cache statistics");
+    return {stats.full_flushes, stats.code_invalidations, stats.translations};
+}
 std::vector<Mapping> Machine::Mappings() const {
     impl->checkOwner();
     std::vector<Mapping> result;
@@ -817,7 +837,8 @@ void Machine::Write(std::uint64_t address, std::span<const std::byte> input) {
     if (input.empty()) return;
     impl->checkMapped(address, input.size());
     impl->transfer(address, const_cast<std::byte*>(input.data()), input.size(), true);
-    impl->refresh();
+    // Drops only translations overlapping these bytes (any alias); data pages cost a bitmap check.
+    impl->check(anyps5_qemu_cpu_invalidate_range(impl->engine, address, input.size()), "Invalidate modern translated guest code");
 }
 std::uint64_t Machine::Get(Register reg) const {
     std::uint64_t value = 0;
@@ -961,7 +982,11 @@ StopReason Machine::RunSlice(std::uint64_t entry, std::uint64_t until, std::uint
         if (impl->requested.load()) return StopReason::Requested;
         if (Get(Register::Rip) == until) return StopReason::Address;
         if (executed == instructionLimit) return StopReason::InstructionLimit;
-        if (std::any_of(impl->ranges.begin(), impl->ranges.end(), [](const Impl::Range& range) { return range.borrowed; })) impl->refresh();
+        // No whole-cache flush: mapping and protection changes flush their own pages in the
+        // engine, Write invalidates code it overlaps, and guest stores to translated pages trap
+        // through the engine's code write-protection. Host code may still rewrite borrowed
+        // executable bytes through its own pointer, so drop translations in those spans only.
+        impl->invalidateBorrowedCode();
         AnyPS5QemuRunResult result{};
         impl->check(anyps5_qemu_cpu_run_until(impl->engine, instructionLimit - executed, until, &result), "Execute modern x86-64 guest");
         if (result.instructions > instructionLimit - executed) throw std::runtime_error("Modern guest CPU exceeded its instruction budget");
