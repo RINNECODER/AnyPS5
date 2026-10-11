@@ -1,9 +1,12 @@
-set(ANYPS5_VULKAN_HEADERS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include")
-set(ANYPS5_SPIRV_HEADERS_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Headers/include")
-set(ANYPS5_SDL2_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/SDL2/include")
-set(ANYPS5_GLSLANG_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/3rdparty/glslang")
-set(ANYPS5_SPIRV_HEADERS_SOURCE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/SPIRV-Headers")
-set(ANYPS5_GLSLANG_SOURCE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/glslang")
+# Resolve from this file, not CMAKE_SOURCE_DIR: the native release profile configures
+# this tree as a subdirectory of an adapter project.
+get_filename_component(ANYPS5_SYSTEM_DEPS_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+set(ANYPS5_VULKAN_HEADERS_INCLUDE_DIR "${ANYPS5_SYSTEM_DEPS_ROOT}/3rdparty/Vulkan-Headers/include")
+set(ANYPS5_SPIRV_HEADERS_INCLUDE_DIR "${ANYPS5_SYSTEM_DEPS_ROOT}/3rdparty/SPIRV-Headers/include")
+set(ANYPS5_SDL2_INCLUDE_DIR "${ANYPS5_SYSTEM_DEPS_ROOT}/3rdparty/SDL2/include")
+set(ANYPS5_GLSLANG_INCLUDE_DIRS "${ANYPS5_SYSTEM_DEPS_ROOT}/3rdparty/glslang")
+set(ANYPS5_SPIRV_HEADERS_SOURCE_DIR "${ANYPS5_SYSTEM_DEPS_ROOT}/3rdparty/SPIRV-Headers")
+set(ANYPS5_GLSLANG_SOURCE_DIR "${ANYPS5_SYSTEM_DEPS_ROOT}/3rdparty/glslang")
 
 if(NOT ANYPS5_USE_SYSTEM_DEPS)
     return()
