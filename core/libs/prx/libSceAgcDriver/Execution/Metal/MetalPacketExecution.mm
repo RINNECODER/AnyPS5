@@ -1,4 +1,5 @@
 #include "MetalDriverInternal.hpp"
+#include "PacketAutoreleasePool.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ComputeDispatch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DrawDispatch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/IndirectDraw.hpp"
@@ -112,7 +113,7 @@ public:
 template <typename Work>
 void MetalDriver::Impl::Tolerate(std::string_view kind, Work&& work) {
     try {
-        work();
+        DrainPacketAutoreleases(std::forward<Work>(work));
     } catch (const MetalGpuExecutionError&) {
         throw;
     } catch (const NativeGuestMemory::ReadOnlyWriteError&) {
