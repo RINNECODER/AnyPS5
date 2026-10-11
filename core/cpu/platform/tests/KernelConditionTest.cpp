@@ -102,8 +102,9 @@ void completed(const char* path,unsigned mode) {
  require(s[7] && s[8] && s[9] && s[7]!=s[8] && s[8]!=s[9],"Fixture lost distinct guest identities");
  require(s[12]==((1ULL<<count)-1) && s[13]==s[12] && s[15]==count && s[16]==1 && s[19]==1,
          "Empty signal accumulated a token, wait lost wake, or owner failed atomic release");
- require(s[17]==Busy && s[18]==Busy && s[29]==Busy,
-         "Pending condition/reacquire binding did not keep condition and mutex destroy busy");
+ require(s[17]==Busy && s[18]==Busy,
+         "Pending condition wait did not keep condition and mutex destroy busy");
+ require(s[29]==0,"Condition destroy after broadcast returned busy while waiters only awaited the mutex (PLAT-15)");
  require(s[31]>2 && s[31]!=s[30] && s[33]>2 && s[33]!=s[32],"Condition/mutex did not retain opaque slot identities");
  require(s[95]>2 && s[95]!=s[31],"Static zero condition failed lazy initialization with fresh identity");
  require(s[34]==1 && s[35]==2,"Condition/mutex destroyed sentinel differs");
@@ -116,8 +117,9 @@ void completed(const char* path,unsigned mode) {
   if(role) require(s[45+role]==0,"Condition wait returned an unexpected error");
   if(mode!=7) require(s[48+role]==Busy,"Condition wait returned without reacquiring its owned mutex");
  }
- require(s[90]==Invalid && s[91]==Invalid && s[92]==Perm && s[93]==Invalid && s[94]==Invalid && s[97]==22,
-         "Copied, destroyed, stale condition slot or unowned-mutex wait fabricated success");
+ require(s[90]==0,"Copied live condition handle was rejected (PLAT-06)");
+ require(s[91]==Invalid && s[92]==Perm && s[93]==Invalid && s[94]==Invalid && s[97]==22,
+         "Destroyed or stale condition handle or unowned-mutex wait fabricated success");
  if(mode==0 || mode==5 || mode==7) {
   require(s[21]==1 && s[22]==Busy && s[27]==1 && s[28]==1,
           "Signal-one woke an extra waiter or Wait returned before actual mutex reacquisition");

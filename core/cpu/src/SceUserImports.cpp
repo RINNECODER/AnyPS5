@@ -1,9 +1,11 @@
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <limits>
 #include <map>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -13,15 +15,27 @@
 namespace Cpu {
 namespace {
 
-enum class Service { Initialize, InitialUser, LoginUsers, UserName };
+enum class Service {
+    Initialize, Initialize2, Terminate, InitialUser, ForegroundUser, LoginUsers, RegisteredUsers, UserName,
+    GetEvent, UserValue
+};
+
+// Fixed per-user output: `size` bytes at `offset` from the caller's pointer, holding `value` as a LE integer
+// in its first four bytes and zero after that. A nonzero `offset` is the caller's u64 this_size field: it is
+// kept, and only the part of the output the caller's structure declares is written.
+struct Output { std::size_t offset = 0; std::size_t size = 0; std::uint32_t value = 0; };
+struct Entry { Service service; Output output{}; };
 
 constexpr std::uint32_t localUser = 0x10000000;
+constexpr std::uint32_t invalidUser = 0xffffffff;
+constexpr std::uint32_t loginEvent = 0;
 constexpr std::string_view localName = "Player";
 constexpr std::uint64_t maxNameCapacity = 16 * 1024 * 1024;
 constexpr std::size_t minimumNameCapacity = 17;
 constexpr std::int64_t notInitialized = std::bit_cast<std::int32_t>(0x80960002u);
 constexpr std::int64_t alreadyInitialized = std::bit_cast<std::int32_t>(0x80960003u);
 constexpr std::int64_t invalidArgument = std::bit_cast<std::int32_t>(0x80960005u);
+constexpr std::int64_t noEvent = std::bit_cast<std::int32_t>(0x80960007u);
 constexpr std::int64_t bufferTooShort = std::bit_cast<std::int32_t>(0x8096000au);
 
 std::string identity(const SceImport& import) {
@@ -55,10 +69,26 @@ struct SceUserImports::Impl {
     Machine& machine;
     const std::uint64_t base;
     bool initialized = false;
+    bool loginReported = false;
     std::size_t nextSlot = 0;
-    const std::map<std::string, Service> services{
-        {"j3YMu1MVNNo", Service::Initialize}, {"CdWp0oHWGr0", Service::InitialUser},
-        {"fPhymKNvK-A", Service::LoginUsers}, {"1xxcMiGu2fo", Service::UserName}};
+    const std::map<std::string, Entry> services{
+        {"j3YMu1MVNNo", {Service::Initialize}}, {"az-0R6eviZ0", {Service::Initialize2}},
+        {"bwFjS+bX9mA", {Service::Terminate}}, {"CdWp0oHWGr0", {Service::InitialUser}},
+        {"eNb53LQJmIM", {Service::ForegroundUser}}, {"fPhymKNvK-A", {Service::LoginUsers}},
+        {"5EiQCnL2G1Y", {Service::RegisteredUsers}}, {"1xxcMiGu2fo", {Service::UserName}},
+        {"yH17Q6NWtVg", {Service::GetEvent}},
+        {"lUoqwTQu4Go", {Service::UserValue, {0, 4, 0}}},   // sceUserServiceGetUserColor
+        {"qbwy0Ub8b3M", {Service::UserValue, {0, 4, 1}}},   // sceUserServiceGetUserNumber
+        {"woNpu+45RLk", {Service::UserValue, {0, 4, 0}}},   // sceUserServiceGetAgeLevel
+        {"6dfDreosXGY", {Service::UserValue, {0, 8, 0}}},   // sceUserServiceGetNpAccountId: no account
+        {"-sD02mFDBh4", {Service::UserValue, {8, 32, 0}}},  // sceUserServiceGetGamePresets: none set
+        {"D-CzAxQL0XI", {Service::UserValue, {0, 4, 0}}},   // sceUserServiceGetPlatformPrivacyWs1
+        {"rnEhHqG-4xo", {Service::UserValue, {0, 4, 0}}},   // sceUserServiceGetAccessibilityChatTranscription
+        {"ZKJtxdgvzwg", {Service::UserValue, {0, 4, 0}}},   // sceUserServiceGetAccessibilityPressAndHoldDelay
+        {"-3Y5GO+-i78", {Service::UserValue, {0, 4, 0}}},   // sceUserServiceGetAccessibilityTriggerEffect
+        {"qWYHOFwqCxY", {Service::UserValue, {0, 4, 0}}},   // sceUserServiceGetAccessibilityVibration
+        {"hD-H81EN9Vg", {Service::UserValue, {0, 4, 0}}},   // sceUserServiceGetAccessibilityZoomEnabled
+        {"O6IW1-Dwm-w", {Service::UserValue, {0, 4, 0}}}};  // sceUserServiceGetAccessibilityZoomFollowFocus
     std::map<Key, std::uint64_t> gates;
 
     Impl(Machine& guest, std::uint64_t gateBase) : machine(guest), base(gateBase) {
@@ -108,23 +138,70 @@ struct SceUserImports::Impl {
         return 0;
     }
 
-    void invoke(Machine& guest, Service service) {
+    std::int64_t write(std::uint64_t destination, std::span<const std::byte> bytes) {
+        if (!accessible(destination, bytes.size(), Permission::Write)) return invalidArgument;
+        machine.Write(destination, bytes);
+        return 0;
+    }
+
+    std::int64_t userValue(std::uint64_t user, std::uint64_t destination, const Output& output) {
+        if (static_cast<std::uint32_t>(user) != localUser) return invalidArgument;
+        std::size_t size = output.size;
+        if (output.offset) {
+            std::array<std::byte, 8> declared;
+            if (!accessible(destination, declared.size(), Permission::Read)) return invalidArgument;
+            machine.Read(destination, declared);
+            std::uint64_t thisSize = 0;
+            for (std::size_t index = 0; index < declared.size(); ++index)
+                thisSize |= std::uint64_t(std::to_integer<unsigned char>(declared[index])) << (8 * index);
+            if (thisSize < output.offset + 4) return invalidArgument;
+            size = static_cast<std::size_t>(std::min<std::uint64_t>(thisSize - output.offset, output.size));
+        }
+        if (!accessible(destination, output.offset + size, Permission::Write)) return invalidArgument;
+        std::vector<std::byte> bytes(size, std::byte{0});
+        const auto value = integers(std::array{output.value});
+        std::copy(value.begin(), value.end(), bytes.begin());
+        machine.Write(destination + output.offset, bytes);
+        return 0;
+    }
+
+    std::int64_t event(std::uint64_t destination) {
+        // SceUserServiceEvent {u32 type; i32 user}: the local user's login once per session, then no events.
+        if (!accessible(destination, 8, Permission::Write)) return invalidArgument;
+        if (loginReported) return noEvent;
+        machine.Write(destination, integers(std::array{loginEvent, localUser}));
+        loginReported = true;
+        return 0;
+    }
+
+    void invoke(Machine& guest, const Entry& entry) {
         const auto first = guest.Get(Register::Rdi);
-        std::int64_t result;
+        std::int64_t result = 0;
         // The initialization prerequisite is emulator policy, not a claim about every SDK's
         // error precedence. All output spans are preflighted before any guest write.
-        if (service == Service::Initialize) result = initialize(first);
+        if (entry.service == Service::Initialize) result = initialize(first);
+        // Initialize2(priority, affinity) has no option block; these services run synchronously.
+        else if (entry.service == Service::Initialize2) result = initialize(0);
         else if (!initialized) result = notInitialized;
-        else if (service == Service::UserName)
-            result = userName(first, guest.Get(Register::Rsi), guest.Get(Register::Rdx));
-        else if (service == Service::InitialUser) {
-            const auto bytes = integers(std::array{localUser});
-            if (!accessible(first, bytes.size(), Permission::Write)) result = invalidArgument;
-            else { machine.Write(first, bytes); result = 0; }
-        } else {
-            const auto bytes = integers(std::array{localUser, 0xffffffffu, 0xffffffffu, 0xffffffffu});
-            if (!accessible(first, bytes.size(), Permission::Write)) result = invalidArgument;
-            else { machine.Write(first, bytes); result = 0; }
+        else switch (entry.service) {
+        case Service::Terminate: initialized = false; loginReported = false; break;
+        case Service::UserName: result = userName(first, guest.Get(Register::Rsi), guest.Get(Register::Rdx)); break;
+        case Service::InitialUser:
+        case Service::ForegroundUser: result = write(first, integers(std::array{localUser})); break;
+        case Service::LoginUsers:
+            result = write(first, integers(std::array{localUser, invalidUser, invalidUser, invalidUser}));
+            break;
+        case Service::RegisteredUsers: {
+            std::array<std::uint32_t, 16> users;
+            users.fill(invalidUser);
+            users[0] = localUser;
+            result = write(first, integers(users));
+            break;
+        }
+        case Service::GetEvent: result = event(first); break;
+        case Service::UserValue: result = userValue(first, guest.Get(Register::Rsi), entry.output); break;
+        case Service::Initialize:
+        case Service::Initialize2: break;
         }
         guest.Set(Register::Rax, static_cast<std::uint64_t>(result));
     }

@@ -8,6 +8,7 @@
 #include <cpu/SceImports.hpp>
 #include <cpu/SceImportStubs.hpp>
 #include <cpu/SceKernelImports.hpp>
+#include <cpu/SceKernelTimeImports.hpp>
 #include <cpu/SceNpLocalImports.hpp>
 #include <cpu/SceNpOfflineImports.hpp>
 #include <cpu/SceNetAddressImports.hpp>
@@ -214,16 +215,18 @@ void Capabilities(const RunLimits& limits) {
         << "\"posix_libraries\":[\"libkernel\",\"libScePosix\"],\"posix_functions\":[\"open\",\"_open\",\"read\",\"_read\",\"pread\",\"write\",\"_write\",\"pwrite\",\"lseek\",\"close\",\"_close\",\"stat\",\"fstat\",\"_fstat\",\"getdents\",\"getdirentries\",\"fsync\",\"ftruncate\",\"mkdir\",\"rmdir\",\"unlink\",\"rename\"],"
         << "\"mounts\":{\"/app0\":\"read-only resource root\",\"/temp0\":\"writable title data\",\"/download0\":\"writable title data\",\"/savedata0\":\"writable title data\"},"
         << "\"constraints\":\"unknown mounts ENOENT; '..' EACCES; host symlinks never followed; performance open flags ignored; transfers of any size in 16 MiB host chunks\"},"
+        << "\"sce_kernel_time_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"libraries\":[\"libkernel\",\"libScePosix\"],\"library_version\":1,"
+        << "\"functions\":[\"sceKernelUsleep\",\"sceKernelNanosleep\",\"sceKernelSleep\",\"sceKernelGetProcessTime\",\"sceKernelGetProcessTimeCounter\",\"sceKernelGetProcessTimeCounterFrequency\",\"sceKernelGettimeofday\",\"sceKernelGettimezone\",\"sceKernelClockGettime\",\"sceKernelClockGetres\",\"sceKernelConvertUtcToLocaltime\",\"sceKernelConvertLocaltimeToUtc\",\"usleep\",\"nanosleep\",\"_nanosleep\",\"sleep\",\"gettimeofday\",\"clock_gettime\",\"clock_getres\"],"
+        << "\"constraints\":\"sce* in library libkernel only, POSIX aliases in libkernel and libScePosix; console clock is UTC; clock ids 0,1,2,4,5,7-15 (CPU-time clocks report host owner thread/process CPU time); process counter in nanoseconds; with guest threads a sleep parks only its caller until the owner pump reaches its deadline (1 ms idle granularity) and is cancelled by stop or shutdown; single-image runs sleep on the host and end early with EINTR on a stop request\"},"
         << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
         << "\"sce_memory_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceKernelGetDirectMemorySize\",\"sceKernelAvailableDirectMemorySize\",\"sceKernelAllocateDirectMemory\",\"sceKernelAllocateMainDirectMemory\",\"sceKernelMapDirectMemory\",\"sceKernelMapFlexibleMemory\",\"sceKernelReserveVirtualRange\",\"sceKernelMprotect\",\"sceKernelVirtualQuery\",\"sceKernelMunmap\",\"sceKernelReleaseDirectMemory\"],"
         << "\"constraints\":\"virtual 12 GiB direct address capacity; demand-backed 16 KiB extents; direct types 0/12; protection mask 0x37 with raw query metadata; fixed non-overwriting maps 0x90; unsupported flags fail explicitly\"},"
         << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
-        << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
+        << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceInitialize2\",\"sceUserServiceTerminate\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetForegroundUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetRegisteredUserIdList\",\"sceUserServiceGetUserName\",\"sceUserServiceGetEvent\",\"sceUserServiceGetUserColor\",\"sceUserServiceGetUserNumber\",\"sceUserServiceGetAgeLevel\",\"sceUserServiceGetNpAccountId\",\"sceUserServiceGetGamePresets\",\"sceUserServiceGetPlatformPrivacyWs1\",\"sceUserServiceGetAccessibilityChatTranscription\",\"sceUserServiceGetAccessibilityPressAndHoldDelay\",\"sceUserServiceGetAccessibilityTriggerEffect\",\"sceUserServiceGetAccessibilityVibration\",\"sceUserServiceGetAccessibilityZoomEnabled\",\"sceUserServiceGetAccessibilityZoomFollowFocus\"],\"constraints\":\"session-local guest profile; one login event then NO_EVENT; no network account services\"},"
         << "\"sce_system_imports\":{\"module\":\"libSceSystemService\",\"module_version\":\"1.1\",\"library_version\":1,"
-        << "\"functions\":[\"sceSystemServiceParamGetInt\",\"sceSystemServiceParamGetString\",\"sceSystemServiceHideSplashScreen\"],"
-        << "\"recognized_unavailable\":[\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceLaunchPlayerDialog\"],"
-        << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
+        << "\"functions\":[\"sceSystemServiceParamGetInt\",\"sceSystemServiceParamGetString\",\"sceSystemServiceHideSplashScreen\",\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceInitializePlayerDialogParam\",\"sceSystemServiceLaunchPlayerDialog\"],"
+        << "\"constraints\":\"virtual console settings: English US, DD/MM/YYYY, 24-hour, UTC, no summertime, parental control off, Cross enter button, AnyPS5 name; unknown integer IDs read 0; idle status; no system events; SDR 100-nit HDR luminance; no player dialog UI\"},"
         << "\"sce_common_dialog_imports\":{\"module\":\"libSceCommonDialog\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceCommonDialogInitialize\"],\"constraints\":\"session initializer only; repeated initialization returns signed 0x80b80002; dialog operations unsupported\"},"
         << "\"unresolved_imports\":{\"default\":\"trap_on_call\",\"weak\":\"zero\",\"objects\":\"zeroed_storage\",\"strict_argument\":\"--strict-imports\",\"return_argument\":\"--unresolved-import-return\",\"constraints\":\"static --sce-module graph only; missing DT_NEEDED modules tolerated; each unresolved function import logs and stops the guest when called unless a return value is configured; TLS imports stay strict\"},"
         << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"initialization and handles succeed; user stays signed out; every network request fails\"},"
@@ -347,7 +350,7 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
                                          ) {
     std::vector<Cpu::SceHostModule> hosts{
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
-        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
+        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}, {"libScePosix", 0, 1}}},
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
         {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
         {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}, {"libSceLibcInternal", 0, 1}}},
@@ -633,6 +636,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::LinuxRuntime> linuxRuntime;
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
+        std::unique_ptr<Cpu::SceKernelTimeImports> timeRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
         std::unique_ptr<Cpu::SceNpLocalImports> npRuntime;
         std::unique_ptr<Cpu::SceNpOfflineImports> npOfflineRuntime;
@@ -661,6 +665,10 @@ int main(int argc, char** argv) {
                     threadRuntime = std::make_shared<Cpu::GuestThreads>(machine);
 #if !ANYPS5_CPU_NATIVE_MODULE_RUNNER
                     threadImports = std::make_unique<Cpu::SceThreadImports>(machine, threadRuntime);
+                    // Lets guest threads park in timed waits (sleeps) while others run, with no idle
+                    // cap (this build has no --max-idle-ms). The native runner installs its own
+                    // boundary that also pumps the window and applies the wall and idle limits.
+                    threadRuntime->SetOwnerBoundary({}, std::chrono::milliseconds{0});
 #endif
                 }
 #endif
@@ -699,6 +707,8 @@ int main(int argc, char** argv) {
                     try { return runtime->ActiveErrnoAddress(); }
                     catch (const std::runtime_error&) { return std::uint64_t{0}; }
                 });
+                timeRuntime = std::make_unique<Cpu::SceKernelTimeImports>(machine, threadRuntime,
+                    [] { return StopSignal::received.load() != 0; });
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
                 npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine, sessionUserId);
                 npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
@@ -718,6 +728,7 @@ int main(int argc, char** argv) {
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = timeRuntime->Resolve(import)) return *gate;
                     if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
                     return sceRuntime->Resolve(import);
                 };
