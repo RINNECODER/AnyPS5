@@ -560,12 +560,14 @@ static constexpr int SceKernelErrorEfault = static_cast<int>(0x8002000e);
 
 int APS5_VABI sceKernelClockGetres(KernelClockid clock_id, KernelTimespec* tp) {
     if (tp == nullptr) return SceKernelErrorEfault;
-    return clock_getres_nid_postfix(static_cast<int>(clock_id), tp);
+    if (clock_getres_nid_postfix(static_cast<int>(clock_id), tp) != 0) return SceKernelError(*__error_nid_postfix());
+    return 0;
 }
 
 int APS5_VABI sceKernelClockGettime(KernelClockid clock_id, KernelTimespec* tp) {
     if (tp == nullptr) return SceKernelErrorEfault;
-    return clock_gettime_nid_postfix(static_cast<int>(clock_id), tp);
+    if (clock_gettime_nid_postfix(static_cast<int>(clock_id), tp) != 0) return SceKernelError(*__error_nid_postfix());
+    return 0;
 }
 
 int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimesec* timezone, int32_t* dst_seconds) {
