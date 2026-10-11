@@ -3,6 +3,7 @@
 #include <cpu/SceElf.hpp>
 #include <cpu/SceHostTrampolines.hpp>
 #include <cpu/SceModules.hpp>
+#include <nid/NidCompute.hpp>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -12,10 +13,13 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <sys/resource.h>
+#include <unistd.h>
 
 namespace Cpu::Platform {
 namespace {
@@ -24,12 +28,20 @@ enum class Op {
     Once, KeyCreate, KeyDelete, Setspecific, Getspecific,
     SyncWait, SyncWait32, SyncWait64, SyncWake,
     ModuleFromAddr, ModuleForUnwind, DebugRaise, DebugRaiseRelease, DebugCppInfo,
-    PosixBegin
+    LoadStart, StopUnload, Dlsym, Trinity, Uuid, AtexitInc, AtexitDec,
+    PosixBegin,
+    // libScePosix rows that return -1 and store errno (the rows above return errno directly).
+    Getpid, SemInit, SemPost, SemWait, SemDestroy, SemTimedwait,
+    Getrusage, Signal, Sigprocmask, PhdrMatch,
+    Coredump
 };
+constexpr unsigned errnoReturnRows = 12, coredumpRows = 13;
 // POSIX names of the same objects return positive errno values.
-constexpr std::array<Op, 12> posixOps{Op::RwInit, Op::RwDestroy, Op::RwWrlock, Op::RwRdlock, Op::RwTrywrlock,
-    Op::RwTryrdlock, Op::RwUnlock, Op::Once, Op::KeyCreate, Op::KeyDelete, Op::Setspecific, Op::Getspecific};
-constexpr std::array<KernelThreadExtraImport, 35> inventory{{
+constexpr std::array<Op, 22> posixOps{Op::RwInit, Op::RwDestroy, Op::RwWrlock, Op::RwRdlock, Op::RwTrywrlock,
+    Op::RwTryrdlock, Op::RwUnlock, Op::Once, Op::KeyCreate, Op::KeyDelete, Op::Setspecific, Op::Getspecific,
+    Op::Getpid, Op::SemInit, Op::SemPost, Op::SemWait, Op::SemDestroy, Op::SemTimedwait,
+    Op::Getrusage, Op::Signal, Op::Sigprocmask, Op::PhdrMatch};
+constexpr std::array<KernelThreadExtraImport, 65> inventory{{
     {"6ULAa0fq4jA", "scePthreadRwlockInit"}, {"BB+kb08Tl9A", "scePthreadRwlockDestroy"},
     {"mqdNorrB+gI", "scePthreadRwlockWrlock"}, {"Ox9i0c7L5w0", "scePthreadRwlockRdlock"},
     {"bIHoZCTomsI", "scePthreadRwlockTrywrlock"}, {"XD3mDeybCnk", "scePthreadRwlockTryrdlock"},
@@ -43,18 +55,36 @@ constexpr std::array<KernelThreadExtraImport, 35> inventory{{
     {"f7KBOafysXo", "sceKernelGetModuleInfoFromAddr"}, {"RpQJJVKTiFM", "sceKernelGetModuleInfoForUnwind"},
     {"OMDRKKAZ8I4", "sceKernelDebugRaiseException"}, {"zE-wXIZjLoM", "sceKernelDebugRaiseExceptionOnReleaseMode"},
     {"cfwBSQyr5Ys", "sceKernelDebugWriteCppExceptionInfo"},
+    {"wzvqT4UqKX8", "sceKernelLoadStartModule"}, {"QKd0qM58Qes", "sceKernelStopUnloadModule"},
+    {"LwG8g3niqwA", "sceKernelDlsym"}, {"tU5e3f9gSiU", "sceKernelIsTrinityMode"},
+    {"Xjoosiw+XPI", "sceKernelUuidCreate"}, {"Tz4RNUCBbGI", "_sceKernelRtldThreadAtexitIncrement"},
+    {"8OnWXlgQlvo", "_sceKernelRtldThreadAtexitDecrement"},
     {"ytQULN-nhL4", "pthread_rwlock_init"}, {"1471ajPzxh0", "pthread_rwlock_destroy"},
     {"sIlRvQqsN2Y", "pthread_rwlock_wrlock"}, {"iGjsr1WAtI0", "pthread_rwlock_rdlock"},
     {"XhWHn6P5R7U", "pthread_rwlock_trywrlock"}, {"SFxTMOfuCkE", "pthread_rwlock_tryrdlock"},
     {"EgmLo6EWgso", "pthread_rwlock_unlock"}, {"Z4QosVuAsA0", "pthread_once"},
     {"mqULNdimTn0", "pthread_key_create"}, {"6BpEZuDT7YI", "pthread_key_delete"},
-    {"WrOLvHU0yQM", "pthread_setspecific"}, {"0-KXaS70xy4", "pthread_getspecific"}}};
-static_assert(inventory.size() == static_cast<std::size_t>(Op::PosixBegin) + posixOps.size());
+    {"WrOLvHU0yQM", "pthread_setspecific"}, {"0-KXaS70xy4", "pthread_getspecific"},
+    {"HoLVWNanBBc", "getpid"}, {"pDuPEf3m4fI", "sem_init"}, {"IKP8typ0QUk", "sem_post"},
+    {"YCV5dGGBcCo", "sem_wait"}, {"cDW233RAwWo", "sem_destroy"}, {"w5IHyvahg-o", "sem_timedwait"},
+    {"hHlZQUnlxSM", "getrusage"}, {"VADc3MNQ3cM", "signal"}, {"6xVpy0Fdq+I", "_sigprocmask"},
+    {"Fjc4-n1+y2g", "__elf_phdr_match_addr"},
+    // libSceCoredump: a host crash is never turned into a guest core dump, so the handler is
+    // recorded by nothing and every call succeeds, exactly as upstream's stand-ins return 0.
+    {"dei8oUx6DbU", "sceCoredumpDebugTextOut"}, {"8zLSfEfW5AU", "sceCoredumpRegisterCoredumpHandler"},
+    {"fFkhOgztiCA", "sceCoredumpUnregisterCoredumpHandler"}, {"kK0DUW1Ukgc", "sceCoredumpGetStopInfoCpu"},
+    {"Jrs7UUkGOFo", "sceCoredumpGetStopInfoGpu_Agc"}, {"ShChva57wIM", "sceCoredumpUnnamedShChva57wIM"},
+    {"5nc2gdLNsok", "sceCoredumpAttachUserFile"}, {"Uxqkdta7wEg", "sceCoredumpSetUserDataType"},
+    {"Dbbkj6YHWdo", "sceCoredumpWriteUserData"}, {"MEJ7tc7ThwM", "sceCoredumpAttachMemoryRegionAsUserFile"},
+    {"32KQRUK13kI", "sceCoredumpWriteUserString"}, {"DoKHmUw1yiQ", "sceCoredumpAttachUserMemoryFile"},
+    {"+YX0z-GUSNw", "sceCoredumpAttachMemoryRegion"}}};
+static_assert(inventory.size() == static_cast<std::size_t>(Op::PosixBegin) + posixOps.size() + coredumpRows);
+constexpr unsigned coredumpFirst = inventory.size() - coredumpRows;
 std::uint64_t posixResult(std::uint64_t code) {
     return code >= 0x80020000u && code < 0x80020100u ? code - 0x80020000u : code;
 }
 
-enum GuestErrno : std::uint32_t { Perm = 1, Search = 3, Deadlock = 11, Fault = 14, Busy = 16, Invalid = 22, Again = 35, TimedOut = 60 };
+enum GuestErrno : std::uint32_t { Perm = 1, NoEntry = 2, Search = 3, Deadlock = 11, Fault = 14, Busy = 16, Invalid = 22, Again = 35, TimedOut = 60, Overflow = 84 };
 constexpr std::uint32_t error(GuestErrno value) { return 0x80020000u + value; }
 constexpr std::uint64_t destroyed = 1;
 constexpr unsigned keyCount = 256, destructorIterations = 4;
@@ -100,8 +130,9 @@ struct KernelThreadExtras::Impl {
     };
     struct OnceState { std::uint64_t token; GuestThreadHandle owner; std::deque<GuestThreadHandle> waiters; };
     struct AddressQueue { std::uint64_t token; std::deque<GuestThreadHandle> waiters; };
-    enum class Kind { Rwlock, Address };
-    struct Timed { Kind kind; std::uint64_t key; std::uint64_t object; Clock::time_point deadline; };
+    enum class Kind { Rwlock, Address, Sem };
+    struct Timed { Kind kind; std::uint64_t key; std::uint64_t object; Clock::time_point deadline; std::uint64_t errnoCell = 0; };
+    struct Sem { std::uint64_t token; std::uint32_t value; std::deque<GuestThreadHandle> waiters; };
     struct Key { bool allocated = false; std::uint64_t destructor = 0; std::uint64_t generation = 0; };
     struct Value { std::uint64_t value = 0, generation = 0; };
     struct ExitCursor { unsigned round = 0, index = 0; bool called = false; };
@@ -114,6 +145,10 @@ struct KernelThreadExtras::Impl {
     std::map<std::uint64_t, Rwlock> rwlocks;
     std::map<std::uint64_t, OnceState> onces;         // keyed by guest control address
     std::map<std::uint64_t, AddressQueue> addresses;  // keyed by guest address
+    std::map<std::uint64_t, Sem> sems;                // POSIX semaphores keyed by guest address
+    std::array<std::uint64_t, 33> signalHandlers{};   // dispositions are recorded; signals are never delivered
+    std::uint32_t blockedSignals = 0;
+    std::map<std::int32_t, unsigned> atexitRefs;      // thread-atexit references per module index
     std::map<GuestThreadHandle, Timed> timed;
     std::array<Key, keyCount> keys{};
     std::map<GuestThreadHandle, std::map<unsigned, Value>> values;
@@ -187,8 +222,8 @@ struct KernelThreadExtras::Impl {
 
     // ---- shared wait plumbing -------------------------------------------------
     void block(GuestThreadHandle id, std::uint64_t key, std::optional<Clock::time_point> deadline,
-               Kind kind, std::uint64_t object) {
-        if (deadline) timed.insert_or_assign(id, Timed{kind, key, object, *deadline});
+               Kind kind, std::uint64_t object, std::uint64_t errnoCell = 0) {
+        if (deadline) timed.insert_or_assign(id, Timed{kind, key, object, *deadline, errnoCell});
         try { waits->BlockFromHostCall(key); }
         catch (...) { timed.erase(id); throw; }
     }
@@ -210,6 +245,13 @@ struct KernelThreadExtras::Impl {
                 const auto erased = std::erase_if(lock.waiters, [&](const auto& w) { return w.id == id; });
                 if (erased && waits->IsWaiting(id, wait.key)) waits->Wake(id, wait.key, error(TimedOut));
                 grant(lock);
+            } else if (wait.kind == Kind::Sem) {
+                const auto found = sems.find(wait.object);
+                if (found == sems.end()) continue;
+                if (std::erase(found->second.waiters, id) && waits->IsWaiting(id, wait.key))
+                    waits->Wake(id, wait.key, std::function<std::uint32_t()>([this, cell = wait.errnoCell] {
+                        if (cell && span(machine, cell, 4, Permission::Write)) store<std::int32_t>(machine, cell, TimedOut);
+                        return 0xffffffffu; }));
             } else {
                 const auto found = addresses.find(wait.object);
                 if (found == addresses.end()) continue;
@@ -228,6 +270,7 @@ struct KernelThreadExtras::Impl {
             // the lock, as a non-robust owner does.
             if (lock.readers.erase(id)) grant(lock);
         }
+        for (auto& [address, sem] : sems) std::erase(sem.waiters, id);
         for (auto it = addresses.begin(); it != addresses.end();) {
             std::erase(it->second.waiters, id);
             it = it->second.waiters.empty() ? addresses.erase(it) : std::next(it);
@@ -630,6 +673,220 @@ struct KernelThreadExtras::Impl {
         return 0;
     }
 
+    // ---- module loading --------------------------------------------------------
+    // The module graph is fixed before the guest runs: every module the title can reach was
+    // loaded and initialised by SceModules. Loading by path therefore resolves an already
+    // present module (matched by file stem, so ".prx" and ".sprx" spellings agree) and an
+    // unknown module reports the same ENOENT upstream returns; unloading keeps the image
+    // resident and its fini runs at process teardown.
+    std::optional<std::string> cstring(std::uint64_t pointer, std::size_t limit = 1024) {
+        if (!pointer) return std::nullopt;
+        std::string value;
+        for (std::size_t i = 0; i < limit; ++i) {
+            char c = 0;
+            try { machine.Read(pointer + i, std::as_writable_bytes(std::span(&c, 1))); }
+            catch (const std::exception&) { return std::nullopt; }
+            if (!c) return value;
+            value.push_back(c);
+        }
+        return std::nullopt;
+    }
+    static std::string stem(std::string value) {
+        if (const auto slash = value.find_last_of('/'); slash != std::string::npos) value.erase(0, slash + 1);
+        for (const std::string_view extension : {".sprx", ".prx"})
+            if (value.size() > extension.size() && value.compare(value.size() - extension.size(), extension.size(), extension) == 0) {
+                value.resize(value.size() - extension.size());
+                break;
+            }
+        return value;
+    }
+    std::optional<std::int32_t> findModule(const std::string& path) {
+        const auto wanted = stem(path);
+        if (wanted.empty() || !modules) return std::nullopt;
+        const auto list = modules();
+        for (std::size_t i = 0; i < list.size(); ++i) {
+            const auto& image = list[i].Image;
+            if (stem(image.Path.filename().string()) == wanted ||
+                (image.OriginalFilename && stem(*image.OriginalFilename) == wanted))
+                return static_cast<std::int32_t>(i);
+        }
+        return std::nullopt;
+    }
+    bool moduleHandle(std::int32_t handle) const { return modules && handle >= 0 && static_cast<std::size_t>(handle) < modules().size(); }
+    std::uint32_t writeResult(std::uint64_t result) {
+        if (!result) return 0;
+        if (!span(machine, result, 4, Permission::Write)) return error(Fault);
+        store<std::int32_t>(machine, result, 0);
+        return 0;
+    }
+    std::uint64_t loadStart(std::uint64_t path, std::uint64_t result) {
+        const auto name = cstring(path);
+        if (!name) return error(Fault);
+        if (const auto status = writeResult(result)) return status;
+        const auto found = findModule(*name);
+        return found ? static_cast<std::uint32_t>(*found) : error(NoEntry);
+    }
+    std::uint32_t stopUnload(std::int32_t handle, std::uint64_t result) {
+        if (const auto status = writeResult(result)) return status;
+        return moduleHandle(handle) ? 0 : error(Search);
+    }
+    std::uint32_t dlsym(std::int32_t handle, std::uint64_t symbol, std::uint64_t output) {
+        const auto name = cstring(symbol, 512);
+        if (!name || !output || !span(machine, output, 8, Permission::Write)) return error(Fault);
+        if (!moduleHandle(handle)) return error(Search);
+        const auto nid = Nid::ComputeNid(*name, "libkernel");
+        const auto list = modules();
+        const auto& record = list[static_cast<std::size_t>(handle)];
+        for (const auto& item : record.Image.Exports) {
+            if ((item.Type != 1 && item.Type != 2) || (item.Identity.Nid != nid && item.Identity.Nid != *name)) continue;
+            store<std::uint64_t>(machine, output, item.Value + record.LoadBias);
+            return 0;
+        }
+        return error(Search);
+    }
+    std::uint32_t uuidCreate(std::uint64_t output) {
+        if (!output || !span(machine, output, 16, Permission::Write)) return error(Invalid);
+        static thread_local std::random_device device;
+        std::array<std::uint32_t, 4> value{};
+        for (auto& word : value) word = device();
+        value[1] = (value[1] & 0x0fffffffu) | 0x40000000u;   // RFC 4122 version 4 and variant bits
+        value[2] = (value[2] & 0xffffff3fu) | 0x80u;
+        machine.Write(output, std::as_bytes(std::span(value)));
+        return 0;
+    }
+    std::optional<std::int32_t> containing(std::uint64_t address) {
+        if (!modules) return std::nullopt;
+        const auto list = modules();
+        for (std::size_t i = 0; i < list.size(); ++i)
+            for (const auto& segment : list[i].Image.Segments) {
+                if (!loadable(segment)) continue;
+                const auto start = segment.Address + list[i].LoadBias;
+                if (address >= start && address - start < segment.MemorySize) return static_cast<std::int32_t>(i);
+            }
+        return std::nullopt;
+    }
+    // Images never unload, so the per-image thread-atexit reference only needs balanced counting.
+    std::uint32_t atexitReference(std::uint64_t address, bool increment) {
+        const auto index = containing(address);
+        if (!index) return error(Search);
+        auto& count = atexitRefs[*index];
+        if (increment) { ++count; return 0; }
+        if (!count) return error(Invalid);
+        --count;
+        return 0;
+    }
+
+    // ---- POSIX semaphores (-1 and errno) ---------------------------------------
+    std::uint64_t fail(GuestErrno code) {
+        if (const auto cell = runtime()->ActiveErrnoAddress(); cell && span(machine, cell, 4, Permission::Write))
+            store<std::int32_t>(machine, cell, static_cast<std::int32_t>(code));
+        return 0xffffffffffffffffULL;
+    }
+    // Host crashes and kill() are not turned into guest signals, so handlers are only recorded
+    // (SIG_DFL = 0 until set) and the process-wide mask is bookkeeping a guest can read back.
+    std::uint64_t signalSet(std::uint64_t number, std::uint64_t handler) {
+        const auto sig = static_cast<std::int32_t>(number);
+        if (sig < 1 || sig > 32 || sig == 9 || sig == 17 || handler == 0xffffffffffffffffULL) return fail(Invalid);
+        const auto previous = signalHandlers[static_cast<std::size_t>(sig)];
+        signalHandlers[static_cast<std::size_t>(sig)] = handler;
+        return previous;
+    }
+    std::uint64_t sigprocmask(std::int32_t how, std::uint64_t set, std::uint64_t previous) {
+        if (previous) {
+            if (!span(machine, previous, 16, Permission::Write)) return fail(Fault);
+            std::array<std::uint32_t, 4> old{blockedSignals, 0, 0, 0};
+            machine.Write(previous, std::as_bytes(std::span(old)));
+        }
+        if (!set) return 0;
+        if (!span(machine, set, 4, Permission::Read)) return fail(Fault);
+        const auto bits = load<std::uint32_t>(machine, set);
+        switch (how) {
+        case 1: blockedSignals |= bits; return 0;
+        case 2: blockedSignals &= ~bits; return 0;
+        case 3: blockedSignals = bits; return 0;
+        default: return fail(Invalid);
+        }
+    }
+    std::uint64_t getrusage(std::int32_t who, std::uint64_t output) {
+        if (who != 0 && who != 1) return fail(Invalid);
+        constexpr std::size_t size = 144;   // two timevals and fourteen longs, as FreeBSD lays out rusage
+        if (!output || !span(machine, output, size, Permission::Write)) return fail(Fault);
+        static_assert(sizeof(::rusage) == size, "host rusage layout differs from the guest layout");
+        ::rusage host{};
+        ::getrusage(RUSAGE_SELF, &host);   // the guest has one process; a thread query reports it
+        machine.Write(output, std::as_bytes(std::span(&host, 1)));
+        return 0;
+    }
+    // Reports whether an executable PT_LOAD of the dl_phdr_info at `info` contains `address`.
+    std::uint64_t phdrMatch(std::uint64_t info, std::uint64_t address) {
+        if (!info || !span(machine, info, 26, Permission::Read)) return 0;
+        const auto bias = load<std::uint64_t>(machine, info), headers = load<std::uint64_t>(machine, info + 16);
+        const auto count = load<std::uint16_t>(machine, info + 24);
+        for (std::uint16_t i = 0; i < count; ++i) {
+            const auto at = headers + 56ULL * i;
+            if (!span(machine, at, 56, Permission::Read)) return 0;
+            if (load<std::uint32_t>(machine, at) != 1 || !(load<std::uint32_t>(machine, at + 4) & 1)) continue;
+            const auto begin = bias + load<std::uint64_t>(machine, at + 16), size = load<std::uint64_t>(machine, at + 40);
+            if (begin <= address && address + 8 < begin + size) return 1;
+        }
+        return 0;
+    }
+    std::uint64_t semInit(std::uint64_t address, std::uint32_t value) {
+        if (!address || !span(machine, address, 4, Permission::Write)) return fail(Fault);
+        if (value > 0x7fffffffu) return fail(Invalid);
+        if (const auto found = sems.find(address); found != sems.end() && !found->second.waiters.empty()) return fail(Busy);
+        sems.insert_or_assign(address, Sem{token(), value, {}});
+        return 0;
+    }
+    std::uint64_t semDestroy(std::uint64_t address) {
+        const auto found = sems.find(address);
+        if (found == sems.end()) return fail(Invalid);
+        if (!found->second.waiters.empty()) return fail(Busy);
+        sems.erase(found);
+        return 0;
+    }
+    std::uint64_t semPost(std::uint64_t address) {
+        const auto found = sems.find(address);
+        if (found == sems.end()) return fail(Invalid);
+        auto& sem = found->second;
+        if (!sem.waiters.empty()) {   // hand the unit straight to the oldest waiter
+            const auto id = sem.waiters.front();
+            sem.waiters.pop_front();
+            wake(id, sem.token, 0);
+            return 0;
+        }
+        if (sem.value == 0x7fffffffu) return fail(Overflow);
+        ++sem.value;
+        return 0;
+    }
+    std::uint64_t semWait(std::uint64_t address, std::optional<Clock::time_point> deadline) {
+        const auto found = sems.find(address);
+        if (found == sems.end()) return fail(Invalid);
+        auto& sem = found->second;
+        if (sem.value) { --sem.value; return 0; }
+        if (deadline && *deadline <= Clock::now()) return fail(TimedOut);
+        const auto id = self();
+        sem.waiters.push_back(id);
+        try { block(id, sem.token, deadline, Kind::Sem, address, runtime()->ActiveErrnoAddress()); }
+        catch (...) {
+            sem.waiters.pop_back();
+            throw;
+        }
+        return 0;
+    }
+    std::uint64_t semTimedwait(std::uint64_t address, std::uint64_t absolute) {
+        if (!absolute || !span(machine, absolute, 16, Permission::Read)) return fail(Fault);
+        const auto seconds = load<std::int64_t>(machine, absolute), nanoseconds = load<std::int64_t>(machine, absolute + 8);
+        if (nanoseconds < 0 || nanoseconds >= 1000000000) return fail(Invalid);
+        const auto target = std::chrono::system_clock::time_point(std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::seconds(seconds) + std::chrono::nanoseconds(nanoseconds)));
+        const auto remaining = target - std::chrono::system_clock::now();
+        const auto limit = std::chrono::duration_cast<std::chrono::microseconds>(Clock::time_point::max() - Clock::now()).count();
+        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(remaining).count();
+        const auto deadline = micros <= 0 ? Clock::now() : micros >= limit ? Clock::time_point::max() : Clock::now() + std::chrono::microseconds(micros);
+        return semWait(address, deadline);
+    }
+
     std::uint64_t invoke(Op op, Machine& m) {
         const auto rdi = m.Get(Register::Rdi), rsi = m.Get(Register::Rsi), rdx = m.Get(Register::Rdx);
         switch (op) {
@@ -659,6 +916,23 @@ struct KernelThreadExtras::Impl {
                       << ",\"parameter\":" << static_cast<std::uint32_t>(rsi) << "}\n";
             return 0;
         case Op::DebugCppInfo: return 0;
+        case Op::LoadStart: return loadStart(rdi, m.Get(Register::R9));
+        case Op::StopUnload: return stopUnload(static_cast<std::int32_t>(rdi), m.Get(Register::R9));
+        case Op::Dlsym: return dlsym(static_cast<std::int32_t>(rdi), rsi, rdx);
+        case Op::Trinity: case Op::Coredump: return 0;
+        case Op::Uuid: return uuidCreate(rdi);
+        case Op::AtexitInc: return atexitReference(rdi, true);
+        case Op::AtexitDec: return atexitReference(rdi, false);
+        case Op::Getpid: return static_cast<std::uint32_t>(::getpid());
+        case Op::SemInit: return semInit(rdi, static_cast<std::uint32_t>(rdx));
+        case Op::SemPost: return semPost(rdi);
+        case Op::SemWait: return semWait(rdi, std::nullopt);
+        case Op::SemDestroy: return semDestroy(rdi);
+        case Op::SemTimedwait: return semTimedwait(rdi, rsi);
+        case Op::Getrusage: return getrusage(static_cast<std::int32_t>(rdi), rsi);
+        case Op::Signal: return signalSet(rdi, rsi);
+        case Op::Sigprocmask: return sigprocmask(static_cast<std::int32_t>(rdi), rsi, rdx);
+        case Op::PhdrMatch: return phdrMatch(rdi, rsi);
         case Op::Once: case Op::PosixBegin: break;
         }
         throw std::runtime_error("Kernel thread extras operation is not routed");
@@ -682,23 +956,26 @@ std::optional<std::uint64_t> KernelThreadExtras::Resolve(const SceImport& import
     unsigned op = 0;
     for (; op < inventory.size(); ++op) if (inventory[op].Nid == import.Nid) break;
     if (op == inventory.size()) return std::nullopt;
-    const bool posixRow = op >= static_cast<unsigned>(Op::PosixBegin);
-    const bool library = import.LibraryName == "libkernel" || (posixRow && import.LibraryName == "libScePosix");
+    const bool coredump = op >= coredumpFirst;
+    const bool posixRow = !coredump && op >= static_cast<unsigned>(Op::PosixBegin);
+    const bool library = coredump ? import.LibraryName == "libSceCoredump"
+        : import.LibraryName == "libkernel" || (posixRow && import.LibraryName == "libScePosix");
     if (!library || import.ModuleName != "libkernel" || import.LibraryVersion != 1 ||
         import.ModuleMajor != 1 || import.ModuleMinor != 1)
         return std::nullopt;
     if (type != 2 || size != 0)
         throw std::runtime_error("Unsupported kernel thread extras symbol type/size: " + import.Nid);
-    const bool posix = op >= static_cast<unsigned>(Op::PosixBegin);
-    const auto operation = posix ? posixOps[op - static_cast<unsigned>(Op::PosixBegin)] : static_cast<Op>(op);
+    const bool posix = posixRow;
+    const bool errnoStyle = posix && op - static_cast<unsigned>(Op::PosixBegin) < errnoReturnRows;
+    const auto operation = posix ? posixOps[op - static_cast<unsigned>(Op::PosixBegin)] : coredump ? Op::Coredump : static_cast<Op>(op);
     if (operation == Op::Once) return posix ? impl->posixOnceStub : impl->onceStub;
     if (const auto found = impl->gates.find(import.Nid); found != impl->gates.end()) return found->second;
-    const auto gate = impl->trampolines.Add([weak = std::weak_ptr<Impl>(impl), operation, posix](Machine& m) {
+    const auto gate = impl->trampolines.Add([weak = std::weak_ptr<Impl>(impl), operation, errnoStyle](Machine& m) {
         const auto state = weak.lock();
         if (!state) throw std::runtime_error("Kernel thread extras provider expired");
         const auto result = state->invoke(operation, m);
         // getspecific returns a value, never an error.
-        m.Set(Register::Rax, posix && operation != Op::Getspecific ? posixResult(result) : result);
+        m.Set(Register::Rax, errnoStyle && operation != Op::Getspecific ? posixResult(result) : result);
     });
     impl->gates.emplace(import.Nid, gate);
     return gate;

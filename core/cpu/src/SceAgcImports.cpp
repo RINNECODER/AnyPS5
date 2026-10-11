@@ -3,6 +3,7 @@
 #include <cpu/SceHostTrampolines.hpp>
 #include "SceShaders.hpp"
 #include "AgcUpstreamBuilders.hpp"
+#include "upstream-prx/Marshal.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include <algorithm>
@@ -21,6 +22,9 @@
 #include <vector>
 
 namespace Cpu {
+namespace UpstreamPrx { const Export* AgcDriverLeafExport(std::string_view nid); }
+// Guest image of an upstream register defaults table laid out at `base`.
+std::vector<std::byte> AgcRegisterDefaultsGuestImage(std::uint32_t version, bool internal, std::uint64_t base);
 namespace {
 using Contract = AgcAbiContract;
 struct Binding { const char* Nid; Contract Operation; bool Driver; };
@@ -57,7 +61,9 @@ constexpr Binding bindings[] = {
     {"BIPexNBSGog", Contract::DcbCondExec, false},
     {"qyM2bxYFPAk", Contract::AcbCondExec, false},
     {"n2fD4A+pb+g", Contract::CbSetShRegisterRangeDirect, false},
-    {"MDLD5Ly94Xk", Contract::CbSetUcRegisterRangeDirect, false}
+    {"MDLD5Ly94Xk", Contract::CbSetUcRegisterRangeDirect, false},
+    {"ebixW91gpPw", Contract::AcbSetFlipCommandBuffer56, false},
+    {"GPbUp9jXQa8", Contract::AcbWaitUntilSafeForRenderingCommandBuffer56, false}
 };
 struct GuestPacket { std::uint64_t Address; std::uint32_t Words; std::uint8_t Flags; std::array<std::uint8_t,3> Reserved; };
 struct GuestCommandBuffer {
@@ -135,8 +141,14 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
     std::optional<std::uint64_t> ResumeGate;
     std::map<std::uint64_t, Growth> PendingGrowth;
     bool Resuming = false;
+    // Host-built tables (register defaults) the guest reads through returned
+    // pointers live in a window above the gate table, mapped on first use.
+    static constexpr std::uint64_t PublishedOffset = 0x400000, PublishedLimit = 0x400000;
+    std::uint64_t PublishedBase = 0, PublishedUsed = 0;
+    std::map<std::pair<std::uint32_t, bool>, std::uint64_t> RegisterDefaults;
     Impl(Machine& machine, SceAgcBackend backend, std::span<const Contract> admitted, std::uint64_t base) :
-        MachineRef(machine), Backend(std::move(backend)), Admitted(admitted.begin(), admitted.end()) {
+        MachineRef(machine), Backend(std::move(backend)), Admitted(admitted.begin(), admitted.end()),
+        PublishedBase(base + PublishedOffset) {
         require(base && !(base & 4095) && base < 0x7ffffffff000, "gates require aligned low canonical guest page");
         for (auto contract : Admitted)
             require(std::any_of(std::begin(bindings), std::end(bindings), [contract](const auto& row) { return row.Operation == contract; }) ||
@@ -332,6 +344,21 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
     }
     std::vector<std::uint32_t> Scratch;
 
+    // One stable guest copy per (version, internal) table: guests compare and
+    // cache the returned pointer like the static table upstream returns.
+    std::uint64_t registerDefaults(Machine& guest, std::uint32_t version, bool internal) {
+        if (const auto found = RegisterDefaults.find({version, internal}); found != RegisterDefaults.end()) return found->second;
+        const auto at = PublishedBase + PublishedUsed;
+        const auto image = AgcRegisterDefaultsGuestImage(version, internal, at);
+        const auto size = (image.size() + 4095) & ~std::size_t{4095};
+        require(size && size <= PublishedLimit - PublishedUsed, "published AGC table window exhausted");
+        guest.Map(at, size, Permission::Read | Permission::Write);
+        guest.Write(at, image);
+        PublishedUsed += size;
+        RegisterDefaults.emplace(std::pair{version, internal}, at);
+        return at;
+    }
+
     // Register ranges are the one builder input upstream dereferences: snapshot
     // the bounded guest values first. Invalid counts reach upstream's own check.
     void registerRange(Machine& guest, Contract operation, std::uint64_t buffer, std::uint32_t offset, std::uint64_t values,
@@ -468,7 +495,7 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
             const std::array words{0xc0031500u, static_cast<std::uint32_t>(b), static_cast<std::uint32_t>(c), static_cast<std::uint32_t>(d), modifier | 0x41u};
             emit(guest, a, words, operation); return;
         }
-        case Contract::DcbSetFlipCommandBuffer56: {
+        case Contract::DcbSetFlipCommandBuffer56: case Contract::AcbSetFlipCommandBuffer56: {
             const auto handle = static_cast<std::uint32_t>(b), mode = static_cast<std::uint32_t>(d);
             const auto index = signed32(c);
             if (Policies.contains(operation)) {
@@ -483,7 +510,7 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
                 static_cast<std::uint32_t>(e), static_cast<std::uint32_t>(e >> 32u)};
             emit(guest, a, words, operation); return;
         }
-        case Contract::DcbWaitUntilSafeForRenderingCommandBuffer56: {
+        case Contract::DcbWaitUntilSafeForRenderingCommandBuffer56: case Contract::AcbWaitUntilSafeForRenderingCommandBuffer56: {
             const auto handle = static_cast<std::uint32_t>(b);
             const auto index = static_cast<std::uint32_t>(c);
             if (Policies.contains(operation)) {
@@ -686,6 +713,78 @@ struct AgcGenericBindings {
         result(guest, status);
     }
 
+    // Marker spans carry exactly `length` text bytes, not a C string.
+    template<auto Fn> static void markerSpan(Impl& state, Machine& guest, Contract operation) {
+        const auto pointer = arg(guest, 1);
+        const auto length = conv<std::uint32_t>(arg(guest, 2));
+        require(length < 0x10000, "marker span text too long");
+        std::vector<char> text(length);
+        if (length) {
+            require(pointer && pointer <= std::numeric_limits<std::uint64_t>::max() - length, "invalid marker span text range");
+            guest.CheckAccess(pointer, length, Permission::Read);
+            guest.Read(pointer, std::as_writable_bytes(std::span(text)));
+        }
+        state.build(guest, arg(guest, 0), operation, [&](CommandBuffer* host) {
+            return Fn(host, length ? text.data() : nullptr, length, conv<std::uint32_t>(arg(guest, 3)));
+        });
+    }
+
+    // Upstream validates the version and builds its host table; the guest gets
+    // a copy of the same data at a guest address.
+    template<bool Internal> static void registerDefaults(Impl& state, Machine& guest, Contract) {
+        const auto version = conv<std::uint32_t>(arg(guest, 0));
+        if constexpr (Internal) sceAgcGetRegisterDefaults2Internal(version);
+        else sceAgcGetRegisterDefaults2(version);
+        result(guest, state.registerDefaults(guest, version, Internal));
+    }
+
+    // Prim state reads only each stage's type and special registers (the Metal
+    // stage ABI resolver is a no-op): copy those, clear every other guest pointer.
+    struct HostStage {
+        Shader Header{};
+        ShaderSpecialRegs Specials{};
+        const Shader* Load(Machine& guest, std::uint64_t at) {
+            if (!at) return nullptr;
+            Header = read<Shader>(guest, at);
+            const auto specials = numeric(Header.specials);
+            Header.user_data = nullptr; Header.code = nullptr; Header.cx_registers = nullptr; Header.sh_registers = nullptr;
+            Header.input_semantics = nullptr; Header.output_semantics = nullptr; Header.specials = nullptr;
+            if (specials) { Specials = read<ShaderSpecialRegs>(guest, specials); Header.specials = &Specials; }
+            return &Header;
+        }
+    };
+    template<std::size_t N> static std::optional<std::array<ShaderRegister, N>> registers(Machine& guest, std::uint64_t at, bool input) {
+        if (!at) return std::nullopt;
+        address(at, N * sizeof(ShaderRegister), alignof(ShaderRegister));
+        guest.CheckAccess(at, N * sizeof(ShaderRegister), input ? Permission::Read | Permission::Write : Permission::Write);
+        std::array<ShaderRegister, N> values{};
+        if (input) guest.Read(at, std::as_writable_bytes(std::span(values)));
+        return values;
+    }
+    template<std::size_t N> static void store(Machine& guest, std::uint64_t at, const std::optional<std::array<ShaderRegister, N>>& values) {
+        if (values) guest.Write(at, std::as_bytes(std::span(*values)));
+    }
+    static void createPrimState(Impl&, Machine& guest, Contract) {
+        const auto cxAt = arg(guest, 0), ucAt = arg(guest, 1);
+        auto cx = registers<2>(guest, cxAt, false);
+        auto uc = registers<3>(guest, ucAt, false);
+        HostStage hs, gs;
+        const auto* hsShader = hs.Load(guest, arg(guest, 2));
+        const auto* gsShader = cx || uc ? gs.Load(guest, arg(guest, 3)) : nullptr;
+        const auto status = sceAgcCreatePrimState(cx ? cx->data() : nullptr, uc ? uc->data() : nullptr, hsShader, gsShader,
+                                                  conv<std::uint32_t>(arg(guest, 4)));
+        if (status == 0) { store(guest, cxAt, cx); store(guest, ucAt, uc); }
+        result(guest, status);
+    }
+    static void updatePrimState(Impl&, Machine& guest, Contract) {
+        const auto cxAt = arg(guest, 0), ucAt = arg(guest, 1);
+        auto cx = registers<2>(guest, cxAt, true);
+        auto uc = registers<3>(guest, ucAt, true);
+        const auto status = sceAgcUpdatePrimState(cx ? cx->data() : nullptr, uc ? uc->data() : nullptr, conv<std::uint32_t>(arg(guest, 2)));
+        if (status == 0) { store(guest, cxAt, cx); store(guest, ucAt, uc); }
+        result(guest, status);
+    }
+
     static std::span<const Row> Rows() {
         static const Row rows[] = {
             {"23LRUSvYu1M", Contract::UpstreamPacketInfo, &plain<sceAgcInit_0090>},
@@ -834,11 +933,27 @@ struct AgcGenericBindings {
             {"7nOoijNPvEU", Contract::UpstreamPatches, &patch<sceAgcWaitRegMemPatchReference>},
             {"IxYiarKlXxM", Contract::UpstreamPatches, &patch<sceAgcDmaDataPatchSetDstAddressOrOffset>},
             {"nCUgItdN2ms", Contract::UpstreamPatches, &patch<sceAgcSetShRegIndirectPatchSetNumRegisters>},
+            {"W0WEyog0f74", Contract::UpstreamPatches, &patch<sceAgcAcquireMemSetEngine>},
+            {"7Wa3aeJgeVU", Contract::UpstreamPatches, &patch<sceAgcBranchPatchSetThenTarget_0300>},
+            {"rP5xLdOf26k", Contract::UpstreamPatches, &patch<sceAgcBranchPatchSetElseTarget_0300>},
+            {"BYcSvEsINWU", Contract::UpstreamMarkers, &markerSpan<sceAgcDcbSetMarkerSpan>},
+            {"N7M3+N-sBCw", Contract::UpstreamMarkers, &markerSpan<sceAgcDcbPushMarkerSpan>},
+            {"8Kly1JrJUlw", Contract::UpstreamMarkers, &markerSpan<sceAgcAcbPushMarkerSpan>},
+            {"pxx-GoOSdw4", Contract::UpstreamMarkers, &markerSpan<sceAgcAcbSetMarkerSpan>},
+            {"ms1xVoZ-Vwc", Contract::UpstreamPacketSizes, &plain<sceAgcDcbBeginOcclusionQueryGetSize>},
+            {"P1CugZ99Uzc", Contract::UpstreamPacketSizes, &plain<sceAgcDcbEndOcclusionQueryGetSize>},
+            {"RTpj-tIlvZc", Contract::UpstreamPacketInfo, &plain<sceAgcSetShaderInstrumentation>},
+            {"SwI6QxqwAC0", Contract::UpstreamPacketInfo, &plain<sceAgcGetShaderInstrumentation>},
+            {"2JtWUUiYBXs", Contract::UpstreamShader, &registerDefaults<false>},
+            {"wRbq6ZjNop4", Contract::UpstreamShader, &registerDefaults<true>},
+            {"D9sr1xGUriE", Contract::UpstreamShader, &createPrimState},
+            {"Y3ymLfZ1384", Contract::UpstreamShader, &updatePrimState},
         };
         return rows;
     }
 };
 bool GenericContractKnown(AgcAbiContract contract) {
+    if (contract == Contract::UpstreamDriver) return true;
     const auto rows = AgcGenericBindings::Rows();
     return std::any_of(rows.begin(), rows.end(), [contract](const auto& row) { return row.Operation == contract; });
 }
@@ -934,7 +1049,15 @@ std::span<const AgcAbiAdmission> TargetAgcAdmissions() {
         {Contract::UpstreamAcb, AgcArgumentPolicy::SourceContract, "upstream compute queue encoders; numeric addresses only"},
         {Contract::UpstreamCb, AgcArgumentPolicy::SourceContract, "upstream common encoders (branch, conditional write, nop); numeric addresses only"},
         {Contract::UpstreamDcb, AgcArgumentPolicy::SourceContract, "upstream graphics queue encoders (jump, flow, state, events); numeric addresses only"},
-        {Contract::UpstreamPacketInfo, AgcArgumentPolicy::SourceContract, "upstream packet inspection; packet copied from guest, results translated back"}
+        {Contract::UpstreamPacketInfo, AgcArgumentPolicy::SourceContract, "upstream packet inspection; packet copied from guest, results translated back"},
+        {Contract::UpstreamShader, AgcArgumentPolicy::SourceContract,
+            "upstream register defaults published as guest tables; prim state on host copies of stage type and special registers"},
+        {Contract::UpstreamDriver, AgcArgumentPolicy::SourceContract,
+            "upstream driver leaf exports via prx bridge descriptors; integer outputs written back, discarded pointers never read"},
+        {Contract::AcbSetFlipCommandBuffer56, AgcArgumentPolicy::SourceContract,
+            "compute cursor56/VideoOut handle32/index32/mode32/arg64; Metal driver flip packet, registry checked on submission"},
+        {Contract::AcbWaitUntilSafeForRenderingCommandBuffer56, AgcArgumentPolicy::SourceContract,
+            "compute cursor56/VideoOut handle32/index32; Metal driver rendering wait packet, registry checked on submission"}
     };
     return admissions;
 }
@@ -945,14 +1068,20 @@ std::uint64_t SceAgcImports::Resolve(const SceImport& import, std::uint8_t symbo
     Contract operation{};
     bool driver = false;
     Impl::Handler handler = nullptr;
+    const UpstreamPrx::Export* leaf = nullptr;
     if (const auto found = std::find_if(std::begin(bindings), std::end(bindings), [&](const auto& row) { return import.Nid == row.Nid; });
         found != std::end(bindings)) {
         operation = found->Operation; driver = found->Driver;
     } else {
         const auto rows = AgcGenericBindings::Rows();
         const auto generic = std::find_if(rows.begin(), rows.end(), [&](const auto& row) { return import.Nid == row.Nid; });
-        if (generic == rows.end()) throw std::runtime_error("Unsupported SCE AGC service: " + identity(import));
-        operation = generic->Operation; handler = generic->Run;
+        if (generic != rows.end()) {
+            operation = generic->Operation; handler = generic->Run;
+        } else if ((leaf = UpstreamPrx::AgcDriverLeafExport(import.Nid))) {
+            operation = Contract::UpstreamDriver; driver = true;
+        } else {
+            throw std::runtime_error("Unsupported SCE AGC service: " + identity(import));
+        }
     }
     const auto name = driver ? "libSceAgcDriver" : "libSceAgc";
     if (import.LibraryName != name || import.ModuleName != name || import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1)
@@ -972,9 +1101,10 @@ std::uint64_t SceAgcImports::Resolve(const SceImport& import, std::uint8_t symbo
     }
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleId};
     if (const auto found=impl->Gates.find(key); found != impl->Gates.end()) return found->second;
-    const auto gate = impl->Trampolines->Add([weak=std::weak_ptr<Impl>(impl), operation, handler](Machine& guest) {
+    const auto gate = impl->Trampolines->Add([weak=std::weak_ptr<Impl>(impl), operation, handler, leaf](Machine& guest) {
         const auto state=weak.lock();
         require(static_cast<bool>(state), "import runtime expired");
+        if (leaf) { state->Active = nullptr; leaf->Call(guest, leaf->Name); return; }
         state->Active = handler;
         if (handler) handler(*state, guest, operation); else state->invoke(guest, operation);
     });

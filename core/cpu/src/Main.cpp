@@ -13,7 +13,9 @@
 #include <cpu/ScePadImports.hpp>
 #include <cpu/SceLeafSystemImports.hpp>
 #include <cpu/SceUpstreamPrxBridge.hpp>
+#include <cpu/SceAjmImports.hpp>
 #include <cpu/SceNetAddressImports.hpp>
+#include <cpu/SceNetImports.hpp>
 #include <cpu/SceJsonImports.hpp>
 #include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
@@ -45,6 +47,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -242,6 +245,7 @@ void Capabilities(const RunLimits& limits) {
         << "\"sce_leaf_system_imports\":{\"modules\":[\"libSceAppContentUtil\",\"libSceImeDialog\",\"libSceSaveDataDialog\",\"libSceSaveData_native\",\"libSceSystemGesture\",\"libSceIme\",\"libSceNpUniversalDataSystem\",\"libSceAcm\",\"libSceNpAuth\"],\"constraints\":\"exports the upstream bridge cannot take (nested guest pointers, callbacks, floats, objects upstream allocates, NotImplemented upstream bodies); dialogs finish at once with the default result; headless: no touch, keyboard or IME panel; add-on content never entitled; save data mounts (sceSaveDataMount3) unsupported\"},"
         << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"exports the upstream bridge does not cover (libSceNpWebApi, callback registration); initialization and handles succeed; user stays signed out; every network request fails\"},"
         << "\"sce_pad_imports\":{\"module\":\"libScePad\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"scePadInit\",\"scePadOpen\",\"scePadOpenExt\",\"scePadGetHandle\",\"scePadClose\",\"scePadRead\",\"scePadReadState\",\"scePadGetControllerInformation\",\"scePadSetLightBar\",\"scePadResetLightBar\",\"scePadSetVibration\",\"scePadSetMotionSensorState\"],\"constraints\":\"one virtual pad per port; native runner feeds GameController input, or keyboard and mouse when no controller is connected; 64-sample drop-oldest read queue; no motion or touch-coordinate sensors\"},"
+        << "\"sce_net_imports\":{\"modules\":[\"libSceNet\",\"libSceHttp2\",\"libSceSsl\",\"libkernel\"],\"constraints\":\"BSD sockets with explicit PS5 sockaddr/errno/option conversion; guest memory only through Machine Read/Write; libSceHttp2 and libSceSsl are offline (requests fail with the console's network error); libHttpServer.Prospero is declared but exports nothing\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
         << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0; writable /temp0, /download0, /savedata0 under the per-title data directory; regular files and directories only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT lifecycle derived from each module's own DT_INIT/DT_FINI and preinit/init/fini arrays for any build; DT_INIT/DT_FINI own their arrays, otherwise the loader runs them; main owns its initializer and arrays\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
@@ -361,18 +365,29 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
                                          ) {
     std::vector<Cpu::SceHostModule> hosts{
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
-        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}, {"libScePosix", 0, 1}}},
+        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}, {"libScePosix", 0, 1}, {"libSceCoredump", 0, 1}}},
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
         {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
         {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}, {"libSceLibcInternal", 0, 1}}},
         {"libSceAudioOut.prx", {"libSceAudioOut", 0, 1, 1}, {{"libSceAudioOut2", 0, 1}}},
         {"libSceNpManager.prx", {"libSceNpManager", 0, 1, 1}, {{"libSceNpManager", 0, 1}}},
         {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
+        {"libSceAjm.native.prx", {"libSceAjm", 0, 1, 1}, {{"libSceAjm", 0, 1}}},
+        {"libSceAudio3d.prx", {"libSceAudio3d", 0, 1, 1}, {{"libSceAudio3d", 0, 1}}},
+        {"libSceHttp2.prx", {"libSceHttp2", 0, 1, 1}, {{"libSceHttp2", 0, 1}}},
+        {"libSceSsl.prx", {"libSceSsl", 0, 2, 1}, {{"libSceSsl", 0, 1}}},
+        {"libHttpServer.Prospero.prx", {"libHttpServer.Prospero", 0, 1, 1}, {{"libHttpServer", 0, 1}, {"libHttpServer.Prospero", 0, 1}}},
         {"libSceJson.prx", {"libSceJson", 0, 1, 1}, {{"libSceJson2", 0, 1}, {"libSceJson", 0, 1}}},
         {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}},
         {"libSceNpWebApi.prx", {"libSceNpWebApi", 0, 1, 1}, {{"libSceNpWebApi", 0, 1}}},
         {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}},
-        {"libScePad.prx", {"libScePad", 0, 1, 1}, {{"libScePad", 0, 1}}}};
+        {"libScePad.prx", {"libScePad", 0, 1, 1}, {{"libScePad", 0, 1}}},
+        // Json2 is served by the libSceJson provider under its own file name. Fiber and RazorCpu
+        // are listed as DT_NEEDED by titles that import nothing from them; any import that does
+        // appear still binds lazily as unresolved.
+        {"libSceJson2.prx", {"libSceJson2", 0, 1, 1}, {{"libSceJson2", 0, 1}}},
+        {"libSceFiber.prx", {"libSceFiber", 0, 1, 1}, {{"libSceFiber", 0, 1}}},
+        {"libSceRazorCpu.prx", {"libSceRazorCpu", 0, 1, 1}, {{"libSceRazorCpu", 0, 1}}}};
     // Modules the upstream bridge and the leaf native provider serve. Several libraries may share
     // one module; a module/library pair both providers serve is declared once.
     auto upstreamHosts = Cpu::SceUpstreamPrxBridge::Hosts();
@@ -391,8 +406,10 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
     if (native) native->AddHostModules(hosts);
 #endif
     bool kernelPrx = false, kernelSprx = false;
+    std::set<std::string> neededFiles;
     const auto neededKernel = [&](const Cpu::SceParsedImage& image) {
         for (const auto& needed : image.NeededFiles) {
+            neededFiles.insert(needed);
             if (needed == "libkernel.prx") kernelPrx = true;
             else if (needed == "libkernel.sprx") kernelSprx = true;
         }
@@ -411,6 +428,20 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         if (kernelPrx && kernelSprx)
             throw std::runtime_error("Unsupported SCE libkernel host filename aliases: graph requires both libkernel.prx and libkernel.sprx");
         if (kernelPrx) host.Filename = "libkernel.prx";
+    }
+    // Titles spell the same system module as .prx or .sprx; a host module answers to the spelling
+    // the graph asks for when the declared one is not requested.
+    for (auto& host : hosts) {
+        if (host.Module.Name == "libkernel" || neededFiles.contains(host.Filename)) continue;
+        for (const std::string_view from : {".sprx", ".prx"}) {
+            if (host.Filename.size() <= from.size() ||
+                host.Filename.compare(host.Filename.size() - from.size(), from.size(), from) != 0) continue;
+            auto alias = host.Filename.substr(0, host.Filename.size() - from.size()) + (from == ".sprx" ? ".prx" : ".sprx");
+            if (neededFiles.contains(alias) && std::none_of(hosts.begin(), hosts.end(),
+                    [&](const auto& other) { return other.Filename == alias; }))
+                host.Filename = std::move(alias);
+            break;
+        }
     }
     return hosts;
 }
@@ -671,6 +702,8 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::ScePadImports> padRuntime;
         std::unique_ptr<Cpu::SceImportStubs> importStubs;
         std::unique_ptr<Cpu::SceNetAddressImports> netAddressRuntime;
+        std::unique_ptr<Cpu::SceAjmImports> ajmRuntime;
+        std::unique_ptr<Cpu::SceNetImports> netRuntime;
         std::unique_ptr<Cpu::SceJsonImports> jsonRuntime;
         std::unique_ptr<Cpu::SceCommonDialogImports> commonDialogRuntime;
         std::unique_ptr<Cpu::SceModules> modules;
@@ -753,6 +786,20 @@ int main(int argc, char** argv) {
                 if (nativeRuntime) nativeRuntime->AttachPadInput(padRuntime->Input());
 #endif
                 netAddressRuntime = std::make_unique<Cpu::SceNetAddressImports>(machine);
+                ajmRuntime = std::make_unique<Cpu::SceAjmImports>(machine);
+                netRuntime = std::make_unique<Cpu::SceNetImports>(machine);
+                netRuntime->SetStopCheck([] { return StopSignal::received.load() != 0; });
+                if (threadRuntime) netRuntime->SetErrnoAddress([owner = std::weak_ptr<Cpu::GuestThreads>(threadRuntime)] {
+                    const auto runtime = owner.lock();
+                    if (!runtime) return std::uint64_t{0};
+                    try { return runtime->ActiveErrnoAddress(); }
+                    catch (const std::runtime_error&) { return std::uint64_t{0}; }
+                });
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                if (nativeRuntime) netRuntime->SetUserEventTrigger([native = nativeRuntime.get()](std::uint64_t queue, std::int32_t id, std::uint64_t data) {
+                    return native->TriggerUserEvent(queue, id, data);
+                });
+#endif
                 jsonRuntime = std::make_unique<Cpu::SceJsonImports>(machine);
                 commonDialogRuntime = std::make_unique<Cpu::SceCommonDialogImports>(machine, 0x7ffdf2000000);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
@@ -768,6 +815,8 @@ int main(int argc, char** argv) {
                     if (const auto gate = leafSystemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = padRuntime->Resolve(import)) return *gate;
                     if (const auto gate = netAddressRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = ajmRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = netRuntime->Resolve(import)) return *gate;
                     if (const auto gate = jsonRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;

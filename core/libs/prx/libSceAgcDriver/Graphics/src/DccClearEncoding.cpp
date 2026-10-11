@@ -95,6 +95,7 @@ const char* DccKeysName(DccKeys keys) {
         case DccKeys::Clear1110: return "1110";
         case DccKeys::Clear1111: return "1111";
         case DccKeys::ClearRegister: return "register";
+        case DccKeys::ClearSingle: return "single";
         case DccKeys::Mixed: return "mixed";
         case DccKeys::Unreadable: return "unreadable";
     }

@@ -317,6 +317,11 @@ void NativeModuleRunner::SetModuleSource(std::function<std::span<const SceModule
     if (impl->shutdown) throw std::runtime_error("Native module source set after shutdown");
     impl->threadExtras->SetModuleSource(std::move(source));
 }
+int NativeModuleRunner::TriggerUserEvent(std::uint64_t queue, std::int32_t id, std::uint64_t data) {
+    if (impl->shutdown || !impl->events) return 9;
+    return impl->events->Provider().TriggerUserEvent(queue, id, data);
+}
+
 void NativeModuleRunner::AttachPadInput(std::shared_ptr<PadHostInput> input) {
     impl->checkOwner();
     if (impl->shutdown) throw std::runtime_error("Native pad input attached after shutdown");

@@ -6,9 +6,6 @@
 namespace Cpu::UpstreamPrx {
 namespace {
 
-// Not bridged here: AppendTouchRecognizer, RemoveTouchRecognizer and UpdateAllTouchRecognizer are
-// NotImplemented upstream (they throw); SceLeafSystemImports answers them with success because no touch
-// input exists.
 constexpr Export exports[]{
     ANYPS5_UPSTREAM_EXPORT(sceSystemGestureInitializePrimitiveTouchRecognizer, Opaque),
     ANYPS5_UPSTREAM_EXPORT(sceSystemGestureFinalizePrimitiveTouchRecognizer),
@@ -16,6 +13,9 @@ constexpr Export exports[]{
     ANYPS5_UPSTREAM_EXPORT(sceSystemGestureCreateTouchRecognizer, I32, Opaque, I32, Opaque, Opaque),
     ANYPS5_UPSTREAM_EXPORT(sceSystemGestureClose, I32),
     ANYPS5_UPSTREAM_EXPORT(sceSystemGestureUpdatePrimitiveTouchRecognizer, I32, Opaque),
+    ANYPS5_UPSTREAM_EXPORT(sceSystemGestureAppendTouchRecognizer, I32, Opaque),
+    ANYPS5_UPSTREAM_EXPORT(sceSystemGestureRemoveTouchRecognizer, I32, Opaque),
+    ANYPS5_UPSTREAM_EXPORT(sceSystemGestureUpdateAllTouchRecognizer, I32),
     ANYPS5_UPSTREAM_EXPORT(sceSystemGestureGetTouchEventsCount, I32, Opaque),
     ANYPS5_UPSTREAM_EXPORT(sceSystemGestureGetTouchEventByIndex, I32, Opaque, I32, Opaque),
 };

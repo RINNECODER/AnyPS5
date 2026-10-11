@@ -11,6 +11,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <optional>
@@ -60,6 +61,19 @@ NSWindow* window(const std::string& title) {
     for(NSWindow* w in NSApp.windows) if([w.title isEqualToString:[NSString stringWithUTF8String:title.c_str()]]) return w;
     throw std::runtime_error("Assembly fixture window missing");
 }
+// A host window only accepts input while it holds real AppKit focus, and on a shared desktop another app can
+// take activation between any two statements. Wait (bounded only against a hang) for the genuine focused
+// state, re-requesting activation, before every stimulus; the assertions that follow are unchanged.
+NSWindow* focusWindow=nil;
+void ensureFocused(Cpu::NativeModuleRunner& runner) {
+    auto& host=runner.Graphics().Window();
+    const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+    while(!host.Snapshot().focused&&std::chrono::steady_clock::now()<end) {
+        host.PumpMainThread(std::chrono::milliseconds(10));
+        AnyPS5::Host::RestoreFocusForTest(focusWindow);
+    }
+    require(host.Snapshot().focused,(std::string("Native runner host never received real AppKit focus active=")+(NSApp.isActive?"1":"0")+" key="+(focusWindow.isKeyWindow?"1":"0")+" vis="+(focusWindow.visible?"1":"0")+" policy="+std::to_string((int)NSApp.activationPolicy)+" front="+std::string([NSWorkspace.sharedWorkspace.frontmostApplication.localizedName UTF8String]?:"?")).c_str());
+}
 void postKey(NSWindow* w,bool down) {
     NSEvent* event=[NSEvent keyEventWithType:(down?NSEventTypeKeyDown:NSEventTypeKeyUp)
         location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:w.windowNumber
@@ -77,10 +91,24 @@ void assertPumped(Cpu::NativeModuleRunner& runner,const char* phase,bool down) {
             (std::string("Owner boundary did not drain posted AppKit input into the attached pad in guest phase: ")+phase).c_str());
         return;
     }
-    require(std::any_of(batch.events.begin(),batch.events.end(),[down](const auto& event) {
-        const auto key=std::get_if<::KeyboardInputEvent>(&event.payload);
-        return key&&key->keyCode==0x04&&key->pressed==down&&!key->resetKeys&&!key->connectionChange;
-    }),(std::string("Assembly owner boundary failed to pump posted AppKit input in actual guest phase: ")+phase).c_str());
+    const auto hasKey=[down](const auto& events) {
+        return std::any_of(events.begin(),events.end(),[down](const auto& event) {
+            const auto key=std::get_if<::KeyboardInputEvent>(&event.payload);
+            return key&&key->keyCode==0x04&&key->pressed==down&&!key->resetKeys&&!key->connectionChange;
+        });
+    };
+    bool found=hasKey(batch.events);
+    const bool focusLost=std::any_of(batch.events.begin(),batch.events.end(),[](const auto& event) {
+        const auto focus=std::get_if<AnyPS5::Host::FocusChanged>(&event.payload);return focus&&!focus->focused;
+    });
+    if(!found&&focusLost) {
+        // The host drops key input while unfocused; another app took focus after the post. With that real focus
+        // loss observed, restore focus, post the key again and require the owner pump to drain it.
+        ensureFocused(runner);postKey(focusWindow,down);
+        runner.Graphics().Window().PumpMainThread(std::chrono::milliseconds(10));
+        found=hasKey(runner.Graphics().Window().DrainEvents().events);
+    }
+    require(found,(std::string("Assembly owner boundary failed to pump posted AppKit input in actual guest phase: ")+phase).c_str());
 }
 // Explicit public x86 machine-code producer, using the production thread gates.
 // Child creation allocates its genuine owned stack/errno/TLS through the runner.
@@ -144,8 +172,8 @@ void idleAssembly(Cpu::Machine& machine,std::shared_ptr<Cpu::GuestThreads> threa
                   Cpu::NativeModuleRunner& runner,NSWindow* fixtureWindow) {
     // Synthetic public provider domain. Its wake is gated by actual delivered
     // AppKit input after the translated caller parked, not a fake EOP receipt.
-    struct State { Cpu::GuestThreadHandle caller=0;unsigned delivered=0; };
-    auto state=std::make_shared<State>();
+    struct State { Cpu::GuestThreadHandle caller=0;unsigned delivered=0;NSWindow* window=nil; };
+    auto state=std::make_shared<State>();state->window=fixtureWindow;
     auto domain=std::make_shared<Cpu::GuestThreads::WaitDomain>(threads->CreateWaitDomain(machine,[](auto){}));
     domain->SetOwnerPump([weak=std::weak_ptr<Cpu::GuestThreads::WaitDomain>(domain),state,&runner] {
         const auto domain=weak.lock();if(!domain||!state->caller||!domain->IsWaiting(state->caller,71))return false;
@@ -155,6 +183,14 @@ void idleAssembly(Cpu::Machine& machine,std::shared_ptr<Cpu::GuestThreads> threa
             return key&&key->keyCode==0x04&&key->pressed&&!key->resetKeys&&!key->connectionChange;
         });
         if(delivered) {++state->delivered;require(domain->Wake(state->caller,71,0x2468),"Idle input wake lost exact suspended call");}
+        else {
+            // The host drops key input while unfocused, so a focus steal after the post loses the key without
+            // any defect in the pump. Observing that real focus-loss event, restore focus and post it again.
+            const bool focusLost=std::any_of(batch.events.begin(),batch.events.end(),[](const auto& event) {
+                const auto focus=std::get_if<AnyPS5::Host::FocusChanged>(&event.payload);return focus&&!focus->focused;
+            });
+            if(focusLost){ensureFocused(runner);postKey(state->window,true);}
+        }
         return true;
     });
     constexpr auto WaitGate=Code+1280,Caller=Code+256;
@@ -163,7 +199,7 @@ void idleAssembly(Cpu::Machine& machine,std::shared_ptr<Cpu::GuestThreads> threa
     });
     X86 caller;caller.op({0x48,0x83,0xec,8});caller.call(WaitGate);caller.op({0x48,0x83,0xc4,8,0xc3});
     machine.Write(Caller,std::as_bytes(std::span(caller.bytes)));
-    runner.Graphics().Window().DrainEvents();
+    ensureFocused(runner);runner.Graphics().Window().DrainEvents();
     Cpu::GuestPhaseBudget budget(1000);
     const auto result=threads->InvokeModule({Cpu::GuestModuleCallKind::Initialize,Caller,Code+2048,{}},budget);
     require(result.Reason==Cpu::StopReason::Address&&result.ReturnValue==0x2468&&state->delivered==1,
@@ -318,11 +354,11 @@ void run(const char* mainPath,const char* dependencyPath,const char* utility,con
     threads->AdoptInitial({graph.Main().Entry,graph.InitialStack(),graph.Tls(),graph.ThreadTlsFactory()});
     auto executor=threads->ModuleExecutor();
     unsigned initialized=0,finalized=0,entered=0;
-    NSWindow* fixtureWindow=window(config.WindowTitle);
+    NSWindow* fixtureWindow=window(config.WindowTitle);focusWindow=fixtureWindow;
     const auto invoke=executor.Invoke;
     executor.Invoke=[&](const Cpu::GuestModuleCall& call,Cpu::GuestPhaseBudget& budget) {
         require(runner.MappingGeneration()>=1,"Actual initializer/finalizer preceded native initial publication");
-        runner.Graphics().Window().DrainEvents();postKey(fixtureWindow,false);
+        ensureFocused(runner);runner.Graphics().Window().DrainEvents();postKey(fixtureWindow,false);
         const auto result=invoke(call,budget);assertPumped(runner,call.Kind==Cpu::GuestModuleCallKind::Initialize?"initialize":"finalize",false);
         if(call.Kind==Cpu::GuestModuleCallKind::Initialize)++initialized;else++finalized;
         return result;
@@ -331,7 +367,7 @@ void run(const char* mainPath,const char* dependencyPath,const char* utility,con
     executor.RunEntry=[&](Cpu::GuestPhaseBudget& budget) {
         const bool terminal=threads->PendingEntryControl().Kind!=Cpu::GuestEntryControlKind::None;
         const bool closing=std::string(mode)=="close";
-        if(!entered&&!closing) {runner.Graphics().Window().DrainEvents();postKey(fixtureWindow,true);}
+        if(!entered&&!closing) {ensureFocused(runner);runner.Graphics().Window().DrainEvents();postKey(fixtureWindow,true);}
         const auto result=entry(budget);
         if(!entered&&!closing)assertPumped(runner,"entry",true);
         if(!terminal)++entered;

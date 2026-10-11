@@ -301,7 +301,8 @@ struct SceModules::Impl {
                     std::string unresolved;
                     if (hostMatches > 1 || (!hostMatches && !lazy.Bind))
                         fail("unresolved typed import scope/version provider for " + import.Nid);
-                    if (!hostMatches) unresolved = "no provider declares module " + import.ModuleName + " library " + import.LibraryName;
+                    if (!hostMatches) unresolved = "no provider declares module " + import.ModuleName + ":" + std::to_string(import.ModuleMajor) + "." +
+                                 std::to_string(import.ModuleMinor) + " library " + import.LibraryName + ":" + std::to_string(import.LibraryVersion);
                     else {
                         if (!consumerResolver && !resolver) fail("missing typed host resolver for " + import.Nid);
                         try {

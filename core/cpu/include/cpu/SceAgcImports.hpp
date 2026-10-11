@@ -28,7 +28,14 @@ enum class AgcAbiContract {
     // pointers are never dereferenced by the host; the bridge marshals every
     // memory operand and runs the upstream encoder on host-side copies.
     UpstreamPacketSizes, UpstreamPatches, UpstreamMarkers, UpstreamRegisters, UpstreamDraw,
-    UpstreamAcb, UpstreamCb, UpstreamDcb, UpstreamPacketInfo
+    UpstreamAcb, UpstreamCb, UpstreamDcb, UpstreamPacketInfo,
+    // Shader helpers run on host copies of guest Shader structs; register
+    // defaults are published as guest tables.
+    UpstreamShader,
+    // libSceAgcDriver leaf exports through prx bridge descriptors.
+    UpstreamDriver,
+    // Compute-queue flip and rendering wait: the Metal driver's packets.
+    AcbSetFlipCommandBuffer56, AcbWaitUntilSafeForRenderingCommandBuffer56
 };
 
 // These policies constrain the admitted target use, independently of the source

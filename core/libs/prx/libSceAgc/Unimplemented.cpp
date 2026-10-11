@@ -5,16 +5,6 @@
 
 extern "C" {
 
-int APS5_VABI sceAgcAcbPushMarkerSpan() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcAcbSetMarkerSpan() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
 int APS5_VABI sceAgcAcbSetWorkloadComplete() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
@@ -26,21 +16,6 @@ int APS5_VABI sceAgcAcbSetWorkloadStreamInactive() {
 }
 
 int APS5_VABI sceAgcAcbSetWorkloadsActive() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcAcquireMemSetEngine() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcDcbPushMarkerSpan() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcDcbSetMarkerSpan() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -80,27 +55,7 @@ int APS5_VABI sceAgcCbMemsetExclusive() {
  return 0;
 }
 
-int APS5_VABI sceAgcBranchPatchSetThenTarget_0300() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
 int APS5_VABI sceAgcGetGsPrimPayload() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcSetShaderInstrumentation() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcGetShaderInstrumentation() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceAgcBranchPatchSetElseTarget_0300() {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }

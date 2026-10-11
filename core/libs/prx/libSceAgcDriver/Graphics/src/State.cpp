@@ -104,6 +104,7 @@ constexpr std::uint32_t DepthControlMask = ~0x007007f0u;
 constexpr std::uint32_t ShaderControlMask = ~(0x0000f870u | 0x00020600u | 0x00010000u);
 constexpr std::uint32_t PixelStageRunsMask = 0x00020747u;
 constexpr std::uint32_t AlphaToCoverageMask = ~0x0001ff00u;
+constexpr std::uint32_t AlphaToCoverageUndithered = 0x0000aa01u;
 constexpr std::uint32_t ScanModeMask = ~0x22u;
 constexpr std::uint32_t ScanControlMask = ~0x76023fffu;
 constexpr std::uint32_t ScreenOffsetMask = ~0x01ff01ffu;
@@ -398,11 +399,13 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
             if (number == floating) return single(VK_FORMAT_R16_SFLOAT, 2);
             if (number == uint) return single(VK_FORMAT_R16_UINT, 2);
             return fail();
-        case 3:
-            if (swap != 0) return fail();
-            if (number == unorm) return {VK_FORMAT_R8G8_UNORM, 2};
-            if (number == snorm) return {VK_FORMAT_R8G8_SNORM, 2};
+        case 3: {
+            if (swap > 1) return fail();
+            const auto mapping = static_cast<std::uint8_t>(alternate ? 0xecu : 0xe4u);
+            if (number == unorm) return {VK_FORMAT_R8G8_UNORM, 2, mapping};
+            if (number == snorm) return {VK_FORMAT_R8G8_SNORM, 2, mapping};
             return fail();
+        }
         case 4:
             if (number == floating) return single(VK_FORMAT_R32_SFLOAT, 4);
             if (number == uint) return single(VK_FORMAT_R32_UINT, 4);
@@ -595,7 +598,8 @@ State DecodeState(const QueueState& queue) {
         Require((depthControl & 0xc0000000u) == 0, "depth-conditional color writes are unsupported");
     }
     zero(cx, 0x203, shaderControlMask(read(cx, 0x1c4)), "depth export, shader coverage or ordered fragment execution");
-    zero(cx, 0x2dc, AlphaToCoverageMask, "alpha-to-coverage");
+    result.alphaToCoverage = read(cx, 0x2dc) == AlphaToCoverageUndithered;
+    if (!result.alphaToCoverage) zero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage");
     zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
     zero(cx, 0x292, ScanModeMask, "scan conversion mode");
     zero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization");
@@ -746,6 +750,10 @@ State DecodeState(const QueueState& queue) {
                 state.dstAlphaBlendFactor = alphaFactorWithOpaqueDestination(state.dstAlphaBlendFactor);
             }
             for (std::uint32_t i = 0; i < 4; ++i) result.blendConstants[i] = readFloat(cx, 0x105 + i);
+            if (mapping == 0xecu) {
+                const auto destinationAlpha = [](VkBlendFactor factor) { return factor == VK_BLEND_FACTOR_DST_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA || factor == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE; };
+                if (destinationAlpha(state.srcColorBlendFactor) || destinationAlpha(state.dstColorBlendFactor) || destinationAlpha(state.srcAlphaBlendFactor) || destinationAlpha(state.dstAlphaBlendFactor)) throw std::runtime_error("AGC graphics: blending into an 8_8 color target with the alternate component order with a factor of the destination alpha, which the target keeps in its second channel, is not implemented");
+            }
         }
         if (color.packing != ShaderRecompiler::ColorExportPacking::None) {
             const auto slotExport = (exportFormat >> (4u * color.exportIndex)) & 0xfu;
@@ -766,6 +774,13 @@ State DecodeState(const QueueState& queue) {
         Require(result.colors.front().componentMapping == 0xe4u, "dual-source blending into a component-swapped color target is unsupported");
         Require(((exportFormat >> 4u) & 0xfu) == (exportFormat & 0xfu), "dual-source blending needs the MRT1 export in the MRT0 export format");
         Require(((shaderMask >> 4u) & 0xfu) == (shaderMask & 0xfu), "dual-source blending needs the MRT1 export with the MRT0 shader mask");
+    }
+    if (result.alphaToCoverage) {
+        const auto mrt0 = std::find_if(result.colors.begin(), result.colors.end(), [](const ColorTarget& color) { return color.exportIndex == 0; });
+        Require(mrt0 != result.colors.end(), "alpha-to-coverage without a written MRT0 color target is unsupported");
+        const auto format = exportFormat & 0xfu;
+        Require(format == 4u || format == 5u || format == 6u || format == 9u, "alpha-to-coverage needs an MRT0 export format with a floating-point alpha");
+        Require(mrt0->componentMapping == 0xe4u && mrt0->packing == ShaderRecompiler::ColorExportPacking::None, "alpha-to-coverage into a component-swapped or packed MRT0 target is unsupported");
     }
     APS5_LOG_OUT_DEBUG("DecodeState done colorTarget=%u render=%ux%u topology=%u", result.hasColorTarget ? 1u : 0u, result.renderExtent.width, result.renderExtent.height, static_cast<unsigned>(result.topology));
     return result;
@@ -980,7 +995,9 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     std::uint32_t zFormat = 0;
     static_cast<void>(value(cx, 0x1c4, zFormat));
     if (auto reason = nonzero(cx, 0x203, shaderControlMask(zFormat), "depth export, shader coverage or ordered fragment execution"); !reason.empty()) return reason;
-    if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "alpha-to-coverage"); !reason.empty()) return reason;
+    if (value(cx, 0x2dc, word) && word != AlphaToCoverageUndithered) {
+        if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage"); !reason.empty()) return reason;
+    }
     if (auto reason = nonzero(cx, 0x2f8, ~0u, "multisampling or coverage conversion"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x292, ScanModeMask, "scan conversion mode"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
@@ -1031,6 +1048,15 @@ std::string NullPixelProgramRejection(const QueueState& queue) {
 std::vector<RegisterRead>*& RegisterReadLog() {
     static thread_local std::vector<RegisterRead>* log = nullptr;
     return log;
+}
+
+bool SplitsAlternateAlpha(const State& state) {
+    for (std::size_t index = 0; index < state.colors.size() && index < state.blends.size(); ++index) {
+        const auto& blend = state.blends[index];
+        if (state.colors[index].componentMapping != 0xecu || !blend.blendEnable) continue;
+        if (blend.srcColorBlendFactor != blend.srcAlphaBlendFactor || blend.dstColorBlendFactor != blend.dstAlphaBlendFactor || blend.colorBlendOp != blend.alphaBlendOp) return true;
+    }
+    return false;
 }
 
 bool DrawKeyCovers(RegisterRead read) {

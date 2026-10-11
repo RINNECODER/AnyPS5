@@ -37,6 +37,16 @@ class FunctionBodyTests(unittest.TestCase):
         source = 'int APS5_VABI sceExample() {\nuse("// }", "/* { */");\nreturn 0;\n}'
         self.assertEqual(function_body(source.splitlines(), 0), 'use("","");return0;')
 
+    def test_apostrophes_in_comments_do_not_open_character_literals(self):
+        source = "int APS5_VABI sceExample() {\n// don't fail here\nvalidate();\n// it's fine\nreturn 0;\n}"
+        body = function_body(source.splitlines(), 0)
+        self.assertEqual(body, "validate();return0;")
+        self.assertIsNone(STUB_BODY.fullmatch(body))
+        source = "int APS5_VABI sceExample() {\n/* don't */\nreturn 0;\n}\nstatic const char Separator = '/';"
+        self.assertEqual(function_body(source.splitlines(), 0), "return0;")
+        source = "int APS5_VABI sceExample() {\nuse(\"http://x\"); // isn't a stub\nreturn 0;\n}"
+        self.assertEqual(function_body(source.splitlines(), 0), 'use("");return0;')
+
     def test_declaration_has_no_body(self):
         source = "int APS5_VABI sceExample();\nint APS5_VABI sceOther() { return 0; }"
         self.assertIsNone(function_body(source.splitlines(), 0))

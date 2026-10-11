@@ -224,11 +224,6 @@ struct SceLeafSystemImports::Impl {
             {&SaveData, "sceSaveDataCommit", ok},
             {&SaveData, "sceSaveDataPrepare", ok},
 
-            // Upstream throws NotImplemented for these; with no touch input there is nothing to do.
-            {&SystemGesture, "sceSystemGestureAppendTouchRecognizer", ok},
-            {&SystemGesture, "sceSystemGestureRemoveTouchRecognizer", ok},
-            {&SystemGesture, "sceSystemGestureUpdateAllTouchRecognizer", ok},
-
             // The event handler is never invoked: no keyboard events exist.
             {&Ime, "sceImeUpdate", [](Impl&, Machine& guest) -> std::int32_t {
                 if (!argument(guest, 0)) Fault("sceImeUpdate", "invalid argument");

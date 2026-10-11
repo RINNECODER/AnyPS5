@@ -33,7 +33,18 @@ extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetMarker(CommandBuffer* buf, const
 extern "C" std::uint32_t* APS5_VABI sceAgcAcbPushMarker(CommandBuffer* buf, const char* str, std::uint32_t color);
 extern "C" std::uint32_t* APS5_VABI sceAgcAcbPopMarker(CommandBuffer* buf);
 extern "C" std::uint32_t* APS5_VABI sceAgcAcbSetMarker(CommandBuffer* buf, const char* str, std::uint32_t color);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbPushMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
+extern "C" std::uint32_t* APS5_VABI sceAgcAcbPushMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
+extern "C" std::uint32_t* APS5_VABI sceAgcAcbSetMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
 extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetIndexBuffer(CommandBuffer* buf, std::uint64_t indexAddress);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetBaseIndirectArgs(CommandBuffer* buf, std::uint32_t shaderType, const volatile void* indirectBaseAddr);
+extern "C" std::uint32_t* APS5_VABI sceAgcSetNop(CommandBuffer* buf, std::uint32_t sizeDw);
+extern "C" std::uint32_t APS5_VABI sceAgcDcbBeginOcclusionQueryGetSize(std::uint8_t type);
+extern "C" std::uint32_t APS5_VABI sceAgcDcbEndOcclusionQueryGetSize();
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbAcquireMem(CommandBuffer* buf, std::uint8_t engine, std::uint32_t cbDbOp, std::uint32_t gcrControl, const volatile void* base, std::uint64_t sizeBytes, std::uint32_t pollCycles);
+extern "C" std::uint32_t* APS5_VABI sceAgcAcbAcquireMem(CommandBuffer* buf, std::uint32_t gcrControl, const volatile void* base, std::uint64_t sizeBytes, std::uint32_t pollCycles);
+extern "C" int APS5_VABI sceAgcAcquireMemSetEngine(std::uint32_t* cmd, std::uint32_t engine);
 
 namespace {
 
@@ -107,6 +118,21 @@ void testPackets() {
     check(noDown.cursor_up == scratch.data() + 6, "buffer without a down cursor did not use its top as the limit");
     expectFailure([&] { Agc::Command::WriteNop(&noDown, 3, __func__); });
     check(noDown.cursor_up == scratch.data() + 6, "allocation past the top of a buffer without a down cursor advanced its cursor");
+}
+
+void testNop() {
+    Storage storage;
+    storage.words.fill(0xdeadbeefu);
+    auto* single = sceAgcSetNop(&storage.buffer, 1);
+    auto* pair = sceAgcSetNop(&storage.buffer, 2);
+    auto* triple = sceAgcSetNop(&storage.buffer, 3);
+    const std::array<std::uint32_t, 7> expected{0xffff1000u, 0xc0001000u, 0, 0xc0011000u, 0, 0, 0xdeadbeefu};
+    check(single == storage.words.data() && pair == single + 1 && triple == pair + 2, "incorrect NOP placement");
+    check(std::equal(expected.begin(), expected.end(), storage.words.begin()), "incorrect NOP packet");
+    check(storage.buffer.cursor_up == storage.words.data() + 6, "incorrect NOP cursor advance");
+    expectFailure([&] { sceAgcSetNop(&storage.buffer, 0); });
+    expectFailure([&] { sceAgcSetNop(&storage.buffer, 0x4002u); });
+    check(storage.buffer.cursor_up == storage.words.data() + 6, "invalid NOP advanced the cursor");
 }
 
 void testClearState() {
@@ -186,6 +212,43 @@ void testMarkers() {
     expectFailure([] { sceAgcAcbSetMarker(nullptr, "frame", 0); });
 }
 
+void testMarkerSpans() {
+    Storage dcb;
+    Storage acb;
+    const char text[] = "framework";
+    const auto* dcbPush = sceAgcDcbPushMarkerSpan(&dcb.buffer, text, 5, 0xff0000u);
+    const auto* acbPush = sceAgcAcbPushMarkerSpan(&acb.buffer, text, 5, 0x00ff00u);
+    check(acbPush == acb.words.data() && acbPush[0] == Agc::Command::Header(0x10, 3, 0x0bu << 2u), "ACB push marker span header mismatch");
+    check(std::strcmp(reinterpret_cast<const char*>(acbPush + 1), "frame") == 0, "ACB push marker span text was not cut at its length");
+    const auto* acbWhole = sceAgcAcbPushMarkerSpan(&acb.buffer, "four", 4, 0);
+    check(acbWhole == acb.words.data() + 3 && acbWhole[0] == Agc::Command::Header(0x10, 3, 0x0bu << 2u) && acbWhole[2] == 0, "marker span of a whole dword has no terminator");
+    sceAgcDcbPushMarkerSpan(&dcb.buffer, "four", 4, 0);
+    const auto* acbSet = sceAgcAcbSetMarkerSpan(&acb.buffer, nullptr, 0, 0);
+    const auto* dcbSet = sceAgcDcbSetMarkerSpan(&dcb.buffer, nullptr, 0, 0);
+    check(acbSet == acb.words.data() + 6 && dcbSet == dcb.words.data() + 6, "set marker span did not return its push packet");
+    check(acbSet[0] == Agc::Command::Header(0x10, 2, 0x0bu << 2u) && acbSet[1] == 0 && acbSet[2] == Agc::Command::Header(0x10, 2, 0x0cu << 2u), "ACB set marker span is not a push and pop pair");
+    check(dcbPush == dcb.words.data() && dcb.words == acb.words, "ACB and DCB marker spans differ");
+    check(acb.buffer.cursor_up == acb.words.data() + 10, "incorrect ACB marker span cursor advance");
+    Storage named;
+    sceAgcDcbPushMarker(&named.buffer, "frame", 0);
+    Storage spanned;
+    sceAgcDcbPushMarkerSpan(&spanned.buffer, "frame", 5, 0);
+    check(named.words == spanned.words, "marker span differs from the marker of the same text");
+    const auto before = acb.words;
+    expectFailure([&] { sceAgcAcbPushMarkerSpan(&acb.buffer, nullptr, 1, 0); });
+    expectFailure([&] { sceAgcDcbSetMarkerSpan(&acb.buffer, text, 0x10000u, 0); });
+    expectFailure([] { sceAgcAcbSetMarkerSpan(nullptr, "frame", 5, 0); });
+    check(acb.words == before && acb.buffer.cursor_up == acb.words.data() + 10, "invalid marker span modified the command buffer");
+}
+
+void testOcclusionQuerySizes() {
+    check(sceAgcDcbBeginOcclusionQueryGetSize(0) == 16, "occlusion query begin size mismatch");
+    check(sceAgcDcbBeginOcclusionQueryGetSize(1) == 288, "type 1 occlusion query begin size mismatch");
+    check(sceAgcDcbEndOcclusionQueryGetSize() == 16, "occlusion query end size mismatch");
+    expectFailure([] { sceAgcDcbBeginOcclusionQueryGetSize(2); });
+    expectFailure([] { sceAgcDcbBeginOcclusionQueryGetSize(0xff); });
+}
+
 void testIndexBuffer() {
     Storage storage;
     alignas(4) std::uint16_t indices[2]{};
@@ -203,6 +266,19 @@ void testIndexBuffer() {
         return;
     }
     throw std::runtime_error("misaligned index buffer was accepted");
+}
+
+void testIndirectBase() {
+    Storage storage;
+    alignas(8) std::uint32_t arguments[4]{};
+    const auto address = reinterpret_cast<std::uintptr_t>(arguments);
+    const auto* bound = sceAgcDcbSetBaseIndirectArgs(&storage.buffer, 0, arguments);
+    check(bound[1] == 1 && bound[2] == static_cast<std::uint32_t>(address) && bound[3] == static_cast<std::uint32_t>(address >> 32u), "indirect base address mismatch");
+    const auto* cleared = sceAgcDcbSetBaseIndirectArgs(&storage.buffer, 1, nullptr);
+    check(cleared == bound + 4 && (cleared[0] & 2u) != 0 && cleared[1] == 1 && cleared[2] == 0 && cleared[3] == 0, "indirect base was not cleared");
+    const auto before = storage.words;
+    expectFailure([&] { sceAgcDcbSetBaseIndirectArgs(&storage.buffer, 0, reinterpret_cast<const volatile void*>(address + 4)); });
+    check(storage.words == before, "misaligned indirect base modified packet memory");
 }
 
 void testContextState() {
@@ -369,6 +445,29 @@ void testMemory() {
     expectFailure([&] { sceAgcWaitRegMemPatchMask(truncated, 0x100000000ull); });
     expectFailure([&] { sceAgcWaitRegMemPatchMask(packet + 4, 1); });
     check(storage.words == beforeMask, "invalid mask patch modified packet memory");
+
+    Storage acquireStorage;
+    auto* acquire = sceAgcDcbAcquireMem(&acquireStorage.buffer, 0, 0x1234u, 0x567u, nullptr, 0x1000, 0);
+    check(acquire[0] == Agc::Command::Header(0x58u, 8), "acquire mem header mismatch");
+    check(acquire[1] == 0x1234u, "acquire mem engine bit was set");
+    check(sceAgcAcquireMemSetEngine(acquire, 1) == 0, "sceAgcAcquireMemSetEngine failed");
+    check(acquire[1] == 0x80001234u, "acquire mem engine bit was not set to 1");
+    check(sceAgcAcquireMemSetEngine(acquire, 0) == 0, "sceAgcAcquireMemSetEngine failed");
+    check(acquire[1] == 0x1234u, "acquire mem engine bit was not cleared to 0");
+    const auto beforeAcquire = acquireStorage.words;
+    expectFailure([&] { sceAgcAcquireMemSetEngine(nullptr, 0); });
+    auto* misalignedAcquire = reinterpret_cast<std::uint32_t*>(reinterpret_cast<unsigned char*>(acquire) + 1);
+    expectFailure([&] { sceAgcAcquireMemSetEngine(misalignedAcquire, 0); });
+    expectFailure([&] { sceAgcAcquireMemSetEngine(acquire, 2); });
+    expectFailure([&] { sceAgcAcquireMemSetEngine(acquire, 0xffffffffu); });
+    std::uint32_t wrongAcquire[8] = {0xc0065000u};
+    expectFailure([&] { sceAgcAcquireMemSetEngine(wrongAcquire, 0); });
+    check(acquireStorage.words == beforeAcquire, "invalid acquire engine patch modified packet memory");
+
+    auto* acbAcquire = sceAgcAcbAcquireMem(&acquireStorage.buffer, 0x567u, nullptr, 0x1000, 0);
+    check(acbAcquire[1] == 0x80000000u, "ACB acquire mem engine bit was not default 1");
+    check(sceAgcAcquireMemSetEngine(acbAcquire, 0) == 0, "sceAgcAcquireMemSetEngine failed on ACB acquire");
+    check(acbAcquire[1] == 0u, "ACB acquire mem engine bit was not cleared to 0");
 }
 
 void testDefaults() {
@@ -404,10 +503,14 @@ int main(int argc, char** argv) {
             return 0;
         }
         testPackets();
+        testNop();
         testClearState();
         testIndexedIndirectDraws();
         testMarkers();
+        testMarkerSpans();
+        testOcclusionQuerySizes();
         testIndexBuffer();
+        testIndirectBase();
         testContextState();
         testFlip();
         testRegisters();

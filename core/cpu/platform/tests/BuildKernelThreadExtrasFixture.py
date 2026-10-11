@@ -33,6 +33,12 @@ KERNEL = {
     "thread_getthreadid": "EI-5-jlq2dE",
     "module_from_addr": "f7KBOafysXo", "module_for_unwind": "RpQJJVKTiFM",
     "debug_raise": "OMDRKKAZ8I4", "debug_raise_release": "zE-wXIZjLoM", "debug_cpp_info": "cfwBSQyr5Ys",
+    "load_start": "wzvqT4UqKX8", "stop_unload": "QKd0qM58Qes", "module_dlsym": "LwG8g3niqwA",
+    "is_trinity": "tU5e3f9gSiU", "uuid_create": "Xjoosiw+XPI", "atexit_inc": "Tz4RNUCBbGI",
+    "atexit_dec": "8OnWXlgQlvo", "get_pid": "HoLVWNanBBc", "psem_init": "pDuPEf3m4fI", "psem_post": "IKP8typ0QUk",
+    "psem_wait": "YCV5dGGBcCo", "psem_destroy": "cDW233RAwWo", "psem_timedwait": "w5IHyvahg-o",
+    "get_rusage": "hHlZQUnlxSM", "sig_set": "VADc3MNQ3cM", "sig_mask": "6xVpy0Fdq+I",
+    "phdr_match": "Fjc4-n1+y2g", "err_loc": "9BcDykPmo1I", "clock_now": "QBi7HCK03hw",
 }
 fixture.IMPORTS = {name: (nid, "libkernel", 1, "B") for name, nid in KERNEL.items()}
 fixture.EXPORTS = {"_start": 2, "KernelThreadExtrasReceipt": 1}
