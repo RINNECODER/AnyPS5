@@ -1,7 +1,8 @@
-add_library(libSceLibcInternal SHARED EXCLUDE_FROM_ALL Export.cpp FileTime.cpp UserContext.cpp FilesystemStatistics.cpp)
+add_library(libSceLibcInternal SHARED EXCLUDE_FROM_ALL Export.cpp FileTime.cpp UserContext.cpp)
 target_include_directories(libSceLibcInternal PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(libSceLibcInternal PRIVATE ${CMAKE_DL_LIBS})
 configure_windows_unwind(libSceLibcInternal)
+target_sources(libSceLibcInternal PRIVATE FilesystemStatistics.cpp)
 
 if(BUILD_TESTING)
     add_test_executable(guest_fstatvfs_conversion_tests ${LIBS_INCLUDE_DIR}/tests/GuestFstatvfsConversion.cpp FilesystemStatistics.cpp)
