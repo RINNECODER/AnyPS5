@@ -1076,7 +1076,18 @@ std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue
     if (mode != 2u && mode != 6u) return std::nullopt;
     ColorMetadataPass pass{mode == 2u ? ColorMetadataPass::Mode::EliminateFastClear : ColorMetadataPass::Mode::DccDecompress, {}};
     Require((control->second & ~0x70u) == 0xcc0000u, "CB metadata pass with a nonstandard ROP, dual quads disabled or degamma");
-    Require(depthPlanesAbsent(cx) || ((read(cx, 0x200) & 0xfu) == 0 && (read(cx, 0x0) & 0xfu) == 0), "CB metadata pass with depth or stencil work");
+    const auto value = [&](std::uint32_t offset) {
+        const auto found = find(cx, offset);
+        return found == cx.end() ? 0u : found->second;
+    };
+    const bool planes = !depthPlanesAbsent(cx);
+    const auto depthControl = planes ? read(cx, 0x200) : 0u;
+    const bool depthWork = (depthControl & 0xfu) != 0 && ((depthControl & 8u) != 0 || !depthPassThrough(depthControl));
+    if (depthWork || (planes && (read(cx, 0x0) & 0xfu) != 0)) {
+        char text[192];
+        std::snprintf(text, sizeof(text), "CB metadata pass with depth or stencil work (DB_DEPTH_CONTROL 0x%08x, DB_RENDER_CONTROL 0x%08x, DB_Z_INFO 0x%08x, DB_STENCIL_INFO 0x%08x)", value(0x200), value(0x0), value(0x010), value(0x011));
+        throw std::runtime_error(text);
+    }
     zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
     zero(cx, 0x80, ~0u, "window offset");
     const auto viewportControl = read(cx, 0x206);

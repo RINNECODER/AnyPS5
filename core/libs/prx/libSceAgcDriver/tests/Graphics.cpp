@@ -1598,6 +1598,15 @@ void metadataPassTests() {
     queue.context[0x0] = 0;
     queue.context[0x200] = 0x70;
     Require(DecodeColorMetadataPass(queue).has_value(), "an always-pass depth function without a test refused the pass");
+    auto bound = queue;
+    bound.context[0x010] = 0x3;
+    bound.context[0x011] = 0x1;
+    bound.context[0x200] = 0x72;
+    Require(DecodeColorMetadataPass(bound).has_value(), "an always-pass depth test without writes refused the pass");
+    bound.context[0x200] = 0x76;
+    expectFailure([&] { DecodeColorMetadataPass(bound); }, "depth or stencil work");
+    bound.context[0x200] = 0x7a;
+    expectFailure([&] { DecodeColorMetadataPass(bound); }, "depth or stencil work");
     queue.context[0x91] = 0x40020;
     expectFailure([&] { DecodeColorMetadataPass(queue); }, "over part of a color target");
     queue.context[0x91] = 0x40040;
