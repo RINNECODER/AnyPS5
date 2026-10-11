@@ -155,6 +155,15 @@ static void CheckAsinfErrno() {
     Require(errno == 0);
 }
 
+static void CheckExp2Errno() {
+    errno = 0;
+    std::feclearexcept(FE_ALL_EXCEPT);
+    double result = exp2_nid_postfix(1024.0);
+    Require(errno == 0);
+    Require(std::isinf(result) && result > 0);
+    Require(std::fetestexcept(FE_OVERFLOW | FE_INEXACT) == (FE_OVERFLOW | FE_INEXACT));
+}
+
 static void CheckLongDouble() {
     Require(ExtendedBits(acosl_nid_postfix(-1.0L), 0xc90fdaa22168c235ull, 0x4000));
     Require(ExtendedBits(acosl_nid_postfix(0.0L), 0xc90fdaa22168c235ull, 0x3fff));
@@ -540,6 +549,7 @@ int main() {
     Require(exp2_nid_postfix(-3.) == 0.125);
     Require(ldexp_nid_postfix(0.75, 4) == 12.);
     CheckSquareRoot();
+    CheckExp2Errno();
     CheckExactOperations();
     CheckLongDouble();
     Require(scalbn_nid_postfix(0.75, -2) == 0.1875);
