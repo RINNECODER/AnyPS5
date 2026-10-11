@@ -57,6 +57,25 @@ extern int module_for_unwind(u64,int,void*);
 extern int debug_raise(u32,u32);
 extern int debug_raise_release(u32,u32);
 extern int debug_cpp_info(const void*);
+extern int load_start(const char*,u64,const void*,u32,const void*,int*);
+extern int stop_unload(int,u64,const void*,u32,const void*,int*);
+extern int module_dlsym(int,const char*,u64*);
+extern int is_trinity(void);
+extern int uuid_create(u32*);
+extern int atexit_inc(const void*);
+extern int atexit_dec(const void*);
+extern int get_pid(void);
+extern int psem_init(u64*,int,u32);
+extern int psem_post(u64*);
+extern int psem_wait(u64*);
+extern int psem_destroy(u64*);
+extern int psem_timedwait(u64*,const long*);
+extern int get_rusage(int,void*);
+extern u64 sig_set(int,u64);
+extern int sig_mask(int,const u32*,u32*);
+extern int phdr_match(const void*,const void*);
+extern int* err_loc(void);
+extern int clock_now(int,long*);
 #define FUNC(n) ".type " #n ",@function\n"
 __asm__(FUNC(thread_create) FUNC(thread_yield) FUNC(thread_join) FUNC(thread_self) FUNC(process_exit)
  FUNC(attr_init) FUNC(attr_destroy) FUNC(attr_policy) FUNC(rw_init) FUNC(rw_destroy) FUNC(rw_wrlock) FUNC(rw_rdlock)
@@ -68,7 +87,10 @@ __asm__(FUNC(thread_create) FUNC(thread_yield) FUNC(thread_join) FUNC(thread_sel
  FUNC(thread_detach) FUNC(thread_getname) FUNC(thread_rename) FUNC(thread_setprio) FUNC(thread_getprio)
  FUNC(thread_setaffinity) FUNC(thread_getaffinity) FUNC(thread_cancel) FUNC(thread_testcancel)
  FUNC(thread_getthreadid) FUNC(module_from_addr) FUNC(module_for_unwind) FUNC(debug_raise)
- FUNC(debug_raise_release) FUNC(debug_cpp_info));
+ FUNC(debug_raise_release) FUNC(debug_cpp_info) FUNC(load_start) FUNC(stop_unload) FUNC(module_dlsym)
+ FUNC(is_trinity) FUNC(uuid_create) FUNC(atexit_inc) FUNC(atexit_dec) FUNC(get_pid) FUNC(psem_init) FUNC(psem_post)
+ FUNC(psem_wait) FUNC(psem_destroy) FUNC(psem_timedwait) FUNC(get_rusage) FUNC(sig_set) FUNC(sig_mask)
+ FUNC(phdr_match) FUNC(err_loc) FUNC(clock_now));
 EXPORT volatile u64 KernelThreadExtrasReceipt[128];
 #define R KernelThreadExtrasReceipt
 static const char label[]="public-thread-extras-fixture";
@@ -241,6 +263,49 @@ static void debug(void) {
  R[10]=(u32)debug_raise(0x1234,5);R[11]=(u32)debug_raise_release(0x1234,5);R[12]=(u32)debug_cpp_info(0);
 }
 
+/* ---- mode 8: module loading, process identity, POSIX semaphores, signals ---- */
+EXPORT __attribute__((noreturn)) void _start(void);
+static u64 semA[4], semB[4], semC[4];
+static void* semWaiter(void* unused) {(void)unused;R[60]=(u32)psem_wait(semB);R[61]=1;return 0;}
+static void* semTimed(void* unused) {
+ long now[2];(void)unused;clock_now(0,now);now[1]+=20000000;if(now[1]>=1000000000){now[1]-=1000000000;++now[0];}
+ R[62]=(u32)psem_timedwait(semC,now);R[63]=(u32)*err_loc();return 0;
+}
+static void posixServices(void) {
+ int result=7;u64 address=0;u32 uuid[4]={~0u,~0u,~0u,~0u};
+ R[10]=(u32)load_start("/app0/kernel-thread-extras.elf",0,0,0,0,&result);R[11]=(u32)result;
+ R[12]=(u32)load_start("/system/common/lib/libSceUnknown.sprx",0,0,0,0,&result);R[13]=(u32)load_start(0,0,0,0,0,&result);
+ R[14]=(u32)module_dlsym(0,"_start",&address);R[15]=address==(u64)&_start;
+ R[16]=(u32)module_dlsym(0,"no_such_symbol",&address);R[17]=(u32)module_dlsym(9,"_start",&address);
+ R[18]=(u32)stop_unload(0,0,0,0,0,&result);R[19]=(u32)stop_unload(9,0,0,0,0,&result);
+ R[20]=(u32)is_trinity();R[21]=(u32)uuid_create(uuid);R[22]=(uuid[1]>>28)==4&&(uuid[2]&0xc0)==0x80&&uuid[0]!=~0u;
+ R[23]=(u32)uuid_create(0);
+ R[24]=(u32)atexit_dec((const void*)&_start);R[25]=(u32)atexit_inc((const void*)&_start);
+ R[26]=(u32)atexit_dec((const void*)&_start);R[27]=(u32)atexit_dec((const void*)&_start);R[28]=(u32)atexit_inc((const void*)0x10);
+ R[29]=get_pid()>0;
+ /* single-threaded semaphore contract */
+ R[30]=(u32)psem_init(semA,0,1);R[31]=(u32)psem_wait(semA);
+ {long past[2]={0,0};R[32]=(u32)psem_timedwait(semA,past);R[33]=(u32)*err_loc();}
+ R[34]=(u32)psem_post(semA);R[35]=(u32)psem_wait(semA);
+ R[36]=(u32)psem_destroy(semA);R[37]=(u32)psem_destroy(semA);R[38]=(u32)*err_loc();
+ R[39]=(u32)psem_init(semA,0,0x80000000u);R[59]=(u32)*err_loc();
+ /* a blocked waiter resumes only after the post */
+ status(psem_init(semB,0,0));
+ const u64 w=spawn(semWaiter,0,0,relocatedLabel);settle(4);R[41]=R[61];status(psem_post(semB));status(thread_join(w,0));R[42]=R[61];
+ /* timed wait that expires reports ETIMEDOUT through the waiter's own errno */
+ status(psem_init(semC,0,0));
+ const u64 t=spawn(semTimed,0,0,relocatedLabel);status(thread_join(t,0));
+ /* rusage, signals, signal mask, program-header match */
+ {u64 usage[18];R[43]=(u32)get_rusage(0,usage);R[44]=(u32)get_rusage(5,usage);}
+ R[45]=sig_set(2,0x1234);R[46]=sig_set(2,0x5678);R[47]=sig_set(9,0x1);R[48]=(u32)*err_loc();
+ {u32 set=0x6,old[4]={9,9,9,9};R[49]=(u32)sig_mask(1,&set,old);R[50]=old[0];
+  set=0x2;R[51]=(u32)sig_mask(2,&set,old);R[52]=old[0];R[53]=(u32)sig_mask(3,0,old);R[54]=old[0];R[55]=(u32)sig_mask(7,&set,old);}
+ {u64 info[4]={0x1000,0,(u64)&info,1};u64 header[7]={0x100000001ULL,0,0x2000,0,0,0x100,0};
+  info[2]=(u64)header;u64 inside=0x1000+0x2000+0x40;
+  R[56]=(u32)phdr_match(info,(const void*)inside);R[57]=(u32)phdr_match(info,(const void*)(0x1000+0x2000+0x100));
+  info[3]=0;R[58]=(u32)phdr_match(info,(const void*)inside);}
+}
+
 EXPORT __attribute__((noreturn)) void _start(void) {
  switch(R[1]){
  case 1: rwlocks();break;
@@ -250,6 +315,7 @@ EXPORT __attribute__((noreturn)) void _start(void) {
  case 5: controls();break;
  case 6: modules();break;
  case 7: debug();break;
+ case 8: posixServices();break;
  default: ++R[4];
  }
  finish();

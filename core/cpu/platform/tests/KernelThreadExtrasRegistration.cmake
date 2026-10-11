@@ -18,7 +18,7 @@ add_executable(anyps5_platform_kernel_thread_extras_test tests/KernelThreadExtra
 target_link_libraries(anyps5_platform_kernel_thread_extras_test PRIVATE anyps5_platform_components)
 target_compile_options(anyps5_platform_kernel_thread_extras_test PRIVATE -Wall -Wextra -Wpedantic)
 add_dependencies(anyps5_platform_kernel_thread_extras_test anyps5_platform_kernel_thread_extras_fixture)
-foreach(extrasCase IN ITEMS rwlock once tsd sync controls module debug)
+foreach(extrasCase IN ITEMS rwlock once tsd sync controls module debug posix)
     add_test(NAME anyps5_platform_kernel_thread_extras_${extrasCase}
         COMMAND anyps5_platform_kernel_thread_extras_test "${kernelThreadExtrasFixture}" "${extrasCase}")
     set_tests_properties(anyps5_platform_kernel_thread_extras_${extrasCase} PROPERTIES TIMEOUT 30)
