@@ -16,9 +16,12 @@
 #include "ModuleTable.hpp"
 #include "prx/libc/include/General.hpp"
 
+extern "C" void* APS5_VABI dlopen_nid_postfix(const char* path, int flags);
+
 namespace {
 
 constexpr int SCE_SYSMODULE_ERROR_UNLOADED = static_cast<int>(0x805A1001);
+constexpr int kRtldNow = 2;
 
 const char* findModuleName(const std::uint32_t id) {
     const auto it = kModuleTable.find(id);
@@ -27,6 +30,12 @@ const char* findModuleName(const std::uint32_t id) {
 
 std::mutex gMutex;
 std::unordered_map<std::uint32_t, std::int32_t> gLoadCount;
+std::unordered_map<std::uint32_t, KernelModule> gHandles;
+
+void* openHostModule(const char* name) {
+    const std::string relative = std::string("libs/") + name + ".prx";
+    return dlopen_nid_postfix(relative.c_str(), kRtldNow);
+}
 
 bool fillModuleInfoForUnwind(std::uint64_t addr, ModuleInfoForUnwind* info) {
 #ifdef _WIN32
@@ -72,6 +81,37 @@ int APS5_VABI sceSysmoduleGetModuleInfoForUnwind(std::uint64_t addr, int flags, 
     if (!fillModuleInfoForUnwind(addr, info)) {
         throw std::runtime_error("sceSysmoduleGetModuleInfoForUnwind: address not found");
     }
+    return 0;
+}
+
+int APS5_VABI sceSysmoduleGetModuleHandleInternal(std::uint32_t id, std::int32_t* handle) {
+    if ((id & 0x7fffffffu) == 0) {
+        throw std::runtime_error("sceSysmoduleGetModuleHandleInternal: invalid id 0");
+    }
+    if (!handle) {
+        throw std::runtime_error("sceSysmoduleGetModuleHandleInternal: null handle");
+    }
+    const char* name = findModuleName(id);
+    if (!name) {
+        throw std::runtime_error(std::string("sceSysmoduleGetModuleHandleInternal: unknown id ") + std::to_string(id));
+    }
+    std::lock_guard<std::mutex> lock(gMutex);
+    const auto loaded = gLoadCount.find(id);
+    if (loaded == gLoadCount.end() || loaded->second < 1) {
+        return SCE_SYSMODULE_ERROR_UNLOADED;
+    }
+    const auto existing = gHandles.find(id);
+    if (existing != gHandles.end()) {
+        *handle = existing->second;
+        return 0;
+    }
+    void* module = openHostModule(name);
+    if (!module) {
+        throw std::runtime_error(std::string("sceSysmoduleGetModuleHandleInternal: failed to open ") + name);
+    }
+    const auto value = static_cast<KernelModule>(reinterpret_cast<std::intptr_t>(module));
+    gHandles.emplace(id, value);
+    *handle = value;
     return 0;
 }
 

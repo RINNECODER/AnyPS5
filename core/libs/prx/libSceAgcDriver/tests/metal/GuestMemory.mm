@@ -22,6 +22,31 @@ using namespace metal;
 struct Header { uint version, count, entryBytes, reserved; };
 struct Range { ulong begin, end; device uchar* address; uint permissions, reserved; };
 struct Parameters { ulong address, value; uint bytes, reserved; };
+void AliasWrittenPage(device atomic_uint* fault, ulong address) {
+    uint key = uint(address >> 17) + 1u;
+    uint bit = 1u << uint((address >> 12) & 31ul);
+    uint hash = (key * 0x9e3779b1u) >> 21;
+    for (uint probe = 0; probe < 8; ++probe) {
+        uint slot = (hash + probe) & 2047u;
+        device atomic_uint* keyWord = fault + 10 + 2 * slot;
+        uint current = atomic_load_explicit(keyWord, memory_order_relaxed);
+        bool done = current == key;
+        if (!done) {
+            uint expected = 0;
+            atomic_compare_exchange_weak_explicit(keyWord, &expected, key, memory_order_relaxed, memory_order_relaxed);
+            done = expected == 0 || expected == key;
+            if (expected == 0) {
+                uint index = atomic_fetch_add_explicit(fault + 9, 1u, memory_order_relaxed);
+                atomic_store_explicit(fault + 10 + 4096 + index, slot, memory_order_relaxed);
+            }
+        }
+        if (done) {
+            atomic_fetch_or_explicit(keyWord + 1, bit, memory_order_relaxed);
+            return;
+        }
+    }
+    atomic_store_explicit(fault + 8, 1u, memory_order_relaxed);
+}
 kernel void GuestWrite(device const Header* header [[buffer(0)]], device atomic_uint* fault [[buffer(1)]], constant Parameters& parameters [[buffer(2)]]) {
     if (header->version != 1 || header->entryBytes != 32 || header->reserved != 0) {
         atomic_store_explicit(fault + 1, 4u, memory_order_relaxed);
@@ -40,14 +65,7 @@ kernel void GuestWrite(device const Header* header [[buffer(0)]], device atomic_
         device uchar* destination = ranges[i].address + parameters.address - ranges[i].begin;
         if (parameters.bytes == 8) *reinterpret_cast<device ulong*>(destination) = parameters.value;
         else *reinterpret_cast<device uint*>(destination) = uint(parameters.value);
-        uint page = uint(parameters.address >> 12) + 1u;
-        uint hash = (page * 0x9e3779b1u) >> 20;
-        for (uint probe = 0; probe < 8; ++probe) {
-            uint expected = 0;
-            device atomic_uint* slot = fault + 9 + ((hash + probe) & 4095);
-            if (atomic_compare_exchange_weak_explicit(slot, &expected, page, memory_order_relaxed, memory_order_relaxed) || expected == page) return;
-        }
-        atomic_store_explicit(fault + 8, 1u, memory_order_relaxed);
+        AliasWrittenPage(fault, parameters.address);
         return;
     }
     device uint* words = reinterpret_cast<device uint*>(fault);
@@ -63,16 +81,6 @@ device atomic_uint* AliasAddress(device const Header* header, ulong address, uin
             return reinterpret_cast<device atomic_uint*>(ranges[i].address + address - ranges[i].begin);
     }
     return nullptr;
-}
-void AliasWrittenPage(device atomic_uint* fault, ulong address) {
-    uint page = uint(address >> 12) + 1u;
-    uint hash = (page * 0x9e3779b1u) >> 20;
-    for (uint probe = 0; probe < 8; ++probe) {
-        uint expected = 0;
-        device atomic_uint* slot = fault + 9 + ((hash + probe) & 4095);
-        if (atomic_compare_exchange_weak_explicit(slot, &expected, page, memory_order_relaxed, memory_order_relaxed) || expected == page) return;
-    }
-    atomic_store_explicit(fault + 8, 1u, memory_order_relaxed);
 }
 kernel void GuestAlias(device const Header* header [[buffer(0)]], device atomic_uint* fault [[buffer(1)]], constant AliasParameters& parameters [[buffer(2)]], device uint* output [[buffer(3)]]) {
     device atomic_uint* write = AliasAddress(header, parameters.writeAddress, 2);
@@ -195,7 +203,7 @@ void RunGuestMemoryTests(const MetalTests::Context& context) {
     memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(readAddress, readOnly, false);
     Reject([&] { memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(address + 1, readOnly, true); }, "Overlapping guest span was accepted");
     Reject([&] { memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(std::numeric_limits<std::uint64_t>::max() - 4, readOnly, false); }, "Guest address overflow was accepted");
-    Reject([&] { memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(std::uint64_t{std::numeric_limits<std::uint32_t>::max()} << Abi::WrittenPageShift, readOnly, true); }, "Unrepresentable writable guest page was accepted");
+    Reject([&] { memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(Abi::WrittenAddressLimit, readOnly, true); }, "Unrepresentable writable guest page was accepted");
     Reject([&] { memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(0x1000, {}, true); }, "Empty guest span was accepted");
 
     auto snapshot = memory.CaptureAfterPriorSnapshotsComplete();
@@ -251,7 +259,10 @@ void RunGuestMemoryTests(const MetalTests::Context& context) {
     words[Abi::WrittenOverflowWord] = 1;
     Reject([&] { (void)invalid.CompleteAndCopyDirtyPagesToBorrowedHost(unknownCommands); }, "Guest copy-back accepted tracker overflow");
     words[Abi::WrittenOverflowWord] = 0;
-    words[Abi::WrittenSlotsWord] = static_cast<std::uint32_t>(readAddress >> Abi::WrittenPageShift) + 1;
+    words[Abi::WrittenSlotsWord] = Abi::WrittenChunkKey(readAddress);
+    words[Abi::WrittenSlotsWord + 1] = 1u << ((readAddress >> Abi::WrittenPageShift) & (Abi::WrittenChunkPages - 1u));
+    words[Abi::WrittenListWord] = 0;
+    words[Abi::WrittenCountWord] = 1;
     Reject([&] { (void)invalid.CompleteAndCopyDirtyPagesToBorrowedHost(unknownCommands); }, "Guest copy-back accepted a read-only dirty page");
 
     std::array<std::byte, 24> unalignedHost;

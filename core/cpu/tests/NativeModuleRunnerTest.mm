@@ -142,8 +142,8 @@ void childAssembly(Cpu::Machine& machine,std::shared_ptr<Cpu::GuestThreads> thre
             require(word(m,tlsWord)==0x2468,"Actual child FS store did not update its own TLS");
             std::uint64_t native=0;std::memcpy(&native,bytes.data()+tlsWord-tls.Address,8);
             require(native==0x2468,"Native child TLS lost its independent translated FS store");
-            rejects([&]{AgcDriver::NativeGuestMemory::ContiguousBorrowedRange(tlsWord,8,true);},
-                "read-only"); // High CPU TLS stays readable; written-page ABI cannot represent GPU writes.
+            require(AgcDriver::NativeGuestMemory::ContiguousBorrowedRange(tlsWord,8,true).size()==8,
+                "High CPU TLS is not writable under the 49-bit written-page ABI"); // The chunked written-page ABI covers every canonical user address.
             const auto returnBytes=AgcDriver::NativeGuestMemory::ContiguousBorrowedRange(stack,8);
             std::uint64_t pc=0;std::memcpy(&pc,returnBytes.data(),8);
             require(pc==Child+29,"Actual newly owned child stack lacks its translated CALL return word");

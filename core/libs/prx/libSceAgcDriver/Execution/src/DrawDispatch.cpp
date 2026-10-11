@@ -95,7 +95,7 @@ void DecodeDrawPrograms(const Graphics::State& state, const QueueState& queue, c
         program.userData[1] = high;
     };
     if (state.stages.path == Graphics::ShaderPath::Tessellation) {
-        append(0x148, 5, Stage::Local, 0x10b, 0x10c, Role::Local);
+        if (!staticAbi || programAddress(0x148) != 0) append(0x148, 5, Stage::Local, 0x10b, 0x10c, Role::Local);
         append(0x108, 7, Stage::TessellationControl, 0x10b, 0x10c, Role::Hull);
         initializeMerged(programs.back(), 0x102, true);
         append(0x0c8, 2, Stage::TessellationEvaluation, 0x08b, 0x08c, Role::Domain);
@@ -127,7 +127,18 @@ void DecodeDrawPrograms(const Graphics::State& state, const QueueState& queue, c
 
 DrawDispatchState DecodeDrawDispatch(const QueueState& queue, const DriverDetail::ShaderRegistry& shaders, std::uint64_t nullPixelProgramAddress) {
     DrawDispatchState product;
-    product.state = Graphics::DecodeState(queue);
+    bool vertexWorkgroup = false;
+#if !defined(ANYPS5_METAL_BACKEND)
+    const auto stages = queue.context.find(0x2d5);
+    const auto low = queue.shader.find(0xc8);
+    const auto high = queue.shader.find(0xc9);
+    if (stages != queue.context.end() && (stages->second & 0x02002024u) == 0x2000u && low != queue.shader.end() && high != queue.shader.end()) {
+        const auto address = (static_cast<std::uint64_t>(low->second) << 8u) | (static_cast<std::uint64_t>(high->second & 0xffu) << 40u);
+        const auto front = DriverDetail::ProgramSnapshot(shaders, address, {2});
+        vertexWorkgroup = front->header.empty() && DriverDetail::ProgramUsesWorkgroup(*front, static_cast<std::size_t>((address - front->codeAddress) / sizeof(std::uint32_t)));
+    }
+#endif
+    product.state = Graphics::DecodeState(queue, vertexWorkgroup);
     DecodeDrawPrograms(product.state, queue, shaders, nullPixelProgramAddress, false, true, product.programs, product.roles);
     product.pixel = Graphics::DecodePixelStageInfo(queue.context, Graphics::ExportMappings(product.state), Graphics::PixelProgramSkipped(queue));
     return product;

@@ -119,6 +119,38 @@ void importSpanTests(const Context& context) {
     ::operator delete(block, std::align_val_t{piece});
 }
 
+void importWindowTests(const Context& context) {
+    constexpr std::size_t piece = 65536;
+    constexpr std::size_t window = 2 * piece;
+    void* block = ::operator new(4 * piece, std::align_val_t{window});
+    auto* guest = static_cast<std::uint8_t*>(block);
+    const auto first = reinterpret_cast<std::uintptr_t>(block);
+    auto importing = context;
+    importing.hostImportAlignment = piece;
+    SetHostImportWindow(window);
+    const auto change = [&](std::uint8_t* range, bool add) {
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, range, piece, true, false, true);
+        else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, range);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+    };
+    for (std::size_t index = 0; index < 3; ++index) change(guest + index * piece, true);
+    const auto* low = HostImportFor(importing, first + piece - 16, 32);
+    Require(low != nullptr && low->base == first && low->bytes == window, "adjacent ranges inside one window were not imported as one span");
+    const auto lowBuffer = low->buffer;
+    const auto* high = HostImportFor(importing, first + window, piece);
+    Require(high != nullptr && high->base == first + window && high->bytes == piece, "a span crossed the import window");
+    Require(HostImportFor(importing, first + window - 16, 32) == nullptr, "a view crossing the import window was imported");
+    change(guest + 3 * piece, true);
+    const auto* grown = HostImportFor(importing, first + window, window);
+    Require(grown != nullptr && grown->base == first + window && grown->bytes == window, "the next window did not grow into the new range");
+    const auto* kept = HostImportFor(importing, first, 16);
+    Require(kept != nullptr && kept->buffer == lowBuffer, "growth in one window re-imported another");
+    for (std::size_t index = 0; index < 4; ++index) change(guest + index * piece, false);
+    SetHostImportWindow(0);
+    ::operator delete(block, std::align_val_t{window});
+}
+
 ShaderRecompiler::DescriptorBinding binding(Role role, std::uint32_t slot) {
     return {ShaderRecompiler::DescriptorKind::StorageBuffer, role, 0, slot, 1, {}, false};
 }
@@ -714,6 +746,128 @@ void sparseHeapTests(const Context& context, const BdaTestAccess& access) {
     releaseSparse(block, reserved);
 }
 
+void sparseHeapMirrorTests(const Context& context, const BdaTestAccess& access) {
+#ifdef _WIN32
+    if (!GuestArena::GuestArenaAvailable_nid_postfix() || !GuestArena::GuestArenaWriteWatched_nid_postfix()) {
+        std::cout << "guest arena unavailable or not write-watched: sparse heap mirrors not tested\n";
+        return;
+    }
+    constexpr std::size_t reserved = 64u << 20u;
+    constexpr std::size_t committed = 2 * 65536;
+    constexpr std::size_t extent = 1u << 20u;
+    constexpr std::size_t late = 512u << 10u;
+    constexpr std::size_t grown = 2u << 20u;
+    constexpr std::size_t past = 3584u << 10u;
+    void* block = GuestArena::GuestArenaAllocate_nid_postfix(reserved, 65536);
+    auto* guest = static_cast<std::uint8_t*>(block);
+    GuestArena::GuestArenaCommit_nid_postfix(block, committed, PAGE_READWRITE, 65536);
+    std::memset(block, 0x5a, committed);
+    const auto base = reinterpret_cast<std::uintptr_t>(block);
+    const auto registry = [&](bool add) {
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, block, reserved, true, true, true);
+        else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, block);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+    };
+    const auto bind = [&](bool written, const std::function<void(std::span<std::byte>, const VkDescriptorBufferInfo&)>& gpu) {
+        GuestBufferMemory memory(context);
+        if (written) memory.AddWritable(base, reserved);
+        else memory.AddReadable(base, reserved);
+        memory.Upload(false);
+        std::uint32_t adjustment = 0;
+        const auto view = memory.Descriptor(base, reserved, adjustment);
+        Require(adjustment == 0, "a sparse heap view at its base is adjusted");
+        gpu(access.bytes(view.buffer), view);
+        memory.WriteBack();
+        return view;
+    };
+    const auto address = [&] {
+        GuestBufferMemory memory(context);
+        memory.AcquireRegistered();
+        memory.Upload(true);
+        const auto ranges = memory.AddressRanges();
+        const auto found = std::find_if(ranges.begin(), ranges.end(), [&](const auto& range) { return range.begin == base; });
+        const auto result = found != ranges.end() ? std::pair{found->end, found->deviceAddress} : std::pair<std::uint64_t, std::uint64_t>{0, 0};
+        memory.WriteBack();
+        return result;
+    };
+    const auto sweep = [&] {
+        GuestBufferMemory memory(context);
+        memory.AcquireRegistered();
+        memory.Upload(true);
+        memory.WriteBack();
+    };
+    sweep();
+    registry(true);
+    const auto before = MirrorCounters();
+    const auto first = bind(true, [&](std::span<std::byte> bytes, const VkDescriptorBufferInfo& view) {
+        Require(view.range == extent && bytes[view.offset + committed - 1] == std::byte{0x5a} && bytes[view.offset + committed] == std::byte{}, "a sparse heap is not bound to a mirror of its committed extent");
+        bytes[view.offset + 8] = std::byte{0x77};
+        guest[24] = 0x55;
+    });
+    const auto made = MirrorCounters();
+    Require(made.heapMirrors == before.heapMirrors + 1 && made.heapBytes == before.heapBytes + extent && made.rebuilds == before.rebuilds + 1 && made.sparseBinds == before.sparseBinds + 1, "a sparse heap was not mirrored once");
+    Require(guest[8] == 0x77 && guest[24] == 0x55, "a sparse heap mirror's write-back lost the GPU's store or rolled back the CPU's");
+    const auto second = bind(false, [&](std::span<std::byte> bytes, const VkDescriptorBufferInfo& view) {
+        Require(bytes[view.offset + 8] == std::byte{0x77} && bytes[view.offset + 24] == std::byte{0x55}, "the sparse heap mirror missed the stores");
+    });
+    const auto again = MirrorCounters();
+    Require(second.buffer == first.buffer && again.rebuilds == made.rebuilds && again.blocksCopied == made.blocksCopied + 1, "a sparse heap bound again was read again beyond its written block");
+    bind(false, [](std::span<std::byte>, const VkDescriptorBufferInfo&) {});
+    Require(MirrorCounters().blocksCopied == again.blocksCopied && MirrorCounters().rebuilds == again.rebuilds, "an unchanged sparse heap was read again");
+    GuestArena::GuestArenaCommit_nid_postfix(guest + late, 65536, PAGE_READWRITE, 65536);
+    guest[late + 4] = 0x66;
+    bind(false, [&](std::span<std::byte> bytes, const VkDescriptorBufferInfo& view) {
+        Require(view.buffer == first.buffer && bytes[view.offset + late + 4] == std::byte{0x66} && bytes[view.offset + late + 65536] == std::byte{}, "a page committed after the mirror was made was not read into it");
+    });
+    const auto [end, device] = address();
+    Require(end == base + extent && device != 0 && access.addressBytes(device)[late + 4] == std::byte{0x66} && MirrorCounters().rebuilds == again.rebuilds, "an address-based build does not map the sparse heap mirror up to its extent");
+    GuestArena::GuestArenaCommit_nid_postfix(guest + grown, 65536, PAGE_READWRITE, 65536);
+    guest[grown + 2] = 0x44;
+    const auto [grownEnd, grownDevice] = address();
+    Require(grownEnd == base + 3 * extent && grownDevice != device && access.addressBytes(grownDevice)[grown + 2] == std::byte{0x44} && access.addressBytes(grownDevice)[8] == std::byte{0x77}, "a sparse heap committed past its mirror was not mirrored again");
+    {
+        GuestBufferMemory memory(context);
+        memory.AddReadable(base, reserved);
+        memory.AddReadable(base + past, 16);
+        memory.Upload(false);
+        std::uint32_t adjustment = 0;
+        const auto view = memory.Descriptor(base + past, 16, adjustment);
+        const auto whole = memory.Descriptor(base, reserved, adjustment);
+        Require(view.buffer == whole.buffer && access.bytes(whole.buffer)[whole.offset + grown + 2] == std::byte{0x44}, "a view past the sparse heap mirror is not copied with the heap");
+        memory.WriteBack();
+    }
+    registry(false);
+    sweep();
+    Require(MirrorCounters().heapMirrors == before.heapMirrors && MirrorCounters().heapBytes == before.heapBytes, "the sparse heap mirror outlived its range");
+    {
+        constexpr std::size_t whole = 1u << 20u;
+        GuestArena::GuestArenaReset_nid_postfix(block, reserved);
+        GuestArena::GuestArenaCommit_nid_postfix(guest, whole, PAGE_READWRITE, 65536);
+        std::memset(guest, 0x31, whole);
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, block, whole, true, true, true);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+        const auto start = MirrorCounters();
+        const auto view = bind(true, [&](std::span<std::byte> bytes, const VkDescriptorBufferInfo& info) {
+            Require(info.range == whole, "a heap bound whole over a smaller registered range is not clamped to that range");
+            Require(bytes[info.offset + whole - 1] == std::byte{0x31}, "a heap bound whole over a smaller registered range misses its last committed byte");
+            bytes[info.offset + 16] = std::byte{0x12};
+        });
+        Require(view.range == whole && MirrorCounters().sparseBinds == start.sparseBinds + 1 && guest[16] == 0x12, "a heap bound whole over a smaller registered range was copied");
+        mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, block);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+        sweep();
+    }
+    GuestArena::GuestArenaReset_nid_postfix(block, reserved);
+    GuestArena::GuestArenaRelease_nid_postfix(block, reserved);
+#else
+    static_cast<void>(context);
+    static_cast<void>(access);
+#endif
+}
+
 void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     alignas(64) std::array<std::uint32_t, 16> guest{};
     guest[0] = 123;
@@ -762,7 +916,8 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
         const std::array<CompiledShader, 1> stages{{{ShaderRecompiler::ShaderStage::TessellationControl, &control, 0}}};
         const std::array<GuestMemorySnapshot, 1> unusedSnapshots{{{0, source}}};
         ShaderResources resources(disabled, stages, ColorTarget{}, 0, 0, 0, unusedSnapshots);
-        Require(ShaderResources::NeverReusable(stages) && !resources.Reusable(), "a fault-buffer build is reusable");
+        Require(!ShaderResources::NeverReusable(stages), "a fault-buffer build is refused the resource cache");
+        Require(!resources.Reusable(), "a fault-buffer build with copied writes is reusable");
         Require(resources.NeedsCompletion() && !resources.UsesAddressTable(), "a fault-buffer build reaches guest memory through the BDA table");
         const auto fault = access.bytes(access.descriptor(5).buffer);
         for (const auto byte : fault) Require(byte == std::byte{}, "rect-list fault buffer was not initialized");
@@ -774,6 +929,19 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
         std::memcpy(access.bytes(access.descriptor(6).buffer).data() + sizeof(std::uint32_t), &changed, sizeof(changed));
         resources.WriteBack();
         Require(guest[1] == changed, "rect-list fault-only path lost guest buffer writes");
+    }
+    {
+        ShaderRecompiler::RecompileResult control;
+        control.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
+        control.bindings = {binding(Role::FaultBuffer, 5)};
+        const std::array<CompiledShader, 1> stages{{{ShaderRecompiler::ShaderStage::TessellationControl, &control, 0}}};
+        ShaderResources resources(disabled, stages, ColorTarget{}, 0, 0, 0, {});
+        Require(!ShaderResources::NeverReusable(stages) && resources.Reusable() && resources.ChecksFaults(), "a fault-only build is not reusable");
+        resources.CheckFaults();
+        const auto fault = access.bytes(access.descriptor(5).buffer);
+        const ShaderRecompiler::BdaAbi::Fault report{ShaderRecompiler::BdaAbi::FaultState::Ready, ShaderRecompiler::BdaAbi::FaultReason::InvalidRectangle, 0, 0, 0, 0, 0};
+        std::memcpy(fault.data(), &report, sizeof(report));
+        reject([&] { resources.CheckFaults(); }, "rect-list requires");
     }
     {
         ShaderResources resources(context, compiled, snapshots);
@@ -901,6 +1069,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     }
     importCrossingTests(context, access);
     importSpanTests(context);
+    importWindowTests(context);
     heapMirrorTests(context, access);
     importedHeapMirrorTests(context, access);
     importWatchTests();
@@ -908,6 +1077,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     gpuMappingTests(context);
     stridedOverhangTests(context, access);
     sparseHeapTests(context, access);
+    sparseHeapMirrorTests(context, access);
     Require(AddressCopyOverflow({{0x1000, 0x3000, 0x2000, "uncommitted pages"}}, 0x2000).empty(), "copies within the limit were refused");
     const auto copies = AddressCopyOverflow({{0x1000, 0x2000, 0x1000, "not mirrored"}, {0x10000, 0x30000, 0x18000, "uncommitted pages"}}, 0x2000);
     Require(!copies.empty() && copies.find("0x10000+0x20000 (0.1 MiB committed, uncommitted pages)") < copies.find("0x1000+0x1000"), "the copy limit does not name the largest copy first");

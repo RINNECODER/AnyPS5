@@ -9,6 +9,9 @@
 #undef APS5_HIT
 #define APS5_HIT(...) ((void)0)
 #include "prx/libSceSysmodule/Export.cpp"
+
+// The host-module loader only serves the *Internal exports, which are not bridged here, so no module opens.
+extern "C" void* APS5_VABI dlopen_nid_postfix(const char*, int) { return nullptr; }
 #include "Marshal.hpp"
 
 namespace Cpu::UpstreamPrx {

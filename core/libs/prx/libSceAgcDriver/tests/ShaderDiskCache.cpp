@@ -41,7 +41,7 @@ void setEnvironment(const char* name, const std::string& value) {
 }
 
 bool sameBinding(const DescriptorBinding& left, const DescriptorBinding& right) {
-    return left.kind == right.kind && left.role == right.role && left.descriptorSet == right.descriptorSet && left.binding == right.binding && left.count == right.count && left.guestDescriptor == right.guestDescriptor && left.readOnly == right.readOnly && left.imageShape == right.imageShape && left.samplerDepthCompare == right.samplerDepthCompare && left.imageWritten == right.imageWritten && left.imageDepthCompare == right.imageDepthCompare && left.imageAtomic == right.imageAtomic && left.bufferAtomic == right.bufferAtomic && left.bufferWritten == right.bufferWritten && left.bufferRead == right.bufferRead && left.samplerUnnormalized == right.samplerUnnormalized && left.samplerIntegerBorder == right.samplerIntegerBorder && left.imageUnnormalized == right.imageUnnormalized && left.imageSamplers == right.imageSamplers && left.resourceSources == right.resourceSources && left.samplerPixelProof == right.samplerPixelProof && left.imagePixelProof == right.imagePixelProof;
+    return left.kind == right.kind && left.role == right.role && left.descriptorSet == right.descriptorSet && left.binding == right.binding && left.count == right.count && left.guestDescriptor == right.guestDescriptor && left.readOnly == right.readOnly && left.imageShape == right.imageShape && left.samplerDepthCompare == right.samplerDepthCompare && left.imageWritten == right.imageWritten && left.imageDepthCompare == right.imageDepthCompare && left.imageAtomic == right.imageAtomic && left.bufferAtomic == right.bufferAtomic && left.bufferWritten == right.bufferWritten && left.bufferRead == right.bufferRead && left.samplerUnnormalized == right.samplerUnnormalized && left.samplerIntegerBorder == right.samplerIntegerBorder && left.imageUnnormalized == right.imageUnnormalized && left.imageUnnormalizedBaseLevel == right.imageUnnormalizedBaseLevel && left.imageSamplers == right.imageSamplers && left.resourceSources == right.resourceSources && left.samplerPixelProof == right.samplerPixelProof && left.imagePixelProof == right.imagePixelProof;
 }
 
 bool sameBindings(const std::vector<DescriptorBinding>& left, const std::vector<DescriptorBinding>& right) {
@@ -121,6 +121,7 @@ DescriptorBinding sampleBinding(std::uint32_t seed) {
     binding.samplerUnnormalized = {false, true, true};
     binding.samplerIntegerBorder = {true, false, seed % 2 == 1};
     binding.imageUnnormalized = {true, false, seed % 2 == 0};
+    binding.imageUnnormalizedBaseLevel = {false, true, seed % 3 == 0};
     binding.imageSamplers = {0x5u, 0u, 0x80000000u};
     binding.resourceSources = {seed * 16u + 1u, seed * 16u + 2u, seed * 16u + 3u};
     binding.bufferRead = {true, false, false, true, true, false};
@@ -237,8 +238,11 @@ CompiledVariant sampleVariant() {
     image.r128 = true;
     image.fmaskCompatible = false;
     image.depthBitsCompatible = false;
+    image.constantSwizzle = true;
+    image.constantSwizzleCompatible = false;
     image.flatVolumeCompatible = false;
     image.flatLineCompatible = false;
+    image.foldTexelOffsetsOnly = true;
     image.byElements = 4;
     image.byComponents = 1;
     image.indirectRoot = 0;
@@ -248,7 +252,7 @@ CompiledVariant sampleVariant() {
     info.info.images = {image};
     ResourceMaterializer::PrepareImageModes(info.info);
     // One surviving unqualified use; the sampler's live-use summary must match its pair.
-    info.info.samplers = {{7, 0x10, 3, true, false, SamplerUseExplicitLod | SamplerUseGather, PixelSamplerUse::Unqualified, 1u}};
+    info.info.samplers = {{7, 0x10, 3, true, false, SamplerUseExplicitLod | SamplerUseGather, PixelSamplerUse::Unqualified, 1u, true}};
     info.info.sampledPairs = {{0, 0, 0x10, PixelSamplerUse::Unqualified, 1u}};
     StageInput input{};
     input.kind = StageInputKind::GlobalInvocationId;

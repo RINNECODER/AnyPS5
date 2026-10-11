@@ -31,6 +31,8 @@
 
 namespace {
 
+constexpr std::uint64_t PRESENT_POLL_MICROS = 10000;
+
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("VideoOut: ") + reason);
 }
@@ -361,7 +363,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
         while (!token.stop_requested()) {
             {
                 std::unique_lock lock(flipQueue->mutex);
-                flipQueue->changed.wait_for(lock, std::chrono::milliseconds(10), [&] { return token.stop_requested() || flipQueue->failure || !flipQueue->requests.empty(); });
+                flipQueue->changed.wait_for(lock, std::chrono::microseconds(PRESENT_POLL_MICROS), [&] { return token.stop_requested() || flipQueue->failure || !flipQueue->requests.empty(); });
                 if (flipQueue->failure) std::rethrow_exception(flipQueue->failure);
                 if (token.stop_requested()) break;
                 if (!flipQueue->requests.empty()) {

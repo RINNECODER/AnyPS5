@@ -1,4 +1,5 @@
 #include <mutex>
+#include <bit>
 #include <cstdint>
 #include <cfenv>
 #include <cmath>
@@ -8,6 +9,7 @@
 #include <stdexcept>
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/SonyCrt.hpp"
 
 namespace {
 
@@ -38,7 +40,16 @@ float APS5_VABI asinf_nid_postfix(float x) { return std::asin(x); }
 float APS5_VABI acosf_nid_postfix(float x) { return std::acos(x); }
 float APS5_VABI atan2f_nid_postfix(float y, float x) { return std::atan2(y, x); }
 float APS5_VABI hypotf_nid_postfix(float x, float y) { return static_cast<float>(std::hypot(static_cast<double>(x), static_cast<double>(y))); }
-double APS5_VABI hypot_nid_postfix(double x, double y) { return std::hypot(x, y); }
+double APS5_VABI hypot_nid_postfix(double x, double y) {
+    const std::uint64_t hx = std::bit_cast<std::uint64_t>(x);
+    const std::uint64_t hy = std::bit_cast<std::uint64_t>(y);
+    const std::uint64_t ix = hx & 0x7fffffffffffffffull;
+    const std::uint64_t iy = hy & 0x7fffffffffffffffull;
+    if (ix == 0x7ff0000000000000ull || iy == 0x7ff0000000000000ull) {
+        return std::numeric_limits<double>::infinity();
+    }
+    return std::hypot(x, y);
+}
 float APS5_VABI tanf_nid_postfix(float x) { return std::tan(x); }
 float APS5_VABI log10f_nid_postfix(float x) { return std::log10(x); }
 float APS5_VABI logbf_nid_postfix(float x) { return std::logb(x); }
@@ -64,6 +75,7 @@ double APS5_VABI acos_nid_postfix(double x) { return std::acos(x); }
 double APS5_VABI sqrt_nid_postfix(double x) { return std::sqrt(x); }
 float APS5_VABI sqrtf_nid_postfix(float x) { return std::sqrt(x); }
 double APS5_VABI fabs_nid_postfix(double x) { return std::fabs(x); }
+int APS5_VABI abs_nid_postfix(int x) { return x < 0 ? static_cast<int>(0u - static_cast<unsigned>(x)) : x; }
 double APS5_VABI trunc_nid_postfix(double x) { return std::trunc(x); }
 double APS5_VABI fma_nid_postfix(double x, double y, double z) { return std::fma(x, y, z); }
 long double APS5_VABI acosl_nid_postfix(long double x) { return std::acos(x); }
@@ -125,6 +137,14 @@ int APS5_VABI __isfinite_nid_postfix(double x) { return std::isfinite(x) ? 1 : 0
 int APS5_VABI __isnan_nid_postfix(double x) { return std::isnan(x) ? 1 : 0; }
 int APS5_VABI __isinf_nid_postfix(double x) { return std::isinf(x) ? 1 : 0; }
 int APS5_VABI __signbit_nid_postfix(double x) { return std::signbit(x) ? 1 : 0; }
+float APS5_VABI nanf_nid_postfix(const char* tagp) {
+    (void)tagp;
+    return std::bit_cast<float>(0x7fc00000u);
+}
+double APS5_VABI nan_nid_postfix(const char* tagp) {
+    (void)tagp;
+    return std::bit_cast<double>(0x7ff8000000000000ull);
+}
 
 double APS5_VABI modf_nid_postfix(double x, double* integral) { return std::modf(x, integral); }
 float APS5_VABI modff_nid_postfix(float x, float* integral) { return std::modf(x, integral); }
@@ -188,6 +208,18 @@ int APS5_VABI rand_r_nid_postfix(unsigned int* state) {
 void APS5_VABI srand_nid_postfix(unsigned int seed) {
     std::lock_guard lock(g_randLock);
     g_randState = seed;
+}
+
+int APS5_VABI __fpclassifyd_nid_postfix(double value) {
+    return SonyFpclassifyd(value);
+}
+
+double APS5_VABI _Sinh_nid_postfix(double x, double y) {
+    return SonySinh(x, y);
+}
+
+int APS5_VABI _Fltrounds_nid_postfix(void) {
+    return SonyFltrounds();
 }
 
 }

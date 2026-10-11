@@ -144,6 +144,15 @@ endforeach()
 add_custom_target(libs DEPENDS ${PATCHED_OUTPUTS})
 
 if(BUILD_TESTING)
+    add_test_executable(guest_posix_scalar_io_tests tests/GuestPosixScalarIo.cpp)
+    target_include_directories(guest_posix_scalar_io_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_posix_scalar_io_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_posix_scalar_io_tests)
+    add_test(NAME guest_posix_scalar_io COMMAND guest_posix_scalar_io_tests)
+    if(WIN32)
+        set_tests_properties(guest_posix_scalar_io PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME nid_patcher_macho COMMAND ${Python3_EXECUTABLE}
@@ -187,6 +196,26 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(guest_rudp_status PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+
+    add_test_executable(guest_rudp_context_queries_tests tests/GuestRudpContextQueries.cpp)
+    target_include_directories(guest_rudp_context_queries_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_rudp_context_queries_tests PRIVATE libSceRudp libc)
+    configure_windows_unwind(guest_rudp_context_queries_tests)
+    add_test(NAME guest_rudp_context_queries COMMAND guest_rudp_context_queries_tests)
+    if(WIN32)
+        set_tests_properties(guest_rudp_context_queries PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+
+    add_test_executable(guest_memory_pool_stats_tests tests/GuestMemoryPoolStats.cpp)
+    target_include_directories(guest_memory_pool_stats_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_memory_pool_stats_tests PRIVATE libSceSsl libSceHttp2 libSceNet libkernel libc)
+    configure_windows_unwind(guest_memory_pool_stats_tests)
+    add_test(NAME guest_memory_pool_stats COMMAND guest_memory_pool_stats_tests)
+    if(WIN32)
+        set_tests_properties(guest_memory_pool_stats PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSsl>")
     endif()
 
     add_test_executable(guest_system_gesture_tests tests/GuestSystemGesture.cpp)
@@ -259,6 +288,16 @@ if(BUILD_TESTING)
     configure_windows_unwind(savedata_replace_file_failure_tests)
     add_test(NAME savedata_replace_file_failure COMMAND savedata_replace_file_failure_tests)
 
+    add_test_executable(guest_crt_tests tests/GuestCrt.cpp)
+    target_include_directories(guest_crt_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_crt_tests PRIVATE libSceAmpr libc)
+    configure_windows_unwind(guest_crt_tests)
+    add_test(NAME guest_crt COMMAND guest_crt_tests)
+    if(WIN32)
+        set_tests_properties(guest_crt PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAmpr>")
+    endif()
+
     if(MINGW)
         target_compile_options(savedata_core_write_replacement_tests PRIVATE -fasynchronous-unwind-tables)
         target_compile_options(savedata_native_write_replacement_tests PRIVATE -fasynchronous-unwind-tables)
@@ -269,6 +308,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData>")
         set_tests_properties(savedata_native_write_replacement PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData.native>")
+    endif()
+
+    add_test_executable(guest_ppsa01530_exports_tests tests/GuestPPSA01530Exports.cpp)
+    target_include_directories(guest_ppsa01530_exports_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_ppsa01530_exports_tests PRIVATE libkernel libSceJson2 libSceNet libScePad libc)
+    configure_windows_unwind(guest_ppsa01530_exports_tests)
+    add_test(NAME guest_ppsa01530_exports COMMAND guest_ppsa01530_exports_tests)
+    if(WIN32)
+        set_tests_properties(guest_ppsa01530_exports PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
 
     add_test_executable(guest_posix_random_tests tests/GuestPosixRandom.cpp)

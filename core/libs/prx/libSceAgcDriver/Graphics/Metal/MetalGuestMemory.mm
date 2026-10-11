@@ -36,7 +36,7 @@ void MetalGuestMemory::RegisterBorrowedHostSpanUntilSnapshotsComplete(std::uint6
     const auto hostBegin = reinterpret_cast<std::uintptr_t>(host.data());
     if (host.size() > std::numeric_limits<std::uintptr_t>::max() - hostBegin) throw std::invalid_argument("Metal borrowed host span address overflow");
     const auto end = guestAddress + host.size();
-    constexpr auto writableLimit = std::uint64_t{std::numeric_limits<std::uint32_t>::max()} << Abi::WrittenPageShift;
+    constexpr auto writableLimit = Abi::WrittenAddressLimit;
     if (writable && end > writableLimit) throw std::invalid_argument("Writable guest address exceeds the written-page ABI");
     std::lock_guard lock(mutex);
     auto position = std::lower_bound(ranges.begin(), ranges.end(), guestAddress, [](const HostRange& range, std::uint64_t address) { return range.begin < address; });
@@ -152,11 +152,12 @@ Abi::Fault MetalGuestMemory::DispatchSnapshot::CompleteAndCopyDirtyPagesToBorrow
     const auto* words = static_cast<const std::uint32_t*>(fault.contents);
     if (words[Abi::WrittenOverflowWord] != 0) throw std::runtime_error("Metal guest written-page tracker overflow");
     std::set<std::uint64_t> pages;
-    for (std::uint32_t i = 0; i < Abi::WrittenPageSlots; ++i) {
-        const auto encoded = words[Abi::WrittenSlotsWord + i];
-        if (encoded != 0) pages.insert(std::uint64_t{encoded - 1u} << Abi::WrittenPageShift);
-    }
     constexpr auto pageBytes = std::uint64_t{1} << Abi::WrittenPageShift;
+    if (!Abi::ForEachWrittenRange(words, [&](std::uint64_t begin, std::size_t bytes) {
+            for (std::uint64_t offset = 0; offset < bytes; offset += pageBytes) pages.insert(begin + offset);
+        })) {
+        throw std::runtime_error("Metal guest written-page tracker is incomplete");
+    }
     for (const auto page : pages) {
         const bool writable = std::any_of(mirrors.begin(), mirrors.end(), [page](const Mirror& mirror) {
             return mirror.range.writable && mirror.range.begin < page + pageBytes && mirror.range.begin + mirror.range.borrowedHost.size() > page;
