@@ -111,12 +111,16 @@ void completed(const char* path,unsigned mode) {
           "Condition returned without default nonrecursive mutex ownership or POSIX error namespace");
  require(s[56]==11 && s[57]==Busy && s[58]==Busy && s[59]==Busy && s[60]==Busy && s[61]==1,
          "Static default/self ownership or live condition mutex destroy behavior differs");
- require(s[50]==22 && s[51]==22 && s[52]==22 && s[53]==22 && s[54]==s[31] &&
-         s[55]==0x1122334455667788 && s[77]==22 && s[78]==22 && !s[79] && s[80]==22 && s[81]==s[32],
-         "Copied/forged/live re-zero slot fabricated success or changed source identity");
- require(s[27]==1 && s[62]==22 && s[63]==22 && !s[69] && s[28]==2 && s[29]==2 &&
-         s[70]==22 && s[71]==22 && s[72]==22 && !s[73],
-         "Destroyed mutex/condition or destroyed re-zero slot fabricated static initialization");
+ // Handles are values (PLAT-06): a copy names the same object; only forged values are invalid.
+ require(s[50]==11 && s[51]==0 && s[87]==0 && s[52]==22 && s[53]==22 && s[54]==s[31] &&
+         s[55]==0x1122334455667788 && s[80]==0 && s[81]==s[32],
+         "Copied handle did not name the same object or a forged handle was admitted");
+ // A slot holding 0 is a static initializer wherever it lives (PLAT-05).
+ require(s[77]==0 && s[78]==0 && s[79]>2 && s[79]!=s[31],
+         "Re-zeroed live slot was not lazily initialized as a fresh mutex");
+ require(s[27]==1 && s[62]==22 && s[63]==0 && s[69]>2 && s[69]!=s[32] && s[28]==2 && s[29]==2 &&
+         s[70]==22 && s[71]==22 && s[72]==0 && s[73]>2 && s[73]!=s[31] && s[88]==0,
+         "Destroyed sentinel was admitted or a zeroed slot at a destroyed object's address was not lazily initialized");
  require(s[34]>2 && s[34]!=s[31] && s[74]==22 && s[75]==22 && s[76]==s[31],
          "Explicit recreation reused stale identity or accepted old token at the original slot");
 }

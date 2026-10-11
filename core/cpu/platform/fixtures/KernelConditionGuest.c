@@ -104,12 +104,12 @@ static void joined(u64 id,unsigned role) {
 }
 static void controls(void) {
  struct Slot copied={CANARY,condition.value,CANARY};
- R[90]=(u32)scePthreadCondSignal(&copied.value);
- R[91]=(u32)scePthreadCondDestroy(&copied.value);
+ R[90]=(u32)scePthreadCondSignal(&copied.value); /* a copied handle names the live condition */
  R[92]=(u32)scePthreadCondWait(&condition.value,&mutex.value); /* unowned */
  const u64 stale=condition.value;
  status(scePthreadCondDestroy(&condition.value));
  R[93]=(u32)scePthreadCondSignal(&condition.value);
+ R[91]=(u32)scePthreadCondDestroy(&copied.value); /* copy of a destroyed condition */
  status(scePthreadCondInit(&condition.value,0,relocatedLabel));
  if(condition.value==stale) ++R[6];
  R[94]=(u32)scePthreadCondBroadcast(&copied.value);
@@ -160,10 +160,12 @@ EXPORT int _start(void) {
   status(scePthreadMutexLock(&mutex.value));
  }
  status(R[1]==8 || R[1]==6 ? posix_cond_broadcast(&condition.value) : scePthreadCondBroadcast(&condition.value)); thread_yield();
+ /* Every waiter now waits only for the mutex, so destroy succeeds before they reacquire. */
  R[28]=R[13]; R[29]=(u32)scePthreadCondDestroy(&condition.value);
  status(scePthreadMutexUnlock(&mutex.value));
  for(unsigned role=(R[1]==0 || R[1]==7 || R[1]==5 ? 1 : 0);role<count;++role) joined(ids[role],role);
- status(scePthreadCondDestroy(&condition.value)); R[34]=condition.value;
+ if(R[29]) status(scePthreadCondDestroy(&condition.value));
+ R[34]=condition.value;
  status(scePthreadMutexDestroy(&mutex.value)); R[35]=mutex.value;
  status(scePthreadMutexattrDestroy(&mutexAttr.value));
  guards(&condition);guards(&mutex);guards(&mutexAttr);guards(&threadAttr);guards(&conditionAttr);

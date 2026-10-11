@@ -25,6 +25,11 @@ static_assert(offsetof(SceVideoOutAttribute, Reserved1) == 56);
 static_assert(sizeof(SceVideoOutBuffer) == 32 && offsetof(SceVideoOutBuffer, Reserved) == 16);
 static_assert(sizeof(SceVideoOutStatus) == 48 && offsetof(SceVideoOutStatus, RefreshRate) == 8);
 static_assert(offsetof(SceVideoOutStatus, Flags) == 16 && offsetof(SceVideoOutStatus, Reserved) == 24);
+static_assert(sizeof(SceVideoOutFlipStatus) == 128 && offsetof(SceVideoOutFlipStatus, FlipPendingNum) == 52);
+static_assert(offsetof(SceVideoOutFlipStatus, SubmitProcessTimeCounter) == 64);
+static_assert(sizeof(SceVideoOutVblankStatus) == 40 && offsetof(SceVideoOutVblankStatus, Flags) == 32);
+static_assert(offsetof(SceVideoOutResolutionStatus, RefreshRate) == 16 &&
+              offsetof(SceVideoOutResolutionStatus, Flags) == 28 && offsetof(SceVideoOutResolutionStatus, Reserved1) == 32);
 static_assert(std::endian::native == std::endian::little);
 
 std::int32_t signedInt(std::uint64_t value) {
@@ -67,6 +72,32 @@ void returnInt(Machine& guest, std::int32_t result) {
     guest.Set(Register::Rax, static_cast<std::uint32_t>(result));
 }
 
+// sceVideoOutRegisterBuffers (v1) attribute: 32-bit format, no DCC fields.
+struct VideoOutAttributeV1 {
+    std::uint32_t PixelFormat;
+    std::uint32_t TilingMode;
+    std::uint32_t AspectRatio;
+    std::uint32_t Width;
+    std::uint32_t Height;
+    std::uint32_t PitchInPixel;
+    std::uint32_t Option;
+    std::uint32_t Reserved0;
+    std::uint64_t Reserved1;
+};
+static_assert(sizeof(VideoOutAttributeV1) == 40 && offsetof(VideoOutAttributeV1, Reserved1) == 32);
+
+// The 32-byte kernel event record as written by sceKernelWaitEqueue.
+struct KernelEventView {
+    std::uint64_t Ident;
+    std::int16_t Filter;
+    std::uint16_t Flags;
+    std::uint32_t Fflags;
+    std::int64_t Data;
+    std::uint64_t Udata;
+};
+static_assert(sizeof(KernelEventView) == 32 && offsetof(KernelEventView, Data) == 16);
+constexpr std::int16_t VideoOutFilter = -13;
+
 }
 
 struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImports::Impl> {
@@ -82,13 +113,22 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
         {"Up36PTk687E", Service::Open}, {"uquVH4-Du78", Service::Close},
         {"utPrVdxio-8", Service::OutputStatus}, {"rKBUtgRrtbk", Service::RegisterBuffers},
         {"PjS5uASwcV8", Service::SetAttribute}, {"CBiu4mCE1DA", Service::FlipRate},
-        {"N5KDtkIjjJ4", Service::Unregister}};
+        {"N5KDtkIjjJ4", Service::Unregister}, {"U46NwOiJpys", Service::SubmitFlip},
+        {"HXzjK9yI30k", Service::AddFlipEvent}, {"-Ozn0F1AFRg", Service::DeleteFlipEvent},
+        {"Xru92wHJRmg", Service::AddVblankEvent}, {"oNOQn3knW6s", Service::DeleteVblankEvent},
+        {"SbU3dwp80lQ", Service::GetFlipStatus}, {"1FZBKy8HeNU", Service::GetVblankStatus},
+        {"j6RaAUlaLv0", Service::WaitVblank}, {"zgXifHT9ErY", Service::IsFlipPending},
+        {"6kPnj51T62Y", Service::GetResolutionStatus}, {"w0hLuNarQxY", Service::ConfigureOutput},
+        {"MTxxrOCeSig", Service::SetWindowModeMargins}, {"w3BY+tAEiQY", Service::RegisterBuffersV1},
+        {"U2JJtSqNKZI", Service::GetEventId}, {"rWUTcKdkUzQ", Service::GetEventData},
+        {"Mt4QHHkxkOc", Service::GetEventCount}};
 
     Impl(Machine& guest, SceVideoOutBackend callbacks, std::uint64_t gateBase,
          std::span<const VideoOutAbiAdmission> admissions) :
         machine(guest), backend(std::move(callbacks)), base(gateBase) {
         for (const auto& admission : admissions) {
-            if (admission.Evidence.empty() || static_cast<unsigned>(admission.Contract) > static_cast<unsigned>(Service::Unregister))
+            if (admission.Evidence.empty() ||
+                static_cast<unsigned>(admission.Contract) > static_cast<unsigned>(Service::GetEventCount))
                 throw std::invalid_argument("SCE VideoOut invalid target admission descriptor");
             admitted.insert(admission.Contract);
         }
@@ -101,7 +141,32 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
         machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
     }
 
-    void invoke(Machine& guest, Service service, bool target) {
+    // A status is written only on success, and only its defined bytes.
+    template<class TStatus> static void writeStatus(Machine& guest, std::uint64_t address, std::int32_t result,
+                                                    const TStatus& status, std::size_t bytes = sizeof(TStatus)) {
+        if (result == 0) guest.Write(address, std::as_bytes(std::span(&status, 1)).first(bytes));
+        returnInt(guest, result);
+    }
+
+    // Null output is an SCE error; a non-null output must be writable before
+    // the backend runs, so a fault never follows a state change.
+    static bool statusOutput(Machine& guest, std::uint64_t address, std::size_t alignment, std::size_t bytes) {
+        if (!address) { returnInt(guest, VideoOutError::InvalidAddress); return false; }
+        alignedAddress(address, alignment);
+        guest.CheckAccess(address, bytes, Permission::Write);
+        return true;
+    }
+
+    // Register row contract: reserved pointers clear, 64 KiB aligned data.
+    static std::int32_t validRows(std::span<const SceVideoOutBuffer> rows) {
+        for (const auto& buffer : rows) {
+            if (buffer.Reserved[0] || buffer.Reserved[1]) return VideoOutError::InvalidValue;
+            if (!buffer.DataAddress || buffer.DataAddress % 65536) return VideoOutError::InvalidAddress;
+        }
+        return 0;
+    }
+
+    void invoke(Machine& guest, Service service) {
         const auto first = guest.Get(Register::Rdi);
         const auto second = guest.Get(Register::Rsi);
         const auto third = guest.Get(Register::Rdx);
@@ -110,29 +175,26 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
         const auto sixth = guest.Get(Register::R9);
         switch (service) {
         case Service::Open: {
-            if (target && (signedInt(first) != 255 || signedInt(second) != 0 || signedInt(third) != 0 || fourth))
-                throw std::runtime_error("SCE VideoOut open outside qualified target use");
             std::optional<SceVideoOutOpenParam> param;
             if (fourth) {
                 guest.CheckAccess(fourth, 16, Permission::Read);
                 param.emplace();
                 guest.Read(fourth, std::as_writable_bytes(std::span(&*param, 1)).first(16));
-                if (param->FirstWord != 16 || param->SetPriority > 1 || param->SetAffinity > 1)
-                    throw std::runtime_error("SCE VideoOut invalid open parameters");
-                if (param->SetPriority && (param->Priority < 256 || param->Priority > 767))
-                    throw std::runtime_error("SCE VideoOut invalid service thread priority");
+                if (param->FirstWord != 16 || param->SetPriority > 1 || param->SetAffinity > 1 ||
+                    (param->SetPriority && (param->Priority < 256 || param->Priority > 767)))
+                    return returnInt(guest, VideoOutError::InvalidValue);
                 if (param->SetAffinity) {
                     if (fourth > std::numeric_limits<std::uint64_t>::max() - 16)
                         throw std::runtime_error("SCE VideoOut open parameter address overflow");
                     guest.CheckAccess(fourth + 16, sizeof(param->Affinity), Permission::Read);
                     guest.Read(fourth + 16, std::as_writable_bytes(std::span(&param->Affinity, 1)));
                     if (!param->Affinity || (param->Affinity & ~std::uint64_t{0x1fff}))
-                        throw std::runtime_error("SCE VideoOut invalid service thread affinity");
+                        return returnInt(guest, VideoOutError::InvalidValue);
                 }
             }
             if ((signedInt(first) != 255 && signedInt(first) != 0) || signedInt(second) < 0 ||
                 signedInt(second) > 2 || signedInt(third) != 0)
-                throw std::runtime_error("SCE VideoOut invalid open user, bus or index");
+                return returnInt(guest, VideoOutError::InvalidValue);
             required(backend.Open, "sceVideoOutOpen");
             returnInt(guest, backend.Open(signedInt(first), signedInt(second), signedInt(third), param));
             break;
@@ -142,12 +204,10 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
             returnInt(guest, backend.Close(signedInt(first)));
             break;
         case Service::OutputStatus: {
-            alignedAddress(second, alignof(SceVideoOutStatus));
-            guest.CheckAccess(second, sizeof(SceVideoOutStatus), Permission::Write);
+            if (!statusOutput(guest, second, alignof(SceVideoOutStatus), sizeof(SceVideoOutStatus))) break;
             required(backend.GetOutputStatus, "sceVideoOutGetOutputStatus");
             const auto result = backend.GetOutputStatus(signedInt(first));
-            if (result.Result == 0) guest.Write(second, std::as_bytes(std::span(&result.Status, 1)));
-            returnInt(guest, result.Result);
+            writeStatus(guest, second, result.Result, result.Status);
             break;
         }
         case Service::RegisterBuffers: {
@@ -156,41 +216,63 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
             const auto start = signedInt(third);
             const auto count = signedInt(fifth);
             const auto category = signedInt(stack[0]);
+            // Generic shapes: any set, any 1-16 buffer run, tiled or linear, any format.
             if (set < 0 || set >= 4 || start < 0 || start >= 16 || count < 1 || count > 16 || start + count > 16)
-                throw std::runtime_error("SCE VideoOut invalid buffer set, slot or count");
-            if (category != 0 && category != 1)
-                throw std::runtime_error("SCE VideoOut invalid buffer category");
-            if (stack[1]) throw std::runtime_error("Unsupported SCE VideoOut register buffer option");
+                return returnInt(guest, VideoOutError::InvalidValue);
+            if (category != 0 && category != 1) return returnInt(guest, VideoOutError::InvalidCategory);
+            if (stack[1] || !sixth) return returnInt(guest, VideoOutError::InvalidOption);
+            if (!fourth) return returnInt(guest, VideoOutError::InvalidAddress);
             const auto attribute = read<SceVideoOutAttribute>(guest, sixth);
-            if (target && (set != 0 || start != 0 || count != 3 || category != 0 ||
-                attribute.TilingMode != 0 || attribute.PitchInPixel != 0 || attribute.Option != 0 ||
-                attribute.DccControl != 0 || attribute.DccClearColor != 0 ||
-                (attribute.PixelFormat != 0x8000000000000000ULL && attribute.PixelFormat != 0x8000000022000000ULL &&
-                 attribute.PixelFormat != 0x8100070422000000ULL)))
-                throw std::runtime_error("SCE VideoOut registration outside qualified target use");
             alignedAddress(fourth, alignof(SceVideoOutBuffer));
             std::vector<SceVideoOutBuffer> buffers(static_cast<std::size_t>(count));
             guest.CheckAccess(fourth, buffers.size() * sizeof(SceVideoOutBuffer), Permission::Read);
             guest.Read(fourth, std::as_writable_bytes(std::span(buffers)));
-            for (const auto& buffer : buffers) {
-                if (target && buffer.MetadataAddress)
-                    throw std::runtime_error("SCE VideoOut target compressed backing is unqualified");
-                if (buffer.Reserved[0] || buffer.Reserved[1])
-                    throw std::runtime_error("SCE VideoOut reserved buffer pointers are set");
-                alignedAddress(buffer.DataAddress, 65536);
-            }
+            if (const auto invalid = validRows(buffers)) return returnInt(guest, invalid);
             required(backend.RegisterBuffers, "sceVideoOutRegisterBuffers2");
             returnInt(guest, backend.RegisterBuffers(signedInt(first), set, start, buffers, attribute, category));
             break;
         }
+        case Service::RegisterBuffersV1: {
+            // (handle, start, const void* const* addresses, count, const SceVideoOutBufferAttribute*)
+            const auto start = signedInt(second);
+            const auto count = signedInt(fourth);
+            if (start < 0 || start >= 16 || count < 1 || count > 16 || start + count > 16)
+                return returnInt(guest, VideoOutError::InvalidValue);
+            if (!third || !fifth) return returnInt(guest, VideoOutError::InvalidAddress);
+            const auto legacy = read<VideoOutAttributeV1>(guest, fifth);
+            if (legacy.AspectRatio || legacy.Reserved0 || legacy.Reserved1)
+                return returnInt(guest, VideoOutError::InvalidValue);
+            // v1 32-bit formats with a v2 64-bit equivalent (A8R8G8B8 / A8B8G8R8 sRGB).
+            std::uint64_t format = 0;
+            if (legacy.PixelFormat == 0x80000000u) format = 0x8000000000000000ULL;
+            else if (legacy.PixelFormat == 0x80002200u) format = 0x8000000022000000ULL;
+            else return returnInt(guest, VideoOutError::InvalidPixelFormat);
+            alignedAddress(third, alignof(std::uint64_t));
+            std::vector<std::uint64_t> addresses(static_cast<std::size_t>(count));
+            guest.CheckAccess(third, addresses.size() * sizeof(std::uint64_t), Permission::Read);
+            guest.Read(third, std::as_writable_bytes(std::span(addresses)));
+            std::vector<SceVideoOutBuffer> buffers;
+            for (const auto address : addresses) buffers.push_back({address, 0, {}});
+            if (const auto invalid = validRows(buffers)) return returnInt(guest, invalid);
+            SceVideoOutAttribute attribute;
+            attribute.TilingMode = legacy.TilingMode;
+            attribute.Width = legacy.Width;
+            attribute.Height = legacy.Height;
+            attribute.PitchInPixel = legacy.PitchInPixel;
+            attribute.Option = legacy.Option;
+            attribute.PixelFormat = format;
+            required(backend.RegisterBuffers, "sceVideoOutRegisterBuffers");
+            // v1 names no attribute set: take the first free one and return its index.
+            for (std::int32_t set = 0; set < 4; ++set) {
+                const auto result = backend.RegisterBuffers(signedInt(first), set, start, buffers, attribute, 0);
+                if (result == VideoOutError::InvalidIndex) continue;
+                return returnInt(guest, result == 0 ? set : result);
+            }
+            returnInt(guest, VideoOutError::NoEmptySlot);
+            break;
+        }
         case Service::SetAttribute: {
             const auto stack = stackArguments(guest);
-            if (target && (static_cast<std::uint32_t>(third) != 0 ||
-                !static_cast<std::uint32_t>(fourth) || static_cast<std::uint32_t>(fourth) > 16384 ||
-                !static_cast<std::uint32_t>(fifth) || static_cast<std::uint32_t>(fifth) > 16384 || sixth ||
-                static_cast<std::uint32_t>(stack[0]) || stack[1] ||
-                (second != 0x8000000000000000ULL && second != 0x8000000022000000ULL && second != 0x8100070422000000ULL)))
-                throw std::runtime_error("SCE VideoOut attribute outside qualified target use");
             alignedAddress(first, alignof(SceVideoOutAttribute));
             guest.CheckAccess(first, sizeof(SceVideoOutAttribute), Permission::Write);
             SceVideoOutAttribute attribute;
@@ -205,20 +287,128 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
             break;
         }
         case Service::FlipRate:
-            if (signedInt(second) < 0 || signedInt(second) > 2)
-                throw std::runtime_error("SCE VideoOut invalid flip rate");
+            if (signedInt(second) < 0 || signedInt(second) > 2) return returnInt(guest, VideoOutError::InvalidValue);
             required(backend.SetFlipRate, "sceVideoOutSetFlipRate");
             returnInt(guest, backend.SetFlipRate(signedInt(first), signedInt(second)));
             break;
         case Service::Unregister:
-            if (target && signedInt(second) != 0)
-                throw std::runtime_error("SCE VideoOut unregister outside qualified target group");
-            if (signedInt(second) < 0 || signedInt(second) >= 4)
-                throw std::runtime_error("SCE VideoOut invalid buffer set index");
+            if (signedInt(second) < 0 || signedInt(second) >= 4) return returnInt(guest, VideoOutError::InvalidIndex);
             required(backend.UnregisterBuffers, "sceVideoOutUnregisterBuffers");
             returnInt(guest, backend.UnregisterBuffers(signedInt(first), signedInt(second)));
             break;
+        case Service::SubmitFlip:
+            // Every mode presents at the next vsync; HSYNC/window variants only change tearing.
+            if (signedInt(third) < 1 || signedInt(third) > 6) return returnInt(guest, VideoOutError::InvalidValue);
+            if (signedInt(second) < -2 || signedInt(second) >= 16) return returnInt(guest, VideoOutError::InvalidIndex);
+            required(backend.SubmitFlip, "sceVideoOutSubmitFlip");
+            returnInt(guest, backend.SubmitFlip(signedInt(first), signedInt(second), signedInt(third),
+                                                static_cast<std::int64_t>(fourth)));
+            break;
+        case Service::AddFlipEvent: case Service::AddVblankEvent:
+            if (!first) return returnInt(guest, VideoOutError::InvalidEventQueue);
+            required(backend.AddEvent, "sceVideoOutAddEvent");
+            returnInt(guest, backend.AddEvent(first, signedInt(second),
+                service == Service::AddFlipEvent ? VideoOutEventFlip : VideoOutEventVblank, third));
+            break;
+        case Service::DeleteFlipEvent: case Service::DeleteVblankEvent:
+            if (!first) return returnInt(guest, VideoOutError::InvalidEventQueue);
+            required(backend.DeleteEvent, "sceVideoOutDeleteEvent");
+            returnInt(guest, backend.DeleteEvent(first, signedInt(second),
+                service == Service::DeleteFlipEvent ? VideoOutEventFlip : VideoOutEventVblank));
+            break;
+        case Service::GetFlipStatus: {
+            if (!statusOutput(guest, second, alignof(SceVideoOutFlipStatus), sizeof(SceVideoOutFlipStatus))) break;
+            required(backend.GetFlipStatus, "sceVideoOutGetFlipStatus");
+            const auto result = backend.GetFlipStatus(signedInt(first));
+            writeStatus(guest, second, result.Result, result.Status);
+            break;
         }
+        case Service::GetVblankStatus: {
+            if (!statusOutput(guest, second, alignof(SceVideoOutVblankStatus), sizeof(SceVideoOutVblankStatus))) break;
+            required(backend.GetVblankStatus, "sceVideoOutGetVblankStatus");
+            const auto result = backend.GetVblankStatus(signedInt(first));
+            writeStatus(guest, second, result.Result, result.Status);
+            break;
+        }
+        case Service::GetResolutionStatus: {
+            constexpr std::size_t defined = offsetof(SceVideoOutResolutionStatus, Reserved1) + 12;
+            if (!statusOutput(guest, second, alignof(SceVideoOutResolutionStatus), defined)) break;
+            required(backend.GetResolutionStatus, "sceVideoOutGetResolutionStatus");
+            const auto result = backend.GetResolutionStatus(signedInt(first));
+            writeStatus(guest, second, result.Result, result.Status, defined);
+            break;
+        }
+        case Service::WaitVblank:
+            required(backend.WaitVblank, "sceVideoOutWaitVblank");
+            returnInt(guest, backend.WaitVblank(signedInt(first)));
+            break;
+        case Service::IsFlipPending:
+            required(backend.IsFlipPending, "sceVideoOutIsFlipPending");
+            returnInt(guest, backend.IsFlipPending(signedInt(first)));
+            break;
+        case Service::ConfigureOutput: {
+            // (handle, mode, const SceVideoOutOutputOptions*, void* reserved, u64 reserved)
+            if (fourth || fifth) return returnInt(guest, VideoOutError::InvalidValue);
+            if (third) {
+                const auto options = read<std::array<std::uint32_t, 16>>(guest, third);
+                for (const auto word : options) if (word) return returnInt(guest, VideoOutError::InvalidOption);
+            }
+            required(backend.ConfigureOutput, "sceVideoOutConfigureOutput");
+            returnInt(guest, backend.ConfigureOutput(signedInt(first), second));
+            break;
+        }
+        case Service::SetWindowModeMargins:
+            required(backend.SetWindowModeMargins, "sceVideoOutSetWindowModeMargins");
+            returnInt(guest, backend.SetWindowModeMargins(signedInt(first), signedInt(second), signedInt(third)));
+            break;
+        case Service::GetEventId: case Service::GetEventData: case Service::GetEventCount: {
+            if (!first || (service == Service::GetEventData && !second))
+                return returnInt(guest, VideoOutError::InvalidAddress);
+            const auto event = read<KernelEventView>(guest, first);
+            if (event.Filter != VideoOutFilter) return returnInt(guest, VideoOutError::InvalidEvent);
+            const auto data = static_cast<std::uint64_t>(event.Data);
+            if (service == Service::GetEventCount)
+                return returnInt(guest, static_cast<std::int32_t>((data >> 12u) & 0xfu));
+            if (service == Service::GetEventId) {
+                if (event.Ident != 0 && event.Ident != 1 && event.Ident != 2 && event.Ident != 8)
+                    return returnInt(guest, VideoOutError::InvalidEvent);
+                return returnInt(guest, static_cast<std::int32_t>(event.Ident));
+            }
+            // Payload is data bits 63:16; a flip argument keeps its sign.
+            auto payload = data >> 16u;
+            if (event.Ident == static_cast<std::uint64_t>(VideoOutEventFlip) && (data & 0x8000000000000000ULL))
+                payload |= 0xffff000000000000ULL;
+            alignedAddress(second, alignof(std::int64_t));
+            guest.CheckAccess(second, sizeof(std::int64_t), Permission::Write);
+            guest.Write(second, std::as_bytes(std::span(&payload, 1)));
+            returnInt(guest, 0);
+            break;
+        }
+        }
+    }
+
+    bool hasCallback(Service service) const {
+        switch (service) {
+        case Service::Open: return bool(backend.Open);
+        case Service::Close: return bool(backend.Close);
+        case Service::OutputStatus: return bool(backend.GetOutputStatus);
+        case Service::RegisterBuffers: case Service::RegisterBuffersV1: return bool(backend.RegisterBuffers);
+        case Service::FlipRate: return bool(backend.SetFlipRate);
+        case Service::Unregister: return bool(backend.UnregisterBuffers);
+        case Service::SubmitFlip: return bool(backend.SubmitFlip);
+        case Service::AddFlipEvent: case Service::AddVblankEvent: return bool(backend.AddEvent);
+        case Service::DeleteFlipEvent: case Service::DeleteVblankEvent: return bool(backend.DeleteEvent);
+        case Service::GetFlipStatus: return bool(backend.GetFlipStatus);
+        case Service::GetVblankStatus: return bool(backend.GetVblankStatus);
+        case Service::WaitVblank: return bool(backend.WaitVblank);
+        case Service::IsFlipPending: return bool(backend.IsFlipPending);
+        case Service::GetResolutionStatus: return bool(backend.GetResolutionStatus);
+        case Service::ConfigureOutput: return bool(backend.ConfigureOutput);
+        case Service::SetWindowModeMargins: return bool(backend.SetWindowModeMargins);
+        case Service::SetAttribute: case Service::GetEventId: case Service::GetEventData: case Service::GetEventCount:
+            return true;
+        }
+        return false;
     }
 
     std::uint64_t resolve(const SceImport& import, bool target) {
@@ -231,15 +421,8 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
         if (target) {
             if (!admitted.contains(service->second))
                 throw std::runtime_error("Unsupported SCE VideoOut target ABI: no qualified admission");
-            switch (service->second) {
-            case Service::Open: required(backend.Open, "sceVideoOutOpen"); break;
-            case Service::Close: required(backend.Close, "sceVideoOutClose"); break;
-            case Service::OutputStatus: required(backend.GetOutputStatus, "sceVideoOutGetOutputStatus"); break;
-            case Service::RegisterBuffers: required(backend.RegisterBuffers, "sceVideoOutRegisterBuffers2"); break;
-            case Service::FlipRate: required(backend.SetFlipRate, "sceVideoOutSetFlipRate"); break;
-            case Service::Unregister: required(backend.UnregisterBuffers, "sceVideoOutUnregisterBuffers"); break;
-            case Service::SetAttribute: break;
-            }
+            if (!hasCallback(service->second))
+                throw std::runtime_error("Unsupported SCE VideoOut service without native backend: " + identity(import));
         }
         const Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                       import.LibraryVersion, import.ModuleMajor, import.ModuleMinor, target};
@@ -248,10 +431,10 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
         const auto gate = base + nextSlot * 16;
         const std::array ret{std::byte{0xc3}};
         machine.Write(gate, ret);
-        machine.AddHostCall(gate, [state = weak_from_this(), operation = service->second, target](Machine& guest) {
+        machine.AddHostCall(gate, [state = weak_from_this(), operation = service->second](Machine& guest) {
             const auto context = state.lock();
             if (!context) throw std::runtime_error("Unsupported SCE VideoOut service: runtime has expired");
-            context->invoke(guest, operation, target);
+            context->invoke(guest, operation);
         });
         gates.emplace(key, gate);
         ++nextSlot;
@@ -265,18 +448,32 @@ SceVideoOutImports::SceVideoOutImports(Machine& machine, SceVideoOutBackend back
 SceVideoOutImports::~SceVideoOutImports() = default;
 
 std::span<const VideoOutAbiAdmission> TargetVideoOutAdmissions() {
-    // Title-agnostic: the same call-shape contracts apply to every importing image.
-    // Bounded target caller/field inference against the pinned public candidate.
-    // Admit the two 8-bit formats and exact source-qualified R10G10B10A2 BT.2100 PQ
-    // value. Native PQ scanout preserves packed code values and uses a matching layer.
+    // Title-agnostic: every contract validates its public ABI generically for
+    // any importing image (any buffer count 1-16, tiled or linear, any set).
     static constexpr VideoOutAbiAdmission admissions[] = {
-        {Service::Open, "eboot:6d8ecd,959cb4,95a349,Open255/main/index0/null; signed EAX"},
-        {Service::Close, "eboot:6d8f06,959d37,95a3a3,973163,opaque int32 handle; EAX ignored"},
-        {Service::OutputStatus, "eboot:6d8ee2,959cc7,95a398,status48; +0/+4 only on EAX==0"},
-        {Service::RegisterBuffers, "eboot:972f8e,group0/start0/count3/stride32/category0/null"},
-        {Service::SetAttribute, "eboot:972eec,attribute80/u64-format/u32-extent/tiling0/noDCC"},
-        {Service::FlipRate, "eboot:972fa7,helper60->0/30->1/20->2; signed EAX"},
-        {Service::Unregister, "eboot:973158,opaque int32 handle/group0; EAX ignored"}
+        {Service::Open, "public ABI: open(user 0/255, bus 0-2, index 0, optional param16/24); signed EAX"},
+        {Service::Close, "public ABI: close(handle); signed EAX"},
+        {Service::OutputStatus, "public ABI: status48 written only on EAX==0"},
+        {Service::RegisterBuffers, "public ABI: register2(set 0-3, start/count within 16, stride32, category 0/1)"},
+        {Service::SetAttribute, "public ABI: attribute80, u64 format, u32 extents, any tiling/DCC"},
+        {Service::FlipRate, "public ABI: flip rate 0-2; signed EAX"},
+        {Service::Unregister, "public ABI: unregister(handle, set 0-3); signed EAX"},
+        {Service::SubmitFlip, "public ABI: submitFlip(handle, index -2..15, mode 1-6, i64 arg)"},
+        {Service::AddFlipEvent, "public ABI: addFlipEvent(equeue, handle, udata) -> EVFILT_VIDEO_OUT ident 0"},
+        {Service::DeleteFlipEvent, "public ABI: deleteFlipEvent(equeue, handle)"},
+        {Service::AddVblankEvent, "public ABI: addVblankEvent(equeue, handle, udata) -> EVFILT_VIDEO_OUT ident 1"},
+        {Service::DeleteVblankEvent, "public ABI: deleteVblankEvent(equeue, handle)"},
+        {Service::GetFlipStatus, "public ABI: flipStatus128 written only on EAX==0"},
+        {Service::GetVblankStatus, "public ABI: vblankStatus40 written only on EAX==0"},
+        {Service::WaitVblank, "public ABI: waitVblank(handle) blocks until the next vblank"},
+        {Service::IsFlipPending, "public ABI: isFlipPending(handle) -> pending flip count"},
+        {Service::GetResolutionStatus, "public ABI: resolutionStatus44 written only on EAX==0"},
+        {Service::ConfigureOutput, "public ABI: configureOutput(handle, mode, options64, null, 0)"},
+        {Service::SetWindowModeMargins, "public ABI: setWindowModeMargins(handle, top, bottom)"},
+        {Service::RegisterBuffersV1, "public ABI: register(start, u64 addresses, count, attribute40) -> set index"},
+        {Service::GetEventId, "public ABI: getEventId(event32) for EVFILT_VIDEO_OUT"},
+        {Service::GetEventData, "public ABI: getEventData(event32, i64*) payload bits 63:16"},
+        {Service::GetEventCount, "public ABI: getEventCount(event32) bits 15:12"}
     };
     return admissions;
 }

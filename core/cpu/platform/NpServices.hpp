@@ -22,7 +22,7 @@ inline constexpr std::array NpRegistrations{
     NpRegistration{"XDncXQIJUSk", "libSceNpManager", "libSceNpManager", 1, 1, 1, 2}
 };
 
-// Local session policy must agree with SceNpLocalImports' signed-out state.
+// Local session policy must agree with the signed-out state upstream sceNpGetState reports.
 // Machine must outlive this provider. No credentials or fabricated account data.
 class NpServices {
 public:

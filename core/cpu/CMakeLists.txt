@@ -67,15 +67,25 @@ add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.c
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
 target_sources(anyps5_cpu PRIVATE src/SceLifecycleImports.cpp)
-target_sources(anyps5_cpu PRIVATE src/GuestThreads.cpp src/SceThreadImports.cpp)
-target_sources(anyps5_cpu PRIVATE src/GuestMemoryRuntime.cpp src/SceMemoryImports.cpp src/SceNpLocalImports.cpp src/SceNetAddressImports.cpp src/SceCommonDialogImports.cpp)
+target_sources(anyps5_cpu PRIVATE src/GuestThreads.cpp src/SceThreadImports.cpp src/SceKernelTimeImports.cpp)
+target_sources(anyps5_cpu PRIVATE src/GuestMemoryRuntime.cpp src/SceMemoryImports.cpp src/SceNetAddressImports.cpp src/SceCommonDialogImports.cpp)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 file(GLOB_RECURSE sceNidNameSources CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/core/libs/prx/*.cpp")
 set(sceNidNames "${CMAKE_CURRENT_BINARY_DIR}/generated/SceNidNames.inc")
 add_custom_command(OUTPUT "${sceNidNames}"
     COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/generate_sce_nid_names.py" "${PROJECT_SOURCE_DIR}/core/libs/prx" "${sceNidNames}"
     DEPENDS "${PROJECT_SOURCE_DIR}/tools/generate_sce_nid_names.py" "${PROJECT_SOURCE_DIR}/tools/nid_names.py" ${sceNidNameSources} VERBATIM)
-target_sources(anyps5_cpu PRIVATE src/SceHostTrampolines.cpp src/SceImportStubs.cpp src/SceNpOfflineImports.cpp "${sceNidNames}")
+target_sources(anyps5_cpu PRIVATE src/SceHostTrampolines.cpp src/SceImportStubs.cpp src/SceNpOfflineImports.cpp src/ScePadImports.cpp "${sceNidNames}")
+# Upstream core/libs/prx NP exports compiled for this host; each translation unit
+# includes one upstream Export.cpp next to its hand-checked bridge descriptors.
+add_library(anyps5_upstream_prx_objects OBJECT
+    src/upstream-prx/NpManager.cpp src/upstream-prx/NpWebApi2.cpp
+    src/upstream-prx/NpAuth.cpp src/upstream-prx/NpEntitlementAccess.cpp
+    "${PROJECT_SOURCE_DIR}/core/libs/prx/libc/src/NotImplemented.cpp")
+target_include_directories(anyps5_upstream_prx_objects PRIVATE include "${PROJECT_SOURCE_DIR}/core/libs")
+# Upstream's libc header declares C-linkage functions returning C++ types.
+target_compile_options(anyps5_upstream_prx_objects PRIVATE -Wall -Wextra -Wno-return-type-c-linkage)
+target_sources(anyps5_cpu PRIVATE src/SceUpstreamPrxBridge.cpp $<TARGET_OBJECTS:anyps5_upstream_prx_objects>)
 target_include_directories(anyps5_cpu PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_include_directories(anyps5_cpu PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
 target_link_libraries(anyps5_cpu PRIVATE ${cpuEngineLibrary} unicorn)
@@ -259,6 +269,10 @@ if(BUILD_TESTING)
     target_include_directories(anyps5_sce_kernel_import_tests PRIVATE "${PROJECT_SOURCE_DIR}/core/libs")
     add_test(NAME anyps5_sce_kernel_imports COMMAND anyps5_sce_kernel_import_tests)
     set_tests_properties(anyps5_sce_tls anyps5_guest_files anyps5_sce_kernel_imports PROPERTIES TIMEOUT 30)
+    add_test_executable(anyps5_sce_kernel_time_import_tests tests/SceKernelTimeImportsTests.cpp)
+    target_link_libraries(anyps5_sce_kernel_time_import_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_kernel_time_imports COMMAND anyps5_sce_kernel_time_import_tests)
+    set_tests_properties(anyps5_sce_kernel_time_imports PROPERTIES TIMEOUT 30)
     add_test_executable(anyps5_sce_user_import_tests tests/SceUserImportsTest.cpp)
     target_link_libraries(anyps5_sce_user_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_user_imports COMMAND anyps5_sce_user_import_tests)
@@ -298,16 +312,49 @@ if(BUILD_TESTING)
     add_custom_target(anyps5_lazy_import_fixture ALL DEPENDS "${lazyImportGuest}" "${lazyImportMain}")
     add_test(NAME anyps5_lazy_import_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/LazyImportCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${lazyImportMain}" "${lazyImportGuest}")
     set_tests_properties(anyps5_lazy_import_cli PROPERTIES TIMEOUT 60)
+    set(npBridgeGuest "${CMAKE_CURRENT_BINARY_DIR}/UpstreamNpBridgeGuest.prx")
+    set(npBridgeMain "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-main.elf")
+    add_custom_command(OUTPUT "${npBridgeGuest}" "${npBridgeMain}"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_BRIDGE_DEPENDENCY=1 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/UpstreamNpBridgeHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-guest.o"
+        COMMAND "${guestLinker}" -shared -soname UpstreamNpBridgeGuest.prx -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro -o "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-guest.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables -DBUILD_BRIDGE_DEPENDENCY=0 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/UpstreamNpBridgeHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-main.o"
+        COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-start.o"
+        COMMAND "${guestLinker}" -shared -e _start -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-main.o" "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-start.o" "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-guest-linked.elf"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildUpstreamNpBridgeFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/upstream-np-bridge-main-linked.elf" "${npBridgeGuest}" "${npBridgeMain}"
+        DEPENDS fixtures/UpstreamNpBridgeHomebrew.c fixtures/SceStart.S tests/BuildUpstreamNpBridgeFixture.py tests/BuildPlatformServiceFixture.py tests/BuildSceModulesFixture.py VERBATIM)
+    add_custom_target(anyps5_upstream_np_bridge_fixture ALL DEPENDS "${npBridgeGuest}" "${npBridgeMain}")
+    add_test(NAME anyps5_upstream_np_bridge_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/UpstreamNpBridgeCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${npBridgeMain}" "${npBridgeGuest}")
+    set_tests_properties(anyps5_upstream_np_bridge_cli PROPERTIES TIMEOUT 90)
+    add_test(NAME anyps5_upstream_prx_bridge_drift COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/UpstreamPrxBridgeDriftTest.py" "${PROJECT_SOURCE_DIR}")
+    set_tests_properties(anyps5_upstream_prx_bridge_drift PROPERTIES TIMEOUT 30)
+    if(ANYPS5_CPU_BACKEND STREQUAL "TCG")
+        set(kernelTimeGuest "${CMAKE_CURRENT_BINARY_DIR}/KernelTimeGuest.prx")
+        set(kernelTimeMain "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main.elf")
+        set(kernelTimeFlags --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables)
+        set(kernelTimeLink -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro)
+        add_custom_command(OUTPUT "${kernelTimeGuest}" "${kernelTimeMain}"
+            COMMAND "${guestClang}" ${kernelTimeFlags} -DBUILD_KERNEL_TIME_DEPENDENCY=1 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelTimeHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest.o"
+            COMMAND "${guestLinker}" -shared -soname KernelTimeGuest.prx ${kernelTimeLink} -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest.o"
+            COMMAND "${guestClang}" ${kernelTimeFlags} -DBUILD_KERNEL_TIME_DEPENDENCY=0 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelTimeHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main.o"
+            COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-start.o"
+            COMMAND "${guestLinker}" -shared -e _start ${kernelTimeLink} --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main.o" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-start.o" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest-linked.elf"
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelTimeFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main-linked.elf" "${kernelTimeGuest}" "${kernelTimeMain}"
+            DEPENDS fixtures/KernelTimeHomebrew.c fixtures/SceStart.S tests/BuildKernelTimeFixture.py tests/BuildPlatformServiceFixture.py tests/BuildSceModulesFixture.py VERBATIM)
+        add_custom_target(anyps5_kernel_time_fixture ALL DEPENDS "${kernelTimeGuest}" "${kernelTimeMain}")
+        add_test(NAME anyps5_kernel_time_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/KernelTimeCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${kernelTimeMain}" "${kernelTimeGuest}")
+        set_tests_properties(anyps5_kernel_time_cli PROPERTIES TIMEOUT 120)
+    endif()
     add_test_executable(anyps5_sce_common_dialog_import_tests tests/SceCommonDialogImportsTest.cpp)
     target_link_libraries(anyps5_sce_common_dialog_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_common_dialog_imports COMMAND anyps5_sce_common_dialog_import_tests)
     set_tests_properties(anyps5_sce_common_dialog_imports PROPERTIES TIMEOUT 30)
-    add_test_executable(anyps5_sce_np_local_import_tests tests/SceNpLocalImportsTest.cpp)
-    target_link_libraries(anyps5_sce_np_local_import_tests PRIVATE anyps5_cpu)
-    add_test(NAME anyps5_sce_np_local_imports COMMAND anyps5_sce_np_local_import_tests)
+    add_test_executable(anyps5_sce_pad_import_tests tests/ScePadImportsTest.cpp)
+    target_link_libraries(anyps5_sce_pad_import_tests PRIVATE anyps5_cpu)
+    target_include_directories(anyps5_sce_pad_import_tests PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
+    add_test(NAME anyps5_sce_pad_imports COMMAND anyps5_sce_pad_import_tests)
+    set_tests_properties(anyps5_sce_pad_imports PROPERTIES TIMEOUT 30)
     add_test_executable(anyps5_sce_net_address_import_tests tests/SceNetAddressImportsTest.cpp)
     target_link_libraries(anyps5_sce_net_address_import_tests PRIVATE anyps5_cpu)
-    set_tests_properties(anyps5_sce_np_local_imports PROPERTIES TIMEOUT 30)
     if(ANYPS5_CPU_BACKEND STREQUAL "TCG")
         add_test(NAME anyps5_sce_net_address_imports COMMAND anyps5_sce_net_address_import_tests)
         set_tests_properties(anyps5_sce_net_address_imports PROPERTIES TIMEOUT 30)
@@ -415,7 +462,7 @@ if(ANYPS5_CPU_METAL_SOURCE_DIR)
         anyps5_add_native_np_identity(anyps5_cpu anyps5_platform_components)
         include("${CMAKE_CURRENT_SOURCE_DIR}/platform/http-uri/NativeUriTests.cmake")
         anyps5_add_native_uri_tests(anyps5_cpu)
-        add_library(anyps5_native_module_runner STATIC src/NativeModuleRunner.mm)
+        add_library(anyps5_native_module_runner STATIC src/NativeModuleRunner.mm src/NativePadInput.cpp)
         target_include_directories(anyps5_native_module_runner PUBLIC include)
         target_compile_features(anyps5_native_module_runner PUBLIC cxx_std_20)
         target_compile_options(anyps5_native_module_runner PRIVATE -fobjc-arc -Wall -Wextra -Wpedantic)
