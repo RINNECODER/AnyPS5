@@ -161,6 +161,20 @@ def main():
                         child = output.parent / 'app0/sce_module/consumer.prx.guest.prx'
                         assert needed_libraries(child.read_bytes()) == ['$ORIGIN/renamed.prx.guest.prx']
 
+            for suffix in ('.suprx', '.prx', '.sprx', '.debug_prx'):
+                providers = {'renamed.prx': declared_provider(22, ('libGuest',)),
+                             'other.prx': declared_provider(33, ('libOther',)),
+                             'own.prx': declared_provider(22, ('libOwn',), symbol='own'),
+                             'consumer.prx': consumer('libGuest' + suffix, module_name='libGuest')}
+                result, output = convert(f'{windows}-shared-{suffix}', windows, 'libOwn.prx', module_name='libOwn',
+                    symbol='own#A#B', providers=providers)
+                assert result.returncode == 0, result.stderr
+                if windows:
+                    run(output)
+                else:
+                    child = output.parent / 'app0/sce_module/consumer.prx.guest.prx'
+                    assert needed_libraries(child.read_bytes()) == ['$ORIGIN/renamed.prx.guest.prx']
+
             providers = {'one.prx': declared_provider(22, ('libGuest',)),
                          'two.prx': declared_provider(33, ('libGuest',), symbol='other')}
             result, output = convert(f'{windows}-ambiguous', windows, 'libGuest.suprx', providers=providers)
