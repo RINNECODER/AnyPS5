@@ -131,7 +131,7 @@ asm(".text\n"
     "    pushq 0x80(%r12)\n"
 #ifdef _WIN32
     "    mov 0x38(%r12), %rdi\n"
-    "    call GuestStackSwitch_nid_no_patch\n"
+    "    call " APS5_ASM_SYMBOL("GuestStackSwitch_nid_no_patch") "\n"
 #endif
     "    fxrstor64 0xa0(%r12)\n"
     "    mov 0x00(%r12), %rax\n"

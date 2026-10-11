@@ -13,4 +13,9 @@
 #define APS5_ASM_SYMBOL(name) name
 #endif
 
+// Name of a C symbol as written inside inline assembly (Mach-O prefixes an underscore).
+#ifndef APS5_ASM_SYMBOL
+#define APS5_ASM_SYMBOL(name) name
+#endif
+
 #endif

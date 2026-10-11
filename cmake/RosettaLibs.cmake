@@ -4,13 +4,9 @@ if(NOT APPLE OR NOT CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
 endif()
 
 # Libraries whose dependencies are not built for x86_64 in this mode yet.
-# Graphics comes with the Metal backend (design doc phase 3); media decoders
-# need the ffmpeg, LibAtrac9, freetype and libjpeg-turbo submodules.
+# Graphics comes with the Metal backend (design doc phase 3).
 set(ANYPS5_ROSETTA_EXCLUDED_LIBS
-    libSceAgc libSceAgcDriver libSceVideoOut
-    libSceAjm.native libSceAudiodec libSceAudiodec.native libSceAvPlayer libSceAvPlayer.native libSceOpusDec libSceVideodec2 libSceVdecsw
-    libSceNgs2 libSceNgs2.native libSceFont libSceFont.native libSceFont-module libSceFontFt libSceFontFt-module
-    libSceJpegDec libSceJpegEnc libScePngDec libScePngEnc libSceZlib)
+    libSceAgc libSceAgcDriver libSceVideoOut)
 
 # Imported by titles but without a source directory in core/libs/prx.
 set(ANYPS5_ROSETTA_SOURCELESS_LIBS libHttpServer.Prospero)
@@ -54,6 +50,22 @@ set(BUILD_TESTING OFF)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/core/relinker ${CMAKE_BINARY_DIR}/core/relinker)
 
+# Third-party code the media libraries link, built for x86_64 (static, PIC).
+# ffmpeg is the prebuilt package that 3rdparty/ffmpeg-core downloads; the
+# freetype, libjpeg-turbo and stb inputs are the vendored submodules.
+set(ARCHITECTURE x86_64)
+add_subdirectory(${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg-core ${CMAKE_BINARY_DIR}/rosetta/3rdparty/ffmpeg-core)
+set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/3rdparty/freetype ${CMAKE_BINARY_DIR}/rosetta/3rdparty/freetype EXCLUDE_FROM_ALL)
+set_target_properties(freetype PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_subdirectory(${CMAKE_SOURCE_DIR}/core/Decoder/Jpeg ${CMAKE_BINARY_DIR}/rosetta/Decoder/Jpeg)
+add_subdirectory(${CMAKE_SOURCE_DIR}/core/Decoder/Png ${CMAKE_BINARY_DIR}/rosetta/Decoder/Png)
+
 add_library(libc SHARED EXCLUDE_FROM_ALL)
 add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libc ${CMAKE_BINARY_DIR}/rosetta/prx/libc)
 target_include_directories(libc PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT})
@@ -90,10 +102,17 @@ foreach(LIB_DIR ${ANYPS5_ROSETTA_LIB_DIRS})
     endif()
     list(APPEND ANYPS5_ROSETTA_TARGETS ${LIB_NAME})
 endforeach()
+# Stub libraries live in tools/rosetta/libs/<name>/Export.cpp (fork-only files).
 foreach(LIB_NAME ${ANYPS5_ROSETTA_SOURCELESS_LIBS})
-    if(NOT IS_DIRECTORY ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/${LIB_NAME})
-        message(STATUS "Rosetta libs: ${LIB_NAME} excluded (no source directory in core/libs/prx; titles that import it need a stub library)")
+    set(STUB_SOURCE ${CMAKE_SOURCE_DIR}/tools/rosetta/libs/${LIB_NAME}/Export.cpp)
+    if(IS_DIRECTORY ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/${LIB_NAME} OR NOT EXISTS ${STUB_SOURCE})
+        message(STATUS "Rosetta libs: ${LIB_NAME} not built (no stub source)")
+        continue()
     endif()
+    add_library(${LIB_NAME} SHARED EXCLUDE_FROM_ALL ${STUB_SOURCE})
+    target_include_directories(${LIB_NAME} PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT})
+    target_link_libraries(${LIB_NAME} PRIVATE libkernel libc)
+    list(APPEND ANYPS5_ROSETTA_TARGETS ${LIB_NAME})
 endforeach()
 
 set(BUILD_TESTING ${ANYPS5_ROSETTA_BUILD_TESTING})
