@@ -42,6 +42,7 @@ struct WindowSnapshot {
     WindowIdentity window;
     InputSources sources;
     std::uint64_t lastSequence{};
+    std::uint64_t droppedEvents{};
     bool open{}, focused{}, closeRequested{};
     std::uint32_t drawableWidth{}, drawableHeight{};
     std::array<bool, 256> heldKeys{};

@@ -842,6 +842,26 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         Require(indices == originalIndices && arguments == originalArguments, name + " modified borrowed index or argument records");
         std::cout << name << " passed\n";
     };
+    {
+        // #289: a draw whose vertex program cannot be decoded is skipped and counted; the
+        // valid draw after it in the same command buffer still renders every pixel.
+        auto& driver = AgcDriver::Metal::MetalDriver::Get();
+        const auto before = driver.SkippedWork();
+        std::vector<std::uint32_t> failSoft;
+        const std::array<std::uint32_t, 2> strayProgram{0x580000u >> 8u, 0}, vertexProgram{0x500000u >> 8u, 0};
+        RegisterPacket(failSoft, 0x76, 0xc8, strayProgram);
+        append(failSoft, 0x2d, {3, 2});
+        RegisterPacket(failSoft, 0x76, 0xc8, vertexProgram);
+        append(failSoft, 0x2d, {3, 2});
+        submitIndirect(failSoft, 255, "Fail-soft draw: an undecodable draw is skipped and the next draw renders");
+        const auto after = driver.SkippedWork();
+        Require(after.draws == before.draws + 1 && after.dispatches == before.dispatches,
+            "Fail-soft draw counters did not record exactly one skipped draw");
+        const auto reason = std::find_if(after.reasons.begin(), after.reasons.end(), [](const auto& entry) {
+            return entry.kind == "draw" && entry.what.find("graphics program is outside registered shader code") != std::string::npos;
+        });
+        Require(reason != after.reasons.end() && reason->count >= 1, "Fail-soft draw did not record why the draw was skipped");
+    }
     std::vector<std::uint32_t> signedCommands;
     append(signedCommands, 0x26, {static_cast<std::uint32_t>(IndexAddress), 0});
     append(signedCommands, 0x2a, {0});

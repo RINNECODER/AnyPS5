@@ -13,7 +13,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
        NOT EXISTS "${ANYPS5_PLATFORM_TCG_INCLUDE}/qemu/anyps5-cpu.h")
         message(FATAL_ERROR "Standalone acceptance needs an explicit pinned TCG library and headers")
     endif()
-    add_library(anyps5_platform_machine STATIC ../src/CpuQemu.cpp ../src/SceNpLocalImports.cpp
+    add_library(anyps5_platform_machine STATIC ../src/CpuQemu.cpp
         ../src/SceElf.cpp ../src/Self.cpp ../src/SceTls.cpp
         ../src/GuestThreads.cpp ../src/SceThreadImports.cpp ../src/SceModules.cpp ../src/SceLifecycleImports.cpp
         ../src/SceHostTrampolines.cpp
@@ -33,7 +33,7 @@ else()
     set(platformCpuTarget anyps5_cpu)
 endif()
 
-add_library(anyps5_platform_components STATIC KernelPrimitives.cpp KernelEvents.cpp KernelSemaphores.cpp ContentServices.cpp
+add_library(anyps5_platform_components STATIC KernelPrimitives.cpp KernelEvents.cpp KernelSemaphores.cpp KernelEventFlags.cpp ContentServices.cpp
     NetworkServices.cpp NpServices.cpp AudioServices.cpp RtcServices.cpp CandidateComponents.cpp)
 target_include_directories(anyps5_platform_components PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" ../include)
 target_compile_features(anyps5_platform_components PUBLIC cxx_std_20)
@@ -80,6 +80,7 @@ if(BUILD_TESTING)
     set_tests_properties(anyps5_platform_registration PROPERTIES TIMEOUT 30)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     include("${CMAKE_CURRENT_SOURCE_DIR}/tests/KernelSemaphoreRegistration.cmake")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/tests/KernelSyncRegistration.cmake")
     set(scePlatformFixture "${CMAKE_CURRENT_BINARY_DIR}/sce-platform.elf")
     add_custom_command(OUTPUT "${scePlatformFixture}"
         COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
@@ -211,6 +212,28 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_platform_kernel_static_mutex
         COMMAND anyps5_platform_kernel_static_mutex_test "${kernelStaticMutexFixture}")
     set_tests_properties(anyps5_platform_kernel_static_mutex PROPERTIES TIMEOUT 60)
+    set(kernelMutexSemanticsFixture "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics.elf")
+    add_custom_command(OUTPUT "${kernelMutexSemanticsFixture}"
+        COMMAND "${platformGuestClang}" --target=x86_64-unknown-linux-gnu -O1 -fPIC
+            -ffreestanding -fno-builtin -fno-stack-protector -fno-unwind-tables
+            -fno-asynchronous-unwind-tables -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelMutexSemanticsGuest.c"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics.o"
+        COMMAND "${platformGuestLinker}" -shared -e _start --hash-style=sysv
+            -z max-page-size=4096 -z separate-code -z norelro
+            -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics-linked.elf"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics.o"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelMutexSemanticsFixture.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/kernel-mutex-semantics-linked.elf" "${kernelMutexSemanticsFixture}"
+        DEPENDS fixtures/KernelMutexSemanticsGuest.c tests/BuildKernelMutexSemanticsFixture.py
+            tests/BuildKernelMutexThreadsFixture.py ../tests/BuildSceCrtFixture.py VERBATIM)
+    add_custom_target(anyps5_platform_kernel_mutex_semantics_fixture DEPENDS "${kernelMutexSemanticsFixture}")
+    add_executable(anyps5_platform_kernel_mutex_semantics_test tests/KernelMutexSemanticsTest.cpp)
+    target_link_libraries(anyps5_platform_kernel_mutex_semantics_test PRIVATE anyps5_platform_components)
+    target_compile_options(anyps5_platform_kernel_mutex_semantics_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_dependencies(anyps5_platform_kernel_mutex_semantics_test anyps5_platform_kernel_mutex_semantics_fixture)
+    add_test(NAME anyps5_platform_kernel_mutex_semantics
+        COMMAND anyps5_platform_kernel_mutex_semantics_test "${kernelMutexSemanticsFixture}")
+    set_tests_properties(anyps5_platform_kernel_mutex_semantics PROPERTIES TIMEOUT 60)
     set(kernelConditionTimeoutFixtures)
     foreach(timeoutKind IN ITEMS posix relative)
         set(timeoutDefine)

@@ -1,5 +1,6 @@
 #include <cpu/SceUserImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +22,7 @@ constexpr std::uint64_t notInitialized = 0xffffffff80960002ULL;
 constexpr std::uint64_t alreadyInitialized = 0xffffffff80960003ULL;
 constexpr std::uint64_t invalidArgument = 0xffffffff80960005ULL;
 constexpr std::uint64_t shortBuffer = 0xffffffff8096000aULL;
+constexpr std::uint64_t noEvent = 0xffffffff80960007ULL;
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -213,6 +215,95 @@ void names() {
     require(session.bytes(0x3000, 64) == std::vector<std::uint8_t>(64, 0xa7), "Unsupported username capacity changed its buffer");
 }
 
+// Contract: the remaining UserService queries report the single local profile (0x10000000) as LE outputs:
+// foreground user, the 16-entry registered list, color 0, user number 1, age level 0, NP account 0, all-zero
+// game presets after the caller's this_size, and zeroed accessibility/privacy settings. Each requires
+// initialization, rejects other users and null/unwritable outputs with signed invalid-argument, and never writes
+// a partial span.
+// Regression: these NIDs resolving to trap stubs that stop the guest at the first call.
+void profileQueries() {
+    struct Query { const char* nid; bool perUser; std::size_t offset; std::vector<std::uint8_t> expected; };
+    const auto word = [](std::uint32_t value) {
+        return std::vector<std::uint8_t>{std::uint8_t(value), std::uint8_t(value >> 8), std::uint8_t(value >> 16), std::uint8_t(value >> 24)};
+    };
+    std::vector<std::uint8_t> registered = word(0x10000000);
+    for (unsigned index = 1; index < 16; ++index) registered.insert(registered.end(), 4, 0xff);
+    const std::vector<Query> queries{
+        {"eNb53LQJmIM", false, 0, word(0x10000000)},                 // GetForegroundUser
+        {"5EiQCnL2G1Y", false, 0, registered},                       // GetRegisteredUserIdList
+        {"lUoqwTQu4Go", true, 0, word(0)},                           // GetUserColor
+        {"qbwy0Ub8b3M", true, 0, word(1)},                           // GetUserNumber
+        {"woNpu+45RLk", true, 0, word(0)},                           // GetAgeLevel
+        {"6dfDreosXGY", true, 0, std::vector<std::uint8_t>(8, 0)},   // GetNpAccountId
+        {"-sD02mFDBh4", true, 8, std::vector<std::uint8_t>(32, 0)},  // GetGamePresets (after this_size)
+        {"D-CzAxQL0XI", true, 0, word(0)},                           // GetPlatformPrivacyWs1
+        {"rnEhHqG-4xo", true, 0, word(0)}, {"ZKJtxdgvzwg", true, 0, word(0)}, {"-3Y5GO+-i78", true, 0, word(0)},
+        {"qWYHOFwqCxY", true, 0, word(0)}, {"hD-H81EN9Vg", true, 0, word(0)}, {"O6IW1-Dwm-w", true, 0, word(0)}};
+    for (const auto& query : queries) {
+        Session session;
+        const auto invoke = [&](std::uint64_t user, std::uint64_t output) {
+            return query.perUser ? session.call(query.nid, user, output) : session.call(query.nid, output);
+        };
+        const auto span = query.offset + query.expected.size();
+        session.fill(0x3000, 128);
+        require(invoke(0x10000000, 0x3001) == notInitialized, "Profile query answered before initialization");
+        require(session.call("j3YMu1MVNNo") == 0, "Profile query session initialization failed");
+        require(invoke(0x10000000, 0x3001) == 0, "Profile query for the local user did not return OK");
+        auto expected = std::vector<std::uint8_t>(span + 2, 0xa7);
+        for (std::size_t index = 0; index < query.expected.size(); ++index) expected[1 + query.offset + index] = query.expected[index];
+        require(session.bytes(0x3000, span + 2) == expected, "Profile query output differs from the independent ABI oracle");
+        session.fill(0x3000, 128);
+        if (query.perUser) for (const auto user : {std::uint64_t(0), std::uint64_t(0xffffffff), std::uint64_t(0x10000001)})
+            require(invoke(user, 0x3000) == invalidArgument, "Profile query accepted a user other than the local profile");
+        const std::uint64_t boundary = 0x7000 - span / 2;
+        session.fill(boundary, span / 2);
+        for (const auto address : std::array<std::uint64_t, 4>{0, boundary, 0x9000, std::numeric_limits<std::uint64_t>::max() - 1})
+            require(invoke(0x10000000, address) == invalidArgument, "Profile query accepted a null or unwritable output");
+        require(session.bytes(0x3000, 128) == std::vector<std::uint8_t>(128, 0xa7) &&
+                session.bytes(boundary, span / 2) == std::vector<std::uint8_t>(span / 2, 0xa7), "Rejected profile query wrote guest memory");
+    }
+}
+
+// Contract: GetEvent reports the local user's login (type 0) once, then the signed NO_EVENT code; Initialize2 and
+// Terminate bracket the session so services report not-initialized after Terminate and accept a fresh Initialize.
+// Regression: a polling loop never seeing NO_EVENT, or Terminate/Initialize2 stopping the guest as trap stubs.
+void eventsAndLifecycle() {
+    Session session;
+    require(session.call("yH17Q6NWtVg", 0x3000) == notInitialized, "GetEvent answered before initialization");
+    require(session.call("bwFjS+bX9mA") == notInitialized, "Terminate succeeded before initialization");
+    require(session.call("az-0R6eviZ0", 700, 0) == 0, "Initialize2 failed");
+    require(session.call("j3YMu1MVNNo") == alreadyInitialized && session.call("az-0R6eviZ0", 700, 0) == alreadyInitialized,
+            "Initialize2 did not share the session initialization state");
+    session.fill(0x3000, 16);
+    for (const auto address : std::array<std::uint64_t, 3>{0, 0x6ffc, 0x9000})
+        require(session.call("yH17Q6NWtVg", address) == invalidArgument, "GetEvent accepted a null or unwritable event");
+    require(session.call("yH17Q6NWtVg", 0x3001) == 0, "The pending login event was consumed by a rejected call");
+    require(session.bytes(0x3000, 10) == std::vector<std::uint8_t>{0xa7, 0, 0, 0, 0, 0, 0, 0, 0x10, 0xa7},
+            "Login event differs from the independent {type 0, user 0x10000000} oracle");
+    session.fill(0x3000, 16);
+    require(session.call("yH17Q6NWtVg", 0x3000) == noEvent, "Second GetEvent did not return signed NO_EVENT");
+    require(session.bytes(0x3000, 16) == std::vector<std::uint8_t>(16, 0xa7), "NO_EVENT changed the event buffer");
+    require(session.call("bwFjS+bX9mA") == 0, "Terminate failed");
+    require(session.call("CdWp0oHWGr0", 0x3000) == notInitialized && session.call("bwFjS+bX9mA") == notInitialized,
+            "Services kept answering after Terminate");
+    require(session.call("j3YMu1MVNNo") == 0 && session.call("CdWp0oHWGr0", 0x3000) == 0, "Initialize after Terminate failed");
+    session.fill(0x3000, 16);
+    require(session.call("yH17Q6NWtVg", 0x3000) == 0 && session.bytes(0x3004, 4) == std::vector<std::uint8_t>{0, 0, 0, 0x10},
+            "A fresh session after Terminate did not report the local login again");
+    // Game presets honour the caller's this_size: a 24-byte structure gets only its 16 declared bytes zeroed.
+    session.fill(0x3000, 64);
+    const std::array<std::uint8_t, 8> small{24, 0, 0, 0, 0, 0, 0, 0};
+    session.machine.Write(0x3000, std::as_bytes(std::span(small)));
+    require(session.call("-sD02mFDBh4", 0x10000000, 0x3000) == 0, "Game presets rejected a smaller declared structure");
+    auto presets = std::vector<std::uint8_t>(64, 0xa7);
+    std::copy(small.begin(), small.end(), presets.begin());
+    std::fill(presets.begin() + 8, presets.begin() + 24, 0);
+    require(session.bytes(0x3000, 64) == presets, "Game presets wrote past the caller's declared this_size");
+    const std::array<std::uint8_t, 8> tiny{11, 0, 0, 0, 0, 0, 0, 0};
+    session.machine.Write(0x3000, std::as_bytes(std::span(tiny)));
+    require(session.call("-sD02mFDBh4", 0x10000000, 0x3000) == invalidArgument, "Game presets accepted a this_size without fields");
+}
+
 // Contract: complete import identity owns an executable nonwritable gate; expired session callbacks fault safely.
 // Regression: NID-only caches, accepting wrong scope/version, or callbacks retaining dangling user-session pointers.
 // Other service resolvers cannot protect this separately owned gate page or weak user-service state lifetime.
@@ -261,6 +352,8 @@ int main() {
         initializationAndState();
         userOutputs();
         names();
+        profileQueries();
+        eventsAndLifecycle();
         scopeAndLifetime();
         std::cout << "PASS native x86 user-service GOT gates, session state, signed errors, checked ABI outputs and lifetime\n";
         return 0;

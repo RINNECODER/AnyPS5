@@ -85,14 +85,13 @@ void truthfulIntervalsAndFailures() {
     runtime.MapDirect(first, 3 * page, 0x32, 0x90, physical, page);
     const auto stableGeneration = runtime.Snapshot().Generation;
     kernelError([&] { runtime.MapDirect(first + 0x10000, page, 2, 0x90, physical, page); }, 17);
-    failure([&] { runtime.MapDirect(whole, page, 0xf2, 0x90, physical, page); }, "Unsupported guest memory protection");
+    failure([&] { runtime.MapDirect(whole, page, 0x400, 0x90, physical, page); }, "Unsupported guest memory protection");
     failure([&] { runtime.MapDirect(whole, page, 2, 2, physical, page); }, "Unsupported guest memory mapping flags");
     kernelError([&] { runtime.MapDirect(whole, page, 4, 0x90, physical, page); }, 22);
     kernelError([&] { runtime.MapDirect(whole, page, 2, 0x90, 7 * page, page); }, 22);
     kernelError([&] { runtime.MapDirect(whole, page, 2, 0x90, physical, page, 0x8000); }, 14);
     kernelError([&] { runtime.Protect(first - page, 2 * page, 1); }, 13);
-    kernelError([&] { runtime.Unmap(first + 2 * page, 2 * page); }, 13);
-    failure([&] { runtime.ReleaseDirect(physical, page); }, "Unsupported guest memory release of mapped");
+    kernelError([&] { runtime.Unmap(first + 3 * page, 2 * page); }, 13);
     kernelError([&] { runtime.AllocateDirect(0, 8 * page, 6 * page, page, 0); }, 35);
     kernelError([&] { runtime.AllocateDirect(-1, 8 * page, page, page, 0); }, 22);
     kernelError([&] { runtime.AllocateDirect(8 * page, 8 * page, page, page, 0); }, 22);
@@ -112,7 +111,7 @@ void truthfulIntervalsAndFailures() {
             "Partial unmap clipped or lost surviving physical offsets");
     runtime.ReleaseDirect(page, page);
     const auto available = runtime.AvailableDirect(0, 8 * page, page);
-    require(available.Address == page && available.Size == page, "Partial physical free reported a fabricated available run");
+    require(available.Address == 3 * page && available.Size == 5 * page, "Partial physical free did not report the largest free run");
     require(runtime.AllocateDirect(0, 8 * page, page, page, 0) == page, "Released physical gap was not reused");
     runtime.MapDirect(whole, page, 2, 0x90, page, page);
     require(read(machine, whole) == std::byte{0}, "Reallocated physical pages retained stale bytes");
@@ -122,8 +121,8 @@ void truthfulIntervalsAndFailures() {
     const auto reservation = runtime.Query(reserved);
     require(reservation.Start == reserved && reservation.End == reserved + 2 * page && reservation.Flags == 0,
             "Reserved address space was reported committed");
-    failure([&] { runtime.MapDirect(reserved, page, 2, 0x10, 0, page); }, "Unsupported guest memory fixed replacement");
-    kernelError([&] { runtime.MapDirect(reserved, page, 2, 0x90, 0, page); }, 17);
+    require(runtime.MapDirect(reserved, page, 2, 0x90, 0, page) == reserved && runtime.Query(reserved).Flags == 0x12 &&
+            runtime.Query(reserved + page).Flags == 0, "Fixed no-overwrite mapping did not split a real reservation");
     require(runtime.Query(0, true).Start == 0x8000, "Find-next query omitted a lower pinned Machine mapping");
     runtime.Protect(whole, page, 4);
     constexpr std::array<std::uint8_t, 6> executed{0xb8, 0x2a, 0, 0, 0, 0x90};
@@ -305,6 +304,203 @@ void roundedProtectionLengths() {
     require(machine.Run(0x1000, 0x100d, 32) == Cpu::StopReason::Address && read(machine, first + page + 17) == std::byte{0x5a},
             "Failed full-page ownership validation partially protected the preceding owned page");
 }
+
+bool accessible(Cpu::Machine& machine, std::uint64_t address, Permission permission) {
+    try { machine.CheckAccess(address, 1, permission); return true; }
+    catch (const std::exception&) { return false; }
+}
+
+// MEM-10: MAP_FIXED into a reservation splits it, and MAP_FIXED without NO_OVERWRITE replaces.
+void fixedPlacementIntoReservations() {
+    Cpu::Machine machine;
+    machine.Map(first + 0x80000, 4096, rw);
+    Cpu::GuestMemoryRuntime runtime(machine, 8 * page);
+    const auto physical = runtime.AllocateDirect(0, 8 * page, 2 * page, page, 0);
+    require(runtime.Reserve(first, 4 * page, 0x10, page) == first, "Fixed reservation was not placed");
+    require(runtime.MapDirect(first + page, page, 3, 0x90, physical, page) == first + page,
+            "Fixed no-overwrite direct mapping into a reservation was refused");
+    auto before = runtime.Query(first), inside = runtime.Query(first + page), after = runtime.Query(first + 2 * page);
+    require(before.Start == first && before.End == first + page && before.Flags == 0 &&
+            inside.Start == first + page && inside.End == first + 2 * page && inside.Flags == 0x12 &&
+            after.Start == first + 2 * page && after.End == first + 4 * page && after.Flags == 0,
+            "Mapping into a reservation did not split it around the committed pages");
+    require(runtime.MapFlexible(first + 2 * page, page, 3, 0x10) == first + 2 * page,
+            "Fixed flexible mapping into a reservation was refused");
+    const std::byte marker{0x6b};
+    machine.Write(first + 2 * page + 9, std::span(&marker, 1));
+    kernelError([&] { runtime.MapFlexible(first + 2 * page, page, 3, 0x90); }, 17);
+    require(read(machine, first + 2 * page + 9) == marker, "Refused no-overwrite mapping changed the committed bytes");
+    require(runtime.MapFlexible(first + 2 * page, page, 3, 0x10) == first + 2 * page &&
+            read(machine, first + 2 * page + 9) == std::byte{0},
+            "MAP_FIXED without NO_OVERWRITE did not replace the committed mapping with fresh memory");
+    require(runtime.MapFlexible(first + page, page, 1, 0x10) == first + page && runtime.Query(first + page).Flags == 0x11 &&
+            !accessible(machine, first + page, Permission::Write) && accessible(machine, first + page, Permission::Read),
+            "MAP_FIXED did not replace a direct mapping with a flexible one");
+    require(runtime.Reserve(first, 2 * page, 0x10, page) == first && runtime.Query(first + page).Flags == 0 &&
+            !accessible(machine, first + page, Permission::Read),
+            "Fixed reservation did not replace and unmap a committed mapping");
+    kernelError([&] { runtime.MapFlexible(first + 0x80000, page, 3, 0x10); }, 17);
+    require(runtime.Snapshot().Views.size() == 1, "Replaced mappings remained published to GPU consumers");
+    runtime.Shutdown();
+}
+
+// MEM-11: releasing physical memory removes every virtual alias of it in the same commit.
+void releaseUnmapsAliases() {
+    Cpu::Machine machine;
+    Cpu::GuestMemoryRuntime runtime(machine, 8 * page);
+    const auto physical = runtime.AllocateDirect(0, 8 * page, 2 * page, page, 0);
+    runtime.MapDirect(first, 2 * page, 3, 0x90, physical, page);
+    runtime.MapDirect(whole, page, 3, 0x90, physical + page, page);
+    runtime.ReleaseDirect(physical + page, page);
+    require(runtime.Query(first).End == first + page && accessible(machine, first, Permission::Write),
+            "Partial release unmapped the surviving physical page");
+    kernelError([&] { runtime.Query(first + page); }, 13);
+    kernelError([&] { runtime.Query(whole); }, 13);
+    require(!accessible(machine, first + page, Permission::Read) && !accessible(machine, whole, Permission::Read),
+            "Released physical page stayed reachable through a guest alias");
+    runtime.ReleaseDirect(physical, page);
+    kernelError([&] { runtime.Query(first); }, 13);
+    require(runtime.Snapshot().Views.empty() && runtime.AvailableDirect(0, 8 * page, page).Size == 8 * page,
+            "Release with live aliases did not return the whole pool");
+    // Holes are skipped by the plain release and reported by the checked one.
+    const auto again = runtime.AllocateDirect(0, 8 * page, page, page, 0);
+    kernelError([&] { runtime.ReleaseDirect(again, 2 * page, true); }, 2);
+    runtime.ReleaseDirect(again, 2 * page);
+    require(runtime.AvailableDirect(0, 8 * page, page).Size == 8 * page, "Release over a hole did not free the allocated part");
+}
+
+// MEM-14: the available-size query answers the largest aligned gap, not the first one.
+void largestAvailableGap() {
+    Cpu::Machine machine;
+    Cpu::GuestMemoryRuntime runtime(machine, 8 * page);
+    runtime.AllocateDirect(0, 8 * page, 8 * page, page, 0);
+    runtime.ReleaseDirect(page, page);
+    runtime.ReleaseDirect(4 * page, 3 * page);
+    auto largest = runtime.AvailableDirect(0, 8 * page, page);
+    require(largest.Address == 4 * page && largest.Size == 3 * page, "Available size reported the first gap instead of the largest");
+    largest = runtime.AvailableDirect(0, 8 * page, 4 * page);
+    require(largest.Address == 4 * page && largest.Size == 3 * page, "Available size ignored the requested alignment");
+    largest = runtime.AvailableDirect(0, 3 * page, page);
+    require(largest.Address == page && largest.Size == page, "Available size ignored the search end");
+    kernelError([&] { runtime.AvailableDirect(0, 8 * page, 8 * page); }, 35);
+}
+
+// MEM-09: every memory type is an attribute, every documented protection/mapping bit is accepted.
+void memoryTypesProtectionsAndFlags() {
+    Cpu::Machine machine;
+    Cpu::GuestMemoryRuntime runtime(machine, 8 * page);
+    const auto typed = runtime.AllocateDirect(0, 8 * page, page, page, 3);
+    const auto other = runtime.AllocateDirect(0, 8 * page, page, page, 10);
+    kernelError([&] { runtime.AllocateDirect(0, 8 * page, page, page, -1); }, 22);
+    const auto direct = runtime.QueryDirect(static_cast<std::int64_t>(typed), false);
+    require(direct && direct->Start == typed && direct->End == typed + page && direct->MemoryType == 3,
+            "Direct memory query lost the allocation type");
+    const auto next = runtime.QueryDirect(static_cast<std::int64_t>(other + page), true);
+    require(!next && !runtime.QueryDirect(static_cast<std::int64_t>(4 * page), false) &&
+            runtime.QueryDirect(static_cast<std::int64_t>(typed), true)->Start == typed,
+            "Direct memory query invented or skipped an allocation");
+    require(runtime.MapFlexible(first, page, 0xf2, 0) == first && runtime.Query(first).Protection == 0xf2,
+            "The title's 0xF2 protection request was not accepted with its raw bits");
+    require(accessible(machine, first, Permission::Write), "0xF2 lost CPU read/write access");
+    runtime.Protect(first, page, 0x3f1);
+    require(runtime.Query(first).Protection == 0x3f1 && accessible(machine, first, Permission::Write),
+            "Extended 0x100/0x200 protection bits did not grant CPU access");
+    kernelError([&] { runtime.Protect(first, page, 0x400); }, 22);
+    require(runtime.MapDirect(whole, page, 0x32, 0x80, typed, page) != 0, "NO_OVERWRITE without FIXED was not a plain hint");
+    require(runtime.MapDirect(0, page, 0x32, 0x400000, other, page) % page == 0, "NO_COALESCE was rejected");
+    const auto super = runtime.MapFlexible(0, page, 3, 1u << 24);
+    require(super % 0x200000 == 0, "MAP_ALIGNED_SUPER did not align to 2 MiB");
+    require(runtime.MapFlexible(0, page, 3, 17u << 24) % 0x20000 == 0, "MAP_ALIGNED(17) did not align to 128 KiB");
+    kernelError([&] { runtime.MapFlexible(0, page, 3, 3u << 24); }, 22);
+    runtime.Protect(whole, page, 0x32, 12);
+    require(runtime.Query(whole).MemoryType == 12 && runtime.QueryDirect(static_cast<std::int64_t>(typed), false)->MemoryType == 12,
+            "Type protection did not retype the mapping and its physical allocation");
+    const auto retyped = runtime.MapDirect(0, page, 3, 0, other, page, 0, 5);
+    require(runtime.Query(retyped).MemoryType == 5, "Typed direct mapping lost its memory type");
+}
+
+// SEC-05: flexible memory has a budget, and size queries report it.
+void flexibleBudget() {
+    Cpu::Machine machine;
+    Cpu::GuestMemoryRuntime runtime(machine, 4 * page, {}, 4 * page);
+    require(runtime.FlexibleMemorySize() == 4 * page && runtime.AvailableFlexible() == 4 * page,
+            "Flexible budget is not reported");
+    runtime.MapFlexible(first, 3 * page, 3, 0x10);
+    require(runtime.AvailableFlexible() == page, "Flexible mapping did not consume the budget");
+    const auto generation = runtime.Snapshot().Generation;
+    kernelError([&] { runtime.MapFlexible(whole, 2 * page, 3, 0x10); }, 12);
+    require(runtime.Snapshot().Generation == generation, "Over-budget flexible mapping mutated the registry");
+    runtime.Unmap(first, page);
+    require(runtime.AvailableFlexible() == 2 * page, "Unmap did not return flexible budget");
+    runtime.MapFlexible(whole, 2 * page, 3, 0x10);
+    require(runtime.AvailableFlexible() == 0, "Flexible budget is not exact");
+    runtime.MapFlexible(first + 2 * page, page, 3, 0x10);
+    require(runtime.AvailableFlexible() == 0, "Fixed flexible replacement double-counted the budget");
+}
+
+// MEM-29: munmap rounds lengths and skips holes; mprotect reaches pinned Machine mappings.
+void unmapRoundingAndHoles() {
+    Cpu::Machine machine;
+    machine.Map(first + 0x40000, page, rw);
+    Cpu::GuestMemoryRuntime runtime(machine, 4 * page);
+    runtime.MapFlexible(first, page, 3, 0x10);
+    runtime.MapFlexible(first + 2 * page, page, 3, 0x10);
+    runtime.Unmap(first, 3 * page);
+    kernelError([&] { runtime.Query(first); }, 13);
+    kernelError([&] { runtime.Query(first + 2 * page); }, 13);
+    runtime.MapFlexible(first, 2 * page, 3, 0x10);
+    runtime.Unmap(first, 1);
+    require(runtime.Query(first + page).Start == first + page && !accessible(machine, first, Permission::Read),
+            "Unmap did not round its length up to a whole guest page");
+    runtime.Unmap(whole, page);
+    kernelError([&] { runtime.Unmap(first + 0x40000, page); }, 13);
+    runtime.Protect(first + 0x40000, page, 1);
+    require(accessible(machine, first + 0x40000, Permission::Read) && !accessible(machine, first + 0x40000, Permission::Write),
+            "Mprotect did not reach a pinned Machine mapping");
+}
+
+// Names, pools.
+void namesAndPools() {
+    Cpu::Machine machine;
+    Cpu::GuestMemoryRuntime runtime(machine, 64 * page);
+    runtime.MapFlexible(first, 4 * page, 3, 0x10);
+    runtime.SetName(first + page, 2 * page, "heap");
+    auto named = runtime.Query(first + page);
+    require(named.Start == first + page && named.End == first + 3 * page && std::string(named.Name.data()) == "heap",
+            "Virtual range name was not reported with its own extent");
+    require(runtime.Query(first).Name[0] == 0 && runtime.Query(first).End == first + page, "Name leaked outside its range");
+    require(runtime.Query(first + page, false, false).End == first + 4 * page, "Unsplit query was clipped to a range name");
+    runtime.Unmap(first, 4 * page);
+    runtime.MapFlexible(first, page, 3, 0x10);
+    require(runtime.Query(first).Name[0] == 0, "Unmap kept a stale range name");
+    runtime.SetName(first + 1, 1, "x");
+    named = runtime.Query(first + 1);
+    require(named.Start == first && named.End == first + page && std::string(named.Name.data()) == "x",
+            "Unaligned range name was not widened to whole pages");
+    kernelError([&] { runtime.PoolCommit(whole, 4 * page, 0, 3); }, 22);
+    const auto pool = runtime.Reserve(whole, 16 * page, 0x10, 4 * page, 0, true);
+    require(runtime.Query(pool).Flags == 8, "Pool reservation was not reported as pooled and uncommitted");
+    require(runtime.PoolStats().AvailableFlushedBlocks == 0, "Empty pool reported blocks");
+    kernelError([&] { runtime.PoolCommit(pool, 4 * page, 0, 3); }, 12);
+    kernelError([&] { runtime.PoolExpand(0, 64 * page, page, 0); }, 22);
+    const auto expanded = runtime.PoolExpand(0, 64 * page, 8 * page, 0);
+    kernelError([&] { runtime.PoolCommit(pool, page, 0, 3); }, 22);
+    runtime.PoolCommit(pool, 4 * page, 0, 3);
+    auto committed = runtime.Query(pool);
+    require(committed.Flags == 0x18 && committed.End == pool + 4 * page && accessible(machine, pool, Permission::Write),
+            "Pool commit did not back the reservation");
+    const auto stats = runtime.PoolStats();
+    require(stats.AllocatedFlushedBlocks == 1 && stats.AvailableFlushedBlocks == 1,
+            "Pool block stats do not reflect the 64 KiB committed blocks");
+    kernelError([&] { runtime.PoolCommit(pool + 4 * page, 8 * page, 0, 3); }, 12);
+    runtime.PoolDecommit(pool, 4 * page);
+    require(runtime.Query(pool).Flags == 8 && !accessible(machine, pool, Permission::Read) &&
+            runtime.PoolStats().AllocatedFlushedBlocks == 0, "Pool decommit did not return pages to the reservation");
+    kernelError([&] { runtime.PoolDecommit(first, page); }, 22);
+    runtime.ReleaseDirect(static_cast<std::int64_t>(expanded), 8 * page);
+    require(runtime.PoolStats().AvailableFlushedBlocks == 0, "Released pool pages still back the pool");
+    kernelError([&] { runtime.PoolCommit(pool, 4 * page, 0, 3); }, 12);
+}
 }
 
 int main(int argc, char** argv) {
@@ -315,6 +511,8 @@ int main(int argc, char** argv) {
             require(argc == 1, "Unknown guest memory test group");
             secondPageFirstAliases(); truthfulIntervalsAndFailures(); gpuTransactionLifetime(); transactionReentrancy();
             boundedSearchEnds(); roundedProtectionLengths();
+            fixedPlacementIntoReservations(); releaseUnmapsAliases(); largestAvailableGap();
+            memoryTypesProtectionsAndFlags(); flexibleBudget(); unmapRoundingAndHoles(); namesAndPools();
         }
         std::cout << "PASS guest memory physical aliases, query ABI, atomic failures, and GPU lease retirement\n";
         return 0;
