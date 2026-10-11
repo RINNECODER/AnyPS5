@@ -67,7 +67,7 @@ add_library(anyps5_cpu STATIC ${cpuEngineSource} src/ElfLoader.cpp src/Runtime.c
     "${PROJECT_SOURCE_DIR}/core/libs/nid/src/Sha1.cpp")
 target_include_directories(anyps5_cpu PUBLIC include)
 target_sources(anyps5_cpu PRIVATE src/SceLifecycleImports.cpp)
-target_sources(anyps5_cpu PRIVATE src/GuestThreads.cpp src/SceThreadImports.cpp)
+target_sources(anyps5_cpu PRIVATE src/GuestThreads.cpp src/SceThreadImports.cpp src/SceKernelTimeImports.cpp)
 target_sources(anyps5_cpu PRIVATE src/GuestMemoryRuntime.cpp src/SceMemoryImports.cpp src/SceNpLocalImports.cpp src/SceNetAddressImports.cpp src/SceCommonDialogImports.cpp)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 file(GLOB_RECURSE sceNidNameSources CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/core/libs/prx/*.cpp")
@@ -259,6 +259,10 @@ if(BUILD_TESTING)
     target_include_directories(anyps5_sce_kernel_import_tests PRIVATE "${PROJECT_SOURCE_DIR}/core/libs")
     add_test(NAME anyps5_sce_kernel_imports COMMAND anyps5_sce_kernel_import_tests)
     set_tests_properties(anyps5_sce_tls anyps5_guest_files anyps5_sce_kernel_imports PROPERTIES TIMEOUT 30)
+    add_test_executable(anyps5_sce_kernel_time_import_tests tests/SceKernelTimeImportsTests.cpp)
+    target_link_libraries(anyps5_sce_kernel_time_import_tests PRIVATE anyps5_cpu)
+    add_test(NAME anyps5_sce_kernel_time_imports COMMAND anyps5_sce_kernel_time_import_tests)
+    set_tests_properties(anyps5_sce_kernel_time_imports PROPERTIES TIMEOUT 30)
     add_test_executable(anyps5_sce_user_import_tests tests/SceUserImportsTest.cpp)
     target_link_libraries(anyps5_sce_user_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_user_imports COMMAND anyps5_sce_user_import_tests)
@@ -298,6 +302,23 @@ if(BUILD_TESTING)
     add_custom_target(anyps5_lazy_import_fixture ALL DEPENDS "${lazyImportGuest}" "${lazyImportMain}")
     add_test(NAME anyps5_lazy_import_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/LazyImportCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${lazyImportMain}" "${lazyImportGuest}")
     set_tests_properties(anyps5_lazy_import_cli PROPERTIES TIMEOUT 60)
+    if(ANYPS5_CPU_BACKEND STREQUAL "TCG")
+        set(kernelTimeGuest "${CMAKE_CURRENT_BINARY_DIR}/KernelTimeGuest.prx")
+        set(kernelTimeMain "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main.elf")
+        set(kernelTimeFlags --target=x86_64-unknown-linux-gnu -ffreestanding -fPIC -O2 -fno-builtin -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables)
+        set(kernelTimeLink -Bsymbolic --hash-style=sysv -z max-page-size=4096 -z separate-code -z norelro)
+        add_custom_command(OUTPUT "${kernelTimeGuest}" "${kernelTimeMain}"
+            COMMAND "${guestClang}" ${kernelTimeFlags} -DBUILD_KERNEL_TIME_DEPENDENCY=1 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelTimeHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest.o"
+            COMMAND "${guestLinker}" -shared -soname KernelTimeGuest.prx ${kernelTimeLink} -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest.o"
+            COMMAND "${guestClang}" ${kernelTimeFlags} -DBUILD_KERNEL_TIME_DEPENDENCY=0 -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/KernelTimeHomebrew.c" -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main.o"
+            COMMAND "${guestClang}" --target=x86_64-unknown-linux-gnu -c "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/SceStart.S" -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-start.o"
+            COMMAND "${guestLinker}" -shared -e _start ${kernelTimeLink} --no-as-needed -o "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main.o" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-start.o" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest-linked.elf"
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/BuildKernelTimeFixture.py" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-guest-linked.elf" "${CMAKE_CURRENT_BINARY_DIR}/kernel-time-main-linked.elf" "${kernelTimeGuest}" "${kernelTimeMain}"
+            DEPENDS fixtures/KernelTimeHomebrew.c fixtures/SceStart.S tests/BuildKernelTimeFixture.py tests/BuildPlatformServiceFixture.py tests/BuildSceModulesFixture.py VERBATIM)
+        add_custom_target(anyps5_kernel_time_fixture ALL DEPENDS "${kernelTimeGuest}" "${kernelTimeMain}")
+        add_test(NAME anyps5_kernel_time_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/KernelTimeCliTest.py" "$<TARGET_FILE:anyps5_cpu_run>" "${kernelTimeMain}" "${kernelTimeGuest}")
+        set_tests_properties(anyps5_kernel_time_cli PROPERTIES TIMEOUT 120)
+    endif()
     add_test_executable(anyps5_sce_common_dialog_import_tests tests/SceCommonDialogImportsTest.cpp)
     target_link_libraries(anyps5_sce_common_dialog_import_tests PRIVATE anyps5_cpu)
     add_test(NAME anyps5_sce_common_dialog_imports COMMAND anyps5_sce_common_dialog_import_tests)
