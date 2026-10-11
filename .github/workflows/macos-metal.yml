@@ -44,6 +44,7 @@ jobs:
       native-runner: ${{ steps.impact.outputs.native-runner }}
       shader-bridge: ${{ steps.impact.outputs.shader-bridge }}
       guest-replay: ${{ steps.impact.outputs.guest-replay }}
+      rosetta-libs: ${{ steps.impact.outputs.rosetta-libs }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -175,3 +176,65 @@ jobs:
         run: cmake --build "$BUILD_DIR" --parallel
       - name: Test
         run: ctest --test-dir "$BUILD_DIR" $CTEST_ARGS
+
+  # Rosetta direct execution (docs/design/rosetta-direct-execution.md): the system
+  # libraries built as x86_64 Mach-O libs/<name>.prx. Compile coverage plus the Darwin
+  # DirectMemory test only; not a required check. Pull requests run it when they touch
+  # core/libs, core/relinker or cmake (tools/ci/impact.py); pushes and manual runs always.
+  rosetta-libs:
+    name: macOS Rosetta libs (x86_64 compile)
+    needs: changes
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.changes.outputs.rosetta-libs == 'true')
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Initialize submodules
+        run: git submodule update --init --depth 1 3rdparty/SDL2
+      - name: Select build directory
+        run: echo "BUILD_DIR=$RUNNER_WORKSPACE/ci-build/rosetta-libs" >> "$GITHUB_ENV"
+      - name: Configure
+        id: configure
+        run: >-
+          cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+          -DCMAKE_OSX_ARCHITECTURES=x86_64 -DANYPS5_ROSETTA_LIBS=ON
+      # -k 0 keeps compiling past failures so the summary lists every failing
+      # translation unit; the step still fails when any of them does.
+      - name: Build (lists failing translation units)
+        run: |
+          # The build directory persists between runs; never test a stale binary.
+          rm -f "$BUILD_DIR/tests/direct_memory_darwin_tests"
+          set +e
+          cmake --build "$BUILD_DIR" --parallel --target rosetta_libs direct_memory_darwin_tests -- -k 0 > "$BUILD_DIR/build.log" 2>&1
+          status=$?
+          set -e
+          tail -n 3 "$BUILD_DIR/build.log"
+          if [ "$status" -ne 0 ]; then
+            failing=$(grep '^FAILED: ' "$BUILD_DIR/build.log" | grep -oE 'CMakeFiles/[^/]+\.dir/[^ ]+\.o' |
+              sed -E 's#^CMakeFiles/##; s#\.dir/(core/libs/prx/[^/]+/)?#: #; s#\.o$##' | sort -u || true)
+            {
+              echo "### x86_64 translation units that fail to compile"
+              echo '```'
+              echo "${failing:-none (the failure is not a compile step; see the log)}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::group::Failing translation units"
+            echo "${failing:-none}"
+            echo "::endgroup::"
+            echo "::group::First errors"
+            grep -E 'error:|Undefined symbols' "$BUILD_DIR/build.log" | head -n 60 || true
+            echo "::endgroup::"
+          fi
+          exit "$status"
+      - name: Test DirectMemory under Rosetta
+        # Runs even when the build step failed on other libraries' translation units.
+        if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
+        run: |
+          if [ ! -x "$BUILD_DIR/tests/direct_memory_darwin_tests" ]; then
+            echo "direct_memory_darwin_tests did not build; see the build step"
+            exit 1
+          fi
+          arch -x86_64 "$BUILD_DIR/tests/direct_memory_darwin_tests"

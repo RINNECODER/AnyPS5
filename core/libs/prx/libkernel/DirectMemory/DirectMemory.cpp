@@ -21,7 +21,7 @@
 #include <system_error>
 #include <vector>
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -29,6 +29,10 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #else
 #include <windows.h>
 
@@ -172,6 +176,58 @@ void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment)
     }
     throw std::runtime_error("Hinted mmap kept racing with other mappings");
 }
+#elif defined(__APPLE__)
+// macOS refuses fixed mappings in [64 GiB, 512 GiB), both natively and under
+// Rosetta, and has neither /proc/self/maps nor MAP_FIXED_NOREPLACE.
+constexpr std::uintptr_t DarwinRefusedStart = 0x1000000000ull;
+constexpr std::uintptr_t DarwinRefusedEnd = 0x8000000000ull;
+
+bool DarwinRefusedRange(std::uintptr_t start, size_t len) {
+    return len != 0 && start < DarwinRefusedEnd && start + len > DarwinRefusedStart;
+}
+
+void* DarwinMapExactly(std::uintptr_t address, size_t len, int prot) {
+    void* result = mmap(reinterpret_cast<void*>(address), len, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (result == MAP_FAILED || reinterpret_cast<std::uintptr_t>(result) == address) return result;
+    munmap(result, len);
+    errno = EEXIST;
+    return MAP_FAILED;
+}
+
+void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment) {
+    constexpr std::uintptr_t UserLimit = 0x7fff00000000ull;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        std::vector<std::pair<std::uintptr_t, std::uintptr_t>> used{{DarwinRefusedStart, DarwinRefusedEnd}};
+        for (mach_vm_address_t region = 0;;) {
+            mach_vm_size_t size = 0;
+            vm_region_basic_info_data_64_t info{};
+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+            mach_port_t object = MACH_PORT_NULL;
+            if (mach_vm_region(mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS) break;
+            used.emplace_back(region, region + size);
+            region += size;
+        }
+        std::sort(used.begin(), used.end());
+        auto candidate = (start + alignment - 1) & ~(static_cast<std::uintptr_t>(alignment) - 1);
+        for (const auto& [begin, end] : used) {
+            if (end <= candidate) continue;
+            if (begin >= candidate + len) break;
+            candidate = (end + alignment - 1) & ~(static_cast<std::uintptr_t>(alignment) - 1);
+        }
+        if (candidate + len > UserLimit || candidate + len < candidate) throw std::runtime_error("No free range above the mapping address hint");
+        void* result = DarwinMapExactly(candidate, len, prot);
+        if (result != MAP_FAILED) return result;
+        if (errno != EEXIST) throw std::system_error(errno, std::generic_category(), "Hinted mmap failed");
+    }
+    throw std::runtime_error("Hinted mmap kept racing with other mappings");
+}
+
+bool DarwinRefusesFixed(void* addr, size_t len, int flags) {
+    constexpr int GuestMapFixed = 0x10;
+    if ((flags & GuestMapFixed) == 0 || !DarwinRefusedRange(reinterpret_cast<std::uintptr_t>(addr), len)) return false;
+    std::fprintf(stderr, "[memory] fixed mapping %p+0x%zx is in the 64-512 GiB range macOS refuses\n", addr, len);
+    return true;
+}
 #endif
 
 void ValidateLength(size_t len) {
@@ -240,6 +296,25 @@ int PhysicalFile() {
     }();
     return file;
 }
+#elif defined(__APPLE__)
+int PhysicalFile() {
+    static const int file = [] {
+        char name[32];
+        std::snprintf(name, sizeof(name), "/aps5-dmem-%d", static_cast<int>(getpid()));
+        const int created = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (created < 0) throw std::system_error(errno, std::generic_category(), "create direct memory backing");
+        shm_unlink(name);
+        if (ftruncate(created, static_cast<off_t>(DIRECT_MEMORY_SIZE)) != 0 || fcntl(created, F_SETFD, FD_CLOEXEC) != 0) {
+            const int error = errno;
+            ::close(created);
+            throw std::system_error(error, std::generic_category(), "size direct memory backing");
+        }
+        return created;
+    }();
+    return file;
+}
+#endif
+#if defined(__linux__) || defined(__APPLE__)
 
 std::vector<bool> g_physicalUsed(DIRECT_MEMORY_SIZE / PS5_PAGE_SIZE);
 
@@ -286,7 +361,7 @@ public:
 
     int MemoryType() const { return memoryType; }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     int File() const { return file; }
     void* HostWriteData(std::uint64_t offset, std::size_t length) {
         if (offset > bytes || length > bytes - offset) return nullptr;
@@ -392,7 +467,7 @@ void ValidatePhysicalRange(std::uint64_t phys, std::size_t len) {
     }
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 void WatchMapping(std::uintptr_t address, std::size_t len) {
     GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(reinterpret_cast<const void*>(address), len);
     const auto end = address + len;
@@ -411,7 +486,7 @@ void WatchMapping(std::uintptr_t address, std::size_t len) {
 }
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 bool SharedBacking(std::uintptr_t address, std::size_t bytes, int* file, std::uint64_t* offset) {
     std::lock_guard lock(g_directLock);
     const auto next = g_directMappings.upper_bound(address);
@@ -484,7 +559,7 @@ void AddMapping(std::uintptr_t address, std::size_t len, std::uint64_t phys, int
         g_directMappings.emplace(address + offset, DirectMapping{address + offset + bytes, phys + offset, page.backing->MemoryType(), page.backing});
         offset += bytes;
     }
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     WatchMapping(address, len);
 #endif
 }
@@ -516,7 +591,7 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
     return true;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 bool ArenaAvailable() { return GuestArena::GuestArenaAvailable_nid_postfix(); }
 
 void* ArenaCommit(void* addr, size_t len, int prot) {
@@ -534,6 +609,10 @@ void Unmap(void* addr, size_t len) {
         GuestArena::GuestArenaReset_nid_postfix(addr, len);
     else if (munmap(addr, len) != 0) throw std::system_error(errno, std::generic_category(), "munmap failed");
     ArenaForget(addr, len);
+    GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(addr, len);
+#elif defined(__APPLE__)
+    // The guest arena is Linux-only, so every mapping here is a plain host one.
+    if (munmap(addr, len) != 0) throw std::system_error(errno, std::generic_category(), "munmap failed");
     GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(addr, len);
 #else
     if (KernelArena::Get().Contains(addr, len)) munmap(addr, len);
@@ -581,7 +660,7 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
             }
         }
 #endif
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         if (ArenaAvailable() && !GuestArena::GuestArenaContains_nid_postfix(addr, len))
             throw std::invalid_argument("fixed mapping is outside the guest address space arena");
         if (ArenaAvailable()) {
@@ -590,7 +669,16 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
             GuestArena::GuestArenaRelease_nid_postfix(addr, len);
             throw std::system_error(errno, std::generic_category(), "Arena mapping failed");
         }
+#if defined(__APPLE__)
+        if ((flags & GuestMapNoOverwrite) != 0) {
+            void* placed = DarwinMapExactly(reinterpret_cast<std::uintptr_t>(addr), len, prot);
+            if (placed == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "Fixed mmap failed");
+            return placed;
+        }
+        const int placement = MAP_FIXED;
+#else
         const int placement = (flags & GuestMapNoOverwrite) != 0 ? MAP_FIXED_NOREPLACE : MAP_FIXED;
+#endif
 #else
         const int placement = MAP_FIXED;
 #endif
@@ -602,7 +690,7 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
         return result;
     }
     if (addr) {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         if (ArenaAvailable()) {
             void* placed = GuestArena::GuestArenaAllocateAtOrAbove_nid_postfix(
                 reinterpret_cast<std::uintptr_t>(addr), len, alignment);
@@ -618,7 +706,7 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
 #ifdef _WIN32
     return mmap_aligned(len, prot, alignment);
 #endif
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     if (ArenaAvailable()) {
         void* placed = GuestArena::GuestArenaAllocate_nid_postfix(len, alignment);
         if (void* committed = ArenaCommit(placed, len, prot); committed != MAP_FAILED) return committed;
@@ -705,7 +793,7 @@ void RecordProtection(const void* addr, size_t len, int prot) {
 
 void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) {
     void* mapped = MapPlaced(addr, len, prot, flags, alignment);
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(mapped, len);
 #endif
     return mapped;
@@ -739,7 +827,7 @@ void UnmapRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t le
         auto* pieceAddress = const_cast<void*>(piece);
         std::lock_guard lock(g_directLock);
         EraseMappings(reinterpret_cast<std::uintptr_t>(piece), reinterpret_cast<std::uintptr_t>(piece) + pieceBytes);
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         Unmap(pieceAddress, pieceBytes);
 #else
         if (KernelArena::Get().Contains(pieceAddress, pieceBytes)) munmap(pieceAddress, pieceBytes);
@@ -771,6 +859,9 @@ int PlaceHintInReservation(void* addr, size_t len, int flags) {
 
 int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
     ValidateOutput(addr);
+#if defined(__APPLE__)
+    if (DarwinRefusesFixed(*addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+#endif
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     if (physStart < 0 || (static_cast<std::uint64_t>(physStart) & (PS5_PAGE_SIZE - 1)) != 0 || static_cast<std::uint64_t>(physStart) >= DIRECT_MEMORY_SIZE || len > DIRECT_MEMORY_SIZE - static_cast<std::uint64_t>(physStart)) {
         return SCE_KERNEL_ERROR_EINVAL;
@@ -805,6 +896,9 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
 
 int DoMapAnon(void** addr, size_t len, int prot, int flags, size_t alignment) {
     ValidateOutput(addr);
+#if defined(__APPLE__)
+    if (DarwinRefusesFixed(*addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+#endif
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
     flags = PlaceHintInReservation(*addr, len, flags);
@@ -869,6 +963,9 @@ int DoMprotect(const void* addr, size_t len, int prot) {
         auto* insidePointer = reinterpret_cast<void*>(inside);
         const auto insideBytes = static_cast<std::size_t>(insideEnd - inside);
         if (mprotect(insidePointer, insideBytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
+#if defined(__APPLE__)
+        GuestWriteWatch::GuestWriteWatchProtectionChanged_nid_postfix(insidePointer, insideBytes, nativeProtection);
+#endif
         NoteGuestStackProtection(inside, insideBytes, (prot & 3) == 3);
         RecordProtection(insidePointer, insideBytes, prot);
         return 0;
@@ -887,6 +984,9 @@ int DoMprotect(const void* addr, size_t len, int prot) {
 #endif
     mutation.Protect(pointer, bytes, (prot & 3) != 0, (prot & 2) != 0, (prot & GuestProtGpuReadWrite) != 0, [&] {
         if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
+#if defined(__APPLE__)
+        GuestWriteWatch::GuestWriteWatchProtectionChanged_nid_postfix(pointer, bytes, nativeProtection);
+#endif
     });
     RecordProtection(pointer, bytes, prot);
     return 0;
@@ -929,6 +1029,9 @@ int DoMunmap(void* addr, size_t len) {
 
 int DoReserveVirtual(void** addr, size_t len, int flags, size_t alignment) {
     ValidateOutput(addr);
+#if defined(__APPLE__)
+    if (DarwinRefusesFixed(*addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+#endif
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
     const bool fixed = *addr != nullptr && (flags & GuestMapFixedFlag) != 0;
@@ -962,7 +1065,7 @@ void CreateDirectMemoryBacking(int64_t start, size_t len, int memoryType) {
     for (std::size_t offset = 0; offset < len; offset += PS5_PAGE_SIZE) {
         if (g_physPages.contains(first + offset)) throw std::runtime_error("physical allocation overlaps live direct memory");
     }
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     static std::once_flag registered;
     std::call_once(registered, [] {
         GuestArena::GuestArenaSetSharedBacking_nid_postfix(&SharedBacking);

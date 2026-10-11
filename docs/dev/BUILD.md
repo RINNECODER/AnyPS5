@@ -90,6 +90,7 @@ Project switches accept `ON` or `OFF`:
 |----------------------------------|---------|--------------------------------------------------|
 | `-DBUILD_TESTING=ON`             | `OFF`   | Build and register tests.                        |
 | `-DANYPS5_RELINKER_ONLY=ON`      | `OFF`   | Build only the relinker and its tests, without third-party dependencies. |
+| `-DANYPS5_ROSETTA_LIBS=ON`       | `OFF`   | macOS with `-DCMAKE_OSX_ARCHITECTURES=x86_64` only: build `core/libs/prx` as NID-patched x86_64 Mach-O `rosetta/libs/<name>.prx` plus the relinker, for [Rosetta direct execution](../design/rosetta-direct-execution.md). Target `rosetta_libs`; needs only the SDL2 submodule. |
 | `-DANYPS5_ENABLE_SPIRV_TOOLS=ON` | `OFF`   | Enable SPIR-V validation and optimization.       |
 | `-DANYPS5_USE_SYSTEM_DEPS=ON`    | `OFF`   | Resolve SDL2, freetype, Vulkan-Headers, SPIRV-Headers, glslang and SPIRV-Tools from the system instead of the submodules. |
 | `-DAPS5_ENABLE_TIMING_LOG=ON`    | `OFF`   | Compile frame timing logging.                    |

@@ -12,9 +12,14 @@ import subprocess
 import sys
 
 CPU, NATIVE, SHADER, REPLAY = "cpu-tcg", "native-runner", "shader-bridge", "guest-replay"
-JOBS = (CPU, NATIVE, SHADER, REPLAY)
-ALL = frozenset(JOBS)
+ROSETTA = "rosetta-libs"
+JOBS = (CPU, NATIVE, SHADER, REPLAY, ROSETTA)
+ALL = frozenset((CPU, NATIVE, SHADER, REPLAY))
 NONE = frozenset()
+EVERY_JOB = frozenset(JOBS)
+
+# The x86_64 Rosetta libs job sits outside RULES: it runs only when one of these changes.
+ROSETTA_PATHS = ("core/libs/*", "core/relinker/*", "cmake/*")
 
 # (glob, jobs). fnmatch's "*" also crosses "/", so "dir/*" covers a whole subtree.
 RULES = (
@@ -65,11 +70,13 @@ def jobs_for_path(path):
 
 def select(paths, labels=()):
     if "upstream-sync" in labels:
-        return set(ALL)
+        return set(EVERY_JOB)
     chosen = set()
     for path in paths:
         if path.strip():
             chosen |= jobs_for_path(path.strip())
+            if any(fnmatch.fnmatchcase(path.strip(), pattern) for pattern in ROSETTA_PATHS):
+                chosen.add(ROSETTA)
     return chosen
 
 
@@ -88,7 +95,7 @@ def main(argv=None):
     ap.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
     args = ap.parse_args(argv)
     if args.all:
-        chosen = set(ALL)
+        chosen = set(EVERY_JOB)
     else:
         if not args.base or not args.head:
             ap.error("--base and --head are required unless --all")
@@ -96,7 +103,7 @@ def main(argv=None):
             chosen = select(changed_files(args.base, args.head), json.loads(args.labels))
         except (subprocess.CalledProcessError, ValueError) as err:
             print(f"impact: cannot classify ({err}); running every job", file=sys.stderr)
-            chosen = set(ALL)
+            chosen = set(EVERY_JOB)
     lines = [f"{job}={'true' if job in chosen else 'false'}" for job in JOBS]
     print("\n".join(lines))
     if args.github_output:

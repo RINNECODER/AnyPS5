@@ -1,5 +1,8 @@
+import contextlib
+import io
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci"))
@@ -7,6 +10,7 @@ import impact
 
 CPU, NATIVE, SHADER, REPLAY = "cpu-tcg", "native-runner", "shader-bridge", "guest-replay"
 EVERY = {CPU, NATIVE, SHADER, REPLAY}
+ROSETTA = "rosetta-libs"
 
 
 class ImpactSelectionTests(unittest.TestCase):
@@ -53,7 +57,24 @@ class ImpactSelectionTests(unittest.TestCase):
         self.assertEqual(impact.select([]), set())
 
     def test_upstream_sync_label_selects_all(self):
-        self.assertEqual(impact.select(["docs/a.md"], ["upstream-sync"]), EVERY)
+        self.assertEqual(impact.select(["docs/a.md"], ["upstream-sync"]), EVERY | {ROSETTA})
+
+    def test_rosetta_libs_only_for_libs_relinker_and_cmake(self):
+        for path in ("core/libs/prx/libkernel/Foo.cpp", "core/libs/prx/libSceAgc/Foo.cpp",
+                     "core/relinker/main.cpp", "cmake/RosettaLibs.cmake"):
+            with self.subTest(path=path):
+                self.assertIn(ROSETTA, impact.select([path]))
+        for path in ("core/cpu/src/Main.cpp", "core/shader/x.cpp", "CMakeLists.txt",
+                     ".github/workflows/macos-metal.yml", "docs/a.md", "mystery.bin"):
+            with self.subTest(path=path):
+                self.assertNotIn(ROSETTA, impact.select([path]))
+
+    def test_push_selects_every_job_including_rosetta_libs(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            output = Path(scratch) / "out"
+            with contextlib.redirect_stdout(io.StringIO()):
+                impact.main(["--all", "--github-output", str(output)])
+            self.assertIn("rosetta-libs=true", output.read_text().splitlines())
 
     def test_unknown_path_among_docs_selects_all(self):
         self.assertEqual(impact.select(["docs/a.md", "mystery.bin"]), EVERY)
