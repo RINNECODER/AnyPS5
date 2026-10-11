@@ -30,8 +30,12 @@ kernel void physicalStore(device const BdaHeader* header [[buffer(0)]],device at
     for(uint i=0;i<header->count;++i) {
         if(address<ranges[i].begin||address>=ranges[i].end||4>ranges[i].end-address||(ranges[i].permissions&2)==0) continue;
         *reinterpret_cast<device uint*>(ranges[i].address+address-ranges[i].begin)=0x9172a3b4;
-        uint page=uint(address>>12)+1u;
-        atomic_store_explicit(fault+9+(((page*0x9e3779b1u)>>20)&4095),page,memory_order_relaxed);
+        uint key=uint(address>>17)+1u;
+        uint slot=((key*0x9e3779b1u)>>21)&2047u;
+        atomic_store_explicit(fault+10+2*slot,key,memory_order_relaxed);
+        atomic_store_explicit(fault+10+2*slot+1,1u<<uint((address>>12)&31ul),memory_order_relaxed);
+        atomic_store_explicit(fault+10+4096,slot,memory_order_relaxed);
+        atomic_store_explicit(fault+9,1u,memory_order_relaxed);
         return;
     }
 }

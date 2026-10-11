@@ -33,11 +33,9 @@ GuestMemoryMetalCompositor::OwnedGpuAccess ownedAccess(const OwnedMappingView& v
     const auto permissions = static_cast<unsigned>(view.Region.Permissions);
     if (!(permissions & static_cast<unsigned>(Permission::Read)))
         return GuestMemoryMetalCompositor::OwnedGpuAccess::CpuOnly;
-    // The native written-page ABI encodes page+1 in uint32. High CPU
-    // stack/TLS mappings remain genuinely readable by the GPU; GPU writes to
-    // them are explicitly unsupported until that ABI can represent the page.
-    constexpr auto writableLimit = std::uint64_t{std::numeric_limits<std::uint32_t>::max()}
-        << ShaderRecompiler::BdaAbi::WrittenPageShift;
+    // The native written-page ABI tracks 128 KiB chunks keyed in uint32; mappings past
+    // its address limit stay readable by the GPU but are never writable.
+    constexpr auto writableLimit = ShaderRecompiler::BdaAbi::WrittenAddressLimit;
     const bool writable = (permissions & static_cast<unsigned>(Permission::Write)) &&
         view.Region.Address <= writableLimit && view.Region.Size <= writableLimit - view.Region.Address;
     return writable ? GuestMemoryMetalCompositor::OwnedGpuAccess::ReadWrite

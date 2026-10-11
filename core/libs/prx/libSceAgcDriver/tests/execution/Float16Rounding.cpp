@@ -725,6 +725,75 @@ void Check(std::uint32_t first, std::uint32_t count, std::span<const Vector> vec
     }
 }
 
+alignas(256) constexpr std::array<std::uint32_t, 13> LdexpDenormalCode{
+    0x34020082u, 0x34060084u, 0xe0302000u, 0x80000401u, 0xe0302004u, 0x80000501u, 0x7e1402ffu, 0xabcdabcdu,
+    0xbf8c3f70u, 0x76140b04u, 0xe0702000u, 0x80010a03u, 0xbf810000u,
+};
+
+struct LdexpDenormalVector {
+    std::uint32_t half;
+    std::uint32_t exponent;
+    std::array<std::uint32_t, 4> expected;
+};
+
+constexpr LdexpDenormalVector LdexpDenormalVectors[] = {
+    {0x00000401u, 0xffffffffu, {0xabcd0000u, 0xabcd0000u, 0xabcd0200u, 0xabcd0200u}},
+    {0x000003ffu, 0x00000000u, {0xabcd0000u, 0xabcd0000u, 0xabcd0000u, 0xabcd03ffu}},
+    {0x000003ffu, 0x00000001u, {0xabcd0000u, 0xabcd07feu, 0xabcd0000u, 0xabcd07feu}},
+    {0x00000400u, 0xffffffffu, {0xabcd0000u, 0xabcd0000u, 0xabcd0200u, 0xabcd0200u}},
+    {0x00008400u, 0xffffffffu, {0xabcd8000u, 0xabcd8000u, 0xabcd8200u, 0xabcd8200u}},
+    {0x000007ffu, 0xffffffffu, {0xabcd0000u, 0xabcd0000u, 0xabcd0400u, 0xabcd0400u}},
+    {0x000087ffu, 0xffffffffu, {0xabcd8000u, 0xabcd8000u, 0xabcd8400u, 0xabcd8400u}},
+    {0x00000001u, 0x00000000u, {0xabcd0000u, 0xabcd0000u, 0xabcd0000u, 0xabcd0001u}},
+    {0x00000001u, 0x00000001u, {0xabcd0000u, 0xabcd0000u, 0xabcd0000u, 0xabcd0002u}},
+    {0x00008001u, 0x00000000u, {0xabcd8000u, 0xabcd8000u, 0xabcd8000u, 0xabcd8001u}},
+    {0x00000200u, 0x00000000u, {0xabcd0000u, 0xabcd0000u, 0xabcd0000u, 0xabcd0200u}},
+    {0x00000200u, 0x00000001u, {0xabcd0000u, 0xabcd0400u, 0xabcd0000u, 0xabcd0400u}},
+    {0x00003c01u, 0x00000000u, {0xabcd3c01u, 0xabcd3c01u, 0xabcd3c01u, 0xabcd3c01u}},
+    {0x00003c01u, 0xffffffffu, {0xabcd3801u, 0xabcd3801u, 0xabcd3801u, 0xabcd3801u}},
+    {0x00007c00u, 0x00000001u, {0xabcd7c00u, 0xabcd7c00u, 0xabcd7c00u, 0xabcd7c00u}},
+    {0x00007e55u, 0x00000000u, {0xabcd7e55u, 0xabcd7e55u, 0xabcd7e55u, 0xabcd7e55u}},
+    {0x00000000u, 0x00000040u, {0xabcd0000u, 0xabcd0000u, 0xabcd0000u, 0xabcd0000u}},
+    {0x00008000u, 0xffffffffu, {0xabcd8000u, 0xabcd8000u, 0xabcd8000u, 0xabcd8000u}},
+};
+
+void RunLdexpDenormal(AgcDriver::VulkanDevice& device, std::uint32_t denorm16) {
+    Input.fill(0u);
+    for (std::uint32_t lane = 0; lane < std::size(LdexpDenormalVectors); ++lane) {
+        Input[lane * Inputs] = LdexpDenormalVectors[lane].half;
+        Input[lane * Inputs + 1] = LdexpDenormalVectors[lane].exponent;
+    }
+    Output.fill(0xdeadbeefu);
+    std::vector<std::uint32_t> userData(8, 0u);
+    const auto input = BufferDescriptor(Input.data(), static_cast<std::uint32_t>(Input.size()));
+    const auto output = BufferDescriptor(Output.data(), static_cast<std::uint32_t>(Output.size()));
+    std::copy(input.begin(), input.end(), userData.begin());
+    std::copy(output.begin(), output.end(), userData.begin() + 4);
+    const std::span<const std::uint32_t> code(LdexpDenormalCode);
+    const std::array<ShaderRecompiler::MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
+    const ShaderRecompiler::ShaderComputeStageInfo compute{{Threads, 1, 1}, 0, {false, false, false}, false, 1};
+    ShaderRecompiler::RecompileRequest request{
+        {ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}},
+        {32, 0, userData, compute, std::nullopt, std::nullopt, memory},
+        device.Target(),
+        {0, 0, 0, 128}
+    };
+    request.context.floatMode = ShaderRecompiler::ShaderFloatMode{denorm16 << 6u, true, true, false};
+    request.useCache = false;
+    const auto result = ShaderRecompiler::Recompile(request);
+    device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
+    device.WaitIdle();
+}
+
+void CheckLdexpDenormal(std::uint32_t denorm16) {
+    for (std::uint32_t lane = 0; lane < std::size(LdexpDenormalVectors); ++lane) {
+        const auto& vector = LdexpDenormalVectors[lane];
+        const auto expected = vector.expected[denorm16];
+        const auto actual = Output[lane * Results];
+        Require(Matches(actual, expected), std::string("f16 ldexp denormal: denorm16 ") + std::to_string(denorm16) + " vector " + std::to_string(lane) + " (" + Hex(vector.half) + ", " + Hex(vector.exponent) + ") is " + Hex(actual) + ", expected " + Hex(expected));
+    }
+}
+
 }
 
 int main() {
@@ -752,6 +821,10 @@ int main() {
                     Check(0u, 32u, vectors, 1u);
                 }
             }
+        }
+        for (std::uint32_t denorm16 = 0u; denorm16 < 4u; ++denorm16) {
+            RunLdexpDenormal(*device, denorm16);
+            CheckLdexpDenormal(denorm16);
         }
         std::puts("f16 rounding tests passed");
         return 0;

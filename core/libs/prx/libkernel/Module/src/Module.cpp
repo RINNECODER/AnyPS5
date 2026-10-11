@@ -9,6 +9,7 @@
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Module/EhFrame.hpp"
+#include "prx/libkernel/Module/ModuleArgs.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
@@ -92,7 +93,9 @@ extern "C" {
 
 int APS5_VABI sceKernelDlsym(KernelModule handle, const char* symbol, void** addr) {
  if (!symbol || !addr) return SCE_KERNEL_ERROR_EFAULT;
- void* found = dlsym_nid_postfix(reinterpret_cast<void*>(static_cast<intptr_t>(handle)), symbol);
+ void* module = handle == 0 ? dlopen_nid_postfix(nullptr, kRtldNow) : reinterpret_cast<void*>(static_cast<intptr_t>(handle));
+ void* found = dlsym_nid_postfix(module, symbol);
+ if (handle == 0 && module) dlclose_nid_postfix(module);
  if (!found) return SCE_KERNEL_ERROR_ESRCH;
  *addr = found;
  return 0;
@@ -180,10 +183,6 @@ int APS5_VABI sceKernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleIn
 
 namespace {
 
-struct PendingModuleArgs {
-    std::size_t args = 0;
-    const void* argp = nullptr;
-};
 thread_local PendingModuleArgs pendingModuleArgs;
 thread_local int pendingModuleInitResult = 0;
 
