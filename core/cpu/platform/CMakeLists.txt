@@ -37,6 +37,7 @@ add_library(anyps5_platform_components STATIC KernelPrimitives.cpp KernelEvents.
     NetworkServices.cpp NpServices.cpp AudioServices.cpp RtcServices.cpp CandidateComponents.cpp)
 target_include_directories(anyps5_platform_components PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" ../include)
 target_compile_features(anyps5_platform_components PUBLIC cxx_std_20)
+target_include_directories(anyps5_platform_components PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
 target_compile_options(anyps5_platform_components PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(anyps5_platform_components PUBLIC ${platformCpuTarget})
 

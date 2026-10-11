@@ -531,6 +531,16 @@ std::int32_t KernelEvents::AddGraphicsEvent(std::uint64_t handle, std::int32_t i
     auto s = std::make_shared<Impl::Subscription>(); s->queue = q; s->id = id; s->udata = udata;
     q->subscriptions.push_back(s); impl->mailbox->subscriptions.push_back(std::move(s)); return 0;
 }
+std::int32_t KernelEvents::TriggerUserEvent(std::uint64_t queue, std::int32_t id, std::uint64_t data) {
+    // Same effect as sceKernelTriggerUserEvent from a guest host call: the owner pump delivers it.
+    impl->owner(false);
+    const auto found = impl->queues.find(queue);
+    if (found == impl->queues.end()) return static_cast<std::int32_t>(Badf);
+    const auto s = impl->find(*found->second, FilterUser, id);
+    if (!s) return static_cast<std::int32_t>(Enoent);
+    s->triggered = true; s->udata = data; s->count = static_cast<std::int64_t>(data);
+    return 0;
+}
 std::int32_t KernelEvents::DeleteGraphicsEvent(std::uint64_t handle, std::int32_t id) {
     impl->owner(false);
     const auto found = impl->queues.find(handle);

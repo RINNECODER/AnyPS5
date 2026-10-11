@@ -5,7 +5,7 @@ if(TARGET anyps5_cpu AND TARGET anyps5_metal_native_execution)
     set(agcUpstream "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceAgc")
     add_library(anyps5_cpu_agc STATIC
         "${PROJECT_SOURCE_DIR}/core/cpu/src/SceAgcImports.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/NativeAgcBackend.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/NativeAgcBackend.cpp" "${CMAKE_CURRENT_LIST_DIR}/AgcRegisterDefaults.cpp"
         "${agcUpstream}/Shader/src/ShaderUtils.cpp"
         "${agcUpstream}/Command/src/Packet.cpp" "${agcUpstream}/Command/src/Memory.cpp"
         "${agcUpstream}/Command/src/Control.cpp" "${agcUpstream}/DcbFlow/src/Memory.cpp"
@@ -22,12 +22,15 @@ if(TARGET anyps5_cpu AND TARGET anyps5_metal_native_execution)
         "${agcUpstream}/Predication/src/Predication.cpp" "${agcUpstream}/Command/src/RegisterDefaults.cpp"
         "${agcUpstream}/Patch/src/Branch.cpp" "${agcUpstream}/Patch/src/CondExec.cpp" "${agcUpstream}/Patch/src/Dma.cpp"
         "${agcUpstream}/Patch/src/IndirectRegisters.cpp" "${agcUpstream}/Patch/src/Jump.cpp" "${agcUpstream}/Patch/src/Nop.cpp"
-        "${agcUpstream}/Patch/src/QueueEndOfPipeAction.cpp" "${agcUpstream}/Patch/src/Rewind.cpp" "${agcUpstream}/Patch/src/WaitRegMem.cpp")
+        "${agcUpstream}/Patch/src/QueueEndOfPipeAction.cpp" "${agcUpstream}/Patch/src/Rewind.cpp" "${agcUpstream}/Patch/src/WaitRegMem.cpp"
+        "${agcUpstream}/Misc/src/RegisterDefaults.cpp" "${agcUpstream}/Shader/src/PrimState.cpp"
+        "${PROJECT_SOURCE_DIR}/core/cpu/src/upstream-prx/AgcDriver.cpp")
     target_compile_features(anyps5_cpu_agc PUBLIC cxx_std_20)
     target_compile_options(anyps5_cpu_agc PRIVATE -Wall -Wextra -Wpedantic)
     target_include_directories(anyps5_cpu_agc PUBLIC
         "${PROJECT_SOURCE_DIR}/core/cpu/include"
         "${CMAKE_CURRENT_LIST_DIR}")
+    target_include_directories(anyps5_cpu_agc PRIVATE "${PROJECT_SOURCE_DIR}/core/libs/nid/include")
     target_link_libraries(anyps5_cpu_agc PUBLIC anyps5_cpu anyps5_metal_native_execution)
     if(BUILD_TESTING)
         find_program(agcGuestClang clang HINTS /opt/homebrew/opt/llvm/bin REQUIRED)
@@ -69,6 +72,12 @@ if(TARGET anyps5_cpu AND TARGET anyps5_metal_native_execution)
         target_link_libraries(anyps5_cpu_agc_builder_fixture PRIVATE anyps5_cpu_agc)
         add_test(NAME anyps5_cpu_agc_builder COMMAND anyps5_cpu_agc_builder_fixture)
         set_tests_properties(anyps5_cpu_agc_builder PROPERTIES TIMEOUT 30)
+        add_executable(anyps5_cpu_agc_driver_leaf_fixture "${CMAKE_CURRENT_LIST_DIR}/AgcDriverLeafFixture.cpp")
+        target_compile_features(anyps5_cpu_agc_driver_leaf_fixture PRIVATE cxx_std_20)
+        target_compile_options(anyps5_cpu_agc_driver_leaf_fixture PRIVATE -Wall -Wextra -Wpedantic)
+        target_link_libraries(anyps5_cpu_agc_driver_leaf_fixture PRIVATE anyps5_cpu_agc)
+        add_test(NAME anyps5_cpu_agc_driver_leaf COMMAND anyps5_cpu_agc_driver_leaf_fixture)
+        set_tests_properties(anyps5_cpu_agc_driver_leaf PROPERTIES TIMEOUT 30)
         # The direct CPU+Metal build does not define platform components. Use
         # the actual existing event provider source in this focused fixture,
         # preserving both direct-build support and wrapper target ordering.
