@@ -2,6 +2,8 @@
 #include <cpu/SceElf.hpp>
 #include "AgcUpstreamBuilders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
+#include "prx/libSceAgc/Misc/include/ShaderFusion.hpp"
+#include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -111,6 +113,11 @@ constexpr std::pair<const char*, bool> Ported[] = {
     {"Y3ymLfZ1384", false}, {"BYcSvEsINWU", false}, {"N7M3+N-sBCw", false}, {"8Kly1JrJUlw", false}, {"pxx-GoOSdw4", false},
     {"ms1xVoZ-Vwc", false}, {"P1CugZ99Uzc", false}, {"7Wa3aeJgeVU", false}, {"rP5xLdOf26k", false}, {"W0WEyog0f74", false},
     {"ebixW91gpPw", false}, {"GPbUp9jXQa8", false},
+    {"AAeX-U5-P3M", false}, {"OQTgEXyihvA", false}, {"T6xuVw0KUJo", false}, {"ICkECTBxrMw", false}, {"6nths4DHNrs", false},
+    {"0o3VDdtA6nM", false}, {"AFIh8SQkYlQ", false}, {"hFQ9pUxoLQ4", false}, {"LFSPFmGc9Hg", false}, {"hEK26Wdny6s", false},
+    {"FneFypEDRgY", false}, {"opR1JeJZCBU", false}, {"FcgdDM3MB+k", false}, {"rVOmPz2RBlg", false}, {"gQkqkLttcpw", false},
+    {"vieBRwlh1Lw", false}, {"zARR5aCmkoY", false}, {"LtTouSCZjHM", false}, {"dolOmWH+huQ", false}, {"fd5Bp5tGTgo", false},
+    {"NKIzURsgV7I", false},
 };
 
 void Admission() {
@@ -312,6 +319,96 @@ void PrimState() {
             "UpdatePrimState registers differ from upstream");
     require(guest.status("D9sr1xGUriE", false, {0, 0, 0, 0, 4}) == 0, "CreatePrimState without outputs must succeed");
 }
+
+// Exports upstream implements as NotImplemented stubs: the guest sees upstream's zero.
+void Stubs() {
+    Guest guest;
+    for (const auto nid : {"AAeX-U5-P3M", "OQTgEXyihvA", "T6xuVw0KUJo", "ICkECTBxrMw", "6nths4DHNrs", "0o3VDdtA6nM", "AFIh8SQkYlQ",
+                           "hFQ9pUxoLQ4", "LFSPFmGc9Hg", "hEK26Wdny6s", "FneFypEDRgY", "opR1JeJZCBU", "FcgdDM3MB+k", "rVOmPz2RBlg",
+                           "gQkqkLttcpw", "vieBRwlh1Lw", "zARR5aCmkoY"})
+        require(guest.call(nid, false, {Data, 1, 2, 3}) == 0, std::string(nid) + " stub did not return zero");
+}
+
+void ShaderHalves() {
+    using Type = ShaderRegs::ShaderBinaryType;
+    constexpr std::uint32_t ChksumHs = 0x100, Rsrc1Hs = 0x10A, Rsrc2Hs = 0x10B, LoLs = 0x148;
+    using Regs = std::array<ShaderRegister, 6>;
+    const Regs frontRegs{{{ChksumHs, 0x11}, {ChksumHs, 0x22}, {Rsrc1Hs, 0x00000013}, {Rsrc2Hs, 0x50000008}, {LoLs, 0}, {LoLs + 1, 0}}};
+    const Regs backRegs{{{ChksumHs, 0x33}, {ChksumHs, 0x44}, {Rsrc1Hs, 0x20000005}, {Rsrc2Hs, 0x0800003e}, {LoLs, 7}, {LoLs + 1, 0x1ff}}};
+    ShaderSpecialRegs specials{};
+    specials.vgt_shader_stages_en = {0x2d5, 0x00200000};
+    constexpr std::uint64_t FrontAt = Data, BackAt = Data + 0x100, SpecialsAt = Data + 0x200, FrontRegsAt = Data + 0x240,
+                            BackRegsAt = Data + 0x280, OutAt = Data + 0x300, ScratchAt = Data + 0x400, SizeAt = Data + 0x500,
+                            CodeAt = 0x7000000;
+    const auto make = [&](Type type, std::uint64_t regsAt) {
+        Shader shader{};
+        shader.type = static_cast<std::uint8_t>(type);
+        shader.num_sh_registers = 6;
+        shader.sh_registers = reinterpret_cast<ShaderRegister*>(std::uintptr_t{regsAt});
+        shader.specials = reinterpret_cast<ShaderSpecialRegs*>(std::uintptr_t{SpecialsAt});
+        shader.code = reinterpret_cast<const volatile void*>(std::uintptr_t{CodeAt});
+        return shader;
+    };
+    const auto guestFront = make(Type::HsFront, FrontRegsAt), guestBack = make(Type::HsBack, BackRegsAt);
+    // Host oracle: the same shaders with host pointers and the same code address value.
+    auto oracleFront = guestFront; auto oracleBack = guestBack;
+    auto frontCopy = frontRegs; auto backCopy = backRegs;
+    oracleFront.sh_registers = frontCopy.data(); oracleBack.sh_registers = backCopy.data();
+    oracleFront.specials = &specials; oracleBack.specials = &specials;
+    SizeAlign expectedSize{};
+    require(sceAgcGetFusedShaderSize_0080(&expectedSize, &oracleFront, &oracleBack) == 0, "oracle refused the hull halves");
+    Regs oracleScratch{};
+    Shader oracleFused{};
+    require(sceAgcFuseShaderHalves_0200(&oracleFused, &oracleFront, &oracleBack, oracleScratch.data()) == 0, "oracle fusion failed");
+    require(std::memcmp(&oracleScratch, &backRegs, sizeof(Regs)) != 0, "oracle fusion did not change the registers");
+
+    Guest guest;
+    store(guest.Machine, FrontAt, guestFront); store(guest.Machine, BackAt, guestBack);
+    store(guest.Machine, SpecialsAt, specials); store(guest.Machine, FrontRegsAt, frontRegs); store(guest.Machine, BackRegsAt, backRegs);
+    require(guest.status("dolOmWH+huQ", false, {SizeAt, FrontAt, BackAt}) == 0, "size query refused the hull halves");
+    const auto size = load<SizeAlign>(guest.Machine, SizeAt);
+    require(size.m_size == expectedSize.m_size && size.m_align == expectedSize.m_align, "fused size differs from upstream");
+    require(guest.status("fd5Bp5tGTgo", false, {OutAt, FrontAt, BackAt, ScratchAt}) == 0, "fusion refused the hull halves");
+    const auto fusedRegs = load<Regs>(guest.Machine, ScratchAt);
+    require(std::memcmp(&fusedRegs, &oracleScratch, sizeof(Regs)) == 0, "fused registers differ from upstream");
+    auto expected = oracleFused;
+    expected.sh_registers = reinterpret_cast<ShaderRegister*>(std::uintptr_t{ScratchAt});
+    expected.specials = reinterpret_cast<ShaderSpecialRegs*>(std::uintptr_t{SpecialsAt});
+    const auto fusedHeader = load<Shader>(guest.Machine, OutAt);
+    require(std::memcmp(&fusedHeader, &expected, sizeof(Shader)) == 0, "fused header differs from upstream");
+    const auto untouched = load<Regs>(guest.Machine, BackRegsAt);
+    require(std::memcmp(&untouched, &backRegs, sizeof(Regs)) == 0, "back registers were modified despite scratch memory");
+
+    // Without scratch memory upstream fuses in place in the back half's registers.
+    auto inPlaceBack = oracleBack; auto inPlaceRegs = backRegs; inPlaceBack.sh_registers = inPlaceRegs.data();
+    Shader inPlaceFused{};
+    require(sceAgcFuseShaderHalves_0200(&inPlaceFused, &oracleFront, &inPlaceBack, nullptr) == 0, "oracle in-place fusion failed");
+    require(guest.status("fd5Bp5tGTgo", false, {OutAt, FrontAt, BackAt, 0}) == 0, "in-place fusion refused the hull halves");
+    const auto written = load<Regs>(guest.Machine, BackRegsAt);
+    require(std::memcmp(&written, &inPlaceRegs, sizeof(Regs)) == 0, "in-place fused registers differ from upstream");
+
+    // Mismatched types: upstream's status. Geometry halves: reported as invalid halves, never a trap.
+    const std::uint32_t invalid = 0x8a6c0008u;
+    store(guest.Machine, BackAt, make(Type::Cs, BackRegsAt));
+    require(guest.status("fd5Bp5tGTgo", false, {OutAt, FrontAt, BackAt, ScratchAt}) == invalid &&
+            guest.status("dolOmWH+huQ", false, {SizeAt, FrontAt, BackAt}) == invalid, "mismatched halves must report invalid halves");
+    store(guest.Machine, FrontAt, make(Type::GsFront, FrontRegsAt)); store(guest.Machine, BackAt, make(Type::GsBack, BackRegsAt));
+    require(guest.status("fd5Bp5tGTgo", false, {OutAt, FrontAt, BackAt, ScratchAt}) == invalid, "geometry fusion must not trap");
+}
+
+extern "C" int APS5_VABI sceAgcGetGsOversubscription(ShaderRegister* regs, const Shader* gs, std::uint32_t budget, float factor);
+
+void GsOversubscription() {
+    Guest guest;
+    constexpr std::uint64_t RegsAt = Data + 0x600;
+    for (const std::uint32_t budget : {0u, 0xffffffffu}) {
+        std::array<ShaderRegister, 2> expected{};
+        require(sceAgcGetGsOversubscription(expected.data(), nullptr, budget, 0.0f) == 0, "oracle refused the budget");
+        require(guest.status("NKIzURsgV7I", false, {RegsAt, 0, budget, 0}) == 0, "oversubscription refused the budget");
+        const auto got = load<std::array<ShaderRegister, 2>>(guest.Machine, RegsAt);
+        require(std::memcmp(&got, &expected, sizeof(expected)) == 0, "oversubscription registers differ from upstream");
+    }
+}
 }
 
 int main() {
@@ -322,6 +419,9 @@ int main() {
         Builders();
         RegisterDefaults();
         PrimState();
+        Stubs();
+        ShaderHalves();
+        GsOversubscription();
     } catch (const std::exception& error) {
         std::cerr << "AGC driver leaf fixture failed: " << error.what() << '\n';
         return 1;

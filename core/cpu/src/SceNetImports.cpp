@@ -1004,6 +1004,9 @@ struct SceNetImports::Impl {
         };
         posix("socket", [this](Machine& m) { return opSocket(iarg(m, 0), iarg(m, 1), iarg(m, 2), true); });
         posix("bind", [this](Machine& m) { return opBind(m, iarg(m, 0), arg(m, 1), static_cast<std::uint32_t>(arg(m, 2))); });
+        posix("connect", [this](Machine& m) { return opConnect(m, iarg(m, 0), arg(m, 1), static_cast<std::uint32_t>(arg(m, 2))); });
+        posix("listen", [this](Machine& m) { return opListen(iarg(m, 0), iarg(m, 1)); });
+        posix("accept", [this](Machine& m) { return opAccept(m, iarg(m, 0), arg(m, 1), arg(m, 2)); });
         posix("setsockopt", [this](Machine& m) {
             return opSetOption(m, iarg(m, 0), iarg(m, 1), iarg(m, 2), arg(m, 3), static_cast<std::uint32_t>(arg(m, 4)), false);
         });

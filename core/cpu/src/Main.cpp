@@ -888,10 +888,11 @@ int main(int argc, char** argv) {
                                 return Cpu::SceResolvedImport{*address, type};
                             }
                             if (const auto address = bootstrapRuntime->Resolve(import)) {
-                                const std::uint8_t expectedType = import.Nid == "f7uOxY9mM1U" || import.Nid == "djxxOmW6-aw" ? 1 : 2;
+                                const bool needFlag = import.Nid == "ZT4ODD2Ts9o"; // 32-bit libc internal object
+                                const std::uint8_t expectedType = import.Nid == "f7uOxY9mM1U" || import.Nid == "djxxOmW6-aw" || needFlag ? 1 : 2;
                                 if (type != expectedType)
                                     throw std::runtime_error("Unsupported SCE libc bootstrap symbol type");
-                                return Cpu::SceResolvedImport{*address, expectedType, expectedType == 1 ? 8u : 0u};
+                                return Cpu::SceResolvedImport{*address, expectedType, expectedType == 1 ? (needFlag ? 4u : 8u) : 0u};
                             }
                             if (type != 2) return std::nullopt;
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER

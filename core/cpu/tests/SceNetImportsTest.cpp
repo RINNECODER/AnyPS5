@@ -330,6 +330,30 @@ void posixSockets(Session& s) {
     require(((s.get<std::uint64_t>(data + 2048 + (peer / 64) * 8) >> (peer % 64)) & 1) == 1, "select keeps the ready bit");
     require(posix("T8fER+tIGgk", {5000, 0, 0, 0, 0}) == -1 && s.errnoValue() == 22, "select nfds bound");
     s.net("sceNetSocketClose", {static_cast<std::uint64_t>(peer)});
+    // POSIX TCP: listen, connect and accept on the same table.
+    const auto connectNid = ::Nid::ComputeNid("connect", "libkernel"), acceptNid = ::Nid::ComputeNid("accept", "libkernel");
+    require(connectNid == "XVL8So3QJUk" && acceptNid == "3e+4Iv7IJ8U", "posix connect/accept NIDs");
+    const auto listenNid = ::Nid::ComputeNid("listen", "libkernel");
+    const auto call = [&](const std::string& nid, std::array<std::uint64_t, 6> args) { return static_cast<std::int64_t>(s.call(nid.c_str(), Lib::Posix, args)); };
+    const auto server = call("TU-d9PfIHPM", {2, 1, 0});
+    s.loopback(data + 1024, 0);
+    require(call(::Nid::ComputeNid("bind", "libkernel"), {static_cast<std::uint64_t>(server), data + 1024, 16}) == 0, "posix tcp bind");
+    require(call(listenNid, {static_cast<std::uint64_t>(server), 2}) == 0, "posix listen");
+    const std::uint32_t size = 16;
+    s.put(data + 640, &size, 4);
+    require(s.net("sceNetGetsockname", {static_cast<std::uint64_t>(server), data + 1056, data + 640}) == 0, "posix tcp name");
+    const auto client = call("TU-d9PfIHPM", {2, 1, 0});
+    require(call(connectNid, {static_cast<std::uint64_t>(client), data + 1056, 16}) == 0, "posix connect");
+    s.put(data + 640, &size, 4);
+    const auto accepted = call(acceptNid, {static_cast<std::uint64_t>(server), data + 1088, data + 640});
+    require(accepted >= 0x10000000 && accepted != server && accepted != client, "posix accept");
+    require(s.get<std::uint32_t>(data + 640) == 16, "accept address length");
+    s.text(data + 128, "hi");
+    require(s.net64("sceNetSend", {static_cast<std::uint64_t>(client), data + 128, 3, 0}) == 3, "posix tcp send");
+    require(s.net64("sceNetRecv", {static_cast<std::uint64_t>(accepted), data + 256, 16, 0}) == 3, "posix tcp recv");
+    require(call(connectNid, {9999, data + 1056, 16}) == -1 && s.errnoValue() == 9, "connect on a bad descriptor is EBADF");
+    require(call(acceptNid, {static_cast<std::uint64_t>(client), 0, 0}) == -1 && s.errnoValue() == 22, "accept on a non-listener is EINVAL");
+    for (auto id : {server, client, accepted}) s.net("sceNetSocketClose", {static_cast<std::uint64_t>(id)});
 }
 
 void ssl(Session& s) {

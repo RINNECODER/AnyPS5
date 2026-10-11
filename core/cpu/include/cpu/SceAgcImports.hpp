@@ -34,6 +34,8 @@ enum class AgcAbiContract {
     UpstreamShader,
     // libSceAgcDriver leaf exports through prx bridge descriptors.
     UpstreamDriver,
+    // Upstream exports that are NotImplemented stubs returning zero.
+    UpstreamStub,
     // Compute-queue flip and rendering wait: the Metal driver's packets.
     AcbSetFlipCommandBuffer56, AcbWaitUntilSafeForRenderingCommandBuffer56
 };
