@@ -1,14 +1,27 @@
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
 
 namespace AgcDriver::NativeGuestMemory {
 namespace {
-thread_local std::vector<BorrowedRange> ranges;
+thread_local std::vector<BorrowedRange> scopedRanges;
 thread_local GuestMemory::ReadSite readSite = GuestMemory::ReadSite::Unknown;
+std::atomic<ProcessRangesProvider> processRanges{nullptr};
+thread_local std::shared_ptr<const std::vector<BorrowedRange>> processSnapshot;
+
+// The borrowed scope of this thread, or the process-wide set outside any scope. References into
+// the process-wide set stay valid until this thread asks again.
+const std::vector<BorrowedRange>& Active() {
+    if (!scopedRanges.empty()) return scopedRanges;
+    const auto provider = processRanges.load(std::memory_order_acquire);
+    if (provider == nullptr) return scopedRanges;
+    processSnapshot = provider();
+    return processSnapshot ? *processSnapshot : scopedRanges;
+}
 
 std::uint64_t End(std::uint64_t address, std::size_t bytes) {
     if (bytes > std::numeric_limits<std::uint64_t>::max() - address)
@@ -17,6 +30,7 @@ std::uint64_t End(std::uint64_t address, std::size_t bytes) {
 }
 
 const BorrowedRange& Find(std::uint64_t address, bool writable) {
+    const auto& ranges = Active();
     auto found = std::upper_bound(ranges.begin(), ranges.end(), address,
         [](std::uint64_t value, const BorrowedRange& range) { return value < range.guestAddress; });
     if (found == ranges.begin()) throw std::out_of_range("Native guest memory address is not borrowed");
@@ -66,11 +80,13 @@ BorrowedRangesScope::BorrowedRangesScope(std::span<const BorrowedRange> borrowed
             throw std::invalid_argument("Native guest memory borrows overlap");
         previousEnd = end;
     }
-    previous.swap(ranges);
-    ranges.swap(validated);
+    previous.swap(scopedRanges);
+    scopedRanges.swap(validated);
 }
 
-BorrowedRangesScope::~BorrowedRangesScope() { ranges.swap(previous); }
+BorrowedRangesScope::~BorrowedRangesScope() { scopedRanges.swap(previous); }
+
+void SetProcessRangesProvider(ProcessRangesProvider provider) { processRanges.store(provider, std::memory_order_release); }
 std::span<std::byte> ContiguousBorrowedRange(std::uint64_t address, std::size_t bytes, bool writable) {
     Check(address, bytes, 1, writable);
     if (bytes == 0) return {};
@@ -85,7 +101,7 @@ std::size_t ReadableBorrowedBytes(std::uint64_t address, std::size_t maxBytes) {
     if (address == 0) throw std::invalid_argument("Native guest memory address is null");
     const auto end = End(address, maxBytes);
     auto cursor = address;
-    for (const auto& range : ranges) {
+    for (const auto& range : Active()) {
         const auto rangeEnd = End(range.guestAddress, range.host.size());
         if (rangeEnd <= cursor) continue;
         if (range.guestAddress > cursor) break;

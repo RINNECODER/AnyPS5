@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -36,5 +37,11 @@ private:
 
 std::span<std::byte> ContiguousBorrowedRange(std::uint64_t address, std::size_t bytes, bool writable = false);
 std::size_t ReadableBorrowedBytes(std::uint64_t address, std::size_t maxBytes);
+
+// Rosetta direct path: a thread with no borrowed scope (a guest thread calling a driver export)
+// resolves against this process-wide set instead. Without a provider (the default) such
+// accesses are refused as before.
+using ProcessRangesProvider = std::shared_ptr<const std::vector<BorrowedRange>> (*)();
+void SetProcessRangesProvider(ProcessRangesProvider provider);
 
 }

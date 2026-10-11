@@ -21,6 +21,8 @@ extern "C" void AgcDriverEndShaderPreparation_nid_postfix(AgcDriver::DriverDetai
     static_cast<void>(transaction);
 }
 
+#if !defined(ANYPS5_ROSETTA_DIRECT)
+// The Rosetta direct path links the real libc mmap instead.
 // The global data share (Pm4::GdsAddress) is a private anonymous mapping. Here it is host memory
 // outside every borrowed guest range, so native guest memory checks refuse GDS packet accesses
 // instead of serving them.
@@ -32,3 +34,4 @@ extern "C" void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, i
     }
     return ::mmap(nullptr, length, protection, MAP_PRIVATE | MAP_ANON, -1, 0);
 }
+#endif
