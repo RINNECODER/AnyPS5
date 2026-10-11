@@ -29,6 +29,7 @@ def main():
         raise SystemExit(f"no .prx files in {libs}")
     exports = {}
     missing = []
+    checked = 0
     for image in images:
         for line in dyld_info("-imports", image):
             match = IMPORT.match(line)
@@ -37,6 +38,7 @@ def main():
             symbol, source = match.group(1), match.group(3)
             if not source.endswith(".prx"):
                 continue
+            checked += 1
             if source not in exports:
                 target = libs / source
                 if not target.exists():
@@ -48,7 +50,10 @@ def main():
                 missing.append(f"{image.name}: {symbol} from {source}")
     for line in missing:
         print(f"unresolved bind: {line}")
-    print(f"{len(images)} libraries checked, {len(missing)} unresolved binds")
+    if checked == 0:
+        print("no inter-library imports parsed from dyld_info output; the parser no longer matches")
+        return 1
+    print(f"{len(images)} libraries checked, {checked} binds, {len(missing)} unresolved binds")
     return 1 if missing else 0
 
 
