@@ -225,6 +225,19 @@ struct ShaderPixelInputInfo {
         return one ? 0x3f800000u : 0u;
     }
 
+    enum class Sampling : std::uint32_t { Center, Centroid, Sample, Mixed };
+
+    // Where the host interpolates a parameter: at the location of the I/J pair its v_interp_p2_f32
+    // read (the center when none was recorded), or Mixed when pairs of different locations read it.
+    [[nodiscard]] static Sampling InputSampling(std::uint32_t input, const IrProgramMetadata& metadata) {
+        const auto bit = input < 32u ? 1u << input : 0u;
+        const bool center = (metadata.pixelCenterInputs & bit) != 0u;
+        const bool centroid = (metadata.pixelCentroidInputs & bit) != 0u;
+        const bool sample = (metadata.pixelSampleInputs & bit) != 0u;
+        if (static_cast<int>(center) + static_cast<int>(centroid) + static_cast<int>(sample) > 1) return Sampling::Mixed;
+        return centroid ? Sampling::Centroid : sample ? Sampling::Sample : Sampling::Center;
+    }
+
     [[nodiscard]] bool InputIsLinear(std::uint32_t input, std::uint32_t linearInputs, std::uint32_t perspectiveInputs) const {
         const auto bit = input < 32u ? 1u << input : 0u;
         if ((linearInputs & perspectiveInputs & bit) != 0u) {

@@ -39,25 +39,29 @@ void configureSamplerArguments(MetalBackend::TargetOptions& options, const Recom
 }
 
 SpirvTarget nativeTarget(id<MTLDevice> device, std::optional<MeshTargetLimits> mesh = {}) {
-    static constexpr std::array<std::uint32_t, 7> capabilities{
+    // FragmentBarycentricKHR (last) means [[barycentric_coord]] weights; per-vertex inputs stay off (false below).
+    static constexpr std::array<std::uint32_t, 8> capabilities{
         spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
         spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing,
-        spv::CapabilityShaderNonUniform, spv::CapabilitySampledImageArrayNonUniformIndexing};
+        spv::CapabilityShaderNonUniform, spv::CapabilitySampledImageArrayNonUniformIndexing, spv::CapabilityFragmentBarycentricKHR};
+    const auto supported = [&](std::span<const std::uint32_t> all) {
+        return device.supportsShaderBarycentricCoordinates ? all : all.first(all.size() - 1u);
+    };
     static constexpr std::array<std::string_view, 3> extensions{
         "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_EXT_descriptor_indexing"};
     const auto maximum = device.maxThreadsPerThreadgroup;
-    SpirvTarget target{0x00401000, 0x00010300, 32, BdaAbi::Version, capabilities, extensions, false,
+    SpirvTarget target{0x00401000, 0x00010300, 32, BdaAbi::Version, supported(capabilities), extensions, false,
         {static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(maximum.height), static_cast<std::uint32_t>(maximum.depth)},
         static_cast<std::uint32_t>(maximum.width), static_cast<std::uint32_t>(device.maxThreadgroupMemoryLength), {}, {}};
     if (mesh) {
-        static constexpr std::array<std::uint32_t, 8> meshCapabilities{
+        static constexpr std::array<std::uint32_t, 9> meshCapabilities{
             spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess,
             spv::CapabilityMeshShadingEXT, spv::CapabilityMinLod, spv::CapabilitySampledImageArrayDynamicIndexing,
-            spv::CapabilityShaderNonUniform, spv::CapabilitySampledImageArrayNonUniformIndexing};
+            spv::CapabilityShaderNonUniform, spv::CapabilitySampledImageArrayNonUniformIndexing, spv::CapabilityFragmentBarycentricKHR};
         static constexpr std::array<std::string_view, 4> meshExtensions{
             "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_EXT_mesh_shader", "SPV_EXT_descriptor_indexing"};
         target.spirvVersion = 0x00010400;
-        target.supportedCapabilities = meshCapabilities;
+        target.supportedCapabilities = supported(meshCapabilities);
         target.supportedExtensions = meshExtensions;
         target.mesh = mesh;
     }

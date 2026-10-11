@@ -8,7 +8,9 @@ namespace ShaderRecompiler {
 
 class HostInterpolationChecker {
 public:
-    [[nodiscard]] bool Lower(IrProgram& program, const ShaderPixelInputInfo& pixel) const;
+    // barycentricWeights: the target reads BaryCoordKHR weights natively but has no per-vertex
+    // inputs (Metal [[barycentric_coord]]), so raw I/J reads may stay next to host interpolation.
+    [[nodiscard]] bool Lower(IrProgram& program, const ShaderPixelInputInfo& pixel, bool barycentricWeights = false) const;
 };
 
 }

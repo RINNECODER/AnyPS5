@@ -111,8 +111,11 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
             }
             pixelStorage.psInputVgpr[static_cast<std::uint32_t>(input)] = PixelInputVgpr(pixel.inputAddr, input);
         };
+        const auto addressed = [&](PixelInput input) { return (pixel.inputAddr & PixelInputBit(input)) != 0u; };
+        place(PixelInput::PerspectiveSample, addressed(PixelInput::PerspectiveSample));
         place(PixelInput::PerspectiveCenter, pixel.hasPerspectiveCenterVgpr);
         place(PixelInput::PerspectiveCentroid, pixel.perspectiveCentroid);
+        place(PixelInput::LinearSample, addressed(PixelInput::LinearSample));
         place(PixelInput::LinearCenter, pixel.noPerspective);
         place(PixelInput::LinearCentroid, pixel.linearCentroid);
         place(PixelInput::PositionX, pixel.posX);
@@ -121,8 +124,8 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         place(PixelInput::PositionW, pixel.posW);
         place(PixelInput::FrontFace, pixel.frontFace);
         place(PixelInput::Ancillary, pixel.ancillary);
-        place(PixelInput::LineStipple, (pixel.inputAddr & PixelInputBit(PixelInput::LineStipple)) != 0u);
-        place(PixelInput::PositionFixedPoint, (pixel.inputAddr & PixelInputBit(PixelInput::PositionFixedPoint)) != 0u);
+        place(PixelInput::LineStipple, addressed(PixelInput::LineStipple));
+        place(PixelInput::PositionFixedPoint, addressed(PixelInput::PositionFixedPoint));
         for (std::uint32_t i = 0; i < 8; ++i) {
             pixelStorage.targetOutputMode[i] = pixel.targetOutputMode[i];
         }
