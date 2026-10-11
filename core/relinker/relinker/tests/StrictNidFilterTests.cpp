@@ -310,8 +310,10 @@ std::vector<std::uint8_t> elfFixture(const StrictReachabilityInput& input) {
     bytes[6] = 1;
     write<std::uint16_t>(bytes, 16, 3);
     write<std::uint16_t>(bytes, 18, 62);
+    write<std::uint32_t>(bytes, 20, 1);
     write<std::uint64_t>(bytes, 24, input.Entries.at(0));
     write<std::uint64_t>(bytes, 32, 64);
+    write<std::uint16_t>(bytes, 52, 64);
     write<std::uint16_t>(bytes, 54, 56);
     write<std::uint16_t>(bytes, 56, 2);
     write<std::uint32_t>(bytes, 64, 1);
