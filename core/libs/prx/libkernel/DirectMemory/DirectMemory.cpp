@@ -32,6 +32,7 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <atomic>
 #endif
 #else
 #include <windows.h>
@@ -222,10 +223,29 @@ void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment)
     throw std::runtime_error("Hinted mmap kept racing with other mappings");
 }
 
-bool DarwinRefusesFixed(void* addr, size_t len, int flags) {
+// PS5 titles place fixed mappings at the start of the application map area
+// (0x10_0000_0000), inside that hole. Relocate such requests by a constant
+// 448 GiB, onto [512 GiB, 960 GiB): still inside the PS5 application area
+// (below 0xFC_0000_0000), which the guest libc checks pointers against. The
+// relocated address is returned through *addr as the guest kernel does, so
+// titles that read it back keep working and relative layouts are preserved.
+constexpr std::uintptr_t DarwinHoleShift = DarwinRefusedEnd - DarwinRefusedStart;
+
+// Returns false for a fixed request that starts below the hole and runs into it,
+// which cannot be moved out of it and fails with ENOMEM.
+bool DarwinRelocateFixed(void** addr, size_t len, int flags) {
     constexpr int GuestMapFixed = 0x10;
-    if ((flags & GuestMapFixed) == 0 || !DarwinRefusedRange(reinterpret_cast<std::uintptr_t>(addr), len)) return false;
-    std::fprintf(stderr, "[memory] fixed mapping %p+0x%zx is in the 64-512 GiB range macOS refuses\n", addr, len);
+    const auto start = reinterpret_cast<std::uintptr_t>(*addr);
+    if ((flags & GuestMapFixed) == 0 || !DarwinRefusedRange(start, len)) return true;
+    if (start < DarwinRefusedStart) {
+        std::fprintf(stderr, "[memory] fixed mapping %p+0x%zx runs into the 64-512 GiB range macOS refuses\n", *addr, len);
+        return false;
+    }
+    static std::atomic<bool> reported{false};
+    if (!reported.exchange(true))
+        std::fprintf(stderr, "[memory] fixed mapping %p+0x%zx is in the 64-512 GiB range macOS refuses; relocating fixed mappings there by +0x%llx\n",
+            *addr, len, static_cast<unsigned long long>(DarwinHoleShift));
+    *addr = reinterpret_cast<void*>(start + DarwinHoleShift);
     return true;
 }
 #endif
@@ -860,7 +880,7 @@ int PlaceHintInReservation(void* addr, size_t len, int flags) {
 int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
     ValidateOutput(addr);
 #if defined(__APPLE__)
-    if (DarwinRefusesFixed(*addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+    if (!DarwinRelocateFixed(addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
 #endif
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     if (physStart < 0 || (static_cast<std::uint64_t>(physStart) & (PS5_PAGE_SIZE - 1)) != 0 || static_cast<std::uint64_t>(physStart) >= DIRECT_MEMORY_SIZE || len > DIRECT_MEMORY_SIZE - static_cast<std::uint64_t>(physStart)) {
@@ -897,7 +917,7 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
 int DoMapAnon(void** addr, size_t len, int prot, int flags, size_t alignment) {
     ValidateOutput(addr);
 #if defined(__APPLE__)
-    if (DarwinRefusesFixed(*addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+    if (!DarwinRelocateFixed(addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
 #endif
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
@@ -1030,7 +1050,7 @@ int DoMunmap(void* addr, size_t len) {
 int DoReserveVirtual(void** addr, size_t len, int flags, size_t alignment) {
     ValidateOutput(addr);
 #if defined(__APPLE__)
-    if (DarwinRefusesFixed(*addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
+    if (!DarwinRelocateFixed(addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
 #endif
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;

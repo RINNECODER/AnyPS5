@@ -19,6 +19,7 @@
 #else
 #include <dlfcn.h>
 #ifdef __APPLE__
+#include <mach-o/dyld.h>
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
 #else
 #include <link.h>
@@ -34,6 +35,10 @@ void Error(const char* message) {
 }
 struct Module {
     void* native = nullptr;
+#ifdef __APPLE__
+    // dlopen handles are opaque on Darwin; module queries identify images by Mach-O header.
+    const void* image = nullptr;
+#endif
     bool owned = true;
     bool global = false;
     ~Module() {
@@ -87,6 +92,22 @@ bool FromGuestModule(void* address) {
 void* DefaultScopeSymbol(const char* symbolName) {
     auto* result = ::dlsym(RTLD_DEFAULT, symbolName);
     return FromGuestModule(result) ? result : nullptr;
+}
+#endif
+
+#ifdef __APPLE__
+const void* ImageHeader(void* handle, bool mainProgram) {
+    if (mainProgram) return _dyld_get_image_header(0);
+    for (std::uint32_t index = 0, count = _dyld_image_count(); index < count; ++index) {
+        const char* name = _dyld_get_image_name(index);
+        if (name == nullptr) continue;
+        void* probe = ::dlopen(name, RTLD_LAZY | RTLD_NOLOAD);
+        if (probe == nullptr) continue;
+        const bool same = probe == handle;
+        ::dlclose(probe);
+        if (same) return _dyld_get_image_header(index);
+    }
+    return nullptr;
 }
 #endif
 
@@ -167,6 +188,9 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             ((flags & 0x100) ? RTLD_GLOBAL : RTLD_LOCAL);
         module->native = ::dlopen(path ? resolved.c_str() : nullptr, nativeFlags);
         if (!module->native) { Error(::dlerror()); return nullptr; }
+#ifdef __APPLE__
+        module->image = ImageHeader(module->native, !path);
+#endif
 #endif
         std::lock_guard lock(modulesMutex);
         const auto handle = nextHandle++;
@@ -236,7 +260,11 @@ int APS5_VABI dlclose_nid_postfix(void* handle) {
 std::int32_t ModuleIdForImage_nid_no_patch(const void* native) {
     std::lock_guard lock(modulesMutex);
     for (const auto& [handle, module] : modules) {
+#ifdef __APPLE__
+        if (module->image == native) return static_cast<std::int32_t>(handle);
+#else
         if (module->native == native) return static_cast<std::int32_t>(handle);
+#endif
     }
     const auto [found, inserted] = imageIds.emplace(native, nextHandle);
     if (inserted) ++nextHandle;
