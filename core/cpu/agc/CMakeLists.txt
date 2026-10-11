@@ -10,7 +10,19 @@ if(TARGET anyps5_cpu AND TARGET anyps5_metal_native_execution)
         "${agcUpstream}/Command/src/Packet.cpp" "${agcUpstream}/Command/src/Memory.cpp"
         "${agcUpstream}/Command/src/Control.cpp" "${agcUpstream}/DcbFlow/src/Memory.cpp"
         "${agcUpstream}/DcbFlow/src/Sync.cpp" "${agcUpstream}/Acb/src/Memory.cpp" "${agcUpstream}/Acb/src/Sync.cpp"
-        "${agcUpstream}/Cb/src/Sync.cpp" "${agcUpstream}/Cb/src/Registers.cpp")
+        "${agcUpstream}/Cb/src/Sync.cpp" "${agcUpstream}/Cb/src/Registers.cpp"
+        "${agcUpstream}/Cb/src/Branch.cpp" "${agcUpstream}/Cb/src/Dispatch.cpp" "${agcUpstream}/Command/src/Draw.cpp"
+        "${agcUpstream}/DcbDraw/src/DrawIndexed.cpp" "${agcUpstream}/DcbDraw/src/DrawNonIndexed.cpp"
+        "${agcUpstream}/DcbDraw/src/IndexBuffer.cpp" "${agcUpstream}/DcbDraw/src/Instancing.cpp" "${agcUpstream}/DcbDraw/src/Stats.cpp"
+        "${agcUpstream}/DcbFlow/src/Control.cpp" "${agcUpstream}/DcbFlow/src/Dispatch.cpp"
+        "${agcUpstream}/DcbState/src/ContextState.cpp" "${agcUpstream}/DcbState/src/Display.cpp" "${agcUpstream}/DcbState/src/Marker.cpp"
+        "${agcUpstream}/DcbState/src/Predication.cpp" "${agcUpstream}/DcbState/src/Registers.cpp"
+        "${agcUpstream}/Acb/src/Control.cpp" "${agcUpstream}/Acb/src/Dispatch.cpp"
+        "${agcUpstream}/Misc/src/PacketInfo.cpp" "${agcUpstream}/Misc/src/Platform.cpp" "${agcUpstream}/DcbState/src/Init.cpp"
+        "${agcUpstream}/Predication/src/Predication.cpp" "${agcUpstream}/Command/src/RegisterDefaults.cpp"
+        "${agcUpstream}/Patch/src/Branch.cpp" "${agcUpstream}/Patch/src/CondExec.cpp" "${agcUpstream}/Patch/src/Dma.cpp"
+        "${agcUpstream}/Patch/src/IndirectRegisters.cpp" "${agcUpstream}/Patch/src/Jump.cpp" "${agcUpstream}/Patch/src/Nop.cpp"
+        "${agcUpstream}/Patch/src/QueueEndOfPipeAction.cpp" "${agcUpstream}/Patch/src/Rewind.cpp" "${agcUpstream}/Patch/src/WaitRegMem.cpp")
     target_compile_features(anyps5_cpu_agc PUBLIC cxx_std_20)
     target_compile_options(anyps5_cpu_agc PRIVATE -Wall -Wextra -Wpedantic)
     target_include_directories(anyps5_cpu_agc PUBLIC

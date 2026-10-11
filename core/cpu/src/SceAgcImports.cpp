@@ -16,6 +16,8 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace Cpu {
@@ -113,11 +115,17 @@ std::string identity(const SceImport& import) {
 }
 }
 
+bool GenericContractKnown(AgcAbiContract contract);
+
 struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
+    // Generic upstream bindings (AgcGenericBindings) run through a handler; the
+    // handler travels with a suspended builder so growth resumes the same call.
+    using Handler = void (*)(Impl&, Machine&, Contract);
+    Handler Active = nullptr;
     using Key = std::tuple<std::string, std::string, std::uint16_t, std::uint16_t>;
     // A builder suspended in its guest growth callback, keyed by the stack slot
     // the callback's return lands on at the resume gate.
-    struct Growth { Contract Operation; std::array<std::uint64_t, 6> Arguments; std::uint64_t Stack; };
+    struct Growth { Contract Operation; Handler Run; std::array<std::uint64_t, 6> Arguments; std::uint64_t Stack; };
     Machine& MachineRef;
     SceAgcBackend Backend;
     std::set<Contract> Admitted;
@@ -131,8 +139,8 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
         MachineRef(machine), Backend(std::move(backend)), Admitted(admitted.begin(), admitted.end()) {
         require(base && !(base & 4095) && base < 0x7ffffffff000, "gates require aligned low canonical guest page");
         for (auto contract : Admitted)
-            require(std::any_of(std::begin(bindings), std::end(bindings), [contract](const auto& row) { return row.Operation == contract; }),
-                    "unknown ABI admission contract");
+            require(std::any_of(std::begin(bindings), std::end(bindings), [contract](const auto& row) { return row.Operation == contract; }) ||
+                    GenericContractKnown(contract), "unknown ABI admission contract");
         Trampolines.emplace(MachineRef, base, SceHostTrampolines::DefaultCapacity, "SCE Agc import");
     }
 
@@ -185,7 +193,7 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
         });
         const std::array<std::uint64_t, 2> call{buffer.Callback, *ResumeGate};
         guest.Write(frame, std::as_bytes(std::span(call)));
-        PendingGrowth.insert_or_assign(frame + 16, Growth{operation, {guest.Get(Register::Rdi), guest.Get(Register::Rsi),
+        PendingGrowth.insert_or_assign(frame + 16, Growth{operation, Active, {guest.Get(Register::Rdi), guest.Get(Register::Rsi),
             guest.Get(Register::Rdx), guest.Get(Register::Rcx), guest.Get(Register::R8), guest.Get(Register::R9)}, stack});
         guest.Set(Register::Rsp, frame);
         guest.Set(Register::Rdi, bufferAddress);
@@ -206,7 +214,8 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
         if (!granted) { guest.Set(Register::Rax, 0); return; }
         Resuming = true;
         struct Clear { bool& Value; ~Clear() { Value = false; } } clear{Resuming};
-        invoke(guest, growth.Operation);
+        Active = growth.Run;
+        if (growth.Run) growth.Run(*this, guest, growth.Operation); else invoke(guest, growth.Operation);
     }
 
     void submit(Machine& guest, std::uint64_t pointer, std::uint32_t queue, Contract operation) {
@@ -496,10 +505,343 @@ struct SceAgcImports::Impl : std::enable_shared_from_this<SceAgcImports::Impl> {
                 require(signed32(b) == 0, "graphics event arguments outside qualified target use");
             required(Backend.DeleteEvent);
             guest.Set(Register::Rax, static_cast<std::uint32_t>(Backend.DeleteEvent(a, signed32(b)))); return;
+        default: break;
         }
         throw std::runtime_error("SCE AGC: unhandled ABI contract");
     }
 };
+
+// Generic binding of upstream libSceAgc entry points by signature. Arguments
+// are fetched per the SysV ABI (registers, then the caller's stack) and
+// converted to the upstream parameter type. Pointer parameters carry the guest
+// numeric value and are never dereferenced; the handlers that need memory
+// (strings, register tables, packets under patch) marshal it explicitly.
+struct AgcGenericBindings {
+    using Impl = SceAgcImports::Impl;
+    using Handler = Impl::Handler;
+    struct Row { const char* Nid; Contract Operation; Handler Run; };
+
+    template<class R, class... P> static std::tuple<P...> paramsOf(R (*)(P...));
+    template<auto Fn> using ParamsOf = decltype(paramsOf(Fn));
+    template<class T> static T conv(std::uint64_t value) {
+        if constexpr (std::is_pointer_v<T>) return reinterpret_cast<T>(value);
+        else if constexpr (std::is_same_v<T, bool>) return (value & 0xff) != 0;
+        else return static_cast<T>(value);
+    }
+    static std::uint64_t arg(Machine& guest, std::size_t index) {
+        switch (index) {
+        case 0: return guest.Get(Register::Rdi);
+        case 1: return guest.Get(Register::Rsi);
+        case 2: return guest.Get(Register::Rdx);
+        case 3: return guest.Get(Register::Rcx);
+        case 4: return guest.Get(Register::R8);
+        case 5: return guest.Get(Register::R9);
+        default: break;
+        }
+        const auto stack = guest.Get(Register::Rsp);
+        require(stack <= UINT64_MAX - 8 * (index - 5), "stack argument overflow");
+        return read<std::uint64_t>(guest, stack + 8 * (index - 5));
+    }
+    // Calls Fn with the host values `pre` for its leading parameters and the
+    // guest argument of the same index for the rest.
+    template<auto Fn, class... Pre> static auto call(Machine& guest, Pre... pre) {
+        using Params = ParamsOf<Fn>;
+        constexpr std::size_t K = sizeof...(Pre);
+        return [&]<std::size_t... I>(std::index_sequence<I...>) {
+            return Fn(pre..., conv<std::tuple_element_t<K + I, Params>>(arg(guest, K + I))...);
+        }(std::make_index_sequence<std::tuple_size_v<Params> - K>{});
+    }
+    template<class R> static void result(Machine& guest, R value) {
+        if constexpr (sizeof(R) <= 4) guest.Set(Register::Rax, static_cast<std::uint32_t>(value));
+        else guest.Set(Register::Rax, static_cast<std::uint64_t>(value));
+    }
+
+    // Size queries and other pure numeric entry points.
+    template<auto Fn> static void plain(Impl&, Machine& guest, Contract) { result(guest, call<Fn>(guest)); }
+    // Encoders: argument 0 is the guest command buffer.
+    template<auto Fn> static void builder(Impl& state, Machine& guest, Contract operation) {
+        state.build(guest, arg(guest, 0), operation, [&](CommandBuffer* host) { return call<Fn>(guest, host); });
+    }
+    // Debug markers carry a guest C string; upstream encodes the text.
+    template<auto Fn> static void marker(Impl& state, Machine& guest, Contract operation) {
+        std::string text;
+        if (const auto pointer = arg(guest, 1)) {
+            for (std::uint64_t at = pointer;; ++at) {
+                require(text.size() < 0xfffc, "marker text too long or unterminated");
+                require(at >= pointer, "guest address range overflow");
+                guest.CheckAccess(at, 1, Permission::Read);
+                char character = 0;
+                guest.Read(at, std::as_writable_bytes(std::span(&character, 1)));
+                if (!character) break;
+                text.push_back(character);
+            }
+        }
+        state.build(guest, arg(guest, 0), operation, [&](CommandBuffer* host) {
+            return Fn(host, text.c_str(), conv<std::uint32_t>(arg(guest, 2)));
+        });
+    }
+    // Direct register tables are read by the encoder: snapshot the bounded guest table.
+    template<auto Fn> static void registersDirect(Impl& state, Machine& guest, Contract operation) {
+        const auto table = arg(guest, 1);
+        const auto count = static_cast<std::uint32_t>(arg(guest, 2));
+        require(count && count <= 0x3fff, "invalid direct register count");
+        std::vector<ShaderRegister> registers(count);
+        address(table, registers.size() * sizeof(ShaderRegister), 4);
+        guest.CheckAccess(table, registers.size() * sizeof(ShaderRegister), Permission::Read);
+        guest.Read(table, std::as_writable_bytes(std::span(registers)));
+        state.build(guest, arg(guest, 0), operation, [&](CommandBuffer* host) { return Fn(host, registers.data(), count); });
+    }
+
+    // Packet patchers edit an already encoded packet in place. The packet is
+    // copied to the host, patched by upstream, and written back on success.
+    static std::vector<std::uint32_t> packet(Machine& guest, std::uint64_t at, bool writable) {
+        const auto header = read<std::uint32_t>(guest, at);
+        std::size_t words = 1;
+        if ((header & 0xc0000000u) == 0xc0000000u && (header & 0x3fffff00u) != 0x3fff1000u) words = ((header >> 16) & 0x3fff) + 2u;
+        address(at, words * 4, 4);
+        const auto access = writable ? Permission::Read | Permission::Write : Permission::Read;
+        guest.CheckAccess(at, words * 4, access);
+        // Some patchers validate a short chain of packets (a wait is wrapped by
+        // marker packets): include up to three following headers that are
+        // readable PM4 packets, within a small fixed window.
+        for (int chained = 0; writable && chained < 3 && words < 64; ++chained) {
+            try {
+                const auto next = read<std::uint32_t>(guest, at + words * 4);
+                if ((next & 0xc0000000u) != 0xc0000000u) break;
+                const std::size_t size = ((next >> 16) & 0x3fff) + 2u;
+                if (words + size > 64) break;
+                guest.CheckAccess(at + words * 4, size * 4, access);
+                words += size;
+            } catch (const std::exception&) { break; }
+        }
+        std::vector<std::uint32_t> copy(words + 16); // zero padding: upstream validates the header before use
+        guest.Read(at, std::as_writable_bytes(std::span(copy).first(words)));
+        return copy;
+    }
+    template<auto Fn> static void patch(Impl&, Machine& guest, Contract) {
+        const auto at = arg(guest, 0);
+        auto copy = packet(guest, at, true);
+        const auto status = call<Fn>(guest, copy.data());
+        guest.Write(at, std::as_bytes(std::span(copy).first(copy.size() - 16)));
+        result(guest, status);
+    }
+    // The end of a conditional range is encoded relative to the packet itself:
+    // present it at the same distance from the host copy as it has in the guest.
+    template<auto Fn> static void patchRelative(Impl&, Machine& guest, Contract) {
+        const auto at = arg(guest, 0);
+        auto copy = packet(guest, at, true);
+        const auto host = reinterpret_cast<std::uintptr_t>(copy.data()) + (arg(guest, 1) - at);
+        const auto status = Fn(copy.data(), reinterpret_cast<const volatile std::uint32_t*>(host));
+        guest.Write(at, std::as_bytes(std::span(copy).first(copy.size() - 16)));
+        result(guest, status);
+    }
+    template<auto Fn> static void rangePatch(Impl&, Machine& guest, Contract) {
+        const auto start = arg(guest, 0), end = arg(guest, 1);
+        require(end >= start && !((end - start) & 3) && end - start <= 0x1000000, "invalid packet range");
+        std::vector<std::uint32_t> copy((end - start) / 4);
+        if (!copy.empty()) {
+            address(start, copy.size() * 4, 4);
+            guest.CheckAccess(start, copy.size() * 4, Permission::Read | Permission::Write);
+            guest.Read(start, std::as_writable_bytes(std::span(copy)));
+        }
+        const auto status = Fn(copy.data(), copy.data() + copy.size(), conv<std::uint32_t>(arg(guest, 2)));
+        if (!copy.empty()) guest.Write(start, std::as_bytes(std::span(copy)));
+        result(guest, status);
+    }
+    template<auto Fn> static void packetSize(Impl&, Machine& guest, Contract) {
+        auto copy = packet(guest, arg(guest, 0), false);
+        result(guest, Fn(copy.data()));
+    }
+    // Payload queries return pointers into the packet: translate them back to guest addresses.
+    static std::uint64_t translate(const void* host, const std::uint32_t* base, std::uint64_t at) {
+        return host ? at + static_cast<std::uint64_t>(static_cast<const std::uint32_t*>(host) - base) * 4 : 0;
+    }
+    template<auto Fn> static void payloadAddress(Impl&, Machine& guest, Contract) {
+        const auto out = arg(guest, 0), at = arg(guest, 1);
+        address(out, 8, 8);
+        guest.CheckAccess(out, 8, Permission::Write);
+        auto copy = packet(guest, at, false);
+        std::uint32_t* host = nullptr;
+        const auto status = Fn(&host, copy.data(), static_cast<int>(arg(guest, 2)));
+        write(guest, out, translate(host, copy.data(), at));
+        result(guest, status);
+    }
+    template<auto Fn> static void payloadRange(Impl&, Machine& guest, Contract) {
+        const auto out = arg(guest, 0), at = arg(guest, 1);
+        address(out, 16, 8);
+        guest.CheckAccess(out, 16, Permission::Write);
+        auto copy = packet(guest, at, false);
+        SceAgcMemoryRange range{};
+        const auto status = Fn(&range, copy.data(), static_cast<int>(arg(guest, 2)));
+        write(guest, out, std::array<std::uint64_t, 2>{translate(range.base, copy.data(), at), range.size});
+        result(guest, status);
+    }
+    template<auto Fn> static void trinity(Impl&, Machine& guest, Contract) {
+        const auto out = arg(guest, 0);
+        address(out, 1, 1);
+        guest.CheckAccess(out, 1, Permission::Write);
+        bool flag = true;
+        const auto status = Fn(&flag);
+        write(guest, out, static_cast<std::uint8_t>(flag));
+        result(guest, status);
+    }
+
+    static std::span<const Row> Rows() {
+        static const Row rows[] = {
+            {"23LRUSvYu1M", Contract::UpstreamPacketInfo, &plain<sceAgcInit_0090>},
+            {"BfBDZGbti7A", Contract::UpstreamPacketInfo, &trinity<sceAgcGetIsTrinityMode>},
+            {"t7PlZ9nt5Lc", Contract::UpstreamPacketSizes, &plain<sceAgcCbNopGetSize>},
+            {"bxGoVxpdSPQ", Contract::UpstreamPacketSizes, &plain<sceAgcCbSetShRegisterRangeDirectGetSize>},
+            {"JOWmDrl+j20", Contract::UpstreamPacketSizes, &plain<sceAgcCbSetUcRegisterRangeDirectGetSize>},
+            {"yUBESvCCJ4I", Contract::UpstreamPacketSizes, &plain<sceAgcCbSetShRegistersDirectGetSize>},
+            {"TGEZzUWLbrc", Contract::UpstreamPacketSizes, &plain<sceAgcCbSetUcRegistersDirectGetSize>},
+            {"nNlUtdDDvZ0", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetShRegistersIndirectGetSize>},
+            {"GBCh3zCihoU", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetCxRegistersIndirectGetSize>},
+            {"UQGTw4xRlcM", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetUcRegistersIndirectGetSize>},
+            {"H6vHS5cidSA", Contract::UpstreamPacketSizes, &plain<sceAgcDcbContextStateOpGetSize>},
+            {"p9tI+yTvx68", Contract::UpstreamPacketSizes, &plain<sceAgcDcbWriteDataGetSize>},
+            {"C4l9fB17t8w", Contract::UpstreamPacketSizes, &plain<sceAgcDcbEventWriteGetSize>},
+            {"43WJ08sSugE", Contract::UpstreamPacketSizes, &plain<sceAgcDcbWaitOnAddressGetSize>},
+            {"idlaArvdXEs", Contract::UpstreamPacketSizes, &plain<sceAgcAcbWaitOnAddressGetSize>},
+            {"Lkf86B98qPc", Contract::UpstreamPacketInfo, &packetSize<sceAgcGetPacketSize>},
+            {"V++UgBtQhn0", Contract::UpstreamPacketInfo, &payloadAddress<sceAgcGetDataPacketPayloadAddress_0090>},
+            {"s+VGAMDQ0AQ", Contract::UpstreamPacketInfo, &payloadRange<sceAgcGetDataPacketPayloadRange>},
+            {"n8vgpaQg6dA", Contract::UpstreamPatches, &rangePatch<sceAgcSetRangePredication>},
+            {"Y-5vneiBtzk", Contract::UpstreamPacketSizes, &plain<sceAgcAcbEventWriteGetSize>},
+            {"w6Dj1VJt5qY", Contract::UpstreamPatches, &patch<sceAgcSetPacketPredication>},
+            {"w1KFAHVqpaU", Contract::UpstreamCb, &builder<sceAgcCbBranch>},
+            {"7toV+elXqNM", Contract::UpstreamCb, &builder<sceAgcCbCondWrite>},
+            {"UZbQjYAwwXM", Contract::UpstreamRegisters, &registersDirect<sceAgcCbSetShRegistersDirect>},
+            {"03RZmELWWzw", Contract::UpstreamRegisters, &registersDirect<sceAgcCbSetUcRegistersDirect>},
+            {"qj7QZpgr9Uw", Contract::UpstreamDcb, &builder<sceAgcDcbContextStateOp_0100>},
+            {"xSAR0LTcRKM", Contract::UpstreamDcb, &builder<sceAgcDcbJump>},
+            {"-HOOCn0JY48", Contract::UpstreamRegisters, &builder<sceAgcDcbSetShRegistersIndirect>},
+            {"ZvwO9euwYzc", Contract::UpstreamRegisters, &builder<sceAgcDcbSetCxRegistersIndirect>},
+            {"hvUfkUIQcOE", Contract::UpstreamRegisters, &builder<sceAgcDcbSetUcRegistersIndirect>},
+            {"CtB+A9-VxO0", Contract::UpstreamDcb, &builder<sceAgcDcbDispatchIndirect>},
+            {"Yw0jKSqop+E", Contract::UpstreamDraw, &builder<sceAgcDcbDrawIndexAuto>},
+            {"q88lQ+GP5Yk", Contract::UpstreamDraw, &builder<sceAgcDcbDrawIndex>},
+            {"B+aG9DUnTKA", Contract::UpstreamDraw, &builder<sceAgcDcbDrawIndexOffset>},
+            {"1q1titRBL6o", Contract::UpstreamDraw, &builder<sceAgcDcbDrawIndirect>},
+            {"kUlvghKs-mA", Contract::UpstreamDraw, &builder<sceAgcDcbDrawIndirectMulti>},
+            {"ypVBz4uPKcQ", Contract::UpstreamDraw, &builder<sceAgcDcbDrawIndexIndirectMulti>},
+            {"t1vNu082-jM", Contract::UpstreamDraw, &builder<sceAgcDcbDrawIndexIndirect>},
+            {"Rlx+bykm0r0", Contract::UpstreamDraw, &builder<sceAgcDcbDrawIndexMultiInstanced>},
+            {"aJf+j5yntiU", Contract::UpstreamDcb, &builder<sceAgcDcbEventWrite>},
+            {"vuSXe69VILM", Contract::UpstreamDcb, &builder<sceAgcDcbGetLodStats>},
+            {"RmaJwLtc8rY", Contract::UpstreamDcb, &builder<sceAgcDcbSetBaseIndirectArgs>},
+            {"-KRzWekV120", Contract::UpstreamDraw, &builder<sceAgcDcbSetIndexSize_0600>},
+            {"l4fM9K-Lyks", Contract::UpstreamDraw, &builder<sceAgcDcbSetIndexBuffer>},
+            {"8N2tmT3jmC8", Contract::UpstreamDraw, &builder<sceAgcDcbSetIndexCount>},
+            {"tSBxhAPyytQ", Contract::UpstreamDraw, &builder<sceAgcDcbSetNumInstances>},
+            {"u2T2DiA5hRI", Contract::UpstreamDcb, &builder<sceAgcDcbStallCommandBufferParser>},
+            {"zfcxg-ewMK8", Contract::UpstreamDcb, &builder<sceAgcDcbRewind>},
+            {"jt3pl7EN17o", Contract::UpstreamDcb, &builder<sceAgcDcbPrimeUtcl2>},
+            {"TRO721eVt4g", Contract::UpstreamDcb, &builder<sceAgcDcbResetQueue>},
+            {"bbFueFP+J4k", Contract::UpstreamDcb, &builder<sceAgcDcbSetPredication>},
+            {"QhCbS4X9Rl8", Contract::UpstreamMarkers, &marker<sceAgcDcbSetMarker>},
+            {"+kSrjIVxKFE", Contract::UpstreamMarkers, &marker<sceAgcDcbPushMarker>},
+            {"H7uZqCoNuWk", Contract::UpstreamDcb, &builder<sceAgcDcbPopMarker>},
+            {"G0jrLdvEqDw", Contract::UpstreamDcb, &builder<sceAgcDcbMemSemaphore>},
+            {"JrtiDtKeS38", Contract::UpstreamAcb, &builder<sceAgcAcbResetQueue>},
+            {"q4VuU-QsLOE", Contract::UpstreamAcb, &builder<sceAgcAcbMemSemaphore>},
+            {"j3EtxFkSIhQ", Contract::UpstreamAcb, &builder<sceAgcAcbDispatchIndirect>},
+            {"xAeBOa0A3kk", Contract::UpstreamMarkers, &marker<sceAgcAcbSetMarker>},
+            {"DwICrVxerkY", Contract::UpstreamAcb, &builder<sceAgcAcbRewind>},
+            {"szG7hz2yEhA", Contract::UpstreamAcb, &builder<sceAgcAcbPrimeUtcl2>},
+            {"cpCILPya5Zk", Contract::UpstreamMarkers, &marker<sceAgcAcbPushMarker>},
+            {"e1DFTg+Sd8U", Contract::UpstreamAcb, &builder<sceAgcAcbJump>},
+            {"cFazmnXpJOE", Contract::UpstreamAcb, &builder<sceAgcAcbEventWrite>},
+            {"6mFxkVqdmbQ", Contract::UpstreamAcb, &builder<sceAgcAcbPopMarker>},
+            {"K2mciNVxUCE", Contract::UpstreamCb, &builder<sceAgcSetNop>},
+            {"Abendgtz+3o", Contract::UpstreamPacketSizes, &plain<sceAgcCbDispatchGetSize>},
+            {"uZW-mqsxkrM", Contract::UpstreamPacketSizes, &plain<sceAgcCbBranchGetSize>},
+            {"FuVbkyKlf+s", Contract::UpstreamPacketSizes, &plain<sceAgcCbCondWriteGetSize>},
+            {"hL7C0IRpWZI", Contract::UpstreamPacketSizes, &plain<sceAgcCbQueueEndOfPipeActionGetSize>},
+            {"QhPDD513V0w", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetShRegisterDirectGetSize>},
+            {"1DeUNpRIDDA", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetCxRegisterDirectGetSize>},
+            {"aP1Ki9G3++4", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetUcRegisterDirectGetSize>},
+            {"-vnlTPPXPrw", Contract::UpstreamPacketSizes, &plain<sceAgcDcbAcquireMemGetSize>},
+            {"1tB0xkLNjcw", Contract::UpstreamPacketSizes, &plain<sceAgcDcbAtomicGdsGetSize>},
+            {"oz6zQq1JwCE", Contract::UpstreamPacketSizes, &plain<sceAgcDcbAtomicMemGetSize>},
+            {"ou16V5hh5sg", Contract::UpstreamPacketSizes, &plain<sceAgcDcbCondExecGetSize>},
+            {"VEGu4dixjUg", Contract::UpstreamPacketSizes, &plain<sceAgcDcbJumpGetSize>},
+            {"b5u0Jzm8TF8", Contract::UpstreamPacketSizes, &plain<sceAgcDcbCopyDataGetSize>},
+            {"2ccJz9LQI+w", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDmaDataGetSize>},
+            {"zg6u-N6Otxs", Contract::UpstreamPacketSizes, &plain<sceAgcDcbQueueEndOfShaderActionGetSize>},
+            {"w8HVkEeXPv8", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDispatchIndirectGetSize>},
+            {"WrdP9Zxx3lQ", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDrawIndexAutoGetSize>},
+            {"6ee9Hd3EWXQ", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDrawIndexGetSize>},
+            {"qMlfB1ZhMDc", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDrawIndexOffsetGetSize>},
+            {"cxPZ4Wgvdj8", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDrawIndirectGetSize>},
+            {"pYoKs3lPy88", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDrawIndirectMultiGetSize>},
+            {"r98I08t+LOg", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDrawIndexIndirectMultiGetSize>},
+            {"mStuvI0zOtc", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDrawIndexIndirectGetSize>},
+            {"mR9j7+SfM34", Contract::UpstreamPacketSizes, &plain<sceAgcDcbDrawIndexMultiInstancedGetSize>},
+            {"rUuVjyR+Rd4", Contract::UpstreamPacketSizes, &plain<sceAgcDcbGetLodStatsGetSize>},
+            {"9S4noWrUI0s", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetBaseDispatchIndirectArgsGetSize>},
+            {"MMlmJAL7N5w", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetBaseDrawIndirectArgsGetSize>},
+            {"ca4KPvp0qLQ", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetIndexSizeGetSize>},
+            {"j4emHHndCPY", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetIndexBufferGetSize>},
+            {"mljzuGDZRQ4", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetIndexCountGetSize>},
+            {"6DFuRKT4C9w", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetNumInstancesGetSize>},
+            {"+u6dKSLWM2o", Contract::UpstreamPacketSizes, &plain<sceAgcDcbStallCommandBufferParserGetSize>},
+            {"QIXCsbipds0", Contract::UpstreamPacketSizes, &plain<sceAgcDcbRewindGetSize>},
+            {"XN+Iuu7XsM8", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetZPassPredicationEnableGetSize>},
+            {"yheJGN-ay+A", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetBoolPredicationEnableGetSize>},
+            {"vLrBL8DQiz8", Contract::UpstreamPacketSizes, &plain<sceAgcDcbSetPredicationDisableGetSize>},
+            {"KjPeVduz6jU", Contract::UpstreamPacketSizes, &plain<sceAgcDcbPrimeUtcl2GetSize>},
+            {"F8NLhWvFemI", Contract::UpstreamPacketSizes, &plain<sceAgcAcbQueueEndOfShaderActionGetSize>},
+            {"CbQh3DKMSno", Contract::UpstreamPacketSizes, &plain<sceAgcAcbCopyDataGetSize>},
+            {"da1Sm8-QDoU", Contract::UpstreamPacketSizes, &plain<sceAgcAcbAtomicMemGetSize>},
+            {"PxKWV2fVAps", Contract::UpstreamPacketSizes, &plain<sceAgcAcbDispatchIndirectGetSize>},
+            {"0ZOG0jc9nRg", Contract::UpstreamPacketSizes, &plain<sceAgcAcbRewindGetSize>},
+            {"ozKzBP4aki4", Contract::UpstreamPacketSizes, &plain<sceAgcAcbCondExecGetSize>},
+            {"eCjKaqeeQ5s", Contract::UpstreamPacketSizes, &plain<sceAgcAcbPrimeUtcl2GetSize>},
+            {"M0ttm8h7SKA", Contract::UpstreamPacketSizes, &plain<sceAgcAcbDmaDataGetSize>},
+            {"hcIxS8pmXF4", Contract::UpstreamPacketSizes, &plain<sceAgcAcbAtomicGdsGetSize>},
+            {"b-oySn+G2tE", Contract::UpstreamPacketSizes, &plain<sceAgcAcbJumpGetSize>},
+            {"ewobAQeMo5k", Contract::UpstreamPacketSizes, &plain<sceAgcAcbAcquireMemGetSize>},
+            {"whb1RL7K4Ss", Contract::UpstreamPatches, &patch<sceAgcSetCxRegIndirectPatchSetNumRegisters>},
+            {"fPSCdQxgpSw", Contract::UpstreamPatches, &patch<sceAgcWriteDataPatchSetAddressOrOffset>},
+            {"6lNcCp+fxi4", Contract::UpstreamPatches, &patch<sceAgcSetUcRegIndirectPatchSetAddress>},
+            {"eAy8eGNsCuU", Contract::UpstreamPatches, &patch<sceAgcWriteDataPatchSetCachePolicy>},
+            {"n485EBnIWmk", Contract::UpstreamPatches, &patch<sceAgcWaitRegMemPatchCompareFunction>},
+            {"J8YCgfKAMQs", Contract::UpstreamPatches, &patch<sceAgcQueueEndOfPipeActionPatchGcrCntl>},
+            {"0fWWK5uG9rQ", Contract::UpstreamPatches, &patch<sceAgcQueueEndOfPipeActionPatchAddress>},
+            {"vcmNN+AAXnY", Contract::UpstreamPatches, &patch<sceAgcSetCxRegIndirectPatchSetAddress>},
+            {"y5K5tPktiL8", Contract::UpstreamPatches, &patch<sceAgcAsyncWriteDataPatchSetCachePolicy>},
+            {"vRoArM9zaIk", Contract::UpstreamPatches, &patch<sceAgcSetUcRegIndirectPatchAddRegisters>},
+            {"GXBlM-ekzrI", Contract::UpstreamPatches, &patch<sceAgcBranchPatchSetCompareAddress>},
+            {"Ikfdt-rIqCE", Contract::UpstreamPatches, &patch<sceAgcJumpPatchSetTarget_0300>},
+            {"MlEw1feXcjg", Contract::UpstreamPatches, &patch<sceAgcQueueEndOfPipeActionPatchData>},
+            {"EJBA4dbmvfg", Contract::UpstreamPatches, &patch<sceAgcAsyncWriteDataPatchSetDst>},
+            {"3KDcnM3lrcU", Contract::UpstreamPatches, &patch<sceAgcWaitRegMemPatchAddress>},
+            {"tmy-+rBpspY", Contract::UpstreamPatches, &patch<sceAgcWriteDataPatchSetDst>},
+            {"d-6uF9sZDIU", Contract::UpstreamPatches, &patch<sceAgcSetCxRegIndirectPatchAddRegisters>},
+            {"k-JpyR2dYAM", Contract::UpstreamPatches, &patchRelative<sceAgcAsyncCondExecPatchSetEnd>},
+            {"fRG-JOH5+sI", Contract::UpstreamPatches, &patch<sceAgcSetUcRegIndirectPatchSetNumRegisters>},
+            {"3ZWa3AoyWZQ", Contract::UpstreamPatches, &patch<sceAgcAsyncCondExecPatchSetCommandAddress>},
+            {"YWTKOju587o", Contract::UpstreamPatches, &patch<sceAgcCondExecPatchSetCommandAddress>},
+            {"T9fjQIINoeE", Contract::UpstreamPatches, &patch<sceAgcQueueEndOfPipeActionPatchType>},
+            {"ORWsxIbk4TE", Contract::UpstreamPatches, &patchRelative<sceAgcCondExecPatchSetEnd>},
+            {"cdDRpqcFGbU", Contract::UpstreamPatches, &patch<sceAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate>},
+            {"eWaWyFegzgQ", Contract::UpstreamPatches, &patch<sceAgcAsyncRewindPatchSetRewindState>},
+            {"d4NZIlguzv0", Contract::UpstreamPatches, &patch<sceAgcAsyncWriteDataPatchSetAddressOrOffset>},
+            {"ziVA3whp3p4", Contract::UpstreamPatches, &patch<sceAgcRewindPatchSetRewindState>},
+            {"z2duB-hHQSM", Contract::UpstreamPatches, &patch<sceAgcSetShRegIndirectPatchAddRegisters>},
+            {"Qrj4c+61z4A", Contract::UpstreamPatches, &patch<sceAgcSetShRegIndirectPatchSetAddress>},
+            {"7nOoijNPvEU", Contract::UpstreamPatches, &patch<sceAgcWaitRegMemPatchReference>},
+            {"IxYiarKlXxM", Contract::UpstreamPatches, &patch<sceAgcDmaDataPatchSetDstAddressOrOffset>},
+            {"nCUgItdN2ms", Contract::UpstreamPatches, &patch<sceAgcSetShRegIndirectPatchSetNumRegisters>},
+        };
+        return rows;
+    }
+};
+bool GenericContractKnown(AgcAbiContract contract) {
+    const auto rows = AgcGenericBindings::Rows();
+    return std::any_of(rows.begin(), rows.end(), [contract](const auto& row) { return row.Operation == contract; });
+}
 
 SceAgcImports::SceAgcImports(Machine& machine, SceAgcBackend backend, std::span<const Contract> admitted, std::uint64_t base) :
     impl(std::make_shared<Impl>(machine, std::move(backend), admitted, base)) {}
@@ -583,7 +925,16 @@ std::span<const AgcAbiAdmission> TargetAgcAdmissions() {
         {Contract::DcbCondExec, AgcArgumentPolicy::SourceContract, "upstream builder; aligned address, dwords<=0x3fff"},
         {Contract::AcbCondExec, AgcArgumentPolicy::SourceContract, "upstream builder; aligned address, dwords<=0x3fff"},
         {Contract::CbSetShRegisterRangeDirect, AgcArgumentPolicy::SourceContract, "upstream builder; bounded guest value snapshot"},
-        {Contract::CbSetUcRegisterRangeDirect, AgcArgumentPolicy::SourceContract, "upstream builder; bounded guest value snapshot"}
+        {Contract::CbSetUcRegisterRangeDirect, AgcArgumentPolicy::SourceContract, "upstream builder; bounded guest value snapshot"},
+        {Contract::UpstreamPacketSizes, AgcArgumentPolicy::SourceContract, "upstream size queries; numeric arguments only"},
+        {Contract::UpstreamPatches, AgcArgumentPolicy::SourceContract, "upstream patchers; packet copied from guest, patched on the host, written back"},
+        {Contract::UpstreamMarkers, AgcArgumentPolicy::SourceContract, "upstream marker encoders; bounded guest C string snapshot"},
+        {Contract::UpstreamRegisters, AgcArgumentPolicy::SourceContract, "upstream register encoders; bounded guest table snapshot or numeric indirect address"},
+        {Contract::UpstreamDraw, AgcArgumentPolicy::SourceContract, "upstream draw and index encoders; numeric addresses are encoded, never dereferenced"},
+        {Contract::UpstreamAcb, AgcArgumentPolicy::SourceContract, "upstream compute queue encoders; numeric addresses only"},
+        {Contract::UpstreamCb, AgcArgumentPolicy::SourceContract, "upstream common encoders (branch, conditional write, nop); numeric addresses only"},
+        {Contract::UpstreamDcb, AgcArgumentPolicy::SourceContract, "upstream graphics queue encoders (jump, flow, state, events); numeric addresses only"},
+        {Contract::UpstreamPacketInfo, AgcArgumentPolicy::SourceContract, "upstream packet inspection; packet copied from guest, results translated back"}
     };
     return admissions;
 }
@@ -591,15 +942,25 @@ SceAgcImports::~SceAgcImports() = default;
 
 std::uint64_t SceAgcImports::Resolve(const SceImport& import, std::uint8_t symbolType, std::uint64_t symbolSize) {
     require(symbolType == 2 && symbolSize == 0, "only function symbols with size zero are admitted");
-    const auto binding = std::find_if(std::begin(bindings), std::end(bindings), [&](const auto& row) { return import.Nid == row.Nid; });
-    if (binding == std::end(bindings)) throw std::runtime_error("Unsupported SCE AGC service: " + identity(import));
-    const auto name = binding->Driver ? "libSceAgcDriver" : "libSceAgc";
+    Contract operation{};
+    bool driver = false;
+    Impl::Handler handler = nullptr;
+    if (const auto found = std::find_if(std::begin(bindings), std::end(bindings), [&](const auto& row) { return import.Nid == row.Nid; });
+        found != std::end(bindings)) {
+        operation = found->Operation; driver = found->Driver;
+    } else {
+        const auto rows = AgcGenericBindings::Rows();
+        const auto generic = std::find_if(rows.begin(), rows.end(), [&](const auto& row) { return import.Nid == row.Nid; });
+        if (generic == rows.end()) throw std::runtime_error("Unsupported SCE AGC service: " + identity(import));
+        operation = generic->Operation; handler = generic->Run;
+    }
+    const auto name = driver ? "libSceAgcDriver" : "libSceAgc";
     if (import.LibraryName != name || import.ModuleName != name || import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1)
         throw std::runtime_error("Unsupported SCE AGC scope/version: " + identity(import));
-    if (!impl->Admitted.contains(binding->Operation)) throw std::runtime_error("Unqualified SCE AGC target ABI contract: " + identity(import));
+    if (!impl->Admitted.contains(operation)) throw std::runtime_error("Unqualified SCE AGC target ABI contract: " + identity(import));
     // A qualified ABI cannot manufacture backend capability. In particular,
     // event imports stay unresolved until the genuine CPU equeue owner exists.
-    switch (binding->Operation) {
+    switch (operation) {
     case Contract::SubmitDcbPacket16: case Contract::AgrSubmitDcbPacket16: case Contract::SubmitAcbPacket16:
     case Contract::SubmitMultiDcbs: case Contract::AgrSubmitMultiDcbs: case Contract::SubmitMultiAcbs:
         required(impl->Backend.Submit); break;
@@ -611,10 +972,11 @@ std::uint64_t SceAgcImports::Resolve(const SceImport& import, std::uint8_t symbo
     }
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleId};
     if (const auto found=impl->Gates.find(key); found != impl->Gates.end()) return found->second;
-    const auto gate = impl->Trampolines->Add([weak=std::weak_ptr<Impl>(impl), operation=binding->Operation](Machine& guest) {
+    const auto gate = impl->Trampolines->Add([weak=std::weak_ptr<Impl>(impl), operation, handler](Machine& guest) {
         const auto state=weak.lock();
         require(static_cast<bool>(state), "import runtime expired");
-        state->invoke(guest, operation);
+        state->Active = handler;
+        if (handler) handler(*state, guest, operation); else state->invoke(guest, operation);
     });
     impl->Gates.emplace(key, gate);
     return gate;
