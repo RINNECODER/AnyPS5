@@ -5,6 +5,8 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <cstdio>
 
 namespace AgcDriver::NativeGuestMemory {
 namespace {
@@ -29,14 +31,19 @@ std::uint64_t End(std::uint64_t address, std::size_t bytes) {
     return address + bytes;
 }
 
+[[noreturn]] void NotBorrowed(std::uint64_t address) {
+    char message[96];
+    std::snprintf(message, sizeof(message), "Native guest memory address %#llx is not borrowed", static_cast<unsigned long long>(address));
+    throw std::out_of_range(message);
+}
+
 const BorrowedRange& Find(std::uint64_t address, bool writable) {
     const auto& ranges = Active();
     auto found = std::upper_bound(ranges.begin(), ranges.end(), address,
         [](std::uint64_t value, const BorrowedRange& range) { return value < range.guestAddress; });
-    if (found == ranges.begin()) throw std::out_of_range("Native guest memory address is not borrowed");
+    if (found == ranges.begin()) NotBorrowed(address);
     --found;
-    if (address >= End(found->guestAddress, found->host.size()))
-        throw std::out_of_range("Native guest memory address is not borrowed");
+    if (address >= End(found->guestAddress, found->host.size())) NotBorrowed(address);
     if (writable && !found->writable)
         throw ReadOnlyWriteError("Native guest memory range is read-only");
     return *found;

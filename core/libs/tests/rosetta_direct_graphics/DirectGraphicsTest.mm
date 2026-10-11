@@ -87,6 +87,22 @@ void Guest(const std::filesystem::path& captureDirectory) {
 
     AgcDriverCheckGuestMemory_nid_postfix(control, sizeof(*control), alignof(Control), true);
     Require(true, "a guest thread outside the driver validates guest memory against the identity ranges");
+    // Titles pass structures on their (host) thread stacks, outside every guest allocation.
+    std::uint64_t onStack[4]{};
+    AgcDriverCheckGuestMemory_nid_postfix(onStack, sizeof(onStack), alignof(std::uint64_t), true);
+    Require(true, "a structure on the thread stack passes the guest memory check");
+
+    // A borrowed range longer than the device's buffer limit is split at multiples of the limit.
+    const auto identity = [](std::uint64_t address, std::size_t bytes) {
+        return AgcDriver::NativeGuestMemory::BorrowedRange{address, {reinterpret_cast<std::byte*>(address), bytes}, true};
+    };
+    const auto split = AgcDriver::Metal::SplitBorrowedRanges({identity(0x18000, 0x28000), identity(0x60000, 0x8000)}, 0x10000);
+    const std::vector<std::pair<std::uint64_t, std::size_t>> expected{{0x18000, 0x8000}, {0x20000, 0x10000}, {0x30000, 0x10000}, {0x60000, 0x8000}};
+    bool splitOk = split.size() == expected.size();
+    for (std::size_t i = 0; splitOk && i < split.size(); ++i)
+        splitOk = split[i].guestAddress == expected[i].first && split[i].host.size() == expected[i].second &&
+            reinterpret_cast<std::uint64_t>(split[i].host.data()) == expected[i].first && split[i].writable;
+    Require(splitOk, "borrowed ranges split at multiples of the limit");
 
     // DMA_DATA: immediate source (src_sel 2), memory destination (dst_sel 0), byte count.
     const std::uint32_t dma[] = {0xc0055000u, 2u << 29u, ClearColor, 0, static_cast<std::uint32_t>(address),

@@ -22,7 +22,13 @@ MetalDriver& DirectDriver();
 void DirectSubmit(const Packet& packet, std::uint32_t queue);
 
 // The current guest allocations as identity ranges (sorted; adjacent ranges with the same access
-// are merged). Refreshed whenever the registry's generation changes.
+// are merged, then split by SplitBorrowedRanges at a power of two under the device's buffer limit).
+// Refreshed whenever the registry's generation changes.
 std::shared_ptr<const std::vector<NativeGuestMemory::BorrowedRange>> DirectGuestRanges();
+
+// Splits ranges at multiples of `limit` (a power of two), so no range is longer than `limit` and
+// every range maps to one Metal buffer. A title's direct memory can be one mapping larger than the
+// device's maxBufferLength.
+std::vector<NativeGuestMemory::BorrowedRange> SplitBorrowedRanges(const std::vector<NativeGuestMemory::BorrowedRange>& ranges, std::uint64_t limit);
 
 }
