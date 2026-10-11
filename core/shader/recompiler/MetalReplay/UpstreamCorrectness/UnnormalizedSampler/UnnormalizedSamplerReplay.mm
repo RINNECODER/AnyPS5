@@ -436,14 +436,13 @@ void DeadSourceLimitations(id<MTLDevice> device) {
 void Rejections(id<MTLDevice> device, id<MTLLibrary> library) {
     Replay fixture(32, 8, 4, true, false, false);
     const auto standard = Program(true, false, false);
-    for (const auto opcode : {0x22u, 0x28u, 0x34u, 0x47u, 0xa0u, 0x60u}) {
+    // 0x34 (texel offsets) is accepted since upstream d0d127b17 and is no longer a rejection.
+    for (const auto opcode : {0x22u, 0x28u, 0x47u, 0xa0u, 0x60u}) {
         auto code = Program(true, false, false, opcode);
         auto users = fixture.users;
         if (opcode == 0x47u) for (auto& word : code) if ((word >> 26u) == 0x3cu) word = (word & ~0xf00u) | 0x200u;
         if (opcode == 0x28u) { users[16] |= 1u << 12u; users[9] = (users[9] & ~(0x1ffu << 20u)) | (22u << 20u); }
-        // SPIR-V emission precedes descriptor population, so the emitter's refusal of a texel offset
-        // that is not a constant owns the offset sample before the unnormalized sampler check.
-        Reject("live unsupported opcode=" + Hex(opcode), opcode == 0x34u ? "has a texel offset that is not a constant" : "unnormalized",
+        Reject("live unsupported opcode=" + Hex(opcode), "unnormalized",
             [&] { static_cast<void>(Compile(device, code, users)); });
     }
     // Compute image_sample flags0 is intentionally explicitLOD0. Only a real
@@ -550,9 +549,8 @@ void Rejections(id<MTLDevice> device, id<MTLLibrary> library) {
     Reject("indirect sampled image binding", {"unnormalized", "bindless image table needs image array dynamic indexing"},
         [&] { static_cast<void>(Recompile(indirect)); });
     Replay pair(32,8,4,true,false,false,true,true);
-    auto liveMixed = QualifiedAndOffsetProgram(false);
-    Reject("same sampler live qualified plus offset sample", {"unnormalized", "has a texel offset that is not a constant"},
-        [&] { static_cast<void>(Compile(device,liveMixed,pair.users)); });
+    // A live qualified sample plus an offset sample on the same sampler compiles since upstream d0d127b17
+    // (texel offsets with unnormalized coordinates), so it is no longer a refusal.
     DeadSourceLimitations(device);
     auto deadMixed = QualifiedAndOffsetProgram(true);
     // Preserve the s8 failure above. The supported placement uses T#s0, so a

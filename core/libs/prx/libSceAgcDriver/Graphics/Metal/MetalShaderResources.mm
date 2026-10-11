@@ -19,7 +19,7 @@ using namespace ShaderRecompiler;
 namespace Abi = ShaderRecompiler::BdaAbi;
 
 MetalGuestMemory::DispatchSnapshot capture(MetalGuestMemory& memory,
-    std::span<const NativeGuestMemory::BorrowedRange> ranges) {
+    std::span<const NativeGuestMemory::BorrowedRange> ranges, MetalGuestHostAliases* aliases) {
     for (const auto& range : ranges) {
         const auto begin = reinterpret_cast<std::uintptr_t>(range.host.data());
         if (range.host.size() > std::numeric_limits<std::uintptr_t>::max() - begin) {
@@ -27,7 +27,7 @@ MetalGuestMemory::DispatchSnapshot capture(MetalGuestMemory& memory,
         }
         memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(range.guestAddress, range.host, range.writable);
     }
-    return memory.CaptureAfterPriorSnapshotsComplete();
+    return memory.CaptureAfterPriorSnapshotsComplete(aliases);
 }
 
 auto textureKey(const Graphics::GuestTextureResource& resource, bool compare) {
@@ -119,9 +119,9 @@ bool writtenBuffer(const DescriptorBinding& binding, std::uint32_t i) {
 }
 
 MetalShaderResources::MetalShaderResources(const MetalDevice& backend,
-    std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup)
+    std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup, MetalGuestHostAliases* aliases)
     : backend(backend), borrowed(ranges), borrowedRanges(ranges.begin(), ranges.end()),
-      memory(backend.Device()), snapshot(capture(memory, ranges)),
+      memory(backend.Device()), snapshot(capture(memory, ranges, aliases)),
       depthLookup(std::move(depthLookup)) {
     resident.push_back(snapshot.Table());
     resident.push_back(snapshot.FaultBuffer());
@@ -593,7 +593,8 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
     }
     const auto fault = snapshot.CompleteAndCopyDirtyPagesToBorrowedHost(commands);
     for (const auto& write : bufferWrites) {
-        std::memcpy(write.host.data(), static_cast<const std::byte*>(write.buffer.buffer.contents) + write.buffer.offset, write.host.size());
+        const auto* written = static_cast<const std::byte*>(write.buffer.buffer.contents) + write.buffer.offset;
+        if (written != write.host.data()) std::memcpy(write.host.data(), written, write.host.size());
     }
     for (const auto& image : images) {
         if (!image.written) continue;

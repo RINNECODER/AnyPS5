@@ -45,6 +45,9 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <cstdio>
+#include <sstream>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <set>
@@ -546,6 +549,65 @@ ErrorCode ExecutionCode(std::string_view message) {
     return ErrorCode::ExecutionFailure;
 }
 
+std::string Hex(std::uint64_t value) {
+    char text[19];
+    std::snprintf(text, sizeof text, "0x%llx", static_cast<unsigned long long>(value));
+    return text;
+}
+
+// "module+0xoffset" for a guest code address inside a loaded SCE module, else hex.
+std::string GuestSymbol(const Cpu::SceModules* modules, std::uint64_t address) {
+    if (modules) for (const auto& record : modules->Modules()) {
+        for (const auto& segment : record.Image.Segments) {
+            if (segment.Type != 1 || !segment.MemorySize) continue;
+            const auto start = record.LoadBias + segment.Address;
+            if (address >= start && address - start < segment.MemorySize)
+                return record.Image.Path.filename().string() + "+" + Hex(address - record.LoadBias);
+        }
+    }
+    return Hex(address);
+}
+
+void StallDumpSignal(int) { Cpu::GuestThreads::RequestThreadDump(); }
+
+// Stall diagnostics: SIGINFO (kill -INFO <pid>) or ANYPS5_GUEST_THREAD_DUMP_MS=<period>
+// writes one "guest_threads" diagnostics event per request/period with every guest
+// thread's saved RIP, frame-pointer backtrace, last host import and wait key.
+void InstallThreadDump(Cpu::GuestThreads& threads, const Cpu::SceModules* modules,
+                       const std::map<std::uint64_t, std::string>& importNames) {
+    std::chrono::milliseconds period{0};
+    if (const char* text = std::getenv("ANYPS5_GUEST_THREAD_DUMP_MS"))
+        period = std::chrono::milliseconds(std::strtoull(text, nullptr, 10));
+    threads.SetThreadDump([modules, &importNames](const std::vector<Cpu::GuestThreadSnapshot>& snapshot) {
+        std::ostringstream line;
+        line << "{\"schema_version\":1,\"event\":\"guest_threads\",\"threads\":[";
+        bool first = true;
+        for (const auto& thread : snapshot) {
+            if (!first) line << ',';
+            first = false;
+            std::string import;
+            if (thread.LastHostEntry) {
+                const auto found = importNames.find(thread.LastHostEntry);
+                import = found != importNames.end() ? found->second : Hex(thread.LastHostEntry);
+            }
+            line << "{\"thread_id\":" << thread.ThreadId << ",\"name\":" << Json(thread.Name)
+                 << ",\"state\":" << Json(thread.State) << ",\"active\":" << (thread.Active ? "true" : "false") << ",\"queued\":" << (thread.Queued ? "true" : "false")
+                 << ",\"policy\":" << thread.Policy << ",\"priority\":" << thread.EffectivePriority
+                 << ",\"rip\":" << Json(GuestSymbol(modules, thread.Rip)) << ",\"rsp\":" << Json(Hex(thread.Rsp))
+                 << ",\"slices\":" << thread.Slices << ",\"instructions\":" << thread.Instructions
+                 << ",\"last_import\":" << Json(import) << ",\"host_entries\":" << thread.HostEntries
+                 << ",\"wait_domain\":" << thread.WaitDomain << ",\"wait_key\":" << Json(Hex(thread.WaitKey))
+                 << ",\"frames\":[";
+            for (std::size_t index = 0; index < thread.Frames.size(); ++index)
+                line << (index ? "," : "") << Json(GuestSymbol(modules, thread.Frames[index]));
+            line << "]}";
+        }
+        line << "]}\n";
+        std::cerr << line.str() << std::flush;
+    }, period);
+    std::signal(SIGINFO, StallDumpSignal);
+}
+
 int Failure(bool diagnostics, ErrorCode code, std::string_view message, std::string_view executable,
             int exitCode = LaunchFailure) {
     try {
@@ -707,6 +769,8 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::SceJsonImports> jsonRuntime;
         std::unique_ptr<Cpu::SceCommonDialogImports> commonDialogRuntime;
         std::unique_ptr<Cpu::SceModules> modules;
+        // Stall diagnostics: resolved import address -> "library:NID".
+        std::map<std::uint64_t, std::string> importNames;
         std::unique_ptr<Cpu::SceSystemImports> systemRuntime;
         std::unique_ptr<Cpu::SceAudioOut2Imports> audioRuntime;
         std::unique_ptr<Cpu::SceLibcBootstrapImports> bootstrapRuntime;
@@ -726,6 +790,9 @@ int main(int argc, char** argv) {
 #if ANYPS5_CPU_MODERN_TCG
                 if (!modulePaths.empty()) {
                     threadRuntime = std::make_shared<Cpu::GuestThreads>(machine);
+                    // A title's threads assume the guest's CPUs: a busy-waiting thread
+                    // must not starve the runnable sibling it waits for.
+                    threadRuntime->SetGuestCores(Cpu::GuestCpuCount);
 #if !ANYPS5_CPU_NATIVE_MODULE_RUNNER
                     threadImports = std::make_unique<Cpu::SceThreadImports>(machine, threadRuntime);
                     // Lets guest threads park in timed waits (sleeps) while others run, with no idle
@@ -877,9 +944,7 @@ int main(int argc, char** argv) {
                         return modules ? modules->Modules() : std::span<const Cpu::SceModuleRecord>{};
                     });
 #endif
-                    modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
-                        Cpu::SceModuleResolver{}, libcInternal,
-                        [&](const Cpu::SceImportConsumer& consumer, const auto& import,
+                    const auto resolveImport = [&](const Cpu::SceImportConsumer& consumer, const Cpu::SceImport& import,
                             std::uint8_t type, std::uint64_t size) -> std::optional<Cpu::SceResolvedImport> {
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                             if (nativeRuntime) if (const auto selected = nativeRuntime->Resolve(consumer, import, type, size))
@@ -903,6 +968,15 @@ int main(int argc, char** argv) {
                             if (size) return std::nullopt;
 #endif
                             return Cpu::SceResolvedImport{resolve(import), 2};
+                        };
+                    modules = std::make_unique<Cpu::SceModules>(machine, Cpu::SceModuleFile{executable, 0x1000000}, files, hosts,
+                        Cpu::SceModuleResolver{}, libcInternal,
+                        [&](const Cpu::SceImportConsumer& consumer, const auto& import,
+                            std::uint8_t type, std::uint64_t size) -> std::optional<Cpu::SceResolvedImport> {
+                            auto resolved = resolveImport(consumer, import, type, size);
+                            if (resolved && diagnostics && type == 2)
+                                importNames.try_emplace(resolved->Address, import.LibraryName + ":" + import.Nid);
+                            return resolved;
                         }, lazyImports);
                     kernelRuntime->SetTls(modules->Tls());
                     bootstrapRuntime->SetProcessParameters(modules->Main().ProcParam ? modules->Main().ProcParam->Address : 0,
@@ -913,6 +987,7 @@ int main(int argc, char** argv) {
                         if (!factory) throw std::runtime_error("Unsupported SCE guest threads: frozen TLS factory is not configured");
                         threadRuntime->AdoptInitial({modules->Main().Entry, modules->InitialStack(), modules->Tls(), std::move(factory)});
                         modules->SetExecutor(threadRuntime->ModuleExecutor());
+                        if (diagnostics) InstallThreadDump(*threadRuntime, modules.get(), importNames);
                     }
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                     if (nativeRuntime) nativeRuntime->ActivateBeforeInitializers();

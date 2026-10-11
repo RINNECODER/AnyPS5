@@ -208,8 +208,9 @@ void freshExecution(Session& session, const std::array<std::uint64_t, 36>& state
 }
 
 void translatedLifecycle(const std::filesystem::path& main, const std::filesystem::path& guest, bool wrongOracle,
-                         unsigned mode = 0) {
+                         unsigned mode = 0, std::size_t cores = 1) {
     Session session(main, guest, mode, ArithmeticResult + (wrongOracle ? 1 : 0));
+    session.Threads->SetGuestCores(cores);
     require(session.Graph->RunMain(2000000, 100000) == Cpu::StopReason::Exit &&
             session.Machine.ExitCode() == (wrongOracle ? 77 : 0),
             "Compiled thread program rejected scheduling, TLS, guard, arithmetic or independent result oracle");
@@ -294,6 +295,21 @@ void workerProcessExit(const std::filesystem::path& main, const std::filesystem:
         session.edgeUnchanged();
         freshExecution(session, state, lifecycle);
     }
+}
+
+// A guest thread that busy-waits for an equal-priority sibling never yields. One
+// guest CPU starves the sibling forever; with the guest's CPUs the owner time-shares
+// every runnable thread, so the sibling runs and the program completes in order.
+void spinningSiblingProgress(const std::filesystem::path& main, const std::filesystem::path& guest) {
+    {
+        Session session(main, guest, 16);
+        require(session.Graph->RunMain(2000000, 100000) == Cpu::StopReason::InstructionLimit &&
+                session.events() == std::array<std::uint64_t, 6>{1, 0, 0, 0, 0, 0},
+                "Single-CPU scheduling no longer models a busy parent starving its runnable child");
+    }
+    translatedLifecycle(main, guest, false, 16, Cpu::GuestCpuCount);
+    // A yielding program keeps the single-CPU order and results on the guest's CPUs.
+    translatedLifecycle(main, guest, false, 0, Cpu::GuestCpuCount);
 }
 
 void arithmeticBudgetStop(const std::filesystem::path& main, const std::filesystem::path& guest) {
@@ -481,6 +497,33 @@ void preflightFailures(const std::filesystem::path& main, const std::filesystem:
 }
 }
 
+// Stall diagnostics: a requested dump reaches the sink on the scheduler owner, and a
+// snapshot after a budget stop names every live thread with its saved guest RIP,
+// retired work since the previous snapshot and the last host import it entered.
+void stallSnapshot(const std::filesystem::path& main, const std::filesystem::path& guest) {
+    Session session(main, guest);
+    const auto& arithmetic = exported(session.Graph->Modules()[0], "8h9-NrHxAh8", 2);
+    std::vector<std::vector<Cpu::GuestThreadSnapshot>> dumps;
+    session.Threads->SetThreadDump([&](const auto& threads) { dumps.push_back(threads); }, std::chrono::milliseconds{0});
+    Cpu::GuestThreads::RequestThreadDump();
+    require(session.Graph->RunMain(16000, 100000) == Cpu::StopReason::InstructionLimit,
+            "Snapshot run did not stop at its instruction budget");
+    require(dumps.size() == 1, "A requested thread dump was not emitted exactly once by the scheduler owner");
+    const auto threads = session.Threads->SnapshotThreads();
+    require(threads.size() >= 2, "Snapshot lost the initial or the created guest thread");
+    const auto initial = std::find_if(threads.begin(), threads.end(), [](const auto& thread) { return thread.Active; });
+    require(initial != threads.end(), "Snapshot does not mark the interrupted thread active");
+    const auto pc = session.Machine.Get(Cpu::Register::Rip);
+    require(initial->Rip == pc && pc - MainBias - arithmetic.Value < arithmetic.Size,
+            "Snapshot RIP is not the interrupted thread's saved guest RIP");
+    require(initial->Slices && initial->Instructions && initial->Rsp, "Snapshot lost the thread's retired slices");
+    require(initial->LastHostEntry && initial->HostEntries, "Snapshot lost the last host import the thread entered");
+    const auto again = session.Threads->SnapshotThreads();
+    require(std::all_of(again.begin(), again.end(), [](const auto& thread) { return !thread.Slices && !thread.Instructions; }),
+            "Snapshot counters are not reset per snapshot, so a spinning thread is indistinguishable from an idle one");
+    session.Threads->SetThreadDump({}, std::chrono::milliseconds{0});
+}
+
 int main(int argc, char** argv) {
     try {
         require(argc == 3, "Usage: GuestThreadsTests main.elf ThreadGuest.prx");
@@ -489,6 +532,8 @@ int main(int argc, char** argv) {
         translatedLifecycle(argv[1], argv[2], false, 12);
         workerProcessExit(argv[1], argv[2]);
         arithmeticBudgetStop(argv[1], argv[2]);
+        stallSnapshot(argv[1], argv[2]);
+        spinningSiblingProgress(argv[1], argv[2]);
         preflightFailures(argv[1], argv[2]);
         rejectedFactoryPreservesParent(argv[1], argv[2]);
         rejectedJoinPreservesChild(argv[1], argv[2]);
