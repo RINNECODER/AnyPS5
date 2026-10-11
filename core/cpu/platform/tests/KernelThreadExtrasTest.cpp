@@ -1,5 +1,6 @@
 #include "KernelThreadExtras.hpp"
 #include <cpu/GuestThreads.hpp>
+#include <cpu/SceKernelTimeImports.hpp>
 #include <cpu/SceLifecycleImports.hpp>
 #include <cpu/SceThreadImports.hpp>
 #include <array>
@@ -29,6 +30,7 @@ struct Session {
     std::shared_ptr<Cpu::GuestThreads> threads = std::make_shared<Cpu::GuestThreads>(machine);
     Cpu::SceThreadImports threadImports{machine, threads};
     Cpu::SceLifecycleImports lifecycle{machine};
+    Cpu::SceKernelTimeImports time{machine, threads};
     std::unique_ptr<Cpu::Platform::KernelThreadExtras> extras;
     std::unique_ptr<Cpu::SceModules> graph;
     std::uint64_t address = 0;
@@ -48,6 +50,7 @@ struct Session {
                 if (const auto gate = threadImports.ResolvePriority(row, type)) return Cpu::SceResolvedImport{*gate, type};
                 if (const auto gate = threadImports.Resolve(row, type)) return Cpu::SceResolvedImport{*gate, type};
                 if (const auto gate = lifecycle.Resolve(row)) return Cpu::SceResolvedImport{*gate, type};
+                if (const auto gate = time.Resolve(row)) return Cpu::SceResolvedImport{*gate, type};
                 return std::nullopt;
             });
         extras->SetModuleSource([this] { return graph->Modules(); });
@@ -166,6 +169,34 @@ void debug(const char* path) {
     require(r[10] == 0 && r[11] == 0 && r[12] == 0, "Debug exceptions did not continue");
     std::cout << "PASS debug exceptions continue\n";
 }
+void posix(const char* path) {
+    Session s(path, 8); const auto r = s.run();
+    constexpr std::uint64_t NoEntry = 0x80020002;
+    require(r[10] == 0 && r[11] == 0, "Loading an already present module by path did not return its handle and start result");
+    require(r[12] == NoEntry && r[13] == Fault, "Unknown module or null path did not return ENOENT or EFAULT");
+    require(r[14] == 0 && r[15] == 1 && r[16] == Search && r[17] == Search, "Dlsym differs from the module export table");
+    require(r[18] == 0 && r[19] == Search, "Stop/unload differs");
+    require(r[20] == 0 && r[21] == 0 && r[22] == 1 && r[23] == Invalid, "Trinity mode or UUID differ");
+    require(r[24] == Invalid && r[25] == 0 && r[26] == 0 && r[27] == Invalid && r[28] == Search,
+            "Thread-atexit references are not balanced per image");
+    require(r[29] == 1, "getpid did not return a positive process id");
+    require(r[30] == 0 && r[31] == 0 && r[32] == 0xffffffff && r[33] == 60, "Semaphore wait/timedwait on an empty semaphore differs");
+    require(r[34] == 0 && r[35] == 0 && r[36] == 0 && r[37] == 0xffffffff && r[38] == 22, "Semaphore post/destroy differs");
+    require(r[39] == 0xffffffff && r[59] == 22, "Oversized semaphore value was accepted");
+    require(r[41] == 0 && r[42] == 1 && r[60] == 0, "Blocked sem_wait did not resume exactly after sem_post");
+    require(r[62] == 0xffffffff && r[63] == 60, "Expired sem_timedwait did not report ETIMEDOUT in the waiter's errno");
+    require(r[43] == 0 && r[44] == 0xffffffff, "getrusage differs");
+    require(r[45] == 0 && r[46] == 0x1234 && r[47] == 0xffffffffffffffffULL && r[48] == 22, "signal() dispositions differ");
+    require(r[49] == 0 && r[50] == 0 && r[51] == 0 && r[52] == 6 && r[53] == 0 && r[54] == 4 && r[55] == 0xffffffff,
+            "Signal mask block/unblock/set differs");
+    require(r[56] == 1 && r[57] == 0 && r[58] == 0, "Program-header address match differs");
+    // libSceCoredump rows resolve only inside their own library scope.
+    Cpu::SceImport row{"dei8oUx6DbU", "libSceCoredump", 0, "libkernel", 0, 1, 1, 1};
+    require(s.extras->Resolve(row, 2, 0).has_value(), "libSceCoredump row did not resolve");
+    row.LibraryName = "libkernel";
+    require(!s.extras->Resolve(row, 2, 0).has_value(), "libSceCoredump row resolved in the libkernel scope");
+    std::cout << "PASS module loading, process, semaphore, signal and coredump services\n";
+}
 }
 int main(int argc, char** argv) {
     try {
@@ -178,6 +209,7 @@ int main(int argc, char** argv) {
         else if (name == "controls") controls(argv[1]);
         else if (name == "module") module(argv[1]);
         else if (name == "debug") debug(argv[1]);
+        else if (name == "posix") posix(argv[1]);
         else throw std::runtime_error("Unknown thread extras case");
     } catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
     return 0;

@@ -45,6 +45,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -361,7 +362,7 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
                                          ) {
     std::vector<Cpu::SceHostModule> hosts{
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
-        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}, {"libScePosix", 0, 1}}},
+        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}, {"libScePosix", 0, 1}, {"libSceCoredump", 0, 1}}},
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
         {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
         {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}, {"libSceLibcInternal", 0, 1}}},
@@ -372,7 +373,13 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}},
         {"libSceNpWebApi.prx", {"libSceNpWebApi", 0, 1, 1}, {{"libSceNpWebApi", 0, 1}}},
         {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}},
-        {"libScePad.prx", {"libScePad", 0, 1, 1}, {{"libScePad", 0, 1}}}};
+        {"libScePad.prx", {"libScePad", 0, 1, 1}, {{"libScePad", 0, 1}}},
+        // Json2 is served by the libSceJson provider under its own file name. Fiber and RazorCpu
+        // are listed as DT_NEEDED by titles that import nothing from them; any import that does
+        // appear still binds lazily as unresolved.
+        {"libSceJson2.prx", {"libSceJson2", 0, 1, 1}, {{"libSceJson2", 0, 1}}},
+        {"libSceFiber.prx", {"libSceFiber", 0, 1, 1}, {{"libSceFiber", 0, 1}}},
+        {"libSceRazorCpu.prx", {"libSceRazorCpu", 0, 1, 1}, {{"libSceRazorCpu", 0, 1}}}};
     // Modules the upstream bridge and the leaf native provider serve. Several libraries may share
     // one module; a module/library pair both providers serve is declared once.
     auto upstreamHosts = Cpu::SceUpstreamPrxBridge::Hosts();
@@ -391,8 +398,10 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
     if (native) native->AddHostModules(hosts);
 #endif
     bool kernelPrx = false, kernelSprx = false;
+    std::set<std::string> neededFiles;
     const auto neededKernel = [&](const Cpu::SceParsedImage& image) {
         for (const auto& needed : image.NeededFiles) {
+            neededFiles.insert(needed);
             if (needed == "libkernel.prx") kernelPrx = true;
             else if (needed == "libkernel.sprx") kernelSprx = true;
         }
@@ -411,6 +420,20 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         if (kernelPrx && kernelSprx)
             throw std::runtime_error("Unsupported SCE libkernel host filename aliases: graph requires both libkernel.prx and libkernel.sprx");
         if (kernelPrx) host.Filename = "libkernel.prx";
+    }
+    // Titles spell the same system module as .prx or .sprx; a host module answers to the spelling
+    // the graph asks for when the declared one is not requested.
+    for (auto& host : hosts) {
+        if (host.Module.Name == "libkernel" || neededFiles.contains(host.Filename)) continue;
+        for (const std::string_view from : {".sprx", ".prx"}) {
+            if (host.Filename.size() <= from.size() ||
+                host.Filename.compare(host.Filename.size() - from.size(), from.size(), from) != 0) continue;
+            auto alias = host.Filename.substr(0, host.Filename.size() - from.size()) + (from == ".sprx" ? ".prx" : ".sprx");
+            if (neededFiles.contains(alias) && std::none_of(hosts.begin(), hosts.end(),
+                    [&](const auto& other) { return other.Filename == alias; }))
+                host.Filename = std::move(alias);
+            break;
+        }
     }
     return hosts;
 }
