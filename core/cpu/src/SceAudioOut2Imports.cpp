@@ -1,6 +1,7 @@
 #include <cpu/SceAudioOut2Imports.hpp>
 #include <cpu/NativeAudioOutput.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -69,9 +70,8 @@ struct SceAudioOut2Imports::Impl {
         std::array<float, 2> gains{1, 1};
     };
     Machine& machine;
-    const std::uint64_t base;
+    SceHostTrampolines trampolines;
     bool initialized = false;
-    std::size_t nextGate = 0;
     // Creation serials never recycle within a session, including after destruction.
     std::uint64_t nextHandle = 1;
     std::map<std::uint64_t, std::uint32_t> users;
@@ -90,15 +90,8 @@ struct SceAudioOut2Imports::Impl {
         {"TViD1EZXkNI", Service::Latency}, {"XHl38ZNknbs", Service::MasteringInit},
         {"2bbBBOkH4CY", Service::MasteringTerm}, {"v8iOE+j8a5o", Service::MasteringParam}};
 
-    Impl(Machine& guest, std::uint64_t gateBase) : machine(guest), base(gateBase) {
-        if (!base || (base & 4095) || base >= 0x7ffffffff000)
-            throw std::invalid_argument("SCE AudioOut2 gates require a nonzero aligned low canonical guest page");
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), rw);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
-    }
+    Impl(Machine& guest, std::uint64_t base)
+        : machine(guest), trampolines(guest, base, SceHostTrampolines::DefaultCapacity, "SCE AudioOut2 import") {}
     // Backend destruction owns nonthrowing native teardown; explicit Close can report failures.
     ~Impl() = default;
     void access(std::uint64_t address, std::size_t size, Permission permission) const {
@@ -365,17 +358,12 @@ std::optional<std::uint64_t> SceAudioOut2Imports::Resolve(const SceImport& impor
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                        import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto cached = impl->gates.find(key); cached != impl->gates.end()) return cached->second;
-    if (impl->nextGate == 256) fault("gate page is exhausted");
-    const auto gate = impl->base + impl->nextGate * 16;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), service = found->second](Machine& guest) {
+    const auto gate = impl->trampolines.Add([state = std::weak_ptr<Impl>(impl), service = found->second](Machine& guest) {
         const auto context = state.lock();
         if (!context) fault("runtime has expired");
         context->invoke(guest, service);
     });
     impl->gates.emplace(key, gate);
-    ++impl->nextGate;
     return gate;
 }
 

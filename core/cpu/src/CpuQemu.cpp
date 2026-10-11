@@ -17,6 +17,9 @@
 
 namespace Cpu {
 namespace {
+// ANYPS5_MAX_GATES in the engine (3rdparty/anyps5-tcg/target/i386/anyps5-cpu.c).
+constexpr std::size_t MaximumHostGates = 256;
+
 AnyPS5QemuRegister registerId(Register reg) {
     switch (reg) {
     case Register::Rax: return ANYPS5_QEMU_RAX;
@@ -888,6 +891,14 @@ void Machine::AddHostCall(std::uint64_t address, std::function<void(Machine&)> h
         impl->check(anyps5_qemu_cpu_add_gate(impl->engine, address, address), "Register modern guest host gate");
     } catch (...) {
         impl->calls.erase(address);
+        // The engine reports a full gate table with its generic owner-thread message.
+        if (impl->calls.size() >= MaximumHostGates) {
+            std::ostringstream message;
+            message << "Modern TCG host-gate budget is exhausted: all " << MaximumHostGates
+                    << " gates are registered, so the host call at 0x" << std::hex << address
+                    << " cannot be added; providers must share one gate per table through SceHostTrampolines";
+            throw HostCapacityError(message.str());
+        }
         throw;
     }
 }

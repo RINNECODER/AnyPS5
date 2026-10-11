@@ -62,7 +62,7 @@ struct SceNpOfflineImports::Impl {
         return static_cast<std::uint32_t>(nextHandle++);
     }
 
-    Impl(Machine& machine, std::uint64_t base) : trampolines(std::make_shared<SceHostTrampolines>(machine, base, 64)) {
+    Impl(Machine& machine, std::uint64_t base) : trampolines(std::make_shared<SceHostTrampolines>(machine, base, SceHostTrampolines::DefaultCapacity, "SCE offline NP")) {
         const auto ok = [](Impl&, Machine&) -> std::uint32_t { return 0; };
         const auto signedOut = [](Impl&, Machine&) -> std::uint32_t { return NpSignedOut; };
         const auto newHandle = [](Impl& self, Machine&) -> std::uint32_t { return self.handle(); };

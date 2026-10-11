@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace Cpu {
@@ -30,6 +31,12 @@ struct OwnedMappingSnapshot {
     std::shared_ptr<const void> Scope;
     std::uint64_t Generation;
     std::vector<OwnedMappingView> Views;
+};
+// A host entry table or the engine's host-gate budget is full. This is a host
+// limit, not a missing provider: lazy linking must not turn it into a trap stub.
+class HostCapacityError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
 };
 
 class Machine {

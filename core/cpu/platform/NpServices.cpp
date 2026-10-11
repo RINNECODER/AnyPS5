@@ -1,7 +1,9 @@
 #include "NpServices.hpp"
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <bit>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <tuple>
 
@@ -14,27 +16,18 @@ struct NpServices::Impl {
     using Key = std::tuple<std::uint16_t, std::uint16_t>;
     Machine& machine;
     std::uint32_t user;
-    std::uint64_t base;
+    std::optional<SceHostTrampolines> trampolines;
     std::map<Key, std::uint64_t> gates;
-    Impl(Machine& guest, std::uint32_t sessionUser, std::uint64_t gateBase)
-        : machine(guest), user(sessionUser), base(gateBase) {
+    Impl(Machine& guest, std::uint32_t sessionUser, std::uint64_t base)
+        : machine(guest), user(sessionUser) {
         if (user == 0xffffffffu) throw std::invalid_argument("NP offline session requires a valid user");
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("NP gates require an aligned low canonical page");
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        try {
-            machine.Write(base, bytes);
-            machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
-        } catch (...) {
-            machine.Unmap(base, bytes.size());
-            throw;
-        }
+        trampolines.emplace(machine, base, SceHostTrampolines::DefaultCapacity, "NP offline query");
     }
     ~Impl() {
-        // Host-call callbacks hold weak references only; release the owned guest page.
-        try { machine.Unmap(base, 4096); } catch (...) { }
+        // Host-call callbacks hold weak references only; release the owned guest pages.
+        try { trampolines->Release(); } catch (...) { }
     }
     void getOnlineId(Machine& guest) const {
         // Offline queries never dereference or write a non-null identity pointer.
@@ -61,11 +54,7 @@ std::optional<std::uint64_t> NpServices::Resolve(const SceImport& import, std::u
         throw std::runtime_error("Unsupported NP offline query scope/version/type");
     const Impl::Key key{import.LibraryId, import.ModuleId};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->gates.size() == 256) throw std::runtime_error("NP offline gate page exhausted");
-    const auto gate = impl->base + impl->gates.size() * 16;
-    constexpr std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [weak = std::weak_ptr<Impl>(impl)](Machine& machine) {
+    const auto gate = impl->trampolines->Add([weak = std::weak_ptr<Impl>(impl)](Machine& machine) {
         const auto owner = weak.lock();
         if (!owner) throw std::runtime_error("NP offline provider expired");
         owner->getOnlineId(machine);

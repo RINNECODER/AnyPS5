@@ -2,9 +2,11 @@
 // URI contract adapted to checked guest memory from shadPS4 http.cpp,
 // commit 945dbc3cc3eee80ac3e053b438502ed936fa6bb2 (2026-10-07).
 #include "NetworkServices.hpp"
+#include <cpu/SceHostTrampolines.hpp>
 #include <array>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -28,23 +30,14 @@ bool unreserved(unsigned char c) {
 struct NetworkServices::Impl {
     using Key = std::tuple<std::uint16_t, std::uint16_t>;
     Machine& machine;
-    const std::uint64_t base;
+    std::optional<SceHostTrampolines> trampolines;
     std::map<Key, std::uint64_t> gates;
-    Impl(Machine& m, std::uint64_t b) : machine(m), base(b) {
+    Impl(Machine& m, std::uint64_t b) : machine(m) {
         if (!b || (b & 4095) || b >= 0x7ffffffff000ULL)
             throw std::invalid_argument("NetworkServices invalid gate page");
-        std::array<std::byte, 4096> page;
-        page.fill(std::byte{0xcc});
-        m.Map(b, page.size(), Permission::Read | Permission::Write);
-        try {
-            m.Write(b, page);
-            m.Protect(b, page.size(), Permission::Read | Permission::Execute);
-        } catch (...) {
-            m.Unmap(b, page.size());
-            throw;
-        }
+        trampolines.emplace(m, b, SceHostTrampolines::DefaultCapacity, "NetworkServices");
     }
-    ~Impl() { machine.Unmap(base, 4096); }
+    ~Impl() { trampolines->Release(); }
     void escape(Machine& m) {
         const auto output = m.Get(Register::Rdi);
         const auto required = m.Get(Register::Rsi);
@@ -93,11 +86,7 @@ std::optional<std::uint64_t> NetworkServices::Resolve(const SceImport& i, std::u
     if (type != 2) throw std::runtime_error("NetworkServices unsupported symbol type");
     const Impl::Key key{i.LibraryId, i.ModuleId};
     if (auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->gates.size() >= 256) throw std::runtime_error("NetworkServices gate page exhausted");
-    const auto address = impl->base + impl->gates.size() * 16;
-    constexpr std::array ret{std::byte{0xc3}};
-    impl->machine.Write(address, ret);
-    impl->machine.AddHostCall(address, [weak = std::weak_ptr<Impl>(impl)](Machine& m) {
+    const auto address = impl->trampolines->Add([weak = std::weak_ptr<Impl>(impl)](Machine& m) {
         const auto state = weak.lock();
         if (!state) throw std::runtime_error("NetworkServices runtime expired");
         state->escape(m);

@@ -1,6 +1,7 @@
 #include <cpu/SceKernelImports.hpp>
 #include <cpu/GuestFiles.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <cpu/SceTls.hpp>
 #include <nid/NidCompute.hpp>
 #include <array>
@@ -57,7 +58,8 @@ constexpr std::array<std::pair<const char*, Service>, 22> posixServices{{
 constexpr std::uint64_t MallocReplaceBytes = 112;
 constexpr std::uint64_t NewReplaceBytes = 104;
 constexpr std::uint64_t NewReplaceOffset = MallocReplaceBytes;   // 8-byte aligned after it
-constexpr std::uint64_t ReplacementOffset = 0x1000;              // one page past the gate page
+// Just past the 1 MiB the gate trampolines reserve.
+constexpr std::uint64_t ReplacementOffset = (SceHostTrampolines::DefaultCapacity + 1) * 16;
 
 std::string identity(const SceImport& import) {
     return import.Nid + " library=" + import.LibraryName + ":" + std::to_string(import.LibraryVersion) +
@@ -78,15 +80,15 @@ struct SceKernelImports::Impl {
     Machine& machine;
     GuestFiles files;
     std::shared_ptr<SceTls> tls;
-    std::uint64_t base;
+    SceHostTrampolines trampolines;
     std::uint64_t replacements = 0;
-    std::size_t nextSlot = 0;
     std::map<std::string, Binding> services;
     std::map<Key, std::uint64_t> gates;
     std::function<std::uint64_t()> errnoAddress;
 
-    Impl(Machine& guest, const std::filesystem::path& resourceRoot, GuestFilesOptions options, std::uint64_t gateBase) :
-        machine(guest), files(guest, resourceRoot, std::move(options)), base(gateBase) {
+    Impl(Machine& guest, const std::filesystem::path& resourceRoot, GuestFilesOptions options, std::uint64_t base) :
+        machine(guest), files(guest, resourceRoot, std::move(options)),
+        trampolines(guest, base, SceHostTrampolines::DefaultCapacity, "SCE kernel import") {
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("SCE kernel import gates require a nonzero aligned low canonical guest page");
         for (const auto& [name, service] : fileServices)
@@ -104,11 +106,6 @@ struct SceKernelImports::Impl {
             services.emplace(Nid::ComputeNid("sceKernelReadTsc", "libkernel"), Binding{Service::ReadTsc, Convention::Kernel});
             services.emplace(Nid::ComputeNid("sceKernelGetTscFrequency", "libkernel"), Binding{Service::TscFrequency, Convention::Kernel});
         }
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
         std::array<std::byte, 4096> tables{};
         tables.fill(std::byte{});
         const auto putSize = [&](std::uint64_t offset, std::uint64_t value) {
@@ -195,18 +192,13 @@ std::uint64_t SceKernelImports::Resolve(const SceImport& import) {
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};
     if (const auto found = impl->gates.find(key); found != impl->gates.end()) return found->second;
-    if (impl->nextSlot == 256) throw std::runtime_error("SCE kernel import gate page is exhausted");
-    const auto gate = impl->base + impl->nextSlot * 16;
     const auto operation = service->second;
-    const std::array ret{std::byte{0xc3}};
-    impl->machine.Write(gate, ret);
-    impl->machine.AddHostCall(gate, [state = std::weak_ptr<Impl>(impl), operation](Machine& guest) {
+    const auto gate = impl->trampolines.Add([state = std::weak_ptr<Impl>(impl), operation](Machine& guest) {
         const auto context = state.lock();
         if (!context) throw std::runtime_error("SCE kernel import runtime has expired");
         context->invoke(guest, operation);
     });
     impl->gates.emplace(key, gate);
-    ++impl->nextSlot;
     return gate;
 }
 

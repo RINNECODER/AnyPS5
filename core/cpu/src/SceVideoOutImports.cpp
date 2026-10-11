@@ -1,5 +1,6 @@
 #include <cpu/SceVideoOutImports.hpp>
 #include <cpu/SceElf.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -105,8 +106,7 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
                            std::uint16_t, std::uint8_t, std::uint8_t, bool>;
     Machine& machine;
     SceVideoOutBackend backend;
-    std::uint64_t base;
-    std::size_t nextSlot = 0;
+    std::optional<SceHostTrampolines> trampolines;
     std::map<Key, std::uint64_t> gates;
     std::set<Service> admitted;
     const std::map<std::string, Service> services{
@@ -123,9 +123,9 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
         {"U2JJtSqNKZI", Service::GetEventId}, {"rWUTcKdkUzQ", Service::GetEventData},
         {"Mt4QHHkxkOc", Service::GetEventCount}};
 
-    Impl(Machine& guest, SceVideoOutBackend callbacks, std::uint64_t gateBase,
+    Impl(Machine& guest, SceVideoOutBackend callbacks, std::uint64_t base,
          std::span<const VideoOutAbiAdmission> admissions) :
-        machine(guest), backend(std::move(callbacks)), base(gateBase) {
+        machine(guest), backend(std::move(callbacks)) {
         for (const auto& admission : admissions) {
             if (admission.Evidence.empty() ||
                 static_cast<unsigned>(admission.Contract) > static_cast<unsigned>(Service::GetEventCount))
@@ -134,11 +134,7 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
         }
         if (!base || (base & 4095) || base >= 0x7ffffffff000)
             throw std::invalid_argument("SCE VideoOut gates require a nonzero aligned low canonical guest page");
-        std::array<std::byte, 4096> bytes;
-        bytes.fill(std::byte{0xcc});
-        machine.Map(base, bytes.size(), Permission::Read | Permission::Write);
-        machine.Write(base, bytes);
-        machine.Protect(base, bytes.size(), Permission::Read | Permission::Execute);
+        trampolines.emplace(machine, base, SceHostTrampolines::DefaultCapacity, "SCE VideoOut import");
     }
 
     // A status is written only on success, and only its defined bytes.
@@ -427,17 +423,12 @@ struct SceVideoOutImports::Impl : std::enable_shared_from_this<SceVideoOutImport
         const Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                       import.LibraryVersion, import.ModuleMajor, import.ModuleMinor, target};
         if (const auto found = gates.find(key); found != gates.end()) return found->second;
-        if (nextSlot == 256) throw std::runtime_error("SCE VideoOut import gate page is exhausted");
-        const auto gate = base + nextSlot * 16;
-        const std::array ret{std::byte{0xc3}};
-        machine.Write(gate, ret);
-        machine.AddHostCall(gate, [state = weak_from_this(), operation = service->second](Machine& guest) {
+        const auto gate = trampolines->Add([state = weak_from_this(), operation = service->second](Machine& guest) {
             const auto context = state.lock();
             if (!context) throw std::runtime_error("Unsupported SCE VideoOut service: runtime has expired");
             context->invoke(guest, operation);
         });
         gates.emplace(key, gate);
-        ++nextSlot;
         return gate;
     }
 };
