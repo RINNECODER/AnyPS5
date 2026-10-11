@@ -298,28 +298,33 @@ int APS5_VABI sceHttp2SetResolveRetry(int id, int32_t retry) {
     return 0;
 }
 
+// There is no WebSocket transport: requests report the same network error as the other
+// unconnected operations, and the pure setters accept their arguments.
 int APS5_VABI sceHttp2WebSocketCreateRequest() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ERROR_NETWORK;
 }
 
 int APS5_VABI sceHttp2WebSocketCloseAsync() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ERROR_NETWORK;
 }
 
 int APS5_VABI sceHttp2WebSocketSendTextMessageAsync() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ERROR_NETWORK;
 }
 
 int APS5_VABI sceHttp2WebSocketSendDataMessageAsync() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ERROR_NETWORK;
+}
+
+int APS5_VABI sceHttp2WebSocketSendDataMessage() {
+    return ERROR_NETWORK;
 }
 
 int APS5_VABI sceHttp2WebSocketSetPingInterval() {
-    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceHttp2WebSocketSetPingTimeout() {
     return 0;
 }
 

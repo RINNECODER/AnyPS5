@@ -41,10 +41,8 @@ int APS5_VABI sceNpAuthGetAuthorizationCodeV3(int req_id, const void* param, voi
 
 int APS5_VABI sceNpAuthGetIdTokenV3(int req_id, const void* param, void* id_token) {
  (void)req_id;
- (void)param;
- (void)id_token;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!param || !id_token) return SCE_NP_ERROR_INVALID_ARGUMENT;
+ return SCE_NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpAuthPollAsync(int req_id, int* result) {

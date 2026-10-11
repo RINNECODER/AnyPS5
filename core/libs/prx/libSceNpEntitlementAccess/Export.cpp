@@ -1,3 +1,7 @@
+#ifdef __APPLE__
+#include <limits.h>
+#include <mach-o/dyld.h>
+#endif
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -28,6 +32,11 @@ std::filesystem::path EntitlementsPath() {
     const auto length = GetModuleFileNameW(nullptr, module, MAX_PATH);
     if (length == 0 || length == MAX_PATH) throw std::runtime_error("NpEntitlementAccess: cannot locate the executable");
     return std::filesystem::path(module).parent_path() / "anyps5-entitlements.ini";
+#elif defined(__APPLE__)
+    char executable[PATH_MAX];
+    std::uint32_t size = sizeof(executable);
+    if (_NSGetExecutablePath(executable, &size) != 0) throw std::runtime_error("NpEntitlementAccess: cannot locate the executable");
+    return std::filesystem::path(executable).parent_path() / "anyps5-entitlements.ini";
 #else
     return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "anyps5-entitlements.ini";
 #endif
@@ -159,8 +168,10 @@ int APS5_VABI sceNpEntitlementAccessGetPftFlag(void) {
     return 0;
 }
 
-int APS5_VABI sceNpEntitlementAccessGetGameTrialsFlag(void) {
-    NotImplemented_nid_no_patch(__func__);
+// Never a trial: the flag is a 32-bit zero.
+int APS5_VABI sceNpEntitlementAccessGetGameTrialsFlag(std::uint32_t* flag) {
+    if (flag == nullptr) return static_cast<int>(0x817D0002);  // SCE_NP_ENTITLEMENT_ACCESS_ERROR_INVALID_ARGUMENT
+    *flag = 0;
     return 0;
 }
 

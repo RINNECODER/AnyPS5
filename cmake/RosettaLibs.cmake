@@ -131,6 +131,9 @@ set_target_properties(${ANYPS5_ROSETTA_TARGETS} PROPERTIES
 
 foreach(LIB_NAME ${ANYPS5_ROSETTA_TARGETS})
     target_link_options(${LIB_NAME} PRIVATE LINKER:-fixup_chains)
+    if(NOT LIB_NAME STREQUAL "libc")
+        target_sources(${LIB_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/cmake/RosettaStackGuard.cpp)
+    endif()
 endforeach()
 
 set(LIBC_UNPATCHED ${UNPATCHED_DIR}/libc.prx)
