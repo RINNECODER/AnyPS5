@@ -50,7 +50,11 @@ anyps5_metal_agc_cond_exec_patch anyps5_metal_agc_register_commands
 anyps5_metal_agc_host_exports
 anyps5_metal_shader_correctness_f64
 anyps5_metal_shader_correctness_msaa
-anyps5_metal_msaa_depth'''.split())
+anyps5_metal_msaa_depth
+anyps5_metal_shader_correctness_f64_trig_preop
+anyps5_metal_color_format_view
+anyps5_metal_color_eqaa
+anyps5_metal_color_msaa_color'''.split())
 INTEGRATION_TESTS = set('''anyps5_cpu_metal_guest anyps5_cpu_memory_metal_guest
 anyps5_sce_videoout_imports anyps5_sce_native_videoout'''.split())
 REQUIRED_TESTS = CPU_TESTS | GPU_TESTS | INTEGRATION_TESTS

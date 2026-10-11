@@ -83,12 +83,15 @@ void Decode(std::uint64_t depthAddress, Graphics::State& msaa) {
 
     QueueState eqaa;
     Configure(eqaa, depthAddress, 0x8000018bu, 0u);
-    Rejects("4x depth under 1x rasterization", "EQAA", [&] { static_cast<void>(Graphics::DecodeState(eqaa)); });
+    // EQAA / MSAA-off passes over a 4x depth surface render at the depth surface's sample count.
+    const auto eqaaState = Graphics::DecodeState(eqaa);
+    Require(eqaaState.depth && eqaaState.depth->samples == Samples && eqaaState.rasterSamples == Samples,
+            "a 4x depth surface under 1x rasterization does not render at the depth surface's 4 samples");
     QueueState coverage;
     Configure(coverage, depthAddress, 0x8000018bu, 2u | (1u << 26u));
     Rejects("coverage-to-shader conversion", "coverage conversion", [&] { static_cast<void>(Graphics::DecodeState(coverage)); });
     Require(!Graphics::DrawRejection(coverage, false).empty(), "the draw pre-check accepted coverage conversion");
-    std::cout << "PASS: DB_Z_INFO 0x8000018b decodes as 4x Z32F; PRT/MAXMIP surfaces decode; EQAA and coverage conversion are rejected\n";
+    std::cout << "PASS: DB_Z_INFO 0x8000018b decodes as 4x Z32F; PRT/MAXMIP surfaces decode; EQAA renders at the depth sample count; coverage conversion is rejected\n";
 }
 
 void DescriptorShape() {
