@@ -19,7 +19,11 @@ enum class AgcAbiContract {
     DcbSetShRegisterDirect, DcbSetCxRegisterDirect, DcbSetUcRegisterDirect,
     CbDispatchCommandBuffer56, CreateShaderRelativeHeader96, SuspendPoint,
     AddEqEvent, DeleteEqEvent, DcbSetFlipCommandBuffer56,
-    DcbWaitUntilSafeForRenderingCommandBuffer56
+    DcbWaitUntilSafeForRenderingCommandBuffer56,
+    // Builders encoded by the linked upstream libSceAgc implementation.
+    DcbAcquireMem, AcbAcquireMem, CbReleaseMem, DcbWaitRegMem, AcbWaitRegMem,
+    DcbCopyData, AcbCopyData, DcbDmaData, AcbDmaData, DcbAtomicMem, AcbAtomicMem,
+    DcbCondExec, AcbCondExec, CbSetShRegisterRangeDirect, CbSetUcRegisterRangeDirect
 };
 
 // These policies constrain the admitted target use, independently of the source

@@ -285,9 +285,14 @@ if(BUILD_TESTING)
     if(TARGET anyps5_cpu_agc)
         target_link_libraries(anyps5_platform_kernel_events_test PRIVATE anyps5_cpu_agc)
     else()
+        set(agcUpstream ../../libs/prx/libSceAgc)
         target_sources(anyps5_platform_kernel_events_test PRIVATE ../src/SceAgcImports.cpp
-            ../../libs/prx/libSceAgc/Shader/src/ShaderUtils.cpp)
-        target_include_directories(anyps5_platform_kernel_events_test PRIVATE ../../libs)
+            ${agcUpstream}/Shader/src/ShaderUtils.cpp
+            ${agcUpstream}/Command/src/Packet.cpp ${agcUpstream}/Command/src/Memory.cpp
+            ${agcUpstream}/Command/src/Control.cpp ${agcUpstream}/DcbFlow/src/Memory.cpp
+            ${agcUpstream}/DcbFlow/src/Sync.cpp ${agcUpstream}/Acb/src/Memory.cpp ${agcUpstream}/Acb/src/Sync.cpp
+            ${agcUpstream}/Cb/src/Sync.cpp ${agcUpstream}/Cb/src/Registers.cpp)
+        target_include_directories(anyps5_platform_kernel_events_test PRIVATE ../../libs ../agc)
     endif()
     target_compile_options(anyps5_platform_kernel_events_test PRIVATE -Wall -Wextra -Wpedantic)
     add_dependencies(anyps5_platform_kernel_events_test anyps5_platform_kernel_events_fixture)

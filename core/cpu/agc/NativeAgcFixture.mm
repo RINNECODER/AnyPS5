@@ -327,8 +327,10 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers, s
         store(guest.Machine,Builder+8,Builder+4096);
         store(guest.Machine,Builder+16,Commands);
         store(guest.Machine,Builder+24,Commands+4);
-        rejects([&]{guest.call("pFLArOT53+w",false,{Builder,(std::uint64_t{99}<<32)|0x207});},"exhausted");
-        require(load<std::uint32_t>(guest.Machine,Commands)==originalCommand,"exhausted builder modified command output");
+        // No growth callback: an exhausted builder returns a null packet.
+        require(guest.call("pFLArOT53+w",false,{Builder,(std::uint64_t{99}<<32)|0x207})==0,"exhausted builder returned a packet");
+        require(load<std::uint32_t>(guest.Machine,Commands)==originalCommand &&
+                load<std::uint64_t>(guest.Machine,Builder+16)==Commands,"exhausted builder modified command output");
         store(guest.Machine,Builder+24,Builder+4096);
         const std::array<std::uint32_t,2> payload{0x12345678,0x90abcdef};
         guest.Machine.Write(Builder+160,std::as_bytes(std::span(payload)));
@@ -375,8 +377,9 @@ void NativeRoute(id<MTLDevice> device, id<MTLLibrary> library, char** callers, s
         guest.Machine.Write(Commands,std::as_bytes(std::span(decoy)));
         guest.Imports=std::make_unique<Cpu::SceAgcImports>(guest.Machine, Cpu::MakeNativeAgcBackend(driver),
             Cpu::TargetAgcAdmissions(), 0x7ffdf3001000);
-        rejects([&]{guest.Imports->Resolve(identity("HF3YllT3mXU",true),2,0);},"Unqualified");
-        rejects([&]{guest.Imports->Resolve(identity("pFLArOT53+w",false),2,0);},"Unqualified");
+        // Multi-submit and direct register builders are admitted for every target.
+        require(guest.Imports->Resolve(identity("HF3YllT3mXU",true),2,0) &&
+                guest.Imports->Resolve(identity("pFLArOT53+w",false),2,0),"target admissions omit source builders");
 
         // Reconstruct the corroborated 304-byte compute geometry from public
         // types and independent offsets, using our synthetic ISA. No retail
