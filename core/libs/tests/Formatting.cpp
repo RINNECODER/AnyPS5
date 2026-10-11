@@ -21,6 +21,7 @@ int APS5_VABI vsscanf_s_nid_postfix(const char*, const char*, VaList*);
 int APS5_VABI vprintf_nid_postfix(const char*, VaList*);
 int APS5_VABI asprintf_nid_postfix(char**, const char*, ...);
 void APS5_VABI free_nid_postfix(void*);
+int* APS5_VABI __error_nid_postfix();
 }
 
 static void Require(bool condition) {
@@ -235,6 +236,12 @@ __attribute__((noinline)) static void APS5_VABI RunChecks() {
     Require(count == 4 && smallCount == 6 && std::strcmp(buffer, "ab") == 0);
     Require(snprintf_nid_postfix(buffer, sizeof(buffer), "a%cb", 0) == 3);
     Require(buffer[0] == 'a' && buffer[1] == 0 && buffer[2] == 'b' && buffer[3] == 0);
+    *__error_nid_postfix() = 35;
+    Require(snprintf_nid_postfix(buffer, sizeof(buffer), "[%m][%.8m][%-10.5m][%d]", 7) == 59);
+    Require(std::strcmp(buffer, "[Resource temporarily unavailable][Resource][Resou     ][7]") == 0);
+    Require(*__error_nid_postfix() == 35);
+    *__error_nid_postfix() = 63;
+    Require(FormatList(buffer, sizeof(buffer), "%s: %m", "open") == 24 && std::strcmp(buffer, "open: File name too long") == 0);
     Require(printf_nid_postfix("printf: %d %.1f\n", 7, 2.5) == 14);
     Require(libc_printf_nid_postfix("libc_printf: %s\n", "OK") == 16);
     Require(libc_printf_nid_postfix("%d %d %d %d %d %d %d\n", 1, 22, 333, 4444, 55555, 666666, 7777777) == 35);
