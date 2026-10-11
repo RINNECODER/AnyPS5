@@ -220,6 +220,7 @@ class NativeCompiledPackaging(PackageFixture):
             'anyps5_metal_normalized_load_replay', 'anyps5_metal_scalar_termination_replay')]
         roots += [self.build / 'native-videoout' / name for name in (
             'anyps5_cpu_videoout_native_fixture', 'anyps5_cpu_videoout_packed_hdr_fixture',
+            'anyps5_cpu_videoout_frame_capture_fixture',
             'anyps5_cpu_videoout_admission_fixture')]
         roots += [self.build / 'native-flip' / name for name in (
             'anyps5_cpu_flip_contract_fixture', 'anyps5_cpu_flip_native_fixture')]
