@@ -15,9 +15,45 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <pwd.h>
+#include <unistd.h>
+#endif
+
 namespace ShaderRecompiler {
 
+inline bool ShaderCacheDisabledBy(const char* variable) {
+    const char* value = std::getenv(variable);
+    return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
+}
+
+// The directory for every persistent shader and pipeline cache, or empty when disk caching is off
+// (ANYPS5_NO_SHADER_CACHE or APS5_NO_SHADER_CACHE set to anything but 0). ANYPS5_SHADER_CACHE_DIR
+// overrides the default: beside the executable on Windows and Linux, and the per-user
+// ~/Library/Caches/AnyPS5/shader_cache on macOS, where an app bundle must not be written.
+#ifdef _WIN32
 std::filesystem::path ShaderCacheDirectory();
+#else
+inline std::filesystem::path ShaderCacheDirectory() {
+    if (ShaderCacheDisabledBy("ANYPS5_NO_SHADER_CACHE") || ShaderCacheDisabledBy("APS5_NO_SHADER_CACHE")) return {};
+    const char* directory = std::getenv("ANYPS5_SHADER_CACHE_DIR");
+    if (directory != nullptr && *directory != '\0') return std::filesystem::path(directory);
+#ifdef __APPLE__
+    const char* home = std::getenv("HOME");
+    if (home == nullptr || *home == '\0') {
+        const passwd* user = getpwuid(getuid());
+        home = user != nullptr ? user->pw_dir : nullptr;
+    }
+    if (home == nullptr || *home == '\0') return {};
+    return std::filesystem::path(home) / "Library" / "Caches" / "AnyPS5" / "shader_cache";
+#else
+    std::error_code error;
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+    if (error) return {};
+    return executable.parent_path() / "shader_cache";
+#endif
+}
+#endif
 
 inline bool WriteFileAtomically(const std::filesystem::path& path, std::span<const std::byte> bytes) {
     std::error_code error;

@@ -1,4 +1,5 @@
 #include "MetalRenderState.hpp"
+#include "MetalPipelineCache.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -286,7 +287,7 @@ id<MTLDepthStencilState> CreateDepthStencilState(id<MTLDevice> device, const Gra
         descriptor.frontFaceStencil = StencilFace(state.stencilFront);
         descriptor.backFaceStencil = StencilFace(state.stencilBack);
     }
-    auto native = [device newDepthStencilStateWithDescriptor:descriptor];
+    auto native = CachedDepthStencilState(device, descriptor);
     if (native == nil) throw std::runtime_error("Metal render state: depth/stencil creation failed");
     return native;
 }

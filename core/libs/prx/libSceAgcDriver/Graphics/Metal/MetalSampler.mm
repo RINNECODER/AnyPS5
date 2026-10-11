@@ -1,10 +1,12 @@
 #include "MetalSampler.hpp"
+#include "MetalPipelineCache.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
 #include <array>
 #include <set>
 #include <cstring>
+#include <mutex>
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #import <objc/runtime.h>
 
@@ -64,7 +66,10 @@ MTLCompareFunction Compare(VkCompareOp operation) {
     }
 }
 
+// Metal returns the same MTLSamplerState for identical descriptors, so one native state can realize several
+// captured guest descriptors: it carries the set of every identity it was created for.
 char capturedSamplerAssociation;
+std::mutex capturedSamplerMutex;
 
 Graphics::GuestSamplerResource Decode(std::span<const std::uint32_t> words, bool compareEnable, bool qualified) {
     auto resource = Graphics::DecodeSamplerResource(words, qualified);
@@ -72,23 +77,36 @@ Graphics::GuestSamplerResource Decode(std::span<const std::uint32_t> words, bool
     return resource;
 }
 
+NSData* CapturedIdentity(std::span<const std::uint32_t> words, bool compareEnable, bool unnormalizedQualified) {
+    std::array<std::uint32_t, 6> identity{};
+    std::copy_n(words.begin(), std::min<std::size_t>(words.size(), 4), identity.begin());
+    identity[4] = compareEnable;
+    identity[5] = unnormalizedQualified;
+    return [NSData dataWithBytes:identity.data() length:sizeof(identity)];
+}
+
+void AddCapturedIdentity(id<MTLSamplerState> sampler, NSData* identity) {
+    std::lock_guard lock(capturedSamplerMutex);
+    NSMutableSet<NSData*>* identities = objc_getAssociatedObject(sampler, &capturedSamplerAssociation);
+    if (identities == nil) {
+        identities = [NSMutableSet set];
+        objc_setAssociatedObject(sampler, &capturedSamplerAssociation, identities, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    [identities addObject:identity];
+}
+
 }
 
 MetalSampler::MetalSampler(id<MTLDevice> device, std::span<const std::uint32_t> words, bool compareEnable,
     bool unnormalizedQualified)
-    : MetalSampler(device, Decode(words, compareEnable, unnormalizedQualified), true) {
-    std::array<std::uint32_t, 6> identity{};
-    std::copy(words.begin(), words.end(), identity.begin());
-    identity[4] = compareEnable;
-    identity[5] = unnormalizedQualified;
-    auto captured = [NSData dataWithBytes:identity.data() length:sizeof(identity)];
-    objc_setAssociatedObject(sampler, &capturedSamplerAssociation, captured, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
+    : MetalSampler(device, Decode(words, compareEnable, unnormalizedQualified),
+                   CapturedIdentity(words, compareEnable, unnormalizedQualified)) {}
 
 MetalSampler::MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerResource& resource)
-    : MetalSampler(device, resource, false) {}
+    : MetalSampler(device, resource, nil) {}
 
-MetalSampler::MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerResource& resource, bool captured) {
+MetalSampler::MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerResource& resource, NSData* identity) {
+    const bool captured = identity != nil;
     if (device == nil) throw std::invalid_argument("Metal sampler requires a device");
     if (resource.unnormalizedCoordinates && (!captured || resource.compareEnable ||
         resource.minFilter != resource.magFilter || resource.anisotropyEnable || resource.maxAnisotropy != 1.0f ||
@@ -147,8 +165,9 @@ MetalSampler::MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerRes
             throw std::invalid_argument("Metal sampler LOD bias requires macOS 26 and Apple10 GPU family");
         }
     }
-    sampler = [device newSamplerStateWithDescriptor:descriptor];
+    sampler = CachedSamplerState(device, descriptor);
     if (sampler == nil) throw std::runtime_error("Metal sampler creation failed");
+    if (captured) AddCapturedIdentity(sampler, identity);
 }
 
 id<MTLSamplerState> MetalSampler::Handle() const {
@@ -158,13 +177,10 @@ id<MTLSamplerState> MetalSampler::Handle() const {
 bool MetalSampler::MatchesCapturedDescriptor(id<MTLSamplerState> sampler, std::span<const std::uint32_t> words,
     bool compareEnable, bool unnormalizedQualified) {
     if (sampler == nil || words.size() != 4) return false;
-    NSData* captured = objc_getAssociatedObject(sampler, &capturedSamplerAssociation);
-    if (![captured isKindOfClass:[NSData class]] || captured.length != 6 * sizeof(std::uint32_t)) return false;
-    std::array<std::uint32_t, 6> identity{};
-    std::copy(words.begin(), words.end(), identity.begin());
-    identity[4] = compareEnable;
-    identity[5] = unnormalizedQualified;
-    return std::memcmp(captured.bytes, identity.data(), sizeof(identity)) == 0;
+    NSData* identity = CapturedIdentity(words, compareEnable, unnormalizedQualified);
+    std::lock_guard lock(capturedSamplerMutex);
+    NSSet<NSData*>* identities = objc_getAssociatedObject(sampler, &capturedSamplerAssociation);
+    return [identities isKindOfClass:[NSSet class]] && [identities containsObject:identity];
 }
 
 void ValidatePixelSamplerBindings(const std::vector<ShaderRecompiler::DescriptorBinding>& bindings) {

@@ -137,7 +137,20 @@ struct Result {
     std::optional<RectListInfo> rectList;
 };
 
+// Converts guest SPIR-V to MSL. Results are memoized in a bounded in-memory cache keyed exactly on the
+// SPIR-V words, every guest field the conversion reads, the stage and every target option; a cached
+// result is returned with the caller's own guest metadata.
 [[nodiscard]] Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage,
                                     const TargetOptions& options = {});
+
+struct ConversionCacheStatistics {
+    std::uint64_t hits = 0;
+    std::uint64_t misses = 0;
+    std::size_t entries = 0;
+    std::size_t bytes = 0;
+};
+
+[[nodiscard]] ConversionCacheStatistics GetConversionCacheStatistics();
+void ClearConversionCache();
 
 }

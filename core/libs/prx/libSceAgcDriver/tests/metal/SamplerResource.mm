@@ -1,5 +1,6 @@
 #include "MetalTestSupport.hpp"
 #include "MetalSampler.hpp"
+#include "MetalPipelineCache.hpp"
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -241,9 +242,39 @@ void CheckReduction(const MetalTests::Context& context, const Probe& probe) {
     }
 }
 
+// Identical native sampler descriptors share one state (Metal itself returns the same object for them), so
+// a state records every captured guest identity it realizes: each identity still matches after sharing,
+// and an identity is never reported for a natively different state.
+void CheckCache(const MetalTests::Context& context) {
+    AgcDriver::Metal::ClearMetalPipelineCaches();
+    const std::array<std::uint32_t, 4> words{2u | (2u << 3u) | (2u << 6u), 0xfffu << 12u, (1u << 20u) | (1u << 22u) | (1u << 26u), 0u};
+    MetalSampler first(context.device, words);
+    MetalSampler second(context.device, words);
+    const auto stats = AgcDriver::Metal::GetMetalPipelineCacheStatistics().samplerStates;
+    MetalTests::Require(first.Handle() == second.Handle() && stats.misses == 1 && stats.hits == 1,
+                        "identical captured guest samplers created separate native states");
+    MetalTests::Require(MetalSampler::MatchesCapturedDescriptor(second.Handle(), words, false, false), "a cached sampler lost its captured identity");
+    MetalSampler compared(context.device, words, true);
+    MetalTests::Require(MetalSampler::MatchesCapturedDescriptor(compared.Handle(), words, true, false) &&
+                        MetalSampler::MatchesCapturedDescriptor(first.Handle(), words, false, false),
+                        "a shared native sampler state lost one of its captured identities");
+    MetalSampler uncaptured(context.device, AgcDriver::Graphics::DecodeSamplerResource(words));
+    MetalSampler uncapturedAgain(context.device, AgcDriver::Graphics::DecodeSamplerResource(words));
+    MetalTests::Require(uncapturedAgain.Handle() == uncaptured.Handle(), "identical uncaptured guest samplers created separate native states");
+    auto otherWords = words;
+    otherWords[2] = (0u << 20u) | (0u << 22u) | (1u << 26u);
+    MetalTests::Require(!MetalSampler::MatchesCapturedDescriptor(first.Handle(), otherWords, false, false),
+                        "a sampler matched a guest identity it was never created for");
+    MetalSampler other(context.device, otherWords);
+    MetalTests::Require(other.Handle() != first.Handle() && !MetalSampler::MatchesCapturedDescriptor(other.Handle(), words, false, false) &&
+                        MetalSampler::MatchesCapturedDescriptor(other.Handle(), otherWords, false, false),
+                        "different guest filters shared a native sampler state or its identity");
+}
+
 }
 
 void RunSamplerResourceTests(const MetalTests::Context& context) {
+    CheckCache(context);
     Probe probe(context);
     CheckAddressing(context, probe);
     CheckFilters(context, probe);

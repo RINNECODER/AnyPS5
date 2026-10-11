@@ -94,6 +94,50 @@ static void Reject(Callable callable, const char* reason) {
     throw std::runtime_error(std::string("accepted invalid contract: ") + reason);
 }
 
+// The conversion cache must return what an uncached conversion returns: a hit needs the same SPIR-V, guest
+// metadata the bridge reads, stage, and every target option; the returned guest is always the caller's.
+static void VerifyConversionCache(const RecompileResult& sample, const RecompileResult& pushGuest, TargetOptions target) {
+    ClearConversionCache();
+    target.pushConstantOffsetBytes = 0;
+    const auto cold = ConvertToMetal(sample, ShaderStage::Compute, target);
+    auto stats = GetConversionCacheStatistics();
+    Require(stats.misses == 1 && stats.hits == 0 && stats.entries == 1, "first conversion was not a counted cache miss");
+    auto relabeled = sample;
+    relabeled.variantId = 777;
+    const auto warm = ConvertToMetal(relabeled, ShaderStage::Compute, target);
+    stats = GetConversionCacheStatistics();
+    Require(stats.hits == 1 && stats.misses == 1, "identical conversion inputs missed the cache");
+    Require(warm.source == cold.source && warm.entryPoint == cold.entryPoint && warm.resources.size() == cold.resources.size(),
+            "cached conversion differs from the uncached result");
+    Require(warm.guest.variantId == 777 && cold.guest.variantId == 191, "cached conversion returned another caller's guest metadata");
+
+    const auto pushCold = ConvertToMetal(pushGuest, ShaderStage::Compute, target);
+    auto shifted = target;
+    shifted.pushConstantOffsetBytes = 16;
+    const auto pushShifted = ConvertToMetal(pushGuest, ShaderStage::Compute, shifted);
+    stats = GetConversionCacheStatistics();
+    Require(stats.misses == 3 && stats.hits == 1, "different target options shared one cache entry");
+    Require(pushShifted.pushConstantBytes == 20 && pushCold.pushConstantData != pushShifted.pushConstantData, "push offset variants returned the wrong layout");
+    auto flipped = target;
+    flipped.flipVertexY = !flipped.flipVertexY;
+    static_cast<void>(ConvertToMetal(sample, ShaderStage::Compute, flipped));
+    Require(GetConversionCacheStatistics().misses == 4, "a target option outside the compute contract still must key the cache");
+
+    auto described = sample;
+    described.bindings[0].guestDescriptor.assign(4 * described.bindings[0].count, 0x1234u);
+    static_cast<void>(ConvertToMetal(described, ShaderStage::Compute, target));
+    auto pushed = pushGuest;
+    pushed.pushConstants[0] = std::byte{0x5a};
+    static_cast<void>(ConvertToMetal(pushed, ShaderStage::Compute, shifted));
+    stats = GetConversionCacheStatistics();
+    Require(stats.misses == 6 && stats.hits == 1, "guest descriptor words or push constants did not key the cache");
+    Require(ConvertToMetal(pushed, ShaderStage::Compute, shifted).pushConstantData == ConvertToMetal(pushed, ShaderStage::Compute, shifted).pushConstantData &&
+            GetConversionCacheStatistics().hits == 3, "repeated push conversion missed the cache");
+    ClearConversionCache();
+    stats = GetConversionCacheStatistics();
+    Require(stats.entries == 0 && stats.bytes == 0, "clearing the conversion cache kept entries");
+}
+
 int main() {
     try {
         const auto sample = Sample();
@@ -142,7 +186,8 @@ int main() {
         invalid = sample;
         invalid.bdaAbiVersion = 1;
         Reject([&] { static_cast<void>(ConvertToMetal(invalid, ShaderStage::Compute)); }, "incompatible BDA ABI");
-        std::cout << "PASS: descriptor reflection, implicit buffer lengths, preserved guest metadata, and unsupported-contract rejection\n";
+        VerifyConversionCache(sample, pushGuest, target);
+        std::cout << "PASS: descriptor reflection, implicit buffer lengths, preserved guest metadata, unsupported-contract rejection, and conversion cache keys\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

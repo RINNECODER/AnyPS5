@@ -369,6 +369,38 @@ void DepthBiasReset(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibra
 
 }
 
+// Depth/stencil states are shared by draws whose native descriptor matches; the dynamic stencil reference
+// is encoder state and must not split them, while any compare, write or stencil operation change must.
+void DepthStencilCache(id<MTLDevice> device) {
+    auto state = BasicState();
+    Graphics::DepthTarget depth{};
+    depth.format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+    state.depth = depth;
+    state.depthTest = true;
+    state.depthWrite = true;
+    state.depthCompare = VK_COMPARE_OP_LESS;
+    state.stencilTest = true;
+    state.stencilFront = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_INCREMENT_AND_WRAP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_EQUAL, 255, 255, 7};
+    state.stencilBack = state.stencilFront;
+    const auto first = Metal::CreateDepthStencilState(device, state);
+    auto reference = state;
+    reference.stencilFront.reference = 8;
+    Require(Metal::CreateDepthStencilState(device, reference) == first, "a stencil reference change rebuilt the depth/stencil state");
+    auto compare = state;
+    compare.depthCompare = VK_COMPARE_OP_GREATER;
+    auto write = state;
+    write.depthWrite = false;
+    auto stencil = state;
+    stencil.stencilBack.passOp = VK_STENCIL_OP_REPLACE;
+    auto mask = state;
+    mask.stencilFront.writeMask = 15;
+    for (const auto& variant : {compare, write, stencil, mask}) {
+        const auto native = Metal::CreateDepthStencilState(device, variant);
+        Require(native != first && Metal::CreateDepthStencilState(device, variant) == native,
+                "depth/stencil variants shared a state, or an identical variant was rebuilt");
+    }
+}
+
 int main() {
     @autoreleasepool {
         try {
@@ -379,6 +411,7 @@ int main() {
             const auto library = Library(device);
             BlendScissor(device, queue, library);
             DepthStencil(device, queue, library);
+            DepthStencilCache(device);
             ViewportWinding(device, queue, library);
             ClipDepth(device, queue, library);
             DepthBounds(device, queue, library);

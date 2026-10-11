@@ -1,9 +1,14 @@
 #include "MetalTestSupport.hpp"
 #include "MetalShaderPipeline.hpp"
+#include "MetalPipelineCache.hpp"
 #include <spirv.hpp>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <random>
 
 namespace {
 
@@ -404,10 +409,106 @@ void Render(const MetalTests::Context& context, bool negativeOneToOne = false) {
     }
 }
 
+MTLRenderPipelineDescriptor* ColorDescriptor(MTLPixelFormat format, bool blend = false) {
+    MTLRenderPipelineDescriptor* descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.colorAttachments[0].pixelFormat = format;
+    descriptor.colorAttachments[0].blendingEnabled = blend;
+    return descriptor;
+}
+
+void RenderVariant(const MetalTests::Context& context, MTLRenderPipelineDescriptor* descriptor, bool fixup = false) {
+    TargetOptions vertexOptions;
+    vertexOptions.fixupClipSpace = fixup;
+    TargetOptions fragmentOptions;
+    fragmentOptions.pushConstantOffsetBytes = 16;
+    MetalRenderPipeline pipeline(context.device, ConvertToMetal(VertexFixture(), ShaderStage::Vertex, vertexOptions),
+                                 ConvertToMetal(FragmentFixture(), ShaderStage::Fragment, fragmentOptions), descriptor);
+}
+
+// Libraries, pipelines and their reflection are reused only for identical native inputs, and a warm
+// pipeline still produces the cold pipeline's results (Compute and Render check their output).
+void Caches(const MetalTests::Context& context) {
+    ClearMetalPipelineCaches();
+    ClearConversionCache();
+    Compute(context);
+    const auto cold = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(cold.libraries.misses == 1 && cold.libraries.hits == 0 && cold.computePipelines.misses == 1 &&
+                        cold.computePipelines.hits == 0, "cold compute pipeline was not a counted library and pipeline miss");
+    Compute(context);
+    const auto warm = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(warm.libraries.misses == 1 && warm.computePipelines.misses == 1 && warm.computePipelines.hits >= 1,
+                        "identical compute pipeline recompiled its library or pipeline state");
+
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm));
+    const auto renderCold = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(renderCold.renderPipelines.misses == 1 && renderCold.renderPipelines.hits == 0, "cold render pipeline was not a counted miss");
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm));
+    auto stats = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(stats.renderPipelines.hits == 1 && stats.renderPipelines.misses == 1 &&
+                        stats.libraries.misses == renderCold.libraries.misses, "identical render pipeline was rebuilt");
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA16Float));
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm, true));
+    stats = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(stats.renderPipelines.misses == 3 && stats.renderPipelines.hits == 1 &&
+                        stats.libraries.misses == renderCold.libraries.misses,
+                        "attachment format or blend variants shared a pipeline, or rebuilt identical libraries");
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm), true);
+    stats = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(stats.renderPipelines.misses == 4 && stats.libraries.misses == renderCold.libraries.misses + 1,
+                        "a clip-space fixup variant shared the unfixed vertex library or pipeline");
+    Render(context);
+    Render(context);
+    Render(context, true);
+    MetalTests::Require(GetMetalPipelineCacheStatistics().renderPipelines.hits >= 2, "repeated draws did not reuse their pipeline");
+}
+
+void SetEnvironment(const char* name, const char* value) {
+    if (value == nullptr) unsetenv(name);
+    else setenv(name, value, 1);
+}
+
+// The binary archive lives in the shader cache directory, is written on flush, survives a reload, and
+// a corrupt or disabled archive never fails pipeline creation.
+void Archive(const MetalTests::Context& context) {
+    const auto directory = std::filesystem::temp_directory_path() / ("aps5-metal-archive-test-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(directory);
+    SetEnvironment("ANYPS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("APS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.c_str());
+    ClearMetalPipelineCaches();
+    const auto path = MetalPipelineArchivePath(context.device);
+    MetalTests::Require(!path.empty() && path.parent_path() == directory, "the pipeline archive is not under the shader cache directory");
+    Compute(context);
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm));
+    auto stats = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(stats.archiveAdditions >= 2 && stats.archiveFailures == 0, "new pipelines were not added to the binary archive");
+    MetalTests::Require(FlushMetalPipelineArchives() && std::filesystem::file_size(path) > 0, "the binary archive was not written");
+    ClearMetalPipelineCaches();
+    Compute(context);
+    MetalTests::Require(GetMetalPipelineCacheStatistics().archiveLoads == 1, "the written binary archive was not loaded");
+    ClearMetalPipelineCaches();
+    { std::ofstream(path, std::ios::binary | std::ios::trunc) << "not a metal binary archive"; }
+    Compute(context);
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm));
+    MetalTests::Require(GetMetalPipelineCacheStatistics().archiveLoads == 0, "a corrupt binary archive was reported as loaded");
+    ClearMetalPipelineCaches();
+    SetEnvironment("APS5_NO_SHADER_CACHE", "1");
+    MetalTests::Require(MetalPipelineArchivePath(context.device).empty(), "APS5_NO_SHADER_CACHE=1 kept the binary archive");
+    Compute(context);
+    MetalTests::Require(GetMetalPipelineCacheStatistics().archiveAdditions == 0, "a disabled disk cache still archived pipelines");
+    ClearMetalPipelineCaches();
+    SetEnvironment("APS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("ANYPS5_SHADER_CACHE_DIR", nullptr);
+    SetEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
+    std::filesystem::remove_all(directory);
+}
+
 }
 
 void RunShaderPipelineTests(const MetalTests::Context& context) {
     Compute(context);
     Render(context);
     Render(context, true);
+    Caches(context);
+    Archive(context);
 }
