@@ -9,6 +9,7 @@
 #include <span>
 #include <utility>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -193,13 +194,34 @@ void module(const char* path) {
     require(unwind(*sysmoduleGate, 0x10, Output).first == Search, "libSceSysmodule unwind found an unmapped address");
     std::cout << "PASS module information from the loaded image\n";
 }
+// Captures what the providers report on stderr while a guest runs.
+struct CapturedErrors {
+    std::ostringstream text;
+    std::streambuf* previous = std::cerr.rdbuf(text.rdbuf());
+    ~CapturedErrors() { std::cerr.rdbuf(previous); }
+};
 void debug(const char* path) {
-    Session s(path, 7); const auto r = s.run();
+    Session s(path, 7);
+    CapturedErrors errors;
+    const auto r = s.run();
+    const auto events = errors.text.str();
     require(r[10] == 0 && r[11] == 0 && r[12] == 0, "Debug exceptions did not continue");
+    // Each event names the guest return address and frame chain that raised it.
+    const auto event = events.find("\"event\":\"kernel_debug_exception\"");
+    const auto caller = events.find("\"return_address\":", event);
+    require(event != std::string::npos && caller != std::string::npos &&
+            events.find("\"frames\":[", caller) != std::string::npos, events.c_str());
+    const auto address = std::stoull(events.substr(caller + 17));
+    require(address > Bias && address < Bias + 0x100000, "Debug exception return address is outside the guest image");
     std::cout << "PASS debug exceptions continue\n";
 }
 void posix(const char* path) {
-    Session s(path, 8); const auto r = s.run();
+    Session s(path, 8);
+    CapturedErrors errors;
+    const auto r = s.run();
+    const auto events = errors.text.str();
+    require(events.find("\"event\":\"module_load_failed\",\"path\":\"") != std::string::npos &&
+            events.find("\"error\":2147614722}") != std::string::npos, "Unknown module load was not reported");
     constexpr std::uint64_t NoEntry = 0x80020002;
     require(r[10] == 0 && r[11] == 0, "Loading an already present module by path did not return its handle and start result");
     require(r[12] == NoEntry && r[13] == Fault, "Unknown module or null path did not return ENOENT or EFAULT");
