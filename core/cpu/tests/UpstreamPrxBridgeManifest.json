@@ -1,4 +1,355 @@
 {
+  "libSceAcm": {
+    "bridged": {
+      "sceAcmBatchStartBuffers": {
+        "nid": "8fe55ktlNVo",
+        "returns": [
+          "0",
+          "0x80e30002"
+        ],
+        "signature": "int(AcmContextId context, uint32_t batch_info_count, const AcmBatchInfo* const* batch_info, AcmBatchError* batch_error, AcmBatchId* batch)"
+      },
+      "sceAcmBatchWait": {
+        "nid": "RLN3gRlXJLE",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(AcmContextId context, AcmBatchId batch, uint32_t timeout)"
+      },
+      "sceAcmContextCreate": {
+        "nid": "ZIXln2K3XMk",
+        "returns": [
+          "0",
+          "0x80e30002"
+        ],
+        "signature": "int(AcmContextId* context)"
+      }
+    },
+    "native": {
+      "sceAcm_Panner": {
+        "nid": "LA4RCNKnFjg",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      }
+    },
+    "skipped": {
+      "sceAcmBatchStartBuffer": "not imported by the target title; audit before bridging",
+      "sceAcmContextDestroy": "not imported by the target title; audit before bridging",
+      "sceAcm_ConvReverb_SharedInput": "not imported by the target title; audit before bridging",
+      "sceAcm_FFT": "NotImplemented upstream"
+    }
+  },
+  "libSceAppContentUtil": {
+    "bridged": {},
+    "native": {
+      "sceAppContentAddcontMount": {
+        "nid": "VANhIWcqYak",
+        "returns": [
+          "0x80d90002",
+          "0x80d90005"
+        ],
+        "signature": "int(uint32_t service_label, const NpUnifiedEntitlementLabel* entitlement_label, AppContentMountPoint* mount_point)"
+      },
+      "sceAppContentAppParamGetInt": {
+        "nid": "99b82IKXpH4",
+        "returns": [
+          "0",
+          "0x80d90002"
+        ],
+        "signature": "int(uint32_t param_id, int32_t* value)"
+      },
+      "sceAppContentInitialize": {
+        "nid": "R9lA82OraNs",
+        "returns": [
+          "0",
+          "0x80d90002"
+        ],
+        "signature": "int(const AppContentInitParam* init_param, AppContentBootParam* boot_param)"
+      },
+      "sceAppContentTemporaryDataMount2": {
+        "nid": "buYbeLOGWmA",
+        "returns": [
+          "0",
+          "0x80d90002",
+          "0x80d90003"
+        ],
+        "signature": "int(uint32_t option, AppContentMountPoint* mountPoint)"
+      },
+      "sceAppContentTemporaryDataUnmount": {
+        "nid": "bcolXMmp6qQ",
+        "returns": [
+          "0",
+          "0x80d90002",
+          "0x80d90004"
+        ],
+        "signature": "int(const AppContentMountPoint* mountPoint)"
+      }
+    },
+    "skipped": {
+      "sceAppContentAddcontEnqueueDownload": "NotImplemented upstream",
+      "sceAppContentAddcontUnmount": "not imported by the target title; audit before bridging",
+      "sceAppContentDownloadDataGetAvailableSpaceKb": "not imported by the target title; audit before bridging",
+      "sceAppContentGetAddcontInfo": "not imported by the target title; audit before bridging",
+      "sceAppContentGetAddcontInfoList": "not imported by the target title; audit before bridging",
+      "sceAppContentTemporaryDataFormat": "not imported by the target title; audit before bridging",
+      "sceAppContentTemporaryDataGetAvailableSpaceKb": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceConvertKeycode": {
+    "bridged": {
+      "sceConvertKeycodeGetVirtualKeycode": {
+        "nid": "vIsoJsLvvlM",
+        "returns": [
+          "kErrInvalidAddress"
+        ],
+        "signature": "int(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3)"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceConvertKeycodeGetCharacterFromKeyboardData": "NotImplemented upstream",
+      "sceConvertKeycodeGetImeKeyboardType": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceErrorDialog": {
+    "bridged": {
+      "sceErrorDialogInitialize": {
+        "nid": "I88KChlynSs",
+        "returns": [
+          "0",
+          "kErrAlreadyInitialized"
+        ],
+        "signature": "int()"
+      },
+      "sceErrorDialogOpen": {
+        "nid": "M2ZF-ClLhgY",
+        "returns": [
+          "0",
+          "kErrInvalidState",
+          "kErrParam"
+        ],
+        "signature": "int(const void* param)"
+      },
+      "sceErrorDialogTerminate": {
+        "nid": "9XAxK2PMwk8",
+        "returns": [
+          "0",
+          "kErrNotInitialized"
+        ],
+        "signature": "int()"
+      },
+      "sceErrorDialogUpdateStatus": {
+        "nid": "WWiGuh9XfgQ",
+        "returns": [
+          "g_status"
+        ],
+        "signature": "int()"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceErrorDialogClose": "not imported by the target title; audit before bridging",
+      "sceErrorDialogGetStatus": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceIme": {
+    "bridged": {
+      "sceImeKeyboardClose": {
+        "nid": "PMVehSlfZ94",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int32_t user_id)"
+      },
+      "sceImeKeyboardGetInfo": {
+        "nid": "VkqLPArfFdc",
+        "returns": [
+          "ErrorInvalidAddress",
+          "g_openKeyboards.empty() ? ErrorNotOpened : ErrorNoResourceId"
+        ],
+        "signature": "int(uint32_t resource_id, KeyboardInfo* info)"
+      },
+      "sceImeKeyboardOpen": {
+        "nid": "eaFXjfJv3xs",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int32_t user_id, const KeyboardParam* param)"
+      }
+    },
+    "native": {
+      "sceImeUpdate": {
+        "nid": "-4GCfYdNF1s",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(EventHandler handler)"
+      }
+    },
+    "skipped": {
+      "sceImeClose_nid_postfix": "not imported by the target title; audit before bridging",
+      "sceImeGetPanelPositionAndForm": "not imported by the target title; audit before bridging",
+      "sceImeGetPanelSize": "not imported by the target title; audit before bridging",
+      "sceImeKeyboardGetResourceId": "not imported by the target title; audit before bridging",
+      "sceImeKeyboardSetMode": "not imported by the target title; audit before bridging",
+      "sceImeOpen_nid_postfix": "NotImplemented upstream",
+      "sceImeParamInit": "not imported by the target title; audit before bridging",
+      "sceImeSetCaret": "not imported by the target title; audit before bridging",
+      "sceImeSetText": "not imported by the target title; audit before bridging",
+      "sceImeSetTextGeometry": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceImeDialog": {
+    "bridged": {},
+    "native": {
+      "sceImeDialogAbort": {
+        "nid": "oBmw4xrmfKs",
+        "returns": [
+          "0",
+          "ErrorNotOpened"
+        ],
+        "signature": "int()"
+      },
+      "sceImeDialogGetPanelSizeExtended": {
+        "nid": "CRD+jSErEJQ",
+        "returns": [
+          "sceImeDialogGetPanelSize(param, width, height)"
+        ],
+        "signature": "int(const Param* param, const ExtendedParam* extended, uint32_t* width, uint32_t* height)"
+      },
+      "sceImeDialogGetResult": {
+        "nid": "x01jxu+vxlc",
+        "returns": [
+          "0",
+          "ErrorNotOpened"
+        ],
+        "signature": "int(Result* result)"
+      },
+      "sceImeDialogGetStatus": {
+        "nid": "IADmD4tScBY",
+        "returns": [
+          "status.load()"
+        ],
+        "signature": "int()"
+      },
+      "sceImeDialogInit": {
+        "nid": "NUeBrN7hzf0",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(const Param* param, const ExtendedParam* extended)"
+      },
+      "sceImeDialogTerm": {
+        "nid": "gyTyVn+bXMw",
+        "returns": [
+          "0",
+          "ErrorNotOpened"
+        ],
+        "signature": "int()"
+      }
+    },
+    "skipped": {
+      "sceImeDialogGetPanelPositionAndForm": "not imported by the target title; audit before bridging",
+      "sceImeDialogGetPanelSize": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceMouse": {
+    "bridged": {
+      "sceMouseInit": {
+        "nid": "Qs0wWulgl7U",
+        "returns": [
+          "Mouse::Initialize()"
+        ],
+        "signature": "int()"
+      },
+      "sceMouseOpen": {
+        "nid": "RaqxZIf6DvE",
+        "returns": [
+          "Mouse::Open(userId, type, index, static_cast<const MouseOpenParam*>(param))"
+        ],
+        "signature": "int(int userId, std::int32_t type, std::int32_t index, const void* param)"
+      },
+      "sceMouseRead": {
+        "nid": "x8qnXqh-tiM",
+        "returns": [
+          "Mouse::Read(handle, data, num)"
+        ],
+        "signature": "int(std::int32_t handle, MouseData* data, std::int32_t num)"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceMouseClose": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceMsgDialog": {
+    "bridged": {
+      "sceMsgDialogInitialize": {
+        "nid": "lDqxaY1UbEo",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceMsgDialogOpen": {
+        "nid": "b06Hh0DPEaE",
+        "returns": [
+          "0",
+          "COMMON_DIALOG_ERROR_ARG_NULL",
+          "COMMON_DIALOG_ERROR_NOT_INITIALIZED"
+        ],
+        "signature": "int(const void* param)"
+      },
+      "sceMsgDialogTerminate": {
+        "nid": "ePw-kqZmelo",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceMsgDialogUpdateStatus": {
+        "nid": "6fIC3XKt2k0",
+        "returns": [
+          "g_status.load()"
+        ],
+        "signature": "int()"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceMsgDialogClose": "not imported by the target title; audit before bridging",
+      "sceMsgDialogGetResult": "not imported by the target title; audit before bridging",
+      "sceMsgDialogGetStatus": "not imported by the target title; audit before bridging",
+      "sceMsgDialogProgressBarInc": "not imported by the target title; audit before bridging",
+      "sceMsgDialogProgressBarSetMsg": "not imported by the target title; audit before bridging",
+      "sceMsgDialogProgressBarSetValue": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceNetCtl": {
+    "bridged": {
+      "sceNetCtlGetInfo": {
+        "nid": "obuxdTiwkF8",
+        "returns": [
+          "0x80412108"
+        ],
+        "signature": "int(int code, NetCtlInfo* info)"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceNetCtlCheckCallback": "not imported by the target title; audit before bridging",
+      "sceNetCtlGetNatInfo": "not imported by the target title; audit before bridging",
+      "sceNetCtlGetResult": "not imported by the target title; audit before bridging",
+      "sceNetCtlGetState": "not imported by the target title; audit before bridging",
+      "sceNetCtlGetStateV6": "not imported by the target title; audit before bridging",
+      "sceNetCtlInit": "not imported by the target title; audit before bridging",
+      "sceNetCtlRegisterCallback": "not imported by the target title; audit before bridging",
+      "sceNetCtlTerm": "not imported by the target title; audit before bridging",
+      "sceNetCtlUnregisterCallback": "not imported by the target title; audit before bridging"
+    }
+  },
   "libSceNpAuth": {
     "bridged": {
       "sceNpAuthAbortRequest": {
@@ -38,10 +389,71 @@
         "signature": "int(int req_id, int* result)"
       }
     },
+    "native": {
+      "sceNpAuthGetIdTokenV3": {
+        "nid": "RdsFVsgSpZY",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int req_id, const void* param, void* id_token)"
+      }
+    },
     "skipped": {
       "sceNpAuthCreateRequest": "NotImplemented upstream",
-      "sceNpAuthGetIdTokenV3": "NotImplemented upstream",
       "sceNpAuthWaitAsync": "NotImplemented upstream"
+    }
+  },
+  "libSceNpCommerce": {
+    "bridged": {
+      "sceNpCommerceDialogGetResult": {
+        "nid": "r42bWcQbtZY",
+        "returns": [
+          "0",
+          "COMMON_DIALOG_ERROR_ARG_NULL",
+          "COMMON_DIALOG_ERROR_NOT_FINISHED"
+        ],
+        "signature": "int(void* result)"
+      },
+      "sceNpCommerceDialogInitialize": {
+        "nid": "0aR2aWmQal4",
+        "returns": [
+          "0",
+          "COMMON_DIALOG_ERROR_ALREADY_INITIALIZED"
+        ],
+        "signature": "int()"
+      },
+      "sceNpCommerceDialogOpen": {
+        "nid": "DfSCDRA3EjY",
+        "returns": [
+          "0",
+          "COMMON_DIALOG_ERROR_ARG_NULL",
+          "COMMON_DIALOG_ERROR_NOT_INITIALIZED"
+        ],
+        "signature": "int(const void* param)"
+      },
+      "sceNpCommerceDialogTerminate": {
+        "nid": "m-I92Ab50W8",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceNpCommerceDialogUpdateStatus": {
+        "nid": "LR5cwFMMCVE",
+        "returns": [
+          "g_status"
+        ],
+        "signature": "int()"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceNpCommerceDialogClose": "not imported by the target title; audit before bridging",
+      "sceNpCommerceDialogGetStatus": "not imported by the target title; audit before bridging",
+      "sceNpCommerceDialogOpen2": "NotImplemented upstream",
+      "sceNpCommerceHidePsStoreIcon": "not imported by the target title; audit before bridging",
+      "sceNpCommerceSetPsStoreIconLayout": "not imported by the target title; audit before bridging",
+      "sceNpCommerceShowPsStoreIcon": "not imported by the target title; audit before bridging"
     }
   },
   "libSceNpEntitlementAccess": {
@@ -158,6 +570,7 @@
         "signature": "int()"
       }
     },
+    "native": {},
     "skipped": {
       "sceNpEntitlementAccessGetPftFlag": "NotImplemented upstream",
       "sceNpEntitlementAccessPollServiceEntitlementInfo": "NotImplemented upstream",
@@ -165,6 +578,40 @@
       "sceNpEntitlementAccessRequestServiceEntitlementInfo": "NotImplemented upstream",
       "sceNpEntitlementAccessRequestUnifiedEntitlementInfo": "NotImplemented upstream"
     }
+  },
+  "libSceNpGameIntent": {
+    "bridged": {
+      "sceNpGameIntentGetPropertyValueString": {
+        "nid": "rPl0INNc-M8",
+        "returns": [
+          "NpGameIntentErrorValueNotFound"
+        ],
+        "signature": "int(const NpGameIntentData* intentData, const char* key, char* valueBuf, size_t bufSize)"
+      },
+      "sceNpGameIntentInitialize": {
+        "nid": "m87BHxt-H60",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(const void* initParam)"
+      },
+      "sceNpGameIntentReceiveIntent": {
+        "nid": "jEIXUAr9XE8",
+        "returns": [
+          "NpGameIntentErrorIntentNotFound"
+        ],
+        "signature": "int(NpGameIntentInfo* intentInfo)"
+      },
+      "sceNpGameIntentTerminate": {
+        "nid": "0HBYxYAjmf0",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      }
+    },
+    "native": {},
+    "skipped": {}
   },
   "libSceNpManager": {
     "bridged": {
@@ -345,6 +792,7 @@
         "signature": "int(int callback_id)"
       }
     },
+    "native": {},
     "skipped": {
       "sceNpGetUserIdByAccountId": "NotImplemented upstream; hand-written in SceNpOfflineImports",
       "sceNpRegisterGamePresenceCallback": "callback; NotImplemented upstream; hand-written in SceNpOfflineImports",
@@ -355,6 +803,212 @@
       "sceNpRegisterStateCallbackA": "callback; hand-written in SceNpOfflineImports",
       "sceNpSetContentRestriction": "NotImplemented upstream; hand-written in SceNpOfflineImports",
       "sceNpUnregisterNpReachabilityStateCallback": "shares registration state with sceNpRegisterNpReachabilityStateCallback; hand-written in SceNpOfflineImports"
+    }
+  },
+  "libSceNpTrophy2": {
+    "bridged": {
+      "sceNpTrophy2CreateContext": {
+        "nid": "Bagshr7OQ6Q",
+        "returns": [
+          "SCE_NP_TROPHY2_OK"
+        ],
+        "signature": "int(int* context, int user_id, uint32_t service_label, uint64_t options)"
+      },
+      "sceNpTrophy2CreateHandle": {
+        "nid": "Gz1rmUZpROM",
+        "returns": [
+          "SCE_NP_TROPHY2_OK"
+        ],
+        "signature": "int(int* handle)"
+      },
+      "sceNpTrophy2DestroyContext": {
+        "nid": "sysY2FHYff4",
+        "returns": [
+          "SCE_NP_TROPHY2_OK"
+        ],
+        "signature": "int(int context)"
+      },
+      "sceNpTrophy2DestroyHandle": {
+        "nid": "d8P11CI40KE",
+        "returns": [
+          "SCE_NP_TROPHY2_OK"
+        ],
+        "signature": "int(int handle)"
+      },
+      "sceNpTrophy2GetGameInfo": {
+        "nid": "4IzqhhUQ3nk",
+        "returns": [
+          "SCE_NP_TROPHY2_OK"
+        ],
+        "signature": "int(int context, int handle, NpTrophy2GameDetails* details, NpTrophy2GameData* data)"
+      },
+      "sceNpTrophy2GetTrophyInfo": {
+        "nid": "EwNylPdWUTM",
+        "returns": [
+          "SCE_NP_TROPHY2_OK"
+        ],
+        "signature": "int(int context, int handle, int trophy_id, NpTrophy2Details* details, NpTrophy2Data* data)"
+      },
+      "sceNpTrophy2RegisterContext": {
+        "nid": "bIDov3wBu5Q",
+        "returns": [
+          "SCE_NP_TROPHY2_OK"
+        ],
+        "signature": "int(int context, int handle, uint64_t options)"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceNpTrophy2AbortHandle": "not imported by the target title; audit before bridging",
+      "sceNpTrophy2GetGameIcon": "not imported by the target title; audit before bridging",
+      "sceNpTrophy2GetGroupIcon": "not imported by the target title; audit before bridging",
+      "sceNpTrophy2GetGroupInfo": "not imported by the target title; audit before bridging",
+      "sceNpTrophy2GetGroupInfoArray": "not imported by the target title; audit before bridging",
+      "sceNpTrophy2GetRewardIcon": "NotImplemented upstream",
+      "sceNpTrophy2GetTrophyIcon": "not imported by the target title; audit before bridging",
+      "sceNpTrophy2GetTrophyInfoArray": "not imported by the target title; audit before bridging",
+      "sceNpTrophy2RegisterUnlockCallback": "not imported by the target title; audit before bridging",
+      "sceNpTrophy2ShowTrophyList": "NotImplemented upstream",
+      "sceNpTrophy2UnregisterUnlockCallback": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceNpUniversalDataSystem": {
+    "bridged": {
+      "sceNpUniversalDataSystemCreateContext": {
+        "nid": "5zBnau1uIEo",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(int* context, int user_id, uint32_t service_label, uint64_t options)"
+      },
+      "sceNpUniversalDataSystemCreateHandle": {
+        "nid": "hT0IAEvN+M0",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(int* handle)"
+      },
+      "sceNpUniversalDataSystemDestroyContext": {
+        "nid": "wB7IWzGp2v0",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(int context)"
+      },
+      "sceNpUniversalDataSystemDestroyHandle": {
+        "nid": "AUIHb7jUX3I",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(int handle)"
+      },
+      "sceNpUniversalDataSystemEventPropertyArraySetString": {
+        "nid": "4llLk7YJRTE",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(NpUniversalDataSystemEventPropertyArray* array, const char* value)"
+      },
+      "sceNpUniversalDataSystemEventPropertyObjectSetInt32": {
+        "nid": "YE4dbtbz6OE",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(NpUniversalDataSystemEventPropertyObject* object, const char* key, int32_t value)"
+      },
+      "sceNpUniversalDataSystemEventPropertyObjectSetString": {
+        "nid": "MfDb+4Nln64",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(NpUniversalDataSystemEventPropertyObject* object, const char* key, const char* value)"
+      },
+      "sceNpUniversalDataSystemEventPropertyObjectSetUInt32": {
+        "nid": "AzD4irAcKE4",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(NpUniversalDataSystemEventPropertyObject* object, const char* key, uint32_t value)"
+      },
+      "sceNpUniversalDataSystemInitialize": {
+        "nid": "sjaobBgqeB4",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(const NpUniversalDataSystemInitParam* param)"
+      },
+      "sceNpUniversalDataSystemPostEvent": {
+        "nid": "CzkKf7ahIyU",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(int context, int handle, const void* event, uint64_t options)"
+      },
+      "sceNpUniversalDataSystemRegisterContext": {
+        "nid": "tpFJ8LIKvPw",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(int context, int handle, uint64_t options)"
+      }
+    },
+    "native": {
+      "sceNpUniversalDataSystemCreateEvent": {
+        "nid": "p+GcLqwpL9M",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(const char* event_name, const NpUniversalDataSystemEventPropertyObject* prop, NpUniversalDataSystemEvent** new_event, NpUniversalDataSystemEventPropertyObject** prop_ptr)"
+      },
+      "sceNpUniversalDataSystemDestroyEvent": {
+        "nid": "wG+84pnNIuo",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(NpUniversalDataSystemEvent* event)"
+      },
+      "sceNpUniversalDataSystemEventPropertyObjectSetArray": {
+        "nid": "Wxbg5x3pTXA",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(NpUniversalDataSystemEventPropertyObject* object, const char* key, const NpUniversalDataSystemEventPropertyArray* value, NpUniversalDataSystemEventPropertyArray** value_ptr)"
+      },
+      "sceNpUniversalDataSystemEventPropertyObjectSetFloat32": {
+        "nid": "lbPlT4+QVcE",
+        "returns": [
+          "SCE_NP_UNIVERSAL_DATA_SYSTEM_OK"
+        ],
+        "signature": "int(NpUniversalDataSystemEventPropertyObject* object, const char* key, float value)"
+      }
+    },
+    "skipped": {
+      "sceNpUniversalDataSystemAbortHandle": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemCreateEventPropertyArray": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemCreateEventPropertyObject": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemDestroyEventPropertyArray": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemDestroyEventPropertyObject": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventEstimateSize": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetArray": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetBinary": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetBool": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetFloat32": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetFloat64": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetInt32": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetInt64": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetObject": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetUInt32": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyArraySetUInt64": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyObjectSetBinary": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyObjectSetBool": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyObjectSetFloat64": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyObjectSetInt64": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyObjectSetObject": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventPropertyObjectSetUInt64": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemEventToString": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemGetMemoryStat": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemGetStorageStat": "not imported by the target title; audit before bridging",
+      "sceNpUniversalDataSystemTerminate": "not imported by the target title; audit before bridging"
     }
   },
   "libSceNpWebApi2": {
@@ -513,10 +1167,385 @@
         "signature": "int(int lib_ctx_id)"
       }
     },
+    "native": {},
     "skipped": {
       "sceNpWebApi2PushEventRegisterCallback": "callback; hand-written in SceNpOfflineImports",
       "sceNpWebApi2PushEventRegisterPushContextCallback": "callback registration (declared without parameters upstream); hand-written in SceNpOfflineImports",
       "sceNpWebApi2SetRequestTimeout": "NotImplemented upstream; hand-written in SceNpOfflineImports"
+    }
+  },
+  "libScePlayerInvitationDialog": {
+    "bridged": {
+      "scePlayerInvitationDialogInitialize": {
+        "nid": "JDwx3Bl4bB4",
+        "returns": [
+          "0"
+        ],
+        "signature": "std::int32_t()"
+      },
+      "scePlayerInvitationDialogOpen": {
+        "nid": "rKPTlHwGa4k",
+        "returns": [
+          "0"
+        ],
+        "signature": "std::int32_t(const ScePlayerInvitationDialogParam* param)"
+      },
+      "scePlayerInvitationDialogTerminate": {
+        "nid": "gDm5a6GSE94",
+        "returns": [
+          "0"
+        ],
+        "signature": "std::int32_t()"
+      },
+      "scePlayerInvitationDialogUpdateStatus": {
+        "nid": "kFhuwHrIUqs",
+        "returns": [
+          "status()"
+        ],
+        "signature": "std::int32_t()"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "scePlayerInvitationDialogClose": "not imported by the target title; audit before bridging",
+      "scePlayerInvitationDialogGetResult": "not imported by the target title; audit before bridging",
+      "scePlayerInvitationDialogGetStatus": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceRtc": {
+    "bridged": {
+      "sceRtcFormatRFC3339": {
+        "nid": "WJ3rqFwymew",
+        "returns": [
+          "0",
+          "0x80b50002",
+          "0x80b50003",
+          "result"
+        ],
+        "signature": "int(char* date_time, const RtcTick* utc, int time_zone_minutes)"
+      },
+      "sceRtcParseRFC3339": {
+        "nid": "99bMGglFW3I",
+        "returns": [
+          "0x80b50002",
+          "parseRfc3339(utc, date_time)"
+        ],
+        "signature": "int(RtcTick* utc, const char* date_time)"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceRtcCheckValid": "not imported by the target title; audit before bridging",
+      "sceRtcConvertLocalTimeToUtc": "not imported by the target title; audit before bridging",
+      "sceRtcConvertUtcToLocalTime": "not imported by the target title; audit before bridging",
+      "sceRtcFormatRFC2822": "not imported by the target title; audit before bridging",
+      "sceRtcFormatRFC2822LocalTime": "not imported by the target title; audit before bridging",
+      "sceRtcFormatRFC3339LocalTime": "not imported by the target title; audit before bridging",
+      "sceRtcGetCurrentClock": "not imported by the target title; audit before bridging",
+      "sceRtcGetCurrentClockLocalTime": "not imported by the target title; audit before bridging",
+      "sceRtcGetCurrentNetworkTick": "not imported by the target title; audit before bridging",
+      "sceRtcGetCurrentTick": "not imported by the target title; audit before bridging",
+      "sceRtcGetDayOfWeek": "not imported by the target title; audit before bridging",
+      "sceRtcGetDaysInMonth": "not imported by the target title; audit before bridging",
+      "sceRtcGetDosTime": "not imported by the target title; audit before bridging",
+      "sceRtcGetTick": "not imported by the target title; audit before bridging",
+      "sceRtcGetTickResolution": "not imported by the target title; audit before bridging",
+      "sceRtcGetTime_t": "not imported by the target title; audit before bridging",
+      "sceRtcGetWin32FileTime": "not imported by the target title; audit before bridging",
+      "sceRtcIsLeapYear": "not imported by the target title; audit before bridging",
+      "sceRtcParseDateTime": "not imported by the target title; audit before bridging",
+      "sceRtcSetDosTime": "not imported by the target title; audit before bridging",
+      "sceRtcSetTick": "not imported by the target title; audit before bridging",
+      "sceRtcSetTime_t": "not imported by the target title; audit before bridging",
+      "sceRtcSetWin32FileTime": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddDays": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddHours": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddMicroseconds": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddMinutes": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddMonths": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddSeconds": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddTicks": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddWeeks": "not imported by the target title; audit before bridging",
+      "sceRtcTickAddYears": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceSaveDataDialog": {
+    "bridged": {},
+    "native": {
+      "sceSaveDataDialogInitialize": {
+        "nid": "s9e3+YpRnzw",
+        "returns": [
+          "SAVE_DATA_DIALOG_ERROR_ALREADY_INITIALIZED",
+          "SAVE_DATA_DIALOG_OK"
+        ],
+        "signature": "int()"
+      },
+      "sceSaveDataDialogOpen": {
+        "nid": "4tPhsP6FpDI",
+        "returns": [
+          "SAVE_DATA_DIALOG_ERROR_ARG_NULL",
+          "SAVE_DATA_DIALOG_ERROR_INVALID_STATE",
+          "SAVE_DATA_DIALOG_OK"
+        ],
+        "signature": "int(const void* param)"
+      },
+      "sceSaveDataDialogTerminate": {
+        "nid": "YuH2FA7azqQ",
+        "returns": [
+          "SAVE_DATA_DIALOG_OK"
+        ],
+        "signature": "int()"
+      },
+      "sceSaveDataDialogUpdateStatus": {
+        "nid": "KK3Bdg1RWK0",
+        "returns": [
+          "g_status"
+        ],
+        "signature": "int()"
+      }
+    },
+    "skipped": {
+      "sceSaveDataDialogClose": "not imported by the target title; audit before bridging",
+      "sceSaveDataDialogGetResult": "not imported by the target title; audit before bridging",
+      "sceSaveDataDialogGetStatus": "not imported by the target title; audit before bridging",
+      "sceSaveDataDialogIsReadyToDisplay": "not imported by the target title; audit before bridging",
+      "sceSaveDataDialogProgressBarInc": "not imported by the target title; audit before bridging",
+      "sceSaveDataDialogProgressBarSetValue": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceSaveData_native": {
+    "bridged": {},
+    "native": {
+      "sceSaveDataCommit": {
+        "nid": "ie7qhZ4X0Cc",
+        "returns": [
+          "SAVE_DATA_OK"
+        ],
+        "signature": "int(const SaveDataCommitParam* param)"
+      },
+      "sceSaveDataCreateTransactionResource": {
+        "nid": "gjRZNnw0JPE",
+        "returns": [
+          "g_transaction_counter.fetch_add(1)"
+        ],
+        "signature": "int(uint32_t size)"
+      },
+      "sceSaveDataInitialize3": {
+        "nid": "TywrFKCoLGY",
+        "returns": [
+          "SAVE_DATA_OK"
+        ],
+        "signature": "int(const void* init)"
+      },
+      "sceSaveDataPrepare": {
+        "nid": "sDCBrmc61XU",
+        "returns": [
+          "SAVE_DATA_OK"
+        ],
+        "signature": "int(const SaveDataMountPoint* mount_point, const SaveDataPrepareParam* param)"
+      },
+      "sceSaveDataTerminate": {
+        "nid": "yKDy8S5yLA0",
+        "returns": [
+          "SAVE_DATA_ERROR_BUSY",
+          "SAVE_DATA_ERROR_NOT_INITIALIZED",
+          "SAVE_DATA_OK"
+        ],
+        "signature": "int()"
+      }
+    },
+    "skipped": {
+      "sceSaveDataBackup": "not imported by the target title; audit before bridging",
+      "sceSaveDataCancel": "NotImplemented upstream",
+      "sceSaveDataConvert": "NotImplemented upstream",
+      "sceSaveDataDelete": "not imported by the target title; audit before bridging",
+      "sceSaveDataDeleteTransactionResource": "not imported by the target title; audit before bridging",
+      "sceSaveDataDirNameSearch": "not imported by the target title; audit before bridging",
+      "sceSaveDataDirNameSearchPs4": "not imported by the target title; audit before bridging",
+      "sceSaveDataGetConvertProgress": "NotImplemented upstream",
+      "sceSaveDataGetEventResult": "not imported by the target title; audit before bridging",
+      "sceSaveDataGetMountInfo": "not imported by the target title; audit before bridging",
+      "sceSaveDataGetParam": "not imported by the target title; audit before bridging",
+      "sceSaveDataGetSaveDataMemory2": "not imported by the target title; audit before bridging",
+      "sceSaveDataLoadIcon": "not imported by the target title; audit before bridging",
+      "sceSaveDataMount3": "maps a save directory into the guest file system; needs GuestFiles save aliasing, not served yet",
+      "sceSaveDataSaveIcon": "not imported by the target title; audit before bridging",
+      "sceSaveDataSaveIconByPath": "not imported by the target title; audit before bridging",
+      "sceSaveDataSetParam": "not imported by the target title; audit before bridging",
+      "sceSaveDataSetSaveDataMemory2": "not imported by the target title; audit before bridging",
+      "sceSaveDataSetupSaveDataMemory2": "not imported by the target title; audit before bridging",
+      "sceSaveDataSyncSaveDataMemory": "not imported by the target title; audit before bridging",
+      "sceSaveDataTransferringMount": "not imported by the target title; audit before bridging",
+      "sceSaveDataTransferringMountPs4": "not imported by the target title; audit before bridging",
+      "sceSaveDataUmount2": "releases a save mount; not served until sceSaveDataMount3 is"
+    }
+  },
+  "libSceSigninDialog": {
+    "bridged": {
+      "sceSigninDialogInitialize": {
+        "nid": "mlYGfmqE3fQ",
+        "returns": [
+          "0",
+          "COMMON_DIALOG_ERROR_ALREADY_INITIALIZED"
+        ],
+        "signature": "int()"
+      },
+      "sceSigninDialogOpen": {
+        "nid": "JlpJVoRWv7U",
+        "returns": [
+          "0",
+          "COMMON_DIALOG_ERROR_ARG_NULL",
+          "COMMON_DIALOG_ERROR_BUSY",
+          "COMMON_DIALOG_ERROR_NOT_INITIALIZED"
+        ],
+        "signature": "int(const void* param)"
+      },
+      "sceSigninDialogTerminate": {
+        "nid": "LXlmS6PvJdU",
+        "returns": [
+          "0",
+          "COMMON_DIALOG_ERROR_NOT_INITIALIZED"
+        ],
+        "signature": "int()"
+      },
+      "sceSigninDialogUpdateStatus": {
+        "nid": "Bw31liTFT3A",
+        "returns": [
+          "g_status.load()"
+        ],
+        "signature": "int()"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceSigninDialogClose": "NotImplemented upstream",
+      "sceSigninDialogGetResult": "NotImplemented upstream",
+      "sceSigninDialogGetStatus": "NotImplemented upstream"
+    }
+  },
+  "libSceSysmodule": {
+    "bridged": {
+      "sceSysmoduleLoadModule": {
+        "nid": "g8cM39EUZ6o",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(std::uint16_t id)"
+      },
+      "sceSysmoduleUnloadModule": {
+        "nid": "eR2bZFAAU0Q",
+        "returns": [
+          "0",
+          "0x805a1001"
+        ],
+        "signature": "int(std::uint16_t id)"
+      }
+    },
+    "native": {},
+    "skipped": {
+      "sceSysmoduleGetModuleInfoForUnwind": "reads /proc/self/maps of the host process; host mappings say nothing about the guest",
+      "sceSysmoduleIsLoaded": "not imported by the target title; audit before bridging",
+      "sceSysmoduleLoadModuleInternal": "not imported by the target title; audit before bridging",
+      "sceSysmoduleLoadModuleInternalWithArg": "not imported by the target title; audit before bridging",
+      "sceSysmoduleUnloadModuleInternal": "not imported by the target title; audit before bridging"
+    }
+  },
+  "libSceSystemGesture": {
+    "bridged": {
+      "sceSystemGestureClose": {
+        "nid": "j4yXIA2jJ68",
+        "returns": [
+          "gesture_handle == 1 ? 0 : 0x80d10003"
+        ],
+        "signature": "int(int32_t gesture_handle)"
+      },
+      "sceSystemGestureCreateTouchRecognizer": {
+        "nid": "FWF8zkhr854",
+        "returns": [
+          "0",
+          "0x80d10002",
+          "0x80d10003"
+        ],
+        "signature": "int(int32_t gesture_handle, SystemGestureTouchRecognizer* recognizer, int32_t type, const SystemGestureRectangle* rectangle, const void* param)"
+      },
+      "sceSystemGestureFinalizePrimitiveTouchRecognizer": {
+        "nid": "3QYCmMlOlCY",
+        "returns": [
+          "0"
+        ],
+        "signature": "int()"
+      },
+      "sceSystemGestureGetTouchEventByIndex": {
+        "nid": "TSKvgSz5ChU",
+        "returns": [
+          "0x80d10005"
+        ],
+        "signature": "int(int32_t gesture_handle, const SystemGestureTouchRecognizer* recognizer, uint32_t index, SystemGestureTouchEvent* event)"
+      },
+      "sceSystemGestureGetTouchEventsCount": {
+        "nid": "h8uongcBNVs",
+        "returns": [
+          "gesture_handle == 1 ? 0 : 0x80d10003"
+        ],
+        "signature": "int(int32_t gesture_handle, const SystemGestureTouchRecognizer* recognizer)"
+      },
+      "sceSystemGestureInitializePrimitiveTouchRecognizer": {
+        "nid": "3pcAvmwKCvM",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(const void* param)"
+      },
+      "sceSystemGestureOpen": {
+        "nid": "qpo-mEOwje0",
+        "returns": [
+          "1"
+        ],
+        "signature": "int32_t(int32_t input_type, const void* param)"
+      },
+      "sceSystemGestureUpdatePrimitiveTouchRecognizer": {
+        "nid": "GgFMb22sbbI",
+        "returns": [
+          "gesture_handle == 1 ? 0 : 0x80d10003"
+        ],
+        "signature": "int(int32_t gesture_handle, const void* param)"
+      }
+    },
+    "native": {
+      "sceSystemGestureAppendTouchRecognizer": {
+        "nid": "1MMK0W-kMgA",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int32_t gesture_handle, SystemGestureTouchRecognizer* recognizer)"
+      },
+      "sceSystemGestureRemoveTouchRecognizer": {
+        "nid": "ELvBVG-LKT0",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int32_t gesture_handle, SystemGestureTouchRecognizer* recognizer)"
+      },
+      "sceSystemGestureUpdateAllTouchRecognizer": {
+        "nid": "wPJGwI2RM2I",
+        "returns": [
+          "0"
+        ],
+        "signature": "int(int32_t gesture_handle)"
+      }
+    },
+    "skipped": {
+      "sceSystemGestureGetPrimitiveTouchEventByIndex": "NotImplemented upstream",
+      "sceSystemGestureGetPrimitiveTouchEventByPrimitiveID": "NotImplemented upstream",
+      "sceSystemGestureGetPrimitiveTouchEvents": "NotImplemented upstream",
+      "sceSystemGestureGetPrimitiveTouchEventsCount": "NotImplemented upstream",
+      "sceSystemGestureGetTouchEventByEventID": "NotImplemented upstream",
+      "sceSystemGestureGetTouchEvents": "NotImplemented upstream",
+      "sceSystemGestureGetTouchRecognizerInformation": "NotImplemented upstream",
+      "sceSystemGestureResetPrimitiveTouchRecognizer": "NotImplemented upstream",
+      "sceSystemGestureResetTouchRecognizer": "NotImplemented upstream",
+      "sceSystemGestureUpdateTouchRecognizer": "not imported by the target title; audit before bridging",
+      "sceSystemGestureUpdateTouchRecognizerRectangle": "NotImplemented upstream"
     }
   }
 }
