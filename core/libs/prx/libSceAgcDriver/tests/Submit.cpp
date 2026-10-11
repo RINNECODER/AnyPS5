@@ -279,7 +279,7 @@ void testEndOfPipeLabelsWithoutWork() {
 }
 
 void testLabelStoredSinceSubmission() {
-    alignas(64) static volatile std::uint32_t gate = 0, label = 0, done = 0, late = 0;
+    alignas(64) static volatile std::uint32_t gate = 0, label = 0, done = 0, late = 0, waiting = 0;
     submit(0x20, commands(waitEqual(&gate, 1), waitEqual(&label, 1), writeData(&done, 1)));
     submit(0, commands(writeData(&label, 1)));
     waitFor(&label, 1, "producer label never landed");
@@ -287,13 +287,17 @@ void testLabelStoredSinceSubmission() {
     gate = 1;
     check(waitFor(&done, 1, "consumer never passed its waits") < std::chrono::milliseconds(500), "a label stored after the wait's submission did not satisfy it");
     AgcDriverWaitIdle_nid_postfix();
-    submit(0x20, commands(waitEqual(&label, 1), writeData(&late, 1)));
-    check(waitFor(&late, 1, "consumer never passed its wait") >= std::chrono::milliseconds(900), "a label stored before the wait's submission satisfied it");
+    submit(0x20, commands(writeData(&waiting, 1), waitEqual(&label, 1), writeData(&late, 1)));
+    waitFor(&waiting, 1, "consumer never reached its label wait");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    check(late == 0, "a label stored before the wait's submission satisfied it or the wait expired");
+    submit(0, commands(writeData(&label, 1)));
+    waitFor(&late, 1, "consumer did not resume after a new producer label");
     AgcDriverWaitIdle_nid_postfix();
 }
 
 void testWideLabelStoredSinceSubmission() {
-    alignas(64) static volatile std::uint32_t gate = 0, done = 0, late = 0;
+    alignas(64) static volatile std::uint32_t gate = 0, done = 0, late = 0, waiting = 0;
     alignas(64) static volatile std::uint32_t label[2] = {0, 0x5eed};
     submit(0x20, commands(waitEqual(&gate, 1), waitEqual64(label, 1, 0xffffffffu), writeData(&done, 1)));
     submit(0, commands(writeData(label, 1)));
@@ -303,17 +307,21 @@ void testWideLabelStoredSinceSubmission() {
     check(waitFor(&done, 1, "consumer never passed its waits") < std::chrono::milliseconds(500), "a 32-bit label stored after a low-dword 64-bit wait's submission did not satisfy it");
     AgcDriverWaitIdle_nid_postfix();
     gate = 0;
-    submit(0x20, commands(waitEqual(&gate, 1), waitEqual64(label, 1, ~0ull), writeData(&late, 1)));
+    submit(0x20, commands(waitEqual(&gate, 1), writeData(&waiting, 1), waitEqual64(label, 1, ~0ull), writeData(&late, 1)));
     submit(0, commands(writeData(label, 1)));
     waitFor(label, 1, "producer label never landed");
     label[0] = 0;
     gate = 1;
-    check(waitFor(&late, 1, "consumer never passed its wait") >= std::chrono::milliseconds(900), "a 32-bit store satisfied a 64-bit wait whose high dword never matched");
+    waitFor(&waiting, 1, "consumer never reached its wide label wait");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    check(late == 0, "a mismatched high dword satisfied the 64-bit wait or the wait expired");
+    submit(0, commands(writeData(label + 1, 0), writeData(label, 1)));
+    waitFor(&late, 1, "consumer did not resume after a matching 64-bit label");
     AgcDriverWaitIdle_nid_postfix();
 }
 
 void testLabelHeldAtSubmission() {
-    alignas(64) static volatile std::uint32_t gate = 0, label = 1, done = 0, reset = 0;
+    alignas(64) static volatile std::uint32_t gate = 0, label = 1, done = 0, reset = 0, waiting = 0;
     submit(0x20, commands(waitEqual(&gate, 1), waitEqual(&label, 1), writeData(&done, 1)));
     label = 0;
     gate = 1;
@@ -321,9 +329,13 @@ void testLabelHeldAtSubmission() {
     AgcDriverWaitIdle_nid_postfix();
     gate = 0;
     label = 1;
-    submit(0x20, commands(waitEqual(&gate, 1), writeData(&label, 0), waitEqual(&label, 1), writeData(&reset, 1)));
+    submit(0x20, commands(waitEqual(&gate, 1), writeData(&label, 0), writeData(&waiting, 1), waitEqual(&label, 1), writeData(&reset, 1)));
     gate = 1;
-    check(waitFor(&reset, 1, "consumer never passed its wait") >= std::chrono::milliseconds(900), "a label its own queue stored first counted as held at the submission");
+    waitFor(&waiting, 1, "consumer never reached its reset label wait");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    check(reset == 0, "a label reset by its own queue satisfied the wait or the wait expired");
+    submit(0x28, commands(writeData(&label, 1)));
+    waitFor(&reset, 1, "consumer did not resume after another queue restored the label");
     AgcDriverWaitIdle_nid_postfix();
 }
 
@@ -602,6 +614,21 @@ void testProgramSnapshots() {
     check(AgcDriver::DriverDetail::DecodeProgramsCurrent(decode, shaders), "a decode with the rewritten program was not current");
 }
 
+void testProgramWorkgroupUse() {
+    const auto snapshot = [](std::vector<std::uint32_t> code) {
+        AgcDriver::DriverDetail::ShaderSnapshot result{0x1000, 0, 2, std::move(code), {}};
+        return result;
+    };
+    const auto plain = snapshot({0xbf800000, 0xbf810000});
+    check(!AgcDriver::DriverDetail::ProgramUsesWorkgroup(plain, 0) && !AgcDriver::DriverDetail::ProgramUsesWorkgroup(plain, 0), "a program without LDS or barriers needs a workgroup");
+    const auto barrier = snapshot({0xbf8a0000, 0xbf810000});
+    check(AgcDriver::DriverDetail::ProgramUsesWorkgroup(barrier, 0), "an s_barrier did not need a workgroup");
+    const auto lds = snapshot({0xd8340000, 0x00000100, 0xbf810000});
+    check(AgcDriver::DriverDetail::ProgramUsesWorkgroup(lds, 0) && AgcDriver::DriverDetail::ProgramUsesWorkgroup(lds, 0), "an LDS write did not need a workgroup");
+    const auto entry = snapshot({0xbf8a0000, 0xbf810000, 0xbf800000, 0xbf810000});
+    check(!AgcDriver::DriverDetail::ProgramUsesWorkgroup(entry, 2) && AgcDriver::DriverDetail::ProgramUsesWorkgroup(entry, 0), "the workgroup check did not start at the program's entry");
+}
+
 void testWorkerFailure() {
     std::array<std::uint32_t, 5> words{0xc0031500, 1, 1, 1, 0x41};
     Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
@@ -694,6 +721,7 @@ int main() {
         check(!unterminated.empty() && bounded->code.size() == 64, "raw compute crossed inaccessible memory or missed its last instruction");
 #endif
         testProgramSnapshots();
+        testProgramWorkgroupUse();
         testEvents();
         testValidation();
         testClearState();

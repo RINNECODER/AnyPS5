@@ -4,6 +4,7 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #else
 #include <sched.h>
 #include <unistd.h>
@@ -196,6 +197,32 @@ int APS5_VABI getpid_nid_postfix(void) {
 #endif
     if (pid == 0 || static_cast<std::uint64_t>(pid) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
         throw std::runtime_error("Process identifier is outside the guest range");
+    return static_cast<int>(pid);
+}
+
+int APS5_VABI getppid_nid_postfix(void) {
+#ifdef _WIN32
+    const DWORD self = GetCurrentProcessId();
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "getppid: CreateToolhelp32Snapshot");
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool found = false;
+    DWORD pid = 0;
+    for (BOOL more = Process32FirstW(snapshot, &entry); more && !found; more = Process32NextW(snapshot, &entry)) {
+        if (entry.th32ProcessID == self) {
+            pid = entry.th32ParentProcessID;
+            found = true;
+        }
+    }
+    CloseHandle(snapshot);
+    if (!found) throw std::runtime_error("getppid: the process is missing from the process snapshot");
+#else
+    const auto pid = ::getppid();
+#endif
+    if (static_cast<std::uint64_t>(pid) > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("Parent process identifier is outside the guest range");
     return static_cast<int>(pid);
 }
 

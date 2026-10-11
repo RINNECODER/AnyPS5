@@ -120,6 +120,13 @@ static int NativeFchmod(int descriptor, int mode) {
 static int NativeFtruncate(int descriptor, std::int64_t length) {
     return static_cast<int>(::_chsize_s(descriptor, length));
 }
+static int NativeTruncate(const std::filesystem::path& path, std::int64_t length) {
+    const int descriptor = ::_wopen(path.c_str(), _O_WRONLY | _O_BINARY);
+    if (descriptor < 0) return errno;
+    const int error = NativeFtruncate(descriptor, length);
+    ::_close(descriptor);
+    return error;
+}
 static int SetTimes(HANDLE handle, const KernelTimeval* times) {
     FILETIME access{}, modified{};
     if (times == nullptr) {
@@ -231,6 +238,9 @@ static int NativeFchmod(int descriptor, int mode) {
 static int NativeFtruncate(int descriptor, std::int64_t length) {
     return ::ftruncate(descriptor, static_cast<off_t>(length));
 }
+static int NativeTruncate(const std::filesystem::path& path, std::int64_t length) {
+    return ::truncate(path.c_str(), static_cast<off_t>(length)) == 0 ? 0 : errno;
+}
 static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
     if (times == nullptr) return ::utimes(path.c_str(), nullptr);
     struct timeval values[2]{{static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)},
@@ -266,10 +276,25 @@ static constexpr int GUEST_EBADF = 9;
 static constexpr int GUEST_EFAULT = 14;
 static constexpr int GUEST_EEXIST = 17;
 static constexpr int GUEST_EINVAL = 22;
+static constexpr int GUEST_ESPIPE = 29;
 static constexpr int GUEST_ENAMETOOLONG = 63;
 static constexpr int GUEST_ENOTDIR = 20;
+static constexpr int GUEST_EISDIR = 21;
 static constexpr int GUEST_EWOULDBLOCK = 35;
 static constexpr int GUEST_ENOTEMPTY = 66;
+
+static int SceErrorFromErrno(int error);
+
+static std::int64_t PositionedGuestSocketError(int descriptor) {
+    if (descriptor < GuestSockets::FirstDescriptor) return 0;
+    return SceErrorFromErrno(GuestSockets::IsOpen(descriptor) ? GUEST_ESPIPE : GUEST_EBADF);
+}
+
+static bool FailPosixPositionedGuestSocket(int descriptor) {
+    if (descriptor < GuestSockets::FirstDescriptor) return false;
+    errno = GuestSockets::IsOpen(descriptor) ? GUEST_ESPIPE : GUEST_EBADF;
+    return true;
+}
 
 static int SceErrorFromErrno(int error) {
     return static_cast<int>(0x80020000u | static_cast<unsigned>(error > 0 && error <= 34 ? error : error == GUEST_ENOTEMPTY ? error : GUEST_EIO));
@@ -284,6 +309,10 @@ static int PosixFailure(int error) {
 
 static int PosixResult(int result) {
     return result < 0 ? PosixFailure(result & 0xffff) : result;
+}
+
+static std::int64_t PosixResult(std::int64_t result) {
+    return result < 0 ? PosixFailure(static_cast<int>(result) & 0xffff) : result;
 }
 
 #ifdef _WIN32
@@ -389,6 +418,19 @@ bool DescriptorIsOpen_nid_no_patch(int descriptor) {
     return descriptor >= 0 && ::fcntl(descriptor, F_GETFD) >= 0;
 }
 #endif
+
+static std::filesystem::path WithoutTrailingSeparator(const std::filesystem::path& native) {
+    return native.has_filename() ? native : native.parent_path();
+}
+
+static bool HasNonDirectoryPrefix(const std::filesystem::path& native) {
+    std::error_code error;
+    for (auto prefix = WithoutTrailingSeparator(native).parent_path(); prefix.has_relative_path(); prefix = prefix.parent_path()) {
+        const auto status = std::filesystem::status(prefix, error);
+        if (std::filesystem::exists(status)) return !std::filesystem::is_directory(status);
+    }
+    return false;
+}
 
 extern "C" {
 
@@ -527,14 +569,17 @@ int APS5_VABI sceKernelFtruncate(int d, int64_t length) {
 }
 
 int64_t APS5_VABI lseek_nid_postfix(int d, int64_t offset, int whence) {
-    return static_cast<int64_t>(sceKernelLseek(d, offset, whence));
+    if (whence < 0 || whence > 2) return PosixFailure(GUEST_EINVAL);
+    return PosixResult(sceKernelLseek(d, offset, whence));
 }
 
 int APS5_VABI mkdir_nid_postfix(const char* path, uint16_t mode) {
     if (const int error = PathError(path)) return PosixFailure(error);
     auto native = ResolvePath_nid_no_patch(path);
     if (NativeMkdir(native, mode) != 0) {
-        return PosixResult(SceErrorFromErrno(errno));
+        const int nativeError = errno;
+        const bool blockedByFile = (nativeError == ENOENT || nativeError == EINVAL) && HasNonDirectoryPrefix(native);
+        return PosixResult(SceErrorFromErrno(blockedByFile ? GUEST_ENOTDIR : nativeError));
     }
     RecordWrittenPath_nid_no_patch(native);
     return 0;
@@ -543,6 +588,10 @@ int APS5_VABI mkdir_nid_postfix(const char* path, uint16_t mode) {
 int APS5_VABI open_nid_postfix(const char* path, int flags, int mode) {
     if (const int error = PathError(path)) return PosixFailure(error);
     return PosixResult(sceKernelOpen(path, flags, static_cast<std::uint16_t>(mode)));
+}
+
+int APS5_VABI creat_nid_postfix(const char* path, int mode) {
+    return open_nid_postfix(path, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC, mode);
 }
 
 int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
@@ -570,6 +619,7 @@ int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t off
     if (offset < 0) {
         APS5_INVALID_ARG_EX;
     }
+    if (FailPosixPositionedGuestSocket(d)) return -1;
     const GuestArena::HostWrite destination(buf, nbytes);
     if (!destination.Open()) errno = EFAULT;
     else if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
@@ -587,6 +637,7 @@ int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_
     if (offset < 0) {
         APS5_INVALID_ARG_EX;
     }
+    if (FailPosixPositionedGuestSocket(d)) return -1;
     auto n = NativePwrite(d, buf, nbytes, offset);
     if (n < 0) {
         throw std::runtime_error(std::string(__func__) + ": pwrite failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
@@ -596,12 +647,16 @@ int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_
 
 int64_t APS5_VABI read_nid_postfix(int d, void* buf, uint64_t nbytes) {
     if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Read(d, buf, static_cast<size_t>(nbytes));
-    return sceKernelRead(d, buf, static_cast<size_t>(nbytes));
+    if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
+    char emptyBuffer = 0;
+    return PosixResult(sceKernelRead(d, buf == nullptr ? &emptyBuffer : buf, static_cast<size_t>(nbytes)));
 }
 
 std::int64_t APS5_VABI _read_nid_postfix(int descriptor, void* buffer, std::size_t count) {
     if (descriptor >= GuestSockets::FirstDescriptor) return GuestSockets::Read(descriptor, buffer, count);
-    return sceKernelRead(descriptor, buffer, count);
+    if (buffer == nullptr && count != 0) return PosixFailure(GUEST_EFAULT);
+    char emptyBuffer = 0;
+    return PosixResult(sceKernelRead(descriptor, buffer == nullptr ? &emptyBuffer : buffer, count));
 }
 
 int64_t APS5_VABI write_nid_postfix(int d, const char* str, int64_t size) {
@@ -609,12 +664,16 @@ int64_t APS5_VABI write_nid_postfix(int d, const char* str, int64_t size) {
         APS5_INVALID_ARG_EX;
     }
     if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Write(d, str, static_cast<std::size_t>(size));
-    return sceKernelWrite(d, str, static_cast<size_t>(size));
+    if (str == nullptr && size != 0) return PosixFailure(GUEST_EFAULT);
+    const char emptyBuffer = 0;
+    return PosixResult(sceKernelWrite(d, str == nullptr ? &emptyBuffer : str, static_cast<size_t>(size)));
 }
 
 std::int64_t APS5_VABI _write_nid_postfix(int descriptor, const void* buffer, std::size_t count) {
     if (descriptor >= GuestSockets::FirstDescriptor) return GuestSockets::Write(descriptor, buffer, count);
-    return sceKernelWrite(descriptor, buffer, count);
+    if (buffer == nullptr && count != 0) return PosixFailure(GUEST_EFAULT);
+    const char emptyBuffer = 0;
+    return PosixResult(sceKernelWrite(descriptor, buffer == nullptr ? &emptyBuffer : buffer, count));
 }
 
 int APS5_VABI stat_nid_postfix(const char* path, FileStat* sb) {
@@ -637,6 +696,7 @@ int APS5_VABI unlink_nid_postfix(const char* path) {
 
 int APS5_VABI sceKernelCheckReachability(const char* path) {
     if (path == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    if (*path == '\0') return SCE_KERNEL_ERROR_ENOENT;
     if (std::strlen(path) > 255) return SCE_KERNEL_ERROR_ENAMETOOLONG;
     std::error_code error;
     return std::filesystem::exists(ResolvePath_nid_no_patch(path), error) ? 0 : SCE_KERNEL_ERROR_ENOENT;
@@ -751,14 +811,10 @@ int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
     auto native = ResolvePath_nid_no_patch(path);
     while (!native.has_filename() && native.has_relative_path()) native = native.parent_path();
     std::error_code error;
-    const auto status = std::filesystem::status(native, error);
-    if (error && error != std::errc::no_such_file_or_directory) return SceErrorFromErrno(error.value());
-    if (std::filesystem::exists(status)) return SceErrorFromErrno(GUEST_EEXIST);
-    error.clear();
-    const auto parent = std::filesystem::status(native.parent_path(), error);
-    if (error) return SceErrorFromErrno(error.value());
-    if (!std::filesystem::exists(parent)) return SceErrorFromErrno(GUEST_ENOENT);
-    if (!std::filesystem::is_directory(parent)) return SceErrorFromErrno(GUEST_ENOTDIR);
+    if (std::filesystem::exists(native, error)) return SceErrorFromErrno(GUEST_EEXIST);
+    if (!std::filesystem::is_directory(WithoutTrailingSeparator(native).parent_path(), error)) {
+        return SceErrorFromErrno(HasNonDirectoryPrefix(native) ? GUEST_ENOTDIR : GUEST_ENOENT);
+    }
     if (!std::filesystem::create_directory(native, error)) return SceErrorFromErrno(error.value() ? error.value() : GUEST_EIO);
     RecordWrittenPath_nid_no_patch(native);
     return 0;
@@ -791,6 +847,7 @@ static bool OpenIovecs(const KernelIovec* iov, int iovcnt, std::deque<GuestArena
 int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
     const GuestArena::HostWrite destination(buf, nbytes);
     if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
@@ -802,6 +859,7 @@ int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset
 int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
     char empty = 0;
     const auto result = NativePwrite(d, nbytes == 0 && buf == nullptr ? &empty : buf, nbytes, offset);
     return result < 0 ? SceErrorFromErrno(errno) : result;
@@ -817,6 +875,9 @@ static std::int64_t TransferIovecs(int d, const KernelIovec* iov, int iovcnt, co
         total += iov[i].length;
     }
     if (offset != nullptr && total > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max() - *offset)) return SceErrorFromErrno(GUEST_EINVAL);
+    if (offset != nullptr) {
+        if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
+    }
     std::deque<GuestArena::HostWrite> destinations;
     if (!write && !OpenIovecs(iov, iovcnt, destinations)) return SceErrorFromErrno(GUEST_EFAULT);
     if (offset == nullptr && d >= GuestSockets::FirstDescriptor) {
@@ -867,6 +928,7 @@ int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* iov, int iovcnt, in
 int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
     const GuestArena::HostWrite destination(buf, nbytes);
     if (!destination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
@@ -877,6 +939,7 @@ int64_t APS5_VABI sceKernelPread(int d, void* buf, size_t nbytes, int64_t offset
 int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t offset) {
     if (buf == nullptr && nbytes != 0) return SceErrorFromErrno(GUEST_EFAULT);
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
     const auto result = NativePwrite(d, buf, nbytes, offset);
     return result < 0 ? SceErrorFromErrno(errno) : result;
 }
@@ -907,6 +970,7 @@ int64_t APS5_VABI sceKernelWritev(int d, const KernelIovec* iov, int iovcnt) {
 int64_t APS5_VABI sceKernelPreadv(int d, const KernelIovec* iov, int iovcnt, int64_t offset) {
     if (const int error = CheckIovecs(iov, iovcnt)) return error;
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
     std::deque<GuestArena::HostWrite> destinations;
     if (!OpenIovecs(iov, iovcnt, destinations)) return SceErrorFromErrno(GUEST_EFAULT);
     if (File::IsRandomDevice(d)) return ReadRandomIovecs(d, iov, iovcnt);
@@ -917,6 +981,7 @@ int64_t APS5_VABI sceKernelPreadv(int d, const KernelIovec* iov, int iovcnt, int
 int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* iov, int iovcnt, int64_t offset) {
     if (const int error = CheckIovecs(iov, iovcnt)) return error;
     if (offset < 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
     const auto result = static_cast<std::int64_t>(::pwritev(d, NativeIovecs(iov), iovcnt, static_cast<off_t>(offset)));
     return result < 0 ? SceErrorFromErrno(errno) : result;
 }
@@ -935,6 +1000,7 @@ int64_t APS5_VABI pwritev_nid_postfix(int d, const KernelIovec* iov, int iovcnt,
 
 int APS5_VABI sceKernelRename(const char* from, const char* to) {
     if (from == nullptr || to == nullptr) throw std::invalid_argument("sceKernelRename: path is null");
+    if (*from == '\0' || *to == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     const auto source = ResolvePath_nid_no_patch(from);
     std::error_code error;
     if (!std::filesystem::exists(source, error)) return SceErrorFromErrno(GUEST_ENOENT);
@@ -948,9 +1014,14 @@ int APS5_VABI sceKernelRename(const char* from, const char* to) {
 
 int APS5_VABI sceKernelRmdir(const char* path) {
     if (path == nullptr) throw std::invalid_argument("sceKernelRmdir: path is null");
+    if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     const auto native = ResolvePath_nid_no_patch(path);
     std::error_code error;
-    if (!std::filesystem::is_directory(native, error)) return SceErrorFromErrno(std::filesystem::exists(native, error) ? GUEST_ENOTDIR : GUEST_ENOENT);
+    if (!std::filesystem::is_directory(native, error)) {
+        const bool blockedByFile = HasNonDirectoryPrefix(native) || std::filesystem::exists(WithoutTrailingSeparator(native), error);
+        return SceErrorFromErrno(blockedByFile ? GUEST_ENOTDIR : GUEST_ENOENT);
+    }
+    if (FinalPathComponentIsDot_nid_no_patch(path)) return SceErrorFromErrno(GUEST_EINVAL);
     if (!std::filesystem::is_empty(native, error)) return SceErrorFromErrno(GUEST_ENOTEMPTY);
     if (!RemoveEmptyDirectory(native)) return SceErrorFromErrno(GUEST_EIO);
     RecordWrittenPath_nid_no_patch(native);
@@ -968,6 +1039,7 @@ extern "C" {
 
 int APS5_VABI sceKernelChmod_nid_postfix(const char* path, std::uint16_t mode) {
     if (!path) return SceErrorFromErrno(GUEST_EFAULT);
+    if (!*path) return SceErrorFromErrno(GUEST_ENOENT);
     const auto native = ResolvePath_nid_no_patch(path);
     if (NativeChmod(native, mode & 07777) != 0) return SceErrorFromErrno(errno);
     return 0;
@@ -985,18 +1057,26 @@ int APS5_VABI fchmod_nid_postfix(int d, int mode) {
 
 int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t length) {
     if (path == nullptr) throw std::invalid_argument("sceKernelTruncate: path is null");
+    if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     if (length < 0) return SceErrorFromErrno(GUEST_EINVAL);
     const auto native = ResolvePath_nid_no_patch(path);
     std::error_code error;
-    if (!std::filesystem::exists(native, error)) return SceErrorFromErrno(GUEST_ENOENT);
-    std::filesystem::resize_file(native, static_cast<std::uintmax_t>(length), error);
-    if (error) return SceErrorFromErrno(GUEST_EIO);
+    const auto status = std::filesystem::status(native, error);
+    if (!std::filesystem::exists(status)) return SceErrorFromErrno(GUEST_ENOENT);
+    if (std::filesystem::is_directory(status)) return SceErrorFromErrno(GUEST_EISDIR);
+    if (const int failure = NativeTruncate(native, length)) return SceErrorFromErrno(failure);
     RecordWrittenPath_nid_no_patch(native);
     return 0;
 }
 
+int APS5_VABI truncate_nid_postfix(const char* path, std::int64_t length) {
+    if (const int error = PathError(path)) return PosixFailure(error);
+    return PosixResult(sceKernelTruncate_nid_postfix(path, length));
+}
+
 int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval* times) {
     if (path == nullptr) throw std::invalid_argument("sceKernelUtimes: path is null");
+    if (*path == '\0') return SceErrorFromErrno(GUEST_ENOENT);
     if (times != nullptr) {
         for (int i = 0; i < 2; ++i) {
             if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return SCE_KERNEL_ERROR_EINVAL;
@@ -1034,6 +1114,16 @@ int APS5_VABI fsync_nid_postfix(int fd) {
 
 int APS5_VABI fdatasync_nid_postfix(int fd) {
     return PosixResult(sceKernelFdatasync(fd));
+}
+
+int64_t APS5_VABI readv_nid_postfix(int d, const KernelIovec* iov, int iovcnt) {
+    const auto result = sceKernelReadv(d, iov, iovcnt);
+    return result < 0 ? PosixFailure(static_cast<int>(result) & 0xffff) : result;
+}
+
+int64_t APS5_VABI writev_nid_postfix(int d, const KernelIovec* iov, int iovcnt) {
+    const auto result = sceKernelWritev(d, iov, iovcnt);
+    return result < 0 ? PosixFailure(static_cast<int>(result) & 0xffff) : result;
 }
 
 }

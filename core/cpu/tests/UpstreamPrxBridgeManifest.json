@@ -91,6 +91,7 @@
       "sceAppContentAddcontEnqueueDownload": "NotImplemented upstream",
       "sceAppContentAddcontUnmount": "not imported by the target title; audit before bridging",
       "sceAppContentDownloadDataGetAvailableSpaceKb": "not imported by the target title; audit before bridging",
+      "sceAppContentGetAddcontDownloadProgress": "NotImplemented upstream",
       "sceAppContentGetAddcontInfo": "not imported by the target title; audit before bridging",
       "sceAppContentGetAddcontInfoList": "not imported by the target title; audit before bridging",
       "sceAppContentTemporaryDataFormat": "not imported by the target title; audit before bridging",
@@ -572,6 +573,7 @@
     },
     "native": {},
     "skipped": {
+      "sceNpEntitlementAccessGetGameTrialsFlag": "NotImplemented upstream",
       "sceNpEntitlementAccessGetPftFlag": "NotImplemented upstream",
       "sceNpEntitlementAccessPollServiceEntitlementInfo": "NotImplemented upstream",
       "sceNpEntitlementAccessPollUnifiedEntitlementInfo": "NotImplemented upstream",
@@ -1079,7 +1081,7 @@
       "sceNpWebApi2Initialize": {
         "nid": "+o9816YQhqQ",
         "returns": [
-          "g_nextHandle.fetch_add(1, std::memory_order_relaxed)"
+          "lib_ctx_id"
         ],
         "signature": "int(int lib_http_ctx_id, size_t pool_size)"
       },
@@ -1170,6 +1172,8 @@
     },
     "native": {},
     "skipped": {
+      "sceNpWebApi2GetMemoryPoolStats": "not imported by the target title; audit before bridging",
+      "sceNpWebApi2PushEventAbortHandle": "NotImplemented upstream",
       "sceNpWebApi2PushEventRegisterCallback": "callback; hand-written in SceNpOfflineImports",
       "sceNpWebApi2PushEventRegisterPushContextCallback": "callback registration (declared without parameters upstream); hand-written in SceNpOfflineImports",
       "sceNpWebApi2SetRequestTimeout": "NotImplemented upstream; hand-written in SceNpOfflineImports"
@@ -1456,6 +1460,7 @@
     },
     "native": {},
     "skipped": {
+      "sceSysmoduleGetModuleHandleInternal": "not imported by the target title; audit before bridging",
       "sceSysmoduleGetModuleInfoForUnwind": "reads /proc/self/maps of the host process; served from the guest module graph by platform KernelThreadExtras",
       "sceSysmoduleIsLoaded": "not imported by the target title; audit before bridging",
       "sceSysmoduleLoadModuleInternal": "not imported by the target title; audit before bridging",

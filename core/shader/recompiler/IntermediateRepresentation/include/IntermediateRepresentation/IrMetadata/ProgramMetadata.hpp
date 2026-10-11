@@ -24,10 +24,13 @@ struct IrProgramMetadata {
     std::uint32_t pixelCentroidInputs = 0;
     std::uint32_t pixelSampleInputs = 0;
     bool barycentricEmulation = false;
+    bool invalidatesCaches = false;
     std::vector<IrValue*> dynamicReads;
     bool shaderInfoComplete = false;
     IrBindingLayout bindings;
     bool bindingLayoutComplete = false;
+    std::uint32_t tessellationLocalStride = 0;
+    std::uint32_t tessellationControlStride = 0;
 };
 
 }

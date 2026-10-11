@@ -1498,7 +1498,8 @@ void keepRecordedDraw(Recorder& recorder, const std::shared_ptr<ShaderResources>
         });
         writers->push_back(resources);
     } else if (completion) {
-        recorder.OnComplete([resources] { resources->WriteBackBuffers(); });
+        if (resources->Reusable()) recorder.OnComplete([resources] { resources->CheckFaults(); });
+        else recorder.OnComplete([resources] { resources->WriteBackBuffers(); });
     }
     for (const auto& resident : residents) {
         if (resident != nullptr) resident->MarkDirty();
@@ -2431,7 +2432,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     SharedResourceCache().Touch(recipe.key);
     countCache(&DrawProfile::cacheHits);
     timer.phase(PhaseLookup);
-    outcome.completion = false;
+    outcome.completion = resources->ChecksFaults();
     outcome.recorded = true;
     // The pipeline is the recipe's while the pipeline store still holds it (its device's teardown
     // or its eviction bound drops it: a miss). The framebuffer is the recipe's while the pipeline's
@@ -2445,6 +2446,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     const auto recordStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     RecordedDraw record;
     record.recorder = recorder;
+    record.completion = outcome.completion;
     record.resources = std::move(resources);
     record.pipeline = std::move(pipeline);
     record.framebuffer = std::move(framebuffer);

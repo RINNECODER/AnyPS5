@@ -13,6 +13,8 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -79,6 +81,7 @@ public:
 
     VkImageView View() const;
     VkImageView FirstLayerView() const { return firstLayerView; }
+    VkImageView BaseLevelView() const;
     struct ViewRange {
         VkImageViewType type;
         std::uint32_t levels;
@@ -101,6 +104,7 @@ public:
 private:
     void release() noexcept;
     void createFirstLayerView(const GuestTextureResource& descriptor, VkImageViewCreateInfo viewInfo);
+    void prepareBaseLevelView(const GuestTextureResource& descriptor, VkImageViewCreateInfo viewInfo);
 
     // Held by value: cached textures outlive the Context of the draw that created them.
     Context context;
@@ -112,6 +116,9 @@ private:
     VkImageView firstLayerView = VK_NULL_HANDLE;
     ViewRange viewRange{};
     ViewRange firstLayerRange{};
+    std::optional<VkImageViewCreateInfo> baseLevelInfo;
+    mutable std::mutex baseLevelMutex;
+    mutable VkImageView baseLevelView = VK_NULL_HANDLE;
     VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkDeviceSize allocationBytes = 0;
     VkDeviceSize countedBytes = 0;

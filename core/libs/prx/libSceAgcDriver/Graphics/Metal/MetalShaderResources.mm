@@ -559,10 +559,13 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
     }
     const auto* words = static_cast<const std::uint32_t*>(snapshot.FaultBuffer().contents);
     constexpr std::uint64_t pageBytes = std::uint64_t{1} << Abi::WrittenPageShift;
-    for (std::uint32_t i = 0; i < Abi::WrittenPageSlots; ++i) {
-        const auto encoded = words[Abi::WrittenSlotsWord + i];
-        if (encoded == 0) continue;
-        const auto page = std::uint64_t{encoded - 1u} << Abi::WrittenPageShift;
+    std::vector<std::uint64_t> writtenPages;
+    if (words[Abi::WrittenOverflowWord] != 0 || !Abi::ForEachWrittenRange(words, [&](std::uint64_t begin, std::size_t bytes) {
+            for (std::uint64_t offset = 0; offset < bytes; offset += pageBytes) writtenPages.push_back(begin + offset);
+        })) {
+        throw std::runtime_error("Metal draw BDA written-page tracker is incomplete or overflowed");
+    }
+    for (const auto page : writtenPages) {
         for (const auto& range : borrowedRanges) {
             if (!range.writable) continue;
             const auto writeBegin = std::max(page, range.guestAddress);
