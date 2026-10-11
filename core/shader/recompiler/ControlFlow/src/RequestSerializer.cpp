@@ -243,6 +243,14 @@ ColorExportPacking readColorExportPacking(Reader& reader) {
     return static_cast<ColorExportPacking>(value);
 }
 
+RasterPrimitive readRasterPrimitive(Reader& reader) {
+    const auto value = reader.ReadU8();
+    if (value > static_cast<std::uint8_t>(RasterPrimitive::Rectangle)) {
+        throw std::runtime_error("RequestSerializer: invalid RasterPrimitive value");
+    }
+    return static_cast<RasterPrimitive>(value);
+}
+
 void writeShaderBinary(Writer& writer, const ShaderBinary& binary) {
     writer.WriteU8(static_cast<std::uint8_t>(binary.stage));
     writer.WriteU64(binary.codeAddress);
@@ -326,6 +334,7 @@ void writePixelInfo(Writer& writer, const ShaderPixelStageInfo& info) {
     writer.WriteBool(info.dualSourceBlend);
     writer.WriteBool(info.alphaToCoverage);
     writer.WriteBool(info.stencilRefExportEnable);
+    writer.WriteU8(static_cast<std::uint8_t>(info.rasterPrimitive));
 }
 
 ShaderPixelStageInfo readPixelInfo(Reader& reader, std::uint32_t version) {
@@ -375,6 +384,7 @@ ShaderPixelStageInfo readPixelInfo(Reader& reader, std::uint32_t version) {
     if (version >= 15u) info.dualSourceBlend = reader.ReadBool();
     if (version >= 16u) info.alphaToCoverage = reader.ReadBool();
     if (version >= 17u) info.stencilRefExportEnable = reader.ReadBool();
+    if (version >= 18u) info.rasterPrimitive = readRasterPrimitive(reader);
     if (version < 5u) {
         const auto input = [](PixelInput value, bool present) { return present ? PixelInputBit(value) : 0u; };
         info.inputAddr = input(PixelInput::PerspectiveSample, info.hasPerspectiveCenterVgpr && inputAddrOrCenterVgpr == 2u) | input(PixelInput::PerspectiveCenter, info.hasPerspectiveCenterVgpr) |
