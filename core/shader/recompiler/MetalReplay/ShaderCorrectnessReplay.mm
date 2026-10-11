@@ -9,6 +9,8 @@
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <span>
 #include <cstring>
 #include <cstdio>
 #include <iostream>
@@ -57,7 +59,7 @@ MetalBackend::Result Compile(id<MTLDevice> device, std::span<const std::uint32_t
 // No test-only production seam. Expected words below come from arithmetic/ISA contracts.
 std::vector<std::uint32_t> Dispatch(id<MTLDevice> device, id<MTLCommandQueue> queue,
     std::span<const std::uint32_t> code, std::span<const std::uint32_t> input,
-    std::uint32_t wordsPerLane, std::uint32_t lds = 0) {
+    std::uint32_t wordsPerLane, std::uint32_t lds = 0, std::span<const std::uint32_t> imageWords = {}, id<MTLTexture> image = nil) {
     constexpr std::uint32_t guardWords = 16, guardBytes = guardWords * 4;
     std::vector<std::uint32_t> in(input.size() + guardWords * 2, Guard);
     std::copy(input.begin(), input.end(), in.begin() + guardWords);
@@ -68,7 +70,9 @@ std::vector<std::uint32_t> Dispatch(id<MTLDevice> device, id<MTLCommandQueue> qu
     Require(inBuffer != nil && outBuffer != nil, "Shader correctness buffer allocation failed");
     const auto inDescriptor = Descriptor(0x100000, static_cast<std::uint32_t>(input.size() * 4));
     const auto outDescriptor = Descriptor(0x200000, Threads * wordsPerLane * 4);
-    std::array<std::uint32_t, 8> userData{};
+    std::vector<std::uint32_t> userData(8);
+    // An image fixture appends its 8-dword descriptor at s[8:15].
+    userData.insert(userData.end(), imageWords.begin(), imageWords.end());
     // The LDS fixture uses s[0:3] for its only output descriptor.
     if (input.empty()) std::copy(outDescriptor.begin(), outDescriptor.end(), userData.begin());
     else {
@@ -80,6 +84,12 @@ std::vector<std::uint32_t> Dispatch(id<MTLDevice> device, id<MTLCommandQueue> qu
     std::vector<MetalShaderResourceBinding> bindings;
     bool boundOutput = false;
     for (const auto& binding : shader.guest.bindings) {
+        if (image != nil && binding.role == DescriptorRole::GuestImages) {
+            Require(binding.imageShape == DescriptorImageShape::Image2DMultisample, "Multisampled image did not reflect a 2D multisample shape");
+            Require(std::equal(imageWords.begin(), imageWords.end(), binding.guestDescriptor.begin(), binding.guestDescriptor.end()), "Unknown image descriptor");
+            bindings.push_back({binding.descriptorSet, binding.binding, {}, {image}});
+            continue;
+        }
         Require(binding.role == DescriptorRole::GuestBuffers, "Unexpected shader correctness descriptor role");
         Require(binding.guestDescriptor.size() == binding.count * 4u, "Incomplete descriptor reflection");
         MetalShaderResourceBinding native{binding.descriptorSet, binding.binding};
@@ -248,6 +258,60 @@ void Double(id<MTLDevice> device, id<MTLCommandQueue> queue) {
     F64Case(device, queue, "f32 to f64", 0xd590000a, 0x02010104, {{{0x3f800000, 0x00000000, 0x00000000, 0xcafebeef}, {0xc0700000, 0x00000000, 0x00000000, 0xcafebeef}, {0x3f000000, 0x00000000, 0x00000000, 0xcafebeef}, {0x7f800000, 0x00000000, 0x00000000, 0xcafebeef}, {0x00000000, 0x00000000, 0x00000000, 0xcafebeef}, {0x41380000, 0x00000000, 0x00000000, 0xcafebeef}, {0x3f800002, 0x00000000, 0x00000000, 0xcafebeef}, {0x80000000, 0x00000000, 0x00000000, 0xcafebeef}}}, {{{0x00000000, 0x3ff00000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0xc00e0000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x3fe00000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x7ff00000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x00000000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x40270000, 0xcafebeef, 0xcafebeef}, {0x40000000, 0x3ff00000, 0xcafebeef, 0xcafebeef}, {0x00000000, 0x80000000, 0xcafebeef, 0xcafebeef}}});
     F64Case(device, queue, "f16 dot2 f32 accumulate", 0xcc13400a, 0x1c1a0b04, {{{0x40003c00, 0x44004200, 0x3f000000, 0xcafebeef}, {0x34003800, 0x44004000, 0x3f800000, 0xcafebeef}, {0x3c00bc00, 0x3c003c00, 0x00000000, 0xcafebeef}, {0x42004000, 0xbc00bc00, 0x40a00000, 0xcafebeef}, {0x00000000, 0x47004700, 0xc0200000, 0xcafebeef}, {0x41003e00, 0x40004000, 0x00000000, 0xcafebeef}, {0x44004400, 0x38003400, 0xbf800000, 0xcafebeef}, {0x3c004800, 0x38003000, 0x3e800000, 0xcafebeef}}}, {{{0x41380000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x40400000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x00000000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x00000000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0xc0200000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x41000000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x40000000, 0xcafebeef, 0xcafebeef, 0xcafebeef}, {0x3fe00000, 0xcafebeef, 0xcafebeef, 0xcafebeef}}});
 }
+// image_load on a 2D MSAA descriptor reads one sample: the bridge must declare texture2d_ms and
+// pass the fragment index to read(coord, sample). Each sample holds x * 100 + y * 10 + sample.
+void Multisample(id<MTLDevice> device, id<MTLCommandQueue> queue) {
+    constexpr std::uint32_t Size = 4, Samples = 4;
+    Require([device supportsTextureSampleCount:Samples], "Metal device lacks 4x multisampling");
+    NSError* error = nil;
+    auto library = [device newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;\n"
+        "vertex float4 fillVertex(uint id [[vertex_id]]) { float2 p = float2((id << 1) & 2, id & 2); return float4(p * 2 - 1, 0, 1); }\n"
+        "fragment float fillFragment(float4 position [[position]], uint sample [[sample_id]]) {\n"
+        "    return floor(position.x) * 100 + floor(position.y) * 10 + float(sample); }\n" options:nil error:&error];
+    Require(library != nil, "Multisample fill library failed to compile");
+    auto textureDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:Size height:Size mipmapped:NO];
+    textureDescriptor.textureType = MTLTextureType2DMultisample;
+    textureDescriptor.sampleCount = Samples;
+    textureDescriptor.storageMode = MTLStorageModePrivate;
+    textureDescriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    auto texture = [device newTextureWithDescriptor:textureDescriptor];
+    auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    pipelineDescriptor.vertexFunction = [library newFunctionWithName:@"fillVertex"];
+    pipelineDescriptor.fragmentFunction = [library newFunctionWithName:@"fillFragment"];
+    pipelineDescriptor.colorAttachments[0].pixelFormat = MTLPixelFormatR32Float;
+    pipelineDescriptor.rasterSampleCount = Samples;
+    auto pipeline = [device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+    Require(texture != nil && pipeline != nil, "Multisample fill pipeline creation failed");
+    auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = texture;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    auto commands = [queue commandBuffer];
+    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:pipeline];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    [commands commit]; [commands waitUntilCompleted];
+    Require(commands.status == MTLCommandBufferStatusCompleted, "Multisample fill render failed");
+    // R32_FLOAT, 4x4, linear, type 14 (2D MSAA) with LAST_LEVEL = MAX_MIP = log2(samples).
+    constexpr std::array<std::uint32_t, 8> descriptor{0x3000u, (22u << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (2u << 16u) | (14u << 28u), 0, 2u << 4u, 0, 0};
+    // v_mov v10..v13 <- v7; image_load v10, v[4:6] (x, y, sample) dmask 1 dim 2D_MSAA unorm, s[8:15]; store v[10:13].
+    const std::vector<std::uint32_t> code{0x34020084, 0x34060084, 0xe0381000, 0x80000401, 0xbf8c3f70,
+        0x7e140307, 0x7e160307, 0x7e180307, 0x7e1a0307, 0xf0001130, 0x00020a04, 0xbf8c3f70,
+        0xe0781000, 0x80010a03, 0xbf810000};
+    constexpr std::array<Row, 8> rows{{{0, 0, 0, Sentinel}, {0, 0, 3, Sentinel}, {1, 2, 1, Sentinel}, {3, 3, 2, Sentinel},
+        {2, 1, 3, Sentinel}, {3, 0, 0, Sentinel}, {0, 3, 1, Sentinel}, {1, 1, 2, Sentinel}}};
+    std::vector<std::uint32_t> input;
+    for (std::uint32_t lane = 0; lane < Threads; ++lane) input.insert(input.end(), rows[lane % 8].begin(), rows[lane % 8].end());
+    const auto result = Dispatch(device, queue, code, input, 4, 0, descriptor, texture);
+    for (std::uint32_t lane = 0; lane < Threads; ++lane) {
+        const auto& row = rows[lane % 8];
+        const auto expected = std::bit_cast<std::uint32_t>(float(row[0] * 100 + row[1] * 10 + row[2]));
+        Require(result[lane * 4] == expected, "MSAA image_load lane " + std::to_string(lane) + " got " + Hex(result[lane * 4]) + " expected " + Hex(expected));
+        for (std::uint32_t j = 1; j < 4; ++j) Require(result[lane * 4 + j] == Sentinel, "MSAA image_load changed neighboring result register");
+    }
+    std::cout << "2D MSAA image_load: texture2d_ms binding, per-sample reads over 32 native lanes passed\n";
+}
 void Lds(id<MTLDevice> device, id<MTLCommandQueue> queue) {
     const auto out = Dispatch(device, queue, LdsCode, {}, 16, 256);
     for (std::uint32_t lane = 0; lane < Threads; ++lane) {
@@ -270,12 +334,13 @@ int main(int argc, char** argv) {
             auto queue = [device newCommandQueue];
             Require(queue != nil, "No Metal command queue available");
             const std::string mode = argc > 1 ? argv[1] : "all";
-            Require(mode == "all" || mode == "packed" || mode == "half" || mode == "sdwa" || mode == "lds" || mode == "f64", "Unknown shader correctness mode");
+            Require(mode == "all" || mode == "packed" || mode == "half" || mode == "sdwa" || mode == "lds" || mode == "f64" || mode == "msaa", "Unknown shader correctness mode");
             if (mode == "all" || mode == "packed") Packed(device, queue);
             if (mode == "all" || mode == "half") Half(device, queue);
             if (mode == "all" || mode == "sdwa") Sdwa(device, queue);
             if (mode == "all" || mode == "lds") Lds(device, queue);
             if (mode == "all" || mode == "f64") Double(device, queue);
+            if (mode == "all" || mode == "msaa") Multisample(device, queue);
             std::cout << "Native shader correctness " << mode << " passed on " << device.name.UTF8String << '\n';
             return 0;
         } catch (const std::exception& error) {

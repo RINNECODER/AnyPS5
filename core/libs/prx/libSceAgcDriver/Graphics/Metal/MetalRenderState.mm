@@ -243,7 +243,7 @@ void ConfigureRenderPipelineDescriptor(MTLRenderPipelineDescriptor* descriptor, 
     Require(state.stages.path == Graphics::ShaderPath::Vertex && !state.stages.mesh, "vertex pipeline requires a vertex shader path");
     Validate(state);
     ConfigureAttachments(descriptor.colorAttachments, state);
-    descriptor.rasterSampleCount = 1;
+    descriptor.rasterSampleCount = state.rasterSamples;
     const auto primitive = state.rectList ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
     if (state.rectList) {
         Require(state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST, "rectangle pipeline requires the original patch topology");
@@ -269,7 +269,7 @@ void ConfigureRenderPipelineDescriptor(MTLMeshRenderPipelineDescriptor* descript
     Require(state.stages.path == Graphics::ShaderPath::Geometry && state.stages.mesh.has_value(), "mesh pipeline requires a mesh shader path");
     Validate(state);
     ConfigureAttachments(descriptor.colorAttachments, state);
-    descriptor.rasterSampleCount = 1;
+    descriptor.rasterSampleCount = state.rasterSamples;
     descriptor.depthAttachmentPixelFormat = state.depth ? RenderPixelFormat(state.depth->format) : MTLPixelFormatInvalid;
     descriptor.stencilAttachmentPixelFormat = !state.depth ? MTLPixelFormatInvalid :
         state.depth->format == VK_FORMAT_D16_UNORM_S8_UINT ? MTLPixelFormatStencil8 :

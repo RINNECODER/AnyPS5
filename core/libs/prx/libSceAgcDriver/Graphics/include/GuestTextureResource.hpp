@@ -86,6 +86,8 @@ struct GuestTextureResource {
     bool dccPipeAligned = false;
     std::uint32_t minLod = 0;
     std::uint32_t allocatedMipCount = 0;
+    // 2D MSAA image types (14, 15) decode as single-level 2D / 2D-array views with this many samples.
+    std::uint32_t samples = 1;
 };
 
 float EffectiveMinLod(const GuestTextureResource& resource);

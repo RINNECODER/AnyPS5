@@ -67,6 +67,8 @@ struct DepthTarget {
     float clearDepth;
     std::uint8_t clearStencil;
     std::uint64_t htileAddress = 0;
+    // DB_Z_INFO NUM_SAMPLES; a multisampled surface renders into a 2D multisample texture.
+    std::uint32_t samples = 1;
 };
 
 struct State {
@@ -95,6 +97,8 @@ struct State {
     bool rectList = false;
     bool dualSourceBlend = false;
     VkExtent2D renderExtent;
+    // PA_SC_AA_CONFIG MSAA_NUM_SAMPLES as a count (1 when multisampling is off).
+    std::uint32_t rasterSamples = 1;
     VkPrimitiveTopology topology;
     bool primitiveRestart = false;
     VkViewport viewport;

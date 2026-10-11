@@ -294,7 +294,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             if (!stencil && !isDepth) continue;
             if (storage || resource.width != target.extent.width || resource.height != target.extent.height ||
                 resource.dimension != Graphics::TextureDimension::k2D || resource.baseLevel != 0 || resource.lastLevel != 0 ||
-                resource.baseArray != 0 || resource.depthOrLastArray != 0 || (stencil && compare)) {
+                resource.baseArray != 0 || resource.depthOrLastArray != 0 || (stencil && compare) || resource.samples != target.samples) {
                 throw std::invalid_argument("Metal draw resident depth view is incompatible with the guest descriptor");
             }
             const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;

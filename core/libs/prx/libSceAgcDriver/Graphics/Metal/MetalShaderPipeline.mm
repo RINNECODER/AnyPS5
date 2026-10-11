@@ -222,6 +222,12 @@ void validateTexture(id<MTLTexture> texture, const ShaderRecompiler::DescriptorB
         case ShaderRecompiler::DescriptorImageShape::Image3D:
             matches = texture.textureType == MTLTextureType3D;
             break;
+        case ShaderRecompiler::DescriptorImageShape::Image2DMultisample:
+            matches = texture.textureType == MTLTextureType2DMultisample;
+            break;
+        case ShaderRecompiler::DescriptorImageShape::Image2DMultisampleArray:
+            matches = texture.textureType == MTLTextureType2DMultisampleArray;
+            break;
         }
         if (!matches) throw std::invalid_argument("Metal shader texture dimensions do not match guest descriptor metadata");
     }
