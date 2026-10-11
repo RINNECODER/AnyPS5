@@ -788,7 +788,13 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     const off_t base = ::lseek(fd, 0, SEEK_CUR);
     if (base < 0) return SceErrorFromErrno(errno);
     if (basep != nullptr) *basep = static_cast<int64_t>(base);
+#if defined(__APPLE__)
+    // d_seekoff is 0 on APFS, so there is no mid-chunk resume cookie. Every Darwin record is at least as
+    // large as its guest record, so a chunk of nbytes always fits and the fd offset is already past it.
+    std::vector<char> host(static_cast<std::size_t>(nbytes));
+#else
     std::vector<char> host(static_cast<std::size_t>(nbytes) < 4096 ? 4096 : static_cast<std::size_t>(nbytes));
+#endif
     const auto read = HostGetdents(fd, host.data(), host.size());
     if (read < 0) return SceErrorFromErrno(errno);
     std::size_t written = 0;
@@ -813,10 +819,14 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
         out[7] = static_cast<char>(nameBytes);
         std::memcpy(out + GuestHeaderBytes, entry->d_name, nameLength);
         written += record;
+#if !defined(__APPLE__)
         resume = entry->APS5_D_OFF;
+#endif
         offset += entry->d_reclen;
     }
+#if !defined(__APPLE__)
     if (::lseek(fd, resume, SEEK_SET) < 0) return SceErrorFromErrno(errno);
+#endif
     return static_cast<int>(written);
 }
 
