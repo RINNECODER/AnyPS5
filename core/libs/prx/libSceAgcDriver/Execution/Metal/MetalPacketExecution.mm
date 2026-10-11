@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <limits>
 #include <new>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -351,9 +352,21 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
 }
 
 void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueState& queue) {
-    NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    // #293: a mapping change no longer waits for the GPU to idle; it swaps
+    // `ranges` with gpuMutex held. Every guest access below holds gpuMutex, and
+    // re-borrows here after each (re)acquire, so a packet never runs on a stale
+    // mapping and work parked across a change resumes on the new one.
+    std::optional<NativeGuestMemory::BorrowedRangesScope> borrowed;
+    std::uint64_t borrowedRevision = 0;
+    const auto borrowCurrentRanges = [&] {
+        if (borrowed && borrowedRevision == rangesRevision) return;
+        borrowed.reset();
+        borrowed.emplace(ranges);
+        borrowedRevision = rangesRevision;
+    };
     if (submission.suspend) {
         std::lock_guard lock(gpuMutex);
+        borrowCurrentRanges();
         CheckFailureAndStopping();
         CompletePriorGpuWorkAndCopyBack();
         return;
@@ -369,6 +382,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         const auto opcode = (header >> 8u) & 0xffu;
         if (header != FlipPacketHeader && header != RenderingWaitPacketHeader) Pm4::Validate(packet, submission.queue);
         std::unique_lock lock(gpuMutex);
+        borrowCurrentRanges();
         CheckFailureAndStopping();
         if (Pm4::Predicated(header) && queue.predication.operation != 0 && !Pm4::PredicationPasses(queue)) {
             cursor = opcode == 0x3f ? submission.conditionalEnds.at(cursor) : next;
@@ -424,6 +438,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                     std::this_thread::sleep_for(std::chrono::microseconds(50));
                     CheckFailureAndStopping();
                     lock.lock();
+                    borrowCurrentRanges();
                 }
             } catch (...) {
                 if (blocked) NoteWaitBlocked(submission.queue, address, false);
@@ -458,9 +473,11 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
     }
     {
         std::lock_guard lock(gpuMutex);
+        borrowCurrentRanges();
         CheckFailureAndStopping();
         CompletePriorGpuWorkAndCopyBack();
     }
+    borrowed.reset();
     if (submission.rewindTail != nullptr) ExecuteRewindTail(submission, queue);
 }
 

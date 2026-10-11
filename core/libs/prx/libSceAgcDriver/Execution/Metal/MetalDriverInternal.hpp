@@ -38,6 +38,9 @@ struct MetalDriver::Impl {
     std::map<std::uint64_t, std::vector<std::shared_ptr<IVideoOutput>>> submissionOutputs;
     std::shared_ptr<const DriverDetail::ShaderRegistry> shaders = std::make_shared<DriverDetail::ShaderRegistry>();
     std::vector<NativeGuestMemory::BorrowedRange> ranges;
+    // Changes only when `ranges` content changes, always with gpuMutex and mutex
+    // held, so a worker holding gpuMutex may read it and `ranges` (#293).
+    std::uint64_t rangesRevision = 0;
     std::uint64_t rangeGeneration = 0;
     bool mappingUpdatePending = false;
     std::thread::id mappingUpdateThread;
@@ -75,6 +78,8 @@ struct MetalDriver::Impl {
     bool Queue0Before(std::uint64_t received) const;
     bool OrderReleased(std::uint32_t queue, std::uint64_t received) const;
     void NoteWaitBlocked(std::uint32_t queue, std::uint64_t address, bool blocked);
+    bool GpuParkedOnHost() const;
+    void AwaitMappingDrain();
     void NotifyLabelStore();
     void CompletePriorGpuWorkAndCopyBack();
     void DeliverEopInterrupt(std::uint32_t queue);
