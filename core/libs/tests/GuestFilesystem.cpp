@@ -627,6 +627,20 @@ int main() {
     Require(rmdir_nid_postfix((missingName + "/").c_str()) == -1 && *__error_nid_postfix() == 2);
     Require(sceKernelRmdir((presentName + "/").c_str()) == static_cast<int>(0x80020014u));
     Require(sceKernelRmdir((missingName + "/").c_str()) == static_cast<int>(0x80020002u));
+#ifndef _WIN32
+    const auto linkedDirectory = root / "linked-directory";
+    const auto directoryLink = root / "directory-link";
+    const auto danglingDirectoryLink = root / "dangling-directory-link";
+    Require(std::filesystem::create_directory(linkedDirectory));
+    std::filesystem::create_directory_symlink("linked-directory", directoryLink);
+    std::filesystem::create_directory_symlink("missing-directory", danglingDirectoryLink);
+    Require(rmdir_nid_postfix(directoryLink.string().c_str()) == -1 && *__error_nid_postfix() == 20);
+    Require(sceKernelRmdir(directoryLink.string().c_str()) == static_cast<int>(0x80020014u));
+    Require(rmdir_nid_postfix(danglingDirectoryLink.string().c_str()) == -1 && *__error_nid_postfix() == 20);
+    Require(std::filesystem::is_symlink(directoryLink) && std::filesystem::is_directory(linkedDirectory));
+    Require(unlink_nid_postfix(directoryLink.string().c_str()) == 0 && unlink_nid_postfix(danglingDirectoryLink.string().c_str()) == 0);
+    Require(rmdir_nid_postfix(linkedDirectory.string().c_str()) == 0 && !std::filesystem::exists(linkedDirectory));
+#endif
     const auto dotDirectory = root / "dot-directory";
     Require(std::filesystem::create_directory(dotDirectory));
     const auto dotDirectoryName = dotDirectory.string() + "/.";
