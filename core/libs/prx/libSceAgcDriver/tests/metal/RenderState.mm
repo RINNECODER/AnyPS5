@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #include "MetalRenderState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 
@@ -613,6 +614,21 @@ void EarlyDepthDecode() {
     std::cout << "PASS: DEPTH_BEFORE_SHADER and Z_ORDER 3 decode as early depth; depth exports stay late\n";
 }
 
+// Upstream a96f8bd64, in the fork's shared DccClearEncoding.cpp: packed R11G11B10 float targets get a
+// DCC fast-clear encoding (RGB zero or one; the format has no alpha).
+void PackedFloatDccClear() {
+    for (const bool alphaOnMsb : {false, true}) {
+        for (const auto keys : {Graphics::DccKeys::Clear0000, Graphics::DccKeys::Clear0001, Graphics::DccKeys::Clear1110, Graphics::DccKeys::Clear1111}) {
+            std::array<std::uint32_t, 4> texels{};
+            texels.fill(0xdeadbeefu);
+            Require(Graphics::FillDccClear(VK_FORMAT_B10G11R11_UFLOAT_PACK32, keys, alphaOnMsb, std::as_writable_bytes(std::span(texels))), "a packed float fast clear was not encoded");
+            const std::uint32_t expected = keys == Graphics::DccKeys::Clear1110 || keys == Graphics::DccKeys::Clear1111 ? 0x781e03c0u : 0u;
+            for (const auto texel : texels) Require(texel == expected, "a packed float DCC clear did not encode RGB zero or one");
+        }
+    }
+    std::cout << "PASS: packed R11G11B10 float DCC fast clears encode\n";
+}
+
 // Renders one draw of `state` (rasterSamples > 1) into a multisampled RGBA8 target with the pass's
 // sample positions from ConfigureSamplePositions, and returns the resolved pixels.
 std::array<Pixel, 64> RenderResolved(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library,
@@ -811,6 +827,7 @@ int main() {
             ClipCullDecode();
             CoveredCentroid();
             EarlyDepthDecode();
+            PackedFloatDccClear();
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {
