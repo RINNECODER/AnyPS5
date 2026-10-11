@@ -232,11 +232,14 @@ void RequiredRegisters() {
     // Unwritten graphics program address, resource and user-data registers read as zero (the shared
     // driver's draw decoding): a missing low address word leaves no registered program to run,
     // while the high address and resource words decode as their zero values.
+    // An unwritten pixel program address (0x008) is the null pixel program, which the shared driver
+    // accepts only for draws that write no color; this draw writes color, so it is refused for that.
     for (const auto offset : {0xc8u, 0x008u}) {
         auto missing = draw;
         missing.shader.erase(offset);
         Reject([&] { static_cast<void>(AgcDriver::DecodeDrawDispatch(missing, registry)); },
-            "does not belong to a registered shader", "draw unwritten program address " + std::to_string(offset));
+            offset == 0x008u ? "a draw without a pixel program writes color" : "does not belong to a registered shader",
+            "draw unwritten program address " + std::to_string(offset));
     }
     for (const auto offset : {0xc9u, 0x8bu, 0x009u, 0x00bu}) {
         auto missing = draw;

@@ -252,12 +252,13 @@ void run(const char* utility, const char* const* paths, bool shutdownCase) {
     rejectSubmission([&] { dispatch(); }, "wait buffer is not registered");
     produce(0); store(machine, Commands + 28, std::uint32_t{0});
     rejectSubmission([&] { dispatch(); }, "unsupported flip mode");
-    // First reservation succeeds; a later unregistered slot must unwind it without
-    // a display or retained pending ticket before the next valid submission.
+    // First reservation succeeds; a later slot naming an unregistered video output must unwind it
+    // without a display or retained pending ticket before the next valid submission. (An
+    // unregistered buffer index is no longer a rejection: it presents black, as upstream does.)
     produce(0);
-    const std::array<std::uint32_t, 6> unregistered{0xc004105c, static_cast<std::uint32_t>(handle), 3, 1, 0, 0};
+    const std::array<std::uint32_t, 6> unregistered{0xc004105c, 0x7fffffffu, 3, 1, 0, 0};
     machine.Write(Commands + 40, std::as_bytes(std::span(unregistered)));
-    rejectSubmission([&] { dispatch(16); }, "flip buffer is not registered");
+    rejectSubmission([&] { dispatch(16); }, "unregistered video output");
 
     Hold held;
     produce(0);
