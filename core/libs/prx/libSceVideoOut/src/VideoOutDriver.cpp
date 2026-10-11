@@ -6,6 +6,7 @@
 #include <thread>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include "SDL.h"
 #if !defined(ANYPS5_METAL_BACKEND)
@@ -34,6 +35,36 @@ void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("VideoOut: ") + reason);
 }
 
+#if !defined(ANYPS5_METAL_BACKEND)
+std::vector<const char*> windowExtensions(SDL_Window* window) {
+    unsigned extensionCount = 0;
+    if (!SDL_Vulkan_GetInstanceExtensions(window, &extensionCount, nullptr)) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
+    std::vector<const char*> extensions(extensionCount);
+    if (!SDL_Vulkan_GetInstanceExtensions(window, &extensionCount, extensions.data())) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
+    extensions.resize(extensionCount);
+    return extensions;
+}
+
+VkSurfaceKHR createWindowSurface(void* context, VkInstance instance) {
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    if (!SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(context), instance, &surface)) throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError());
+    return surface;
+}
+
+void windowDrawableSize(void* context, std::uint32_t* width, std::uint32_t* height) {
+    if ((SDL_GetWindowFlags(static_cast<SDL_Window*>(context)) & SDL_WINDOW_MINIMIZED) != 0) {
+        *width = 0;
+        *height = 0;
+        return;
+    }
+    int drawableWidth = 0;
+    int drawableHeight = 0;
+    SDL_Vulkan_GetDrawableSize(static_cast<SDL_Window*>(context), &drawableWidth, &drawableHeight);
+    *width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
+    *height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
+}
+#endif
+
 void checkConfig(const VideoOutConfig& cfg) {
     cfg.Check();
 }
@@ -52,7 +83,10 @@ VideoOutDriver::VideoOutDriver() {
     }
     try {
         AgcDriverWaitIdle_nid_postfix();
-        presentThread = std::jthread([this](std::stop_token token) { presentLoop(token); });
+        std::promise<void> started;
+        auto attached = started.get_future();
+        presentThread = std::jthread([this, &started](std::stop_token token) { presentLoop(token, started); });
+        attached.get();
         vblankThread = std::jthread([this](std::stop_token token) { vblankLoop(token); });
         LibcRegisterShutdown_nid_postfix([] { VideoOutDriver::Get().Shutdown(); });
     } catch (...) {
@@ -120,6 +154,7 @@ int VideoOutDriver::Open(int busType) {
     }
     auto cfg = std::make_shared<VideoOutConfig>(LibcShutdownToken_nid_postfix());
     cfg->generation = generation;
+    cfg->busType = busType;
     cfg->opened = true;
     cfg->flipStatus.flipArg = -1;
     cfg->flipStatus.currentBuffer = -1;
@@ -154,10 +189,12 @@ bool VideoOutDriver::close(int handle) {
     removeEvents(cfg->vblankEvents, VIDEO_OUT_EVENT_VBLANK);
     removeEvents(cfg->preVblankEvents, VIDEO_OUT_EVENT_PRE_VBLANK_START);
     removeEvents(cfg->outputModeEvents, VIDEO_OUT_EVENT_SET_MODE);
+    removeEvents(cfg->vrrStatusEvents, VIDEO_OUT_EVENT_VRR_STATUS);
     cfg->flipEvents.clear();
     cfg->vblankEvents.clear();
     cfg->preVblankEvents.clear();
     cfg->outputModeEvents.clear();
+    cfg->vrrStatusEvents.clear();
     cfg->vblankCond.notify_all();
     flipQueue->changed.notify_all();
     return true;
@@ -179,6 +216,17 @@ std::shared_ptr<VideoOutConfig> VideoOutDriver::GetConfig(int handle) {
 
 bool VideoOutDriver::IsOpen(int handle) {
     return GetConfig(handle) != nullptr;
+}
+
+bool VideoOutDriver::HasConfig(int handle) {
+    std::shared_ptr<VideoOutConfig> cfg;
+    {
+        std::lock_guard lock(mutex);
+        if (handle <= 0 || handle >= VIDEO_OUT_NUM_MAX || contexts[handle] == nullptr) return false;
+        cfg = contexts[handle];
+    }
+    std::lock_guard cfgLock(cfg->mutex);
+    return cfg->opened && !cfg->closing;
 }
 
 int VideoOutDriver::SubmitFlip(int handle, int index, int flipMode, int64_t flipArg) {
@@ -218,6 +266,10 @@ void VideoOutDriver::vblankEnd() {
         std::lock_guard cfgLock(cfg->mutex);
         if (!cfg->opened || cfg->failure) continue;
         require(cfg->vblankStatus.count != std::numeric_limits<uint64_t>::max(), "vblank counter overflow");
+        ++cfg->preVblankStatus.count;
+        cfg->preVblankStatus.processTime = sceKernelGetProcessTime();
+        cfg->preVblankStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
+        triggerEvents(*cfg, VIDEO_OUT_EVENT_PRE_VBLANK_START, reinterpret_cast<void*>(cfg->preVblankStatus.count));
         ++cfg->vblankStatus.count;
         cfg->vblankStatus.processTime = sceKernelGetProcessTime();
         cfg->vblankStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
@@ -229,52 +281,39 @@ void VideoOutDriver::vblankEnd() {
 void VideoOutDriver::processFlip(FlipRequest& req) {
     AgcDriver::PerformanceContext timingContext(req.timing.get());
     AgcDriver::PerformanceTimer timing("VideoOut.Flip");
-    WaitForFlipVblank(req, &timing);
+    // false: the title closed the port; the flip was released without presenting.
+    if (!WaitForFlipVblank(req, &timing)) return;
     require(req.width != 0 && req.height != 0 && req.width <= static_cast<uint32_t>(std::numeric_limits<int>::max()) && req.height <= static_cast<uint32_t>(std::numeric_limits<int>::max()), "invalid window dimensions");
-    window.Ensure(req.width, req.height);
-#if defined(ANYPS5_METAL_BACKEND)
-    const AgcDriver::PresentationWindow target{&window, {}, nullptr, [](void* context, std::uint32_t* width, std::uint32_t* height) {
-        static_cast<DisplayWindow*>(context)->DrawableSize(*width, *height);
-    }, req.width, req.height, req.timing, [](void* context) {
-        return static_cast<DisplayWindow*>(context)->MetalLayer();
-    }};
-#else
-    unsigned extensionCount = 0;
-    if (!SDL_Vulkan_GetInstanceExtensions(window.Handle(), &extensionCount, nullptr)) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
-    std::vector<const char*> extensions(extensionCount);
-    if (!SDL_Vulkan_GetInstanceExtensions(window.Handle(), &extensionCount, extensions.data())) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
-    extensions.resize(extensionCount);
-    const AgcDriver::PresentationWindow target{window.Handle(), extensions, [](void* context, VkInstance instance) {
-        VkSurfaceKHR surface = VK_NULL_HANDLE;
-        if (!SDL_Vulkan_CreateSurface(static_cast<SDL_Window*>(context), instance, &surface)) throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError());
-        return surface;
-    }, [](void* context, std::uint32_t* width, std::uint32_t* height) {
-        if ((SDL_GetWindowFlags(static_cast<SDL_Window*>(context)) & SDL_WINDOW_MINIMIZED) != 0) {
-            *width = 0;
-            *height = 0;
-            return;
-        }
-        int drawableWidth = 0;
-        int drawableHeight = 0;
-        SDL_Vulkan_GetDrawableSize(static_cast<SDL_Window*>(context), &drawableWidth, &drawableHeight);
-        *width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
-        *height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
-    }, req.width, req.height, req.timing};
-#endif
-    timing.Mark("window_prepare");
-    const auto gpuReady = [](void* context) {
-        auto& request = *static_cast<FlipRequest*>(context);
-        MarkFlipGpuComplete(request);
-    };
-    if (req.index >= 0) {
-        const auto display = DescribeVideoOutBuffer(req.buffer, req.group);
-        AgcDriverPresentBuffer_nid_postfix(target, display, gpuReady, &req);
+    if (req.cfg->busType == VIDEO_OUT_BUS_TYPE_OVERLAY) {
+        // Overlay-bus flips complete without replacing the main output.
+        MarkFlipGpuComplete(req);
     } else {
-        AgcDriverPresentClear_nid_postfix(target, req.index == VIDEO_OUT_BUFFER_INDEX_BLACK, gpuReady, &req);
+        window.Ensure(req.width, req.height);
+#if defined(ANYPS5_METAL_BACKEND)
+        const AgcDriver::PresentationWindow target{&window, {}, nullptr, [](void* context, std::uint32_t* width, std::uint32_t* height) {
+            static_cast<DisplayWindow*>(context)->DrawableSize(*width, *height);
+        }, req.width, req.height, req.timing, [](void* context) {
+            return static_cast<DisplayWindow*>(context)->MetalLayer();
+        }};
+#else
+        const auto extensions = windowExtensions(window.Handle());
+        const AgcDriver::PresentationWindow target{window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, req.width, req.height, req.timing};
+#endif
+        timing.Mark("window_prepare");
+        const auto gpuReady = [](void* context) {
+            auto& request = *static_cast<FlipRequest*>(context);
+            MarkFlipGpuComplete(request);
+        };
+        if (req.index >= 0 && !req.unregistered) {
+            const auto display = DescribeVideoOutBuffer(req.buffer, req.group);
+            AgcDriverPresentBuffer_nid_postfix(target, display, gpuReady, &req);
+        } else {
+            AgcDriverPresentClear_nid_postfix(target, req.unregistered || req.index == VIDEO_OUT_BUFFER_INDEX_BLACK, gpuReady, &req);
+        }
+        timing.Mark("present");
+        window.UpdateTitle();
+        timing.Mark("window_title");
     }
-    timing.Mark("present");
-    window.UpdateTitle();
-    timing.Mark("window_title");
     const VideoOutCompletionCallbacks callbacks{
         this,
         [](void*) { return sceKernelGetProcessTime(); },
@@ -286,7 +325,20 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     CompleteFlip(req, callbacks, &timing);
 }
 
-void VideoOutDriver::presentLoop(std::stop_token token) {
+void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& started) {
+    try {
+        window.Ensure(VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT);
+#if !defined(ANYPS5_METAL_BACKEND)
+        // The Metal backend binds its layer on the first present instead.
+        const auto extensions = windowExtensions(window.Handle());
+        AgcDriverAttachWindow_nid_postfix({window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT, nullptr});
+#endif
+    } catch (...) {
+        window.Destroy();
+        started.set_exception(std::current_exception());
+        return;
+    }
+    started.set_value();
     std::shared_ptr<FlipRequest> current;
 #if APS5_ENABLE_TIMING_LOG
     std::unique_ptr<FrameTimingLog> timingLog;
@@ -375,7 +427,12 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
 #if defined(ANYPS5_METAL_BACKEND)
     AgcDriverReleaseWindow_nid_postfix(&window);
 #endif
-    AgcDriverShutdown_nid_postfix();
+    try {
+        AgcDriverShutdown_nid_postfix();
+    } catch (...) {
+        std::lock_guard lock(flipQueue->mutex);
+        if (!flipQueue->failure) flipQueue->failure = std::current_exception();
+    }
     window.Destroy();
 }
 
