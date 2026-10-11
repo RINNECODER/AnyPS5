@@ -2,7 +2,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 extern "C" {
@@ -14,6 +16,15 @@ int APS5_VABI pipe_nid_postfix(int*);
 int APS5_VABI socketpair_nid_postfix(int, int, int, int*);
 std::int64_t APS5_VABI send_nid_postfix(int, const void*, std::uint64_t, int);
 std::int64_t APS5_VABI recv_nid_postfix(int, void*, std::uint64_t, int);
+int APS5_VABI open_nid_postfix(const char*, int, int);
+int APS5_VABI mkdir_nid_postfix(const char*, unsigned short);
+std::int64_t APS5_VABI write_nid_postfix(int, const char*, std::int64_t);
+int APS5_VABI ftruncate_nid_postfix(int, std::int64_t);
+int APS5_VABI sceKernelCreateEqueue(KernelEqueue* eq, const char* name);
+int APS5_VABI sceKernelDeleteEqueue(KernelEqueue eq);
+int APS5_VABI sceKernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int* out, const KernelUseconds* timo);
+int APS5_VABI sceKernelAddFileEvent(KernelEqueue eq, int fd, int watch, void* udata);
+int APS5_VABI sceKernelDeleteFileEvent(KernelEqueue eq, int fd);
 int* APS5_VABI __error_nid_postfix();
 }
 
@@ -25,6 +36,7 @@ static constexpr int Stream = 1;
 static constexpr int FirstSocket = 0x10000000;
 static constexpr std::int16_t EvfiltRead = -1;
 static constexpr std::int16_t EvfiltWrite = -2;
+static constexpr std::int16_t EvfiltVnode = -4;
 static constexpr std::int16_t EvfiltProc = -5;
 static constexpr std::int16_t EvfiltTimer = -7;
 static constexpr std::int16_t EvfiltUser = -11;
@@ -40,6 +52,20 @@ static constexpr std::uint32_t NoteTrigger = 0x01000000;
 static constexpr std::uint32_t NoteFfcopy = 0xc0000000;
 static constexpr std::uint32_t NoteFfor = 0x80000000;
 static constexpr std::uint32_t NoteUseconds = 0x0004;
+static constexpr std::uint32_t NoteDelete = 0x0001;
+static constexpr std::uint32_t NoteWrite = 0x0002;
+static constexpr std::uint32_t NoteExtend = 0x0004;
+static constexpr std::uint32_t NoteAttrib = 0x0008;
+static constexpr std::uint32_t NoteLink = 0x0010;
+static constexpr std::uint32_t NoteRename = 0x0020;
+static constexpr std::uint32_t NoteRevoke = 0x0040;
+static constexpr int ReadWrite = 0x0002;
+static constexpr int Create = 0x0200;
+static constexpr int Directory = 0x00020000;
+static constexpr int SceOk = 0;
+static constexpr int SceEnoent = static_cast<int>(0x80020002);
+static constexpr int SceEbadf = static_cast<int>(0x80020009);
+static constexpr int SceEinval = static_cast<int>(0x80020016);
 
 static void Require(bool value) { if (!value) std::abort(); }
 
@@ -219,6 +245,89 @@ static void Errors() {
     Require(close_nid_postfix(kq) == 0);
 }
 
+static std::string TemporaryName(const char* stem) {
+    return std::string("anyps5-kqueue-") + stem + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+}
+
+static void FileWatch() {
+    const auto path = TemporaryName("file");
+    const int file = open_nid_postfix(path.c_str(), ReadWrite | Create, 0644);
+    Require(file >= 0);
+    const int kq = kqueue_nid_postfix();
+    int marker = 0;
+    KernelEvent events[4]{};
+    const auto ident = static_cast<std::uintptr_t>(file);
+    Require(Apply(kq, Change(ident, EvfiltVnode, 0x25, NoteDelete | NoteWrite | NoteExtend | NoteLink | NoteRename, 0, &marker)) == 0);
+    Require(Poll(kq, events, 4) == 0);
+    Require(write_nid_postfix(file, "abc", 3) == 3);
+    Require(Wait(kq, events, 4) == 1);
+    Require(events[0].ident == ident && events[0].filter == EvfiltVnode && events[0].flags == EvClear && events[0].udata == &marker);
+    Require(events[0].fflags == (NoteWrite | NoteExtend) && events[0].data == 0);
+    Require(Poll(kq, events, 4) == 0);
+    Require(ftruncate_nid_postfix(file, 0) == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    Require(Poll(kq, events, 4) == 0);
+    Require(Apply(kq, Change(ident, EvfiltVnode, EvAdd, NoteAttrib)) == 0);
+    Require(write_nid_postfix(file, "abc", 3) == 3);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    Require(ftruncate_nid_postfix(file, 0) == 0);
+    Require(Wait(kq, events, 4) == 1 && events[0].fflags == NoteAttrib && events[0].udata == nullptr);
+    Require(Throws([kq, ident] { Apply(kq, Change(ident, EvfiltVnode, EvAdd, NoteRevoke)); }));
+    Require(Apply(kq, Change(ident, EvfiltVnode, EvDelete)) == 0);
+    RequireFailure(Apply(kq, Change(ident, EvfiltVnode, EvDelete)), GuestEnoent);
+
+    KernelEqueue eq = 0;
+    Require(sceKernelCreateEqueue(&eq, "file") == SceOk);
+    Require(sceKernelAddFileEvent(eq, file, static_cast<int>(NoteWrite), &marker) == SceOk);
+    Require(write_nid_postfix(file, "defg", 4) == 4);
+    int count = 0;
+    const KernelUseconds second = 1000000;
+    Require(sceKernelWaitEqueue(eq, events, 4, &count, &second) == SceOk && count == 1);
+    Require(events[0].ident == ident && events[0].filter == EvfiltVnode && events[0].fflags == (NoteWrite | NoteExtend) && events[0].udata == &marker);
+    Require(sceKernelDeleteFileEvent(eq, file) == SceOk);
+    Require(sceKernelDeleteFileEvent(eq, file) == SceEnoent);
+    Require(sceKernelAddFileEvent(eq, FirstSocket + 4000, static_cast<int>(NoteWrite), nullptr) == SceEbadf);
+    int pair[2];
+    Require(socketpair_nid_postfix(Unix, Stream, 0, pair) == 0);
+    Require(sceKernelAddFileEvent(eq, pair[0], static_cast<int>(NoteWrite), nullptr) == SceEinval);
+    RequireFailure(Apply(kq, Change(static_cast<std::uintptr_t>(pair[0]), EvfiltVnode, EvAdd, NoteWrite)), GuestEinval);
+    RequireFailure(Apply(kq, Change(static_cast<std::uintptr_t>(kq), EvfiltVnode, EvAdd, NoteWrite)), GuestEinval);
+    Require(close_nid_postfix(pair[0]) == 0 && close_nid_postfix(pair[1]) == 0);
+    int pipe[2];
+    Require(pipe_nid_postfix(pipe) == 0);
+    RequireFailure(Apply(kq, Change(static_cast<std::uintptr_t>(pipe[0]), EvfiltVnode, EvAdd, NoteWrite)), GuestEinval);
+    Require(close_nid_postfix(pipe[0]) == 0 && close_nid_postfix(pipe[1]) == 0);
+
+    Require(Apply(kq, Change(ident, EvfiltVnode, EvAdd, NoteWrite)) == 0);
+    Require(sceKernelAddFileEvent(eq, file, static_cast<int>(NoteWrite), nullptr) == SceOk);
+    Require(close_nid_postfix(file) == 0);
+    RequireFailure(Apply(kq, Change(ident, EvfiltVnode, EvDelete)), GuestEbadf);
+    Require(sceKernelDeleteFileEvent(eq, file) == SceEbadf);
+    Require(sceKernelDeleteEqueue(eq) == SceOk);
+    Require(close_nid_postfix(kq) == 0);
+    Require(std::filesystem::remove(path));
+}
+
+static void DirectoryWatch() {
+    const auto path = TemporaryName("directory");
+    Require(mkdir_nid_postfix(path.c_str(), 0755) == 0);
+    const int directory = open_nid_postfix(path.c_str(), Directory, 0);
+    Require(directory >= 0);
+    const int kq = kqueue_nid_postfix();
+    KernelEvent events[4]{};
+    const auto ident = static_cast<std::uintptr_t>(directory);
+    Require(Apply(kq, Change(ident, EvfiltVnode, EvAdd | EvClear, NoteWrite | NoteLink | NoteDelete | NoteRename)) == 0);
+    Require(Poll(kq, events, 4) == 0);
+    const int child = open_nid_postfix((path + "/child.bin").c_str(), ReadWrite | Create, 0644);
+    Require(child >= 0 && close_nid_postfix(child) == 0);
+    Require(Wait(kq, events, 4) == 1 && events[0].ident == ident && events[0].fflags == NoteWrite);
+    Require(mkdir_nid_postfix((path + "/sub").c_str(), 0755) == 0);
+    Require(Wait(kq, events, 4) == 1 && events[0].fflags == (NoteWrite | NoteLink));
+    Require(close_nid_postfix(directory) == 0);
+    Require(close_nid_postfix(kq) == 0);
+    Require(std::filesystem::remove_all(path) == 3);
+}
+
 static void Timeout() {
     const int kq = kqueue_nid_postfix();
     KernelEvent event{};
@@ -236,6 +345,8 @@ int main() {
     UserEvents();
     SocketPair();
     Errors();
+    FileWatch();
+    DirectoryWatch();
     Timeout();
     return 0;
 }

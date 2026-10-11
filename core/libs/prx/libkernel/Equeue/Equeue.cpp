@@ -342,7 +342,7 @@ void KernelEqueuePrivate::RemoveDescriptorEvents(uintptr_t ident) {
     std::unique_lock lock(m_mutex);
     bool removed = false;
     for (auto it = m_events.begin(); it != m_events.end();) {
-        if (it->event.ident != ident || (it->event.filter != EVFILT_READ && it->event.filter != EVFILT_WRITE)) {
+        if (it->event.ident != ident || (it->event.filter != EVFILT_READ && it->event.filter != EVFILT_WRITE && it->event.filter != EVFILT_VNODE)) {
             ++it;
             continue;
         }
