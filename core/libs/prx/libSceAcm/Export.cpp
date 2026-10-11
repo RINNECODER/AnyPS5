@@ -58,8 +58,8 @@ int APS5_VABI sceAcm_FFT() {
     return 0;
 }
 
+// Panner command batches have no audible effect here: accept them.
 int APS5_VABI sceAcm_Panner() {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 

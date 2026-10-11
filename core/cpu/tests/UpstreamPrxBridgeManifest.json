@@ -394,7 +394,8 @@
       "sceNpAuthGetIdTokenV3": {
         "nid": "RdsFVsgSpZY",
         "returns": [
-          "0"
+          "0x80550003",
+          "0x80550006"
         ],
         "signature": "int(int req_id, const void* param, void* id_token)"
       }

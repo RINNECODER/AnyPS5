@@ -1254,9 +1254,9 @@ int APS5_VABI sceNetResolverAbort(void) {
     return 0;
 }
 
-int APS5_VABI sceNetResolverStartNtoaMultipleRecords() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+// Same arguments as the Ex entry without the flags word.
+int APS5_VABI sceNetResolverStartNtoaMultipleRecords(int rid, const char* hostname, NetResolverInfo* info, int timeout, int retry) {
+    return sceNetResolverStartNtoaMultipleRecordsEx(rid, hostname, info, timeout, retry, 0);
 }
 
 int APS5_VABI sceNetShowIfconfig() {
