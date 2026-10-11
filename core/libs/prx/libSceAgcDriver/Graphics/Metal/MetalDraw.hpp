@@ -14,6 +14,7 @@ namespace AgcDriver::Metal {
 
 class MetalDepthSurfaceCache;
 class MetalDepthSurface;
+class MetalGuestHostAliases;
 
 class MetalDraw {
 public:
@@ -22,6 +23,9 @@ public:
     MetalDraw(const MetalDraw&) = delete;
     MetalDraw& operator=(const MetalDraw&) = delete;
     void InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed);
+    // The persistent no-copy guest aliases draws and dispatches bind (#291); mapping
+    // publications drop the aliases of changed host spans through InvalidateBorrowedRanges.
+    [[nodiscard]] MetalGuestHostAliases& HostAliases();
     void DumpSamplesSynchronously(std::uint64_t guestAddress);
     [[nodiscard]] ShaderRecompiler::MeshTargetLimits MeshLimits() const;
     [[nodiscard]] ShaderRecompiler::TessellationTargetLimits TessellationLimits() const;
@@ -34,6 +38,7 @@ public:
 private:
     MetalDevice backend;
     std::unique_ptr<MetalDepthSurfaceCache> depthCache;
+    std::unique_ptr<MetalGuestHostAliases> hostAliases;
     std::vector<std::shared_ptr<MetalDepthSurface>> depthSurfaces;
     std::mutex drawMutex;
     id<MTLBuffer> sampleCounter = nil;

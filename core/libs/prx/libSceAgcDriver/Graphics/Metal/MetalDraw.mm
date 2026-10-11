@@ -147,7 +147,8 @@ std::span<const std::byte> pushBlock(const MetalBackend::Result& shader,
 }
 
 MetalDraw::MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary)
-    : backend(device, utilityLibrary), depthCache(std::make_unique<MetalDepthSurfaceCache>(backend)) {
+    : backend(device, utilityLibrary), depthCache(std::make_unique<MetalDepthSurfaceCache>(backend)),
+      hostAliases(std::make_unique<MetalGuestHostAliases>(device)) {
     if (![device supportsFamily:MTLGPUFamilyApple7] || ![device supportsFamily:MTLGPUFamilyMetal3]) {
         throw std::invalid_argument("Metal draw requires an Apple GPU with Metal 3 integer and GPU address support");
     }
@@ -158,8 +159,11 @@ MetalDraw::~MetalDraw() = default;
 void MetalDraw::InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed) {
     std::lock_guard lock(drawMutex);
     depthCache->Invalidate(changed);
+    for (const auto& range : changed) hostAliases->Invalidate(range.host.data(), range.host.size());
     std::erase_if(depthSurfaces, [&](const auto& surface) { return surface->OverlapsMappings(changed); });
 }
+
+MetalGuestHostAliases& MetalDraw::HostAliases() { return *hostAliases; }
 
 MeshTargetLimits MetalDraw::MeshLimits() const {
     const auto maximum = backend.Device().maxThreadsPerThreadgroup;
@@ -325,7 +329,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             return view;
         }
         return nil;
-    });
+    }, hostAliases.get());
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];

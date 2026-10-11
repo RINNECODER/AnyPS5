@@ -211,7 +211,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     configureSamplerArguments(options, *guest, nativeDevice);
     const auto converted = MetalBackend::ConvertToMetal(*guest, ShaderStage::Compute, options);
     MetalComputePipeline pipeline(nativeDevice, converted);
-    MetalShaderResources bindings(*backend, ranges);
+    MetalShaderResources bindings(*backend, ranges, {}, draw ? &draw->HostAliases() : nullptr);
     const auto descriptors = bindings.Bindings(converted);
     std::array<NSUInteger, 3> grid{};
     for (std::uint32_t axis = 0; axis < 3; ++axis) {
