@@ -269,9 +269,22 @@ void RegisterDefaults() {
             require(std::memcmp(&image[4], &hostImage[4], 16) == 0 && image[7] == hostImage[7], "register defaults counts differ");
             const auto count = static_cast<std::uint32_t>(image[7]);
             const auto* hostTypes = reinterpret_cast<const std::uint32_t*>(hostImage[6]);
-            std::vector<std::uint32_t> types(count);
+            // Each type is a 12-byte record {name hash, encoded bank/index, 0}; guests
+            // scan all `count` records with that stride, so the whole array is published.
+            std::vector<std::uint32_t> types(std::size_t{count} * 3);
             if (count) guest.Machine.Read(image[6], std::as_writable_bytes(std::span(types)));
             require(std::equal(types.begin(), types.end(), hostTypes), "register defaults types differ");
+            for (std::uint32_t record = 0; record < count; ++record) {
+                // The guest lookup: tables[encoded & 3][(encoded & 0x3fc) / 4] -> ShaderRegister.
+                const auto encoded = types[record * 3 + 1];
+                const auto bank = encoded & 3u, index = (encoded & 0x3fcu) >> 2;
+                require(index < compact->banks[bank].pointerCount, "register defaults type names a missing pointer");
+                const auto entry = load<std::uint64_t>(guest.Machine, image[bank] + index * 8);
+                const auto* expected = reinterpret_cast<ShaderRegister* const*>(hostImage[bank])[index];
+                const auto value = load<ShaderRegister>(guest.Machine, entry);
+                require(value.offset == expected->offset && value.value == expected->value,
+                        "register defaults type lookup differs from upstream");
+            }
             for (std::size_t bank = 0; bank < 4; ++bank) {
                 const auto pointers = compact->banks[bank].pointerCount;
                 require((pointers == 0) == (image[bank] == 0), "register defaults table presence differs");

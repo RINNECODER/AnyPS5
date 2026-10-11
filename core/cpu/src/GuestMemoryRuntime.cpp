@@ -89,6 +89,16 @@ std::vector<Span> subtract(const std::vector<Span>& from, std::vector<Span> minu
     }
     return result;
 }
+// Sorted spans with touching neighbours merged.
+std::vector<Span> coalesce(std::vector<Span> spans) {
+    std::sort(spans.begin(), spans.end());
+    std::vector<Span> result;
+    for (const auto& span : spans) {
+        if (!result.empty() && span.first <= result.back().second) result.back().second = std::max(result.back().second, span.second);
+        else result.push_back(span);
+    }
+    return result;
+}
 struct Storage {
     std::byte* data;
     std::size_t size;
@@ -531,7 +541,8 @@ void GuestMemoryRuntime::Protect(std::uint64_t address, std::uint64_t bytes, std
     auto affected = impl->parts(first, stop);
     // MEM-29: pinned Machine mappings (module images, stacks) are protected directly; only a
     // range with an unmapped hole is refused.
-    auto known = impl->foreign(first, stop);
+    const auto pinned = coalesce(impl->foreign(first, stop));
+    auto known = pinned;
     for (const auto& region : affected) known.emplace_back(region.first, region.last);
     if (!subtract({{first, stop}}, std::move(known)).empty()) error(13, "Guest memory range is not owned by the runtime");
     auto candidate = Impl::remove(impl->regions, first, stop);
@@ -547,9 +558,20 @@ void GuestMemoryRuntime::Protect(std::uint64_t address, std::uint64_t bytes, std
         candidate.push_back(region);
     }
     Impl::sort(candidate);
-    impl->commit(std::move(candidate), std::move(allocations), [state = impl.get(), first, size, cpu] {
-        state->machine.Protect(first, static_cast<std::size_t>(size), cpu);
-    });
+    std::vector<Span> runtimeSpans;
+    for (const auto& region : affected) runtimeSpans.emplace_back(region.first, region.last);
+    runtimeSpans = coalesce(std::move(runtimeSpans));
+    // The runtime publication covers only runtime-owned spans. A pinned Machine
+    // mapping changes owned (compositor-selected) bindings, which Machine publishes
+    // through its own owned transaction; issuing it from inside the runtime commit
+    // would nest that publication in this one (publication reentry). Publish each
+    // after the runtime commit, sequentially and never nested.
+    if (!affected.empty())
+        impl->commit(std::move(candidate), std::move(allocations), [state = impl.get(), &runtimeSpans, cpu] {
+            for (const auto& [low, high] : runtimeSpans)
+                state->machine.Protect(low, static_cast<std::size_t>(high - low), cpu);
+        });
+    for (const auto& [low, high] : pinned) impl->machine.Protect(low, static_cast<std::size_t>(high - low), cpu);
 }
 void GuestMemoryRuntime::Unmap(std::uint64_t address, std::uint64_t bytes) {
     impl->live(); Impl::MutationScope mutation(impl->transactionInProgress);

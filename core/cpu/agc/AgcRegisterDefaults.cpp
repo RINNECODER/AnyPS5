@@ -54,7 +54,8 @@ std::vector<std::byte> AgcRegisterDefaultsGuestImage(std::uint32_t version, bool
         header.Tables[bank] = append(pointers.data(), pointers.size() * sizeof(std::uint64_t));
     }
     header.Count = source->count;
-    if (source->count) header.Types = append(source->types, std::size_t{source->count} * sizeof(std::uint32_t));
+    // Types are 12-byte records {name hash, encoded bank/pointer index, 0}, not one word each.
+    if (source->count) header.Types = append(source->types, std::size_t{source->count} * 3 * sizeof(std::uint32_t));
     std::memcpy(image.data(), &header, sizeof(header));
     return image;
 }
