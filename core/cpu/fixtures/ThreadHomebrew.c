@@ -244,7 +244,10 @@ EXPORT int SceGuestMain(u64 argc, char** argv) {
     ThreadReceipt[23] = created.after;
     if (!created.handle || created.before != 0x13579bdf2468ace0ul || created.after != 0xeca86420fdb97531ul) return 85;
     if (mode == 7) thread_join(created.handle, (void**)0x300000000ffful);
-    thread_yield();
+    // Mode 16 busy-waits for the child's first event without yielding, as a
+    // multi-core guest may: the equal-priority child must still get a CPU.
+    if (mode == 16) while (ThreadReceipt[0] != 2) {}
+    else thread_yield();
     if (!tls(0x1122334455667798ul, 0x8877665544332231ul, 7, 0x22334455667788c9ul) ||
         *thread_error() != 17 || thread_self() != ThreadReceipt[6] || ThreadReceipt[0] != 2) return 86;
     for (u64 index = 0; index < 32; ++index)

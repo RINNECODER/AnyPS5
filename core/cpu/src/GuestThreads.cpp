@@ -1,8 +1,13 @@
 #include <cpu/GuestThreads.hpp>
+#include <cpu/SceHostTrampolines.hpp>
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <deque>
+#include <utility>
+#include <span>
+#include <chrono>
 #include <limits>
 #include <map>
 #include <optional>
@@ -20,6 +25,7 @@ constexpr std::uint64_t MinimumStackSize = 16 * 1024;
 // A slot keeps at least 8 MiB for errno and the thread's TLS instance.
 constexpr std::uint64_t MaximumStackExtent = 24 * 1024 * 1024;
 constexpr std::uint64_t DefaultAffinity = 0x1fff;
+static_assert(std::popcount(DefaultAffinity) == GuestCpuCount);
 constexpr std::size_t NameCapacity = 32;
 constexpr std::uint64_t ArenaBase = 0x7ff900000000;
 constexpr std::uint64_t SlotSize = 32 * 1024 * 1024;
@@ -34,6 +40,9 @@ constexpr std::uint32_t NotSupported = 0x8002002d;
 // Process-wide monotonic identities prevent destroyed slots or replacement
 // schedulers from accepting a previous scheduler's opaque attribute token.
 std::atomic<std::uint64_t> NextAttributeToken{0xa006000000000003ULL};
+// Set from signal handlers; consumed by the scheduler owner at its next turn.
+std::atomic<bool> ThreadDumpRequested{false};
+constexpr std::size_t DumpFrameLimit = 12;
 
 std::uint64_t attributeToken() {
     auto value = NextAttributeToken.load();
@@ -95,6 +104,12 @@ struct GuestThreads::Impl {
         std::string name;
         bool detached = false;
         bool cancelRequested = false;
+        // Stall diagnostics, tracked only while a dump sink is installed.
+        std::uint64_t diagRip = 0, diagRsp = 0, diagRbp = 0;
+        std::uint64_t diagSlices = 0, diagInstructions = 0;
+        std::uint64_t lastHostEntry = 0, hostEntries = 0;
+        // Scheduler turn of this thread's latest slice (0: never ran).
+        std::uint64_t lastTurn = 0;
     };
 
     Machine& machine;
@@ -132,6 +147,11 @@ struct GuestThreads::Impl {
     // Unset until SetOwnerBoundary; zero then means unlimited continuous idle.
     std::optional<std::chrono::milliseconds> maximumIdleWait;
     bool gateMapped = false;
+    GuestThreadDumpSink dumpSink;
+    std::size_t cores = 1;
+    std::uint64_t turn = 0;
+    std::chrono::milliseconds dumpPeriod{0};
+    std::chrono::steady_clock::time_point nextDump{};
     Phase phase = Phase::None;
     std::optional<StopReason> terminal;
     GuestEntryControl control;
@@ -737,9 +757,107 @@ struct GuestThreads::Impl {
     bool idleExpired(std::chrono::steady_clock::duration consumed) const {
         return maximumIdleWait && maximumIdleWait->count() > 0 && consumed >= *maximumIdleWait;
     }
+    static const char* stateName(State state) {
+        switch (state) {
+        case State::Runnable: return "runnable";
+        case State::Running: return "running";
+        case State::BlockedJoining: return "joining";
+        case State::BlockedWaiting: return "waiting";
+        case State::Finishing: return "finishing";
+        case State::Finished: return "finished";
+        case State::Reaped: return "reaped";
+        case State::Control: return "control";
+        case State::Cancelled: return "cancelled";
+        }
+        return "unknown";
+    }
+    std::vector<GuestThreadSnapshot> snapshot() {
+        std::vector<GuestThreadSnapshot> threads;
+        for (auto& [id, owned] : records) {
+            auto& record = *owned;
+            if (record.state == State::Reaped) continue;
+            GuestThreadSnapshot view;
+            view.Id = id;
+            view.ThreadId = static_cast<std::int32_t>(0x10000 + (id - HandleBase));
+            view.Name = record.name;
+            view.State = stateName(record.state);
+            view.Active = id == active;
+            view.Queued = std::find(runnable.begin(), runnable.end(), id) != runnable.end();
+            view.Policy = record.policy;
+            view.BasePriority = record.basePriority;
+            view.EffectivePriority = record.effectivePriority;
+            view.Rip = record.diagRip;
+            view.Rsp = record.diagRsp;
+            view.Rbp = record.diagRbp;
+            view.Slices = std::exchange(record.diagSlices, 0);
+            view.Instructions = std::exchange(record.diagInstructions, 0);
+            view.LastHostEntry = record.lastHostEntry;
+            view.HostEntries = std::exchange(record.hostEntries, 0);
+            if (record.pending && record.pending->kind == Action::Wait && !record.pending->awakened) {
+                view.WaitDomain = record.pending->args[0];
+                view.WaitKey = record.pending->args[1];
+            }
+            // Bounded frame-pointer walk through checked guest reads; a frame
+            // that leaves mapped memory or stops ascending ends the walk.
+            auto frame = record.diagRbp;
+            for (std::size_t depth = 0; frame && depth < DumpFrameLimit; ++depth) {
+                std::array<std::uint64_t, 2> link{};
+                try { machine.Read(frame, std::as_writable_bytes(std::span(link))); }
+                catch (const std::exception&) { break; }
+                if (!link[1]) break;
+                view.Frames.push_back(link[1]);
+                if (link[0] <= frame) break;
+                frame = link[0];
+            }
+            threads.push_back(std::move(view));
+        }
+        return threads;
+    }
+    void maybeDump() {
+        if (!dumpSink) return;
+        bool due = ThreadDumpRequested.exchange(false, std::memory_order_relaxed);
+        if (dumpPeriod.count() > 0) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= nextDump) {
+                due = true;
+                nextDump = now + dumpPeriod;
+            }
+        }
+        if (due) dumpSink(snapshot());
+    }
+    void noteSlice(Record& record) {
+        record.diagRip = machine.Get(Register::Rip);
+        record.diagRsp = machine.Get(Register::Rsp);
+        record.diagRbp = machine.Get(Register::Rbp);
+        ++record.diagSlices;
+        record.diagInstructions += machine.LastRunInstructions();
+        if (const auto entry = SceHostTrampolines::TakeLastEntry()) {
+            record.lastHostEntry = entry;
+            ++record.hostEntries;
+        }
+    }
+    std::deque<GuestThreadHandle>::iterator select() {
+        // Stable selection leaves equal-priority queue order intact while
+        // ABI continuation front insertions cannot outrank donated owners.
+        const auto byPriority = [&](auto left, auto right) {
+            return lookup(left).effectivePriority < lookup(right).effectivePriority;
+        };
+        if (cores <= 1 || runnable.size() <= 1) return std::min_element(runnable.begin(), runnable.end(), byPriority);
+        // The best-priority threads that fit on the guest CPUs all run at once:
+        // time-share them, least recently run first (queue order breaks ties).
+        std::vector<std::deque<GuestThreadHandle>::iterator> running;
+        running.reserve(runnable.size());
+        for (auto entry = runnable.begin(); entry != runnable.end(); ++entry) running.push_back(entry);
+        std::stable_sort(running.begin(), running.end(), [&](auto left, auto right) { return byPriority(*left, *right); });
+        if (running.size() > cores) running.resize(cores);
+        return *std::min_element(running.begin(), running.end(), [&](auto left, auto right) {
+            return lookup(*left).lastTurn < lookup(*right).lastTurn;
+        });
+    }
     StopReason drive(GuestPhaseBudget& budget) {
         std::chrono::steady_clock::duration idleConsumed{};
         for (;;) {
+            maybeDump();
             if (terminal) return *terminal;
             if (const auto stopped = observeStop()) return cancel(*stopped);
             if (!budget.Remaining()) return StopReason::InstructionLimit;
@@ -773,13 +891,10 @@ struct GuestThreads::Impl {
             }
             // Runnable guest work ends the idle stretch; the cap is per stretch.
             idleConsumed = {};
-            // Stable selection leaves equal-priority queue order intact while
-            // ABI continuation front insertions cannot outrank donated owners.
-            const auto selected = std::min_element(runnable.begin(), runnable.end(), [&](auto left, auto right) {
-                return lookup(left).effectivePriority < lookup(right).effectivePriority;
-            });
+            const auto selected = select();
             auto& record = lookup(*selected);
             runnable.erase(selected);
+            record.lastTurn = ++turn;
             if (record.state != State::Runnable && record.state != State::Finishing)
                 fail("guest run queue contains an ineligible thread");
             activate(record);
@@ -816,6 +931,7 @@ struct GuestThreads::Impl {
                     record.quantumRemaining -= instructions;
                 }
             };
+            if (dumpSink) static_cast<void>(SceHostTrampolines::TakeLastEntry());
             try {
                 reason = machine.RunSlice(machine.Get(Register::Rip), until, std::min(slice, budget.Remaining()));
             } catch (...) {
@@ -824,6 +940,7 @@ struct GuestThreads::Impl {
                 throw;
             }
             charge();
+            if (dumpSink) noteSlice(record);
             machine.SaveContext(record.context);
             if (reason == StopReason::Requested || reason == StopReason::Exit) return cancel(reason);
             if (const auto stopped = observeStop()) return cancel(*stopped);
@@ -1037,6 +1154,23 @@ void GuestThreads::WaitDomain::Withdraw() {
 
 GuestThreads::GuestThreads(Machine& machine) : impl(std::make_shared<Impl>(machine)) {}
 void GuestThreads::CheckIdleOwner() const { impl->checkIdleOwner(); }
+void GuestThreads::SetGuestCores(std::size_t cores) {
+    impl->checkOwner();
+    if (!cores || cores > GuestCpuCount) fail("guest CPU count must be between 1 and the guest affinity width");
+    impl->cores = cores;
+}
+void GuestThreads::RequestThreadDump() noexcept { ThreadDumpRequested.store(true, std::memory_order_relaxed); }
+void GuestThreads::SetThreadDump(GuestThreadDumpSink sink, std::chrono::milliseconds period) {
+    impl->checkOwner();
+    impl->dumpSink = std::move(sink);
+    impl->dumpPeriod = impl->dumpSink ? period : std::chrono::milliseconds{0};
+    // Periodic snapshots start at the next scheduler turn, so every run records one.
+    impl->nextDump = std::chrono::steady_clock::now();
+}
+std::vector<GuestThreadSnapshot> GuestThreads::SnapshotThreads() const {
+    impl->checkOwner();
+    return impl->snapshot();
+}
 void GuestThreads::SetOwnerBoundary(std::function<void(bool)> callback,
                                     std::chrono::milliseconds maximumIdleWait) {
     impl->checkIdleOwner();
