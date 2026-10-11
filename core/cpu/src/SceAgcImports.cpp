@@ -5,6 +5,7 @@
 #include "AgcUpstreamBuilders.hpp"
 #include "upstream-prx/Marshal.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
+#include "prx/libSceAgc/Misc/include/ShaderFusion.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include <algorithm>
 #include <array>
@@ -20,6 +21,8 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+extern "C" int APS5_VABI sceAgcGetGsOversubscription(ShaderRegister* regs, const Shader* gs, std::uint32_t budget, float factor);
 
 namespace Cpu {
 namespace UpstreamPrx { const Export* AgcDriverLeafExport(std::string_view nid); }
@@ -785,6 +788,118 @@ struct AgcGenericBindings {
         result(guest, status);
     }
 
+    // NotImplemented upstream exports: upstream logs and returns zero (or null),
+    // so the guest sees exactly that.
+    static void notImplemented(Impl&, Machine& guest, Contract) { guest.Set(Register::Rax, 0); }
+
+    // Shader halves are read from guest memory into host copies. Only the
+    // fields upstream's fusion logic dereferences are copied; pointers that
+    // upstream only compares or copies keep their guest values.
+    struct HalfSnapshot {
+        Shader Header{};
+        ShaderSpecialRegs Specials{};
+        ShaderUserData User{};
+        std::vector<ShaderRegister> Sh, Cx;
+        std::vector<std::byte> Code;
+        std::uint64_t ShAt = 0, SpecialsAt = 0;
+        template<class T> static void table(Machine& guest, std::uint64_t at, std::uint32_t count, std::vector<T>& out) {
+            if (!at || !count) return;
+            out.resize(count);
+            address(at, count * sizeof(T), alignof(T));
+            guest.CheckAccess(at, count * sizeof(T), Permission::Read);
+            guest.Read(at, std::as_writable_bytes(std::span(out)));
+        }
+        void Load(Machine& guest, std::uint64_t at, bool code) {
+            Header = read<Shader>(guest, at);
+            ShAt = numeric(Header.sh_registers); SpecialsAt = numeric(Header.specials);
+            table(guest, ShAt, Header.num_sh_registers, Sh);
+            table(guest, numeric(Header.cx_registers), Header.num_cx_registers, Cx);
+            if (!Sh.empty()) Header.sh_registers = Sh.data();
+            if (!Cx.empty()) Header.cx_registers = Cx.data();
+            if (SpecialsAt) { Specials = read<ShaderSpecialRegs>(guest, SpecialsAt); Header.specials = &Specials; }
+            if (const auto user = numeric(Header.user_data)) { User = read<ShaderUserData>(guest, user); Header.user_data = &User; }
+            if (code && Header.code) {
+                const auto base = numeric(const_cast<const void*>(Header.code));
+                require(Header.shader_size <= 0x4000000 && base <= UINT64_MAX - Header.shader_size, "shader half code too large");
+                Code.resize(Header.shader_size);
+                if (!Code.empty()) { guest.CheckAccess(base, Code.size(), Permission::Read); guest.Read(base, std::as_writable_bytes(std::span(Code))); }
+                Header.code = Code.data();
+            }
+        }
+    };
+    static bool halvesOfType(const HalfSnapshot& front, const HalfSnapshot& back, ShaderRegs::ShaderBinaryType f, ShaderRegs::ShaderBinaryType b) {
+        return static_cast<ShaderRegs::ShaderBinaryType>(front.Header.type) == f && static_cast<ShaderRegs::ShaderBinaryType>(back.Header.type) == b;
+    }
+    static void fusedShaderSize(Impl&, Machine& guest, Contract) {
+        const auto dst = arg(guest, 0), frontAt = arg(guest, 1), backAt = arg(guest, 2);
+        require(dst && frontAt && backAt, "sceAgcGetFusedShaderSize_0080: invalid argument");
+        address(dst, sizeof(SizeAlign), 8);
+        guest.CheckAccess(dst, sizeof(SizeAlign), Permission::Write);
+        HalfSnapshot front, back;
+        front.Load(guest, frontAt, true); back.Load(guest, backAt, false);
+        SizeAlign size{};
+        const auto status = sceAgcGetFusedShaderSize_0080(&size, &front.Header, &back.Header);
+        if (status == 0) write(guest, dst, size);
+        result(guest, status);
+    }
+    // Tessellation halves are fused on host copies; the fused header and
+    // register copy are written back with guest addresses. Geometry halves need
+    // the fused image relocated and registered with the driver, which this
+    // bridge does not do: they report the invalid-halves status upstream uses.
+    static void fuseHalves(Impl&, Machine& guest, Contract) {
+        constexpr std::int32_t InvalidShaderHalves = static_cast<std::int32_t>(0x8a6c0008u);
+        const auto outAt = arg(guest, 0), frontAt = arg(guest, 1), backAt = arg(guest, 2), scratchAt = arg(guest, 3);
+        require(outAt && frontAt && backAt, "sceAgcFuseShaderHalves_0200: invalid argument");
+        address(outAt, sizeof(Shader), 8);
+        guest.CheckAccess(outAt, sizeof(Shader), Permission::Write);
+        HalfSnapshot front, back;
+        front.Load(guest, frontAt, false); back.Load(guest, backAt, false);
+        if (halvesOfType(front, back, ShaderRegs::ShaderBinaryType::GsFront, ShaderRegs::ShaderBinaryType::GsBack)) { result(guest, InvalidShaderHalves); return; }
+        std::vector<ShaderRegister> scratch;
+        if (halvesOfType(front, back, ShaderRegs::ShaderBinaryType::HsFront, ShaderRegs::ShaderBinaryType::HsBack)) {
+            require(front.SpecialsAt && back.SpecialsAt, "sceAgcFuseShaderHalves_0200: halves lack special registers");
+            if (scratchAt) {
+                scratch.resize(back.Sh.size());
+                address(scratchAt, scratch.size() * sizeof(ShaderRegister), 4);
+                guest.CheckAccess(scratchAt, scratch.size() * sizeof(ShaderRegister), Permission::Write);
+            }
+        }
+        Shader fused{};
+        const auto status = sceAgcFuseShaderHalves_0200(&fused, &front.Header, &back.Header, scratchAt ? scratch.data() : nullptr);
+        if (status == 0) {
+            if (scratchAt) {
+                if (!scratch.empty()) guest.Write(scratchAt, std::as_bytes(std::span(scratch)));
+                fused.sh_registers = reinterpret_cast<ShaderRegister*>(scratchAt);
+            } else {
+                if (!back.Sh.empty()) {
+                    guest.CheckAccess(back.ShAt, back.Sh.size() * sizeof(ShaderRegister), Permission::Write);
+                    guest.Write(back.ShAt, std::as_bytes(std::span(back.Sh)));
+                }
+                fused.sh_registers = reinterpret_cast<ShaderRegister*>(back.ShAt);
+            }
+            if (fused.specials == &back.Specials) fused.specials = reinterpret_cast<ShaderSpecialRegs*>(back.SpecialsAt);
+            write(guest, outAt, fused);
+        }
+        result(guest, status);
+    }
+    // The factor arrives in xmm0, which the Machine does not expose, so it is
+    // treated as zero: no oversubscription beyond the full-budget request.
+    static void gsOversubscription(Impl&, Machine& guest, Contract) {
+        const auto regsAt = arg(guest, 0);
+        require(regsAt, "sceAgcGetGsOversubscription: regs is null");
+        address(regsAt, 2 * sizeof(ShaderRegister), 4);
+        guest.CheckAccess(regsAt, 2 * sizeof(ShaderRegister), Permission::Write);
+        const auto budget = conv<std::uint32_t>(arg(guest, 2));
+        // A partial budget needs the gs registers and the xmm0 factor, neither of which is bridged:
+        // refuse rather than hand the guest the zero-budget registers as if they were its answer.
+        require(budget == 0 || budget == std::numeric_limits<std::uint32_t>::max(),
+                "sceAgcGetGsOversubscription: partial budgets need the gs shader and float factor, which are not bridged");
+        std::array<ShaderRegister, 2> regs{};
+        const auto status = sceAgcGetGsOversubscription(regs.data(), nullptr, budget, 0.0f);
+        if (status == 0) write(guest, regsAt, regs);
+        result(guest, status);
+    }
+
     static std::span<const Row> Rows() {
         static const Row rows[] = {
             {"23LRUSvYu1M", Contract::UpstreamPacketInfo, &plain<sceAgcInit_0090>},
@@ -948,6 +1063,27 @@ struct AgcGenericBindings {
             {"wRbq6ZjNop4", Contract::UpstreamShader, &registerDefaults<true>},
             {"D9sr1xGUriE", Contract::UpstreamShader, &createPrimState},
             {"Y3ymLfZ1384", Contract::UpstreamShader, &updatePrimState},
+            {"vieBRwlh1Lw", Contract::UpstreamStub, &notImplemented},  // upstream sceAgcUnknown_vieBRwlh1Lw
+            {"zARR5aCmkoY", Contract::UpstreamStub, &notImplemented},  // upstream sceAgcDcbA_zARR5aCmkoY
+            {"LtTouSCZjHM", Contract::UpstreamCb, &builder<sceAgcSetNop>},  // sceAgcCbNop
+            {"AAeX-U5-P3M", Contract::UpstreamStub, &notImplemented},
+            {"OQTgEXyihvA", Contract::UpstreamStub, &notImplemented},
+            {"T6xuVw0KUJo", Contract::UpstreamStub, &notImplemented},
+            {"ICkECTBxrMw", Contract::UpstreamStub, &notImplemented},
+            {"6nths4DHNrs", Contract::UpstreamStub, &notImplemented},
+            {"0o3VDdtA6nM", Contract::UpstreamStub, &notImplemented},
+            {"AFIh8SQkYlQ", Contract::UpstreamStub, &notImplemented},
+            {"hFQ9pUxoLQ4", Contract::UpstreamStub, &notImplemented},
+            {"LFSPFmGc9Hg", Contract::UpstreamStub, &notImplemented},
+            {"hEK26Wdny6s", Contract::UpstreamStub, &notImplemented},
+            {"FneFypEDRgY", Contract::UpstreamStub, &notImplemented},
+            {"opR1JeJZCBU", Contract::UpstreamStub, &notImplemented},
+            {"FcgdDM3MB+k", Contract::UpstreamStub, &notImplemented},
+            {"rVOmPz2RBlg", Contract::UpstreamStub, &notImplemented},
+            {"gQkqkLttcpw", Contract::UpstreamStub, &notImplemented},
+            {"dolOmWH+huQ", Contract::UpstreamShader, &fusedShaderSize},
+            {"fd5Bp5tGTgo", Contract::UpstreamShader, &fuseHalves},
+            {"NKIzURsgV7I", Contract::UpstreamShader, &gsOversubscription},
         };
         return rows;
     }
@@ -1050,6 +1186,8 @@ std::span<const AgcAbiAdmission> TargetAgcAdmissions() {
         {Contract::UpstreamCb, AgcArgumentPolicy::SourceContract, "upstream common encoders (branch, conditional write, nop); numeric addresses only"},
         {Contract::UpstreamDcb, AgcArgumentPolicy::SourceContract, "upstream graphics queue encoders (jump, flow, state, events); numeric addresses only"},
         {Contract::UpstreamPacketInfo, AgcArgumentPolicy::SourceContract, "upstream packet inspection; packet copied from guest, results translated back"},
+        {Contract::UpstreamStub, AgcArgumentPolicy::SourceContract,
+            "upstream exports that are NotImplemented stubs returning zero; no guest memory is read or written"},
         {Contract::UpstreamShader, AgcArgumentPolicy::SourceContract,
             "upstream register defaults published as guest tables; prim state on host copies of stage type and special registers"},
         {Contract::UpstreamDriver, AgcArgumentPolicy::SourceContract,

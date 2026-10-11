@@ -211,9 +211,28 @@ void scopeAndLifetime() {
     rejects([&] { machine.Run(0x1000, 0x1006, 100); }, "runtime has expired");
 }
 }
+void leafExports() {
+    Session session;
+    for (const auto nid : {"crb5j7mkk1c", "kbw4UHHSYy0"})
+        require(session.invoke(session.resolve(nid), 0x1234) == 0, "libkernel leaf export did not return zero");
+    for (const auto nid : {"EHsF2i9FXPM", "al3JzFI9MQ0"}) {
+        require(session.invoke(session.resolve(nid, true), 0x1234) == 0, "libc internal diagnostic export did not return zero");
+        auto wrong = qualified(nid); // wrong library scope must not resolve
+        bool refused = false;
+        try { refused = !session.imports.Resolve(wrong).has_value(); } catch (const std::exception&) { refused = true; }
+        require(refused, "libc internal export resolved from libkernel");
+    }
+    auto flag = qualified("ZT4ODD2Ts9o");
+    flag.LibraryName = "libSceLibcInternal"; flag.ModuleName = "libSceLibcInternal";
+    const auto at = session.imports.Resolve(flag).value();
+    session.machine.CheckAccess(at, 4, rw);
+    require(session.qword(at) % (1ULL << 32) == 1, "need-flag object is not a 32-bit one");
+    rejects([&] { (void)session.invoke(session.resolve("Ou3iL1abvng")); }, "stack protector");
+}
+
 int main() {
     try {
-        processParameters(); callbackRegistration(); objectsAndTrace(); scopeAndLifetime();
+        processParameters(); callbackRegistration(); objectsAndTrace(); scopeAndLifetime(); leafExports();
         std::cout << "PASS actual x86 libc bootstrap gates, guest objects, callbacks, process parameters and persistent trace storage\n";
         return 0;
     } catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }

@@ -13,7 +13,10 @@
 namespace Cpu {
 namespace {
 
-enum class Service { ProcessParameters, HeapRegistration, TraceInfo, StackGuard, ProgramName };
+// KernelNoop: libkernel leaves with nothing to do (zero result). StackCheckFail: a guest stack-protector
+// failure terminates the run. LibcNoop: libSceLibcInternalExt diagnostics. NeedFlag: libSceLibcInternal data object.
+enum class Service { ProcessParameters, HeapRegistration, TraceInfo, StackGuard, ProgramName,
+                     KernelNoop, StackCheckFail, LibcNoop, NeedFlag };
 constexpr std::size_t pageSize = 4096;
 // The data page sits just past the 1 MiB the gate trampolines reserve.
 constexpr std::uint64_t dataOffset = (SceHostTrampolines::DefaultCapacity + 1) * 16;
@@ -22,7 +25,8 @@ constexpr std::size_t programPointerOffset = 8;
 constexpr std::size_t programStringOffset = 16;
 constexpr std::size_t maskOffset = programStringOffset + 256;
 constexpr std::size_t tableOffset = maskOffset + 8;
-static_assert(tableOffset + 65 * 8 <= pageSize);
+constexpr std::size_t needFlagOffset = tableOffset + 65 * 8;
+static_assert(needFlagOffset + 4 <= pageSize);
 
 std::string identity(const SceImport& import) {
     return import.Nid + " library=" + import.LibraryName + ":" + std::to_string(import.LibraryVersion) +
@@ -79,7 +83,13 @@ struct SceLibcBootstrapImports::Impl {
     const std::map<std::string, Service> services{
         {"959qrazPIrg", Service::ProcessParameters}, {"p5EcQeEeJAE", Service::HeapRegistration},
         {"NWtTN10cJzE", Service::TraceInfo}, {"f7uOxY9mM1U", Service::StackGuard},
-        {"djxxOmW6-aw", Service::ProgramName}};
+        {"djxxOmW6-aw", Service::ProgramName},
+        {"crb5j7mkk1c", Service::KernelNoop},      // _is_signal_return: no signal frame is ever active
+        {"kbw4UHHSYy0", Service::KernelNoop},      // __pthread_cxa_finalize: no per-thread destructors are tracked
+        {"Ou3iL1abvng", Service::StackCheckFail},  // __stack_chk_fail
+        {"EHsF2i9FXPM", Service::LibcNoop},        // sceLibcInternalBacktraceForGame
+        {"al3JzFI9MQ0", Service::LibcNoop},        // sceLibcInternalHeapErrorReportForGame
+        {"ZT4ODD2Ts9o", Service::NeedFlag}};       // g_need_flag, initially 1
 
     Impl(Machine& guest, const std::string& name, std::uint64_t base) :
         machine(guest), dataBase(base + dataOffset) {
@@ -93,6 +103,7 @@ struct SceLibcBootstrapImports::Impl {
         if (!guard) guard = 1;
         writeInteger(data, guardOffset, guard, 8);
         writeInteger(data, programPointerOffset, dataBase + programStringOffset, 8);
+        writeInteger(data, needFlagOffset, 1, 4);
         for (std::size_t index = 0; index < name.size(); ++index)
             data[programStringOffset + index] = std::byte(static_cast<unsigned char>(name[index]));
         trampolines.emplace(machine, base, SceHostTrampolines::DefaultCapacity, "SCE libc bootstrap import");
@@ -143,6 +154,8 @@ struct SceLibcBootstrapImports::Impl {
             guest.Set(Register::Rax, processSpan ? processSpan->first : 0);
         } else if (service == Service::HeapRegistration) registerHeap(guest.Get(Register::Rdi));
         else if (service == Service::TraceInfo) traceInfo(guest.Get(Register::Rdi));
+        else if (service == Service::KernelNoop || service == Service::LibcNoop) guest.Set(Register::Rax, 0);
+        else if (service == Service::StackCheckFail) throw std::runtime_error("guest stack protector check failed (__stack_chk_fail)");
         else throw std::runtime_error("Unsupported SCE libc bootstrap gate operation");
     }
 };
@@ -171,14 +184,16 @@ std::optional<std::uint64_t> SceLibcBootstrapImports::Resolve(const SceImport& i
     const auto found = impl->services.find(import.Nid);
     if (found == impl->services.end()) return std::nullopt;
     const auto service = found->second;
-    const bool trace = service == Service::TraceInfo;
-    const std::string_view library = trace ? "libSceLibcInternalExt" : "libkernel";
-    const std::string_view module = trace ? "libSceLibcInternal" : "libkernel";
+    const bool trace = service == Service::TraceInfo || service == Service::LibcNoop;
+    const bool internal = service == Service::NeedFlag;
+    const std::string_view library = trace ? "libSceLibcInternalExt" : internal ? "libSceLibcInternal" : "libkernel";
+    const std::string_view module = trace || internal ? "libSceLibcInternal" : "libkernel";
     if (import.LibraryName != library && import.ModuleName != module) return std::nullopt;
     if (import.LibraryName != library || import.ModuleName != module ||
         import.LibraryVersion != 1 || import.ModuleMajor != 1 || import.ModuleMinor != 1)
         throw std::runtime_error("Unsupported SCE libc bootstrap import scope/version: " + identity(import));
     if (service == Service::StackGuard) return impl->dataBase + guardOffset;
+    if (service == Service::NeedFlag) return impl->dataBase + needFlagOffset;
     if (service == Service::ProgramName) return impl->dataBase + programPointerOffset;
     const Impl::Key key{import.Nid, import.LibraryName, import.LibraryId, import.ModuleName, import.ModuleId,
                         import.LibraryVersion, import.ModuleMajor, import.ModuleMinor};

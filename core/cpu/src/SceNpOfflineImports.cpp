@@ -26,8 +26,9 @@ constexpr std::uint32_t NpCallbackNotRegistered = 0x80550009;
 constexpr std::uint32_t WebApiInvalidArgument = 0x80552902;
 constexpr std::uint32_t WebApiNotSignedIn = 0x80552907;
 
-enum class Library { NpManager, WebApi, WebApi2 };
-constexpr std::array<std::string_view, 3> LibraryNames{"libSceNpManager", "libSceNpWebApi", "libSceNpWebApi2"};
+enum class Library { NpManager, WebApi, WebApi2, EntitlementAccess };
+constexpr std::array<std::string_view, 4> LibraryNames{"libSceNpManager", "libSceNpWebApi", "libSceNpWebApi2", "libSceNpEntitlementAccess"};
+constexpr std::uint32_t EntitlementInvalidArgument = 0x817D0002;
 
 std::uint64_t argument(Machine& guest, unsigned index) {
     constexpr std::array registers{Register::Rdi, Register::Rsi, Register::Rdx, Register::Rcx, Register::R8, Register::R9};
@@ -93,6 +94,12 @@ struct SceNpOfflineImports::Impl {
                 return argument(guest, 0) ? 1 : NpInvalidArgument; }},
             {Library::NpManager, "sceNpSetContentRestriction", ok},
 
+            // Never a trial: the flag is a 32-bit zero.
+            {Library::EntitlementAccess, "sceNpEntitlementAccessGetGameTrialsFlag", [](Impl&, Machine& guest) -> std::uint32_t {
+                const auto flag = argument(guest, 0);
+                if (!flag) return EntitlementInvalidArgument;
+                return store<std::uint32_t>(guest, flag, 0) ? 0 : 0x8002000eu;
+            }},
             {Library::WebApi2, "sceNpWebApi2PushEventRegisterCallback", newHandle},
             {Library::WebApi2, "sceNpWebApi2PushEventRegisterPushContextCallback", newHandle},
             {Library::WebApi2, "sceNpWebApi2SetRequestTimeout", ok},
