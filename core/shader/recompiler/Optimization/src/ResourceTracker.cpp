@@ -114,11 +114,20 @@ public:
         }
         SplitDescriptorPhis();
         PlanIndirectImages();
+        std::unordered_map<const IrBlock*, std::uint32_t> blockIndices;
+        for (const IrBlock* block : m_program.BlockOrder()) {
+            blockIndices.emplace(block, static_cast<std::uint32_t>(blockIndices.size()));
+        }
+        m_blockSources.assign(blockIndices.size(), {});
         for (auto& block : m_program.Blocks()) {
+            const auto found = blockIndices.find(block.get());
+            m_currentBlock = found == blockIndices.end() ? std::numeric_limits<std::uint32_t>::max() : found->second;
             for (IrValue* inst : block->Instructions()) {
                 Collect(*inst);
             }
         }
+        m_currentBlock = std::numeric_limits<std::uint32_t>::max();
+        PlanResourceControlFlow();
         if (m_bdaTraces > bdaTraceLimit) std::fprintf(stderr, "[bda] %u more address accesses in this program not shown\n", m_bdaTraces - bdaTraceLimit);
         LinkImageAliases();
         for (const auto& patch : m_handlePatches) {
@@ -241,11 +250,89 @@ private:
                 same = same && EquivalentValue(m_program.Resources(), current.dwords[i], descriptor.dwords[i]);
             }
             if (same) {
+                NoteBlockSource(candidate);
                 return candidate;
             }
         }
         m_sources.push_back(descriptor);
+        NoteBlockSource(static_cast<std::uint32_t>(m_sources.size() - 1));
         return static_cast<std::uint32_t>(m_sources.size() - 1);
+    }
+
+    void NoteBlockSource(std::uint32_t source) {
+        if (m_currentBlock >= m_blockSources.size()) {
+            return;
+        }
+        auto& sources = m_blockSources[m_currentBlock];
+        if (std::ranges::find(sources, source) == sources.end()) {
+            sources.push_back(source);
+        }
+    }
+
+    // A descriptor source that every path of the program reaches stays active; one that is used
+    // only behind a conditional branch can be left out when the branch condition is evaluable at
+    // capture time (see EvaluateRuntimeSourcesImpl), so a descriptor the untaken path would read
+    // as another resource kind is not validated. The edges are the structured terminators of the
+    // block metadata; a block whose terminator is not a plain or conditional branch keeps all of
+    // its CFG successors, so no source is ever dropped for a path the walk cannot decide.
+    void PlanResourceControlFlow() {
+        const auto& order = m_program.BlockOrder();
+        const auto& info = m_program.Metadata().blockInfo;
+        if (order.empty() || order.size() != info.size()) {
+            return;
+        }
+        std::unordered_map<const IrBlock*, std::uint32_t> indexOf;
+        std::unordered_map<std::uint32_t, std::uint32_t> idToIndex;
+        for (std::uint32_t index = 0; index < order.size(); index++) {
+            indexOf.emplace(order[index], index);
+            idToIndex.emplace(info[index].id, index);
+        }
+        std::vector<ResourceBlock> controlFlow(order.size());
+        for (std::uint32_t index = 0; index < order.size(); index++) {
+            auto& block = controlFlow[index];
+            const auto& terminator = info[index].terminator;
+            const auto target = [&](std::uint32_t id) { return idToIndex.find(id); };
+            const auto trueEdge = target(terminator.trueBlock);
+            const auto falseEdge = target(terminator.falseBlock);
+            if (terminator.kind == TerminatorKind::ConditionalBranch && !terminator.loopHeader && info[index].condition != nullptr && trueEdge != idToIndex.end() && falseEdge != idToIndex.end()) {
+                block.condition = info[index].condition;
+                block.successors = {trueEdge->second, falseEdge->second};
+            } else if (terminator.kind != TerminatorKind::Return) {
+                for (const IrBlock* successor : order[index]->Successors()) {
+                    const auto found = indexOf.find(successor);
+                    if (found == indexOf.end()) {
+                        return;
+                    }
+                    block.successors.push_back(found->second);
+                }
+            }
+            block.sources = m_blockSources[index];
+        }
+        std::vector<std::uint8_t> unconditional(order.size());
+        for (std::uint32_t index = 0; index < order.size() && unconditional[index] == 0u;) {
+            unconditional[index] = 1u;
+            if (controlFlow[index].successors.size() != 1u) {
+                break;
+            }
+            index = controlFlow[index].successors.front();
+        }
+        std::vector<std::uint8_t> reached(m_sources.size());
+        for (std::uint32_t index = 0; index < order.size(); index++) {
+            for (const auto source : controlFlow[index].sources) {
+                if (unconditional[index] != 0u) {
+                    reached[source] = 1u;
+                }
+            }
+        }
+        bool guarded = false;
+        for (const auto& block : controlFlow) {
+            for (const auto source : block.sources) {
+                guarded = guarded || reached[source] == 0u;
+            }
+        }
+        if (guarded) {
+            m_program.Resources().controlFlow = std::move(controlFlow);
+        }
     }
 
     static bool immediateU32(IrValue* value, std::uint32_t& result) {
@@ -1384,6 +1471,8 @@ private:
     ShaderInfo m_info;
     IrBuilder m_builder;
     std::vector<DescriptorSource> m_sources;
+    std::vector<std::vector<std::uint32_t>> m_blockSources;
+    std::uint32_t m_currentBlock = std::numeric_limits<std::uint32_t>::max();
     std::vector<HandlePatch> m_handlePatches;
     std::vector<MemoryPatch> m_memoryPatches;
     // APS5_TRACE_BDA: address accesses seen by Collect (the first bdaTraceLimit are printed).

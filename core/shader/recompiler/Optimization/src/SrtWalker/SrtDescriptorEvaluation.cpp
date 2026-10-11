@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -85,7 +86,14 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
                 active[source] = 1u;
             }
             std::uint32_t condition = 0;
-            const bool cleanEvaluable = block.condition != nullptr && runtime.readSpecializationMemory != nullptr && cleanEvaluator.Evaluate(block.condition, condition);
+            bool cleanEvaluable = false;
+            if (block.condition != nullptr && runtime.readSpecializationMemory != nullptr) {
+                try {
+                    cleanEvaluable = cleanEvaluator.Evaluate(block.condition, condition);
+                } catch (const std::runtime_error&) {
+                    cleanEvaluable = false;
+                }
+            }
             if (cleanEvaluable) {
                 pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
             } else {
