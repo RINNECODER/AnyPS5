@@ -1,10 +1,13 @@
 #include "SpirvBackend/SpirvEmitterInstructions.hpp"
 #include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp>
+#include <algorithm>
 #include <array>
 #include <initializer_list>
 #include <iterator>
 #include <span>
+#include <stdexcept>
+#include <string>
 
 namespace ShaderRecompiler {
 namespace {
@@ -91,6 +94,163 @@ F64Bits Quiet(SpirvEmitterState& state, F64Bits bits) {
     return {bits.low, Binary(state, spv::OpBitwiseOr, TypeU32(state), bits.high, ConstantU32(state, 0x00080000u))};
 }
 
+// Devices without the Float64 capability (Metal has no double type) keep every f64 value as its
+// IEEE bit pair and never declare a 64-bit float. Classification, comparisons, min/max, ldexp,
+// truncation, frexp and every conversion are computed exactly on those bits; the remaining
+// arithmetic (add, mul, fma, rcp, sqrt, rounding) runs at f32 precision and is widened back exactly.
+bool NativeFloat64(const SpirvEmitterState& state) {
+    return std::find(state.supportedCapabilities.begin(), state.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityFloat64)) != state.supportedCapabilities.end();
+}
+
+std::uint32_t SoftOp(SpirvEmitterState& state, spv::Op opcode, std::uint32_t lhs, std::uint32_t rhs) {
+    return Binary(state, opcode, TypeU32(state), lhs, rhs);
+}
+
+std::uint32_t SoftOpK(SpirvEmitterState& state, spv::Op opcode, std::uint32_t lhs, std::uint32_t value) {
+    return SoftOp(state, opcode, lhs, ConstantU32(state, value));
+}
+
+std::uint32_t SoftTest(SpirvEmitterState& state, spv::Op opcode, std::uint32_t lhs, std::uint32_t value) {
+    return Binary(state, opcode, TypeBool(state), lhs, ConstantU32(state, value));
+}
+
+std::uint32_t SoftAny(SpirvEmitterState& state, std::uint32_t lhs, std::uint32_t rhs) {
+    return Binary(state, spv::OpLogicalOr, TypeBool(state), lhs, rhs);
+}
+
+std::uint32_t SoftAll(SpirvEmitterState& state, std::uint32_t lhs, std::uint32_t rhs) {
+    return Binary(state, spv::OpLogicalAnd, TypeBool(state), lhs, rhs);
+}
+
+std::uint32_t SoftPick(SpirvEmitterState& state, std::uint32_t condition, std::uint32_t trueValue, std::uint32_t falseValue) {
+    return Select(state, TypeU32(state), condition, trueValue, falseValue);
+}
+
+std::uint32_t SoftExponent(SpirvEmitterState& state, std::uint32_t high) {
+    return SoftOpK(state, spv::OpBitwiseAnd, SoftOpK(state, spv::OpShiftRightLogical, high, 20u), 0x7ffu);
+}
+
+// f64 bits -> f32 bits, rounded to nearest even. Results below the f32 normal range flush to zero.
+std::uint32_t SoftNarrowBits(SpirvEmitterState& state, F64Bits bits) {
+    const auto sign = SoftOpK(state, spv::OpBitwiseAnd, bits.high, 0x80000000u);
+    const auto exponent = SoftExponent(state, bits.high);
+    const auto fractionHigh = SoftOpK(state, spv::OpBitwiseAnd, bits.high, 0x000fffffu);
+    const auto mantissa = SoftOp(state, spv::OpBitwiseOr, SoftOpK(state, spv::OpShiftLeftLogical, fractionHigh, 3u), SoftOpK(state, spv::OpShiftRightLogical, bits.low, 29u));
+    const auto rest = SoftOpK(state, spv::OpBitwiseAnd, bits.low, 0x1fffffffu);
+    const auto tie = SoftAll(state, SoftTest(state, spv::OpIEqual, rest, 0x10000000u), SoftTest(state, spv::OpINotEqual, SoftOpK(state, spv::OpBitwiseAnd, mantissa, 1u), 0u));
+    const auto roundUp = SoftAny(state, SoftTest(state, spv::OpUGreaterThan, rest, 0x10000000u), tie);
+    const auto base = SoftOp(state, spv::OpIAdd, SoftOpK(state, spv::OpShiftLeftLogical, SoftOpK(state, spv::OpISub, exponent, 896u), 23u), mantissa);
+    auto result = SoftOp(state, spv::OpBitwiseOr, sign, SoftOp(state, spv::OpIAdd, base, SoftPick(state, roundUp, ConstantU32(state, 1u), ConstantU32(state, 0u))));
+    result = SoftPick(state, SoftTest(state, spv::OpULessThanEqual, exponent, 896u), sign, result);
+    result = SoftPick(state, SoftTest(state, spv::OpUGreaterThanEqual, exponent, 1151u), SoftOpK(state, spv::OpBitwiseOr, sign, 0x7f800000u), result);
+    const auto nan = SoftAll(state, SoftTest(state, spv::OpIEqual, exponent, 0x7ffu), SoftTest(state, spv::OpINotEqual, SoftOp(state, spv::OpBitwiseOr, fractionHigh, bits.low), 0u));
+    return SoftPick(state, nan, SoftOp(state, spv::OpBitwiseOr, SoftOpK(state, spv::OpBitwiseOr, sign, 0x7fc00000u), mantissa), result);
+}
+
+std::uint32_t SoftNarrow(SpirvEmitterState& state, std::uint32_t value) {
+    return Unary(state, spv::OpBitcast, TypeF32(state), SoftNarrowBits(state, Split(state, value)));
+}
+
+// f32 bits -> f64 bits, exact (f32 denormals become normal doubles).
+F64Bits SoftWidenBits(SpirvEmitterState& state, std::uint32_t bits) {
+    const auto sign = SoftOpK(state, spv::OpBitwiseAnd, bits, 0x80000000u);
+    const auto exponent = SoftOpK(state, spv::OpBitwiseAnd, SoftOpK(state, spv::OpShiftRightLogical, bits, 23u), 0xffu);
+    const auto mantissa = SoftOpK(state, spv::OpBitwiseAnd, bits, 0x007fffffu);
+    const auto pack = [&](std::uint32_t biased, std::uint32_t fraction) {
+        return F64Bits{SoftOpK(state, spv::OpShiftLeftLogical, fraction, 29u),
+            SoftOp(state, spv::OpBitwiseOr, SoftOp(state, spv::OpBitwiseOr, sign, SoftOpK(state, spv::OpShiftLeftLogical, biased, 20u)), SoftOpK(state, spv::OpShiftRightLogical, fraction, 3u))};
+    };
+    const auto normal = pack(SoftOpK(state, spv::OpIAdd, exponent, 896u), mantissa);
+    const auto special = pack(ConstantU32(state, 0x7ffu), mantissa);
+    const auto shift = SoftOpK(state, spv::OpBitwiseAnd, SoftOp(state, spv::OpISub, ConstantU32(state, 23u), Glsl(state, TypeU32(state), GLSLstd450FindUMsb, mantissa)), 31u);
+    const auto denormal = pack(SoftOp(state, spv::OpISub, ConstantU32(state, 897u), shift), SoftOpK(state, spv::OpBitwiseAnd, SoftOp(state, spv::OpShiftLeftLogical, mantissa, shift), 0x007fffffu));
+    auto result = SelectBits(state, SoftTest(state, spv::OpIEqual, exponent, 0xffu), special, normal);
+    result = SelectBits(state, SoftTest(state, spv::OpIEqual, exponent, 0u), denormal, result);
+    return SelectBits(state, SoftTest(state, spv::OpIEqual, SoftOpK(state, spv::OpBitwiseAnd, bits, 0x7fffffffu), 0u), F64Bits{ConstantU32(state, 0u), sign}, result);
+}
+
+std::uint32_t SoftWiden(SpirvEmitterState& state, std::uint32_t value) {
+    return Join(state, SoftWidenBits(state, Unary(state, spv::OpBitcast, TypeU32(state), value)));
+}
+
+// Unsigned magnitude with a sign -> f64 bits, exact.
+F64Bits SoftFromInteger(SpirvEmitterState& state, std::uint32_t magnitude, std::uint32_t sign) {
+    const auto msb = Glsl(state, TypeU32(state), GLSLstd450FindUMsb, magnitude);
+    const auto fraction = SoftOp(state, spv::OpBitwiseXor, magnitude, SoftOp(state, spv::OpShiftLeftLogical, ConstantU32(state, 1u), SoftOpK(state, spv::OpBitwiseAnd, msb, 31u)));
+    const auto narrow = SoftTest(state, spv::OpULessThanEqual, msb, 20u);
+    const auto shift = [&](std::uint32_t lhs, std::uint32_t rhs) { return SoftOpK(state, spv::OpBitwiseAnd, SoftOp(state, spv::OpISub, lhs, rhs), 31u); };
+    const auto highNarrow = SoftOp(state, spv::OpShiftLeftLogical, fraction, shift(ConstantU32(state, 20u), msb));
+    const auto highWide = SoftOp(state, spv::OpShiftRightLogical, fraction, shift(msb, ConstantU32(state, 20u)));
+    const auto lowWide = SoftOp(state, spv::OpShiftLeftLogical, fraction, shift(ConstantU32(state, 52u), msb));
+    const auto high = SoftOp(state, spv::OpBitwiseOr, SoftOp(state, spv::OpBitwiseOr, sign, SoftOpK(state, spv::OpShiftLeftLogical, SoftOpK(state, spv::OpIAdd, msb, 1023u), 20u)), SoftPick(state, narrow, highNarrow, highWide));
+    const F64Bits result{SoftPick(state, narrow, ConstantU32(state, 0u), lowWide), high};
+    return SelectBits(state, SoftTest(state, spv::OpIEqual, magnitude, 0u), F64Bits{ConstantU32(state, 0u), ConstantU32(state, 0u)}, result);
+}
+
+// f64 bits -> truncated 32-bit integer with RDNA saturation (NaN converts to zero).
+std::uint32_t SoftToInteger(SpirvEmitterState& state, std::uint32_t value, bool isSigned) {
+    const auto cls = Classify(state, value);
+    const auto exponent = SoftExponent(state, cls.bits.high);
+    const auto power = SoftOpK(state, spv::OpBitwiseAnd, SoftOpK(state, spv::OpISub, exponent, 1023u), 31u);
+    const auto fractionHigh = SoftOpK(state, spv::OpBitwiseAnd, cls.bits.high, 0x000fffffu);
+    const auto leading = SoftOp(state, spv::OpShiftLeftLogical, ConstantU32(state, 1u), power);
+    const auto narrowShift = SoftOpK(state, spv::OpBitwiseAnd, SoftOp(state, spv::OpISub, ConstantU32(state, 20u), power), 31u);
+    const auto wideShift = SoftOpK(state, spv::OpBitwiseAnd, SoftOpK(state, spv::OpISub, power, 20u), 31u);
+    const auto lowShift = SoftOpK(state, spv::OpBitwiseAnd, SoftOp(state, spv::OpISub, ConstantU32(state, 52u), power), 31u);
+    const auto narrow = SoftOp(state, spv::OpBitwiseOr, leading, SoftOp(state, spv::OpShiftRightLogical, fractionHigh, narrowShift));
+    const auto wide = SoftOp(state, spv::OpBitwiseOr, SoftOp(state, spv::OpBitwiseOr, leading, SoftOp(state, spv::OpShiftLeftLogical, fractionHigh, wideShift)), SoftOp(state, spv::OpShiftRightLogical, cls.bits.low, lowShift));
+    const auto magnitude = SoftPick(state, SoftTest(state, spv::OpULessThanEqual, exponent, 1043u), narrow, wide);
+    const auto belowOne = SoftTest(state, spv::OpULessThan, exponent, 1023u);
+    if (isSigned) {
+        const auto negated = SoftOp(state, spv::OpISub, ConstantU32(state, 0u), magnitude);
+        auto result = SoftPick(state, cls.negative, negated, magnitude);
+        result = SoftPick(state, belowOne, ConstantU32(state, 0u), result);
+        result = SoftPick(state, SoftTest(state, spv::OpUGreaterThanEqual, exponent, 1054u), SoftPick(state, cls.negative, ConstantU32(state, 0x80000000u), ConstantU32(state, 0x7fffffffu)), result);
+        return SoftPick(state, cls.nan, ConstantU32(state, 0u), result);
+    }
+    auto result = SoftPick(state, belowOne, ConstantU32(state, 0u), magnitude);
+    result = SoftPick(state, SoftTest(state, spv::OpUGreaterThanEqual, exponent, 1055u), ConstantU32(state, 0xffffffffu), result);
+    return SoftPick(state, SoftAny(state, cls.nan, cls.negative), ConstantU32(state, 0u), result);
+}
+
+// Arithmetic at f32 precision; NaN operands propagate quieted (first operand first) and a NaN
+// produced from ordered operands becomes the RDNA default NaN, as in the Float64 path.
+std::uint32_t SoftArithmetic(SpirvEmitterState& state, std::uint32_t narrowResult, std::initializer_list<std::uint32_t> inputs) {
+    auto result = SoftWidenBits(state, Unary(state, spv::OpBitcast, TypeU32(state), narrowResult));
+    const auto produced = Classify(state, Join(state, result));
+    result = SelectBits(state, produced.nan, F64Bits{ConstantU32(state, 0u), ConstantU32(state, 0xfff80000u)}, result);
+    for (auto it = std::rbegin(inputs); it != std::rend(inputs); ++it) {
+        const auto input = Classify(state, *it);
+        result = SelectBits(state, input.nan, Quiet(state, input.bits), result);
+    }
+    return Join(state, result);
+}
+
+std::uint32_t SoftFloatOp(SpirvEmitterState& state, spv::Op opcode, std::uint32_t lhs, std::uint32_t rhs) {
+    const auto result = Binary(state, opcode, TypeF32(state), SoftNarrow(state, lhs), SoftNarrow(state, rhs));
+    // No NoContraction: the bitcast that follows cannot fuse, and MSL lowers precise products to fma(a, b, 0), losing -0.
+    return SoftArithmetic(state, result, {lhs, rhs});
+}
+
+// Exact ordering of two non-NaN f64 bit pairs (-0 orders below +0; callers handle zeros).
+std::uint32_t SoftLess(SpirvEmitterState& state, F64Bits lhs, F64Bits rhs) {
+    const auto key = [&](F64Bits bits) {
+        const auto negative = SoftTest(state, spv::OpINotEqual, SoftOpK(state, spv::OpBitwiseAnd, bits.high, 0x80000000u), 0u);
+        const auto flipLow = SoftPick(state, negative, ConstantU32(state, 0xffffffffu), ConstantU32(state, 0u));
+        const auto flipHigh = SoftPick(state, negative, ConstantU32(state, 0xffffffffu), ConstantU32(state, 0x80000000u));
+        return F64Bits{SoftOp(state, spv::OpBitwiseXor, bits.low, flipLow), SoftOp(state, spv::OpBitwiseXor, bits.high, flipHigh)};
+    };
+    const auto a = key(lhs);
+    const auto b = key(rhs);
+    const auto highLess = Binary(state, spv::OpULessThan, TypeBool(state), a.high, b.high);
+    const auto highEqual = Binary(state, spv::OpIEqual, TypeBool(state), a.high, b.high);
+    return SoftAny(state, highLess, SoftAll(state, highEqual, Binary(state, spv::OpULessThan, TypeBool(state), a.low, b.low)));
+}
+
+std::uint32_t SoftUnsupported(const char* instruction) {
+    throw std::runtime_error(std::string(instruction) + " needs the Float64 capability, which the device lacks");
+}
+
 std::uint32_t NanResult(SpirvEmitterState& state, std::uint32_t value, std::initializer_list<std::uint32_t> inputs) {
     const auto cls = Classify(state, FromF64(state, value));
     auto result = SelectBits(state, cls.nan, {ConstantU32(state, 0u), ConstantU32(state, 0xfff80000u)}, cls.bits);
@@ -104,7 +264,8 @@ std::uint32_t NanResult(SpirvEmitterState& state, std::uint32_t value, std::init
 std::uint32_t MinMax(SpirvEmitterState& state, std::uint32_t lhs, std::uint32_t rhs, bool maxValue) {
     const auto a = Classify(state, lhs);
     const auto b = Classify(state, rhs);
-    const auto ordered = Binary(state, maxValue ? spv::OpFOrdGreaterThan : spv::OpFOrdLessThan, TypeBool(state), ToF64(state, lhs), ToF64(state, rhs));
+    const auto ordered = !NativeFloat64(state) ? (maxValue ? SoftLess(state, b.bits, a.bits) : SoftLess(state, a.bits, b.bits)) :
+        Binary(state, maxValue ? spv::OpFOrdGreaterThan : spv::OpFOrdLessThan, TypeBool(state), ToF64(state, lhs), ToF64(state, rhs));
     auto result = SelectBits(state, ordered, a.bits, b.bits);
     const auto bothZero = Binary(state, spv::OpLogicalAnd, TypeBool(state), a.zero, b.zero);
     const auto zero = maxValue ? SelectBits(state, a.negative, b.bits, a.bits) : SelectBits(state, a.negative, a.bits, b.bits);
@@ -116,7 +277,7 @@ std::uint32_t MinMax(SpirvEmitterState& state, std::uint32_t lhs, std::uint32_t 
     return Join(state, result);
 }
 
-std::uint32_t Trunc(SpirvEmitterState& state, std::uint32_t value) {
+F64Bits TruncBits(SpirvEmitterState& state, std::uint32_t value) {
     const auto cls = Classify(state, value);
     const auto exponent = Binary(state, spv::OpBitwiseAnd, TypeU32(state), Binary(state, spv::OpShiftRightLogical, TypeU32(state), cls.bits.high, ConstantU32(state, 20u)), ConstantU32(state, 0x7ffu));
     const auto fractionBits = Binary(state, spv::OpISub, TypeU32(state), ConstantU32(state, 1075u), exponent);
@@ -131,7 +292,11 @@ std::uint32_t Trunc(SpirvEmitterState& state, std::uint32_t value) {
     const auto integral = Binary(state, spv::OpUGreaterThanEqual, TypeBool(state), exponent, ConstantU32(state, 1075u));
     auto result = SelectBits(state, belowOne, signedZero, masked);
     result = SelectBits(state, integral, cls.bits, result);
-    return ToF64(state, Join(state, SelectBits(state, cls.nan, Quiet(state, cls.bits), result)));
+    return SelectBits(state, cls.nan, Quiet(state, cls.bits), result);
+}
+
+std::uint32_t Trunc(SpirvEmitterState& state, std::uint32_t value) {
+    return ToF64(state, Join(state, TruncBits(state, value)));
 }
 
 std::uint32_t Floor(SpirvEmitterState& state, std::uint32_t bits) {
@@ -255,6 +420,19 @@ std::uint32_t FlushDenormal32(SpirvEmitterState& state, std::uint32_t value, boo
     return Unary(state, spv::OpBitcast, TypeF32(state), Select(state, u32, denormal, Binary(state, spv::OpBitwiseAnd, u32, bits, ConstantU32(state, 0x80000000u)), bits));
 }
 
+// floor/ceil from the exact truncation; the +-1 step is exact for magnitudes below 2^24.
+F64Bits SoftRoundBits(SpirvEmitterState& state, std::uint32_t value, bool ceiling) {
+    const auto cls = Classify(state, value);
+    const auto truncated = TruncBits(state, value);
+    const auto differs = SoftAny(state, Binary(state, spv::OpINotEqual, TypeBool(state), truncated.low, cls.bits.low),
+        Binary(state, spv::OpINotEqual, TypeBool(state), truncated.high, cls.bits.high));
+    const auto direction = ceiling ? Unary(state, spv::OpLogicalNot, TypeBool(state), cls.negative) : cls.negative;
+    const auto step = SoftAll(state, SoftAll(state, differs, direction), Unary(state, spv::OpLogicalNot, TypeBool(state), cls.nan));
+    const auto narrow = Unary(state, spv::OpBitcast, TypeF32(state), SoftNarrowBits(state, truncated));
+    const auto stepped = Binary(state, spv::OpFAdd, TypeF32(state), narrow, ConstantF32Value(state, ceiling ? 1.0f : -1.0f));
+    return SelectBits(state, step, SoftWidenBits(state, Unary(state, spv::OpBitcast, TypeU32(state), stepped)), truncated);
+}
+
 std::uint32_t Interpolate(SpirvEmitterState& state, std::uint32_t delta, std::uint32_t coordinate, std::uint32_t base, bool halfResult, std::uint32_t mode) {
     const auto u32 = TypeU32(state);
     const bool quietNans = halfResult || (mode & InterpolationQuiet) != 0u;
@@ -263,6 +441,12 @@ std::uint32_t Interpolate(SpirvEmitterState& state, std::uint32_t delta, std::ui
     delta = FlushDenormal32(state, delta, flush16, 0x38800000u);
     coordinate = FlushDenormal32(state, coordinate, flush32, 0x00800000u);
     base = halfResult ? FlushDenormal32(state, base, flush32, 0x00800000u) : FlushDenormal32(state, base, flush16, 0x38800000u);
+    if (!NativeFloat64(state)) {
+        // One f32 fused rounding instead of the exact wide sum; f16 results are then rounded to half.
+        auto fused = Glsl(state, TypeF32(state), GLSLstd450Fma, delta, coordinate, base);
+        if (halfResult) fused = Unary(state, spv::OpQuantizeToF16, TypeF32(state), fused);
+        return halfResult ? FlushDenormal32(state, fused, flush16, 0x38800000u) : FlushDenormal32(state, fused, flush32, 0x00800000u);
+    }
     const auto product = Exact(state, spv::OpFMul, FromF32Exact(state, delta), FromF32Exact(state, coordinate));
     const auto sum = AddRoundToOdd(state, product, FromF32Exact(state, base));
     auto rounded = halfResult ? RoundToPrecision(state, sum, 10u, 999u) : RoundToPrecision(state, sum, 23u, 874u);
@@ -290,6 +474,10 @@ std::uint32_t Interpolate(SpirvEmitterState& state, std::uint32_t delta, std::ui
 }
 
 std::uint32_t FusedMultiplyAdd(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1, std::uint32_t arg2, std::uint32_t scale) {
+    if (!NativeFloat64(state)) {
+        const auto fused = Glsl(state, TypeF32(state), GLSLstd450Fma, SoftNarrow(state, arg0), SoftNarrow(state, arg1), SoftNarrow(state, arg2));
+        return SoftArithmetic(state, Glsl(state, TypeF32(state), GLSLstd450Ldexp, fused, scale), {arg0, arg1, arg2});
+    }
     const auto a = Classify(state, arg0);
     const auto b = Classify(state, arg1);
     const auto c = Classify(state, arg2);
@@ -400,10 +588,12 @@ std::uint32_t FusedMultiplyAdd(SpirvEmitterState& state, std::uint32_t arg0, std
 }
 
 std::uint32_t EmitFPAdd64(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+    if (!NativeFloat64(state)) return SoftFloatOp(state, spv::OpFAdd, arg0, arg1);
     return NanResult(state, Exact(state, spv::OpFAdd, ToF64(state, arg0), ToF64(state, arg1)), {arg0, arg1});
 }
 
 std::uint32_t EmitFPMul64(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+    if (!NativeFloat64(state)) return SoftFloatOp(state, spv::OpFMul, arg0, arg1);
     return NanResult(state, Exact(state, spv::OpFMul, ToF64(state, arg0), ToF64(state, arg1)), {arg0, arg1});
 }
 
@@ -424,6 +614,13 @@ std::uint32_t EmitFPMax64(SpirvEmitterState& state, std::uint32_t arg0, std::uin
 }
 
 std::uint32_t EmitFPSaturate64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) {
+        const auto cls = Classify(state, arg0);
+        const auto positive = Unary(state, spv::OpLogicalNot, TypeBool(state), SoftAny(state, SoftAny(state, cls.negative, cls.zero), cls.nan));
+        const auto belowOne = SoftTest(state, spv::OpULessThan, SoftOpK(state, spv::OpBitwiseAnd, cls.bits.high, 0x7fffffffu), 0x3ff00000u);
+        const auto upper = SelectBits(state, belowOne, cls.bits, F64Bits{ConstantU32(state, 0u), ConstantU32(state, 0x3ff00000u)});
+        return Join(state, SelectBits(state, positive, upper, F64Bits{ConstantU32(state, 0u), ConstantU32(state, 0u)}));
+    }
     const auto value = ToF64(state, arg0);
     const auto positive = Binary(state, spv::OpFOrdGreaterThan, TypeBool(state), value, ConstantF64(state, 0u));
     const auto belowOne = Binary(state, spv::OpFOrdLessThan, TypeBool(state), value, ConstantF64(state, 0x3ff0000000000000ull));
@@ -432,6 +629,22 @@ std::uint32_t EmitFPSaturate64(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitFPLdexp64(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+    if (!NativeFloat64(state)) {
+        // Exact exponent arithmetic on normal doubles; subnormal inputs and results flush to zero.
+        const auto cls = Classify(state, arg0);
+        const auto exponent = SoftExponent(state, cls.bits.high);
+        const auto sign = SoftOpK(state, spv::OpBitwiseAnd, cls.bits.high, 0x80000000u);
+        const auto steps = Glsl(state, TypeI32(state), GLSLstd450SClamp, Unary(state, spv::OpBitcast, TypeI32(state), arg1), ConstantI32(state, -2200), ConstantI32(state, 2200));
+        const auto biased = Binary(state, spv::OpIAdd, TypeI32(state), Unary(state, spv::OpBitcast, TypeI32(state), exponent), steps);
+        const auto field = SoftOpK(state, spv::OpShiftLeftLogical, SoftOpK(state, spv::OpBitwiseAnd, Unary(state, spv::OpBitcast, TypeU32(state), biased), 0x7ffu), 20u);
+        F64Bits result{cls.bits.low, SoftOp(state, spv::OpBitwiseOr, SoftOpK(state, spv::OpBitwiseAnd, cls.bits.high, 0x800fffffu), field)};
+        const auto signedZero = F64Bits{ConstantU32(state, 0u), sign};
+        result = SelectBits(state, Binary(state, spv::OpSLessThanEqual, TypeBool(state), biased, ConstantI32(state, 0)), signedZero, result);
+        result = SelectBits(state, Binary(state, spv::OpSGreaterThanEqual, TypeBool(state), biased, ConstantI32(state, 2047)), F64Bits{ConstantU32(state, 0u), SoftOpK(state, spv::OpBitwiseOr, sign, 0x7ff00000u)}, result);
+        result = SelectBits(state, SoftTest(state, spv::OpIEqual, exponent, 0u), signedZero, result);
+        const auto special = SoftTest(state, spv::OpIEqual, exponent, 0x7ffu);
+        return Join(state, SelectBits(state, SoftAny(state, cls.zero, special), SelectBits(state, cls.nan, Quiet(state, cls.bits), cls.bits), result));
+    }
     const auto cls = Classify(state, arg0);
     const auto exponentOf = [&](std::uint32_t high) {
         return Binary(state, spv::OpBitwiseAnd, TypeU32(state), Binary(state, spv::OpShiftRightLogical, TypeU32(state), high, ConstantU32(state, 20u)), ConstantU32(state, 0x7ffu));
@@ -459,6 +672,7 @@ std::uint32_t EmitFPLdexp64(SpirvEmitterState& state, std::uint32_t arg0, std::u
 }
 
 std::uint32_t EmitFPRoundEven64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) return SoftArithmetic(state, Glsl(state, TypeF32(state), GLSLstd450RoundEven, SoftNarrow(state, arg0)), {arg0});
     const auto cls = Classify(state, arg0);
     const auto value = ToF64(state, arg0);
     const auto magnitude = Glsl(state, TypeF64(state), GLSLstd450FAbs, value);
@@ -472,20 +686,29 @@ std::uint32_t EmitFPRoundEven64(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitFPFloor64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) return Join(state, SoftRoundBits(state, arg0, false));
     return FromF64(state, Floor(state, arg0));
 }
 
 std::uint32_t EmitFPCeil64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) return Join(state, SoftRoundBits(state, arg0, true));
     const auto truncated = Trunc(state, arg0);
     const auto above = Binary(state, spv::OpFOrdGreaterThan, TypeBool(state), ToF64(state, arg0), truncated);
     return FromF64(state, Select(state, TypeF64(state), above, Exact(state, spv::OpFAdd, truncated, ConstantF64(state, 0x3ff0000000000000ull)), truncated));
 }
 
 std::uint32_t EmitFPTrunc64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) return Join(state, TruncBits(state, arg0));
     return FromF64(state, Trunc(state, arg0));
 }
 
 std::uint32_t EmitFPFract64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) {
+        const auto fraction = Split(state, SoftFloatOp(state, spv::OpFSub, arg0, Join(state, SoftRoundBits(state, arg0, false))));
+        // Only finite results in [1, 2) clamp; NaN (NaN or infinite input) must pass through.
+        const auto overflow = Binary(state, spv::OpULessThan, TypeBool(state), SoftOpK(state, spv::OpISub, fraction.high, 0x3ff00000u), ConstantU32(state, 0x00100000u));
+        return Join(state, SelectBits(state, overflow, F64Bits{ConstantU32(state, 0xffffffffu), ConstantU32(state, 0x3fefffffu)}, fraction));
+    }
     const auto value = ToF64(state, arg0);
     const auto fraction = Exact(state, spv::OpFSub, value, Floor(state, arg0));
     const auto belowOne = ConstantF64(state, 0x3fefffffffffffffull);
@@ -494,6 +717,14 @@ std::uint32_t EmitFPFract64(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitFPFrexpMant64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) {
+        const auto cls = Classify(state, arg0);
+        const auto exponent = SoftExponent(state, cls.bits.high);
+        const F64Bits mantissa{cls.bits.low, SoftOpK(state, spv::OpBitwiseOr, SoftOpK(state, spv::OpBitwiseAnd, cls.bits.high, 0x800fffffu), 1022u << 20u)};
+        const F64Bits signedZero{ConstantU32(state, 0u), SoftOpK(state, spv::OpBitwiseAnd, cls.bits.high, 0x80000000u)};
+        auto result = SelectBits(state, SoftTest(state, spv::OpIEqual, exponent, 0u), signedZero, mantissa);
+        return Join(state, SelectBits(state, SoftTest(state, spv::OpIEqual, exponent, 0x7ffu), SelectBits(state, cls.nan, Quiet(state, cls.bits), cls.bits), result));
+    }
     const auto cls = Classify(state, arg0);
     const auto split = Glsl(state, state.module.Type(spv::OpTypeStruct, TypeF64(state), TypeI32(state)), GLSLstd450FrexpStruct, ToF64(state, arg0));
     const auto mantissa = state.module.AllocateId();
@@ -505,6 +736,11 @@ std::uint32_t EmitFPFrexpMant64(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitFPFrexpExp64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) {
+        const auto exponent = SoftExponent(state, Split(state, arg0).high);
+        const auto special = SoftAny(state, SoftTest(state, spv::OpIEqual, exponent, 0u), SoftTest(state, spv::OpIEqual, exponent, 0x7ffu));
+        return SoftPick(state, special, ConstantU32(state, 0u), SoftOpK(state, spv::OpISub, exponent, 1022u));
+    }
     const auto bits = Split(state, arg0);
     const auto split = Glsl(state, state.module.Type(spv::OpTypeStruct, TypeF64(state), TypeI32(state)), GLSLstd450FrexpStruct, ToF64(state, arg0));
     const auto exponent = state.module.AllocateId();
@@ -517,7 +753,9 @@ std::uint32_t EmitFPFrexpExp64(SpirvEmitterState& state, std::uint32_t arg0) {
 std::uint32_t EmitFPRcp64(SpirvEmitterState& state, std::uint32_t arg0) {
     const auto cls = Classify(state, arg0);
     const auto sign = Binary(state, spv::OpBitwiseAnd, TypeU32(state), cls.bits.high, ConstantU32(state, 0x80000000u));
-    const auto quotient = Split(state, FromF64(state, Exact(state, spv::OpFDiv, ConstantF64(state, 0x3ff0000000000000ull), ToF64(state, arg0))));
+    const auto quotient = !NativeFloat64(state) ?
+        SoftWidenBits(state, Unary(state, spv::OpBitcast, TypeU32(state), Binary(state, spv::OpFDiv, TypeF32(state), ConstantF32Value(state, 1.0f), SoftNarrow(state, arg0)))) :
+        Split(state, FromF64(state, Exact(state, spv::OpFDiv, ConstantF64(state, 0x3ff0000000000000ull), ToF64(state, arg0))));
     auto result = SelectBits(state, cls.zero, {ConstantU32(state, 0u), Binary(state, spv::OpBitwiseOr, TypeU32(state), sign, ConstantU32(state, 0x7ff00000u))}, quotient);
     result = SelectBits(state, cls.infinite, {ConstantU32(state, 0u), sign}, result);
     return Join(state, SelectBits(state, cls.nan, Quiet(state, cls.bits), result));
@@ -526,8 +764,9 @@ std::uint32_t EmitFPRcp64(SpirvEmitterState& state, std::uint32_t arg0) {
 std::uint32_t EmitFPRsq64(SpirvEmitterState& state, std::uint32_t arg0) {
     const auto cls = Classify(state, arg0);
     const auto sign = Binary(state, spv::OpBitwiseAnd, TypeU32(state), cls.bits.high, ConstantU32(state, 0x80000000u));
-    const auto root = Glsl(state, TypeF64(state), GLSLstd450Sqrt, ToF64(state, arg0));
-    auto result = Split(state, FromF64(state, Exact(state, spv::OpFDiv, ConstantF64(state, 0x3ff0000000000000ull), root)));
+    auto result = !NativeFloat64(state) ?
+        SoftWidenBits(state, Unary(state, spv::OpBitcast, TypeU32(state), Glsl(state, TypeF32(state), GLSLstd450InverseSqrt, SoftNarrow(state, arg0)))) :
+        Split(state, FromF64(state, Exact(state, spv::OpFDiv, ConstantF64(state, 0x3ff0000000000000ull), Glsl(state, TypeF64(state), GLSLstd450Sqrt, ToF64(state, arg0)))));
     result = SelectBits(state, cls.negative, {ConstantU32(state, 0u), ConstantU32(state, 0xfff80000u)}, result);
     result = SelectBits(state, cls.zero, {ConstantU32(state, 0u), Binary(state, spv::OpBitwiseOr, TypeU32(state), sign, ConstantU32(state, 0x7ff00000u))}, result);
     result = SelectBits(state, cls.infinite, SelectBits(state, cls.negative, result, {ConstantU32(state, 0u), ConstantU32(state, 0u)}), result);
@@ -536,7 +775,9 @@ std::uint32_t EmitFPRsq64(SpirvEmitterState& state, std::uint32_t arg0) {
 
 std::uint32_t EmitFPSqrt64(SpirvEmitterState& state, std::uint32_t arg0) {
     const auto cls = Classify(state, arg0);
-    auto result = Split(state, FromF64(state, Glsl(state, TypeF64(state), GLSLstd450Sqrt, ToF64(state, arg0))));
+    auto result = !NativeFloat64(state) ?
+        SoftWidenBits(state, Unary(state, spv::OpBitcast, TypeU32(state), Glsl(state, TypeF32(state), GLSLstd450Sqrt, SoftNarrow(state, arg0)))) :
+        Split(state, FromF64(state, Glsl(state, TypeF64(state), GLSLstd450Sqrt, ToF64(state, arg0))));
     result = SelectBits(state, cls.negative, {ConstantU32(state, 0u), ConstantU32(state, 0xfff80000u)}, result);
     const auto passthrough = Binary(state, spv::OpLogicalOr, TypeBool(state), cls.zero, Binary(state, spv::OpLogicalAnd, TypeBool(state), cls.infinite, Unary(state, spv::OpLogicalNot, TypeBool(state), cls.negative)));
     result = SelectBits(state, passthrough, cls.bits, result);
@@ -544,6 +785,7 @@ std::uint32_t EmitFPSqrt64(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitFPTrigPreop64(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1) {
+    if (!NativeFloat64(state)) SoftUnsupported("v_trig_preop_f64");
     static constexpr std::array<std::uint32_t, 40> TwoOverPi{
         0xa2f9836eu, 0x4e441529u, 0xfc2757d1u, 0xf534ddc0u, 0xdb629599u, 0x3c439041u, 0xfe5163abu, 0xdebbc561u,
         0xb7246e3au, 0x424dd2e0u, 0x06492eeau, 0x09d1921cu, 0xfe1deb1cu, 0xb129a73eu, 0xe88235f5u, 0x2ebb4484u,
@@ -743,7 +985,7 @@ void DefineDot2F32F16Function(SpirvEmitterState& state) {
     for (const IrBlock* block : state.program.BlockOrder()) {
         for (const IrValue* inst : block->Instructions()) used = used || inst->Opcode() == IrOpcode::FPDot2F32F16;
     }
-    if (!used) return;
+    if (!used || !NativeFloat64(state)) return;
     const auto u32 = TypeU32(state);
     state.dot2F32F16Function = state.module.AllocateId();
     state.module.AddName(state.dot2F32F16Function, "dot2_f32_f16_exact");
@@ -759,6 +1001,32 @@ void DefineDot2F32F16Function(SpirvEmitterState& state) {
 }
 
 std::uint32_t EmitFPDot2F32F16(SpirvEmitterState& state, std::uint32_t arg0, std::uint32_t arg1, std::uint32_t arg2) {
+    if (!NativeFloat64(state)) {
+        // Half products are exact in f32; the two accumulations round separately here.
+        const auto pair = state.module.Type(spv::OpTypeVector, TypeF32(state), 2u);
+        const auto lhs = Glsl(state, pair, GLSLstd450UnpackHalf2x16, arg0);
+        const auto rhs = Glsl(state, pair, GLSLstd450UnpackHalf2x16, arg1);
+        const auto lane = [&](std::uint32_t vector, std::uint32_t index) {
+            const auto result = state.module.AllocateId();
+            state.module.AddFunction(spv::OpCompositeExtract, TypeF32(state), result, vector, index);
+            return result;
+        };
+        const auto accumulator = FlushDenormal32(state, Unary(state, spv::OpBitcast, TypeF32(state), arg2), true, 0x00800000u);
+        const auto upper = Glsl(state, TypeF32(state), GLSLstd450Fma, lane(lhs, 1u), lane(rhs, 1u), accumulator);
+        auto result = Unary(state, spv::OpBitcast, TypeU32(state), Glsl(state, TypeF32(state), GLSLstd450Fma, lane(lhs, 0u), lane(rhs, 0u), upper));
+        const auto halfNan = [&](std::uint32_t packed, std::uint32_t shift) {
+            const auto bits = SoftOpK(state, spv::OpBitwiseAnd, SoftOpK(state, spv::OpShiftRightLogical, packed, shift), 0xffffu);
+            const auto quiet = SoftOp(state, spv::OpBitwiseOr, SoftOpK(state, spv::OpBitwiseOr, SoftOpK(state, spv::OpShiftLeftLogical, SoftOpK(state, spv::OpBitwiseAnd, bits, 0x8000u), 16u), 0x7fc00000u),
+                SoftOpK(state, spv::OpShiftLeftLogical, SoftOpK(state, spv::OpBitwiseAnd, bits, 0x3ffu), 13u));
+            return std::pair{SoftTest(state, spv::OpUGreaterThan, SoftOpK(state, spv::OpBitwiseAnd, bits, 0x7fffu), 0x7c00u), quiet};
+        };
+        result = SoftPick(state, SoftTest(state, spv::OpUGreaterThan, SoftOpK(state, spv::OpBitwiseAnd, arg2, 0x7fffffffu), 0x7f800000u), SoftOpK(state, spv::OpBitwiseOr, arg2, 0x00400000u), result);
+        for (const auto& [packed, shift] : {std::pair{arg1, 16u}, std::pair{arg0, 16u}, std::pair{arg1, 0u}, std::pair{arg0, 0u}}) {
+            const auto [nan, quiet] = halfNan(packed, shift);
+            result = SoftPick(state, nan, quiet, result);
+        }
+        return result;
+    }
     if (state.dot2F32F16Function == 0u) FailEmit("v_dot2_f32_f16 function was not defined before function emission");
     std::uint32_t fast = 0;
     const auto fastResult = Dot2F32F16Fast(state, arg0, arg1, arg2, fast);
@@ -778,6 +1046,7 @@ std::uint32_t EmitFPInterpolateF16(SpirvEmitterState& state, std::uint32_t arg0,
 }
 
 std::uint32_t EmitConvertF32F64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) return SoftNarrow(state, arg0);
     const auto converted = Unary(state, spv::OpBitcast, TypeU32(state), Unary(state, spv::OpFConvert, TypeF32(state), ToF64(state, arg0)));
     const auto cls = Classify(state, arg0);
     const auto sign = Binary(state, spv::OpBitwiseAnd, TypeU32(state), cls.bits.high, ConstantU32(state, 0x80000000u));
@@ -788,6 +1057,11 @@ std::uint32_t EmitConvertF32F64(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitConvertF64F32(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) {
+        const auto bits = Unary(state, spv::OpBitcast, TypeU32(state), arg0);
+        const auto widened = SoftWidenBits(state, bits);
+        return Join(state, SelectBits(state, SoftTest(state, spv::OpUGreaterThan, SoftOpK(state, spv::OpBitwiseAnd, bits, 0x7fffffffu), 0x7f800000u), Quiet(state, widened), widened));
+    }
     const auto converted = Split(state, FromF64(state, Unary(state, spv::OpFConvert, TypeF64(state), arg0)));
     const auto bits = Unary(state, spv::OpBitcast, TypeU32(state), arg0);
     const auto nan = Binary(state, spv::OpUGreaterThan, TypeBool(state), Binary(state, spv::OpBitwiseAnd, TypeU32(state), bits, ConstantU32(state, 0x7fffffffu)), ConstantU32(state, 0x7f800000u));
@@ -799,14 +1073,21 @@ std::uint32_t EmitConvertF64F32(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitConvertF64S32(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) {
+        const auto sign = SoftOpK(state, spv::OpBitwiseAnd, arg0, 0x80000000u);
+        const auto magnitude = SoftPick(state, SoftTest(state, spv::OpINotEqual, sign, 0u), SoftOp(state, spv::OpISub, ConstantU32(state, 0u), arg0), arg0);
+        return Join(state, SoftFromInteger(state, magnitude, sign));
+    }
     return FromF64(state, Unary(state, spv::OpConvertSToF, TypeF64(state), Unary(state, spv::OpBitcast, TypeI32(state), arg0)));
 }
 
 std::uint32_t EmitConvertF64U32(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) return Join(state, SoftFromInteger(state, arg0, ConstantU32(state, 0u)));
     return FromF64(state, Unary(state, spv::OpConvertUToF, TypeF64(state), arg0));
 }
 
 std::uint32_t EmitConvertS32F64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) return SoftToInteger(state, arg0, true);
     const auto value = ToF64(state, arg0);
     const auto low = Binary(state, spv::OpFOrdLessThanEqual, TypeBool(state), value, ConstantF64(state, 0xc1e0000000000000ull));
     const auto high = Binary(state, spv::OpFOrdGreaterThanEqual, TypeBool(state), value, ConstantF64(state, 0x41e0000000000000ull));
@@ -819,6 +1100,7 @@ std::uint32_t EmitConvertS32F64(SpirvEmitterState& state, std::uint32_t arg0) {
 }
 
 std::uint32_t EmitConvertU32F64(SpirvEmitterState& state, std::uint32_t arg0) {
+    if (!NativeFloat64(state)) return SoftToInteger(state, arg0, false);
     const auto value = ToF64(state, arg0);
     const auto low = Binary(state, spv::OpFUnordLessThanEqual, TypeBool(state), value, ConstantF64(state, 0u));
     const auto high = Binary(state, spv::OpFOrdGreaterThanEqual, TypeBool(state), value, ConstantF64(state, 0x41f0000000000000ull));

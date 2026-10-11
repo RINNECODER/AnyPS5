@@ -193,15 +193,43 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
     return face;
 }
 
+// PA_SC_AA_CONFIG: MSAA_NUM_SAMPLES [2:0], AA_MASK_CENTROID_DTMN [4], MAX_SAMPLE_DIST [16:13] and
+// MSAA_EXPOSED_SAMPLES [22:20] describe ordinary multisampling (standard sample positions are used);
+// DETAIL_TO_EXPOSED_MODE and COVERAGE_TO_SHADER_SELECT (coverage conversion) stay unsupported.
+constexpr std::uint32_t AaConfigMask = ~(0x7u | 0x10u | 0x1e000u | 0x700000u);
+
+std::uint32_t rasterSamples(const Registers& cx) {
+    const auto config = find(cx, 0x2f8);
+    return config == cx.end() ? 1u : 1u << (config->second & 7u);
+}
+
+// PA_SC_MODE_CNTL_0 MSAA_ENABLE (bit 0) is accepted only for multisampled rasterization.
+std::uint32_t scanModeMask(const Registers& cx) {
+    return rasterSamples(cx) > 1u ? ScanModeMask & ~1u : ScanModeMask;
+}
+
+// DB_Z_INFO: FORMAT [1:0], NUM_SAMPLES [3:2], SW_MODE [8:4], PARTIALLY_RESIDENT [12], MAXMIP [19:16],
+// TILE_SURFACE_ENABLE [29]. Partial residency only governs page faults, and a mipmapped surface is
+// rendered through its view's level (DB_DEPTH_VIEW MIP_LEVEL, which must be 0 here).
+struct DepthSurfaceInfo {
+    std::uint32_t format;
+    std::uint32_t samples;
+    std::uint32_t maxMip;
+    bool partiallyResident;
+};
+
+DepthSurfaceInfo depthSurfaceInfo(std::uint32_t zInfo) {
+    return {zInfo & 3u, 1u << ((zInfo >> 2u) & 3u), (zInfo >> 16u) & 0xfu, (zInfo & 0x1000u) != 0};
+}
+
 void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result) {
     zero(cx, 0x000, 0x00001f9cu, "depth copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
     const bool depthClear = (read(cx, 0x000) & 1u) != 0;
     const bool stencilClear = (read(cx, 0x000) & 2u) != 0;
     const auto view = read(cx, 0x002);
     zero(cx, 0x002, 0x3c000000u, "depth mips (DB_DEPTH_VIEW MIP_LEVEL)");
-    zero(cx, 0x010, 0x000f100cu, "multisampled, partially resident or mipmapped depth (DB_Z_INFO)");
-    zero(cx, 0x011, 0x00001000u, "partially resident stencil (DB_STENCIL_INFO)");
-    const auto zFormat = read(cx, 0x010) & 3u;
+    const auto surface = depthSurfaceInfo(read(cx, 0x010));
+    const auto zFormat = surface.format;
     const bool stencil = (read(cx, 0x011) & 1u) != 0;
     Require(zFormat != 2, "Z_24 depth is unsupported");
     if (zFormat == 0) depthControl &= ~6u;
@@ -222,12 +250,15 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     const auto size = read(cx, 0x007);
     depth.extent = {(size & 0x3fffu) + 1u, ((size >> 16u) & 0x3fffu) + 1u};
     if (const auto slice = view & 0x1fffu; slice != 0) {
+        Require(surface.samples == 1 && surface.maxMip == 0, "array slices of a multisampled or mipmapped depth surface are unsupported");
         if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, zFormat == 1 ? 2u : 4u);
         if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, 1u);
     }
     depth.format = zFormat == 1 ? (stencil ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D16_UNORM) : (stencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT);
     depth.clearDepth = readFloat(cx, 0x00b);
     depth.clearStencil = static_cast<std::uint8_t>(read(cx, 0x00a) & 0xffu);
+    depth.samples = surface.samples;
+    Require(depth.samples == rasterSamples(cx), "a depth surface whose sample count differs from the rasterizer's (EQAA) is unsupported");
     if (const auto htile = find(cx, 0x005); zFormat != 0 && htile != cx.end() && htile->second != 0 && (read(cx, 0x010) & (1u << 29u)) != 0) {
         depth.htileAddress = base(0x005, 0x01e);
         depth.htileStencil = stencil && (read(cx, 0x011) & (1u << 29u)) == 0;
@@ -606,8 +637,9 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     zero(cx, 0x203, shaderControlMask(read(cx, 0x1c4)), "depth export, shader coverage or ordered fragment execution");
     result.alphaToCoverage = read(cx, 0x2dc) == AlphaToCoverageUndithered;
     if (!result.alphaToCoverage) zero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage");
-    zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
-    zero(cx, 0x292, ScanModeMask, "scan conversion mode");
+    zero(cx, 0x2f8, AaConfigMask, "coverage conversion or over-8x multisampling");
+    result.rasterSamples = rasterSamples(cx);
+    zero(cx, 0x292, scanModeMask(cx), "scan conversion mode");
     zero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization");
     zero(cx, 0x80, ~0u, "window offset");
     zero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits");
@@ -677,6 +709,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         }
         result.colors.push_back(color);
     }
+    Require(result.rasterSamples == 1 || result.colors.empty(), "multisampled draws into color targets are unsupported (color targets are single-sample)");
     if (result.hasColorTarget) {
         result.color = result.colors.front();
         if (result.depth) result.renderExtent = {std::min(result.renderExtent.width, result.depth->extent.width), std::min(result.renderExtent.height, result.depth->extent.height)};
@@ -1019,8 +1052,8 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (value(cx, 0x2dc, word) && word != AlphaToCoverageUndithered) {
         if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage"); !reason.empty()) return reason;
     }
-    if (auto reason = nonzero(cx, 0x2f8, ~0u, "multisampling or coverage conversion"); !reason.empty()) return reason;
-    if (auto reason = nonzero(cx, 0x292, ScanModeMask, "scan conversion mode"); !reason.empty()) return reason;
+    if (auto reason = nonzero(cx, 0x2f8, AaConfigMask, "coverage conversion or over-8x multisampling"); !reason.empty()) return reason;
+    if (auto reason = nonzero(cx, 0x292, scanModeMask(cx), "scan conversion mode"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x80, ~0u, "window offset"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits"); !reason.empty()) return reason;

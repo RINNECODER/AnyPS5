@@ -507,6 +507,10 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                     throw std::invalid_argument("guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
                 }
                 id<MTLTexture> view = depthLookup ? depthLookup(descriptor, storage, depth) : nil;
+                if (view == nil && descriptor.samples > 1) {
+                    // Only depth surfaces are rendered multisampled; guest-memory MSAA images have no upload path.
+                    throw std::invalid_argument("Metal multisampled guest image is not a resident multisampled depth surface (multisampled color images are unsupported)");
+                }
                 if (view == nil) {
                     auto texture = this->texture(descriptor, written, depth, atomic, minimumLodLowered, storage);
                     const bool rawSintStorage = storage && written && !atomic && mapping.unsignedStorageImage &&

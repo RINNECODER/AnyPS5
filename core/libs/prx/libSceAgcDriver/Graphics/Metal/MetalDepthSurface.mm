@@ -7,8 +7,13 @@
 namespace AgcDriver::Metal {
 namespace {
 
-id<MTLTexture> texture(id<MTLDevice> device, MTLPixelFormat format, VkExtent2D extent) {
+id<MTLTexture> texture(id<MTLDevice> device, MTLPixelFormat format, VkExtent2D extent, std::uint32_t samples) {
     auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:extent.width height:extent.height mipmapped:NO];
+    if (samples > 1) {
+        if (![device supportsTextureSampleCount:samples]) throw std::invalid_argument("Metal device does not support the depth surface sample count");
+        descriptor.textureType = MTLTextureType2DMultisample;
+        descriptor.sampleCount = samples;
+    }
     descriptor.storageMode = MTLStorageModePrivate;
     descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
     auto result = [device newTextureWithDescriptor:descriptor];
@@ -18,13 +23,15 @@ id<MTLTexture> texture(id<MTLDevice> device, MTLPixelFormat format, VkExtent2D e
 
 bool sameTarget(const Graphics::DepthTarget& left, const Graphics::DepthTarget& right) {
     return left.address == right.address && left.stencilAddress == right.stencilAddress &&
-        left.extent.width == right.extent.width && left.extent.height == right.extent.height && left.format == right.format;
+        left.extent.width == right.extent.width && left.extent.height == right.extent.height && left.format == right.format &&
+        left.samples == right.samples;
 }
 
 }
 
 MetalDepthSurface::MetalDepthSurface(const MetalDevice& backend, const Graphics::DepthTarget& target) : target(target) {
     if (target.extent.width == 0 || target.extent.height == 0 || target.extent.width > 16384 || target.extent.height > 16384 ||
+        target.samples == 0 || target.samples > 8 || (target.samples & (target.samples - 1u)) != 0 ||
         !std::isfinite(target.clearDepth) || target.clearDepth < 0 || target.clearDepth > 1) {
         throw std::invalid_argument("Metal depth surface dimensions or clear depth are invalid");
     }
@@ -32,21 +39,21 @@ MetalDepthSurface::MetalDepthSurface(const MetalDevice& backend, const Graphics:
     switch (target.format) {
     case VK_FORMAT_D16_UNORM:
         if (hasStencil) throw std::invalid_argument("Metal depth format has an unexpected stencil plane");
-        depth = texture(backend.Device(), MTLPixelFormatDepth16Unorm, target.extent);
+        depth = texture(backend.Device(), MTLPixelFormatDepth16Unorm, target.extent, target.samples);
         break;
     case VK_FORMAT_D32_SFLOAT:
         if (hasStencil) throw std::invalid_argument("Metal depth format has an unexpected stencil plane");
-        depth = texture(backend.Device(), MTLPixelFormatDepth32Float, target.extent);
+        depth = texture(backend.Device(), MTLPixelFormatDepth32Float, target.extent, target.samples);
         break;
     case VK_FORMAT_D16_UNORM_S8_UINT:
         if (!hasStencil) throw std::invalid_argument("Metal depth/stencil format requires a stencil plane");
-        depth = texture(backend.Device(), MTLPixelFormatDepth16Unorm, target.extent);
-        stencil = texture(backend.Device(), MTLPixelFormatStencil8, target.extent);
+        depth = texture(backend.Device(), MTLPixelFormatDepth16Unorm, target.extent, target.samples);
+        stencil = texture(backend.Device(), MTLPixelFormatStencil8, target.extent, target.samples);
         sampledStencil = stencil;
         break;
     case VK_FORMAT_D32_SFLOAT_S8_UINT:
         if (!hasStencil) throw std::invalid_argument("Metal depth/stencil format requires a stencil plane");
-        depth = texture(backend.Device(), MTLPixelFormatDepth32Float_Stencil8, target.extent);
+        depth = texture(backend.Device(), MTLPixelFormatDepth32Float_Stencil8, target.extent, target.samples);
         stencil = depth;
         sampledStencil = [depth newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
         if (sampledStencil == nil) throw std::runtime_error("Metal stencil sampled view creation failed");
@@ -87,8 +94,8 @@ bool MetalDepthSurface::OverlapsMappings(std::span<const NativeGuestMemory::Borr
             return address <= range.guestAddress ? range.guestAddress - address < bytes : address - range.guestAddress < range.host.size();
         });
     };
-    return overlaps(target.address, Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u)) ||
-        overlaps(target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u));
+    return overlaps(target.address, Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u) * target.samples) ||
+        overlaps(target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples);
 }
 
 MetalDepthSurfaceCache::MetalDepthSurfaceCache(const MetalDevice& backend) : backend(backend) {}
