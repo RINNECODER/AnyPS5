@@ -54,6 +54,8 @@ void Report(const char* what, const std::exception_ptr& error) {
     }
 }
 
+void CloseWindow(std::unique_ptr<AnyPS5::Host::NativeHostWindow> window);
+
 // Main queue only. The window keeps its own copy of the state pointer alive.
 void CreateWindow(const std::shared_ptr<DirectWindow>& state) {
     std::uint32_t width = 0;
