@@ -91,7 +91,7 @@ std::size_t storedKeyCount(const Graphics::GuestTextureResource& descriptor, std
     std::snprintf(message, sizeof(message),
         "Metal DCC metadata 0x%llx is not writable over the 0x%zx key bytes of its surface (0x%zx at one per 256 bytes)",
         static_cast<unsigned long long>(descriptor.dccAddress), count, keys);
-    throw std::runtime_error(message);
+    throw NativeGuestMemory::ReadOnlyWriteError(message);
 }
 
 void validateCommittedImageWrite(std::span<const NativeGuestMemory::BorrowedRange> ranges,
@@ -100,7 +100,7 @@ void validateCommittedImageWrite(std::span<const NativeGuestMemory::BorrowedRang
         // Sparse holes may discard stores, but committed read-only bytes must never
         // be exposed through a writable native view, including staged view upgrades.
         if (!range.writable && overlaps(address, address + bytes, range.guestAddress, range.guestAddress + range.host.size())) {
-            throw std::invalid_argument("Metal storage texture writes overlap read-only committed guest intervals");
+            throw NativeGuestMemory::ReadOnlyWriteError("Metal storage texture writes overlap read-only committed guest intervals");
         }
     }
 }
@@ -194,7 +194,7 @@ MetalBufferBinding MetalShaderResources::stageStorageImage(std::uint64_t address
         if (range.writable) writableRanges.push_back(clipped);
     }
     if (writableRanges.empty()) {
-        throw std::invalid_argument("Metal storage texture has no writable committed guest intervals");
+        throw NativeGuestMemory::ReadOnlyWriteError("Metal storage texture has no writable committed guest intervals");
     }
     id<MTLBuffer> buffer = backend.Buffer(bytes);
     std::memset(buffer.contents, 0, bytes);
@@ -265,7 +265,7 @@ Graphics::DccKeys MetalShaderResources::textureKeys(const Graphics::GuestTexture
 void MetalShaderResources::validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys) {
     if (descriptor.dccAddress == 0) return;
     if (!GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.baseAddress), bytes, true)) {
-        throw std::invalid_argument("Metal DCC image writes require a fully writable guest surface");
+        throw NativeGuestMemory::ReadOnlyWriteError("Metal DCC image writes require a fully writable guest surface");
     }
     const auto count = storedKeyCount(descriptor, bytes);
     if (count == 0) return;
