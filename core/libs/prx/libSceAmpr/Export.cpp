@@ -273,7 +273,7 @@ static void RequireThrd(int result, const char* what) {
     if (result != ThrdSuccess) throw std::runtime_error(std::string(what) + " failed with " + std::to_string(result));
 }
 
-static void* APS5_VABI PadEntry(void* argument) {
+static void* APS5_VABI PadEntry_nid_no_patch(void* argument) {
     auto* pad = static_cast<GuestPad*>(argument);
     const auto go = pad->vtable[0];
     return reinterpret_cast<void*>(static_cast<std::uintptr_t>(go(pad)));
@@ -935,7 +935,7 @@ int APS5_VABI _Thrd_id_nid_postfix(void) {
 
 void APS5_VABI _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(GuestPad* pad, Pthread* thread) {
     if (!pad || !thread) APS5_INVALID_ARG_EX;
-    const int created = pthread_create_nid_postfix(thread, nullptr, PadEntry, pad);
+    const int created = pthread_create_nid_postfix(thread, nullptr, PadEntry_nid_no_patch, pad);
     if (created != 0) throw std::runtime_error("_Pad::_Launch: pthread_create failed with " + std::to_string(created));
     while (!pad->started) RequireThrd(_Cnd_wait_nid_postfix(&pad->condition, &pad->mutex), "_Pad::_Launch: _Cnd_wait");
 }
