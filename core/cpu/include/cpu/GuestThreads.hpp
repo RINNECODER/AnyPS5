@@ -5,6 +5,8 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <vector>
+#include <string>
 
 namespace Cpu {
 
@@ -26,6 +28,8 @@ enum class GuestThreadAttributeField { StackSize, StackAddress, GuardSize, Detac
 // Deterministic translated-instruction bound, not a vendor millisecond quantum
 // or certification of native host real-time scheduling.
 inline constexpr std::uint64_t GuestThreadRoundRobinQuantum = 4096;
+// CPUs in the default guest thread affinity mask (0x1fff).
+inline constexpr std::size_t GuestCpuCount = 13;
 
 struct GuestInitialThread {
     std::uint64_t Entry;
@@ -34,6 +38,30 @@ struct GuestInitialThread {
     SceThreadTlsFactory CreateThreadTls;
     std::int32_t BasePriority = GuestThreadPriorityDefault;
 };
+
+// Stall diagnostics: one guest thread as the scheduler owner saw it between
+// slices. Registers are the thread's last saved context; Frames are return
+// addresses from a bounded frame-pointer walk through guest memory reads.
+struct GuestThreadSnapshot {
+    GuestThreadHandle Id = 0;
+    std::int32_t ThreadId = 0;
+    std::string Name;
+    std::string State;
+    bool Active = false;
+    // In the run queue (a runnable thread that is not queued can never run again).
+    bool Queued = false;
+    std::int32_t Policy = 0, BasePriority = 0, EffectivePriority = 0;
+    std::uint64_t Rip = 0, Rsp = 0, Rbp = 0;
+    // Slices run and instructions retired since the previous snapshot.
+    std::uint64_t Slices = 0, Instructions = 0;
+    // Guest address of the last host import trampoline the thread entered (0: none yet).
+    std::uint64_t LastHostEntry = 0;
+    std::uint64_t HostEntries = 0;
+    // Provider wait domain and key while parked in a host wait, else 0.
+    std::uint64_t WaitDomain = 0, WaitKey = 0;
+    std::vector<std::uint64_t> Frames;
+};
+using GuestThreadDumpSink = std::function<void(const std::vector<GuestThreadSnapshot>&)>;
 
 class GuestThreads {
 public:
@@ -105,6 +133,17 @@ public:
     void SetOwnerBoundary(std::function<void(bool waiting)>,
                           std::chrono::milliseconds maximumIdleWait);
     void CheckIdleOwner() const;
+    // Guest CPUs the single host owner emulates. With one CPU (the default) the best
+    // effective priority always runs next. With n CPUs the n best-priority runnable
+    // threads are all on a CPU at once, so the owner time-shares them least recently
+    // run first: a thread busy-waiting for a sibling no longer starves it.
+    void SetGuestCores(std::size_t cores);
+    // Async-signal-safe: the scheduler owner emits one snapshot at its next turn.
+    static void RequestThreadDump() noexcept;
+    // Owner only. The sink runs on the scheduler owner between slices; a positive
+    // period also emits a snapshot that often. An empty sink disables tracking.
+    void SetThreadDump(GuestThreadDumpSink sink, std::chrono::milliseconds period);
+    std::vector<GuestThreadSnapshot> SnapshotThreads() const;
     GuestThreadHandle ActiveThread() const;
     std::shared_ptr<SceTls> ActiveTls() const;
     std::uint64_t ActiveErrnoAddress() const;

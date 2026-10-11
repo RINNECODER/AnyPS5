@@ -7,6 +7,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 
 namespace AgcDriver::Metal {
 namespace Abi = ShaderRecompiler::BdaAbi;
@@ -20,6 +21,53 @@ id<MTLBuffer> sharedBuffer(id<MTLDevice> device, std::size_t bytes) {
     if (buffer.gpuAddress == 0) throw std::runtime_error("Metal guest buffer has no GPU address");
     return buffer;
 }
+}
+
+MetalGuestHostAliases::MetalGuestHostAliases(id<MTLDevice> device) : device(device) {
+    if (device == nil) throw std::invalid_argument("Metal guest host aliases require a device");
+    const auto page = ::getpagesize();
+    if (page <= 0 || (page & (page - 1)) != 0) throw std::runtime_error("Metal guest host aliases require a power-of-two host page");
+    pageBytes = static_cast<std::uintptr_t>(page);
+}
+
+void MetalGuestHostAliases::Invalidate(const void* host, std::size_t bytes) {
+    const auto begin = reinterpret_cast<std::uintptr_t>(host);
+    const auto end = bytes > std::numeric_limits<std::uintptr_t>::max() - begin ? std::numeric_limits<std::uintptr_t>::max() : begin + bytes;
+    std::lock_guard lock(mutex);
+    std::erase_if(entries, [&](const Entry& entry) { return entry.begin < end && begin < entry.end; });
+}
+
+void MetalGuestHostAliases::Clear() {
+    std::lock_guard lock(mutex);
+    entries.clear();
+}
+
+std::size_t MetalGuestHostAliases::Count() const {
+    std::lock_guard lock(mutex);
+    return static_cast<std::size_t>(std::count_if(entries.begin(), entries.end(), [](const Entry& entry) { return entry.buffer != nil; }));
+}
+
+id<MTLBuffer> MetalGuestHostAliases::alias(std::uintptr_t begin, std::uintptr_t end, std::uint64_t now) {
+    if (end <= begin || end > std::numeric_limits<std::uintptr_t>::max() - (pageBytes - 1)) return nil;
+    const auto first = begin & ~(pageBytes - 1);
+    const auto last = (end + pageBytes - 1) & ~(pageBytes - 1);
+    for (auto& entry : entries) {
+        if (entry.begin != first || entry.end != last) continue;
+        entry.epoch = now;
+        return entry.buffer;
+    }
+    id<MTLBuffer> buffer = nil;
+    if (last - first <= device.maxBufferLength) {
+        buffer = [device newBufferWithBytesNoCopy:reinterpret_cast<void*>(first) length:last - first
+                                          options:MTLResourceStorageModeShared deallocator:nil];
+        if (buffer != nil && (buffer.contents != reinterpret_cast<void*>(first) || buffer.gpuAddress == 0 ||
+                                 buffer.gpuAddress > std::numeric_limits<std::uint64_t>::max() - buffer.length)) {
+            buffer = nil;
+        }
+    }
+    // A refusal is remembered too, so an unaliasable component is not retried on every capture.
+    entries.push_back({first, last, buffer, now});
+    return buffer;
 }
 
 MetalGuestMemory::MetalGuestMemory(id<MTLDevice> device) : device(device) {
@@ -55,12 +103,13 @@ void MetalGuestMemory::Unregister(std::uint64_t guestAddress) {
     ranges.erase(found);
 }
 
-MetalGuestMemory::DispatchSnapshot MetalGuestMemory::CaptureAfterPriorSnapshotsComplete() const {
+MetalGuestMemory::DispatchSnapshot MetalGuestMemory::CaptureAfterPriorSnapshotsComplete(MetalGuestHostAliases* aliases) const {
     std::lock_guard lock(mutex);
-    return DispatchSnapshot(device, ranges);
+    return DispatchSnapshot(device, ranges, aliases);
 }
 
-MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const std::vector<HostRange>& ranges) : device(device) {
+MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const std::vector<HostRange>& ranges,
+    MetalGuestHostAliases* aliases) : device(device) {
     if (ranges.size() > (std::numeric_limits<std::size_t>::max() - sizeof(Abi::Header)) / sizeof(Abi::Range)) throw std::invalid_argument("Metal guest table size overflow");
     table = sharedBuffer(device, sizeof(Abi::Header) + ranges.size() * sizeof(Abi::Range));
     fault = sharedBuffer(device, Abi::FaultBufferBytes);
@@ -73,6 +122,7 @@ MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const
         std::uint64_t alignment;
         id<MTLBuffer> buffer;
         std::size_t bufferOffset;
+        bool aliased;
     };
     std::vector<std::size_t> physicalOrder(ranges.size());
     for (std::size_t i = 0; i < ranges.size(); ++i) physicalOrder[i] = i;
@@ -87,20 +137,47 @@ MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const
         if (range.borrowedHost.size() > std::numeric_limits<std::uintptr_t>::max() - begin) throw std::invalid_argument("Metal borrowed host span address overflow");
         const auto end = begin + range.borrowedHost.size();
         const auto alignment = (range.begin - begin) & (addressAlignment - 1);
-        if (components.empty() || begin >= components.back().end) components.push_back({begin, end, alignment, nil, 0});
+        if (components.empty() || begin >= components.back().end) components.push_back({begin, end, alignment, nil, 0, false});
         else {
             if (alignment != components.back().alignment) throw std::invalid_argument("Metal physically aliased guest spans have incompatible address alignment");
             components.back().end = std::max(components.back().end, end);
         }
         componentIndices[i] = components.size() - 1;
     }
+    std::unique_lock<std::mutex> aliasLock;
+    std::uint64_t aliasEpoch = 0;
+    if (aliases != nullptr) {
+        if (aliases->device != device) throw std::invalid_argument("Metal guest host aliases belong to another device");
+        aliasLock = std::unique_lock(aliases->mutex);
+        aliasEpoch = ++aliases->epoch;
+    }
     for (auto& component : components) {
         const auto bytes = component.end - component.begin;
+        // A no-copy alias starts on a host page, so its GPU address keeps the host address's
+        // low bits: it can stand in for a copy only when guest and host agree modulo 16.
+        if (aliases != nullptr && component.alignment == 0) {
+            if (id<MTLBuffer> alias = aliases->alias(component.begin, component.end, aliasEpoch)) {
+                const auto offset = static_cast<std::size_t>(component.begin - reinterpret_cast<std::uintptr_t>(alias.contents));
+                if (((alias.gpuAddress + offset - component.begin) & (addressAlignment - 1)) == 0 && offset + bytes <= alias.length) {
+                    component.buffer = alias;
+                    component.bufferOffset = offset;
+                    component.aliased = true;
+                    continue;
+                }
+            }
+        }
         if (device.maxBufferLength < addressAlignment || bytes > device.maxBufferLength - (addressAlignment - 1)) throw std::invalid_argument("Metal physical guest component exceeds the device limit");
         component.buffer = sharedBuffer(device, bytes + addressAlignment - 1);
         if (component.buffer.gpuAddress > std::numeric_limits<std::uint64_t>::max() - component.buffer.length) throw std::runtime_error("Metal GPU address overflow");
         component.bufferOffset = static_cast<std::size_t>((component.begin + component.alignment - component.buffer.gpuAddress) & (addressAlignment - 1));
         std::memcpy(static_cast<std::byte*>(component.buffer.contents) + component.bufferOffset, reinterpret_cast<const void*>(component.begin), bytes);
+        copiedBytes += bytes;
+    }
+    if (aliases != nullptr) {
+        // Every capture names the whole borrowed set, so an alias it did not use belongs to a
+        // superseded layout of the host components.
+        std::erase_if(aliases->entries, [aliasEpoch](const MetalGuestHostAliases::Entry& entry) { return entry.epoch != aliasEpoch; });
+        aliasLock.unlock();
     }
     mirrors.reserve(ranges.size());
     for (std::size_t i = 0; i < ranges.size(); ++i) {
@@ -110,12 +187,13 @@ MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const
         const auto bufferOffset = component.bufferOffset + hostBegin - component.begin;
         const Abi::Range entry{range.begin, range.begin + range.borrowedHost.size(), component.buffer.gpuAddress + bufferOffset, Abi::Read | (range.writable ? Abi::Write : 0), 0};
         std::memcpy(static_cast<std::byte*>(table.contents) + sizeof(header) + mirrors.size() * sizeof(entry), &entry, sizeof(entry));
-        mirrors.push_back({range, component.buffer, bufferOffset});
+        mirrors.push_back({range, component.buffer, bufferOffset, component.aliased});
     }
 }
 
 id<MTLBuffer> MetalGuestMemory::DispatchSnapshot::Table() const { return table; }
 id<MTLBuffer> MetalGuestMemory::DispatchSnapshot::FaultBuffer() const { return fault; }
+std::uint64_t MetalGuestMemory::DispatchSnapshot::CopiedBytes() const { return copiedBytes; }
 
 NSArray<id<MTLBuffer>>* MetalGuestMemory::DispatchSnapshot::Buffers() const {
     NSMutableArray<id<MTLBuffer>>* buffers = [NSMutableArray arrayWithCapacity:mirrors.size()];
@@ -172,7 +250,8 @@ Abi::Fault MetalGuestMemory::DispatchSnapshot::CompleteAndCopyDirtyPagesToBorrow
     };
     std::vector<CopySegment> segments;
     for (const auto& mirror : mirrors) {
-        if (!mirror.range.writable) continue;
+        // An aliased mirror is the borrowed host memory itself: the GPU already wrote it.
+        if (!mirror.range.writable || mirror.aliased) continue;
         const auto end = mirror.range.begin + mirror.range.borrowedHost.size();
         const auto firstPage = mirror.range.begin & ~(pageBytes - 1u);
         for (auto it = pages.lower_bound(firstPage); it != pages.end() && *it < end; ++it) {

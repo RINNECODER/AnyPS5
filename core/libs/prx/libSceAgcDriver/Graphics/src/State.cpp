@@ -258,7 +258,6 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     depth.clearDepth = readFloat(cx, 0x00b);
     depth.clearStencil = static_cast<std::uint8_t>(read(cx, 0x00a) & 0xffu);
     depth.samples = surface.samples;
-    Require(depth.samples == rasterSamples(cx), "a depth surface whose sample count differs from the rasterizer's (EQAA) is unsupported");
     if (const auto htile = find(cx, 0x005); zFormat != 0 && htile != cx.end() && htile->second != 0 && (read(cx, 0x010) & (1u << 29u)) != 0) {
         depth.htileAddress = base(0x005, 0x01e);
         depth.htileStencil = stencil && (read(cx, 0x011) & (1u << 29u)) == 0;
@@ -709,7 +708,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         }
         result.colors.push_back(color);
     }
-    Require(result.rasterSamples == 1 || result.colors.empty(), "multisampled draws into color targets are unsupported (color targets are single-sample)");
+    result.rasterSamples = AttachmentSampleCount(result.rasterSamples, result.depth ? result.depth->samples : 0u, result.colors);
     if (result.hasColorTarget) {
         result.color = result.colors.front();
         if (result.depth) result.renderExtent = {std::min(result.renderExtent.width, result.depth->extent.width), std::min(result.renderExtent.height, result.depth->extent.height)};
@@ -861,6 +860,31 @@ std::size_t CmaskBytes(std::uint32_t width, std::uint32_t height) {
     return CmaskLayout(width, height).Bytes();
 }
 
+// Metal rasterizes a pass at one sample count shared by every attachment. A resident depth surface
+// fixes that count (under EQAA PA_SC_AA_CONFIG may ask for more coverage samples than the depth
+// surface stores, or fewer when MSAA is off for a pass over a multisampled surface: the extra
+// coverage samples are dropped, and a 1x pass rasterizes per depth sample instead of once per pixel).
+// Without depth, multisampled color fragments fix it, and otherwise PA_SC_AA_CONFIG does.
+// Single-fragment color targets in a multisampled pass are expanded and resolved around the draw.
+std::uint32_t AttachmentSampleCount(std::uint32_t rasterSamples, std::uint32_t depthSamples, std::span<const ColorTarget> colors) {
+    auto samples = depthSamples != 0 ? depthSamples : rasterSamples;
+    if (depthSamples == 0) {
+        for (const auto& color : colors) {
+            if (color.samples > 1u) {
+                samples = color.samples;
+                break;
+            }
+        }
+    }
+    for (const auto& color : colors) {
+        if (color.samples != 1u && color.samples != samples) {
+            throw std::runtime_error("AGC graphics: a color target with " + std::to_string(color.samples) + " fragments cannot share a " +
+                std::to_string(samples) + "-sample pass (depth " + std::to_string(depthSamples) + ", rasterizer " + std::to_string(rasterSamples) + ")");
+        }
+    }
+    return samples;
+}
+
 std::uint32_t ColorWriteMask(const Registers& context) {
     auto mask = read(context, 0x8e) & read(context, 0x8f);
     for (std::uint32_t slot = 0; slot < 8; ++slot) {
@@ -883,14 +907,24 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     const auto format = (info >> 2u) & 0x1fu;
     const auto decoded = DecodeColorFormat(format, number, swap);
     // ROUND_MODE (bit 18) only affects unorm rounding. With DCC_ENABLE (bit 28) the target is written
-    if ((info & ~(0x00039f7cu | 0x00040000u | 0x10000000u | 0x00002000u)) != 0) throw std::runtime_error("AGC graphics: color compression, DCC, endian conversion, nonstandard rounding or color optimization is unsupported (CB_COLOR_INFO 0x" + [&] { char text[16]; std::snprintf(text, sizeof(text), "%08x", info); return std::string(text); }() + ")");
+    // FMASK compression (COMPRESSION [14], FMASK_COMPRESSION_DISABLE [26], FMASK_COMPRESS_1FRAG_ONLY [27])
+    // only describes how the guest stores sample coverage; it is accepted on surfaces with several
+    // coverage samples, whose fragments are not read back from guest memory.
+    const auto fmaskBits = ((read(cx, 0x31d + stride) >> 12u) & 7u) != 0 ? 0x0c004000u : 0u;
+    if ((info & ~(0x00039f7cu | 0x00040000u | 0x10000000u | 0x00002000u | fmaskBits)) != 0) throw std::runtime_error("AGC graphics: color compression, DCC, endian conversion, nonstandard rounding or color optimization is unsupported (CB_COLOR_INFO 0x" + [&] { char text[16]; std::snprintf(text, sizeof(text), "%08x", info); return std::string(text); }() + ")");
     Require((info & 0x8000u) != 0 || number == 7 || number == 4 || number == 5, "unclamped normalized color is unsupported");
     const auto view = read(cx, 0x31b + stride);
     Require((view & ~0x3fffffffu) == 0, "reserved CB_COLOR_VIEW bits are set");
     const auto slice = view & 0x1fffu;
     Require(slice == ((view >> 13u) & 0x1fffu), "color views of several array slices are unsupported");
     const auto viewMip = (view >> 26u) & 0xfu;
-    zero(cx, 0x31d + stride, ~0x20000u, "color samples, fragments or destination alpha override");
+    // CB_COLOR_ATTRIB: NUM_SAMPLES [14:12], NUM_FRAGMENTS [16:15] and FORCE_DST_ALPHA_1 [17].
+    zero(cx, 0x31d + stride, ~0x3f000u, "CB_COLOR_ATTRIB bits beyond samples, fragments and destination alpha override");
+    const auto attrib = read(cx, 0x31d + stride);
+    color.coverageSamples = 1u << ((attrib >> 12u) & 7u);
+    color.samples = 1u << ((attrib >> 15u) & 3u);
+    Require(color.coverageSamples <= 8u && color.samples <= color.coverageSamples, "color fragments exceed the color sample count or 8x");
+    const bool multisampled = color.samples > 1u;
     const auto attrib2 = read(cx, 0x3b0 + slot);
     const auto maxMip = attrib2 >> 28u;
     Require(viewMip <= maxMip, "color view mip exceeds the surface");
@@ -907,6 +941,7 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
         Require(slice <= (attrib3 & 0x1fffu), "the color view slice is beyond the array surface");
     }
     color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
+    Require(!multisampled || (maxMip == 0 && !volume && slice == 0), "mipmapped, 3D or array-sliced multisampled color targets are unsupported");
     color.elementBytes = decoded.elementBytes;
     std::uint64_t mipOffset = 0;
     color.surfaceExtent = color.extent;
@@ -941,7 +976,8 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
         const auto clear = find(cx, 0x323 + word + stride);
         color.clearWords[word] = clear == cx.end() ? 0u : clear->second;
     }
-    if ((info & 0x2000u) != 0) {
+    // Multisampled fragments live in a resident surface, so their CMASK/DCC keys are not consulted.
+    if ((info & 0x2000u) != 0 && !multisampled) {
         Require(maxMip == 0 && !volume && slice == 0, "CMASK fast clears of a mipmapped, 3D or array color target are unsupported");
         Require(((attrib3 >> 19u) & 0x1fu) == 0x18u && (attrib3 & 0x4000000u) != 0, "CMASK fast clears need pipe-aligned SW_64KB_Z_X metadata (CB_COLOR_ATTRIB3 FMASK_SW_MODE 24, CMASK_PIPE_ALIGNED)");
         Require(color.elementBytes <= 8, "CMASK fast clears of texels over 64 bits are unsupported");
@@ -951,7 +987,7 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
         color.cmaskBytes = CmaskBytes(color.extent.width, color.extent.height);
         GuestMemory::CheckRange(reinterpret_cast<const void*>(color.cmaskAddress), color.cmaskBytes, CmaskLayout::Alignment, true);
     }
-    if ((info & 0x10000000u) != 0) {
+    if ((info & 0x10000000u) != 0 && !multisampled) {
         if (maxMip == 0) {
             const auto dccHigh = find(cx, 0x3a8 + slot);
             color.dccAddress = ((dccHigh == cx.end() ? 0ull : static_cast<std::uint64_t>(dccHigh->second & 0xffu)) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x325 + stride)) << 8u);

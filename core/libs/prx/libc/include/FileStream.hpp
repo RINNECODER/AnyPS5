@@ -100,7 +100,7 @@ public:
     void SyncUnlockedStatus() {
         _guest.readRemaining = 0;
         _guest.writeRemaining = 0;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__APPLE__)
         const bool endOfFile = std::feof(GetHandle()) != 0;
         const bool error = std::ferror(GetHandle()) != 0;
 #else

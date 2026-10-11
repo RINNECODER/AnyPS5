@@ -92,6 +92,10 @@ add_test_executable(anyps5_metal_msaa_depth_tests "${agcDriverRoot}/tests/metal/
 target_compile_options(anyps5_metal_msaa_depth_tests PRIVATE -fobjc-arc)
 target_link_libraries(anyps5_metal_msaa_depth_tests PRIVATE anyps5_metal_native_execution)
 
+add_test_executable(anyps5_metal_msaa_color_tests "${agcDriverRoot}/tests/metal/MultisampleColor.mm")
+target_compile_options(anyps5_metal_msaa_color_tests PRIVATE -fobjc-arc)
+target_link_libraries(anyps5_metal_msaa_color_tests PRIVATE anyps5_metal_native_execution)
+
 add_test_executable(anyps5_metal_guest_draw_replay GuestDrawReplay.mm)
 target_compile_options(anyps5_metal_guest_draw_replay PRIVATE -fobjc-arc)
 target_link_libraries(anyps5_metal_guest_draw_replay PRIVATE anyps5_metal_native_execution)
@@ -127,7 +131,7 @@ if(BUILD_TESTING)
     target_compile_options(anyps5_metal_shader_correctness_replay PRIVATE -fobjc-arc)
     target_link_libraries(anyps5_metal_shader_correctness_replay PRIVATE
         anyps5_metal_guest_recompiler anyps5_metal_utilities)
-    foreach(correctnessMode IN ITEMS packed half sdwa lds f64 msaa)
+    foreach(correctnessMode IN ITEMS packed half sdwa lds f64 f64_trig_preop msaa)
         add_test(NAME anyps5_metal_shader_correctness_${correctnessMode}
             COMMAND anyps5_metal_shader_correctness_replay "${correctnessMode}")
         set_tests_properties(anyps5_metal_shader_correctness_${correctnessMode} PROPERTIES
@@ -191,6 +195,11 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_metal_msaa_depth COMMAND anyps5_metal_msaa_depth_tests)
     set_tests_properties(anyps5_metal_msaa_depth PROPERTIES TIMEOUT 120
         ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
+    foreach(colorMode IN ITEMS format_view eqaa msaa_color)
+        add_test(NAME anyps5_metal_color_${colorMode} COMMAND anyps5_metal_msaa_color_tests "${colorMode}")
+        set_tests_properties(anyps5_metal_color_${colorMode} PROPERTIES TIMEOUT 120
+            ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
+    endforeach()
     add_test(NAME anyps5_metal_guest_replay COMMAND anyps5_metal_guest_replay)
     set_tests_properties(anyps5_metal_guest_replay PROPERTIES TIMEOUT 120)
 endif()

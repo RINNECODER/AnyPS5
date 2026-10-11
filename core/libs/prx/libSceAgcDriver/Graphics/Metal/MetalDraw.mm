@@ -110,6 +110,18 @@ MTLVertexFormat vertexFormat(VkFormat format) {
     }
 }
 
+MTLTextureSwizzle channelSwizzle(std::uint8_t value) {
+    switch (value) {
+    case 0: return MTLTextureSwizzleZero;
+    case 1: return MTLTextureSwizzleOne;
+    case 4: return MTLTextureSwizzleRed;
+    case 5: return MTLTextureSwizzleGreen;
+    case 6: return MTLTextureSwizzleBlue;
+    case 7: return MTLTextureSwizzleAlpha;
+    default: throw std::invalid_argument("Metal draw resident surface component selection is invalid");
+    }
+}
+
 Graphics::GuestTextureResource colorSurface(const Graphics::ColorTarget& color) {
     if (color.depth == 0 || color.mipCount == 0 || color.mip >= color.mipCount || color.depthSlice >= color.depth) {
         throw std::invalid_argument("Metal draw color subresource is invalid");
@@ -147,7 +159,8 @@ std::span<const std::byte> pushBlock(const MetalBackend::Result& shader,
 }
 
 MetalDraw::MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary)
-    : backend(device, utilityLibrary), depthCache(std::make_unique<MetalDepthSurfaceCache>(backend)) {
+    : backend(device, utilityLibrary), depthCache(std::make_unique<MetalDepthSurfaceCache>(backend)),
+      hostAliases(std::make_unique<MetalGuestHostAliases>(device)) {
     if (![device supportsFamily:MTLGPUFamilyApple7] || ![device supportsFamily:MTLGPUFamilyMetal3]) {
         throw std::invalid_argument("Metal draw requires an Apple GPU with Metal 3 integer and GPU address support");
     }
@@ -158,8 +171,12 @@ MetalDraw::~MetalDraw() = default;
 void MetalDraw::InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed) {
     std::lock_guard lock(drawMutex);
     depthCache->Invalidate(changed);
+    for (const auto& range : changed) hostAliases->Invalidate(range.host.data(), range.host.size());
     std::erase_if(depthSurfaces, [&](const auto& surface) { return surface->OverlapsMappings(changed); });
+    std::erase_if(colorSurfaces, [&](const auto& surface) { return surface->OverlapsMappings(changed); });
 }
+
+MetalGuestHostAliases& MetalDraw::HostAliases() { return *hostAliases; }
 
 MeshTargetLimits MetalDraw::MeshLimits() const {
     const auto maximum = backend.Device().maxThreadsPerThreadgroup;
@@ -304,44 +321,91 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             if (Graphics::ResolveTextureFormat(resource.format) != expected && !depthBits) {
                 throw std::invalid_argument("Metal draw resident depth plane format disagrees with the guest descriptor");
             }
-            auto channel = [](std::uint8_t value) {
-                switch (value) {
-                case 0: return MTLTextureSwizzleZero;
-                case 1: return MTLTextureSwizzleOne;
-                case 4: return MTLTextureSwizzleRed;
-                case 5: return MTLTextureSwizzleGreen;
-                case 6: return MTLTextureSwizzleBlue;
-                case 7: return MTLTextureSwizzleAlpha;
-                default: throw std::invalid_argument("Metal draw resident depth component selection is invalid");
-                }
-            };
             id<MTLTexture> source = stencil ? surface->SampledStencilView() : surface->SampledDepthView();
             if (source == nil) throw std::invalid_argument("Metal draw sampled depth plane is missing");
-            const auto swizzle = MTLTextureSwizzleChannelsMake(channel(resource.dstSelX), channel(resource.dstSelY),
-                channel(resource.dstSelZ), channel(resource.dstSelW));
+            const auto swizzle = MTLTextureSwizzleChannelsMake(channelSwizzle(resource.dstSelX), channelSwizzle(resource.dstSelY),
+                channelSwizzle(resource.dstSelZ), channelSwizzle(resource.dstSelW));
             id<MTLTexture> view = [source newTextureViewWithPixelFormat:source.pixelFormat textureType:source.textureType
                 levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:swizzle];
             if (view == nil) throw std::runtime_error("Metal draw resident depth component view creation failed");
             return view;
         }
+        if (resource.samples <= 1) return nil;
+        for (auto cursor = colorSurfaces.rbegin(); cursor != colorSurfaces.rend(); ++cursor) {
+            const auto& surface = *cursor;
+            const auto& target = surface->Target();
+            if (resource.baseAddress != target.address) continue;
+            if (storage || compare || resource.width != target.extent.width || resource.height != target.extent.height ||
+                resource.dimension != Graphics::TextureDimension::k2D || resource.baseArray != 0 || resource.depthOrLastArray != 0 ||
+                resource.samples != target.samples) {
+                throw std::invalid_argument("Metal draw resident multisampled color view is incompatible with the guest descriptor");
+            }
+            id<MTLTexture> source = surface->Texture();
+            // The descriptor may reinterpret the fragments (an sRGB or swapped view of the same texel size).
+            auto format = source.pixelFormat;
+            try {
+                format = RenderPixelFormat(Graphics::ResolveTextureFormat(resource.format));
+            } catch (const std::invalid_argument&) {
+            }
+            if (format != source.pixelFormat) source = ColorAttachmentView(source, format);
+            const auto swizzle = MTLTextureSwizzleChannelsMake(channelSwizzle(resource.dstSelX), channelSwizzle(resource.dstSelY),
+                channelSwizzle(resource.dstSelZ), channelSwizzle(resource.dstSelW));
+            id<MTLTexture> view = [source newTextureViewWithPixelFormat:source.pixelFormat textureType:source.textureType
+                levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:swizzle];
+            if (view == nil) throw std::runtime_error("Metal draw resident multisampled color view creation failed");
+            return view;
+        }
         return nil;
-    });
+    }, hostAliases.get());
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
     renderPass.renderTargetWidth = state.renderExtent.width;
     renderPass.renderTargetHeight = state.renderExtent.height;
+    struct Expansion {
+        id<MTLTexture> source;
+        std::uint32_t slot;
+    };
+    std::vector<Expansion> expansions;
     for (const auto& color : state.colors) {
         if (color.exportIndex >= 8) throw std::invalid_argument("Metal draw color export slot is invalid");
-        auto texture = resources.Texture(colorSurface(color), true);
-        id<MTLTexture> handle = texture->Texture();
-        if (handle.pixelFormat != RenderPixelFormat(color.format)) throw std::invalid_argument("Metal draw color attachment format disagrees with the guest state");
         auto attachment = renderPass.colorAttachments[color.exportIndex];
-        attachment.texture = handle;
-        attachment.level = color.mip;
-        attachment.depthPlane = color.depthSlice;
         attachment.loadAction = MTLLoadActionLoad;
         attachment.storeAction = MTLStoreActionStore;
+        if (color.samples > 1) {
+            if (color.samples != state.rasterSamples) throw std::invalid_argument("Metal draw multisampled color target disagrees with the pass sample count");
+            auto surface = depthCache->Acquire(color);
+            if (std::find(colorSurfaces.begin(), colorSurfaces.end(), surface) == colorSurfaces.end()) colorSurfaces.push_back(surface);
+            attachment.texture = surface->Texture();
+            continue;
+        }
+        auto texture = resources.Texture(colorSurface(color), true);
+        // The surface is typed by its memory layout; the attachment renders through the guest state's format.
+        id<MTLTexture> handle = ColorAttachmentView(texture->Texture(), RenderPixelFormat(color.format));
+        if (state.rasterSamples == 1) {
+            attachment.texture = handle;
+            attachment.level = color.mip;
+            attachment.depthPlane = color.depthSlice;
+            continue;
+        }
+        // A single-fragment target in a multisampled pass: expand it into a transient multisample
+        // texture before the draw and resolve the samples back into the target after it.
+        if (color.depth != 1 || color.uintExport || color.packing != ShaderRecompiler::ColorExportPacking::None) {
+            throw std::invalid_argument("Metal draw cannot resolve a 3D, integer or packed single-fragment color target from a multisampled pass");
+        }
+        switch (handle.pixelFormat) {
+        case MTLPixelFormatR8Uint: case MTLPixelFormatR16Uint: case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint:
+        case MTLPixelFormatRG16Uint: case MTLPixelFormatRG32Uint: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA32Uint:
+            throw std::invalid_argument("Metal draw cannot resolve an integer single-fragment color target from a multisampled pass");
+        default:
+            break;
+        }
+        id<MTLTexture> level = [handle newTextureViewWithPixelFormat:handle.pixelFormat textureType:MTLTextureType2D
+            levels:NSMakeRange(color.mip, 1) slices:NSMakeRange(0, 1)];
+        if (level == nil) throw std::runtime_error("Metal draw color level view creation failed");
+        expansions.push_back({level, color.exportIndex});
+        attachment.resolveTexture = level;
+        attachment.storeAction = MTLStoreActionMultisampleResolve;
     }
     if (depth) {
         renderPass.depthAttachment.texture = depth->DepthTexture();
@@ -607,6 +671,12 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         renderPass.visibilityResultBuffer = sampleCounter;
     }
     auto commands = backend.CommandBuffer();
+    if (!expansions.empty()) {
+        if (!multisampleExpander) multisampleExpander = std::make_unique<MetalMultisampleExpander>(backend);
+        for (const auto& expansion : expansions) {
+            renderPass.colorAttachments[expansion.slot].texture = multisampleExpander->Expand(commands, expansion.source, state.rasterSamples, expansion.slot);
+        }
+    }
     auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
     if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
     try {

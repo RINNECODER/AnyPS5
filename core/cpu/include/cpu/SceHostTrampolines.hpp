@@ -37,6 +37,9 @@ public:
     void Release();
     std::size_t Size() const;
     std::size_t Capacity() const;
+    // Stall diagnostics: the guest address of the last trampoline entered on this host
+    // thread (the import address the guest called), or 0. Taking it clears it.
+    static std::uint64_t TakeLastEntry() noexcept;
 private:
     struct Impl;
     std::shared_ptr<Impl> impl;

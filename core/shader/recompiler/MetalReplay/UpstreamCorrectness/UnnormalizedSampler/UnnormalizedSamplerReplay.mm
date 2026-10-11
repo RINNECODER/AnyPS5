@@ -549,9 +549,8 @@ void Rejections(id<MTLDevice> device, id<MTLLibrary> library) {
     Reject("indirect sampled image binding", {"unnormalized", "bindless image table needs image array dynamic indexing"},
         [&] { static_cast<void>(Recompile(indirect)); });
     Replay pair(32,8,4,true,false,false,true,true);
-    auto liveMixed = QualifiedAndOffsetProgram(false);
-    Reject("same sampler live qualified plus offset sample", {"unnormalized", "has a texel offset that is not a constant"},
-        [&] { static_cast<void>(Compile(device,liveMixed,pair.users)); });
+    // A live qualified sample plus an offset sample on the same sampler compiles since upstream d0d127b17
+    // (texel offsets with unnormalized coordinates), so it is no longer a refusal.
     DeadSourceLimitations(device);
     auto deadMixed = QualifiedAndOffsetProgram(true);
     // Preserve the s8 failure above. The supported placement uses T#s0, so a

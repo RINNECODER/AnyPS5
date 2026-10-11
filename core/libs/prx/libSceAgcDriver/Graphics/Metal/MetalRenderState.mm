@@ -185,6 +185,46 @@ void ConfigureAttachments(MTLRenderPipelineColorAttachmentDescriptorArray* attac
 
 }
 
+namespace {
+
+std::uint32_t ColorPixelBytes(MTLPixelFormat format) {
+    switch (format) {
+    case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Unorm_sRGB: case MTLPixelFormatR8Snorm: case MTLPixelFormatR8Uint: case MTLPixelFormatR8Sint:
+        return 1;
+    case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: case MTLPixelFormatR16Uint: case MTLPixelFormatR16Sint: case MTLPixelFormatR16Float:
+    case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Unorm_sRGB: case MTLPixelFormatRG8Snorm: case MTLPixelFormatRG8Uint: case MTLPixelFormatRG8Sint:
+        return 2;
+    case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint: case MTLPixelFormatR32Float:
+    case MTLPixelFormatRG16Unorm: case MTLPixelFormatRG16Snorm: case MTLPixelFormatRG16Uint: case MTLPixelFormatRG16Sint: case MTLPixelFormatRG16Float:
+    case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatRGBA8Snorm: case MTLPixelFormatRGBA8Uint: case MTLPixelFormatRGBA8Sint:
+    case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatBGRA8Unorm_sRGB:
+    case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatRGB10A2Uint: case MTLPixelFormatRG11B10Float: case MTLPixelFormatRGB9E5Float:
+        return 4;
+    case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint: case MTLPixelFormatRG32Float:
+    case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRGBA16Snorm: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA16Float:
+        return 8;
+    case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: case MTLPixelFormatRGBA32Float:
+        return 16;
+    default:
+        return 0;
+    }
+}
+
+}
+
+id<MTLTexture> ColorAttachmentView(id<MTLTexture> texture, MTLPixelFormat format) {
+    Require(texture != nil, "color attachment texture is missing");
+    if (texture.pixelFormat == format) return texture;
+    const auto bytes = ColorPixelBytes(format);
+    if (bytes == 0 || bytes != ColorPixelBytes(texture.pixelFormat) || (texture.usage & MTLTextureUsagePixelFormatView) == 0) {
+        throw std::invalid_argument("Metal draw color attachment format disagrees with the guest state (surface pixel format " +
+            std::to_string(static_cast<unsigned>(texture.pixelFormat)) + ", attachment " + std::to_string(static_cast<unsigned>(format)) + ")");
+    }
+    id<MTLTexture> view = [texture newTextureViewWithPixelFormat:format];
+    if (view == nil) throw std::runtime_error("Metal color attachment format view creation failed");
+    return view;
+}
+
 MTLPixelFormat RenderPixelFormat(VkFormat format) {
     switch (format) {
     case VK_FORMAT_R8_UNORM: return MTLPixelFormatR8Unorm;

@@ -16,12 +16,15 @@ class MetalShaderResources {
 public:
     using DepthTextureLookup = std::function<id<MTLTexture>(const Graphics::GuestTextureResource&, bool, bool)>;
     explicit MetalShaderResources(const MetalDevice& backend,
-        std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup = {});
+        std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup = {},
+        MetalGuestHostAliases* aliases = nullptr);
     [[nodiscard]] std::vector<MetalShaderResourceBinding> Bindings(const ShaderRecompiler::MetalBackend::Result& shader);
     [[nodiscard]] MetalBufferBinding Buffer(std::uint64_t address, std::size_t bytes, bool writable = false);
     [[nodiscard]] std::shared_ptr<MetalTexture> Texture(const Graphics::GuestTextureResource& descriptor, bool written = false, bool compare = false, bool atomic = false);
     [[nodiscard]] std::span<const id<MTLResource>> Residency() const;
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault Complete(id<MTLCommandBuffer> commands);
+    // Guest bytes the snapshot copied instead of aliasing (#291).
+    [[nodiscard]] std::uint64_t CopiedBytes() const { return snapshot.CopiedBytes(); }
 
 private:
     [[nodiscard]] std::shared_ptr<MetalTexture> texture(const Graphics::GuestTextureResource& descriptor,
