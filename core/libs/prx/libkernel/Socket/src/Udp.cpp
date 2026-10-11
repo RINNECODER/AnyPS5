@@ -268,6 +268,12 @@ bool GuestSockets::WaitAny(const std::vector<Interest>& interests, std::uint64_t
     }
     if (WSAPoll(entries.data(), static_cast<ULONG>(entries.size()), timeout) == SOCKET_ERROR)
         throw std::runtime_error("equeue wait: WSAPoll failed, guest errno " + std::to_string(NativeError()));
+#elif defined(__APPLE__)
+    // Darwin has no ppoll: poll takes milliseconds, rounded up so a short wait is not a busy spin.
+    int timeout = -1;
+    if (deadlineNanos != 0) timeout = static_cast<int>(std::min<std::uint64_t>((remaining + 999999) / 1000000, INT_MAX));
+    if (::poll(entries.data(), entries.size(), timeout) < 0 && errno != EINTR)
+        throw std::runtime_error("equeue wait: poll failed, guest errno " + std::to_string(NativeError()));
 #else
     timespec timeout{static_cast<time_t>(remaining / 1000000000), static_cast<long>(remaining % 1000000000)};
     if (::ppoll(entries.data(), entries.size(), deadlineNanos != 0 ? &timeout : nullptr, nullptr) < 0 && errno != EINTR)
@@ -462,9 +468,15 @@ bool GuestSockets::Ready(int descriptor, bool write, std::int64_t* data, bool* e
     WSAPOLLFD entry{socket->value, static_cast<SHORT>(write ? POLLWRNORM : POLLRDNORM), 0};
     if (WSAPoll(&entry, 1, 0) <= 0) return false;
 #else
-    pollfd entry{socket->value, static_cast<short>(write ? POLLOUT : (POLLIN | POLLRDHUP)), 0};
+#ifdef __APPLE__
+    // Darwin has no POLLRDHUP; POLLHUP reports the peer shutdown for stream sockets.
+    constexpr short HostPollRdHup = 0;
+#else
+    constexpr short HostPollRdHup = POLLRDHUP;
+#endif
+    pollfd entry{socket->value, static_cast<short>(write ? POLLOUT : (POLLIN | HostPollRdHup)), 0};
     if (::poll(&entry, 1, 0) <= 0) return false;
-    if (!write && (entry.revents & POLLRDHUP)) entry.revents |= POLLHUP;
+    if (!write && (entry.revents & HostPollRdHup)) entry.revents |= POLLHUP;
 #endif
     *eof = (entry.revents & (POLLHUP | POLLERR)) != 0;
     *data = 0;

@@ -15,6 +15,12 @@
 #include <random>
 #else
 #include <sys/mman.h>
+#ifdef __APPLE__
+#include <fcntl.h>
+#include <unistd.h>
+#include <atomic>
+#include <cstdio>
+#endif
 #endif
 
 extern "C" int* APS5_VABI __error_nid_postfix();
@@ -64,6 +70,23 @@ int CreateAnonymousFile() {
             errno = error;
             return -1;
         }
+    }
+    errno = EEXIST;
+    return -1;
+#elif defined(__APPLE__)
+    // Darwin has no memfd_create: use a uniquely named POSIX shm object and unlink it at once,
+    // which leaves an anonymous descriptor. Names are limited to 31 characters.
+    static std::atomic<unsigned> sequence{0};
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "/aps5-%x-%x", static_cast<unsigned>(getpid()), sequence++);
+        const int descriptor = ::shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (descriptor >= 0) {
+            ::shm_unlink(name);
+            ::fcntl(descriptor, F_SETFD, FD_CLOEXEC);
+            return descriptor;
+        }
+        if (errno != EEXIST) return -1;
     }
     errno = EEXIST;
     return -1;

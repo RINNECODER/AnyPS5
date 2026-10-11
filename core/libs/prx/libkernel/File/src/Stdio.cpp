@@ -350,7 +350,11 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
 }
 #else
 #include <sys/statvfs.h>
+#if defined(__APPLE__)
+#include <sys/mount.h>
+#else
 #include <sys/vfs.h>
+#endif
 static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     constexpr long PipeFilesystem = 0x50495045;
     struct stat file{};
@@ -364,7 +368,9 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     if (::fstatvfs(descriptor, &host) != 0) return SceErrorFromErrno(errno) & 0xffff;
     if (host.f_flag & ST_RDONLY) fs->f_flags |= KERNEL_MNT_RDONLY;
     if (host.f_flag & ST_NOSUID) fs->f_flags |= KERNEL_MNT_NOSUID;
+#if !defined(__APPLE__)
     if (host.f_flag & ST_NOEXEC) fs->f_flags |= KERNEL_MNT_NOEXEC;
+#endif
     fs->f_bsize = host.f_frsize != 0 ? host.f_frsize : host.f_bsize;
     fs->f_iosize = host.f_bsize;
     fs->f_blocks = host.f_blocks;
@@ -720,6 +726,8 @@ int APS5_VABI sceKernelFdatasync(int fd) {
     if (fd >= GuestSockets::FirstDescriptor) return SceErrorFromErrno(GuestSockets::IsOpen(fd) ? GUEST_EINVAL : GUEST_EBADF);
 #ifdef _WIN32
     if (::_commit(fd) != 0) return SceErrorFromErrno(errno);
+#elif defined(__APPLE__)
+    if (::fsync(fd) != 0) return SceErrorFromErrno(errno);
 #else
     if (::fdatasync(fd) != 0) return SceErrorFromErrno(errno);
 #endif
@@ -750,6 +758,28 @@ int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
 
 #else
 
+#if defined(__APPLE__)
+// Darwin's directory-entries record (struct direntry); d_seekoff is the resume cookie.
+struct dirent64 {
+    std::uint64_t d_ino;
+    std::uint64_t d_seekoff;
+    std::uint16_t d_reclen;
+    std::uint16_t d_namlen;
+    std::uint8_t d_type;
+    char d_name[1024];
+};
+#define APS5_D_OFF d_seekoff
+static long HostGetdents(int fd, char* buffer, std::size_t size) {
+    off_t position = 0;
+    return ::syscall(SYS_getdirentries64, fd, buffer, size, &position);
+}
+#else
+#define APS5_D_OFF d_off
+static long HostGetdents(int fd, char* buffer, std::size_t size) {
+    return ::syscall(SYS_getdents64, fd, buffer, size);
+}
+#endif
+
 int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
     constexpr std::size_t GuestHeaderBytes = 8;
     constexpr std::size_t GuestMaxName = 255;
@@ -759,7 +789,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     if (base < 0) return SceErrorFromErrno(errno);
     if (basep != nullptr) *basep = static_cast<int64_t>(base);
     std::vector<char> host(static_cast<std::size_t>(nbytes) < 4096 ? 4096 : static_cast<std::size_t>(nbytes));
-    const auto read = ::syscall(SYS_getdents64, fd, host.data(), host.size());
+    const auto read = HostGetdents(fd, host.data(), host.size());
     if (read < 0) return SceErrorFromErrno(errno);
     std::size_t written = 0;
     off_t resume = base;
@@ -783,7 +813,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
         out[7] = static_cast<char>(nameBytes);
         std::memcpy(out + GuestHeaderBytes, entry->d_name, nameLength);
         written += record;
-        resume = entry->d_off;
+        resume = entry->APS5_D_OFF;
         offset += entry->d_reclen;
     }
     if (::lseek(fd, resume, SEEK_SET) < 0) return SceErrorFromErrno(errno);
