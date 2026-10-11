@@ -1090,6 +1090,24 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             inputs.nothing = true;
             return inputs;
         }
+        constexpr std::uint32_t ZeroFetchSlack = 0x10000u;
+        if (const auto zeroFrom = state.stages.mesh ? std::nullopt : ZeroFetchVertex(shaders.front().program->vertexAttributes)) {
+            const auto limit = *zeroFrom > draw.firstVertex ? *zeroFrom - draw.firstVertex : 0u;
+            if (*highest >= limit && *highest - limit >= ZeroFetchSlack) {
+                GuestMemory::FlushGpuWrites(draw.indexAddress, static_cast<std::size_t>(indexBytes));
+                auto clamped = std::make_shared<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+                const auto bytes = clamped->Bytes().first(static_cast<std::size_t>(indexBytes));
+                GuestMemory::Read(draw.indexAddress, bytes, draw.indexSize);
+                highest = ClampDrawIndices(bytes, draw.indexSize, skipRestart, limit);
+                import = nullptr;
+                copy = DrawInputCopy{};
+                copy.buffer = std::move(clamped);
+                if (!highest) {
+                    inputs.nothing = true;
+                    return inputs;
+                }
+            }
+        }
         Require(*highest <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
         Require(!fanGeometry || !state.primitiveRestart || *highest != (draw.indexSize == 2 ? 0xffffu : 0xffffffffu), "primitive restart in a triangle fan geometry draw is unsupported");
         inputs.maxIndex = *highest;
