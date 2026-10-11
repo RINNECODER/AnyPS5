@@ -10,7 +10,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
+#include <initializer_list>
+#include <algorithm>
 #include <map>
+#include <stdexcept>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -27,7 +31,7 @@ class VulkanDevice;
 namespace AgcDriver::DriverDetail {
 
 struct ShaderSnapshot;
-using ShaderRegistry = std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>;
+using ShaderRegistry = std::map<std::uint64_t, std::vector<std::shared_ptr<const ShaderSnapshot>>>;
 
 struct PreparedShaderState {
     struct Entry {
@@ -82,14 +86,36 @@ struct ShaderSnapshot {
 };
 
 
-std::shared_ptr<const ShaderSnapshot> ReadRawComputeShader(std::uint64_t address);
+std::shared_ptr<const ShaderSnapshot> ReadRawShader(std::uint64_t address);
+std::shared_ptr<const ShaderSnapshot> ProgramSnapshot(const ShaderRegistry& shaders, std::uint64_t address, std::initializer_list<std::uint8_t> types);
+void NoteRawGraphicsDraw();
+bool RawGraphicsDrawn();
 
 std::shared_ptr<const ShaderRecompiler::SourceHandle> PrepareShaderWithDiagnostics(const ShaderRecompiler::RecompileRequest& request, ShaderRecompiler::ShaderPreparationContext* preparation = nullptr);
 
 std::uint64_t NullPixelProgramAddress();
 ShaderSnapshot PrepareNullPixelProgram(const VulkanDevice& device);
 std::optional<ShaderRecompiler::ShaderFloatMode> RegisteredFloatMode(const ShaderSnapshot& snapshot);
+// Inline so the Metal driver, which does not link ShaderRegistry.cpp, resolves programs identically.
+inline std::shared_ptr<const ShaderSnapshot> RegisteredProgram(const ShaderRegistry& registry, std::uint64_t address, std::initializer_list<std::uint8_t> types) {
+    auto found = registry.upper_bound(address);
+    if (found == registry.begin()) return {};
+    --found;
+    std::shared_ptr<const ShaderSnapshot> result;
+    bool registered = false;
+    for (const auto& snapshot : found->second) {
+        if (address - snapshot->codeAddress >= snapshot->code.size() * sizeof(std::uint32_t)) continue;
+        registered = true;
+        if (std::find(types.begin(), types.end(), snapshot->type) == types.end()) continue;
+        if (result != nullptr && result->type != snapshot->type) throw std::runtime_error("AGC driver: registered program has ambiguous shader binary types");
+        result = snapshot;
+    }
+    if (registered && result == nullptr) throw std::runtime_error("AGC driver: registered program refers to an incompatible shader binary type");
+    return result;
+}
 void PublishRegisteredShader(std::shared_ptr<ShaderRegistry>& registry, const std::shared_ptr<const ShaderSnapshot>& snapshot);
+void SubmitRegistrationPreparation(std::function<void()> task);
+void CloseRegistrationPreparation();
 
 void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target);
 

@@ -149,6 +149,8 @@ public:
     // Whether a written buffer was copied (its results reach guest memory by the CPU write-back).
     bool HasCopiedWrites() const { return guestMemory.HasCopiedWrites(); }
     bool HoldsLease() const { return guestMemory.HoldsLease(); }
+    bool UsesAddressTable() const { return usesBda; }
+    std::size_t CopiedBytes() const { return guestMemory.CopiedBytes(); }
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const { return guestMemory.WritesOverlap(address, bytes); }
     // Whether a region the recorded work reads in place through a host import overlaps the range.
     bool ReadsOverlap(std::uint64_t address, std::size_t bytes) const;
@@ -213,7 +215,7 @@ public:
     bool DataWordsDiffer(const CompiledShader& shader) const;
     // Why the fast proof of a Revalidate left the object to the full walk (the [rescache]
     // revalidate line's reasons); Count: it did not.
-    enum class FastFail : std::size_t { NoRecord, Collect, Pending, Evicted, Changed, Keys, ClearedView, StorageKeys, Count };
+    enum class FastFail : std::size_t { NoRecord, Collect, Pending, Evicted, Changed, Keys, ClearedView, StorageKeys, Depth, Count };
     // Why a Pending failure was left to the full walk instead of the own-object refresh (T1, see
     // refreshOwnObjects); Count: it was not.
     enum class OwnRefreshFallback : std::size_t { Disabled, Snapshot, Keys, ForeignView, SurfaceKey, NotImported, Uncached, Rerun, Count };
@@ -371,6 +373,7 @@ private:
         std::uint64_t collected = 0;
         // Storage-sourced textures: the image the view follows (kept alive by the texture).
         const StorageTexture* source = nullptr;
+        bool depth = false;
         bool valid = false;
     };
     void captureValidation();
@@ -442,6 +445,7 @@ private:
         std::array<std::uint32_t, 4> words{};
         bool compareEnable = false;
         bool unnormalized = false;
+        bool integerBorder = false;
         bool singleLevelImage = false;
         bool mipmappedImage = false;
     };

@@ -140,6 +140,7 @@ struct ShaderPixelStageInfo {
     std::array<std::uint8_t, 8> targetExportMapping;
     std::array<ColorExportPacking, 8> targetExportPacking;
     bool dualSourceBlend;
+    bool alphaToCoverage;
 };
 
 struct ShaderVertexBufferResource {
@@ -226,6 +227,7 @@ struct SpirvTarget {
     std::uint32_t srgbDecodeFormats = 0;
     bool narrowSubgroupClock = false;
     bool fixedPushSlots = false;
+    bool float64DenormPreserve = false;
 };
 
 struct BindingLayout {
@@ -278,6 +280,9 @@ inline constexpr std::uint32_t MeshArgumentAddressDword = 4;
 inline constexpr std::uint32_t MeshArgumentIndexCountDword = 3;
 inline constexpr std::uint32_t MeshArgumentFirstIndexDword = 4;
 inline constexpr std::uint32_t MeshArgumentBytes = 20;
+inline constexpr std::uint32_t MeshIndexRestartTable = 0x100;
+inline constexpr std::uint32_t MeshRestartLengthDword = MeshArgumentBytes / 4;
+inline constexpr std::uint32_t MeshRestartTableDword = MeshRestartLengthDword + 1;
 inline constexpr std::uint32_t MeshIndexBufferUserWord = 4;
 inline constexpr std::uint32_t WorkgroupMemoryDescriptorSet = 1;
 
@@ -378,6 +383,7 @@ struct DescriptorBinding {
     // (a producer that does not fill it) must be treated as written.
     std::vector<bool> bufferWritten;
     std::vector<bool> samplerUnnormalized;
+    std::vector<bool> samplerIntegerBorder;
     std::vector<bool> imageUnnormalized;
     std::vector<std::uint32_t> imageSamplers;
     std::vector<bool> bufferRead;
