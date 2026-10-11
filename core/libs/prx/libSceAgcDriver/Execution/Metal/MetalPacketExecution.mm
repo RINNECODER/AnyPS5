@@ -211,7 +211,22 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     configureSamplerArguments(options, *guest, nativeDevice);
     const auto converted = MetalBackend::ConvertToMetal(*guest, ShaderStage::Compute, options);
     MetalComputePipeline pipeline(nativeDevice, converted);
-    MetalShaderResources bindings(*backend, ranges, {}, draw ? &draw->HostAliases() : nullptr);
+    // Depth/stencil and multisampled color targets live only in the draw executor's resident
+    // textures, so a dispatch reading one (an MSAA resolve, a depth-based post pass) binds that
+    // texture like a draw does; guest memory at those addresses never holds the rendered pixels.
+    // A single-sample descriptor the resident surface cannot serve keeps its guest-memory binding.
+    MetalShaderResources::DepthTextureLookup resident;
+    if (draw) {
+        resident = [this](const Graphics::GuestTextureResource& resource, bool storage, bool compare) -> id<MTLTexture> {
+            try {
+                return draw->ResidentTexture(resource, storage, compare);
+            } catch (const std::invalid_argument&) {
+                if (resource.samples > 1) throw;
+                return nil;
+            }
+        };
+    }
+    MetalShaderResources bindings(*backend, ranges, std::move(resident), draw ? &draw->HostAliases() : nullptr);
     const auto descriptors = bindings.Bindings(converted);
     std::array<NSUInteger, 3> grid{};
     for (std::uint32_t axis = 0; axis < 3; ++axis) {

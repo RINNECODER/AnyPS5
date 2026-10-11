@@ -189,6 +189,67 @@ TessellationTargetLimits MetalDraw::TessellationLimits() const {
     return {32, 128, 128, 120, 4096, 128, 128};
 }
 
+id<MTLTexture> MetalDraw::ResidentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
+    std::lock_guard lock(drawMutex);
+    return residentTexture(resource, storage, compare);
+}
+
+id<MTLTexture> MetalDraw::residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const {
+    for (auto cursor = depthSurfaces.rbegin(); cursor != depthSurfaces.rend(); ++cursor) {
+        const auto& surface = *cursor;
+        const auto& target = surface->Target();
+        const bool stencil = target.stencilAddress != 0 && resource.baseAddress == target.stencilAddress;
+        const bool isDepth = resource.baseAddress == target.address;
+        if (!stencil && !isDepth) continue;
+        if (storage || resource.width != target.extent.width || resource.height != target.extent.height ||
+            resource.dimension != Graphics::TextureDimension::k2D || resource.baseLevel != 0 || resource.lastLevel != 0 ||
+            resource.baseArray != 0 || resource.depthOrLastArray != 0 || (stencil && compare) || resource.samples != target.samples) {
+            throw std::invalid_argument("Metal draw resident depth view is incompatible with the guest descriptor");
+        }
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        const auto expected = stencil ? VK_FORMAT_R8_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
+        const bool depthBits = !stencil && DepthBitsTextureWidth(resource.format << 20u,
+            Graphics::XorSwizzleMode(resource.tileMode) << 20u) == (d16 ? 16u : 32u);
+        if (Graphics::ResolveTextureFormat(resource.format) != expected && !depthBits) {
+            throw std::invalid_argument("Metal draw resident depth plane format disagrees with the guest descriptor");
+        }
+        id<MTLTexture> source = stencil ? surface->SampledStencilView() : surface->SampledDepthView();
+        if (source == nil) throw std::invalid_argument("Metal draw sampled depth plane is missing");
+        const auto swizzle = MTLTextureSwizzleChannelsMake(channelSwizzle(resource.dstSelX), channelSwizzle(resource.dstSelY),
+            channelSwizzle(resource.dstSelZ), channelSwizzle(resource.dstSelW));
+        id<MTLTexture> view = [source newTextureViewWithPixelFormat:source.pixelFormat textureType:source.textureType
+            levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:swizzle];
+        if (view == nil) throw std::runtime_error("Metal draw resident depth component view creation failed");
+        return view;
+    }
+    if (resource.samples <= 1) return nil;
+    for (auto cursor = colorSurfaces.rbegin(); cursor != colorSurfaces.rend(); ++cursor) {
+        const auto& surface = *cursor;
+        const auto& target = surface->Target();
+        if (resource.baseAddress != target.address) continue;
+        if (storage || compare || resource.width != target.extent.width || resource.height != target.extent.height ||
+            resource.dimension != Graphics::TextureDimension::k2D || resource.baseArray != 0 || resource.depthOrLastArray != 0 ||
+            resource.samples != target.samples) {
+            throw std::invalid_argument("Metal draw resident multisampled color view is incompatible with the guest descriptor");
+        }
+        id<MTLTexture> source = surface->Texture();
+        // The descriptor may reinterpret the fragments (an sRGB or swapped view of the same texel size).
+        auto format = source.pixelFormat;
+        try {
+            format = RenderPixelFormat(Graphics::ResolveTextureFormat(resource.format));
+        } catch (const std::invalid_argument&) {
+        }
+        if (format != source.pixelFormat) source = ColorAttachmentView(source, format);
+        const auto swizzle = MTLTextureSwizzleChannelsMake(channelSwizzle(resource.dstSelX), channelSwizzle(resource.dstSelY),
+            channelSwizzle(resource.dstSelZ), channelSwizzle(resource.dstSelW));
+        id<MTLTexture> view = [source newTextureViewWithPixelFormat:source.pixelFormat textureType:source.textureType
+            levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:swizzle];
+        if (view == nil) throw std::runtime_error("Metal draw resident multisampled color view creation failed");
+        return view;
+    }
+    return nil;
+}
+
 void MetalDraw::DumpSamplesSynchronously(std::uint64_t guestAddress) {
     std::lock_guard lock(drawMutex);
     constexpr std::size_t targetBytes = 15 * 16 + 8;
@@ -302,60 +363,8 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     }
     auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
     if (depth && std::find(depthSurfaces.begin(), depthSurfaces.end(), depth) == depthSurfaces.end()) depthSurfaces.push_back(depth);
-    MetalShaderResources resources(backend, ranges, [&](const Graphics::GuestTextureResource& resource, bool storage, bool compare) -> id<MTLTexture> {
-        for (auto cursor = depthSurfaces.rbegin(); cursor != depthSurfaces.rend(); ++cursor) {
-            const auto& surface = *cursor;
-            const auto& target = surface->Target();
-            const bool stencil = target.stencilAddress != 0 && resource.baseAddress == target.stencilAddress;
-            const bool isDepth = resource.baseAddress == target.address;
-            if (!stencil && !isDepth) continue;
-            if (storage || resource.width != target.extent.width || resource.height != target.extent.height ||
-                resource.dimension != Graphics::TextureDimension::k2D || resource.baseLevel != 0 || resource.lastLevel != 0 ||
-                resource.baseArray != 0 || resource.depthOrLastArray != 0 || (stencil && compare) || resource.samples != target.samples) {
-                throw std::invalid_argument("Metal draw resident depth view is incompatible with the guest descriptor");
-            }
-            const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
-            const auto expected = stencil ? VK_FORMAT_R8_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
-            const bool depthBits = !stencil && DepthBitsTextureWidth(resource.format << 20u,
-                Graphics::XorSwizzleMode(resource.tileMode) << 20u) == (d16 ? 16u : 32u);
-            if (Graphics::ResolveTextureFormat(resource.format) != expected && !depthBits) {
-                throw std::invalid_argument("Metal draw resident depth plane format disagrees with the guest descriptor");
-            }
-            id<MTLTexture> source = stencil ? surface->SampledStencilView() : surface->SampledDepthView();
-            if (source == nil) throw std::invalid_argument("Metal draw sampled depth plane is missing");
-            const auto swizzle = MTLTextureSwizzleChannelsMake(channelSwizzle(resource.dstSelX), channelSwizzle(resource.dstSelY),
-                channelSwizzle(resource.dstSelZ), channelSwizzle(resource.dstSelW));
-            id<MTLTexture> view = [source newTextureViewWithPixelFormat:source.pixelFormat textureType:source.textureType
-                levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:swizzle];
-            if (view == nil) throw std::runtime_error("Metal draw resident depth component view creation failed");
-            return view;
-        }
-        if (resource.samples <= 1) return nil;
-        for (auto cursor = colorSurfaces.rbegin(); cursor != colorSurfaces.rend(); ++cursor) {
-            const auto& surface = *cursor;
-            const auto& target = surface->Target();
-            if (resource.baseAddress != target.address) continue;
-            if (storage || compare || resource.width != target.extent.width || resource.height != target.extent.height ||
-                resource.dimension != Graphics::TextureDimension::k2D || resource.baseArray != 0 || resource.depthOrLastArray != 0 ||
-                resource.samples != target.samples) {
-                throw std::invalid_argument("Metal draw resident multisampled color view is incompatible with the guest descriptor");
-            }
-            id<MTLTexture> source = surface->Texture();
-            // The descriptor may reinterpret the fragments (an sRGB or swapped view of the same texel size).
-            auto format = source.pixelFormat;
-            try {
-                format = RenderPixelFormat(Graphics::ResolveTextureFormat(resource.format));
-            } catch (const std::invalid_argument&) {
-            }
-            if (format != source.pixelFormat) source = ColorAttachmentView(source, format);
-            const auto swizzle = MTLTextureSwizzleChannelsMake(channelSwizzle(resource.dstSelX), channelSwizzle(resource.dstSelY),
-                channelSwizzle(resource.dstSelZ), channelSwizzle(resource.dstSelW));
-            id<MTLTexture> view = [source newTextureViewWithPixelFormat:source.pixelFormat textureType:source.textureType
-                levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:swizzle];
-            if (view == nil) throw std::runtime_error("Metal draw resident multisampled color view creation failed");
-            return view;
-        }
-        return nil;
+    MetalShaderResources resources(backend, ranges, [&](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
+        return residentTexture(resource, storage, compare);
     }, hostAliases.get());
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
