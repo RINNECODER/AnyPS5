@@ -26,8 +26,8 @@ int APS5_VABI sceSharePlayGetCurrentConnectionInfoA(SharePlayConnectionInfoA* in
     return 0;
 }
 
-int APS5_VABI sceSharePlayProhibitController(void) {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceSharePlayProhibitController(int prohibited) {
+    if (prohibited != 0 && prohibited != 1) APS5_INVALID_ARG_EX;
     return 0;
 }
 
