@@ -204,7 +204,8 @@ void GuestExitCallback() {}
 // ---- fault diagnostics ----------------------------------------------------
 
 struct sigaction previousActions[32];
-constexpr int DiagnosedSignals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP};
+// SIGABRT gives uncaught host exceptions (std::terminate) a backtrace to the throw site.
+constexpr int DiagnosedSignals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGABRT};
 
 const char* SignalName(int signal) {
     switch (signal) {
@@ -213,6 +214,7 @@ const char* SignalName(int signal) {
     case SIGILL: return "SIGILL";
     case SIGFPE: return "SIGFPE";
     case SIGTRAP: return "SIGTRAP";
+    case SIGABRT: return "SIGABRT";
     default: return "signal";
     }
 }
@@ -259,7 +261,7 @@ void Diagnose(int signal, siginfo_t* info, ucontext_t* context) {
         Write("[rosetta]   [rsp] %#llx %s\n", static_cast<unsigned long long>(returnAddress), where);
     }
     std::uint64_t frame = state.__rbp;
-    for (int depth = 0; depth < 16 && frame != 0; ++depth) {
+    for (int depth = 0; depth < 32 && frame != 0; ++depth) {
         std::uint64_t next = 0;
         if (!ReadWord(frame, &next) || !ReadWord(frame + 8, &returnAddress) || returnAddress == 0) break;
         Describe(returnAddress, where, sizeof(where));
