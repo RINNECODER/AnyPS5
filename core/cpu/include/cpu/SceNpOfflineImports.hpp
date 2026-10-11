@@ -9,9 +9,10 @@ namespace Cpu {
 
 struct SceImport;
 
-// Offline PSN: libSceNpManager, libSceNpWebApi and libSceNpWebApi2 initialise and
-// hand out handles, the user stays signed out, and every network request fails.
-// sceNpGetState stays with SceNpLocalImports. Unknown NIDs return nullopt.
+// Offline PSN for the NP exports SceUpstreamPrxBridge does not serve: libSceNpWebApi,
+// callback registration and exports NotImplemented upstream. Initialisation and
+// handles succeed, the user stays signed out, and every network request fails.
+// Unknown NIDs return nullopt.
 // Machine must outlive this provider.
 class SceNpOfflineImports {
 public:

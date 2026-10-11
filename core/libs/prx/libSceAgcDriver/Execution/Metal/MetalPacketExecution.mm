@@ -13,7 +13,9 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <limits>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 
@@ -62,19 +64,105 @@ SpirvTarget nativeTarget(id<MTLDevice> device, std::optional<MeshTargetLimits> m
     return target;
 }
 
+// The work already ran on the GPU when it faulted, so this is never a skippable packet.
 void checkGpuFault(const BdaAbi::Fault& fault) {
     if (fault.state == BdaAbi::FaultState::Empty) return;
     std::ostringstream message;
     message << "Native Metal guest GPU access failed: reason=" << static_cast<std::uint32_t>(fault.reason)
         << " address=0x" << std::hex << fault.address << " instruction=0x" << fault.instruction
         << std::dec << " bytes=" << fault.bytes << " stage=" << fault.stage;
-    throw std::runtime_error(message.str());
+    throw MetalGpuExecutionError(message.str());
 }
 
+constexpr std::string_view SkippedDraw = "draw", SkippedDispatch = "dispatch";
+constexpr std::size_t MaxSkipReasonBytes = 240;
+
+// Log the first skip of each reason, then every power of ten, so a draw that fails
+// every frame stays visible without flooding the log.
+bool reportSkipCount(std::uint64_t count) {
+    while (count >= 10 && count % 10 == 0) count /= 10;
+    return count == 1;
+}
+
+// The driver itself is unusable (not configured): failing every packet would only
+// hide that, so it stays sticky.
+class DriverInvariantError final : public std::logic_error {
+public:
+    using std::logic_error::logic_error;
+};
+
+}
+
+// Fail-soft packet execution (#289): an unsupported or failed draw or dispatch
+// (decode, shader translation, pipeline or resource setup) is skipped, logged and
+// counted, and the command buffer continues. Skipping is safe because guest memory
+// only changes when a packet's results are copied back after its last command
+// buffer completes; work that ran on the GPU before a later failure in the same
+// packet stays in driver-owned buffers and is dropped with the packet.
+// A sticky failure is kept for what puts the GPU, guest memory or the driver in
+// doubt: command-buffer and encoder errors, faults and copy-back failures of work
+// that already ran (MetalGpuExecutionError), guest writes into read-only memory,
+// allocation failure, an unconfigured driver, a failure reported elsewhere, and
+// shutdown.
+template <typename Work>
+void MetalDriver::Impl::Tolerate(std::string_view kind, Work&& work) {
+    try {
+        work();
+    } catch (const MetalGpuExecutionError&) {
+        throw;
+    } catch (const NativeGuestMemory::ReadOnlyWriteError&) {
+        throw;
+    } catch (const DriverInvariantError&) {
+        throw;
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (const std::exception& error) {
+        // A sticky failure or a stop that arrived meanwhile outranks this packet's own error.
+        CheckFailureAndStopping();
+        RecordSkip(kind, error.what());
+    }
+}
+
+void MetalDriver::Impl::RecordSkip(std::string_view kind, std::string_view what) {
+    std::string reason(what.substr(0, what.find('\n')));
+    if (reason.size() > MaxSkipReasonBytes) reason.resize(MaxSkipReasonBytes);
+    std::uint64_t count = 0;
+    bool unlisted = false;
+    {
+        std::lock_guard lock(skipMutex);
+        ++(kind == SkippedDraw ? skipped.draws : skipped.dispatches);
+        const auto found = std::find_if(skipped.reasons.begin(), skipped.reasons.end(), [&](const auto& entry) {
+            return entry.kind == kind && entry.what == reason;
+        });
+        if (found != skipped.reasons.end()) {
+            count = ++found->count;
+        } else if (skipped.reasons.size() < SkippedWorkDiagnostics::MaxReasons) {
+            skipped.reasons.push_back({std::string(kind), reason, 1});
+            count = 1;
+        } else {
+            count = ++skipped.unlistedReasons;
+            unlisted = true;
+        }
+    }
+    if (!reportSkipCount(count)) return;
+    if (unlisted) {
+        // Reasons past the list are not deduplicated, so sample them by their running total.
+        std::fprintf(stderr, "[metal] skipped %.*s (unlisted #%llu, reason list full at %zu): %s\n",
+            static_cast<int>(kind.size()), kind.data(), static_cast<unsigned long long>(count),
+            SkippedWorkDiagnostics::MaxReasons, reason.c_str());
+    } else {
+        std::fprintf(stderr, "[metal] skipped %.*s (x%llu): %s\n", static_cast<int>(kind.size()), kind.data(),
+            static_cast<unsigned long long>(count), reason.c_str());
+    }
+}
+
+SkippedWorkDiagnostics MetalDriver::SkippedWork() const {
+    std::lock_guard lock(impl->skipMutex);
+    return impl->skipped;
 }
 
 void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
-    if (backend == nullptr || submission.shaders == nullptr) throw std::runtime_error("Native Metal compute executor is not configured");
+    if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
     // Find the registered shader first so the dispatch decodes against its AGC header, as the Vulkan
     // Driver::dispatch does (SCRATCH_EN takes its per-lane size from the header).
     const auto programAddress = DecodeComputeProgramAddress(queue.shader);
@@ -137,11 +225,11 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     pipeline.Encode(commands, descriptors, MTLSizeMake(grid[0], grid[1], grid[2]), {}, bindings.Residency());
     [commands commit];
     backend->Wait(commands);
-    checkGpuFault(bindings.Complete(commands));
+    checkGpuFault(CompleteCommittedWork([&] { return bindings.Complete(commands); }));
 }
 
 void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
-    if (draw == nullptr || submission.shaders == nullptr) throw std::runtime_error("Native Metal draw executor is not configured");
+    if (draw == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal draw executor is not configured");
     auto parameters = Pm4::ResolveDraw(packet, queue);
     if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) return;
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
@@ -240,21 +328,25 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     const auto records = ReadIndirectDrawRecords(*parameters.indirect);
     for (std::uint32_t record = 0; record < records.size(); ++record) {
         CheckFailureAndStopping();
-        const auto expanded = ExpandIndirectDrawRecord(parameters, records[record], record, programs);
-        if (!expanded) continue;
-        std::optional<std::array<std::uint32_t, 5>> meshArguments;
-        if (decoded.state.stages.mesh && expanded->parameters.indexed) {
-            const auto& mesh = *decoded.state.stages.mesh;
-            const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
-            const auto step = mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize;
-            if (expanded->parameters.indexCount < inputSize || mesh.primitivesPerGroup == 0) {
-                throw std::runtime_error("Native Metal mesh draw contains no complete primitive");
+        // Earlier records may already have reached guest memory, so a failing record is
+        // skipped on its own (and counted as one skipped draw) instead of the rest of the packet.
+        Tolerate(SkippedDraw, [&] {
+            const auto expanded = ExpandIndirectDrawRecord(parameters, records[record], record, programs);
+            if (!expanded) return;
+            std::optional<std::array<std::uint32_t, 5>> meshArguments;
+            if (decoded.state.stages.mesh && expanded->parameters.indexed) {
+                const auto& mesh = *decoded.state.stages.mesh;
+                const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
+                const auto step = mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize;
+                if (expanded->parameters.indexCount < inputSize || mesh.primitivesPerGroup == 0) {
+                    throw std::runtime_error("Native Metal mesh draw contains no complete primitive");
+                }
+                const auto groups = ((expanded->parameters.indexCount - inputSize) / step) / mesh.primitivesPerGroup + 1u;
+                meshArguments = {groups, expanded->parameters.instanceCount, 1, expanded->parameters.indexCount,
+                    records[record].firstVertexOrIndex};
             }
-            const auto groups = ((expanded->parameters.indexCount - inputSize) / step) / mesh.primitivesPerGroup + 1u;
-            meshArguments = {groups, expanded->parameters.instanceCount, 1, expanded->parameters.indexCount,
-                records[record].firstVertexOrIndex};
-        }
-        executeDirect(expanded->parameters, meshArguments);
+            executeDirect(expanded->parameters, meshArguments);
+        });
     }
 }
 
@@ -312,12 +404,14 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             lock.unlock();
             flip->GpuReady(frame);
         } else if (opcode == 0x15) {
-            ExecuteDispatchSynchronously(queue, packet, submission);
+            Tolerate(SkippedDispatch, [&] { ExecuteDispatchSynchronously(queue, packet, submission); });
         } else if (opcode == 0x16) {
-            const auto direct = Pm4::ResolveDispatch(packet, queue);
-            ExecuteDispatchSynchronously(queue, direct, submission);
+            Tolerate(SkippedDispatch, [&] {
+                const auto direct = Pm4::ResolveDispatch(packet, queue);
+                ExecuteDispatchSynchronously(queue, direct, submission);
+            });
         } else if (Pm4::DrawOpcode(opcode)) {
-            ExecuteDrawSynchronously(queue, packet, submission);
+            Tolerate(SkippedDraw, [&] { ExecuteDrawSynchronously(queue, packet, submission); });
         } else if (opcode == 0x3c || opcode == 0x93) {
             CompletePriorGpuWorkAndCopyBack();
             const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);

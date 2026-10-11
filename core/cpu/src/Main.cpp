@@ -1,5 +1,6 @@
 #include <cpu/Cpu.hpp>
 #include <cpu/ElfLoader.hpp>
+#include <cpu/GuestFiles.hpp>
 #include <cpu/GuestMemoryRuntime.hpp>
 #include <cpu/GuestThreads.hpp>
 #include <cpu/Runtime.hpp>
@@ -7,8 +8,10 @@
 #include <cpu/SceImports.hpp>
 #include <cpu/SceImportStubs.hpp>
 #include <cpu/SceKernelImports.hpp>
-#include <cpu/SceNpLocalImports.hpp>
+#include <cpu/SceKernelTimeImports.hpp>
 #include <cpu/SceNpOfflineImports.hpp>
+#include <cpu/ScePadImports.hpp>
+#include <cpu/SceUpstreamPrxBridge.hpp>
 #include <cpu/SceNetAddressImports.hpp>
 #include <cpu/SceCommonDialogImports.hpp>
 #include <cpu/SceLibcBootstrapImports.hpp>
@@ -26,12 +29,15 @@
 #include <mach-o/dyld.h>
 #endif
 #include <array>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <algorithm>
 #include <limits>
 #include <memory>
@@ -42,6 +48,42 @@
 #include <vector>
 
 namespace {
+// The title ID from sce_sys/param.json when the dump has one, else the resource root's
+// directory name (the launcher stores each title under its ID), as one safe path component.
+std::string TitleName(const std::filesystem::path& resourceRoot) {
+    const auto safe = [](std::string value) {
+        for (auto& character : value) {
+            const auto byte = static_cast<unsigned char>(character);
+            if (!std::isalnum(byte) && byte != '-' && byte != '_' && byte != '.' && byte != ' ' && byte < 0x80) character = '_';
+        }
+        return value.empty() || value == "." || value == ".." ? std::string("default") : value;
+    };
+    std::ifstream parameters(resourceRoot / "sce_sys" / "param.json");
+    const std::string json((std::istreambuf_iterator<char>(parameters)), {});
+    if (const auto key = json.find("\"titleId\""); key != std::string::npos) {
+        const auto open = json.find('"', json.find(':', key));
+        const auto close = open == std::string::npos ? open : json.find('"', open + 1);
+        if (close != std::string::npos && close > open + 1 && close - open <= 33) return safe(json.substr(open + 1, close - open - 1));
+    }
+    std::error_code error;
+    return safe(std::filesystem::weakly_canonical(std::filesystem::absolute(resourceRoot, error), error).filename().string());
+}
+
+// Per-title host directory behind the writable /temp0, /download0 and /savedata0 mounts:
+// --title-data-dir, else ANYPS5_TITLE_DATA_DIR, else the launcher's application-support data
+// directory, TitleData/<title>. An explicit choice that overlaps the game dump is an error
+// (GuestFiles refuses it); a default that would (resource root at or above the home folder)
+// leaves the writable mounts absent instead. Nothing is created until the guest writes.
+std::filesystem::path TitleDataDirectory(const std::filesystem::path& option, const std::filesystem::path& resourceRoot) {
+    if (!option.empty()) return option;
+    if (const char* environment = std::getenv("ANYPS5_TITLE_DATA_DIR"); environment && *environment) return environment;
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return {};
+    auto directory = std::filesystem::path(home) / "Library" / "Application Support" / "AnyPS5Launcher" / "TitleData" /
+                     TitleName(resourceRoot);
+    return Cpu::GuestFiles::Overlaps(directory, resourceRoot) ? std::filesystem::path{} : directory;
+}
+
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
 std::filesystem::path NativeUtilityMetallib() {
     std::uint32_t size = 0;
@@ -169,24 +211,31 @@ void Capabilities(const RunLimits& limits) {
         << "\"functions\":[\"memcpy\",\"memmove\",\"memset\",\"strlen\",\"strcmp\",\"exit\"]},"
         << "\"execution_limits\":{\"max_instructions\":" << limits.MaxInstructions.value_or(0)
         << ",\"max_init_instructions\":" << limits.MaxInitInstructions.value_or(0) << "},"
-        << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"__tls_get_addr\",\"sceKernelIsAddressSanitizerEnabled\",\"sceKernelGetSanitizerMallocReplaceExternal\",\"sceKernelGetSanitizerNewReplaceExternal\"]},"
+        << "\"sce_module_argument\":\"--sce-module\",\"resource_root_argument\":\"--resource-root\",\"title_data_argument\":\"--title-data-dir\",\"title_data_environment\":\"ANYPS5_TITLE_DATA_DIR\","
+        << "\"sce_kernel_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library\":\"libkernel\",\"library_version\":1,\"functions\":[\"sceKernelOpen\",\"sceKernelRead\",\"sceKernelPread\",\"sceKernelLseek\",\"sceKernelClose\",\"sceKernelWrite\",\"sceKernelPwrite\",\"sceKernelStat\",\"sceKernelFstat\",\"sceKernelGetdents\",\"sceKernelGetdirentries\",\"sceKernelFsync\",\"sceKernelFtruncate\",\"sceKernelMkdir\",\"sceKernelRmdir\",\"sceKernelUnlink\",\"sceKernelRename\",\"sceKernelCheckReachability\",\"__tls_get_addr\",\"sceKernelIsAddressSanitizerEnabled\",\"sceKernelGetSanitizerMallocReplaceExternal\",\"sceKernelGetSanitizerNewReplaceExternal\"],"
+        << "\"posix_libraries\":[\"libkernel\",\"libScePosix\"],\"posix_functions\":[\"open\",\"_open\",\"read\",\"_read\",\"pread\",\"write\",\"_write\",\"pwrite\",\"lseek\",\"close\",\"_close\",\"stat\",\"fstat\",\"_fstat\",\"getdents\",\"getdirentries\",\"fsync\",\"ftruncate\",\"mkdir\",\"rmdir\",\"unlink\",\"rename\"],"
+        << "\"mounts\":{\"/app0\":\"read-only resource root\",\"/temp0\":\"writable title data\",\"/download0\":\"writable title data\",\"/savedata0\":\"writable title data\"},"
+        << "\"constraints\":\"unknown mounts ENOENT; '..' EACCES; host symlinks never followed; performance open flags ignored; transfers of any size in 16 MiB host chunks\"},"
+        << "\"sce_kernel_time_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"libraries\":[\"libkernel\",\"libScePosix\"],\"library_version\":1,"
+        << "\"functions\":[\"sceKernelUsleep\",\"sceKernelNanosleep\",\"sceKernelSleep\",\"sceKernelGetProcessTime\",\"sceKernelGetProcessTimeCounter\",\"sceKernelGetProcessTimeCounterFrequency\",\"sceKernelGettimeofday\",\"sceKernelGettimezone\",\"sceKernelClockGettime\",\"sceKernelClockGetres\",\"sceKernelConvertUtcToLocaltime\",\"sceKernelConvertLocaltimeToUtc\",\"usleep\",\"nanosleep\",\"_nanosleep\",\"sleep\",\"gettimeofday\",\"clock_gettime\",\"clock_getres\"],"
+        << "\"constraints\":\"sce* in library libkernel only, POSIX aliases in libkernel and libScePosix; console clock is UTC; clock ids 0,1,2,4,5,7-15 (CPU-time clocks report host owner thread/process CPU time); process counter in nanoseconds; with guest threads a sleep parks only its caller until the owner pump reaches its deadline (1 ms idle granularity) and is cancelled by stop or shutdown; single-image runs sleep on the host and end early with EINTR on a stop request\"},"
         << "\"sce_lifecycle_imports\":{\"module\":\"libkernel\",\"library_version\":1,\"module_version\":\"1.1\",\"functions\":[\"_exit\"],\"constraints\":\"nonreturning process exit; low 32-bit status truncated to 8 bits; guest libc owns atexit\"},"
         << "\"sce_memory_imports\":{\"module\":\"libkernel\",\"module_version\":\"1.1\",\"library_version\":1,"
         << "\"functions\":[\"sceKernelGetDirectMemorySize\",\"sceKernelAvailableDirectMemorySize\",\"sceKernelAllocateDirectMemory\",\"sceKernelAllocateMainDirectMemory\",\"sceKernelMapDirectMemory\",\"sceKernelMapFlexibleMemory\",\"sceKernelReserveVirtualRange\",\"sceKernelMprotect\",\"sceKernelVirtualQuery\",\"sceKernelMunmap\",\"sceKernelReleaseDirectMemory\"],"
         << "\"constraints\":\"virtual 12 GiB direct address capacity; demand-backed 16 KiB extents; direct types 0/12; protection mask 0x37 with raw query metadata; fixed non-overwriting maps 0x90; unsupported flags fail explicitly\"},"
         << "\"sce_user_imports\":{\"module\":\"libSceUserService\",\"module_version\":\"1.1\",\"library_version\":1,"
-        << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetUserName\"],\"constraints\":\"session-local guest profile; no network account services\"},"
+        << "\"functions\":[\"sceUserServiceInitialize\",\"sceUserServiceInitialize2\",\"sceUserServiceTerminate\",\"sceUserServiceGetInitialUser\",\"sceUserServiceGetForegroundUser\",\"sceUserServiceGetLoginUserIdList\",\"sceUserServiceGetRegisteredUserIdList\",\"sceUserServiceGetUserName\",\"sceUserServiceGetEvent\",\"sceUserServiceGetUserColor\",\"sceUserServiceGetUserNumber\",\"sceUserServiceGetAgeLevel\",\"sceUserServiceGetNpAccountId\",\"sceUserServiceGetGamePresets\",\"sceUserServiceGetPlatformPrivacyWs1\",\"sceUserServiceGetAccessibilityChatTranscription\",\"sceUserServiceGetAccessibilityPressAndHoldDelay\",\"sceUserServiceGetAccessibilityTriggerEffect\",\"sceUserServiceGetAccessibilityVibration\",\"sceUserServiceGetAccessibilityZoomEnabled\",\"sceUserServiceGetAccessibilityZoomFollowFocus\"],\"constraints\":\"session-local guest profile; one login event then NO_EVENT; no network account services\"},"
         << "\"sce_system_imports\":{\"module\":\"libSceSystemService\",\"module_version\":\"1.1\",\"library_version\":1,"
-        << "\"functions\":[\"sceSystemServiceParamGetInt\",\"sceSystemServiceParamGetString\",\"sceSystemServiceHideSplashScreen\"],"
-        << "\"recognized_unavailable\":[\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceLaunchPlayerDialog\"],"
-        << "\"constraints\":\"virtual console settings: English US, UTC, no summertime, AnyPS5 name; unavailable calls return signed 0x80a10002 without touching outputs; player dialog initializer unsupported\"},"
+        << "\"functions\":[\"sceSystemServiceParamGetInt\",\"sceSystemServiceParamGetString\",\"sceSystemServiceHideSplashScreen\",\"sceSystemServiceGetStatus\",\"sceSystemServiceReceiveEvent\",\"sceSystemServiceGetHdrToneMapLuminance\",\"sceSystemServiceInitializePlayerDialogParam\",\"sceSystemServiceLaunchPlayerDialog\"],"
+        << "\"constraints\":\"virtual console settings: English US, DD/MM/YYYY, 24-hour, UTC, no summertime, parental control off, Cross enter button, AnyPS5 name; unknown integer IDs read 0; idle status; no system events; SDR 100-nit HDR luminance; no player dialog UI\"},"
         << "\"sce_common_dialog_imports\":{\"module\":\"libSceCommonDialog\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceCommonDialogInitialize\"],\"constraints\":\"session initializer only; repeated initialization returns signed 0x80b80002; dialog operations unsupported\"},"
         << "\"unresolved_imports\":{\"default\":\"trap_on_call\",\"weak\":\"zero\",\"objects\":\"zeroed_storage\",\"strict_argument\":\"--strict-imports\",\"return_argument\":\"--unresolved-import-return\",\"constraints\":\"static --sce-module graph only; missing DT_NEEDED modules tolerated; each unresolved function import logs and stops the guest when called unless a return value is configured; TLS imports stay strict\"},"
-        << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"initialization and handles succeed; user stays signed out; every network request fails\"},"
-        << "\"sce_np_local_imports\":{\"module\":\"libSceNpManager\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNpGetState\"],\"constraints\":\"session-local user and offline state only; no network account or authentication services\"},"
+        << "\"sce_upstream_prx_bridge\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi2\",\"libSceNpAuth\",\"libSceNpEntitlementAccess\"],\"module_version\":\"1.1\",\"library_version\":1,\"constraints\":\"upstream core/libs/prx exports with hand-checked descriptors only; guest buffers copied in and out; user stays signed out; entitlements from ANYPS5_ENTITLEMENTS or anyps5-entitlements.ini beside the engine, none otherwise\"},"
+        << "\"sce_np_offline_imports\":{\"modules\":[\"libSceNpManager\",\"libSceNpWebApi\",\"libSceNpWebApi2\"],\"constraints\":\"exports the upstream bridge does not cover (libSceNpWebApi, callback registration); initialization and handles succeed; user stays signed out; every network request fails\"},"
+        << "\"sce_pad_imports\":{\"module\":\"libScePad\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"scePadInit\",\"scePadOpen\",\"scePadOpenExt\",\"scePadGetHandle\",\"scePadClose\",\"scePadRead\",\"scePadReadState\",\"scePadGetControllerInformation\",\"scePadSetLightBar\",\"scePadResetLightBar\",\"scePadSetVibration\",\"scePadSetMotionSensorState\"],\"constraints\":\"one virtual pad per port; native runner feeds GameController input, or keyboard and mouse when no controller is connected; 64-sample drop-oldest read queue; no motion or touch-coordinate sensors\"},"
         << "\"sce_net_address_imports\":{\"module\":\"libSceNet\",\"module_version\":\"1.1\",\"library_version\":1,\"functions\":[\"sceNetHtonl\",\"sceNetHtons\",\"sceNetInetNtop\",\"sceNetInetPton\"],\"constraints\":\"local IPv4 conversion only; malformed text returns 0 without writing output; unsupported family/insufficient capacity fails explicitly; no socket, resolver or guest errno services\"},"
         << "\"sce_libc_bootstrap_imports\":{\"function_nids\":[\"959qrazPIrg\",\"p5EcQeEeJAE\",\"NWtTN10cJzE\"],\"object_nids\":[\"f7uOxY9mM1U\",\"djxxOmW6-aw\"],\"constraints\":\"typed static module graph only; actual mapped process parameters; captures checked heap callbacks; tracing disabled with writable guest storage\"},"
-        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0 resources; regular files only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
+        << "\"supported_containers\":[\"plain_self\"],\"sce_constraints\":[\"no encrypted or compressed SELF segments\",\"static graph TLS; main TLS provider required before dependency TLS\",\"read-only /app0; writable /temp0, /download0, /savedata0 under the per-title data directory; regular files and directories only\",\"explicit static --sce-module graph only; unknown attributes unsupported\",\"dependency CRT initializers/finalizers only; nonempty arrays require an exact source certificate; main owns its initializer\",\"host object imports limited to checked libc bootstrap storage; no host TLS imports\",\"entry termination callback requires static module graph and defers dependency cleanup outside active CPU execution\"],"
 #if ANYPS5_CPU_MODERN_TCG
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
         << "\"native_module_runner\":{\"enabled\":true,\"owned_memory\":\"live staged CPU/Metal publication\",\"provider_selection\":\"actual parsed consumer SHA-256, size, scope and ELF symbol\",\"utility_metallib\":\"../fixtures/AnyPS5Utilities.metallib relative to engine\",\"wall_limit_ms\":"
@@ -303,7 +352,7 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
                                          ) {
     std::vector<Cpu::SceHostModule> hosts{
         {"libc.prx", {"libc", 0, 1, 1}, {{"libc", 0, 1}}},
-        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}}},
+        {"libkernel.sprx", {"libkernel", 0, 1, 1}, {{"libkernel", 0, 1}, {"libScePosix", 0, 1}}},
         {"libSceUserService.sprx", {"libSceUserService", 0, 1, 1}, {{"libSceUserService", 0, 1}}},
         {"libSceSystemService.sprx", {"libSceSystemService", 0, 1, 1}, {{"libSceSystemService", 0, 1}}},
         {"libSceLibcInternal.prx", {"libSceLibcInternal", 0, 1, 1}, {{"libSceLibcInternalExt", 0, 1}, {"libSceLibcInternal", 0, 1}}},
@@ -312,7 +361,11 @@ std::vector<Cpu::SceHostModule> HostModules(const std::filesystem::path& main,
         {"libSceNet.prx", {"libSceNet", 0, 1, 1}, {{"libSceNet", 0, 1}}},
         {"libSceCommonDialog.prx", {"libSceCommonDialog", 0, 1, 1}, {{"libSceCommonDialog", 0, 1}}},
         {"libSceNpWebApi.prx", {"libSceNpWebApi", 0, 1, 1}, {{"libSceNpWebApi", 0, 1}}},
-        {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}}};
+        {"libSceNpWebApi2.prx", {"libSceNpWebApi2", 0, 1, 1}, {{"libSceNpWebApi2", 0, 1}}},
+        {"libScePad.prx", {"libScePad", 0, 1, 1}, {{"libScePad", 0, 1}}}};
+    for (const auto module : Cpu::SceUpstreamPrxBridge::Modules())
+        if (std::none_of(hosts.begin(), hosts.end(), [&](const auto& host) { return host.Module.Name == module; }))
+            hosts.push_back({std::string(module) + ".prx", {std::string(module), 0, 1, 1}, {{std::string(module), 0, 1}}});
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
     if (native) native->AddHostModules(hosts);
 #endif
@@ -469,6 +522,7 @@ int main(int argc, char** argv) {
         int first = 1;
         bool inspect = false;
         std::filesystem::path resourceRoot;
+        std::filesystem::path titleDataDirectory;
         std::vector<std::filesystem::path> modulePaths;
         bool strictImports = false;
         std::optional<std::uint64_t> unresolvedImportReturn;
@@ -536,10 +590,16 @@ int main(int argc, char** argv) {
                 if (!resourceRoot.empty()) throw std::runtime_error("--resource-root may be supplied only once");
                 resourceRoot = argv[first + 1];
                 first += 2;
+            } else if (option == "--title-data-dir") {
+                if (argc <= first + 1 || std::string_view(argv[first + 1]).empty() || std::string_view(argv[first + 1]).starts_with('-'))
+                    throw std::runtime_error("--title-data-dir requires a directory path");
+                if (!titleDataDirectory.empty()) throw std::runtime_error("--title-data-dir may be supplied only once");
+                titleDataDirectory = argv[first + 1];
+                first += 2;
             } else break;
         }
         if (capabilities) {
-            if (argc != first || diagnostics || inspect || !modulePaths.empty() || !resourceRoot.empty()
+            if (argc != first || diagnostics || inspect || !modulePaths.empty() || !resourceRoot.empty() || !titleDataDirectory.empty()
 #if ANYPS5_CPU_NATIVE_MODULE_RUNNER
                 || publicNpIdentity || publicUriEscape
 #endif
@@ -582,9 +642,11 @@ int main(int argc, char** argv) {
         std::unique_ptr<Cpu::LinuxRuntime> linuxRuntime;
         std::unique_ptr<Cpu::SceImports> sceRuntime;
         std::unique_ptr<Cpu::SceKernelImports> kernelRuntime;
+        std::unique_ptr<Cpu::SceKernelTimeImports> timeRuntime;
         std::unique_ptr<Cpu::SceUserImports> userRuntime;
-        std::unique_ptr<Cpu::SceNpLocalImports> npRuntime;
+        std::unique_ptr<Cpu::SceUpstreamPrxBridge> upstreamPrxRuntime;
         std::unique_ptr<Cpu::SceNpOfflineImports> npOfflineRuntime;
+        std::unique_ptr<Cpu::ScePadImports> padRuntime;
         std::unique_ptr<Cpu::SceImportStubs> importStubs;
         std::unique_ptr<Cpu::SceNetAddressImports> netAddressRuntime;
         std::unique_ptr<Cpu::SceCommonDialogImports> commonDialogRuntime;
@@ -600,7 +662,7 @@ int main(int argc, char** argv) {
 #endif
         std::uint64_t entry;
         const bool sce = SceExecutable(executable);
-        constexpr std::uint32_t sessionUserId = 0x10000000;
+        [[maybe_unused]] constexpr std::uint32_t sessionUserId = 0x10000000;
         try {
             std::vector<std::string> arguments;
             for (int index = first; index < argc; ++index) arguments.emplace_back(argv[index]);
@@ -610,6 +672,10 @@ int main(int argc, char** argv) {
                     threadRuntime = std::make_shared<Cpu::GuestThreads>(machine);
 #if !ANYPS5_CPU_NATIVE_MODULE_RUNNER
                     threadImports = std::make_unique<Cpu::SceThreadImports>(machine, threadRuntime);
+                    // Lets guest threads park in timed waits (sleeps) while others run, with no idle
+                    // cap (this build has no --max-idle-ms). The native runner installs its own
+                    // boundary that also pumps the window and applies the wall and idle limits.
+                    threadRuntime->SetOwnerBoundary({}, std::chrono::milliseconds{0});
 #endif
                 }
 #endif
@@ -635,10 +701,28 @@ int main(int argc, char** argv) {
                 memoryImports = std::make_unique<Cpu::SceMemoryImports>(machine, memoryRuntime);
                 sceRuntime = std::make_unique<Cpu::SceImports>(machine);
                 lifecycleRuntime = std::make_unique<Cpu::SceLifecycleImports>(machine);
-                kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot);
+                {
+                    const auto root = resourceRoot.empty() ? std::filesystem::current_path() : resourceRoot;
+                    kernelRuntime = std::make_unique<Cpu::SceKernelImports>(machine, root,
+                        Cpu::GuestFilesOptions{TitleDataDirectory(titleDataDirectory, root)});
+                }
+                // POSIX file aliases store errno where the active thread's __error points.
+                // Outside an active guest thread there is no errno cell: the call still returns -1.
+                if (threadRuntime) kernelRuntime->SetErrnoAddress([owner = std::weak_ptr<Cpu::GuestThreads>(threadRuntime)] {
+                    const auto runtime = owner.lock();
+                    if (!runtime) return std::uint64_t{0};
+                    try { return runtime->ActiveErrnoAddress(); }
+                    catch (const std::runtime_error&) { return std::uint64_t{0}; }
+                });
+                timeRuntime = std::make_unique<Cpu::SceKernelTimeImports>(machine, threadRuntime,
+                    [] { return StopSignal::received.load() != 0; });
                 userRuntime = std::make_unique<Cpu::SceUserImports>(machine);
-                npRuntime = std::make_unique<Cpu::SceNpLocalImports>(machine, sessionUserId);
+                upstreamPrxRuntime = std::make_unique<Cpu::SceUpstreamPrxBridge>(machine);
                 npOfflineRuntime = std::make_unique<Cpu::SceNpOfflineImports>(machine);
+                padRuntime = std::make_unique<Cpu::ScePadImports>(machine);
+#if ANYPS5_CPU_NATIVE_MODULE_RUNNER
+                if (nativeRuntime) nativeRuntime->AttachPadInput(padRuntime->Input());
+#endif
                 netAddressRuntime = std::make_unique<Cpu::SceNetAddressImports>(machine);
                 commonDialogRuntime = std::make_unique<Cpu::SceCommonDialogImports>(machine, 0x7ffdf2000000);
                 systemRuntime = std::make_unique<Cpu::SceSystemImports>(machine);
@@ -649,12 +733,14 @@ int main(int argc, char** argv) {
                     if (const auto gate = lifecycleRuntime->Resolve(import)) return *gate;
                     if (const auto gate = memoryImports->Resolve(import)) return *gate;
                     if (const auto gate = commonDialogRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = upstreamPrxRuntime->Resolve(import)) return *gate;
                     if (const auto gate = npOfflineRuntime->Resolve(import)) return *gate;
-                    if (const auto gate = npRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = padRuntime->Resolve(import)) return *gate;
                     if (const auto gate = netAddressRuntime->Resolve(import)) return *gate;
                     if (const auto gate = audioRuntime->Resolve(import)) return *gate;
                     if (const auto gate = systemRuntime->Resolve(import)) return *gate;
                     if (const auto gate = userRuntime->Resolve(import)) return *gate;
+                    if (const auto gate = timeRuntime->Resolve(import)) return *gate;
                     if (import.ModuleName == "libkernel" || import.LibraryName == "libkernel") return kernelRuntime->Resolve(import);
                     return sceRuntime->Resolve(import);
                 };

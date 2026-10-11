@@ -144,7 +144,9 @@ EXPORT int _start(void) {
   for(unsigned role=0;role<count;++role) {void* result=0;status(thread_join(ids[role],&result));R[56+role]=(u64)result;}
   R[23]=condition.value;R[24]=mutex.value;
  }
- status(scePthreadCondDestroy(&condition.value));R[34]=condition.value;
+ /* Mode 4 already destroyed it while the expired waiter awaited only the mutex. */
+ if(R[1]!=4 || R[22]) status(scePthreadCondDestroy(&condition.value));
+ R[34]=condition.value;
  status(scePthreadMutexDestroy(&mutex.value));R[35]=mutex.value;
  status(scePthreadMutexattrDestroy(&attribute.value));guard(&mutex);guard(&condition);guard(&attribute);
  R[0]=0x54494d4544434f4eULL;process_exit(0);

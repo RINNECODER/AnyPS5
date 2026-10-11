@@ -10,6 +10,8 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <string>
+#include <string_view>
 #include <thread>
 
 namespace AgcDriver::Metal {
@@ -59,6 +61,9 @@ struct MetalDriver::Impl {
     std::uint64_t queue0Executing = 0;
     std::uint64_t queue0Awaited = 0;
     std::set<std::uint64_t> completedOutOfOrder;
+    // Fail-soft bookkeeping (#289). Its own mutex: skips are recorded with gpuMutex held.
+    mutable std::mutex skipMutex;
+    SkippedWorkDiagnostics skipped;
     static bool& OnWorkerThread();
     void CheckFailureAndStopping();
     void RejectMappingReentry();
@@ -77,6 +82,9 @@ struct MetalDriver::Impl {
     void ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
     void ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
     void ExecuteRewindTail(const Submission& submission, QueueState& queue);
+    template <typename Work>
+    void Tolerate(std::string_view kind, Work&& work);
+    void RecordSkip(std::string_view kind, std::string_view what);
     void ReserveOutputs(Submission& submission);
     void WaitForFlipRoom(const Submission& submission);
     void MarkCompleted(std::uint64_t serial);

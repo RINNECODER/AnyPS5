@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,7 @@ struct ControllerSnapshot {
     ControllerState state;
     std::string vendorName;
     std::uint64_t lastSequence{};
+    std::uint64_t droppedEvents{};
     std::uint32_t unsupportedControllerCount{};
     bool sourceOpen{}, connected{};
 };
@@ -46,6 +48,10 @@ struct ControllerEvent {
     ControllerEventKind kind;
     std::chrono::steady_clock::time_point capturedAt;
     ControllerSnapshot after;
+};
+struct ControllerOutput {
+    std::optional<std::array<std::uint8_t, 3>> lightBar;
+    std::uint8_t largeMotor{}, smallMotor{};
 };
 struct ControllerEventBatch {
     std::vector<ControllerEvent> events;
@@ -58,6 +64,7 @@ public:
     NativeControllerSource(const NativeControllerSource&) = delete;
     NativeControllerSource& operator=(const NativeControllerSource&) = delete;
     void CloseMainThread();
+    void ApplyOutputMainThread(const ControllerOutput&);
     ControllerEventBatch DrainEvents();
     ControllerSnapshot Snapshot() const;
 private:
