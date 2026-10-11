@@ -999,4 +999,9 @@ APS5_EXPORT("qlWiRfOJx1A", sceAmprFpclassifyd);
 int APS5_VABI sceAmprFpclassifyd(double value) {
     return SonyFpclassifyd(value);
 }
+
+int APS5_VABI sceAmprAmmGetUsageStatsData() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
 }
