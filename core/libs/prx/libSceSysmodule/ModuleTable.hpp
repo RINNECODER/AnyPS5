@@ -156,6 +156,7 @@ inline const std::unordered_map<std::uint32_t, const char*> kModuleTable = {
     {0x00000115, "libSceNpCppWebApi"},
     {0x00000116, "libSceHubAppUtil"},
     {0x0000011a, "libSceNpPartner001"},
+    {0x00000120, "libSceAudioPropagation"},
     {0x0000012f, "libSceFontGs"},
     {0x00000135, "libSceFontGsm"},
     {0x00000138, "libSceNpPartnerSubscription"},

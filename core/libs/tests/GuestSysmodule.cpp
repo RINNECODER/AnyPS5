@@ -177,4 +177,11 @@ int main() {
     Require(symbol != nullptr);
     Require(sceSysmoduleUnloadModule(kFiberModuleId) == 0);
     Require(sceSysmoduleGetModuleHandleInternal(kFiberModuleId, &handle) == kModuleUnloaded);
+
+    constexpr std::uint16_t kAudioPropagationModuleId = 0x0120;
+    Require(sceSysmoduleIsLoaded(kAudioPropagationModuleId) == kModuleUnloaded);
+    Require(sceSysmoduleLoadModule(kAudioPropagationModuleId) == 0);
+    Require(sceSysmoduleIsLoaded(kAudioPropagationModuleId) == 0);
+    Require(sceSysmoduleUnloadModule(kAudioPropagationModuleId) == 0);
+    Require(sceSysmoduleIsLoaded(kAudioPropagationModuleId) == kModuleUnloaded);
 }
