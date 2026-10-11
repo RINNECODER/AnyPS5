@@ -1061,7 +1061,8 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     const auto view = read(cx, 0x31b + stride);
     Require((view & ~0x3fffffffu) == 0, "reserved CB_COLOR_VIEW bits are set");
     const auto slice = view & 0x1fffu;
-    Require(slice == ((view >> 13u) & 0x1fffu), "color views of several array slices are unsupported");
+    const auto lastSlice = (view >> 13u) & 0x1fffu;
+    Require(lastSlice >= slice, "the color view ends before its first slice");
     const auto viewMip = (view >> 26u) & 0xfu;
     // CB_COLOR_ATTRIB: NUM_SAMPLES [14:12], NUM_FRAGMENTS [16:15] and FORCE_DST_ALPHA_1 [17].
     zero(cx, 0x31d + stride, ~0x3f000u, "CB_COLOR_ATTRIB bits beyond samples, fragments and destination alpha override");
@@ -1081,11 +1082,16 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
         color.depth = (attrib3 & 0x1fffu) + 1u;
         Require(maxMip == 0 && (info & 0x10000000u) == 0, "mipmapped or DCC 3D color targets are unsupported");
         Require(slice < color.depth, "the color view slice is beyond the 3D surface");
+        Require(lastSlice == slice, "color views of several 3D slices are unsupported");
         color.depthSlice = slice;
     } else if ((attrib3 & 0x1fffu) != 0) {
-        Require(slice <= (attrib3 & 0x1fffu), "the color view slice is beyond the array surface");
+        Require(lastSlice <= (attrib3 & 0x1fffu), "the color view slice is beyond the array surface");
         color.arrayLastSlice = attrib3 & 0x1fffu;
         color.arraySlice = slice;
+    }
+    if (lastSlice != slice) {
+        const auto exports = find(cx, 0x207);
+        Require(exports == cx.end() || (exports->second & (1u << 18u)) == 0, "layered draws into a color view of several array slices are unsupported");
     }
     color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
     Require(!multisampled || (maxMip == 0 && !volume && slice == 0), "mipmapped, 3D or array-sliced multisampled color targets are unsupported");
