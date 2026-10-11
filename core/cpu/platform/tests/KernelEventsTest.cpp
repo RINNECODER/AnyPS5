@@ -51,6 +51,81 @@ void asynchronous(const char* file) {
     record(r,84,0x20,3,User);
     std::cout<<"PASS translated guest parks, another guest progresses, completion-thread receipts coalesce and owner resumes ABI\n";
 }
+// EVFILT_VIDEO_OUT delivery: a parked guest wait receives VideoOut flip
+// completions in the source record encoding, coalesced per subscription,
+// and never confused with an AGC EOP subscription or another output.
+void videoOutRecord(const State& r,unsigned slot,std::uint64_t count,std::int64_t payload,std::uint64_t user) {
+    const auto expectedFilterWord=0xfff3ULL|(0x1ULL<<16)|(count<<32);
+    const auto data=static_cast<std::uint64_t>(r[slot+2]);
+    require(r[slot]==0 && r[slot+1]==expectedFilterWord && r[slot+3]==user,
+            "VideoOut record ident/filter/flags/fflags/udata differ from EVFILT_VIDEO_OUT oracle");
+    require((data>>12)==(count|((static_cast<std::uint64_t>(payload)&0xffffffffffffULL)<<4)),
+            "VideoOut record data lost count bits 15:12 or payload bits 63:16");
+}
+void videoOutEvents(const char* file) {
+    Session s(file,0); bool registered=false,published=false,republished=false;
+    Cpu::Platform::KernelEvents foreign(s.machine,s.threads,0x7ffdc3000000);
+    auto eop=s.queues->EopPublisher();
+    auto video=s.queues->VideoOutPublisher();
+    s.boundary=[&](bool waiting){
+        const auto r=s.state();
+        if(r[2] && !registered) {
+            require(!foreign.AddVideoOutEvent(r[2],7,0,User) && !foreign.DeleteVideoOutEvent(r[2],7,0),
+                    "Foreign provider accepted another provider's queue");
+            require(s.queues->AddVideoOutEvent(r[2],7,0,~User) && s.queues->AddVideoOutEvent(r[2],7,0,User),
+                    "Owned VideoOut subscription rejected or re-add did not replace");
+            // Absent kind, and another output's delete of this kind, succeed without
+            // removing output 7's flip registration (its delivery is checked below).
+            require(s.queues->DeleteVideoOutEvent(r[2],7,1) && s.queues->DeleteVideoOutEvent(r[2],8,0),
+                    "Deleting an absent or foreign VideoOut event was not success");
+            registered=true;
+        }
+        if(waiting && !published) {
+            require(r[8]==2 && r[5]==0,"Wait did not park before VideoOut publication");
+            std::thread producer([&]{
+                video(7,0,-5);video(7,0,-6); // flip completions of output 7
+                video(8,0,99);                // another output
+                video(7,1,3);                 // unsubscribed vblank kind
+                eop(0);                       // AGC EOP id 0 is not VideoOut ident 0
+            });
+            producer.join();
+            published=true;
+        }
+        if(r[3]==3 && !republished){video(7,0,9);republished=true;}
+    };
+    s.finish();const auto r=s.state();
+    require(published && r[10]==0 && r[34]==1 && r[5]==1,"VideoOut flip did not resume the parked guest wait");
+    videoOutRecord(r,64,2,-6,User);
+    require(republished && r[50]==0x8002003c && r[51]==0 && r[52]==0 && r[53]==1,
+            "Delivered VideoOut event was not cleared or fresh flip was lost");
+    videoOutRecord(r,80,1,9,User);
+    std::cout<<"PASS parked guest receives EVFILT_VIDEO_OUT flip records; per-output/kind filtering; EOP separation; clear on delivery\n";
+}
+// sceVideoOutWaitVblank through the real import gate parks only its guest
+// thread: another guest thread progresses, another output's vblank does not
+// wake it, and the next vblank of its own output does.
+void vblankWait(const char* file) {
+    Session s(file,16); s.put(s.address+55*8,7);
+    bool foreignPublished=false,published=false;
+    auto video=s.queues->VideoOutPublisher();
+    video(7,1,1); // a vblank before the call must not satisfy it
+    s.boundary=[&](bool waiting){
+        const auto r=s.state();
+        if(!waiting || r[3]!=4) return;
+        if(!foreignPublished) {
+            std::thread producer([&]{video(8,1,1);video(7,0,-1);}); producer.join();
+            foreignPublished=true;
+        } else if(!published) {
+            require(r[8]==2 && r[5]==0,"WaitVblank blocked other guest threads or returned without a vblank");
+            std::thread producer([&]{video(7,1,2);}); producer.join();
+            published=true;
+        }
+    };
+    s.finish();const auto r=s.state();
+    require(published && r[54]==0 && r[5]==1 && r[56]==2 && r[35]==0 && r[36]==0x5566778899aabbccULL,
+            "Parked WaitVblank did not resume with 0 after its output's next vblank");
+    std::cout<<"PASS sceVideoOutWaitVblank parks one guest thread, others progress, only its output's next vblank resumes it\n";
+}
 void deletedWait(const char* file) {
     Session s(file,7);s.finish(true);
     const auto r=s.state();
@@ -327,7 +402,7 @@ int main(int argc,char** argv) {
         require(argc==2 || (argc==3 && (std::string(argv[2])=="--queued-delete" || std::string(argv[2])=="--subscription-delete")),
                 "Usage: KernelEventsTest kernel-events.elf [--queued-delete|--subscription-delete]");
         if(argc==3){if(std::string(argv[2])=="--queued-delete")queuedDelete(argv[1]);else reservedSubscriptionDelete(argv[1]);return 0;}
-        asynchronous(argv[1]);timeouts(argv[1]);capacity(argv[1]);deletedWait(argv[1]);queuedDelete(argv[1]);reservedSubscriptionDelete(argv[1]);subscriptionRace(argv[1]);
+        asynchronous(argv[1]);videoOutEvents(argv[1]);vblankWait(argv[1]);timeouts(argv[1]);capacity(argv[1]);deletedWait(argv[1]);queuedDelete(argv[1]);reservedSubscriptionDelete(argv[1]);subscriptionRace(argv[1]);
         for(unsigned mode:{3U,4U,5U,6U})cancellation(argv[1],mode);
         memoryAndIdleBound(argv[1]);continuousIdleBound(argv[1]);unlimitedIdle(argv[1]);
         admission();
