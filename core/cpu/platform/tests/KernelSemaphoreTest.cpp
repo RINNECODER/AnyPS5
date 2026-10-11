@@ -21,7 +21,7 @@
 // synthetic execution uses the explicit engineering provider only.
 namespace {
 constexpr std::uint64_t Bias=0x1000000, Canary=0x1badc0ffeef00d55ULL;
-constexpr std::uint64_t Invalid=0x80020016, Missing=0x80020003, Deleted=0x8002000d;
+constexpr std::uint64_t Invalid=0x80020016, Missing=0x80020003, Deleted=0x8002000d, Fault=0x8002000e;
 constexpr std::uint64_t Page=0x71000000;
 using State=std::array<std::uint64_t,128>;
 void require(bool ok,const char* message) {if(!ok)throw std::runtime_error(message);}
@@ -134,7 +134,8 @@ void counts(const char* path,unsigned mode) {
  if(mode==5)require(r[70]==Invalid && r[71]==0 && r[72]==0 && r[73]==0,"INT32_MAX overflow or exact large consumption differs");
  else {
   for(unsigned i:{70,72,73,80,81,83})require(r[i]==0,"Positive signed low32 consume/signal rejected poisoned upper bits or lost tokens");
-  for(unsigned i:{71,74,75,76,77,78,79,82,87,88,93,94,95})require(r[i]==Invalid,"Unsupported/count/overflow guard failed before mutation");
+  for(unsigned i:{71,74,75,76,77,78,82,87,88,93,94,95})require(r[i]==Invalid,"Unsupported/count/overflow guard failed before mutation");
+  require(r[79]==Fault,"Unreadable timeout pointer was not rejected with EFAULT before waiting");
   for(unsigned i:{84,85,86})require(r[i]==Missing,"64-bit token admitted low32 alias or changed high word");
   require(r[89]==0xfeedbeefdeadbeefULL,"Rejected Create changed eight-byte output");
  }
@@ -243,7 +244,7 @@ void admission() {
  std::array<std::byte,4096> originalGateBytes{};
  machine.Read(GatePage,originalGateBytes);
  const auto originalMappingCount=machine.Mappings().size();
- constexpr std::array nids{"188x57JYp0g","R1Jvn8bSCW8","Zxa0VhQVTsk","4czppHBiriw"};
+ constexpr std::array nids{"188x57JYp0g","R1Jvn8bSCW8","Zxa0VhQVTsk","4czppHBiriw","12wOHk8ywb0","4DM06U2BNEY"};
  for(const auto nid:nids){const auto row=scoped(nid);
   for(unsigned control=0;control<8;++control){auto wrong=row;unsigned type=2;std::uint64_t size=0;
    if(control==0)type=1;if(control==1)size=8;
@@ -265,9 +266,8 @@ void admission() {
   auto other=scoped(nid);other.LibraryId=1;other.ModuleId=1;
   require(target.Resolve(other,2,0).has_value(),"Another image's semaphore import-table ids were refused");
  }
- for(const auto nid:{"12wOHk8ywb0","4DM06U2BNEY","AAAAAAAAAAA"})
-  require(!target.Resolve(scoped(nid),2,0),"Unobserved Poll/Cancel/unknown NID fabricated callable semaphore gate");
- std::cout<<"PASS native selector only: title-agnostic four FUNC2 size0 scopes; no title execution\n";
+ require(!target.Resolve(scoped("AAAAAAAAAAA"),2,0),"Unknown NID fabricated callable semaphore gate");
+ std::cout<<"PASS native selector only: title-agnostic six FUNC2 size0 scopes; no title execution\n";
 }
 }
 int main(int argc,char** argv) {

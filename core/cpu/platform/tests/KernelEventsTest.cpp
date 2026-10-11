@@ -291,7 +291,7 @@ void admission() {
         }
     }
     const auto selected=Cpu::Platform::TargetKernelEventAdmissions();
-    require(selected.size()==3,"Title-agnostic event selection changed");
+    require(selected.size()==Cpu::Platform::KernelEventInventory().size(),"Title-agnostic event selection does not cover every contract");
     {
     Cpu::Platform::TargetKernelEvents target(m,t,selected);
     for(auto nid:{"D0OdFMjp46I","jpFjmgAC5AE","fzyMKs9kim0"}) {
@@ -319,7 +319,7 @@ void admission() {
         auto provider=std::make_unique<Cpu::Platform::KernelEvents>(m,scheduler);
         const auto retained=provider->EopPublisher();scheduler.reset();provider.reset();retained(0x20);
     }
-    std::cout<<"PASS default denied, title-agnostic three-route profile, scope/type/size/domain/owner rejection and expired scheduler shutdown\n";
+    std::cout<<"PASS default denied, title-agnostic full-inventory profile, scope/type/size/domain/owner rejection and expired scheduler shutdown\n";
 }
 }
 int main(int argc,char** argv) {
