@@ -810,10 +810,10 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
     if ((flags & ~2) != 0) return Fail(45);
-    const bool datagram = socket->type == 2;
+    const bool records = socket->type == 2 || socket->type == 5;
     std::vector<char> buffer;
     try {
-        buffer.resize(static_cast<std::size_t>(total) + (datagram ? 1u : 0u));
+        buffer.resize(static_cast<std::size_t>(total) + (records ? 1u : 0u));
     } catch (const std::bad_alloc&) {
         return Fail(55);
     }
@@ -823,7 +823,7 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
         flags & 2 ? MSG_PEEK : 0, reinterpret_cast<sockaddr*>(&native), &size);
     if (received < 0) {
 #ifdef _WIN32
-        if (!datagram || WSAGetLastError() != WSAEMSGSIZE) return Fail(NativeError());
+        if (!records || WSAGetLastError() != WSAEMSGSIZE) return Fail(NativeError());
         received = static_cast<std::int64_t>(buffer.size());
 #else
         return Fail(NativeError());
