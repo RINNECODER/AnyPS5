@@ -257,6 +257,8 @@ public:
             changed |= propagateCopies();
         }
         removeDeadComputations();
+        removeUnreachableBlocks();
+        removeUnusedConstants();
         orderPhis();
         std::vector<std::uint32_t> words = header;
         bool inserted = false;
@@ -503,6 +505,50 @@ private:
             }
         }
         return changed;
+    }
+
+    std::set<std::uint32_t> referencedIds() const {
+        std::set<std::uint32_t> referenced;
+        for (const auto& instruction : instructions) {
+            if (instruction.empty()) continue;
+            const auto op = Opcode(instruction);
+            if (op == spv::OpName || op == spv::OpMemberName || op == spv::OpDecorate || op == spv::OpMemberDecorate || op == spv::OpLabel) continue;
+            for (std::size_t index = 1; index < instruction.size(); ++index) referenced.insert(instruction[index]);
+        }
+        return referenced;
+    }
+
+    void removeUnreachableBlocks() {
+        const auto referenced = referencedIds();
+        const auto next = [&](std::size_t index) {
+            while (++index < instructions.size() && instructions[index].empty()) {}
+            return index;
+        };
+        std::size_t previous = instructions.size();
+        for (std::size_t index = 0; index < instructions.size(); ++index) {
+            if (instructions[index].empty()) continue;
+            const auto op = Opcode(instructions[index]);
+            const auto following = next(index);
+            const bool entry = previous < instructions.size() && (Opcode(instructions[previous]) == spv::OpFunction || Opcode(instructions[previous]) == spv::OpFunctionParameter);
+            if (op == spv::OpLabel && !entry && following < instructions.size() && Opcode(instructions[following]) == spv::OpUnreachable && !referenced.contains(instructions[index].at(1))) {
+                removed.insert(instructions[index].at(1));
+                instructions[index].clear();
+                instructions[following].clear();
+                index = following;
+                continue;
+            }
+            previous = index;
+        }
+    }
+
+    void removeUnusedConstants() {
+        const auto referenced = referencedIds();
+        std::erase_if(constants, [&](const Instruction& constant) {
+            const auto id = Result(constant);
+            if (referenced.contains(id)) return false;
+            removed.insert(id);
+            return true;
+        });
     }
 
     void orderPhis() {
