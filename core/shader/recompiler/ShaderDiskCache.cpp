@@ -14,7 +14,7 @@
 #endif
 #include <windows.h>
 #endif
-#include "ShaderCacheVersion.hpp"
+#include "ShaderCacheSourceVersion.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>

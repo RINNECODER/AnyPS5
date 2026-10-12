@@ -140,23 +140,22 @@ list(REMOVE_DUPLICATES switches)
 list(SORT switches)
 list(JOIN switches ",\n    " switchList)
 
-set(content "#ifndef CORE_SHADER_RECOMPILER_SHADERCACHEVERSION_HPP
-#define CORE_SHADER_RECOMPILER_SHADERCACHEVERSION_HPP
-
-#include <cstdint>
-#include <string_view>
-
+set(content "#include \"ShaderCacheSourceVersion.hpp\"\n")
+string(APPEND content "
 namespace ShaderRecompiler::ShaderDiskCache::Generated {
 
-inline constexpr std::uint64_t SourceVersion = 0x${version}ull;
+namespace {
 
-inline constexpr std::string_view RecompilerSwitches[] = {
+constexpr std::string_view recompilerSwitches[] = {
     ${switchList}
 };
 
 }
 
-#endif
+constinit const std::uint64_t SourceVersion = 0x${version}ull;
+constinit const std::span<const std::string_view> RecompilerSwitches = recompilerSwitches;
+
+}
 ")
 
 if(EXISTS "${OUTPUT}")
