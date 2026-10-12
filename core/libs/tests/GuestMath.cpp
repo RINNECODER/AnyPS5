@@ -103,6 +103,7 @@ long double APS5_VABI log10l_nid_postfix(long double);
 long double APS5_VABI powl_nid_postfix(long double, long double);
 long double APS5_VABI ldexpl_nid_postfix(long double, int);
 long double APS5_VABI truncl_nid_postfix(long double);
+long double APS5_VABI nearbyintl_nid_postfix(long double);
 double APS5_VABI logb_nid_postfix(double);
 double APS5_VABI remainder_nid_postfix(double, double);
 }
@@ -195,6 +196,19 @@ static void CheckLongDouble() {
     Require(frexpl_nid_postfix(INFINITY, &exponent) == INFINITY && exponent == 77);
     Require(frexpl_nid_postfix(-INFINITY, &exponent) == -INFINITY && exponent == 77);
     Require(std::isnan(frexpl_nid_postfix(NAN, &exponent)) && exponent == 77);
+}
+
+static void CheckNearbyintl() {
+    std::feclearexcept(FE_ALL_EXCEPT);
+    const long double zero = nearbyintl_nid_postfix(0.5L);
+    Require(zero == 0.0L && !std::signbit(zero));
+    Require(nearbyintl_nid_postfix(1.5L) == 2.0L && nearbyintl_nid_postfix(2.5L) == 2.0L);
+    Require(nearbyintl_nid_postfix(2.7L) == 3.0L && nearbyintl_nid_postfix(-2.7L) == -3.0L);
+    Require(ExtendedBits(nearbyintl_nid_postfix(-0.5L), 0, 0x8000));
+    Require(nearbyintl_nid_postfix(0x1p200L) == 0x1p200L);
+    Require(nearbyintl_nid_postfix(INFINITY) == INFINITY && nearbyintl_nid_postfix(-INFINITY) == -INFINITY);
+    Require(std::isnan(nearbyintl_nid_postfix(NAN)));
+    Require(std::fetestexcept(FE_INEXACT) == 0);
 }
 
 static void CheckFmodErrno() {
@@ -638,6 +652,7 @@ int main() {
     CheckExp2Errno();
     CheckExactOperations();
     CheckLongDouble();
+    CheckNearbyintl();
     CheckAsinl();
     Require(scalbn_nid_postfix(0.75, -2) == 0.1875);
     Require(scalbnf_nid_postfix(0.75f, 4) == 12.f);
