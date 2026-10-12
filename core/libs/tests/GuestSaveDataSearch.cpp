@@ -12,6 +12,7 @@
 
 extern "C" {
 int APS5_VABI sceSaveDataDirNameSearch(const SaveDataDirNameSearchCond*, SaveDataDirNameSearchResult*);
+int APS5_VABI sceSaveDataDirNameSearch2(const SaveDataDirNameSearchCond*, SaveDataDirNameSearchResult*);
 int APS5_VABI sceSaveDataMount3(const SaveDataMount3*, SaveDataMountResult*);
 int APS5_VABI sceSaveDataUmount2(std::uint32_t, const SaveDataMountPoint*);
 int APS5_VABI sceSaveDataSetParam(const SaveDataMountPoint*, std::uint32_t, const void*, std::size_t);
@@ -71,6 +72,22 @@ static void SortByKey() {
     Require(Search(1, 1, 3, &hits) == Names{"SORT_A", "SORT_C", "SORT_B"}, "user parameters must sort descending");
     Require(Search(3, 0, 3, &hits) == Names{"SORT_B", "SORT_A", "SORT_C"}, "modification times must sort ascending");
     Require(Search(3, 1, 1, &hits) == Names{"SORT_C"} && hits == 3, "the newest save must come first in descending modification time");
+    SceSaveDataDirName pattern{};
+    std::snprintf(pattern.data, sizeof(pattern.data), "SORT_%%");
+    SaveDataDirNameSearchCond second{};
+    second.user_id = 1;
+    second.dir_name = &pattern;
+    second.key = 1;
+    second.order = 1;
+    std::array<SceSaveDataDirName, 3> secondNames{};
+    SaveDataDirNameSearchResult secondResult{};
+    secondResult.dir_names = secondNames.data();
+    secondResult.dir_names_num = 3;
+    Require(sceSaveDataDirNameSearch2(&second, &secondResult) == 0, "the second search failed");
+    Require(secondResult.hit_num == 3 && secondResult.set_num == 3, "the second search must return all three saves");
+    Require(std::string(secondNames[0].data) == "SORT_A" && std::string(secondNames[1].data) == "SORT_C" && std::string(secondNames[2].data) == "SORT_B", "the second search must sort like the first");
+    second.key = 6;
+    Require(sceSaveDataDirNameSearch2(&second, &secondResult) == SaveDataErrorParameter, "the second search must reject an unknown sort key");
     SaveDataDirNameSearchCond cond{};
     cond.user_id = 1;
     cond.key = 6;

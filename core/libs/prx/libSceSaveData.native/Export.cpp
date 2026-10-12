@@ -810,9 +810,10 @@ int APS5_VABI sceSaveDataCancel() {
     return 0;
 }
 
-int APS5_VABI sceSaveDataDirNameSearch2() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceSaveDataDirNameSearch2(const SaveDataDirNameSearchCond* cond, SaveDataDirNameSearchResult* result) {
+    const int rc = dirNameSearch(cond, result);
+    SAVEDATA_TRACE("dirNameSearch2 user=%d pattern=%s hit=%u set=%u -> 0x%08x", cond != nullptr ? cond->user_id : -1, cond != nullptr && cond->dir_name != nullptr ? cond->dir_name->data : "(all)", result != nullptr ? result->hit_num : 0u, result != nullptr ? result->set_num : 0u, static_cast<unsigned>(rc));
+    return rc;
 }
 
 APS5_EXPORT("RvID8BVeg+g", sceSaveDataUnknown_RvID8BVeg);
