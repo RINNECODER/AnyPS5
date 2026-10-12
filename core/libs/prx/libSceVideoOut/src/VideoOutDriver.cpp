@@ -14,6 +14,7 @@
 #endif
 #include "prx/libSceVideoOut/include/PadInput.hpp"
 #include "prx/libSceVideoOut/include/MouseInput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include "prx/libSceVideoOut/include/KeyboardInput.hpp"
 #include "prx/libSceVideoOut/include/ImeTextInput.hpp"
 #include "prx/libScePad/include/PadState.hpp"
@@ -388,11 +389,19 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 }
             }
             padInput.Update();
+            mouseInput.UpdateCapture(!padInput.MouseModeEnabled());
             if (current) {
                 require(current->timing != nullptr, "missing presentation timing");
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
                 current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
                 processFlip(*current);
+                int windowWidth = 0;
+                int windowHeight = 0;
+                if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);
+                if (windowWidth > 0 && windowHeight > 0) {
+                    const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
+                    mouseInput.SetPresentation(current->width, current->height, presented.width, presented.height);
+                }
                 const auto finished = AgcDriver::FrameTiming::Clock::now();
                 AgcDriver::FrameTiming::Clock::duration interval{};
                 {
