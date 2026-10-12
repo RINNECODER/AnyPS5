@@ -156,6 +156,7 @@ def run(args, log=print):
 
 
 def main(argv=None):
+    raise SystemExit("TCG engine removed; Rosetta packaging pending")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--commit", required=True)

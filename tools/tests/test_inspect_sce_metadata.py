@@ -29,8 +29,6 @@ BUILDER_PATH = TOOLS / 'tests/fixtures/sce_metadata/build_fixture.py'
 spec = importlib.util.spec_from_file_location('public_sce_fixture', BUILDER_PATH)
 builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
-sys.path.insert(0, str(TOOLS))
-from prepare_diagnostic_engine import Lease
 
 
 class RichMetadataContract(unittest.TestCase):
@@ -39,8 +37,7 @@ class RichMetadataContract(unittest.TestCase):
         cls.temporary = tempfile.TemporaryDirectory(prefix='sce-metadata-controls-')
         cls.root = Path(cls.temporary.name)
         try:
-            with Lease(['tcg-build'], owner='tools04-public-fixture-controls'):
-                cls.commands = builder.compile_fixture(cls.root)
+            cls.commands = builder.compile_fixture(cls.root)
         except BaseException:
             cls.temporary.cleanup()
             raise

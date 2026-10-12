@@ -75,11 +75,6 @@ target_link_libraries(anyps5_metal_native_execution PUBLIC
     anyps5_metal_utilities
 )
 
-if(TARGET anyps5_cpu)
-    add_subdirectory("${PROJECT_SOURCE_DIR}/core/cpu/agc"
-        "${CMAKE_CURRENT_BINARY_DIR}/cpu-agc")
-endif()
-
 add_test_executable(anyps5_metal_pm4_compute_replay Pm4ComputeReplay.mm)
 target_compile_options(anyps5_metal_pm4_compute_replay PRIVATE -fobjc-arc)
 target_link_libraries(anyps5_metal_pm4_compute_replay PRIVATE anyps5_metal_native_execution)
@@ -156,18 +151,6 @@ if(BUILD_TESTING)
             RUN_SERIAL TRUE
             ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
     endforeach()
-    if(TARGET anyps5_cpu)
-        add_test_executable(anyps5_sce_native_graphics_session_tests
-            "${PROJECT_SOURCE_DIR}/core/cpu/tests/SceNativeGraphicsSessionTest.mm")
-        target_compile_options(anyps5_sce_native_graphics_session_tests PRIVATE -fobjc-arc)
-        target_link_libraries(anyps5_sce_native_graphics_session_tests PRIVATE
-            anyps5_cpu anyps5_metal_native_execution)
-        add_test(NAME anyps5_sce_native_graphics_session
-            COMMAND anyps5_sce_native_graphics_session_tests "${metalUtilityLibrary}")
-        set_tests_properties(anyps5_sce_native_graphics_session PROPERTIES
-            TIMEOUT 120 RUN_SERIAL TRUE
-            ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
-    endif()
     target_sources(metal_utility_tests PRIVATE
         "${agcDriverRoot}/tests/metal/TextureResource.mm"
         "${agcDriverRoot}/tests/metal/TextureViews.mm"
