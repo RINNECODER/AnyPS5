@@ -209,13 +209,23 @@ bool writtenBuffer(const DescriptorBinding& binding, std::uint32_t i) {
 }
 
 MetalShaderResources::MetalShaderResources(const MetalDevice& backend,
-    std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup, MetalGuestHostAliases* aliases)
+    std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup, MetalGuestHostAliases* aliases,
+    ImageCache* imageCache)
     : backend(backend), borrowed(ranges), borrowedRanges(ranges.begin(), ranges.end()),
       memory(backend.Device()), snapshot(capture(memory, ranges, aliases)),
-      depthLookup(std::move(depthLookup)), aliases(aliases) {
+      depthLookup(std::move(depthLookup)), aliases(aliases), imageCache(imageCache) {
     resident.push_back(snapshot.Table());
     resident.push_back(snapshot.FaultBuffer());
     for (id<MTLBuffer> buffer in snapshot.Buffers()) resident.push_back(buffer);
+}
+
+void MetalShaderResources::forgetCachedImages(std::uint64_t begin, std::uint64_t end) {
+    if (imageCache == nullptr) return;
+    for (const auto& range : borrowedRanges) {
+        const auto clippedBegin = std::max(begin, range.guestAddress);
+        const auto clippedEnd = std::min(end, range.guestAddress + range.host.size());
+        if (clippedBegin < clippedEnd) imageCache->Invalidate(range.host.data() + (clippedBegin - range.guestAddress), clippedEnd - clippedBegin);
+    }
 }
 
 bool MetalShaderResources::physicallyOverlaps(std::uint64_t begin, std::uint64_t end,
@@ -316,6 +326,7 @@ MetalBufferBinding MetalShaderResources::Buffer(std::uint64_t address, std::size
         }
     }
     bufferRanges.emplace_back(address, address + bytes);
+    if (writable) forgetCachedImages(address, address + bytes);
     if (writable) bufferWrites.push_back({address, NativeGuestMemory::ContiguousBorrowedRange(address, bytes, true), buffer});
     return buffer;
 }
@@ -416,6 +427,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
             }
             validateDccWrite(descriptor, image.texture->GuestBytes(), image.keys);
             image.written = true;
+            forgetCachedImages(descriptor.baseAddress, descriptor.baseAddress + image.texture->GuestBytes());
         }
         for (const auto& view : imageViews) {
             if (textureKey(view.texture->Descriptor(), view.compare) == textureKey(descriptor, compare)) return view.texture;
@@ -468,7 +480,6 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
                 describeImage(other) + ")");
         }
     }
-    auto texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
     auto host = staged ? std::span<std::byte>{} : NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, bytes, written);
     std::vector<std::byte> original;
     if (staged) {
@@ -477,19 +488,41 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     }
     const auto keys = textureKeys(descriptor, bytes);
     if (written) validateDccWrite(descriptor, bytes, keys);
-    if (keys == Graphics::DccKeys::Uncompressed) {
-        texture->Upload(buffer.buffer, buffer.offset);
+    // An uncompressed surface read or written in place is what the image cache can serve and hold.
+    const bool cacheable = imageCache != nullptr && !staged && descriptor.dccAddress == 0 &&
+        keys == Graphics::DccKeys::Uncompressed && host.size() == bytes;
+    const auto cached = cacheable ? imageCache->Find(descriptor.baseAddress, host.data(), descriptor) : std::nullopt;
+    // This work rewrites the surface: no cached texture describes it until the copy-back completes.
+    if (written) forgetCachedImages(descriptor.baseAddress, end);
+    std::shared_ptr<MetalTexture> texture;
+    bool textureCompare = compare;
+    if (cached) {
+        texture = cached->texture;
+        textureCompare = cached->compare;
     } else {
-        std::vector<std::byte> clear(bytes);
-        if (!Graphics::FillDccClear(Graphics::ResolveTextureFormat(descriptor.format), keys, descriptor.dccAlphaOnMsb, clear)) {
-            throw std::runtime_error("Metal texture DCC clear encoding changed after classification");
+        texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
+        if (keys == Graphics::DccKeys::Uncompressed) {
+            texture->Upload(buffer.buffer, buffer.offset);
+        } else {
+            std::vector<std::byte> clear(bytes);
+            if (!Graphics::FillDccClear(Graphics::ResolveTextureFormat(descriptor.format), keys, descriptor.dccAlphaOnMsb, clear)) {
+                throw std::runtime_error("Metal texture DCC clear encoding changed after classification");
+            }
+            texture->Upload(clear);
         }
-        texture->Upload(clear);
     }
     resident.push_back(texture->Texture());
     images.push_back({texture, buffer, host, written, keys, std::move(writableRanges), std::move(original)});
-    imageViews.push_back({texture, compare});
-    return texture;
+    images.back().compare = textureCompare;
+    images.back().cacheable = cacheable;
+    imageViews.push_back({texture, textureCompare});
+    if (textureKey(texture->Descriptor(), textureCompare) == textureKey(descriptor, compare)) return texture;
+    // A cached texture made for another view of the surface backs this one as a view, as two
+    // descriptors of one surface share a backing within a single draw or dispatch.
+    auto view = texture->CreateView(descriptor, compare, minimumLodLowered);
+    imageViews.push_back({view, compare});
+    resident.push_back(view->Texture());
+    return view;
 }
 
 std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const MetalBackend::Result& shader) {
@@ -667,6 +700,12 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
 
 std::span<const id<MTLResource>> MetalShaderResources::Residency() const { return resident; }
 
+void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands) {
+    for (auto& image : images) {
+        if (image.written && image.texture->EncodeReadback(commands, image.buffer.buffer, image.buffer.offset)) image.readbackIn = commands;
+    }
+}
+
 Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
     if (commands == nil || commands.status != MTLCommandBufferStatusCompleted || commands.device != backend.Device()) {
         throw std::invalid_argument("Metal draw resource copyback requires successful GPU completion");
@@ -677,8 +716,10 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
     if (words[Abi::WrittenOverflowWord] != 0 || !Abi::ForEachWrittenRange(words, [&](std::uint64_t begin, std::size_t bytes) {
             for (std::uint64_t offset = 0; offset < bytes; offset += pageBytes) writtenPages.push_back(begin + offset);
         })) {
+        if (imageCache != nullptr) imageCache->Clear();
         throw std::runtime_error("Metal draw BDA written-page tracker is incomplete or overflowed");
     }
+    for (const auto page : writtenPages) forgetCachedImages(page, page + pageBytes);
     for (const auto page : writtenPages) {
         for (const auto& range : borrowedRanges) {
             if (!range.writable) continue;
@@ -702,7 +743,7 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
     }
     for (const auto& image : images) {
         image.texture->FinishUpload();
-        if (image.written) {
+        if (image.written && image.readbackIn != commands) {
             image.texture->Readback(image.buffer.buffer, image.buffer.offset);
         }
     }
@@ -741,10 +782,18 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         if (!image.written || descriptor.dccAddress == 0) continue;
         const auto count = storedKeyCount(descriptor, image.texture->GuestBytes());
         if (count == 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.dccAddress), count, true)) continue;
+        forgetCachedImages(descriptor.dccAddress, descriptor.dccAddress + count);
         auto buffer = mirror(descriptor.dccAddress, count, true);
         std::memset(static_cast<std::byte*>(buffer.buffer.contents) + buffer.offset, 0xff, count);
         std::vector<std::byte> uncompressed(count, std::byte{0xff});
         GuestMemory::Write(descriptor.dccAddress, uncompressed);
+    }
+    // Every image now matches its guest bytes: read ones were uploaded from them and written ones
+    // were copied back over them. Work that faulted runs again and records them then.
+    if (imageCache != nullptr && fault.state == Abi::FaultState::Empty) {
+        for (const auto& image : images) {
+            if (image.cacheable) imageCache->Insert(image.texture->Descriptor().baseAddress, image.host.data(), image.texture, image.compare);
+        }
     }
     if (BindTrace::Active()) {
         for (const auto& image : images) {

@@ -1,4 +1,5 @@
 #include "MetalTexture.hpp"
+#include "GpuTiming.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
 #include <algorithm>
@@ -466,6 +467,7 @@ void MetalTexture::FinishUpload() const {
     if (pendingUpload == nil) return;
     id<MTLCommandBuffer> commands = pendingUpload;
     pendingUpload = nil;
+    GpuTiming::Scope timing(GpuTiming::Kind::Upload);
     backend.Wait(commands);
 }
 
@@ -501,7 +503,17 @@ void MetalTexture::readbackInto(id<MTLBuffer> guest, std::size_t offset) const {
     auto commands = backend.CommandBuffer();
     encodeLinearCopy(commands, linear, false);
     encodeTransfer(commands, linear, 0, guest, offset, true);
+    GpuTiming::Scope timing(GpuTiming::Kind::Readback);
     backend.Wait(commands);
+}
+
+bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset) const {
+    if (!inPlace(guest, offset)) return false;
+    // Uploads commit when they are encoded, so this command buffer runs after them on the queue.
+    auto linear = backend.Buffer(bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers));
+    encodeLinearCopy(commands, linear, false);
+    encodeTransfer(commands, linear, 0, guest, offset, true);
+    return true;
 }
 
 id<MTLTexture> MetalTexture::Texture() const { return typedTexture; }

@@ -2,6 +2,8 @@
 
 #include "MetalDevice.hpp"
 #include "BdaAbi.hpp"
+#include "GuestImageCache.hpp"
+#include "MetalTexture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
@@ -28,6 +30,10 @@ public:
     // The persistent no-copy guest aliases draws and dispatches bind (#291); mapping
     // publications drop the aliases of changed host spans through InvalidateBorrowedRanges.
     [[nodiscard]] MetalGuestHostAliases& HostAliases();
+    // Textures that still match the guest surfaces they came from, shared by draws and dispatches
+    // (GuestImageCache.hpp). The driver clears it wherever guest memory may have changed under it.
+    // Null when ANYPS5_METAL_IMAGE_CACHE=0 turns it off (every binding uploads again).
+    [[nodiscard]] GuestImageCache<MetalTexture>* ImageCache();
     void DumpSamplesSynchronously(std::uint64_t guestAddress);
     [[nodiscard]] ShaderRecompiler::MeshTargetLimits MeshLimits() const;
     [[nodiscard]] ShaderRecompiler::TessellationTargetLimits TessellationLimits() const;
@@ -54,6 +60,8 @@ private:
     std::mutex drawMutex;
     id<MTLBuffer> sampleCounter = nil;
     id<MTLBuffer> sampleTarget = nil;
+    // Last, so its textures go before the device they were made on.
+    GuestImageCache<MetalTexture> imageCache;
 };
 
 }

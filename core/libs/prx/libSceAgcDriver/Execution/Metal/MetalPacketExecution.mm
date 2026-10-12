@@ -11,6 +11,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/MeshDraw.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/GpuTiming.hpp"
+#include "PacketStoreRange.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -139,7 +141,13 @@ public:
 template <typename Work>
 void MetalDriver::Impl::Tolerate(std::string_view kind, Work&& work) {
     try {
-        DrainPacketAutoreleases(std::forward<Work>(work));
+        try {
+            DrainPacketAutoreleases(std::forward<Work>(work));
+        } catch (...) {
+            // Work that failed part-way may have written guest memory the cache does not know about.
+            ForgetCachedImages(ForgetReason::Failure);
+            throw;
+        }
     } catch (const MetalGpuExecutionError&) {
         throw;
     } catch (const NativeGuestMemory::ReadOnlyWriteError&) {
@@ -195,6 +203,7 @@ SkippedWorkDiagnostics MetalDriver::SkippedWork() const {
 }
 
 void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
+    GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
     // Find the registered shader first so the dispatch decodes against its AGC header, as the Vulkan
     // Driver::dispatch does (SCRATCH_EN takes its per-lane size from the header).
@@ -264,10 +273,12 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
         grid[axis] = static_cast<NSUInteger>(threads);
     }
     const auto run = [&] {
-        MetalShaderResources bindings(*backend, ranges, resident, draw ? &draw->HostAliases() : nullptr);
+        MetalShaderResources bindings(*backend, ranges, resident, draw ? &draw->HostAliases() : nullptr,
+            draw ? draw->ImageCache() : nullptr);
         const auto descriptors = bindings.Bindings(converted);
         id<MTLCommandBuffer> commands = backend->CommandBuffer();
         pipeline.Encode(commands, descriptors, MTLSizeMake(grid[0], grid[1], grid[2]), {}, bindings.Residency());
+        bindings.EncodeReadbacks(commands);
         [commands commit];
         backend->Wait(commands);
         return CompleteCommittedWork([&] { return bindings.Complete(commands); });
@@ -276,6 +287,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
 }
 
 void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
+    GpuTiming::Scope timing(GpuTiming::Kind::Draw);
     if (draw == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal draw executor is not configured");
     auto parameters = Pm4::ResolveDraw(packet, queue);
     if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) {
@@ -440,6 +452,12 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
     // mapping and work parked across a change resumes on the new one.
     std::optional<NativeGuestMemory::BorrowedRangesScope> borrowed;
     std::uint64_t borrowedRevision = 0;
+    // The guest may have written anything since the previous submission ran.
+    ForgetCachedImages(ForgetReason::Submission);
+    {
+        std::lock_guard lock(gpuMutex);
+        ownLabels.Reset();
+    }
     const auto borrowCurrentRanges = [&] {
         if (borrowed && borrowedRevision == rangesRevision) return;
         borrowed.reset();
@@ -483,6 +501,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         if (opcode == 0x3f) { cursor = next; continue; }
         if (header == RenderingWaitPacketHeader) {
             CompletePriorGpuWorkAndCopyBack();
+            ForgetCachedImages(ForgetReason::Wait);
             const auto wait = submission.renderingWaits.at(cursor);
             if (wait == nullptr) throw std::runtime_error("Native Metal rendering wait reservation is null");
             NoteWaitBlocked(submission.queue, 0, true);
@@ -498,6 +517,20 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             NoteWaitBlocked(submission.queue, 0, false);
         } else if (header == FlipPacketHeader) {
             CompletePriorGpuWorkAndCopyBack();
+            ForgetCachedImages(ForgetReason::Flip);
+            if (draw != nullptr && draw->ImageCache() != nullptr && GpuTiming::Enabled()) {
+                static std::uint64_t flips = 0;
+                if (++flips % 16 == 0) {
+                    const auto cache = draw->ImageCache()->TakeStatistics();
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}\n",
+                        static_cast<unsigned long long>(cache.hits), static_cast<unsigned long long>(cache.misses),
+                        static_cast<unsigned long long>(cache.inserts), static_cast<unsigned long long>(cache.clears),
+                        static_cast<unsigned long long>(cache.clearsBy[0]), static_cast<unsigned long long>(cache.clearsBy[1]),
+                        static_cast<unsigned long long>(cache.clearsBy[2]), static_cast<unsigned long long>(cache.clearsBy[3]),
+                        static_cast<unsigned long long>(cache.clearsBy[4]), static_cast<unsigned long long>(cache.clearsBy[5]),
+                        static_cast<unsigned long long>(cache.clearsBy[6]), static_cast<unsigned long long>(cache.clearsBy[7]));
+                }
+            }
             CheckFailureAndStopping();
             const auto flip = submission.flips.at(cursor);
             if (flip == nullptr) throw std::runtime_error("Native Metal flip reservation is null");
@@ -537,6 +570,12 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             }
             if (blocked) NoteWaitBlocked(submission.queue, address, false);
             CheckFailureAndStopping();
+            // A wait that our own earlier label store already satisfied is a GPU-to-GPU barrier; any
+            // other (it blocked, or the guest wrote the value) may let guest CPU writes reach later work.
+            std::array<std::byte, 8> awaited{};
+            const auto awaitedBytes = std::span(awaited).first(Pm4::WaitAwaitedBytes(packet));
+            GuestMemory::Read(address, awaitedBytes, 1);
+            if (blocked || !ownLabels.Holds(address, awaitedBytes)) ForgetCachedImages(ForgetReason::Wait);
         } else if (opcode == 0x22) {
             if (Pm4::ReadCondition(packet) == 0) {
                 next = submission.conditionalEnds.at(cursor);
@@ -550,16 +589,31 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             if (opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u) {
                 if (draw == nullptr) throw std::runtime_error("Native Metal sample counter executor is not configured");
                 const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+                ForgetCachedImages(ForgetReason::Event);
                 draw->DumpSamplesSynchronously(address);
             }
         } else {
             if (opcode == 0x49 || opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x83) {
                 CompletePriorGpuWorkAndCopyBack();
             }
+            // A store the driver performs itself: only its destination stops matching cached images.
+            // (A label it writes lets the guest go on, but guest writes reach later work of this
+            // submission only behind a wait, which forgets everything.)
+            if (const auto store = PacketStoreRange(packet)) ForgetCachedImages(*store);
             Pm4::Execute(packet, queue);
+            // Remember label values this driver wrote (RELEASE_MEM data, WRITE_DATA), for the wait above.
+            if (opcode == 0x49 || opcode == 0x37) {
+                if (const auto store = PacketStoreRange(packet); store && store->bytes != 0 && store->bytes <= 64) {
+                    std::array<std::byte, 64> stored{};
+                    const auto written = std::span(stored).first(static_cast<std::size_t>(store->bytes));
+                    GuestMemory::Read(store->begin, written, 1);
+                    ownLabels.Record(store->begin, written);
+                }
+            }
             if (opcode == 0x49 || opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x83) NotifyLabelStore();
             if (opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0) {
                 CompletePriorGpuWorkAndCopyBack();
+                ForgetCachedImages(ForgetReason::Event);
                 DeliverEopInterrupt(submission.queue);
             }
         }
@@ -570,6 +624,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         borrowCurrentRanges();
         CheckFailureAndStopping();
         CompletePriorGpuWorkAndCopyBack();
+        ForgetCachedImages(ForgetReason::Submission);
     }
     borrowed.reset();
     if (submission.rewindTail != nullptr) ExecuteRewindTail(submission, queue);

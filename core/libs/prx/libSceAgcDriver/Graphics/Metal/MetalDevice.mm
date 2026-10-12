@@ -1,4 +1,5 @@
 #include "MetalDevice.hpp"
+#include "GpuTiming.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -145,7 +146,14 @@ void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
     if (commands.status < MTLCommandBufferStatusCommitted) {
         [commands commit];
     }
-    [commands waitUntilCompleted];
+    if (GpuTiming::Enabled()) {
+        const auto start = std::chrono::steady_clock::now();
+        [commands waitUntilCompleted];
+        GpuTiming::Record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
+            commands.GPUEndTime - commands.GPUStartTime);
+    } else {
+        [commands waitUntilCompleted];
+    }
     if (commands.status == MTLCommandBufferStatusError) {
         throw MetalGpuExecutionError(errorMessage("Metal GPU execution failed", commands.error));
     }

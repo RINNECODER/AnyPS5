@@ -10,7 +10,9 @@
 #include <atomic>
 #include <bit>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <string>
 #include <vector>
 #include <limits>
@@ -299,6 +301,7 @@ MetalDraw::~MetalDraw() = default;
 
 void MetalDraw::InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed) {
     std::lock_guard lock(drawMutex);
+    imageCache.Clear();
     depthCache->Invalidate(changed);
     for (const auto& range : changed) hostAliases->Invalidate(range.host.data(), range.host.size());
     std::erase_if(depthSurfaces, [&](const auto& surface) { return surface->OverlapsMappings(changed); });
@@ -306,6 +309,13 @@ void MetalDraw::InvalidateBorrowedRanges(std::span<const NativeGuestMemory::Borr
 }
 
 MetalGuestHostAliases& MetalDraw::HostAliases() { return *hostAliases; }
+GuestImageCache<MetalTexture>* MetalDraw::ImageCache() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_METAL_IMAGE_CACHE");
+        return value == nullptr || std::string_view(value) != "0";
+    }();
+    return enabled ? &imageCache : nullptr;
+}
 
 MeshTargetLimits MetalDraw::MeshLimits() const {
     const auto maximum = backend.Device().maxThreadsPerThreadgroup;
@@ -519,7 +529,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     if (depth && std::find(depthSurfaces.begin(), depthSurfaces.end(), depth) == depthSurfaces.end()) depthSurfaces.push_back(depth);
     MetalShaderResources resources(backend, ranges, [&](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
         return residentTexture(resource, storage, compare);
-    }, hostAliases.get());
+    }, hostAliases.get(), ImageCache());
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -918,6 +928,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         const SampleCounterParameters parameters{1, 0};
         backend.Encode(commands, @"SampleCounter", @[sampleCounter, sampleTarget], &parameters, sizeof(parameters), MTLSizeMake(1, 1, 1));
     }
+    resources.EncodeReadbacks(commands);
     backend.Wait(commands);
     if (sampleCounter != nil) samplesPassed.store(sampleTotal(sampleCounter), std::memory_order_release);
     return CompleteCommittedWork([&] { return resources.Complete(commands); });
