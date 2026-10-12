@@ -338,6 +338,9 @@ int Aps5RosettaFaultDiagnosticsInstalled_nid_no_patch() {
     if (std::getenv("APS5_ROSETTA_QUIET") == nullptr)
         Write("[rosetta] guest entry %#llx after %.3fs of image start-up, %zu TLS images\n",
             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(entry)), Seconds(), Aps5Darwin::RegisteredTlsImages());
+    // The engine launcher (anyps5_rosetta_run --diagnostics-json) asks for the startup event.
+    if (const char* json = std::getenv("ANYPS5_DIAGNOSTICS_JSON"); json != nullptr && json[0] == '1')
+        Write("{\"schema_version\":1,\"event\":\"startup\",\"entry\":1,\"seconds\":%.3f}\n", Seconds());
     const int result = entry(guestFrame.data(), GuestExitCallback);
     if (std::getenv("APS5_ROSETTA_QUIET") == nullptr) Write("[rosetta] guest entry returned %d at %.3fs\n", result, Seconds());
     std::exit(result);

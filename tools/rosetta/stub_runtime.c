@@ -1,10 +1,14 @@
-// Logging stubs for imports that no x86_64 library exports yet. run_title.py
-// generates one entry per symbol (movl $index, %eax; jmp _aps5_stub_common)
-// and injects the dylib with DYLD_INSERT_LIBRARIES. A stub logs its first call
-// and returns 0 to the guest, so a run shows which NIDs a title needs next.
+// Logging stubs for imports that no x86_64 library exports yet. The launcher
+// (tools/rosetta/launcher, anyps5_rosetta_run) writes a stub dylib with one
+// entry per symbol (movl $index, %eax; jmp *_aps5_stub_common) plus the name
+// tables below, and injects it with DYLD_INSERT_LIBRARIES. That dylib loads
+// this runtime (built as aps5_stub_runtime.dylib, linked with -undefined
+// dynamic_lookup so the tables bind to the stub dylib by flat lookup). A stub
+// logs its first call and returns 0 to the guest, so a run shows which NIDs a
+// title needs next.
 //
-// The same dylib carries tracing stubs for `run_title.py --trace` (movl $index,
-// %r11d; jmp _aps5_trace_common). The guest binds imports by flat lookup, and
+// The stub dylib also carries tracing stubs for `--trace` (movl $index,
+// %r11d; jmp *_aps5_trace_common). The guest binds imports by flat lookup, and
 // inserted libraries come first, so a guest call lands in the tracing stub. It
 // logs the call (thread, time, first three arguments, and the bytes behind
 // pointer arguments that hold a C string) and jumps to the next definition of
@@ -111,17 +115,20 @@ static void trace_init(void) {
 // RTLD_NEXT does not reach the x86_64 libraries from an inserted library, so
 // each image is asked in load order.
 static void* next_definition(const char* name) {
-    Dl_info self;
-    if (dladdr((const void*)next_definition, &self) == 0) return NULL;
+    // Skip this runtime and the stub dylib that holds the tables (and the tracing stubs).
+    Dl_info self, stubs;
+    if (dladdr((const void*)next_definition, &self) == 0 || dladdr((const void*)aps5_trace_names, &stubs) == 0) return NULL;
     const uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; ++i) {
-        if ((const void*)_dyld_get_image_header(i) == self.dli_fbase) continue;
+        const void* header = _dyld_get_image_header(i);
+        if (header == self.dli_fbase || header == stubs.dli_fbase) continue;
         void* image = dlopen(_dyld_get_image_name(i), RTLD_LAZY | RTLD_NOLOAD);
         if (image == NULL) continue;
         void* symbol = dlsym(image, name);
         dlclose(image);
         Dl_info owner;
-        if (symbol != NULL && dladdr(symbol, &owner) != 0 && owner.dli_fbase != self.dli_fbase) return symbol;
+        if (symbol != NULL && dladdr(symbol, &owner) != 0 && owner.dli_fbase != self.dli_fbase && owner.dli_fbase != stubs.dli_fbase)
+            return symbol;
     }
     return NULL;
 }

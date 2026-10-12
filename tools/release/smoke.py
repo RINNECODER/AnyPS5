@@ -8,14 +8,15 @@ runner environment variable ANYPS5_E2E_TITLE_DIR. The directory holds ``eboot.bi
 the ``.prx`` modules MacPS passes with ``--sce-module`` (``libc.prx`` first, then the rest
 sorted), and is also the resource root, exactly as MacPS launches an unmounted title.
 
-The title does not boot yet, so the smoke records the furthest boot stage reached from
-the engine's ``--diagnostics-json`` events instead of requiring a pass:
+The engine is anyps5_rosetta_run (bin/ of the package); it relinks the title into a scratch
+cache, so the smoke includes the first-launch relink. It records the furthest boot stage
+reached from the engine's ``--diagnostics-json`` events instead of requiring a pass:
 
   0 no_diagnostics          crashed, hung or printed no diagnostics event
   1 launch_rejected         invalid arguments, unreadable input or host failure
-  2 load_rejected           the loader or module graph refused the title (e.g. missing import)
+  2 load_rejected           unself or the relinker refused the title (loader_failure)
   3 dependency_init_failed  modules loaded; a dependency initializer failed in guest code
-  4 entered_main            the startup event: the title's entry point was reached
+  4 entered_main            the startup event (libkernel, at the guest entry point)
   5 guest_exit              the title ran to a guest exit
 
 The engine also writes frames of its own game window (ANYPS5_FRAME_CAPTURE_DIR, set to
@@ -119,9 +120,16 @@ def title_arguments(title_dir):
     return args + [str(title_dir / "eboot.bin")]
 
 
+def title_pid(launcher_pid):
+    """The relinked title the launcher started (its child), which owns the game window."""
+    result = subprocess.run(["pgrep", "-P", str(launcher_pid)], capture_output=True, text=True)
+    children = [int(pid) for pid in result.stdout.split()]
+    return children[0] if children else launcher_pid
+
+
 def run_smoke(package, title_dir, timeout=180, scratch=None, frame_interval=30):
     package, title_dir = Path(package), Path(title_dir)
-    engine = package / "bin" / "anyps5_cpu_run"
+    engine = package / "bin" / "anyps5_rosetta_run"
     if not engine.is_file() or not (title_dir / "eboot.bin").is_file():
         raise RuntimeError("smoke needs an accepted package and a title directory with eboot.bin")
     scratch = Path(scratch) if scratch else Path(tempfile.mkdtemp(prefix="anyps5-smoke-"))
@@ -130,6 +138,8 @@ def run_smoke(package, title_dir, timeout=180, scratch=None, frame_interval=30):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DYLD_", "LD_"))}
     env["ANYPS5_FRAME_CAPTURE_DIR"] = str(frames)
     env["ANYPS5_FRAME_CAPTURE_INTERVAL_MS"] = str(int(frame_interval * 1000))
+    # A scratch relink cache: every smoke measures a cold launch (the first relink included).
+    env["ANYPS5_ROSETTA_CACHE"] = str(scratch / "relink-cache")
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import window_capture  # noqa: E402
     started = time.monotonic()
@@ -152,7 +162,7 @@ def run_smoke(package, title_dir, timeout=180, scratch=None, frame_interval=30):
                 break
             # Window-only: the engine's own window, selected by its PID. Never the display.
             name = "window-%d.png" % int((time.monotonic() - started) * 1000)
-            window_status = window_capture.capture(process.pid, shots / name)
+            window_status = window_capture.capture(title_pid(process.pid), shots / name)
     text = stderr.decode(errors="replace")
     stage, code, message = classify(text)
     return {"stage": stage, "stage_name": STAGES[stage], "error_code": code, "message": redact(message, title_dir),
@@ -163,7 +173,7 @@ def run_smoke(package, title_dir, timeout=180, scratch=None, frame_interval=30):
 
 
 def with_title_lease(function):
-    """Run the smoke; the shared title-session lease went away with the TCG packaging tools."""
+    """Run the smoke (no shared title-session lease is needed on the Rosetta path)."""
     return function()
 
 

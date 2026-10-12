@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
-"""Build, accept and zip one engine release package from a clean checkout.
+"""Build, verify and zip one Rosetta engine release package from a clean checkout.
 
     python3 tools/release/build_package.py --source <clean checkout with submodules> \
-        --commit <40-hex HEAD> --macps-repo <MacPS git repository> --version 2026.10.09.1 \
-        --work <new directory without personal paths, e.g. /private/tmp/anyps5-release/x>
+        --commit <40-hex HEAD> --version 2026.10.12.1 \
+        --work <new directory without personal paths, e.g. /private/tmp/anyps5-release/x> \
+        [--macps-repo <MacPS git repository>]
 
-The release successor of the diagnostic package flow. It runs the existing
-tools/prepare_diagnostic_engine.py ``--profile native`` unchanged (fresh clone and build,
-the full declared native CTest inventory, packaging, relocated fixture runs and a fresh
-MacPS ``EnginePackage.accept`` with negative controls), then:
+Steps (docs/RELEASES.md):
 
-* refuses any package byte that contains the build user's home path or user name, so a
-  public release never leaks a local path (the tools are run from a copy under --work
-  for the same reason);
-* writes a deterministic zip whose root is the package directory itself
-  (``manifest.json``, ``bin/``, ``lib/``, ``fixtures/``, ``SHA256SUMS``), with Unix modes;
-* unzips that zip with ``ditto`` into a fresh directory and runs MacPS acceptance again on
-  the round-tripped bytes, pinned to the manifest SHA-256.
+1. clone --source at --commit (and its submodules, from the source's own copies) into
+   --work, so no byte of the build carries the runner's checkout path;
+2. configure the x86_64 Rosetta build (-DANYPS5_ROSETTA_LIBS=ON
+   -DCMAKE_OSX_ARCHITECTURES=x86_64) and build ``rosetta_engine`` (the libs, the relinker,
+   anyps5_rosetta_run and the stub runtime) plus the launcher's unit test, and run it;
+3. assemble the package: bin/anyps5_rosetta_run, bin/relinker, libs/ (x86_64 *.prx and
+   AnyPS5Utilities.metallib), share/aps5_stub_runtime.dylib, share/LICENSE, manifest.json
+   (schema 3) and SHA256SUMS; every Mach-O must be thin x86_64 and load only system
+   libraries or package-relative ones;
+4. refuse any package byte that holds the build user's home path or user name;
+5. run the synthetic fixture title (tools/rosetta/tests/launcher_smoke.py) through the
+   packaged launcher, cold and warm (never a retail title);
+6. write a deterministic zip whose root is the package (manifest.json at the top), unzip
+   it with the release extractor and run the fixture smoke again on those bytes;
+7. with --macps-repo, run MacPS ``EnginePackage.accept`` on the package and on the
+   round-tripped bytes, pinned to the manifest SHA-256.
 
-Prints one JSON object describing the result; build-info.json in --work holds the same.
+Signing and publishing stay in alpha.py (release.json + Ed25519 signature). Prints one JSON
+object describing the result; build-info.json in --work holds the same.
 """
 import argparse
 import getpass
@@ -34,8 +42,17 @@ import zipfile
 import releaselib
 import verify
 
-TOOL_FILES = ()
+ROOT = Path(__file__).resolve().parents[2]
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
+BACKEND = "Rosetta 2 direct execution (x86_64 relinked guest)"
+EXECUTABLE = "bin/anyps5_rosetta_run"
+SUBMODULES = ("3rdparty/SDL2", "3rdparty/SPIRV-Cross", "3rdparty/SPIRV-Headers", "3rdparty/Vulkan-Headers",
+              "3rdparty/glslang", "3rdparty/LibAtrac9", "3rdparty/ffmpeg-core", "3rdparty/freetype",
+              "3rdparty/libjpeg-turbo", "3rdparty/stb")
+MAX_FILES = 512
+SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/", "@rpath/", "@loader_path/", "@executable_path/")
+MACHO_MAGIC_64 = b"\xcf\xfa\xed\xfe"
+CPU_X86_64 = 0x01000007
 
 
 def git(path, *args):
@@ -91,37 +108,126 @@ def accept(helper, package, manifest_sha256, cwd):
     return json.loads(result.stdout)
 
 
-FOCUS_FLAKE = ("failed to pump AppKit", "key-window restore did not complete")
+def digest(path):
+    return verify.sha256_file(path)
 
 
-def focus_flake(receipt):
-    """True only for the documented AppKit focus flake in a relocated fixture run.
+def run_logged(name, command, logs, log, cwd=None, env=None):
+    """Run a build step with its output in <logs>/<name>.log; show the tail on failure."""
+    path = logs / (name + ".log")
+    with open(path, "w") as stream:
+        result = subprocess.run([str(part) for part in command], cwd=cwd, env=env, stdout=stream, stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        text = path.read_text(errors="replace").replace(str(Path.home()), "~")
+        log("--- %s failed (exit %d), last lines:\n%s" % (name, result.returncode, "\n".join(text.splitlines()[-40:])))
+    releaselib.require(result.returncode == 0, "%s failed (exit %d)" % (name, result.returncode))
+    return path
 
-    Any other failure (build, CTest, packaging, acceptance) is never retried.
-    """
-    failed = [item for item in receipt.get("commands", []) if item.get("exit_code") != item.get("expected_exit_code")]
-    if len(failed) != 1 or not failed[0]["name"].startswith("relocation-"):
-        return False
-    path = Path(failed[0]["logs"]["stderr"]["path"])
-    return path.is_file() and any(marker in path.read_text(errors="replace") for marker in FOCUS_FLAKE)
+
+def clone_source(source, commit, target, logs, log):
+    """A fresh clone of --source at --commit; submodules come from the source's checked-out copies."""
+    run_logged("clone", ["git", "clone", "--quiet", "--no-hardlinks", "--no-checkout", source, target], logs, log)
+    run_logged("checkout", ["git", "-C", target, "checkout", "--quiet", "--detach", commit], logs, log)
+    names = git(target, "config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$").splitlines()
+    by_path = {line.split()[1]: line.split()[0][len("submodule."):-len(".path")] for line in names}
+    for path in SUBMODULES:
+        releaselib.require(path in by_path and (Path(source) / path / ".git").exists(),
+                           "source checkout lacks the submodule " + path)
+        run_logged("submodule-config", ["git", "-C", target, "config", "submodule.%s.url" % by_path[path], Path(source) / path], logs, log)
+    run_logged("submodules", ["git", "-C", target, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet",
+                              *SUBMODULES], logs, log)
 
 
-def failed_log_tail(receipt, log, lines=40):
-    """Show the failing command's last output before the work tree is removed (home path redacted)."""
-    failed = [item for item in receipt.get("commands", []) if item.get("exit_code") != item.get("expected_exit_code")]
-    if not failed:
-        return
-    item = failed[-1]
-    log("prepare_diagnostic_engine command failed: %s (exit %s)" % (item["name"], item["exit_code"]))
-    for stream in ("stdout", "stderr"):
-        path = Path(item["logs"][stream]["path"])
+def macho_info(path):
+    """(is Mach-O, thin x86_64) for a file."""
+    with open(path, "rb") as stream:
+        header = stream.read(8)
+    if header[:4] != MACHO_MAGIC_64:
+        return header[:4] in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"), False
+    return True, int.from_bytes(header[4:8], "little") == CPU_X86_64
+
+
+def load_commands(path):
+    output = subprocess.check_output(["otool", "-L", str(path)], text=True)
+    return re.findall(r"^\s+(\S.*?) \(compatibility version ", output, re.M)
+
+
+def assemble(build, source, package):
+    """Copy the engine files from the build's rosetta/ tree into the package layout."""
+    rosetta = build / "rosetta"
+    for directory in ("bin", "libs", "share"):
+        (package / directory).mkdir(parents=True)
+    shutil.copy2(rosetta / "bin" / "anyps5_rosetta_run", package / "bin" / "anyps5_rosetta_run")
+    shutil.copy2(rosetta / "bin" / "relinker", package / "bin" / "relinker")
+    shutil.copy2(rosetta / "share" / "aps5_stub_runtime.dylib", package / "share" / "aps5_stub_runtime.dylib")
+    shutil.copyfile(source / "LICENSE", package / "share" / "LICENSE")
+    libraries = sorted(path for path in (rosetta / "libs").iterdir() if path.is_file() and not path.is_symlink())
+    releaselib.require(any(path.suffix == ".prx" for path in libraries) and (rosetta / "libs" / "AnyPS5Utilities.metallib").is_file(),
+                       "the build produced no libs/*.prx or AnyPS5Utilities.metallib")
+    for path in libraries:
+        shutil.copy2(path, package / "libs" / path.name)
+    for path in package.rglob("*"):
         if path.is_file():
-            text = path.read_text(errors="replace").replace(str(Path.home()), "~")
-            log("--- %s (last %d lines)\n%s" % (stream, lines, "\n".join(text.splitlines()[-lines:])))
+            path.chmod(0o755 if path.parent.name == "bin" else 0o644)
 
 
-def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=print, attempts=3):
-    raise SystemExit("TCG engine removed; Rosetta packaging pending")
+def check_binaries(package):
+    """Every Mach-O is thin x86_64 and loads only system or package-relative libraries."""
+    problems = []
+    for path in sorted(package.rglob("*")):
+        if not path.is_file():
+            continue
+        is_macho, x86_64 = macho_info(path)
+        if not is_macho:
+            continue
+        relative = str(path.relative_to(package))
+        if not x86_64:
+            problems.append(relative + " is not a thin x86_64 Mach-O")
+            continue
+        for dependency in load_commands(path):
+            if not dependency.startswith(SYSTEM_PREFIXES) and dependency != path.name:
+                problems.append("%s loads %s" % (relative, dependency))
+    releaselib.require(not problems, "package binaries: " + "; ".join(problems[:10]))
+
+
+def capabilities(package):
+    output = subprocess.check_output([str(package / EXECUTABLE), "--capabilities-json"], text=True, timeout=30,
+                                     env={k: v for k, v in os.environ.items() if not k.startswith(("DYLD_", "LD_"))})
+    value = json.loads(output)
+    releaselib.require(value.get("backend") == BACKEND and value.get("resource_root_argument") == "--resource-root" and
+                       value.get("sce_module_argument") == "--sce-module" and value.get("schema_version") == 1 and
+                       value.get("host_architecture") == "arm64" and value.get("guest_architecture") == "x86_64",
+                       "launcher capabilities do not match the engine package contract")
+    return value
+
+
+def write_manifest(package, version, revision, caps):
+    files = {str(path.relative_to(package)): {"sha256": digest(path), "size": path.stat().st_size}
+             for path in sorted(package.rglob("*")) if path.is_file()}
+    releaselib.require(0 < len(files) <= MAX_FILES and EXECUTABLE in files, "package file inventory out of range")
+    manifest = {"schema_version": 3, "backend": BACKEND, "engine_version": version, "executable": EXECUTABLE,
+                "architecture": "x86_64", "source_revisions": {"AnyPS5": revision}, "capabilities": caps,
+                "validation": {"fixture": "tools/rosetta/tests/launcher_smoke.py (synthetic title, cold and warm relink)",
+                               "result": "PASS"},
+                "files": files}
+    encoded = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    releaselib.require(len(encoded.encode()) <= 1048576, "manifest exceeds 1 MiB")
+    (package / "manifest.json").write_text(encoded)
+    (package / "SHA256SUMS").write_text("".join(digest(path) + "  " + str(path.relative_to(package)) + "\n"
+                                                for path in sorted(package.rglob("*")) if path.is_file()))
+    return digest(package / "manifest.json"), len(files)
+
+
+def smoke(source, package, work, logs, log, name):
+    """The synthetic fixture title through the packaged launcher (tools/rosetta/tests/launcher_smoke.py)."""
+    path = run_logged(name, [sys.executable, source / "tools" / "rosetta" / "tests" / "launcher_smoke.py", package, work / name],
+                      logs, log, env={k: v for k, v in os.environ.items() if not k.startswith(("DYLD_", "LD_"))})
+    lines = path.read_text().splitlines()
+    releaselib.require(lines and lines[-1] == "PASS", name + " did not pass")
+    return json.loads(lines[-2])
+
+
+def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=print, jobs=None):
     source, work = Path(source).resolve(), Path(work)
     releaselib.require(re.fullmatch(r"[0-9a-f]{40}", commit or "") is not None, "--commit must be a full 40-hex SHA")
     releaselib.require(git(source, "rev-parse", "HEAD") == commit, "source checkout is not at --commit")
@@ -130,70 +236,81 @@ def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=
     releaselib.require(not any(marker in str(work.resolve()).encode() for marker in private_markers()),
                        "--work must not contain the home path or user name (it is embedded in the binaries)")
     work.mkdir(parents=True, exist_ok=False)
-    tools = work / "tools"
-    tools.mkdir()
-    for name in TOOL_FILES:
-        shutil.copyfile(source / "tools" / name, tools / name)
-    macps = work / "macps-source"
-    subprocess.run(["git", "clone", "--quiet", "--no-hardlinks", "--no-checkout", str(macps_repo), str(macps)], check=True)
-    macps_commit = git(macps_repo, "rev-parse", macps_revision + "^{commit}")
-    subprocess.run(["git", "-C", str(macps), "checkout", "--quiet", "--detach", macps_commit], check=True)
-    engine = work / "engine"
-    for attempt in range(1, attempts + 1):
-        # A second attempt only absorbs the documented AppKit focus flake in relocated window
-        # tests; a real failure fails both fresh builds.
-        releaselib.clean_tree(engine)
-        log(json.dumps({"step": "prepare_diagnostic_engine", "profile": "native", "attempt": attempt,
-                        "commit": commit, "macps_commit": macps_commit}))
-        result = subprocess.run([sys.executable, str(tools / "prepare_diagnostic_engine.py"), "--source", str(source),
-                                 "--revision", commit, "--macps-source", str(macps), "--macps-revision", macps_commit,
-                                 "--output", str(engine), "--dependency-cache", str(source), "--profile", "native"],
-                                cwd=str(work), check=False)
-        receipt_path = engine / "receipt.json"
-        receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
-        if result.returncode == 0 and receipt.get("status") == "PASS":
-            break
-        failed_log_tail(receipt, log)
-        releaselib.require(attempt < attempts and focus_flake(receipt), "prepare_diagnostic_engine failed: " +
-                           str(receipt.get("failure", "exit %d" % result.returncode)))
-    package = Path(receipt["package"]["package"])
-    manifest_sha256 = receipt["package"]["manifest_sha256"]
-    releaselib.require(receipt["strict_acceptance"]["source_commit"] == commit, "accepted package is from another commit")
-    releaselib.require(verify.sha256_file(package / "manifest.json") == manifest_sha256, "manifest changed after acceptance")
+    work = work.resolve()
+    logs = work / "logs"
+    logs.mkdir()
+
+    checkout = work / "source"
+    log(json.dumps({"step": "clone", "commit": commit}))
+    clone_source(source, commit, checkout, logs, log)
+    revision = {"commit": commit, "tree": git(checkout, "rev-parse", "HEAD^{tree}"), "clean": True}
+
+    build_dir = work / "build"
+    log(json.dumps({"step": "build", "version": version}))
+    run_logged("configure", ["cmake", "-S", checkout, "-B", build_dir, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
+                             "-DBUILD_TESTING=ON", "-DCMAKE_OSX_ARCHITECTURES=x86_64", "-DANYPS5_ROSETTA_LIBS=ON",
+                             "-DANYPS5_ROSETTA_ENGINE_VERSION=" + version], logs, log)
+    parallel = ["--parallel", str(jobs)] if jobs else ["--parallel"]
+    run_logged("build", ["cmake", "--build", build_dir, *parallel, "--target", "rosetta_engine", "rosetta_launcher_tests"], logs, log)
+    run_logged("unit-tests", ["ctest", "--test-dir", build_dir, "-R", "^rosetta_launcher_tests$", "--output-on-failure"], logs, log)
+
+    package = work / "package"
+    assemble(build_dir, checkout, package)
+    check_binaries(package)
+    caps = capabilities(package)
+    releaselib.require(caps.get("engine_version") == version, "launcher reports another version")
     leaks = privacy_scan(package)
     releaselib.require(not leaks, "package bytes contain a private local path: " + ", ".join(leaks[:10]))
+    log(json.dumps({"step": "smoke", "package": "staged"}))
+    staged_smoke = smoke(checkout, package, work, logs, log, "smoke-staged")
+    manifest_sha256, file_count = write_manifest(package, version, revision, caps)
+
     out = work / "out"
     out.mkdir()
     archive = write_zip(package, out / verify.asset_name("engine", version))
-    roundtrip = work / "roundtrip"
-    roundtrip.mkdir()
-    subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(roundtrip / "package")], check=True)
-    accepted = accept(engine / "accept-diagnostic-package", roundtrip / "package", manifest_sha256, roundtrip)
-    releaselib.require(accepted["manifest_sha256"] == manifest_sha256 and accepted["source_commit"] == commit and
-                       accepted["ps5_game_runtime_ready"] is False, "round-tripped package identity mismatch")
-    info = {"version": version, "commit": commit, "zip": str(archive), "zip_sha256": verify.sha256_file(archive),
-            "zip_size": archive.stat().st_size, "package_manifest_sha256": manifest_sha256,
-            "package_files": len(receipt["package"]["artifacts"]), "macps_commit": macps_commit,
-            "native_ctest_results": len(receipt.get("ctest_results", [])),
-            "acceptance": {"build_dir": "PASS", "zip_roundtrip": "PASS", "backend": accepted["backend"],
-                           "engine_commit": accepted["engine_commit"]}}
+    roundtrip = verify.safe_extract(archive, work / "roundtrip" / "package")
+    releaselib.require(digest(roundtrip / "manifest.json") == manifest_sha256, "round-tripped manifest differs")
+    for name, record in json.loads((roundtrip / "manifest.json").read_text())["files"].items():
+        path = roundtrip / name
+        releaselib.require(path.is_file() and digest(path) == record["sha256"] and path.stat().st_size == record["size"],
+                           "round-tripped file differs from the manifest: " + name)
+    log(json.dumps({"step": "smoke", "package": "zip round trip"}))
+    roundtrip_smoke = smoke(checkout, roundtrip, work, logs, log, "smoke-roundtrip")
+
+    acceptance = {"macps": "NOT_RUN (no --macps-repo)"}
+    macps_commit = None
+    if macps_repo:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import macps_accept  # noqa: E402
+        helper, macps_commit = macps_accept.build_helper(macps_repo, work / "macps", macps_revision)
+        staged = macps_accept.run_accept(helper, package, manifest_sha256)
+        again = macps_accept.run_accept(helper, roundtrip, manifest_sha256)
+        for accepted in (staged, again):
+            releaselib.require(accepted["manifest_sha256"] == manifest_sha256 and accepted["source_commit"] == commit and
+                               accepted["backend"] == BACKEND, "MacPS accepted another package identity")
+        acceptance = {"macps": "PASS", "build_dir": "PASS", "zip_roundtrip": "PASS"}
+
+    info = {"version": version, "commit": commit, "zip": str(archive), "zip_sha256": digest(archive),
+            "zip_size": archive.stat().st_size, "package_manifest_sha256": manifest_sha256, "package_files": file_count,
+            "backend": BACKEND, "macps_commit": macps_commit, "acceptance": acceptance,
+            "smoke": {"staged": staged_smoke, "zip_roundtrip": roundtrip_smoke}}
     (work / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")
     return info
 
 
 def main(argv=None):
-    raise SystemExit("TCG engine removed; Rosetta packaging pending")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--commit", required=True)
-    parser.add_argument("--macps-repo", type=Path, required=True)
+    parser.add_argument("--macps-repo", type=Path, default=None)
     parser.add_argument("--macps-revision", default="HEAD")
     parser.add_argument("--version", required=True)
     parser.add_argument("--work", type=Path, required=True)
+    parser.add_argument("--jobs", type=int, default=None)
     args = parser.parse_args(argv)
     try:
-        info = build(args.source, args.commit, args.macps_repo, args.version, args.work, args.macps_revision)
-    except (releaselib.ReleaseError, subprocess.CalledProcessError, OSError, KeyError) as error:
+        info = build(args.source, args.commit, args.macps_repo, args.version, args.work, args.macps_revision, jobs=args.jobs)
+    except (releaselib.ReleaseError, verify.VerificationError, subprocess.CalledProcessError, OSError, KeyError, ValueError) as error:
         print(json.dumps({"status": "FAILED", "error": str(error)}), file=sys.stderr)
         return 1
     print(json.dumps(info, indent=2))

@@ -14,10 +14,16 @@ if(NOT ANYPS5_ROSETTA_LLD)
     return()
 endif()
 
-add_custom_target(rosetta_runtime_tests DEPENDS rosetta_libs relinker)
+add_custom_target(rosetta_runtime_tests DEPENDS rosetta_libs relinker rosetta_engine)
 foreach(mode threads fault)
     add_test(NAME rosetta_runtime_${mode}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_test.py
             $<TARGET_FILE:relinker> ${CMAKE_BINARY_DIR}/rosetta/libs ${CMAKE_CURRENT_BINARY_DIR}/work ${mode})
     set_tests_properties(rosetta_runtime_${mode} PROPERTIES TIMEOUT 180 LABELS rosetta)
 endforeach()
+
+# A synthetic title through the engine launcher with MacPS's arguments, from the build's
+# rosetta/ tree (the package layout); build_package.py runs the same script on the package.
+add_test(NAME rosetta_launcher_smoke
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/launcher_smoke.py ${CMAKE_BINARY_DIR}/rosetta ${CMAKE_CURRENT_BINARY_DIR}/launcher-smoke)
+set_tests_properties(rosetta_launcher_smoke PROPERTIES TIMEOUT 300 LABELS rosetta)
