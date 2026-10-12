@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
-#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -77,6 +76,10 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
         }
         std::vector<std::uint8_t> visited(program.controlFlow.size());
         std::vector<std::uint32_t> pending {0};
+        InaccessibleRead conditionRead;
+        std::uint32_t conditionNullRoots = 0;
+        cleanEvaluator.ReportInaccessibleReads(&conditionRead);
+        cleanEvaluator.ReportNullRootReads(&conditionNullRoots);
         while (!pending.empty()) {
             const auto index = pending.back();
             pending.pop_back();
@@ -92,20 +95,16 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
                 active[program.descriptorSources.size() + image] = 1u;
             }
             std::uint32_t condition = 0;
-            bool cleanEvaluable = false;
-            if (block.condition != nullptr && runtime.readSpecializationMemory != nullptr) {
-                try {
-                    cleanEvaluable = cleanEvaluator.Evaluate(block.condition, condition);
-                } catch (const std::runtime_error&) {
-                    cleanEvaluable = false;
-                }
-            }
+            const auto nullRootsBefore = conditionNullRoots;
+            const bool cleanEvaluable = block.condition != nullptr && runtime.readSpecializationMemory != nullptr && cleanEvaluator.Evaluate(block.condition, condition) && conditionNullRoots == nullRootsBefore;
             if (cleanEvaluable) {
                 pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
             } else {
                 pending.insert(pending.end(), block.successors.begin(), block.successors.end());
             }
         }
+        cleanEvaluator.ReportInaccessibleReads(nullptr);
+        cleanEvaluator.ReportNullRootReads(nullptr);
     }
     InaccessibleRead inaccessible;
     std::uint32_t nullRoots = 0;
