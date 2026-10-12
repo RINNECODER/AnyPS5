@@ -1,6 +1,8 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAUDIOOUT_SRC_AUDIOOUT2PADMIX_HPP
 #define CORE_LIBS_PRX_LIBSCEAUDIOOUT_SRC_AUDIOOUT2PADMIX_HPP
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 static constexpr std::uint16_t AUDIO_OUT2_PORT_TYPE_PAD_SPEAKER = 0x3;
@@ -30,5 +32,12 @@ void AudioOut2AccumulatePadFrame(AudioOut2Route route, const float* in, std::uin
 void AudioOut2FinishPadMix(float* out, std::uint32_t frames);
 AudioOut2PadLayout AudioOut2PadLayoutForDriver(const char* driver);
 void AudioOut2WritePadFrames(const float* pad, const AudioOut2PadLayout& layout, float* out, std::uint32_t frames);
+
+// The final per-sample step before the device: a NaN or infinite mix (a title can hand the ports garbage
+// floats) plays as silence rather than reaching the device, everything else is attenuated and clamped.
+inline float AudioOut2FinalSample(float sample, float gain) {
+    if (!std::isfinite(sample)) return 0.0f;
+    return std::clamp(sample * gain, -1.0f, 1.0f);
+}
 
 #endif

@@ -183,6 +183,28 @@ static void UpdatePadDevice(AudioOut2Context& context, Clock::time_point now) {
     if (AudioOut2HasPadPorts(context)) OpenPadDevice(context);
 }
 
+// The main output device stops when its sound card goes away (unplugged headphones, a changed default
+// output) and may never have opened. Both are retried every PAD_PROBE_INTERVAL; the wall-clock queue model
+// paces the title meanwhile. The caller holds the context lock, which this drops around the close because
+// the device callback takes it.
+static void UpdateMainDevice(AudioOut2Context& context, std::unique_lock<std::mutex>& lock, Clock::time_point now) {
+    if (now < context.nextMainProbe) return;
+    if (context.device != 0) {
+        if (SDL_GetAudioDeviceStatus(context.device) != SDL_AUDIO_STOPPED) return;
+        APS5_LOG_CHARS_OUT("AudioOut2: the main sound card went away; reopening the default output");
+        const auto lost = std::exchange(context.device, 0);
+        context.output.clear();
+        context.pendingGrains.clear();
+        context.pendingSince.clear();
+        context.priming = true;
+        lock.unlock();
+        CloseDevice(lost);
+        lock.lock();
+    }
+    context.nextMainProbe = now + PAD_PROBE_INTERVAL;
+    OpenDevice(context);
+}
+
 static void QueuePadGrain(AudioOut2Context& context) {
     AudioOut2WritePadFrames(context.padMix.data(), context.padLayout, context.padFrames.data(), context.grain);
     const auto frameBytes = static_cast<std::uint32_t>(context.padLayout.channels * sizeof(float));
@@ -207,7 +229,7 @@ static void Render(AudioOut2Context& context, const AudioOut2Grain& grain) {
     std::fill(context.mix.begin(), context.mix.end(), 0.0f);
     AudioOut2MixPorts(context, grain, context.mix.data(), pad, context.grain);
     for (float& sample : context.mix) {
-        sample = std::clamp(sample * MASTER_GAIN, -1.0f, 1.0f);
+        sample = AudioOut2FinalSample(sample, MASTER_GAIN);
         if (AudioOut2TraceEnabled()) context.summaryPeak = std::max(context.summaryPeak, std::abs(sample));
     }
     if (pad != nullptr) {
@@ -331,6 +353,7 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
     }
     context->queued++;
     context->playHead += GrainDuration(*context);
+    UpdateMainDevice(*context, lock, now);
     UpdatePadDevice(*context, now);
     auto grain = AudioOut2CaptureGrain(*context);
     const auto mixed = static_cast<std::uint32_t>(grain.size());
