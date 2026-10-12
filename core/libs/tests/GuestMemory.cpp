@@ -61,6 +61,7 @@ int APS5_VABI sceKernelSetVirtualRangeName(const void*, std::uint64_t, const cha
 int APS5_VABI sceKernelClearVirtualRangeName(const void*, std::uint64_t);
 int APS5_VABI sceKernelAllocateDirectMemory(std::int64_t, std::int64_t, std::size_t, std::size_t, int, std::int64_t*);
 int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
+int APS5_VABI sceKernelEnableDmemAliasing();
 int APS5_VABI sceKernelReleaseDirectMemory(std::int64_t, std::size_t);
 int APS5_VABI sceKernelAvailableDirectMemorySize(std::int64_t, std::int64_t, std::size_t, std::int64_t*, std::size_t*);
 int APS5_VABI sceKernelCheckedReleaseDirectMemory(std::int64_t, std::size_t);
@@ -253,6 +254,7 @@ static void CheckDirectMemoryFollowsPhysicalPages() {
     Require(sceKernelMapDirectMemory(&first, page * 2, 3, 0, phys, 0) == 0);
     static_cast<unsigned char*>(first)[0] = 11;
     static_cast<unsigned char*>(first)[page + 5] = 22;
+    Require(sceKernelEnableDmemAliasing() == 0);
     void* alias = nullptr;
     Require(sceKernelMapDirectMemory(&alias, page, 3, 0, phys + page, 0) == 0);
     Require(alias != first && static_cast<unsigned char*>(alias)[5] == 22);
