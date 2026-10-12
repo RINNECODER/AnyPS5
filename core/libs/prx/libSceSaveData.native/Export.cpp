@@ -315,6 +315,9 @@ static int dirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameS
         if (result->params != nullptr) {
             result->params[i] = sortByParam ? matches[i].param : load_param(matches[i].path);
         }
+        if (result->infos != nullptr) {
+            result->infos[i] = SaveDataSearchInfo{SAVE_DATA_BLOCKS_MAX, SAVE_DATA_BLOCKS_MAX, {}};
+        }
     }
     result->hit_num = static_cast<std::uint32_t>(matches.size());
     result->set_num = set;
