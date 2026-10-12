@@ -1,6 +1,7 @@
 #include "prx/libSceAudioOut/src/AudioOut2PadMix.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -29,6 +30,10 @@ static void Accumulate(AudioOut2Route route, const float* data, std::uint32_t ch
 }
 
 int main() {
+    Require(AudioOut2FinalSample(std::nanf(""), 0.5f) == 0.0f, "a NaN sample plays as silence");
+    Require(AudioOut2FinalSample(INFINITY, 0.5f) == 0.0f && AudioOut2FinalSample(-INFINITY, 0.5f) == 0.0f, "an infinite sample plays as silence");
+    Require(AudioOut2FinalSample(1.0f, 0.5f) == 0.5f && AudioOut2FinalSample(-0.25f, 0.5f) == -0.125f, "finite samples are attenuated");
+    Require(AudioOut2FinalSample(8.0f, 0.5f) == 1.0f && AudioOut2FinalSample(-8.0f, 0.5f) == -1.0f, "a hot mix is clamped");
     Require(AudioOut2RouteForPort(0x3, 1) == AudioOut2Route::PadSpeaker, "mono type 0x3 is the pad speaker");
     Require(AudioOut2RouteForPort(0x3, 2) == AudioOut2Route::PadSpeaker, "stereo type 0x3 is the pad speaker");
     Require(AudioOut2RouteForPort(0x6, 2) == AudioOut2Route::PadVibration, "stereo type 0x6 is the vibration");
