@@ -861,8 +861,15 @@ void LinkTitleData(const fs::path& out, const fs::path& data, const char* guest,
         if (fs::read_symlink(link, error) == target) return;
         fs::remove(link, error);
     } else if (fs::is_directory(link, error)) {
-        for (const auto& entry : SortedEntries(link))
-            if (!fs::exists(fs::symlink_status(target / entry.filename(), error))) fs::rename(entry, target / entry.filename(), error);
+        for (const auto& entry : SortedEntries(link)) {
+            const fs::path destination = target / entry.filename();
+            if (fs::exists(fs::symlink_status(destination, error))) continue;
+            std::error_code moved;
+            fs::rename(entry, destination, moved);
+            // A data directory on another volume cannot be renamed into: copy, so no save is lost.
+            if (moved) fs::copy(entry, destination, fs::copy_options::recursive | fs::copy_options::copy_symlinks, moved);
+            if (moved) throw HostFailure("cannot move " + entry.string() + " into the title data directory: " + moved.message());
+        }
         fs::remove_all(link, error);
     }
     fs::create_directory_symlink(target, link, error);
