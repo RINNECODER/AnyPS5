@@ -37,15 +37,6 @@ std::string AsciiPrefix(const char16_t* text) {
     return prefix;
 }
 
-template<typename TParse>
-auto ParseAsciiPrefix(const char16_t* text, char16_t** end, TParse parse) {
-    const std::string prefix = AsciiPrefix(text);
-    char* parsedEnd = nullptr;
-    const auto value = parse(prefix.c_str(), &parsedEnd);
-    if (end != nullptr) *end = const_cast<char16_t*>(text) + (parsedEnd - prefix.c_str());
-    return value;
-}
-
 bool IsNanSubject(const char* text) {
     while (*text == ' ' || (*text >= '\t' && *text <= '\r')) ++text;
     if (*text == '+' || *text == '-') ++text;
@@ -70,6 +61,15 @@ long double QuietNan(long double value, const char* text) {
     if ((exponent & 0x7fffu) != 0x7fffu || !IsNanSubject(text)) return value;
     const std::uint64_t significand = 0xc000000000000000u;
     std::memcpy(&value, &significand, sizeof(significand));
+    return value;
+}
+
+template<typename TParse>
+auto ParseAsciiPrefix(const char16_t* text, char16_t** end, TParse parse) {
+    const std::string prefix = AsciiPrefix(text);
+    char* parsedEnd = nullptr;
+    const auto value = parse(prefix.c_str(), &parsedEnd);
+    if (end != nullptr) *end = const_cast<char16_t*>(text) + (parsedEnd - prefix.c_str());
     return value;
 }
 

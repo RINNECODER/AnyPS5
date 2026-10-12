@@ -1,12 +1,12 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
-#include <bit>
 #include <climits>
-#include <cmath>
 #include <cstddef>
-#include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <initializer_list>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 
 extern "C" {
 const char16_t* APS5_VABI wmemchr_nid_postfix(const char16_t* s, char16_t c, std::size_t n);
