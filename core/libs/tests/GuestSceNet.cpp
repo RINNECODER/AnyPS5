@@ -157,6 +157,38 @@ static void CheckEmptyEpoll() {
     }
 }
 
+static void CheckEpollWritable() {
+    std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};
+    const int receiver = sceNetSocket("epoll-receiver", 2, 2, 17);
+    const int sender = sceNetSocket("epoll-sender", 2, 2, 17);
+    Require(receiver >= 0 && sender >= 0);
+    Require(sceNetBind_nid_postfix(receiver, address.data(), address.size()) == 0);
+    std::uint32_t size = address.size();
+    Require(sceNetGetsockname(receiver, address.data(), &size) == 0 && size == address.size());
+    const int epoll = sceNetEpollCreate("epoll-writable", 0);
+    Require(epoll >= 0);
+    NetEpollEvent registration{};
+    registration.events = 2;
+    registration.ident = static_cast<std::uint64_t>(sender);
+    registration.data.u32 = 41;
+    Require(sceNetEpollControl(epoll, 1, sender, &registration) == 0);
+    NetEpollEvent ready{};
+    Require(sceNetEpollWait(epoll, &ready, 1, 1000000) == 1);
+    Require(ready.events == 2 && ready.ident == static_cast<std::uint64_t>(sender) && ready.data.u32 == 41);
+    Require(sceNetEpollControl(epoll, 3, sender, nullptr) == 0);
+    const char payload[] = "epoll";
+    char peeked[sizeof(payload)]{};
+    Require(sceNetSendto(sender, payload, sizeof(payload), 0, address.data(), address.size()) == sizeof(payload));
+    Require(sceNetRecv(receiver, peeked, sizeof(peeked), 2) == sizeof(payload));
+    registration.events = 3;
+    registration.ident = static_cast<std::uint64_t>(receiver);
+    Require(sceNetEpollControl(epoll, 1, receiver, &registration) == 0);
+    Require(sceNetEpollWait(epoll, &ready, 1, 1000000) == 1);
+    Require(ready.events == 3 && ready.ident == static_cast<std::uint64_t>(receiver) && ready.data.u32 == 41);
+    Require(sceNetEpollDestroy(epoll) == 0);
+    Require(sceNetSocketClose(sender) == 0 && sceNetSocketClose(receiver) == 0);
+}
+
 static void CheckReceiveTimeout(int receiver, int sender, const std::array<std::uint8_t, 16>& address) {
     const int timeout = 50000;
     Require(sceNetSetsockopt(receiver, 0xffff, 0x1006, &timeout, sizeof(timeout)) == 0);
@@ -554,6 +586,7 @@ int main() {
     Require(sceNetInit_nid_postfix() == 0);
     CheckPoolStats();
     CheckEmptyEpoll();
+    CheckEpollWritable();
     CheckAddressText(2, "127.0.0.1");
     CheckAddressText(2, "255.255.255.255");
     CheckAddressText(28, "::1");
