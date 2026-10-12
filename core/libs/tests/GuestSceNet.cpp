@@ -344,6 +344,32 @@ static void CheckAddressText(int family, const char* text) {
     Require(sceNetInetNtop(family, address.data(), nullptr, output.size()) == nullptr && *sceNetErrnoLoc() == 22);
 }
 
+static void CheckEpollIdent() {
+    std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};
+    const int receiver = sceNetSocket("epoll-ident", 2, 2, 17);
+    const int sender = sceNetSocket("epoll-ident-sender", 2, 2, 17);
+    Require(receiver >= 0 && sender >= 0);
+    Require(sceNetBind_nid_postfix(receiver, address.data(), address.size()) == 0);
+    std::uint32_t size = address.size();
+    Require(sceNetGetsockname(receiver, address.data(), &size) == 0 && size == address.size());
+    const int epoll = sceNetEpollCreate("epoll-ident", 0);
+    Require(epoll >= 0);
+    NetEpollEvent registration{};
+    registration.events = 1;
+    registration.reserved = 0x5a5a5a5a;
+    registration.ident = 0x123456789abcdef0;
+    registration.data.u64 = 0x1122334455667788;
+    Require(sceNetEpollControl(epoll, 1, receiver, &registration) == 0);
+    const char payload[] = "ident";
+    Require(sceNetSendto(sender, payload, sizeof(payload), 0, address.data(), address.size()) == sizeof(payload));
+    NetEpollEvent ready{};
+    Require(sceNetEpollWait(epoll, &ready, 1, 1000000) == 1);
+    Require(ready.events == 1 && ready.reserved == 0 && ready.ident == static_cast<std::uint64_t>(receiver));
+    Require(ready.data.u64 == 0x1122334455667788);
+    Require(sceNetEpollDestroy(epoll) == 0);
+    Require(sceNetSocketClose(sender) == 0 && sceNetSocketClose(receiver) == 0);
+}
+
 static bool ipv6Unavailable = false;
 
 static bool HostIpv6LoopbackUnavailable() {
@@ -591,6 +617,7 @@ int main() {
     CheckAddressText(2, "255.255.255.255");
     CheckAddressText(28, "::1");
     CheckAddressText(28, "1234:5678:9abc:def0:1234:5678:9abc:def0");
+    CheckEpollIdent();
     CheckLinkLocalAllNodesIpv6();
     CheckUnspecifiedIpv6();
     CheckStreamSender(2);
