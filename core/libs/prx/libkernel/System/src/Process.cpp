@@ -575,6 +575,15 @@ int APS5_VABI setreuid_nid_postfix(std::uint32_t ruid, std::uint32_t euid) {
     return 0;
 }
 
+int APS5_VABI setregid_nid_postfix(std::uint32_t rgid, std::uint32_t egid) {
+    constexpr std::uint32_t unchanged = 0xffffffffu;
+    if (rgid != 0 && rgid != unchanged)
+        throw std::runtime_error("setregid: unsupported real group id " + std::to_string(rgid));
+    if (egid != 0 && egid != unchanged)
+        throw std::runtime_error("setregid: unsupported effective group id " + std::to_string(egid));
+    return 0;
+}
+
 int APS5_VABI setgroups_nid_postfix(int count, const std::uint32_t* groups) {
     if (count < 0 || count > freebsdGroupsMax) {
         *__error_nid_postfix() = errnoInvalidArgument;
