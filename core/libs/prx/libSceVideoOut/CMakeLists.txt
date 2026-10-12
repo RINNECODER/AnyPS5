@@ -53,6 +53,16 @@ if(BUILD_TESTING)
     endforeach()
 endif()
 
+if(BUILD_TESTING AND NOT WIN32)
+    add_test_executable(video_out_frame_dump_queue_tests tests/FrameDumpQueue.cpp)
+    target_include_directories(video_out_frame_dump_queue_tests PRIVATE ${LIBS_INCLUDE_DIR} ${ANYPS5_SDL2_INCLUDE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
+    target_link_libraries(video_out_frame_dump_queue_tests PRIVATE libSceVideoOut libSceAgcDriver libkernel libc)
+    set_target_properties(video_out_frame_dump_queue_tests PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME video_out_frame_dump_queue COMMAND video_out_frame_dump_queue_tests)
+    set_tests_properties(video_out_frame_dump_queue PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77 RESOURCE_LOCK videoout_app0
+        ENVIRONMENT "SDL_VIDEODRIVER=${ANYPS5_VIDEO_OUT_TEST_DRIVER};APS5_DUMP_FRAMES=4;APS5_DUMP_SCALE=4")
+endif()
+
 if(BUILD_TESTING)
     add_test_executable(pad_sdl_tests tests/PadSdl.cpp)
     target_link_libraries(pad_sdl_tests PRIVATE SDL2-static)
