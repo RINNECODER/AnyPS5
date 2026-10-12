@@ -61,9 +61,19 @@ static void* APS5_VABI Send(void* arg) {
     sender.result = pthread_kill_nid_postfix(sender.target, sender.guest);
     return nullptr;
 }
+static void* APS5_VABI SendWithoutDelay(void* arg) {
+    auto& sender = *static_cast<Sender*>(arg);
+    sender.result = pthread_kill_nid_postfix(sender.target, sender.guest);
+    return nullptr;
+}
 static Pthread StartSender(Sender& sender) {
     Pthread thread = nullptr;
     Require(scePthreadCreate(&thread, nullptr, Send, &sender, nullptr) == 0);
+    return thread;
+}
+static Pthread StartSenderWithoutDelay(Sender& sender) {
+    Pthread thread = nullptr;
+    Require(scePthreadCreate(&thread, nullptr, SendWithoutDelay, &sender, nullptr) == 0);
     return thread;
 }
 static void JoinSender(Pthread thread, const Sender& sender) {
@@ -144,4 +154,17 @@ int main() {
     Require(pause_nid_postfix() == -1 && *__error_nid_postfix() == 4 && received == 15);
     JoinSender(senderThread, sender);
     Require(signal_nid_postfix(15, nullptr) == Callback);
+
+    // The senders above sleep 50 ms first, so the signal always arrives while the wait is
+    // already blocked. A raise landing between the check of the pending set and the wait
+    // used to be lost, and the wait then never returned, so raise with no delay instead,
+    // many times.
+    Require(_sigprocmask_nid_postfix(1, &interrupt, &previous) == 0);
+    for (int round = 0; round < 500; ++round) {
+        Sender tight{self, 2, -1};
+        const Pthread senderThread = StartSenderWithoutDelay(tight);
+        Require(sigwait_nid_postfix(&interrupt, &taken) == 0 && taken == 2);
+        JoinSender(senderThread, tight);
+    }
+    Require(_sigprocmask_nid_postfix(3, &previous, nullptr) == 0);
 }

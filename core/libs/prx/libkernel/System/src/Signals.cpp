@@ -92,7 +92,12 @@ PendingSignals& Pending() {
 
 void MarkPending(int guest) {
     auto& pending = Pending();
-    pending.words[SignalWord(guest)].fetch_or(SignalBit(guest), std::memory_order_relaxed);
+    {
+        // under the same lock the waits check the set with: without it a signal raised
+        // between the check and the wait is lost and the wait never returns
+        std::lock_guard lock(pending.lock);
+        pending.words[SignalWord(guest)].fetch_or(SignalBit(guest), std::memory_order_relaxed);
+    }
     pending.changed.notify_all();
 }
 
