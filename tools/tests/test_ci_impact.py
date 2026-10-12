@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci"))
 import impact
 
 CPU, NATIVE, SHADER, REPLAY = "cpu-tcg", "native-runner", "shader-bridge", "guest-replay"
-EVERY = {CPU, NATIVE, SHADER, REPLAY}
 ROSETTA = "rosetta-libs"
+EVERY = {CPU, NATIVE, SHADER, REPLAY, ROSETTA}
 
 
 class ImpactSelectionTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class ImpactSelectionTests(unittest.TestCase):
 
     def test_union_over_files(self):
         got = impact.select(["docs/a.md", "core/cpu/src/Main.cpp", "core/shader/x.cpp"])
-        self.assertEqual(got, EVERY)
+        self.assertEqual(got, EVERY - {ROSETTA})
 
     def test_docs_only_selects_nothing(self):
         self.assertEqual(impact.select(["docs/a.md", "README.md"]), set())
@@ -57,15 +57,18 @@ class ImpactSelectionTests(unittest.TestCase):
         self.assertEqual(impact.select([]), set())
 
     def test_upstream_sync_label_selects_all(self):
-        self.assertEqual(impact.select(["docs/a.md"], ["upstream-sync"]), EVERY | {ROSETTA})
+        self.assertEqual(impact.select(["docs/a.md"], ["upstream-sync"]), EVERY)
 
-    def test_rosetta_libs_only_for_libs_relinker_and_cmake(self):
+    def test_rosetta_libs_for_the_direct_path_and_global_changes(self):
         for path in ("core/libs/prx/libkernel/Foo.cpp", "core/libs/prx/libSceAgc/Foo.cpp",
-                     "core/relinker/main.cpp", "cmake/RosettaLibs.cmake"):
+                     "core/relinker/main.cpp", "cmake/RosettaLibs.cmake", "tools/rosetta/run_title.py",
+                     "core/libs/prx/libSceAgcDriver/Execution/Metal/DirectDriver.mm",
+                     "core/libs/prx/libSceVideoOut/src/DirectDisplayWindow.mm",
+                     ".github/workflows/macos-metal.yml", "CMakeLists.txt", "tools/ci/impact.py"):
             with self.subTest(path=path):
                 self.assertIn(ROSETTA, impact.select([path]))
-        for path in ("core/cpu/src/Main.cpp", "core/shader/x.cpp", "CMakeLists.txt",
-                     ".github/workflows/macos-metal.yml", "docs/a.md", "mystery.bin"):
+        for path in ("core/cpu/src/Main.cpp", "core/shader/x.cpp", "docs/a.md", "tools/stubgen.py",
+                     "tools/other.py"):
             with self.subTest(path=path):
                 self.assertNotIn(ROSETTA, impact.select([path]))
 

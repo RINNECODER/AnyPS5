@@ -178,9 +178,9 @@ jobs:
         run: ctest --test-dir "$BUILD_DIR" $CTEST_ARGS
 
   # Rosetta direct execution (docs/design/rosetta-direct-execution.md): the system
-  # libraries built as x86_64 Mach-O libs/<name>.prx. Compile coverage plus the Darwin
-  # DirectMemory test only; not a required check. Pull requests run it when they touch
-  # core/libs, core/relinker or cmake (tools/ci/impact.py); pushes and manual runs always.
+  # libraries built as x86_64 Mach-O libs/<name>.prx. Compile coverage plus the x86_64
+  # direct-path tests (DirectMemory, Metal graphics, lib binds, runtime fixtures); not a required check. Pull requests run it when they touch
+  # core/libs, core/relinker, cmake, tools/rosetta or CI (tools/ci/impact.py); pushes and manual runs always.
   rosetta-libs:
     name: macOS Rosetta libs (x86_64 compile)
     needs: changes
@@ -230,16 +230,21 @@ jobs:
             echo "::endgroup::"
           fi
           exit "$status"
-      - name: Test DirectMemory under Rosetta
+      - name: Test the Rosetta direct path (x86_64)
         # Runs even when the build step failed on other libraries' translation units.
+        # direct_memory_darwin and the metal tests are x86_64 binaries (Rosetta runs them);
+        # rosetta_runtime_* relink small guest fixtures and run them under arch -x86_64;
+        # rosetta_lib_binds checks the libs' cross-imports. Window tests inherit
+        # ANYPS5_UNOBTRUSIVE_WINDOWS from the job environment via ctest.
         if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
         run: |
           if [ ! -x "$BUILD_DIR/tests/direct_memory_darwin_tests" ]; then
             echo "direct_memory_darwin_tests did not build; see the build step"
             exit 1
           fi
-          arch -x86_64 "$BUILD_DIR/tests/direct_memory_darwin_tests"
-      - name: Test Metal graphics under Rosetta
-        # metal_utility_tests and the direct-path clear + flip (they need libc and libkernel to link).
-        if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
-        run: ctest --test-dir "$BUILD_DIR" -R 'metal_utility_tests|rosetta_direct_graphics' --output-on-failure --timeout 120
+          if ! command -v ld.lld >/dev/null && [ ! -x /opt/homebrew/opt/lld/bin/ld.lld ] && [ ! -x /opt/homebrew/opt/llvm/bin/ld.lld ]; then
+            echo "::warning::ld.lld not found: rosetta_runtime_* tests are not registered"
+          else
+            cmake --build "$BUILD_DIR" --parallel --target rosetta_runtime_tests
+          fi
+          arch -x86_64 ctest --test-dir "$BUILD_DIR" -R 'direct_memory_darwin|metal_utility_tests|rosetta_direct_graphics|rosetta_lib_binds|rosetta_runtime' --output-on-failure --timeout 180
