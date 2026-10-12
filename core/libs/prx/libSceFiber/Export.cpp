@@ -2,6 +2,7 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/general/AsmMacros.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -207,12 +208,8 @@ static void UnpinStack(const void* context, std::uint64_t bytes) {
 extern "C" void Aps5FiberSwitchStack_nid_no_patch(void** save, void* load);
 extern "C" void Aps5FiberTrampoline_nid_no_patch();
 
-#ifdef __APPLE__
-// Mach-O: underscore-prefixed C symbols and no .type/.size directives.
-asm(R"(
-    .text
-    .globl _Aps5FiberSwitchStack_nid_no_patch
-_Aps5FiberSwitchStack_nid_no_patch:
+asm(".text\n"
+    APS5_ASM_FUNCTION("Aps5FiberSwitchStack_nid_no_patch") R"(
     push %rbp
     push %rbx
     push %r12
@@ -234,53 +231,13 @@ _Aps5FiberSwitchStack_nid_no_patch:
     pop %rbx
     pop %rbp
     ret
-
-    .globl _Aps5FiberTrampoline_nid_no_patch
-_Aps5FiberTrampoline_nid_no_patch:
+)" APS5_ASM_FUNCTION_END("Aps5FiberSwitchStack_nid_no_patch")
+    APS5_ASM_FUNCTION("Aps5FiberTrampoline_nid_no_patch") R"(
     mov %r12, %rdi
     and $-16, %rsp
-    call _Aps5FiberMain_nid_no_patch
+    call )" APS5_ASM_SYMBOL("Aps5FiberMain_nid_no_patch") R"(
     ud2
-)");
-#else
-asm(R"(
-    .text
-    .globl Aps5FiberSwitchStack_nid_no_patch
-    .type Aps5FiberSwitchStack_nid_no_patch, @function
-Aps5FiberSwitchStack_nid_no_patch:
-    push %rbp
-    push %rbx
-    push %r12
-    push %r13
-    push %r14
-    push %r15
-    sub $8, %rsp
-    stmxcsr 0(%rsp)
-    fnstcw 4(%rsp)
-    mov %rsp, (%rdi)
-    mov %rsi, %rsp
-    ldmxcsr 0(%rsp)
-    fldcw 4(%rsp)
-    add $8, %rsp
-    pop %r15
-    pop %r14
-    pop %r13
-    pop %r12
-    pop %rbx
-    pop %rbp
-    ret
-    .size Aps5FiberSwitchStack_nid_no_patch, .-Aps5FiberSwitchStack_nid_no_patch
-
-    .globl Aps5FiberTrampoline_nid_no_patch
-    .type Aps5FiberTrampoline_nid_no_patch, @function
-Aps5FiberTrampoline_nid_no_patch:
-    mov %r12, %rdi
-    and $-16, %rsp
-    call Aps5FiberMain_nid_no_patch
-    ud2
-    .size Aps5FiberTrampoline_nid_no_patch, .-Aps5FiberTrampoline_nid_no_patch
-)");
-#endif
+)" APS5_ASM_FUNCTION_END("Aps5FiberTrampoline_nid_no_patch"));
 
 struct InitialFrame {
     std::uint32_t mxcsr;
