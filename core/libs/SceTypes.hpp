@@ -14,6 +14,14 @@ typedef float __m128 __attribute__((__vector_size__(16), __aligned__(16)));
 struct alignas(16) __m128 { float v[4]; };
 #endif
 
+struct KernelAioSchedulingParam {
+    std::int32_t schedulingWindowSize;
+    std::int32_t delayedCountLimit;
+    std::uint32_t enableSplit;
+    std::uint32_t splitSize;
+    std::uint32_t splitChunkSize;
+};
+
 using Bool = std::uint8_t;
 
 struct SonyLconv {
@@ -1253,7 +1261,7 @@ union NetCtlInfo { std::uint8_t opaque[256]; };
 
 using NetCtlCallback = void (*)(int, void*);
 
-struct HttpEpoll {};
+struct HttpEpoll;
 using HttpEpollHandle = HttpEpoll*;
 using HttpsCallback = int (*)(int, unsigned int, void* const*, int, void*);
 using HttpRedirectCallback = int (*)(int, std::int32_t, std::int32_t*, const char*, void*);
@@ -1561,6 +1569,13 @@ struct SaveDataBackup {
     const SceSaveDataDirName* dir_name;
     const void* fingerprint;
     std::uint8_t reserved[32];
+};
+
+struct SaveDataConvert {
+    std::int32_t user_id;
+    std::int32_t pad;
+    const SceSaveDataDirName* dir_name;
+    std::uint8_t unknown[48];
 };
 
 struct AppContentInitParam { char reserved[32]; };

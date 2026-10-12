@@ -90,6 +90,7 @@ struct AudioOut2Context {
     std::deque<std::chrono::steady_clock::time_point> pendingSince;
     SDL_AudioDeviceID padDevice = 0;
     std::chrono::steady_clock::time_point nextPadProbe;
+    std::chrono::steady_clock::time_point nextMainProbe;
     AudioOut2PadLayout padLayout;
     std::vector<float> padMix;
     std::vector<float> padFrames;

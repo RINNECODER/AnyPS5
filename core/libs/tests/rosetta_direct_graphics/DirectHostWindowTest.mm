@@ -4,15 +4,18 @@
 // (Aps5RunHostApplication, as libkernel's Aps5StartGuest does) and the "guest" runs on the thread it
 // starts. Opening VideoOut from that thread must put a window owned by this process on screen
 // (CGWindowList), titled, full-screen capable, in an app with a Quit menu item; closing the window
-// or quitting must end the process with exit code 0. Each scenario runs in a child process, so its
+// or quitting, or a SIGTERM/SIGINT from the launcher, must run the registered shutdown callbacks and
+// end the process with exit code 0 within a few seconds. Each scenario runs in a child process, so its
 // exit status is checked. ANYPS5_UNOBTRUSIVE_WINDOWS keeps its meaning: no Dock icon, parked window.
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #include "prx/libSceVideoOut/include/DirectHostApplication.hpp"
+#include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceVideoOut/include/UnobtrusiveWindows.hpp"
 #include "SceTypes.hpp"
 #include <chrono>
 #include <climits>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -72,6 +75,7 @@ bool HasMenuItem(NSMenu* menu, SEL action) {
 
 void Guest() {
     Require(pthread_main_np() == 0, "the guest runs off the main thread");
+    LibcRegisterShutdown_nid_postfix([] { std::ofstream(marker + ".shutdown") << "ran\n"; });
     const auto opened = std::chrono::steady_clock::now();
     Require(sceVideoOutOpen(255, 0, 0, nullptr) > 0, "open the video output");
     bool onScreen = false;
@@ -100,6 +104,11 @@ void Guest() {
     std::ofstream(marker) << "window " << window << " on screen after " << seconds << " s\n";
     std::printf("window %u on screen %.2f s after sceVideoOutOpen; %s\n", window, seconds, scenario.c_str());
     std::fflush(stdout);
+    if (scenario == "term" || scenario == "int") {
+        kill(getpid(), scenario == "term" ? SIGTERM : SIGINT);
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        Fail("a stop signal ends the process");
+    }
     const bool close = scenario == "close";
     dispatch_async(dispatch_get_main_queue(), ^{
         if (close) {
@@ -137,12 +146,15 @@ bool RunScenario(const char* self, const char* metallib, const char* name) {
     const bool shown = markerFile.good();
     const bool ended = log.find("ending the game") != std::string::npos;
     const bool clean = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-    std::printf("%s: window shown %d, exit %d, ended the game %d\n", name, shown, WIFEXITED(status) ? WEXITSTATUS(status) : -1, ended);
-    if (!(shown && clean && ended)) std::fprintf(stderr, "%s child stderr:\n%s\n", name, log.c_str());
+    const bool flushed = std::ifstream(markerPath + ".shutdown").good();
+    std::printf("%s: window shown %d, exit %d, ended the game %d, shutdown callbacks %d\n", name, shown,
+        WIFEXITED(status) ? WEXITSTATUS(status) : -1, ended, flushed);
+    if (!(shown && clean && ended && flushed)) std::fprintf(stderr, "%s child stderr:\n%s\n", name, log.c_str());
     std::remove(markerPath.c_str());
+    std::remove((markerPath + ".shutdown").c_str());
     std::remove(logPath.c_str());
     rmdir(directory);
-    return shown && clean && ended;
+    return shown && clean && ended && flushed;
 }
 
 }
@@ -163,7 +175,7 @@ int main(int argc, char** argv) {
     uint32_t size = sizeof(self);
     if (_NSGetExecutablePath(self, &size) != 0) return 2;
     bool passed = true;
-    for (const char* name : {"close", "quit"}) passed = RunScenario(self, argv[1], name) && passed;
-    if (passed) std::printf("rosetta direct host window: window on screen from a guest thread; close and quit exit 0\n");
+    for (const char* name : {"close", "quit", "term", "int"}) passed = RunScenario(self, argv[1], name) && passed;
+    if (passed) std::printf("rosetta direct host window: window on screen from a guest thread; close, quit, SIGTERM and SIGINT run shutdown and exit 0\n");
     return passed ? 0 : 1;
 }

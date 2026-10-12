@@ -11,9 +11,11 @@
 #include "prx/libSceAgcDriver/Graphics/include/MeshDraw.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/GpuStallWatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GpuTiming.hpp"
 #include "PacketStoreRange.hpp"
 #include <spirv/unified1/spirv.hpp>
+#include <deque>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -214,6 +216,61 @@ SkippedWorkDiagnostics MetalDriver::SkippedWork() const {
     return impl->skipped;
 }
 
+namespace {
+
+// ANYPS5_METAL_STALL_DUMP: the user data and the first words of each bound buffer, appended to the
+// stuck dispatch's source as a comment.
+std::string DescribeDispatch(std::span<const std::uint32_t> userData, std::span<const MetalShaderResourceBinding> descriptors) {
+    std::string text = "\n/* user data:";
+    char word[48];
+    for (const auto value : userData) {
+        std::snprintf(word, sizeof word, " %08x", value);
+        text += word;
+    }
+    for (const auto& descriptor : descriptors) {
+        for (std::size_t i = 0; i < descriptor.buffers.size(); ++i) {
+            const auto& binding = descriptor.buffers[i];
+            if (binding.buffer == nil || binding.buffer.storageMode != MTLStorageModeShared) continue;
+            const auto available = binding.buffer.length > binding.offset ? binding.buffer.length - binding.offset : 0;
+            std::snprintf(word, sizeof word, "\n set %u binding %u[%zu] %llu bytes:", descriptor.descriptorSet, descriptor.binding, i,
+                static_cast<unsigned long long>(binding.length.value_or(available)));
+            text += word;
+            const auto* words = reinterpret_cast<const std::uint32_t*>(static_cast<const std::byte*>(binding.buffer.contents) + binding.offset);
+            for (std::size_t at = 0; at < std::min<std::size_t>(64, available / 4); ++at) {
+                std::snprintf(word, sizeof word, " %08x", words[at]);
+                text += word;
+            }
+        }
+    }
+    return text + "\n*/\n";
+}
+
+// ANYPS5_METAL_STALL_DUMP: the buffer ranges (host addresses) the last dispatches bound, oldest first,
+// so a stuck dispatch's inputs can be traced to the work that produced them.
+std::string RememberDispatch(std::uint64_t program, std::span<const std::uint32_t, 3> groups, std::span<const MetalShaderResourceBinding> descriptors) {
+    static std::deque<std::string> history;
+    char text[96];
+    std::snprintf(text, sizeof text, "\n cs 0x%llx groups %ux%ux%u:", static_cast<unsigned long long>(program), groups[0], groups[1], groups[2]);
+    std::string line = text;
+    for (const auto& descriptor : descriptors) {
+        for (const auto& binding : descriptor.buffers) {
+            if (binding.buffer == nil || binding.buffer.storageMode != MTLStorageModeShared) continue;
+            const auto available = binding.buffer.length > binding.offset ? binding.buffer.length - binding.offset : 0;
+            std::snprintf(text, sizeof text, " [0x%llx +0x%llx]",
+                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(binding.buffer.contents) + binding.offset),
+                static_cast<unsigned long long>(binding.length.value_or(available)));
+            line += text;
+        }
+    }
+    history.push_back(std::move(line));
+    if (history.size() > 64) history.pop_front();
+    std::string all = "\n/* recent dispatches (buffer host ranges), oldest first:";
+    for (const auto& entry : history) all += entry;
+    return all + "\n*/\n";
+}
+
+}
+
 void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
     GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
@@ -227,6 +284,8 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     const auto decoded = DecodeComputeDispatch(queue, packet,
         captured != nullptr ? std::span<const std::byte>(captured->header) : std::span<const std::byte>{});
     if (std::any_of(decoded.groups.begin(), decoded.groups.end(), [](auto value) { return value == 0; })) return;
+    GpuStallWatch::Note(1, decoded.programAddress, std::uint64_t{decoded.groups[0] & 0x1fffffu} |
+        std::uint64_t{decoded.groups[1] & 0x1fffffu} << 21 | std::uint64_t{decoded.groups[2] & 0x1fffffu} << 42);
     if (BindTrace::Active()) {
         BindTrace::Log("dispatch cs 0x%llx groups %ux%ux%u", static_cast<unsigned long long>(decoded.programAddress),
             decoded.groups[0], decoded.groups[1], decoded.groups[2]);
@@ -264,6 +323,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     options.supportsSimdGroups = true;
     configureSamplerArguments(options, *guest, nativeDevice);
     const auto converted = MetalBackend::ConvertToMetal(*guest, ShaderStage::Compute, options);
+    GpuStallWatch::SourceScope stallSource(converted.source);
     const bool bdaStores = StoresThroughBda(converted);
     auto pipeline = std::make_shared<const MetalComputePipeline>(nativeDevice, converted);
     // Depth/stencil and multisampled color targets live only in the draw executor's resident
@@ -290,12 +350,18 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     const auto size = MTLSizeMake(grid[0], grid[1], grid[2]);
     // One run of the dispatch; with `deferred` it is committed without waiting when its results need
     // no CPU copy into guest memory, and `completed` gets its fault at the timeline's next drain.
-    const auto encode = [this, pipeline, resident, size](bool deferred, MetalDraw::Completed completed, bool stores)
+    const auto encode = [this, pipeline, resident, size,
+        stallUserData = GpuStallWatch::DumpPath() != nullptr ? decoded.userData : std::vector<std::uint32_t>{},
+        stallProgram = decoded.programAddress, stallGroups = decoded.groups](bool deferred, MetalDraw::Completed completed, bool stores)
         -> std::optional<BdaAbi::Fault> {
         auto bindings = std::make_shared<MetalShaderResources>(*backend, ranges, resident, draw ? &draw->HostAliases() : nullptr,
             draw ? draw->ImageCache() : nullptr);
         bindings->SetCpuReadHook([this](std::uint64_t address, std::uint64_t bytes) { BeforeCpuRead(address, bytes); });
         const auto descriptors = bindings->Bindings(pipeline->Reflection());
+        if (GpuStallWatch::DumpPath() != nullptr) {
+            GpuStallWatch::SetDetail(DescribeDispatch(stallUserData, descriptors) +
+                RememberDispatch(stallProgram, std::span<const std::uint32_t, 3>(stallGroups.data(), 3), descriptors));
+        }
         id<MTLCommandBuffer> commands = backend->CommandBuffer();
         pipeline->Encode(commands, descriptors, size, {}, bindings->Residency());
         bindings->EncodeReadbacks(commands);
@@ -343,6 +409,7 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         return;
     }
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
+    GpuStallWatch::Note(2, decoded.programs.empty() ? 0 : decoded.programs.front().binary.codeAddress, parameters.indexCount);
     if (BindTrace::Active()) {
         std::string programs;
         for (const auto& program : decoded.programs) {

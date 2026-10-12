@@ -56,10 +56,12 @@ def build_title(work):
     return title, resource
 
 
-def launch(engine, title, resource, cache, eboot=None):
+def launch(engine, title, resource, cache, eboot=None, data=None):
     """MacPS's invocation: --resource-root, --diagnostics-json, --sce-module..., executable."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DYLD_", "LD_"))}
     env["ANYPS5_ROSETTA_CACHE"] = str(cache)
+    if data is not None:
+        env["ANYPS5_TITLE_DATA"] = str(data)
     command = [str(engine), "--resource-root", str(resource), "--diagnostics-json",
                "--sce-module", str(title / "GuestModule.prx"), str(eboot or title / "eboot.bin")]
     started = time.monotonic()
@@ -112,6 +114,19 @@ def main():
     check_run("cold", result, events, relinked=True)
     result, events, warm = launch(engine, title, resource, cache)
     check_run("warm", result, events, relinked=False)
+
+    # The title's save data and download0 live in the per-title data directory, linked into the run directory.
+    data = work / "data"
+    for out in cache.glob("*/out"):
+        (out / "_sd" / "slot").mkdir(parents=True, exist_ok=True)
+        (out / "_sd" / "slot" / "kept.bin").write_text("kept")
+    result, events, _ = launch(engine, title, resource, cache, data=data)
+    check_run("data-dir", result, events, relinked=False)
+    require((data / "SaveData" / "slot" / "kept.bin").read_text() == "kept", "save data written before the data dir moved into it", result)
+    require((data / "download0").is_dir(), "download0 in the data directory", result)
+    for out in cache.glob("*/out"):
+        require((out / "_sd").is_symlink() and (out / "_sd").resolve() == (data / "SaveData").resolve(), "_sd links to SaveData", result)
+        require((out / "download0").is_symlink(), "download0 is linked", result)
 
     result, events, _ = launch(engine, title, resource, cache, eboot=title / "missing.bin")
     errors = [event for event in events if event["event"] == "error"]

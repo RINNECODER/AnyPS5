@@ -10,7 +10,9 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include <mutex>
+#include <map>
 #include <memory>
+#include <tuple>
 #include <optional>
 #include <functional>
 
@@ -24,7 +26,11 @@ class MetalGuestHostAliases;
 
 class MetalDraw {
 public:
-    explicit MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary, id<MTLCommandQueue> queue = nil);
+    explicit MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary);
+    // Draws on the driver's own queue. Textures and uploads are shared with dispatches (the image
+    // cache, resident surfaces), and a texture encodes its uploads and copy-backs into the caller's
+    // command buffer, so draws and dispatches must use the same MetalDevice and command queue.
+    explicit MetalDraw(MetalDevice& shared);
     ~MetalDraw();
     MetalDraw(const MetalDraw&) = delete;
     MetalDraw& operator=(const MetalDraw&) = delete;
@@ -64,13 +70,18 @@ public:
         std::optional<std::array<std::uint32_t, 5>> meshArguments, MetalTimeline* timeline, Completed completed);
 
 private:
+    MetalDraw(std::unique_ptr<MetalDevice> owned, MetalDevice* shared);
     [[nodiscard]] id<MTLTexture> residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare);
+    [[nodiscard]] id<MTLTexture> residentDepthArray(const Graphics::GuestTextureResource& resource, bool storage);
     [[nodiscard]] id<MTLTexture> residentView(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const;
-    MetalDevice backend;
+    std::unique_ptr<MetalDevice> ownedBackend;
+    MetalDevice& backend;
     std::unique_ptr<MetalDepthSurfaceCache> depthCache;
     std::unique_ptr<MetalGuestHostAliases> hostAliases;
     std::vector<std::shared_ptr<MetalDepthSurface>> depthSurfaces;
     std::vector<std::shared_ptr<MetalColorSurface>> colorSurfaces;
+    // Array textures that gather resident depth slices (residentDepthArray), by base address and layers.
+    std::map<std::tuple<std::uint64_t, std::uint32_t, std::uint32_t>, id<MTLTexture>> depthArrays;
     std::unique_ptr<MetalMultisampleExpander> multisampleExpander;
     std::recursive_mutex drawMutex;
     std::function<void(std::uint64_t, std::uint64_t)> cpuReadHook;

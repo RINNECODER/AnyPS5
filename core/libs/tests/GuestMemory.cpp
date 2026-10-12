@@ -53,6 +53,7 @@ int APS5_VABI sceKernelReleaseFlexibleMemory(void*, std::size_t);
 int APS5_VABI sceKernelMprotect(const void*, std::size_t, int);
 int APS5_VABI sceKernelMtypeprotect(const void*, std::size_t, int, int);
 int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry*, int, int*, int);
+int APS5_VABI sceKernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry*, int, int*, int);
 int APS5_VABI sceKernelVirtualQuery(const void*, int, VirtualQueryInfo*, std::uint64_t);
 int APS5_VABI sceKernelSetVirtualRangeName(const void*, std::uint64_t, const char*);
 int APS5_VABI sceKernelClearVirtualRangeName(const void*, std::uint64_t);
@@ -175,6 +176,21 @@ static void CheckInternalNamedFlexibleMapping() {
     void* unknown = nullptr;
     try { sceKernelMapNamedFlexibleMemoryInternal(&unknown, length, 3, 0x20000, "internal mapping"); } catch (const std::exception&) { rejected = true; }
     Require(rejected && unknown == nullptr);
+    Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before);
+}
+
+static void CheckGuestModuleUsesFlexibleMemory() {
+    constexpr std::size_t moduleData = 0x10000;
+    const auto path = std::filesystem::relative(GUEST_MEMORY_MODULE).generic_string();
+    std::size_t before = 0;
+    std::size_t available = 0;
+    Require(sceKernelAvailableFlexibleMemorySize(&before) == 0);
+    void* module = dlopen_nid_postfix(path.c_str(), 2);
+    Require(module != nullptr);
+    Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available + moduleData <= before);
+    void* mapped = nullptr;
+    Require(sceKernelMapFlexibleMemory(&mapped, before, 3, 0) == SCE_KERNEL_ERROR_ENOMEM && mapped == nullptr);
+    Require(dlclose_nid_postfix(module) == 0);
     Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before);
 }
 
@@ -421,6 +437,16 @@ static void CheckMtypeprotect() {
     check(0, 0, 3);
     check(1, 3, 1);
     check(2, 5, 3);
+    KernelMemoryPoolBatchEntry poolEntry{};
+    poolEntry.op = 4;
+    poolEntry.type_protect.addr = bytes + page * 2;
+    poolEntry.type_protect.len = page;
+    poolEntry.type_protect.prot = 1;
+    poolEntry.type_protect.type = 4;
+    processed = -1;
+    Require(sceKernelMemoryPoolBatch(&poolEntry, 1, &processed, 0) == 0 && processed == 1);
+    check(1, 3, 1);
+    check(2, 4, 1);
     Require(sceKernelMtypeprotect(bytes, page * 3, 2, 3) == 0);
     VirtualQueryInfo whole{};
     Require(sceKernelVirtualQuery(bytes, 0, &whole, sizeof(whole)) == 0);
@@ -813,8 +839,10 @@ static void CheckGuestModuleImageProtection() {
 
 static void CheckUnhintedKernelMappingsLandInTheWindow() {
     constexpr std::size_t page = 0x4000;
-    constexpr std::uintptr_t windowStart = 0x200000000ull;
-    constexpr std::uintptr_t windowEnd = 0xFC00000000ull;
+    std::uintptr_t windowStart = 0;
+    std::size_t windowSize = 0;
+    GuestArena::GuestArenaRange_nid_postfix(&windowStart, &windowSize);
+    const auto windowEnd = windowStart + windowSize;
     std::int64_t phys = 0;
     Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page, 0, 0, &phys) == 0);
     void* direct = nullptr;
@@ -889,11 +917,17 @@ static void CheckArenaHonoursHintsWithoutGoingBelowThem() {
 
 static void CheckFixedMappingsReachTheApplicationAreaEnd() {
     constexpr std::size_t page = 0x4000;
-    constexpr std::uintptr_t applicationAreaEnd = 0xFC00000000ull;
     std::uintptr_t base = 0;
     std::size_t size = 0;
     GuestArena::GuestArenaRange_nid_postfix(&base, &size);
-    Require(base == 0x200000000ull && base + size == applicationAreaEnd);
+    constexpr std::uintptr_t expectedOffset =
+#ifdef ANYPS5_ENABLE_ASAN
+        0x0000100000000000ull;
+#else
+        0;
+#endif
+    constexpr std::uintptr_t applicationAreaEnd = 0xFC00000000ull + expectedOffset;
+    Require(base == 0x200000000ull + expectedOffset && base + size == applicationAreaEnd);
     std::int64_t phys = 0;
     Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * 2, 0, 0, &phys) == 0);
     void* const requested = reinterpret_cast<void*>(applicationAreaEnd - page * 2);
@@ -919,7 +953,7 @@ static void CheckFixedMappingsReachTheApplicationAreaEnd() {
     Require(sceKernelReleaseDirectMemory(phys, page * 2) == 0);
 }
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(ANYPS5_ENABLE_ASAN)
 static std::size_t LockedKilobytes() {
     std::ifstream status("/proc/self/status");
     std::string line;
@@ -943,7 +977,7 @@ static void CheckMlock() {
     Require(sceKernelMapFlexibleMemory(&mapped, length, 3, 0) == 0);
     auto* bytes = static_cast<unsigned char*>(mapped);
     Require(sceKernelMlock_nid_postfix(mapped, 0) == 0);
-#if defined(__linux__)
+#if defined(__linux__) && !defined(ANYPS5_ENABLE_ASAN)
     const auto lockedBefore = LockedKilobytes();
 #endif
     Require(sceKernelMlock_nid_postfix(bytes + 1, length - page) == 0);
@@ -954,7 +988,7 @@ static void CheckMlock() {
     Require(GetProcessWorkingSetSizeEx(GetCurrentProcess(), &minimum, &maximum, &limits) && minimum >= length && maximum > minimum);
     Require(VirtualUnlock(mapped, length));
     Require(!VirtualUnlock(mapped, length) && GetLastError() == ERROR_NOT_LOCKED);
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(ANYPS5_ENABLE_ASAN)
     Require(LockedKilobytes() - lockedBefore == length / 1024);
 #endif
     Require(sceKernelMlock_nid_postfix(mapped, length) == 0);
@@ -963,10 +997,14 @@ static void CheckMlock() {
     Require(sceKernelMlock_nid_postfix(reinterpret_cast<void*>(std::numeric_limits<std::uintptr_t>::max() - page + 1), page * 2) == invalid);
     void* reserved = nullptr;
     Require(sceKernelReserveVirtualRange(&reserved, page, 0, 0) == 0);
+#ifndef ANYPS5_ENABLE_ASAN
     Require(sceKernelMlock_nid_postfix(reserved, page) == outOfMemory);
+#endif
     Require(sceKernelMunmap(reserved, page) == 0);
     Require(sceKernelMunmap(mapped, length) == 0);
+#ifndef ANYPS5_ENABLE_ASAN
     Require(sceKernelMlock_nid_postfix(mapped, page) == outOfMemory);
+#endif
 }
 
 static void CheckSharedDirectMemoryLifecycle() {
@@ -1672,6 +1710,28 @@ static void CheckAvailableDirectMemoryIsLargestFreeBlock() {
     Require(start == top && size == static_cast<std::size_t>(window));
 }
 
+static void CheckMunmapOverUnmappedPages() {
+    constexpr std::size_t page = 0x4000;
+    const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
+    void* raw = mmap_nid_postfix(nullptr, page * 3, 3, 0x1002, -1, 0);
+    Require(raw != failed);
+    auto* memory = static_cast<unsigned char*>(raw);
+    memory[0] = 1;
+    memory[page * 2] = 2;
+    Require(munmap_nid_postfix(memory + page, page) == 0);
+    Require(munmap_nid_postfix(memory, page * 3) == 0);
+    {
+        GuestAllocations::Mutation mutation;
+        Require(!mutation.Overlaps(memory, page * 3));
+    }
+    VirtualQueryInfo info{};
+    Require(sceKernelVirtualQuery(memory, 0, &info, sizeof(info)) == SCE_KERNEL_ERROR_EACCES);
+    Require(sceKernelVirtualQuery(memory + page * 2, 0, &info, sizeof(info)) == SCE_KERNEL_ERROR_EACCES);
+    Require(munmap_nid_postfix(memory, page * 3) == 0);
+    Require(sceKernelMunmap(memory, page * 3) == 0);
+    Require(sceKernelMunmap(memory, 0) == SCE_KERNEL_ERROR_EINVAL);
+}
+
 int main() {
 #ifdef _WIN32
     _putenv_s("APS5_PIN_WAIT_MS", "1000");
@@ -1681,8 +1741,10 @@ int main() {
     CheckVirtualQueryForNonReadableGuestRange();
     CheckReleaseFlexibleMemory();
     CheckVirtualQueryPartialMunmap();
+    CheckMunmapOverUnmappedPages();
     CheckNamedAndHintedMappings();
     CheckInternalNamedFlexibleMapping();
+    CheckGuestModuleUsesFlexibleMemory();
     CheckBatchMapStopsAtInvalidEntry();
     CheckCheckedReleaseDirectMemory();
     CheckAudioCoprocessorProtection();
@@ -1793,7 +1855,7 @@ int main() {
     Require(munmap_nid_postfix(memory, page) == 0);
     Require(memory[page * 2] == 73);
     Require(munmap_nid_postfix(memory + page * 2, page) == 0);
-    Require(munmap_nid_postfix(memory, page) == -1);
+    Require(munmap_nid_postfix(memory, page) == 0);
     Require(madvise_nid_postfix(memory, page, 4) == 0);
     *__error_nid_postfix() = 0;
     Require(mprotect_nid_postfix(memory, page, 1) == -1 && *__error_nid_postfix() == 22);
