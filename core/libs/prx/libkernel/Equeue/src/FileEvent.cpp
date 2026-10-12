@@ -288,9 +288,6 @@ void RunHostWatch(std::shared_ptr<VnodeWatch> watch, HostWatch host) {
 
 int OpenHostWatch(int descriptor, std::uint32_t notes, HostWatch& host) {
     if (const auto directory = File::DirectoryDescriptorPath(descriptor)) {
-        if ((notes & NOTE_EXTEND) != 0) {
-            NotImplemented_nid_no_patch("EVFILT_VNODE: NOTE_EXTEND on a directory");
-        }
         host.directory = true;
         host.target = ::CreateFileW(directory->wstring().c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
