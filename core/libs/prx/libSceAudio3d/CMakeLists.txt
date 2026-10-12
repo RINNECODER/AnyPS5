@@ -21,4 +21,9 @@ if(BUILD_TESTING)
         set_tests_properties(guest_audio3d_port PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAudio3d>")
     endif()
+    add_test_executable(guest_audio3d_mixer_tests ${LIBS_INCLUDE_DIR}/tests/GuestAudio3dMixer.cpp)
+    target_include_directories(guest_audio3d_mixer_tests PRIVATE
+        ${LIBS_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+    configure_windows_unwind(guest_audio3d_mixer_tests)
+    add_test(NAME guest_audio3d_mixer COMMAND guest_audio3d_mixer_tests)
 endif()
