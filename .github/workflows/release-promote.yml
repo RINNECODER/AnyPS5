@@ -14,6 +14,11 @@ on:
   issues:
     types: [labeled]
   workflow_dispatch:
+    inputs:
+      skip_beta_age:
+        description: "Promote the newest verified alpha to beta without the 24 h wait (other gates still apply)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -54,7 +59,9 @@ jobs:
         run: python3 tools/release/promote.py stable ${ISSUE_NUMBER:+--issue "$ISSUE_NUMBER"}
       - name: Beta
         if: github.event_name != 'issues'
-        run: python3 tools/release/promote.py beta
+        env:
+          SKIP_BETA_AGE: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_beta_age && '--skip-beta-age' || '' }}
+        run: python3 tools/release/promote.py beta $SKIP_BETA_AGE
       - name: Stable candidate issue
         if: github.event_name != 'issues'
         run: python3 tools/release/promote.py stable-candidate
