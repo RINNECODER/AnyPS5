@@ -5,10 +5,12 @@
 #include <iphlpapi.h>
 #else
 #include <ifaddrs.h>
-#include <linux/if_link.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#ifdef __linux__
+#include <linux/if_link.h>
 #include <netpacket/packet.h>
+#endif
 #endif
 #include <cstdint>
 #include <cstddef>
@@ -94,7 +96,7 @@ static void HostTraffic(std::uint64_t& sent, std::uint64_t& received) {
         received += row.InOctets;
     }
     FreeMibTable(table);
-#else
+#elif defined(__linux__)
     ifaddrs* interfaces = nullptr;
     if (getifaddrs(&interfaces) != 0) throw std::runtime_error("sceNetCtlGetIfStat: the host interface list is unavailable");
     for (auto* item = interfaces; item; item = item->ifa_next) {
@@ -105,6 +107,8 @@ static void HostTraffic(std::uint64_t& sent, std::uint64_t& received) {
         received += stats->rx_bytes;
     }
     freeifaddrs(interfaces);
+#else
+    throw std::runtime_error("sceNetCtlGetIfStat: host interface byte counters are not implemented on this platform");
 #endif
 }
 
