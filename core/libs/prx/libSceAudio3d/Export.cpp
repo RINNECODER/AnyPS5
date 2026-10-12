@@ -266,9 +266,9 @@ int APS5_VABI sceAudio3dBedWrite2(uint32_t port_id, uint32_t num_channels, uint3
     if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
     if (num_channels != 2 && num_channels != 6 && num_channels != 8) return AUDIO3D_ERROR_INVALID_PARAMETER;
     if (format > AUDIO3D_FORMAT_FLOAT) return AUDIO3D_ERROR_INVALID_PARAMETER;
-    if (output_route > AUDIO3D_OUTPUT_ROUTE_BOTH) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (output_route != AUDIO3D_OUTPUT_ROUTE_BOTH && output_route != AUDIO3D_OUTPUT_ROUTE_HMU_ONLY && output_route != AUDIO3D_OUTPUT_ROUTE_TV_ONLY) return AUDIO3D_ERROR_INVALID_PARAMETER;
     if (buffer == nullptr || num_samples == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
-    const std::size_t sample_size = format == AUDIO3D_FORMAT_FLOAT ? 4 : 2;
+    const std::size_t sample_size = format == AUDIO3D_FORMAT_S16 ? 2u : 4u;
     if (reinterpret_cast<std::uintptr_t>(buffer) % sample_size != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
     const std::uint32_t samples = std::min(num_samples, g_port.granularity);
     const std::size_t bytes = static_cast<std::size_t>(samples) * num_channels * sample_size;

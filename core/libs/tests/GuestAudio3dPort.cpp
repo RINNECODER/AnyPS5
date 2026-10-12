@@ -7,6 +7,7 @@
 #include <exception>
 #include <iterator>
 #include <thread>
+#include <vector>
 
 extern "C" {
 void APS5_VABI sceAudio3dGetDefaultOpenParameters(Audio3dOpenParameters* parameters);
@@ -281,7 +282,18 @@ void CheckBed() {
     Require(sceAudio3dBedWrite(0, 1, 0, samples, 4) == INVALID_PARAMETER, "1 channel bed write");
     Require(sceAudio3dBedWrite(0, 2, 0, nullptr, 4) == INVALID_PARAMETER, "null bed buffer");
     Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 0, false) == 0, "bed write2 route both");
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 1, false) == 0, "bed write2 route hmu only");
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 2, false) == 0, "bed write2 route tv only");
     Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 3, false) == INVALID_PARAMETER, "bed write2 unknown route");
+    Require(sceAudio3dBedWrite(0, 2, 2, samples, 4) == INVALID_PARAMETER, "unknown bed format");
+    Require(sceAudio3dBedWrite(0, 2, 0, samples, 0) == INVALID_PARAMETER, "zero bed samples");
+    Require(sceAudio3dBedWrite(0, 2, 0, reinterpret_cast<const char*>(samples) + 1, 4) == INVALID_PARAMETER, "misaligned s16 bed buffer");
+    const float floats[8] = {};
+    Require(sceAudio3dBedWrite(0, 2, 1, floats, 4) == 0, "float bed write");
+    const std::uint32_t granularity = parameters.granularity;
+    std::vector<std::int16_t> wide(static_cast<std::size_t>(granularity) * 8, 0);
+    Require(sceAudio3dBedWrite(0, 6, 0, wide.data(), granularity) == 0, "6 channel bed write");
+    Require(sceAudio3dBedWrite(0, 8, 0, wide.data(), granularity) == 0, "8 channel bed write");
     Require(sceAudio3dPortClose(0) == 0, "close");
 }
 
