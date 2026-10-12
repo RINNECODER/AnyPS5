@@ -9,7 +9,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <stdexcept>
 #include <string>
 #include <system_error>
 
@@ -23,7 +22,6 @@
 #include <io.h>
 #include <atomic>
 #include <filesystem>
-#include <random>
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -103,18 +101,18 @@ int WindowsFailure(const char* operation, DWORD error) {
     throw std::system_error(static_cast<int>(error), std::system_category(), operation);
 }
 
+std::filesystem::path BackingPath() {
+    static std::atomic<std::uint64_t> sequence{0};
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    const auto name = "anyps5-jit-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(sequence++) + "-" + std::to_string(counter.QuadPart);
+    return std::filesystem::temp_directory_path() / name;
+}
+
 int CreateBacking(std::size_t bytes, int* descriptor, std::shared_ptr<JitObject>* object) {
-    static std::atomic<unsigned> sequence{0};
-    const auto directory = std::filesystem::temp_directory_path();
-    const auto seed = std::to_string(std::random_device{}());
-    HANDLE file = INVALID_HANDLE_VALUE;
-    for (int attempt = 0; attempt < 64 && file == INVALID_HANDLE_VALUE; ++attempt) {
-        const auto path = directory / ("anyps5-jit-" + seed + "-" + std::to_string(sequence++));
-        file = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
-                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
-        if (file == INVALID_HANDLE_VALUE && GetLastError() != ERROR_FILE_EXISTS) return WindowsFailure("create JIT shared memory file", GetLastError());
-    }
-    if (file == INVALID_HANDLE_VALUE) throw std::runtime_error("create JIT shared memory file: no free temporary name");
+    HANDLE file = CreateFileW(BackingPath().c_str(), GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
+                              FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (file == INVALID_HANDLE_VALUE) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "create JIT shared memory file");
     const auto size = static_cast<std::uint64_t>(bytes);
     HANDLE section = CreateFileMappingW(file, nullptr, PAGE_EXECUTE_READWRITE, static_cast<DWORD>(size >> 32), static_cast<DWORD>(size), nullptr);
     if (section == nullptr) {
@@ -138,16 +136,8 @@ int DuplicateDescriptor(int descriptor) {
     return _dup(descriptor);
 }
 #else
-int CreateExecutableFile() {
-#ifdef MFD_EXEC
-    const int file = memfd_create("anyps5 jit shared memory", MFD_CLOEXEC | MFD_EXEC);
-    if (file >= 0 || errno != EINVAL) return file;
-#endif
-    return memfd_create("anyps5 jit shared memory", MFD_CLOEXEC);
-}
-
 int CreateBacking(std::size_t bytes, int* descriptor, std::shared_ptr<JitObject>* object) {
-    const int file = CreateExecutableFile();
+    const int file = memfd_create("anyps5 jit shared memory", MFD_CLOEXEC);
     if (file < 0) return HostFailure("create JIT shared memory", errno);
     const bool representable = bytes <= static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
     if (!representable || ftruncate(file, static_cast<off_t>(bytes)) != 0) {
