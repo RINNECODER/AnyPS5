@@ -103,6 +103,9 @@ private:
             case IrOpcode::FPMinTri32:
             case IrOpcode::FPMaxTri32:
             case IrOpcode::FPMedTri32:
+            case IrOpcode::FPFract32:
+            case IrOpcode::FPSin:
+            case IrOpcode::FPCos:
             case IrOpcode::Phi:
                 for (std::size_t index = 0; index < value.ArgumentCount(); ++index) {
                     if (!Contains(value.Argument(index))) return false;

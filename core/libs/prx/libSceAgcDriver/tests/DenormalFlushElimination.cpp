@@ -202,6 +202,31 @@ int main() {
         return b.eliminate() == 2u && !floored.HasUses() && !ceiled.HasUses();
     });
 
+    passed &= run("a fract, sin or cos of a flushed value needs no flush, one of an unknown value does", [] {
+        Builder b;
+        auto& flushedInput = b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&b.flush(b.unknown())});
+        auto& raw = b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&b.unknown()});
+        const auto flushedResult = [&](IrOpcode opcode, IrValue& argument) -> IrValue& {
+            return b.flush(b.emit(IrOpcode::BitCastU32F32, IrType::U32, {&b.emit(opcode, IrType::F32, {&argument})}));
+        };
+        IrValue* removed[] = {
+            &flushedResult(IrOpcode::FPFract32, flushedInput),
+            &flushedResult(IrOpcode::FPSin, flushedInput),
+            &flushedResult(IrOpcode::FPCos, flushedInput),
+        };
+        IrValue* kept[] = {
+            &flushedResult(IrOpcode::FPFract32, raw),
+            &flushedResult(IrOpcode::FPSin, raw),
+            &flushedResult(IrOpcode::FPCos, raw),
+        };
+        for (auto* flushed : removed) b.keep(*flushed);
+        for (auto* flushed : kept) b.keep(*flushed);
+        bool result = b.eliminate() == 3u;
+        for (auto* flushed : removed) result &= !flushed->HasUses();
+        for (auto* flushed : kept) result &= flushed->HasUses();
+        return result;
+    });
+
     passed &= run("a max carried around a loop without a flush keeps its flush and the search ends", [] {
         Builder b;
         IrBlock& head = *b.block;
