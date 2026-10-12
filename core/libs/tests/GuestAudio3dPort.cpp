@@ -26,6 +26,10 @@ int APS5_VABI sceAudio3dObjectUnreserve(std::uint32_t port_id, std::uint32_t obj
 int APS5_VABI sceAudio3dObjectSetAttributes(std::uint32_t port_id, std::uint32_t object_id, std::uint64_t num_attributes, const Audio3dAttribute* attribute_array);
 int APS5_VABI sceAudio3dBedWrite(std::uint32_t port_id, std::uint32_t num_channels, std::uint32_t format, const void* buffer, std::uint32_t num_samples);
 int APS5_VABI sceAudio3dBedWrite2(std::uint32_t port_id, std::uint32_t num_channels, std::uint32_t format, const void* buffer, std::uint32_t num_samples, std::uint32_t output_route, bool restricted);
+int APS5_VABI sceAudio3dAudioOutOpen(std::uint32_t port_id, int user_id, std::int32_t type, std::int32_t index, std::uint32_t len, std::uint32_t freq, std::uint32_t param);
+int APS5_VABI sceAudio3dAudioOutClose(std::int32_t handle);
+int APS5_VABI sceAudio3dAudioOutOutput(std::int32_t handle, const void* ptr);
+int APS5_VABI sceAudio3dAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num);
 }
 
 namespace {
@@ -257,6 +261,33 @@ void CheckFlush() {
     Require(sceAudio3dPortClose(0) == 0, "close");
 }
 
+void CheckAudioOutPorts() {
+    const std::uint32_t granularity = Defaults().granularity;
+    Require(sceAudio3dAudioOutOpen(0, SYSTEM_USER, 126, 0, granularity, 48000, 1) == INVALID_PORT, "audio out open needs an open port");
+    Audio3dOpenParameters parameters = Defaults();
+    std::uint32_t id = 7;
+    Require(Open(parameters, &id) == 0 && id == 0, "open");
+    Require(sceAudio3dAudioOutOpen(1, SYSTEM_USER, 126, 0, granularity, 48000, 1) == INVALID_PORT, "audio out open on port 1");
+    Require(sceAudio3dAudioOutOpen(0, SYSTEM_USER, 126, 0, granularity + 0x100, 48000, 1) == INVALID_PARAMETER, "len must equal the granularity");
+    const int handle = sceAudio3dAudioOutOpen(0, SYSTEM_USER, 126, 0, granularity, 48000, 1);
+    Require(handle > 0, "audio out open returns a handle");
+    const std::vector<std::int16_t> block(static_cast<std::size_t>(granularity) * 2, 256);
+    Require(sceAudio3dAudioOutOutput(handle, block.data()) == static_cast<int>(granularity), "audio out output returns the sample count");
+    Require(sceAudio3dAudioOutOutput(handle, block.data()) == static_cast<int>(granularity), "a second output fills the pending queue");
+    Require(sceAudio3dAudioOutOutput(handle, block.data()) == NOT_READY, "a full pending queue must be NOT_READY");
+    Require(sceAudio3dPortFlush(0) == 0, "flush drains the associated ports");
+    Require(sceAudio3dAudioOutOutput(handle, block.data()) == static_cast<int>(granularity), "flush resets the pending queue");
+    Require(sceAudio3dAudioOutOutputs(nullptr, 0) == INVALID_PARAMETER, "outputs rejects an empty batch");
+    Require(sceAudio3dAudioOutClose(handle) == 0, "audio out close");
+    Require(sceAudio3dAudioOutClose(handle) == INVALID_PORT, "audio out double close");
+    Require(sceAudio3dAudioOutOutput(handle, block.data()) == INVALID_PORT, "output on a closed handle");
+    const int open_handle = sceAudio3dAudioOutOpen(0, SYSTEM_USER, 126, 0, granularity, 48000, 1);
+    Require(open_handle > 0, "audio out reopen");
+    Require(sceAudio3dPortClose(0) == 0, "close");
+    Require(sceAudio3dAudioOutOutput(open_handle, block.data()) == INVALID_PORT, "port close clears the associated ports");
+    Require(sceAudio3dAudioOutClose(open_handle) == INVALID_PORT, "port close closes the associated ports");
+}
+
 void CheckObjectAttributes() {
     float value = 0.5f;
     Audio3dAttribute attribute{0x10001, 0, &value, sizeof(value)};
@@ -331,6 +362,7 @@ int main() {
     CheckQueue();
     CheckMixAndPush();
     CheckFlush();
+    CheckAudioOutPorts();
     CheckObjectAttributes();
     CheckBed();
     CheckTerminate();
