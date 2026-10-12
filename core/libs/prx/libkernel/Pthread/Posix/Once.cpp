@@ -37,14 +37,16 @@ extern "C" int APS5_VABI pthread_once_nid_postfix(
     // Initializers may initialize other once controls. Never run guest code
     // under the shared lock. The lock publishes all initializer writes.
     CleanupHandler reset{};
+    void* const mark = ThreadCancel::CleanupMark();
     __pthread_cleanup_push_imp_nid_postfix(ResetOnce, control, &reset);
     try {
         initialize();
     } catch (...) {
-        __pthread_cleanup_pop_imp_nid_postfix(1);
+        ThreadCancel::CleanupRestore(mark);
+        ResetOnce(control);
         throw;
     }
-    __pthread_cleanup_pop_imp_nid_postfix(0);
+    ThreadCancel::CleanupRestore(mark);
     lock.lock();
     control->state = 1;
     lock.unlock();

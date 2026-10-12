@@ -393,6 +393,14 @@ void ThreadCancel::Check() {
     if (Requested()) scePthreadExit(GUEST_CANCELED);
 }
 
+void* ThreadCancel::CleanupMark() {
+    return CurrentGuestState().cleanupHandlers;
+}
+
+void ThreadCancel::CleanupRestore(void* mark) {
+    CurrentGuestState().cleanupHandlers = static_cast<CleanupHandler*>(mark);
+}
+
 void ThreadCancel::BeginWait(TimedWait::Condition* condition) {
     if (!CurrentGuestState().current) return;
     std::lock_guard lock(CurrentGuestState().current->cancelLock);
@@ -866,14 +874,16 @@ int APS5_VABI scePthreadOnce(int32_t* once, void (APS5_VABI* init)(void)) {
         state.wait(Running, std::memory_order_acquire);
     }
     CleanupHandler reset{};
+    void* const mark = ThreadCancel::CleanupMark();
     __pthread_cleanup_push_imp_nid_postfix(ResetOnce, once, &reset);
     try {
         init();
     } catch (...) {
-        __pthread_cleanup_pop_imp_nid_postfix(1);
+        ThreadCancel::CleanupRestore(mark);
+        ResetOnce(once);
         throw;
     }
-    __pthread_cleanup_pop_imp_nid_postfix(0);
+    ThreadCancel::CleanupRestore(mark);
     state.store(Done, std::memory_order_release);
     state.notify_all();
     return SCE_OK;

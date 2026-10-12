@@ -18,6 +18,7 @@ void APS5_VABI scePthreadExit(void* retval);
 int APS5_VABI scePthreadCancel(Pthread thread);
 void APS5_VABI scePthreadTestcancel();
 Pthread APS5_VABI scePthreadSelf();
+void APS5_VABI __pthread_cleanup_push_imp_nid_postfix(void (APS5_VABI* routine)(void*), void* argument, void* info);
 }
 static void Require(bool value) { if (!value) std::abort(); }
 static GuestOnce control{}, nested{}, retry{};
@@ -42,6 +43,14 @@ static void APS5_VABI CancelInsideInitializer() {
     scePthreadTestcancel();
 }
 static void APS5_VABI CountRetry() { ++retried; }
+static void APS5_VABI AbortCleanup(void*) { std::abort(); }
+static void APS5_VABI PushAndThrow() {
+    std::uintptr_t info[8];
+    __pthread_cleanup_push_imp_nid_postfix(AbortCleanup, nullptr, info);
+    throw 7;
+}
+static GuestOnce pushed{};
+static std::int32_t scePushed = 0;
 struct OnceCall { GuestOnce* control; std::int32_t* sceControl; Initializer initialize; };
 static void* APS5_VABI CallOnce(void* argument) {
     const auto& call = *static_cast<const OnceCall*>(argument);
@@ -83,4 +92,10 @@ int main() {
     LeaveInsideInitializer({nullptr, &sceCancelled, CancelInsideInitializer});
     Require(sceCancelled == 0);
     Require(scePthreadOnce(&sceCancelled, CountRetry) == 0 && sceCancelled == 1 && retried == 4);
+    try { pthread_once_nid_postfix(&pushed, PushAndThrow); std::abort(); }
+    catch (int value) { Require(value == 7 && pushed.state == 0); }
+    Require(pthread_once_nid_postfix(&pushed, CountRetry) == 0 && pushed.state == 1 && retried == 5);
+    try { scePthreadOnce(&scePushed, PushAndThrow); std::abort(); }
+    catch (int value) { Require(value == 7 && scePushed == 0); }
+    Require(scePthreadOnce(&scePushed, CountRetry) == 0 && scePushed == 1 && retried == 6);
 }
