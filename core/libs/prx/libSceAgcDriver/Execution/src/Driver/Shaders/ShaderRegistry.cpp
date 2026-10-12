@@ -23,6 +23,7 @@
 #include <functional>
 #include <list>
 #include <pthread.h>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
@@ -32,6 +33,16 @@ namespace AgcDriver::DriverDetail {
 std::shared_ptr<const ShaderRecompiler::SourceHandle> PrepareShaderWithDiagnostics(const ShaderRecompiler::RecompileRequest& request, ShaderRecompiler::ShaderPreparationContext* preparation) {
     try {
         return ShaderRecompiler::PrepareShader(request, preparation);
+    } catch (const std::exception& error) {
+        std::string dump;
+        try {
+            if (std::getenv("APS5_DUMP_SHADERS") != nullptr) dump = Driver::dumpRequest(request.shader.codeAddress, request);
+        } catch (...) {}
+        std::ostringstream where;
+        where << "shader 0x" << std::hex << request.shader.codeAddress << " stage " << static_cast<unsigned>(request.shader.stage);
+        if (!dump.empty()) where << " (" << dump << ")";
+        where << ": ";
+        throw std::runtime_error(where.str() + error.what());
     } catch (...) {
         try {
             if (std::getenv("APS5_DUMP_SHADERS") != nullptr) static_cast<void>(Driver::dumpRequest(request.shader.codeAddress, request));
