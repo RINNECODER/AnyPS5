@@ -14,6 +14,14 @@ typedef float __m128 __attribute__((__vector_size__(16), __aligned__(16)));
 struct alignas(16) __m128 { float v[4]; };
 #endif
 
+struct KernelAioSchedulingParam {
+    std::int32_t schedulingWindowSize;
+    std::int32_t delayedCountLimit;
+    std::uint32_t enableSplit;
+    std::uint32_t splitSize;
+    std::uint32_t splitChunkSize;
+};
+
 using Bool = std::uint8_t;
 
 struct SonyLconv {
