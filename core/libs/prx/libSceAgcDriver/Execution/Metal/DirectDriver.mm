@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/Metal/DirectDriver.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/MetalGuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -121,7 +122,27 @@ std::filesystem::path UtilityLibraryPath() {
     return std::filesystem::path(info.dli_fname).parent_path() / "AnyPS5Utilities.metallib";
 }
 
+// Guest GPU memory is bound to Metal per working-set interval (MetalGuestHostAliases::EnableWorkingSet):
+// a command buffer wires the host pages of every no-copy alias it uses, so binding a title's whole
+// GPU mapping wired all of it (13.5 GiB for the reference title). The budget caps the wired set;
+// ANYPS5_METAL_WORKING_SET_MIB overrides it (0 binds the whole mapping, as before).
+constexpr std::uint64_t WorkingSetGranule = std::uint64_t{4} << 20;
+constexpr std::uint64_t DefaultWorkingSetBudget = std::uint64_t{3} << 30;
+
+std::uint64_t WorkingSetBudget() {
+    const char* value = std::getenv("ANYPS5_METAL_WORKING_SET_MIB");
+    if (value == nullptr || *value == '\0') return DefaultWorkingSetBudget;
+    char* end = nullptr;
+    const auto mebibytes = std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0' || mebibytes > (std::numeric_limits<std::uint64_t>::max() >> 20))
+        throw std::invalid_argument("Rosetta direct path: ANYPS5_METAL_WORKING_SET_MIB must be a number of MiB");
+    if (mebibytes == 0) return 0;
+    return std::max(mebibytes << 20, WorkingSetGranule);
+}
+
 void Configure(DirectState& state, MetalDriver& driver, const std::shared_ptr<const Ranges>& ranges) {
+    const auto budget = WorkingSetBudget();
+    MetalGuestHostAliases::SetProcessWorkingSet(budget == 0 ? 0 : WorkingSetGranule, budget);
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (device == nil) throw std::runtime_error("Rosetta direct path: no Metal device");

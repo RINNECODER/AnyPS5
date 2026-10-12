@@ -65,6 +65,7 @@ private:
     std::vector<std::shared_ptr<MetalSampler>> samplers;
     id<MTLBuffer> emptyBuffer = nil;
     DepthTextureLookup depthLookup;
+    MetalGuestHostAliases* aliases = nullptr;
     [[nodiscard]] Graphics::DccKeys textureKeys(const Graphics::GuestTextureResource& descriptor, std::size_t bytes);
     void validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys);
     [[nodiscard]] bool physicallyOverlaps(std::uint64_t begin, std::uint64_t end,

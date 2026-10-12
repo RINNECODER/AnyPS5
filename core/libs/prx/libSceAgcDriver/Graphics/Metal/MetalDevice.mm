@@ -92,8 +92,11 @@ id<MTLComputePipelineState> MetalDevice::pipeline(NSString* kernel,
 
 void MetalDevice::Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArray<id<MTLBuffer>>* buffers,
                          const void* parameters, std::size_t parameterBytes, MTLSize grid,
-                         const std::array<std::uint32_t, 22>* constants) const {
+                         const std::array<std::uint32_t, 22>* constants, std::span<const NSUInteger> offsets) const {
     validateCommands(commands);
+    if (!offsets.empty() && (buffers == nil || offsets.size() != buffers.count)) {
+        throw std::invalid_argument("Metal encoding buffer offsets must match the buffers");
+    }
     if (commands.status >= MTLCommandBufferStatusCommitted) {
         throw std::invalid_argument("Metal command buffer has already been committed");
     }
@@ -128,7 +131,7 @@ void MetalDevice::Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArra
     }
     [encoder setComputePipelineState:state];
     for (NSUInteger i = 0; i < buffers.count; ++i) {
-        [encoder setBuffer:buffers[i] offset:0 atIndex:i];
+        [encoder setBuffer:buffers[i] offset:offsets.empty() ? 0 : offsets[i] atIndex:i];
     }
     if (parameterBytes != 0) {
         [encoder setBytes:parameters length:parameterBytes atIndex:buffers.count];
