@@ -110,6 +110,12 @@ static bool AppendThroughDescriptor(int descriptor) {
     errno = error;
     return moved == 0;
 }
+
+static bool IsPipeStream(FileStream* stream) {
+    return stream->IsPipe([](std::FILE* native) {
+        return GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(_fileno(native)))) == FILE_TYPE_PIPE;
+    });
+}
 #endif
 
 using GuestCompare = int (APS5_VABI *)(const void*, const void*);
@@ -371,7 +377,9 @@ size_t APS5_VABI fwrite_nid_postfix(const void* buffer, size_t size, size_t coun
 int APS5_VABI fseeko_nid_postfix(FileStream* stream, std::int64_t offset, int origin) {
     if (origin != SEEK_SET && origin != SEEK_CUR && origin != SEEK_END) { errno = 22; return -1; }
 #ifdef _WIN32
-    const int result = _fseeki64(GetNativeStream(stream), offset, origin);
+    auto* native = GetNativeStream(stream);
+    if (IsPipeStream(stream)) { errno = 29; return -1; }
+    const int result = _fseeki64(native, offset, origin);
 #else
     static_assert(sizeof(off_t) == 8);
     const int result = ::fseeko(GetNativeStream(stream), offset, origin);
@@ -384,7 +392,9 @@ int APS5_VABI fseeko_nid_postfix(FileStream* stream, std::int64_t offset, int or
 
 std::int64_t APS5_VABI ftello_nid_postfix(FileStream* stream) {
 #ifdef _WIN32
-    const auto result = _ftelli64(GetNativeStream(stream));
+    auto* native = GetNativeStream(stream);
+    if (IsPipeStream(stream)) { errno = 29; return -1; }
+    const auto result = _ftelli64(native);
 #else
     static_assert(sizeof(off_t) == 8);
     const auto result = ::ftello(GetNativeStream(stream));
