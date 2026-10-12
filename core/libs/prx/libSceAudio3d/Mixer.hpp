@@ -5,7 +5,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <numbers>
 #include <vector>
 
 namespace Audio3dInternal {
@@ -28,20 +27,15 @@ inline float ReadSample(const Source& source, std::uint32_t frame, std::uint32_t
 inline void MixFrame(const Source* sources, std::size_t count, std::uint32_t granularity, std::vector<std::int16_t>& out) {
     std::vector<float> mix(static_cast<std::size_t>(granularity) * 2, 0.0f);
     for (std::size_t source_index = 0; source_index < count; ++source_index) {
-        const Source& source = sources[source_index];
-        const double angle = (static_cast<double>(source.pan) + 1.0) * 0.25 * std::numbers::pi;
-        const float left_gain = static_cast<float>(std::cos(angle)) * source.gain;
-        const float right_gain = static_cast<float>(std::sin(angle)) * source.gain;
-        for (std::uint32_t frame = 0; frame < granularity && frame < source.num_samples; ++frame) {
+        const Source& src = sources[source_index];
+        const float gl = (src.pan <= 0.0f ? 1.0f : 1.0f - src.pan) * src.gain;
+        const float gr = (src.pan >= 0.0f ? 1.0f : 1.0f + src.pan) * src.gain;
+        for (std::uint32_t frame = 0; frame < granularity && frame < src.num_samples; ++frame) {
             const std::size_t left_index = static_cast<std::size_t>(frame) * 2;
-            if (source.channels == 1) {
-                const float sample = ReadSample(source, frame, 0);
-                mix[left_index] += sample * left_gain;
-                mix[left_index + 1] += sample * right_gain;
-            } else {
-                mix[left_index] += ReadSample(source, frame, 0) * source.gain;
-                mix[left_index + 1] += ReadSample(source, frame, 1) * source.gain;
-            }
+            const float left = ReadSample(src, frame, 0);
+            const float right = src.channels == 1 ? left : ReadSample(src, frame, 1);
+            mix[left_index] += left * gl;
+            mix[left_index + 1] += right * gr;
         }
     }
     out.resize(static_cast<std::size_t>(granularity) * 2);
