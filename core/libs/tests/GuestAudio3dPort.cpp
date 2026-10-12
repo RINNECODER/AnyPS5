@@ -23,6 +23,8 @@ int APS5_VABI sceAudio3dPortFlush(std::uint32_t port_id);
 int APS5_VABI sceAudio3dObjectReserve(std::uint32_t port_id, std::uint32_t* object_id);
 int APS5_VABI sceAudio3dObjectUnreserve(std::uint32_t port_id, std::uint32_t object_id);
 int APS5_VABI sceAudio3dObjectSetAttributes(std::uint32_t port_id, std::uint32_t object_id, std::uint64_t num_attributes, const Audio3dAttribute* attribute_array);
+int APS5_VABI sceAudio3dBedWrite(std::uint32_t port_id, std::uint32_t num_channels, std::uint32_t format, const void* buffer, std::uint32_t num_samples);
+int APS5_VABI sceAudio3dBedWrite2(std::uint32_t port_id, std::uint32_t num_channels, std::uint32_t format, const void* buffer, std::uint32_t num_samples, std::uint32_t output_route, bool restricted);
 }
 
 namespace {
@@ -268,6 +270,21 @@ void CheckObjectAttributes() {
     Require(sceAudio3dPortClose(0) == 0, "close");
 }
 
+void CheckBed() {
+    const std::int16_t samples[8] = {};
+    Require(sceAudio3dBedWrite(0, 2, 0, samples, 4) == INVALID_PORT, "bed write needs an open port");
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 0, false) == INVALID_PORT, "bed write2 needs an open port");
+    Audio3dOpenParameters parameters = Defaults();
+    std::uint32_t id = 7;
+    Require(Open(parameters, &id) == 0 && id == 0, "open");
+    Require(sceAudio3dBedWrite(0, 2, 0, samples, 4) == 0, "2 channel s16 bed write");
+    Require(sceAudio3dBedWrite(0, 1, 0, samples, 4) == INVALID_PARAMETER, "1 channel bed write");
+    Require(sceAudio3dBedWrite(0, 2, 0, nullptr, 4) == INVALID_PARAMETER, "null bed buffer");
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 0, false) == 0, "bed write2 route both");
+    Require(sceAudio3dBedWrite2(0, 2, 0, samples, 4, 3, false) == INVALID_PARAMETER, "bed write2 unknown route");
+    Require(sceAudio3dPortClose(0) == 0, "close");
+}
+
 void CheckTerminate() {
     std::uint32_t id = 7;
     const Audio3dOpenParameters parameters = Defaults();
@@ -294,5 +311,6 @@ int main() {
     CheckQueue();
     CheckFlush();
     CheckObjectAttributes();
+    CheckBed();
     CheckTerminate();
 }

@@ -9,6 +9,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
@@ -33,18 +34,28 @@ constexpr std::uint32_t AUDIO3D_ATTRIBUTE_RESET_STATE = 0x20000;
 constexpr std::uint32_t AUDIO3D_ATTRIBUTE_LATE_REVERB_LEVEL = 0x10001;
 constexpr std::uint32_t AUDIO3D_ATTRIBUTE_DOWNMIX_SPREAD_RADIUS = 0x10002;
 constexpr std::uint32_t AUDIO3D_ATTRIBUTE_DOWNMIX_SPREAD_HEIGHT_AWARE = 0x10003;
+constexpr std::uint32_t AUDIO3D_FORMAT_S16 = 0;
+constexpr std::uint32_t AUDIO3D_FORMAT_FLOAT = 1;
+constexpr std::uint32_t AUDIO3D_OUTPUT_ROUTE_BOTH = 0;
+constexpr std::uint32_t AUDIO3D_OUTPUT_ROUTE_HMU_ONLY = 1;
+constexpr std::uint32_t AUDIO3D_OUTPUT_ROUTE_TV_ONLY = 2;
 
 using Clock = std::chrono::steady_clock;
 
 struct Audio3dPort {
     bool open = false;
     std::uint32_t queue_depth = 0;
+    std::uint32_t granularity = 0;
     Clock::duration frame_duration{};
     std::uint32_t advanced = 0;
     std::deque<Clock::time_point> playing;
     std::uint32_t max_objects = 0;
     std::uint32_t next_object_id = 0;
     std::set<std::uint32_t> objects;
+    std::vector<std::uint8_t> bed;
+    std::uint32_t bed_channels = 0;
+    std::uint32_t bed_format = 0;
+    std::uint32_t bed_samples = 0;
 };
 
 std::mutex g_mutex;
@@ -164,6 +175,7 @@ int APS5_VABI sceAudio3dPortOpen(int user_id, const Audio3dOpenParameters* param
     g_port = Audio3dPort{};
     g_port.open = true;
     g_port.queue_depth = parameters->queue_depth;
+    g_port.granularity = parameters->granularity;
     g_port.max_objects = parameters->max_objects;
     g_port.frame_duration = std::chrono::duration_cast<Clock::duration>(
         std::chrono::nanoseconds(std::uint64_t{parameters->granularity} * 1000000000u / AUDIO3D_SAMPLE_RATE));
@@ -248,6 +260,28 @@ int APS5_VABI sceAudio3dPortFlush(uint32_t port_id) {
     g_port.playing.clear();
     return 0;
 }
+
+int APS5_VABI sceAudio3dBedWrite2(uint32_t port_id, uint32_t num_channels, uint32_t format, const void* buffer, uint32_t num_samples, uint32_t output_route, bool) {
+    std::lock_guard lock(g_mutex);
+    if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
+    if (num_channels != 2 && num_channels != 6 && num_channels != 8) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (format > AUDIO3D_FORMAT_FLOAT) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (output_route > AUDIO3D_OUTPUT_ROUTE_BOTH) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    if (buffer == nullptr || num_samples == 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    const std::size_t sample_size = format == AUDIO3D_FORMAT_FLOAT ? 4 : 2;
+    if (reinterpret_cast<std::uintptr_t>(buffer) % sample_size != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
+    const std::uint32_t samples = std::min(num_samples, g_port.granularity);
+    const std::size_t bytes = static_cast<std::size_t>(samples) * num_channels * sample_size;
+    const auto* first = static_cast<const std::uint8_t*>(buffer);
+    g_port.bed.assign(first, first + bytes);
+    g_port.bed_channels = num_channels;
+    g_port.bed_format = format;
+    g_port.bed_samples = samples;
+    return 0;
+}
+
+int APS5_VABI sceAudio3dBedWrite(uint32_t port_id, uint32_t num_channels, uint32_t format, const void* buffer, uint32_t num_samples) {
+    return sceAudio3dBedWrite2(port_id, num_channels, format, buffer, num_samples, AUDIO3D_OUTPUT_ROUTE_BOTH, false);
 
 int APS5_VABI sceAudio3dStrError(void) {
     NotImplemented_nid_no_patch(__func__);
