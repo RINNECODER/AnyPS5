@@ -1,12 +1,22 @@
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <charconv>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 #include "prx/libc/include/Shutdown.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -29,17 +39,61 @@ int ConsoleLanguage() {
     return language;
 }
 
+constexpr char OwnExecutable[] = "/app0/eboot.bin";
+
+void RelaunchHostExecutable() {
+    std::fflush(nullptr);
+#if defined(_WIN32)
+    std::wstring executable(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (length == 0 || length >= executable.size()) {
+        throw std::runtime_error("sceSystemServiceLoadExec: GetModuleFileNameW failed with error " + std::to_string(GetLastError()));
+    }
+    executable.resize(length);
+    std::wstring commandLine = GetCommandLineW();
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(executable.c_str(), commandLine.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &process)) {
+        throw std::runtime_error("sceSystemServiceLoadExec: CreateProcessW failed with error " + std::to_string(GetLastError()));
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+#elif defined(__linux__)
+    std::ifstream file("/proc/self/cmdline", std::ios::binary);
+    const std::string commandLine((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::vector<char*> argv;
+    std::size_t start = 0;
+    while (start < commandLine.size()) {
+        argv.push_back(const_cast<char*>(commandLine.c_str() + start));
+        const std::size_t end = commandLine.find('\0', start);
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    if (argv.empty()) throw std::runtime_error("sceSystemServiceLoadExec: empty /proc/self/cmdline");
+    argv.push_back(nullptr);
+    ::execv("/proc/self/exe", argv.data());
+    throw std::runtime_error("sceSystemServiceLoadExec: execv failed: " + std::string(std::strerror(errno)));
+#else
+    NotImplemented_nid_no_patch("sceSystemServiceLoadExec: relaunching on this host");
+#endif
+}
+
 }
 
 extern "C" {
 
 int APS5_VABI sceSystemServiceLoadExec(const char* path, const char* const* arguments) {
     if (!path || !*path) return SYSTEM_SERVICE_ERROR_PARAMETER;
-    if (std::strcmp(path, "exit") != 0) {
+    const bool exit = std::strcmp(path, "exit") == 0;
+    if (!exit && std::strcmp(path, OwnExecutable) != 0) {
         NotImplemented_nid_no_patch("sceSystemServiceLoadExec: executable replacement");
     }
-    (void)arguments;
+    if (!exit && arguments != nullptr && arguments[0] != nullptr) {
+        NotImplemented_nid_no_patch("sceSystemServiceLoadExec: arguments for the relaunched executable");
+    }
     LibcRunShutdown_nid_postfix();
+    if (!exit) RelaunchHostExecutable();
     std::exit(0);
 }
 
