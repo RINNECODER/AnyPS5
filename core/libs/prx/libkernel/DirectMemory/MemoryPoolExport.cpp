@@ -81,9 +81,8 @@ int APS5_VABI sceKernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entries
 }
 
 int APS5_VABI sceKernelMemoryPoolCommit(void* addr, size_t len, int type, int prot, int flags) {
- (void)type;
  (void)flags;
- return Guarded([&] { return PoolCommit(addr, len, 0, prot); });
+ return Guarded([&] { return PoolCommit(addr, len, type, prot); });
 }
 
 int APS5_VABI sceKernelMemoryPoolDecommit(void* addr, size_t len, int flags) {
