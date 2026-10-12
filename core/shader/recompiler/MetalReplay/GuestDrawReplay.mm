@@ -1898,7 +1898,7 @@ ShaderPixelStageInfo InterpolatedPixelInfo() {
 }
 
 std::vector<std::byte> DrawInterpolated(id<MTLDevice> device, id<MTLLibrary> library, std::span<const std::uint32_t> code, bool& emulated,
-    const ShaderPixelStageInfo& pixel = InterpolatedPixelInfo(), std::vector<std::uint32_t>* decorations = nullptr) {
+    const ShaderPixelStageInfo& pixel = InterpolatedPixelInfo(), std::vector<std::uint32_t>* decorations = nullptr, bool indexed = false) {
     std::vector<std::array<float, 4>> vertices(Triangle.begin(), Triangle.end());
     std::vector<std::byte> pixels(Width * Height * 4, std::byte{0x40});
     const auto compiled = Compile(device, code, static_cast<std::uint32_t>(vertices.size()), pixel, ParameterVertexCode);
@@ -1909,12 +1909,16 @@ std::vector<std::byte> DrawInterpolated(id<MTLDevice> device, id<MTLLibrary> lib
     }
     const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
         {ShaderStage::Vertex, &compiled.vertex, 0}, {ShaderStage::Fragment, &compiled.fragment, compiled.fragmentPush}}};
+    std::array<std::uint16_t, 3> indices{0, 1, 2};
     std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
         {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAddress, pixels, true}};
+    if (indexed) ranges.push_back({IndexAddress, std::as_writable_bytes(std::span(indices)), false});
     AgcDriver::Pm4::DrawParameters draw{};
     draw.indexCount = 3;
     draw.instanceCount = 1;
-    draw.indexed = false;
+    draw.indexed = indexed;
+    draw.indexSize = indexed ? 2u : 0u;
+    draw.indexAddress = indexed ? IndexAddress : 0u;
     AgcDriver::Metal::MetalDraw adapter(device, library);
     Require(adapter.DrawSynchronously(State(), draw, shaders, ranges).state == BdaAbi::FaultState::Empty,
         "Interpolated guest draw published a GPU memory fault");
@@ -2014,6 +2018,49 @@ void DrawInterpolation(id<MTLDevice> device, id<MTLLibrary> library) {
     std::cout << "Fixed-function interpolation: " << shapes.size() << " shapes and centroid/sample pairs matched the canonical draw; raw I/J read [[barycentric_coord]]\n";
 }
 
+// Per-vertex parameter reads (v_interp_mov P0/P10/P20) have no host interpolation and no MSL
+// per-vertex inputs. Vulkan feeds them from a generated geometry shader; Metal captures the vertex
+// shader and draws the captured triangles with a generated vertex function that gives every corner
+// the parameters of all three corners and its barycentric weights.
+void DrawPerVertexParameters(id<MTLDevice> device, id<MTLLibrary> library) {
+    const std::vector<std::uint32_t> code{
+        0xc80a0002,                         // v_interp_mov_f32 v2, p0, attr0.x
+        0xc80e0000,                         // v_interp_mov_f32 v3, p10, attr0.x
+        0xc8120001,                         // v_interp_mov_f32 v4, p20, attr0.x
+        0xd54b0002, 0x040a0700,             // v_fma_f32 v2, v0, v3, v2   (P0 + I * P10)
+        0xd54b0002, 0x040a0901,             // v_fma_f32 v2, v1, v4, v2   (+ J * P20)
+        0xc80e0202,                         // v_interp_mov_f32 v3, p0, attr0.z
+        0xc8120101,                         // v_interp_mov_f32 v4, p20, attr0.y
+        0x100808ff, 0x3d800000,             // v_mul_f32 v4, 0.0625, v4
+        0x7e0a02f2,                         // v_mov_b32 v5, 1.0
+        0xf800180f, 0x05040302, 0xbf810000, // exp mrt0 v2, v3, v4, v5 done; s_endpgm
+    };
+    for (const bool indexed : {false, true}) {
+        const std::string draw = indexed ? "indexed per-vertex parameter draw" : "per-vertex parameter draw";
+        bool emulated = false;
+        std::vector<std::byte> pixels;
+        try {
+            pixels = DrawInterpolated(device, library, code, emulated, InterpolatedPixelInfo(), nullptr, indexed);
+        } catch (const std::exception& error) {
+            throw std::runtime_error("The " + draw + " was rejected: " + error.what());
+        }
+        Require(emulated, "Per-vertex parameter reads did not request barycentric emulation");
+        // Triangle: x = -1, 3, -1 and y = -1, -1, 3; every vertex has z = 0.5.
+        for (std::uint32_t y = 0; y < Height; ++y) {
+            for (std::uint32_t x = 0; x < Width; ++x) {
+                const auto* pixel = &pixels[(y * Width + x) * 4];
+                const auto red = std::clamp((x + 0.5) / Width * 2.0 - 1.0, 0.0, 1.0) * 255.0;
+                Require(std::abs(std::to_integer<int>(pixel[0]) - red) <= 1.5 && std::abs(std::to_integer<int>(pixel[1]) - 127.5) <= 1.0 &&
+                        std::abs(std::to_integer<int>(pixel[2]) - 63.75) <= 1.0 && std::to_integer<int>(pixel[3]) == 255,
+                    "The " + draw + " drew the wrong value at pixel " + std::to_string(x) + "," + std::to_string(y) + ": " +
+                    std::to_string(std::to_integer<int>(pixel[0])) + " " + std::to_string(std::to_integer<int>(pixel[1])) + " " +
+                    std::to_string(std::to_integer<int>(pixel[2])) + " " + std::to_string(std::to_integer<int>(pixel[3])));
+            }
+        }
+    }
+    std::cout << "Per-vertex parameters: P0/P10/P20 reads in indexed and non-indexed draws drew through the captured-triangle vertex function\n";
+}
+
 }
 
 int main(int argc, const char* argv[]) {
@@ -2032,6 +2079,7 @@ int main(int argc, const char* argv[]) {
             DrawGuest(device, library, false, true, true);
             DrawSubmittedGuest(device, library);
             DrawInterpolation(device, library);
+            DrawPerVertexParameters(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

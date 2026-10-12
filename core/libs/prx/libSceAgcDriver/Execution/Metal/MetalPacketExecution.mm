@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/MeshDraw.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalShaderResources.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -157,6 +158,7 @@ void MetalDriver::Impl::Tolerate(std::string_view kind, Work&& work) {
 void MetalDriver::Impl::RecordSkip(std::string_view kind, std::string_view what) {
     std::string reason(what.substr(0, what.find('\n')));
     if (reason.size() > MaxSkipReasonBytes) reason.resize(MaxSkipReasonBytes);
+    if (BindTrace::Active()) BindTrace::Log("skipped %.*s: %s", static_cast<int>(kind.size()), kind.data(), reason.c_str());
     std::uint64_t count = 0;
     bool unlisted = false;
     {
@@ -202,6 +204,10 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     const auto decoded = DecodeComputeDispatch(queue, packet,
         captured != nullptr ? std::span<const std::byte>(captured->header) : std::span<const std::byte>{});
     if (std::any_of(decoded.groups.begin(), decoded.groups.end(), [](auto value) { return value == 0; })) return;
+    if (BindTrace::Active()) {
+        BindTrace::Log("dispatch cs 0x%llx groups %ux%ux%u", static_cast<unsigned long long>(decoded.programAddress),
+            decoded.groups[0], decoded.groups[1], decoded.groups[2]);
+    }
     if (decoded.compute.scratchDwords != 0) {
         throw std::runtime_error("Native Metal compute scratch memory (COMPUTE_PGM_RSRC2.SCRATCH_EN) is not implemented");
     }
@@ -274,6 +280,29 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     auto parameters = Pm4::ResolveDraw(packet, queue);
     if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) return;
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
+    if (BindTrace::Active()) {
+        std::string programs;
+        for (const auto& program : decoded.programs) {
+            char text[40];
+            std::snprintf(text, sizeof text, " 0x%llx", static_cast<unsigned long long>(program.binary.codeAddress));
+            programs += text;
+        }
+        BindTrace::Log("draw programs%s count %u instances %u%s samples %u colors %zu depth %s", programs.c_str(),
+            parameters.indexCount, parameters.instanceCount, decoded.state.rectList ? " rect-list" : "",
+            decoded.state.rasterSamples, decoded.state.colors.size(), decoded.state.depth ? "yes" : "no");
+        for (const auto& color : decoded.state.colors) {
+            BindTrace::Log("  color[%u] 0x%llx vk-format %d %ux%u mip %u samples %u dcc 0x%llx -> %s", color.exportIndex,
+                static_cast<unsigned long long>(color.address), static_cast<int>(color.format), color.extent.width, color.extent.height,
+                color.mip, color.samples, static_cast<unsigned long long>(color.dccAddress),
+                color.samples > 1 ? "resident MSAA surface" : "guest-memory texture");
+        }
+        if (decoded.state.depth) {
+            const auto& depth = *decoded.state.depth;
+            BindTrace::Log("  depth 0x%llx stencil 0x%llx vk-format %d %ux%u samples %u", static_cast<unsigned long long>(depth.address),
+                static_cast<unsigned long long>(depth.stencilAddress), static_cast<int>(depth.format), depth.extent.width,
+                depth.extent.height, depth.samples);
+        }
+    }
     if ((decoded.state.stages.path != Graphics::ShaderPath::Vertex && decoded.state.stages.path != Graphics::ShaderPath::Geometry) ||
         (decoded.state.rectList && decoded.state.stages.path != Graphics::ShaderPath::Vertex)) {
         throw std::runtime_error("Native Metal draw execution requires the implemented vertex or mesh path");

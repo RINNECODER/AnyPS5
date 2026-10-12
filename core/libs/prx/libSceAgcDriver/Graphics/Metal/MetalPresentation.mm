@@ -1,5 +1,6 @@
 #include "MetalPresentation.hpp"
 #include "FrameCapture.hpp"
+#include "BindTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DisplayFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
@@ -52,6 +53,12 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
         throw std::invalid_argument("Metal display buffer extent differs from the output");
     }
     if (buffer != nullptr) static_cast<void>(DisplayBufferSize(*buffer));
+    if (BindTrace::Active()) {
+        BindTrace::Log("present buffer 0x%llx format 0x%llx %ux%u tiling %u dcc 0x%llx",
+            static_cast<unsigned long long>(buffer ? buffer->address : 0), static_cast<unsigned long long>(buffer ? buffer->pixelFormat : 0),
+            window.width, window.height, buffer ? buffer->tilingMode : 0u, static_cast<unsigned long long>(buffer ? buffer->dccAddress : 0));
+    }
+    BindTrace::Flip();
     std::unique_lock lock(mutex);
     auto* layer = (__bridge CAMetalLayer*)window.metalLayer(window.context);
     if (layer == nil || ![layer isKindOfClass:CAMetalLayer.class]) throw std::invalid_argument("Metal presentation window callback did not return a CAMetalLayer");
