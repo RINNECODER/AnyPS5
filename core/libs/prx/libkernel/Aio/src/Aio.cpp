@@ -132,11 +132,15 @@ int SubmitCommandsMultiple(KernelAioRwRequest* req, std::int32_t size, bool writ
     return 0;
 }
 
-int ValidateIds(const std::int32_t* id, std::int32_t num, const void* out, const char* name) {
+// Waits and polls accept id 0 in a batch: it names no request (a caller's empty slot, as
+// for a request it already waited for and deleted), its state is left untouched, and it
+// counts as finished. Titles keep such slots in the batches they wait on.
+int ValidateIds(const std::int32_t* id, std::int32_t num, const void* out, const char* name, bool allowEmpty = false) {
     if (id == nullptr || out == nullptr) return SCE_KERNEL_ERROR_EFAULT;
     if (num < 0) return SCE_KERNEL_ERROR_EINVAL;
     if (num > AioIdNumMax) throw std::runtime_error(std::string(name) + ": more than 128 ids per batch is not modelled");
     for (std::int32_t i = 0; i < num; ++i) {
+        if (allowEmpty && id[i] == 0) continue;
         if (!ValidId(id[i])) return SCE_KERNEL_ERROR_EINVAL;
     }
     return 0;
@@ -233,7 +237,7 @@ int APS5_VABI sceKernelAioPollRequest(int32_t id, int32_t* state) {
 }
 
 int APS5_VABI sceKernelAioWaitRequests(int32_t* id, int32_t num, int32_t* state, uint32_t mode, uint32_t* usec) {
-    const int error = ValidateIds(id, num, state, "sceKernelAioWaitRequests");
+    const int error = ValidateIds(id, num, state, "sceKernelAioWaitRequests", true);
     if (error != 0) return error;
     if (mode != AioWaitAnd && mode != AioWaitOr) throw std::runtime_error("sceKernelAioWaitRequests: unsupported wait mode");
     const auto start = std::chrono::steady_clock::now();
@@ -243,6 +247,10 @@ int APS5_VABI sceKernelAioWaitRequests(int32_t* id, int32_t num, int32_t* state,
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             for (int32_t i = 0; i < num; ++i) {
+                if (id[i] == 0) {
+                    anyCompleted = true;
+                    continue;
+                }
                 state[i] = g_states[id[i]];
                 if (state[i] == AioProcessing) allDone = false;
                 if (state[i] == AioCompleted) anyCompleted = true;
@@ -283,10 +291,12 @@ int APS5_VABI sceKernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* usec
 }
 
 int APS5_VABI sceKernelAioPollRequests(int32_t* id, int32_t num, int32_t* state) {
-    const int error = ValidateIds(id, num, state, "sceKernelAioPollRequests");
+    const int error = ValidateIds(id, num, state, "sceKernelAioPollRequests", true);
     if (error != 0) return error;
     std::lock_guard<std::mutex> lock(g_mutex);
-    for (int32_t i = 0; i < num; ++i) state[i] = g_states[id[i]];
+    for (int32_t i = 0; i < num; ++i) {
+        if (id[i] != 0) state[i] = g_states[id[i]];
+    }
     return 0;
 }
 
