@@ -48,6 +48,17 @@ library change without it therefore tests the previous binaries and can show no 
 
 [Relinker usage and runtime layout](../user/USAGE.md).
 
+## macOS Rosetta direct path
+
+The engine on macOS runs the relinked title under Rosetta 2. Build the x86_64 libraries and the relinker, then run a title (see [Rosetta direct execution](../design/rosetta-direct-execution.md) for the options):
+
+```sh
+cmake -S . -B build-rosetta -G Ninja -DANYPS5_ROSETTA_LIBS=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 -DBUILD_TESTING=ON
+cmake --build build-rosetta --parallel
+ctest --test-dir build-rosetta -R 'direct_memory_darwin|metal_utility_tests|rosetta_direct_graphics|rosetta_lib_binds|rosetta_runtime' --output-on-failure
+python3 tools/rosetta/run_title.py <title-dir> --build build-rosetta
+```
+
 ## macOS Metal backend
 
 On an Apple Silicon Mac with Xcode's Metal command-line tools available, build and test the native Metal utilities, presentation path, and guest-memory mapping with:
@@ -58,7 +69,7 @@ cmake --build build-metal --parallel
 ctest --test-dir build-metal --output-on-failure
 ```
 
-This mode builds texture detiling, color transfer, mesh arguments, sample counter utilities, texture presentation, and guest-memory mapping. It does not build the guest CPU runtime or the whole renderer. It skips the existing third-party targets, so submodule initialization is unnecessary for this mode. Shader intermediates and `AnyPS5Utilities.metallib` are generated in the build directory.
+This mode builds texture detiling, color transfer, mesh arguments, sample counter utilities, texture presentation, and guest-memory mapping. It does not build the whole renderer. It skips the existing third-party targets, so submodule initialization is unnecessary for this mode. Shader intermediates and `AnyPS5Utilities.metallib` are generated in the build directory.
 
 To also build and test the SPIR-V to Metal shader bridge and native converted-shader pipelines, use CMake 3.24 or newer and initialize its SPIRV-Cross and Vulkan-Headers submodules (the guest sampler state types include `vulkan/vulkan.h`):
 

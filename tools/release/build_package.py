@@ -34,8 +34,7 @@ import zipfile
 import releaselib
 import verify
 
-TOOL_FILES = ("prepare_diagnostic_engine.py", "diagnostic_package.py",
-              "native_diagnostic_controls.cmake", "accept_diagnostic_package.swift")
+TOOL_FILES = ()
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -122,6 +121,7 @@ def failed_log_tail(receipt, log, lines=40):
 
 
 def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=print, attempts=3):
+    raise SystemExit("TCG engine removed; Rosetta packaging pending")
     source, work = Path(source).resolve(), Path(work)
     releaselib.require(re.fullmatch(r"[0-9a-f]{40}", commit or "") is not None, "--commit must be a full 40-hex SHA")
     releaselib.require(git(source, "rev-parse", "HEAD") == commit, "source checkout is not at --commit")
@@ -182,6 +182,7 @@ def build(source, commit, macps_repo, version, work, macps_revision="HEAD", log=
 
 
 def main(argv=None):
+    raise SystemExit("TCG engine removed; Rosetta packaging pending")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--commit", required=True)

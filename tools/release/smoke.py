@@ -163,11 +163,8 @@ def run_smoke(package, title_dir, timeout=180, scratch=None, frame_interval=30):
 
 
 def with_title_lease(function):
-    """Hold the shared title-session lease so the smoke never overlaps a MacPS or agent title run."""
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from prepare_diagnostic_engine import Lease  # noqa: E402  (tools/ is not a package)
-    with Lease(["title-session"], owner="release-smoke"):
-        return function()
+    """Run the smoke; the shared title-session lease went away with the TCG packaging tools."""
+    return function()
 
 
 def main(argv=None):

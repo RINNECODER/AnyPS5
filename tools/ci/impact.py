@@ -11,11 +11,11 @@ import os
 import subprocess
 import sys
 
-CPU, NATIVE, SHADER, REPLAY = "cpu-tcg", "native-runner", "shader-bridge", "guest-replay"
+SHADER, REPLAY = "shader-bridge", "guest-replay"
 ROSETTA = "rosetta-libs"
-JOBS = (CPU, NATIVE, SHADER, REPLAY, ROSETTA)
+JOBS = (SHADER, REPLAY, ROSETTA)
 # Global changes (build system, CI, unknown paths) run every job, the Rosetta one included.
-ALL = frozenset((CPU, NATIVE, SHADER, REPLAY, ROSETTA))
+ALL = frozenset((SHADER, REPLAY, ROSETTA))
 NONE = frozenset()
 EVERY_JOB = frozenset(JOBS)
 
@@ -32,13 +32,8 @@ RULES = (
     ("3rdparty/*", ALL),
     (".github/*", ALL),
     ("tools/ci/*", ALL),
-    ("tools/package_release.py", ALL),
-    ("tools/diagnostic_package.py", ALL),
-    ("tools/prepare_diagnostic_engine.py", ALL),
-    ("tools/native_diagnostic_controls.cmake", ALL),
     ("tools/ctest_unobtrusive_windows.cmake", ALL),
     ("tools/release/*", ALL),
-    ("tools/tests/test_native_diagnostic_package.py", ALL),
     # Nothing a macOS job builds or runs.
     ("docs/*", NONE),
     ("*.md", NONE),
@@ -47,14 +42,10 @@ RULES = (
     ("core/shader/recompiler/MetalReplay/*", frozenset({REPLAY})),
     ("core/shader/*", frozenset({SHADER, REPLAY})),
     # Metal/AGC execution and video out.
-    ("core/libs/prx/libSceAgcDriver/Graphics/Metal/*", frozenset({NATIVE, SHADER, REPLAY})),
-    ("core/libs/prx/libSceAgcDriver/Execution/Metal/*", frozenset({NATIVE, REPLAY})),
-    ("core/libs/prx/libSceAgc/*", frozenset({NATIVE, REPLAY})),
-    ("core/libs/prx/libSceVideoOut/*", frozenset({NATIVE, REPLAY})),
-    ("core/cpu/videoout/*", frozenset({NATIVE, REPLAY})),
-    ("core/cpu/*Metal*", frozenset({NATIVE, REPLAY})),
-    # Everything else under the guest CPU runtime.
-    ("core/cpu/*", frozenset({CPU, NATIVE})),
+    ("core/libs/prx/libSceAgcDriver/Graphics/Metal/*", frozenset({SHADER, REPLAY})),
+    ("core/libs/prx/libSceAgcDriver/Execution/Metal/*", frozenset({REPLAY})),
+    ("core/libs/prx/libSceAgc/*", frozenset({REPLAY})),
+    ("core/libs/prx/libSceVideoOut/*", frozenset({REPLAY})),
     # Tooling no macOS job builds; its python tests run in the changes job and build.yml.
     ("tools/rosetta/*", frozenset({ROSETTA})),
     ("tools/*", NONE),

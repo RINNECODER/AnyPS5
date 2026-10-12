@@ -1,5 +1,7 @@
 # Engine releases and update channels
 
+> Engine releases are paused. The TCG engine these tools packaged was removed; `tools/release/alpha.py` and `build_package.py` fail fast until Rosetta packaging exists. The channel feed tooling below is kept as is.
+
 The fork publishes signed engine builds for MacPS on three channels. MacPS installs from
 the channel picked in its Settings (default `alpha`), verifies everything below before it
 touches the installed engine, and always keeps the previous version for a one-click
@@ -7,7 +9,7 @@ rollback.
 
 | Channel | What lands there | How |
 |---|---|---|
-| `alpha` | Every push to `main` whose four required macOS checks passed | `.github/workflows/release-alpha.yml` → `tools/release/alpha.py` |
+| `alpha` | Every push to `main` whose required macOS checks passed | `.github/workflows/release-alpha.yml` → `tools/release/alpha.py` |
 | `beta` | An alpha that is at least 24 h old, passed the required checks, MacPS acceptance and the local PPSA04203 smoke (boot stage not below the current beta), with no open `regression` issue against it | hourly `.github/workflows/release-promote.yml` → `promote.py beta` |
 | `stable` | A beta the maintainer approved | `promote.py stable-candidate` opens an issue; the maintainer adds `release:approved` |
 
@@ -90,7 +92,7 @@ python3 tools/release/macps_accept.py anyps5-engine-<version>-macos-arm64.zip --
 
 **Beta: `promote.py beta`, run hourly.** It takes the newest verified alpha that is newer than the current beta and at least 24 h old. Every one of these gates must pass:
 
-1. The four required macOS checks succeeded on that commit.
+1. The required macOS checks succeeded on that commit.
 2. MacPS accepts the downloaded zip.
 3. The PPSA04203 smoke reaches a boot stage at least as far as the current beta's.
 4. No open `regression` issue is filed against it.

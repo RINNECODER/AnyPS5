@@ -1,35 +1,19 @@
 # AnyPS5 for macOS
 
-Apple Silicon PS5 runtime: QEMU/TCG guest CPU, native HLE system libraries, and a Metal graphics backend.
+PS5 runtime for macOS: the guest runs directly under Rosetta 2 as relinked x86_64 code, with native HLE system libraries and a Metal graphics backend.
 
 > Fork of [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5) (a Linux/Windows relinker); this fork targets macOS.
 
 ## Requirements
 
-- A Mac with Apple Silicon (arm64). The CPU runtime build requires it (`ANYPS5_CPU_RUNTIME_ONLY` in [CMakeLists.txt](CMakeLists.txt)).
+- A Mac with Apple Silicon and Rosetta 2 installed (`arch -x86_64 /usr/bin/true` must succeed). The engine is built for x86_64 (`-DANYPS5_ROSETTA_LIBS=ON -DCMAKE_OSX_ARCHITECTURES=x86_64`).
 - Xcode command-line tools with the Metal toolchain. No minimum macOS version is pinned in the build files.
 
-## Get it
+## Run a title
 
-- **Engine releases:** signed engine packages are published on the [releases page](https://github.com/RINNECODER/AnyPS5/releases) and announced through the channel feeds (`engine-alpha.json`, `engine-beta.json`, `engine-stable.json` on the [channels release](https://github.com/RINNECODER/AnyPS5/releases/tag/channels)).
-- **MacPS:** MacPS, a separate macOS launcher app, installs and updates engines automatically.
-- **Build from source:** see the [macOS Metal backend section](docs/dev/BUILD.md#macos-metal-backend) of the build instructions; the exact flags used in CI are in [macos-metal.yml](.github/workflows/macos-metal.yml).
+The direct path relinks the title with `relinker --macos --to-rosetta`, builds the system libraries as x86_64 Mach-O `libs/<name>.prx`, and runs the result under `arch -x86_64`. [`tools/rosetta/run_title.py`](tools/rosetta/run_title.py) does the relink (cached per title), lays out the run directory and launches it; see [the design](docs/design/rosetta-direct-execution.md) and the [macOS build section](docs/dev/BUILD.md#macos-rosetta-direct-path).
 
-### Release channels
-
-- **alpha:** every green merge to `main`.
-- **beta:** promoted automatically after 24 hours and passing the suites.
-- **stable:** promoted on maintainer approval.
-
-See [docs/RELEASES.md](docs/RELEASES.md).
-
-## Status
-
-[![alpha](https://rinnecoder.github.io/AnyPS5/badge-engine-alpha.svg)](https://rinnecoder.github.io/AnyPS5/) [![beta](https://rinnecoder.github.io/AnyPS5/badge-engine-beta.svg)](https://rinnecoder.github.io/AnyPS5/) [![stable](https://rinnecoder.github.io/AnyPS5/badge-engine-stable.svg)](https://rinnecoder.github.io/AnyPS5/) [![macOS tests](https://rinnecoder.github.io/AnyPS5/badge-macos-tests.svg)](https://rinnecoder.github.io/AnyPS5/) [![macOS HLE](https://rinnecoder.github.io/AnyPS5/badge-macos-hle.svg)](https://rinnecoder.github.io/AnyPS5/)
-
-[![macOS HLE coverage map](https://rinnecoder.github.io/AnyPS5/macos-coverage.svg)](https://rinnecoder.github.io/AnyPS5/)
-
-<sub>Engine badges: latest version and build date on each channel ("none" if nothing is published). macOS tests: native required tests gating an engine build. macOS HLE: share of the functions declared in [core/libs/prx](core/libs/prx) that a macOS provider in [core/cpu/src](core/cpu/src) registers (static scan; method on the [status page](https://rinnecoder.github.io/AnyPS5/)).</sub>
+Engine releases are paused while packaging is rebuilt around the Rosetta path. The exact flags CI uses are in [macos-metal.yml](.github/workflows/macos-metal.yml).
 
 [List of verified games](docs/user/COMPATIBILITY.md)
 

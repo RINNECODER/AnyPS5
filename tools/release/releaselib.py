@@ -22,7 +22,7 @@ import verify
 REPO = verify.REPO
 CHANNELS_TAG = "channels"
 CHANNELS = ("alpha", "beta", "stable")
-REQUIRED_CHECKS = ("macOS CPU TCG", "macOS native runner", "macOS shader bridge", "macOS guest replay")
+REQUIRED_CHECKS = ("macOS shader bridge", "macOS guest replay", "macOS Rosetta libs (x86_64 compile)")
 MAINTAINER = "RINNECODER"
 LABELS = {
     "regression": ("d73a4a", "A released engine/app version regressed; blocks beta and stable promotion"),
