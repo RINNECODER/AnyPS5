@@ -90,6 +90,10 @@ struct Frame {
     std::intptr_t dataAlign {};
     unsigned returnRegister {};
     bool signal {};
+#ifdef _WIN32
+    bool foreign {};
+    _Unwind_Context caller {};
+#endif
 };
 
 bool DecodeRange(Frame& frame, const Lookup& query, const Byte*& p, const char*& augmentation, Byte& lsdaEncoding) {
@@ -192,6 +196,42 @@ const FrameIndex& IndexFrames(const ImageKey& key, const Byte* begin, const Byte
     std::sort(index.begin(), index.end());
     return index;
 }
+
+const IMAGE_NT_HEADERS64* ImageHeaders(Word pc, const Byte*& base) {
+    void* image = nullptr;
+    if (!RtlPcToFileHeader(reinterpret_cast<void*>(pc), &image) || !image) return nullptr;
+    base = static_cast<const Byte*>(image);
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    return nt->Signature == IMAGE_NT_SIGNATURE ? nt : nullptr;
+}
+
+bool VirtualUnwind(const _Unwind_Context& context, _Unwind_Context& caller) {
+    const Word pc = context.registers[16];
+    const Byte* base = nullptr;
+    const auto* nt = ImageHeaders(pc, base);
+    if (!nt) return false;
+    const auto* sections = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        if (std::memcmp(sections[i].Name, ".ehmeta", 8) == 0 || std::memcmp(sections[i].Name, ".ehfram", 8) == 0) return false;
+    DWORD64 imageBase = 0;
+    auto* function = RtlLookupFunctionEntry(pc, &imageBase, nullptr);
+    if (!function) return false;
+    CONTEXT state {};
+    DWORD64* const registers[17] {&state.Rax, &state.Rdx, &state.Rcx, &state.Rbx, &state.Rsi, &state.Rdi, &state.Rbp, &state.Rsp,
+        &state.R8, &state.R9, &state.R10, &state.R11, &state.R12, &state.R13, &state.R14, &state.R15, &state.Rip};
+    for (unsigned i = 0; i < 17; ++i) *registers[i] = context.registers[i];
+    for (unsigned i = 0; i < 16; ++i) std::memcpy(&state.FltSave.XmmRegisters[i], context.vectorRegisters[i], 16);
+    void* handlerData = nullptr;
+    DWORD64 establisher = 0;
+    if (RtlVirtualUnwind(UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER, imageBase, pc, function, &state, &handlerData, &establisher, nullptr)) return false;
+    caller = context;
+    for (unsigned i = 0; i < 17; ++i) caller.registers[i] = *registers[i];
+    for (unsigned i = 0; i < 16; ++i) std::memcpy(caller.vectorRegisters[i], &state.FltSave.XmmRegisters[i], 16);
+    caller.signalFrame = false;
+    return true;
+}
 #endif
 
 bool DecodeFrame(_Unwind_Context& context, Frame& frame) {
@@ -224,13 +264,9 @@ bool DecodeFrame(_Unwind_Context& context, Frame& frame) {
 #endif
     return DecodeCandidate(context, frame, query);
 #else
-    void* image = nullptr;
-    if (!RtlPcToFileHeader(reinterpret_cast<void*>(query.pc), &image) || !image) return false;
-    const auto* base = static_cast<const Byte*>(image);
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    const Byte* base = nullptr;
+    const auto* nt = ImageHeaders(query.pc, base);
+    if (!nt) return false;
     const auto* sections = IMAGE_FIRST_SECTION(nt);
     for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
         const auto& section = sections[i];
@@ -385,7 +421,18 @@ bool Expression(const Byte* p, const _Unwind_Context& context, Word cfa, Word& r
 }
 
 bool GetRules(_Unwind_Context& context, Frame& frame, Rules& rules) {
-    if (!DecodeFrame(context, frame)) return false;
+    if (!DecodeFrame(context, frame)) {
+#ifdef _WIN32
+        frame = {};
+        if (!VirtualUnwind(context, frame.caller)) return false;
+        frame.foreign = true;
+        context.cfa = frame.caller.registers[7];
+        context.region = context.lsda = context.personality = context.textBase = context.dataBase = 0;
+        return true;
+#else
+        return false;
+#endif
+    }
     Rules initial;
     if (!Instructions(frame.cieBegin, frame.cieEnd, frame, ~Word(0), initial, {})) return false;
 #ifdef _WIN32
@@ -406,6 +453,14 @@ bool GetRules(_Unwind_Context& context, Frame& frame, Rules& rules) {
 bool Step(_Unwind_Context& context) {
     Frame frame; Rules rules;
     if (!GetRules(context, frame, rules)) return false;
+#ifdef _WIN32
+    if (frame.foreign) {
+        const auto& next = frame.caller;
+        if (!next.registers[16] || (next.registers[7] == context.registers[7] && next.registers[16] == context.registers[16])) return false;
+        context = next;
+        return true;
+    }
+#endif
     _Unwind_Context next = context;
     for (unsigned i = 0; i < 17; ++i) {
         const auto& rule = rules.registers[i];
