@@ -433,7 +433,7 @@ void MetalTexture::Upload(std::span<const std::byte> guestBytes) {
     auto tiled = backend.Buffer(bufferSize(geometry.guestBytes));
     std::memcpy(tiled.contents, guestBytes.data(), guestBytes.size());
     std::memset(static_cast<std::byte*>(tiled.contents) + guestBytes.size(), 0, tiled.length - guestBytes.size());
-    Upload(tiled, 0);
+    uploadFrom(tiled, 0);
     FinishUpload();
 }
 
@@ -445,6 +445,11 @@ void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
         Upload(std::span(static_cast<const std::byte*>(guest.contents) + offset, static_cast<std::size_t>(geometry.guestBytes)));
         return;
     }
+    uploadFrom(guest, offset);
+}
+
+void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset) {
+    const auto& geometry = backing->geometry;
     // The blit reads only texels the detile wrote, so the linear buffer needs no clearing.
     auto linear = backend.Buffer(bufferSize(geometry.sliceLinearBytes * geometry.layers));
     FinishUpload();
@@ -470,7 +475,7 @@ void MetalTexture::Readback(std::span<std::byte> guestBytes) const {
     auto tiled = backend.Buffer(bufferSize(geometry.guestBytes));
     std::memcpy(tiled.contents, guestBytes.data(), guestBytes.size());
     std::memset(static_cast<std::byte*>(tiled.contents) + guestBytes.size(), 0, tiled.length - guestBytes.size());
-    Readback(tiled, 0);
+    readbackInto(tiled, 0);
     std::memcpy(guestBytes.data(), tiled.contents, guestBytes.size());
 }
 
@@ -482,6 +487,11 @@ void MetalTexture::Readback(id<MTLBuffer> guest, std::size_t offset) const {
         Readback(std::span(static_cast<std::byte*>(guest.contents) + offset, static_cast<std::size_t>(geometry.guestBytes)));
         return;
     }
+    readbackInto(guest, offset);
+}
+
+void MetalTexture::readbackInto(id<MTLBuffer> guest, std::size_t offset) const {
+    const auto& geometry = backing->geometry;
     FinishUpload();
     // The retile reads only the elements the blit wrote (each level's texel extent in elements), so
     // the linear buffer needs no clearing either.
