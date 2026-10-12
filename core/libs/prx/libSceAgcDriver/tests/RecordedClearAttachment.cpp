@@ -80,14 +80,10 @@ void Run(AgcDriver::VulkanDevice& device) {
     color.dccAddress = reinterpret_cast<std::uintptr_t>(Keys.data());
     std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
     for (unsigned frame = 0; frame < 12; ++frame) {
-        // Poison texels so preserving old contents cannot accidentally pass. DCC metadata
-        // makes the real StorageTexture upload record a clear before the LOAD/blended draw.
         std::fill(Surface.begin(), Surface.end(), std::byte{0x55});
         std::fill(Keys.begin(), Keys.end(), std::byte{0});
         AgcDriver::GuestMemory::BumpCollectEpoch();
         DrawBlended(device, color, {{0, 0}, {Width / 2, Height}});
-        // No wait separates the clear and attachment load/blend. Publication/readback
-        // occurs only after that draw, so this exercises transfer->attachment visibility.
         StorageTexture::FlushPending(color.address, color.bytes, nullptr, "recorded clear attachment regression");
         device.WaitIdle();
         for (std::uint32_t y = 0; y < Height; ++y) {
