@@ -53,6 +53,8 @@ struct State {
     std::mutex mutex;
     std::array<Totals, static_cast<std::size_t>(Kind::Count)> totals{};
     std::chrono::steady_clock::time_point windowStart = std::chrono::steady_clock::now();
+    double busyMs = 0;
+    double busyUntil = 0;
 };
 
 inline State& Shared() {
@@ -60,8 +62,22 @@ inline State& Shared() {
     return state;
 }
 
-// One finished wait. `gpuSeconds` is the command buffer's GPUEndTime - GPUStartTime.
-inline void Record(double waitMs, double gpuSeconds) {
+// One finished wait. `gpuSeconds` is the command buffer's GPUEndTime - GPUStartTime; with the
+// command buffer's start and end (host seconds), the union of GPU intervals feeds "gpu_busy_ms"
+// (command buffers committed without waiting overlap, so the per-kind sums can exceed it).
+inline void Record(double waitMs, double gpuSeconds, double gpuStart = 0, double gpuEnd = 0);
+
+// ANYPS5_METAL_GPU_TIMING=2 also puts the copy-backs of written images into command buffers of
+// their own (enqueued right behind the work), so their GPU time shows as "readback".
+inline bool SplitReadbacks() {
+    static const bool split = [] {
+        const char* value = std::getenv("ANYPS5_METAL_GPU_TIMING");
+        return value != nullptr && value[0] == '2';
+    }();
+    return split;
+}
+
+inline void Record(double waitMs, double gpuSeconds, double gpuStart, double gpuEnd) {
     static constexpr const char* names[] = {"other", "dispatch", "draw", "readback", "upload"};
     if (BindTrace::Active()) BindTrace::Log("  gpu %s wait %.3f ms gpu %.3f ms", names[static_cast<std::size_t>(Current())], waitMs, gpuSeconds * 1000.0);
     auto& state = Shared();
@@ -70,6 +86,11 @@ inline void Record(double waitMs, double gpuSeconds) {
     ++totals.count;
     totals.waitMs += waitMs;
     totals.gpuMs += gpuSeconds > 0 ? gpuSeconds * 1000.0 : 0.0;
+    if (gpuEnd > gpuStart && gpuStart > 0) {
+        const auto from = std::max(gpuStart, state.busyUntil);
+        if (gpuEnd > from) state.busyMs += (gpuEnd - from) * 1000.0;
+        state.busyUntil = std::max(state.busyUntil, gpuEnd);
+    }
     const auto now = std::chrono::steady_clock::now();
     const auto window = std::chrono::duration<double, std::milli>(now - state.windowStart).count();
     if (window < 2000.0) return;
@@ -80,7 +101,8 @@ inline void Record(double waitMs, double gpuSeconds) {
         used += std::snprintf(line + used, sizeof line - static_cast<std::size_t>(used), ",\"%s\":[%llu,%.1f,%.1f]", names[i],
             static_cast<unsigned long long>(t.count), t.waitMs, t.gpuMs);
     }
-    std::fprintf(stderr, "%s}\n", line);
+    std::fprintf(stderr, "%s,\"gpu_busy_ms\":%.1f}\n", line, state.busyMs);
+    state.busyMs = 0;
     state.totals = {};
     state.windowStart = now;
 }

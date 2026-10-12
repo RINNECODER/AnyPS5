@@ -50,6 +50,22 @@ std::uint64_t sampleTotal(id<MTLBuffer> counter) {
     return total;
 }
 
+// A capture or control pass binds the work's fault buffer when it has one (Complete reads it for
+// every pass); `required` when the pass must have one.
+void requireFaultBinding(const MetalBackend::Result& shader, std::span<const MetalShaderResourceBinding> bindings, const char* missing,
+    bool required = true) {
+    bool found = false;
+    for (const auto& mapping : shader.resources) {
+        if (mapping.role != DescriptorRole::FaultBuffer) continue;
+        const auto binding = std::find_if(bindings.begin(), bindings.end(), [&](const auto& resource) {
+            return resource.descriptorSet == mapping.descriptorSet && resource.binding == mapping.binding;
+        });
+        if (binding == bindings.end() || binding->buffers.size() != 1) throw std::runtime_error(missing);
+        found = true;
+    }
+    if (required && !found) throw std::runtime_error(missing);
+}
+
 std::uint32_t rectSlot(const MetalBackend::Result& shader, MetalBackend::ImplicitBufferRole role) {
     if (!shader.rectList) throw std::invalid_argument("Metal rectangle stage lacks an intermediate ABI");
     const auto& buffers = shader.rectList->buffers;
@@ -289,8 +305,8 @@ std::span<const std::byte> pushBlock(const MetalBackend::Result& shader,
 
 }
 
-MetalDraw::MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary)
-    : backend(device, utilityLibrary), depthCache(std::make_unique<MetalDepthSurfaceCache>(backend)),
+MetalDraw::MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary, id<MTLCommandQueue> queue)
+    : backend(device, utilityLibrary, queue), depthCache(std::make_unique<MetalDepthSurfaceCache>(backend)),
       hostAliases(std::make_unique<MetalGuestHostAliases>(device)) {
     if (![device supportsFamily:MTLGPUFamilyApple7] || ![device supportsFamily:MTLGPUFamilyMetal3]) {
         throw std::invalid_argument("Metal draw requires an Apple GPU with Metal 3 integer and GPU address support");
@@ -299,8 +315,13 @@ MetalDraw::MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary)
 
 MetalDraw::~MetalDraw() = default;
 
+void MetalDraw::SetCpuReadHook(std::function<void(std::uint64_t, std::uint64_t)> hook) {
+    std::lock_guard<std::recursive_mutex> lock(drawMutex);
+    cpuReadHook = std::move(hook);
+}
+
 void MetalDraw::InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed) {
-    std::lock_guard lock(drawMutex);
+    std::lock_guard<std::recursive_mutex> lock(drawMutex);
     imageCache.Clear();
     depthCache->Invalidate(changed);
     for (const auto& range : changed) hostAliases->Invalidate(range.host.data(), range.host.size());
@@ -329,7 +350,7 @@ TessellationTargetLimits MetalDraw::TessellationLimits() const {
 }
 
 id<MTLTexture> MetalDraw::ResidentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
-    std::lock_guard lock(drawMutex);
+    std::lock_guard<std::recursive_mutex> lock(drawMutex);
     return residentTexture(resource, storage, compare);
 }
 
@@ -414,7 +435,7 @@ id<MTLTexture> MetalDraw::residentView(const Graphics::GuestTextureResource& res
 }
 
 void MetalDraw::DumpSamplesSynchronously(std::uint64_t guestAddress) {
-    std::lock_guard lock(drawMutex);
+    std::lock_guard<std::recursive_mutex> lock(drawMutex);
     constexpr std::size_t targetBytes = 15 * 16 + 8;
     if (guestAddress == 0 || guestAddress % 8 != 0 ||
         guestAddress > std::numeric_limits<std::uint64_t>::max() - targetBytes) {
@@ -447,7 +468,14 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     std::span<const Graphics::CompiledShader> shaders,
     std::span<const NativeGuestMemory::BorrowedRange> ranges,
     std::optional<std::array<std::uint32_t, 5>> meshArguments) {
-    std::lock_guard lock(drawMutex);
+    return *Draw(state, draw, shaders, ranges, meshArguments, nullptr, {});
+}
+
+std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const Pm4::DrawParameters& draw,
+    std::span<const Graphics::CompiledShader> shaders,
+    std::span<const NativeGuestMemory::BorrowedRange> ranges,
+    std::optional<std::array<std::uint32_t, 5>> meshArguments, MetalTimeline* timeline, Completed completed) {
+    std::lock_guard<std::recursive_mutex> lock(drawMutex);
     if (draw.indirect) throw std::invalid_argument("Metal draw indirect submission requires a native argument adapter");
     if (draw.flags != (draw.indexed ? 0u : (draw.flags & 0x20u))) throw std::invalid_argument("Metal draw packet flags are unsupported");
     if (draw.indexCount == 0 || draw.instanceCount == 0) return {};
@@ -527,9 +555,12 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     }
     auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
     if (depth && std::find(depthSurfaces.begin(), depthSurfaces.end(), depth) == depthSurfaces.end()) depthSurfaces.push_back(depth);
-    MetalShaderResources resources(backend, ranges, [&](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
-        return residentTexture(resource, storage, compare);
-    }, hostAliases.get(), ImageCache());
+    auto resourcesOwner = std::make_shared<MetalShaderResources>(backend, ranges,
+        [this](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
+            return residentTexture(resource, storage, compare);
+        }, hostAliases.get(), ImageCache());
+    auto& resources = *resourcesOwner;
+    if (cpuReadHook) resources.SetCpuReadHook(cpuReadHook);
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -615,6 +646,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         }
         const auto bytes = std::uint64_t{draw.indexCount} * draw.indexSize;
         if (bytes > std::numeric_limits<std::size_t>::max()) throw std::invalid_argument("Metal draw index byte count overflows");
+        if (cpuReadHook) cpuReadHook(draw.indexAddress, bytes);
         indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
         const auto* data = static_cast<const std::byte*>(indexBuffer.buffer.contents) + indexBuffer.offset;
         const auto restartIndex = draw.indexSize == 2 ? 0xffffu : 0xffffffffu;
@@ -727,6 +759,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     target.rectListIndexSize = capturePath && draw.indexed ? nativeIndexSize : 0;
     configureSamplerArguments(target, *vertex->program, backend.Device());
     auto nativeVertex = MetalBackend::ConvertToMetal(*vertex->program, meshPath ? ShaderStage::Mesh : ShaderStage::Vertex, target);
+    bool bdaStores = StoresThroughBda(nativeVertex);
     std::unique_ptr<MetalRectKernelPipeline> capturePipeline;
     std::unique_ptr<MetalRectKernelPipeline> controlPipeline;
     id<MTLBuffer> rectCapture = nil;
@@ -794,6 +827,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     target.rectListInputLayout.reset();
     configureSamplerArguments(target, *fragment->program, backend.Device());
     auto nativeFragment = MetalBackend::ConvertToMetal(*fragment->program, ShaderStage::Fragment, target);
+    bdaStores = bdaStores || StoresThroughBda(nativeFragment);
     if (baryPath) {
         MetalBackend::Result corners;
         corners.stage = ShaderStage::Vertex;
@@ -817,25 +851,18 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     const auto& fragmentReflection = meshPath ? meshPipeline->FragmentReflection() : vertexPipeline->FragmentReflection();
     auto vertexBindings = resources.Bindings(mainReflection);
     auto fragmentBindings = resources.Bindings(fragmentReflection);
+    // The vertex capture and rectangle control passes go into the draw's own command buffer: the
+    // queue runs them before the draw, and Complete reads the one fault buffer all passes share
+    // (a fault in any pass reports the work as faulted, and it runs again or fails like the draw).
+    id<MTLCommandBuffer> commands = backend.CommandBuffer();
     if (baryPath) {
         const auto& captured = capturePipeline->Reflection();
         const auto captureBindings = resources.Bindings(captured);
         std::vector<MetalImplicitBufferBinding> captureBuffers{{rectSlot(captured, MetalBackend::ImplicitBufferRole::StageOutput), {baryCapture, 0, baryCapture.length}}};
         if (draw.indexed) captureBuffers.push_back({rectSlot(captured, MetalBackend::ImplicitBufferRole::Indices), indexBuffer});
-        auto commands = backend.CommandBuffer();
         capturePipeline->Encode(commands, captureBindings, MTLRegionMake3D(draw.firstVertex, draw.firstInstance, 0, draw.indexCount, draw.instanceCount, 1),
             captureBuffers, vertexBuffers, pushBlock(captured, pushConstants), resources.Residency());
-        backend.Wait(commands);
-        for (const auto& mapping : captured.resources) {
-            if (mapping.role != DescriptorRole::FaultBuffer) continue;
-            const auto binding = std::find_if(captureBindings.begin(), captureBindings.end(), [&](const auto& resource) {
-                return resource.descriptorSet == mapping.descriptorSet && resource.binding == mapping.binding;
-            });
-            if (binding == captureBindings.end() || binding->buffers.size() != 1) throw std::runtime_error("Metal per-vertex capture fault binding is missing");
-            BdaAbi::Fault fault{};
-            std::memcpy(&fault, static_cast<const std::byte*>(binding->buffers[0].buffer.contents) + binding->buffers[0].offset, sizeof(fault));
-            if (fault.state != BdaAbi::FaultState::Empty) return CompleteCommittedWork([&] { return resources.Complete(commands); });
-        }
+        requireFaultBinding(captured, captureBindings, "Metal per-vertex capture fault binding is missing", false);
     }
     if (rectPath) {
         const auto& captured = capturePipeline->Reflection();
@@ -849,25 +876,11 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             {rectSlot(controlled, MetalBackend::ImplicitBufferRole::StageOutput), {rectOutput, 0, rectOutput.length}},
             {rectSlot(controlled, MetalBackend::ImplicitBufferRole::TessellationFactors), {rectFactors, 0, rectFactors.length}},
             {rectSlot(controlled, MetalBackend::ImplicitBufferRole::IndirectParameters), {rectParameters, 0, rectParameters.length}}}};
-        auto commands = backend.CommandBuffer();
         capturePipeline->Encode(commands, captureBindings, MTLRegionMake3D(draw.firstVertex, draw.firstInstance, 0, draw.indexCount, draw.instanceCount, 1),
             captureBuffers, vertexBuffers, pushBlock(captured, pushConstants), resources.Residency());
         controlPipeline->Encode(commands, controlBindings, MTLRegionMake3D(0, 0, 0, std::uint64_t{rectPatches} * 4u, 1, 1),
             controlBuffers, {}, pushBlock(controlled, pushConstants), resources.Residency());
-        backend.Wait(commands);
-        bool faultFound = false;
-        for (const auto& mapping : controlled.resources) {
-            if (mapping.role != DescriptorRole::FaultBuffer) continue;
-            const auto binding = std::find_if(controlBindings.begin(), controlBindings.end(), [&](const auto& resource) {
-                return resource.descriptorSet == mapping.descriptorSet && resource.binding == mapping.binding;
-            });
-            if (binding == controlBindings.end() || binding->buffers.size() != 1) throw std::runtime_error("Metal rectangle control fault binding is missing");
-            BdaAbi::Fault fault{};
-            std::memcpy(&fault, static_cast<const std::byte*>(binding->buffers[0].buffer.contents) + binding->buffers[0].offset, sizeof(fault));
-            faultFound = true;
-            if (fault.state != BdaAbi::FaultState::Empty) return CompleteCommittedWork([&] { return resources.Complete(commands); });
-        }
-        if (!faultFound) throw std::runtime_error("Metal rectangle control requires its original fault buffer");
+        requireFaultBinding(controlled, controlBindings, "Metal rectangle control requires its original fault buffer");
     }
     auto residency = resources.Residency();
     std::vector<id<MTLResource>> meshResidency;
@@ -882,7 +895,6 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         std::memset(static_cast<std::byte*>(sampleCounter.contents) + 16, 0, 8);
         renderPass.visibilityResultBuffer = sampleCounter;
     }
-    auto commands = backend.CommandBuffer();
     if (!expansions.empty()) {
         if (!multisampleExpander) multisampleExpander = std::make_unique<MetalMultisampleExpander>(backend);
         for (const auto& expansion : expansions) {
@@ -929,6 +941,14 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         backend.Encode(commands, @"SampleCounter", @[sampleCounter, sampleTarget], &parameters, sizeof(parameters), MTLSizeMake(1, 1, 1));
     }
     resources.EncodeReadbacks(commands);
+    if (timeline != nullptr && sampleCounter == nil && !resources.NeedsSynchronousCompletion()) {
+        resources.CommittedWithoutWaiting();
+        timeline->Commit(commands, [resourcesOwner, commands, completed = std::move(completed)] {
+            const auto fault = CompleteCommittedWork([&] { return resourcesOwner->Complete(commands); });
+            if (completed) completed(fault);
+        }, bdaStores, resources.WrittenGuestRanges());
+        return std::nullopt;
+    }
     backend.Wait(commands);
     if (sampleCounter != nil) samplesPassed.store(sampleTotal(sampleCounter), std::memory_order_release);
     return CompleteCommittedWork([&] { return resources.Complete(commands); });

@@ -399,6 +399,7 @@ void MetalTexture::encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer>
     const auto& geometry = backing->geometry;
     id<MTLTexture> texture = backing->texture;
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (GpuTiming::Enabled() && blit != nil) blit.label = toTexture ? @"upload linear copy" : @"readback linear copy";
     require(blit != nil, "Metal texture blit encoder creation failed");
     const bool volume = texture.textureType == MTLTextureType3D;
     for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
@@ -434,8 +435,8 @@ void MetalTexture::Upload(std::span<const std::byte> guestBytes) {
     auto tiled = backend.Buffer(bufferSize(geometry.guestBytes));
     std::memcpy(tiled.contents, guestBytes.data(), guestBytes.size());
     std::memset(static_cast<std::byte*>(tiled.contents) + guestBytes.size(), 0, tiled.length - guestBytes.size());
+    // The command buffer keeps the staging buffer alive; work that samples the texture runs after it.
     uploadFrom(tiled, 0);
-    FinishUpload();
 }
 
 void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
@@ -451,10 +452,11 @@ void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
 
 void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset) {
     const auto& geometry = backing->geometry;
-    // The blit reads only texels the detile wrote, so the linear buffer needs no clearing.
-    auto linear = backend.Buffer(bufferSize(geometry.sliceLinearBytes * geometry.layers));
-    FinishUpload();
+    // The queue runs uploads in commit order: no need to wait for an earlier one of this texture.
+    pendingUpload = nil;
     auto commands = backend.CommandBuffer();
+    // The blit reads only texels the detile wrote, so the (recycled) linear buffer needs no clearing.
+    auto linear = backend.TransientBuffer(bufferSize(geometry.sliceLinearBytes * geometry.layers), commands);
     encodeTransfer(commands, guest, offset, linear, 0, false);
     encodeLinearCopy(commands, linear, true);
     // The draw or dispatch that samples the texture is committed later on the same queue, so it runs
@@ -510,7 +512,8 @@ void MetalTexture::readbackInto(id<MTLBuffer> guest, std::size_t offset) const {
 bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset) const {
     if (!inPlace(guest, offset)) return false;
     // Uploads commit when they are encoded, so this command buffer runs after them on the queue.
-    auto linear = backend.Buffer(bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers));
+    // The retile reads only the elements the blit wrote, so the recycled linear buffer needs no clearing.
+    auto linear = backend.TransientBuffer(bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers), commands);
     encodeLinearCopy(commands, linear, false);
     encodeTransfer(commands, linear, 0, guest, offset, true);
     return true;

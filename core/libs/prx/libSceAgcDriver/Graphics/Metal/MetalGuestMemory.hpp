@@ -78,6 +78,9 @@ private:
     mutable std::mutex mutex;
     std::vector<Entry> entries;
     std::uint64_t epoch = 0;
+    // The last BDA table a capture built, and its entries (DispatchSnapshot reuses it unchanged).
+    id<MTLBuffer> table = nil;
+    std::vector<ShaderRecompiler::BdaAbi::Range> tableEntries;
 };
 
 class MetalGuestMemory {
@@ -102,7 +105,9 @@ public:
         DispatchSnapshot(const DispatchSnapshot&) = delete;
         DispatchSnapshot& operator=(const DispatchSnapshot&) = delete;
         DispatchSnapshot(DispatchSnapshot&&) noexcept = default;
-        DispatchSnapshot& operator=(DispatchSnapshot&&) noexcept = default;
+        DispatchSnapshot& operator=(DispatchSnapshot&&) noexcept = delete;
+        // Gives the fault buffer back to MetalBufferPool: a snapshot outlives its GPU work.
+        ~DispatchSnapshot();
 
         [[nodiscard]] id<MTLBuffer> Table() const;
         [[nodiscard]] id<MTLBuffer> FaultBuffer() const;

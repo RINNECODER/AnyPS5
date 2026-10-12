@@ -4,7 +4,9 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Queues/Submission.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalDraw.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/MetalTimeline.hpp"
 #include "PacketStoreRange.hpp"
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -28,6 +30,8 @@ struct MetalDriver::Impl {
         std::thread thread;
         bool running = false;
         bool active = false;
+        // Submissions taken from `pending` whose GPU work has not retired yet (RetireSubmission).
+        std::uint32_t unretired = 0;
     };
     std::mutex mutex;
     std::mutex shutdownMutex;
@@ -50,6 +54,7 @@ struct MetalDriver::Impl {
     id<MTLDevice> nativeDevice = nil;
     id<MTLLibrary> nativeLibrary = nil;
     std::unique_ptr<MetalDevice> backend;
+    std::unique_ptr<MetalDevice> presentationBackend;
     std::unique_ptr<MetalPresentation> presentation;
     std::unique_ptr<MetalDraw> draw;
     EopInterrupt eopInterrupt;
@@ -82,7 +87,8 @@ struct MetalDriver::Impl {
     bool GpuParkedOnHost() const;
     void AwaitMappingDrain();
     void NotifyLabelStore();
-    void CompletePriorGpuWorkAndCopyBack();
+    // `cause` only feeds the ANYPS5_METAL_GPU_TIMING drain statistics (a packet opcode or 0x100+).
+    void CompletePriorGpuWorkAndCopyBack(std::uint32_t cause = 0x10f);
     // Clears the draw executor's image cache (GuestImageCache.hpp), or drops the entries a store
     // overlaps. The reason only feeds the ANYPS5_METAL_GPU_TIMING statistics (0 is a mapping change).
     enum class ForgetReason : unsigned { Other, Submission, Wait, Flip, Event, Failure, Store };
@@ -90,7 +96,33 @@ struct MetalDriver::Impl {
     void ForgetCachedImages(const GuestStoreRange& store);
     // Label bytes this driver stored itself; read and written with gpuMutex held.
     OwnLabelStores ownLabels;
+    // Draws and dispatches committed without waiting (MetalTimeline.hpp); used with gpuMutex held.
+    // CompletePriorGpuWorkAndCopyBack drains it.
+    MetalTimeline timeline;
+    // Drains the timeline before the worker reads guest [address, address + bytes) on the CPU when
+    // committed work may have written it. Called with gpuMutex held.
+    void BeforeCpuRead(std::uint64_t address, std::uint64_t bytes);
+    // Work whose deferred completion found a working-set fault and ran again synchronously.
+    std::uint64_t deferredReruns = 0;
+    std::array<std::uint64_t, 0x110> drainsBy{};
+    // A label store (RELEASE_MEM, WRITE_DATA) behind committed work runs at the next drain instead
+    // of draining now; returns false when the packet must run now. Called with gpuMutex held.
+    bool DeferLabelStore(std::span<const std::uint32_t> packet, std::uint32_t queue);
+    // Whether a WAIT_REG_MEM is satisfied by the latest deferred label store to its address. Such a
+    // wait is a GPU-to-GPU barrier: everything after it is committed after the work it waits for.
+    bool PendingLabelSatisfies(std::span<const std::uint32_t> packet) const;
+    struct PendingLabel {
+        std::uint64_t address;
+        std::array<std::byte, 64> bytes;
+        std::size_t size;
+        // MetalTimeline::Epoch when recorded: once completions ran, the store may be visible to the guest.
+        std::uint64_t epoch;
+    };
+    std::vector<PendingLabel> pendingLabels;
+    // ANYPS5_METAL_DEFER=0 waits for every draw and dispatch as before.
+    static bool DeferWork();
     void DeliverEopInterrupt(std::uint32_t queue);
+    std::uint64_t barrierWaits = 0;
     void ExecuteSubmission(const Submission& submission, QueueState& queue);
     void ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
     void ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
@@ -102,6 +134,14 @@ struct MetalDriver::Impl {
     void ReserveOutputs(Submission& submission);
     void WaitForFlipRoom(const Submission& submission);
     void MarkCompleted(std::uint64_t serial);
+    // Bookkeeping once a submission's GPU work completed: completion serial, retained outputs, label
+    // writes in flight, queue room. Runs with `mutex` held.
+    void RetireSubmission(Worker& worker, const Submission& submission, std::vector<std::shared_ptr<IVideoOutput>>& releasedOutputs);
+    // Set (with `mutex` held) when a command buffer behind a deferred retirement completed, so an
+    // idle worker reaps the timeline.
+    bool reapSignal = false;
+    // Runs the timeline completions whose GPU work finished (gpuMutex taken here).
+    void ReapTimeline();
     void Stop();
 };
 

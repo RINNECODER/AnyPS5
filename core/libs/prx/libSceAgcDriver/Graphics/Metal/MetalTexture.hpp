@@ -38,6 +38,9 @@ public:
     [[nodiscard]] const Graphics::SurfaceGeometry& Geometry() const;
     [[nodiscard]] std::size_t GuestBytes() const;
 
+    // Whether Upload(buffer, offset) runs on the GPU in place (otherwise it copies on the CPU).
+    [[nodiscard]] bool UploadsInPlace(id<MTLBuffer> buffer, std::size_t offset) const { return inPlace(buffer, offset); }
+
 private:
     friend class MetalShaderResources;
     MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor,

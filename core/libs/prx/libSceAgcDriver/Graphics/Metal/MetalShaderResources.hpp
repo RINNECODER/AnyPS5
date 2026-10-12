@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include <memory>
 #include <functional>
+#include <optional>
 
 namespace AgcDriver::Metal {
 
@@ -30,6 +31,21 @@ public:
     // them, before the commit), so Complete(commands) need not read them back separately.
     void EncodeReadbacks(id<MTLCommandBuffer> commands);
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault Complete(id<MTLCommandBuffer> commands);
+    // Asynchronous completion (MetalTimeline). True when Complete must copy bytes into guest
+    // memory on the CPU (a staged or copied range, a copy-back that is not encoded, DCC metadata):
+    // later work would read those bytes before a deferred Complete wrote them, so such work waits.
+    [[nodiscard]] bool NeedsSynchronousCompletion() const;
+    // Called once the work is committed without waiting: records the images it binds in the image
+    // cache now (later work on the same queue runs after it, so it sees what this work leaves in
+    // them), so Complete does not, and ends this object's borrowed-range scope so it can outlive
+    // the caller's frame.
+    void CommittedWithoutWaiting();
+    // Guest ranges [begin, end) this work stores to: written images and writable buffers.
+    [[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint64_t>> WrittenGuestRanges() const;
+    // Called before this object reads guest bytes on the CPU (an upload that cannot run in place,
+    // a staged storage image), so the caller can first finish GPU work that may write them.
+    using CpuReadHook = std::function<void(std::uint64_t address, std::uint64_t bytes)>;
+    void SetCpuReadHook(CpuReadHook hook) { cpuRead = std::move(hook); }
     // Guest bytes the snapshot copied instead of aliasing (#291).
     [[nodiscard]] std::uint64_t CopiedBytes() const { return snapshot.CopiedBytes(); }
 
@@ -59,13 +75,18 @@ private:
         // Uploaded from (or, written, read back into) its whole guest surface in place: what the
         // image cache may hold once the work completes.
         bool cacheable = false;
+        // What the cached texels stand for (GuestImageCache::Find).
+        std::uint64_t content = 0;
     };
     struct ImageView {
         std::shared_ptr<MetalTexture> texture;
         bool compare;
     };
     const MetalDevice& backend;
-    NativeGuestMemory::BorrowedRangesScope borrowed;
+    std::optional<NativeGuestMemory::BorrowedRangesScope> borrowed;
+    bool committedWithoutWaiting = false;
+    void markDccUncompressed();
+    CpuReadHook cpuRead;
     std::vector<NativeGuestMemory::BorrowedRange> borrowedRanges;
     MetalGuestMemory memory;
     MetalGuestMemory::DispatchSnapshot snapshot;

@@ -48,11 +48,14 @@ public:
 
     // The cached texture for a surface at `guest` (backed by `host`) whose backing `descriptor`
     // can share, if any.
+    // `content` distinguishes what the texels stand for: 0 for the guest bytes themselves, another
+    // value for a surface whose DCC keys say "clear" (the texels are the clear value, whatever the
+    // bytes underneath hold).
     template <typename Descriptor>
-    std::optional<Hit> Find(std::uint64_t guest, const std::byte* host, const Descriptor& descriptor) {
+    std::optional<Hit> Find(std::uint64_t guest, const std::byte* host, const Descriptor& descriptor, std::uint64_t content = 0) {
         std::lock_guard lock(mutex);
         for (auto& entry : entries) {
-            if (entry.guest != guest || entry.host != address(host) || !entry.texture->CanShareBacking(descriptor)) continue;
+            if (entry.guest != guest || entry.host != address(host) || entry.content != content || !entry.texture->CanShareBacking(descriptor)) continue;
             entry.stamp = ++clock;
             ++statistics.hits;
             return Hit{entry.texture, entry.compare};
@@ -63,7 +66,7 @@ public:
 
     // Records that `texture`'s texels now equal the guest bytes at `guest`/`host`; replaces every
     // entry whose host bytes overlap them.
-    void Insert(std::uint64_t guest, const std::byte* host, std::shared_ptr<Texture> texture, bool compare) {
+    void Insert(std::uint64_t guest, const std::byte* host, std::shared_ptr<Texture> texture, bool compare, std::uint64_t content = 0) {
         if (texture == nullptr || host == nullptr) return;
         const auto bytes = texture->GuestBytes();
         std::lock_guard lock(mutex);
@@ -71,7 +74,7 @@ public:
         if (entries.size() >= MaxEntries) {
             entries.erase(std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.stamp < b.stamp; }));
         }
-        entries.push_back({guest, address(host), bytes, std::move(texture), compare, ++clock});
+        entries.push_back({guest, address(host), bytes, std::move(texture), compare, ++clock, content});
         ++statistics.inserts;
     }
 
@@ -111,6 +114,7 @@ private:
         std::shared_ptr<Texture> texture;
         bool compare;
         std::uint64_t stamp;
+        std::uint64_t content;
     };
 
     static std::uintptr_t address(const std::byte* host) { return reinterpret_cast<std::uintptr_t>(host); }

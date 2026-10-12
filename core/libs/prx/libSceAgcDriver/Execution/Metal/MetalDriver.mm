@@ -135,8 +135,12 @@ void MetalDriver::Configure(void* device, void* library,
     std::vector<NativeGuestMemory::BorrowedRange> captured(ranges.begin(), ranges.end());
     std::sort(captured.begin(), captured.end(), [](const auto& a, const auto& b) { return a.guestAddress < b.guestAddress; });
     auto backend = std::make_unique<MetalDevice>(nativeDevice, nativeLibrary);
-    auto presentation = std::make_unique<MetalPresentation>(*backend, nativeLibrary);
-    auto draw = std::make_unique<MetalDraw>(nativeDevice, nativeLibrary);
+    // Presentation uploads pixels the CPU already read: its own queue keeps a present from waiting
+    // behind draws and dispatches the workers committed meanwhile.
+    auto presentationBackend = std::make_unique<MetalDevice>(nativeDevice, nativeLibrary);
+    auto presentation = std::make_unique<MetalPresentation>(*presentationBackend, nativeLibrary);
+    auto draw = std::make_unique<MetalDraw>(nativeDevice, nativeLibrary, backend->Queue());
+    draw->SetCpuReadHook([impl = impl.get()](std::uint64_t address, std::uint64_t bytes) { impl->BeforeCpuRead(address, bytes); });
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>();
     auto nullPixel = DriverDetail::CaptureNullPixelShader();
     const auto nullPixelAddress = nullPixel->codeAddress;
@@ -146,8 +150,17 @@ void MetalDriver::Configure(void* device, void* library,
     impl->nativeDevice = nativeDevice;
     impl->nativeLibrary = nativeLibrary;
     impl->backend = std::move(backend);
+    impl->presentationBackend = std::move(presentationBackend);
     impl->presentation = std::move(presentation);
     impl->draw = std::move(draw);
+    // A worker with nothing to execute still retires submissions as their GPU work completes.
+    impl->timeline.SetCompletionSignal([impl = impl.get()] {
+        {
+            std::lock_guard lock(impl->mutex);
+            impl->reapSignal = true;
+        }
+        impl->changed.notify_all();
+    });
     impl->eopInterrupt = std::move(interrupt);
     impl->shaders = std::move(registry);
     impl->configured = true;
@@ -200,7 +213,15 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
         // Workers touch guest memory only with gpuMutex held and re-borrow the
         // ranges when rangesRevision moves, so holding it is enough to swap them.
         std::unique_lock<std::recursive_mutex> gpuLock;
-        if (visible) gpuLock = std::unique_lock(impl->gpuMutex);
+        if (visible) {
+            gpuLock = std::unique_lock(impl->gpuMutex);
+            // Work committed without waiting still reads the old mapping: let it finish first.
+            try {
+                impl->timeline.Drain();
+            } catch (...) {
+                impl->ReportFailure(std::current_exception());
+            }
+        }
         std::shared_ptr<DriverDetail::ShaderRegistry> registry;
         {
             std::lock_guard lock(impl->mutex);
@@ -468,7 +489,7 @@ void MetalDriver::Impl::WaitForQueueRoom(std::uint32_t queue) {
     if (found == workers.end()) return;
     const auto& worker = found->second;
     changed.wait_for(lock, std::chrono::milliseconds(250), [&] {
-        return stopping || failure || static_cast<long>(worker.pending.size() + (worker.active ? 1u : 0u)) <= maxQueued;
+        return stopping || failure || static_cast<long>(worker.pending.size() + worker.unretired) <= maxQueued;
     });
 }
 
@@ -547,7 +568,24 @@ void MetalDriver::Impl::AwaitMappingDrain() {
             static_cast<unsigned long long>(target - completed));
     }
 }
-void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack() { std::lock_guard lock(gpuMutex); }
+void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack(std::uint32_t cause) {
+    std::lock_guard lock(gpuMutex);
+    if (!timeline.Empty()) ++drainsBy[std::min<std::uint32_t>(cause, drainsBy.size() - 1)];
+    timeline.Drain();
+}
+
+void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes) {
+    const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
+    if (timeline.MayHaveWritten(address, end)) { ++drainsBy[0x102]; timeline.Drain(); }
+}
+
+bool MetalDriver::Impl::DeferWork() {
+    static const bool defer = [] {
+        const char* value = std::getenv("ANYPS5_METAL_DEFER");
+        return value == nullptr || *value == '\0' || *value != '0';
+    }();
+    return defer;
+}
 
 void MetalDriver::Impl::ForgetCachedImages(ForgetReason reason) {
     if (draw != nullptr && draw->ImageCache() != nullptr) draw->ImageCache()->Clear(static_cast<unsigned>(reason));
@@ -567,6 +605,27 @@ void MetalDriver::Impl::ForgetCachedImages(const GuestStoreRange& store) {
 void MetalDriver::Impl::DeliverEopInterrupt(std::uint32_t queue) {
     if (!eopInterrupt) throw std::runtime_error("Metal driver EOP interrupt requires a configured native host callback");
     eopInterrupt(queue);
+}
+
+void MetalDriver::Impl::RetireSubmission(Worker& worker, const Submission& submission,
+    std::vector<std::shared_ptr<IVideoOutput>>& releasedOutputs) {
+    MarkCompleted(submission.serial);
+    const auto retained = submissionOutputs.find(submission.serial);
+    if (retained != submissionOutputs.end()) {
+        releasedOutputs = std::move(retained->second);
+        submissionOutputs.erase(retained);
+    }
+    for (const auto address : submission.labelWrites) {
+        const auto found = worker.unfinishedWrites.find(address);
+        if (found != worker.unfinishedWrites.end() && --found->second == 0) worker.unfinishedWrites.erase(found);
+    }
+    if (worker.unretired != 0) --worker.unretired;
+}
+
+void MetalDriver::Impl::ReapTimeline() {
+    std::lock_guard lock(gpuMutex);
+    NativeGuestMemory::BorrowedRangesScope scope(ranges);
+    timeline.Reap();
 }
 
 void MetalDriver::Impl::MarkCompleted(std::uint64_t serial) {
@@ -589,12 +648,20 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                 {
                     std::unique_lock lock(mutex);
                     worker = &workers.at(id);
-                    changed.wait(lock, [&] { return stopping || failure || !worker->pending.empty(); });
+                    changed.wait(lock, [&] { return stopping || failure || !worker->pending.empty() || reapSignal; });
                     if (failure) std::rethrow_exception(failure);
                     if (stopping) break;
+                    if (worker->pending.empty()) {
+                        // GPU work behind a deferred retirement finished while this worker was idle.
+                        reapSignal = false;
+                        lock.unlock();
+                        ReapTimeline();
+                        continue;
+                    }
                     submission = std::move(worker->pending.front());
                     worker->pending.pop_front();
                     worker->active = true;
+                    ++worker->unretired;
                     if (id == 0) queue0Executing = submission.suspend ? 0 : submission.received;
                     if (submission.waitFree) {
                         changed.wait(lock, [&] { return stopping || failure || OrderReleased(id, submission.received); });
@@ -609,23 +676,34 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                         resetGraphics = false;
                     }
                 }
-                if (!submission.suspend) {
+                bool retireLater = false;
+                if (submission.suspend) {
+                    // A suspend point needs the GPU idle.
+                    NativeGuestMemory::BorrowedRangesScope scope(capturedRanges);
+                    CompletePriorGpuWorkAndCopyBack();
+                } else {
                     NativeGuestMemory::BorrowedRangesScope scope(capturedRanges);
                     ExecuteSubmission(submission, worker->state);
+                    // GPU work may still be running: retire the submission (and so let the guest
+                    // submit past it, MAX_QUEUED) when it completed, while this worker goes on.
+                    std::lock_guard gpuLock(gpuMutex);
+                    if (!timeline.Empty()) {
+                        retireLater = true;
+                        auto retired = std::make_shared<Submission>(std::move(submission));
+                        timeline.Defer([this, worker, retired] {
+                            std::vector<std::shared_ptr<IVideoOutput>> outputs;
+                            {
+                                std::lock_guard lock(mutex);
+                                RetireSubmission(*worker, *retired, outputs);
+                            }
+                            changed.notify_all();
+                        });
+                    }
                 }
                 {
                     std::lock_guard lock(mutex);
                     if (failure) std::rethrow_exception(failure);
-                    MarkCompleted(submission.serial);
-                    const auto retained = submissionOutputs.find(submission.serial);
-                    if (retained != submissionOutputs.end()) {
-                        releasedOutputs = std::move(retained->second);
-                        submissionOutputs.erase(retained);
-                    }
-                    for (const auto address : submission.labelWrites) {
-                        const auto found = worker->unfinishedWrites.find(address);
-                        if (found != worker->unfinishedWrites.end() && --found->second == 0) worker->unfinishedWrites.erase(found);
-                    }
+                    if (!retireLater) RetireSubmission(*worker, submission, releasedOutputs);
                     worker->running = false;
                     worker->active = false;
                     if (id == 0) { queue0Executing = 0; queue0Awaited = 0; }
@@ -884,14 +962,21 @@ void MetalDriver::Present(const PresentationWindow& window, const DisplayBuffer*
     impl->RejectMappingReentry();
     impl->CheckFailureAndStopping();
     DriverCallbackScope callbackScope;
-    std::unique_lock gpuLock(impl->gpuMutex);
-    impl->CheckFailureAndStopping();
-    bool ready = false;
+    // Only reading the display buffer needs the guest ranges (gpuMutex). The upload, the wait for a
+    // drawable and for the present run on the presentation's own queue without it, so the queue
+    // workers keep encoding meanwhile.
+    std::vector<std::byte> pixels;
     {
-        NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
-        impl->presentation->Present(window, buffer, opaque, gpuReady ? +[](void* value) { *static_cast<bool*>(value) = true; } : nullptr, &ready);
+        std::unique_lock gpuLock(impl->gpuMutex);
+        impl->CheckFailureAndStopping();
+        if (buffer != nullptr) {
+            NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
+            pixels = MetalPresentation::ReadPixels(*buffer);
+        }
     }
-    gpuLock.unlock();
+    bool ready = false;
+    impl->presentation->Present(window, buffer, opaque, gpuReady ? +[](void* value) { *static_cast<bool*>(value) = true; } : nullptr, &ready,
+        buffer != nullptr ? &pixels : nullptr);
     if (ready) gpuReady(context);
 }
 
