@@ -57,6 +57,7 @@ int APS5_VABI sceNetResolverAbort(int, int);
 int APS5_VABI sceNetResolverDestroy(int);
 int APS5_VABI sceNetResolverGetError(int, int*);
 int APS5_VABI sceNetCtlGetState(int*);
+int APS5_VABI sceNetCtlGetIfStat(NetCtlIfStat*);
 int APS5_VABI select_nid_postfix(int, void*, void*, void*, const void*);
 int APS5_VABI open_nid_postfix(const char*, int, int);
 int APS5_VABI close_nid_postfix(int);
@@ -822,6 +823,18 @@ int main() {
     int state = -1;
     Require(sceNetCtlGetState(&state) == 0);
     Require(state == 0 || state == 3);
+    Require(sceNetCtlGetIfStat(nullptr) == static_cast<int>(0x80412107));
+    NetCtlIfStat first{};
+    first.device = 7;
+    first.reserved[7] = 7;
+    const int statResult = sceNetCtlGetIfStat(&first);
+    Require(statResult == (state == 3 ? 0 : static_cast<int>(0x80412108)));
+    if (statResult == 0) {
+        Require(first.device == 0 && first.reserved[7] == 0);
+        NetCtlIfStat second{};
+        Require(sceNetCtlGetIfStat(&second) == 0);
+        Require(second.tx_bytes >= first.tx_bytes && second.rx_bytes >= first.rx_bytes);
+    }
     if (ipv6Unavailable) {
         std::puts("skipped the IPv6 socket checks, the host has no usable IPv6 loopback");
         return 77;

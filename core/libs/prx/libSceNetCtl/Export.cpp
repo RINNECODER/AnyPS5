@@ -5,14 +5,17 @@
 #include <iphlpapi.h>
 #else
 #include <ifaddrs.h>
+#include <linux/if_link.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <netpacket/packet.h>
 #endif
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include <mutex>
+#include <stdexcept>
 #ifdef _WIN32
 #include <vector>
 #endif
@@ -78,9 +81,44 @@ static bool HostHasAddress(int family) {
 #endif
 }
 
+static void HostTraffic(std::uint64_t& sent, std::uint64_t& received) {
+    sent = 0;
+    received = 0;
+#ifdef _WIN32
+    MIB_IF_TABLE2* table = nullptr;
+    if (GetIfTable2(&table) != NO_ERROR) throw std::runtime_error("sceNetCtlGetIfStat: the host interface table is unavailable");
+    for (ULONG index = 0; index < table->NumEntries; ++index) {
+        const auto& row = table->Table[index];
+        if (row.OperStatus != IfOperStatusUp || row.Type == IF_TYPE_SOFTWARE_LOOPBACK || !row.InterfaceAndOperStatusFlags.HardwareInterface) continue;
+        sent += row.OutOctets;
+        received += row.InOctets;
+    }
+    FreeMibTable(table);
+#else
+    ifaddrs* interfaces = nullptr;
+    if (getifaddrs(&interfaces) != 0) throw std::runtime_error("sceNetCtlGetIfStat: the host interface list is unavailable");
+    for (auto* item = interfaces; item; item = item->ifa_next) {
+        if (!item->ifa_addr || item->ifa_addr->sa_family != AF_PACKET || !item->ifa_data) continue;
+        if (!(item->ifa_flags & IFF_UP) || (item->ifa_flags & IFF_LOOPBACK)) continue;
+        const auto* stats = static_cast<const rtnl_link_stats*>(item->ifa_data);
+        sent += stats->tx_bytes;
+        received += stats->rx_bytes;
+    }
+    freeifaddrs(interfaces);
+#endif
+}
+
 extern "C" {
 
 int APS5_VABI sceNetCtlCheckCallback(void) {
+    return 0;
+}
+
+int APS5_VABI sceNetCtlGetIfStat(NetCtlIfStat* stat) {
+    if (!stat) return SCE_NET_CTL_ERROR_INVALID_ADDR;
+    if (!HostHasAddress(AF_UNSPEC)) return SCE_NET_CTL_ERROR_NOT_CONNECTED;
+    *stat = {};
+    HostTraffic(stat->tx_bytes, stat->rx_bytes);
     return 0;
 }
 
