@@ -211,11 +211,6 @@ std::uint32_t rasterSamples(const Registers& cx) {
     return config == cx.end() ? 1u : 1u << (config->second & 7u);
 }
 
-// PA_SC_MODE_CNTL_0 MSAA_ENABLE (bit 0) is accepted only for multisampled rasterization.
-std::uint32_t scanModeMask(const Registers& cx) {
-    return rasterSamples(cx) > 1u ? ScanModeMask & ~1u : ScanModeMask;
-}
-
 // DB_Z_INFO: FORMAT [1:0], NUM_SAMPLES [3:2], SW_MODE [8:4], PARTIALLY_RESIDENT [12], MAXMIP [19:16],
 // TILE_SURFACE_ENABLE [29]. Partial residency only governs page faults, and a mipmapped surface is
 // rendered through its view's level (DB_DEPTH_VIEW MIP_LEVEL, which must be 0 here).
@@ -338,6 +333,36 @@ bool depthPassThrough(std::uint32_t depthControl) {
 
 std::uint32_t effectiveDepthControl(std::uint32_t depthControl) {
     return (depthControl & 3u) == 0 ? depthControl & ~4u : depthControl;
+}
+
+std::string singleSampleMsaaRejection(const QueueState& queue) {
+    const auto& cx = queue.context;
+    const auto word = [](const Registers& registers, std::uint32_t offset, RegisterBank bank = RegisterBank::Context) -> std::optional<std::uint32_t> {
+        const auto it = find(registers, offset, bank);
+        if (it == registers.end()) return std::nullopt;
+        return it->second;
+    };
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+        const auto offset = 0x2feu + pixel * 4u;
+        if (const auto locations = word(cx, offset); locations && (*locations & 0xffu) != 0) return zeroMessage(offset, *locations, "MSAA_ENABLE on a single-sample target whose sample is off the pixel center");
+    }
+    if (const auto alphaToMask = word(cx, 0x2dc); alphaToMask && (*alphaToMask & 1u) != 0) return zeroMessage(0x2dc, *alphaToMask, "MSAA_ENABLE on a single-sample target with alpha-to-coverage");
+    if (const auto conservative = word(cx, 0x313); conservative && (*conservative & ~0x001f6000u) != 0) return zeroMessage(0x313, *conservative, "MSAA_ENABLE on a single-sample target with conservative rasterization");
+    constexpr const char* primitives = "MSAA_ENABLE on a single-sample target for primitives other than triangles";
+    const auto stages = word(cx, 0x2d5);
+    if (!stages) return {};
+    if ((*stages & 0x20u) != 0) {
+        if (const auto output = word(cx, 0x29b); output && ((*output & 0x80000000u) != 0 || (*output & 0x3fu) != 2u)) return zeroMessage(0x29b, *output, primitives);
+    } else if ((*stages & 4u) != 0) {
+        if (const auto parameters = word(cx, 0x2db)) {
+            const auto domain = *parameters & 3u;
+            const auto topology = (*parameters >> 5u) & 7u;
+            if ((domain != 1u && domain != 2u) || (topology != 2u && topology != 3u)) return zeroMessage(0x2db, *parameters, primitives);
+        }
+    } else if (const auto primitive = word(queue.userConfig, 0x242, RegisterBank::UserConfig); primitive && *primitive != 4u && *primitive != 5u && *primitive != 6u) {
+        return zeroMessage(0x242, *primitive, primitives);
+    }
+    return {};
 }
 
 bool colorControlSupported(std::uint32_t colorControl, bool hasColorTarget) {
@@ -665,7 +690,13 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     if (!result.alphaToCoverage) zero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage");
     zero(cx, 0x2f8, AaConfigMask, "coverage conversion or over-8x multisampling");
     result.rasterSamples = rasterSamples(cx);
-    zero(cx, 0x292, scanModeMask(cx), "scan conversion mode");
+    // MSAA_ENABLE on a single-sample scan is accepted when its samples sit at the pixel center (see singleSampleMsaaRejection).
+    zero(cx, 0x292, ScanModeMask & ~1u, "scan conversion mode");
+    const bool singleSampleMsaa = result.rasterSamples == 1 && (read(cx, 0x292) & 1u) != 0;
+    if (singleSampleMsaa) {
+        for (std::uint32_t pixel = 0; pixel < 4; ++pixel) static_cast<void>(read(cx, 0x2feu + pixel * 4u));
+        if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) throw std::runtime_error(reason);
+    }
     zero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization");
     zero(cx, 0x80, ~0u, "window offset");
     zero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits");
@@ -736,6 +767,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         result.colors.push_back(color);
     }
     result.rasterSamples = AttachmentSampleCount(result.rasterSamples, result.depth ? result.depth->samples : 0u, result.colors);
+    Require(!singleSampleMsaa || result.rasterSamples == 1, "MSAA_ENABLE on a single-sample scan into multisampled targets is unsupported");
     if (result.hasColorTarget) {
         result.color = result.colors.front();
         if (result.depth) result.renderExtent = {std::min(result.renderExtent.width, result.depth->extent.width), std::min(result.renderExtent.height, result.depth->extent.height)};
@@ -1123,7 +1155,10 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
         if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage"); !reason.empty()) return reason;
     }
     if (auto reason = nonzero(cx, 0x2f8, AaConfigMask, "coverage conversion or over-8x multisampling"); !reason.empty()) return reason;
-    if (auto reason = nonzero(cx, 0x292, scanModeMask(cx), "scan conversion mode"); !reason.empty()) return reason;
+    if (auto reason = nonzero(cx, 0x292, ScanModeMask & ~1u, "scan conversion mode"); !reason.empty()) return reason;
+    if (rasterSamples(cx) == 1 && value(cx, 0x292, word) && (word & 1u) != 0) {
+        if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) return reason;
+    }
     if (auto reason = nonzero(cx, 0x293, ScanControlMask, "sample iteration, primitive discard or out-of-order rasterization"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x80, ~0u, "window offset"); !reason.empty()) return reason;
     if (auto reason = nonzero(cx, 0x8d, ScreenOffsetMask, "reserved PA_SU_HARDWARE_SCREEN_OFFSET bits"); !reason.empty()) return reason;
