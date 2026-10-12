@@ -682,7 +682,7 @@ int GuestSockets::Poll(KernelSocketPoll::Entry* entries, int count, int timeoutM
 
 extern "C" {
 int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...) {
-    if (descriptor < GuestSockets::FirstDescriptor) {
+    if (!GuestSockets::IsOpen(descriptor)) {
         const auto type = File::FcntlArgumentOf(command);
         std::intptr_t argument = 0;
         if (type != File::FcntlArgument::None) {
@@ -929,7 +929,7 @@ int APS5_VABI getpeername_nid_postfix(int descriptor, void* address, std::uint32
     return 0;
 }
 int APS5_VABI ioctl_nid_postfix(int descriptor, std::uint64_t request, void* argument) {
-    if (descriptor < GuestSockets::FirstDescriptor) return File::Ioctl(descriptor, request, argument);
+    if (!GuestSockets::IsOpen(descriptor)) return File::Ioctl(descriptor, request, argument);
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
     if (!argument) return Fail(14);
