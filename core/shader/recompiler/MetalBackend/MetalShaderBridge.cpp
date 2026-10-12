@@ -14,9 +14,40 @@
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
+#include <string_view>
 
 namespace ShaderRecompiler::MetalBackend {
 namespace {
+
+// SPIRV-Cross keeps NoContraction arithmetic (every guest v_add/v_sub/v_mul_f32 is exact, as on
+// the guest GPU) from being fused by wrapping it in [[clang::optnone]] helpers (spvFMul, spvFAdd,
+// spvFSub and their matrix forms). optnone also means noinline, so each such operation became a
+// real function call with an unoptimized body: hundreds per shader, and most of the GPU time of
+// the heavy compute passes. `#pragma METAL fp contract(off)` forbids the fusion for the whole
+// source instead, so the helpers can inline; they still compute the same fma(l, r, 0) etc., so
+// results are bit-identical.
+void InlineExactArithmetic(std::string& source) {
+    // Only the exact-arithmetic helpers: spvMulExtended keeps optnone (it works around a Metal
+    // compiler fault) and spvQuantizeToF16 / spvReflect keep theirs.
+    static constexpr std::string_view Attribute = "[[clang::optnone]] ";
+    bool found = false;
+    for (auto at = source.find(Attribute); at != std::string::npos; at = source.find(Attribute, at)) {
+        const auto name = source.find(" spvF", at + Attribute.size());
+        const auto line = source.find('\n', at);
+        const auto helper = name != std::string::npos && name < line ? std::string_view(source).substr(name + 1, 8) : std::string_view{};
+        if (helper != "spvFAdd(" && helper != "spvFSub(" && !helper.starts_with("spvFMul")) {
+            at += Attribute.size();
+            continue;
+        }
+        source.erase(at, Attribute.size());
+        found = true;
+    }
+    if (!found) return;
+    static constexpr std::string_view Anchor = "using namespace metal;\n";
+    const auto anchor = source.find(Anchor);
+    if (anchor == std::string::npos) throw std::runtime_error("converted Metal source lacks its metal namespace declaration");
+    source.insert(anchor + Anchor.size(), "#pragma METAL fp contract(off)\n");
+}
 [[noreturn]] void Fail(const std::string& reason) {
     throw std::runtime_error("Metal shader bridge: " + reason);
 }
@@ -1443,6 +1474,7 @@ static Result ConvertToMetalUncached(const RecompileResult& guest, ShaderStage s
     for (const auto& pair : compiler.MinimumLodPairs()) result.minimumLodPairs.push_back({pair.imageSet, pair.imageBinding, pair.imageElement, pair.samplerSet, pair.samplerBinding, pair.samplerElement, pair.magArgument, pair.minArgument, pair.relativeViewMin});
     try { result.source = compiler.compile(); }
     catch (const std::exception& error) { Fail(error.what()); }
+    InlineExactArithmetic(result.source);
     result.requiresTextureLodQueries = compiler.RequiresTextureLodQueries();
     result.minimumLodImages = compiler.MinimumLodImages();
     result.capturedSamplerRequirements = compiler.CapturedSamplers();
