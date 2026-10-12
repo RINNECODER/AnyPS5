@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Queues/Submission.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalDraw.hpp"
+#include "PacketStoreRange.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -82,6 +83,13 @@ struct MetalDriver::Impl {
     void AwaitMappingDrain();
     void NotifyLabelStore();
     void CompletePriorGpuWorkAndCopyBack();
+    // Clears the draw executor's image cache (GuestImageCache.hpp), or drops the entries a store
+    // overlaps. The reason only feeds the ANYPS5_METAL_GPU_TIMING statistics (0 is a mapping change).
+    enum class ForgetReason : unsigned { Other, Submission, Wait, Flip, Event, Failure, Store };
+    void ForgetCachedImages(ForgetReason reason);
+    void ForgetCachedImages(const GuestStoreRange& store);
+    // Label bytes this driver stored itself; read and written with gpuMutex held.
+    OwnLabelStores ownLabels;
     void DeliverEopInterrupt(std::uint32_t queue);
     void ExecuteSubmission(const Submission& submission, QueueState& queue);
     void ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);

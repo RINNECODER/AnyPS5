@@ -549,6 +549,21 @@ void MetalDriver::Impl::AwaitMappingDrain() {
 }
 void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack() { std::lock_guard lock(gpuMutex); }
 
+void MetalDriver::Impl::ForgetCachedImages(ForgetReason reason) {
+    if (draw != nullptr && draw->ImageCache() != nullptr) draw->ImageCache()->Clear(static_cast<unsigned>(reason));
+}
+
+void MetalDriver::Impl::ForgetCachedImages(const GuestStoreRange& store) {
+    if (draw == nullptr || draw->ImageCache() == nullptr || store.bytes == 0) return;
+    if (store.bytes == GuestStoreRange::Everything().bytes) return ForgetCachedImages(ForgetReason::Store);
+    for (const auto& range : ranges) {
+        if (!store.Overlaps(range.guestAddress, range.host.size())) continue;
+        const auto begin = std::max(store.begin, range.guestAddress);
+        const auto end = std::min(store.begin + std::min(store.bytes, ~std::uint64_t{0} - store.begin), range.guestAddress + range.host.size());
+        draw->ImageCache()->Invalidate(range.host.data() + (begin - range.guestAddress), static_cast<std::size_t>(end - begin));
+    }
+}
+
 void MetalDriver::Impl::DeliverEopInterrupt(std::uint32_t queue) {
     if (!eopInterrupt) throw std::runtime_error("Metal driver EOP interrupt requires a configured native host callback");
     eopInterrupt(queue);

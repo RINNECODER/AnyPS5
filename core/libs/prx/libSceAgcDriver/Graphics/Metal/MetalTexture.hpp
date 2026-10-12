@@ -25,6 +25,10 @@ public:
     // afterwards on the same queue runs after it. This waits for it and reports a GPU failure;
     // Readback calls it too.
     void FinishUpload() const;
+    // Encodes Readback(guest, offset) into `commands`, after the work that writes the texture, when
+    // the surface converts in place; returns false (encoding nothing) otherwise. The copy-back then
+    // completes with that work instead of costing a second command buffer and CPU wait.
+    [[nodiscard]] bool EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset) const;
     [[nodiscard]] id<MTLTexture> Texture() const;
     [[nodiscard]] id<MTLTexture> SampledView() const;
     [[nodiscard]] id<MTLTexture> StorageView(bool atomic = false) const;
