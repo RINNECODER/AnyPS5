@@ -198,6 +198,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSigninDialog>")
     endif()
 
+    add_test_executable(guest_netctl_ap_dialog_tests tests/GuestNetCtlApDialog.cpp)
+    target_include_directories(guest_netctl_ap_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_netctl_ap_dialog_tests PRIVATE libSceNetCtlApDialog libc)
+    configure_windows_unwind(guest_netctl_ap_dialog_tests)
+    add_test(NAME guest_netctl_ap_dialog COMMAND guest_netctl_ap_dialog_tests)
+    if(WIN32)
+        set_tests_properties(guest_netctl_ap_dialog PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNetCtlApDialog>")
+    endif()
+
     add_test_executable(guest_rudp_status_tests tests/GuestRudpStatus.cpp)
     target_include_directories(guest_rudp_status_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_rudp_status_tests PRIVATE libSceRudp libc)
