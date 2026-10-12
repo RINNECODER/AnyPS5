@@ -557,6 +557,41 @@ void ClipCullDecode() {
     std::cout << "PASS: clip and cull distance enables decode; more than eight are refused\n";
 }
 
+// Upstream 44c4b3f8b: PA_SC_AA_CONFIG COVERED_CENTROID_IS_CENTER is admitted while the pixel program
+// reads no centroid input, and refused (decode and precheck) when it does.
+void CoveredCentroid() {
+    alignas(65536) static std::array<std::byte, 1u << 20u> memory{};
+    const auto address = reinterpret_cast<std::uintptr_t>(memory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{address, memory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    auto guest = GuestDraw(address);
+    guest.shader[0x008] = 0x1000;
+    guest.context[0x1b3] = 2u;
+    guest.context[0x1b4] = 2u;
+    guest.context[0x2f8] = 1u << 29u;
+    Require(Graphics::DecodeState(guest).samples == 1 && Graphics::DrawRejection(guest, false).empty(), "covered-centroid mode without centroid inputs was refused");
+    const auto refused = [&] {
+        try {
+            static_cast<void>(Graphics::DecodeState(guest));
+        } catch (const std::exception& error) {
+            return std::string(error.what()).find("COVERED_CENTROID_IS_CENTER") != std::string::npos &&
+                Graphics::DrawRejection(guest, false).find("COVERED_CENTROID_IS_CENTER") != std::string::npos;
+        }
+        return false;
+    };
+    for (const auto centroid : {4u, 64u}) {
+        guest.context[0x1b3] = 2u | centroid;
+        guest.context[0x1b4] = 2u | centroid;
+        Require(refused(), "covered-centroid mode with an active centroid input was not refused");
+        guest.context[0x1b4] = 2u;
+        Require(Graphics::DrawRejection(guest, false).empty(), "an unaddressed centroid input refused covered-centroid mode");
+    }
+    guest.context[0x1b3] = 2u;
+    guest.context.erase(0x1b4);
+    Require(refused(), "covered-centroid mode with unspecified centroid inputs was not refused");
+    std::cout << "PASS: covered-centroid mode is admitted without centroid inputs and refused with them\n";
+}
+
 // Renders one draw of `state` (rasterSamples > 1) into a multisampled RGBA8 target with the pass's
 // sample positions from ConfigureSamplePositions, and returns the resolved pixels.
 std::array<Pixel, 64> RenderResolved(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library,
@@ -753,6 +788,7 @@ int main() {
             CustomSampleLocations(device, queue, library);
             ColorViewSlices();
             ClipCullDecode();
+            CoveredCentroid();
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {

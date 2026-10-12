@@ -207,7 +207,19 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
 // PA_SC_AA_CONFIG: MSAA_NUM_SAMPLES [2:0], AA_MASK_CENTROID_DTMN [4], MAX_SAMPLE_DIST [16:13] and
 // MSAA_EXPOSED_SAMPLES [22:20] describe ordinary multisampling (standard sample positions are used);
 // DETAIL_TO_EXPOSED_MODE and COVERAGE_TO_SHADER_SELECT (coverage conversion) stay unsupported.
-constexpr std::uint32_t AaConfigMask = ~(0x7u | 0x10u | 0x1e000u | 0x700000u);
+constexpr std::uint32_t AaConfigMask = ~(0x7u | 0x10u | 0x1e000u | 0x700000u | (1u << 29u));
+constexpr std::uint32_t CoveredCentroidIsCenter = 1u << 29u;
+constexpr std::uint32_t CentroidInputs = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PerspectiveCentroid) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::LinearCentroid);
+
+// PA_SC_AA_CONFIG COVERED_CENTROID_IS_CENTER only changes centroid inputs, so it is admitted when the
+// pixel program reads none (or is skipped).
+bool coveredCentroidSupported(const QueueState& queue) {
+    const auto config = find(queue.context, 0x2f8);
+    if (config == queue.context.end() || (config->second & CoveredCentroidIsCenter) == 0 || PixelProgramSkipped(queue)) return true;
+    const auto ena = find(queue.context, 0x1b3);
+    const auto addr = find(queue.context, 0x1b4);
+    return ena != queue.context.end() && addr != queue.context.end() && (ena->second & addr->second & CentroidInputs) == 0;
+}
 
 std::uint32_t rasterSamples(const Registers& cx) {
     const auto config = find(cx, 0x2f8);
@@ -753,6 +765,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     result.alphaToCoverage = read(cx, 0x2dc) == AlphaToCoverageUndithered;
     if (!result.alphaToCoverage) zero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage");
     zero(cx, 0x2f8, AaConfigMask, "coverage conversion or over-8x multisampling");
+    Require(coveredCentroidSupported(queue), "COVERED_CENTROID_IS_CENTER with active or unspecified centroid inputs is not implemented");
     result.rasterSamples = rasterSamples(cx);
     const auto guestSamples = result.rasterSamples;
     // Multisampling with MSAA_ENABLE clear rasterizes every sample at the pixel center (upstream refuses
@@ -1288,6 +1301,7 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
         if (auto reason = nonzero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage"); !reason.empty()) return reason;
     }
     if (auto reason = nonzero(cx, 0x2f8, AaConfigMask, "coverage conversion or over-8x multisampling"); !reason.empty()) return reason;
+    if (!coveredCentroidSupported(queue)) return "AGC graphics: COVERED_CENTROID_IS_CENTER with active or unspecified centroid inputs is not implemented";
     if (auto reason = nonzero(cx, 0x292, ScanModeMask & ~1u, "scan conversion mode"); !reason.empty()) return reason;
     if (rasterSamples(cx) == 1 && value(cx, 0x292, word) && (word & 1u) != 0) {
         if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) return reason;
