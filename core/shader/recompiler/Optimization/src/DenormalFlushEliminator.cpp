@@ -67,6 +67,8 @@ private:
             case IrOpcode::ConvertF32S32:
             case IrOpcode::ConvertF32U32:
             case IrOpcode::ConvertF32F16:
+            case IrOpcode::FPFloor32:
+            case IrOpcode::FPCeil32:
                 return true;
             case IrOpcode::BitCastU32F32:
             case IrOpcode::BitCastF32U32:
@@ -96,6 +98,11 @@ private:
                 if (nanOnlyTrueArm(value)) return Contains(value.Argument(2));
                 return Contains(value.Argument(1)) && Contains(value.Argument(2));
             }
+            case IrOpcode::FPMin32:
+            case IrOpcode::FPMax32:
+            case IrOpcode::FPMinTri32:
+            case IrOpcode::FPMaxTri32:
+            case IrOpcode::FPMedTri32:
             case IrOpcode::Phi:
                 for (std::size_t index = 0; index < value.ArgumentCount(); ++index) {
                     if (!Contains(value.Argument(index))) return false;
