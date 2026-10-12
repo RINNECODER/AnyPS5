@@ -156,6 +156,7 @@ void MetalDriver::Configure(void* device, void* library,
     impl->draw = std::move(draw);
     // A worker with nothing to execute still retires submissions as their GPU work completes.
     impl->timeline.SetCompletionSignal([impl = impl.get()] {
+        impl->progress.fetch_add(1, std::memory_order_relaxed);
         {
             std::lock_guard lock(impl->mutex);
             impl->reapSignal = true;
@@ -493,13 +494,23 @@ void MetalDriver::Impl::WaitForQueueRoom(std::uint32_t queue) {
     const auto found = workers.find(queue);
     if (found == workers.end()) return;
     const auto& worker = found->second;
-    const bool room = changed.wait_for(lock, std::chrono::seconds(10), [&] {
+    const auto hasRoom = [&] {
         return stopping || failure || static_cast<long>(worker.pending.size() + worker.unretired) <= maxQueued ||
             (worker.active && !worker.running);
-    });
+    };
+    // Gives up only when the workers made no progress for 10 s (a wait this does not model): a
+    // worker busy converting a burst of new shaders can take longer than that to retire one
+    // submission, and submitting past it then let the guest rewrite data queued work reads.
+    bool room = false;
+    for (auto seen = progress.load(std::memory_order_relaxed);;) {
+        room = changed.wait_for(lock, std::chrono::seconds(10), hasRoom);
+        const auto now = progress.load(std::memory_order_relaxed);
+        if (room || now == seen) break;
+        seen = now;
+    }
     static std::atomic<unsigned> reports{0};
     if (!room && reports.fetch_add(1) < 4) {
-        std::fprintf(stderr, "[metal] queue %u still had %zu submissions waiting after 10 s; submitting anyway\n", queue, worker.pending.size());
+        std::fprintf(stderr, "[metal] queue %u made no progress for 10 s with %zu submissions waiting; submitting anyway\n", queue, worker.pending.size());
     }
 }
 

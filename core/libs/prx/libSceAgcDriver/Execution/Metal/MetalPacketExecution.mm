@@ -691,6 +691,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             static_cast<unsigned long long>(submission.serial), submission.commands.size(), submission.flips.size());
     }
     for (std::size_t cursor = 0; cursor < submission.commands.size();) {
+        progress.fetch_add(1, std::memory_order_relaxed);
         CheckFailureAndStopping();
         const auto header = submission.commands[cursor];
         const auto count = Pm4::PacketWords(header);

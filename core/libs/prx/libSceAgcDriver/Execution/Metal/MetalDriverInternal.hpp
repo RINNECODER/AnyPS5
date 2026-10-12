@@ -72,6 +72,9 @@ struct MetalDriver::Impl {
     std::uint64_t completed = 0;
     std::uint64_t eventSerial = 0;
     std::atomic<std::uint64_t> frameSerial{0};
+    // Moves with every packet a worker executes and every timeline completion: WaitForQueueRoom
+    // keeps waiting while it moves.
+    std::atomic<std::uint64_t> progress{0};
     std::uint64_t queue0Executing = 0;
     std::uint64_t queue0Awaited = 0;
     std::set<std::uint64_t> completedOutOfOrder;
