@@ -119,6 +119,29 @@ def check_registry_inputs(relinker, work, windows):
                 assert not (case / "app0").exists()
 
 
+def check_registry_after_failed_patch(relinker, work):
+    case = work / "registry-failed-patch"
+    (case / "sce_module").mkdir(parents=True)
+    (case / "sce_module" / "sample.prx").write_bytes(guest_fixture(PLAIN_SITE))
+    (case / "sce_sys").mkdir()
+    (case / "sce_sys" / "icon0.png").write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(40))
+    source = case / "input.elf"
+    source.write_bytes(main_fixture())
+    output = case / "output.exe"
+    previous_output = b"previous executable"
+    output.write_bytes(previous_output)
+    registries = [case / "output.registry.json", case / "output.sample.prx.guest.prx.registry.json"]
+    previous_registry = b"previous registry"
+    for registry in registries:
+        registry.write_bytes(previous_registry)
+    result = subprocess.run([str(relinker), "--windows", "--registry", str(source), str(output)],
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 2 and "Invalid Windows icon PNG" in result.stderr, (result.stdout, result.stderr)
+    assert output.read_bytes() == previous_output
+    assert all(registry.read_bytes() == previous_registry for registry in registries)
+    assert not (case / "app0").exists()
+
+
 def check_desktop_inputs(relinker, work):
     for desktop in (False, True):
         for bundled in (False, True):
@@ -180,6 +203,7 @@ def main():
         work = Path(directory)
         check_diagnostic_inputs(relinker, work)
         check_desktop_inputs(relinker, work)
+        check_registry_after_failed_patch(relinker, work)
         for windows in (False, True):
             options = ["--windows"] if windows else []
             check_registry_inputs(relinker, work, windows)
