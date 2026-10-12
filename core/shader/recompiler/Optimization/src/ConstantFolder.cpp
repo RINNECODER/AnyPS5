@@ -418,8 +418,9 @@ void lowerPackedAncillary(IrProgram& program, IrBuilder& builder, IrValue& ancil
     }
     std::array<IrValue*, 2> fields {};
     const auto field = [&](std::size_t index) -> IrValue& {
+        if (fields[index] == nullptr && index == 1u) fields[index] = &builder.Constant(0u);
         if (fields[index] == nullptr) {
-            fields[index] = &insertBuiltin(program, builder, ancillary, index == 0u ? StageInputKind::SampleId : StageInputKind::Layer);
+            fields[index] = &insertBuiltin(program, builder, ancillary, StageInputKind::SampleId);
         }
         return *fields[index];
     };

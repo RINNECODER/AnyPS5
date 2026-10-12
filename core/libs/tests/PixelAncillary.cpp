@@ -23,6 +23,19 @@ struct Row {
 };
 constexpr std::array<Row, 6> Rows {{{0u, 0u, false}, {0u, 0u, true}, {15u, 0x1FFFu, false}, {15u, 0x1FFFu, true}, {0u, 0x1FFFu, true}, {15u, 0u, false}}};
 
+static std::uint32_t Evaluate(const IrValue* value, const Row& row);
+static void RequireField(const IrValue& user, StageInputKind kind, std::uint32_t fieldOffset, std::uint32_t count) {
+    if (kind == StageInputKind::Layer) {
+        for (const Row& row : Rows) Require(Evaluate(&user, row) == 0u);
+        return;
+    }
+    const IrValue* field = user.Argument(0)->Resolve();
+    Require(field->Opcode() == IrOpcode::GetBuiltin);
+    Require(static_cast<StageInputKind>(field->Argument(0)->Resolve()->ImmediateU32()) == kind);
+    Require(user.Argument(1)->Resolve()->ImmediateU32() == fieldOffset);
+    Require(user.Argument(2)->Resolve()->ImmediateU32() == count);
+}
+
 static IrBlock& Begin(IrProgram& program) {
     program.Resources().stage = IrShaderStage::Pixel;
     program.Resources().resourceTrackingComplete = true;
@@ -80,11 +93,7 @@ static void ExtractVector(std::uint32_t offset, std::uint32_t count, StageInputK
     static_cast<void>(builder.Emit(IrOpcode::ReferenceU32, IrType::Void, {&user}));
     static_cast<void>(builder.Emit(IrOpcode::Return, IrType::Void, {}));
     Lower(program);
-    const IrValue* field = user.Argument(0)->Resolve();
-    Require(field->Opcode() == IrOpcode::GetBuiltin);
-    Require(static_cast<StageInputKind>(field->Argument(0)->Resolve()->ImmediateU32()) == kind);
-    Require(user.Argument(1)->Resolve()->ImmediateU32() == fieldOffset);
-    Require(user.Argument(2)->Resolve()->ImmediateU32() == count);
+    RequireField(user, kind, fieldOffset, count);
 }
 
 static void ExtractVectorMaskedCopy(std::uint32_t offset, std::uint32_t count, StageInputKind kind, std::uint32_t fieldOffset) {
@@ -109,21 +118,13 @@ static void ExtractVectorMaskedCopy(std::uint32_t offset, std::uint32_t count, S
     static_cast<void>(builder.Emit(IrOpcode::ReferenceU32, IrType::Void, {&copy}));
     static_cast<void>(builder.Emit(IrOpcode::Return, IrType::Void, {}));
     ConstantFolder().Fold(program);
-    const IrValue* field = user.Argument(0)->Resolve();
-    Require(field->Opcode() == IrOpcode::GetBuiltin);
-    Require(static_cast<StageInputKind>(field->Argument(0)->Resolve()->ImmediateU32()) == kind);
-    Require(user.Argument(1)->Resolve()->ImmediateU32() == fieldOffset);
-    Require(user.Argument(2)->Resolve()->ImmediateU32() == count);
+    RequireField(user, kind, fieldOffset, count);
 }
 static void Extract(IrOpcode opcode, std::uint32_t offset, std::uint32_t count, StageInputKind kind, std::uint32_t fieldOffset) {
     IrProgram program;
     auto& user = Build(program, opcode, offset, count);
     Lower(program);
-    const IrValue* field = user.Argument(0)->Resolve();
-    Require(field->Opcode() == IrOpcode::GetBuiltin);
-    Require(static_cast<StageInputKind>(field->Argument(0)->Resolve()->ImmediateU32()) == kind);
-    Require(user.Argument(1)->Resolve()->ImmediateU32() == fieldOffset);
-    Require(user.Argument(2)->Resolve()->ImmediateU32() == count);
+    RequireField(user, kind, fieldOffset, count);
 }
 static void Refused(IrOpcode opcode, std::uint32_t offset, std::uint32_t count, bool throughSelect = false) {
     IrProgram program;
@@ -171,7 +172,7 @@ static std::uint32_t Evaluate(const IrValue* value, const Row& row) {
     throw std::runtime_error("packed pixel ancillary evaluation reached an unsupported value");
 }
 static std::uint32_t PackedWord(const Row& row) {
-    return UnmodelledBits | (row.sample << 8u) | (row.layer << 16u);
+    return UnmodelledBits | (row.sample << 8u);
 }
 static void Values(IrOpcode opcode, std::uint32_t offset, std::uint32_t count, bool throughSelect) {
     IrProgram program;
@@ -193,11 +194,7 @@ static void LateFold() {
     IrValue& user = builder.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {&ancillary, &offset, &count});
     End(builder, user);
     Lower(program);
-    const IrValue* field = user.Argument(0)->Resolve();
-    Require(field->Opcode() == IrOpcode::GetBuiltin);
-    Require(static_cast<StageInputKind>(field->Argument(0)->Resolve()->ImmediateU32()) == StageInputKind::Layer);
-    Require(user.Argument(1)->Resolve()->ImmediateU32() == 0u);
-    Require(user.Argument(2)->Resolve()->ImmediateU32() == 11u);
+    RequireField(user, StageInputKind::Layer, 0u, 11u);
     for (const Row& row : Rows) {
         Require(Evaluate(&user, row) == BitField(PackedWord(row), 16u, 11u, false));
     }
@@ -329,8 +326,7 @@ static void HelperLanesOnly(std::uint32_t chain = 0u) {
         }
     }
     Require(built.written->Parent() == nullptr);
-    const IrValue* field = built.layer->Argument(0)->Resolve();
-    Require(field->Opcode() == IrOpcode::GetBuiltin && static_cast<StageInputKind>(field->Argument(0)->Resolve()->ImmediateU32()) == StageInputKind::Layer);
+    RequireField(*built.layer, StageInputKind::Layer, 0u, 11u);
     const IrValue* entryValue = built.exported->Argument(0)->Resolve();
     Require(entryValue->HasImmediate() && entryValue->ImmediateU32() == SelectOther);
 }
@@ -416,8 +412,7 @@ static void HelperLoopOnly(LoopRead read) {
         }
     }
     Require(built.written->Parent() == nullptr);
-    const IrValue* field = built.layer->Argument(0)->Resolve();
-    Require(field->Opcode() == IrOpcode::GetBuiltin && static_cast<StageInputKind>(field->Argument(0)->Resolve()->ImmediateU32()) == StageInputKind::Layer);
+    RequireField(*built.layer, StageInputKind::Layer, 0u, 11u);
     const IrValue* entryValue = built.exported->Argument(0)->Resolve();
     Require(entryValue->HasImmediate() && entryValue->ImmediateU32() == SelectOther);
 }
