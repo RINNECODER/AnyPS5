@@ -2,7 +2,10 @@
 #include "MetalGuestMemory.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
+#include <sys/mman.h>
+#include <vector>
 
 namespace {
 namespace Abi = ShaderRecompiler::BdaAbi;
@@ -189,10 +192,78 @@ void guestAliasCases(const MetalTests::Context& context) {
     Reject([&] { auto snapshot = excessive.CaptureAfterPriorSnapshotsComplete(); }, "Overlapping physical guest component exceeded the Metal buffer limit");
 }
 
+// Working-set mode binds only admitted granules of a mapping, so a command buffer wires those pages
+// and not the whole mapping; bytes outside report an Unmapped fault until admitted.
+void workingSetCases(const MetalTests::Context& context) {
+    using AgcDriver::Metal::MetalGuestHostAliases;
+    constexpr std::size_t mappingBytes = 1 << 20, granule = 64 << 10;
+    constexpr std::uint64_t guest = 0x10000000;
+    // Granules are aligned in host address space; a granule-aligned host keeps the guest offsets below round.
+    void* mapping = ::mmap(nullptr, mappingBytes + granule, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    MetalTests::Require(mapping != MAP_FAILED, "Working-set host mapping failed");
+    const auto hostBase = (reinterpret_cast<std::uintptr_t>(mapping) + granule - 1) & ~std::uintptr_t{granule - 1};
+    const std::span<std::byte> host(reinterpret_cast<std::byte*>(hostBase), mappingBytes);
+    const std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{{guest, host, true}};
+    auto pipeline = guestPipeline(context);
+    MetalGuestHostAliases aliases(context.device);
+    Reject([&] { aliases.EnableWorkingSet(granule + 1, granule * 3); }, "Non-power-of-two working-set granule was accepted");
+    aliases.EnableWorkingSet(granule, granule * 3);
+    MetalTests::Require(aliases.WorkingSetEnabled() && aliases.WorkingSetBytes() == 0, "Working set did not start empty");
+    GuestMemory memory(context.device);
+    memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(guest, host, true);
+    const auto tableCount = [](const GuestMemory::DispatchSnapshot& snapshot) {
+        Abi::Header header{};
+        std::memcpy(&header, snapshot.Table().contents, sizeof(header));
+        return header.count;
+    };
+
+    // Nothing admitted: the capture binds nothing and the GPU write faults without touching the host.
+    constexpr std::uint64_t target = guest + 0x18000;
+    auto empty = memory.CaptureAfterPriorSnapshotsComplete(&aliases);
+    MetalTests::Require(tableCount(empty) == 0 && empty.Buffers().count == 0, "Empty working set bound guest memory");
+    const auto missed = empty.CompleteAndCopyDirtyPagesToBorrowedHost(dispatch(context, empty, pipeline, target, 0x5eed));
+    MetalTests::Require(missed.state != Abi::FaultState::Empty && missed.reason == Abi::FaultReason::Unmapped && missed.address == target,
+        "Access outside the working set did not report an Unmapped fault at its address");
+    std::uint32_t word = 0;
+    std::memcpy(&word, host.data() + 0x18000, sizeof(word));
+    MetalTests::Require(word == 0, "Access outside the working set reached the host");
+
+    // Admitting binds exactly the granule around the bytes, as a no-copy alias of the host pages.
+    MetalTests::Require(aliases.AdmitGuest(ranges, missed.address, 4), "Admitting a missing granule reported no change");
+    MetalTests::Require(!aliases.AdmitGuest(ranges, target + 8, 4), "Admitting a present granule reported a change");
+    MetalTests::Require(!aliases.AdmitGuest(ranges, guest + mappingBytes, 4), "Admitting bytes outside every range reported a change");
+    MetalTests::Require(aliases.WorkingSetBytes() == granule, "Working set did not hold exactly one granule");
+    auto bound = memory.CaptureAfterPriorSnapshotsComplete(&aliases);
+    MetalTests::Require(tableCount(bound) == 1 && bound.Buffers().count == 1 && bound.CopiedBytes() == 0, "Admitted granule was not bound as one alias");
+    MetalTests::Require(bound.Buffers()[0].length == granule && bound.Buffers()[0].contents == host.data() + 0x10000,
+        "Alias did not cover exactly the admitted host granule");
+    Abi::Range entry{};
+    std::memcpy(&entry, static_cast<const std::byte*>(bound.Table().contents) + sizeof(Abi::Header), sizeof(entry));
+    MetalTests::Require(entry.begin == guest + 0x10000 && entry.end == guest + 0x20000, "Table entry did not name the admitted guest granule");
+    const auto written = bound.CompleteAndCopyDirtyPagesToBorrowedHost(dispatch(context, bound, pipeline, target, 0x5eed));
+    MetalTests::Require(written.state == Abi::FaultState::Empty, "Access inside the working set faulted");
+    std::memcpy(&word, host.data() + 0x18000, sizeof(word));
+    MetalTests::Require(word == 0x5eed, "Write inside the working set did not reach the host pages");
+
+    // Adjacent granules merge; going over the budget starts the set again from the new bytes.
+    MetalTests::Require(aliases.AdmitGuest(ranges, guest + 0x20000, 1) && aliases.WorkingSet().size() == 1 && aliases.WorkingSetBytes() == 2 * granule,
+        "Adjacent granules did not merge");
+    MetalTests::Require(aliases.AdmitGuest(ranges, guest + 0x80000, 1) && aliases.WorkingSet().size() == 2, "Second interval was not admitted");
+    MetalTests::Require(aliases.AdmitGuest(ranges, guest + 0xc0000, 1), "Granule over the budget was not admitted");
+    const auto reset = aliases.WorkingSet();
+    MetalTests::Require(reset.size() == 1 && reset[0].first == hostBase + 0xc0000 && reset[0].second == hostBase + 0xc0000 + granule,
+        "Working set over its budget did not restart from the new granule");
+    auto restarted = memory.CaptureAfterPriorSnapshotsComplete(&aliases);
+    MetalTests::Require(tableCount(restarted) == 1 && aliases.Count() == 1, "Capture after a restart kept aliases outside the working set");
+    static_cast<void>(restarted.CompleteAndCopyDirtyPagesToBorrowedHost(dispatch(context, restarted, pipeline, guest + 0xc0000, 1)));
+    ::munmap(mapping, mappingBytes + granule);
+}
+
 }
 
 void RunGuestMemoryTests(const MetalTests::Context& context) {
     guestAliasCases(context);
+    workingSetCases(context);
     std::vector<std::byte> host(8192 + 24, std::byte{0x31});
     std::array<std::byte, 32> readOnly;
     readOnly.fill(std::byte{0x72});

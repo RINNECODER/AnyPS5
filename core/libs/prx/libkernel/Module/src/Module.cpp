@@ -83,6 +83,7 @@ extern "C" {
 void* APS5_VABI dlopen_nid_postfix(const char* path, int flags);
 void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name);
 int APS5_VABI dlclose_nid_postfix(void* handle);
+char* APS5_VABI dlerror_nid_postfix();
 }
 
 namespace {
@@ -212,7 +213,12 @@ KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, si
  pendingModuleArgs = {};
  pendingModuleInitResult = 0;
  if (res) *res = started;
- if (!handle) return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT);
+ if (!handle) {
+  const char* error = dlerror_nid_postfix();
+  APS5_LOG_OUT("%s: not loaded (%s)", module_file_name, error ? error : "unknown error");
+  return static_cast<KernelModule>(SCE_KERNEL_ERROR_ENOENT);
+ }
+ APS5_LOG_OUT("%s: handle=%p start=%d", module_file_name, handle, started);
  return static_cast<KernelModule>(reinterpret_cast<intptr_t>(handle));
 }
 

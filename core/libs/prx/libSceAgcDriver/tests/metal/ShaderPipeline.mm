@@ -503,9 +503,36 @@ void Archive(const MetalTests::Context& context) {
     std::filesystem::remove_all(directory);
 }
 
+// A relinked title declares an old SDK, so the process default is MSL 2.3; converted shaders still
+// compile as MSL 3.2, which the bridge's workgroup acquire/release fences need.
+void LanguageVersion(const MetalTests::Context& context) {
+    if (@available(macOS 15.0, *)) {
+        using AgcDriver::Metal::ConvertedShaderLanguageVersion;
+        MetalTests::Require(ConvertedShaderLanguageVersion(MTLLanguageVersion2_3, false) == MTLLanguageVersion3_2 &&
+            ConvertedShaderLanguageVersion(MTLLanguageVersion3_2, false) == MTLLanguageVersion3_2 &&
+            ConvertedShaderLanguageVersion(MTLLanguageVersion4_0, false) == MTLLanguageVersion4_0 &&
+            ConvertedShaderLanguageVersion(MTLLanguageVersion4_0, true) == MTLLanguageVersion3_2,
+            "Converted shader language version does not reach MSL 3.2");
+        NSString* source = @"#include <metal_stdlib>\nusing namespace metal;\n"
+            "kernel void fence(device atomic_uint* value [[buffer(0)]]) {\n"
+            "  atomic_thread_fence(mem_flags::mem_threadgroup, memory_order_seq_cst, thread_scope_threadgroup);\n"
+            "  atomic_fetch_add_explicit(value, 1u, memory_order_relaxed);\n}\n";
+        const auto compiles = [&](MTLLanguageVersion version) {
+            auto options = [[MTLCompileOptions alloc] init];
+            options.languageVersion = version;
+            NSError* error = nil;
+            return [context.device newLibraryWithSource:source options:options error:&error] != nil;
+        };
+        MetalTests::Require(!compiles(MTLLanguageVersion2_3), "MSL 2.3 unexpectedly accepted a seq_cst thread-scope fence");
+        MetalTests::Require(compiles(ConvertedShaderLanguageVersion(MTLLanguageVersion2_3, false)),
+            "Converted shader language version rejected the bridge's seq_cst fence");
+    }
+}
+
 }
 
 void RunShaderPipelineTests(const MetalTests::Context& context) {
+    LanguageVersion(context);
     Compute(context);
     Render(context);
     Render(context, true);

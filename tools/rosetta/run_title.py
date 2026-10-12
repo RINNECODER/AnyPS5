@@ -180,25 +180,60 @@ def relink(args, cache, eboot, preload, deferred):
     return out
 
 
-def build_stubs(work, symbols, names):
-    """One dylib exporting a logging stub (returns 0) for each symbol."""
+def nid_label(symbol, names):
+    nid = symbol[1:].split("#")[0]
+    return f"{nid} ({names[nid]})" if nid in names else nid
+
+
+def build_stubs(work, symbols, names, traced=()):
+    """One dylib exporting a logging stub (returns 0) for each unresolved symbol,
+    and a tracing stub (logs, then jumps to the real definition) for each traced one."""
     work.mkdir(parents=True, exist_ok=True)
     ordered = sorted(symbols)
+    traced = sorted(traced)
     asm = ["    .text"]
     for index, symbol in enumerate(ordered):
         asm += [f'    .globl "{symbol}"', f'"{symbol}":', f"    movl ${index}, %eax", "    jmp _aps5_stub_common"]
-    asm += ["    .section __DATA,__const", "    .p2align 3", "    .globl _aps5_stub_names", "_aps5_stub_names:"]
-    asm += [f"    .quad Lname{index}" for index in range(len(ordered))]
-    asm += ["    .globl _aps5_stub_count", "    .p2align 2", "_aps5_stub_count:", f"    .long {len(ordered)}", "    .cstring"]
+    for index, symbol in enumerate(traced):
+        asm += [f'    .globl "{symbol}"', f'"{symbol}":', f"    movl ${index}, %r11d", "    jmp _aps5_trace_common"]
+    asm += ["    .section __DATA,__const", "    .p2align 3"]
+    for table, prefix, entries in (("_aps5_stub_names", "Lname", ordered), ("_aps5_trace_names", "Ltrace", traced),
+                                   ("_aps5_trace_symbols", "Lsymbol", traced)):
+        asm += [f"    .globl {table}", f"{table}:"] + [f"    .quad {prefix}{index}" for index in range(len(entries))] + ["    .quad 0"]
+    asm += ["    .p2align 2", "    .globl _aps5_stub_count", "_aps5_stub_count:", f"    .long {len(ordered)}",
+            "    .globl _aps5_trace_count", "_aps5_trace_count:", f"    .long {len(traced)}", "    .cstring"]
     for index, symbol in enumerate(ordered):
-        nid = symbol[1:].split("#")[0]
-        label = f"{nid} ({names[nid]})" if nid in names else nid
-        asm += [f"Lname{index}:", f'    .asciz "{label}"']
+        asm += [f"Lname{index}:", f'    .asciz "{nid_label(symbol, names)}"']
+    for index, symbol in enumerate(traced):
+        asm += [f"Ltrace{index}:", f'    .asciz "{nid_label(symbol, names)}"', f"Lsymbol{index}:", f'    .asciz "{symbol}"']
     (work / "stubs.S").write_text("\n".join(asm) + "\n")
     output = work / "aps5_unresolved.dylib"
     subprocess.run(["clang", "-arch", "x86_64", "-O1", "-dynamiclib", "-install_name", str(output), "-o", str(output),
                     str(STUB_RUNTIME), str(work / "stubs.S")], check=True)
     return output
+
+
+# C++ vtables, typeinfo and VTTs are data: a tracing stub in their place breaks the guest.
+DATA_NAME = re.compile(r"^_ZT[VIST]")
+
+
+def traced_symbols(pattern, imported, unresolved, names):
+    """Imported NIDs (bound to a real definition) whose NID or known name matches `pattern`.
+    Only functions can be traced: a pattern must not match a data import such as a variable."""
+    if not pattern:
+        return []
+    expression = re.compile(pattern)
+    result = []
+    for symbol in sorted(imported - set(unresolved) - HOOKS):
+        if not NID_SYMBOL.match(symbol):
+            continue
+        nid = symbol[1:].split("#")[0]
+        name = names.get(nid, "")
+        if DATA_NAME.match(name):
+            continue
+        if expression.search(nid) or expression.search(name):
+            result.append(symbol)
+    return result
 
 
 def layout(args, cache, out, resource):
@@ -230,7 +265,11 @@ def layout(args, cache, out, resource):
         subprocess.run(["clang", "-arch", "x86_64", "-dynamiclib", "-install_name", f"@rpath/{name}", "-o", str(libs / name), str(empty)], check=True)
     # Only NIDs: other names (relinker hooks, ___cxa_atexit) come from libkernel or libSystem.
     unresolved = sorted(name for name in imported - available - HOOKS if NID_SYMBOL.match(name))
-    stub_library = build_stubs(stub_work, unresolved, nid_names()) if unresolved else None
+    names = nid_names()
+    traced = traced_symbols(args.trace, imported, unresolved, names)
+    if args.trace:
+        log(f"tracing {len(traced)} imports matching {args.trace!r}")
+    stub_library = build_stubs(stub_work, unresolved, names, traced) if unresolved or traced else None
 
     # app0: the resource root linked in read-only, plus the relinker outputs.
     app0 = out / "app0"
@@ -322,6 +361,9 @@ def main():
     parser.add_argument("--relink", action="store_true")
     parser.add_argument("--abort-on-unimplemented", action="store_true",
                         help="let library functions that are not implemented throw (default: log once and return 0)")
+    parser.add_argument("--trace", metavar="REGEX",
+                        help="log guest calls to imports whose NID or name matches REGEX (ANYPS5_TRACE_LIMIT calls each, default 16; "
+                             "ANYPS5_TRACE_AFTER=SECONDS skips calls made before then; ANYPS5_TRACE_RETURNS=1 also logs each logged call's %%rax)")
     parser.add_argument("guest_args", nargs="*")
     args = parser.parse_args()
     if args.build:

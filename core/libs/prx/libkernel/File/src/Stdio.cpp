@@ -815,7 +815,18 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
         const auto nameBytes = static_cast<std::uint8_t>(nameLength);
         std::memcpy(out, &fileNumber, sizeof(fileNumber));
         std::memcpy(out + 4, &recordLength, sizeof(recordLength));
-        out[6] = static_cast<char>(entry->d_type);
+        auto type = entry->d_type;
+        if (type == DT_LNK || type == DT_UNKNOWN) {
+            // The guest file system has no symbolic links, but a host layout of
+            // the title (app0 linked to its resource root) does: report the
+            // type of what the link names, as stat does.
+            struct stat target{};
+            if (::fstatat(fd, entry->d_name, &target, 0) == 0) {
+                if (S_ISDIR(target.st_mode)) type = DT_DIR;
+                else if (S_ISREG(target.st_mode)) type = DT_REG;
+            }
+        }
+        out[6] = static_cast<char>(type);
         out[7] = static_cast<char>(nameBytes);
         std::memcpy(out + GuestHeaderBytes, entry->d_name, nameLength);
         written += record;

@@ -221,6 +221,19 @@ int main() {
     std::uint32_t timeout = 1000;
     Check(sceKernelAioWaitRequests(readIds, 2, readStates, 2, &timeout) == 0);
     Check(readStates[0] == 3 && readStates[1] == 3);
+    // Id 0 in a batch is an empty slot: the call succeeds, leaves that state alone and, with
+    // no request left to wait for, returns at once instead of failing the whole batch.
+    std::int32_t emptySlots[2] = {0, 0};
+    std::int32_t emptyStates[2] = {7, 7};
+    Check(sceKernelAioWaitRequests(emptySlots, 2, emptyStates, 2, nullptr) == 0);
+    Check(sceKernelAioWaitRequests(emptySlots, 2, emptyStates, 1, nullptr) == 0);
+    Check(emptyStates[0] == 7 && emptyStates[1] == 7);
+    std::int32_t mixedSlots[2] = {0, readIds[1]};
+    Check(sceKernelAioWaitRequests(mixedSlots, 2, emptyStates, 1, nullptr) == 0);
+    Check(emptyStates[0] == 7 && emptyStates[1] == 3);
+    emptyStates[1] = 7;
+    Check(sceKernelAioPollRequests(mixedSlots, 2, emptyStates) == 0);
+    Check(emptyStates[0] == 7 && emptyStates[1] == 3);
     std::int32_t cancelled = 0;
     Check(sceKernelAioCancelRequest(readIds[0], &cancelled) == 0);
     Check(cancelled == 4);

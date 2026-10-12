@@ -30,6 +30,15 @@ MetalGuestMemory::DispatchSnapshot capture(MetalGuestMemory& memory,
     return memory.CaptureAfterPriorSnapshotsComplete(aliases);
 }
 
+// A short description of a guest image for skip reasons: no address, so equal images share a reason.
+std::string describeImage(const Graphics::GuestTextureResource& resource) {
+    char text[160];
+    std::snprintf(text, sizeof text, "format %u %ux%ux%u mips %u-%u of %u samples %u tile %u",
+        resource.format, resource.width, resource.height, resource.depthOrLastArray + 1u, resource.baseLevel,
+        resource.lastLevel, resource.mipCount, resource.samples, static_cast<unsigned>(resource.tileMode));
+    return text;
+}
+
 auto textureKey(const Graphics::GuestTextureResource& resource, bool compare) {
     return std::tuple(resource.baseAddress, resource.width, resource.height, resource.depthOrLastArray,
         resource.baseArray, resource.mipCount, resource.baseLevel, resource.lastLevel, resource.tileMode,
@@ -122,7 +131,7 @@ MetalShaderResources::MetalShaderResources(const MetalDevice& backend,
     std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup, MetalGuestHostAliases* aliases)
     : backend(backend), borrowed(ranges), borrowedRanges(ranges.begin(), ranges.end()),
       memory(backend.Device()), snapshot(capture(memory, ranges, aliases)),
-      depthLookup(std::move(depthLookup)) {
+      depthLookup(std::move(depthLookup)), aliases(aliases) {
     resident.push_back(snapshot.Table());
     resident.push_back(snapshot.FaultBuffer());
     for (id<MTLBuffer> buffer in snapshot.Buffers()) resident.push_back(buffer);
@@ -167,6 +176,10 @@ MetalBufferBinding MetalShaderResources::mirror(std::uint64_t address, std::size
         const auto offset = range.deviceAddress - buffer.gpuAddress + address - range.begin;
         if (offset >= buffer.length || bytes > buffer.length - offset) throw std::runtime_error("Metal draw mirror extent is invalid");
         return {buffer, static_cast<NSUInteger>(offset), bytes};
+    }
+    // Borrowed bytes outside the alias working set: admit them and let the caller set up again.
+    if (aliases != nullptr && aliases->AdmitGuest(borrowedRanges, address, bytes)) {
+        throw MetalWorkingSetMiss("Metal draw guest range is outside the alias working set");
     }
     throw std::out_of_range("Metal draw guest range has no shared mirror");
 }
@@ -369,7 +382,9 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         }
         if (overlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes()) ||
             physicallyOverlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes())) {
-            throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing");
+            throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing (" +
+                describeImage(descriptor) + (descriptor.baseAddress == begin ? " at the same base as " : " overlapping ") +
+                describeImage(other) + ")");
         }
     }
     auto texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
@@ -382,7 +397,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     const auto keys = textureKeys(descriptor, bytes);
     if (written) validateDccWrite(descriptor, bytes, keys);
     if (keys == Graphics::DccKeys::Uncompressed) {
-        texture->Upload({static_cast<const std::byte*>(buffer.buffer.contents) + buffer.offset, bytes});
+        texture->Upload(buffer.buffer, buffer.offset);
     } else {
         std::vector<std::byte> clear(bytes);
         if (!Graphics::FillDccClear(Graphics::ResolveTextureFormat(descriptor.format), keys, descriptor.dccAlphaOnMsb, clear)) {
@@ -509,7 +524,8 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 id<MTLTexture> view = depthLookup ? depthLookup(descriptor, storage, depth) : nil;
                 if (view == nil && descriptor.samples > 1) {
                     // Only resident depth and color surfaces are multisampled; guest-memory MSAA images have no upload path.
-                    throw std::invalid_argument("Metal multisampled guest image is not a resident multisampled depth or color surface (guest-memory MSAA images have no upload path)");
+                    throw std::invalid_argument("Metal multisampled guest image is not a resident multisampled depth or color surface (guest-memory MSAA images have no upload path; " +
+                        describeImage(descriptor) + ")");
                 }
                 if (view == nil) {
                     auto texture = this->texture(descriptor, written, depth, atomic, minimumLodLowered, storage);
@@ -587,8 +603,9 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         }
     }
     for (const auto& image : images) {
+        image.texture->FinishUpload();
         if (image.written) {
-            image.texture->Readback({static_cast<std::byte*>(image.buffer.buffer.contents) + image.buffer.offset, image.texture->GuestBytes()});
+            image.texture->Readback(image.buffer.buffer, image.buffer.offset);
         }
     }
     const auto fault = snapshot.CompleteAndCopyDirtyPagesToBorrowedHost(commands);

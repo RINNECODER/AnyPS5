@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -16,6 +17,23 @@ namespace Abi = ShaderRecompiler::BdaAbi;
 
 namespace {
 constexpr std::size_t addressAlignment = 16;
+
+struct ProcessWorkingSet {
+    std::mutex mutex;
+    std::uint64_t granule = 0;
+    std::uint64_t budget = 0;
+};
+
+ProcessWorkingSet& processWorkingSetSetting() {
+    static auto* setting = new ProcessWorkingSet;
+    return *setting;
+}
+
+std::pair<std::uint64_t, std::uint64_t> processWorkingSet() {
+    auto& setting = processWorkingSetSetting();
+    std::lock_guard lock(setting.mutex);
+    return {setting.granule, setting.budget};
+}
 id<MTLBuffer> sharedBuffer(id<MTLDevice> device, std::size_t bytes) {
     if (bytes == 0 || bytes > device.maxBufferLength) throw std::invalid_argument("Metal guest buffer exceeds the device limit");
     auto buffer = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
@@ -49,6 +67,15 @@ MetalGuestHostAliases::MetalGuestHostAliases(id<MTLDevice> device) : device(devi
     const auto page = ::getpagesize();
     if (page <= 0 || (page & (page - 1)) != 0) throw std::runtime_error("Metal guest host aliases require a power-of-two host page");
     pageBytes = static_cast<std::uintptr_t>(page);
+    const auto [processGranule, processBudget] = processWorkingSet();
+    if (processGranule != 0) EnableWorkingSet(processGranule, processBudget);
+}
+
+void MetalGuestHostAliases::SetProcessWorkingSet(std::uint64_t granule, std::uint64_t budget) {
+    auto& setting = processWorkingSetSetting();
+    std::lock_guard lock(setting.mutex);
+    setting.granule = granule;
+    setting.budget = budget;
 }
 
 void MetalGuestHostAliases::Invalidate(const void* host, std::size_t bytes) {
@@ -66,6 +93,90 @@ void MetalGuestHostAliases::Clear() {
 std::size_t MetalGuestHostAliases::Count() const {
     std::lock_guard lock(mutex);
     return static_cast<std::size_t>(std::count_if(entries.begin(), entries.end(), [](const Entry& entry) { return entry.buffer != nil; }));
+}
+
+void MetalGuestHostAliases::EnableWorkingSet(std::uint64_t granuleBytes, std::uint64_t budgetBytes) {
+    if (granuleBytes < pageBytes || (granuleBytes & (granuleBytes - 1)) != 0 || budgetBytes < granuleBytes) {
+        throw std::invalid_argument("Metal alias working set needs a power-of-two granule of at least a page and a budget of at least one granule");
+    }
+    std::lock_guard lock(mutex);
+    granule = granuleBytes;
+    budget = budgetBytes;
+    intervals.clear();
+    intervalBytes = 0;
+    entries.clear();
+}
+
+bool MetalGuestHostAliases::WorkingSetEnabled() const {
+    std::lock_guard lock(mutex);
+    return granule != 0;
+}
+
+std::uint64_t MetalGuestHostAliases::WorkingSetBytes() const {
+    std::lock_guard lock(mutex);
+    return intervalBytes;
+}
+
+std::vector<std::pair<std::uintptr_t, std::uintptr_t>> MetalGuestHostAliases::WorkingSet() const {
+    std::lock_guard lock(mutex);
+    return {intervals.begin(), intervals.end()};
+}
+
+bool MetalGuestHostAliases::AdmitGuest(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t address, std::uint64_t bytes) {
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    const auto end = address + bytes;
+    std::lock_guard lock(mutex);
+    if (granule == 0) return false;
+    bool added = false;
+    for (const auto& range : ranges) {
+        const auto begin = std::max(address, range.guestAddress);
+        const auto limit = std::min(end, range.guestAddress + range.host.size());
+        if (begin >= limit) continue;
+        const auto host = reinterpret_cast<std::uintptr_t>(range.host.data()) + (begin - range.guestAddress);
+        added |= admitHost(host, host + (limit - begin));
+    }
+    return added;
+}
+
+// Under `mutex`.
+bool MetalGuestHostAliases::admitHost(std::uintptr_t begin, std::uintptr_t end) {
+    begin &= ~static_cast<std::uintptr_t>(granule - 1);
+    end = end > std::numeric_limits<std::uintptr_t>::max() - (granule - 1) ? std::numeric_limits<std::uintptr_t>::max() & ~static_cast<std::uintptr_t>(granule - 1)
+                                                                          : (end + granule - 1) & ~static_cast<std::uintptr_t>(granule - 1);
+    // Bytes of [begin, end) the set already holds.
+    std::uint64_t present = 0;
+    auto next = intervals.upper_bound(begin);
+    if (next != intervals.begin()) --next;
+    for (auto it = next; it != intervals.end() && it->first < end; ++it) {
+        if (it->second > begin) present += std::min(end, it->second) - std::max(begin, it->first);
+    }
+    if (present == end - begin) return false;
+    if (intervalBytes + (end - begin - present) > budget) {
+        ++resets;
+        std::fprintf(stderr, "[metal] alias working set over budget (%llu MiB): starting empty (reset %llu)\n",
+            static_cast<unsigned long long>(budget >> 20), static_cast<unsigned long long>(resets));
+        intervals.clear();
+        intervalBytes = 0;
+    }
+    // Merge with every interval that overlaps or touches [begin, end).
+    auto first = intervals.upper_bound(begin);
+    if (first != intervals.begin() && std::prev(first)->second >= begin) --first;
+    auto last = first;
+    while (last != intervals.end() && last->first <= end) {
+        begin = std::min(begin, last->first);
+        end = std::max(end, last->second);
+        intervalBytes -= last->second - last->first;
+        ++last;
+    }
+    intervals.erase(first, last);
+    intervals.emplace(begin, end);
+    intervalBytes += end - begin;
+    ++admissions;
+    if ((admissions & (admissions - 1)) == 0) {
+        std::fprintf(stderr, "[metal] alias working set: %llu admissions, %zu intervals, %llu MiB\n",
+            static_cast<unsigned long long>(admissions), intervals.size(), static_cast<unsigned long long>(intervalBytes >> 20));
+    }
+    return true;
 }
 
 id<MTLBuffer> MetalGuestHostAliases::alias(std::uintptr_t begin, std::uintptr_t end, std::uint64_t now) {
@@ -131,12 +242,8 @@ MetalGuestMemory::DispatchSnapshot MetalGuestMemory::CaptureAfterPriorSnapshotsC
 
 MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const std::vector<HostRange>& ranges,
     MetalGuestHostAliases* aliases) : device(device) {
-    if (ranges.size() > (std::numeric_limits<std::size_t>::max() - sizeof(Abi::Header)) / sizeof(Abi::Range)) throw std::invalid_argument("Metal guest table size overflow");
-    table = sharedBuffer(device, sizeof(Abi::Header) + ranges.size() * sizeof(Abi::Range));
     fault = sharedBuffer(device, Abi::FaultBufferBytes);
     std::memset(fault.contents, 0, fault.length);
-    const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(Abi::Range), 0};
-    std::memcpy(table.contents, &header, sizeof(header));
     struct PhysicalComponent {
         std::uintptr_t begin;
         std::uintptr_t end;
@@ -151,7 +258,6 @@ MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const
         return reinterpret_cast<std::uintptr_t>(ranges[left].borrowedHost.data()) < reinterpret_cast<std::uintptr_t>(ranges[right].borrowedHost.data());
     });
     std::vector<PhysicalComponent> components;
-    std::vector<std::size_t> componentIndices(ranges.size());
     for (const auto i : physicalOrder) {
         const auto& range = ranges[i];
         const auto begin = reinterpret_cast<std::uintptr_t>(range.borrowedHost.data());
@@ -163,7 +269,6 @@ MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const
             if (alignment != components.back().alignment) throw std::invalid_argument("Metal physically aliased guest spans have incompatible address alignment");
             components.back().end = std::max(components.back().end, end);
         }
-        componentIndices[i] = components.size() - 1;
     }
     std::unique_lock<std::mutex> aliasLock;
     std::uint64_t aliasEpoch = 0;
@@ -171,6 +276,20 @@ MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const
         if (aliases->device != device) throw std::invalid_argument("Metal guest host aliases belong to another device");
         aliasLock = std::unique_lock(aliases->mutex);
         aliasEpoch = ++aliases->epoch;
+        // Working-set mode binds only the parts of each component inside the working set.
+        if (aliases->granule != 0) {
+            std::vector<PhysicalComponent> pieces;
+            for (const auto& component : components) {
+                auto interval = aliases->intervals.upper_bound(component.begin);
+                if (interval != aliases->intervals.begin()) --interval;
+                for (; interval != aliases->intervals.end() && interval->first < component.end; ++interval) {
+                    const auto begin = std::max(component.begin, interval->first);
+                    const auto end = std::min(component.end, interval->second);
+                    if (begin < end) pieces.push_back({begin, end, component.alignment, nil, 0, false});
+                }
+            }
+            components = std::move(pieces);
+        }
     }
     for (auto& component : components) {
         const auto bytes = component.end - component.begin;
@@ -195,21 +314,35 @@ MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const
         copiedBytes += bytes;
     }
     if (aliases != nullptr) {
-        // Every capture names the whole borrowed set, so an alias it did not use belongs to a
-        // superseded layout of the host components.
+        // Every capture names the whole bound set, so an alias it did not use belongs to a
+        // superseded layout of the host components (or of the working set).
         std::erase_if(aliases->entries, [aliasEpoch](const MetalGuestHostAliases::Entry& entry) { return entry.epoch != aliasEpoch; });
         aliasLock.unlock();
     }
-    mirrors.reserve(ranges.size());
-    for (std::size_t i = 0; i < ranges.size(); ++i) {
-        const auto& range = ranges[i];
-        const auto& component = components[componentIndices[i]];
+    // One table entry per part of a guest range that a component holds, in guest address order
+    // (ranges are sorted and disjoint, and a range's parts follow its host order).
+    std::vector<Abi::Range> entries;
+    for (const auto& range : ranges) {
         const auto hostBegin = reinterpret_cast<std::uintptr_t>(range.borrowedHost.data());
-        const auto bufferOffset = component.bufferOffset + hostBegin - component.begin;
-        const Abi::Range entry{range.begin, range.begin + range.borrowedHost.size(), component.buffer.gpuAddress + bufferOffset, Abi::Read | (range.writable ? Abi::Write : 0), 0};
-        std::memcpy(static_cast<std::byte*>(table.contents) + sizeof(header) + mirrors.size() * sizeof(entry), &entry, sizeof(entry));
-        mirrors.push_back({range, component.buffer, bufferOffset, component.aliased});
+        const auto hostEnd = hostBegin + range.borrowedHost.size();
+        auto component = std::upper_bound(components.begin(), components.end(), hostBegin,
+            [](std::uintptr_t address, const PhysicalComponent& candidate) { return address < candidate.end; });
+        for (; component != components.end() && component->begin < hostEnd; ++component) {
+            const auto begin = std::max(hostBegin, component->begin);
+            const auto end = std::min(hostEnd, component->end);
+            if (begin >= end) continue;
+            const auto guestBegin = range.begin + (begin - hostBegin);
+            const auto bufferOffset = component->bufferOffset + (begin - component->begin);
+            entries.push_back({guestBegin, guestBegin + (end - begin), component->buffer.gpuAddress + bufferOffset, Abi::Read | (range.writable ? Abi::Write : 0), 0});
+            mirrors.push_back({{guestBegin, range.borrowedHost.subspan(begin - hostBegin, end - begin), range.writable}, component->buffer, bufferOffset, component->aliased});
+        }
     }
+    if (entries.size() > std::numeric_limits<std::uint32_t>::max() ||
+        entries.size() > (std::numeric_limits<std::size_t>::max() - sizeof(Abi::Header)) / sizeof(Abi::Range)) throw std::invalid_argument("Metal guest table size overflow");
+    table = sharedBuffer(device, sizeof(Abi::Header) + entries.size() * sizeof(Abi::Range));
+    const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(entries.size()), sizeof(Abi::Range), 0};
+    std::memcpy(table.contents, &header, sizeof(header));
+    if (!entries.empty()) std::memcpy(static_cast<std::byte*>(table.contents) + sizeof(header), entries.data(), entries.size() * sizeof(Abi::Range));
 }
 
 id<MTLBuffer> MetalGuestMemory::DispatchSnapshot::Table() const { return table; }

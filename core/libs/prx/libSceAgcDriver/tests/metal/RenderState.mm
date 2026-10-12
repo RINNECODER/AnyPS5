@@ -239,6 +239,19 @@ void ViewportWinding(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibr
     }
 }
 
+// A guest viewport transform may map depth outside zero-to-one (a [-1, 1] clip-space
+// title with no depth target); Metal takes such a range, so the draw renders.
+void UnrestrictedViewportDepth(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library) {
+    auto state = BasicState();
+    state.negativeOneToOne = true;
+    state.viewport.minDepth = -1;
+    state.viewport.maxDepth = 1;
+    const std::array<Draw, 1> draws{{{state, {{1, 0, 0, 1}, 0.25f}}}};
+    for (const auto pixel : Render(device, queue, library, draws, MTLClearColorMake(0, 0, 0, 1))) {
+        Match(pixel, {255, 0, 0, 255}, "Viewport depth outside zero-to-one without a depth target did not render");
+    }
+}
+
 void ClipDepth(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library) {
     auto state = BasicState();
     Graphics::DepthTarget depth{};
@@ -414,6 +427,7 @@ int main() {
             DepthStencilCache(device);
             ViewportWinding(device, queue, library);
             ClipDepth(device, queue, library);
+            UnrestrictedViewportDepth(device, queue, library);
             DepthBounds(device, queue, library);
             DepthBiasReset(device, queue, library);
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
