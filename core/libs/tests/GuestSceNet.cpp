@@ -121,6 +121,24 @@ static void CheckPoolStats() {
     Require(Failed(sceNetGetMemoryPoolStats(pool, &stats), 9));
 }
 
+static void CheckUnboundSocketName() {
+    for (const int family : {2, 28}) {
+        for (const int type : {1, 2}) {
+            const int socket = sceNetSocket("unbound", family, type, type == 1 ? 6 : 17);
+            if (socket < 0 && family == 28 && *sceNetErrnoLoc() == 47) continue;
+            Require(socket >= 0);
+            const std::uint32_t addressSize = family == 2 ? 16 : 28;
+            std::array<std::uint8_t, 28> address;
+            address.fill(0xa5);
+            std::uint32_t size = address.size();
+            Require(sceNetGetsockname(socket, address.data(), &size) == 0 && size == addressSize);
+            Require(address[0] == addressSize && address[1] == family);
+            Require(std::all_of(address.begin() + 2, address.begin() + addressSize, [](auto byte) { return byte == 0; }));
+            Require(sceNetSocketClose(socket) == 0);
+        }
+    }
+}
+
 static void CheckEmptyEpoll() {
     const int epoll = sceNetEpollCreate("empty-epoll", 0);
     Require(epoll >= 0);
@@ -686,6 +704,7 @@ int main() {
     }
     Require(sceNetInit_nid_postfix() == 0);
     CheckPoolStats();
+    CheckUnboundSocketName();
     CheckEmptyEpoll();
     CheckEpollWritable();
     CheckAddressText(2, "127.0.0.1");
