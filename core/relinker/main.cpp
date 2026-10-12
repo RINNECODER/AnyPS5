@@ -313,7 +313,7 @@ int Run(const int argc, char* argv[]) {
                   << Io::Utf8Path(Io::NativePath(absPath).filename()) << "\n"
                   << "libs/\n    *.prx\napp0/\n    <game resources>\n";
         for (const auto& artifact : guestArtifacts) {
-            std::string relative = Io::Utf8Path(artifact.Path.lexically_relative(Io::NativePath(absPath).parent_path() / "app0"));
+            std::string relative = Io::Utf8Path(artifact.Path.lexically_relative(Io::NativePath(absPath).parent_path().lexically_normal() / "app0"));
             std::replace(relative.begin(), relative.end(), '\\', '/');
             std::cout << "    " << relative << '\n';
         }
