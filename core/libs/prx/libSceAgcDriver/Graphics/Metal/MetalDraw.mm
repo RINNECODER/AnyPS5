@@ -323,7 +323,31 @@ id<MTLTexture> MetalDraw::ResidentTexture(const Graphics::GuestTextureResource& 
     return residentTexture(resource, storage, compare);
 }
 
-id<MTLTexture> MetalDraw::residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const {
+id<MTLTexture> MetalDraw::residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
+    if (auto view = residentView(resource, storage, compare); view != nil || resource.samples <= 1) return view;
+    // A multisampled image that no draw has rendered yet (a target cleared only through its DCC keys
+    // and then read by a resolve or post pass). Guest memory never holds fragments, so the reader
+    // gets the resident surface the first draw into the image would create: a new one starts
+    // cleared to zero, as a draw-created surface does. Later draws into it render into this surface.
+    if (storage || compare || resource.dimension != Graphics::TextureDimension::k2D || resource.baseLevel != 0 ||
+        resource.lastLevel != 0 || resource.baseArray != 0 || resource.depthOrLastArray != 0) {
+        return nil;
+    }
+    Graphics::ColorTarget target{};
+    target.address = resource.baseAddress;
+    target.extent = {resource.width, resource.height};
+    target.format = Graphics::ResolveTextureFormat(resource.format);
+    target.elementBytes = Graphics::BytesPerElement(resource.format);
+    target.bytes = static_cast<std::size_t>(resource.width) * resource.height * target.elementBytes;
+    target.dccAddress = resource.dccAddress;
+    target.samples = target.coverageSamples = resource.samples;
+    static_cast<void>(RenderPixelFormat(target.format)); // A format with no render target stays unbound.
+    auto surface = depthCache->Acquire(target);
+    if (std::find(colorSurfaces.begin(), colorSurfaces.end(), surface) == colorSurfaces.end()) colorSurfaces.push_back(surface);
+    return residentView(resource, storage, compare);
+}
+
+id<MTLTexture> MetalDraw::residentView(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const {
     for (auto cursor = depthSurfaces.rbegin(); cursor != depthSurfaces.rend(); ++cursor) {
         const auto& surface = *cursor;
         const auto& target = surface->Target();

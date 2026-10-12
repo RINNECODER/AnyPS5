@@ -278,7 +278,10 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
 void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
     if (draw == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal draw executor is not configured");
     auto parameters = Pm4::ResolveDraw(packet, queue);
-    if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) return;
+    if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) {
+        if (BindTrace::Active()) BindTrace::Log("empty draw: count %u instances %u", parameters.indexCount, parameters.instanceCount);
+        return;
+    }
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
     if (BindTrace::Active()) {
         std::string programs;
@@ -290,6 +293,15 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         BindTrace::Log("draw programs%s count %u instances %u%s samples %u colors %zu depth %s", programs.c_str(),
             parameters.indexCount, parameters.instanceCount, decoded.state.rectList ? " rect-list" : "",
             decoded.state.rasterSamples, decoded.state.colors.size(), decoded.state.depth ? "yes" : "no");
+        const auto& s = decoded.state;
+        const auto& blend = s.blends.empty() ? s.blend : s.blends.front();
+        BindTrace::Log("  state scissor %d,%d %ux%u viewport %.0f,%.0f %.0fx%.0f blend %u (%d,%d,%d / %d,%d,%d) mask 0x%x depth test %u write %u op %d"
+            " stencil %u ref 0x%x cmp %d read 0x%x write 0x%x ops %d/%d/%d cull %u", s.scissor.offset.x, s.scissor.offset.y,
+            s.scissor.extent.width, s.scissor.extent.height, s.viewport.x, s.viewport.y, s.viewport.width, s.viewport.height,
+            blend.blendEnable, blend.srcColorBlendFactor, blend.dstColorBlendFactor, blend.colorBlendOp, blend.srcAlphaBlendFactor,
+            blend.dstAlphaBlendFactor, blend.alphaBlendOp, blend.colorWriteMask, s.depthTest, s.depthWrite, s.depthCompare,
+            s.stencilTest, s.stencilFront.reference, s.stencilFront.compareOp, s.stencilFront.compareMask, s.stencilFront.writeMask,
+            s.stencilFront.failOp, s.stencilFront.depthFailOp, s.stencilFront.passOp, s.cullMode);
         for (const auto& color : decoded.state.colors) {
             BindTrace::Log("  color[%u] 0x%llx vk-format %d %ux%u mip %u samples %u dcc 0x%llx -> %s", color.exportIndex,
                 static_cast<unsigned long long>(color.address), static_cast<int>(color.format), color.extent.width, color.extent.height,
@@ -441,6 +453,10 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         CompletePriorGpuWorkAndCopyBack();
         return;
     }
+    if (BindTrace::Active()) {
+        BindTrace::Log("submission queue %u serial %llu words %zu flips %zu", submission.queue,
+            static_cast<unsigned long long>(submission.serial), submission.commands.size(), submission.flips.size());
+    }
     for (std::size_t cursor = 0; cursor < submission.commands.size();) {
         CheckFailureAndStopping();
         const auto header = submission.commands[cursor];
@@ -455,8 +471,13 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         borrowCurrentRanges();
         CheckFailureAndStopping();
         if (Pm4::Predicated(header) && queue.predication.operation != 0 && !Pm4::PredicationPasses(queue)) {
+            const auto skippedFrom = cursor;
             cursor = opcode == 0x3f ? submission.conditionalEnds.at(cursor) : next;
             if (cursor < next || cursor > submission.commands.size()) throw std::invalid_argument("Native Metal predicated indirect-buffer end is invalid");
+            if (BindTrace::Active()) {
+                BindTrace::Log("predicated packet 0x%02x skipped (%zu words, predicate 0x%llx)", opcode, cursor - skippedFrom,
+                    static_cast<unsigned long long>(queue.predication.address));
+            }
             continue;
         }
         if (opcode == 0x3f) { cursor = next; continue; }
@@ -520,6 +541,9 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             if (Pm4::ReadCondition(packet) == 0) {
                 next = submission.conditionalEnds.at(cursor);
                 if (next < cursor + count || next > submission.commands.size()) throw std::invalid_argument("Native Metal conditional execution end is invalid");
+                if (BindTrace::Active()) {
+                    BindTrace::Log("COND_EXEC 0x%x%08x is zero: skipped %zu words", packet[2], packet[1], next - cursor - count);
+                }
             }
         } else if (opcode == 0x42 || opcode == 0x58 || opcode == 0x46) {
             CompletePriorGpuWorkAndCopyBack();

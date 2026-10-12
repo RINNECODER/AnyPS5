@@ -87,6 +87,7 @@ struct MetalDriver::Impl {
     void ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
     void ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
     void ExecuteRewindTail(const Submission& submission, QueueState& queue);
+    void WaitForQueueRoom(std::uint32_t queue);
     template <typename Work>
     void Tolerate(std::string_view kind, Work&& work);
     void RecordSkip(std::string_view kind, std::string_view what);

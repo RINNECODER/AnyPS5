@@ -791,7 +791,8 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
             hasAttributes |= descriptor.vertexDescriptor.attributes[i].format != MTLVertexFormatInvalid;
         }
         if (rect.mode != RectMode::Evaluation || rect.inputControlPoints != 3 || rect.outputControlPoints != 4 ||
-            hasAttributes || descriptor.rasterSampleCount != 1 ||
+            hasAttributes || (descriptor.rasterSampleCount != 1 && descriptor.rasterSampleCount != 2 &&
+                descriptor.rasterSampleCount != 4 && descriptor.rasterSampleCount != 8) ||
             descriptor.tessellationPartitionMode != MTLTessellationPartitionModePow2 || descriptor.maxTessellationFactor != 64 ||
             descriptor.tessellationFactorFormat != MTLTessellationFactorFormatHalf ||
             descriptor.tessellationFactorStepFunction != MTLTessellationFactorStepFunctionPerPatch ||
@@ -810,6 +811,10 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
     NSError* error = nil;
     const auto created = CachedRenderPipelineState(device, native, &error);
     pipeline = created.state;
+    if (pipeline == nil && this->vertex.rectList && descriptor.rasterSampleCount != 1) {
+        // Multisampled quad patches are new on this path: report the draw instead of stopping the driver.
+        throw std::invalid_argument(errorMessage("Converted Metal multisampled rectangle pipeline creation failed", error));
+    }
     if (pipeline == nil) {
         throw std::runtime_error(errorMessage("Converted Metal render pipeline creation failed", error));
     }

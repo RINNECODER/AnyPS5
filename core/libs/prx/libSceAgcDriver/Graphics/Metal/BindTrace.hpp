@@ -14,6 +14,10 @@
 // resident GPU surface or guest memory) and every skip, as "[bind] f<flip> ..." lines on
 // stderr. Guest-memory images also report how many of 64 probed texels are non-zero, which
 // shows a target that was rendered on the GPU but is sampled from stale guest memory.
+// Each draw also logs its scissor, viewport, blend, depth and stencil state; written images
+// log the same probe after their copy-back ("wrote ..."), so a draw that left its target
+// unchanged stands out; guest buffers log their first words; and submissions, empty draws
+// and predicated or COND_EXEC-skipped packets are logged too.
 namespace AgcDriver::Metal::BindTrace {
 
 struct Settings {
