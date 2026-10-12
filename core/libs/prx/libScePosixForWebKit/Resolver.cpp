@@ -183,9 +183,11 @@ GuestResolver::HostEntry* APS5_VABI gethostbyname_nid_postfix(const char* name) 
         int error = 0;
         if (!numeric) {
 #ifdef __APPLE__
-            // macOS libc has no gethostbyname_r; its gethostbyname returns per-thread storage.
             native = ::gethostbyname(name);
-            if (!native) hostError = h_errno;
+            if (native == nullptr) {
+                hostError = h_errno;
+                error = hostError == TRY_AGAIN ? EAGAIN : 0;
+            }
 #else
             buffer.resize(1024);
             while ((error = ::gethostbyname_r(name, &nativeEntry, buffer.data(), buffer.size(), &native, &hostError)) == ERANGE)
