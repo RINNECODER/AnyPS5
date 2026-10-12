@@ -41,25 +41,31 @@ std::string describeImage(const Graphics::GuestTextureResource& resource) {
 }
 
 // BindTrace: one image binding, and for guest memory how many of 64 evenly spaced texels are non-zero.
+// Non-zero texels among 64 evenly spaced guest texels of the image, or -1 when unreadable.
+int probeGuest(const Graphics::GuestTextureResource& resource) {
+    const auto geometry = Graphics::DescribeSurface(resource);
+    const auto elementBytes = Graphics::BytesPerElement(resource.format);
+    if (geometry.guestBytes == 0 || elementBytes == 0 || elementBytes > 16 ||
+        !GuestMemory::Accessible(reinterpret_cast<const void*>(resource.baseAddress), static_cast<std::size_t>(geometry.guestBytes), false)) {
+        return -1;
+    }
+    int nonZero = 0;
+    const auto stride = geometry.guestBytes / 64u / elementBytes * elementBytes;
+    for (std::uint64_t probeIndex = 0; probeIndex < 64; ++probeIndex) {
+        std::array<std::byte, 16> texel{};
+        GuestMemory::Read(resource.baseAddress + probeIndex * stride, std::span(texel).first(elementBytes));
+        nonZero += std::any_of(texel.begin(), texel.begin() + elementBytes, [](std::byte value) { return value != std::byte{0}; });
+    }
+    return nonZero;
+}
+
 void traceImage(std::uint32_t set, std::uint32_t binding, std::uint32_t element, const Graphics::GuestTextureResource& resource,
     bool storage, bool written, bool resident) {
     char probe[48] = "";
     if (!resident) {
-        const auto geometry = Graphics::DescribeSurface(resource);
-        const auto elementBytes = Graphics::BytesPerElement(resource.format);
-        if (geometry.guestBytes != 0 && elementBytes != 0 && elementBytes <= 16 &&
-            GuestMemory::Accessible(reinterpret_cast<const void*>(resource.baseAddress), static_cast<std::size_t>(geometry.guestBytes), false)) {
-            unsigned nonZero = 0;
-            const auto stride = geometry.guestBytes / 64u / elementBytes * elementBytes;
-            for (std::uint64_t probeIndex = 0; probeIndex < 64; ++probeIndex) {
-                std::array<std::byte, 16> texel{};
-                GuestMemory::Read(resource.baseAddress + probeIndex * stride, std::span(texel).first(elementBytes));
-                nonZero += std::any_of(texel.begin(), texel.begin() + elementBytes, [](std::byte value) { return value != std::byte{0}; });
-            }
-            std::snprintf(probe, sizeof probe, " guest non-zero %u/64", nonZero);
-        } else {
-            std::snprintf(probe, sizeof probe, " guest unreadable");
-        }
+        const auto nonZero = probeGuest(resource);
+        if (nonZero >= 0) std::snprintf(probe, sizeof probe, " guest non-zero %d/64", nonZero);
+        else std::snprintf(probe, sizeof probe, " guest unreadable");
     }
     BindTrace::Log("  %s %u.%u[%u] 0x%llx %s dim %u array %u-%u%s -> %s%s", storage ? (written ? "storage-rw" : "storage-r") : "sampled",
         set, binding, element, static_cast<unsigned long long>(resource.baseAddress), describeImage(resource).c_str(),
@@ -76,6 +82,53 @@ auto textureKey(const Graphics::GuestTextureResource& resource, bool compare) {
 
 bool overlaps(std::uint64_t begin, std::uint64_t end, std::uint64_t otherBegin, std::uint64_t otherEnd) {
     return begin < otherEnd && otherBegin < end;
+}
+
+bool arrayImage(const Graphics::GuestTextureResource& resource) {
+    return resource.dimension == Graphics::TextureDimension::k2DArray || resource.dimension == Graphics::TextureDimension::k1DArray;
+}
+
+// Two array descriptors that address slice ranges of one allocation: the same base, texel layout and
+// mip chain, differing at most in their first and last array slice.
+bool sameArrayAllocation(const Graphics::GuestTextureResource& a, const Graphics::GuestTextureResource& b) {
+    return arrayImage(a) && a.dimension == b.dimension &&
+        std::tie(a.baseAddress, a.width, a.height, a.mipCount, a.allocatedMipCount, a.tileMode, a.samples, a.dccAddress, a.dccAlphaOnMsb, a.dccPipeAligned) ==
+        std::tie(b.baseAddress, b.width, b.height, b.mipCount, b.allocatedMipCount, b.tileMode, b.samples, b.dccAddress, b.dccAlphaOnMsb, b.dccPipeAligned) &&
+        Graphics::BytesPerElement(a.format) == Graphics::BytesPerElement(b.format);
+}
+
+// A guest array image is often bound through several descriptors that each address part of its slices:
+// one dispatch binds slice 0 of a two-slice image through a descriptor whose last array slice is 0 and
+// slice 1 through one whose base and last slice are 1. On the GPU both are views of one allocation, but
+// each descriptor alone describes a differently sized surface, so the captured backings would overlap
+// without sharing. Every array descriptor of a shader's image bindings is therefore widened to the
+// last slice any descriptor of the same allocation addresses; each keeps its own base slice.
+std::vector<Graphics::GuestTextureResource> widestArrays(const MetalBackend::Result& shader) {
+    std::vector<Graphics::GuestTextureResource> widest;
+    for (const auto& mapping : shader.resources) {
+        if (!mapping.active) continue;
+        for (const auto& binding : shader.guest.bindings) {
+            if (binding.descriptorSet != mapping.descriptorSet || binding.binding != mapping.binding ||
+                binding.role != DescriptorRole::GuestImages || binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8) {
+                continue;
+            }
+            for (std::uint32_t i = 0; i < binding.count; ++i) {
+                const auto words = std::span(binding.guestDescriptor).subspan(i * 8u, 8);
+                if (NullImageDescriptor(words)) continue;
+                Graphics::GuestTextureResource descriptor;
+                try {
+                    descriptor = Graphics::DecodeTextureResource(words);
+                } catch (const std::exception&) {
+                    continue; // The binding pass reports the descriptor.
+                }
+                if (!arrayImage(descriptor)) continue;
+                const auto found = std::find_if(widest.begin(), widest.end(), [&](const auto& other) { return sameArrayAllocation(other, descriptor); });
+                if (found == widest.end()) widest.push_back(descriptor);
+                else found->depthOrLastArray = std::max(found->depthOrLastArray, descriptor.depthOrLastArray);
+            }
+        }
+    }
+    return widest;
 }
 
 // The runtime ABI image records in a shader's ShaderData words name element ranges of the image heaps
@@ -441,6 +494,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
 
 std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const MetalBackend::Result& shader) {
     ValidatePixelSamplerBindings(shader.guest.bindings);
+    const auto arrays = widestArrays(shader);
     std::vector<MetalShaderResourceBinding> result;
     for (const auto& mapping : shader.resources) {
         if (!mapping.active) continue;
@@ -468,6 +522,18 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                     }
                     native.buffers.push_back({emptyBuffer, 0, 0});
                 } else {
+                    if (BindTrace::Active()) {
+                        std::array<std::uint32_t, 16> head{};
+                        const auto bytes = std::min<std::size_t>(sizeof head, descriptor.GetSize());
+                        std::uint32_t sum = 0;
+                        if (GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.Base48()), bytes, false)) {
+                            GuestMemory::Read(descriptor.Base48(), std::as_writable_bytes(std::span(head)).first(bytes));
+                            for (const auto word : head) sum = sum * 31u + word;
+                        }
+                        BindTrace::Log("  buffer %u.%u[%u] 0x%llx size %u%s head %08x %08x %08x %08x hash %08x", mapping.descriptorSet,
+                            mapping.binding, i, static_cast<unsigned long long>(descriptor.Base48()), static_cast<unsigned>(descriptor.GetSize()),
+                            written ? " rw" : "", head[0], head[1], head[2], head[3], sum);
+                    }
                     auto buffer = Buffer(descriptor.Base48(), descriptor.GetSize(), written);
                     if (buffer.offset % 4 != 0) throw std::invalid_argument("Metal draw storage buffer view must be DWORD aligned");
                     native.buffers.push_back(buffer);
@@ -516,6 +582,9 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                     continue;
                 }
                 auto descriptor = Graphics::DecodeTextureResource(std::span(found->guestDescriptor).subspan(i * 8u, 8));
+                for (const auto& array : arrays) {
+                    if (sameArrayAllocation(array, descriptor)) descriptor.depthOrLastArray = array.depthOrLastArray;
+                }
                 const bool storage = found->kind == DescriptorKind::StorageImage || found->kind == DescriptorKind::StorageTexelBuffer;
                 if (storage) {
                     const auto words = std::span(found->guestDescriptor).subspan(i * 8u, 8);
@@ -676,6 +745,14 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         std::memset(static_cast<std::byte*>(buffer.buffer.contents) + buffer.offset, 0xff, count);
         std::vector<std::byte> uncompressed(count, std::byte{0xff});
         GuestMemory::Write(descriptor.dccAddress, uncompressed);
+    }
+    if (BindTrace::Active()) {
+        for (const auto& image : images) {
+            if (!image.written) continue;
+            const auto& descriptor = image.texture->Descriptor();
+            BindTrace::Log("  wrote 0x%llx %s via %s: guest non-zero %d/64", static_cast<unsigned long long>(descriptor.baseAddress),
+                describeImage(descriptor).c_str(), image.original.empty() ? "borrowed host" : "staged ranges", probeGuest(descriptor));
+        }
     }
     return fault;
 }

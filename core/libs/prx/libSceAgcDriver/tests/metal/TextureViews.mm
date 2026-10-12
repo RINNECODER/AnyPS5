@@ -40,6 +40,7 @@ kernel void physicalStore(device const BdaHeader* header [[buffer(0)]],device at
     }
 }
 kernel void write2D(texture2d<float,access::write> t [[texture(0)]],uint2 p [[thread_position_in_grid]]) { t.write(float4(17,31,73,127)/255.0f,p); }
+kernel void writeArrayColor(texture2d_array<float,access::write> t [[texture(0)]],constant float4& c [[buffer(1)]],uint2 p [[thread_position_in_grid]]) { t.write(c,p,0); }
 )";
 
 id<MTLComputePipelineState> Pipeline(const Metal::MetalDevice& backend,id<MTLLibrary> library,NSString* name) {
@@ -642,6 +643,47 @@ void AccessGuards(const Metal::MetalDevice& backend) {
     try {Metal::MetalShaderResources resources(backend,ranges);static_cast<void>(resources.Texture(d,true));} catch(const std::exception&) {rejected=true;}
     Require(rejected,"written clear-backed image accepted readonly DCC metadata");
 }
+
+// One two-slice array image bound through descriptors that each address part of its slices, as a
+// title's dispatch does: element 0 names slice 0 (last array slice 0) and element 1 names slice 1
+// (base and last slice 1). Both bind as views of one backing, and each view's writes reach its own
+// guest slice.
+void ArraySliceDescriptors(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    auto d=Descriptor(); d.dimension=Graphics::TextureDimension::k2DArray; d.depthOrLastArray=1;
+    const auto geometry=Graphics::DescribeSurface(d);
+    Require(geometry.layers==2,"two-slice array geometry has the wrong slice count");
+    std::vector<std::byte> guest(geometry.guestBytes,std::byte{0});
+    const NativeGuestMemory::BorrowedRange range{d.baseAddress,guest,true};
+    Metal::MetalShaderResources resources(backend,std::span(&range,1));
+    const auto words=[&](std::uint32_t baseArray,std::uint32_t lastArray) {
+        return std::array<std::uint32_t,8>{static_cast<std::uint32_t>(d.baseAddress>>8),(d.format<<20)|(3u<<30),1u|(7u<<14),
+            0xfacu|(13u<<28),lastArray|(baseArray<<16),0,0,0};
+    };
+    DescriptorBinding binding{};
+    binding.kind=DescriptorKind::StorageImage; binding.role=DescriptorRole::GuestImages;
+    binding.count=2; binding.imageShape=DescriptorImageShape::Image2DArray; binding.imageWritten={true,true};
+    for(const auto& element:{words(0,0),words(1,1)}) binding.guestDescriptor.insert(binding.guestDescriptor.end(),element.begin(),element.end());
+    MetalBackend::Result shader{}; shader.guest.bindings.push_back(binding);
+    MetalBackend::ResourceMapping mapping{};
+    mapping.count=2; mapping.kind=binding.kind; mapping.role=binding.role; mapping.texture=0; mapping.active=true;
+    shader.resources.push_back(mapping);
+    const auto bindings=resources.Bindings(shader);
+    Require(bindings.size()==1&&bindings[0].textures.size()==2,"array slice descriptors did not bind both elements");
+    const std::array<float,4> first{17/255.0f,31/255.0f,73/255.0f,127/255.0f},second{200/255.0f,100/255.0f,50/255.0f,1};
+    auto commands=backend.CommandBuffer();
+    Encode(backend,library,commands,@"writeArrayColor",bindings[0].textures[0],nil,MTLSizeMake(8,8,1),first.data(),sizeof first);
+    Encode(backend,library,commands,@"writeArrayColor",bindings[0].textures[1],nil,MTLSizeMake(8,8,1),second.data(),sizeof second);
+    backend.Wait(commands);
+    Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"array slice writes faulted");
+    for(std::uint32_t layer=0;layer<2;++layer) {
+        const std::array<std::uint8_t,4> expected=layer==0?std::array<std::uint8_t,4>{17,31,73,127}:std::array<std::uint8_t,4>{200,100,50,255};
+        for(std::uint32_t y=0;y<8;++y) {
+            const auto* row=guest.data()+geometry.GuestLayerOffset(layer)+y*geometry.mips[0].pitchBytes;
+            Pixels(row,expected,8,layer==0?"slice 0 of the array image lost its descriptor's writes":"slice 1 of the array image lost its descriptor's writes");
+        }
+    }
+}
+
 }
 
 void RunTextureViewsTests(const MetalTests::Context& context) {
@@ -657,5 +699,6 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     PhysicalGuards(backend);
     PhysicalBdaGuards(backend,library);
     StoragePermissions(backend,library);
+    ArraySliceDescriptors(backend,library);
     AccessGuards(backend);
 }

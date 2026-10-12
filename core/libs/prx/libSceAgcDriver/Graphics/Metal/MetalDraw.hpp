@@ -43,7 +43,8 @@ public:
         std::optional<std::array<std::uint32_t, 5>> meshArguments = std::nullopt);
 
 private:
-    [[nodiscard]] id<MTLTexture> residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const;
+    [[nodiscard]] id<MTLTexture> residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare);
+    [[nodiscard]] id<MTLTexture> residentView(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const;
     MetalDevice backend;
     std::unique_ptr<MetalDepthSurfaceCache> depthCache;
     std::unique_ptr<MetalGuestHostAliases> hostAliases;

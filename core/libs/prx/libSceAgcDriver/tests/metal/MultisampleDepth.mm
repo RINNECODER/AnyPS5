@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 #include "MetalDepthSurface.hpp"
 #include "MetalRenderState.hpp"
+#include "MetalShaderPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 
@@ -16,7 +17,8 @@
 // Multisampled depth: DB_Z_INFO NUM_SAMPLES with a matching PA_SC_AA_CONFIG decodes to a 4x depth
 // target, the production depth cache allocates a 2D multisample texture, the production pipeline
 // configuration rasterizes at 4x, and the resident sampled view of that surface (what a 2D MSAA
-// image descriptor of the depth address binds to) reads every sample back.
+// image descriptor of the depth address binds to) reads every sample back. A rect-list draw into the
+// same 4x target (a depth clear or fill) builds its quad-patch pipeline at 4x and rasterizes per sample.
 namespace {
 
 using namespace AgcDriver;
@@ -183,6 +185,105 @@ void Render(id<MTLDevice> device, const Graphics::State& state) {
     std::cout << "PASS: 4x depth-only draw: " << covered << " covered, " << empty << " empty, " << partial << " edge pixels with mixed samples\n";
 }
 
+
+id<MTLTexture> ResidentDepthView(const Metal::MetalDepthSurface& surface) {
+    id<MTLTexture> depth = surface.DepthTexture();
+    return [surface.SampledDepthView() newTextureViewWithPixelFormat:depth.pixelFormat textureType:depth.textureType
+        levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1)
+        swizzle:MTLTextureSwizzleChannelsMake(MTLTextureSwizzleRed, MTLTextureSwizzleGreen, MTLTextureSwizzleBlue, MTLTextureSwizzleAlpha)];
+}
+
+// Counts pixels whose 4 samples are all drawn (0.25), none drawn (1.0) or mixed.
+std::array<std::uint32_t, 3> ReadCoverage(id<MTLDevice> device, id<MTLLibrary> library, id<MTLCommandBuffer> commands,
+    const Metal::MetalDevice& backend, const Metal::MetalDepthSurface& surface) {
+    id<MTLTexture> view = ResidentDepthView(surface);
+    NSError* error = nil;
+    auto output = [device newBufferWithLength:Edge * Edge * Samples * sizeof(float) options:MTLResourceStorageModeShared];
+    auto read = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"readSamples"] error:&error];
+    Require(view != nil && read != nil && output != nil, "multisample depth readback setup failed");
+    auto compute = [commands computeCommandEncoder];
+    [compute setComputePipelineState:read];
+    [compute setTexture:view atIndex:0];
+    [compute setBuffer:output offset:0 atIndex:0];
+    [compute dispatchThreads:MTLSizeMake(Edge, Edge, 1) threadsPerThreadgroup:MTLSizeMake(Edge, Edge, 1)];
+    [compute endEncoding];
+    backend.Wait(commands);
+    const auto* values = static_cast<const float*>(output.contents);
+    std::array<std::uint32_t, 3> counts{};
+    for (std::uint32_t pixel = 0; pixel < Edge * Edge; ++pixel) {
+        std::uint32_t inside = 0;
+        for (std::uint32_t sample = 0; sample < Samples; ++sample) {
+            const auto value = values[pixel * Samples + sample];
+            Require(value == 0.25f || value == 1.0f, "a depth sample is neither the cleared 1.0 nor the drawn 0.25");
+            inside += value == 0.25f ? 1u : 0u;
+        }
+        ++counts[inside == Samples ? 0 : inside == 0 ? 1 : 2];
+    }
+    return counts;
+}
+
+// A rect-list depth draw into the 4x target: the production pipeline descriptor (quad patches, 4x
+// rasterization) and the production rectangle-evaluation pipeline contract accept it, and the quad,
+// whose right edge crosses pixel column 5 between sample positions, covers some samples of that column.
+void RectRender(id<MTLDevice> device, std::uint64_t depthAddress) {
+    QueueState guest;
+    Configure(guest, depthAddress, 0x8000018bu, 2u);
+    guest.userConfig[0x242] = 0x11; // DI_PT_RECTLIST
+    const auto state = Graphics::DecodeState(guest);
+    Require(state.rectList && state.rasterSamples == Samples && state.depth && state.depth->samples == Samples,
+            "a rect-list draw into the 4x depth target did not decode as a 4x rectangle draw");
+    auto library = Library(device);
+    Metal::MetalDevice backend(device, library);
+    Metal::MetalDepthSurfaceCache cache(backend);
+    const auto surface = cache.Acquire(*state.depth);
+    auto descriptor = [MTLRenderPipelineDescriptor new];
+    Metal::ConfigureRenderPipelineDescriptor(descriptor, state);
+    Require(descriptor.rasterSampleCount == Samples, "the rectangle pipeline does not rasterize at the decoded sample count");
+
+    namespace Bridge = ShaderRecompiler::MetalBackend;
+    const std::string source = "#include <metal_stdlib>\nusing namespace metal;\n"
+        "[[patch(quad, 4)]] vertex float4 rectEvaluation(float2 uv [[position_in_patch]]) {\n"
+        "    return float4(mix(-1.0f, 0.375f, uv.x), mix(-1.0f, 1.0f, uv.y), 0.25f, 1.0f); }\n"
+        "fragment void rectDepth() {}\n";
+    Bridge::Result vertex{};
+    vertex.stage = ShaderRecompiler::ShaderStage::TessellationEvaluation;
+    vertex.nativeExecutionKind = Bridge::NativeExecutionKind::Vertex;
+    vertex.source = source;
+    vertex.entryPoint = "rectEvaluation";
+    Bridge::RectListInfo rect{};
+    rect.mode = Bridge::RectListMode::Evaluation;
+    rect.inputLayout.stride = rect.inputLayout.alignment = 16;
+    rect.inputLayout.members.push_back({std::nullopt, std::nullopt, 4, 32, 0, 16});
+    vertex.rectList = rect;
+    Bridge::Result fragment{};
+    fragment.stage = ShaderRecompiler::ShaderStage::Fragment;
+    fragment.nativeExecutionKind = Bridge::NativeExecutionKind::Fragment;
+    fragment.source = source;
+    fragment.entryPoint = "rectDepth";
+    const Metal::MetalRenderPipeline pipeline(device, vertex, fragment, descriptor);
+
+    struct Factors { std::uint16_t edge[4]; std::uint16_t inside[2]; };
+    const Factors one{{0x3c00, 0x3c00, 0x3c00, 0x3c00}, {0x3c00, 0x3c00}};
+    auto factors = [device newBufferWithBytes:&one length:sizeof one options:MTLResourceStorageModeShared];
+    auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.renderTargetWidth = state.renderExtent.width;
+    pass.renderTargetHeight = state.renderExtent.height;
+    pass.depthAttachment.texture = surface->DepthTexture();
+    pass.depthAttachment.loadAction = MTLLoadActionLoad;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    auto commands = backend.CommandBuffer();
+    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    pipeline.Bind(encoder, {}, {}, {}, {}, {}, {}, 1);
+    Metal::BindRenderState(encoder, state, Metal::CreateDepthStencilState(device, state));
+    [encoder setTessellationFactorBuffer:factors offset:0 instanceStride:0];
+    [encoder drawPatches:4 patchStart:0 patchCount:1 patchIndexBuffer:nil patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];
+    [encoder endEncoding];
+    const auto [covered, empty, partial] = ReadCoverage(device, library, commands, backend, *surface);
+    Require(covered == 5 * Edge && empty == 2 * Edge && partial == Edge, "the 4x rectangle did not cover columns 0-4, part of column 5 and none of 6-7 (covered " +
+            std::to_string(covered) + ", empty " + std::to_string(empty) + ", partial " + std::to_string(partial) + ")");
+    std::cout << "PASS: 4x rect-list depth draw: " << covered << " covered, " << empty << " empty, " << partial << " pixels with mixed samples\n";
+}
+
 }
 
 int main() {
@@ -199,6 +300,7 @@ int main() {
             Decode(depthAddress, state);
             DescriptorShape();
             Render(device, state);
+            RectRender(device, depthAddress);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

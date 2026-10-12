@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "MetalDepthSurface.hpp"
+#include "MetalDraw.hpp"
 #include "MetalRenderState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
@@ -20,6 +21,9 @@
 //                 target is expanded into a 4x transient and resolved back (untouched pixels exact).
 //   msaa_color  - CB_COLOR_ATTRIB NUM_SAMPLES/NUM_FRAGMENTS decode to a 4-fragment target, rendered into
 //                 a resident 2D multisample texture whose samples read back through texture2d_ms.
+//   msaa_read   - a 2D MSAA image descriptor of an address no draw has rendered (a target cleared only
+//                 through DCC, read by a post pass) binds a new resident 4x surface whose samples read
+//                 zero, and a second lookup binds that same surface.
 namespace {
 
 using namespace AgcDriver;
@@ -265,13 +269,57 @@ void MultisampleColor(id<MTLDevice> device, id<MTLLibrary> library, const Guest&
     std::cout << "PASS: 4x color target: " << covered << " covered, " << empty << " empty, " << partial << " pixels with mixed samples\n";
 }
 
+
+void MultisampleRead(id<MTLDevice> device, id<MTLLibrary> library, const Guest& memory) {
+    Graphics::GuestTextureResource image{};
+    image.baseAddress = reinterpret_cast<std::uintptr_t>(memory.color.data());
+    image.width = image.height = Edge;
+    image.mipCount = image.allocatedMipCount = 1;
+    image.dimension = Graphics::TextureDimension::k2D;
+    image.tileMode = Graphics::TextureTileMode::kLinear;
+    image.format = 36; // 10_11_11 float, the post pass's B10G11R11 image
+    image.samples = Samples;
+    image.dstSelX = 4; image.dstSelY = 5; image.dstSelZ = 6; image.dstSelW = 7;
+    Require(Graphics::ResolveTextureFormat(image.format) == VK_FORMAT_B10G11R11_UFLOAT_PACK32, "image format 36 is not B10G11R11");
+    Metal::MetalDraw draw(device, library);
+    id<MTLTexture> view = draw.ResidentTexture(image, false, false);
+    Require(view != nil, "a never-drawn 4x image did not bind a resident multisampled surface");
+    Require(view.textureType == MTLTextureType2DMultisample && view.sampleCount == Samples && view.pixelFormat == MTLPixelFormatRG11B10Float,
+            "the resident surface of a 4x B10G11R11 image is not a 4x RG11B10Float multisample texture");
+    id<MTLTexture> again = draw.ResidentTexture(image, false, false);
+    Require(again != nil && (again.parentTexture ?: again) == (view.parentTexture ?: view), "a second lookup of the image bound a different surface");
+    NSError* error = nil;
+    auto read = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"readSamples"] error:&error];
+    auto output = [device newBufferWithLength:Edge * Edge * Samples * 16 options:MTLResourceStorageModeShared];
+    Require(read != nil && output != nil, "multisample read setup failed");
+    std::memset(output.contents, 0xff, output.length);
+    auto queue = [device newCommandQueue];
+    auto commands = [queue commandBuffer];
+    auto compute = [commands computeCommandEncoder];
+    [compute setComputePipelineState:read];
+    [compute setTexture:view atIndex:0];
+    [compute setBuffer:output offset:0 atIndex:0];
+    [compute dispatchThreads:MTLSizeMake(Edge, Edge, 1) threadsPerThreadgroup:MTLSizeMake(Edge, Edge, 1)];
+    [compute endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    Require(commands.status == MTLCommandBufferStatusCompleted, "multisample read failed on the GPU");
+    const auto* values = static_cast<const float*>(output.contents);
+    // B10G11R11 has no alpha channel, so alpha reads as one.
+    for (std::uint32_t i = 0; i < Edge * Edge * Samples; ++i) {
+        Require(values[i * 4] == 0.0f && values[i * 4 + 1] == 0.0f && values[i * 4 + 2] == 0.0f && values[i * 4 + 3] == 1.0f,
+                "a sample of the new resident surface is not zero");
+    }
+    std::cout << "PASS: a never-drawn 4x image binds a zeroed resident surface\n";
+}
+
 }
 
 int main(int argc, char** argv) {
     @autoreleasepool {
         try {
             const std::string mode = argc > 1 ? argv[1] : "all";
-            Require(mode == "all" || mode == "format_view" || mode == "eqaa" || mode == "msaa_color", "Unknown multisample color mode");
+            Require(mode == "all" || mode == "format_view" || mode == "eqaa" || mode == "msaa_color" || mode == "msaa_read", "Unknown multisample color mode");
             auto device = MTLCreateSystemDefaultDevice();
             Require(device != nil, "Multisample color tests require a Metal device");
             Require([device supportsTextureSampleCount:Samples], "Metal device lacks 4x multisampling");
@@ -285,6 +333,7 @@ int main(int argc, char** argv) {
             if (mode == "all" || mode == "format_view") FormatView(device, library, memory);
             if (mode == "all" || mode == "eqaa") Eqaa(device, library, memory);
             if (mode == "all" || mode == "msaa_color") MultisampleColor(device, library, memory);
+            if (mode == "all" || mode == "msaa_read") MultisampleRead(device, library, memory);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';
