@@ -150,6 +150,7 @@ public:
     void Reset(double milliseconds) {
         base = milliseconds;
         running = false;
+        paused = false;
     }
 
     void Pause() {
