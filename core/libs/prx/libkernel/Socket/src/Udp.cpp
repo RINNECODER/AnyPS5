@@ -540,6 +540,9 @@ int APS5_VABI socket_nid_postfix(int family, int type, int protocol) {
     const auto native = ::socket(family == 2 ? AF_INET : AF_INET6, nativeType, protocol);
     if (native == Invalid) return Fail(NativeError());
     Socket guard(native, family, plainType);
+    const int ipv6Only = 1;
+    if (family == 28 && ::setsockopt(native, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&ipv6Only), sizeof(ipv6Only)))
+        return Fail(NativeError());
     try {
         auto socket = std::make_shared<Socket>(native, family, plainType);
         guard.value = Invalid;
