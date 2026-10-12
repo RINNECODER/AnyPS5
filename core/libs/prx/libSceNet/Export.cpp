@@ -198,6 +198,10 @@ bool guest_to_native_address(const void* address, std::uint32_t length,
 
 bool native_to_guest_address(const sockaddr_storage& native, void* address, std::uint32_t* length) {
     if (!address || !length) return false;
+    if (native.ss_family == AF_UNSPEC) {
+        *length = 0;
+        return true;
+    }
     std::uint8_t bytes[28]{};
     if (native.ss_family == AF_INET) {
         const auto& v4 = reinterpret_cast<const sockaddr_in&>(native);
