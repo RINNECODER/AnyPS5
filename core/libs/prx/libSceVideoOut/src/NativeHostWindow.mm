@@ -395,6 +395,11 @@ std::unique_ptr<NativeHostWindow> NativeHostWindow::CreateMainThread(const Windo
     state->applicationActiveObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSApplicationDidBecomeActiveNotification
         object:NSApp queue:nil usingBlock:^(NSNotification*) { capture(pointer, [](auto& value) { value.focus(value.window.keyWindow); }); }];
     [state->window makeFirstResponder:view];
+    if (configuration.gameWindow) {
+        state->window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+        state->window.contentAspectRatio = NSMakeSize(configuration.contentWidth, configuration.contentHeight);
+        [state->window center];
+    }
     ParkUnobtrusively(state->window);
     [state->window makeKeyAndOrderFront:nil];
     if (etiquette != WindowEtiquette::Unobtrusive) [NSApp activateIgnoringOtherApps:YES];

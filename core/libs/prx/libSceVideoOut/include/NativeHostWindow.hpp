@@ -56,6 +56,9 @@ struct EventBatch {
 struct WindowConfiguration {
     std::string title;
     std::uint32_t contentWidth{}, contentHeight{};
+    // A game's window: centred on the main screen, full-screen capable (green button,
+    // Ctrl-Cmd-F), and resizes keep the content aspect ratio.
+    bool gameWindow{};
 };
 
 class NativeHostWindow {
