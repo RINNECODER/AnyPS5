@@ -453,6 +453,12 @@ std::int64_t message_length(const NetMsghdr* message) {
     return static_cast<std::int64_t>(total);
 }
 
+int timeout_option(int optname) {
+    if (optname == NET_SO_SCE_SNDTIMEO) return NET_SO_SNDTIMEO;
+    if (optname == NET_SO_SCE_RCVTIMEO) return NET_SO_RCVTIMEO;
+    return optname;
+}
+
 int receive_error(const Sock& socket) {
 #ifdef _WIN32
     if (WSAGetLastError() == WSAETIMEDOUT && socket.type != NET_SOCK_STREAM && socket.rcv_timeout_us > 0) return NET_EAGAIN;
@@ -460,12 +466,6 @@ int receive_error(const Sock& socket) {
     (void)socket;
 #endif
     return native_error();
-}
-
-int timeout_option(int optname) {
-    if (optname == NET_SO_SCE_SNDTIMEO) return NET_SO_SNDTIMEO;
-    if (optname == NET_SO_SCE_RCVTIMEO) return NET_SO_RCVTIMEO;
-    return optname;
 }
 
 }  // namespace
