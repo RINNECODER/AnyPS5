@@ -2,6 +2,7 @@
 #include "MetalRenderState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 
 #include <algorithm>
 #include <array>
@@ -592,6 +593,26 @@ void CoveredCentroid() {
     std::cout << "PASS: covered-centroid mode is admitted without centroid inputs and refused with them\n";
 }
 
+// Upstream 320bd37c9: DB_SHADER_CONTROL.DEPTH_BEFORE_SHADER and Z_ORDER 3 test depth before the pixel
+// shader. On Metal a depth-exporting shader stays late ([[depth]] is not allowed with
+// [[early_fragment_tests]]).
+void EarlyDepthDecode() {
+    Registers cx;
+    cx[0x1b3] = 2u;
+    cx[0x1b4] = 2u;
+    std::array<std::uint8_t, 8> exports{};
+    const auto early = [&](std::uint32_t shaderControl) {
+        cx[0x203] = shaderControl;
+        return Graphics::DecodePixelStageInfo(cx, exports).earlyZ;
+    };
+    constexpr std::uint32_t depthExport = 1u, kill = 1u << 6u, maskExport = 1u << 8u, depthBeforeShader = 1u << 12u;
+    Require(!early(0) && early(1u << 4u) && early(3u << 4u) && !early(2u << 4u), "Z_ORDER 1 and 3 must be early, 0 and 2 late");
+    Require(!early((1u << 4u) | kill) && !early((3u << 4u) | maskExport), "a killing or mask-exporting shader without DEPTH_BEFORE_SHADER must stay late");
+    Require(early(depthBeforeShader) && early(depthBeforeShader | kill) && early(depthBeforeShader | maskExport), "DEPTH_BEFORE_SHADER must test depth early");
+    Require(!early(depthBeforeShader | depthExport) && !early((1u << 4u) | depthExport), "a depth-exporting shader must stay late on Metal");
+    std::cout << "PASS: DEPTH_BEFORE_SHADER and Z_ORDER 3 decode as early depth; depth exports stay late\n";
+}
+
 // Renders one draw of `state` (rasterSamples > 1) into a multisampled RGBA8 target with the pass's
 // sample positions from ConfigureSamplePositions, and returns the resolved pixels.
 std::array<Pixel, 64> RenderResolved(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library,
@@ -789,6 +810,7 @@ int main() {
             ColorViewSlices();
             ClipCullDecode();
             CoveredCentroid();
+            EarlyDepthDecode();
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {
