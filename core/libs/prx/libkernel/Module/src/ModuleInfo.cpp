@@ -10,6 +10,7 @@
 #include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Module/EhFrame.hpp"
 #ifdef _WIN32
@@ -21,7 +22,9 @@
 #include <filesystem>
 #else
 #include <dlfcn.h>
+#include <mutex>
 #include <unistd.h>
+#include <unordered_map>
 #ifdef __APPLE__
 // Darwin has no <link.h>: libc.prx emulates dl_iterate_phdr from the ELF program
 // headers the relinker embeds, and the image identity is the Mach-O header address.
@@ -84,6 +87,11 @@ struct GuestImage {
     std::uintptr_t address;
 };
 
+std::uint64_t PageSpan(std::uint64_t address, std::uint64_t size) {
+    constexpr std::uint64_t pageMask = PS5_PAGE_SIZE - 1;
+    return ((address + size + pageMask) & ~pageMask) - (address & ~pageMask);
+}
+
 #ifndef _WIN32
 template<typename TInfo>
 struct ImageSearch {
@@ -112,6 +120,34 @@ bool Readable(const dl_phdr_info& image, std::uintptr_t begin, std::uint64_t siz
         if (begin >= start && begin - start <= header.p_memsz && size <= header.p_memsz - (begin - start)) return true;
     }
     return false;
+}
+
+struct FrameTableCache {
+    std::mutex mutex;
+    unsigned long long unloads = 0;
+    std::unordered_map<std::uintptr_t, EhFrame::Tables> tables;
+};
+
+unsigned long long UnloadCount(const dl_phdr_info& image) {
+#ifdef __APPLE__
+    // The Darwin dl_iterate_phdr emulation has no unload counter; guest images are never unloaded.
+    (void)image;
+    return 0;
+#else
+    return image.dlpi_subs;
+#endif
+}
+
+EhFrame::Tables FrameTables(const dl_phdr_info& image, std::uintptr_t header) {
+    static auto& cache = *new FrameTableCache();
+    std::lock_guard lock(cache.mutex);
+    if (cache.unloads != UnloadCount(image)) {
+        cache.tables.clear();
+        cache.unloads = UnloadCount(image);
+    }
+    if (const auto found = cache.tables.find(header); found != cache.tables.end()) return found->second;
+    const auto contains = [&](std::uintptr_t begin, std::uint64_t size) { return Contains(image, begin, size); };
+    return cache.tables.emplace(header, EhFrame::ReadTables(contains, header, Caller)).first->second;
 }
 
 std::string ImageName(const dl_phdr_info& image) {
@@ -154,8 +190,7 @@ void Fill(const dl_phdr_info& image, TInfo& info) {
                 info.tls_size = ToU32(header.p_memsz, "TLS size");
                 info.tls_align = ToU32(header.p_align, "TLS alignment");
             } else if (header.p_type == PT_GNU_EH_FRAME) {
-                const auto contains = [&](std::uintptr_t begin, std::uint64_t size) { return Contains(image, begin, size); };
-                const auto tables = EhFrame::ReadTables(contains, address, Caller);
+                const auto tables = FrameTables(image, address);
                 info.eh_frame_hdr_addr = address;
                 info.eh_frame_hdr_size = ToU32(header.p_memsz, "eh_frame_hdr size");
                 info.eh_frame_addr = tables.frames;
@@ -210,6 +245,24 @@ std::vector<GuestImage> GuestImages() {
         images.push_back({native, address});
     }
     return images;
+}
+
+int AddGuestSegmentBytes(dl_phdr_info* image, std::size_t, void* data) {
+    const std::string_view name = image->dlpi_name ? image->dlpi_name : "";
+    if (!name.empty() && !name.ends_with(GuestModuleSuffix)) return 0;
+    constexpr auto allAccess = PF_R | PF_W | PF_X;
+    for (std::uint16_t i = 0; i < image->dlpi_phnum; ++i) {
+        const auto& header = image->dlpi_phdr[i];
+        if (header.p_type != PT_LOAD || header.p_offset == 0 || (header.p_flags & allAccess) == allAccess) continue;
+        *static_cast<std::uint64_t*>(data) += PageSpan(header.p_vaddr, header.p_memsz);
+    }
+    return 0;
+}
+
+std::uint64_t GuestSegmentBytes() {
+    std::uint64_t bytes = 0;
+    dl_iterate_phdr(AddGuestSegmentBytes, &bytes);
+    return bytes;
 }
 #else
 bool SectionNamed(const IMAGE_SECTION_HEADER& section, const char* name) {
@@ -316,6 +369,37 @@ std::vector<GuestImage> GuestImages() {
     }
     return images;
 }
+
+std::uint64_t ImageSegmentBytes(std::uintptr_t base) {
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + static_cast<std::uintptr_t>(dos->e_lfanew));
+    const auto* sections = IMAGE_FIRST_SECTION(nt);
+    const auto sectionCount = nt->FileHeader.NumberOfSections;
+    bool relinked = false;
+    for (unsigned i = 0; i < sectionCount; ++i) relinked = relinked || SectionNamed(sections[i], ".elf0");
+    std::uint64_t bytes = 0;
+    for (unsigned i = 0; i < sectionCount; ++i) {
+        const auto& section = sections[i];
+        if (SectionProtection(section) == 0 || (relinked && std::strncmp(reinterpret_cast<const char*>(section.Name), ".elf", 4) != 0)) continue;
+        bytes += PageSpan(section.VirtualAddress, section.Misc.VirtualSize);
+    }
+    return bytes;
+}
+
+std::uint64_t GuestSegmentBytes() {
+    const auto executable = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    constexpr std::wstring_view suffix = L".guest.prx";
+    std::uint64_t bytes = 0;
+    for (const auto& image : GuestImages()) {
+        if (image.address != executable) {
+            const auto path = ModulePath(reinterpret_cast<HMODULE>(image.address));
+            if (path.size() < suffix.size() || CompareStringOrdinal(path.data() + path.size() - suffix.size(), static_cast<int>(suffix.size()), suffix.data(), static_cast<int>(suffix.size()), TRUE) != CSTR_EQUAL)
+                continue;
+        }
+        bytes += ImageSegmentBytes(image.address);
+    }
+    return bytes;
+}
 #endif
 
 }
@@ -376,6 +460,10 @@ int APS5_VABI sceKernelGetModuleInfo(KernelModule handle, ModuleInfo* info) {
         return 0;
     }
     return SCE_KERNEL_ERROR_ESRCH;
+}
+
+std::uint64_t GuestImageSegmentBytes_nid_no_patch() {
+    return GuestSegmentBytes();
 }
 
 }
