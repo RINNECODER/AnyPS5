@@ -646,14 +646,17 @@ private:
             }
             if (target != 0u) {
                 bool retainMerge = false;
+                std::uint32_t merge = 0;
                 for (const auto index : indices) {
                     auto& instruction = instructions[index];
                     if (Opcode(instruction) != spv::OpSelectionMerge) continue;
-                    retainMerge = !linearSelection(target, instruction.at(1));
+                    merge = instruction.at(1);
+                    retainMerge = !linearSelection(target, merge);
                     if (!retainMerge) instruction.clear();
                 }
+                const bool takesTrue = op == spv::OpBranchConditional && target == terminal.at(2);
                 const auto replacement = !retainMerge ? Make(spv::OpBranch, {target}) : op == spv::OpSwitch ?
-                    Make(spv::OpSwitch, {terminal.at(1), target}) : Make(spv::OpBranchConditional, {terminal.at(1), target, target});
+                    Make(spv::OpSwitch, {terminal.at(1), target}) : Make(spv::OpBranchConditional, {terminal.at(1), takesTrue ? target : merge, takesTrue ? merge : target});
                 if (terminal != replacement) {
                     terminal = replacement;
                     changed = true;
