@@ -42,6 +42,7 @@
 extern "C" {
 void* APS5_VABI mmap_nid_postfix(void*, std::size_t, int, int, int, std::int64_t) noexcept;
 int APS5_VABI munmap_nid_postfix(void*, std::size_t) noexcept;
+int APS5_VABI sceKernelMmap(void*, std::size_t, int, int, int, std::int64_t, void**);
 int APS5_VABI mprotect_nid_postfix(void*, std::size_t, int) noexcept;
 int APS5_VABI madvise_nid_postfix(void*, std::size_t, int);
 int* APS5_VABI __error_nid_postfix();
@@ -1764,6 +1765,18 @@ static void CheckVirtualQueryForNonReadableGuestRange() {
     Require(sceKernelMunmap(mapped, page) == 0);
 }
 
+static void CheckSceKernelMmap() {
+    constexpr std::size_t page = 0x4000;
+    void* mapped = nullptr;
+    Require(sceKernelMmap(nullptr, page, 3, 0x1002, -1, 0, &mapped) == 0 && mapped != nullptr);
+    static_cast<volatile unsigned char*>(mapped)[page - 1] = 7;
+    Require(static_cast<volatile unsigned char*>(mapped)[page - 1] == 7);
+    Require(sceKernelMunmap(mapped, page) == 0);
+    void* untouched = &mapped;
+    Require(sceKernelMmap(nullptr, 0, 3, 0x1002, -1, 0, &untouched) == static_cast<int>(0x80020016u));
+    Require(untouched == &mapped);
+}
+
 static void CheckVirtualQueryPartialMunmap() {
     constexpr std::size_t page = 0x4000;
     const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
@@ -1853,6 +1866,7 @@ int main() {
     CheckVirtualQuerySplitFlexibleRanges();
     CheckVirtualQueryForNonReadableGuestRange();
     CheckReleaseFlexibleMemory();
+    CheckSceKernelMmap();
     CheckVirtualQueryPartialMunmap();
     CheckMunmapOverUnmappedPages();
     CheckNamedAndHintedMappings();

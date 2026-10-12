@@ -31,6 +31,8 @@
 #include <mutex>
 
 extern "C" std::uint64_t GuestImageSegmentBytes_nid_no_patch();
+extern "C" void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protection, int flags, int descriptor, std::int64_t offset) noexcept;
+extern "C" int* APS5_VABI __error_nid_postfix();
 
 namespace {
 
@@ -212,6 +214,13 @@ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
  const int result = DoMunmap(reinterpret_cast<void*>(vaddr), len);
  if (result == 0) _releaseFlexible(static_cast<uintptr_t>(vaddr), len);
  return result;
+}
+
+int APS5_VABI sceKernelMmap(void* addr, size_t len, int prot, int flags, int fd, int64_t offset, void** res) {
+ void* mapped = mmap_nid_postfix(addr, len, prot, flags, fd, offset);
+ if (mapped == reinterpret_cast<void*>(static_cast<uintptr_t>(-1))) return SceKernelError(*__error_nid_postfix());
+ *res = mapped;
+ return 0;
 }
 
 int APS5_VABI sceKernelReleaseFlexibleMemory(void* addr, size_t len) {
