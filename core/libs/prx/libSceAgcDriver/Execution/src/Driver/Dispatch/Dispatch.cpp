@@ -18,6 +18,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     PerformanceTimer timing("Driver.Dispatch");
     const auto noteShaderRead = [](std::uint32_t offset) { Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, offset); };
     const auto address = DecodeComputeProgramAddress(queue.shader);
+    if (address == SkippedShader() && address != 0) return;
     auto registeredShader = RegisteredProgram(*submission.shaders, address, {0});
     if (!registeredShader) registeredShader = ReadRawShader(address);
     const auto& snapshot = *registeredShader;
