@@ -136,7 +136,7 @@ void MetalDriver::Configure(void* device, void* library,
     std::sort(captured.begin(), captured.end(), [](const auto& a, const auto& b) { return a.guestAddress < b.guestAddress; });
     auto backend = std::make_unique<MetalDevice>(nativeDevice, nativeLibrary);
     auto presentation = std::make_unique<MetalPresentation>(*backend, nativeLibrary);
-    auto draw = std::make_unique<MetalDraw>(nativeDevice, nativeLibrary);
+    auto draw = std::make_unique<MetalDraw>(*backend);
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>();
     auto nullPixel = DriverDetail::CaptureNullPixelShader();
     const auto nullPixelAddress = nullPixel->codeAddress;
@@ -454,9 +454,13 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
 // several submissions ahead and rewrote ring entries before the draws that read them ran: UI
 // draws then rendered with later vertex or constant data, clearing or filling the wrong regions
 // of a layer the guest only repaints where it changed. Submitting therefore waits until at most
-// `ANYPS5_METAL_MAX_QUEUED` (default 1) submissions of the queue are waiting or running. The wait
-// is bounded (250 ms), so a guest that submits work gated on a label it writes only after the
-// submit returns still makes progress. A negative value turns the bound off.
+// `ANYPS5_METAL_MAX_QUEUED` (default 1) submissions of the queue are waiting or running. A guest
+// that submits work gated on a label it writes only after the submit returns still makes progress:
+// the wait also ends once the queue's worker is parked on such a host-satisfied wait (WAIT_REG_MEM,
+// RenderingWait). It used to end after 250 ms instead, which a title loading its map outran: a
+// dispatch that takes longer let the guest rewrite the constants of work still queued, and a
+// dispatch that then read a tile table as its loop bounds never finished. The 10 s cap only guards
+// against waits this does not model. A negative value turns the bound off.
 void MetalDriver::Impl::WaitForQueueRoom(std::uint32_t queue) {
     static const long maxQueued = [] {
         const char* value = std::getenv("ANYPS5_METAL_MAX_QUEUED");
@@ -467,9 +471,14 @@ void MetalDriver::Impl::WaitForQueueRoom(std::uint32_t queue) {
     const auto found = workers.find(queue);
     if (found == workers.end()) return;
     const auto& worker = found->second;
-    changed.wait_for(lock, std::chrono::milliseconds(250), [&] {
-        return stopping || failure || static_cast<long>(worker.pending.size() + (worker.active ? 1u : 0u)) <= maxQueued;
+    const bool room = changed.wait_for(lock, std::chrono::seconds(10), [&] {
+        return stopping || failure || static_cast<long>(worker.pending.size() + (worker.active ? 1u : 0u)) <= maxQueued ||
+            (worker.active && !worker.running);
     });
+    static std::atomic<unsigned> reports{0};
+    if (!room && reports.fetch_add(1) < 4) {
+        std::fprintf(stderr, "[metal] queue %u still had %zu submissions waiting after 10 s; submitting anyway\n", queue, worker.pending.size());
+    }
 }
 
 void MetalDriver::Impl::Enqueue(Submission submission) {

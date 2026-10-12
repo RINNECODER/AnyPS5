@@ -1,4 +1,5 @@
 #include "MetalDevice.hpp"
+#include "GpuStallWatch.hpp"
 #include "GpuTiming.hpp"
 
 #include <stdexcept>
@@ -146,6 +147,7 @@ void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
     if (commands.status < MTLCommandBufferStatusCommitted) {
         [commands commit];
     }
+    GpuStallWatch::Scope stallWatch;
     if (GpuTiming::Enabled()) {
         const auto start = std::chrono::steady_clock::now();
         [commands waitUntilCompleted];
