@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -49,7 +50,7 @@ public:
     [[nodiscard]] id<MTLCommandBuffer> CommandBuffer() const;
     void Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArray<id<MTLBuffer>>* buffers,
                 const void* parameters, std::size_t parameterBytes, MTLSize grid,
-                const std::array<std::uint32_t, 22>* constants = nullptr) const;
+                const std::array<std::uint32_t, 22>* constants = nullptr, std::span<const NSUInteger> offsets = {}) const;
     void Wait(id<MTLCommandBuffer> commands) const;
     [[nodiscard]] id<MTLDevice> Device() const;
     [[nodiscard]] id<MTLCommandQueue> Queue() const;

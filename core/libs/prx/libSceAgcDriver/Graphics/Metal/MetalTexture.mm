@@ -337,7 +337,9 @@ std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestText
     return std::shared_ptr<MetalTexture>(new MetalTexture(backend, backing, resource, compare, minimumLodLowered));
 }
 
-void MetalTexture::transfer(id<MTLBuffer> source, id<MTLBuffer> destination, bool retile) const {
+void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> source, NSUInteger sourceOffset,
+    id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile) const {
+    const std::array<NSUInteger, 2> offsets{sourceOffset, destinationOffset};
     const auto& descriptor = backing->descriptor;
     const auto& geometry = backing->geometry;
     const auto elementBytes = backing->elementBytes;
@@ -364,7 +366,6 @@ void MetalTexture::transfer(id<MTLBuffer> source, id<MTLBuffer> destination, boo
         constants[2] = 2;
         std::copy(equation->bits.begin(), equation->bits.end(), constants.begin() + 4);
     }
-    auto commands = backend.CommandBuffer();
     for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
         const auto& mip = geometry.mips[level];
         for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
@@ -384,59 +385,113 @@ void MetalTexture::transfer(id<MTLBuffer> source, id<MTLBuffer> destination, boo
             p.elementBytes = elementBytes;
             p.slice = layer;
             p.rangeEnd = UINT32_MAX;
-            backend.Encode(commands, @"TextureDetile", @[source, destination], &p, sizeof(p), MTLSizeMake(mip.width, mip.height, 1), &constants);
+            backend.Encode(commands, @"TextureDetile", @[source, destination], &p, sizeof(p), MTLSizeMake(mip.width, mip.height, 1), &constants, offsets);
         }
     }
-    backend.Wait(commands);
+}
+
+// The copies stay on the GPU: replaceRegion/getBytes convert to the texture's internal layout on the
+// CPU inside the Metal driver, which on the Rosetta direct path runs translated (a third of the queue
+// worker's time went there for surfaces uploaded and read back around each draw or dispatch).
+void MetalTexture::encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer> linear, bool toTexture) const {
+    const auto& descriptor = backing->descriptor;
+    const auto& geometry = backing->geometry;
+    id<MTLTexture> texture = backing->texture;
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    require(blit != nil, "Metal texture blit encoder creation failed");
+    const bool volume = texture.textureType == MTLTextureType3D;
+    for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
+        const auto& mip = geometry.mips[level];
+        for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
+            if (!geometry.HasLayer(level, layer)) continue;
+            const auto size = MTLSizeMake(std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1);
+            const auto origin = MTLOriginMake(0, 0, geometry.CopyDepth(layer));
+            const auto offset = geometry.LinearLayerOffset(layer) + mip.linearOffset;
+            const NSUInteger bytesPerImage = volume ? mip.linearSize : 0;
+            if (toTexture) {
+                [blit copyFromBuffer:linear sourceOffset:offset sourceBytesPerRow:mip.pitchBytes sourceBytesPerImage:bytesPerImage sourceSize:size
+                           toTexture:texture destinationSlice:geometry.CopyLayer(layer) destinationLevel:level destinationOrigin:origin];
+            } else {
+                [blit copyFromTexture:texture sourceSlice:geometry.CopyLayer(layer) sourceLevel:level sourceOrigin:origin sourceSize:size
+                             toBuffer:linear destinationOffset:offset destinationBytesPerRow:mip.pitchBytes destinationBytesPerImage:bytesPerImage];
+            }
+        }
+    }
+    [blit endEncoding];
+}
+
+bool MetalTexture::inPlace(id<MTLBuffer> buffer, std::size_t offset) const {
+    // The detile addresses whole words, so the surface must be word-aligned and a whole number of words.
+    const auto extent = bufferSize(backing->geometry.guestBytes);
+    return buffer != nil && buffer.device == backend.Device() && offset % 4 == 0 && extent == backing->geometry.guestBytes &&
+        offset <= buffer.length && extent <= buffer.length - offset;
 }
 
 void MetalTexture::Upload(std::span<const std::byte> guestBytes) {
-    const auto& descriptor = backing->descriptor;
     const auto& geometry = backing->geometry;
-    id<MTLTexture> texture = backing->texture;
     require(guestBytes.size() == geometry.guestBytes, "Metal texture upload byte extent differs from guest surface");
     auto tiled = backend.Buffer(bufferSize(geometry.guestBytes));
-    auto linear = backend.Buffer(bufferSize(geometry.sliceLinearBytes * geometry.layers));
-    std::memset(tiled.contents, 0, tiled.length);
-    std::memset(linear.contents, 0, linear.length);
     std::memcpy(tiled.contents, guestBytes.data(), guestBytes.size());
-    transfer(tiled, linear, false);
-    const auto* bytes = static_cast<const std::byte*>(linear.contents);
-    for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
-        const auto& mip = geometry.mips[level];
-        for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
-            if (!geometry.HasLayer(level, layer)) continue;
-            const auto region = MTLRegionMake3D(0, 0, geometry.CopyDepth(layer), std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1);
-            const auto* source = bytes + geometry.LinearLayerOffset(layer) + mip.linearOffset;
-            [texture replaceRegion:region mipmapLevel:level slice:geometry.CopyLayer(layer) withBytes:source bytesPerRow:mip.pitchBytes bytesPerImage:mip.linearSize];
-        }
+    std::memset(static_cast<std::byte*>(tiled.contents) + guestBytes.size(), 0, tiled.length - guestBytes.size());
+    Upload(tiled, 0);
+    FinishUpload();
+}
+
+void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
+    const auto& geometry = backing->geometry;
+    if (!inPlace(guest, offset)) {
+        require(guest != nil && offset <= guest.length && geometry.guestBytes <= guest.length - offset,
+            "Metal texture upload source does not hold the guest surface");
+        Upload(std::span(static_cast<const std::byte*>(guest.contents) + offset, static_cast<std::size_t>(geometry.guestBytes)));
+        return;
     }
+    // The blit reads only texels the detile wrote, so the linear buffer needs no clearing.
+    auto linear = backend.Buffer(bufferSize(geometry.sliceLinearBytes * geometry.layers));
+    FinishUpload();
+    auto commands = backend.CommandBuffer();
+    encodeTransfer(commands, guest, offset, linear, 0, false);
+    encodeLinearCopy(commands, linear, true);
+    // The draw or dispatch that samples the texture is committed later on the same queue, so it runs
+    // after this; the command buffer keeps the staging buffers alive until then.
+    [commands commit];
+    pendingUpload = commands;
+}
+
+void MetalTexture::FinishUpload() const {
+    if (pendingUpload == nil) return;
+    id<MTLCommandBuffer> commands = pendingUpload;
+    pendingUpload = nil;
+    backend.Wait(commands);
 }
 
 void MetalTexture::Readback(std::span<std::byte> guestBytes) const {
-    const auto& descriptor = backing->descriptor;
     const auto& geometry = backing->geometry;
-    id<MTLTexture> texture = backing->texture;
     require(guestBytes.size() == geometry.guestBytes, "Metal texture readback byte extent differs from guest surface");
-    auto synchronize = backend.CommandBuffer();
-    backend.Wait(synchronize);
     auto tiled = backend.Buffer(bufferSize(geometry.guestBytes));
-    auto linear = backend.Buffer(bufferSize(geometry.sliceLinearBytes * geometry.layers));
-    std::memset(tiled.contents, 0, tiled.length);
     std::memcpy(tiled.contents, guestBytes.data(), guestBytes.size());
-    std::memset(linear.contents, 0, linear.length);
-    auto* bytes = static_cast<std::byte*>(linear.contents);
-    for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
-        const auto& mip = geometry.mips[level];
-        for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
-            if (!geometry.HasLayer(level, layer)) continue;
-            const auto region = MTLRegionMake3D(0, 0, geometry.CopyDepth(layer), std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1);
-            auto* destination = bytes + geometry.LinearLayerOffset(layer) + mip.linearOffset;
-            [texture getBytes:destination bytesPerRow:mip.pitchBytes bytesPerImage:mip.linearSize fromRegion:region mipmapLevel:level slice:geometry.CopyLayer(layer)];
-        }
-    }
-    transfer(linear, tiled, true);
+    std::memset(static_cast<std::byte*>(tiled.contents) + guestBytes.size(), 0, tiled.length - guestBytes.size());
+    Readback(tiled, 0);
     std::memcpy(guestBytes.data(), tiled.contents, guestBytes.size());
+}
+
+void MetalTexture::Readback(id<MTLBuffer> guest, std::size_t offset) const {
+    const auto& geometry = backing->geometry;
+    if (!inPlace(guest, offset)) {
+        require(guest != nil && offset <= guest.length && geometry.guestBytes <= guest.length - offset,
+            "Metal texture readback destination does not hold the guest surface");
+        Readback(std::span(static_cast<std::byte*>(guest.contents) + offset, static_cast<std::size_t>(geometry.guestBytes)));
+        return;
+    }
+    FinishUpload();
+    // The retile reads only the elements the blit wrote (each level's texel extent in elements), so
+    // the linear buffer needs no clearing either.
+    auto linear = backend.Buffer(bufferSize(geometry.sliceLinearBytes * geometry.layers));
+    // The queue runs command buffers in commit order, so the blit sees the texture's earlier writes;
+    // the retile rewrites only the surface's texels in place.
+    auto commands = backend.CommandBuffer();
+    encodeLinearCopy(commands, linear, false);
+    encodeTransfer(commands, linear, 0, guest, offset, true);
+    backend.Wait(commands);
 }
 
 id<MTLTexture> MetalTexture::Texture() const { return typedTexture; }

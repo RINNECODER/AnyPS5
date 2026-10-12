@@ -80,6 +80,31 @@ void checkGpuFault(const BdaAbi::Fault& fault) {
     throw MetalGpuExecutionError(message.str());
 }
 
+// Alias working set (MetalGuestHostAliases::EnableWorkingSet): work that needs guest bytes outside
+// the set runs again once they are admitted. A binding miss is found before anything reaches the
+// GPU. A shader access outside the set read zero or dropped its store and reported an Unmapped
+// fault; the second run repeats the work's other writes, which only differs from one run for
+// blending or atomics, and only on the first touch of a granule.
+constexpr unsigned WorkingSetAttempts = 64;
+
+template <typename Run>
+BdaAbi::Fault runInWorkingSet(MetalGuestHostAliases& aliases, std::span<const NativeGuestMemory::BorrowedRange> ranges, Run&& run) {
+    for (unsigned attempt = 1;; ++attempt) {
+        BdaAbi::Fault fault{};
+        try {
+            fault = run();
+        } catch (const MetalWorkingSetMiss&) {
+            if (attempt < WorkingSetAttempts) continue;
+            throw;
+        }
+        if (attempt < WorkingSetAttempts && fault.state != BdaAbi::FaultState::Empty && fault.reason == BdaAbi::FaultReason::Unmapped &&
+            aliases.AdmitGuest(ranges, fault.address, std::max<std::uint32_t>(fault.bytes, 1u))) {
+            continue;
+        }
+        return fault;
+    }
+}
+
 constexpr std::string_view SkippedDraw = "draw", SkippedDispatch = "dispatch";
 constexpr std::size_t MaxSkipReasonBytes = 240;
 
@@ -226,19 +251,22 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
             }
         };
     }
-    MetalShaderResources bindings(*backend, ranges, std::move(resident), draw ? &draw->HostAliases() : nullptr);
-    const auto descriptors = bindings.Bindings(converted);
     std::array<NSUInteger, 3> grid{};
     for (std::uint32_t axis = 0; axis < 3; ++axis) {
         const auto threads = static_cast<std::uint64_t>(decoded.groups[axis]) * converted.threadsPerThreadgroup[axis];
         if (threads > std::numeric_limits<std::uint32_t>::max()) throw std::invalid_argument("Native Metal compute grid exceeds shader integer range");
         grid[axis] = static_cast<NSUInteger>(threads);
     }
-    id<MTLCommandBuffer> commands = backend->CommandBuffer();
-    pipeline.Encode(commands, descriptors, MTLSizeMake(grid[0], grid[1], grid[2]), {}, bindings.Residency());
-    [commands commit];
-    backend->Wait(commands);
-    checkGpuFault(CompleteCommittedWork([&] { return bindings.Complete(commands); }));
+    const auto run = [&] {
+        MetalShaderResources bindings(*backend, ranges, resident, draw ? &draw->HostAliases() : nullptr);
+        const auto descriptors = bindings.Bindings(converted);
+        id<MTLCommandBuffer> commands = backend->CommandBuffer();
+        pipeline.Encode(commands, descriptors, MTLSizeMake(grid[0], grid[1], grid[2]), {}, bindings.Residency());
+        [commands commit];
+        backend->Wait(commands);
+        return CompleteCommittedWork([&] { return bindings.Complete(commands); });
+    };
+    checkGpuFault(draw ? runInWorkingSet(draw->HostAliases(), ranges, run) : run());
 }
 
 void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
@@ -324,7 +352,8 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             stages.insert(stages.begin() + 1, {{ShaderStage::TessellationControl, &programs[2], 0},
                 {ShaderStage::TessellationEvaluation, &programs[3], 0}});
         }
-        checkGpuFault(draw->DrawSynchronously(decoded.state, direct, stages, ranges, meshArguments));
+        checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges,
+            [&] { return draw->DrawSynchronously(decoded.state, direct, stages, ranges, meshArguments); }));
     };
     if (!parameters.indirect) {
         executeDirect(parameters);

@@ -2,13 +2,24 @@
 
 #import <Metal/Metal.h>
 #include "BdaAbi.hpp"
+#include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <span>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace AgcDriver::Metal {
+
+// A binding needed guest bytes outside the host-alias working set; they were admitted, so the
+// work can be set up again (nothing reached the GPU yet).
+class MetalWorkingSetMiss final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 // #291: persistent shared Metal buffers that alias the page-aligned host backing of guest
 // mappings (newBufferWithBytesNoCopy), so a snapshot binds guest memory without copying it.
@@ -26,8 +37,34 @@ public:
     void Clear();
     [[nodiscard]] std::size_t Count() const;
 
+    // Working-set mode (Rosetta direct path). A command buffer that uses a no-copy alias wires every
+    // host page under it while the buffer is in flight, so one alias of a title's whole GPU mapping
+    // (13.5 GiB) kept it all wired. In this mode a capture binds only the host pages in the working
+    // set: the union of `granule`-aligned host intervals admitted so far, one alias per interval.
+    // Guest bytes outside it are absent from the capture's table: CPU-side binding raises
+    // MetalWorkingSetMiss and a GPU access reports an Unmapped fault; callers admit the bytes and
+    // run the work again. When admitting would take the set over `budget` bytes it starts empty.
+    void EnableWorkingSet(std::uint64_t granule, std::uint64_t budget);
+    // Working-set mode for every MetalGuestHostAliases constructed afterwards (0 granule: off).
+    static void SetProcessWorkingSet(std::uint64_t granule, std::uint64_t budget);
+    [[nodiscard]] bool WorkingSetEnabled() const;
+    // Admits the host pages behind guest [address, address + bytes) in `ranges`. True when that
+    // added pages, false when they were all present already or no range holds the bytes.
+    bool AdmitGuest(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t address, std::uint64_t bytes);
+    // Host bytes in the working set.
+    [[nodiscard]] std::uint64_t WorkingSetBytes() const;
+    // Disjoint, non-adjacent host intervals of the working set, in address order.
+    [[nodiscard]] std::vector<std::pair<std::uintptr_t, std::uintptr_t>> WorkingSet() const;
+
 private:
     friend class MetalGuestMemory;
+    bool admitHost(std::uintptr_t begin, std::uintptr_t end);
+    std::uint64_t granule = 0;
+    std::uint64_t budget = 0;
+    std::map<std::uintptr_t, std::uintptr_t> intervals;
+    std::uint64_t intervalBytes = 0;
+    std::uint64_t admissions = 0;
+    std::uint64_t resets = 0;
     struct Entry {
         std::uintptr_t begin;
         std::uintptr_t end;

@@ -375,6 +375,10 @@ void Record(id<MTLDevice> device, id<MTLBinaryArchive> archive, Add&& add) {
 
 }
 
+MTLLanguageVersion ConvertedShaderLanguageVersion(MTLLanguageVersion processDefault, bool languageVersion32) {
+    return languageVersion32 || processDefault < MTLLanguageVersion3_2 ? MTLLanguageVersion3_2 : processDefault;
+}
+
 id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& source, const std::string& entryPoint,
                                      bool languageVersion32) {
     CacheKeyWriter writer;
@@ -390,7 +394,7 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
     MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
     if (@available(macOS 15.0, *)) {
         options.mathMode = MTLMathModeSafe;
-        if (languageVersion32) options.languageVersion = MTLLanguageVersion3_2;
+        options.languageVersion = ConvertedShaderLanguageVersion(options.languageVersion, languageVersion32);
     }
     NSError* error = nil;
     id<MTLLibrary> library = [device newLibraryWithSource:text options:options error:&error];

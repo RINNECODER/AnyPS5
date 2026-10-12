@@ -38,8 +38,13 @@ struct CachedRenderPipeline {
     MTLRenderPipelineReflection* reflection = nil;
 };
 
+// The language version converted shaders compile with, given the process default. The shader bridge
+// targets MSL 3.2 (it emits atomic_thread_fence with memory_order_seq_cst and thread scopes), and the
+// default follows the main executable's SDK: a relinked title (Rosetta direct path) declares SDK 11,
+// whose default MSL 2.3 lacks those identifiers. Exactly MSL 3.2 when `languageVersion32`.
+[[nodiscard]] MTLLanguageVersion ConvertedShaderLanguageVersion(MTLLanguageVersion processDefault, bool languageVersion32) API_AVAILABLE(macos(15.0));
 // Returns `entryPoint` from the library compiled from `source` with the converted-shader compile options
-// (safe math; MSL 3.2 when `languageVersion32`). Throws std::runtime_error when compilation fails and
+// (safe math; ConvertedShaderLanguageVersion). Throws std::runtime_error when compilation fails and
 // returns nil when the entry point is missing.
 [[nodiscard]] id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& source,
                                                    const std::string& entryPoint, bool languageVersion32);
