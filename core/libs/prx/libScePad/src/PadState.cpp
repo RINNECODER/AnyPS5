@@ -1,9 +1,12 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/Pad.hpp"
 #include "prx/libScePad/include/InputCommandFile.hpp"
+#include "prx/libScePad/include/InputScript.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <deque>
@@ -172,10 +175,31 @@ PadData BuildData(const PadInputState& state, std::uint64_t changeTime, std::uin
     return data;
 }
 
+// ANYPS5_INPUT_SCRIPT (fork-only, InputScript.hpp). A malformed script is reported and ignored.
+Pad::InputScript LoadInputScript() {
+    const char* text = std::getenv("ANYPS5_INPUT_SCRIPT");
+    if (text == nullptr || text[0] == '\0') return {};
+    try {
+        auto presses = Pad::ParseInputScript(text);
+        std::fprintf(stderr, "[pad] input script: %zu presses\n", presses.size());
+        return Pad::InputScript(std::move(presses));
+    } catch (const std::invalid_argument& error) {
+        std::fprintf(stderr, "[pad] %s; script ignored\n", error.what());
+        return {};
+    }
+}
+
 std::uint32_t InjectedButtons(std::uint64_t now) {
     static Pad::InputCommandFile commands(std::getenv("APS5_PAD_INPUT_FILE"));
+    static Pad::InputScript script = LoadInputScript();
     static std::uint32_t lastInjected = 0;
-    const auto injected = commands.Buttons(now);
+    std::vector<const Pad::ScriptedPress*> started;
+    const auto injected = commands.Buttons(now) | script.Buttons(now, &started);
+    for (const auto* press : started) {
+        const auto epochMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+        std::fprintf(stderr, "[pad] input script %s: down at %.3f s (epoch ms %lld)\n", press->text.c_str(),
+            static_cast<double>(now) / 1e6, static_cast<long long>(epochMs));
+    }
     if (injected != lastInjected) {
         lastInjected = injected;
         timestamp = now;

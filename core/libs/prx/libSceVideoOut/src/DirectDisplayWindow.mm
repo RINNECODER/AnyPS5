@@ -11,11 +11,15 @@
 // ANYPS5_ROSETTA_HEADLESS=1 keeps every frame offscreen and never touches AppKit.
 // SDL stays initialized for game controllers only; its video driver is the offscreen one, so the
 // presentation thread's SDL event pump never calls into AppKit off the main thread.
+// Keyboard and mouse input reach the window, not SDL: the main-queue pump drains the window's
+// events, publishes them to libSceKeyboard/libSceMouse and pushes keys and focus loss into SDL's
+// queue, where the presentation thread's PadInput maps them to pad buttons as on the SDL window.
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libSceVideoOut/include/DirectHostApplication.hpp"
 #include "prx/libSceVideoOut/include/NativeHostWindow.hpp"
 #include "prx/libSceVideoOut/include/UnobtrusiveWindows.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
+#include "SDL_events.h"
 #include "SDL_hints.h"
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -28,6 +32,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <variant>
 
 namespace {
 
@@ -61,6 +66,29 @@ void Report(const char* what, const std::exception_ptr& error) {
 }
 
 void CloseWindow(std::unique_ptr<AnyPS5::Host::NativeHostWindow> window);
+
+// Main queue only. SDL_PushEvent is thread-safe and drops events before SDL's queue exists.
+void ForwardInput(const AnyPS5::Host::EventBatch& batch) {
+    for (const auto& event : batch.events) {
+        if (const auto* key = std::get_if<KeyboardInputEvent>(&event.payload)) {
+            KeyboardPublishInput_nid_postfix(*key);
+            if (key->keyCode == 0 || key->resetKeys || key->connectionChange) continue;
+            SDL_Event sdl{};
+            sdl.type = key->pressed ? SDL_KEYDOWN : SDL_KEYUP;
+            sdl.key.state = key->pressed ? SDL_PRESSED : SDL_RELEASED;
+            sdl.key.keysym.scancode = static_cast<SDL_Scancode>(key->keyCode);
+            SDL_PushEvent(&sdl);
+        } else if (const auto* mouse = std::get_if<MouseInputEvent>(&event.payload)) {
+            MousePublishInput_nid_postfix(*mouse);
+        } else if (const auto* focus = std::get_if<AnyPS5::Host::FocusChanged>(&event.payload); focus != nullptr && !focus->focused) {
+            // PadInput releases every held key on focus loss.
+            SDL_Event sdl{};
+            sdl.type = SDL_WINDOWEVENT;
+            sdl.window.event = SDL_WINDOWEVENT_FOCUS_LOST;
+            SDL_PushEvent(&sdl);
+        }
+    }
+}
 
 // Content size in points: the output at one point per backing pixel, scaled down to fit the screen.
 NSSize FittedContentSize(std::uint32_t width, std::uint32_t height) {
@@ -107,6 +135,7 @@ void CreateWindow(const std::shared_ptr<DirectWindow>& state) {
         if (!live->window) return;
         try {
             live->window->PumpMainThread(std::chrono::milliseconds(0));
+            ForwardInput(live->window->DrainEvents());
             // The close button or Quit (the window's application delegate turns it into a close request).
             if (live->window->Snapshot().closeRequested) AnyPS5::Host::EndDirectSession("the game window was closed");
         } catch (...) {
