@@ -31,6 +31,7 @@
 #include <fstream>
 #include <string>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 #ifdef _WIN32
@@ -1632,6 +1633,90 @@ static void CheckDirectMemoryWriteWatch() {
     Require(sceKernelMunmap(flexible, page * 3) == 0);
     Require(sceKernelReleaseDirectMemory(phys, page * 3) == 0);
 }
+
+static void CheckDirectMemoryWriteWatchFollowsRemovedMappings() {
+    if (!GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix()) {
+        std::puts("write watch unavailable: removed direct mappings not tested");
+        return;
+    }
+    constexpr std::size_t page = 0x4000;
+    std::int64_t phys = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * 4, 0, 0, &phys) == 0);
+    void* whole = nullptr;
+    Require(sceKernelMapDirectMemory(&whole, page * 4, 3, 0, phys, 0) == 0);
+    const auto address = reinterpret_cast<std::uintptr_t>(whole);
+    const auto watched = [](const void* pointer, std::size_t offset) { return GuestWriteWatch::GuestWriteWatchCovers_nid_postfix(reinterpret_cast<std::uintptr_t>(pointer) + offset, page); };
+    void* pair = nullptr;
+    Require(sceKernelMapDirectMemory(&pair, page * 2, 3, 0, phys + page, 0) == 0);
+    Require(watched(whole, 0) && !watched(whole, page) && !watched(whole, page * 2) && watched(whole, page * 3));
+    Require(!watched(pair, 0) && !watched(pair, page));
+    Require(sceKernelMunmap(pair, page) == 0);
+    void* single = nullptr;
+    Require(sceKernelMapDirectMemory(&single, page, 3, 0, phys + page, 0) == 0);
+    Require(!watched(single, 0) && watched(whole, 0) && watched(whole, page * 3));
+    Require(sceKernelMunmap(single, page) == 0);
+    Require(sceKernelMunmap(static_cast<unsigned char*>(pair) + page, page) == 0);
+    void* replaced = whole;
+    Require(sceKernelMapDirectMemory(&replaced, page, 3, 0x10, phys + page * 3, 0) == 0 && replaced == whole);
+    Require(!watched(whole, 0) && !watched(whole, page * 3));
+    std::uintptr_t start = 0;
+    std::uintptr_t end = 0;
+    std::uint64_t offset = 0;
+    int type = 0;
+    Require(QueryDirectMapping(address, &start, &end, &offset, &type) && start == address && end == address + page && offset == static_cast<std::uint64_t>(phys) + page * 3);
+    void* alone = nullptr;
+    Require(sceKernelMapDirectMemory(&alone, page, 3, 0, phys, 0) == 0);
+    Require(watched(alone, 0));
+    void* again = nullptr;
+    Require(sceKernelMapDirectMemory(&again, page, 3, 0, phys, 0) == 0);
+    Require(!watched(alone, 0) && !watched(again, 0));
+    Require(sceKernelMunmap(again, page) == 0);
+    Require(sceKernelMunmap(alone, page) == 0);
+    Require(sceKernelMunmap(whole, page * 4) == 0);
+    Require(sceKernelReleaseDirectMemory(phys, page * 4) == 0);
+}
+
+static double MapAcrossBackingsSeconds(std::int64_t phys, std::size_t backings) {
+    constexpr std::size_t page = 0x4000;
+    const auto threadSeconds = [] {
+        timespec now{};
+        Require(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now) == 0);
+        return static_cast<double>(now.tv_sec) + static_cast<double>(now.tv_nsec) * 1e-9;
+    };
+    auto best = std::numeric_limits<double>::max();
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        void* mapped = nullptr;
+        const auto before = threadSeconds();
+        Require(sceKernelMapDirectMemory(&mapped, page * backings, 3, 0, phys, 0) == 0);
+        best = std::min(best, threadSeconds() - before);
+        const auto last = reinterpret_cast<std::uintptr_t>(mapped) + page * (backings - 1);
+        std::uintptr_t start = 0;
+        std::uintptr_t end = 0;
+        std::uint64_t offset = 0;
+        int type = 0;
+        Require(QueryDirectMapping(last, &start, &end, &offset, &type) && start == last && end == last + page);
+        Require(sceKernelMunmap(mapped, page * backings) == 0);
+    }
+    return best;
+}
+
+static void CheckMappingCostFollowsTheMappingCount() {
+    constexpr std::size_t page = 0x4000;
+    constexpr std::size_t few = 1024;
+    constexpr std::size_t many = few * 16;
+    std::int64_t phys = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * many, 0, 0, &phys) == 0);
+    Require(sceKernelReleaseDirectMemory(phys, page * many) == 0);
+    for (std::size_t index = 0; index < many; ++index) {
+        const auto wanted = phys + static_cast<std::int64_t>(page * index);
+        std::int64_t piece = 0;
+        Require(sceKernelAllocateDirectMemory(wanted, wanted + static_cast<std::int64_t>(page), page, 0, 0, &piece) == 0 && piece == wanted);
+    }
+    const auto small = MapAcrossBackingsSeconds(phys, few);
+    const auto large = MapAcrossBackingsSeconds(phys, many);
+    Require(large <= small * 48);
+    Require(sceKernelReleaseDirectMemory(phys, page * many) == 0);
+}
 #endif
 
 static void CheckVirtualQuerySplitFlexibleRanges() {
@@ -1818,6 +1903,8 @@ int main() {
     CheckWriteWatchArmedCollect();
     CheckWriteWatchFreshCollect();
     CheckDirectMemoryWriteWatch();
+    CheckDirectMemoryWriteWatchFollowsRemovedMappings();
+    CheckMappingCostFollowsTheMappingCount();
     CheckDirectMemoryBackingNeedsNoFilesystem();
     CheckDirectMemorySharedBacking();
 #endif
