@@ -128,6 +128,8 @@ int Run(const int argc, char* argv[]) {
             checkOutputInputs(desktopEntry->IconPath, "Icon");
             checkOutputInputs(desktopEntry->EntryPath, "Desktop entry");
         }
+        if (args.windowsDiagnostics)
+            checkOutputInputs(std::filesystem::absolute("windows-diagnostics-imports.txt"), "Windows import diagnostics");
 
         if (args.writeRegistry) {
             const std::filesystem::path outFsPath = Io::NativePath(absPath);
