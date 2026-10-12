@@ -30,6 +30,7 @@ struct GuestFileMode {
     std::string native;
     bool writes = false;
     bool exclusive = false;
+    bool append = false;
 };
 
 static std::optional<GuestFileMode> ParseFileMode(const char* mode) {
@@ -42,7 +43,7 @@ static std::optional<GuestFileMode> ParseFileMode(const char* mode) {
         if (*flag == 'x') exclusive = true;
     }
     if (exclusive && access == 'r' && !update) return std::nullopt;
-    GuestFileMode result{std::string(1, access), access != 'r' || update, exclusive};
+    GuestFileMode result{std::string(1, access), access != 'r' || update, exclusive, access == 'a'};
     if (update) result.native += '+';
 #ifdef _WIN32
     result.native += 'b';
@@ -123,6 +124,7 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
             }
         }
         if (stream->Reopen(path, parsed->native.c_str())) {
+            if (parsed->append) static_cast<void>(std::fseek(stream->GetHandle(), 0, SEEK_END));
             if (!path.empty() && parsed->writes) RecordWrittenPath_nid_no_patch(path);
             return stream;
         }
@@ -168,6 +170,7 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
         throw std::runtime_error(std::string(__func__) + ": " + FOPEN_MSG_OPEN_FAILED + ": \"" + abs_path + "\": " + reason);
     }
     // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());
+    if (parsed->append) static_cast<void>(std::fseek(handle.get(), 0, SEEK_END));
     if (parsed->writes) RecordWrittenPath_nid_no_patch(fpath);
     auto stream = std::make_unique<FileStream>(handle.get(), true);
     handle.release();

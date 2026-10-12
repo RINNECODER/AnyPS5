@@ -295,6 +295,12 @@ static bool CheckBinaryModes() {
             FileStream* stream = reopen ? freopen_nid_postfix(filename.c_str(), mode, &redirected) : fopen_nid_postfix(filename.c_str(), mode);
             Require(stream != nullptr);
             const bool update = std::strchr(mode, '+') != nullptr;
+            if (*mode == 'a') {
+                const bool atEnd = ftello_nid_postfix(stream) == static_cast<std::int64_t>(original.size()) &&
+                    (!update || fgetc_nid_postfix(stream) == EOF);
+                if (!atEnd) std::fprintf(stderr, "%s %s: the append stream does not start at the end of the file\n", reopen ? "freopen" : "fopen", mode);
+                correct &= atEnd;
+            }
             if (*mode == 'r' || (*mode == 'a' && update)) {
                 Require(fseeko_nid_postfix(stream, 0, SEEK_SET) == 0);
                 char bytes[16]{};
