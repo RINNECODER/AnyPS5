@@ -1364,6 +1364,189 @@ void verifyHalfWaveReduction() {
     expectFailure([&] { static_cast<void>(pixel(umin, 8u, true)); }, "v_permlanex16_b32 from lanes 16-31 is outside the 8-lane host subgroup", "half-wave reduction: the scan built on an 8-lane subgroup");
 }
 
+void verifyNarrowVertexWave() {
+    using namespace ShaderRecompiler;
+    static constexpr std::array<std::uint32_t, 5> capabilities{spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityGroupNonUniformArithmetic, spv::CapabilityClipDistance};
+    static constexpr std::array<std::uint32_t, 4> userData{0u, 0u, 0u, 0x2020u};
+    const auto vertex = [](std::span<const std::uint32_t> code, std::uint32_t waveSize, std::uint32_t subgroupSize, std::uint32_t userDataBase) {
+        RecompileRequest request{};
+        request.shader = {ShaderStage::Vertex, 0x50000u, code, 0, {}};
+        request.context.waveSize = waveSize;
+        request.context.userDataBaseRegister = userDataBase;
+        if (userDataBase == 0u) request.context.userData = userData;
+        request.context.vertex = ShaderVertexStageInfo{};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = subgroupSize;
+        request.target.supportedCapabilities = capabilities;
+        request.target.fragmentShaderBarycentricEnabled = false;
+        request.layout.pushConstantSizeBytes = 128;
+        return request;
+    };
+    const auto prepared = [&vertex](std::span<const std::uint32_t> code, std::uint32_t subgroupSize, std::uint32_t userDataBase = 8u) {
+        return GetPreparedArtifact(*PrepareShader(vertex(code, 64u, subgroupSize, userDataBase))).spirv;
+    };
+    const auto prepares = [&prepared](std::span<const std::uint32_t> code, std::uint32_t subgroupSize, std::uint32_t userDataBase = 8u) {
+        return !prepared(code, subgroupSize, userDataBase).empty();
+    };
+    const auto reductions = [](const std::vector<std::uint32_t>& spirv) {
+        std::uint32_t count = 0;
+        for (std::size_t cursor = 5; cursor < spirv.size() && (spirv[cursor] >> 16u) != 0u; cursor += spirv[cursor] >> 16u) {
+            if ((spirv[cursor] & 0xffffu) == spv::OpGroupNonUniformBitwiseOr && (spirv[cursor] >> 16u) == 6u && spirv[cursor + 4u] == spv::GroupOperationReduce) ++count;
+        }
+        return count;
+    };
+    const std::vector<std::uint32_t> culling{
+        0xd7650015u, 0x000100c1u, 0xd7660015u, 0x00022ac1u, 0x7e0e0280u, 0x7da206f9u, 0x81060015u, 0x360e0a81u,
+        0xbefe04c1u, 0xd4c50002u, 0x00020e80u, 0xd763000fu, 0x00022a81u, 0xd5010000u, 0x000a1e80u,
+        0x380000fau, 0xff091100u, 0x380000fau, 0xff091200u, 0x380000fau, 0xff091400u, 0x380000fau, 0xff091800u,
+        0xd778000fu, 0x03058300u, 0x38001f00u, 0xd7600002u, 0x00013f00u, 0xd760006bu, 0x00017f00u, 0x88026b02u,
+        0x7e020202u, 0xf80008cfu, 0x01010101u, 0xbf810000u,
+    };
+    const auto patched = [&culling](std::initializer_list<std::pair<std::size_t, std::uint32_t>> words) {
+        auto code = culling;
+        for (const auto& [index, word] : words) code[index] = word;
+        return code;
+    };
+    const char* lane63 = "v_readlane_b32 of lane 63 is outside the 32-lane host subgroup";
+    require(reductions(prepared(culling, 32u)) == 1u, "narrow vertex wave: the NGG culling scan, keyed on lanes below the primitive count in s3, did not read lane 31 as a subgroup OR on 32 lanes");
+    const auto wide64 = prepared(culling, 64u);
+    require(!wide64.empty() && reductions(wide64) == 0u, "narrow vertex wave: the NGG culling scan, keyed on lanes below 64 on 64 lanes, did not keep its DPP scan");
+    require(prepares(patched({{6, 0x80060015u}}), 32u), "narrow vertex wave: the scan keyed on lanes below the vertex count in s3 did not prepare on 32 lanes");
+    static constexpr std::array<std::uint32_t, 4> noArithmetic{spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityClipDistance};
+    const auto otherKeys = patched({{7, 0x360e0a82u}});
+    auto withoutArithmetic = vertex(otherKeys, 64u, 32u, 8u);
+    withoutArithmetic.target.supportedCapabilities = noArithmetic;
+    const auto shuffled = GetPreparedArtifact(*PrepareShader(withoutArithmetic)).spirv;
+    require(!shuffled.empty() && reductions(shuffled) == 0u, "narrow vertex wave: without subgroup arithmetic, the scan did not keep lane 31 as a shuffle with lane 63 read as 0");
+    require(prepares(patched({{5, 0x7da82aa0u}, {6, 0xbf800000u}}), 32u), "narrow vertex wave: the scan keyed on lanes below 32 did not prepare on 32 lanes");
+    expectFailure([&] { static_cast<void>(prepares(patched({{5, 0x7da82aa1u}, {6, 0xbf800000u}}), 32u)); }, lane63, "narrow vertex wave: a scan keyed on lanes below 33 read lane 63");
+    expectFailure([&] { static_cast<void>(prepares(culling, 32u, 0u)); }, lane63, "narrow vertex wave: a scan keyed on a count from user data read lane 63");
+    expectFailure([&] { static_cast<void>(prepares(patched({{6, 0x81060005u}}), 32u)); }, lane63, "narrow vertex wave: a scan keyed on the vertex index instead of the lane read lane 63");
+    auto otherRegister = patched({{21, 0x380200fau}, {24, 0x03058301u}, {25, 0x38001f01u}});
+    otherRegister.insert(otherRegister.begin(), 0x7e020305u);
+    require(reductions(prepared(otherRegister, 32u)) == 1u, "narrow vertex wave: a scan whose bound_ctrl:1 step is written to another register did not read lane 31 as a subgroup OR on 32 lanes");
+    otherRegister[23] = 0xff011800u;
+    expectFailure([&] { static_cast<void>(prepares(otherRegister, 32u)); }, lane63, "narrow vertex wave: a scan step written to another register without bound_ctrl:1, which keeps that register's lanes outside the row, read lane 63");
+    auto threeSteps = culling;
+    threeSteps.erase(threeSteps.begin() + 21, threeSteps.begin() + 23);
+    const auto partialScan = prepared(threeSteps, 32u);
+    require(!partialScan.empty() && reductions(partialScan) == 0u, "narrow vertex wave: lane 63 of row_shr 1/2/4 steps over keys of 0 in lanes 32-63 did not read 0, or lane 31 became a subgroup OR");
+    threeSteps[5] = 0x7da82aa1u;
+    threeSteps[6] = 0xbf800000u;
+    expectFailure([&] { static_cast<void>(prepares(threeSteps, 32u)); }, lane63, "narrow vertex wave: lane 63 of row_shr 1/2/4 steps over keys of lanes below 33 read 0");
+
+    std::array<std::vector<std::uint32_t>, 2> narrow;
+    std::array<std::vector<std::uint32_t>, 2> wide;
+    for (const bool narrowFirst : {false, true}) {
+        const std::vector<std::uint32_t> code{0xbf800001u + static_cast<std::uint32_t>(narrowFirst), 0x7e020203u, 0xf80008cfu, 0x01010101u, 0xbf810000u};
+        const auto narrowRequest = vertex(code, 64u, 32u, 8u);
+        const auto wideRequest = vertex(code, 64u, 64u, 8u);
+        ShaderPreparationContext preparation;
+        const auto first = PrepareShader(narrowFirst ? narrowRequest : wideRequest, &preparation);
+        const auto second = PrepareShader(narrowFirst ? wideRequest : narrowRequest, &preparation);
+        const auto& narrowHandle = narrowFirst ? *first : *second;
+        const auto& wideHandle = narrowFirst ? *second : *first;
+        require(first->source != second->source, "narrow vertex wave: the program prepared for 32 and for 64 lanes shares one translated source");
+        require(MatchesPreparedShader(narrowRequest, narrowHandle) && MatchesPreparedShader(wideRequest, wideHandle), "narrow vertex wave: a prepared program did not match its own request");
+        require(!MatchesPreparedShader(narrowRequest, wideHandle) && !MatchesPreparedShader(wideRequest, narrowHandle), "narrow vertex wave: a program prepared for one subgroup width matched a request for the other");
+        narrow[narrowFirst ? 1u : 0u] = GetPreparedArtifact(narrowHandle).spirv;
+        wide[narrowFirst ? 1u : 0u] = GetPreparedArtifact(wideHandle).spirv;
+    }
+    require(narrow[0] == narrow[1] && wide[0] == wide[1], "narrow vertex wave: preparing for one subgroup width after the other gave another program than preparing it first");
+    require(narrow[0] != wide[0], "narrow vertex wave: s3 of a wave64 vertex program was the same on 32 and 64 lanes");
+    const std::vector<std::uint32_t> wave32{0x7e020203u, 0xf80008cfu, 0x01010101u, 0xbf810000u};
+    require(GetPreparedArtifact(*PrepareShader(vertex(wave32, 32u, 32u, 8u))).spirv == GetPreparedArtifact(*PrepareShader(vertex(wave32, 32u, 64u, 8u))).spirv, "narrow vertex wave: s3 of a wave32 vertex program depended on the subgroup width");
+}
+
+void verifySingleLaneVertexWave() {
+    using namespace ShaderRecompiler;
+    static constexpr std::array<std::uint32_t, 5> capabilities{spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityGroupNonUniformArithmetic, spv::CapabilityClipDistance};
+    const auto vertex = [](std::span<const std::uint32_t> code, std::uint32_t subgroupSize, bool vertexSubgroups) {
+        RecompileRequest request{};
+        request.shader = {ShaderStage::Vertex, 0x58000u, code, 0, {}};
+        request.context.waveSize = 64;
+        request.context.userDataBaseRegister = 8;
+        request.context.vertex = ShaderVertexStageInfo{};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = subgroupSize;
+        request.target.supportedCapabilities = capabilities;
+        request.target.vertexSubgroups = vertexSubgroups;
+        request.layout.pushConstantSizeBytes = 128;
+        request.useCache = false;
+        return request;
+    };
+    const auto compiled = [&vertex](std::span<const std::uint32_t> code, std::uint32_t subgroupSize, bool vertexSubgroups) {
+        return Recompile(vertex(code, subgroupSize, vertexSubgroups)).spirv;
+    };
+    const auto usesSubgroups = [](const std::vector<std::uint32_t>& spirv) {
+        for (std::size_t cursor = 5; cursor < spirv.size() && (spirv[cursor] >> 16u) != 0u; cursor += spirv[cursor] >> 16u) {
+            const auto op = spirv[cursor] & 0xffffu;
+            if (op == spv::OpCapability && spirv[cursor + 1u] >= spv::CapabilityGroupNonUniform && spirv[cursor + 1u] <= spv::CapabilityGroupNonUniformQuad) return true;
+            if (op >= spv::OpGroupNonUniformElect && op <= spv::OpGroupNonUniformQuadSwap) return true;
+            if (op == spv::OpDecorate && spirv[cursor + 2u] == spv::DecorationBuiltIn && (spirv[cursor + 3u] == spv::BuiltInSubgroupLocalInvocationId || spirv[cursor + 3u] == spv::BuiltInSubgroupSize)) return true;
+        }
+        return false;
+    };
+    const auto hasConstant = [](const std::vector<std::uint32_t>& spirv, std::uint32_t value) {
+        for (std::size_t cursor = 5; cursor < spirv.size() && (spirv[cursor] >> 16u) != 0u; cursor += spirv[cursor] >> 16u) {
+            if ((spirv[cursor] & 0xffffu) == spv::OpConstant && (spirv[cursor] >> 16u) == 4u && spirv[cursor + 3u] == value) return true;
+        }
+        return false;
+    };
+    static constexpr std::array<std::uint32_t, 4> waveInfo{0x7e020203u, 0xf80008cfu, 0x01010101u, 0xbf810000u};
+    static constexpr std::array<std::uint32_t, 12> laneOps{
+        0xd7650015u, 0x000100c1u, 0xd7660015u, 0x00022ac1u, 0x7e0c0500u, 0xd7600007u, 0x00010100u, 0x4a022a06u,
+        0x4a020207u, 0xf80008cfu, 0x01010101u, 0xbf810000u,
+    };
+    static constexpr std::array<std::uint32_t, 11> waterfall{0xbe80047eu, 0xbe821400u, 0xd7600003u, 0x00000500u, 0xbe801c02u, 0xbf138000u, 0xbf85fffau, 0x7e020203u, 0xf80008cfu, 0x01010101u, 0xbf810000u};
+    static constexpr std::array<std::uint32_t, 6> lane31{0xd7600006u, 0x00013f00u, 0x7e020206u, 0xf80008cfu, 0x01010101u, 0xbf810000u};
+
+    const auto single = compiled(waveInfo, 32u, false);
+    const auto wide = compiled(waveInfo, 64u, true);
+    require(hasConstant(single, 0x0101u) && !hasConstant(single, 0x4040u) && !hasConstant(single, 0x2020u), "single-lane vertex wave: s3 of a vertex program without vertex subgroups was not one vertex and one primitive");
+    require(hasConstant(wide, 0x4040u) && !hasConstant(wide, 0x0101u), "single-lane vertex wave: s3 of a vertex program with vertex subgroups on 64 lanes changed");
+    require(single == compiled(waveInfo, 4u, false), "single-lane vertex wave: the program without vertex subgroups depended on the device subgroup size");
+    for (const auto code : {std::span<const std::uint32_t>(laneOps), std::span<const std::uint32_t>(waterfall)}) {
+        const auto withSubgroups = compiled(code, 32u, true);
+        const auto withoutSubgroups = compiled(code, 32u, false);
+        require(usesSubgroups(withSubgroups), "single-lane vertex wave: the program did not use subgroup operations with vertex subgroups");
+        require(!withoutSubgroups.empty() && !usesSubgroups(withoutSubgroups), "single-lane vertex wave: a vertex program without vertex subgroups declared a subgroup capability, built-in or instruction");
+    }
+    expectFailure([&] { static_cast<void>(compiled(lane31, 32u, false)); }, "v_readlane_b32 of lane 31 is outside the 1-lane host subgroup", "single-lane vertex wave: a vertex program without vertex subgroups read lane 31");
+    require(!compiled(lane31, 32u, true).empty(), "single-lane vertex wave: lane 31 of a 32-lane vertex subgroup did not build");
+
+    ShaderPixelStageInfo info{};
+    info.inputAddr = PixelInputBit(PixelInput::PerspectiveCenter);
+    info.hasPerspectiveCenterVgpr = true;
+    info.targetOutputMode[0] = 9u;
+    info.targetExportMapping.fill(0xe4u);
+    static constexpr std::array<std::uint32_t, 6> pixelLane31{0xd7600006u, 0x00013f00u, 0x7e020206u, 0xf800180fu, 0x01010101u, 0xbf810000u};
+    RecompileRequest pixel{};
+    pixel.shader = {ShaderStage::Fragment, 0x30000u, pixelLane31, 0, {}};
+    pixel.context.waveSize = 64;
+    pixel.context.pixel = info;
+    pixel.target.vulkanVersion = 0x00401000u;
+    pixel.target.spirvVersion = 0x00010300u;
+    pixel.target.subgroupSize = 32u;
+    pixel.target.vertexSubgroups = false;
+    pixel.layout.pushConstantSizeBytes = 128;
+    pixel.useCache = false;
+    require(usesSubgroups(Recompile(pixel).spirv), "single-lane vertex wave: a pixel program stopped using subgroups when only the vertex stage lacks them");
+
+    auto request = vertex(waveInfo, 32u, false);
+    const auto replay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(request));
+    require(!replay.request.target.vertexSubgroups && replay.request.target.subgroupSize == 32u, "single-lane vertex wave: missing vertex subgroups were lost in serialization");
+    require(Recompile(replay.request).spirv == single, "single-lane vertex wave: the replayed request built another program");
+    std::vector<std::uint64_t> withoutKey;
+    std::vector<std::uint64_t> withKey;
+    RecompileCacheKey::Build(request, withoutKey);
+    request.target.vertexSubgroups = true;
+    RecompileCacheKey::Build(request, withKey);
+    require(withoutKey != withKey, "single-lane vertex wave: vertex subgroup support did not change the cache key");
+}
+
 void verifyMeshConfiguration() {
     using namespace ShaderRecompiler;
     ShaderMeshInputInfo list;
@@ -1532,12 +1715,12 @@ void verifyPixelRequestSerialization() {
     minimal.context.waveSize = 64;
     minimal.context.pixel = ShaderPixelStageInfo{};
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRAAAAA=", "new requests did not use serialization version 16");
+    require(requestPrefix(encoded, 8u) == "NVNQQRIAAAA=", "new requests did not use serialization version 18");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
     for (std::size_t bytes = 0; bytes < 18u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source or alpha-to-coverage flag was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQREAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRMAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
 }
@@ -3203,6 +3386,8 @@ int main(int argc, char** argv) {
         verifyProgramCounterRelativeData();
         verifyLanesOutsideHostSubgroup();
         verifyHalfWaveReduction();
+        verifyNarrowVertexWave();
+        verifySingleLaneVertexWave();
         verifyMeshConfiguration();
         verifyPixelInputs();
         verifyPixelRequestSerialization();

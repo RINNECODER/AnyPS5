@@ -232,6 +232,7 @@ struct SpirvTarget {
     bool float64DenormPreserve = false;
     bool registrationModules = false;
     std::uint32_t registrationWordLimit = 200000u;
+    bool vertexSubgroups = true;
 };
 
 struct BindingLayout {
