@@ -8,6 +8,31 @@ add_test(NAME rosetta_lib_binds
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check_lib_binds.py ${CMAKE_BINARY_DIR}/rosetta/libs)
 set_tests_properties(rosetta_lib_binds PROPERTIES TIMEOUT 120 LABELS rosetta)
 
+# The relinker's --to-rosetta CPUID stub, linked on a page and run under Rosetta.
+set(ANYPS5_RELINKER_ROOT ${CMAKE_SOURCE_DIR}/core/relinker)
+add_test_executable(rosetta_cpuid_tests
+    ${ANYPS5_RELINKER_ROOT}/codegen/tests/RosettaCpuidTests.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/Amd64OnlyConverter.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/InstructionScanner.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/X64InstructionDecoder.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/DecodedInstruction.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/Amd64OnlyInstructionMatcher.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/Sse4aOperands.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/Sse4aLowering.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/StubBodyBuilder.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/Sha256Operands.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/Sha256Lowering.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/Sha1Operands.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/Sha1Lowering.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ClzeroOperands.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ClzeroLowering.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ReciprocalOperands.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ReciprocalLowering.cpp)
+target_include_directories(rosetta_cpuid_tests PRIVATE ${ANYPS5_RELINKER_ROOT}/domain/include ${ANYPS5_RELINKER_ROOT}/codegen/include)
+target_compile_features(rosetta_cpuid_tests PRIVATE cxx_std_20)
+add_test(NAME rosetta_cpuid COMMAND rosetta_cpuid_tests)
+set_tests_properties(rosetta_cpuid PROPERTIES TIMEOUT 60 LABELS rosetta)
+
 find_program(ANYPS5_ROSETTA_LLD ld.lld HINTS /opt/homebrew/opt/lld/bin /opt/homebrew/opt/llvm/bin)
 if(NOT ANYPS5_ROSETTA_LLD)
     message(STATUS "Rosetta runtime tests skipped: ld.lld not found (the guest fixtures are ELF)")

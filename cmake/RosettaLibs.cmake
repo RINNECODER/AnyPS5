@@ -49,6 +49,9 @@ set(ANYPS5_ROSETTA_BUILD_TESTING ${BUILD_TESTING})
 set(BUILD_TESTING OFF)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/core/relinker ${CMAKE_BINARY_DIR}/core/relinker)
+# The relinker is a plain host tool: ship it universal so the launcher runs it
+# natively on Apple silicon (about a third faster than under Rosetta).
+set_target_properties(relinker PROPERTIES OSX_ARCHITECTURES "arm64;x86_64")
 
 # Third-party code the media libraries link, built for x86_64 (static, PIC).
 # ffmpeg is the prebuilt package that 3rdparty/ffmpeg-core downloads; the
@@ -99,7 +102,8 @@ foreach(LIB_DIR ${ANYPS5_ROSETTA_LIB_DIRS})
     endif()
     if(LIB_NAME STREQUAL "libkernel")
         # Fork-only start, TLS and fault hooks the relinked Mach-O binds to (design doc phase 2).
-        target_sources(${LIB_NAME} PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libkernel/Darwin/GuestRuntime.cpp)
+        target_sources(${LIB_NAME} PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libkernel/Darwin/GuestRuntime.cpp
+            ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libkernel/Darwin/GuestProfiler.cpp)
         target_link_libraries(${LIB_NAME} PRIVATE libc)
     else()
         target_link_libraries(${LIB_NAME} PRIVATE libkernel libc)

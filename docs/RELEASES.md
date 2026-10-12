@@ -56,7 +56,7 @@ The signer, `tools/release/signer.swift`, uses CryptoKit. Every signature is re-
 | Path | What |
 |---|---|
 | `bin/anyps5_rosetta_run` | The engine executable MacPS runs: a thin x86_64 Mach-O (tools/rosetta/launcher). |
-| `bin/relinker` | `relinker --macos --to-rosetta`, run by the launcher on a title's first launch. |
+| `bin/relinker` | `relinker --macos --to-rosetta`, run by the launcher on a title's first launch: a universal (x86_64 and arm64) Mach-O, run natively. |
 | `libs/*.prx`, `libs/AnyPS5Utilities.metallib` | The x86_64 system libraries the relinked title loads, and the Metal utility shaders. |
 | `share/aps5_stub_runtime.dylib` | Logging stubs for imports no library exports yet (tools/rosetta/stub_runtime.c). |
 | `share/LICENSE` | The license. |
@@ -113,7 +113,7 @@ mixed with the title's own output (MacPS reads stdout and stderr as one stream):
    -DCMAKE_OSX_ARCHITECTURES=x86_64 -DANYPS5_ROSETTA_ENGINE_VERSION=<v>`), builds
    `rosetta_engine` and runs the launcher's unit test (`rosetta_launcher_tests`);
 3. assembles the package from the build's `rosetta/` tree, which already has the package
-   layout, and checks that every Mach-O is thin x86_64 and loads only system libraries or
+   layout, and checks that every Mach-O is thin x86_64 (`bin/relinker`: x86_64/arm64 universal) and loads only system libraries or
    package-relative ones (`@rpath`, `@loader_path`);
 4. rejects any package byte that contains the build user's home path or user name;
 5. runs a synthetic fixture title (tools/rosetta/tests/launcher_smoke.py, never a retail

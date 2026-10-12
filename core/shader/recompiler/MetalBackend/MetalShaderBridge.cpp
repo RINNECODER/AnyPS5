@@ -1,8 +1,12 @@
 #include "MetalShaderBridge.hpp"
 #include "../BdaAbi.hpp"
 #include "BoundedCache.hpp"
+#include "MetalConversionDiskCache.hpp"
 #include <spirv_msl.hpp>
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <unordered_map>
@@ -1527,7 +1531,30 @@ void WriteWords(CacheKeyWriter& key, const std::vector<T>& words) {
     key.Bytes(words.data(), words.size() * sizeof(T));
 }
 
-void WriteProofs(CacheKeyWriter& key, const std::vector<std::vector<PixelSamplerProof>>& proofs) {
+// Only the image-descriptor bits the conversion reads (minimum-LOD metadata in dwords 1, 3 and 5); the
+// rest, such as the base address in dword 0 and the low byte of dword 1, changes from launch to launch.
+void WriteImageDescriptorFields(CacheKeyWriter& key, const std::uint32_t* words) {
+    key.Value(words[1] >> 8u);
+    key.Value(words[3]);
+    key.Value(words[5]);
+}
+
+// stable: as above for image descriptors; sampler descriptors carry no addresses and stay whole.
+void WriteDescriptor(CacheKeyWriter& key, const DescriptorBinding& binding, bool stable) {
+    if (!stable) {
+        WriteWords(key, binding.guestDescriptor);
+        return;
+    }
+    key.Value<std::uint64_t>(binding.guestDescriptor.size());
+    if (binding.role == DescriptorRole::GuestImages && binding.guestDescriptor.size() % 8u == 0) {
+        for (std::size_t element = 0; element < binding.guestDescriptor.size(); element += 8u)
+            WriteImageDescriptorFields(key, binding.guestDescriptor.data() + element);
+    } else if (binding.role == DescriptorRole::GuestSamplers) {
+        WriteWords(key, binding.guestDescriptor);
+    }
+}
+
+void WriteProofs(CacheKeyWriter& key, const std::vector<std::vector<PixelSamplerProof>>& proofs, bool stable = false) {
     key.Value<std::uint64_t>(proofs.size());
     for (const auto& element : proofs) {
         key.Value<std::uint64_t>(element.size());
@@ -1537,7 +1564,8 @@ void WriteProofs(CacheKeyWriter& key, const std::vector<std::vector<PixelSampler
             key.Value(proof.liveUseMask);
             key.Value(proof.liveUseCount);
             key.Value(proof.samplerLiveUseCount);
-            for (const auto word : proof.imageDescriptor) key.Value(word);
+            if (stable) WriteImageDescriptorFields(key, proof.imageDescriptor.data());
+            else for (const auto word : proof.imageDescriptor) key.Value(word);
             for (const auto word : proof.samplerDescriptor) key.Value(word);
         }
     }
@@ -1546,7 +1574,11 @@ void WriteProofs(CacheKeyWriter& key, const std::vector<std::vector<PixelSampler
 // The exact conversion input: every target option, the stage, and every guest field ConvertToMetalUncached
 // (and the classifiers it includes) reads. Guest fields it never reads stay out so that, for example, a
 // relabeled variant still hits; the returned Result then carries the caller's guest.
-std::string ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
+// stable = true leaves out what changes from launch to launch but does not change the generated
+// shader: push-constant values (they only fill pushConstantData, which RestorePushConstants rebuilds),
+// vertex-buffer descriptor fields and descriptor addresses. The disk cache uses it so that an entry
+// is found again by the next launch.
+std::string ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target, bool stable = false) {
     CacheKeyWriter key;
     key.Value(stage);
     key.Value(target.mslVersion);
@@ -1596,12 +1628,14 @@ std::string ConversionKey(const RecompileResult& guest, ShaderStage stage, const
     key.Value(guest.runtimeAbiVersion);
     key.Value(guest.bdaAbiVersion);
     key.Value(guest.runtimeImageCount);
-    WriteWords(key, guest.pushConstants);
+    if (stable) key.Value<std::uint64_t>(guest.pushConstants.size());
+    else WriteWords(key, guest.pushConstants);
     key.Value<std::uint64_t>(guest.vertexAttributes.size());
     for (const auto& attribute : guest.vertexAttributes) {
         key.Value(attribute.location);
         key.Value(attribute.components);
-        for (const auto field : attribute.resource.fields) key.Value(field);
+        if (!stable)
+            for (const auto field : attribute.resource.fields) key.Value(field);
         key.Value(attribute.fetchIndex);
         key.Value(attribute.formatComponents);
     }
@@ -1612,14 +1646,14 @@ std::string ConversionKey(const RecompileResult& guest, ShaderStage stage, const
         key.Value(binding.descriptorSet);
         key.Value(binding.binding);
         key.Value(binding.count);
-        WriteWords(key, binding.guestDescriptor);
+        WriteDescriptor(key, binding, stable);
         key.Bool(binding.readOnly);
         key.Bool(binding.imageShape.has_value());
         if (binding.imageShape) key.Value(*binding.imageShape);
         WriteBits(key, binding.samplerDepthCompare);
         WriteWords(key, binding.resourceSources);
-        WriteProofs(key, binding.samplerPixelProof);
-        WriteProofs(key, binding.imagePixelProof);
+        WriteProofs(key, binding.samplerPixelProof, stable);
+        WriteProofs(key, binding.imagePixelProof, stable);
         WriteBits(key, binding.imageWritten);
         WriteBits(key, binding.imageDepthCompare);
         WriteBits(key, binding.imageAtomic);
@@ -1644,6 +1678,17 @@ std::size_t ResultBytes(const Result& result) {
         (result.rectList ? sizeof(RectListInfo) + 256u : 0u);
 }
 
+// pushConstantData exactly as ConvertToMetalUncached materializes it for `guest`.
+bool RestorePushConstants(Result& result, const RecompileResult& guest, const TargetOptions& target) {
+    result.pushConstantData.clear();
+    if (!result.pushConstantBuffer) return true;
+    if (target.pushConstantOffsetBytes > result.pushConstantBytes || guest.pushConstants.size() > result.pushConstantBytes - target.pushConstantOffsetBytes)
+        return false;
+    result.pushConstantData.resize(result.pushConstantBytes);
+    std::copy(guest.pushConstants.begin(), guest.pushConstants.end(), result.pushConstantData.begin() + target.pushConstantOffsetBytes);
+    return true;
+}
+
 BoundedCache<Result>& ConversionCache() {
     static BoundedCache<Result> cache(4096, std::size_t{256} << 20);
     return cache;
@@ -1657,7 +1702,27 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         cached->guest = guest;
         return std::move(*cached);
     }
-    auto result = ConvertToMetalUncached(guest, stage, target);
+    // A miss in memory tries the disk before running SPIRV-Cross (most of a warm launch's shader time).
+    Result result;
+    const auto diskKey = ConversionKey(guest, stage, target, true);
+    if (ConversionDiskCache::Load(diskKey, result) && RestorePushConstants(result, guest, target)) {
+        result.guest = guest;
+        // ANYPS5_MSL_CACHE_VERIFY=1 converts anyway and reports any difference (a field the stable key
+        // leaves out that the conversion does read).
+        static const bool verify = std::getenv("ANYPS5_MSL_CACHE_VERIFY") != nullptr;
+        if (verify) {
+            static std::atomic<std::uint32_t> checked{0}, different{0};
+            const auto fresh = ConvertToMetalUncached(guest, stage, target);
+            const bool same = ConversionDiskCache::EncodeEntry(diskKey, fresh) == ConversionDiskCache::EncodeEntry(diskKey, result);
+            const auto count = checked.fetch_add(1) + 1;
+            const auto differences = same ? different.load() : different.fetch_add(1) + 1;
+            if (!same || count % 100 == 0)
+                std::fprintf(stderr, "[msl-cache] verify: %u checked, %u different%s\n", count, differences, same ? "" : " (this one differs)");
+        }
+    } else {
+        result = ConvertToMetalUncached(guest, stage, target);
+        ConversionDiskCache::Store(diskKey, result);
+    }
     auto stored = result;
     stored.guest = {};
     const auto bytes = ResultBytes(stored);

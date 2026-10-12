@@ -7,6 +7,7 @@
 #include <codegen/x86/ClzeroOperands.hpp>
 #include <codegen/x86/ReciprocalLowering.hpp>
 #include <codegen/x86/ReciprocalOperands.hpp>
+#include <codegen/x86/RosettaCpuid.hpp>
 #include <codegen/x86/Sha256Lowering.hpp>
 #include <codegen/x86/Sha256Operands.hpp>
 #include <codegen/x86/Sha1Lowering.hpp>
@@ -208,6 +209,8 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::_matchRosetta(const D
         return _inPlace(kClwb, instr.Length, {});
     if (instr.IsRdpid())
         return _trampoline(kRdpid.Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { body.Raw(_rdpidReplacement(instr)); }), true);
+    if (instr.IsCpuid())
+        return _trampoline(kCpuid.Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { body.Raw(RosettaCpuid::StubBody()); }), true);
     return std::nullopt;
 }
 
@@ -249,6 +252,10 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
             if (name == nullptr)
                 name = kRdpid.Name;
             body.Raw(_rdpidReplacement(instr));
+        } else if (_target == Amd64OnlyTarget::Rosetta && instr.IsCpuid()) {
+            if (name == nullptr)
+                name = kCpuid.Name;
+            body.Raw(RosettaCpuid::StubBody());
         } else {
             return std::nullopt;
         }
@@ -256,7 +263,7 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
     }
     _moveTrailing(body, trailing);
     const DecodedInstruction first{instructions.front().data(), instructions.front().size()};
-    const bool optional = DecodeReciprocal(first.Data, first.Length).has_value() || (_target == Amd64OnlyTarget::Rosetta && first.IsRdpid());
+    const bool optional = DecodeReciprocal(first.Data, first.Length).has_value() || (_target == Amd64OnlyTarget::Rosetta && (first.IsRdpid() || first.IsCpuid()));
     return _trampoline(name, instructions.front().size(), body.Finish(), optional);
 }
 

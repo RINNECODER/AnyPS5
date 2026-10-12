@@ -26,6 +26,7 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
+#include <mach/machine.h>
 #include <pwd.h>
 #include <signal.h>
 #include <spawn.h>
@@ -299,9 +300,13 @@ std::string Sha256File(const fs::path& path) {
 }
 
 std::vector<std::uint8_t> ReadFile(const fs::path& path) {
-    std::ifstream stream(path, std::ios::binary);
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
     if (!stream) throw InputUnavailable("cannot read " + path.filename().string());
-    return std::vector<std::uint8_t>((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(stream.tellg()));
+    stream.seekg(0);
+    if (!stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+        throw InputUnavailable("cannot read " + path.filename().string());
+    return bytes;
 }
 
 // Writes `bytes` to `path` through a sibling temporary file and a rename.
@@ -378,7 +383,9 @@ void IgnoreStopSignals() {
     for (int signal : kStopSignals) ::signal(signal, SIG_IGN);
 }
 
-pid_t Spawn(const std::vector<std::string>& argv, const std::vector<std::string>& environment, const fs::path& output) {
+// preferNative: run a universal binary's arm64 slice. A translated launcher's
+// children otherwise inherit its x86_64 preference.
+pid_t Spawn(const std::vector<std::string>& argv, const std::vector<std::string>& environment, const fs::path& output, bool preferNative = false) {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     if (!output.empty()) {
@@ -395,6 +402,12 @@ pid_t Spawn(const std::vector<std::string>& argv, const std::vector<std::string>
     posix_spawnattr_setsigmask(&attributes, &none);
     posix_spawnattr_setsigdefault(&attributes, &defaults);
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_CLOEXEC_DEFAULT);
+    if (preferNative) {
+        cpu_type_t types[] = {CPU_TYPE_ARM64, CPU_TYPE_X86_64};
+        cpu_subtype_t subtypes[] = {CPU_SUBTYPE_ANY, CPU_SUBTYPE_ANY};
+        std::size_t set = 0;
+        posix_spawnattr_setarchpref_np(&attributes, 2, types, subtypes, &set);
+    }
     // CLOEXEC_DEFAULT closes everything else; keep the standard streams.
     for (int fd = 0; fd <= 2; ++fd)
         if (output.empty() || fd == STDIN_FILENO) posix_spawn_file_actions_addinherit_np(&actions, fd);
@@ -624,10 +637,10 @@ fs::path Relink(const Options& options, const Paths& paths, const fs::path& cach
     command.push_back((work / "out" / "eboot").string());
     Log("relinking %zu preloaded and %zu deferred modules (first launch only)", modules.preload.size(), modules.deferred.size());
     const auto started = std::chrono::steady_clock::now();
-    // The relinker handles roughly 4 MB of input per second under Rosetta; the
+    // The relinker (its arm64 slice) handles roughly 9 MB of input per second; the
     // estimate only paces the progress events and never exceeds 0.95.
-    const double expected = std::max(5.0, static_cast<double>(inputBytes) / (4.0 * 1024 * 1024));
-    const pid_t relinker = Spawn(command, BaseEnvironment(), work / "relink.log");
+    const double expected = std::max(5.0, static_cast<double>(inputBytes) / (9.0 * 1024 * 1024));
+    const pid_t relinker = Spawn(command, BaseEnvironment(), work / "relink.log", true);
     const ChildResult result = Wait(relinker, 1000, 0, [&] {
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         Preparing("relink", 0.1 + 0.85 * (1.0 - std::exp(-seconds / expected)), true);
