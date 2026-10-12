@@ -135,6 +135,14 @@ static void CheckCount() {
     Require(Format(buffer, 16, u"a%n", nullCount) < 0, "vswprintf null %n argument");
 }
 
+static void CheckGroupingFlag() {
+    char16_t buffer[48];
+    Require(swprintf_nid_postfix(buffer, 48, u"%'d|%'-6u|%'.2f|%'+05d|%'g", 1234567, 42u, 1234.5, 12, 1e6) == 34 &&
+        buffer == std::u16string(u"1234567|42    |1234.50|+0012|1e+06"), "swprintf ' flag");
+    Require(snwprintf_s_nid_postfix(buffer, 48, u"%'lld %ls", 9876543210ll, u"x") == 12 && buffer == std::u16string(u"9876543210 x"),
+        "snwprintf_s ' flag");
+}
+
 static void CheckSwprintf() {
     char16_t buffer[8];
     for (auto& unit : buffer) unit = u'x';
@@ -176,4 +184,5 @@ int main() {
     Check(u"%.2s", "\xf0\x9f\x98\x80x", u"\U0001f600");
     Check(u"%.1s", "\xf0\x9f\x98\x80x", u"");
     Check(u"%.3s", "\xf0\x9f\x98\x80x", u"\U0001f600x");
+    CheckGroupingFlag();
 }

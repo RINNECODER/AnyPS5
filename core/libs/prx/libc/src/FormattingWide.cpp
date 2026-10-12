@@ -115,9 +115,10 @@ std::u16string FormatWide(const char16_t* format, VaList* source, bool secure = 
         bool left = false;
         int width = 0;
         int precision = -1;
-        while (In(*format, "-+ #0")) {
+        while (In(*format, "-+ #0'")) {
             if (*format == u'-') left = true;
-            spec += static_cast<char>(*format++);
+            if (*format != u'\'') spec += static_cast<char>(*format);
+            ++format;
         }
         if (*format == u'*') {
             ++format;
