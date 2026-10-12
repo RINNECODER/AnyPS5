@@ -528,7 +528,7 @@ std::atomic<int> g_hostStandardError{-1};
 void PreserveHostStandardError() {
     if (g_hostStandardError.load() >= 0) return;
 #ifdef _WIN32
-    const int saved = _dup(2);
+    const int saved = WithoutParameterHandler([] { return ::_dup(2); });
 #else
     const int saved = ::dup(2);
 #endif
