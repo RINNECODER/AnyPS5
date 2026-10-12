@@ -222,6 +222,26 @@ void retireImport(VkDevice device, HostImports& state, std::map<std::uint64_t, H
     state.imports.erase(it);
 }
 
+bool releaseParkedImports(HostImports& state, std::uint64_t begin, std::uint64_t end) {
+    std::vector<std::shared_ptr<RetiredImport>> released;
+    {
+        std::lock_guard lock(state.mutex);
+        for (auto device = state.parked.begin(); device != state.parked.end();) {
+            auto& list = device->second;
+            for (auto it = list.begin(); it != list.end();) {
+                if ((*it)->entry.base < end && begin < (*it)->entry.base + (*it)->entry.bytes) {
+                    released.push_back(std::move(*it));
+                    it = list.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            device = list.empty() ? state.parked.erase(device) : std::next(device);
+        }
+    }
+    return !released.empty();
+}
+
 const char* bindImport(const Context& context, HostImport& entry, VkExternalMemoryHandleTypeFlagBits handleType, const void* import, std::uint32_t importTypes, bool& allocated, VkResult& failure) {
     const auto failed = [&](const char* step, VkResult result) -> const char* {
         if (entry.buffer) context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, entry.buffer, nullptr);
@@ -1542,6 +1562,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
             if (recorder != nullptr) recorder->FlushDeferredReleases();
             const auto end = static_cast<std::uint64_t>(address) + bytes;
             auto& imports = Imports();
+            if (releaseParkedImports(imports, address, end)) retiredImport = true;
             const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
             {
                 std::lock_guard importsLock(imports.mutex);
@@ -1593,6 +1614,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
 
             const auto end = static_cast<std::uint64_t>(address) + bytes;
             auto& imports = Imports();
+            if (releaseParkedImports(imports, address, end)) retiredImport = true;
             bool overlapsImport = false;
             {
                 std::lock_guard importsLock(imports.mutex);
