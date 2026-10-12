@@ -247,4 +247,4 @@ jobs:
           else
             cmake --build "$BUILD_DIR" --parallel --target rosetta_runtime_tests
           fi
-          arch -x86_64 ctest --test-dir "$BUILD_DIR" -R 'direct_memory_darwin|metal_utility_tests|rosetta_direct_graphics|rosetta_lib_binds|rosetta_runtime' --output-on-failure --timeout 180
+          ctest --test-dir "$BUILD_DIR" -R 'direct_memory_darwin|metal_utility_tests|rosetta_direct_graphics|rosetta_lib_binds|rosetta_runtime' --output-on-failure --timeout 180
