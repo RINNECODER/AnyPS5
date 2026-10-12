@@ -12,6 +12,10 @@
 - [DirectMemory](../../core/libs/prx/libkernel/DirectMemory/DirectMemory.cpp) on macOS cannot place fixed mappings in 64-512 GiB, which macOS refuses natively and under Rosetta: a title that maps there with `MAP_FIXED` gets `SCE_KERNEL_ERROR_ENOMEM`, and hinted mappings are moved above the range. The guest address-space arena is Linux-only, so macOS mappings are plain host mappings.
 - The Rosetta engine launcher ([tools/rosetta/launcher](../../tools/rosetta/launcher), `anyps5_rosetta_run`) binds every imported NID that no x86_64 library exports to a stub that logs its first call and returns 0, and gives libraries the build lacks an empty placeholder, so a title runs past missing functions instead of stopping at them. Its relink progress is an estimate (about 4 MB of input per second), the relink cache is keyed by the eboot's SHA-256 and the modules' names and sizes (a module changed in place without a size change reuses the old relink), `--trace` can tell data imports from functions only with the NID name database (`ANYPS5_NID_DB`), and the watchdog that kills the title when the launcher is killed matches it by PID.
 
+### Direct memory
+
+- Windows direct-memory backing reserves a paging-file section and commits each mapped guest page before setting its protection. Committed physical contents remain in the section across unmap/remap and are released when the backing and its remaining views are destroyed; commitment is not recovered merely by unmapping a page. Linux retains its existing backing. Peak gameplay memory and Windows versions other than the tested host remain unverified.
+
 ### Silent stubs
 
 Throughout the project, every function at every stage either **does exactly what it's supposed to or throws an exception**. Everywhere... except:
