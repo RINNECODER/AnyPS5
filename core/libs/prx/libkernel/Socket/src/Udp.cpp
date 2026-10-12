@@ -732,7 +732,7 @@ int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...) {
 int APS5_VABI setsockopt_nid_postfix(int descriptor, int level, int option,
                                     const void* value, std::uint32_t length) {
     int netError = 0;
-    if (descriptor < GuestSockets::FirstDescriptor && KernelSetSocketOption_nid_no_patch(descriptor, level, option, value, length, &netError)) {
+    if (!GuestSockets::IsOpen(descriptor) && KernelSetSocketOption_nid_no_patch(descriptor, level, option, value, length, &netError)) {
         return netError == 0 ? 0 : Fail(netError);
     }
     const auto socket = Lookup(descriptor);
