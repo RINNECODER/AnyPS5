@@ -355,18 +355,6 @@ void memoryBarrier(const Context& context, VkCommandBuffer commands, VkPipelineS
     context.Resolved(&DeviceFunctions::cmdPipelineBarrier, "vkCmdPipelineBarrier")(commands, sourceStage, destinationStage, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
-// The color surface as one untailed SW_64KB_R_X mip for the GPU detiler, with tightly packed linear rows.
-TileMipLayout ColorTargetMip(const ColorTarget& color, const ColorTargetLayout& layout) {
-    TileMipLayout mip{};
-    mip.width = color.extent.width;
-    mip.height = color.extent.height;
-    mip.blocksPerRow = layout.BlocksPerRow();
-    mip.pitchBytes = color.extent.width * color.elementBytes;
-    mip.tiledSize = layout.Bytes();
-    mip.linearSize = layout.LinearBytes();
-    return mip;
-}
-
 // APS5_PROFILE_DRAW: per-draw phase timers in microseconds (a recorded draw's phases are far below
 // the millisecond the old print rounded to), totalled over 10 s in the [draws] line.
 enum DrawPhase : std::size_t { PhaseValidate, PhaseVertex, PhaseSetup, PhaseReadTarget, PhasePrepare, PhaseLookup, PhaseResources, PhasePipeline, PhaseRecord, PhaseKeep, PhaseSync, PhaseWriteBack, PhaseDescribe, PhaseCount };
@@ -1914,11 +1902,11 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             continue;
         }
         materializeCmaskClear(context, color, nullptr);
-        Require(!color.mipTail, "rendering into a packed mip tail needs the resident image of its surface");
+        Require(!color.mipTail || binding.gpuTiling, "rendering into a packed mip tail requires the GPU tiled fallback");
         Require(color.depth == 1, "rendering into a 3D color target needs the resident image of its surface");
         Require(color.arraySlice == 0 || !ColorTileModeIsXor(color.tileMode), "rendering into a slice of a 2D array color target with an XOR tile mode needs the resident image of its array");
         if (binding.gpuTiling) {
-            binding.mip = ColorTargetMip(color, colorLayout);
+            binding.mip = ComputeColorTargetMipLayout(color.tileMode, color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount, color.mip);
             binding.tiled = std::make_unique<Buffer>(context, colorLayout.Bytes(), copies);
             binding.tiledDevice = std::make_unique<DeviceBuffer>(context, colorLayout.Bytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             binding.linearDevice = std::make_unique<DeviceBuffer>(context, colorLayout.LinearBytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
