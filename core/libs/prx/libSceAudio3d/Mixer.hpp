@@ -18,6 +18,16 @@ struct Source {
     float pan;
 };
 
+constexpr float kSurroundFold = 0.7071f;
+constexpr std::uint32_t kChannelL = 0;
+constexpr std::uint32_t kChannelR = 1;
+constexpr std::uint32_t kChannelCenter = 2;
+[[maybe_unused]] constexpr std::uint32_t kChannelLfe = 3;
+constexpr std::uint32_t kChannelLs = 4;
+constexpr std::uint32_t kChannelRs = 5;
+constexpr std::uint32_t kChannelLrs = 6;
+constexpr std::uint32_t kChannelRrs = 7;
+
 inline float ReadSample(const Source& source, std::uint32_t frame, std::uint32_t channel) {
     const std::size_t index = static_cast<std::size_t>(frame) * source.channels + channel;
     if (source.is_float) return static_cast<const float*>(source.samples)[index];
@@ -34,17 +44,17 @@ inline void MixFrame(const Source* sources, std::size_t count, std::uint32_t gra
         const float gr = (pan >= 0.0f ? 1.0f : 1.0f + pan) * src.gain;
         for (std::uint32_t frame = 0; frame < granularity && frame < src.num_samples; ++frame) {
             const std::size_t left_index = static_cast<std::size_t>(frame) * 2;
-            float left = ReadSample(src, frame, 0);
-            float right = src.channels == 1 ? left : ReadSample(src, frame, 1);
-            if (src.channels >= 3) {
-                const float center = ReadSample(src, frame, 2) * 0.7071f;
+            float left = ReadSample(src, frame, kChannelL);
+            float right = src.channels == 1 ? left : ReadSample(src, frame, kChannelR);
+            if (src.channels > kChannelCenter) {
+                const float center = ReadSample(src, frame, kChannelCenter) * kSurroundFold;
                 left += center;
                 right += center;
             }
-            if (src.channels >= 5) left += ReadSample(src, frame, 4) * 0.7071f;
-            if (src.channels >= 6) right += ReadSample(src, frame, 5) * 0.7071f;
-            if (src.channels >= 7) left += ReadSample(src, frame, 6) * 0.7071f;
-            if (src.channels >= 8) right += ReadSample(src, frame, 7) * 0.7071f;
+            if (src.channels > kChannelLs) left += ReadSample(src, frame, kChannelLs) * kSurroundFold;
+            if (src.channels > kChannelRs) right += ReadSample(src, frame, kChannelRs) * kSurroundFold;
+            if (src.channels > kChannelLrs) left += ReadSample(src, frame, kChannelLrs) * kSurroundFold;
+            if (src.channels > kChannelRrs) right += ReadSample(src, frame, kChannelRrs) * kSurroundFold;
             mix[left_index] += left * gl;
             mix[left_index + 1] += right * gr;
         }

@@ -89,5 +89,26 @@ int main() {
     Require(surround5_out.size() == 2 && surround5_out[0] == 5950 && surround5_out[1] == 4121,
             "5 channel downmix reads only the channels present");
 
+    std::int16_t surround3[3] = {1000, 2000, 3000};
+    Audio3dInternal::Source surround3_source{surround3, 1, 3, false, 1.0f, 0.0f};
+    std::vector<std::int16_t> surround3_out;
+    Audio3dInternal::MixFrame(&surround3_source, 1, 1, surround3_out);
+    Require(surround3_out.size() == 2 && surround3_out[0] == 3121 && surround3_out[1] == 4121,
+            "3 channel downmix folds center into both sides");
+
+    std::int16_t surround4[4] = {1000, 2000, 3000, 0};
+    Audio3dInternal::Source surround4_source{surround4, 1, 4, false, 1.0f, 0.0f};
+    std::vector<std::int16_t> surround4_out;
+    Audio3dInternal::MixFrame(&surround4_source, 1, 1, surround4_out);
+    Require(surround4_out.size() == 2 && surround4_out[0] == 3121 && surround4_out[1] == 4121,
+            "4 channel downmix drops LFE");
+
+    std::int16_t surround6_panned[6] = {1000, 2000, 3000, 0, 4000, 5000};
+    Audio3dInternal::Source surround6_panned_source{surround6_panned, 1, 6, false, 1.0f, 1.0f};
+    std::vector<std::int16_t> surround6_panned_out;
+    Audio3dInternal::MixFrame(&surround6_panned_source, 1, 1, surround6_panned_out);
+    Require(surround6_panned_out.size() == 2 && surround6_panned_out[0] == 0 && surround6_panned_out[1] == 7657,
+            "6 channel downmix is panned after folding");
+
     return 0;
 }
