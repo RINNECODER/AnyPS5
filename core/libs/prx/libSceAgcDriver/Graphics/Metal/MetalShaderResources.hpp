@@ -4,6 +4,7 @@
 #include "MetalGuestMemory.hpp"
 #include "MetalShaderPipeline.hpp"
 #include "MetalTexture.hpp"
+#include "GuestImageCache.hpp"
 #include "MetalSampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
@@ -15,13 +16,19 @@ namespace AgcDriver::Metal {
 class MetalShaderResources {
 public:
     using DepthTextureLookup = std::function<id<MTLTexture>(const Graphics::GuestTextureResource&, bool, bool)>;
+    using ImageCache = GuestImageCache<MetalTexture>;
+    // `imageCache`, when given, supplies textures for surfaces an earlier draw or dispatch already
+    // uploaded or read back (GuestImageCache.hpp) and learns this work's images once it completes.
     explicit MetalShaderResources(const MetalDevice& backend,
         std::span<const NativeGuestMemory::BorrowedRange> ranges, DepthTextureLookup depthLookup = {},
-        MetalGuestHostAliases* aliases = nullptr);
+        MetalGuestHostAliases* aliases = nullptr, ImageCache* imageCache = nullptr);
     [[nodiscard]] std::vector<MetalShaderResourceBinding> Bindings(const ShaderRecompiler::MetalBackend::Result& shader);
     [[nodiscard]] MetalBufferBinding Buffer(std::uint64_t address, std::size_t bytes, bool writable = false);
     [[nodiscard]] std::shared_ptr<MetalTexture> Texture(const Graphics::GuestTextureResource& descriptor, bool written = false, bool compare = false, bool atomic = false);
     [[nodiscard]] std::span<const id<MTLResource>> Residency() const;
+    // Encodes the copy-back of every written image into `commands` (after the work that writes
+    // them, before the commit), so Complete(commands) need not read them back separately.
+    void EncodeReadbacks(id<MTLCommandBuffer> commands);
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault Complete(id<MTLCommandBuffer> commands);
     // Guest bytes the snapshot copied instead of aliasing (#291).
     [[nodiscard]] std::uint64_t CopiedBytes() const { return snapshot.CopiedBytes(); }
@@ -47,6 +54,11 @@ private:
         Graphics::DccKeys keys;
         std::vector<ImageRange> writableRanges;
         std::vector<std::byte> original;
+        id<MTLCommandBuffer> readbackIn = nil;
+        bool compare = false;
+        // Uploaded from (or, written, read back into) its whole guest surface in place: what the
+        // image cache may hold once the work completes.
+        bool cacheable = false;
     };
     struct ImageView {
         std::shared_ptr<MetalTexture> texture;
@@ -66,6 +78,9 @@ private:
     id<MTLBuffer> emptyBuffer = nil;
     DepthTextureLookup depthLookup;
     MetalGuestHostAliases* aliases = nullptr;
+    ImageCache* imageCache = nullptr;
+    // Drops cached images whose guest bytes overlap [begin, end) through any borrowed range.
+    void forgetCachedImages(std::uint64_t begin, std::uint64_t end);
     [[nodiscard]] Graphics::DccKeys textureKeys(const Graphics::GuestTextureResource& descriptor, std::size_t bytes);
     void validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys);
     [[nodiscard]] bool physicallyOverlaps(std::uint64_t begin, std::uint64_t end,

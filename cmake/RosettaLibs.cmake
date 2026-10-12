@@ -167,6 +167,9 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/tools/rosetta/launcher ${CMAKE_BINARY_DIR}/
 
 if(BUILD_TESTING)
     add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/tests/direct_memory_darwin ${CMAKE_BINARY_DIR}/rosetta/tests/direct_memory_darwin)
+    add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/tests/pad_input_script ${CMAKE_BINARY_DIR}/rosetta/tests/pad_input_script)
     anyps5_rosetta_graphics_tests()
+    add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/tests/rosetta_direct_input ${CMAKE_BINARY_DIR}/rosetta/tests/direct_input)
+    add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/tests/ajm_opus_surround ${CMAKE_BINARY_DIR}/rosetta/tests/ajm_opus_surround)
     add_subdirectory(${CMAKE_SOURCE_DIR}/tools/rosetta/tests ${CMAKE_BINARY_DIR}/rosetta/tests/runtime)
 endif()
