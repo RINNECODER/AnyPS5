@@ -18,6 +18,7 @@ int APS5_VABI sceKernelGetModuleList(KernelModule*, std::size_t, std::size_t*);
 int APS5_VABI sceKernelGetModuleInfo(KernelModule, ModuleInfo*);
 int APS5_VABI sceKernelGetModuleList2(KernelModule*, std::size_t, std::size_t*);
 int APS5_VABI sceKernelGetModuleInfo2(KernelModule, ModuleInfo*);
+std::int32_t APS5_VABI sceKernelGetLibkernelTextLocation_nid_postfix(void**, std::size_t*);
 }
 static void Require(bool value) { if (!value) std::abort(); }
 template<typename TFunction>
@@ -96,6 +97,16 @@ int main(int argc, char** argv) {
         Require(sceKernelGetModuleInfo(handle, &listed) == 0 && listed.name[0] != '\0');
         if (handle == self.id) Require(std::string(listed.name) == self.name);
     }
+    ModuleInfo program{};
+    program.st_size = sizeof(ModuleInfo);
+    Require(sceKernelGetModuleInfo(self.id, &program) == 0 && program.segment_count > 0);
+    void* textAddress = nullptr;
+    std::size_t textSize = 0;
+    Require(sceKernelGetLibkernelTextLocation_nid_postfix(&textAddress, &textSize) == 0);
+    Require(reinterpret_cast<std::uintptr_t>(textAddress) == program.segments[0].address);
+    Require(textSize == program.segments[0].size);
+    Require(ThrowsInvalidArgument([&] { sceKernelGetLibkernelTextLocation_nid_postfix(nullptr, &textSize); }));
+    Require(ThrowsInvalidArgument([&] { sceKernelGetLibkernelTextLocation_nid_postfix(&textAddress, nullptr); }));
     for (const std::uint64_t size : {0x158, 0x1a8, 0x1b0, 0x200, 0}) {
         ModuleInfo sized{};
         sized.st_size = size;
