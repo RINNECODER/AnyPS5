@@ -303,6 +303,8 @@ int APS5_VABI waitpid_nid_postfix(int pid, int* status, int options) {
     return -1;
 }
 
+int APS5_VABI getrlimit_nid_postfix(int resource, GuestResourceLimit* limit);
+
 int APS5_VABI setrlimit_nid_postfix(int resource, const GuestResourceLimit* limit) {
     if (limit == nullptr) {
         *__error_nid_postfix() = guestFault;
