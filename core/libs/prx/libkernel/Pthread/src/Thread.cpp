@@ -78,6 +78,27 @@ static GuestThreadState& CurrentGuestState() {
 static std::mutex stackLock;
 static std::map<PthreadPrivate*, std::pair<std::uintptr_t, std::uintptr_t>> liveStacks;
 static std::map<std::uintptr_t, std::size_t> protectedStackPages;
+#if defined(__linux__)
+struct GuestStackMapping {
+    std::uintptr_t mappingEnd;
+    std::uintptr_t stackStart;
+    std::uintptr_t stackEnd;
+};
+static std::mutex guestStackMappingsLock;
+static std::map<std::uintptr_t, GuestStackMapping> guestStackMappings;
+
+static void RegisterGuestStackMapping(PthreadPrivate* thread) {
+    const auto mappingStart = reinterpret_cast<std::uintptr_t>(thread->guestStack);
+    const auto stackStart = reinterpret_cast<std::uintptr_t>(thread->stackAddress);
+    std::lock_guard lock(guestStackMappingsLock);
+    guestStackMappings[mappingStart] = {mappingStart + thread->guestStackBytes, stackStart, stackStart + thread->stackSize};
+}
+
+static void UnregisterGuestStackMapping(void* mapping) {
+    std::lock_guard lock(guestStackMappingsLock);
+    guestStackMappings.erase(reinterpret_cast<std::uintptr_t>(mapping));
+}
+#endif
 
 #if defined(__linux__)
 static constexpr std::size_t GUEST_STACK_GUARD = PS5_PAGE_SIZE;
@@ -106,7 +127,9 @@ static void AllocateGuestStack(PthreadPrivate* thread, std::size_t usableBytes) 
 
 static void FreeGuestStack(PthreadPrivate* thread) {
     if (thread->guestStack == nullptr) return;
+    void* const mapping = thread->guestStack;
     DoMunmap(thread->guestStack, thread->guestStackBytes);
+    UnregisterGuestStackMapping(mapping);
     thread->guestStack = nullptr;
     thread->guestStackBytes = 0;
 }
@@ -131,7 +154,10 @@ static void ReapRetiredStacks() {
             }
         }
     }
-    for (const auto& stack : ready) DoMunmap(stack.address, stack.bytes);
+    for (const auto& stack : ready) {
+        DoMunmap(stack.address, stack.bytes);
+        UnregisterGuestStackMapping(stack.address);
+    }
 }
 
 static void RetireGuestStack(PthreadPrivate* thread) {
@@ -251,6 +277,24 @@ bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintpt
             return true;
         }
     }
+    return false;
+}
+
+bool GuestThreadStackHostRangeOverlaps(std::uintptr_t start, std::uintptr_t end) {
+#if defined(__linux__)
+    std::lock_guard lock(guestStackMappingsLock);
+    auto it = guestStackMappings.upper_bound(start);
+    if (it != guestStackMappings.begin()) --it;
+    for (; it != guestStackMappings.end() && it->first < end; ++it) {
+        const auto mappingStart = it->first;
+        const auto& stack = it->second;
+        if (start < stack.stackStart && end > mappingStart) return true;
+        if (start < stack.mappingEnd && end > stack.stackEnd) return true;
+    }
+#else
+    (void)start;
+    (void)end;
+#endif
     return false;
 }
 
@@ -616,6 +660,7 @@ static void* StartNativeThread(void* opaque) {
         self->threadId = std::this_thread::get_id();
 #if defined(__linux__)
         self->hostTid = static_cast<int>(gettid());
+        RegisterGuestStackMapping(self);
 #endif
         args->initialized.set_value();
     } catch (...) {
