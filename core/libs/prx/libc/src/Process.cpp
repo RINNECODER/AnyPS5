@@ -54,6 +54,12 @@ extern "C" void LibcRequestShutdown_nid_postfix() {
     shutdownSource.request_stop();
 }
 
+extern "C" void LibcBeginHostExit_nid_postfix() {
+    exitRequested.store(true);
+    exitRequested.notify_all();
+    LibcRequestShutdown_nid_postfix();
+}
+
 extern "C" void LibcRequestExit_nid_postfix(int code) {
     if (exitRequested.exchange(true)) return;
     LibcRequestShutdown_nid_postfix();

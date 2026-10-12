@@ -47,6 +47,19 @@ int main() {
     Require(getcwd_nid_postfix(path, sizeof(path)) == path && std::strcmp(path, "/") == 0);
     Require(chdir_nid_postfix("../..") == 0);
     Require(getcwd_nid_postfix(path, sizeof(path)) == path && std::strcmp(path, "/") == 0);
+    // A mount linked in from outside the root (the per-title data directory) stays enterable.
+    const auto outside = std::filesystem::temp_directory_path() / (name + "-outside");
+    Require(std::filesystem::create_directory(outside));
+    { std::ofstream file(outside / "kept.txt"); file << "kept"; }
+    const auto link = host / (name + "-link");
+    std::filesystem::create_directory_symlink(outside, link);
+    Require(chdir_nid_postfix((name + "-link").c_str()) == 0);
+    Require(getcwd_nid_postfix(path, sizeof(path)) == path && path == "/" + name + "-link");
+    Require(std::filesystem::exists(ResolvePath_nid_no_patch("kept.txt")));
+    Require(chdir_nid_postfix("..") == 0);
+    Require(getcwd_nid_postfix(path, sizeof(path)) == path && std::strcmp(path, "/") == 0);
+    std::filesystem::remove(link);
+    std::filesystem::remove_all(outside);
     std::filesystem::remove(directory / "sample.txt");
     std::filesystem::remove(directory);
 }

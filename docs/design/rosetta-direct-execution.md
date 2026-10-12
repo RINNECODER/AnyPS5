@@ -128,6 +128,19 @@ Direct execution is the only engine. The QEMU/TCG runner (`anyps5_cpu_run`, `cor
 - **Controllers.** They go through SDL's game controller support, which stays initialized on the offscreen video driver, as on the SDL window.
 - **Scripted presses.** `ANYPS5_INPUT_SCRIPT` presses buttons at fixed times through the same pad state the title reads, for agents and CI. It is off unless set, and adds to live input. The format is `t=<seconds since process start>:<button>[+<button>...][:<hold ms>]`, with entries separated by `;`. The default hold is 250 ms. The hold counts from the first pad read that sees the press, so a title that polls slowly still sees each press. Each press logs `[pad] input script ...: down at <s> (epoch ms <ms>)`, which lines up with `ANYPS5_FRAME_CAPTURE_DIR` file names. For example: `ANYPS5_INPUT_SCRIPT="t=42:square;t=56:square;t=66:cross"`. Button names: cross, circle, square, triangle, up, down, left, right, l1, r1, l2, r2, l3, r3, options, touchpad.
 
+## 8. Save data and shutdown
+
+**Where a title's data lives.** The title runs with its relink-cache `out/` directory as its root, and writes `_sd/` (libSceSaveData, one folder per save directory name) and `download0/` (the title's own option files) there. The launcher now links both to one directory per title, outside the relink cache, so they survive a re-relink, a patched eboot and a cache wipe:
+
+| Guest path | Host path |
+| --- | --- |
+| `_sd/<dirName>` | `<data>/SaveData/<dirName>` |
+| `download0/...` | `<data>/download0/...` |
+
+`<data>` is `--data-dir DIR`, else `ANYPS5_TITLE_DATA`, else `~/Library/Application Support/AnyPS5Launcher/TitleData/<titleId>` (the title id is read from `sce_sys/param.json`; a title without one keeps its data in the cache). That is the folder the MacPS launcher already used per title, with the same `SaveData` and `download0` names. Data a title already wrote into the cache is moved in on the first run; a file already in the data directory wins. Every save write goes straight to disk through a temporary file and a rename, so a stop never leaves a half-written save.
+
+**Ending the game.** Closing the window, Cmd-Q, SIGTERM (the launcher forwards MacPS's stop), SIGINT and SIGHUP all call `EndDirectSession`: it marks the exit as requested (guest threads that meet the shutdown park instead of unwinding into guest frames), runs the libc shutdown callbacks (the video output and GPU threads stop and join), flushes stdio and exits with code 0. A watchdog thread leaves with code 0 after one second whatever the callbacks are doing, which is inside the launcher's 1.5 s grace before SIGKILL. A title that calls `exit` itself takes the existing `LibcExit` path.
+
 ## Reproduce
 
 ```sh

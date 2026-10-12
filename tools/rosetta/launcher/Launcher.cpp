@@ -203,6 +203,8 @@ constexpr const char* kUsage =
     "  --resource-root DIR      the title's data (app0); default: the eboot's directory\n"
     "  --sce-module PRX         a guest module to preload (repeatable; libc.prx first)\n"
     "  --diagnostics-json       JSON diagnostics events on stderr\n"
+    "  --data-dir DIR           the title's save data and download0 (default ~/Library/Application Support/\n"
+    "                           AnyPS5Launcher/TitleData/<titleId>; env ANYPS5_TITLE_DATA)\n"
     "  --cache DIR              relink cache root (default ~/Library/Caches/AnyPS5/rosetta,\n"
     "                           or ANYPS5_ROSETTA_CACHE)\n"
     "  --relink                 relink even when the cache is current\n"
@@ -214,7 +216,7 @@ constexpr const char* kUsage =
     "                           development overrides of the package layout\n";
 
 struct Options {
-    fs::path eboot, resourceRoot, cache, libs, relinker, stubRuntime;
+    fs::path eboot, resourceRoot, cache, libs, relinker, stubRuntime, dataDir;
     std::vector<fs::path> modules;
     std::vector<std::string> guestArgs;
     std::string trace;
@@ -244,6 +246,7 @@ Options ParseArguments(int argc, char** argv) {
         else if (argument == "--resource-root") options.resourceRoot = value(index, "--resource-root");
         else if (argument == "--sce-module") options.modules.emplace_back(value(index, "--sce-module"));
         else if (argument == "--cache") options.cache = value(index, "--cache");
+        else if (argument == "--data-dir") options.dataDir = value(index, "--data-dir");
         else if (argument == "--libs") options.libs = value(index, "--libs");
         else if (argument == "--relinker") options.relinker = value(index, "--relinker");
         else if (argument == "--stub-runtime") options.stubRuntime = value(index, "--stub-runtime");
@@ -823,6 +826,55 @@ Layout LayOut(const Options& options, const Paths& paths, const fs::path& cache,
     return layout;
 }
 
+// The title's writable state (save data under _sd, download0) lives in one directory per title, outside the
+// relink cache, so it survives a re-relink, a patched eboot and a cache wipe. The default is the folder the
+// MacPS launcher already uses: ~/Library/Application Support/AnyPS5Launcher/TitleData/<titleId>/{SaveData,download0}.
+std::string TitleId(const fs::path& resource) {
+    std::ifstream stream(resource / "sce_sys" / "param.json");
+    const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    static const std::regex pattern("\"titleId\"\\s*:\\s*\"([A-Za-z0-9_-]{1,32})\"");
+    std::smatch match;
+    return std::regex_search(text, match, pattern) ? match[1].str() : std::string();
+}
+
+fs::path DataRoot(const Options& options, const fs::path& resource) {
+    if (!options.dataDir.empty()) return fs::absolute(options.dataDir).lexically_normal();
+    if (const char* configured = std::getenv("ANYPS5_TITLE_DATA"); configured != nullptr && *configured != '\0') return configured;
+    const std::string id = TitleId(resource);
+    if (id.empty()) return {};
+    const char* home = std::getenv("HOME");
+    if (home == nullptr || *home == '\0') {
+        const passwd* user = ::getpwuid(::getuid());
+        home = user != nullptr ? user->pw_dir : nullptr;
+    }
+    if (home == nullptr) return {};
+    return fs::path(home) / "Library" / "Application Support" / "AnyPS5Launcher" / "TitleData" / id;
+}
+
+// Links out/<guest> to <data>/<host>, first moving anything the title already wrote into out/<guest> there.
+void LinkTitleData(const fs::path& out, const fs::path& data, const char* guest, const char* host) {
+    std::error_code error;
+    const fs::path link = out / guest, target = data / host;
+    fs::create_directories(target, error);
+    if (!fs::is_directory(target, error)) throw HostFailure("cannot create the title data directory " + target.string());
+    if (fs::is_symlink(link, error)) {
+        if (fs::read_symlink(link, error) == target) return;
+        fs::remove(link, error);
+    } else if (fs::is_directory(link, error)) {
+        for (const auto& entry : SortedEntries(link))
+            if (!fs::exists(fs::symlink_status(target / entry.filename(), error))) fs::rename(entry, target / entry.filename(), error);
+        fs::remove_all(link, error);
+    }
+    fs::create_directory_symlink(target, link, error);
+    if (error) throw HostFailure("cannot link " + link.string() + ": " + error.message());
+}
+
+void BindTitleData(const fs::path& out, const fs::path& data) {
+    if (data.empty()) return;
+    LinkTitleData(out, data, "_sd", "SaveData");
+    LinkTitleData(out, data, "download0", "download0");
+}
+
 int Launch(const Options& options) {
     std::error_code error;
     const fs::path eboot = fs::absolute(options.eboot).lexically_normal();
@@ -859,6 +911,7 @@ int Launch(const Options& options) {
         throw;
     }
     ::close(lock);
+    BindTitleData(out, DataRoot(options, resource));
     Log("%zu images, %zu imported symbols, %zu libraries stubbed, %zu imports stubbed", layout.images, layout.imports,
         layout.missingLibs.size(), layout.unresolved.size());
     Preparing("ready", 1.0);

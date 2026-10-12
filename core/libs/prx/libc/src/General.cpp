@@ -223,7 +223,14 @@ int SetWorkingDirectory(WorkingDirectory& state, const std::filesystem::path& re
     if (error) return DirectoryFailure(error);
     if (!std::filesystem::is_directory(canonical, error)) return error ? DirectoryFailure(error) : 20;
     const auto relative = canonical.lexically_relative(state.root);
-    if (relative.empty() || *relative.begin() == "..") return 45;
+    if (relative.empty() || *relative.begin() == "..") {
+        // A mount the launcher links in from the per-title data directory (_sd, download0) resolves outside
+        // the root; it stays reachable when the path the title named is itself inside the root.
+        const auto named = resolved.lexically_normal().lexically_relative(state.root);
+        if (named.empty() || *named.begin() == ".." || named == ".") return 45;
+        state.current = state.root / named;
+        return 0;
+    }
     state.current = canonical;
     return 0;
 }
