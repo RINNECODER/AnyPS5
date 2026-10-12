@@ -34,8 +34,17 @@ inline void MixFrame(const Source* sources, std::size_t count, std::uint32_t gra
         const float gr = (pan >= 0.0f ? 1.0f : 1.0f + pan) * src.gain;
         for (std::uint32_t frame = 0; frame < granularity && frame < src.num_samples; ++frame) {
             const std::size_t left_index = static_cast<std::size_t>(frame) * 2;
-            const float left = ReadSample(src, frame, 0);
-            const float right = src.channels == 1 ? left : ReadSample(src, frame, 1);
+            float left = ReadSample(src, frame, 0);
+            float right = src.channels == 1 ? left : ReadSample(src, frame, 1);
+            if (src.channels >= 3) {
+                const float center = ReadSample(src, frame, 2) * 0.7071f;
+                left += center;
+                right += center;
+            }
+            if (src.channels >= 5) left += ReadSample(src, frame, 4) * 0.7071f;
+            if (src.channels >= 6) right += ReadSample(src, frame, 5) * 0.7071f;
+            if (src.channels >= 7) left += ReadSample(src, frame, 6) * 0.7071f;
+            if (src.channels >= 8) right += ReadSample(src, frame, 7) * 0.7071f;
             mix[left_index] += left * gl;
             mix[left_index + 1] += right * gr;
         }

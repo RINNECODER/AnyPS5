@@ -18,6 +18,7 @@ int main() {
     Audio3dInternal::MixFrame(&s, 1, 2, out);
     Require(out.size() == 4, "frame is granularity*2 samples");
     Require(out[0] == 16384 && out[1] == -16384, "centered stereo passes through");
+    Require(out[2] == 8192 && out[3] == -8192, "centered stereo passes through the second frame");
 
     std::int16_t panned[2] = {10000, 20000};
     Audio3dInternal::Source hard_right{panned, 1, 2, false, 1.0f, 1.0f};
@@ -66,5 +67,27 @@ int main() {
     std::vector<std::int16_t> skipped_out;
     Audio3dInternal::MixFrame(skipped_sources, 2, 1, skipped_out);
     Require(skipped_out.size() == 2 && skipped_out[0] == 0 && skipped_out[1] == 0, "null and empty sources are skipped");
+
+    std::int16_t surround6[6] = {1000, 2000, 3000, 0, 4000, 5000};
+    Audio3dInternal::Source surround6_source{surround6, 1, 6, false, 1.0f, 0.0f};
+    std::vector<std::int16_t> surround6_out;
+    Audio3dInternal::MixFrame(&surround6_source, 1, 1, surround6_out);
+    Require(surround6_out.size() == 2 && surround6_out[0] == 5950 && surround6_out[1] == 7657,
+            "6 channel downmix folds center and surrounds, dropping LFE");
+
+    std::int16_t surround8[8] = {1000, 2000, 3000, 0, 4000, 5000, 6000, 7000};
+    Audio3dInternal::Source surround8_source{surround8, 1, 8, false, 1.0f, 0.0f};
+    std::vector<std::int16_t> surround8_out;
+    Audio3dInternal::MixFrame(&surround8_source, 1, 1, surround8_out);
+    Require(surround8_out.size() == 2 && surround8_out[0] == 10192 && surround8_out[1] == 12606,
+            "8 channel downmix folds rear surrounds into stereo");
+
+    std::int16_t surround5[5] = {1000, 2000, 3000, 0, 4000};
+    Audio3dInternal::Source surround5_source{surround5, 1, 5, false, 1.0f, 0.0f};
+    std::vector<std::int16_t> surround5_out;
+    Audio3dInternal::MixFrame(&surround5_source, 1, 1, surround5_out);
+    Require(surround5_out.size() == 2 && surround5_out[0] == 5950 && surround5_out[1] == 4121,
+            "5 channel downmix reads only the channels present");
+
     return 0;
 }
