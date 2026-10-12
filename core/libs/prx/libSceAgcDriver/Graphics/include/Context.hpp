@@ -196,24 +196,26 @@ struct Context {
         throw std::runtime_error("AGC graphics: required Vulkan memory type is unavailable");
     }
 
-    VkResult AllocateDeviceMemory(std::uint32_t mask, VkDeviceSize bytes, VkDeviceMemory* memoryOut, const char* what) const {
-        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.allocationSize = bytes;
-        allocation.memoryTypeIndex = MemoryType(mask, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        const auto allocate = Function<PFN_vkAllocateMemory>("vkAllocateMemory");
-        auto result = allocate(device, &allocation, nullptr, memoryOut);
-        if (result != VK_ERROR_OUT_OF_DEVICE_MEMORY) return result;
+    std::uint32_t DeviceMemoryType(std::uint32_t mask, VkDeviceSize bytes, const char* what) const {
+        const auto type = MemoryType(mask, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (memoryProperties2 == nullptr || physical == VK_NULL_HANDLE) return type;
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+        properties.pNext = &reported;
+        memoryProperties2(physical, &properties);
+        const auto heap = memory.memoryTypes[type].heapIndex;
+        const auto budget = reported.heapBudget[heap];
+        const auto usage = reported.heapUsage[heap];
+        if (budget == 0 || (usage < budget && bytes <= budget - usage)) return type;
         for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
             if ((mask & (1u << i)) == 0 || (memory.memoryHeaps[memory.memoryTypes[i].heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) continue;
-            allocation.memoryTypeIndex = i;
-            result = allocate(device, &allocation, nullptr, memoryOut);
-            static std::atomic<std::uint64_t> fallbacks{0}, fallbackBytes{0};
-            const auto count = fallbacks.fetch_add(1) + 1;
-            const auto total = fallbackBytes.fetch_add(bytes) + bytes;
-            if (count <= 5 || (count & (count - 1)) == 0) std::fprintf(stderr, "[gpu] %s: device memory exhausted, %llu bytes placed in host memory type %u (%s); %llu such allocations, %llu MiB\n", what, static_cast<unsigned long long>(bytes), i, result == VK_SUCCESS ? "ok" : "failed", static_cast<unsigned long long>(count), static_cast<unsigned long long>(total >> 20u));
-            return result;
+            static std::atomic<std::uint64_t> placements{0}, placedBytes{0};
+            const auto count = placements.fetch_add(1) + 1;
+            const auto total = placedBytes.fetch_add(bytes) + bytes;
+            if (count <= 5 || (count & (count - 1)) == 0) std::fprintf(stderr, "[gpu] %s: device-local heap %u uses %llu of its %llu MiB budget, %llu bytes placed in host memory type %u; %llu such allocations, %llu MiB\n", what, heap, static_cast<unsigned long long>(usage >> 20u), static_cast<unsigned long long>(budget >> 20u), static_cast<unsigned long long>(bytes), i, static_cast<unsigned long long>(count), static_cast<unsigned long long>(total >> 20u));
+            return i;
         }
-        return result;
+        return type;
     }
 };
 
