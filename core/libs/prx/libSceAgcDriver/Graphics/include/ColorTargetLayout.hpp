@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_COLORTARGETLAYOUT_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -33,6 +34,8 @@ constexpr TextureTileMode ColorTextureTileMode(ColorTileMode mode) {
 }
 
 ColorTileMode DecodeColorTileMode(std::uint32_t attrib3);
+// Layout for one color mip addressed as a separate target buffer, retaining its packed-tail origin.
+TileMipLayout ComputeColorTargetMipLayout(ColorTileMode mode, std::uint32_t bytesPerElement, std::uint32_t surfaceWidth, std::uint32_t surfaceHeight, std::uint32_t mipCount, std::uint32_t mipLevel);
 
 class ColorTargetLayout {
 public:
