@@ -658,7 +658,7 @@ int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int d, FileStat* sb) {
         APS5_INVALID_ARG_EX;
     }
     if (GuestSockets::IsOpen(d)) throw std::runtime_error(std::string(__func__) + ": the status of a guest socket is not implemented");
-    File::FillFileStat(d, sb);
+    if (!File::FillFileStatFromDescriptor(d, sb)) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
     return 0;
 }
 

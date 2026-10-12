@@ -1,3 +1,4 @@
+#include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
 #include <array>
@@ -39,6 +40,7 @@ std::int64_t APS5_VABI send_nid_postfix(int, const void*, std::uint64_t, int);
 std::int64_t APS5_VABI recv_nid_postfix(int, void*, std::uint64_t, int);
 int APS5_VABI close_nid_postfix(int);
 int APS5_VABI sceKernelClose(int);
+std::int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int, FileStat*);
 int APS5_VABI dup_nid_postfix(int);
 int APS5_VABI open_nid_postfix(const char*, int, int);
 std::int64_t APS5_VABI read_nid_postfix(int, void*, std::uint64_t);
@@ -142,6 +144,8 @@ static void SelectSocketAndFile() {
 static void CloseReleasesNumber() {
     const int socket = Socket();
     Require(close_nid_postfix(socket) == 0);
+    FileStat status{};
+    Require(fstat_nid_disambig1_nid_postfix(socket, &status) == -1 && *__error_nid_postfix() == 9);
     std::vector<int> files;
     while (files.size() < 8 && (files.empty() || files.back() != socket)) {
         const int file = open_nid_postfix("/dev/urandom", 0, 0);
