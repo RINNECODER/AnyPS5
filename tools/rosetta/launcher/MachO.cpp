@@ -217,9 +217,12 @@ std::set<std::string> ParseExportTrie(const std::uint8_t* trie, std::size_t size
 }
 
 MachOImage ReadMachO(const std::string& path) {
-    std::ifstream stream(path, std::ios::binary);
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
     if (!stream) throw std::runtime_error("cannot read " + path);
-    std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    // One sized read: a byte iterator over a relinked title's 160 MB eboot took most of the warm layout.
+    std::vector<std::uint8_t> data(static_cast<std::size_t>(stream.tellg()));
+    stream.seekg(0);
+    if (!stream.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()))) throw std::runtime_error("cannot read " + path);
     if (data.size() < 32 || U32(data, 0) != kMagic64 || U32(data, 4) != kCpuX86_64)
         throw std::runtime_error("not a thin x86_64 Mach-O image: " + path);
     MachOImage image;

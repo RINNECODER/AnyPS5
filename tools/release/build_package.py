@@ -15,8 +15,8 @@ Steps (docs/RELEASES.md):
    anyps5_rosetta_run and the stub runtime) plus the launcher's unit test, and run it;
 3. assemble the package: bin/anyps5_rosetta_run, bin/relinker, libs/ (x86_64 *.prx and
    AnyPS5Utilities.metallib), share/aps5_stub_runtime.dylib, share/LICENSE, manifest.json
-   (schema 3) and SHA256SUMS; every Mach-O must be thin x86_64 and load only system
-   libraries or package-relative ones;
+   (schema 3) and SHA256SUMS; every Mach-O must be thin x86_64 (the relinker x86_64/arm64
+   universal) and load only system libraries or package-relative ones;
 4. refuse any package byte that holds the build user's home path or user name;
 5. run the synthetic fixture title (tools/rosetta/tests/launcher_smoke.py) through the
    packaged launcher, cold and warm (never a retail title);
@@ -53,6 +53,9 @@ MAX_FILES = 512
 SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/", "@rpath/", "@loader_path/", "@executable_path/")
 MACHO_MAGIC_64 = b"\xcf\xfa\xed\xfe"
 CPU_X86_64 = 0x01000007
+CPU_ARM64 = 0x0100000C
+# The relinker is a host tool the launcher runs natively: it ships universal (x86_64 and arm64).
+UNIVERSAL_ALLOWED = {"bin/relinker"}
 
 
 def git(path, *args):
@@ -147,6 +150,16 @@ def macho_info(path):
     return True, int.from_bytes(header[4:8], "little") == CPU_X86_64
 
 
+def universal_architectures(path):
+    """CPU types of a fat (universal) Mach-O, or None for anything else."""
+    with open(path, "rb") as stream:
+        data = stream.read(8 + 20 * 8)
+    if data[:4] != b"\xca\xfe\xba\xbe":
+        return None
+    count = int.from_bytes(data[4:8], "big")
+    return {int.from_bytes(data[8 + 20 * index:12 + 20 * index], "big") for index in range(min(count, 8))}
+
+
 def load_commands(path):
     output = subprocess.check_output(["otool", "-L", str(path)], text=True)
     return re.findall(r"^\s+(\S.*?) \(compatibility version ", output, re.M)
@@ -172,7 +185,8 @@ def assemble(build, source, package):
 
 
 def check_binaries(package):
-    """Every Mach-O is thin x86_64 and loads only system or package-relative libraries."""
+    """Every Mach-O is thin x86_64 (bin/relinker may be x86_64/arm64 universal) and loads only system or
+    package-relative libraries."""
     problems = []
     for path in sorted(package.rglob("*")):
         if not path.is_file():
@@ -181,8 +195,9 @@ def check_binaries(package):
         if not is_macho:
             continue
         relative = str(path.relative_to(package))
-        if not x86_64:
-            problems.append(relative + " is not a thin x86_64 Mach-O")
+        universal = relative in UNIVERSAL_ALLOWED and universal_architectures(path) == {CPU_X86_64, CPU_ARM64}
+        if not x86_64 and not universal:
+            problems.append(relative + " is not a thin x86_64 Mach-O" + (" or an x86_64/arm64 universal one" if relative in UNIVERSAL_ALLOWED else ""))
             continue
         for dependency in load_commands(path):
             if not dependency.startswith(SYSTEM_PREFIXES) and dependency != path.name:

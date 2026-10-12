@@ -11,7 +11,9 @@
 #include <map>
 #include <span>
 #include <string>
+#include <set>
 #include <unordered_set>
+#include <utility>
 
 namespace Relinker {
 
@@ -32,9 +34,62 @@ public:
     }
 };
 
+// A set of addresses with one bit per byte of each executable segment (the
+// first segment that holds an address owns it, as in isCode); anything else
+// falls back to a std::set.
+class AddressBits {
+public:
+    explicit AddressBits(const std::vector<Domain::ProgramHeader>& headers) {
+        for (const auto& header : headers)
+            if (header.Type == 1 && (header.Flags & 1) != 0 && header.FileSize != 0)
+                _segments.push_back({header.MappedAddress, header.FileSize, std::vector<std::uint64_t>((header.FileSize + 63) / 64)});
+    }
+
+    // True when the address was not in the set yet.
+    bool Insert(const std::uint64_t address) {
+        for (auto& segment : _segments) {
+            if (address < segment.Begin || address - segment.Begin >= segment.Size) continue;
+            const auto index = address - segment.Begin;
+            auto& word = segment.Words[index / 64];
+            const auto bit = std::uint64_t{1} << (index % 64);
+            const bool fresh = (word & bit) == 0;
+            word |= bit;
+            return fresh;
+        }
+        return _other.insert(address).second;
+    }
+
+    [[nodiscard]] std::vector<std::uint64_t> Sorted() const {
+        std::size_t count = _other.size();
+        for (const auto& segment : _segments)
+            for (const auto word : segment.Words) count += static_cast<std::size_t>(std::popcount(word));
+        std::vector<std::uint64_t> addresses;
+        addresses.reserve(count);
+        for (const auto& segment : _segments)
+            for (std::size_t index = 0; index < segment.Words.size(); ++index)
+                for (auto word = segment.Words[index]; word != 0; word &= word - 1)
+                    addresses.push_back(segment.Begin + index * 64 + static_cast<std::uint64_t>(std::countr_zero(word)));
+        addresses.insert(addresses.end(), _other.begin(), _other.end());
+        if (!std::is_sorted(addresses.begin(), addresses.end())) {
+            std::sort(addresses.begin(), addresses.end());
+            addresses.erase(std::unique(addresses.begin(), addresses.end()), addresses.end());
+        }
+        return addresses;
+    }
+
+private:
+    struct Segment {
+        std::uint64_t Begin;
+        std::uint64_t Size;
+        std::vector<std::uint64_t> Words;
+    };
+    std::vector<Segment> _segments;
+    std::set<std::uint64_t> _other;
+};
+
 }
 
-std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::vector<std::uint8_t>& bytes, const std::vector<Domain::ProgramHeader>& headers) const {
+CodeInstructionSet CodeInstructionCollector::Collect(const std::vector<std::uint8_t>& bytes, const std::vector<Domain::ProgramHeader>& headers) const {
     const auto range = [&](std::uint64_t offset, std::uint64_t size) {
         if (offset > bytes.size() || size > bytes.size() - offset) throw Domain::RelinkerException("Code analysis: file range exceeds image", offset);
     };
@@ -218,7 +273,7 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
         for (const auto target : function.ExtraTargets) addRoot(target);
     }
     if (roots.empty()) throw Domain::RelinkerException("Code analysis: no code entry points");
-    std::set<std::uint64_t> instructions;
+    AddressBits instructions(headers);
     const Codegen::X64InstructionDecoder decoder;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> skipped;
     std::set<std::uint64_t> staticTargets;
@@ -244,7 +299,7 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
             }
             if (info.Length == 0 || info.Length > end - address)
                 throw Domain::RelinkerException("Code analysis: instruction crosses function boundary", address);
-            instructions.insert(address);
+            instructions.Insert(address);
             addAddressTakenRoot(address, bytes.data() + offset + address - begin, info);
             if (info.HasBranchTarget && !info.HasRipRelativeDisp) {
                 const auto target = address + info.Length + static_cast<std::uint64_t>(info.BranchDisp);
@@ -320,7 +375,7 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
         }
     }
     std::size_t previousRoots = 0;
-    std::unordered_set<Domain::VirtualAddress> decodedInstructions;
+    AddressBits decodedInstructions(headers);
     std::vector<std::unordered_set<Domain::VirtualAddress>> sectionReachable(headers.size());
     do {
         previousRoots = roots.size();
@@ -334,8 +389,8 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
             const std::span<const std::uint8_t> text(bytes.data() + header.Offset, header.FileSize);
             const auto graph = UnusedNidFilter::BuildControlFlowGraph(text, header.MappedAddress, entries.front(), entries, pointers, true, sectionReachable[i]);
             for (const auto address : graph->ReachableVaddrs()) {
-                if (!decodedInstructions.insert(address).second) continue;
-                instructions.insert(address);
+                if (!decodedInstructions.Insert(address)) continue;
+                instructions.Insert(address);
                 const auto offset = address - header.MappedAddress;
                 const auto info = decoder.DecodeInstruction(text.data() + offset, text.size() - offset);
                 addAddressTakenRoot(address, text.data() + offset, info);
@@ -344,7 +399,8 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
         }
     } while (roots.size() != previousRoots);
     std::uint64_t previousEnd = 0;
-    for (const auto address : instructions) {
+    auto sorted = instructions.Sorted();
+    for (const auto address : sorted) {
         if (address < previousEnd) {
             std::uint64_t spanEnd = previousEnd;
             try {
@@ -371,8 +427,8 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
                 break;
             }
             if (!spanHasFsPrefix) {
-                const auto previous = instructions.lower_bound(address);
-                if (previous != instructions.begin()) {
+                const auto previous = std::lower_bound(sorted.begin(), sorted.end(), address);
+                if (previous != sorted.begin()) {
                     const auto previousStart = *std::prev(previous);
                     for (const auto& header : headers) {
                         if (header.Type != 1 || (header.Flags & 1) == 0 || previousStart < header.MappedAddress || previousStart - header.MappedAddress >= header.FileSize) continue;
@@ -393,7 +449,7 @@ std::set<Domain::VirtualAddress> CodeInstructionCollector::Collect(const std::ve
             break;
         }
     }
-    return instructions;
+    return CodeInstructionSet(std::move(sorted));
 }
 
 }

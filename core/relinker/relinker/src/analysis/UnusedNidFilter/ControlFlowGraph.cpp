@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <queue>
 #include <cstring>
+#include <vector>
 
 namespace Relinker::UnusedNidFilter {
 
@@ -40,7 +41,8 @@ void buildGraph(
     std::unordered_set<VirtualAddress>& reachable
 ) {
     const Codegen::X64InstructionDecoder decoder;
-    std::unordered_set<VirtualAddress> visited;
+    // One bit per text byte: a hash set of every visited address dominated large titles.
+    std::vector<std::uint64_t> visited((text.size() + 63) / 64);
     std::queue<VirtualAddress> worklist;
     std::vector<VirtualAddress> addressTaken;
     bool speculative = false;
@@ -48,7 +50,11 @@ void buildGraph(
     auto enqueue = [&](VirtualAddress va) {
         if (reachable.count(va) > 0) return;
         if (va < textVaddr || va >= textVaddr + static_cast<VirtualAddress>(text.size())) return;
-        if (!visited.insert(va).second) return;
+        const auto offset = static_cast<std::size_t>(va - textVaddr);
+        auto& word = visited[offset / 64];
+        const auto bit = std::uint64_t{1} << (offset % 64);
+        if ((word & bit) != 0) return;
+        word |= bit;
         worklist.push(va);
     };
 
