@@ -357,7 +357,12 @@ void verifyLayoutPairVariant(const ShaderRecompiler::SourceHandle& paired, const
     require(left.bindings.layout == right.bindings.layout && left.bindings.layout.UsesPushData() == right.bindings.layout.UsesPushData() && left.bindings.pushConstantOffsetBytes == right.bindings.pushConstantOffsetBytes && left.bindings.pushConstantSizeBytes == right.bindings.pushConstantSizeBytes, "layout pair: the binding layout or push range differs from an isolated compile");
     const auto& a = left.artifact;
     const auto& b = right.artifact;
-    require(a.registrationModule == b.registrationModule && a.bdaAbiVersion == b.bdaAbiVersion && a.memoryOffsetDword == b.memoryOffsetDword && a.shaderDataDwords == b.shaderDataDwords && a.imageMetadataDword == b.imageMetadataDword && a.runtimeImageCount == b.runtimeImageCount && a.runtimeImageResources == b.runtimeImageResources && a.hostSubgroupSize == b.hostSubgroupSize && a.parameterExports == b.parameterExports && a.fragmentParameters.size() == b.fragmentParameters.size(), "layout pair: the artifact differs from an isolated compile");
+    const auto sameParameter = [](const ShaderRecompiler::FragmentParameter& p, const ShaderRecompiler::FragmentParameter& q) {
+        return p.location == q.location && p.sourceLocation == q.sourceLocation && p.flat == q.flat && p.perVertex == q.perVertex && p.custom == q.custom && p.flatP10 == q.flatP10;
+    };
+    require(a.vertexInputPatches == b.vertexInputPatches && a.memoryOffsetDword == b.memoryOffsetDword && a.shaderDataDwords == b.shaderDataDwords && a.imageMetadataDword == b.imageMetadataDword && a.runtimeImageCount == b.runtimeImageCount && a.runtimeImageResources == b.runtimeImageResources && a.registrationModule == b.registrationModule && a.bdaAbiVersion == b.bdaAbiVersion && a.runtimeAbiVersion == b.runtimeAbiVersion, "layout pair: the artifact's bindings or ABI differ from an isolated compile");
+    require(a.vertexInputs == b.vertexInputs && a.vertexOffsetSgpr == b.vertexOffsetSgpr && a.instanceOffsetSgpr == b.instanceOffsetSgpr && a.vertexOffsetShared == b.vertexOffsetShared && a.instanceOffsetShared == b.instanceOffsetShared && a.vertexOffsetConflict == b.vertexOffsetConflict && a.instanceOffsetConflict == b.instanceOffsetConflict && a.hostSubgroupSize == b.hostSubgroupSize, "layout pair: the artifact's vertex interface differs from an isolated compile");
+    require(a.parameterExports == b.parameterExports && std::ranges::equal(a.fragmentParameters, b.fragmentParameters, sameParameter) && a.barycentricEmulation.active == b.barycentricEmulation.active && a.barycentricEmulation.smooth == b.barycentricEmulation.smooth && a.barycentricEmulation.linear == b.barycentricEmulation.linear, "layout pair: the artifact's fragment interface differs from an isolated compile");
     const auto& x = left.info;
     const auto& y = right.info;
     require(x.stage == y.stage && x.shaderHash == y.shaderHash && x.waveSize == y.waveSize && x.userDataBase == y.userDataBase && x.userDataCount == y.userDataCount && x.scratchDwords == y.scratchDwords && x.paramExportMask == y.paramExportMask && x.info == y.info && x.bindings == y.bindings, "layout pair: the compiled shader information differs from an isolated compile");
@@ -387,18 +392,28 @@ void verifyLayoutPair() {
     const auto pixelCode = [](std::uint32_t variant) {
         return std::vector<std::uint32_t>{0xbf800000u | variant, 0xf4200100u, 0xfa000000u, 0xbf8cc07fu, 0x7e000204u, 0xf800180fu, 0u, 0xbf810000u};
     };
+    const auto interpolatedCode = [](std::uint32_t variant) {
+        return std::vector<std::uint32_t>{0xbf800000u | variant, 0xc8100000u, 0xc8110001u, 0xc8140500u, 0xc8150501u, 0xf4200100u, 0xfa000000u, 0xbf8cc07fu, 0x7e000204u, 0xf800180fu, 0x05040500u, 0xbf810000u};
+    };
     const auto defaultLimit = SpirvTarget{}.registrationWordLimit;
     struct Configuration {
         bool registration;
         std::uint32_t wordLimit;
         std::uint32_t pushOffset;
+        bool interpolated;
     };
     std::uint32_t variant = 0u;
-    for (const auto& [registration, wordLimit, pushOffset] : {Configuration{false, defaultLimit, 0u}, Configuration{true, defaultLimit, 0u}, Configuration{true, defaultLimit, 128u}, Configuration{true, 1u, 128u}}) {
+    for (const auto& [registration, wordLimit, pushOffset, interpolated] : {Configuration{false, defaultLimit, 0u, false}, Configuration{true, defaultLimit, 0u, false}, Configuration{true, defaultLimit, 128u, false}, Configuration{true, 1u, 128u, false}, Configuration{true, defaultLimit, 128u, true}}) {
         for (const bool zeroFirst : {false, true}) {
-            const auto code = pixelCode(variant++);
+            const auto code = interpolated ? interpolatedCode(variant++) : pixelCode(variant++);
             auto pixel = LayoutPairRequest(code, buffer, registration, wordLimit);
             pixel.layout.pushConstantOffsetBytes = pushOffset;
+            if (interpolated) {
+                pixel.context.pixel->interpolatorCount = 2u;
+                pixel.context.pixel->interpolatorSettings[1] = 1u;
+                pixel.context.pixel->inputAddr = PixelInputBit(PixelInput::PerspectiveCenter);
+                pixel.context.pixel->hasPerspectiveCenterVgpr = true;
+            }
             auto zero = pixel;
             zero.layout.pushConstantSizeBytes = 0u;
             ShaderPreparationContext preparation;
@@ -411,6 +426,7 @@ void verifyLayoutPair() {
             require(pixelHandle->artifact->bindings.layout.UsesPushData() && !zeroHandle->artifact->bindings.layout.UsesPushData(), "layout pair: the fixture does not distinguish the push-constant capacities");
             const bool module = registration && wordLimit == defaultLimit;
             require(GetPreparedArtifact(*pixelHandle).registrationModule == module && GetPreparedArtifact(*zeroHandle).registrationModule == module, "layout pair: the word limit did not choose the module mode");
+            require(GetPreparedArtifact(*pixelHandle).fragmentParameters.size() == (interpolated ? 2u : 0u) && GetPreparedArtifact(*zeroHandle).fragmentParameters.size() == (interpolated ? 2u : 0u), "layout pair: the interpolated fixture did not declare its two parameters");
             verifyLayoutPairIsolation(pixel, *pixelHandle, wordLimit + 1u);
             verifyLayoutPairIsolation(zero, *zeroHandle, wordLimit + 2u);
         }
