@@ -357,6 +357,19 @@ IrValue* TranslationContext::nanResultF32(std::initializer_list<IrValue*> source
     return &ir.BitCastF32(ir.Select(isNan(ir.BitCastF32(*candidate)), quietNan32(IrU32(*candidate)).Value(), fallback));
 }
 
+IrValue* TranslationContext::rareFixupF32(IrValue* plain, IrValue* fixed, bool tinyFlushed) {
+    if (fixed == plain) return fixed;
+    const std::uint32_t roundMode = floatMode.has_value() ? floatMode->floatMode & 3u : 0u;
+    if (tinyFlushed && roundMode != 0u) return fixed;
+    IrValue* special = nullptr;
+    if (tinyFlushed) {
+        special = &ir.ULessThan(ir.BitwiseAnd(ir.IAdd(ir.BitCastU32(*plain), ir.Constant(0x007fffffu)), ir.Constant(0x7fffffffu)), ir.Constant(0x01000000u));
+    } else {
+        special = &ir.Emit(IrOpcode::FPIsNan32, IrType::U1, {plain});
+    }
+    return &ir.Emit(IrOpcode::SelectF32, IrType::F32, {special, fixed, plain}, SelectFlags{true});
+}
+
 IrValue& TranslationContext::invalidProductF32(IrValue* lhs, IrValue* rhs) {
     IrValue& lhsMagnitude = ir.BitwiseAnd(ir.BitCastU32(*lhs), ir.Constant(0x7fffffffu));
     IrValue& rhsMagnitude = ir.BitwiseAnd(ir.BitCastU32(*rhs), ir.Constant(0x7fffffffu));

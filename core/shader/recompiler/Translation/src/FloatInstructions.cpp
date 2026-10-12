@@ -573,14 +573,16 @@ bool TranslationContext::floatBinary(const RdnaInstruction& inst, IrOpcode opcod
         const RdnaOperand& operand = sourceAt(inst, reverse ? 1u - index : index);
         args[index] = readOperand(operand, IrOpcodeArgumentType(opcode, index));
     }
-    IrValue* result = &ir.Emit(opcode, IrOpcodeType(opcode), {args[0], args[1]});
+    IrValue* plain = &ir.Emit(opcode, IrOpcodeType(opcode), {args[0], args[1]});
+    IrValue* result = plain;
     if (opcode == IrOpcode::FPMul32) result = &flushTinyProduct(args[0], args[1], result).Value();
+    const bool tinyFlushed = result != plain;
     if (opcode == IrOpcode::FPAdd32 || opcode == IrOpcode::FPMul32) result = nanResultF32({args[0], args[1]}, result);
     if (opcode == IrOpcode::FPSub32) {
         IrValue* negated = &ir.BitCastF32(ir.BitwiseXor(ir.BitCastU32(*args[1]), ir.Constant(0x80000000u)));
         result = reverse ? nanResultF32({negated, args[0]}, result) : nanResultF32({args[0], negated}, result);
     }
-    writeOperand(inst.destination, result);
+    writeOperand(inst.destination, rareFixupF32(plain, result, tinyFlushed));
     return true;
 }
 
@@ -591,11 +593,13 @@ bool TranslationContext::floatTernary(const RdnaInstruction& inst, IrOpcode opco
         const IrType type = IrOpcodeArgumentType(opcode, index);
         args[index] = type == IrType::F32 && mix ? &readMixF32(operand).Value() : readOperand(operand, type);
     }
-    IrValue* result = &ir.Emit(opcode, IrOpcodeType(opcode), {args[0], args[1], args[2]});
+    IrValue* plain = &ir.Emit(opcode, IrOpcodeType(opcode), {args[0], args[1], args[2]});
+    IrValue* result = plain;
     if (opcode == IrOpcode::FPFma32) result = &flushTinyProduct(args[0], args[1], result, args[2]).Value();
+    const bool tinyFlushed = result != plain;
     const bool f32Sources = !mix || !(sourceAt(inst, 0u).opSelHi || sourceAt(inst, 1u).opSelHi || (!accumulator && sourceAt(inst, 2u).opSelHi));
     if (opcode == IrOpcode::FPFma32 && f32Sources) result = nanResultF32({args[0], args[1], args[2]}, result, &invalidProductF32(args[0], args[1]));
-    writeOperand(inst.destination, result);
+    writeOperand(inst.destination, rareFixupF32(plain, result, tinyFlushed));
     return true;
 }
 
