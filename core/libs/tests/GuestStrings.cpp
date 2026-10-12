@@ -31,6 +31,7 @@ int APS5_VABI memcpy_s_nid_postfix(void*, std::size_t, const void*, std::size_t)
 int APS5_VABI memmove_s_nid_postfix(void*, std::size_t, const void*, std::size_t);
 int APS5_VABI memset_s_nid_postfix(void*, std::size_t, int, std::size_t);
 char* APS5_VABI strnstr_nid_postfix(const char*, const char*, std::size_t);
+std::size_t APS5_VABI strxfrm_nid_postfix(char*, const char*, std::size_t);
 int APS5_VABI snprintf_s_nid_postfix(char*, std::size_t, const char*, ...);
 int APS5_VABI sscanf_s_nid_postfix(const char*, const char*, ...);
 int APS5_VABI __inet_aton_nid_postfix(const char*, void*);
@@ -206,6 +207,20 @@ int main() {
     Require(stpcpy_nid_postfix(end, "") == end && chained[5] == 'z');
     Require(strncat_nid_postfix(buffer, "xyz", 2) == buffer);
     Require(std::strcmp(buffer, "xy") == 0);
+    char transformed[8] = "zzzzzzz";
+    Require(strxfrm_nid_postfix(transformed, "abc", sizeof(transformed)) == 3);
+    Require(std::strcmp(transformed, "abc") == 0 && transformed[4] == 'z');
+    std::memset(transformed, 'z', sizeof(transformed));
+    Require(strxfrm_nid_postfix(transformed, "abcdefgh", 4) == 8);
+    Require(std::strcmp(transformed, "abc") == 0 && transformed[4] == 'z');
+    std::memset(transformed, 'z', sizeof(transformed));
+    Require(strxfrm_nid_postfix(transformed, "abcdefg", sizeof(transformed)) == 7 && std::strcmp(transformed, "abcdefg") == 0);
+    std::memset(transformed, 'z', sizeof(transformed));
+    Require(strxfrm_nid_postfix(transformed, "abcdefgh", sizeof(transformed)) == 8 && std::strcmp(transformed, "abcdefg") == 0);
+    std::memset(transformed, 'z', sizeof(transformed));
+    Require(strxfrm_nid_postfix(transformed, "", sizeof(transformed)) == 0 && transformed[0] == '\0' && transformed[1] == 'z');
+    Require(strxfrm_nid_postfix(transformed, "abc", 1) == 3 && transformed[0] == '\0' && transformed[1] == 'z');
+    Require(strxfrm_nid_postfix(nullptr, "abc", 0) == 3);
     Require(strpbrk_nid_postfix(buffer, "ay") == buffer + 1);
     Require(strpbrk_nid_postfix(buffer, "") == nullptr);
     Require(strcspn_nid_postfix(buffer, "y") == 1);

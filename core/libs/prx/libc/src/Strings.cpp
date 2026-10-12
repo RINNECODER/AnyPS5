@@ -499,7 +499,7 @@ size_t APS5_VABI wcsxfrm_nid_postfix(char16_t* destination, const char16_t* sour
 }
 
 size_t APS5_VABI strxfrm_nid_postfix(char* destination, const char* source, size_t count) {
-    return std::strxfrm(destination, source, count);
+    return strlcpy_nid_postfix(destination, source, count);
 }
 
 char* APS5_VABI strtok_s_nid_postfix(char* str, const char* delim, char** context) {
