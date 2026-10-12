@@ -515,6 +515,11 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         texture = cached->texture;
         textureCompare = cached->compare;
     } else {
+        if (BindTrace::Active()) {
+            BindTrace::Log("  image miss 0x%llx %s bytes %zu written %d cacheable %d staged %d keys %u content %llx",
+                static_cast<unsigned long long>(descriptor.baseAddress), describeImage(descriptor).c_str(), bytes, written ? 1 : 0,
+                cacheable ? 1 : 0, staged ? 1 : 0, static_cast<unsigned>(keys), static_cast<unsigned long long>(content));
+        }
         texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
         if (keys == Graphics::DccKeys::Uncompressed) {
             if (cpuRead && !texture->UploadsInPlace(buffer.buffer, buffer.offset)) cpuRead(descriptor.baseAddress, bytes);
@@ -783,7 +788,7 @@ void MetalShaderResources::CommittedWithoutWaiting() {
         for (const auto& image : images) {
             if (image.cacheable) {
                 imageCache->Insert(image.texture->Descriptor().baseAddress, image.host.data(), image.texture, image.compare,
-                    image.written ? 0 : image.content);
+                    image.written ? 0 : image.content, image.written);
             }
         }
     }
@@ -873,8 +878,14 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         for (const auto& image : images) {
             if (image.cacheable) {
                 imageCache->Insert(image.texture->Descriptor().baseAddress, image.host.data(), image.texture, image.compare,
-                    image.written ? 0 : image.content);
+                    image.written ? 0 : image.content, image.written);
             }
+        }
+    }
+    // Written surfaces' guest bytes now hold their copy-backs.
+    if (imageCache != nullptr && fault.state == Abi::FaultState::Empty) {
+        for (const auto& image : images) {
+            if (image.cacheable && image.written) imageCache->Seal(image.host.data(), image.texture.get());
         }
     }
     if (BindTrace::Active()) {

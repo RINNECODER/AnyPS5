@@ -316,17 +316,33 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     memory = capture.Regions();
     request.context.memory = memory;
     const auto guest = Recompile(request, *resources);
-    MetalBackend::TargetOptions options;
-    if (@available(macOS 15.0, *))
-        options.supportsWorkgroupAtomicFences = [nativeDevice supportsFamily:MTLGPUFamilyApple1];
-    options.supportsInt64 = true;
-    options.supportsGpuAddresses = true;
-    options.supportsSimdGroups = true;
-    configureSamplerArguments(options, *guest, nativeDevice);
-    const auto converted = MetalBackend::ConvertToMetal(*guest, ShaderStage::Compute, options);
+    // The recompiler memoizes its results: the same result object means the same conversion and
+    // pipeline, so a repeated dispatch skips building and hashing the conversion key (the whole
+    // SPIR-V) and the Metal source (the function cache key).
+    auto [pipeline, bdaStores] = [&]() -> std::pair<std::shared_ptr<const MetalComputePipeline>, bool> {
+        std::lock_guard lock(computePipelinesMutex);
+        const auto found = computePipelines.find(guest.get());
+        if (found != computePipelines.end() && !found->second.guest.expired()) return {found->second.pipeline, found->second.bdaStores};
+        MetalBackend::TargetOptions options;
+        if (@available(macOS 15.0, *))
+            options.supportsWorkgroupAtomicFences = [nativeDevice supportsFamily:MTLGPUFamilyApple1];
+        options.supportsInt64 = true;
+        options.supportsGpuAddresses = true;
+        options.supportsSimdGroups = true;
+        configureSamplerArguments(options, *guest, nativeDevice);
+        const auto converted = MetalBackend::ConvertToMetal(*guest, ShaderStage::Compute, options);
+        GpuStallWatch::SourceScope stallSource(converted.source);
+        auto created = std::make_shared<const MetalComputePipeline>(nativeDevice, converted);
+        const bool stores = StoresThroughBda(converted);
+        if (computePipelines.size() >= 1024) {
+            std::erase_if(computePipelines, [](const auto& entry) { return entry.second.guest.expired(); });
+            if (computePipelines.size() >= 1024) computePipelines.clear();
+        }
+        computePipelines[guest.get()] = {guest, created, stores};
+        return {created, stores};
+    }();
+    const auto& converted = pipeline->Reflection();
     GpuStallWatch::SourceScope stallSource(converted.source);
-    const bool bdaStores = StoresThroughBda(converted);
-    auto pipeline = std::make_shared<const MetalComputePipeline>(nativeDevice, converted);
     // Depth/stencil and multisampled color targets live only in the draw executor's resident
     // textures, so a dispatch reading one (an MSAA resolve, a depth-based post pass) binds that
     // texture like a draw does; guest memory at those addresses never holds the rendered pixels.
@@ -725,9 +741,11 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                 static std::uint64_t flips = 0;
                 if (++flips % 16 == 0) {
                     const auto cache = draw->ImageCache()->TakeStatistics();
-                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}\n",
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"verified\":%llu,\"rejected\":%llu,\"hashed_mib\":%.1f,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}\n",
                         static_cast<unsigned long long>(cache.hits), static_cast<unsigned long long>(cache.misses),
                         static_cast<unsigned long long>(cache.inserts), static_cast<unsigned long long>(cache.clears),
+                        static_cast<unsigned long long>(cache.verified), static_cast<unsigned long long>(cache.rejected),
+                        static_cast<double>(cache.hashedBytes) / (1024.0 * 1024.0),
                         static_cast<unsigned long long>(cache.clearsBy[0]), static_cast<unsigned long long>(cache.clearsBy[1]),
                         static_cast<unsigned long long>(cache.clearsBy[2]), static_cast<unsigned long long>(cache.clearsBy[3]),
                         static_cast<unsigned long long>(cache.clearsBy[4]), static_cast<unsigned long long>(cache.clearsBy[5]),

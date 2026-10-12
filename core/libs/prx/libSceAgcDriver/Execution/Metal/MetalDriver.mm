@@ -1,4 +1,5 @@
 #include "MetalDriverInternal.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderCapture.hpp"
@@ -585,7 +586,14 @@ void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack(std::uint32_t cause) {
 
 void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes) {
     const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
-    if (timeline.MayHaveWritten(address, end)) { ++drainsBy[0x102]; timeline.Drain(); }
+    if (timeline.MayHaveWritten(address, end)) {
+        if (BindTrace::Active()) {
+            BindTrace::Log("  drain before CPU read 0x%llx +0x%llx%s", static_cast<unsigned long long>(address),
+                static_cast<unsigned long long>(bytes), timeline.UnknownWritesPending() ? " (unknown writes pending)" : "");
+        }
+        ++drainsBy[0x102];
+        timeline.Drain();
+    }
 }
 
 bool MetalDriver::Impl::DeferWork() {
@@ -597,7 +605,17 @@ bool MetalDriver::Impl::DeferWork() {
 }
 
 void MetalDriver::Impl::ForgetCachedImages(ForgetReason reason) {
-    if (draw != nullptr && draw->ImageCache() != nullptr) draw->ImageCache()->Clear(static_cast<unsigned>(reason));
+    if (draw == nullptr || draw->ImageCache() == nullptr) return;
+    // The guest may have written memory at these points: cached surfaces prove their bytes before
+    // their next use (GuestImageCache::Expire). ANYPS5_METAL_IMAGE_CACHE_EXPIRE=0 drops them instead.
+    static const bool expire = [] {
+        const char* value = std::getenv("ANYPS5_METAL_IMAGE_CACHE_EXPIRE");
+        return value == nullptr || *value != '0';
+    }();
+    const bool guestPoint = reason == ForgetReason::Submission || reason == ForgetReason::Wait || reason == ForgetReason::Flip ||
+        reason == ForgetReason::Event;
+    if (expire && guestPoint) draw->ImageCache()->Expire(static_cast<unsigned>(reason));
+    else draw->ImageCache()->Clear(static_cast<unsigned>(reason));
 }
 
 void MetalDriver::Impl::ForgetCachedImages(const GuestStoreRange& store) {

@@ -10,6 +10,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <unordered_map>
 #include <map>
 #include <mutex>
 #include <set>
@@ -17,7 +18,11 @@
 #include <string_view>
 #include <thread>
 
+namespace ShaderRecompiler { struct RecompileResult; }
+
 namespace AgcDriver::Metal {
+
+class MetalComputePipeline;
 
 class MetalPresentation;
 
@@ -121,6 +126,15 @@ struct MetalDriver::Impl {
     std::vector<PendingLabel> pendingLabels;
     // ANYPS5_METAL_DEFER=0 waits for every draw and dispatch as before.
     static bool DeferWork();
+    // Compute pipelines by recompile result (ExecuteDispatchSynchronously); the weak pointer tells
+    // a live result from a new one at a reused address.
+    struct ComputePipelineEntry {
+        std::weak_ptr<const ShaderRecompiler::RecompileResult> guest;
+        std::shared_ptr<const MetalComputePipeline> pipeline;
+        bool bdaStores = false;
+    };
+    std::mutex computePipelinesMutex;
+    std::unordered_map<const ShaderRecompiler::RecompileResult*, ComputePipelineEntry> computePipelines;
     void DeliverEopInterrupt(std::uint32_t queue);
     std::uint64_t barrierWaits = 0;
     void ExecuteSubmission(const Submission& submission, QueueState& queue);
