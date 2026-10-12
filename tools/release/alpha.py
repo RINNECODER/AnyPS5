@@ -12,8 +12,9 @@ push to main, or locally with the same arguments. Steps:
 2. Read and verify the current engine-alpha.json. Skip if this commit is already the alpha
    or is not a descendant of it (an older run finishing late must never replace a newer alpha).
 3. Pick the tag ``engine-<YYYY.MM.DD>.<n>`` (n counts up per UTC day).
-4. build_package.py: fresh native-profile build, full CTest inventory, MacPS acceptance,
-   private-path scan, zip, zip round-trip acceptance.
+4. build_package.py: fresh x86_64 Rosetta build (libs, relinker, anyps5_rosetta_run), launcher
+   unit test, package assembly and binary checks, private-path scan, synthetic fixture title
+   through the packaged launcher, zip, zip round-trip smoke, MacPS acceptance of both.
 5. Write release.json (schema 1), sign it, verify the signature independently.
 6. ``gh release create`` the immutable prerelease with the zip, release.json and .sig.
 7. Write engine-alpha.json with the next sequence, sign, upload, read back, verify.
@@ -156,7 +157,6 @@ def run(args, log=print):
 
 
 def main(argv=None):
-    raise SystemExit("TCG engine removed; Rosetta packaging pending")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--commit", required=True)

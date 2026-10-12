@@ -5,9 +5,8 @@
         [--macps-revision HEAD] [--manifest-sha256 <hex>]
 
 Builds LauncherCore from a fresh clone of the MacPS repository at the given revision and
-links tools/accept_diagnostic_package.swift against it (the same helper
-prepare_diagnostic_engine.py uses), then accepts the package pinned to its manifest
-SHA-256. A zip is unpacked with the safe extractor from verify.py first. Prints the
+links tools/release/accept_package.swift against it, then accepts the package pinned to
+its manifest SHA-256. A zip is unpacked with the safe extractor from verify.py first. Prints the
 acceptance record; exit status 0 only when MacPS accepted the package.
 """
 import argparse
@@ -20,7 +19,7 @@ import tempfile
 
 import verify
 
-HELPER_SOURCE = Path(__file__).resolve().parents[1] / "accept_diagnostic_package.swift"
+HELPER_SOURCE = Path(__file__).resolve().with_name("accept_package.swift")
 
 
 def build_helper(macps_repo, work, revision="HEAD"):

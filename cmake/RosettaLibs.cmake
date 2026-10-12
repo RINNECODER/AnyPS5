@@ -158,6 +158,9 @@ endforeach()
 add_custom_target(rosetta_libs ALL)
 add_dependencies(rosetta_libs ${ANYPS5_ROSETTA_PATCHED} relinker rosetta_metallib)
 
+# The engine package's launcher and stub runtime (tools/rosetta/launcher; target rosetta_engine).
+add_subdirectory(${CMAKE_SOURCE_DIR}/tools/rosetta/launcher ${CMAKE_BINARY_DIR}/rosetta/launcher)
+
 if(BUILD_TESTING)
     add_subdirectory(${ANYPS5_ROSETTA_LIBS_ROOT}/tests/direct_memory_darwin ${CMAKE_BINARY_DIR}/rosetta/tests/direct_memory_darwin)
     anyps5_rosetta_graphics_tests()

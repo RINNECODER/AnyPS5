@@ -1,6 +1,8 @@
 # Engine releases and update channels
 
-> Engine releases are paused. The TCG engine these tools packaged was removed; `tools/release/alpha.py` and `build_package.py` fail fast until Rosetta packaging exists. The channel feed tooling below is kept as is.
+> The engine is the Rosetta 2 direct-execution engine (docs/design/rosetta-direct-execution.md):
+> `build_package.py` packages it and `alpha.py` publishes it. The alpha and promote workflows
+> stay disabled in the repository settings until the maintainer enables them.
 
 The fork publishes signed engine builds for MacPS on three channels. MacPS installs from
 the channel picked in its Settings (default `alpha`), verifies everything below before it
@@ -19,7 +21,7 @@ Everything is public on RINNECODER/AnyPS5 and downloads need no authentication.
 
 **Build releases.** Each build is an immutable GitHub prerelease tagged `engine-<YYYY.MM.DD>.<n>`, where `n` counts up per UTC day. It has three assets:
 
-- `anyps5-engine-<version>-macos-arm64.zip`: the engine package. The zip root is the package directory itself (`manifest.json`, `SHA256SUMS`, `bin/`, `lib/`, `fixtures/`), with Unix modes preserved.
+- `anyps5-engine-<version>-macos-arm64.zip`: the engine package (see [The engine package](#the-engine-package)). The zip root is the package directory itself (`manifest.json`, `SHA256SUMS`, `bin/`, `libs/`, `share/`), with Unix modes preserved. The engine is x86_64 and runs under Rosetta 2 on Apple silicon.
 - `release.json`: the build record (schema 1). It holds the version, commit, build time, the zip's URL, SHA-256 and size, `package_manifest_sha256` and short notes.
 - `release.json.sig`: the signature of `release.json`.
 
@@ -49,21 +51,83 @@ Sequences are allocated under a machine-wide lock, and the signer keeps a journa
 
 The signer, `tools/release/signer.swift`, uses CryptoKit. Every signature is re-checked before upload by the independent RFC 8032 verifier in `verify.py`, and the signer refuses to run with a key whose public half doesn't match the key above.
 
+## The engine package
+
+| Path | What |
+|---|---|
+| `bin/anyps5_rosetta_run` | The engine executable MacPS runs: a thin x86_64 Mach-O (tools/rosetta/launcher). |
+| `bin/relinker` | `relinker --macos --to-rosetta`, run by the launcher on a title's first launch. |
+| `libs/*.prx`, `libs/AnyPS5Utilities.metallib` | The x86_64 system libraries the relinked title loads, and the Metal utility shaders. |
+| `share/aps5_stub_runtime.dylib` | Logging stubs for imports no library exports yet (tools/rosetta/stub_runtime.c). |
+| `share/LICENSE` | The license. |
+| `manifest.json` | Schema 3: `backend` `"Rosetta 2 direct execution (x86_64 relinked guest)"`, `engine_version`, `executable`, `architecture` `"x86_64"`, `source_revisions.AnyPS5` (`commit`, `tree`, `clean`), `capabilities` (the launcher's `--capabilities-json`), `validation`, and `files` (`sha256` and `size` of every other file). |
+| `SHA256SUMS` | `sha256  path` for every file, `manifest.json` included. |
+
+**The launch contract.** MacPS runs
+
+```
+anyps5_rosetta_run --resource-root <mounted data image> --diagnostics-json \
+    --sce-module <title>/libc.prx [--sce-module <title>/<other>.prx ...] <title>/eboot.bin
+```
+
+and probes it first with `--capabilities-json` (schema 1: `host_architecture` `arm64`,
+`guest_architecture` `x86_64`, the backend above, `supported_formats` `sce_elf64_x86_64`,
+`supported_containers` `plain_self`, `runtime_abi` `sce_sysv`, `resource_root_argument`
+`--resource-root`, `sce_module_argument` `--sce-module`). The launcher:
+
+1. unselfs the eboot and the modules (the `--sce-module` paths, `sce_module/` of the title
+   and of the resource root, and the resource root's top-level `*.prx` as modules loaded at
+   run time);
+2. relinks them with `bin/relinker --macos --to-rosetta` into
+   `~/Library/Caches/AnyPS5/rosetta/<eboot sha256>/` on the first launch (about 40 s for a
+   large title; `ANYPS5_ROSETTA_CACHE` moves the cache). The relink is built in a `.partial`
+   directory and renamed into place, and reused while the eboot, the module sizes and the
+   relinker are unchanged. A new engine version relinks once;
+3. lays out `libs/` (links to the package's libraries, plus empty placeholders for libraries
+   the build lacks), `app0/` (the resource root linked in read-only, beside the relinked
+   modules) and a stub dylib for imports no library exports (written by the launcher, so
+   the user's Mac needs no developer tools);
+4. runs the relinked title as its child with the caller's environment (frame capture,
+   bind-trace and other `ANYPS5_*` variables pass through), forwards SIGTERM/SIGINT/SIGHUP
+   (and sends SIGKILL 1.5 s later), and a watchdog kills the title if the launcher itself is
+   killed. The launcher exits with the title's exit code (128 + signal for a signal).
+
+**Diagnostics.** With `--diagnostics-json`, JSON lines (`schema_version` 1) go to stderr,
+mixed with the title's own output (MacPS reads stdout and stderr as one stream):
+
+| Event | When | Fields |
+|---|---|---|
+| `preparing` | hashing, unself, relink (every second, first launch only), layout, ready | `stage`, `message` (for display), `progress` (0..1; `estimated` while relinking), `elapsed_ms` |
+| `startup` | libkernel reached the title's entry point | `entry`, `seconds` |
+| `frames_presented`, `frame_captured` | with `ANYPS5_FRAME_CAPTURE_DIR` (Metal backend) | as before |
+| `guest_exit` | the title exited | `exit_code`, `signal`, `seconds`, `stopped`, `timed_out` |
+| `error` | the launch failed; the exit code is non-zero | `code` (`invalid_arguments` 2, `input_unavailable` 3, `unsupported_executable` 4, `loader_failure` 5, `host_failure` 6), `message` |
+
 ## How a package is built
 
-`tools/release/build_package.py` runs the existing `tools/prepare_diagnostic_engine.py --profile native` unchanged. That one run covers:
+`tools/release/build_package.py --source <clean checkout> --commit <sha> --version <v> --work <dir> [--macps-repo <MacPS>]`, on the self-hosted Apple silicon runner:
 
-- a fresh clone and build at the exact commit;
-- the full declared native CTest inventory;
-- packaging through `tools/diagnostic_package.py`;
-- relocated fixture runs;
-- MacPS's production `EnginePackage.accept`, built from a fresh clone of the MacPS repository, with negative controls.
+1. clones the source at the commit (submodules from the checkout's own copies) into `--work`,
+   which must not contain the home path or user name;
+2. configures the x86_64 Rosetta build (`-DANYPS5_ROSETTA_LIBS=ON
+   -DCMAKE_OSX_ARCHITECTURES=x86_64 -DANYPS5_ROSETTA_ENGINE_VERSION=<v>`), builds
+   `rosetta_engine` and runs the launcher's unit test (`rosetta_launcher_tests`);
+3. assembles the package from the build's `rosetta/` tree, which already has the package
+   layout, and checks that every Mach-O is thin x86_64 and loads only system libraries or
+   package-relative ones (`@rpath`, `@loader_path`);
+4. rejects any package byte that contains the build user's home path or user name;
+5. runs a synthetic fixture title (tools/rosetta/tests/launcher_smoke.py, never a retail
+   title) through the packaged launcher with MacPS's arguments, cold and warm;
+6. writes `manifest.json` and `SHA256SUMS`, then a deterministic zip, unzips it with the
+   release extractor, checks every file against the manifest and runs the fixture smoke
+   again on those bytes;
+7. with `--macps-repo`, runs MacPS's production `EnginePackage.accept`
+   (tools/release/macps_accept.py) on the package and on the round-tripped bytes, pinned to
+   the manifest SHA-256. `alpha.py` always passes the runner's MacPS checkout.
 
-`build_package.py` then adds three steps of its own:
-
-1. It rejects any package byte that contains the build user's home path or user name, because the binaries are public.
-2. It writes a deterministic zip.
-3. It unzips the zip with `ditto` and runs `EnginePackage.accept` again on the round-tripped bytes, pinned to the manifest SHA-256.
+Signing stays where it was: `alpha.py` writes `release.json`, signs it with the runner's key
+and publishes. `tools/rosetta/run_title.py` is a development wrapper over the same launcher
+(`--build <dir>` uses `<dir>/rosetta/bin/anyps5_rosetta_run`).
 
 ## Verifying a channel yourself
 
@@ -99,9 +163,9 @@ python3 tools/release/macps_accept.py anyps5-engine-<version>-macos-arm64.zip --
 
 If a gate fails, the run reports the reason and waits for the next hour.
 
-**The smoke.** The title doesn't boot yet, so the smoke records the furthest boot stage reached rather than requiring a pass. The stages, in order, are: `no_diagnostics`, `launch_rejected`, `load_rejected`, `dependency_init_failed`, `entered_main`, `guest_exit`.
+**The smoke.** The smoke runs the title through the candidate's `bin/anyps5_rosetta_run` with a scratch relink cache (so it includes the first-launch relink) and records the furthest boot stage reached rather than requiring a pass. The stages, in order, are: `no_diagnostics`, `launch_rejected`, `load_rejected`, `dependency_init_failed`, `entered_main`, `guest_exit`.
 
-- The candidate and the current beta run side by side on the runner, under the shared `title-session` lease.
+- The candidate and the current beta run one after the other on the runner.
 - The title dump's location comes only from the runner `.env` (`ANYPS5_E2E_TITLE_DIR`). Its paths and hashes are never committed or logged.
 
 **Regression issues.** A `regression` issue counts against the oldest version it mentions, in the form `YYYY.MM.DD.n`, and against every later version, since later builds still carry the regression until it is fixed. Older versions are not blocked. An issue that mentions no version blocks every promotion. Close the issue, or edit it to name the right version, to unblock.

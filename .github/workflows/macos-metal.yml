@@ -148,7 +148,7 @@ jobs:
           # The build directory persists between runs; never test a stale binary.
           rm -f "$BUILD_DIR/tests/direct_memory_darwin_tests"
           set +e
-          cmake --build "$BUILD_DIR" --parallel --target rosetta_libs direct_memory_darwin_tests metal_utility_tests rosetta_direct_graphics_tests -- -k 0 > "$BUILD_DIR/build.log" 2>&1
+          cmake --build "$BUILD_DIR" --parallel --target rosetta_libs rosetta_engine rosetta_launcher_tests direct_memory_darwin_tests metal_utility_tests rosetta_direct_graphics_tests -- -k 0 > "$BUILD_DIR/build.log" 2>&1
           status=$?
           set -e
           tail -n 3 "$BUILD_DIR/build.log"
@@ -173,6 +173,8 @@ jobs:
         # Runs even when the build step failed on other libraries' translation units.
         # direct_memory_darwin and the metal tests are x86_64 binaries (Rosetta runs them);
         # rosetta_runtime_* relink small guest fixtures and run them under arch -x86_64;
+        # rosetta_launcher_tests checks the launcher's stub dylibs and rosetta_launcher_smoke
+        # runs a fixture title through anyps5_rosetta_run as MacPS launches one;
         # rosetta_lib_binds checks the libs' cross-imports. Window tests inherit
         # ANYPS5_UNOBTRUSIVE_WINDOWS from the job environment via ctest.
         if: ${{ !cancelled() && steps.configure.outcome == 'success' }}
@@ -186,4 +188,4 @@ jobs:
           else
             cmake --build "$BUILD_DIR" --parallel --target rosetta_runtime_tests
           fi
-          ctest --test-dir "$BUILD_DIR" -R 'direct_memory_darwin|metal_utility_tests|rosetta_direct_graphics|rosetta_lib_binds|rosetta_runtime' --output-on-failure --timeout 180
+          ctest --test-dir "$BUILD_DIR" -R 'direct_memory_darwin|metal_utility_tests|rosetta_direct_graphics|rosetta_lib_binds|rosetta_runtime|rosetta_launcher' --output-on-failure --timeout 180

@@ -356,21 +356,6 @@ class PackageArchiveTests(unittest.TestCase):
             self.assertEqual(build_package.privacy_scan(scratch, {b"/Users/someone"}), ["lib/a.dylib"])
 
 
-class BuildRetryTests(unittest.TestCase):
-    def test_only_the_relocated_focus_flake_is_retried(self):
-        with tempfile.TemporaryDirectory() as scratch:
-            def receipt(name, stderr):
-                log = Path(scratch) / (name + ".stderr")
-                log.write_text(stderr)
-                ok = {"name": "build", "exit_code": 0, "expected_exit_code": 0}
-                return {"commands": [ok, {"name": name, "exit_code": 1, "expected_exit_code": 0,
-                                          "logs": {"stderr": {"path": str(log)}}}]}
-            self.assertTrue(build_package.focus_flake(receipt("relocation-8", "Actual native idle owner failed to pump AppKit")))
-            self.assertFalse(build_package.focus_flake(receipt("relocation-8", "FAIL wrong guest result")))
-            self.assertFalse(build_package.focus_flake(receipt("combined-native", "failed to pump AppKit")))
-            self.assertFalse(build_package.focus_flake(receipt("strict-fresh-accept", "failed to pump AppKit")))
-
-
 class SmokeStageTests(unittest.TestCase):
     def test_stage_ladder_from_diagnostics_events(self):
         def event(kind, **fields):

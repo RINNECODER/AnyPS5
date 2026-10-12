@@ -82,10 +82,12 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Initialize submodules
+        # The Rosetta engine package: the same submodules as the macOS Rosetta libs job.
         run: >-
           git submodule update --init --depth 1
-          3rdparty/SDL2 3rdparty/SPIRV-Cross
-          3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers 3rdparty/glslang
+          3rdparty/SDL2 3rdparty/SPIRV-Cross 3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers
+          3rdparty/glslang 3rdparty/LibAtrac9 3rdparty/ffmpeg-core 3rdparty/freetype
+          3rdparty/libjpeg-turbo 3rdparty/stb
       - name: Clean submodules
         # The package build requires a pristine source tree; checkout only cleans the superproject.
         run: git submodule foreach --quiet 'git reset --quiet --hard && git clean -qffdx'

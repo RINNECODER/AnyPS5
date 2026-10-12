@@ -11,7 +11,7 @@ PS5 runtime for macOS: the guest runs directly under Rosetta 2 as relinked x86_6
 
 ## Run a title
 
-The direct path relinks the title with `relinker --macos --to-rosetta`, builds the system libraries as x86_64 Mach-O `libs/<name>.prx`, and runs the result under `arch -x86_64`. [`tools/rosetta/run_title.py`](tools/rosetta/run_title.py) does the relink (cached per title), lays out the run directory and launches it; see [the design](docs/design/rosetta-direct-execution.md) and the [macOS build section](docs/dev/BUILD.md#macos-rosetta-direct-path).
+The direct path relinks the title with `relinker --macos --to-rosetta`, builds the system libraries as x86_64 Mach-O `libs/<name>.prx`, and runs the result under `arch -x86_64`. The engine launcher, `anyps5_rosetta_run` ([`tools/rosetta/launcher`](tools/rosetta/launcher)), does the relink (cached per title), lays out the run directory and launches it; it is the executable of the engine package MacPS installs ([releases](docs/RELEASES.md)), and [`tools/rosetta/run_title.py`](tools/rosetta/run_title.py) wraps it for development; see [the design](docs/design/rosetta-direct-execution.md) and the [macOS build section](docs/dev/BUILD.md#macos-rosetta-direct-path).
 
 Engine releases are paused while packaging is rebuilt around the Rosetta path. The exact flags CI uses are in [macos-metal.yml](.github/workflows/macos-metal.yml).
 
