@@ -10,6 +10,10 @@ extern "C" void LibcRunShutdown_nid_postfix();
 extern "C" std::stop_token LibcShutdownToken_nid_postfix();
 extern "C" void LibcRequestShutdown_nid_postfix();
 extern "C" void LibcRequestExit_nid_postfix(int code);
+// The host is ending the process (window closed, SIGTERM): marks the exit as requested, so a guest
+// thread that meets ProcessShutdown parks in LibcAwaitExit instead of unwinding into the guest, and
+// requests the stop. The caller then runs LibcRunShutdown and leaves the process itself.
+extern "C" void LibcBeginHostExit_nid_postfix();
 extern "C" [[noreturn]] void LibcAwaitExit_nid_postfix();
 extern "C" [[noreturn]] void LibcExit_nid_no_patch(int code);
 extern "C" [[noreturn]] void LibcTerminate_nid_no_patch(int code);

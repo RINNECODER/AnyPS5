@@ -16,7 +16,8 @@ extern "C" {
 namespace AnyPS5::Host {
 // The game's title (param.json), or "AnyPS5" when the title has none.
 const std::string& DirectApplicationTitle();
-// Ends the game the way a user expects from closing it: exit code 0, without tearing down the
-// guest's threads (the launcher reports the exit to MacPS).
-[[noreturn]] void EndDirectSession(const char* reason);
+// Ends the game the way a user expects from closing it (window close, Quit, SIGTERM/SIGINT/SIGHUP):
+// runs the libc shutdown callbacks (video output and GPU threads stop), flushes stdio and exits with
+// code 0. Returns at once; the exit follows within one second whatever the guest threads are doing.
+void EndDirectSession(const char* reason);
 }
