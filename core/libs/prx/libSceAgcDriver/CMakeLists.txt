@@ -749,30 +749,6 @@ target_link_libraries(agc_driver_cmask_fast_clear_tests PRIVATE
 set_target_properties(agc_driver_cmask_fast_clear_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_cmask_fast_clear_tests)
 
-add_test_executable(agc_driver_recorded_clear_attachment_tests EXCLUDE_FROM_ALL
-        tests/RecordedClearAttachment.cpp
-        ${agcCoverShaderHeaders}
-)
-target_include_directories(agc_driver_recorded_clear_attachment_tests PRIVATE
-        ${LIBS_INCLUDE_DIR}
-        ${agcTestShaderGeneratedRoot}
-        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
-        ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
-)
-target_link_libraries(agc_driver_recorded_clear_attachment_tests PRIVATE libSceAgcDriver SDL2-static libc)
-set_target_properties(agc_driver_recorded_clear_attachment_tests PROPERTIES CXX_EXTENSIONS OFF)
-configure_windows_unwind(agc_driver_recorded_clear_attachment_tests)
-
-
-if(BUILD_TESTING)
-    set_target_properties(agc_driver_recorded_clear_attachment_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
-    add_test(NAME agc_driver_recorded_clear_attachment COMMAND agc_driver_recorded_clear_attachment_tests)
-    set_tests_properties(agc_driver_recorded_clear_attachment PROPERTIES SKIP_RETURN_CODE 77)
-    if(WIN32)
-        set_tests_properties(agc_driver_recorded_clear_attachment PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
-    endif()
-endif()
-
 add_test_executable(agc_driver_recorder_tests EXCLUDE_FROM_ALL
         tests/Recorder.cpp
         tests/ResidentPresent.cpp
@@ -798,6 +774,30 @@ target_link_libraries(agc_driver_recorder_tests PRIVATE
 
 set_target_properties(agc_driver_recorder_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_recorder_tests)
+
+add_test_executable(agc_driver_recorded_clear_attachment_tests EXCLUDE_FROM_ALL
+        tests/RecordedClearAttachment.cpp
+        ${agcCoverShaderHeaders}
+)
+target_include_directories(agc_driver_recorded_clear_attachment_tests PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${agcTestShaderGeneratedRoot}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
+)
+target_link_libraries(agc_driver_recorded_clear_attachment_tests PRIVATE libSceAgcDriver SDL2-static libc)
+set_target_properties(agc_driver_recorded_clear_attachment_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_recorded_clear_attachment_tests)
+
+
+if(BUILD_TESTING)
+    set_target_properties(agc_driver_recorded_clear_attachment_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_driver_recorded_clear_attachment COMMAND agc_driver_recorded_clear_attachment_tests)
+    set_tests_properties(agc_driver_recorded_clear_attachment PROPERTIES SKIP_RETURN_CODE 77)
+    if(WIN32)
+        set_tests_properties(agc_driver_recorded_clear_attachment PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
 if(BUILD_TESTING)
     set_target_properties(agc_driver_recorder_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME agc_pipeline_cache COMMAND agc_driver_recorder_tests --pipeline-cache-only)
