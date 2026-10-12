@@ -241,6 +241,52 @@ OpFunctionEnd
     }
 }
 
+void testSpecializedDeadContinue() {
+    for (const bool folded : {false, true}) {
+        const std::string source = std::string(R"(OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main"
+OpExecutionMode %main LocalSize 8 1 1
+%void = OpTypeVoid
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%private = OpTypePointer Private %uint
+%function = OpTypeFunction %void
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%false = OpConstantFalse %bool
+%output = OpVariable %private Private
+%main = OpFunction %void None %function
+%entry = OpLabel
+OpBranch %header
+%header = OpLabel
+%count = OpPhi %uint %zero %entry %next %continue
+OpLoopMerge %exit %continue None
+OpBranch %body
+%body = OpLabel
+OpStore %output %count
+)") + (folded ? "OpBranchConditional %false %continue %exit\n" : "OpBranch %exit\n") + R"(%continue = OpLabel
+%next = OpIAdd %uint %count %one
+OpBranch %header
+%exit = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+        const std::string label = folded ? "loop exit on a constant condition" : "loop with an unreachable continue target";
+        try {
+            const auto words = assemble(source);
+            static_cast<void>(ShaderRecompiler::ValidateAndOptimizeSpirv(words, Vulkan11, Spirv13, false, false));
+            const auto specialized = ShaderRecompiler::SpecializeSpirv(words);
+            static_cast<void>(ShaderRecompiler::ValidateAndOptimizeSpirv(specialized, Vulkan11, Spirv13, false, false));
+            check(opcodeCount(specialized, spv::OpLoopMerge) == 1u, label + ": specialization lost the loop");
+            check(opcodeCount(specialized, spv::OpIAdd) == 0u, label + ": specialization retained the dead continue block");
+            check(ShaderRecompiler::SpecializeSpirv(specialized) == specialized, label + ": specialization is not stable");
+        } catch (const std::exception& error) {
+            check(false, label + ": " + error.what());
+        }
+    }
+}
+
 void testInvalidInputIsRejected() {
     const auto valid = assemble(moduleSource(Types.front(), false, ArithmeticSupport::StorageOnly));
     expectRejected(valid, 0x00400000u, Spirv13, "SPIR-V 1.3 with Vulkan 1.0");
@@ -285,6 +331,7 @@ int main() {
     testNarrowConversions(optimizationEnabled);
     testInvalidInputIsRejected();
     testSpecializedSelectionExit();
+    testSpecializedDeadContinue();
     if (failures != 0) {
         std::fprintf(stderr, "%d optimizer check(s) failed\n", failures);
         return 1;
