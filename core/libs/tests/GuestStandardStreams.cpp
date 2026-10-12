@@ -505,6 +505,14 @@ int main() {
     Require(feof_nid_postfix(&scanned) && (scanned.GuestState().flags & 0x20));
     scanned.Close();
 
+    FileStream scanBinary(std::tmpfile());
+    Require(std::fputs("0b101", scanBinary.GetHandle()) >= 0);
+    std::rewind(scanBinary.GetHandle());
+    int binaryValue = -1;
+    Require(fscanf_nid_postfix(&scanBinary, "%i", &binaryValue) == 1 && binaryValue == 0);
+    Require(fgetc_nid_postfix(&scanBinary) == 'b');
+    scanBinary.Close();
+
 #ifdef _WIN32
     FileStream scanSuppressed(std::tmpfile());
     Require(std::fputs("12", scanSuppressed.GetHandle()) >= 0);

@@ -18,6 +18,7 @@ int APS5_VABI sscanf_nid_postfix(const char*, const char*, ...);
 int APS5_VABI vsnprintf_nid_postfix(char*, size_t, const char*, VaList*);
 int APS5_VABI vsnprintf_s_nid_postfix(char*, size_t, const char*, VaList*);
 int APS5_VABI vsscanf_s_nid_postfix(const char*, const char*, VaList*);
+int APS5_VABI vsscanf_nid_postfix(const char*, const char*, VaList*);
 int APS5_VABI vprintf_nid_postfix(const char*, VaList*);
 int APS5_VABI asprintf_nid_postfix(char**, const char*, ...);
 void APS5_VABI free_nid_postfix(void*);
@@ -46,6 +47,16 @@ static int APS5_VABI FormatListS(char* buffer, size_t size, const char* format, 
     VaList list;
     std::memcpy(&list, args, sizeof(list));
     const int result = vsnprintf_s_nid_postfix(buffer, size, format, &list);
+    __builtin_sysv_va_end(args);
+    return result;
+}
+
+static int APS5_VABI ScanList(const char* buffer, const char* format, ...) {
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+    VaList list;
+    std::memcpy(&list, args, sizeof(list));
+    const int result = vsscanf_nid_postfix(buffer, format, &list);
     __builtin_sysv_va_end(args);
     return result;
 }
@@ -200,6 +211,13 @@ __attribute__((noinline)) static void APS5_VABI RunChecks() {
         &first, &second, &third, &fourth, &fifth, &sixth, word, &real) == 8);
     Require(first == 1 && second == 2 && third == 3 && fourth == 4 && fifth == 5 && sixth == 6);
     Require(std::strcmp(word, "seven") == 0 && real == 8.5);
+    int binary = -1, binaryEnd = -1;
+    char binaryRest[8] = {};
+    Require(sscanf_nid_postfix("0b101", "%i%n%7s", &binary, &binaryEnd, binaryRest) == 2);
+    Require(binary == 0 && binaryEnd == 1 && std::strcmp(binaryRest, "b101") == 0);
+    Require(ScanList(" -0B11", "%i", &binary) == 1 && binary == 0);
+    Require(ScanListS("0b1", "%i", &binary) == 1 && binary == 0);
+    Require(sscanf_nid_postfix("0x1f", "%i", &binary) == 1 && binary == 31);
 #ifdef _WIN32
     int scanned = -1;
     int position = -1;
