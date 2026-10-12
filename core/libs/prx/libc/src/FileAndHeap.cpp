@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -84,6 +85,100 @@ static std::FILE* OpenNative(const std::filesystem::path& path, const std::strin
 #else
     return std::fopen(path.c_str(), nativeMode.c_str());
 #endif
+}
+
+using GuestCompare = int (APS5_VABI *)(const void*, const void*);
+
+static void SwapElements(unsigned char* left, unsigned char* right, size_t size) {
+    for (size_t index = 0; index < size; ++index) std::swap(left[index], right[index]);
+}
+
+static void SwapRanges(unsigned char* left, unsigned char* right, size_t bytes) {
+    if (bytes > 0) SwapElements(left, right, bytes);
+}
+
+static unsigned char* MedianOfThree(unsigned char* a, unsigned char* b, unsigned char* c, GuestCompare compare) {
+    return compare(a, b) < 0
+        ? (compare(b, c) < 0 ? b : (compare(a, c) < 0 ? c : a))
+        : (compare(b, c) > 0 ? b : (compare(a, c) < 0 ? a : c));
+}
+
+static void InsertionSort(unsigned char* base, size_t count, size_t size, GuestCompare compare) {
+    for (unsigned char* next = base + size; next < base + count * size; next += size)
+        for (unsigned char* element = next; element > base && compare(element - size, element) > 0; element -= size)
+            SwapElements(element, element - size, size);
+}
+
+static void SortElements(unsigned char* base, size_t count, size_t size, GuestCompare compare) {
+    for (;;) {
+        if (count < 7) {
+            InsertionSort(base, count, size, compare);
+            return;
+        }
+        unsigned char* middle = base + (count / 2) * size;
+        if (count > 7) {
+            unsigned char* low = base;
+            unsigned char* high = base + (count - 1) * size;
+            if (count > 40) {
+                const size_t step = (count / 8) * size;
+                low = MedianOfThree(low, low + step, low + 2 * step, compare);
+                middle = MedianOfThree(middle - step, middle, middle + step, compare);
+                high = MedianOfThree(high - 2 * step, high - step, high, compare);
+            }
+            middle = MedianOfThree(low, middle, high, compare);
+        }
+        SwapElements(base, middle, size);
+        unsigned char* equalLow = base + size;
+        unsigned char* scanLow = equalLow;
+        unsigned char* scanHigh = base + (count - 1) * size;
+        unsigned char* equalHigh = scanHigh;
+        bool swapped = false;
+        for (;;) {
+            int result = 0;
+            while (scanLow <= scanHigh && (result = compare(scanLow, base)) <= 0) {
+                if (result == 0) {
+                    swapped = true;
+                    SwapElements(equalLow, scanLow, size);
+                    equalLow += size;
+                }
+                scanLow += size;
+            }
+            while (scanLow <= scanHigh && (result = compare(scanHigh, base)) >= 0) {
+                if (result == 0) {
+                    swapped = true;
+                    SwapElements(scanHigh, equalHigh, size);
+                    equalHigh -= size;
+                }
+                scanHigh -= size;
+            }
+            if (scanLow > scanHigh) break;
+            SwapElements(scanLow, scanHigh, size);
+            swapped = true;
+            scanLow += size;
+            scanHigh -= size;
+        }
+        if (!swapped) {
+            InsertionSort(base, count, size, compare);
+            return;
+        }
+        unsigned char* const end = base + count * size;
+        size_t moved = std::min<size_t>(equalLow - base, scanLow - equalLow);
+        SwapRanges(base, scanLow - moved, moved);
+        moved = std::min<size_t>(equalHigh - scanHigh, end - equalHigh - size);
+        SwapRanges(scanLow, end - moved, moved);
+        const size_t lowBytes = scanLow - equalLow;
+        const size_t highBytes = equalHigh - scanHigh;
+        if (lowBytes <= highBytes) {
+            if (lowBytes > size) SortElements(base, lowBytes / size, size, compare);
+            if (highBytes <= size) return;
+            base = end - highBytes;
+            count = highBytes / size;
+        } else {
+            if (highBytes > size) SortElements(end - highBytes, highBytes / size, size, compare);
+            if (lowBytes <= size) return;
+            count = lowBytes / size;
+        }
+    }
 }
 
 extern "C" {
@@ -397,27 +492,7 @@ void APS5_VABI qsort_nid_postfix(void* base, size_t count, size_t size, int (APS
     if (count > std::numeric_limits<size_t>::max() / size) throw std::overflow_error("qsort: array size overflow");
     if (count == 1) return;
 
-    auto* bytes = static_cast<unsigned char*>(base);
-    const auto swapElements = [bytes, size](size_t left, size_t right) {
-        auto* leftElement = bytes + left * size;
-        auto* rightElement = bytes + right * size;
-        for (size_t index = 0; index < size; ++index) std::swap(leftElement[index], rightElement[index]);
-    };
-    const auto siftDown = [bytes, size, compare, &swapElements](size_t root, size_t heapSize) {
-        while (root < heapSize / 2) {
-            size_t child = root * 2 + 1;
-            if (child + 1 < heapSize && compare(bytes + child * size, bytes + (child + 1) * size) < 0) ++child;
-            if (compare(bytes + root * size, bytes + child * size) >= 0) return;
-            swapElements(root, child);
-            root = child;
-        }
-    };
-
-    for (size_t parent = count / 2; parent != 0; --parent) siftDown(parent - 1, count);
-    for (size_t heapSize = count; heapSize > 1;) {
-        swapElements(0, --heapSize);
-        siftDown(0, heapSize);
-    }
+    SortElements(static_cast<unsigned char*>(base), count, size, compare);
 }
 
 }
