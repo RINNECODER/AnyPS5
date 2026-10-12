@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
@@ -1700,7 +1701,18 @@ void VisitContentKey(const CompiledShader& shader, bool dataWords, bool movableB
 std::vector<std::uint32_t> ShaderResources::ContentKey(const CompiledShader& shader, bool dataWords, bool movableBuffers) {
     Require(shader.program != nullptr, "missing compiled shader");
     std::vector<std::uint32_t> key;
-    key.reserve(8u + shader.program->bindings.size() * 12u);
+    std::size_t words = 5;
+    const auto addWords = [&](std::size_t count) {
+        if (count > key.max_size() - words) throw std::length_error("resource content key exceeds vector limits");
+        words += count;
+    };
+    for (const auto& binding : shader.program->bindings) {
+        addWords(18);
+        addWords(binding.imageSamplers.size());
+        if ((dataWords && !movableBuffers) || !DataRole(binding.role)) addWords(binding.guestDescriptor.size());
+        for (const auto* bits : {&binding.imageWritten, &binding.samplerDepthCompare, &binding.imageDepthCompare, &binding.imageAtomic, &binding.samplerUnnormalized, &binding.samplerIntegerBorder, &binding.imageUnnormalized, &binding.imageUnnormalizedBaseLevel, &binding.bufferWritten}) addWords(bits->size() / 32u + (bits->size() % 32u != 0 ? 1u : 0u));
+    }
+    key.reserve(words);
     VisitContentKey(shader, dataWords, movableBuffers, [&](std::uint32_t word) { key.push_back(word); });
     return key;
 }

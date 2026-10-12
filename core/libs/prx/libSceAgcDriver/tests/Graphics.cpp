@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -4920,6 +4921,78 @@ void parallelCompareTests() {
     CompareSpansFrom({}, none, 0);
 }
 
+void ResourceContentKeyTests(bool benchmark) {
+    using AgcDriver::Graphics::ShaderResources;
+    using ShaderRecompiler::DescriptorKind;
+    using ShaderRecompiler::DescriptorRole;
+    for (const auto count : {0u, 1u, 31u, 32u, 33u, 16384u}) {
+        ShaderRecompiler::RecompileResult program;
+        ShaderRecompiler::DescriptorBinding images{};
+        images.kind = DescriptorKind::SampledImage;
+        images.role = DescriptorRole::GuestImages;
+        images.count = count;
+        images.guestDescriptor.resize(static_cast<std::size_t>(count) * 8u);
+        for (std::size_t i = 0; i < images.guestDescriptor.size(); ++i) images.guestDescriptor[i] = static_cast<std::uint32_t>(i * 1664525u + 1013904223u);
+        for (auto* bits : {&images.imageWritten, &images.samplerDepthCompare, &images.imageDepthCompare, &images.imageAtomic, &images.samplerUnnormalized, &images.samplerIntegerBorder, &images.imageUnnormalized, &images.imageUnnormalizedBaseLevel, &images.bufferWritten}) {
+            bits->resize(count);
+            for (std::size_t i = 0; i < bits->size(); ++i) (*bits)[i] = i % 3u == 0;
+        }
+        images.imageSamplers.resize(count, 7u);
+        program.bindings.push_back(std::move(images));
+        ShaderRecompiler::DescriptorBinding data{};
+        data.kind = DescriptorKind::StorageBuffer;
+        data.role = DescriptorRole::ShaderData;
+        data.count = 1;
+        data.guestDescriptor.resize(257u, 0x12345678u);
+        program.bindings.push_back(std::move(data));
+        ShaderRecompiler::DescriptorBinding buffers{};
+        buffers.kind = DescriptorKind::StorageBuffer;
+        buffers.role = DescriptorRole::GuestBuffers;
+        buffers.count = 1;
+        buffers.guestDescriptor = {0x1000u, 0x10000u, 4u, 0x1234u};
+        buffers.bufferWritten = {false};
+        program.bindings.push_back(std::move(buffers));
+        const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &program, 0};
+        for (const bool dataWords : {false, true}) for (const bool movable : {false, true}) {
+            const auto original = ShaderResources::ContentKey(shader, dataWords, movable);
+            program.bindings[1].guestDescriptor.back() ^= 1u;
+            Require((ShaderResources::ContentKey(shader, dataWords, movable) != original) == (dataWords && !movable), "content key changed its data-word policy");
+            program.bindings[1].guestDescriptor.back() ^= 1u;
+            program.bindings[2].guestDescriptor[0] += 0x1000u;
+            Require((ShaderResources::ContentKey(shader, dataWords, movable) != original) == !movable, "content key changed its movable-buffer policy");
+            program.bindings[2].guestDescriptor[0] -= 0x1000u;
+            program.bindings[2].bufferWritten[0] = true;
+            Require(ShaderResources::ContentKey(shader, dataWords, movable) != original, "content key ignored the written-buffer mask");
+            program.bindings[2].bufferWritten[0] = false;
+            if (count != 0) {
+                for (auto* bits : {&program.bindings[0].imageWritten, &program.bindings[0].samplerDepthCompare, &program.bindings[0].imageDepthCompare, &program.bindings[0].imageAtomic, &program.bindings[0].samplerUnnormalized, &program.bindings[0].samplerIntegerBorder, &program.bindings[0].imageUnnormalized, &program.bindings[0].imageUnnormalizedBaseLevel}) {
+                    bits->back().flip();
+                    Require(ShaderResources::ContentKey(shader, dataWords, movable) != original, "content key ignored the last packed flag");
+                    bits->back().flip();
+                }
+                ++program.bindings[0].imageSamplers.back();
+                Require(ShaderResources::ContentKey(shader, dataWords, movable) != original, "content key ignored the last sampler association");
+                --program.bindings[0].imageSamplers.back();
+            }
+            std::uint64_t hash = 14695981039346656037ull;
+            for (const auto word : original) hash = (hash ^ word) * 1099511628211ull;
+            std::cout << "content-key count=" << count << " data=" << dataWords << " movable=" << movable << " words=" << original.size() << " capacity=" << original.capacity() << " hash=" << hash;
+            if (benchmark) {
+                constexpr std::size_t repeats = 256;
+                std::uint64_t checksum = 0;
+                const auto begin = std::chrono::steady_clock::now();
+                for (std::size_t i = 0; i < repeats; ++i) {
+                    const auto key = ShaderResources::ContentKey(shader, dataWords, movable);
+                    checksum += key.size() + key.back();
+                }
+                const auto elapsed = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count();
+                std::cout << " us/key=" << elapsed / repeats << " checksum=" << checksum;
+            }
+            std::cout << '\n';
+        }
+    }
+}
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     _putenv_s("APS5_PIN_WAIT_MS", "200");
@@ -4936,6 +5009,10 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--buffer-budget-placement") {
             bufferBudgetPlacementTests();
+            return 0;
+        }
+        if (argc == 2 && (std::string_view(argv[1]) == "--resource-content-key" || std::string_view(argv[1]) == "--benchmark-resource-content-key")) {
+            ResourceContentKeyTests(std::string_view(argv[1]) == "--benchmark-resource-content-key");
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-pool-reset-failure") {
@@ -4974,6 +5051,7 @@ int main(int argc, char** argv) {
             AgcDriver::Graphics::ValidateDepthBounds(unrestricted, bounded);
         }
         RunGuestLeaseWaitTests();
+        ResourceContentKeyTests(false);
         stateTests();
         hdrComponentSwapTests();
         depthMaintenanceTests();
