@@ -72,6 +72,40 @@ static bool CheckMemcpyOverlap() {
     return correct;
 }
 
+static void CheckSecureCopySizeLimits() {
+    using Copy = int (APS5_VABI*)(void*, std::size_t, const void*, std::size_t);
+    constexpr std::size_t RsizeMax = SIZE_MAX >> 1;
+    const std::array<unsigned char, 8> original = {1, 2, 3, 4, 5, 6, 7, 8};
+    const unsigned char source[] = {9, 10, 11, 12};
+    for (Copy copy : {memcpy_s_nid_postfix, memmove_s_nid_postfix}) {
+        for (const auto size : {RsizeMax + 1, SIZE_MAX}) {
+            for (const auto count : {std::size_t{1}, std::size_t{0}, RsizeMax + 1, SIZE_MAX}) {
+                for (const void* input : {static_cast<const void*>(source), static_cast<const void*>(nullptr)}) {
+                    auto bytes = original;
+                    Require(copy(bytes.data() + 2, size, input, count) != 0);
+                    Require(bytes == original);
+                }
+            }
+        }
+        for (const auto count : {RsizeMax + 1, SIZE_MAX}) {
+            auto bytes = original;
+            Require(copy(bytes.data() + 2, 4, source, count) != 0);
+            const std::array<unsigned char, 8> cleared = {1, 2, 0, 0, 0, 0, 7, 8};
+            Require(bytes == cleared);
+        }
+        auto bytes = original;
+        Require(copy(bytes.data() + 2, RsizeMax, source, 1) == 0);
+        const std::array<unsigned char, 8> copied = {1, 2, 9, 4, 5, 6, 7, 8};
+        Require(bytes == copied);
+        Require(copy(bytes.data() + 2, 4, source, 0) == 0 && bytes == copied);
+        Require(copy(nullptr, SIZE_MAX, source, 1) == 22);
+        bytes = original;
+        Require(copy(bytes.data() + 2, 4, nullptr, 1) == 22);
+        const std::array<unsigned char, 8> cleared = {1, 2, 0, 0, 0, 0, 7, 8};
+        Require(bytes == cleared);
+    }
+}
+
 static void CheckBoundsCheckedFunctions() {
     char small[4] = "zz";
     Require(strcpy_s_nid_postfix(small, sizeof(small), "abc") == 0 && std::strcmp(small, "abc") == 0);
@@ -301,5 +335,6 @@ int main() {
     Require(strcasestr_nid_postfix("", "a") == nullptr);
     const char highBytes[] = {static_cast<char>(0xff), 'A', 0};
     Require(strcasestr_nid_postfix(highBytes, "a") == highBytes + 1);
+    CheckSecureCopySizeLimits();
     return CheckMemcpyOverlap() ? 0 : 1;
 }
