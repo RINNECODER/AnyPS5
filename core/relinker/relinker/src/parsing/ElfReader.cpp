@@ -130,6 +130,23 @@ std::vector<ProgramHeader> ElfReader::ReadProgramHeaders() const {
         offset += header.ProgramHeaderEntrySize;
     }
 
+    for (auto& relro : headers) {
+        if (relro.Type != PT_OS_RELRO || relro.MemorySize == 0) continue;
+        bool covered = false;
+        for (const auto& load : headers) {
+            if (load.Type != PT_LOAD || load.MemorySize == 0) continue;
+            const bool overlaps = relro.MappedAddress < load.MappedAddress ? load.MappedAddress - relro.MappedAddress < relro.MemorySize : relro.MappedAddress - load.MappedAddress < load.MemorySize;
+            if (!overlaps) continue;
+            if (relro.MappedAddress < load.MappedAddress || relro.MemorySize > load.MemorySize - (relro.MappedAddress - load.MappedAddress))
+                throw RelinkerException("PT_SCE_RELRO partially overlaps a PT_LOAD segment", relro.MappedAddress);
+            covered = true;
+        }
+        if (!covered) {
+            relro.Type = PT_LOAD;
+            relro.Flags = PF_R | PF_W;
+        }
+    }
+
     return headers;
 }
 
