@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include <string>
+#include <vector>
 #ifdef _WIN32
 #include <io.h>
 #include <windows.h>
@@ -48,6 +50,7 @@ int APS5_VABI rmdir_nid_postfix(const char*);
 int APS5_VABI mkdir_nid_postfix(const char*, unsigned short);
 int APS5_VABI sceKernelOpen(const char*, int, unsigned short);
 int APS5_VABI sceKernelClose(int);
+int APS5_VABI sceKernelGetdents(int, char*, int);
 int APS5_VABI sceKernelStat(const char*, FileStat*);
 int APS5_VABI sceKernelCheckReachability(const char*);
 int APS5_VABI sceKernelFstat(int, FileStat*);
@@ -577,6 +580,15 @@ int main() {
     Require(directoryDescriptor >= 0 && close_nid_postfix(directoryDescriptor) == 0);
     const int flaggedDirectory = sceKernelOpen(rootName.c_str(), 0x20000, 0);
     Require(flaggedDirectory >= 0 && sceKernelClose(flaggedDirectory) == 0);
+    std::vector<char> entries(4096);
+    for (const auto& directoryName : {std::string("/"), std::string("."), rootName + "/", rootName + "/.."}) {
+        const int listed = sceKernelOpen(directoryName.c_str(), 0x20000, 0);
+        Require(listed >= 0);
+        int read = sceKernelGetdents(listed, entries.data(), static_cast<int>(entries.size()));
+        Require(read > 0);
+        while (read > 0) read = sceKernelGetdents(listed, entries.data(), static_cast<int>(entries.size()));
+        Require(read == 0 && sceKernelClose(listed) == 0);
+    }
     Require(open_nid_postfix(presentName.c_str(), 0x20000, 0) == -1 && *__error_nid_postfix() == 20);
     Require(sceKernelOpen(presentName.c_str(), 0x20000, 0) == static_cast<int>(0x80020014u));
     Require(sceKernelOpen(presentName.c_str(), 0x20402, 0) == static_cast<int>(0x80020014u));
