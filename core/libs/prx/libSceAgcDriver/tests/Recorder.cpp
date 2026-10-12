@@ -4806,6 +4806,20 @@ void keysFillTests(const Device& device, Recorder& recorder) {
     recorder.Sync();
 }
 
+void integerClearTests(const Device& device) {
+    const auto& context = device.GetContext();
+    std::size_t tested = 0;
+    for (const std::uint32_t format : {5u, 11u, 20u}) {
+        if (!StorageFormatAvailable(context, format)) continue;
+        ++tested;
+        Require(StorageClearAvailable(context, format, DccKeys::Clear0000), "an integer storage format refused the 0000 clear");
+        for (const auto keys : {DccKeys::Clear0001, DccKeys::Clear1111, DccKeys::ClearRegister, DccKeys::Uncompressed}) {
+            Require(!StorageClearAvailable(context, format, keys), "an integer storage format took a clear code other than 0000");
+        }
+    }
+    std::cout << "integer storage clears: " << tested << " formats ok\n";
+}
+
 void denormalClearTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
     if (base.hostImportAlignment == 0) {
@@ -5081,6 +5095,7 @@ int main(int argc, char** argv) {
         movedMetadataTests(device, recorder);
         viewPastLastMipTests(device, recorder);
         keysFillTests(device, recorder);
+        integerClearTests(device);
         denormalClearTests(device, recorder);
         unitShadowTests(device, recorder);
         storageRefreshTests(device, recorder, false);
