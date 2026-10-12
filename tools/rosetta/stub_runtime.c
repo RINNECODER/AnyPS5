@@ -12,6 +12,10 @@
 // ANYPS5_TRACE_LIMIT caps the logged calls per symbol (default 16), and
 // ANYPS5_TRACE_AFTER=SECONDS ignores calls made earlier, so a title's steady
 // state can be traced without the start-up calls using up the limit.
+// ANYPS5_TRACE_RETURNS=1 also logs what each logged call returns (%rax): the
+// stub swaps the return address for a trampoline that logs and returns to the
+// caller. A C++ exception unwinding through a hooked call cannot pass the
+// trampoline, so this is opt-in.
 #include <ctype.h>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
@@ -72,6 +76,24 @@ static unsigned g_trace_limit = 16;
 static double g_trace_after = 0.0;
 static pthread_once_t g_trace_once = PTHREAD_ONCE_INIT;
 static struct timespec g_trace_start;
+static int g_trace_returns;
+
+// Return addresses replaced by _aps5_trace_return, innermost last, per thread.
+struct pending_return {
+    uint64_t address;
+    unsigned index;
+    unsigned call;
+};
+enum { kPendingReturns = 64 };
+static __thread struct pending_return t_pending[kPendingReturns];
+static __thread unsigned t_pending_depth;
+extern char aps5_trace_return[];
+
+static double trace_seconds(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)(now.tv_sec - g_trace_start.tv_sec) + (double)(now.tv_nsec - g_trace_start.tv_nsec) / 1e9;
+}
 
 static void trace_init(void) {
     g_targets = calloc(aps5_trace_count ? aps5_trace_count : 1, sizeof *g_targets);
@@ -80,6 +102,8 @@ static void trace_init(void) {
     if (limit != NULL && *limit != '\0') g_trace_limit = (unsigned)strtoul(limit, NULL, 0);
     const char* after = getenv("ANYPS5_TRACE_AFTER");
     if (after != NULL && *after != '\0') g_trace_after = strtod(after, NULL);
+    const char* returns = getenv("ANYPS5_TRACE_RETURNS");
+    g_trace_returns = returns != NULL && *returns != '\0' && *returns != '0';
     clock_gettime(CLOCK_MONOTONIC, &g_trace_start);
 }
 
@@ -102,7 +126,7 @@ static void* next_definition(const char* name) {
     return NULL;
 }
 
-void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2) {
+void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t* return_slot) {
     pthread_once(&g_trace_once, trace_init);
     void* target = atomic_load_explicit(&g_targets[index], memory_order_acquire);
     if (target == NULL) {
@@ -115,9 +139,7 @@ void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2) {
         }
         atomic_store_explicit(&g_targets[index], target, memory_order_release);
     }
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    const double seconds = (double)(now.tv_sec - g_trace_start.tv_sec) + (double)(now.tv_nsec - g_trace_start.tv_nsec) / 1e9;
+    const double seconds = trace_seconds();
     // Calls before ANYPS5_TRACE_AFTER seconds are neither logged nor counted, so the
     // per-import limit applies to the window of interest (a title's steady state).
     if (seconds < g_trace_after) return target;
@@ -134,8 +156,24 @@ void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2) {
         emit(line, snprintf(line, sizeof line, "[trace] %.3fs tid=%llu #%u %s(%s, %s, %s)%s\n", seconds, (unsigned long long)thread, call,
                             aps5_trace_names[index], text[0], text[1], text[2], call == g_trace_limit ? " (limit reached)" : ""),
              sizeof line);
+        if (g_trace_returns && t_pending_depth < kPendingReturns) {
+            t_pending[t_pending_depth++] = (struct pending_return){*return_slot, index, call};
+            *return_slot = (uint64_t)(uintptr_t)aps5_trace_return;
+        }
     }
     return target;
+}
+
+// Called by _aps5_trace_return with the callee's %rax; returns the caller's address.
+uint64_t aps5_trace_returned(uint64_t value) {
+    const struct pending_return entry = t_pending[--t_pending_depth];
+    uint64_t thread = 0;
+    pthread_threadid_np(NULL, &thread);
+    char line[256];
+    emit(line, snprintf(line, sizeof line, "[trace] %.3fs tid=%llu #%u %s -> 0x%llx\n", trace_seconds(), (unsigned long long)thread,
+                        entry.call, aps5_trace_names[entry.index], (unsigned long long)value),
+         sizeof line);
+    return entry.address;
 }
 
 __asm__(".text\n"
@@ -174,6 +212,7 @@ __asm__(".text\n"
         "    movdqu %xmm5, 80(%rsp)\n"
         "    movdqu %xmm6, 96(%rsp)\n"
         "    movdqu %xmm7, 112(%rsp)\n"
+        "    leaq 8(%rbp), %r8\n"
         "    movq %rdx, %rcx\n"
         "    movq %rsi, %rdx\n"
         "    movq %rdi, %rsi\n"
@@ -198,4 +237,27 @@ __asm__(".text\n"
         "    popq %rsi\n"
         "    popq %rdi\n"
         "    popq %rbp\n"
-        "    jmp *%r11\n");
+        "    jmp *%r11\n"
+        // A hooked call returns here: log %rax, then return to the real caller
+        // through a slot in place of the consumed return address.
+        ".globl _aps5_trace_return\n"
+        "_aps5_trace_return:\n"
+        "    subq $8, %rsp\n"
+        "    pushq %rbp\n"
+        "    movq %rsp, %rbp\n"
+        "    pushq %rax\n"
+        "    pushq %rdx\n"
+        "    andq $-16, %rsp\n"
+        "    subq $32, %rsp\n"
+        "    movdqu %xmm0, 0(%rsp)\n"
+        "    movdqu %xmm1, 16(%rsp)\n"
+        "    movq %rax, %rdi\n"
+        "    call _aps5_trace_returned\n"
+        "    movq %rax, 8(%rbp)\n"
+        "    movdqu 0(%rsp), %xmm0\n"
+        "    movdqu 16(%rsp), %xmm1\n"
+        "    leaq -16(%rbp), %rsp\n"
+        "    popq %rdx\n"
+        "    popq %rax\n"
+        "    popq %rbp\n"
+        "    ret\n");

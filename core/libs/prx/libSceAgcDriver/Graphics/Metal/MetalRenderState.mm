@@ -2,7 +2,9 @@
 #include "MetalPipelineCache.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -126,9 +128,16 @@ void Validate(const Graphics::State& state) {
     Require(std::isfinite(viewport.x) && std::isfinite(viewport.y) && std::isfinite(viewport.width) && std::isfinite(viewport.height) &&
             viewport.width > 0 && viewport.height != 0 && std::isfinite(viewport.y + viewport.height),
             "viewport must be finite with positive width and nonzero height");
-    Require(std::isfinite(viewport.minDepth) && std::isfinite(viewport.maxDepth) &&
-            viewport.minDepth >= 0 && viewport.minDepth <= 1 && viewport.maxDepth >= 0 && viewport.maxDepth <= 1,
-            "viewport depth must lie within zero-to-one");
+    // Metal takes znear/zfar outside zero-to-one (as VK_EXT_depth_range_unrestricted does), and a
+    // guest viewport transform may map there, e.g. a [-1, 1] clip-space title with no depth target.
+    Require(std::isfinite(viewport.minDepth) && std::isfinite(viewport.maxDepth), "viewport depth must be finite");
+    if (viewport.minDepth < 0 || viewport.minDepth > 1 || viewport.maxDepth < 0 || viewport.maxDepth > 1) {
+        static std::atomic<int> reported{0};
+        if (reported.fetch_add(1, std::memory_order_relaxed) < 4) {
+            std::fprintf(stderr, "[metal] viewport depth range [%g, %g] outside zero-to-one passed through (depth target: %s)\n",
+                viewport.minDepth, viewport.maxDepth, state.depth ? "yes" : "no");
+        }
+    }
     Require(state.renderExtent.width != 0 && state.renderExtent.height != 0, "render extent must be nonzero");
     Require(state.scissor.offset.x >= 0 && state.scissor.offset.y >= 0, "negative scissor offset is unsupported");
     Require(static_cast<std::uint64_t>(state.scissor.offset.x) + state.scissor.extent.width <= state.renderExtent.width &&
