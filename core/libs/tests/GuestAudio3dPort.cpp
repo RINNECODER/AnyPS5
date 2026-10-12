@@ -198,11 +198,8 @@ void CheckObjects() {
 }
 
 void CheckQueue() {
-    using namespace std::chrono;
-    constexpr std::uint32_t granularity = 0x1800;
-    constexpr auto frame = microseconds(1000000ull * granularity / 48000);
     Audio3dOpenParameters parameters = Defaults();
-    parameters.granularity = granularity;
+    parameters.granularity = 0x1800;
     std::uint32_t id = 7;
     Require(Open(parameters, &id) == 0 && id == 0, "open");
     CheckAttributes();
@@ -216,23 +213,31 @@ void CheckQueue() {
     RequireLevel(1, 1, "one frame queued");
     Require(sceAudio3dPortAdvance(0) == 0, "advance 2");
     RequireLevel(2, 0, "queue full");
-    RequireThrows([] { sceAudio3dPortAdvance(0); }, "advance into a full queue must throw");
+    Require(sceAudio3dPortAdvance(0) == NOT_READY, "advance into a full queue must be NOT_READY");
     RequireThrows([] { sceAudio3dPortPush(0, 2); }, "unknown blocking mode must throw");
-
-    auto start = steady_clock::now();
     Require(sceAudio3dPortPush(0, 1) == 0, "blocking push");
-    auto waited = steady_clock::now() - start;
-    Require(waited >= frame - milliseconds(2), "blocking push waits until one frame has played");
     RequireLevel(1, 1, "blocking push returns with one free slot");
-
     Require(sceAudio3dPortAdvance(0) == 0, "advance 3");
-    start = steady_clock::now();
     Require(sceAudio3dPortPush(0, 0) == 0, "async push");
-    Require(steady_clock::now() - start < frame, "async push does not wait for a frame");
-    std::uint32_t level = 0;
-    Require(sceAudio3dPortGetQueueLevel(0, &level, nullptr) == 0 && level >= 1, "async push keeps frames queued");
-    std::this_thread::sleep_for(frame * 3);
-    RequireLevel(0, 2, "frames drain at the port's rate");
+    RequireLevel(1, 1, "async push submits the excess frame");
+    Require(sceAudio3dPortClose(0) == 0, "close");
+}
+
+void CheckMixAndPush() {
+    Audio3dOpenParameters parameters = Defaults();
+    std::uint32_t id = 7;
+    Require(Open(parameters, &id) == 0 && id == 0, "open");
+    Require(sceAudio3dPortAdvance(0) == 0, "advance mixes an empty bed into silence");
+    RequireLevel(1, 1, "the silent frame is queued");
+    const std::int16_t samples[8] = {1000, -1000, 2000, -2000, 3000, -3000, 4000, -4000};
+    Require(sceAudio3dBedWrite(0, 2, 0, samples, 4) == 0, "bed write");
+    Require(sceAudio3dPortAdvance(0) == 0, "advance mixes the bed");
+    RequireLevel(2, 0, "the mixed frame is queued");
+    Require(sceAudio3dPortAdvance(0) == NOT_READY, "a full queue rejects the mix");
+    Require(sceAudio3dPortPush(0, 1) == 0, "sync push delivers through audio out");
+    RequireLevel(1, 1, "push keeps the queue below the depth");
+    Require(sceAudio3dPortPush(0, 0) == 0, "async push delivers through audio out");
+    RequireLevel(1, 1, "async push leaves the remaining frame");
     Require(sceAudio3dPortClose(0) == 0, "close");
 }
 
@@ -321,6 +326,7 @@ int main() {
     CheckOpenClose();
     CheckObjects();
     CheckQueue();
+    CheckMixAndPush();
     CheckFlush();
     CheckObjectAttributes();
     CheckBed();
