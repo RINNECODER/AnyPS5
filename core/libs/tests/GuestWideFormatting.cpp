@@ -89,6 +89,20 @@ static void CheckBounded() {
     Require(Format(buffer, 16, u"%s", nullNarrow) == 6 && buffer == std::u16string(u"(null)"), "vswprintf null %s argument");
 }
 
+static void CheckPositional() {
+    char16_t buffer[32];
+    Require(swprintf_nid_postfix(buffer, 32, u"%2$d-%1$d", 1, 2) == 3 && buffer == std::u16string(u"2-1"),
+        "swprintf positional integers");
+    Require(swprintf_nid_postfix(buffer, 32, u"%2$ls %1$ls", u"world", u"hello") == 11 && buffer == std::u16string(u"hello world"),
+        "swprintf positional wide strings");
+    Require(swprintf_nid_postfix(buffer, 32, u"[%1$*2$d|%3$.*2$f]", 7, 2, 2.5) == 9 && buffer == std::u16string(u"[ 7|2.50]"),
+        "swprintf positional width and precision");
+    Require(swprintf_nid_postfix(buffer, 32, u"%1$Lg %2$d %d", 0.5L, 3, 9) == 7 && buffer == std::u16string(u"0.5 3 9"),
+        "swprintf positional long double and the next argument");
+    Require(snwprintf_s_nid_postfix(buffer, 32, u"%2$s%1$lc", 0x20ac, "\xc3\xa9") == 2 && buffer == std::u16string(u"\u00e9\u20ac"),
+        "snwprintf_s positional arguments");
+}
+
 static void CheckPointer() {
     char16_t buffer[64];
     const auto address = [](std::uintptr_t value) { return reinterpret_cast<void*>(value); };
@@ -147,6 +161,7 @@ static void CheckSwprintf() {
 
 int main() {
     CheckBounded();
+    CheckPositional();
     CheckPointer();
     CheckCount();
     CheckSwprintf();
