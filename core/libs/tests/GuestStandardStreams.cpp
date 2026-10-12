@@ -53,6 +53,7 @@ int APS5_VABI setvbuf_nid_postfix(FileStream*, char*, int, std::size_t);
 void APS5_VABI setbuf_nid_postfix(FileStream*, char*);
 FileStream* APS5_VABI fdopen_nid_postfix(int, const char*);
 int APS5_VABI fclose_nid_postfix(FileStream*);
+int APS5_VABI fflush_nid_postfix(FileStream*);
 int APS5_VABI _Getmbcurmax_nid_postfix();
 int APS5_VABI ___mb_cur_max_nid_postfix();
 void APS5_VABI flockfile_nid_postfix(FileStream*);
@@ -280,6 +281,28 @@ static void CheckRewind() {
 #endif
 }
 
+static void CheckFlushWhileReading() {
+    const auto filename = "anyps5-flush-read-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    { std::ofstream seed(filename, std::ios::binary); seed << "abcdef\n"; Require(seed.good()); }
+    for (const char* mode : {"r", "r+"}) {
+        FileStream* stream = fopen_nid_postfix(filename.c_str(), mode);
+        Require(stream != nullptr);
+        Require(fgetc_nid_postfix(stream) == 'a' && ungetc_nid_postfix('Z', stream) == 'Z');
+        Require(fflush_nid_postfix(stream) == 0);
+        char rest[16]{};
+        const auto count = fread_nid_postfix(rest, 1, sizeof(rest) - 1, stream);
+        if (count != 7 || std::strcmp(rest, "Zbcdef\n") != 0) {
+            std::string shown;
+            for (std::size_t index = 0; index < count; ++index) shown += rest[index] == '\n' ? std::string("\\n") : std::string(1, rest[index]);
+            std::fprintf(stderr, "fflush of a \"%s\" stream that is reading changed the data read next: \"%s\" (%zu bytes), expected \"Zbcdef\\n\" (7 bytes)\n",
+                mode, shown.c_str(), count);
+            std::abort();
+        }
+        Require(fclose_nid_postfix(stream) == 0);
+    }
+    std::filesystem::remove(filename);
+}
+
 static bool CheckBinaryModes() {
     const auto directory = "anyps5-byte-stream-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     Require(std::filesystem::create_directory(directory));
@@ -371,6 +394,7 @@ static void CheckDescriptorModes(std::FILE* original) {
 
 int main() {
     Require(_Getmbcurmax_nid_postfix() == 1 && _Getmbcurmax_nid_postfix() == ___mb_cur_max_nid_postfix());
+    CheckFlushWhileReading();
     Require(fdopen_nid_postfix(-1, "rb") == nullptr && *__error_nid_postfix() == 9);
     Require(fdopen_nid_postfix(0, nullptr) == nullptr && *__error_nid_postfix() == 22);
     Require(fdopen_nid_postfix(0, "invalid") == nullptr && *__error_nid_postfix() == 22);

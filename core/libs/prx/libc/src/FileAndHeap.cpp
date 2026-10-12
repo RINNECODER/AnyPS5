@@ -26,6 +26,10 @@
 #include "prx/libc/include/FilesystemError.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 
+#ifdef __linux__
+#include <stdio_ext.h>
+#endif
+
 struct GuestFileMode {
     std::string native;
     bool writes = false;
@@ -303,7 +307,11 @@ int APS5_VABI fputs_nid_postfix(const char* str, FileStream* stream) {
 }
 
 int APS5_VABI fflush_nid_postfix(FileStream* stream) {
-    if (std::fflush(stream ? GetNativeStream(stream) : nullptr) != 0) throw std::runtime_error("fflush: flush failed");
+    std::FILE* native = stream ? GetNativeStream(stream) : nullptr;
+#ifdef __linux__
+    if (native && !__fwriting(native)) return 0;
+#endif
+    if (std::fflush(native) != 0) throw std::runtime_error("fflush: flush failed");
     return 0;
 }
 
