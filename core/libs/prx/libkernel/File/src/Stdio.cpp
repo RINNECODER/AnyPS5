@@ -808,6 +808,7 @@ int APS5_VABI sceKernelCheckReachability(const char* path) {
     if (std::strlen(path) > 255) return SCE_KERNEL_ERROR_ENAMETOOLONG;
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
+    native = File::PathOrRelinkedModule(native);
     std::error_code error;
     return std::filesystem::exists(native, error) ? 0 : SCE_KERNEL_ERROR_ENOENT;
 }
