@@ -157,6 +157,8 @@ int Run(const int argc, char* argv[]) {
         auto sourceBytes = fileReader.Read(args.inputPath);
         if (std::filesystem::exists(Io::NativePath(args.outputPath)) && std::filesystem::equivalent(Io::NativePath(args.inputPath), Io::NativePath(args.outputPath)))
             throw Domain::RelinkerException("Executable output would overwrite the input executable");
+        if (Io::NativePath(args.outputPath).filename().empty() || std::filesystem::is_directory(Io::NativePath(args.outputPath)))
+            throw Domain::RelinkerException("Executable output is a directory: " + args.outputPath);
         const std::string absPath = Io::Utf8Path(std::filesystem::absolute(Io::NativePath(args.outputPath)));
 
         std::vector<Codegen::TrampolineSite> trampolines;
