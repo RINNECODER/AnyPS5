@@ -181,6 +181,19 @@ if(BUILD_TESTING)
     add_test(NAME call_site_index COMMAND call_site_index_tests)
     set_tests_properties(call_site_index PROPERTIES TIMEOUT 20)
 
+    add_test_executable(sdk_mman_syscall_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/SdkMmanSyscallTests.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/SyscallScanner.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/InstructionScanner.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/X64InstructionDecoder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/DecodedInstruction.cpp)
+    target_include_directories(sdk_mman_syscall_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/domain/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/include)
+    add_test(NAME sdk_mman_syscall COMMAND sdk_mman_syscall_tests)
+    set_tests_properties(sdk_mman_syscall PROPERTIES TIMEOUT 20)
+
     add_test_executable(autorun_exit_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/cli/tests/AutorunExitTests.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/cli/src/Autorun.cpp
