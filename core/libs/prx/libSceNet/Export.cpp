@@ -227,9 +227,9 @@ bool native_to_guest_address(const sockaddr_storage& native, void* address, std:
     } else {
         return false;
     }
-    const auto required = static_cast<std::uint32_t>(bytes[0]);
-    std::memcpy(address, bytes, std::min(*length, required));
-    *length = required;
+    const auto copied = std::min<std::uint32_t>(*length, bytes[0]);
+    std::memcpy(address, bytes, copied);
+    *length = copied;
     return true;
 }
 

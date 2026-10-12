@@ -30,6 +30,7 @@ int APS5_VABI sceNetSocket(const char*, int, int, int);
 int APS5_VABI sceNetBind_nid_postfix(int, const void*, std::uint32_t);
 int APS5_VABI sceNetListen(int, int);
 int APS5_VABI sceNetGetsockname(int, void*, std::uint32_t*);
+int APS5_VABI sceNetGetpeername(int, void*, std::uint32_t*);
 int APS5_VABI sceNetConnect(int, const void*, std::uint32_t);
 int APS5_VABI sceNetAccept(int, void*, std::uint32_t*);
 std::int64_t APS5_VABI sceNetSend(int, const void*, std::size_t, int);
@@ -416,6 +417,79 @@ static void CheckLinkLocalAllNodesIpv6() {
     Require(std::memcmp(sce_net_in6addr_linklocal_allnodes, address.data(), address.size()) == 0);
 }
 
+template <std::size_t TSize>
+static bool Untouched(const std::array<std::uint8_t, TSize>& bytes, std::uint32_t from) {
+    return std::all_of(bytes.begin() + from, bytes.end(), [](auto byte) { return byte == 0xa5; });
+}
+
+static void CheckDatagramAddressLengths(int family) {
+    if (family == 28 && ipv6Unavailable) return;
+    const std::uint32_t addressSize = family == 2 ? 16 : 28;
+    std::array<std::uint8_t, 28> destination{};
+    destination[0] = static_cast<std::uint8_t>(addressSize);
+    destination[1] = static_cast<std::uint8_t>(family);
+    if (family == 2) { destination[4] = 127; destination[7] = 1; }
+    else destination[23] = 1;
+    const int receiver = sceNetSocket("length-receiver", family, 2, 17);
+    const int sender = sceNetSocket("length-sender", family, 2, 17);
+    Require(receiver >= 0 && sender >= 0);
+    Require(sceNetBind_nid_postfix(receiver, destination.data(), addressSize) == 0);
+    std::uint32_t size = destination.size();
+    Require(sceNetGetsockname(receiver, destination.data(), &size) == 0 && size == addressSize);
+    Require(sceNetConnect(sender, destination.data(), addressSize) == 0);
+    std::array<std::uint8_t, 28> source{};
+    size = source.size();
+    Require(sceNetGetsockname(sender, source.data(), &size) == 0 && size == addressSize);
+    const char payload[] = "address length";
+    for (const std::uint32_t capacity : {0u, 1u, 2u, addressSize - 1, addressSize, 32u, UINT32_MAX}) {
+        const auto copied = std::min(capacity, addressSize);
+        std::array<std::uint8_t, 32> address;
+        address.fill(0xa5);
+        size = capacity;
+        Require(sceNetGetsockname(receiver, address.data(), &size) == 0 && size == copied);
+        Require(std::memcmp(address.data(), destination.data(), copied) == 0 && Untouched(address, copied));
+        char received[sizeof(payload)]{};
+        Require(sceNetSend(sender, payload, sizeof(payload), 0) == sizeof(payload));
+        address.fill(0xa5);
+        size = capacity;
+        Require(sceNetRecvfrom(receiver, received, sizeof(received), 2, address.data(), &size) == sizeof(payload));
+        Require(size == copied && std::memcmp(address.data(), source.data(), copied) == 0 && Untouched(address, copied));
+        address.fill(0xa5);
+        NetIovec in[] = {{received, sizeof(received)}};
+        NetMsghdr message{address.data(), capacity, in, 1, nullptr, 0, -1};
+        Require(sceNetRecvmsg(receiver, &message, 0) == sizeof(payload) && std::memcmp(received, payload, sizeof(payload)) == 0);
+        Require(message.name_length == copied && std::memcmp(address.data(), source.data(), copied) == 0 && Untouched(address, copied));
+    }
+    Require(sceNetSocketClose(sender) == 0 && sceNetSocketClose(receiver) == 0);
+}
+
+static void CheckStreamAddressLengths() {
+    const int listener = sceNetSocket("length-listener", 2, 1, 6);
+    Require(listener >= 0);
+    std::array<std::uint8_t, 16> listening{16, 2, 0, 0, 127, 0, 0, 1};
+    Require(sceNetBind_nid_postfix(listener, listening.data(), listening.size()) == 0 && sceNetListen(listener, 1) == 0);
+    std::uint32_t size = listening.size();
+    Require(sceNetGetsockname(listener, listening.data(), &size) == 0 && size == 16);
+    const int client = sceNetSocket("length-client", 2, 1, 6);
+    Require(client >= 0 && sceNetConnect(client, listening.data(), listening.size()) == 0);
+    std::array<std::uint8_t, 16> clientAddress{};
+    size = clientAddress.size();
+    Require(sceNetGetsockname(client, clientAddress.data(), &size) == 0 && size == 16);
+    std::array<std::uint8_t, 28> peer;
+    peer.fill(0xa5);
+    size = 1;
+    const int accepted = sceNetAccept(listener, peer.data(), &size);
+    Require(accepted >= 0 && size == 1 && peer[0] == 16 && Untouched(peer, 1));
+    for (const std::uint32_t capacity : {0u, 1u, 15u, 16u, 28u, UINT32_MAX}) {
+        const auto copied = std::min(capacity, std::uint32_t{16});
+        peer.fill(0xa5);
+        size = capacity;
+        Require(sceNetGetpeername(accepted, peer.data(), &size) == 0 && size == copied);
+        Require(std::memcmp(peer.data(), clientAddress.data(), copied) == 0 && Untouched(peer, copied));
+    }
+    for (const int descriptor : {accepted, client, listener}) Require(sceNetSocketClose(descriptor) == 0);
+}
+
 static void CheckUnspecifiedIpv6() {
     std::array<std::uint8_t, 16> unspecified{};
     Require(sceNetInetPton(28, "::", unspecified.data()) == 1);
@@ -663,6 +737,10 @@ int main() {
     const int started = sceNetConnect(connecting, address.data(), address.size());
     Require(started == 0 || (started == static_cast<int>(0x80410124) && *sceNetErrnoLoc() == 36));
     Require(sceNetSocketClose(connecting) == 0);
+
+    CheckDatagramAddressLengths(2);
+    CheckDatagramAddressLengths(28);
+    CheckStreamAddressLengths();
 
     const int epoll = sceNetEpollCreate("guest-sce-net", 0);
     Require(epoll >= 0);
