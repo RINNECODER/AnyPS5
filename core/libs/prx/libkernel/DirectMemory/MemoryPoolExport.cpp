@@ -67,7 +67,7 @@ int APS5_VABI sceKernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entries
   const KernelMemoryPoolBatchEntry& e = entries[done];
   ret = Guarded([&] {
    switch (e.op) {
-    case 1: return PoolCommit(e.commit.addr, e.commit.len, 0, e.commit.prot);
+    case 1: return PoolCommit(e.commit.addr, e.commit.len, e.commit.type, e.commit.prot);
     case 2: return PoolDecommit(e.decommit.addr, e.decommit.len);
     case 3: return DoMprotect(e.protect.addr, static_cast<size_t>(e.protect.len), e.protect.prot);
     case 4: return DoMtypeprotect(e.type_protect.addr, static_cast<size_t>(e.type_protect.len), e.type_protect.type, e.type_protect.prot);
