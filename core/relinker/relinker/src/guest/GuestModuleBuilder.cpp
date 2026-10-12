@@ -331,7 +331,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     };
     for (const auto index : order) if (!windows && !deferred(index)) addNeeded("$ORIGIN/" + appDirectory(images[index]) + "/" + images[index].OutputName);
     for (const auto& name : hostLibraries) addNeeded(name);
-    if (!windows && runPath != "$ORIGIN" && !runPath.starts_with("$ORIGIN/") && !std::filesystem::path(runPath).is_absolute()) throw Domain::RelinkerException("Guest Linux run path must be absolute or begin with $ORIGIN");
+    if (!windows && runPath != "$ORIGIN" && !runPath.starts_with("$ORIGIN/") && !runPath.starts_with("$ORIGIN:") && !std::filesystem::path(runPath).is_absolute()) throw Domain::RelinkerException("Guest Linux run path must be absolute or begin with $ORIGIN");
     const auto outputDirectory = std::filesystem::absolute(outputPath).parent_path().lexically_normal();
     std::vector<GuestArtifact> artifacts;
     for (const auto index : order) {
@@ -370,9 +370,12 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         if (windows) output = Elfpatcher::GuestModuleWriter().WriteWindows(image, runtime);
         else {
             std::string guestRunPath = runPath;
-            if (runPath == "$ORIGIN" || runPath.starts_with("$ORIGIN/")) {
-                const auto relativeRoot = outputDirectory.lexically_relative(destination.lexically_normal()).generic_string();
-                guestRunPath = "$ORIGIN/" + relativeRoot + runPath.substr(7);
+            const auto relativeRoot = outputDirectory.lexically_relative(destination.lexically_normal()).generic_string();
+            for (std::size_t position = 0; (position = guestRunPath.find("$ORIGIN", position)) != std::string::npos;) {
+                position += 7;
+                if (position != guestRunPath.size() && guestRunPath[position] != '/' && guestRunPath[position] != ':') continue;
+                guestRunPath.insert(position, "/" + relativeRoot);
+                position += relativeRoot.size() + 1;
             }
             std::vector<std::string> needed;
             for (const auto dependency : dependencies[index]) {
