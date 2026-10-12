@@ -672,6 +672,34 @@ void ShaderStageTests() {
         fan.userConfig[0x242] = 3;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(fan); }, "unsupported geometry input or output assembly");
     }
+    {
+        auto fast = makeState();
+        fast.userConfig[0x242] = 1;
+        fast.context[0x2d5] = 0x482030;
+        fast.userConfig[0x25b] = 0x201;
+        fast.context[0x1ff] = 32;
+        fast.context[0x2ce] = 32;
+        fast.context[0x2d3] = 64;
+        fast.context[0x29b] = 2;
+        fast.context[0x2ab] = 4;
+        fast.shader[0x8a] = 0x022c0245;
+        fast.shader[0x8b] = 0x9002a;
+        const auto state = AgcDriver::Graphics::DecodeState(fast);
+        Require(state.stages.path == AgcDriver::Graphics::ShaderPath::Geometry && state.stages.vertexWaveSize == 32 && state.stages.mesh, "a fast-launch draw did not decode as wave32 geometry");
+        const auto& mesh = *state.stages.mesh;
+        Require(mesh.inputPrimitive == 1 && mesh.primitivesPerGroup == 1 && mesh.verticesPerGroup == 1 && mesh.maxVertices == 32 && mesh.maxPrimitives == 64 && mesh.threadsPerGroup == 64 && mesh.ldsSizeDwords == 128, "a fast-launch subgroup did not decode as one point amplified by PRIM_AMP_FACTOR");
+        fast.context[0x2d5] = 0x502030;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(fast); }, "unsupported geometry routing, fast launch or wave-ID state");
+        fast.context[0x2d5] = 0x482030;
+        fast.userConfig[0x25b] = 0x402;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(fast); }, "fast launch other than one point per subgroup");
+        fast.userConfig[0x25b] = 0x201;
+        fast.userConfig[0x242] = 4;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(fast); }, "fast launch other than one point per subgroup");
+        fast.userConfig[0x242] = 1;
+        fast.context[0x2d3] = 0;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(fast); }, "amplifies to no primitives");
+    }
     queue.context[0x2ab] = 0;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "invalid VGT_ESGS_RING_ITEMSIZE");
     queue.context[0x2ab] = 4;
