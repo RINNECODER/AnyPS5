@@ -13,6 +13,7 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libSceIme/include/ImeInput.hpp"
 
 PadInput::PadInput() : PadInput(Pad::LoadInputMapping()) {
 }
@@ -244,6 +245,7 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
     const bool mouse = event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP;
     if (!keyboard && !mouse) return;
     if (ignoreInput) return;
+    if (event.type == SDL_KEYDOWN && ImeCapturesKeyboard_nid_postfix()) return;
     if (keyboard && event.key.repeat != 0) return;
     const bool down = event.type == SDL_KEYDOWN || event.type == SDL_MOUSEBUTTONDOWN;
     for (std::size_t index = 0; index < bindings.size(); ++index) {
