@@ -1,6 +1,7 @@
 #include "ShaderDiskCache.hpp"
 #include "CacheKey.hpp"
 #include "ShaderCacheDirectory.hpp"
+#include "ShaderCacheEviction.hpp"
 #include "ThreadOwned.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #ifdef _WIN32
@@ -847,6 +848,7 @@ public:
         } else {
             switch (DecodeEntry(file, key, variant)) {
                 case LoadStatus::Loaded:
+                    CacheEviction::Touch(directory / name);
                     hits.fetch_add(1, std::memory_order_relaxed);
                     bytesRead.fetch_add(file.size(), std::memory_order_relaxed);
                     loaded = true;
@@ -927,6 +929,7 @@ private:
         if (WriteFileAtomically(directory / EntryName(job.key), file)) {
             writes.fetch_add(1, std::memory_order_relaxed);
             bytesWritten.fetch_add(file.size(), std::memory_order_relaxed);
+            CacheEviction::SharedBudget().NoteWrite(root, file.size());
         } else {
             const auto failures = writeFailures.fetch_add(1, std::memory_order_relaxed);
             if (failures < 4) std::fprintf(stderr, "[shader-disk-cache] cannot write %s\n", (directory / EntryName(job.key)).string().c_str());
@@ -936,21 +939,13 @@ private:
     void housekeeping() {
         std::error_code error;
         std::filesystem::create_directories(directory, error);
-        const auto stamp = directory / "last-used";
-        std::ofstream(stamp, std::ios::binary | std::ios::trunc).close();
-        std::filesystem::last_write_time(stamp, std::filesystem::file_time_type::clock::now(), error);
+        CacheEviction::MarkInUse(directory);
         const auto now = std::filesystem::file_time_type::clock::now();
-        for (std::filesystem::directory_iterator it(root, error), end; !error && it != end; it.increment(error)) {
-            const auto name = it->path().filename().string();
-            if (it->path() == directory || name.size() != 16 || name.find_first_not_of("0123456789abcdef") != std::string::npos || !it->is_directory(error)) continue;
-            std::error_code timeError;
-            auto used = std::filesystem::last_write_time(it->path() / "last-used", timeError);
-            if (timeError) used = std::filesystem::last_write_time(it->path(), timeError);
-            if (!timeError && now - used > std::chrono::hours(24 * 14)) {
-                std::error_code removeError;
-                std::filesystem::remove_all(it->path(), removeError);
-            }
-        }
+        // Other source versions' directories can never hit for this build.
+        CacheEviction::RemoveStaleVersions(root, directory, [](const std::string& name) {
+            return name.size() == 16 && name.find_first_not_of("0123456789abcdef") == std::string::npos;
+        });
+        CacheEviction::SharedBudget().Startup(root);
         error.clear();
         for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
             if (it->path().filename().string().find(".tmp.") == std::string::npos) continue;
