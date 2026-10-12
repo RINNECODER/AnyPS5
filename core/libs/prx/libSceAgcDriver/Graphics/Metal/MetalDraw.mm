@@ -9,7 +9,10 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cctype>
 #include <cstring>
+#include <string>
+#include <vector>
 #include <limits>
 #include <stdexcept>
 
@@ -147,6 +150,132 @@ Graphics::GuestTextureResource colorSurface(const Graphics::ColorTarget& color) 
     surface.dccAlphaOnMsb = color.dccAlphaOnMsb;
     surface.dccPipeAligned = color.dccPipeAligned;
     return surface;
+}
+
+// Metal has no geometry stage. A pixel shader that reads per-vertex parameters (AMD P0/P10/P20, the
+// barycentric emulation Vulkan feeds from BuildBarycentricGeometryShader) is drawn in two passes: the
+// vertex shader runs as a capture kernel, as for rectangle lists, and this generated vertex function
+// draws the captured triangles. Each corner gets what the geometry shader gives it: its own position
+// and parameters, the weights of its corner, and the parameters of all three corners of its triangle.
+constexpr const char* BarycentricVertexEntry = "anyps5_barycentric_vertex";
+
+struct FragmentInput {
+    std::string type;
+    std::uint32_t location;
+};
+
+// The [[user(locnN)]] stage inputs of a converted fragment shader, with their MSL types: a vertex
+// function feeding it must write the same types at the same locations.
+std::vector<FragmentInput> fragmentInputs(const std::string& source) {
+    std::vector<FragmentInput> inputs;
+    std::size_t at = 0;
+    while ((at = source.find("[[user(locn", at)) != std::string::npos) {
+        const auto lineStart = source.rfind('\n', at) + 1;
+        auto cursor = at + std::strlen("[[user(locn");
+        std::uint32_t location = 0;
+        const auto digits = cursor;
+        while (cursor < source.size() && std::isdigit(static_cast<unsigned char>(source[cursor]))) {
+            location = location * 10u + static_cast<std::uint32_t>(source[cursor++] - '0');
+        }
+        if (cursor == digits || cursor >= source.size() || source[cursor] != ')') {
+            throw std::invalid_argument("Metal per-vertex parameter emulation does not support component-packed fragment inputs");
+        }
+        auto typeStart = source.find_first_not_of(" \t", lineStart);
+        const auto typeEnd = source.find_first_of(" \t", typeStart);
+        if (typeStart == std::string::npos || typeEnd == std::string::npos || typeEnd > at) {
+            throw std::invalid_argument("Metal per-vertex parameter emulation cannot read a fragment input type");
+        }
+        inputs.push_back({source.substr(typeStart, typeEnd - typeStart), location});
+        at = cursor;
+    }
+    return inputs;
+}
+
+// Converts four raw 32-bit words (`words`, a uint4 expression) to an MSL scalar or vector type.
+std::string convertWords(const std::string& type, const std::string& words) {
+    std::size_t split = type.size();
+    while (split > 0 && std::isdigit(static_cast<unsigned char>(type[split - 1]))) --split;
+    const auto base = type.substr(0, split);
+    const auto count = split == type.size() ? 1u : static_cast<std::uint32_t>(std::stoul(type.substr(split)));
+    if (count == 0 || count > 4) throw std::invalid_argument("Metal per-vertex parameter emulation met an invalid fragment input type " + type);
+    static constexpr std::array<const char*, 5> swizzles{"", ".x", ".xy", ".xyz", ""};
+    std::string value;
+    if (base == "float") value = "as_type<float4>(" + words + ")";
+    else if (base == "half") value = "half4(as_type<float4>(" + words + "))";
+    else if (base == "int") value = "as_type<int4>(" + words + ")";
+    else if (base == "uint") value = words;
+    else throw std::invalid_argument("Metal per-vertex parameter emulation met an unsupported fragment input type " + type);
+    return "(" + value + ")" + swizzles[count];
+}
+
+std::string barycentricVertexSource(const MetalBackend::InterfaceLayout& captured, const std::string& fragmentSource,
+    const RecompileResult& fragment, bool flipY, bool fixupClipSpace) {
+    constexpr std::uint32_t PositionBuiltin = 0; // SPIR-V BuiltIn Position
+    if (captured.stride == 0 || captured.stride % 4u != 0) throw std::invalid_argument("Metal per-vertex parameter capture stride is not word aligned");
+    const MetalBackend::InterfaceMember* position = nullptr;
+    std::vector<const MetalBackend::InterfaceMember*> byLocation;
+    for (const auto& member : captured.members) {
+        if (member.offset % 4u != 0 || (member.width != 0 && member.width != 32) || member.components > 4) {
+            throw std::invalid_argument("Metal per-vertex parameter capture holds a non-32-bit or unaligned output");
+        }
+        if (member.builtin && *member.builtin == PositionBuiltin) position = &member;
+        if (member.location) {
+            if (*member.location >= byLocation.size()) byLocation.resize(*member.location + 1u, nullptr);
+            byLocation[*member.location] = &member;
+        }
+    }
+    if (position == nullptr || position->components != 4) throw std::invalid_argument("Metal per-vertex parameter capture has no vec4 position");
+    const auto layout = LayoutBarycentricEmulation(fragment.fragmentParameters, fragment.barycentricEmulation);
+    const auto strideWords = std::to_string(captured.stride / 4u);
+    const auto load = [&](const std::string& vertex, std::uint32_t location) -> std::string {
+        if (location >= byLocation.size() || byLocation[location] == nullptr) return "uint4(0u)";
+        const auto& member = *byLocation[location];
+        return "anyps5Words(captured, (" + vertex + ") * " + strideWords + "u + " + std::to_string(member.offset / 4u) + "u, " +
+            std::to_string(member.components) + "u)";
+    };
+    std::string members, stores;
+    for (const auto& input : fragmentInputs(fragmentSource)) {
+        const auto name = "v" + std::to_string(input.location);
+        members += "    " + input.type + " " + name + " [[user(locn" + std::to_string(input.location) + ")]];\n";
+        std::string words;
+        if (input.location == layout.smoothLocation || input.location == layout.linearLocation) {
+            words = "as_type<uint4>(float4(corner == 0u ? 1.0f : 0.0f, corner == 1u ? 1.0f : 0.0f, corner == 2u ? 1.0f : 0.0f, 0.0f))";
+        } else {
+            const auto perVertex = std::find_if(layout.perVertexLocations.begin(), layout.perVertexLocations.end(), [&](const auto& entry) {
+                return input.location >= entry.second && input.location < entry.second + 3u;
+            });
+            const auto parameter = [&](auto matches) {
+                return std::find_if(fragment.fragmentParameters.begin(), fragment.fragmentParameters.end(), matches);
+            };
+            if (perVertex != layout.perVertexLocations.end()) {
+                const auto source = parameter([&](const auto& p) { return p.perVertex && p.location == perVertex->first; });
+                if (source == fragment.fragmentParameters.end()) throw std::invalid_argument("Metal per-vertex parameter has no source");
+                words = load("first + " + std::to_string(input.location - perVertex->second) + "u", source->sourceLocation);
+            } else {
+                const auto source = parameter([&](const auto& p) { return !p.perVertex && p.location == input.location; });
+                words = load("vertexId", source != fragment.fragmentParameters.end() ? source->sourceLocation : input.location);
+            }
+        }
+        stores += "    out." + name + " = " + convertWords(input.type, words) + ";\n";
+    }
+    std::string source =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "struct AnyPS5BarycentricOut {\n    float4 position [[position]];\n" + members + "};\n"
+        "static inline uint4 anyps5Words(device const uint* words, uint at, uint count) {\n"
+        "    uint4 value = uint4(0u);\n"
+        "    for (uint i = 0u; i < count; ++i) value[i] = words[at + i];\n"
+        "    return value;\n}\n"
+        "vertex AnyPS5BarycentricOut " + std::string(BarycentricVertexEntry) +
+        "(uint vertexId [[vertex_id]], device const uint* captured [[buffer(0)]]) {\n"
+        "    AnyPS5BarycentricOut out;\n"
+        "    const uint corner = vertexId % 3u;\n"
+        "    const uint first = vertexId - corner;\n"
+        "    float4 position = as_type<float4>(anyps5Words(captured, vertexId * " + strideWords + "u + " +
+            std::to_string(position->offset / 4u) + "u, 4u));\n";
+    if (flipY) source += "    position.y = -position.y;\n";
+    if (fixupClipSpace) source += "    position.z = (position.z + position.w) * 0.5f;\n";
+    source += "    out.position = position;\n" + stores + "    return out;\n}\n";
+    return source;
 }
 
 std::span<const std::byte> pushBlock(const MetalBackend::Result& shader,
@@ -331,8 +460,9 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         else throw std::invalid_argument("Metal draw requires one rasterization and one fragment program");
     }
     if (vertex == nullptr || fragment == nullptr) throw std::invalid_argument("Metal draw vertex or fragment program is missing");
-    if (fragment->program->barycentricEmulation.active) {
-        throw std::invalid_argument("Metal draw pixel shader needs per-vertex barycentric inputs, which Metal has no geometry stage to emulate");
+    const bool baryPath = fragment->program->barycentricEmulation.active;
+    if (baryPath && (meshPath || rectPath || state.topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || draw.indexCount % 3 != 0)) {
+        throw std::invalid_argument("Metal draw pixel shader needs per-vertex barycentric inputs, which Metal emulates only for complete triangle lists");
     }
     if (rectPath && (control == nullptr || evaluation == nullptr)) throw std::invalid_argument("Metal rectangle draw requires the original generated control and evaluation programs");
     auto pushConstants = Graphics::AssemblePushConstants(shaders);
@@ -547,7 +677,7 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
             (attribute.fetchIndex == 0 ? MTLVertexStepFunctionPerVertex : MTLVertexStepFunctionPerInstance);
         nativeLayout.stepRate = layout.bindings[i].stride == 0 ? 0 : 1;
     }
-    pipelineDescriptor.vertexDescriptor = rectPath ? nil : vertexDescriptor;
+    pipelineDescriptor.vertexDescriptor = rectPath || baryPath ? nil : vertexDescriptor;
     MetalBackend::TargetOptions target;
     if (@available(macOS 15.0, *))
         target.supportsWorkgroupAtomicFences = [backend.Device() supportsFamily:MTLGPUFamilyApple1];
@@ -558,8 +688,9 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     target.pushConstantOffsetBytes = vertex->pushConstantOffset;
     target.flipVertexY = state.viewport.height > 0;
     target.fixupClipSpace = state.negativeOneToOne;
-    target.rectListMode = rectPath ? MetalBackend::RectListMode::VertexCapture : MetalBackend::RectListMode::None;
-    target.rectListIndexSize = rectPath && draw.indexed ? nativeIndexSize : 0;
+    const bool capturePath = rectPath || baryPath;
+    target.rectListMode = capturePath ? MetalBackend::RectListMode::VertexCapture : MetalBackend::RectListMode::None;
+    target.rectListIndexSize = capturePath && draw.indexed ? nativeIndexSize : 0;
     configureSamplerArguments(target, *vertex->program, backend.Device());
     auto nativeVertex = MetalBackend::ConvertToMetal(*vertex->program, meshPath ? ShaderStage::Mesh : ShaderStage::Vertex, target);
     std::unique_ptr<MetalRectKernelPipeline> capturePipeline;
@@ -569,11 +700,13 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     id<MTLBuffer> rectFactors = nil;
     id<MTLBuffer> rectParameters = nil;
     std::uint32_t rectPatches = 0;
+    id<MTLBuffer> baryCapture = nil;
+    std::uint32_t baryTriangles = 0;
     std::vector<MetalImplicitBufferBinding> evaluationBuffers;
-    if (rectPath) {
+    if (capturePath) {
         const auto patches = std::uint64_t{draw.indexCount / 3} * draw.instanceCount;
         if (patches > std::numeric_limits<std::uint32_t>::max() / 4u) throw std::invalid_argument("Metal rectangle patch grid exceeds shader integer range");
-        rectPatches = static_cast<std::uint32_t>(patches);
+        (rectPath ? rectPatches : baryTriangles) = static_cast<std::uint32_t>(patches);
         auto inputs = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
         inputs.indexType = nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
         inputs.indexBufferIndex = target.rectListBuffers.indices;
@@ -591,6 +724,12 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
                 attributes[i].fetchIndex == 0 ? (draw.indexed ? MTLStepFunctionThreadPositionInGridXIndexed : MTLStepFunctionThreadPositionInGridX) : MTLStepFunctionThreadPositionInGridY;
         }
         capturePipeline = std::make_unique<MetalRectKernelPipeline>(backend.Device(), std::move(nativeVertex), inputs);
+        const auto& captured = capturePipeline->Reflection();
+        if (baryPath) {
+            baryCapture = backend.Buffer(std::uint64_t{baryTriangles} * 3u * captured.rectList->outputLayout.stride);
+        }
+    }
+    if (rectPath) {
         const auto& captured = capturePipeline->Reflection();
         target.vertexBufferCount = 0;
         target.pushConstantOffsetBytes = control->pushConstantOffset;
@@ -617,9 +756,19 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     target.vertexBufferCount = 0;
     target.pushConstantOffsetBytes = fragment->pushConstantOffset;
     target.rectListMode = MetalBackend::RectListMode::None;
+    target.rectListIndexSize = 0;
     target.rectListInputLayout.reset();
     configureSamplerArguments(target, *fragment->program, backend.Device());
     auto nativeFragment = MetalBackend::ConvertToMetal(*fragment->program, ShaderStage::Fragment, target);
+    if (baryPath) {
+        MetalBackend::Result corners;
+        corners.stage = ShaderStage::Vertex;
+        corners.nativeExecutionKind = MetalBackend::NativeExecutionKind::Vertex;
+        corners.entryPoint = BarycentricVertexEntry;
+        corners.source = barycentricVertexSource(capturePipeline->Reflection().rectList->outputLayout, nativeFragment.source,
+            *fragment->program, state.viewport.height > 0, state.negativeOneToOne);
+        nativeVertex = std::move(corners);
+    }
     std::unique_ptr<MetalRenderPipeline> vertexPipeline;
     std::unique_ptr<MetalMeshPipeline> meshPipeline;
     if (meshPath) {
@@ -634,6 +783,26 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     const auto& fragmentReflection = meshPath ? meshPipeline->FragmentReflection() : vertexPipeline->FragmentReflection();
     auto vertexBindings = resources.Bindings(mainReflection);
     auto fragmentBindings = resources.Bindings(fragmentReflection);
+    if (baryPath) {
+        const auto& captured = capturePipeline->Reflection();
+        const auto captureBindings = resources.Bindings(captured);
+        std::vector<MetalImplicitBufferBinding> captureBuffers{{rectSlot(captured, MetalBackend::ImplicitBufferRole::StageOutput), {baryCapture, 0, baryCapture.length}}};
+        if (draw.indexed) captureBuffers.push_back({rectSlot(captured, MetalBackend::ImplicitBufferRole::Indices), indexBuffer});
+        auto commands = backend.CommandBuffer();
+        capturePipeline->Encode(commands, captureBindings, MTLRegionMake3D(draw.firstVertex, draw.firstInstance, 0, draw.indexCount, draw.instanceCount, 1),
+            captureBuffers, vertexBuffers, pushBlock(captured, pushConstants), resources.Residency());
+        backend.Wait(commands);
+        for (const auto& mapping : captured.resources) {
+            if (mapping.role != DescriptorRole::FaultBuffer) continue;
+            const auto binding = std::find_if(captureBindings.begin(), captureBindings.end(), [&](const auto& resource) {
+                return resource.descriptorSet == mapping.descriptorSet && resource.binding == mapping.binding;
+            });
+            if (binding == captureBindings.end() || binding->buffers.size() != 1) throw std::runtime_error("Metal per-vertex capture fault binding is missing");
+            BdaAbi::Fault fault{};
+            std::memcpy(&fault, static_cast<const std::byte*>(binding->buffers[0].buffer.contents) + binding->buffers[0].offset, sizeof(fault));
+            if (fault.state != BdaAbi::FaultState::Empty) return CompleteCommittedWork([&] { return resources.Complete(commands); });
+        }
+    }
     if (rectPath) {
         const auto& captured = capturePipeline->Reflection();
         const auto& controlled = controlPipeline->Reflection();
@@ -698,12 +867,15 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
         }
         BindRenderState(encoder, state, depthStencilState);
         if (sampleCounter != nil) [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:16];
-        if (!rectPath) for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setVertexBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
+        if (baryPath) [encoder setVertexBuffer:baryCapture offset:0 atIndex:0];
+        else if (!rectPath) for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setVertexBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
         if (meshPath) {
             const auto threads = mainReflection.threadsPerThreadgroup;
             [encoder drawMeshThreadgroups:MTLSizeMake(meshGroups, draw.instanceCount, 1)
                 threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1)
                 threadsPerMeshThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+        } else if (baryPath) {
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:NSUInteger{baryTriangles} * 3u];
         } else if (rectPath) {
             [encoder setTessellationFactorBuffer:rectFactors offset:0 instanceStride:0];
             [encoder drawPatches:4 patchStart:0 patchCount:rectPatches patchIndexBuffer:nil patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];

@@ -1,4 +1,5 @@
 #include "MetalShaderResources.hpp"
+#include "BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "RuntimeAbi.hpp"
@@ -37,6 +38,33 @@ std::string describeImage(const Graphics::GuestTextureResource& resource) {
         resource.format, resource.width, resource.height, resource.depthOrLastArray + 1u, resource.baseLevel,
         resource.lastLevel, resource.mipCount, resource.samples, static_cast<unsigned>(resource.tileMode));
     return text;
+}
+
+// BindTrace: one image binding, and for guest memory how many of 64 evenly spaced texels are non-zero.
+void traceImage(std::uint32_t set, std::uint32_t binding, std::uint32_t element, const Graphics::GuestTextureResource& resource,
+    bool storage, bool written, bool resident) {
+    char probe[48] = "";
+    if (!resident) {
+        const auto geometry = Graphics::DescribeSurface(resource);
+        const auto elementBytes = Graphics::BytesPerElement(resource.format);
+        if (geometry.guestBytes != 0 && elementBytes != 0 && elementBytes <= 16 &&
+            GuestMemory::Accessible(reinterpret_cast<const void*>(resource.baseAddress), static_cast<std::size_t>(geometry.guestBytes), false)) {
+            unsigned nonZero = 0;
+            const auto stride = geometry.guestBytes / 64u / elementBytes * elementBytes;
+            for (std::uint64_t probeIndex = 0; probeIndex < 64; ++probeIndex) {
+                std::array<std::byte, 16> texel{};
+                GuestMemory::Read(resource.baseAddress + probeIndex * stride, std::span(texel).first(elementBytes));
+                nonZero += std::any_of(texel.begin(), texel.begin() + elementBytes, [](std::byte value) { return value != std::byte{0}; });
+            }
+            std::snprintf(probe, sizeof probe, " guest non-zero %u/64", nonZero);
+        } else {
+            std::snprintf(probe, sizeof probe, " guest unreadable");
+        }
+    }
+    BindTrace::Log("  %s %u.%u[%u] 0x%llx %s dim %u array %u-%u%s -> %s%s", storage ? (written ? "storage-rw" : "storage-r") : "sampled",
+        set, binding, element, static_cast<unsigned long long>(resource.baseAddress), describeImage(resource).c_str(),
+        static_cast<unsigned>(resource.dimension), resource.baseArray, resource.depthOrLastArray,
+        resource.dccAddress != 0 ? " dcc" : "", resident ? "resident surface" : "guest memory", probe);
 }
 
 auto textureKey(const Graphics::GuestTextureResource& resource, bool compare) {
@@ -522,6 +550,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                     throw std::invalid_argument("guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
                 }
                 id<MTLTexture> view = depthLookup ? depthLookup(descriptor, storage, depth) : nil;
+                if (BindTrace::Active()) traceImage(mapping.descriptorSet, mapping.binding, i, descriptor, storage, written, view != nil);
                 if (view == nil && descriptor.samples > 1) {
                     // Only resident depth and color surfaces are multisampled; guest-memory MSAA images have no upload path.
                     throw std::invalid_argument("Metal multisampled guest image is not a resident multisampled depth or color surface (guest-memory MSAA images have no upload path; " +
