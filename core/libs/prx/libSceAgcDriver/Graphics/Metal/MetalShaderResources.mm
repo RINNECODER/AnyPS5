@@ -498,7 +498,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
             physicallyOverlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes())) {
             throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing (" +
                 describeImage(descriptor) + (descriptor.baseAddress == begin ? " at the same base as " : " overlapping ") +
-                describeImage(other) + ")");
+                describeImage(other) + "; " + image.texture->ShareMismatch(descriptor) + ")");
         }
     }
     auto host = staged ? std::span<std::byte>{} : NativeGuestMemory::ContiguousBorrowedRange(descriptor.baseAddress, bytes, written);

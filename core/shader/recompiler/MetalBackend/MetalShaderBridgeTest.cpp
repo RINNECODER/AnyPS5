@@ -178,6 +178,8 @@ int main() {
         Reject([&] { static_cast<void>(ConvertToMetal(sample, ShaderStage::Vertex)); }, "matching the requested stage");
         Reject([&] { static_cast<void>(ConvertToMetal(sample, ShaderStage::TessellationControl)); }, "unimplemented native Metal scheduling");
         Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityFloat64}), ShaderStage::Compute)); }, "Float64");
+        // A rejected conversion is remembered: the same input fails again with the same error.
+        Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityFloat64}), ShaderStage::Compute)); }, "Float64");
         Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityInt64Atomics}), ShaderStage::Compute)); }, "64-bit atomics");
         Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityInt64}), ShaderStage::Compute)); }, "lacks 64-bit integer");
         Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityPhysicalStorageBufferAddresses}), ShaderStage::Compute)); }, "lacks GPU-address");

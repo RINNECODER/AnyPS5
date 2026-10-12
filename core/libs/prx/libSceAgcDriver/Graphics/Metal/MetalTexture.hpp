@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include <cstddef>
 #include <memory>
+#include <string>
 #include <span>
 
 namespace AgcDriver::Metal {
@@ -22,6 +23,8 @@ public:
     MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor, bool compare = false);
     MetalTexture(const MetalDevice& backend, std::span<const std::uint32_t> words, bool compare = false);
     [[nodiscard]] bool CanShareBacking(const Graphics::GuestTextureResource& descriptor) const;
+    // Why CanShareBacking(descriptor) is false, for error messages.
+    [[nodiscard]] std::string ShareMismatch(const Graphics::GuestTextureResource& descriptor) const;
     [[nodiscard]] std::shared_ptr<MetalTexture> CreateView(const Graphics::GuestTextureResource& descriptor, bool compare = false) const;
     void Upload(std::span<const std::byte> guestBytes);
     void Readback(std::span<std::byte> guestBytes) const;

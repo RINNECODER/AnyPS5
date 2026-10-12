@@ -351,6 +351,26 @@ bool MetalTexture::CanShareBacking(const Graphics::GuestTextureResource& resourc
         layerPrefix(backing->geometry, Graphics::DescribeSurface(resource));
 }
 
+std::string MetalTexture::ShareMismatch(const Graphics::GuestTextureResource& resource) const {
+    const auto& original = backing->descriptor;
+    std::string why;
+    const auto field = [&](const char* name, std::uint64_t a, std::uint64_t b) {
+        if (a != b) why += std::string(why.empty() ? "" : ", ") + name + " " + std::to_string(a) + " vs " + std::to_string(b);
+    };
+    field("address", original.baseAddress, resource.baseAddress);
+    field("width", original.width, resource.width);
+    field("height", original.height, resource.height);
+    field("last array", original.depthOrLastArray, resource.depthOrLastArray);
+    field("mips", original.mipCount, resource.mipCount);
+    field("allocated mips", original.allocatedMipCount, resource.allocatedMipCount);
+    field("tile", static_cast<std::uint64_t>(original.tileMode), static_cast<std::uint64_t>(resource.tileMode));
+    field("dimension", static_cast<std::uint64_t>(original.dimension), static_cast<std::uint64_t>(resource.dimension));
+    field("dcc", original.dccAddress, resource.dccAddress);
+    field("format family", formatFamily(original.format), formatFamily(resource.format));
+    if (why.empty()) why = CanShareBacking(resource) ? "shareable" : "surface geometry differs";
+    return why;
+}
+
 std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestTextureResource& resource, bool compare) const {
     return CreateView(resource, compare, false);
 }
