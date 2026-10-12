@@ -4817,6 +4817,7 @@ void integerClearTests(const Device& device) {
             Require(!StorageClearAvailable(context, format, keys), "an integer storage format took a clear code other than 0000");
         }
     }
+    Require(tested == 3, "an integer storage format has no storage form");
     std::cout << "integer storage clears: " << tested << " formats ok\n";
 }
 
@@ -5019,6 +5020,10 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--unchanged-cpu-stamps-only") {
             unchangedCpuStampTests(device, recorder);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--integer-clear-only") {
+            integerClearTests(device);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--settled-baseline-only") {
