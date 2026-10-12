@@ -284,6 +284,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     const auto decoded = DecodeComputeDispatch(queue, packet,
         captured != nullptr ? std::span<const std::byte>(captured->header) : std::span<const std::byte>{});
     if (std::any_of(decoded.groups.begin(), decoded.groups.end(), [](auto value) { return value == 0; })) return;
+    GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Dispatch, decoded.programAddress));
     GpuStallWatch::Note(1, decoded.programAddress, std::uint64_t{decoded.groups[0] & 0x1fffffu} |
         std::uint64_t{decoded.groups[1] & 0x1fffffu} << 21 | std::uint64_t{decoded.groups[2] & 0x1fffffu} << 42);
     if (BindTrace::Active()) {
@@ -409,6 +410,7 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         return;
     }
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
+    GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Draw, decoded.programs.empty() ? 0 : decoded.programs.back().binary.codeAddress));
     GpuStallWatch::Note(2, decoded.programs.empty() ? 0 : decoded.programs.front().binary.codeAddress, parameters.indexCount);
     if (BindTrace::Active()) {
         std::string programs;

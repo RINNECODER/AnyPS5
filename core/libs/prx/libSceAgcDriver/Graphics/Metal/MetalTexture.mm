@@ -451,6 +451,7 @@ void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
 }
 
 void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset) {
+    GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Upload, descriptor.baseAddress));
     const auto& geometry = backing->geometry;
     // The queue runs uploads in commit order: no need to wait for an earlier one of this texture.
     pendingUpload = nil;
@@ -495,6 +496,7 @@ void MetalTexture::Readback(id<MTLBuffer> guest, std::size_t offset) const {
 }
 
 void MetalTexture::readbackInto(id<MTLBuffer> guest, std::size_t offset) const {
+    GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Readback, descriptor.baseAddress));
     const auto& geometry = backing->geometry;
     FinishUpload();
     // The retile reads only the elements the blit wrote (each level's texel extent in elements), so

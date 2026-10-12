@@ -99,6 +99,10 @@ id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
     if (commands == nil) {
         throw MetalGpuExecutionError("Metal command buffer creation failed");
     }
+    if (GpuTiming::ProfileTags()) {
+        const auto tag = GpuTiming::Tag() != 0 ? GpuTiming::Tag() : GpuTiming::MakeTag(GpuTiming::Current(), 0);
+        [commands addCompletedHandler:^(id<MTLCommandBuffer> done) { GpuTiming::RecordTag(tag, done.GPUEndTime - done.GPUStartTime); }];
+    }
     return commands;
 }
 
