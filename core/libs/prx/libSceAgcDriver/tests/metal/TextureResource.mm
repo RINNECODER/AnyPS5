@@ -143,6 +143,7 @@ void VerifySurface(const MetalTests::Context& context, id<MTLLibrary> probes, Gu
         }
     }
     texture.Upload(guest);
+    texture.FinishUpload();  // the probes run on another queue
     for (unsigned level = 0; level < descriptor.mipCount; ++level) {
         const auto& mip = g.mips[level];
         auto output = Probe(context,probes,texture.Texture(),descriptor.dimension,level);
@@ -190,6 +191,7 @@ void VerifyViews(const MetalTests::Context& context, id<MTLLibrary> probes) {
     MetalTexture texture(backend,descriptor);
     std::vector<std::byte> guest(texture.GuestBytes(),std::byte{0xa7});
     texture.Upload(guest);
+    texture.FinishUpload();  // the probes run on another queue
     auto commands = [context.queue commandBuffer];
     auto write = [commands computeCommandEncoder];
     [write setComputePipelineState:Pipeline(context,probes,@"writeView")];
@@ -228,6 +230,7 @@ void VerifyArrayView(const MetalTests::Context& context, id<MTLLibrary> probes) 
         std::memcpy(guest.data()+Address(texture,x,y,layer,1),pixel.data(),4);
     }
     texture.Upload(guest);
+    texture.FinishUpload();  // the probes run on another queue
     auto output = Probe(context,probes,texture.SampledView(),TextureDimension::k2DArray,0);
     const auto* bytes = static_cast<const std::byte*>(output.contents);
     for (unsigned layer = 0; layer < 2; ++layer) for (unsigned y = 0; y < 4; ++y) for (unsigned x = 0; x < 4; ++x) {
@@ -244,6 +247,7 @@ void VerifyDecodedDescriptor(const MetalTests::Context& context, id<MTLLibrary> 
     const auto pixel=Pixel(1,2,0,0);
     std::memcpy(guest.data()+Address(texture,1,2,0,0),pixel.data(),4);
     texture.Upload(guest);
+    texture.FinishUpload();  // the probes run on another queue
     auto output=Probe(context,probes,texture.Texture(),TextureDimension::k2D,0);
     Require(std::memcmp(static_cast<const std::byte*>(output.contents)+(2*8+1)*4,pixel.data(),4)==0,"decoded guest descriptor does not produce native texture pixels");
     bool rejected=false;
@@ -273,6 +277,7 @@ void VerifyThick(const MetalTests::Context& context, id<MTLLibrary> probes) {
         std::memcpy(guest.data()+point.address,pixel.data(),4);
     }
     texture.Upload(guest);
+    texture.FinishUpload();  // the probes run on another queue
     for (unsigned level=0;level<2;++level) {
         auto output=Probe(context,probes,texture.Texture(),TextureDimension::k3D,level);
         const unsigned width=8>>level;
@@ -304,6 +309,7 @@ void VerifyDisplaySwizzle(const MetalTests::Context& context, id<MTLLibrary> pro
     constexpr Point points[]{{1,0,0x01},{0,1,0x10},{0,2,0x08},{8,0,0x40},{4,4,0x24},{3,9,0x93},{6,10,0x8e},{15,15,0xff}};
     for (unsigned i = 0; i < std::size(points); ++i) guest[points[i].address] = std::byte(40 + 23 * i);
     texture.Upload(guest);
+    texture.FinishUpload();  // the probes run on another queue
     auto output = Probe(context,probes,texture.Texture(),TextureDimension::k2D,0);
     const auto* bytes = static_cast<const std::uint8_t*>(output.contents);
     for (unsigned i = 0; i < std::size(points); ++i) {
@@ -441,6 +447,7 @@ void VerifyCompressed(const MetalTests::Context& context, id<MTLLibrary> probes,
         }
     }
     texture.Upload(guest);
+    texture.FinishUpload();  // the probes run on another queue
     for (unsigned view=0; view<2; ++view) {
         auto native = view ? texture.SampledView() : texture.Texture();
         const unsigned baseLevel = view ? 1 : 0;
@@ -478,6 +485,7 @@ void VerifyPacked(const MetalTests::Context& context, id<MTLLibrary> probes) {
         std::vector<std::byte> guest(texture.GuestBytes(),std::byte{0xa7});
         std::memcpy(guest.data(),test.pixels.data(),sizeof(test.pixels));
         texture.Upload(guest);
+        texture.FinishUpload();  // the probes run on another queue
         auto output = SamplePixels(context,probes,texture.SampledView(),0);
         const auto* pixels = static_cast<const float*>(output.contents);
         for (unsigned x=0; x<3; ++x) RequireColor(pixels + x * 4,colors[x],"packed guest texture red, green, blue, or alpha bit positions differ");

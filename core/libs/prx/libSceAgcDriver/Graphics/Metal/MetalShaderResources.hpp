@@ -25,7 +25,10 @@ public:
         MetalGuestHostAliases* aliases = nullptr, ImageCache* imageCache = nullptr);
     [[nodiscard]] std::vector<MetalShaderResourceBinding> Bindings(const ShaderRecompiler::MetalBackend::Result& shader);
     [[nodiscard]] MetalBufferBinding Buffer(std::uint64_t address, std::size_t bytes, bool writable = false);
-    [[nodiscard]] std::shared_ptr<MetalTexture> Texture(const Graphics::GuestTextureResource& descriptor, bool written = false, bool compare = false, bool atomic = false);
+    // `writtenLevel`: the one level a written binding renders into (a color attachment), so only
+    // that level is copied back.
+    [[nodiscard]] std::shared_ptr<MetalTexture> Texture(const Graphics::GuestTextureResource& descriptor, bool written = false, bool compare = false, bool atomic = false,
+        std::optional<std::uint32_t> writtenLevel = std::nullopt);
     [[nodiscard]] std::span<const id<MTLResource>> Residency() const;
     // Encodes the copy-back of every written image into `commands` (after the work that writes
     // them, before the commit), so Complete(commands) need not read them back separately.
@@ -51,7 +54,8 @@ public:
 
 private:
     [[nodiscard]] std::shared_ptr<MetalTexture> texture(const Graphics::GuestTextureResource& descriptor,
-        bool written, bool compare, bool atomic, bool minimumLodLowered, bool storage);
+        bool written, bool compare, bool atomic, bool minimumLodLowered, bool storage,
+        std::optional<std::uint32_t> writtenLevel = std::nullopt);
     struct BufferWrite {
         std::uint64_t address;
         std::span<std::byte> host;
@@ -77,7 +81,12 @@ private:
         bool cacheable = false;
         // What the cached texels stand for (GuestImageCache::Find).
         std::uint64_t content = 0;
+        // The levels and layers this work's bindings may write (copied back), empty when not written.
+        MetalTexture::Subresources writtenPart{~0u, 0, ~0u, 0};
     };
+    // Widens `image.writtenPart` by what binding `descriptor` (as storage, or as a render target
+    // writing `level`) may write.
+    static void noteWrite(Image& image, const Graphics::GuestTextureResource& descriptor, bool storage, std::optional<std::uint32_t> level);
     struct ImageView {
         std::shared_ptr<MetalTexture> texture;
         bool compare;

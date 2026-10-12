@@ -684,6 +684,48 @@ void ArraySliceDescriptors(const Metal::MetalDevice& backend,id<MTLLibrary> libr
     }
 }
 
+// A per-slice pass binds "array k-k" (k + 1 layers) of a four-layer array whose whole texture the
+// image cache already holds: the view shares that backing, addresses only slice k, and its copy-back
+// rewrites only slice k's guest bytes.
+void ArrayPrefixViews(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    auto d=Descriptor(); d.dimension=Graphics::TextureDimension::k2DArray; d.depthOrLastArray=3;
+    const auto geometry=Graphics::DescribeSurface(d);
+    Require(geometry.layers==4,"four-slice array geometry has the wrong slice count");
+    std::vector<std::byte> guest(geometry.guestBytes);
+    for(std::uint32_t layer=0;layer<4;++layer) for(std::uint32_t y=0;y<8;++y) for(std::uint32_t x=0;x<8;++x) {
+        const std::array<std::uint8_t,4> color{std::uint8_t(10+layer),std::uint8_t(20+layer),std::uint8_t(30+layer),255};
+        std::memcpy(guest.data()+geometry.GuestLayerOffset(layer)+y*geometry.mips[0].pitchBytes+x*4,color.data(),4);
+    }
+    const NativeGuestMemory::BorrowedRange range{d.baseAddress,guest,true};
+    Metal::GuestImageCache<Metal::MetalTexture> cache;
+    {
+        Metal::MetalShaderResources whole(backend,std::span(&range,1),{},nullptr,&cache);
+        static_cast<void>(whole.Texture(d));
+        auto commands=backend.CommandBuffer();
+        backend.Wait(commands);
+        Require(whole.Complete(commands).state==BdaAbi::FaultState::Empty,"whole array upload faulted");
+    }
+    auto expected=guest;
+    auto slice=d; slice.baseArray=2; slice.depthOrLastArray=2;
+    Metal::MetalShaderResources resources(backend,std::span(&range,1),{},nullptr,&cache);
+    auto view=resources.Texture(slice,true);
+    Require(view->GuestBytes()==geometry.guestBytes,"a view of the first layers did not share the cached whole array");
+    Require(view->StorageView().arrayLength==1&&view->SampledView().arrayLength==1,"a one-slice view of a larger backing addresses other slices");
+    const std::array<float,4> color{200/255.0f,100/255.0f,50/255.0f,1};
+    auto commands=backend.CommandBuffer();
+    Encode(backend,library,commands,@"writeArrayColor",view->StorageView(),nil,MTLSizeMake(8,8,1),color.data(),sizeof color);
+    resources.EncodeReadbacks(commands);
+    backend.Wait(commands);
+    Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"array slice view write faulted");
+    for(std::uint32_t y=0;y<8;++y) for(std::uint32_t x=0;x<8;++x) {
+        const std::array<std::uint8_t,4> written{200,100,50,255};
+        std::memcpy(expected.data()+geometry.GuestLayerOffset(2)+y*geometry.mips[0].pitchBytes+x*4,written.data(),4);
+    }
+    Require(guest==expected,"the slice view's copy-back did not write exactly its slice");
+    auto larger=d; larger.depthOrLastArray=4;
+    Require(!view->CanShareBacking(larger),"a backing served a view with more layers than it has");
+}
+
 }
 
 void RunTextureViewsTests(const MetalTests::Context& context) {
@@ -700,5 +742,6 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     PhysicalBdaGuards(backend,library);
     StoragePermissions(backend,library);
     ArraySliceDescriptors(backend,library);
+    ArrayPrefixViews(backend,library);
     AccessGuards(backend);
 }

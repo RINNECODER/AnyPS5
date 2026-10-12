@@ -633,7 +633,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             attachment.texture = surface->Texture();
             continue;
         }
-        auto texture = resources.Texture(colorSurface(color), true);
+        auto texture = resources.Texture(colorSurface(color), true, false, false, color.mip);
         // The surface is typed by its memory layout; the attachment renders through the guest state's format.
         id<MTLTexture> handle = ColorAttachmentView(texture->Texture(), RenderPixelFormat(color.format));
         if (state.rasterSamples == 1) {

@@ -719,7 +719,12 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         }
         if (opcode == 0x3f) { cursor = next; continue; }
         if (header == RenderingWaitPacketHeader) {
-            CompletePriorGpuWorkAndCopyBack(0x105);
+            // Waits until video out no longer shows the display buffer the following work renders
+            // into: a host condition that GPU work committed so far neither satisfies nor observes,
+            // and work committed after the wait runs after that work on the queue. So the wait no
+            // longer drains the timeline first (flips still do, so no deferred flip is pending
+            // here), and the GPU keeps executing the frame meanwhile.
+            if (!DeferWork()) CompletePriorGpuWorkAndCopyBack(0x105);
             ForgetCachedImages(ForgetReason::Wait);
             const auto wait = submission.renderingWaits.at(cursor);
             if (wait == nullptr) throw std::runtime_error("Native Metal rendering wait reservation is null");
