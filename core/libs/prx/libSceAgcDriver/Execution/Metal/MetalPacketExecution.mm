@@ -575,7 +575,9 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             std::array<std::byte, 8> awaited{};
             const auto awaitedBytes = std::span(awaited).first(Pm4::WaitAwaitedBytes(packet));
             GuestMemory::Read(address, awaitedBytes, 1);
-            if (blocked || !ownLabels.Holds(address, awaitedBytes)) ForgetCachedImages(ForgetReason::Wait);
+            // ownLabels is shared by every queue's worker: guard it with gpuMutex like its Reset.
+            const bool ours = !blocked && [&] { std::lock_guard lock(gpuMutex); return ownLabels.Holds(address, awaitedBytes); }();
+            if (!ours) ForgetCachedImages(ForgetReason::Wait);
         } else if (opcode == 0x22) {
             if (Pm4::ReadCondition(packet) == 0) {
                 next = submission.conditionalEnds.at(cursor);
@@ -607,6 +609,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                     std::array<std::byte, 64> stored{};
                     const auto written = std::span(stored).first(static_cast<std::size_t>(store->bytes));
                     GuestMemory::Read(store->begin, written, 1);
+                    std::lock_guard lock(gpuMutex);
                     ownLabels.Record(store->begin, written);
                 }
             }
