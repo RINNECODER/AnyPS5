@@ -130,6 +130,9 @@ def title_pid(launcher_pid):
 def run_smoke(package, title_dir, timeout=180, scratch=None, frame_interval=30):
     package, title_dir = Path(package), Path(title_dir)
     engine = package / "bin" / "anyps5_rosetta_run"
+    if not engine.is_file():
+        # Baselines published before the Rosetta engine ship the TCG runner, which takes the same CLI.
+        engine = package / "bin" / "anyps5_cpu_run"
     if not engine.is_file() or not (title_dir / "eboot.bin").is_file():
         raise RuntimeError("smoke needs an accepted package and a title directory with eboot.bin")
     scratch = Path(scratch) if scratch else Path(tempfile.mkdtemp(prefix="anyps5-smoke-"))
