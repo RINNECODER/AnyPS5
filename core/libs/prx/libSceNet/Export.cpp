@@ -45,6 +45,7 @@ constexpr int NET_EACCES = 13;
 constexpr int NET_EFAULT = 14;
 constexpr int NET_EINVAL = 22;
 constexpr int NET_ENOSPC = 28;
+constexpr int NET_EDOM = 33;
 constexpr int NET_EAGAIN = 35;
 constexpr int NET_EINPROGRESS = 36;
 constexpr int NET_EALREADY = 37;
@@ -325,6 +326,45 @@ int fail(int err) {
     return NET_ERROR_BASE | err;
 }
 
+int set_native_timeout(NativeSocket native, int optname, std::int64_t microseconds) {
+    const int native_option = optname == NET_SO_RCVTIMEO ? SO_RCVTIMEO : SO_SNDTIMEO;
+#ifdef _WIN32
+    const std::int64_t milliseconds = (microseconds + 999) / 1000;
+    const DWORD timeout_ms = milliseconds > static_cast<std::int64_t>(MAXDWORD) ? MAXDWORD : static_cast<DWORD>(milliseconds);
+    return ::setsockopt(native, SOL_SOCKET, native_option, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+#else
+    timeval timeout{};
+    timeout.tv_sec = static_cast<time_t>(microseconds / 1000000);
+    timeout.tv_usec = static_cast<suseconds_t>(microseconds % 1000000);
+    return ::setsockopt(native, SOL_SOCKET, native_option, &timeout, sizeof(timeout));
+#endif
+}
+
+int set_kernel_timeout(int descriptor, int optname, const void* value, std::uint32_t length) {
+    KernelTimeval timeout{};
+    if (value == nullptr && length != 0) return NET_EFAULT;
+    if (length < sizeof(timeout)) return NET_EINVAL;
+    std::memcpy(&timeout, value, sizeof(timeout));
+    if (timeout.tv_sec < 0 || timeout.tv_usec < 0 || timeout.tv_usec >= 1000000) return NET_EDOM;
+    const std::int64_t microseconds = std::min<std::int64_t>(timeout.tv_sec, INT32_MAX) * 1000000 + timeout.tv_usec;
+    Sock socket;
+    {
+        std::lock_guard lk(g_mutex);
+        const auto it = g_socks.find(descriptor);
+        if (it == g_socks.end()) return NET_EBADF;
+        socket = it->second;
+    }
+    if (set_native_timeout(socket.native->value, optname, microseconds) != 0) return native_error();
+    std::lock_guard lk(g_mutex);
+    const auto it = g_socks.find(descriptor);
+    if (it != g_socks.end()) {
+        const int stored = static_cast<int>(std::min<std::int64_t>(microseconds, INT_MAX));
+        if (optname == NET_SO_RCVTIMEO) it->second.rcv_timeout_us = stored;
+        else it->second.snd_timeout_us = stored;
+    }
+    return 0;
+}
+
 void set_resolver_error(int rid, int error) {
     std::lock_guard lk(g_mutex);
     const auto resolver = g_resolvers.find(rid);
@@ -486,6 +526,11 @@ bool SetSocketOptionForKernel(int descriptor, int level, int option, const void*
     {
         std::lock_guard lk(g_mutex);
         if (g_socks.count(descriptor) == 0) return false;
+    }
+    if (level == NET_SOL_SOCKET && (option == NET_SO_RCVTIMEO || option == NET_SO_SNDTIMEO)) {
+        *error = set_kernel_timeout(descriptor, option, value, length);
+        if (*error != 0) set_errno(*error);
+        return true;
     }
     *error = sceNetSetsockopt(descriptor, level, option, value, length) == 0 ? 0 : *errno_slot();
     return true;
@@ -882,20 +927,7 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
 #endif
     } else if (optname == NET_SO_RCVTIMEO || optname == NET_SO_SNDTIMEO) {
         if (value < 0) return fail(NET_EINVAL);
-#ifdef _WIN32
-        const DWORD timeout_ms = value == 0 ? 0 : static_cast<DWORD>((value + 999) / 1000);
-        const int native_option = optname == NET_SO_RCVTIMEO ? SO_RCVTIMEO : SO_SNDTIMEO;
-        if (::setsockopt(socket.native->value, SOL_SOCKET, native_option,
-                         reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms)) != 0)
-            return fail(native_error());
-#else
-        timeval timeout{};
-        timeout.tv_sec = value / 1000000;
-        timeout.tv_usec = value % 1000000;
-        const int native_option = optname == NET_SO_RCVTIMEO ? SO_RCVTIMEO : SO_SNDTIMEO;
-        if (::setsockopt(socket.native->value, SOL_SOCKET, native_option, &timeout, sizeof(timeout)) != 0)
-            return fail(native_error());
-#endif
+        if (set_native_timeout(socket.native->value, optname, value) != 0) return fail(native_error());
     } else if (optname == NET_SO_REUSEADDR || optname == NET_SO_BROADCAST || optname == NET_SO_SNDBUF || optname == NET_SO_RCVBUF) {
         const int native_option = optname == NET_SO_REUSEADDR ? SO_REUSEADDR : optname == NET_SO_BROADCAST ? SO_BROADCAST : optname == NET_SO_SNDBUF ? SO_SNDBUF : SO_RCVBUF;
         if (::setsockopt(socket.native->value, SOL_SOCKET, native_option, reinterpret_cast<const char*>(&value), sizeof(value)) != 0)
