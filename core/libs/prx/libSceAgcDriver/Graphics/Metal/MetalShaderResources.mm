@@ -30,6 +30,15 @@ MetalGuestMemory::DispatchSnapshot capture(MetalGuestMemory& memory,
     return memory.CaptureAfterPriorSnapshotsComplete(aliases);
 }
 
+// A short description of a guest image for skip reasons: no address, so equal images share a reason.
+std::string describeImage(const Graphics::GuestTextureResource& resource) {
+    char text[160];
+    std::snprintf(text, sizeof text, "format %u %ux%ux%u mips %u-%u of %u samples %u tile %u",
+        resource.format, resource.width, resource.height, resource.depthOrLastArray + 1u, resource.baseLevel,
+        resource.lastLevel, resource.mipCount, resource.samples, static_cast<unsigned>(resource.tileMode));
+    return text;
+}
+
 auto textureKey(const Graphics::GuestTextureResource& resource, bool compare) {
     return std::tuple(resource.baseAddress, resource.width, resource.height, resource.depthOrLastArray,
         resource.baseArray, resource.mipCount, resource.baseLevel, resource.lastLevel, resource.tileMode,
@@ -373,7 +382,9 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         }
         if (overlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes()) ||
             physicallyOverlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes())) {
-            throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing");
+            throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing (" +
+                describeImage(descriptor) + (descriptor.baseAddress == begin ? " at the same base as " : " overlapping ") +
+                describeImage(other) + ")");
         }
     }
     auto texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
@@ -513,7 +524,8 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 id<MTLTexture> view = depthLookup ? depthLookup(descriptor, storage, depth) : nil;
                 if (view == nil && descriptor.samples > 1) {
                     // Only resident depth and color surfaces are multisampled; guest-memory MSAA images have no upload path.
-                    throw std::invalid_argument("Metal multisampled guest image is not a resident multisampled depth or color surface (guest-memory MSAA images have no upload path)");
+                    throw std::invalid_argument("Metal multisampled guest image is not a resident multisampled depth or color surface (guest-memory MSAA images have no upload path; " +
+                        describeImage(descriptor) + ")");
                 }
                 if (view == nil) {
                     auto texture = this->texture(descriptor, written, depth, atomic, minimumLodLowered, storage);

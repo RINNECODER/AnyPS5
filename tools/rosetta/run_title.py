@@ -363,7 +363,7 @@ def main():
                         help="let library functions that are not implemented throw (default: log once and return 0)")
     parser.add_argument("--trace", metavar="REGEX",
                         help="log guest calls to imports whose NID or name matches REGEX (ANYPS5_TRACE_LIMIT calls each, default 16; "
-                             "ANYPS5_TRACE_AFTER=SECONDS skips calls made before then)")
+                             "ANYPS5_TRACE_AFTER=SECONDS skips calls made before then; ANYPS5_TRACE_RETURNS=1 also logs each logged call's %%rax)")
     parser.add_argument("guest_args", nargs="*")
     args = parser.parse_args()
     if args.build:
