@@ -110,6 +110,7 @@ add_library(libSceVideoOut SHARED EXCLUDE_FROM_ALL
     ${rosettaVideoOut}/src/InputMapping.cpp
     ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libkernel/Time/TimedWait.cpp
     ${rosettaVideoOut}/src/NativeHostWindow.mm
+    ${rosettaVideoOut}/src/DirectHostApplication.mm
     ${rosettaVideoOut}/src/DirectDisplayWindow.mm)
 target_compile_options(libSceVideoOut PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 target_compile_definitions(libSceVideoOut PRIVATE ANYPS5_METAL_BACKEND=1 ANYPS5_ROSETTA_DIRECT=1)
@@ -145,4 +146,17 @@ function(anyps5_rosetta_graphics_tests)
     add_dependencies(rosetta_direct_graphics_tests rosetta_metallib)
     add_test(NAME rosetta_direct_graphics COMMAND arch -x86_64 $<TARGET_FILE:rosetta_direct_graphics_tests> ${PATCHED_DIR}/AnyPS5Utilities.metallib)
     set_tests_properties(rosetta_direct_graphics PROPERTIES TIMEOUT 60)
+
+    add_test_executable(rosetta_direct_host_window_tests
+        ${ANYPS5_ROSETTA_LIBS_ROOT}/tests/rosetta_direct_graphics/DirectHostWindowTest.mm)
+    target_compile_options(rosetta_direct_host_window_tests PRIVATE -fobjc-arc)
+    target_include_directories(rosetta_direct_host_window_tests PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT})
+    target_link_libraries(rosetta_direct_host_window_tests PRIVATE
+        libSceVideoOut libSceAgcDriver libkernel libc "${ANYPS5_ROSETTA_APPKIT}" "-framework CoreGraphics")
+    set_target_properties(rosetta_direct_host_window_tests PROPERTIES
+        BUILD_RPATH ${UNPATCHED_DIR})
+    add_dependencies(rosetta_direct_host_window_tests rosetta_metallib)
+    add_test(NAME rosetta_direct_host_window
+        COMMAND arch -x86_64 $<TARGET_FILE:rosetta_direct_host_window_tests> ${PATCHED_DIR}/AnyPS5Utilities.metallib)
+    set_tests_properties(rosetta_direct_host_window PROPERTIES TIMEOUT 90)
 endfunction()

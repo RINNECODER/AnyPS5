@@ -2,10 +2,12 @@
 // of DisplayWindow.cpp. AppKit windows exist only on the main thread, which the presentation
 // thread cannot block on (the guest may be waiting on it), so:
 //  - the window is the native host window (NativeHostWindow: AppKit window + CAMetalLayer), created
-//    and pumped asynchronously on the main dispatch queue, which the direct-path launcher must
-//    service (the guest runs off the main thread, as in the TCG engine's native runner);
-//  - until it exists, or after it is closed, frames go to an offscreen CAMetalLayer. The Metal
-//    presenter (and ANYPS5_FRAME_CAPTURE_DIR frame capture) work the same on either layer.
+//    and pumped asynchronously on the main dispatch queue. The main thread stays in the AppKit run
+//    loop of DirectHostApplication while the guest runs on its own thread (libkernel Aps5StartGuest);
+//  - the window opens with VideoOut, titled with the game's title, sized to the output (scaled to
+//    fit the screen) and centred; closing it or quitting (Cmd-Q) ends the game with exit code 0;
+//  - until it exists, frames go to an offscreen CAMetalLayer. The Metal presenter (and
+//    ANYPS5_FRAME_CAPTURE_DIR frame capture) work the same on either layer.
 // ANYPS5_ROSETTA_HEADLESS=1 keeps every frame offscreen and never touches AppKit.
 // SDL stays initialized for game controllers only; its video driver is the offscreen one, so the
 // presentation thread's SDL event pump never calls into AppKit off the main thread.
@@ -13,13 +15,17 @@
 // events, publishes them to libSceKeyboard/libSceMouse and pushes keys and focus loss into SDL's
 // queue, where the presentation thread's PadInput maps them to pad buttons as on the SDL window.
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
+#include "prx/libSceVideoOut/include/DirectHostApplication.hpp"
 #include "prx/libSceVideoOut/include/NativeHostWindow.hpp"
+#include "prx/libSceVideoOut/include/UnobtrusiveWindows.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "SDL_events.h"
 #include "SDL_hints.h"
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -84,6 +90,17 @@ void ForwardInput(const AnyPS5::Host::EventBatch& batch) {
     }
 }
 
+// Content size in points: the output at one point per backing pixel, scaled down to fit the screen.
+NSSize FittedContentSize(std::uint32_t width, std::uint32_t height) {
+    NSScreen* screen = NSScreen.mainScreen ?: NSScreen.screens.firstObject;
+    if (screen == nil) return NSMakeSize(width, height);
+    const CGFloat scale = screen.backingScaleFactor > 0 ? screen.backingScaleFactor : 1;
+    const NSRect visible = screen.visibleFrame;
+    CGFloat fit = std::min<CGFloat>(1, std::min(visible.size.width * 0.9 * scale / width, (visible.size.height - 32) * 0.9 * scale / height));
+    if (!(fit > 0)) fit = 1;
+    return NSMakeSize(std::max<CGFloat>(160, std::floor(width * fit / scale)), std::max<CGFloat>(90, std::floor(height * fit / scale)));
+}
+
 // Main queue only. The window keeps its own copy of the state pointer alive.
 void CreateWindow(const std::shared_ptr<DirectWindow>& state) {
     std::uint32_t width = 0;
@@ -96,7 +113,15 @@ void CreateWindow(const std::shared_ptr<DirectWindow>& state) {
     }
     std::unique_ptr<AnyPS5::Host::NativeHostWindow> window;
     try {
-        window = AnyPS5::Host::NativeHostWindow::CreateMainThread({"AnyPS5", width, height});
+        const NSSize content = FittedContentSize(width, height);
+        AnyPS5::Host::WindowConfiguration configuration{AnyPS5::Host::DirectApplicationTitle(),
+            static_cast<std::uint32_t>(content.width), static_cast<std::uint32_t>(content.height)};
+        configuration.gameWindow = true;
+        window = AnyPS5::Host::NativeHostWindow::CreateMainThread(configuration);
+        // CreateMainThread's activateIgnoringOtherApps is only a request on macOS 14+.
+        if (AnyPS5::Host::CurrentWindowEtiquette() != AnyPS5::Host::WindowEtiquette::Unobtrusive) {
+            if (@available(macOS 14.0, *)) [NSApp activate];
+        }
     } catch (...) {
         Report("cannot create the native window", std::current_exception());
         return;
@@ -111,6 +136,8 @@ void CreateWindow(const std::shared_ptr<DirectWindow>& state) {
         try {
             live->window->PumpMainThread(std::chrono::milliseconds(0));
             ForwardInput(live->window->DrainEvents());
+            // The close button or Quit (the window's application delegate turns it into a close request).
+            if (live->window->Snapshot().closeRequested) AnyPS5::Host::EndDirectSession("the game window was closed");
         } catch (...) {
             Report("native window pump failed", std::current_exception());
             dispatch_source_cancel(live->pump);

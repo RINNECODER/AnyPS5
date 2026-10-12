@@ -4,7 +4,11 @@
 //
 // The relinker's Mach-O output binds these hooks by name:
 //   Aps5StartGuest        - called from LC_MAIN with the guest entry point and the
-//                           argc/argv/envp frame the entry stub built.
+//                           argc/argv/envp frame the entry stub built. When the title
+//                           loads libSceVideoOut, the guest runs on its own thread (with
+//                           the main thread's stack size) and the main thread becomes
+//                           the AppKit application (Aps5RunHostApplication), so the game
+//                           window and its input run on the main queue.
 //   Aps5GuestTlsRegister  - called by each image's __mod_init_func with its TLS
 //                           descriptor; assigns the pthread key the %fs stubs read.
 //   Aps5GuestTlsAllocate  - called by a %fs stub on a thread's first access to an
@@ -28,6 +32,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <pthread.h>
+#include <pthread/qos.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -198,6 +203,8 @@ constexpr char GuestProgramPath[] = "/app0/eboot.bin";
 
 std::vector<std::uint64_t> guestFrame;
 std::vector<std::string> guestArguments;
+int (*guestEntry)(void*, void (*)()) = nullptr;
+std::size_t guestStackBytes = 0;
 
 void GuestExitCallback() {}
 
@@ -323,6 +330,47 @@ int Aps5RosettaFaultDiagnosticsInstalled_nid_no_patch() {
     return ::sigaction(SIGSEGV, nullptr, &current) == 0 && (current.sa_flags & SA_SIGINFO) != 0 && current.sa_sigaction == OnFault;
 }
 
+}
+
+namespace {
+
+[[noreturn]] void RunGuest() {
+    const int result = guestEntry(guestFrame.data(), GuestExitCallback);
+    if (std::getenv("APS5_ROSETTA_QUIET") == nullptr) Write("[rosetta] guest entry returned %d at %.3fs\n", result, Seconds());
+    std::exit(result);
+}
+
+void* GuestThread(void*) {
+    InstallFaultDiagnostics();
+    RunGuest();
+}
+
+// Called by the host application once AppKit is set up, on the main thread.
+void StartGuestThread(void*) {
+    pthread_attr_t attributes;
+    if (::pthread_attr_init(&attributes) != 0) Fatal("cannot initialise the guest thread attributes");
+    ::pthread_attr_setstacksize(&attributes, guestStackBytes);
+    ::pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
+    // The guest's first thread keeps the main thread's priority.
+    ::pthread_attr_set_qos_class_np(&attributes, QOS_CLASS_USER_INTERACTIVE, 0);
+    pthread_t thread{};
+    if (::pthread_create(&thread, &attributes, GuestThread, nullptr) != 0) Fatal("cannot start the guest thread");
+    ::pthread_attr_destroy(&attributes);
+}
+
+// The guest's main thread gets what it had as the process main thread: the stack size limit
+// (8 MiB by default), never less.
+std::size_t MainThreadStackBytes() {
+    constexpr std::size_t Minimum = 8u << 20;
+    const std::size_t page = static_cast<std::size_t>(::getpagesize());
+    const std::size_t size = std::max(Minimum, ::pthread_get_stacksize_np(::pthread_self()));
+    return (size + page - 1) / page * page;
+}
+
+}
+
+extern "C" {
+
 [[noreturn]] void Aps5StartGuest_nid_no_patch(int (*entry)(void*, void (*)()), const std::uint64_t* hostFrame) {
     InstallFaultDiagnostics();
     // FreeBSD process frame: argc, argv[], NULL, envp[] (empty), NULL, auxv.
@@ -341,9 +389,18 @@ int Aps5RosettaFaultDiagnosticsInstalled_nid_no_patch() {
     // The engine launcher (anyps5_rosetta_run --diagnostics-json) asks for the startup event.
     if (const char* json = std::getenv("ANYPS5_DIAGNOSTICS_JSON"); json != nullptr && json[0] == '1')
         Write("{\"schema_version\":1,\"event\":\"startup\",\"entry\":1,\"seconds\":%.3f}\n", Seconds());
-    const int result = entry(guestFrame.data(), GuestExitCallback);
-    if (std::getenv("APS5_ROSETTA_QUIET") == nullptr) Write("[rosetta] guest entry returned %d at %.3fs\n", result, Seconds());
-    std::exit(result);
+    guestEntry = entry;
+    // libSceVideoOut's AppKit application owns the main thread when the title has a display;
+    // APS5_ROSETTA_GUEST_ON_MAIN_THREAD=1 keeps the guest on it (no window events).
+    using HostApplication = void (*)(void (*)(void*), void*);
+    const char* onMain = std::getenv("APS5_ROSETTA_GUEST_ON_MAIN_THREAD");
+    const auto host = reinterpret_cast<HostApplication>(::dlsym(RTLD_DEFAULT, "Aps5RunHostApplication_nid_no_patch"));
+    if (host != nullptr && (onMain == nullptr || std::strcmp(onMain, "1") != 0)) {
+        guestStackBytes = MainThreadStackBytes();
+        host(StartGuestThread, nullptr);
+        Fatal("the host application returned");
+    }
+    RunGuest();
 }
 
 }
