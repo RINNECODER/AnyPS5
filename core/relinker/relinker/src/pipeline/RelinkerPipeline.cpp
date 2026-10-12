@@ -219,6 +219,15 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
         return relaOff + off;
     };
 
+    auto isZeroSectionSymbol = [&](const std::uint32_t symIdx) {
+        const FileByteOffset symOff = dynSymTabOffset + static_cast<FileByteOffset>(symIdx) * symEntSize;
+        if (symOff < dynSymTabOffset || symOff > raw.size() || raw.size() - symOff < symEntSize)
+            throw RelinkerException("Symbol table entry out of bounds", symOff);
+        std::uint64_t value = 0;
+        std::memcpy(&value, raw.data() + symOff + 8, sizeof(value));
+        return (raw[symOff + 4] & 0xf) == 3 && value == 0;
+    };
+
     auto extractRela = [&](const FileByteOffset relaOff, const ByteCount relaSize) {
         for (ByteCount off = 0; relaSize >= relaEntSize && off <= relaSize - relaEntSize; off += relaEntSize) {
             const FileByteOffset pos = relaEntryPos(relaOff, off);
@@ -236,7 +245,7 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
                 continue;
 
             if (relType == 8) {
-                if (symIdx != 0)
+                if (symIdx != 0 && !isZeroSectionSymbol(symIdx))
                     throw RelinkerException("RELATIVE relocation has a nonzero symbol index", pos);
                 continue;
             }
@@ -405,9 +414,8 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
             std::memcpy(&rOffset, raw.data() + pos, 8);
             std::memcpy(&rInfo, raw.data() + pos + 8, 8);
             std::memcpy(&rAddend, raw.data() + pos + 16, 8);
-            const std::uint32_t symIdx = static_cast<std::uint32_t>(rInfo >> 32);
             const std::uint32_t relType = static_cast<std::uint32_t>(rInfo & 0xffffffff);
-            if (symIdx == 0 && relType == R_X86_64_RELATIVE)
+            if (relType == R_X86_64_RELATIVE)
                 appendRela(dynSection.RelaData, rOffset, static_cast<std::uint64_t>(R_X86_64_RELATIVE), rAddend);
         }
     };
