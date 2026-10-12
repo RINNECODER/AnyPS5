@@ -28,8 +28,10 @@ inline void MixFrame(const Source* sources, std::size_t count, std::uint32_t gra
     std::vector<float> mix(static_cast<std::size_t>(granularity) * 2, 0.0f);
     for (std::size_t source_index = 0; source_index < count; ++source_index) {
         const Source& src = sources[source_index];
-        const float gl = (src.pan <= 0.0f ? 1.0f : 1.0f - src.pan) * src.gain;
-        const float gr = (src.pan >= 0.0f ? 1.0f : 1.0f + src.pan) * src.gain;
+        if (src.samples == nullptr || src.num_samples == 0) continue;
+        const float pan = std::clamp(src.pan, -1.0f, 1.0f);
+        const float gl = (pan <= 0.0f ? 1.0f : 1.0f - pan) * src.gain;
+        const float gr = (pan >= 0.0f ? 1.0f : 1.0f + pan) * src.gain;
         for (std::uint32_t frame = 0; frame < granularity && frame < src.num_samples; ++frame) {
             const std::size_t left_index = static_cast<std::size_t>(frame) * 2;
             const float left = ReadSample(src, frame, 0);
