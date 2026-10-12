@@ -694,6 +694,7 @@ int main() {
     CheckAddressText(28, "1234:5678:9abc:def0:1234:5678:9abc:def0");
     CheckEpollIdent();
     CheckLinkLocalAllNodesIpv6();
+    CheckUnboundSocketName();
     CheckUnspecifiedIpv6();
     CheckStreamSender(2);
     if (!ipv6Unavailable) CheckStreamSender(28);
