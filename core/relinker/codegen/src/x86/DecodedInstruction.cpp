@@ -307,6 +307,12 @@ bool DecodedInstruction::IsClwb() const {
            ((modrm >> ModRmModShift) & ModRmModMask) != ModRmModRegister && ((modrm >> ModRmRegShift) & ModRmRegMask) == 6;
 }
 
+// Only the bare encoding: compilers never prefix CPUID, and a prefixed 0F A2
+// in a linear sweep is more likely data than code.
+bool DecodedInstruction::IsCpuid() const {
+    return Length == 2 && Data[0] == X64OpcodeConstants::TwoByteOpcodeEscape && Data[1] == 0xA2;
+}
+
 bool DecodedInstruction::IsMovntss() const {
     bool operandSizeOverride = false;
     bool repnePrefix = false;

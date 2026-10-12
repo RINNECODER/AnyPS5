@@ -55,7 +55,7 @@ The engine on macOS runs the relinked title under Rosetta 2. Build the x86_64 li
 ```sh
 cmake -S . -B build-rosetta -G Ninja -DANYPS5_ROSETTA_LIBS=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 -DBUILD_TESTING=ON
 cmake --build build-rosetta --parallel
-ctest --test-dir build-rosetta -R 'direct_memory_darwin|metal_utility_tests|rosetta_direct_graphics|rosetta_lib_binds|rosetta_runtime|rosetta_launcher' --output-on-failure
+ctest --test-dir build-rosetta -R 'direct_memory_darwin|metal_utility_tests|rosetta_direct_graphics|rosetta_lib_binds|rosetta_runtime|rosetta_launcher|rosetta_cpuid' --output-on-failure
 python3 tools/rosetta/run_title.py <title-dir> --build build-rosetta
 ```
 
