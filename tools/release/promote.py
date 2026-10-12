@@ -75,7 +75,7 @@ def beta(github, now, args):
     newer = [(release, record) for release, record in releaselib.engine_releases(github)
              if current is None or releaselib.version_key(record["version"]) > releaselib.version_key(current_version)]
     aged = [(release, record) for release, record in newer
-            if now - releaselib.parse_rfc3339(record["built_at"]) >= BETA_MIN_AGE]
+            if getattr(args, "skip_beta_age", False) or now - releaselib.parse_rfc3339(record["built_at"]) >= BETA_MIN_AGE]
     if not aged:
         say("Beta hold: no alpha newer than beta %s is at least 24 h old (%d newer, younger)." % (current_version, len(newer)))
         return 0
@@ -253,6 +253,8 @@ def main(argv=None):
     parser.add_argument("--title-dir")
     parser.add_argument("--macps-repo")
     parser.add_argument("--dry-run", action="store_true")
+    # Maintainer-triggered only (workflow_dispatch input): every other beta gate still applies.
+    parser.add_argument("--skip-beta-age", action="store_true")
     args = parser.parse_args(argv)
     github = releaselib.GitHub(dry_run=args.dry_run)
     args.signer = releaselib.Signer()
