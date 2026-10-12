@@ -371,7 +371,10 @@ std::int32_t InitializeInstance(Instance& instance, const std::uint8_t* paramete
         if (channels == 0 || channels > 8 || sampleRate == 0) return AJM_RESULT_INVALID_PARAMETER;
         std::uint32_t third = 0;
         if (size >= 12) std::memcpy(&third, parameters + 8, sizeof(third));
-        if (sampleRate != 48000 || third != 0) NotImplemented_nid_no_patch("sceAjmBatchJobInitialize (Opus sample rate other than 48000 or nonzero third parameter word)");
+        if (sampleRate != 48000 || third != 0) {
+            std::fprintf(stderr, "[ajm] Opus initialize: %u channels, %u Hz, third word 0x%x\n", channels, sampleRate, third);
+            NotImplemented_nid_no_patch("sceAjmBatchJobInitialize (Opus sample rate other than 48000 or nonzero third parameter word)");
+        }
         instance.opusChannels = channels;
         instance.opusSampleRate = sampleRate;
         OpenOpus(instance);
@@ -939,6 +942,32 @@ void RunMp3(Instance& instance, const JobHeader& job, const AjmBuffer* inputs, c
               instance.mp3Channels, instance.mp3SampleRate, instance.mp3Bitrate, static_cast<unsigned long long>(instance.totalDecodedSamples));
     WriteRunSideband(job, instance, result, consumed, pcmOutputs.produced, frames, CurrentFormat(instance));
 }
+// FFmpeg decodes more than two Opus channels only as a multistream described by an OpusHead
+// (RFC 7845 section 5.1); without one, avcodec_open2 fails with EINVAL. Describe the Vorbis-order
+// surround layouts of libopus's surround encoder (channel mapping family 1).
+void SetOpusMultistreamHeader(AVCodecContext* context, std::uint32_t channels) {
+    struct Layout { std::uint8_t streams, coupled, mapping[8]; };
+    static constexpr Layout layouts[] = {
+        {2, 1, {0, 2, 1}}, {2, 2, {0, 1, 2, 3}}, {3, 2, {0, 4, 1, 2, 3}}, {4, 2, {0, 4, 1, 2, 3, 5}},
+        {4, 3, {0, 4, 1, 2, 3, 5, 6}}, {5, 3, {0, 6, 1, 2, 3, 4, 5, 7}}};
+    if (channels < 3 || channels > 8) return;
+    const Layout& layout = layouts[channels - 3];
+    const std::size_t size = 21 + channels;
+    auto* header = static_cast<std::uint8_t*>(av_mallocz(size + AV_INPUT_BUFFER_PADDING_SIZE));
+    if (header == nullptr) throw std::runtime_error("AJM: cannot allocate the Opus multistream header");
+    std::memcpy(header, "OpusHead", 8);
+    header[8] = 1;  // version
+    header[9] = static_cast<std::uint8_t>(channels);
+    header[12] = 0x80;  // input sample rate 48000, little endian; pre-skip and gain stay 0
+    header[13] = 0xBB;
+    header[18] = 1;  // channel mapping family 1
+    header[19] = layout.streams;
+    header[20] = layout.coupled;
+    std::memcpy(header + 21, layout.mapping, channels);
+    context->extradata = header;
+    context->extradata_size = static_cast<int>(size);
+}
+
 void OpenOpus(Instance& instance) {
     static const bool quiet = (av_log_set_level(TraceEnabled() ? AV_LOG_WARNING : AV_LOG_QUIET), true);
     (void)quiet;
@@ -948,7 +977,13 @@ void OpenOpus(Instance& instance) {
     if (!instance.opus) throw std::runtime_error("AJM: cannot allocate the FFmpeg Opus decoder");
     av_channel_layout_default(&instance.opus->ch_layout, static_cast<int>(instance.opusChannels));
     instance.opus->sample_rate = 48000;
-    if (avcodec_open2(instance.opus, codec, nullptr) < 0) throw std::runtime_error("AJM: cannot open the FFmpeg Opus decoder");
+    SetOpusMultistreamHeader(instance.opus, instance.opusChannels);
+    if (const int status = avcodec_open2(instance.opus, codec, nullptr); status < 0) {
+        char reason[AV_ERROR_MAX_STRING_SIZE]{};
+        av_strerror(status, reason, sizeof reason);
+        throw std::runtime_error("AJM: cannot open the FFmpeg Opus decoder (" + std::to_string(instance.opusChannels) + " channels, " +
+                                 std::to_string(instance.opusSampleRate) + " Hz): " + reason);
+    }
 }
 
 std::size_t OpusPacketSamples(const std::uint8_t* packet, std::size_t size) {

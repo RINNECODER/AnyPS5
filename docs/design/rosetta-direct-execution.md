@@ -121,6 +121,12 @@ The total is roughly 5–7 weeks of focused work to reach first rendering on the
 
 Direct execution is the only engine. The QEMU/TCG runner (`anyps5_cpu_run`, `core/cpu`) and the Unicorn and AnyPS5-TCG submodules were removed; the pointer translation and loader that were TCG-only went with them. The Metal backend, `core/libs` and the x86_64 library build are what remains, and CI keeps the shader bridge, guest replay and Rosetta jobs. The TCG numbers in sections 1 to 5 are the spike's historical comparison.
 
+## 7. Input
+
+- **Keyboard and mouse.** They reach the native AppKit window, not SDL. The main-queue pump in `DirectDisplayWindow.mm` drains the window's events and publishes them to `libSceKeyboard` and `libSceMouse`. It also pushes key presses and focus loss into SDL's event queue, where the presentation thread's `PadInput` maps them to pad buttons through the usual bindings (`anyps5-input.ini`; Space and Return are Cross by default). Before this, keys never reached the pad on the direct path. `rosetta_direct_input` posts a Space key to the window and reads Cross back through `scePadReadState`.
+- **Controllers.** They go through SDL's game controller support, which stays initialized on the offscreen video driver, as on the SDL window.
+- **Scripted presses.** `ANYPS5_INPUT_SCRIPT` presses buttons at fixed times through the same pad state the title reads, for agents and CI. It is off unless set, and adds to live input. The format is `t=<seconds since process start>:<button>[+<button>...][:<hold ms>]`, with entries separated by `;`. The default hold is 250 ms. The hold counts from the first pad read that sees the press, so a title that polls slowly still sees each press. Each press logs `[pad] input script ...: down at <s> (epoch ms <ms>)`, which lines up with `ANYPS5_FRAME_CAPTURE_DIR` file names. For example: `ANYPS5_INPUT_SCRIPT="t=42:square;t=56:square;t=66:cross"`. Button names: cross, circle, square, triangle, up, down, left, right, l1, r1, l2, r2, l3, r3, options, touchpad.
+
 ## Reproduce
 
 ```sh
