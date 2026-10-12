@@ -14,6 +14,7 @@
 #include "SpirvBackend/SpirvOptimizer.hpp"
 #endif
 #include "CacheKey.hpp"
+#include "CompiledVariant.hpp"
 #include "BdaAbi.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
@@ -332,6 +333,114 @@ void verifyFrontendPair() {
         verifyResult(pixelReference, *MaterializeShader(pixel, *pixelCapture, *pixelHandle));
         verifyResult(zeroReference, *MaterializeShader(zero, *zeroCapture, *zeroHandle));
     }
+}
+
+ShaderRecompiler::RecompileRequest LayoutPairRequest(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, bool registration, std::uint32_t wordLimit) {
+    using namespace ShaderRecompiler;
+    auto request = FrontendRequest(code, userData);
+    request.shader.stage = ShaderStage::Fragment;
+    request.context.compute.reset();
+    request.context.pixel = ShaderPixelStageInfo{};
+    request.context.pixel->wave32 = true;
+    request.context.pixel->targetOutputMode[0] = 9u;
+    request.context.waveSize = 32u;
+    request.target.registrationModules = registration;
+    request.target.registrationWordLimit = wordLimit;
+    request.useCache = true;
+    return request;
+}
+
+void verifyLayoutPairVariant(const ShaderRecompiler::SourceHandle& paired, const ShaderRecompiler::SourceHandle& isolated) {
+    const auto& left = *paired.artifact;
+    const auto& right = *isolated.artifact;
+    require(left.artifact.spirv == right.artifact.spirv, "layout pair: the SPIR-V differs from an isolated compile");
+    require(left.bindings.layout == right.bindings.layout && left.bindings.layout.UsesPushData() == right.bindings.layout.UsesPushData() && left.bindings.pushConstantOffsetBytes == right.bindings.pushConstantOffsetBytes && left.bindings.pushConstantSizeBytes == right.bindings.pushConstantSizeBytes, "layout pair: the binding layout or push range differs from an isolated compile");
+    const auto& a = left.artifact;
+    const auto& b = right.artifact;
+    require(a.registrationModule == b.registrationModule && a.bdaAbiVersion == b.bdaAbiVersion && a.memoryOffsetDword == b.memoryOffsetDword && a.shaderDataDwords == b.shaderDataDwords && a.imageMetadataDword == b.imageMetadataDword && a.runtimeImageCount == b.runtimeImageCount && a.runtimeImageResources == b.runtimeImageResources && a.hostSubgroupSize == b.hostSubgroupSize && a.parameterExports == b.parameterExports && a.fragmentParameters.size() == b.fragmentParameters.size(), "layout pair: the artifact differs from an isolated compile");
+    const auto& x = left.info;
+    const auto& y = right.info;
+    require(x.stage == y.stage && x.shaderHash == y.shaderHash && x.waveSize == y.waveSize && x.userDataBase == y.userDataBase && x.userDataCount == y.userDataCount && x.scratchDwords == y.scratchDwords && x.paramExportMask == y.paramExportMask && x.info == y.info && x.bindings == y.bindings, "layout pair: the compiled shader information differs from an isolated compile");
+}
+
+void verifyLayoutPairIsolation(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::SourceHandle& handle, std::uint32_t separateLimit) {
+    using namespace ShaderRecompiler;
+    const std::vector<std::uint32_t> isolatedCode(request.shader.code.begin(), request.shader.code.end());
+    auto isolated = request;
+    isolated.shader.code = isolatedCode;
+    isolated.target.registrationWordLimit = separateLimit;
+    const auto reference = PrepareShader(isolated);
+    require(reference->source != handle.source, "layout pair: the isolated compile shared a source");
+    verifyLayoutPairVariant(handle, *reference);
+    SrtRuntime runtime{};
+    runtime.userData = request.context.userData;
+    runtime.shaderBase = request.shader.codeAddress;
+    auto uncached = request;
+    uncached.useCache = false;
+    verifyResult(Recompile(uncached), *MaterializeShader(request, *CaptureResources(request, runtime, handle), handle));
+}
+
+void verifyLayoutPair() {
+    using namespace ShaderRecompiler;
+    const bool reuse = std::getenv("APS5_NO_PERF_LAYOUT_PAIR") == nullptr;
+    const std::array<std::uint32_t, 4> buffer{0x10000000u, 0u, 0x40u, 0x00027facu};
+    const auto pixelCode = [](std::uint32_t variant) {
+        return std::vector<std::uint32_t>{0xbf800000u | variant, 0xf4200100u, 0xfa000000u, 0xbf8cc07fu, 0x7e000204u, 0xf800180fu, 0u, 0xbf810000u};
+    };
+    const auto defaultLimit = SpirvTarget{}.registrationWordLimit;
+    struct Configuration {
+        bool registration;
+        std::uint32_t wordLimit;
+        std::uint32_t pushOffset;
+    };
+    std::uint32_t variant = 0u;
+    for (const auto& [registration, wordLimit, pushOffset] : {Configuration{false, defaultLimit, 0u}, Configuration{true, defaultLimit, 0u}, Configuration{true, defaultLimit, 128u}, Configuration{true, 1u, 128u}}) {
+        for (const bool zeroFirst : {false, true}) {
+            const auto code = pixelCode(variant++);
+            auto pixel = LayoutPairRequest(code, buffer, registration, wordLimit);
+            pixel.layout.pushConstantOffsetBytes = pushOffset;
+            auto zero = pixel;
+            zero.layout.pushConstantSizeBytes = 0u;
+            ShaderPreparationContext preparation;
+            const auto first = PrepareShader(zeroFirst ? zero : pixel, &preparation);
+            const auto second = PrepareShader(zeroFirst ? pixel : zero, &preparation);
+            require(first->source == second->source, "layout pair: the two layouts did not share a source");
+            require(preparation.ResourcePrograms() == (reuse ? 1u : 2u), "layout pair: the second layout ignored the reuse switch");
+            const auto& pixelHandle = zeroFirst ? second : first;
+            const auto& zeroHandle = zeroFirst ? first : second;
+            require(pixelHandle->artifact->bindings.layout.UsesPushData() && !zeroHandle->artifact->bindings.layout.UsesPushData(), "layout pair: the fixture does not distinguish the push-constant capacities");
+            const bool module = registration && wordLimit == defaultLimit;
+            require(GetPreparedArtifact(*pixelHandle).registrationModule == module && GetPreparedArtifact(*zeroHandle).registrationModule == module, "layout pair: the word limit did not choose the module mode");
+            verifyLayoutPairIsolation(pixel, *pixelHandle, wordLimit + 1u);
+            verifyLayoutPairIsolation(zero, *zeroHandle, wordLimit + 2u);
+        }
+    }
+
+    const auto code = pixelCode(variant++);
+    const auto pixel = LayoutPairRequest(code, buffer, true, defaultLimit);
+    auto relocated = pixel;
+    relocated.shader.codeAddress += 0x1000u;
+    relocated.layout.pushConstantSizeBytes = 0u;
+    ShaderPreparationContext preparation;
+    const auto first = PrepareShader(pixel, &preparation);
+    const auto moved = PrepareShader(relocated, &preparation);
+    require(first->source == moved->source, "layout pair: relocated code did not share the source");
+    require(preparation.ResourcePrograms() == 2u && moved->artifact->info.shaderHash == relocated.shader.codeAddress, "layout pair: a program translated at another code address was reused");
+    verifyLayoutPairIsolation(relocated, *moved, defaultLimit + 1u);
+
+    const std::vector<std::uint32_t> colorCode{0xbf800000u | variant++, 0x7e000200u, 0xf800180fu, 0u, 0xbf810000u};
+    auto color = LayoutPairRequest(colorCode, std::span(buffer).first(1u), true, defaultLimit);
+    color.shader.codeAddress = relocated.shader.codeAddress;
+    color.layout.pushConstantSizeBytes = 0u;
+    require(ResolveSource(color) != nullptr, "layout pair: the other source was not resolved");
+    const auto colored = PrepareShader(color, &preparation);
+    require(colored->source != first->source && preparation.ResourcePrograms() == 2u, "layout pair: another source at the same code address reused the retained program");
+    verifyLayoutPairIsolation(color, *colored, defaultLimit + 1u);
+
+    const auto retained = colored->source.use_count();
+    const auto otherCode = pixelCode(variant++);
+    static_cast<void>(PrepareResourceProgram(LayoutPairRequest(otherCode, buffer, true, defaultLimit), &preparation));
+    require(preparation.ResourcePrograms() == 3u && retained - colored->source.use_count() == (reuse ? 1 : 0), "layout pair: the context kept a program while it built another");
 }
 
 void verifyRegisterSources() {
@@ -3840,6 +3949,11 @@ int main(int argc, char** argv) {
             std::cout << "Prepared frontend reuse preserves full and partial-thread programs\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--layout-pair") {
+            verifyLayoutPair();
+            std::cout << "Both push-constant layouts of a pixel shader compile from one program unchanged\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--bindless") {
             verifyBindlessTable();
             std::cout << "Bindless mapping, indexing capabilities and strict validation passed\n";
@@ -3854,6 +3968,7 @@ int main(int argc, char** argv) {
         verifyRegisterSources();
         verifyEvaluatedValues();
         verifyFrontendPair();
+        verifyLayoutPair();
         verifySignedSrtComparison();
         verifyTypeZeroImageMaterialization();
         verifyOutOfRangeConstantReads();
