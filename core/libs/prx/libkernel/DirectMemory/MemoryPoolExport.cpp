@@ -24,9 +24,8 @@ PoolState& Pool() {
 bool PageAligned(uint64_t v) { return (v & (PS5_PAGE_SIZE - 1)) == 0; }
 
 int PoolCommit(void* addr, uint64_t len, int type, int prot) {
-    (void)type;
     if (!addr || len == 0 || !PageAligned(reinterpret_cast<uintptr_t>(addr)) || !PageAligned(len)) return SCE_KERNEL_ERROR_EINVAL;
-    const int ret = DoMprotect(addr, static_cast<size_t>(len), prot);
+    const int ret = DoMtypeprotect(addr, static_cast<size_t>(len), type, prot);
     if (ret == 0) {
         PoolState& pool = Pool();
         std::lock_guard<std::mutex> lock(pool.mutex);
