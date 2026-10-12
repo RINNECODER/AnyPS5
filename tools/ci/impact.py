@@ -14,12 +14,14 @@ import sys
 CPU, NATIVE, SHADER, REPLAY = "cpu-tcg", "native-runner", "shader-bridge", "guest-replay"
 ROSETTA = "rosetta-libs"
 JOBS = (CPU, NATIVE, SHADER, REPLAY, ROSETTA)
-ALL = frozenset((CPU, NATIVE, SHADER, REPLAY))
+# Global changes (build system, CI, unknown paths) run every job, the Rosetta one included.
+ALL = frozenset((CPU, NATIVE, SHADER, REPLAY, ROSETTA))
 NONE = frozenset()
 EVERY_JOB = frozenset(JOBS)
 
 # The x86_64 Rosetta libs job sits outside RULES: it runs only when one of these changes.
-ROSETTA_PATHS = ("core/libs/*", "core/relinker/*", "cmake/*")
+ROSETTA_PATHS = ("core/libs/*", "core/relinker/*", "cmake/*", "tools/rosetta/*",
+                 "core/shader/recompiler/MetalBackend/*")
 
 # (glob, jobs). fnmatch's "*" also crosses "/", so "dir/*" covers a whole subtree.
 RULES = (
@@ -54,6 +56,7 @@ RULES = (
     # Everything else under the guest CPU runtime.
     ("core/cpu/*", frozenset({CPU, NATIVE})),
     # Tooling no macOS job builds; its python tests run in the changes job and build.yml.
+    ("tools/rosetta/*", frozenset({ROSETTA})),
     ("tools/*", NONE),
 )
 
