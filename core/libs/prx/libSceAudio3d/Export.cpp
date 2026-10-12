@@ -61,7 +61,7 @@ struct Audio3dPort {
     std::uint32_t bed_format = 0;
     std::uint32_t bed_samples = 0;
     std::deque<std::vector<std::int16_t>> mixed;
-    int audio_out = 0;
+    int audio_out_handle = 0;
 };
 
 std::mutex g_mutex;
@@ -126,10 +126,14 @@ int APS5_VABI sceAudio3dPortAdvance(uint32_t port_id) {
 }
 
 int APS5_VABI sceAudio3dPortClose(uint32_t port_id) {
-    std::lock_guard lock(g_mutex);
-    if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
-    if (g_port.audio_out != 0) sceAudioOutClose(g_port.audio_out);
-    g_port = Audio3dPort{};
+    int handle = 0;
+    {
+        std::lock_guard lock(g_mutex);
+        if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
+        handle = g_port.audio_out_handle;
+        g_port = Audio3dPort{};
+    }
+    if (handle != 0) sceAudioOutClose(handle);
     return 0;
 }
 
@@ -200,20 +204,30 @@ int APS5_VABI sceAudio3dPortOpen(int user_id, const Audio3dOpenParameters* param
 }
 
 int APS5_VABI sceAudio3dPortPush(uint32_t port_id, uint32_t blocking) {
-    std::lock_guard lock(g_mutex);
-    if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
-    if (blocking != AUDIO3D_BLOCKING_ASYNC && blocking != AUDIO3D_BLOCKING_SYNC) {
-        Unsupported(__func__, "blocking mode " + std::to_string(blocking));
+    int handle = 0;
+    std::deque<std::vector<std::int16_t>> frames;
+    {
+        std::lock_guard lock(g_mutex);
+        if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
+        if (blocking != AUDIO3D_BLOCKING_ASYNC && blocking != AUDIO3D_BLOCKING_SYNC) {
+            Unsupported(__func__, "blocking mode " + std::to_string(blocking));
+        }
+        if (g_port.audio_out_handle == 0) {
+            const int opened = sceAudioOutOpen(AUDIO3D_USER_ID_SYSTEM, AUDIO3D_AUDIO_OUT_PORT_TYPE, 0,
+                g_port.granularity, AUDIO3D_SAMPLE_RATE, AUDIO3D_AUDIO_OUT_FORMAT_STEREO);
+            if (opened < 0) return AUDIO3D_ERROR_OUT_OF_RESOURCES;
+            g_port.audio_out_handle = opened;
+        }
+        handle = g_port.audio_out_handle;
+        const std::size_t target = blocking == AUDIO3D_BLOCKING_SYNC ? 0 : g_port.queue_depth - 1;
+        while (g_port.mixed.size() > target) {
+            frames.push_back(std::move(g_port.mixed.front()));
+            g_port.mixed.pop_front();
+        }
     }
-    if (g_port.audio_out == 0) {
-        const int handle = sceAudioOutOpen(AUDIO3D_USER_ID_SYSTEM, AUDIO3D_AUDIO_OUT_PORT_TYPE, 0,
-            g_port.granularity, AUDIO3D_SAMPLE_RATE, AUDIO3D_AUDIO_OUT_FORMAT_STEREO);
-        if (handle < 0) return handle;
-        g_port.audio_out = handle;
-    }
-    while (QueueLevel() >= g_port.queue_depth) {
-        sceAudioOutOutput(g_port.audio_out, g_port.mixed.front().data());
-        g_port.mixed.pop_front();
+    for (const std::vector<std::int16_t>& frame : frames) {
+        const int result = sceAudioOutOutput(handle, frame.data());
+        if (result < 0) return result;
     }
     return 0;
 }
@@ -267,10 +281,14 @@ int APS5_VABI sceAudio3dObjectSetAttributes(uint32_t port_id, uint32_t object_id
 }
 
 int APS5_VABI sceAudio3dPortFlush(uint32_t port_id) {
-    std::lock_guard lock(g_mutex);
-    if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
-    g_port.mixed.clear();
-    if (g_port.audio_out != 0) sceAudioOutOutput(g_port.audio_out, nullptr);
+    int handle = 0;
+    {
+        std::lock_guard lock(g_mutex);
+        if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
+        g_port.mixed.clear();
+        handle = g_port.audio_out_handle;
+    }
+    if (handle != 0) sceAudioOutOutput(handle, nullptr);
     return 0;
 }
 

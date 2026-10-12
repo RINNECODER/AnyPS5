@@ -215,11 +215,12 @@ void CheckQueue() {
     RequireLevel(2, 0, "queue full");
     Require(sceAudio3dPortAdvance(0) == NOT_READY, "advance into a full queue must be NOT_READY");
     RequireThrows([] { sceAudio3dPortPush(0, 2); }, "unknown blocking mode must throw");
-    Require(sceAudio3dPortPush(0, 1) == 0, "blocking push");
-    RequireLevel(1, 1, "blocking push returns with one free slot");
+    Require(sceAudio3dPortPush(0, 1) == 0, "sync push");
+    RequireLevel(0, 2, "sync push drains every queued frame");
     Require(sceAudio3dPortAdvance(0) == 0, "advance 3");
+    Require(sceAudio3dPortAdvance(0) == 0, "advance 4");
     Require(sceAudio3dPortPush(0, 0) == 0, "async push");
-    RequireLevel(1, 1, "async push submits the excess frame");
+    RequireLevel(1, 1, "async push keeps the queue one below the depth");
     Require(sceAudio3dPortClose(0) == 0, "close");
 }
 
@@ -234,10 +235,12 @@ void CheckMixAndPush() {
     Require(sceAudio3dPortAdvance(0) == 0, "advance mixes the bed");
     RequireLevel(2, 0, "the mixed frame is queued");
     Require(sceAudio3dPortAdvance(0) == NOT_READY, "a full queue rejects the mix");
-    Require(sceAudio3dPortPush(0, 1) == 0, "sync push delivers through audio out");
-    RequireLevel(1, 1, "push keeps the queue below the depth");
-    Require(sceAudio3dPortPush(0, 0) == 0, "async push delivers through audio out");
-    RequireLevel(1, 1, "async push leaves the remaining frame");
+    Require(sceAudio3dPortPush(0, 1) == 0, "sync push");
+    RequireLevel(0, 2, "sync push drains every queued frame");
+    Require(sceAudio3dPortAdvance(0) == 0, "advance after the sync drain");
+    Require(sceAudio3dPortAdvance(0) == 0, "advance fills the queue again");
+    Require(sceAudio3dPortPush(0, 0) == 0, "async push");
+    RequireLevel(1, 1, "async push leaves the queue one below the depth");
     Require(sceAudio3dPortClose(0) == 0, "close");
 }
 
