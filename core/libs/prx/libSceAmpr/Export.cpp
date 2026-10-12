@@ -228,6 +228,18 @@ static constexpr int ThrdError = 4;
 
 static std::atomic_flag sharedPtrSpinLock;
 
+struct AmmUsageStatsData {
+    std::uint64_t sizeInBytes;
+    std::uint16_t numPageTablePoolEntries;
+    std::uint16_t allocatedPageTablePoolEntries;
+    std::uint16_t highWatermarkAllocatedEntries;
+    std::uint16_t reserved;
+    std::uint32_t ringIdleFlags;
+};
+static_assert(sizeof(AmmUsageStatsData) == 0x18);
+static constexpr std::uint16_t AmmPageTablePoolEntries = 512;
+static constexpr std::uint32_t AmmRingIdleFlags = 0x7;
+
 extern "C" {
 int APS5_VABI pthread_join_nid_postfix(Pthread thread, void** value);
 int APS5_VABI wcsrtombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t** source, std::size_t limit, void* state);
@@ -1000,8 +1012,13 @@ int APS5_VABI sceAmprFpclassifyd(double value) {
     return SonyFpclassifyd(value);
 }
 
-int APS5_VABI sceAmprAmmGetUsageStatsData() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceAmprAmmGetUsageStatsData(AmmUsageStatsData* stats) {
+    if (!stats || stats->sizeInBytes > sizeof(AmmUsageStatsData)) return SCE_KERNEL_ERROR_EINVAL;
+    AmmUsageStatsData out{};
+    out.sizeInBytes = stats->sizeInBytes;
+    out.numPageTablePoolEntries = AmmPageTablePoolEntries;
+    out.ringIdleFlags = AmmRingIdleFlags;
+    std::memcpy(stats, &out, static_cast<std::size_t>(stats->sizeInBytes));
     return 0;
 }
 }

@@ -73,6 +73,7 @@ std::uint64_t APS5_VABI sceAmprMeasureCommandSizeReadFileScatter(void*, std::uin
 std::uint64_t APS5_VABI sceAmprMeasureCommandSizeReadFileGatherScatter(void*, std::uint64_t, std::uint64_t);
 std::uint64_t APS5_VABI sceAmprMeasureCommandSizeResetGatherScatterState();
 std::size_t APS5_VABI sceKernelGetDirectMemorySize();
+int APS5_VABI sceAmprAmmGetUsageStatsData(void*);
 int APS5_VABI sceAmprAmmCommandBufferConstructor(Apr::CommandBufferObject*);
 int APS5_VABI sceAmprAmmCommandBufferMap(Apr::CommandBufferObject*, std::uint64_t, std::uint64_t, std::int32_t, std::int32_t);
 int APS5_VABI sceAmprAmmCommandBufferMapWithGpuMaskId(Apr::CommandBufferObject*, std::uint64_t, std::uint64_t, std::int32_t, std::int32_t, std::uint8_t);
@@ -734,6 +735,24 @@ void TestAmmRangesAboveHintedMaps() {
     Require(sceKernelMunmap(span, page) == 0);
 }
 
+void TestAmmUsageStats() {
+    std::array<std::uint64_t, 4> stats{};
+    Require(sceAmprAmmGetUsageStatsData(nullptr) == static_cast<int>(0x80020016));
+    stats[0] = 0x19;
+    Require(sceAmprAmmGetUsageStatsData(stats.data()) == static_cast<int>(0x80020016));
+    stats = {0x18, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef};
+    Require(sceAmprAmmGetUsageStatsData(stats.data()) == 0);
+    Require(stats[0] == 0x18);
+    Require((stats[1] & 0xffffu) == 512u && (stats[1] >> 16u) == 0u);
+    Require((stats[2] & 0xffffffffu) == 7u && (stats[2] >> 32u) == 0u);
+    stats = {0x8, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef};
+    Require(sceAmprAmmGetUsageStatsData(stats.data()) == 0);
+    Require(stats[0] == 0x8 && stats[1] == 0xdeadbeef && stats[2] == 0xdeadbeef);
+    stats = {0x0, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef};
+    Require(sceAmprAmmGetUsageStatsData(stats.data()) == 0);
+    Require(stats[0] == 0 && stats[1] == 0xdeadbeef);
+}
+
 void TestAmm() {
     std::uint64_t start = 0;
     std::uint64_t end = 0;
@@ -1170,6 +1189,7 @@ int main() {
     TestResolveFailures();
     TestGatherScatter();
     TestAmmRangesAboveHintedMaps();
+    TestAmmUsageStats();
     TestAmm();
     TestAmmRemapAndProtect();
     TestAmmPrt();
