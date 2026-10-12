@@ -21,6 +21,7 @@
 // the stream. Environment variables (ANYPS5_FRAME_CAPTURE_DIR, ANYPS5_METAL_*,
 // ANYPS5_TRACE_*, ...) pass through to the title.
 #include "MachO.hpp"
+#include "RelinkCachePrune.hpp"
 #include "Unself.hpp"
 
 #include <CommonCrypto/CommonDigest.h>
@@ -918,6 +919,10 @@ int Launch(const Options& options) {
         throw;
     }
     ::close(lock);
+    // Held until this launcher exits: marks the entry as running for other launchers' pruning.
+    (void)MarkRelinkEntryInUse(cacheRoot, sha);
+    TouchRelinkEntry(cacheRoot, sha);
+    for (const auto& name : PruneRelinkCache(cacheRoot, RelinkCacheKeep(), sha)) Log("pruned old relink cache entry %.12s", name.c_str());
     BindTitleData(out, DataRoot(options, resource));
     Log("%zu images, %zu imported symbols, %zu libraries stubbed, %zu imports stubbed", layout.images, layout.imports,
         layout.missingLibs.size(), layout.unresolved.size());
