@@ -2,6 +2,9 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 
 static constexpr float SoundSpeed = 343.0f;
 
@@ -49,9 +52,101 @@ static void TestResetSourceParam() {
     Require(sceNgs2GeomResetSourceParam(nullptr) == SCE_NGS2_ERROR_INVALID_OUT_ADDRESS);
 }
 
+static Ngs2GeomListenerParam Listener() {
+    Ngs2GeomListenerParam param{};
+    Require(sceNgs2GeomResetListenerParam(&param) == SCE_NGS2_OK);
+    return param;
+}
+
+static void RequireMatrix(const Ngs2GeomListenerWork& work, const float (&expected)[4][4]) {
+    for (std::size_t row = 0; row < 4; row++) {
+        for (std::size_t column = 0; column < 4; column++) Require(std::abs(work.matrix[row][column] - expected[row][column]) < 0.00001f);
+    }
+}
+
+static void TestListenerTransform() {
+    auto param = Listener();
+    param.velocity = {2.0f, -3.0f, 4.0f};
+    param.sound_speed = 1500.0f;
+    Ngs2GeomListenerWork work;
+    std::memset(&work, 0x5a, sizeof(work));
+    Require(sceNgs2GeomCalcListener(&param, &work, 0) == SCE_NGS2_OK);
+    RequireMatrix(work, {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}});
+    Require(work.velocity.x == 2.0f && work.velocity.y == -3.0f && work.velocity.z == 4.0f);
+    Require(work.sound_speed == 1500.0f && work.coordinate == 0);
+    Require(work.reserved[0] == 0 && work.reserved[1] == 0 && work.reserved[2] == 0);
+
+    param.position = {3.0f, 4.0f, 5.0f};
+    Require(sceNgs2GeomCalcListener(&param, &work, 0) == SCE_NGS2_OK);
+    RequireMatrix(work, {{1, 0, 0, -3}, {0, 1, 0, -4}, {0, 0, 1, -5}, {0, 0, 0, 1}});
+
+    param.orient_front = {2.0f, 0.0f, 0.0f};
+    param.orient_up = {1.0f, 3.0f, 0.0f};
+    Require(sceNgs2GeomCalcListener(&param, &work, 0) == SCE_NGS2_OK);
+    RequireMatrix(work, {{0, 0, -1, 5}, {0, 1, 0, -4}, {1, 0, 0, -3}, {0, 0, 0, 1}});
+
+    param.orient_front = {0.0f, 0.0f, -2.0f};
+    param.orient_up = {0.0f, 3.0f, 0.0f};
+    Require(sceNgs2GeomCalcListener(&param, &work, 1) == SCE_NGS2_OK);
+    RequireMatrix(work, {{1, 0, 0, -3}, {0, 1, 0, -4}, {0, 0, -1, 5}, {0, 0, 0, 1}});
+    Require(work.coordinate == 1);
+
+    param.orient_front = {0.0f, 0.0f, std::numeric_limits<float>::max()};
+    param.orient_up = {0.0f, std::numeric_limits<float>::min(), 0.0f};
+    Require(sceNgs2GeomCalcListener(&param, &work, 0) == SCE_NGS2_OK);
+    RequireMatrix(work, {{1, 0, 0, -3}, {0, 1, 0, -4}, {0, 0, 1, -5}, {0, 0, 0, 1}});
+}
+
+static void RejectListener(const Ngs2GeomListenerParam* param, std::uint32_t flags) {
+    Ngs2GeomListenerWork work;
+    std::memset(&work, 0x5a, sizeof(work));
+    unsigned char before[sizeof(work)];
+    std::memcpy(before, &work, sizeof(work));
+    bool rejected = false;
+    try {
+        sceNgs2GeomCalcListener(param, &work, flags);
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    Require(rejected);
+    Require(std::memcmp(before, &work, sizeof(work)) == 0);
+}
+
+static void TestInvalidListener() {
+    auto param = Listener();
+    Require(sceNgs2GeomCalcListener(&param, nullptr, 0) == SCE_NGS2_ERROR_INVALID_OUT_ADDRESS);
+    RejectListener(nullptr, 0);
+    RejectListener(&param, 2);
+    RejectListener(&param, 0xffffffffu);
+    for (const float value : {0.0f, -1.0f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        param.sound_speed = value;
+        RejectListener(&param, 0);
+    }
+    param = Listener();
+    param.orient_front = {};
+    RejectListener(&param, 0);
+    param = Listener();
+    param.orient_up = param.orient_front;
+    RejectListener(&param, 0);
+    param = Listener();
+    param.orient_up = {};
+    RejectListener(&param, 0);
+    param = Listener();
+    param.position.x = std::numeric_limits<float>::infinity();
+    RejectListener(&param, 0);
+    param = Listener();
+    param.velocity.z = std::numeric_limits<float>::quiet_NaN();
+    RejectListener(&param, 0);
+    param = Listener();
+    param.orient_front.y = std::numeric_limits<float>::quiet_NaN();
+    RejectListener(&param, 0);
+}
+
 int main() {
     TestLayouts();
     TestResetListenerParam();
     TestResetSourceParam();
+    TestListenerTransform();
+    TestInvalidListener();
     return 0;
 }
