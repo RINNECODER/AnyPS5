@@ -14,6 +14,12 @@
 struct LibcStatvfs;
 extern "C" int APS5_VABI fstatvfs_nid_postfix(int, LibcStatvfs*);
 
+#if defined(O_PATH)
+#define HostPathOpenFlag O_PATH
+#else
+#define HostPathOpenFlag O_RDONLY // macOS has no O_PATH
+#endif
+
 namespace {
 int Fail(int error) {
     errno = error;
@@ -100,7 +106,7 @@ int OpenMetadata(const std::filesystem::path& path, bool directory) {
     }
     return descriptor;
 #else
-    const int descriptor = ::open(path.c_str(), O_PATH | O_CLOEXEC | (directory ? O_DIRECTORY : 0));
+    const int descriptor = ::open(path.c_str(), HostPathOpenFlag | O_CLOEXEC | (directory ? O_DIRECTORY : 0));
     return descriptor < 0 ? Fail(HostError(errno)) : descriptor;
 #endif
 }

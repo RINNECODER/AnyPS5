@@ -391,11 +391,16 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
 #else
 #include <sys/vfs.h>
 #endif
+#if defined(O_PATH)
+constexpr int HostPathOpenFlag = O_PATH;
+#else
+constexpr int HostPathOpenFlag = 0; // macOS has no O_PATH; a socket descriptor then always reports EINVAL
+#endif
 static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     constexpr long PipeFilesystem = 0x50495045;
     struct stat file{};
     if (::fstat(descriptor, &file) != 0) return SceErrorFromErrno(errno) & 0xffff;
-    if (S_ISSOCK(file.st_mode) && (::fcntl(descriptor, F_GETFL) & O_PATH) == 0) return GUEST_EINVAL;
+    if (S_ISSOCK(file.st_mode) && (::fcntl(descriptor, F_GETFL) & HostPathOpenFlag) == 0) return GUEST_EINVAL;
     if (S_ISFIFO(file.st_mode)) {
         struct statfs kind{};
         if (::fstatfs(descriptor, &kind) == 0 && static_cast<long>(kind.f_type) == PipeFilesystem) return GUEST_EINVAL;
