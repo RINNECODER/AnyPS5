@@ -166,7 +166,13 @@ def infer_requirements(functions):
                 continue
             if ins.address in getattr(function, 'dispatch_calls', {}):
                 continue
-            contract, slot = image.call(ins, function.contract)
+            tail = function.tail_calls.get(ins.address)
+            if tail is not None:
+                # A fall-through or conditional tail call's last instruction is not a call;
+                # discovery already recorded its contract and provider-binding slot.
+                contract, slot = tail
+            else:
+                contract, slot = image.call(ins, function.contract)
             effects = contract.get('memory_effects')
             if type(slot) is int and effects is not None and not effects['callbacks']:
                 requirements[address].add(slot)

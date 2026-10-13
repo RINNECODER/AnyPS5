@@ -194,6 +194,22 @@ class UniformABITests(unittest.TestCase):
         function(ctypes.byref(registers))
         self.assertEqual(registers.gpr[GPR['rax']], 42)
 
+    def test_uniform_fall_through_tail_call(self):
+        # 0x1000: mov eax, 1   (falls through into 0x1005)   0x1005: ret
+        # The last instruction is not a call, so the tail call's contract has to come from
+        # discovery, not from image.call on the mov.
+        code = bytearray(0x06)
+        code[0x00:0x05] = bytes.fromhex('b801000000')
+        code[0x05:0x06] = bytes.fromhex('c3')
+        functions = [uniform_function('sub_1000', 0x1000, 5),
+                     uniform_function('sub_1005', 0x1005, 1)]
+        raw, contracts = fixture(bytes(code), functions)
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        self.assertIn('call void @sub_1005(ptr %rf_out)', ir)
+        registers = RegisterFile()
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 1)
+
     def test_uniform_indirect_call_uses_the_declared_target_set(self):
         # 0x1000: call rax ; ret          0x1010: mov rax, rdi ; ret
         code = bytearray(0x14)
