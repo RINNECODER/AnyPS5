@@ -50,6 +50,13 @@ public:
     void ShiftDwordImm(std::uint8_t extension, std::uint8_t reg, std::uint8_t imm);
     void RipOperand(std::initializer_list<std::uint8_t> opcode, std::uint8_t reg, const StubConstant& constant);
     void Load(std::uint8_t reg, const MemoryOperand& operand);
+    // A legacy-encoded SSE instruction with the guest's memory operand (prefix 0 = none).
+    void SseMemory(std::uint8_t prefix, std::initializer_list<std::uint8_t> opcode, std::uint8_t reg, const MemoryOperand& operand);
+    // A three-byte-VEX instruction (map 0F, W0) with the guest's memory operand; pp is the VEX prefix field.
+    void VexMemory(std::uint8_t pp, bool ymm, std::uint8_t opcode, std::uint8_t reg, std::uint8_t vvvv, const MemoryOperand& operand);
+    // Lowers rsp by bytes (flag-preserving lea) and tracks it for stack-based guest operands.
+    void Reserve(std::size_t bytes);
+    void Release(std::size_t bytes);
     void Spill(std::uint8_t reg);
     void Restore(std::uint8_t reg);
     void Raw(std::span<const std::uint8_t> bytes);
@@ -68,6 +75,7 @@ private:
         std::size_t ConstantIndex;
     };
 
+    void _memoryTail(std::uint8_t reg, const MemoryOperand& operand);
     void _rel32(std::initializer_list<std::uint8_t> opcode, std::int64_t siteTarget);
     void _pushReturnAddress(std::int64_t siteTarget);
 
