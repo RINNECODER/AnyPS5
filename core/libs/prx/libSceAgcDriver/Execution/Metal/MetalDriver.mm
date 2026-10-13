@@ -482,8 +482,8 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
 // the wait also ends once the queue's worker is parked on such a host-satisfied wait (WAIT_REG_MEM,
 // RenderingWait). It used to end after 250 ms instead, which a title loading its map outran: a
 // dispatch that takes longer let the guest rewrite the constants of work still queued, and a
-// dispatch that then read a tile table as its loop bounds never finished. The 10 s cap only guards
-// against waits this does not model. A negative value turns the bound off.
+// dispatch that then read a tile table as its loop bounds never finished. Giving up after 10 s
+// without worker progress (60 s at most) only guards against waits this does not model. A negative value turns the bound off.
 void MetalDriver::Impl::WaitForQueueRoom(std::uint32_t queue) {
     static const long maxQueued = [] {
         const char* value = std::getenv("ANYPS5_METAL_MAX_QUEUED");
@@ -498,19 +498,25 @@ void MetalDriver::Impl::WaitForQueueRoom(std::uint32_t queue) {
         return stopping || failure || static_cast<long>(worker.pending.size() + worker.unretired) <= maxQueued ||
             (worker.active && !worker.running);
     };
-    // Gives up only when the workers made no progress for 10 s (a wait this does not model): a
-    // worker busy converting a burst of new shaders can take longer than that to retire one
-    // submission, and submitting past it then let the guest rewrite data queued work reads.
+    // Gives up when the workers made no progress for 10 s (a wait this does not model): a worker
+    // busy converting a burst of new shaders can take longer than that to retire one submission,
+    // and submitting past it then let the guest rewrite data queued work reads. `progress` is
+    // shared by every queue, so another queue's work could keep it moving while this one is stuck
+    // on such a wait: 60 s in all ends the wait regardless.
     bool room = false;
+    bool stalled = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     for (auto seen = progress.load(std::memory_order_relaxed);;) {
         room = changed.wait_for(lock, std::chrono::seconds(10), hasRoom);
         const auto now = progress.load(std::memory_order_relaxed);
-        if (room || now == seen) break;
+        stalled = now == seen;
+        if (room || stalled || std::chrono::steady_clock::now() >= deadline) break;
         seen = now;
     }
     static std::atomic<unsigned> reports{0};
     if (!room && reports.fetch_add(1) < 4) {
-        std::fprintf(stderr, "[metal] queue %u made no progress for 10 s with %zu submissions waiting; submitting anyway\n", queue, worker.pending.size());
+        std::fprintf(stderr, "[metal] queue %u %s with %zu submissions waiting; submitting anyway\n", queue,
+            stalled ? "made no progress for 10 s" : "had no room for 60 s", worker.pending.size());
     }
 }
 
