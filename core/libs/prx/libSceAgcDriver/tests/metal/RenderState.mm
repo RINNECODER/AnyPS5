@@ -9,6 +9,7 @@
 #include <iostream>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -382,6 +383,86 @@ void DepthBiasReset(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibra
 
 }
 
+// Shared State decode fixes ported from upstream, checked on the Metal path: CB_COLOR_INFO BLEND_BYPASS
+// turns blending off (upstream PR 4862), and MSAA_ENABLE on a single-sample scan whose samples sit at
+// the pixel center rasterizes like a plain single-sample draw (upstream fdfbeba8a).
+void SharedStateDecode(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library) {
+    alignas(256) std::array<std::byte, 2048> colorMemory{};
+    const auto colorAddress = reinterpret_cast<std::uintptr_t>(colorMemory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{colorAddress, colorMemory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    constexpr auto stride = 3u * 0xfu;
+    QueueState guest;
+    auto& cx = guest.context;
+    guest.userConfig[0x242] = 4;
+    cx[0x2d5] = 0x2000;
+    cx[0x204] = 0x80000;
+    cx[0x205] = 0;
+    cx[0x200] = 0;
+    cx[0x010] = 0;
+    cx[0x011] = 0;
+    cx[0x8e] = 0xf000;
+    cx[0x8f] = 0xffff;
+    cx[0x1c3] = 4;
+    cx[0x1c5] = 0x9000;
+    cx[0x318 + stride] = static_cast<std::uint32_t>(colorAddress >> 8u);
+    cx[0x390 + 3] = static_cast<std::uint32_t>(colorAddress >> 40u);
+    cx[0x31b + stride] = 0;
+    cx[0x31c + stride] = 0x8028; // RGBA8 UNORM, clamped.
+    cx[0x31d + stride] = 0;
+    cx[0x3b0 + 3] = (7u << 14u) | 7u;
+    cx[0x3b8 + 3] = 0x09000000;
+    for (const auto offset : {0x10fu, 0x110u, 0x111u, 0x112u}) cx[offset] = std::bit_cast<std::uint32_t>(4.0f);
+    cx[0x113] = std::bit_cast<std::uint32_t>(1.0f);
+    cx[0x114] = 0;
+    cx[0xb5] = std::bit_cast<std::uint32_t>(1.0f);
+    for (std::uint32_t constant = 0x105; constant < 0x109; ++constant) cx[constant] = 0;
+    // SRC_ALPHA, ADD, ONE_MINUS_SRC_ALPHA for color and alpha.
+    cx[0x1e0 + 3] = (1u << 30u) | 4u | (5u << 8u);
+
+    const auto blended = Graphics::DecodeState(guest);
+    Require(blended.blends.at(3).blendEnable, "Enabled blending was not decoded");
+    cx[0x31c + stride] |= 0x10000u;
+    const auto bypassed = Graphics::DecodeState(guest);
+    Require(!bypassed.blends.at(3).blendEnable && bypassed.blends.at(3).colorWriteMask != 0, "A target with BLEND_BYPASS still blends");
+    const std::array<float, 4> halfRed{1, 0, 0, 0.5f};
+    const std::array<Draw, 1> blendDraw{{{blended, {halfRed, 0.5f}}}};
+    for (const auto pixel : Render(device, queue, library, blendDraw, MTLClearColorMake(0, 1, 0, 1))) {
+        Match(pixel, {128, 128, 0, 191}, "Enabled blending did not mix the draw over the clear color", 2);
+    }
+    const std::array<Draw, 1> bypassDraw{{{bypassed, {halfRed, 0.5f}}}};
+    for (const auto pixel : Render(device, queue, library, bypassDraw, MTLClearColorMake(0, 1, 0, 1))) {
+        Match(pixel, {255, 0, 0, 128}, "BLEND_BYPASS did not write the shader color unblended", 2);
+    }
+    cx[0x1e0 + 3] = 0;
+    cx[0x31c + stride] &= ~0x10000u;
+
+    const auto plain = Graphics::DecodeState(guest);
+    const auto plainRejection = Graphics::DrawRejection(guest, false);
+    cx[0x292] = 1; // MSAA_ENABLE on a single-sample scan.
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) cx[0x2fe + pixel * 4u] = 0;
+    const auto centered = Graphics::DecodeState(guest);
+    Require(centered.rasterSamples == 1 && centered.colors.size() == 1 && centered.colors[0].samples == 1, "MSAA_ENABLE at the pixel center did not decode as single-sampled");
+    Require(Graphics::DrawRejection(guest, false) == plainRejection, "MSAA_ENABLE at the pixel center changed the draw precheck");
+    const std::array<Draw, 1> plainDraw{{{plain, {{0, 0, 1, 1}, 0.5f}}}};
+    const std::array<Draw, 1> centeredDraw{{{centered, {{0, 0, 1, 1}, 0.5f}}}};
+    const auto plainPixels = Render(device, queue, library, plainDraw, MTLClearColorMake(0, 0, 0, 1));
+    const auto centeredPixels = Render(device, queue, library, centeredDraw, MTLClearColorMake(0, 0, 0, 1));
+    Require(plainPixels == centeredPixels, "MSAA_ENABLE at the pixel center changed the rendered pixels");
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+        cx[0x2fe + pixel * 4u] = 0x04;
+        bool refused = false;
+        try {
+            static_cast<void>(Graphics::DecodeState(guest));
+        } catch (const std::exception& error) {
+            refused = std::string(error.what()).find("off the pixel center") != std::string::npos;
+        }
+        Require(refused, "MSAA_ENABLE with a sample off the pixel center was not refused");
+        cx[0x2fe + pixel * 4u] = 0;
+    }
+    std::cout << "PASS: BLEND_BYPASS disables decoded blending (native blend=128,128,0,191 bypass=255,0,0,128); MSAA_ENABLE single-sample at the pixel center renders as single-sample, off-center refused\n";
+}
+
 // Depth/stencil states are shared by draws whose native descriptor matches; the dynamic stencil reference
 // is encoder state and must not split them, while any compare, write or stencil operation change must.
 void DepthStencilCache(id<MTLDevice> device) {
@@ -430,6 +511,7 @@ int main() {
             UnrestrictedViewportDepth(device, queue, library);
             DepthBounds(device, queue, library);
             DepthBiasReset(device, queue, library);
+            SharedStateDecode(device, queue, library);
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {

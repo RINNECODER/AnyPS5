@@ -174,7 +174,11 @@ extern "C" void AgcDriverResolveShaderAbi_nid_postfix(const Shader* shader, std:
     static_cast<void>(context);
     static_cast<void>(primitive);
 #else
-    AgcDriver::DriverDetail::Driver::Get().ResolveShaderAbi(shader, context, primitive);
+    try {
+        AgcDriver::DriverDetail::Driver::Get().ResolveShaderAbi(shader, context, primitive);
+    } catch (const ProcessShutdown&) {
+        LibcAwaitExit_nid_postfix();
+    }
 #endif
 }
 
@@ -184,7 +188,11 @@ extern "C" void AgcDriverResolveGraphicsAbi_nid_postfix(const Shader* vertex, co
     static_cast<void>(pixel);
     static_cast<void>(primitiveType);
 #else
-    AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsAbi(vertex, pixel, primitiveType);
+    try {
+        AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsAbi(vertex, pixel, primitiveType);
+    } catch (const ProcessShutdown&) {
+        LibcAwaitExit_nid_postfix();
+    }
 #endif
 }
 
@@ -194,6 +202,10 @@ extern "C" void AgcDriverResolveGraphicsStagesAbi_nid_postfix(std::span<const Sh
     static_cast<void>(context);
     static_cast<void>(primitive);
 #else
-    AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsStagesAbi(stages, context, primitive);
+    try {
+        AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsStagesAbi(stages, context, primitive);
+    } catch (const ProcessShutdown&) {
+        LibcAwaitExit_nid_postfix();
+    }
 #endif
 }
