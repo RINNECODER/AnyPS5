@@ -69,6 +69,7 @@ def validate_indirect_calls(image, owner_contract):
                     'invalid indirect call target address')
             require(len(set(targets)) == len(targets), 'duplicate indirect call target address')
             names = []
+            seen = set()
             for target in targets:
                 if start <= target < start + size:
                     continue
@@ -78,7 +79,8 @@ def validate_indirect_calls(image, owner_contract):
                     raise CallError(f'unresolved indirect call target 0x{target:x}: {error}') from error
                 require(abi.uniform(contract),
                         f'uniform indirect call target {contract["name"]} is not a uniform function')
-                if contract['name'] not in names:
+                if contract['name'] not in seen:
+                    seen.add(contract['name'])
                     names.append(contract['name'])
             descriptors[address] = {'contract': candidate, 'kind': 'operand', 'targets': names,
                                     'target_addresses': list(targets),
@@ -98,7 +100,7 @@ def validate_indirect_calls(image, owner_contract):
         require(all(type(target) is int and 0 <= target <= (1 << 64) - 1 for target in targets),
                 'invalid indirect call target address')
         require(len(set(targets)) == len(targets), 'duplicate indirect call target address')
-        names, resolved = [], []
+        names, resolved, seen = [], [], set()
         for target in targets:
             try:
                 contract = image.functions[target] if target in image.functions else image.callee(target)
@@ -106,7 +108,8 @@ def validate_indirect_calls(image, owner_contract):
                 raise CallError(f'unresolved indirect call target 0x{target:x}: {error}') from error
             require(structural_signature(contract) == expected,
                     f'indirect call ABI does not match target {contract["name"]}')
-            if contract['name'] not in names:
+            if contract['name'] not in seen:
+                seen.add(contract['name'])
                 names.append(contract['name'])
             resolved.append(contract)
         all_noreturn = all(bool(contract.get('noreturn')) for contract in resolved)
