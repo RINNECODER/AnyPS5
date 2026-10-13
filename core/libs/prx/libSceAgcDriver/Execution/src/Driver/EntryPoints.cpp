@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #endif
 #include "prx/libc/include/Shutdown.hpp"
+#include <condition_variable>
 #include <mutex>
 
 namespace {
@@ -23,6 +24,22 @@ using BackendDriver = AgcDriver::Metal::MetalDriver;
 using BackendDriver = AgcDriver::DriverDetail::Driver;
 #endif
 
+#if defined(ANYPS5_METAL_BACKEND)
+// Parks a guest thread whose driver stopped. The Rosetta library links libc and parks in
+// LibcAwaitExit; the guest-replay and host-fixture builds have no libc (no process exit to await),
+// so their threads block for good.
+[[noreturn]] void ParkGuestThread() {
+#if defined(ANYPS5_ROSETTA_DIRECT)
+    LibcAwaitExit_nid_postfix();
+#else
+    std::mutex mutex;
+    std::condition_variable never;
+    std::unique_lock lock(mutex);
+    for (;;) never.wait(lock);
+#endif
+}
+#endif
+
 template <typename Operation>
 void InvokeEntry(Operation&& operation) {
 #if defined(ANYPS5_METAL_BACKEND)
@@ -30,9 +47,9 @@ void InvokeEntry(Operation&& operation) {
         operation();
     } catch (const AgcDriver::Metal::DriverStopped&) {
         // The driver stopped under this guest thread: park it rather than unwind through guest frames.
-        LibcAwaitExit_nid_postfix();
+        ParkGuestThread();
     } catch (const ProcessShutdown&) {
-        LibcAwaitExit_nid_postfix();
+        ParkGuestThread();
     }
 #else
     try {
