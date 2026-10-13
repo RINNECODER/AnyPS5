@@ -23,6 +23,11 @@ kernel void SampleDepth(depth2d<float> depth [[texture(0)]], device float* value
     constexpr sampler nearest(coord::pixel, address::clamp_to_edge, filter::nearest);
     values[at.y * 5 + at.x] = depth.sample(nearest, float2(at) + 0.5);
 }
+struct LayeredDepthOut { float4 position [[position]]; uint layer [[render_target_array_index]]; };
+vertex LayeredDepthOut LayeredDepthVertex(uint index [[vertex_id]], uint instance [[instance_id]], constant float* depths [[buffer(0)]]) {
+    const float2 positions[3] = {float2(-1,-1), float2(3,-1), float2(-1,3)};
+    return {float4(positions[index], depths[instance], 1), instance};
+}
 kernel void ReadDepthArray(depth2d_array<float> depth [[texture(0)]], device float* values [[buffer(0)]], uint3 at [[thread_position_in_grid]]) {
     values[(at.z * 3 + at.y) * 5 + at.x] = depth.read(at.xy, at.z);
 }
@@ -195,6 +200,132 @@ void depthArray(const MetalTests::Context& context, const AgcDriver::Metal::Meta
     }
     MetalTests::Require(rejected, "Depth array with a slice no draw rendered was gathered");
 }
+
+// Every slice of a depth array is a layer of one set of planes: a layered draw (render target index
+// per primitive) writes all of them at once, single-slice surfaces see what it wrote, a slice rendered
+// on its own before its array was known moves into the array with its texels, the array grows without
+// losing layers, and a 2D-array read of the slices is a view of the planes rather than a copy.
+void layeredDepthArray(const MetalTests::Context& context, const AgcDriver::Metal::MetalDevice& backend, id<MTLLibrary> shaders, VkFormat format) {
+    const bool d16 = format == VK_FORMAT_D16_UNORM;
+    const auto sliceBytes = AgcDriver::Graphics::DepthSliceBytes({width, height}, d16 ? 2u : 4u);
+    AgcDriver::Metal::MetalDepthSurfaceCache cache(backend);
+    const auto slice = [&](std::uint32_t index, std::uint32_t last) {
+        AgcDriver::Graphics::DepthTarget target{0x400000 + index * sliceBytes, 0, {width, height}, format, 1, 0};
+        target.slice = index;
+        target.lastSlice = last;
+        return target;
+    };
+    // Slice 1 rendered (to depth 0) as a plain surface before any draw names the array.
+    auto plain = cache.Acquire(slice(0, 0));
+    plain = nullptr;
+    auto early = cache.Acquire([&] { auto target = slice(1, 0); target.slice = 0; return target; }());
+    render(context, shaders, *early);
+    auto first = cache.Acquire(slice(0, 2));
+    auto second = cache.Acquire(slice(1, 2));
+    MetalTests::Require(second == early && second->Planes() == first->Planes() && second->Layer() == 1 && first->Layer() == 0 &&
+        first->Planes()->layers == 3, "Depth array slices do not share one set of planes");
+    samples(context, shaders, *second, 0, 0);
+
+    auto descriptor = [MTLRenderPipelineDescriptor new];
+    descriptor.vertexFunction = [shaders newFunctionWithName:@"LayeredDepthVertex"];
+    descriptor.depthAttachmentPixelFormat = first->DepthTexture().pixelFormat;
+    descriptor.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    NSError* error = nil;
+    auto pipeline = [context.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (pipeline == nil) throw std::runtime_error(error.localizedDescription.UTF8String ?: "Layered depth pipeline creation failed");
+    auto stateDescriptor = [MTLDepthStencilDescriptor new];
+    stateDescriptor.depthCompareFunction = MTLCompareFunctionLess;
+    stateDescriptor.depthWriteEnabled = YES;
+    auto depthState = [context.device newDepthStencilStateWithDescriptor:stateDescriptor];
+    auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.depthAttachment.texture = first->LayeredDepthTexture(3);
+    pass.depthAttachment.loadAction = MTLLoadActionLoad;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.renderTargetArrayLength = 3;
+    pass.renderTargetWidth = width;
+    pass.renderTargetHeight = height;
+    auto commands = [backend.Queue() commandBuffer];
+    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    MetalTests::Require(encoder != nil, "Layered depth encoder creation failed");
+    [encoder setRenderPipelineState:pipeline];
+    [encoder setDepthStencilState:depthState];
+    const std::array<float, 3> depths{0.25f, 0.75f, 0.5f};
+    [encoder setVertexBytes:depths.data() length:sizeof(depths) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3 instanceCount:3];
+    [encoder endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    MetalTests::Require(commands.status == MTLCommandBufferStatusCompleted, "Layered depth draw failed");
+    // Slice 2's surface is made after the draw: it must view what the draw wrote, not a cleared layer.
+    auto third = cache.Acquire(slice(2, 2));
+    MetalTests::Require(third->Planes() == first->Planes() && third->Layer() == 2, "A later slice surface is not a layer of its array");
+    samples(context, shaders, *first, 0.25f, 0);
+    samples(context, shaders, *second, 0, 0); // LESS kept the slice's own earlier depth
+    samples(context, shaders, *third, 0.5f, 0);
+
+    auto readPipeline = [context.device newComputePipelineStateWithFunction:[shaders newFunctionWithName:@"ReadDepthArray"] error:&error];
+    if (readPipeline == nil) throw std::runtime_error(error.localizedDescription.UTF8String ?: "Depth array compute pipeline creation failed");
+    const auto read = [&](id<MTLTexture> array, std::vector<float> expected) {
+        const auto layers = static_cast<std::uint32_t>(array.arrayLength);
+        MetalTests::Require(layers == expected.size(), "Depth array view has the wrong layer count");
+        auto output = context.Buffer(width * height * layers * sizeof(float), 0xa5);
+        auto reads = [backend.Queue() commandBuffer];
+        auto compute = [reads computeCommandEncoder];
+        [compute setComputePipelineState:readPipeline];
+        [compute setTexture:array atIndex:0];
+        [compute setBuffer:output offset:0 atIndex:0];
+        [compute dispatchThreads:MTLSizeMake(width, height, layers) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [compute endEncoding];
+        [reads commit];
+        [reads waitUntilCompleted];
+        MetalTests::Require(reads.status == MTLCommandBufferStatusCompleted, "Depth array read dispatch failed");
+        const auto* values = static_cast<const float*>(output.contents);
+        for (std::uint32_t layer = 0; layer < layers; ++layer) for (std::uint32_t i = 0; i < width * height; ++i) {
+            MetalTests::Require(std::abs(values[layer * width * height + i] - expected[layer]) < 0.00004f, "Depth array layer holds the wrong depth");
+        }
+    };
+    std::vector<std::shared_ptr<Surface>> surfaces{first, second, third};
+    const auto view = AgcDriver::Metal::GatherDepthSlices(backend, surfaces, *first, 0, 2, nil);
+    MetalTests::Require(view.parentTexture == first->Planes()->depth, "Slices of one array were copied instead of viewed in place");
+    read(view, {0.25f, 0, 0.5f});
+    read(AgcDriver::Metal::GatherDepthSlices(backend, surfaces, *first, 1, 2, nil), {0, 0.5f});
+
+    // A view naming a later slice grows the array: old layers keep their texels, surfaces follow.
+    auto fourth = cache.Acquire(slice(3, 3));
+    MetalTests::Require(fourth->Planes() == first->Planes() && first->Planes()->layers == 4 && fourth->Layer() == 3, "Depth array did not grow in place");
+    surfaces.push_back(fourth);
+    samples(context, shaders, *first, 0.25f, 0);
+    samples(context, shaders, *fourth, 1, 0);
+    read(AgcDriver::Metal::GatherDepthSlices(backend, surfaces, *first, 0, 3, nil), {0.25f, 0, 0.5f, 1});
+}
+
+// A block-compressed texture (or one of another texel size) at a resident depth surface's address is
+// another resource in reused memory: the surface is dropped; a depth-sized view keeps it.
+void replacedDepth(const AgcDriver::Metal::MetalDevice& backend) {
+    AgcDriver::Metal::MetalDepthSurfaceCache cache(backend);
+    AgcDriver::Graphics::DepthTarget target{0x400000, 0, {width, height}, VK_FORMAT_D16_UNORM, 1, 0};
+    std::vector<std::shared_ptr<Surface>> surfaces{cache.Acquire(target)};
+    AgcDriver::Graphics::GuestTextureResource resource{};
+    resource.baseAddress = target.address;
+    resource.width = width;
+    resource.height = height;
+    resource.dimension = AgcDriver::Graphics::TextureDimension::k2D;
+    resource.format = 7; // R16_UNORM: reads the depth plane
+    AgcDriver::Metal::DropReplacedDepthSurfaces(surfaces, cache, resource);
+    MetalTests::Require(surfaces.size() == 1 && cache.Acquire(target) == surfaces[0], "A depth-plane view dropped its resident surface");
+    resource.baseAddress = target.address + 256;
+    resource.format = 169; // BC1, elsewhere
+    AgcDriver::Metal::DropReplacedDepthSurfaces(surfaces, cache, resource);
+    MetalTests::Require(surfaces.size() == 1, "A texture at another address dropped a resident depth surface");
+    resource.baseAddress = target.address;
+    const auto old = surfaces[0];
+    AgcDriver::Metal::DropReplacedDepthSurfaces(surfaces, cache, resource);
+    MetalTests::Require(surfaces.empty() && cache.Acquire(target) != old, "A block-compressed texture over a depth surface kept the dead surface");
+    surfaces = {cache.Acquire(target)};
+    resource.format = 22; // R32_SFLOAT over a 16-bit depth plane
+    AgcDriver::Metal::DropReplacedDepthSurfaces(surfaces, cache, resource);
+    MetalTests::Require(surfaces.empty(), "A texture of another texel size over a depth surface kept the dead surface");
+}
 }
 
 void RunDepthResourceTests(const MetalTests::Context& context) {
@@ -224,4 +355,6 @@ void RunDepthResourceTests(const MetalTests::Context& context) {
         samples(context, shaders, *fresh, 1, 99);
     }
     for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) depthArray(context, backend, shaders, format);
+    for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) layeredDepthArray(context, backend, shaders, format);
+    replacedDepth(backend);
 }

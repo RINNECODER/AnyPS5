@@ -23,6 +23,16 @@ namespace AgcDriver::Metal {
 namespace {
 using namespace ShaderRecompiler;
 
+// Whether a texture descriptor's format reads the depth (or stencil) plane of a resident depth surface:
+// the plane's own single-channel format or a depth-bits view of its width.
+bool readsDepthPlane(const Graphics::GuestTextureResource& resource, const Graphics::DepthTarget& target, bool stencil) {
+    const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+    const auto expected = stencil ? VK_FORMAT_R8_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
+    const bool depthBits = !stencil && DepthBitsTextureWidth(resource.format << 20u,
+        Graphics::XorSwizzleMode(resource.tileMode) << 20u) == (d16 ? 16u : 32u);
+    return Graphics::ResolveTextureFormat(resource.format) == expected || depthBits;
+}
+
 void configureSamplerArguments(MetalBackend::TargetOptions& options, const RecompileResult& guest, id<MTLDevice> device) {
     options.supportsArgumentBuffersTier2 = device.argumentBuffersSupport == MTLArgumentBuffersTier2;
     options.maxArgumentBufferSamplers = 32;
@@ -378,27 +388,40 @@ id<MTLTexture> MetalDraw::residentDepthArray(const Graphics::GuestTextureResourc
         (Graphics::ResolveTextureFormat(resource.format) != (d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT) && !depthBits)) {
         return nil;
     }
-    // A slice no draw has rendered gets the surface its first draw would create (cleared like the base).
+    // A slice no draw has rendered gets the surface its first draw would create: a layer of the base's
+    // depth array (cleared like the base when the array is created or grows).
     const auto sliceBytes = Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u);
+    const auto stencilBytes = Graphics::DepthSliceBytes(target.extent, 1u);
     for (std::uint32_t layer = resource.baseArray; layer <= resource.depthOrLastArray; ++layer) {
         auto slice = target;
         slice.address = target.address + std::uint64_t{layer} * sliceBytes;
-        slice.stencilAddress = 0;
-        if (std::none_of(depthSurfaces.begin(), depthSurfaces.end(), [&](const auto& surface) { return surface->Target().address == slice.address; })) {
-            depthSurfaces.push_back(depthCache->Acquire(slice));
-        }
+        if (slice.stencilAddress != 0) slice.stencilAddress += std::uint64_t{layer} * stencilBytes;
+        slice.slice = target.slice + layer;
+        slice.lastSlice = std::max(target.lastSlice, target.slice + resource.depthOrLastArray);
+        // Acquire places the slice in the base's depth array (moving a surface rendered on its own).
+        auto surface = depthCache->Acquire(slice);
+        std::erase_if(depthSurfaces, [&](const auto& other) { return other != surface && other->Target().address == slice.address; });
+        if (std::find(depthSurfaces.begin(), depthSurfaces.end(), surface) == depthSurfaces.end()) depthSurfaces.push_back(surface);
     }
     auto& array = depthArrays[{resource.baseAddress, resource.baseArray, resource.depthOrLastArray}];
     array = GatherDepthSlices(backend, depthSurfaces, *baseSurface, resource.baseArray, resource.depthOrLastArray, array);
     const auto swizzle = MTLTextureSwizzleChannelsMake(channelSwizzle(resource.dstSelX), channelSwizzle(resource.dstSelY),
         channelSwizzle(resource.dstSelZ), channelSwizzle(resource.dstSelW));
-    id<MTLTexture> view = [array newTextureViewWithPixelFormat:array.pixelFormat textureType:MTLTextureType2DArray
-        levels:NSMakeRange(0, 1) slices:NSMakeRange(0, array.arrayLength) swizzle:swizzle];
+    // An in-place array is a view of the depth planes: view the planes themselves rather than the view.
+    id<MTLTexture> source = array.parentTexture != nil ? array.parentTexture : array;
+    const auto firstSlice = array.parentTexture != nil ? array.parentRelativeSlice : 0;
+    id<MTLTexture> view = [source newTextureViewWithPixelFormat:array.pixelFormat textureType:MTLTextureType2DArray
+        levels:NSMakeRange(0, 1) slices:NSMakeRange(firstSlice, array.arrayLength) swizzle:swizzle];
     if (view == nil) throw std::runtime_error("Metal draw depth array view creation failed");
     return view;
 }
 
 id<MTLTexture> MetalDraw::residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
+    // Guest memory reused: a descriptor whose texels cannot be the depth or stencil plane of a resident
+    // surface at its address (a block-compressed texture placed where a depth target was) is another
+    // resource. Its texels are in guest memory; the surface's are dead, so it is dropped (a later draw
+    // into the address makes a new one).
+    DropReplacedDepthSurfaces(depthSurfaces, *depthCache, resource);
     if (auto array = residentDepthArray(resource, storage); array != nil) return array;
     if (auto view = residentView(resource, storage, compare); view != nil || resource.samples <= 1) return view;
     // A multisampled image that no draw has rendered yet (a target cleared only through its DCC keys
@@ -433,26 +456,25 @@ id<MTLTexture> MetalDraw::residentView(const Graphics::GuestTextureResource& res
         if (storage || resource.width != target.extent.width || resource.height != target.extent.height ||
             resource.dimension != Graphics::TextureDimension::k2D || resource.baseLevel != 0 || resource.lastLevel != 0 ||
             resource.baseArray != 0 || resource.depthOrLastArray != 0 || (stencil && compare) || resource.samples != target.samples) {
-            char detail[192];
-            std::snprintf(detail, sizeof detail, " (%ux%u dim %d levels %u-%u layers %u-%u samples %u%s%s; surface %ux%u samples %u)",
+            char detail[224];
+            std::snprintf(detail, sizeof detail, " (%ux%u dim %d levels %u-%u/%u layers %u-%u samples %u fmt %u tile %u%s%s; surface %ux%u samples %u fmt %d)",
                 resource.width, resource.height, static_cast<int>(resource.dimension), resource.baseLevel, resource.lastLevel,
-                resource.baseArray, resource.depthOrLastArray, resource.samples, storage ? " storage" : "", stencil ? " stencil" : "",
-                target.extent.width, target.extent.height, target.samples);
+                resource.mipCount, resource.baseArray, resource.depthOrLastArray, resource.samples, resource.format,
+                static_cast<unsigned>(resource.tileMode), storage ? " storage" : "", stencil ? " stencil" : "",
+                target.extent.width, target.extent.height, target.samples, static_cast<int>(target.format));
             throw std::invalid_argument(std::string("Metal draw resident depth view is incompatible with the guest descriptor") + detail);
         }
-        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
-        const auto expected = stencil ? VK_FORMAT_R8_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
-        const bool depthBits = !stencil && DepthBitsTextureWidth(resource.format << 20u,
-            Graphics::XorSwizzleMode(resource.tileMode) << 20u) == (d16 ? 16u : 32u);
-        if (Graphics::ResolveTextureFormat(resource.format) != expected && !depthBits) {
+        if (!readsDepthPlane(resource, target, stencil)) {
             throw std::invalid_argument("Metal draw resident depth plane format disagrees with the guest descriptor");
         }
-        id<MTLTexture> source = stencil ? surface->SampledStencilView() : surface->SampledDepthView();
-        if (source == nil) throw std::invalid_argument("Metal draw sampled depth plane is missing");
+        const auto plane = stencil ? surface->SampledStencilPlane() : surface->SampledDepthPlane();
+        if (plane.texture == nil) throw std::invalid_argument("Metal draw sampled depth plane is missing");
         const auto swizzle = MTLTextureSwizzleChannelsMake(channelSwizzle(resource.dstSelX), channelSwizzle(resource.dstSelY),
             channelSwizzle(resource.dstSelZ), channelSwizzle(resource.dstSelW));
-        id<MTLTexture> view = [source newTextureViewWithPixelFormat:source.pixelFormat textureType:source.textureType
-            levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:swizzle];
+        // A layer of the surface's planes (a 2D array for single-sample surfaces) viewed as one 2D texture.
+        id<MTLTexture> view = [plane.texture newTextureViewWithPixelFormat:plane.format
+            textureType:plane.texture.textureType == MTLTextureType2DArray ? MTLTextureType2D : plane.texture.textureType
+            levels:NSMakeRange(0, 1) slices:NSMakeRange(plane.layer, 1) swizzle:swizzle];
         if (view == nil) throw std::runtime_error("Metal draw resident depth component view creation failed");
         return view;
     }
@@ -605,6 +627,23 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     }
     auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
     if (depth && std::find(depthSurfaces.begin(), depthSurfaces.end(), depth) == depthSurfaces.end()) depthSurfaces.push_back(depth);
+    // A depth-only draw that exports a render target index renders into slices slice..lastSlice of its
+    // depth array at once; each slice also gets its surface, so later single-slice and array readers find it.
+    const std::uint32_t depthLayers = depth && state.layered && state.colors.empty() && state.depth->samples == 1 ?
+        state.depth->lastSlice - state.depth->slice + 1u : 0u;
+    if (depthLayers > 1) {
+        const auto& target = *state.depth;
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        for (std::uint32_t layer = 1; layer < depthLayers; ++layer) {
+            auto slice = target;
+            slice.address += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u);
+            if (slice.stencilAddress != 0) slice.stencilAddress += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, 1u);
+            slice.slice += layer;
+            auto surface = depthCache->Acquire(slice);
+            std::erase_if(depthSurfaces, [&](const auto& other) { return other != surface && other->Target().address == slice.address; });
+            if (std::find(depthSurfaces.begin(), depthSurfaces.end(), surface) == depthSurfaces.end()) depthSurfaces.push_back(surface);
+        }
+    }
     auto resourcesOwner = std::make_shared<MetalShaderResources>(backend, ranges,
         [this](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
             return residentTexture(resource, storage, compare);
@@ -662,7 +701,19 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         attachment.resolveTexture = level;
         attachment.storeAction = MTLStoreActionMultisampleResolve;
     }
-    if (depth) {
+    if (depth && depthLayers > 1) {
+        id<MTLTexture> layeredDepth = depth->LayeredDepthTexture(depthLayers);
+        renderPass.renderTargetArrayLength = depthLayers;
+        renderPass.depthAttachment.texture = layeredDepth;
+        renderPass.depthAttachment.loadAction = MTLLoadActionLoad;
+        renderPass.depthAttachment.storeAction = MTLStoreActionStore;
+        if (depth->StencilTexture() != nil) {
+            id<MTLTexture> layeredStencil = depth->LayeredStencilTexture(depthLayers);
+            renderPass.stencilAttachment.texture = layeredStencil != nil ? layeredStencil : layeredDepth;
+            renderPass.stencilAttachment.loadAction = MTLLoadActionLoad;
+            renderPass.stencilAttachment.storeAction = MTLStoreActionStore;
+        }
+    } else if (depth) {
         renderPass.depthAttachment.texture = depth->DepthTexture();
         renderPass.depthAttachment.loadAction = MTLLoadActionLoad;
         renderPass.depthAttachment.storeAction = MTLStoreActionStore;

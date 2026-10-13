@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #include "MetalRenderState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 
 #include <algorithm>
 #include <array>
@@ -364,6 +365,19 @@ void DepthBiasReset(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibra
     guest.context[0x205] = 0;
     const auto disabled = Graphics::DecodeState(guest);
     Require(!disabled.depthBias, "Depth bias remained enabled in the decoded control");
+    Require(disabled.depth->slice == 0 && disabled.depth->lastSlice == 0 && !disabled.layered, "A plain depth view decoded as an array slice range");
+    // DB_DEPTH_VIEW SLICE_START 2, SLICE_MAX 5 and a render target index export: a layered draw into
+    // slices 2..5 whose depth address starts at slice 2.
+    guest.context[0x002] = 2u | (5u << 13u);
+    guest.context[0x207] = 1u << 18u;
+    const auto layered = Graphics::DecodeState(guest);
+    Require(layered.layered && layered.depth->slice == 2 && layered.depth->lastSlice == 5 &&
+            layered.depth->address == depthAddress + 2 * Graphics::DepthSliceBytes({8, 8}, 2), "A layered depth array view did not decode its slice range");
+    guest.context[0x002] = 3u;
+    guest.context[0x207] = 0;
+    const auto single = Graphics::DecodeState(guest);
+    Require(!single.layered && single.depth->slice == 3 && single.depth->lastSlice == 3, "A one-slice depth view did not keep its slice as the last one");
+    guest.context[0x002] = 0;
 
     // D16 bias of 16384 units adds approximately 0.25 to depth 0.375: LESS than
     // cleared 0.5 fails. A 0.03125 clamp admits the triangle; no bias also admits it.

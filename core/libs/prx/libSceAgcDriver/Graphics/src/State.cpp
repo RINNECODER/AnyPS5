@@ -96,8 +96,9 @@ VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueSt
 
 // The register rules DecodeState and DrawRejection share (the precheck must reject exactly what
 // DecodeState would): the masks whose set bits are unsupported, and the depth-control verdict.
-// Render target index, viewport index and the misc export vector that carries them are accepted but
-// not routed: color targets are single-layer, so layered draws land in layer 0.
+// Render target index, viewport index and the misc export vector that carries them are accepted. The
+// render target index routes depth-only draws into the slices of a layered depth target (State::layered);
+// color targets are single-layer, so layered draws with color land in layer 0, and viewport indices are ignored.
 constexpr std::uint32_t LayerExports = (1u << 18u) | (1u << 19u) | (1u << 21u) | (1u << 24u);
 constexpr std::uint32_t DepthControlMask = ~0x007007f0u;
 // EXEC_ON_HIER_FAIL / EXEC_ON_NOOP / EXEC_IF_OVERLAPPED (bits 9, 10, 17) only force the pixel shader
@@ -288,11 +289,16 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     Require(!stencil || stencilReadOnly || base(0x015, 0x01d) == depth.stencilAddress, "stencil read and written at different addresses is unsupported");
     const auto size = read(cx, 0x007);
     depth.extent = {(size & 0x3fffu) + 1u, ((size >> 16u) & 0x3fffu) + 1u};
+    // DB_DEPTH_VIEW SLICE_START [12:0] (with SLICE_START_HI), SLICE_MAX [23:13] and SLICE_MAX_HI [31:30].
+    const auto lastSlice = ((view >> 13u) & 0x7ffu) | (((view >> 30u) & 3u) << 11u);
     if (const auto slice = view & 0x1fffu; slice != 0) {
         Require(surface.samples == 1 && surface.maxMip == 0, "array slices of a multisampled or mipmapped depth surface are unsupported");
+        depth.slice = slice;
         if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, zFormat == 1 ? 2u : 4u);
         if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, 1u);
     }
+    if (surface.samples == 1 && surface.maxMip == 0) depth.lastSlice = std::max(lastSlice, depth.slice);
+    else depth.lastSlice = depth.slice;
     depth.format = zFormat == 1 ? (stencil ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D16_UNORM) : (stencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT);
     depth.clearDepth = readFloat(cx, 0x00b);
     depth.clearStencil = static_cast<std::uint8_t>(read(cx, 0x00a) & 0xffu);
@@ -705,11 +711,12 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     APS5_LOG_OUT_DEBUG("Topology=%u", static_cast<unsigned>(result.topology));
     result.primitiveRestart = read(queue.userConfig, 0x24b, RegisterBank::UserConfig) != 0 && !result.rectList && result.topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    result.layered = (read(cx, 0x207) & (1u << 18u)) != 0;
     if ((read(cx, 0x207) & LayerExports) != 0) {
         static bool reported = false;
         if (!reported) {
             reported = true;
-            std::fprintf(stderr, "[gpu] layer/viewport index vertex exports are ignored (PA_CL_VS_OUT_CNTL=0x%08x)\n", read(cx, 0x207));
+            std::fprintf(stderr, "[gpu] layer/viewport index vertex exports: viewport index and layered color are ignored (PA_CL_VS_OUT_CNTL=0x%08x)\n", read(cx, 0x207));
         }
     }
     zero(cx, 0x207, ~LayerExports, "clip distances, layer, viewport or auxiliary vertex exports");
