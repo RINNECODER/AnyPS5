@@ -127,18 +127,18 @@ def run_logged(name, command, logs, log, cwd=None, env=None):
     return path
 
 
-def clone_source(source, commit, target, logs, log):
+def clone_source(source, commit, target, logs, log, submodules=SUBMODULES):
     """A fresh clone of --source at --commit; submodules come from the source's checked-out copies."""
     run_logged("clone", ["git", "clone", "--quiet", "--no-hardlinks", "--no-checkout", source, target], logs, log)
     run_logged("checkout", ["git", "-C", target, "checkout", "--quiet", "--detach", commit], logs, log)
     names = git(target, "config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$").splitlines()
     by_path = {line.split()[1]: line.split()[0][len("submodule."):-len(".path")] for line in names}
-    for path in SUBMODULES:
+    for path in submodules:
         releaselib.require(path in by_path and (Path(source) / path / ".git").exists(),
                            "source checkout lacks the submodule " + path)
         run_logged("submodule-config", ["git", "-C", target, "config", "submodule.%s.url" % by_path[path], Path(source) / path], logs, log)
     run_logged("submodules", ["git", "-C", target, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--quiet",
-                              *SUBMODULES], logs, log)
+                              *submodules], logs, log)
 
 
 def macho_info(path):
