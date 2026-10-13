@@ -5,7 +5,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -16,7 +15,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <wincrypt.h>
+#include "prx/libkernel/File/include/TrustedRoots.hpp"
 #else
 #include <unistd.h>
 #endif
@@ -35,40 +34,15 @@ std::optional<std::string> ReadFile(const std::filesystem::path& path) {
 }
 
 #ifdef _WIN32
-void AppendStore(const wchar_t* name, std::string& bundle) {
-    const std::unique_ptr<void, void (*)(HCERTSTORE)> store(CertOpenSystemStoreW(0, name), [](HCERTSTORE handle) { CertCloseStore(handle, 0); });
-    if (store == nullptr) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "Opening the host certificate store");
-    for (PCCERT_CONTEXT certificate = CertEnumCertificatesInStore(store.get(), nullptr); certificate != nullptr;
-         certificate = CertEnumCertificatesInStore(store.get(), certificate)) {
-        DWORD length = 0;
-        std::wstring text;
-        bool encoded = CryptBinaryToStringW(certificate->pbCertEncoded, certificate->cbCertEncoded, CRYPT_STRING_BASE64HEADER, nullptr, &length);
-        if (encoded) {
-            text.resize(length);
-            encoded = CryptBinaryToStringW(certificate->pbCertEncoded, certificate->cbCertEncoded, CRYPT_STRING_BASE64HEADER, text.data(), &length);
-        }
-        if (!encoded) {
-            const auto error = GetLastError();
-            CertFreeCertificateContext(certificate);
-            throw std::system_error(static_cast<int>(error), std::system_category(), "Encoding a host certificate");
-        }
-        text.resize(length);
-        for (const wchar_t character : text) bundle.push_back(static_cast<char>(character));
-    }
-}
-
 std::string HostCertificates() {
-    std::string bundle;
-    AppendStore(L"ROOT", bundle);
-    AppendStore(L"CA", bundle);
-    return bundle;
+    return HostTrustedTlsRoots_nid_no_patch();
 }
 
 unsigned long ProcessId() { return GetCurrentProcessId(); }
 #else
 std::string HostCertificates() {
-    std::array<const char*, 4> candidates{std::getenv("SSL_CERT_FILE"), "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/ca-bundle.pem"};
+    std::array<const char*, 5> candidates{std::getenv("SSL_CERT_FILE"), "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/ssl/ca-bundle.pem", "/etc/ssl/cert.pem"};
     for (const char* candidate : candidates) {
         std::error_code error;
         if (candidate == nullptr || *candidate == '\0' || !std::filesystem::is_regular_file(candidate, error)) continue;

@@ -45,6 +45,31 @@ static std::string ReadStream(const std::string& path) {
     Require(fclose_nid_postfix(stream) == 0);
     return text;
 }
+static void CheckOverrides(const std::string& directory, const std::string& path) {
+    const auto root = std::filesystem::current_path();
+    const auto supplied = root / std::filesystem::path(path).relative_path();
+    std::filesystem::create_directories(supplied.parent_path());
+    const std::string expected = "explicit guest certificate bundle\n";
+    { std::ofstream file(supplied, std::ios::binary | std::ios::trunc); file << expected; Require(static_cast<bool>(file)); }
+    Require(ReadKernel(path) == expected);
+    Require(ReadStream(path) == expected);
+    Require(ResolvePath_nid_no_patch(path.c_str()) == supplied);
+    Require(std::filesystem::remove(supplied));
+    for (auto parent = supplied.parent_path(); parent != root; parent = parent.parent_path())
+        Require(std::filesystem::remove(parent));
+    const auto alias = root / "sandbox_certificate_override";
+    std::filesystem::create_directory(alias);
+    { std::ofstream file(alias / "CA_LIST.cer", std::ios::binary | std::ios::trunc); file << expected; Require(static_cast<bool>(file)); }
+    AddPathAlias_nid_no_patch(directory.c_str(), alias.string().c_str());
+    Require(ReadKernel(path) == expected && ReadStream(path) == expected);
+    BlockPathAlias_nid_no_patch(directory.c_str());
+    Require(sceKernelOpen(path.c_str(), 0, 0) == SCE_KERNEL_ERROR_ENOENT);
+    Require(fopen_nid_postfix(path.c_str(), "rb") == nullptr);
+    AddPathAlias_nid_no_patch(directory.c_str(), alias.string().c_str());
+    RemovePathAlias_nid_no_patch(directory.c_str());
+    Require(std::filesystem::remove(alias / "CA_LIST.cer"));
+    Require(std::filesystem::remove(alias));
+}
 int main() {
 #ifndef _WIN32
     const auto bundle = std::filesystem::absolute("host_bundle.pem");
@@ -54,6 +79,7 @@ int main() {
 #endif
     const std::string directory = std::string("/") + sceKernelGetFsSandboxRandomWord() + "/common/cert";
     const std::string path = directory + "/CA_LIST.cer";
+    CheckOverrides(directory, path);
     const auto text = ReadKernel(path);
     const auto begin = text.find("-----BEGIN CERTIFICATE-----");
     Require(begin != std::string::npos);

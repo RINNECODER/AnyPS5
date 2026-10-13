@@ -181,17 +181,17 @@ std::optional<std::filesystem::path> ProvidedPath(const WorkingDirectory& state,
         }
     }
     if (provide == nullptr) return std::nullopt;
+    const auto supplied = ResolveHostPath(state.root, guest.relative_path());
+    std::error_code error;
+    if (std::filesystem::exists(supplied, error) || error) return supplied;
     auto provided = provide(state.root);
     if (provided.empty()) return std::nullopt;
     return provided.make_preferred();
 }
 std::filesystem::path HostPath(WorkingDirectory& state, const std::filesystem::path& guest, bool module = false) {
     if (auto aliased = ResolveAlias(guest.relative_path().generic_string(), module)) return *aliased;
-    if (!module) {
-        if (auto provided = ProvidedPath(state, guest)) return *provided;
-    }
+    if (auto provided = ProvidedPath(state, guest)) return *provided;
     return ResolveHostPath(state.root, guest.relative_path(), module).make_preferred();
-}
 }
 void RequireHostDirectory(WorkingDirectory& state, const std::filesystem::path& guest) {
     const auto host = HostPath(state, guest);
