@@ -55,7 +55,7 @@ jobs:
         (github.event_name == 'push' && github.ref == 'refs/heads/native/arm64') ||
         (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/native/arm64' || inputs.dry_run)))
     runs-on: [self-hosted, anyps5-metal]
-    timeout-minutes: 240
+    timeout-minutes: 120
     # One native alpha at a time so two builds can never race the tag number or feed sequence.
     concurrency:
       group: native-engine-release-alpha
@@ -67,9 +67,11 @@ jobs:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
       - uses: actions/checkout@v7
+        timeout-minutes: 15
         with:
           ref: ${{ github.sha }}
       - name: Initialize submodules
+        timeout-minutes: 20
         # The Rosetta engine job's submodules plus the AOT compiler's (capstone, pyelftools, ps5link-sdk).
         run: >-
           git submodule update --init --depth 1
@@ -77,11 +79,16 @@ jobs:
           3rdparty/glslang 3rdparty/LibAtrac9 3rdparty/ffmpeg-core 3rdparty/freetype
           3rdparty/libjpeg-turbo 3rdparty/stb 3rdparty/capstone 3rdparty/pyelftools 3rdparty/ps5link-sdk
       - name: Clean submodules
+        timeout-minutes: 10
         # The package build requires a pristine source tree; checkout only cleans the superproject.
         run: git submodule foreach --quiet 'git reset --quiet --hard && git clean -qffdx'
       - name: Release tooling tests
+        timeout-minutes: 10
         run: python3 -m unittest discover -s tools/tests -p 'test_*release*.py'
       - name: Build, test, package, sign and publish
+        # configure/build/ctest/gpu_cube carry their own wall-clock limits in native_package.py; this is the backstop.
+        # A locked screen skips the run cleanly (the gpu_cube sample needs a GUI session) instead of hanging.
+        timeout-minutes: 100
         run: |
           args=()
           if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
@@ -89,6 +96,7 @@ jobs:
             --work-root "/private/tmp/anyps5-release/native-run-$GITHUB_RUN_ID" --jobs 6 "${args[@]}"
       - name: Remove build directories
         if: always()
+        timeout-minutes: 10
         run: |
           dir="/private/tmp/anyps5-release/native-run-$GITHUB_RUN_ID"
           if [ -e "$dir" ]; then chmod -R u+w "$dir"; rm -rf "$dir"; fi
