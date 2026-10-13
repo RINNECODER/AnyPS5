@@ -31,6 +31,17 @@ class SsePackedTests(NativeAvxHarness):
             with self.subTest(mnemonic=mnemonic):
                 self.compare_native(f'{mnemonic} xmm0, xmm1', self.samples())
 
+    def test_word_shuffles(self):
+        for mnemonic in ('pshuflw', 'pshufhw'):
+            for control in (0x00, 0x1b, 0x39, 0xe4):
+                with self.subTest(mnemonic=mnemonic, control=control):
+                    self.compare_native(f'{mnemonic} xmm0, xmm1, {control}', self.samples())
+
+    def test_signed_packs(self):
+        for mnemonic in ('packsswb', 'packssdw'):
+            with self.subTest(mnemonic=mnemonic):
+                self.compare_native(f'{mnemonic} xmm0, xmm1', self.samples())
+
     def test_packed_shifts(self):
         for mnemonic in ('psrlw', 'psrld', 'psrlq', 'psraw', 'psrad', 'psllw', 'pslld', 'psllq'):
             for amount in (0, 1, 5, 15):
