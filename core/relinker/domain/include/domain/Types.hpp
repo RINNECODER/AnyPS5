@@ -99,6 +99,7 @@ struct SysVDynamicSection {
     std::vector<GuestRuntime> GuestModules;
     std::map<VirtualAddress, std::string> ImportModules;
     std::set<std::string> UnmatchedImportModules;
+    std::vector<std::string> NeededLibraries;
 };
 
 struct CallRegistryEntry {

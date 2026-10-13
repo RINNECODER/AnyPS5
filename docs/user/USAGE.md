@@ -164,6 +164,8 @@ python3 tools/import_audit.py app.registry.json app.libc.prx.guest.prx.registry.
 | `absent` | No built library exports the NID: the loader fails. |
 | `module` | The import names a file found in `--modules` (the title's own library); its exports are not checked. |
 
+Each registry has a companion with the same prefix and the suffix `.needed.json`, listing its host library dependencies, including declared `DT_NEEDED` entries with no imports. Dependencies supplied by converted bundled modules, including their aliases, are omitted. The executable's companion includes host dependencies of its bundled modules. The import audit in this fork does not read them yet.
+
 The report also lists needed libraries that have no file in `--libs` or `--modules`, and imports exported only by a library other than the one they name; those resolve on Linux and can fail on Windows.
 
 | Option | Effect |
