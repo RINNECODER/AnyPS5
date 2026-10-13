@@ -70,6 +70,7 @@ def main():
     parser.add_argument('--object')
     parser.add_argument('--limit', type=int, default=600)
     parser.add_argument('--entries', default='entry,init')
+    parser.add_argument('--nid-symbols', help='file of runtime symbol names (one per line, underscore stripped)')
     args = parser.parse_args()
     contracts = json.loads(open(args.contracts).read())
     image = Image(args.elf, contracts)
@@ -90,6 +91,14 @@ def main():
         if spec['address'] not in native:
             spec['stub'] = True
     contracts['allow_unimplemented'] = True
+    contracts['guest_data'] = True
+    # HLE NID binding: point a typed import at the runtime's <name>_nid_postfix symbol when
+    # that exists (the arm64 libs define every guest entry point with that suffix).
+    if args.nid_symbols:
+        known = set(open(args.nid_symbols).read().split())
+        for contract in contracts['imports'].values():
+            if not contract.get('stub') and contract['name'] + '_nid_postfix' in known:
+                contract['name'] = contract['name'] + '_nid_postfix'
     image = Image(args.elf, contracts)
     print(f'native {len(order)} stub {len(frontier)} entries {[hex(e) for e in entries]} ({time.time() - start:.1f}s)', flush=True)
     start = time.time()

@@ -1,9 +1,14 @@
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/NativeAotImage.hpp"
 #include <atomic>
+#include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace {
 
@@ -43,6 +48,50 @@ void CheckFunction(const NativeAotImage& image, const void* function) {
     throw std::invalid_argument("native AOT allocator callback is not registered native code");
 }
 
+}
+
+namespace {
+
+// One PT_LOAD of the user's eboot, as emitted by core/aot/native_image.py.
+struct NativeAotSegment {
+    std::uint64_t vaddr;
+    std::uint64_t offset;
+    std::uint64_t filesz;
+    std::uint64_t memsz;
+    std::uint64_t flags;
+};
+
+}
+
+// Maps the guest data segments at their guest vaddrs from the user's own eboot, so the native
+// image can reference title data without carrying it in the IR. The generated native_image_init
+// applies the pointer relocations afterwards.
+extern "C" void NativeAotMapImage_nid_no_patch(const NativeAotSegment* segments, std::size_t count) {
+    Require(segments != nullptr || count == 0, "native AOT segment table is null");
+    const char* path = std::getenv("ANYPS5_AOT_EBOOT");
+    Require(path != nullptr && *path != 0, "ANYPS5_AOT_EBOOT is not set");
+    const int descriptor = ::open(path, O_RDONLY);
+    if (descriptor < 0) throw std::runtime_error(std::string("cannot open the title eboot: ") + path);
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& segment = segments[index];
+        Require(segment.memsz >= segment.filesz, "native AOT segment file size exceeds memory size");
+        // The executable segment is native code here; its guest bytes (rodata, jump tables) are not
+        // mapped because its vaddr overlaps the process image. Data references into it are a gap.
+        if (segment.memsz == 0 || (segment.flags & 1)) continue;
+        void* base = ::mmap(reinterpret_cast<void*>(static_cast<std::uintptr_t>(segment.vaddr)),
+                            static_cast<std::size_t>(segment.memsz), PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+        if (base == MAP_FAILED) throw std::runtime_error("cannot map the title data at its guest address");
+        std::size_t copied = 0;
+        while (copied < segment.filesz) {
+            const auto got = ::pread(descriptor, static_cast<char*>(base) + copied,
+                                     static_cast<std::size_t>(segment.filesz - copied),
+                                     static_cast<off_t>(segment.offset + copied));
+            if (got <= 0) { ::close(descriptor); throw std::runtime_error("truncated title eboot while mapping data"); }
+            copied += static_cast<std::size_t>(got);
+        }
+    }
+    ::close(descriptor);
 }
 
 extern "C" void NativeAotRegisterImage_nid_no_patch(const NativeAotImage* image) {

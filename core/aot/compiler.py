@@ -130,6 +130,9 @@ class Image:
         require(self.elf['e_entry'] in self.functions, 'entry function has no contract')
         self.imports = contracts['imports']
         self.data_bindings = contracts.get('data_bindings', {})
+        # guest_data: the title's data segments are not emitted as IR bytes; the image
+        # references them at their guest vaddrs and the runtime maps the user's eboot there.
+        self.guest_data = bool(contracts.get('guest_data'))
         for contract in self.imports.values():
             signature(contract)
             try:
@@ -224,6 +227,8 @@ class Image:
             return '@' + self.functions[address]['name']
         for spec in self.data:
             if spec['address'] <= address and address + size <= spec['address'] + spec['size']:
+                if self.guest_data:
+                    return f'inttoptr (i64 {address} to ptr)'
                 return f"getelementptr (i8, ptr @data_{spec['address']:x}, i64 {address - spec['address']})"
         raise Rejected(f'no native pointer contract for 0x{address:x}')
 
@@ -1518,7 +1523,9 @@ def compile_image(image):
     lines.append('declare ptr @NativeAotTlsBase_nid_no_patch()')
     lines.append('declare double @llvm.fabs.f64(double)')
     lines.append('declare double @llvm.sqrt.f64(double)')
-    lines.append('declare double @fmod(double, double)')
+    # The x87 fprem lowering uses fmod; a title may also import it, so declare it once.
+    if 'fmod' not in {contract['name'] for contract in image.imports.values()}:
+        lines.append('declare double @fmod(double, double)')
     lines.extend(d for d in avx.INTRINSIC_DECLARATIONS if d not in lines)
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
@@ -1554,7 +1561,14 @@ def compile_image(image):
         else:
             suffix = ' noreturn' if contract.get('noreturn') else ''
             lines.append(f"declare {abi.result_type(result)} @{contract['name']}({argument_types}){suffix}")
+    if image.guest_data:
+        require(not image.immutable_regions, 'guest data cannot also declare immutable regions')
+        segments = ', '.join(f"{{ i64, i64, i64, i64, i64 }} {{ i64 {spec['p_vaddr']}, i64 {spec['p_offset']}, i64 {spec['p_filesz']}, i64 {spec['p_memsz']}, i64 {spec['p_flags']} }}" for spec in image.segments)
+        lines.append(f'@__aps5_aot_segments = private constant [{len(image.segments)} x {{ i64, i64, i64, i64, i64 }}] [{segments}], align 8')
+        lines.append('declare void @NativeAotMapImage_nid_no_patch(ptr, i64)')
     for spec in image.data:
+        if image.guest_data:
+            continue
         if spec['address'] in image.immutable_initializers:
             lines.append(immutable_data.declaration(image, spec))
             continue
@@ -1572,6 +1586,8 @@ def compile_image(image):
     if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
+        if image.guest_data:
+            lines.append(f'  call void @NativeAotMapImage_nid_no_patch(ptr @__aps5_aot_segments, i64 {len(image.segments)})')
         for slot, target in image.relocations:
             if slot in image.immutable_cells:
                 continue
