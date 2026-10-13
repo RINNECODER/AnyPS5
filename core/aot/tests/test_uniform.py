@@ -255,6 +255,21 @@ class UniformABITests(unittest.TestCase):
         with self.assertRaises(Exception):
             compile_image(Image(source, contracts))
 
+    def test_unimplemented_function_becomes_a_reporting_stub(self):
+        # Contract: with allow_unimplemented (the whole-title build), a body the lifter rejects
+        # becomes a stub that reports its guest address and traps, so one image covers the whole
+        # eboot. Without the flag the image is still rejected (the SDK-sample default).
+        functions = [uniform_function('sub_1000', 0x1000, 3)]
+        raw, contracts = fixture(bytes.fromhex('d907c3'), functions)
+        source = self.directory / 'input.elf'
+        source.write_bytes(raw)
+        with self.assertRaises(Exception):
+            compile_image(Image(source, contracts))
+        contracts['allow_unimplemented'] = True
+        ir, report = compile_image(Image(source, contracts))
+        self.assertIn('call void @NativeAotReportUnimplemented_nid_no_patch(i64 4096)', ir)
+        self.assertEqual(report['unimplemented_functions'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

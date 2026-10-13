@@ -49,3 +49,10 @@ extern "C" void NativeAotReportDispatchFailure_nid_no_patch(std::uint64_t site, 
     std::fprintf(stderr, "[aot] dispatch miss at 0x%llx: target 0x%llx\n",
                  static_cast<unsigned long long>(site), static_cast<unsigned long long>(value));
 }
+
+// A declared function the lifter rejected: the generated stub reports its guest address and traps.
+extern "C" void NativeAotReportUnimplemented_nid_no_patch(std::uint64_t address) {
+    std::fprintf(stderr, "[aot] unimplemented function at 0x%llx\n",
+                 static_cast<unsigned long long>(address));
+    std::fflush(stderr);
+}

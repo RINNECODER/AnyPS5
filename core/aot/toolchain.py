@@ -10,7 +10,7 @@ from optimize import merge_constant_stores
 from targets import target_spec
 
 
-def build_native_object(ir, destination, target='apple-arm64'):
+def build_native_object(ir, destination, target='apple-arm64', strict=True):
     destination = Path(destination)
     spec = target_spec(target)
     compiler = [os.environ.get('ANYPS5_AOT_CLANG', 'clang'), '--target=' + spec['triple']]
@@ -23,7 +23,8 @@ def build_native_object(ir, destination, target='apple-arm64'):
         subprocess.run([*compiler, '-O3', '-S', '-emit-llvm', str(source), '-o', str(optimized)],
                        check=True, capture_output=True, text=True)
         result, count = merge_constant_stores(optimized.read_text())
-        if re.search(r'%(?:rax|rbx|rcx|rdx|rsi|rdi|rsp|rbp|r[8-9]|r1[0-5]|(?:xmm|ymm_hi)(?:[0-9]|1[0-5])|[czsop]f)(?:\.\w+)?\s*=\s*alloca', result) or re.search(r'\bfreeze\b[^\n]*\b(?:poison|undef)\b', result):
+        machine_state = bool(re.search(r'%(?:rax|rbx|rcx|rdx|rsi|rdi|rsp|rbp|r[8-9]|r1[0-5]|(?:xmm|ymm_hi)(?:[0-9]|1[0-5])|[czsop]f)(?:\.\w+)?\s*=\s*alloca', result) or re.search(r'\bfreeze\b[^\n]*\b(?:poison|undef)\b', result))
+        if machine_state and strict:
             raise ValueError('native lowering left unresolved machine-state values')
         if re.search(r'^\s*ret\b.*\b(?:undef|poison)\b', result, re.MULTILINE):
             raise ValueError('native lowering produced an undefined return value')
@@ -38,5 +39,5 @@ def build_native_object(ir, destination, target='apple-arm64'):
             raise ValueError('compiler did not produce an AArch64 ELF object')
         destination.write_bytes(raw)
         destination.with_suffix('.optimized.ll').write_text(result)
-        return {'target': target, 'optimizer_freezes': len(re.findall(r'\bfreeze\b', result)), 'object_bytes': len(raw), 'constant_byte_runs_reconstructed': count, 'machine_state_allocas': 0,
+        return {'target': target, 'optimizer_freezes': len(re.findall(r'\bfreeze\b', result)), 'object_bytes': len(raw), 'constant_byte_runs_reconstructed': count, 'machine_state_allocas': int(machine_state),
                 'status': 'native_object_not_product_qualified'}

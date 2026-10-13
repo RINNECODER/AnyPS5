@@ -11,6 +11,7 @@ from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_OP_REG
 from elftools.elf.elffile import ELFFile
 import abi
+import atomics
 import vector
 import avx
 import fma
@@ -526,6 +527,12 @@ class Function:
                 if pointer:
                     kind, index, offset = pointer
                     state['pointers'][name] = (kind, index, offset + (1 if ins.mnemonic == 'inc' else -1))
+            return state
+        if atomics.analyze(self, ins, state):
+            for register in ins.regs_access()[1]:
+                name = ins.reg_name(register)
+                if name in ALIASES:
+                    state['constants'].pop(ALIASES[name][0], None)
             return state
         if op == 'nop':
             return state
@@ -1102,7 +1109,7 @@ class Function:
             return self.load(name, min(width, bits), shift)
         if operand.type == X86_OP_IMM:
             return str(operand.imm & ((1 << bits) - 1))
-        value = self.emit(f'load i{bits}, ptr {self.address(ins, operand)}, align 1')
+        value = self.emit(atomics.ordered_load(bits, self.address(ins, operand)))
         return checked_pointers.emit(self, ins, operand, value)
 
     def write(self, ins, operand, value):
@@ -1111,7 +1118,7 @@ class Function:
             self.store(name, value, bits, shift)
         else:
             pointer = frame_exclusion.guard(self, ins, operand, self.address(ins, operand))
-            self.lines.append(f'  store i{operand.size * 8} {value}, ptr {pointer}, align 1')
+            self.lines.append(atomics.ordered_store(operand.size * 8, value, pointer))
 
     def flags(self, operation, bits, left, right, value):
         zf = self.emit(f'icmp eq i{bits} {value}, 0')
@@ -1319,6 +1326,8 @@ class Function:
                 pass
             elif integer.lower(self, ins) or bmi.lower(self, ins) or system.lower(self, ins):
                 pass
+            elif atomics.lower(self, ins):
+                pass
             elif op in ('push', 'pop'):
                 reg = self.reg(ins, args[0])[0] if args[0].type == X86_OP_REG else None
                 if op == 'push':
@@ -1441,9 +1450,54 @@ class Function:
         return '\n'.join(self.lines)
 
 
+def _reason_histogram(stubs):
+    counts = {}
+    for _, reason in stubs:
+        key = re.sub(r'0x[0-9a-f]+', '0xADDR', reason.split('\n', 1)[0])[:160]
+        counts[key] = counts.get(key, 0) + 1
+    return [{'reason': key, 'count': count} for key, count in sorted(counts.items(), key=lambda item: -item[1])[:20]]
+
+
+def stub_function(spec, reason):
+    """Native entry for a function the lifter rejected: report its guest address and trap.
+
+    The image keeps every declared function so direct and dispatch calls still resolve; a rejected
+    body becomes this stub, so a title run reports the first function the lifter cannot lower
+    instead of failing the whole build.
+    """
+    result, parameters = signature(spec)
+    name = spec['name']
+    if abi.uniform(spec):
+        head = f'define void @{name}(ptr %rf) uwtable {{'
+    else:
+        args = ', '.join(f'{abi.parameter_type(typ)} %arg{i}' for i, typ in enumerate(parameters))
+        head = f'define {abi.result_type(result)} @{name}({args}) uwtable {{'
+    return '\n'.join([head, 'entry:',
+                      f'  call void @NativeAotReportUnimplemented_nid_no_patch(i64 {spec["address"]})',
+                      '  call void @llvm.trap()', '  unreachable', '}'])
+
+
 def compile_image(image):
-    functions = [Function(image, spec) for spec in image.functions.values()]
-    effects.analyze(functions)
+    # A whole-title build sets allow_unimplemented so a rejected body becomes a reporting trap
+    # stub instead of failing the image; the SDK samples keep the strict default.
+    tolerant = bool(image.contracts.get('allow_unimplemented'))
+    functions, stubs = [], []
+    for spec in image.functions.values():
+        if spec.get('stub'):
+            stubs.append((spec, 'declared stub'))
+            continue
+        try:
+            functions.append(Function(image, spec))
+        except Rejected as error:
+            if not tolerant:
+                raise
+            stubs.append((spec, str(error)))
+    def reject(function, error):
+        stubs.append((function.contract, str(error)))
+        function.rejected = True
+    # effects.analyze calls analyze() in callee order, which the pointer/effect summaries need.
+    effects.analyze(functions, reject=reject if tolerant else None)
+    functions = [function for function in functions if not getattr(function, 'rejected', False)]
     try:
         descriptor = native_image.describe(image) if image.contracts.get('native_runtime_registration') else None
     except ValueError as error:
@@ -1476,6 +1530,8 @@ def compile_image(image):
         lines.append('declare ptr @NativeAotDispatch_nid_no_patch(i64)')
         lines.append('declare void @NativeAotReportDispatchFailure_nid_no_patch(i64, i64)')
         lines.append('declare void @NativeAotRegisterDispatch_nid_no_patch(ptr, i64)')
+    if stubs:
+        lines.append('declare void @NativeAotReportUnimplemented_nid_no_patch(i64)')
     if image.contracts.get('guard_diagnostics', False):
         lines.append('declare void @NativeAotReportGuardFailure_nid_no_patch(i64, i32)')
     if any(f.checked_pointer_loads or f.checked_pointer_arguments or f.checked_pointer_bases for f in functions):
@@ -1512,13 +1568,21 @@ def compile_image(image):
         lines.extend(native_image.declarations(image, descriptor))
     if image.immutable_regions:
         lines.extend(immutable_data.declarations(image))
+    unresolved_relocations = []
     if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
         for slot, target in image.relocations:
             if slot in image.immutable_cells:
                 continue
-            lines.append(f'  store ptr {image.pointer(target)}, ptr {image.pointer(slot, 8)}, align 1')
+            try:
+                value = image.pointer(target)
+            except Rejected:
+                # A pointer into the middle of a function (jump-table entries) has no native
+                # function to name; leave the slot zero and report it instead of failing the image.
+                unresolved_relocations.append(hex(target))
+                continue
+            lines.append(f'  store ptr {value}, ptr {image.pointer(slot, 8)}, align 1')
         for slot, contract in image.import_slots.items():
             if slot in image.immutable_cells:
                 continue
@@ -1534,7 +1598,20 @@ def compile_image(image):
         if descriptor is not None:
             lines.append('  call void @NativeAotRegisterImage_nid_no_patch(ptr @__aps5_aot_image)')
         lines.extend(['  ret void', '}'])
-    lines.extend(function.lower() for function in functions)
+    bodies = []
+    late_stubs = []
+    for function in functions:
+        try:
+            bodies.append(function.lower())
+        except Rejected as error:
+            if not tolerant:
+                raise
+            # The stub is the body here; do not emit it a second time below.
+            late_stubs.append((function.contract, str(error)))
+            bodies.append(stub_function(function.contract, str(error)))
+    lines.extend(bodies)
+    lines.extend(stub_function(spec, reason) for spec, reason in stubs)
+    stubs.extend(late_stubs)
     report = {'schema': 1, 'target': image.target, 'status': 'experimental_native_ir', 'input_sha256': hashlib.sha256(image.bytes).hexdigest(),
               'functions': [{'name': f.contract['name'], 'address': f.contract['address'], 'instructions': len(f.instructions),
                              'native_tail_calls': len(f.tail_calls),
@@ -1553,6 +1630,9 @@ def compile_image(image):
               'provider_pointer_outputs': {name: contract['pointer_outputs'] for name, contract in image.imports.items() if 'pointer_outputs' in contract},
               'provider_effect_contracts': {name: contract['memory_effects'] for name, contract in image.imports.items() if 'memory_effects' in contract},
               'imports': len(image.import_slots), 'pointer_relocations': len(image.relocations),
+              'unimplemented_functions': len(stubs),
+              'unresolved_relocations': unresolved_relocations,
+              'unimplemented_reasons': _reason_histogram(stubs),
               'indirect_calls': [site for sites in image.call_contracts.values() for site in sites.values()],
               'limitations': ['declared function boundaries and ABIs', 'declared scalar, SSE and AVX instruction subsets', 'no guest exception, TLS or computed-jump target recovery', 'indirect call target sets are declared, not inferred',
                               'no game compatibility or performance qualification']}
