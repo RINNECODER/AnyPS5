@@ -1203,6 +1203,28 @@ void DepthStencilTests() {
     for (const auto offset : {0x013u, 0x015u}) queue.context[offset] = 0x200;
     queue.context[0x005] = 0x300;
     queue.context[0x01e] = 0x1;
+    {
+        AgcDriver::QueueState unwritten;
+        unwritten.shader = queue.shader;
+        unwritten.userConfig = queue.userConfig;
+        queue.context[0x200] = 0x00700791;
+        for (int reset = 0; reset < 2; ++reset) {
+            queue.context.ForEach([&](std::uint32_t offset, std::uint32_t value) { unwritten.context[offset] = value; });
+            const auto state = AgcDriver::Graphics::DecodeState(unwritten);
+            Require(state.stencilTest && state.depth, "unwritten stencil registers rejected a stencil draw");
+            for (const auto face : {state.stencilFront, state.stencilBack}) {
+                Require(face.failOp == VK_STENCIL_OP_KEEP && face.passOp == VK_STENCIL_OP_KEEP && face.depthFailOp == VK_STENCIL_OP_KEEP && face.compareOp == VK_COMPARE_OP_ALWAYS, "unwritten stencil operations changed");
+                Require(face.compareMask == 0 && face.writeMask == 0 && face.reference == 0, "unwritten stencil reference or masks changed");
+            }
+            Require(AgcDriver::Graphics::DrawRejection(unwritten, false).empty(), "precheck rejected unwritten stencil registers");
+            unwritten.context[0x10b] = 0x00070070;
+            unwritten.context[0x10c] = unwritten.context[0x10d] = 0x01ffff09;
+            const auto explicitState = AgcDriver::Graphics::DecodeState(unwritten);
+            for (const auto face : {explicitState.stencilFront, explicitState.stencilBack}) Require(face.passOp == VK_STENCIL_OP_INVERT && face.compareMask == 0xff && face.writeMask == 0xff && face.reference == 9, "explicit stencil state was replaced by defaults");
+            unwritten.ClearContext();
+            for (const auto offset : {0x10bu, 0x10cu, 0x10du}) Require(unwritten.context.at(offset) == 0, "context clear did not reset stencil state");
+        }
+    }
     queue.context[0x10b] = 0x00050050;
     queue.context[0x10c] = 0x01ffff01;
     queue.context[0x10d] = 0x01000001;
