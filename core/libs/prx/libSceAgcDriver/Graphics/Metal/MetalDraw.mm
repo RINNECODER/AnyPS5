@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 namespace AgcDriver::Metal {
@@ -878,8 +879,16 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     }
     const auto& attributes = vertex->program->vertexAttributes;
     if (meshPath && !attributes.empty()) throw std::invalid_argument("Metal mesh draw requires shader-based vertex fetch");
-    const auto layout = Graphics::BuildVertexInputLayout(attributes, 29, 31, 2048,
-        [](VkFormat format) { return vertexFormat(format) != MTLVertexFormatInvalid; });
+    const auto buildLayout = [](std::span<const ShaderRecompiler::VertexAttribute> input) {
+        return Graphics::BuildVertexInputLayout(input, 29, 31, 2048,
+            [](VkFormat format) { return vertexFormat(format) != MTLVertexFormatInvalid; });
+    };
+    // Kept per vertex shader variant instead of rebuilt every draw (upstream #1316).
+    static Graphics::VertexInputCache vertexInputs(buildLayout);
+    auto retainedLayout = vertexInputs.TryGet(vertex->program->variantId, attributes);
+    std::optional<Graphics::VertexInputLayout> builtLayout;
+    if (retainedLayout == nullptr) builtLayout = buildLayout(attributes);
+    const auto& layout = retainedLayout != nullptr ? *retainedLayout : *builtLayout;
     auto vertexDescriptor = [MTLVertexDescriptor vertexDescriptor];
     std::vector<MetalBufferBinding> vertexBuffers;
     for (std::size_t i = 0; i < attributes.size(); ++i) {
