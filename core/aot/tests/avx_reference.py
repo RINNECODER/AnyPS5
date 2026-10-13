@@ -17,6 +17,7 @@ from pathlib import Path
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 from elftools.elf.elffile import ELFFile
 
+import atomics
 import avx
 import bmi
 import fma
@@ -103,7 +104,7 @@ class NativeAvxHarness(unittest.TestCase):
         emitter = Emitter()
         for ins in instructions:
             handled = False
-            for module in (fma, avx, vector, x87, integer, bmi, system):
+            for module in (fma, avx, vector, x87, integer, bmi, system, atomics):
                 if module.analyze(emitter, ins, emitter.state):
                     self.assertTrue(module.lower(emitter, ins))
                     handled = True
