@@ -616,6 +616,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
     renderPass.renderTargetWidth = state.renderExtent.width;
     renderPass.renderTargetHeight = state.renderExtent.height;
+    ConfigureSamplePositions(renderPass, backend.Device(), state);
     struct Expansion {
         id<MTLTexture> source;
         std::uint32_t slot;
