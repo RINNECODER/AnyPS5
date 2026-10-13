@@ -140,7 +140,7 @@ def validate_indirect_calls(image, owner_contract):
                                 'target_set': record.get('target_set'),
                                 'target_addresses': list(targets),
                                 'qualification': 'declared-target-set-not-inferred',
-                                'source_qualification': 'Caller-supplied closed-world target set; no automatic target proof or runtime membership check',
+                                'source_qualification': 'Caller-supplied closed-world target set; no automatic target proof; native membership is checked before the call',
                                 'native_pointer_requirement': 'operand must already contain a native pointer to a declared target'}
     return descriptors
 

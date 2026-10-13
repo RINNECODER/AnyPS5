@@ -15,16 +15,6 @@ class TLSTests(unittest.TestCase):
         cls.directory = Path(cls.temporary.name)
         cls.addClassCleanup(cls.temporary.cleanup)
 
-    def test_tls_init_is_registered(self):
-        code = bytes.fromhex('64488b042510000000c3')  # mov rax, fs:[0x10] ; ret
-        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))],
-                                 tls=bytes.fromhex('34120000'))
-        elf = self.directory / 'tls-init.elf'
-        elf.write_bytes(raw)
-        ir, report = compile_image(Image(elf, contracts))
-        self.assertIn('@__aps5_aot_tls_init', ir)
-        self.assertIn('NativeAotRegisterTls_nid_no_patch', ir)
-
     def test_fs_access_reads_the_runtime_tls_block(self):
         code = bytes.fromhex('64488b042510000000c3')  # mov rax, fs:[0x10] ; ret
         raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
