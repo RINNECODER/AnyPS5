@@ -7,12 +7,12 @@
 extern "C" {
 
 int APS5_VABI sceAgcDriverSubmitDcb(const Packet* packet) {
-    AgcDriver::Submit(packet, 0);
+    AgcDriver::Submit(packet, 0, __func__);
     return 0;
 }
 
 int APS5_VABI sceAgcDriverAgrSubmitDcb(const Packet* packet) {
-    AgcDriver::Submit(packet, 0);
+    AgcDriver::Submit(packet, 0, __func__);
     return 0;
 }
 
@@ -20,7 +20,7 @@ int APS5_VABI sceAgcDriverSubmitAcb(uint32_t queue, const Packet* packet) {
     if (queue < 0x20 || queue >= 0x58) {
         throw std::runtime_error(std::string(__func__) + ": unsupported compute queue");
     }
-    AgcDriver::Submit(packet, queue);
+    AgcDriver::Submit(packet, queue, __func__);
     return 0;
 }
 

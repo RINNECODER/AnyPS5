@@ -17,9 +17,11 @@ namespace AgcDriver::Metal {
 MetalDriver& DirectDriver();
 
 // Submits the command words a descriptor names. The descriptor is read as a host pointer (it may be
-// on a thread stack), and words outside guest memory (host-built packets such as VideoOut's flip)
-// are staged in a driver-owned range first; the driver captures them during the call.
-void DirectSubmit(const Packet& packet, std::uint32_t queue);
+// on a thread stack), and words outside guest memory (host-built packets such as VideoOut's flip,
+// or words in CPU-only memory) are staged in a driver-owned range first, which grows to fit; the
+// driver captures them during the call. Words that cannot be read (a null or unmapped address)
+// are skipped with a log line naming `call`, the address and the size.
+void DirectSubmit(const Packet& packet, std::uint32_t queue, const char* call = nullptr);
 
 // The current guest allocations as identity ranges (sorted; adjacent ranges with the same access
 // are merged, then split by SplitBorrowedRanges at a power of two under the device's buffer limit).
@@ -30,5 +32,9 @@ std::shared_ptr<const std::vector<NativeGuestMemory::BorrowedRange>> DirectGuest
 // every range maps to one Metal buffer. A title's direct memory can be one mapping larger than the
 // device's maxBufferLength.
 std::vector<NativeGuestMemory::BorrowedRange> SplitBorrowedRanges(const std::vector<NativeGuestMemory::BorrowedRange>& ranges, std::uint64_t limit);
+
+// Whether [address, address + bytes) lies in `ranges` (sorted, non-overlapping), possibly across
+// adjacent ranges.
+bool RangesCover(const std::vector<NativeGuestMemory::BorrowedRange>& ranges, std::uint64_t address, std::size_t bytes);
 
 }

@@ -11,14 +11,14 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-int AgcDriver::SubmitMany(std::uint32_t* const* addresses, const std::uint32_t* sizes, std::uint32_t count, std::uint32_t queue) {
+int AgcDriver::SubmitMany(std::uint32_t* const* addresses, const std::uint32_t* sizes, std::uint32_t count, std::uint32_t queue, const char* call) {
     if (count == 0) return 0;
     if (!addresses || !sizes) throw std::runtime_error("AGC driver: null multi-submit arrays");
     AgcDriver::GuestMemory::CheckRange(addresses, count * sizeof(*addresses), alignof(std::uint32_t*));
     AgcDriver::GuestMemory::CheckRange(sizes, count * sizeof(*sizes), alignof(std::uint32_t));
     for (std::uint32_t i = 0; i < count; ++i) {
         const Packet packet{addresses[i], sizes[i], 0, {}};
-        AgcDriver::Submit(&packet, queue);
+        AgcDriver::Submit(&packet, queue, call);
     }
     return 0;
 }
@@ -42,11 +42,11 @@ std::uint32_t APS5_VABI sceAgcDriverWaitUntilSafeForRendering(std::uint32_t** co
 }
 
 int APS5_VABI sceAgcDriverSubmitMultiDcbs(std::uint32_t* const* dcbGpuAddrs, const std::uint32_t* dcbSizesInDwords, std::uint32_t count) {
-    return AgcDriver::SubmitMany(dcbGpuAddrs, dcbSizesInDwords, count, 0);
+    return AgcDriver::SubmitMany(dcbGpuAddrs, dcbSizesInDwords, count, 0, __func__);
 }
 
 int APS5_VABI sceAgcDriverAgrSubmitMultiDcbs(std::uint32_t* const* dcbGpuAddrs, const std::uint32_t* dcbSizesInDwords, std::uint32_t count) {
-    return AgcDriver::SubmitMany(dcbGpuAddrs, dcbSizesInDwords, count, 0);
+    return AgcDriver::SubmitMany(dcbGpuAddrs, dcbSizesInDwords, count, 0, __func__);
 }
 
 }

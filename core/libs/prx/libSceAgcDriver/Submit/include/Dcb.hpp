@@ -5,7 +5,7 @@
 
 namespace AgcDriver {
 
-int SubmitMany(std::uint32_t* const* addresses, const std::uint32_t* sizes, std::uint32_t count, std::uint32_t queue);
+int SubmitMany(std::uint32_t* const* addresses, const std::uint32_t* sizes, std::uint32_t count, std::uint32_t queue, const char* call = nullptr);
 
 }
 

@@ -63,11 +63,11 @@ void InvokeEntry(Operation&& operation) {
 
 namespace AgcDriver {
 
-void Submit(const Packet* packet, std::uint32_t queue) {
+void Submit(const Packet* packet, std::uint32_t queue, [[maybe_unused]] const char* call) {
 #if defined(ANYPS5_METAL_BACKEND) && defined(ANYPS5_ROSETTA_DIRECT)
     // Descriptors and host-built command words (VideoOut's flip packet) live outside guest memory.
     if (packet == nullptr) throw std::invalid_argument("AGC driver: null submission packet");
-    InvokeEntry([&] { AgcDriver::Metal::DirectSubmit(*packet, queue); });
+    InvokeEntry([&] { AgcDriver::Metal::DirectSubmit(*packet, queue, call); });
 #else
     InvokeEntry([&] { BackendDriver::Get().Submit(packet, queue); });
 #endif

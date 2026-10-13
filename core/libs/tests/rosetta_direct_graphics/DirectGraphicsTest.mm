@@ -71,6 +71,64 @@ struct Control {
     VideoOutBuffers buffers;
 };
 
+// A DCB of `fillerWords` type-2 filler words and a DMA_DATA that writes `value` to `target`.
+std::vector<std::uint32_t> MarkerDcb(std::size_t fillerWords, std::uint32_t* target, std::uint32_t value) {
+    std::vector<std::uint32_t> words(fillerWords, 0x80000000u);
+    const auto address = reinterpret_cast<std::uint64_t>(target);
+    const std::uint32_t dma[] = {0xc0055000u, 2u << 29u, value, 0, static_cast<std::uint32_t>(address),
+        static_cast<std::uint32_t>(address >> 32u), 4u};
+    words.insert(words.end(), std::begin(dma), std::end(dma));
+    return words;
+}
+
+// Where a submitted command buffer may live (#461): a buffer must not be refused because it spans
+// adjacent guest mappings, lies outside guest memory and is larger than the staging buffer, or is
+// invalid; an invalid one is skipped and the driver keeps running.
+void CheckCommandBufferPlacement(Control* control) {
+    using AgcDriver::NativeGuestMemory::BorrowedRange;
+    const auto identity = [](std::uint64_t address, std::size_t bytes, bool writable) {
+        return BorrowedRange{address, {reinterpret_cast<std::byte*>(address), bytes}, writable};
+    };
+    // Adjacent ranges with different access (never merged) and a split at the buffer limit.
+    const std::vector<BorrowedRange> ranges{identity(0x10000, 0x10000, true), identity(0x20000, 0x10000, false),
+        identity(0x30000, 0x10000, false), identity(0x50000, 0x1000, true)};
+    using AgcDriver::Metal::RangesCover;
+    Require(RangesCover(ranges, 0x1f000, 0x2000) && RangesCover(ranges, 0x10000, 0x30000) && RangesCover(ranges, 0x2fffc, 8),
+        "a command buffer across adjacent guest ranges counts as guest memory");
+    Require(!RangesCover(ranges, 0x3f000, 0x2000) && !RangesCover(ranges, 0x8000, 0x10) && !RangesCover(ranges, 0x50800, 0x1000),
+        "a command buffer reaching a gap between guest ranges does not");
+
+    std::uint32_t* const target = &control->marker;
+    const auto submit = [&](std::uint32_t* address, std::uint32_t words) {
+        control->dcbAddress = address;
+        control->dcbWords = words;
+        return sceAgcDriverSubmitMultiDcbs(&control->dcbAddress, &control->dcbWords, 1);
+    };
+
+    // A 1 MiB DCB in host memory outside every guest allocation (larger than the 64 KiB staging buffer).
+    constexpr std::uint32_t HostValue = 0x461b16u;
+    const auto large = MarkerDcb(256 * 1024, target, HostValue);
+    control->marker = 0;
+    Require(submit(const_cast<std::uint32_t*>(large.data()), static_cast<std::uint32_t>(large.size())) == 0,
+        "a 1 MiB command buffer outside guest memory is accepted");
+    AgcDriverWaitIdle_nid_postfix();
+    Require(std::atomic_ref<std::uint32_t>(control->marker).load(std::memory_order_acquire) == HostValue,
+        "the 1 MiB command buffer outside guest memory ran to its last packet");
+
+    // Null and unmapped addresses are skipped, not thrown.
+    Require(submit(nullptr, 7) == 0, "a null command buffer is skipped");
+    Require(submit(reinterpret_cast<std::uint32_t*>(std::uintptr_t{0x1000}), 7) == 0, "an unmapped command buffer is skipped");
+
+    // The driver still runs a small host buffer afterwards (it reuses the staging buffer).
+    constexpr std::uint32_t AfterValue = 0x461a5eu;
+    const auto small = MarkerDcb(3, target, AfterValue);
+    control->marker = 0;
+    Require(submit(const_cast<std::uint32_t*>(small.data()), static_cast<std::uint32_t>(small.size())) == 0, "submit a small host buffer after the skips");
+    AgcDriverWaitIdle_nid_postfix();
+    Require(std::atomic_ref<std::uint32_t>(control->marker).load(std::memory_order_acquire) == AfterValue, "the driver runs submissions after skipped ones");
+    control->dcbAddress = control->dcb;
+}
+
 void Guest(const std::filesystem::path& captureDirectory) {
     std::int64_t physical = -1;
     Require(sceKernelAllocateDirectMemory(0, static_cast<std::int64_t>(sceKernelGetDirectMemorySize()), MappedBytes, 64 * 1024, 0, &physical) == 0, "allocate direct memory");
@@ -141,6 +199,8 @@ void Guest(const std::filesystem::path& captureDirectory) {
     Require(lateSubmit == 0, "a buffer whose first packet header is written 3 ms after submit is accepted");
     AgcDriverWaitIdle_nid_postfix();
     Require(std::atomic_ref<std::uint32_t>(control->marker).load(std::memory_order_acquire) == LateValue, "the packet written after submit ran");
+
+    CheckCommandBufferPlacement(control);
 
     const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
     Require(handle > 0, "open the video output");

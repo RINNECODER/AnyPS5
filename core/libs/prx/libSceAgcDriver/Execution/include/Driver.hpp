@@ -7,7 +7,8 @@
 
 namespace AgcDriver {
 
-void Submit(const Packet* packet, std::uint32_t queue);
+// `call` names the guest entry point for log lines (a skipped submission).
+void Submit(const Packet* packet, std::uint32_t queue, const char* call = nullptr);
 
 }
 
