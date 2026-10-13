@@ -1,4 +1,5 @@
 #include "MetalDevice.hpp"
+#include "GpuStallWatch.hpp"
 #include "GpuTiming.hpp"
 
 #include <stdexcept>
@@ -15,7 +16,7 @@ std::string errorMessage(const char* operation, NSError* error) {
 
 }
 
-MetalDevice::MetalDevice(id<MTLDevice> device, id<MTLLibrary> library)
+MetalDevice::MetalDevice(id<MTLDevice> device, id<MTLLibrary> library, id<MTLCommandQueue> sharedQueue)
     : device(device), library(library) {
     if (device == nil || library == nil) {
         throw std::invalid_argument("MetalDevice requires a device and a library");
@@ -23,7 +24,10 @@ MetalDevice::MetalDevice(id<MTLDevice> device, id<MTLLibrary> library)
     if (library.device != device) {
         throw std::invalid_argument("Metal library belongs to a different device");
     }
-    queue = [device newCommandQueue];
+    if (sharedQueue != nil && sharedQueue.device != device) {
+        throw std::invalid_argument("Metal command queue belongs to a different device");
+    }
+    queue = sharedQueue != nil ? sharedQueue : [device newCommandQueue];
     if (queue == nil) {
         throw std::runtime_error("Metal command queue creation failed");
     }
@@ -40,10 +44,64 @@ id<MTLBuffer> MetalDevice::Buffer(std::size_t bytes) const {
     return buffer;
 }
 
+MetalBufferPool& MetalBufferPool::Shared() {
+    static MetalBufferPool* const pool = new MetalBufferPool();
+    return *pool;
+}
+
+id<MTLBuffer> MetalBufferPool::Take(id<MTLDevice> device, std::size_t bytes) {
+    if (bytes == 0 || bytes > device.maxBufferLength) {
+        throw std::invalid_argument("Metal buffer length must be nonzero and within the device limit");
+    }
+    {
+        std::lock_guard lock(mutex);
+        const auto found = free.find({reinterpret_cast<std::uintptr_t>((__bridge void*)device), bytes});
+        if (found != free.end() && !found->second.empty()) {
+            id<MTLBuffer> buffer = found->second.back();
+            found->second.pop_back();
+            freeBytes -= bytes;
+            return buffer;
+        }
+    }
+    id<MTLBuffer> buffer = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    if (buffer == nil || buffer.contents == nullptr) throw std::runtime_error("Metal buffer allocation failed");
+    return buffer;
+}
+
+void MetalBufferPool::Give(id<MTLBuffer> buffer) {
+    // Enough for a few frames of surface staging; beyond it buffers are simply released.
+    constexpr std::size_t LimitBytes = std::size_t{768} << 20u;
+    constexpr std::size_t LimitPerLength = 32;
+    if (buffer == nil) return;
+    std::lock_guard lock(mutex);
+    if (freeBytes + buffer.length > LimitBytes) return;
+    auto& list = free[{reinterpret_cast<std::uintptr_t>((__bridge void*)buffer.device), buffer.length}];
+    if (list.size() >= LimitPerLength) return;
+    list.push_back(buffer);
+    freeBytes += buffer.length;
+}
+
+void MetalBufferPool::GiveWhenCompleted(id<MTLBuffer> buffer, id<MTLCommandBuffer> commands) {
+    if (buffer == nil || commands == nil) return;
+    [commands addCompletedHandler:^(id<MTLCommandBuffer>) { MetalBufferPool::Shared().Give(buffer); }];
+}
+
+id<MTLBuffer> MetalDevice::TransientBuffer(std::size_t bytes, id<MTLCommandBuffer> commands) const {
+    validateCommands(commands);
+    if (commands.status >= MTLCommandBufferStatusCommitted) throw std::invalid_argument("Metal transient buffer needs an uncommitted command buffer");
+    id<MTLBuffer> buffer = MetalBufferPool::Shared().Take(device, bytes);
+    MetalBufferPool::Shared().GiveWhenCompleted(buffer, commands);
+    return buffer;
+}
+
 id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
     id<MTLCommandBuffer> commands = [queue commandBuffer];
     if (commands == nil) {
         throw MetalGpuExecutionError("Metal command buffer creation failed");
+    }
+    if (GpuTiming::ProfileTags()) {
+        const auto tag = GpuTiming::Tag() != 0 ? GpuTiming::Tag() : GpuTiming::MakeTag(GpuTiming::Current(), 0);
+        [commands addCompletedHandler:^(id<MTLCommandBuffer> done) { GpuTiming::RecordTag(tag, done.GPUEndTime - done.GPUStartTime); }];
     }
     return commands;
 }
@@ -130,6 +188,11 @@ void MetalDevice::Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArra
     if (encoder == nil) {
         throw MetalGpuExecutionError("Metal compute command encoder creation failed");
     }
+    // Named for GPU traces (Metal System Trace) when ANYPS5_METAL_GPU_TIMING is on.
+    if (GpuTiming::Enabled()) {
+        encoder.label = ![kernel isEqualToString:@"TextureDetile"] || constants == nullptr ? kernel :
+            (*constants)[3] != 0 ? @"readback retile" : @"upload detile";
+    }
     [encoder setComputePipelineState:state];
     for (NSUInteger i = 0; i < buffers.count; ++i) {
         [encoder setBuffer:buffers[i] offset:offsets.empty() ? 0 : offsets[i] atIndex:i];
@@ -146,11 +209,12 @@ void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
     if (commands.status < MTLCommandBufferStatusCommitted) {
         [commands commit];
     }
+    GpuStallWatch::Scope stallWatch;
     if (GpuTiming::Enabled()) {
         const auto start = std::chrono::steady_clock::now();
         [commands waitUntilCompleted];
         GpuTiming::Record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
-            commands.GPUEndTime - commands.GPUStartTime);
+            commands.GPUEndTime - commands.GPUStartTime, commands.GPUStartTime, commands.GPUEndTime);
     } else {
         [commands waitUntilCompleted];
     }

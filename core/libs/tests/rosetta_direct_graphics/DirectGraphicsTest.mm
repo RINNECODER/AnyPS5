@@ -15,6 +15,7 @@
 #import <ImageIO/ImageIO.h>
 #include "prx/libSceAgcDriver/Execution/Metal/DirectDriver.hpp"
 #include "SceTypes.hpp"
+#include "prx/libc/include/Shutdown.hpp"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -34,6 +35,8 @@ int APS5_VABI sceKernelAllocateDirectMemory(std::int64_t, std::int64_t, std::siz
 int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
 int APS5_VABI sceAgcDriverSubmitMultiDcbs(std::uint32_t* const*, const std::uint32_t*, std::uint32_t);
 void AgcDriverWaitIdle_nid_postfix();
+void AgcDriverSuspendPoint_nid_postfix();
+void AgcDriverShutdown_nid_postfix();
 void AgcDriverCheckGuestMemory_nid_postfix(const void*, std::size_t, std::size_t, bool);
 void APS5_VABI sceVideoOutSetBufferAttribute2(VideoOutBufferAttribute2*, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint32_t, std::uint64_t);
 int APS5_VABI sceVideoOutOpen(int, int, int, const void*);
@@ -163,6 +166,21 @@ void Guest(const std::filesystem::path& captureDirectory) {
     Require(near(center[0], 0xe0) && near(center[1], 0x80) && near(center[2], 0x20), "the captured frame shows the clear colour");
 }
 
+// Shutdown (time limit, window close): guest threads entering the stopped driver must park, not
+// unwind a DriverStopped through guest frames (which aborts, exit 134). If one escaped, this
+// process would terminate; a thread that returned would be running guest code on a dead driver.
+void CheckShutdownParksGuestThreads() {
+    LibcBeginHostExit_nid_postfix();
+    AgcDriverShutdown_nid_postfix();
+    std::atomic<int> returned{0};
+    std::thread suspend([&] { AgcDriverSuspendPoint_nid_postfix(); ++returned; });
+    std::thread idle([&] { AgcDriverWaitIdle_nid_postfix(); ++returned; });
+    suspend.detach();
+    idle.detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    Require(returned.load() == 0, "guest threads entering the stopped driver park instead of returning or throwing");
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -188,7 +206,15 @@ int main(int argc, char** argv) {
     while (result.load() < 0) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
     guest.join();
     std::filesystem::remove_all(directory);
-    if (result == 0) std::printf("rosetta direct graphics: clear + flip presented and captured\n");
+    if (result == 0) {
+        try {
+            CheckShutdownParksGuestThreads();
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "FAIL: %s\n", error.what());
+            result = 1;
+        }
+    }
+    if (result == 0) std::printf("rosetta direct graphics: clear + flip presented and captured; shutdown parks guest threads\n");
     std::fflush(stdout);
     std::fflush(stderr);
     // The video output and Metal driver threads keep running; skip their teardown.

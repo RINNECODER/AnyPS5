@@ -14,6 +14,10 @@ namespace AgcDriver::Metal {
 void ConfigureRenderPipelineDescriptor(MTLRenderPipelineDescriptor* descriptor, const Graphics::State& state);
 void ConfigureRenderPipelineDescriptor(MTLMeshRenderPipelineDescriptor* descriptor, const Graphics::State& state);
 [[nodiscard]] id<MTLDepthStencilState> CreateDepthStencilState(id<MTLDevice> device, const Graphics::State& state);
+// Sets the pass's programmable sample positions for a custom PA_SC_AA_SAMPLE_LOCS pattern. A standard
+// pattern keeps Metal's default positions, which are the same locations. Throws when the device has no
+// programmable sample positions.
+void ConfigureSamplePositions(MTLRenderPassDescriptor* pass, id<MTLDevice> device, const Graphics::State& state);
 void BindRenderState(id<MTLRenderCommandEncoder> encoder, const Graphics::State& state,
                      id<MTLDepthStencilState> depthStencilState);
 

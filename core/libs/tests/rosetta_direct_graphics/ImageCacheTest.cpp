@@ -3,6 +3,7 @@
 // texels, so these cover what may and may not keep an entry.
 #include "prx/libSceAgcDriver/Execution/Metal/PacketStoreRange.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GuestImageCache.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -82,6 +83,75 @@ void CacheTests() {
     Check(!cache.Find(0x100, host + 0x100, Descriptor{0x100, 1}), "the least recently used entry is evicted");
 }
 
+// Expire (a new submission, a wait, a flip) keeps entries that can prove their guest bytes.
+void ExpiryTests() {
+    std::vector<std::byte> memory(0x40000, std::byte{0x5a});
+    auto* host = memory.data();
+    Cache cache;
+    auto uploaded = std::make_shared<FakeTexture>(FakeTexture{{0x0000, 8}, 0x10000});
+    auto written = std::make_shared<FakeTexture>(FakeTexture{{0x10000, 8}, 0x10000});
+    auto cleared = std::make_shared<FakeTexture>(FakeTexture{{0x20000, 8}, 0x10000});
+    cache.Insert(0x0000, host, uploaded, false);
+    cache.Insert(0x10000, host + 0x10000, written, false, 0, true);
+    cache.Insert(0x20000, host + 0x20000, cleared, false, 0x77);
+
+    cache.Expire(1);
+    Check(cache.Find(0x0000, host, Descriptor{0x0000, 8}).has_value(), "an uploaded surface whose bytes did not change survives an expiry");
+    Check(cache.Find(0x10000, host + 0x10000, Descriptor{0x10000, 8}).has_value(), "a written surface still in flight survives an expiry");
+    cache.Seal(host + 0x10000, written.get());
+
+    memory[0x1234] = std::byte{0};
+    cache.Expire(1);
+    Check(!cache.Find(0x0000, host, Descriptor{0x0000, 8}), "one changed byte of an uploaded surface drops it after an expiry");
+    Check(cache.Find(0x10000, host + 0x10000, Descriptor{0x10000, 8}).has_value(), "a sealed written surface whose bytes did not change survives");
+    std::fill(memory.begin() + 0x20000, memory.begin() + 0x30000, std::byte{0});
+    Check(cache.Find(0x20000, host + 0x20000, Descriptor{0x20000, 8}, 0x77).has_value(), "a DCC-clear surface does not depend on its bytes");
+
+    std::fill(memory.begin() + 0x10000, memory.begin() + 0x20000, std::byte{0});
+    Check(cache.Find(0x10000, host + 0x10000, Descriptor{0x10000, 8}).has_value(), "without an expiry the cache trusts the driver's own tracking");
+    cache.Expire(1);
+    Check(!cache.Find(0x10000, host + 0x10000, Descriptor{0x10000, 8}), "a written surface the guest cleared afterwards drops after an expiry");
+
+    // A re-insert of the texture a hit returned keeps its proof (no new hash).
+    std::fill(memory.begin(), memory.end(), std::byte{0x11});
+    static_cast<void>(cache.TakeStatistics());
+    cache.Insert(0x0000, host, uploaded, false);
+    const auto before = cache.TakeStatistics().hashedBytes;
+    cache.Insert(0x0000, host, uploaded, false);
+    Check(before == 0x10000 && cache.TakeStatistics().hashedBytes == 0, "binding a cached upload again does not hash it again");
+
+    // A written surface whose copy-back never sealed stops being trusted.
+    cache.Insert(0x10000, host + 0x10000, written, false, 0, true);
+    for (int i = 0; i < 8; ++i) cache.Expire(1);
+    Check(cache.Find(0x10000, host + 0x10000, Descriptor{0x10000, 8}).has_value(), "an unsealed written surface is kept for a few expiries");
+    cache.Expire(1);
+    Check(!cache.Find(0x10000, host + 0x10000, Descriptor{0x10000, 8}), "an unsealed written surface is dropped after that");
+
+    cache.Insert(0x20000, host + 0x20000, cleared, false, 0x77);
+    cache.Clear(0);
+    Check(!cache.Find(0x20000, host + 0x20000, Descriptor{0x20000, 8}, 0x77), "a clear (mapping change) drops even proven surfaces");
+}
+
+void FingerprintTests() {
+    std::vector<std::byte> bytes(3 * 1024 * 1024 + 13);
+    for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<std::byte>((i * 2654435761u) >> 13u);
+    namespace Fingerprint = AgcDriver::Metal::GuestBytesFingerprint;
+    const auto hash = Fingerprint::Hash(bytes.data(), bytes.size());
+    const auto sample = Fingerprint::Sample(bytes.data(), bytes.size());
+    bool everyFlipSeen = true;
+    for (const std::size_t at : {std::size_t{0}, std::size_t{63}, std::size_t{64}, std::size_t{4097}, bytes.size() / 2, bytes.size() - 14, bytes.size() - 1}) {
+        bytes[at] ^= std::byte{1};
+        everyFlipSeen = everyFlipSeen && Fingerprint::Hash(bytes.data(), bytes.size()) != hash;
+        bytes[at] ^= std::byte{1};
+    }
+    Check(everyFlipSeen, "the hash sees a single flipped bit anywhere, the tail included");
+    Check(Fingerprint::Hash(bytes.data(), bytes.size()) == hash && Fingerprint::Sample(bytes.data(), bytes.size()) == sample, "fingerprints are deterministic");
+    std::swap(bytes[100], bytes[200000]);
+    Check(Fingerprint::Hash(bytes.data(), bytes.size()) != hash, "the hash depends on where bytes are");
+    std::fill(bytes.begin(), bytes.end(), std::byte{0});
+    Check(Fingerprint::Sample(bytes.data(), bytes.size()) != sample, "the sample sees a whole-surface clear");
+}
+
 void StoreRangeTests() {
     const auto header = [](std::uint32_t opcode, std::size_t words) { return 0xc0000000u | (static_cast<std::uint32_t>(words - 2) << 16u) | (opcode << 8u); };
     // RELEASE_MEM with DATA_SEL 1 (32-bit data) to 0x12345678.
@@ -128,6 +198,8 @@ void OwnLabelTests() {
 
 int main() {
     CacheTests();
+    ExpiryTests();
+    FingerprintTests();
     StoreRangeTests();
     OwnLabelTests();
     if (failures != 0) {

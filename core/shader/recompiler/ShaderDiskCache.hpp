@@ -12,8 +12,9 @@
 
 namespace ShaderRecompiler::ShaderDiskCache {
 
-// 28: upstream format 27 plus the native pixel-sampler certificate fields (fork format 26).
-inline constexpr std::uint32_t FormatVersion = 29;
+// 29: upstream format 27 plus the native pixel-sampler certificate fields (fork format 26).
+// 30: fork format 29 plus upstream format 28 (the pixel ancillary word reaches the request).
+inline constexpr std::uint32_t FormatVersion = 30;
 
 enum class LoadStatus {
     Loaded,

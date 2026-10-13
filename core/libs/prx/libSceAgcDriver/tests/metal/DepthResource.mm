@@ -1,6 +1,9 @@
 #include "MetalTestSupport.hpp"
 #include "MetalDepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include <cmath>
+#include <memory>
+#include <vector>
 
 namespace {
 using Surface = AgcDriver::Metal::MetalDepthSurface;
@@ -19,6 +22,9 @@ fragment float4 DepthColor(constant float4& color [[buffer(0)]]) { return color;
 kernel void SampleDepth(depth2d<float> depth [[texture(0)]], device float* values [[buffer(0)]], uint2 at [[thread_position_in_grid]]) {
     constexpr sampler nearest(coord::pixel, address::clamp_to_edge, filter::nearest);
     values[at.y * 5 + at.x] = depth.sample(nearest, float2(at) + 0.5);
+}
+kernel void ReadDepthArray(depth2d_array<float> depth [[texture(0)]], device float* values [[buffer(0)]], uint3 at [[thread_position_in_grid]]) {
+    values[(at.z * 3 + at.y) * 5 + at.x] = depth.read(at.xy, at.z);
 }
 kernel void ReadStencil(texture2d<uint> stencil [[texture(0)]], device uint* values [[buffer(0)]], uint2 at [[thread_position_in_grid]]) {
     values[at.y * 5 + at.x] = stencil.read(at).x;
@@ -139,6 +145,56 @@ void render(const MetalTests::Context& context, id<MTLLibrary> shaders, const Su
         MetalTests::Require(std::memcmp(data + y * 256 + x * 4, greenBytes.data(), 4) == 0, "Retained depth attachment produced an incorrect rendered pixel");
     }
 }
+
+// Shadow cascades render each slice of a depth array as its own resident surface (the depth target's
+// address advanced by whole slices) and sample them through one 2D-array descriptor: the gathered
+// array must hold each slice's depth in its own layer, and a range must start at its first layer.
+void depthArray(const MetalTests::Context& context, const AgcDriver::Metal::MetalDevice& backend, id<MTLLibrary> shaders, VkFormat format) {
+    const bool d16 = format == VK_FORMAT_D16_UNORM;
+    const auto sliceBytes = AgcDriver::Graphics::DepthSliceBytes({width, height}, d16 ? 2u : 4u);
+    std::vector<std::shared_ptr<Surface>> surfaces;
+    for (std::uint32_t slice = 0; slice < 2; ++slice) {
+        AgcDriver::Graphics::DepthTarget target{0x400000 + slice * sliceBytes, 0, {width, height}, format, 1, 0};
+        surfaces.push_back(std::make_shared<Surface>(backend, target));
+    }
+    render(context, shaders, *surfaces[1]);
+    NSError* error = nil;
+    auto pipeline = [context.device newComputePipelineStateWithFunction:[shaders newFunctionWithName:@"ReadDepthArray"] error:&error];
+    if (pipeline == nil) throw std::runtime_error(error.localizedDescription.UTF8String ?: "Depth array compute pipeline creation failed");
+    const auto read = [&](id<MTLTexture> array) {
+        const auto layers = static_cast<std::uint32_t>(array.arrayLength);
+        auto output = context.Buffer(width * height * layers * sizeof(float), 0xa5);
+        auto commands = [backend.Queue() commandBuffer];
+        auto encoder = [commands computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline];
+        [encoder setTexture:array atIndex:0];
+        [encoder setBuffer:output offset:0 atIndex:0];
+        [encoder dispatchThreads:MTLSizeMake(width, height, layers) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        [encoder endEncoding];
+        [commands commit];
+        [commands waitUntilCompleted];
+        MetalTests::Require(commands.status == MTLCommandBufferStatusCompleted, "Depth array read dispatch failed");
+        return std::vector<float>(static_cast<const float*>(output.contents), static_cast<const float*>(output.contents) + width * height * layers);
+    };
+    const auto array = AgcDriver::Metal::GatherDepthSlices(backend, surfaces, *surfaces[0], 0, 1, nil);
+    MetalTests::Require(array.textureType == MTLTextureType2DArray && array.arrayLength == 2, "Depth array has the wrong shape");
+    const auto both = read(array);
+    for (std::size_t i = 0; i < width * height; ++i) {
+        MetalTests::Require(both[i] == 1.0f, "Depth array layer 0 does not hold slice 0 (cleared to 1)");
+        MetalTests::Require(both[width * height + i] == 0.0f, "Depth array layer 1 does not hold slice 1 (rendered at 0)");
+    }
+    const auto again = AgcDriver::Metal::GatherDepthSlices(backend, surfaces, *surfaces[0], 0, 1, array);
+    MetalTests::Require(again == array, "Depth array of the same shape was not reused");
+    const auto second = read(AgcDriver::Metal::GatherDepthSlices(backend, surfaces, *surfaces[0], 1, 1, nil));
+    MetalTests::Require(second.size() == width * height && second[0] == 0.0f, "Depth array range does not start at its first layer");
+    bool rejected = false;
+    try {
+        static_cast<void>(AgcDriver::Metal::GatherDepthSlices(backend, surfaces, *surfaces[0], 0, 2, nil));
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    MetalTests::Require(rejected, "Depth array with a slice no draw rendered was gathered");
+}
 }
 
 void RunDepthResourceTests(const MetalTests::Context& context) {
@@ -167,4 +223,5 @@ void RunDepthResourceTests(const MetalTests::Context& context) {
         MetalTests::Require(fresh != retained, "Depth surface cache clear retained a stale GPU resource");
         samples(context, shaders, *fresh, 1, 99);
     }
+    for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) depthArray(context, backend, shaders, format);
 }

@@ -1,5 +1,6 @@
 #include "MetalConversionDiskCache.hpp"
 #include "../ShaderCacheDirectory.hpp"
+#include "../ShaderCacheEviction.hpp"
 
 #include <compression.h>
 #include <cstdint>
@@ -316,7 +317,13 @@ const std::filesystem::path& Directory() {
     static const std::filesystem::path directory = [] {
         // ANYPS5_NO_MSL_CACHE turns off only this cache (for comparisons and troubleshooting).
         const auto root = ShaderCacheDisabledBy("ANYPS5_NO_MSL_CACHE") ? std::filesystem::path() : ShaderCacheDirectory();
-        return root.empty() ? root : root / ("msl-" ANYPS5_MSL_CACHE_VERSION);
+        if (root.empty()) return root;
+        auto current = root / ("msl-" ANYPS5_MSL_CACHE_VERSION);
+        // Older MSL cache versions can never hit again; the cap then applies to the whole cache directory.
+        CacheEviction::MarkInUse(current);
+        CacheEviction::RemoveStaleVersions(root, current, [](const std::string& name) { return name.rfind("msl-", 0) == 0; });
+        CacheEviction::SharedBudget().Startup(root);
+        return current;
     }();
     return directory;
 }
@@ -378,7 +385,9 @@ bool Load(const std::string& key, Result& result) {
     if (Directory().empty()) return false;
     const auto digest = KeyDigest(key);
     std::vector<std::byte> file;
-    const bool hit = ReadWholeFile(EntryPath(digest), file) && Decode(file, digest, result);
+    const auto path = EntryPath(digest);
+    const bool hit = ReadWholeFile(path, file) && Decode(file, digest, result);
+    if (hit) CacheEviction::Touch(path);
     // ANYPS5_MSL_CACHE_STATS=1 logs the running hit and miss counts every 100 lookups.
     static const bool stats = std::getenv("ANYPS5_MSL_CACHE_STATS") != nullptr;
     if (stats) {
@@ -394,7 +403,7 @@ void Store(const std::string& key, const Result& result) {
     if (Directory().empty()) return;
     const auto digest = KeyDigest(key);
     const auto bytes = Encode(digest, result);
-    if (!bytes.empty()) (void)WriteFileAtomically(EntryPath(digest), bytes);
+    if (!bytes.empty() && WriteFileAtomically(EntryPath(digest), bytes)) CacheEviction::SharedBudget().NoteWrite(Directory().parent_path(), bytes.size());
 }
 
 }

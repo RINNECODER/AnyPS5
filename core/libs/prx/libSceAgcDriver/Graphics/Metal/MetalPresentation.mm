@@ -42,8 +42,10 @@ std::vector<std::byte> displayPixels(const DisplayBuffer& buffer) {
 MetalPresentation::MetalPresentation(const MetalDevice& backend, id<MTLLibrary> library)
     : backend(backend), presenter(backend.Device(), library) {}
 
+std::vector<std::byte> MetalPresentation::ReadPixels(const DisplayBuffer& buffer) { return displayPixels(buffer); }
+
 void MetalPresentation::Present(const PresentationWindow& window, const DisplayBuffer* buffer, bool opaque,
-                                void (*gpuReady)(void*), void* completionContext) {
+                                void (*gpuReady)(void*), void* completionContext, const std::vector<std::byte>* decoded) {
     if (window.context == nullptr || window.getDrawableSize == nullptr || window.metalLayer == nullptr) {
         throw std::invalid_argument("Metal presentation requires a window, drawable size query, and Metal layer callback");
     }
@@ -95,9 +97,12 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
     // A throw before the readback is encoded must not wedge the single in-flight slot.
     struct Slot { FrameCapture& capture; bool active; const bool& encoded; ~Slot() { if (active && !encoded) capture.Abandon(); } }
         slot{frameCapture, ticket.has_value(), captureEncoded};
-    if (width != 0 && height != 0) {
+    // Empty `decoded` pixels: the caller saw a minimized window and read nothing; the window
+    // grew since, so this frame is skipped like a minimized one.
+    const bool unread = buffer != nullptr && decoded != nullptr && decoded->empty();
+    if (width != 0 && height != 0 && !unread) {
         if (buffer != nullptr) {
-            const auto pixels = displayPixels(*buffer);
+            const auto pixels = decoded != nullptr ? *decoded : displayPixels(*buffer);
             auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:buffer->width height:buffer->height mipmapped:NO];
             descriptor.storageMode = MTLStorageModeShared;
             descriptor.usage = MTLTextureUsageShaderRead;
