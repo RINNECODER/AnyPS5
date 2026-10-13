@@ -311,6 +311,10 @@ static void ReleaseHostStack(Fiber*) {}
 
 #else
 
+#ifndef MAP_STACK
+#define MAP_STACK 0 // macOS has no MAP_STACK
+#endif
+
 static void AllocateHostStack(Fiber* fiber) {
     const auto page = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
     const auto bytes = (fiber->contextSize + FIBER_HOST_STACK_MARGIN + page - 1) / page * page + page;
