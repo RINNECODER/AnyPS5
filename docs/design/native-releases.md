@@ -33,7 +33,7 @@ re-runs the same check on the downloaded package.
 A release ships the recompiler, not recompiled titles. On the first native launch of a title,
 MacPS runs the release's `bin/native_aot` against the user's own installed copy and caches the
 output on that Mac (the same model as the Rosetta relink cache). The cache stays local, next to the
-other per-title work (`anyps5-native-work`). Native releases are picked in MacPS next to the
+other per-title work (a private local work directory). Native releases are picked in MacPS next to the
 Rosetta ones; MacPS refuses to install one kind as the other.
 
 ## Channels
