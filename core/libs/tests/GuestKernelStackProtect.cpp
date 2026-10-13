@@ -81,6 +81,7 @@ static void* APS5_VABI Worker(void* arg) {
     Require(sceKernelIsStack(&local, &start, &end) == SCE_OK);
     const auto low = (reinterpret_cast<std::uintptr_t>(start) + Page - 1) & ~(Page - 1);
     Require(low + GuardBytes + Page < reinterpret_cast<std::uintptr_t>(&local));
+#ifdef __linux__
     std::uintptr_t hostGuard = 0;
     for (auto cursor = low; cursor >= Page && low - cursor <= 4 * 1024 * 1024; cursor -= Page) {
         const auto page = QueryPage(cursor);
@@ -91,6 +92,7 @@ static void* APS5_VABI Worker(void* arg) {
     const auto hostGuardBefore = QueryPage(hostGuard).raw;
     Require(mprotect_nid_postfix(reinterpret_cast<void*>(hostGuard), Page, 3) == -1);
     Require(QueryPage(hostGuard).raw == hostGuardBefore);
+#endif
     auto* guard = reinterpret_cast<volatile unsigned char*>(low);
     Require(mprotect_nid_postfix(const_cast<unsigned char*>(guard), GuardBytes, 0) == 0);
 #ifdef _WIN32
