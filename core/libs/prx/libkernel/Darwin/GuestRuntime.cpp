@@ -536,12 +536,19 @@ void AppendEntryRecord(const std::uint64_t entry, const ucontext_t* context) {
     std::uint64_t pages[MaxPages];
     std::size_t count = 0;
     for (const std::uint64_t value : values) {
-        const std::uint64_t page = value & ~(PageSize - 1);
-        if (page < indirectTrace.guestBase) continue;
-        bool seen = false;
-        for (std::size_t index = 0; index < count; ++index) if (pages[index] == page) { seen = true; break; }
-        if (seen) continue;
-        pages[count++] = page;
+        const std::uint64_t base = value & ~(PageSize - 1);
+        if (base < indirectTrace.guestBase) continue;
+        // A window around each pointer, not just the page it names: the body
+        // dereferences [reg + offset] across struct fields and stack frames.
+        for (std::int64_t step = -1; step <= 14; ++step) {
+            const std::uint64_t page = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + step * static_cast<std::int64_t>(PageSize));
+            if (page < indirectTrace.guestBase) continue;
+            bool seen = false;
+            for (std::size_t index = 0; index < count; ++index) if (pages[index] == page) { seen = true; break; }
+            if (seen) continue;
+            pages[count++] = page;
+            if (count == MaxPages) break;
+        }
         if (count == MaxPages) break;
     }
     for (std::size_t index = 0; index < count; ++index) {
