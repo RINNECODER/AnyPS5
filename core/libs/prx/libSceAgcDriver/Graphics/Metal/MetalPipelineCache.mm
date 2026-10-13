@@ -5,11 +5,13 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
 #include <system_error>
+#include <vector>
 
 namespace AgcDriver::Metal {
 
@@ -231,10 +233,19 @@ std::string MeshKey(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descr
 
 // ---- Binary archive -------------------------------------------------------------------------------
 
+// A pipeline added to an archive, with what is needed to check that it reached the file and to add it
+// again if it did not.
+struct Recorded {
+    std::function<bool(id<MTLBinaryArchive>, NSError**)> add;
+    std::function<bool(id<MTLBinaryArchive>)> present;
+};
+
 struct Archive {
+    id<MTLDevice> device = nil;
     id<MTLBinaryArchive> archive = nil;
     std::filesystem::path path;
     std::size_t pending = 0;
+    std::vector<Recorded> unverified;  // added since the file was last verified
 };
 
 std::mutex archiveMutex;
@@ -269,12 +280,14 @@ void ReportArchiveFailure(const char* operation, NSError* error) {
                  message == nullptr ? "no Metal error description" : message);
 }
 
-// Requires archiveMutex.
-bool WriteArchive(Archive& state) {
-    if (state.archive == nil || state.pending == 0) return true;
+enum class Serialized { Failed, Wrote, NothingNew };
+
+// Requires archiveMutex. Writes the archive to a temporary file and moves it over the archive file.
+Serialized SerializeArchive(Archive& state) {
     @autoreleasepool {
         auto temporary = state.path;
-        temporary += ".tmp." + std::to_string(static_cast<unsigned long>(getpid()));
+        static std::atomic<unsigned long> sequence{0};
+        temporary += ".tmp." + std::to_string(static_cast<unsigned long>(getpid())) + "." + std::to_string(sequence.fetch_add(1));
         NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:temporary.c_str()]];
         NSError* error = nil;
         bool written = false;
@@ -285,27 +298,118 @@ bool WriteArchive(Archive& state) {
         }
         std::error_code ignored;
         if (written && !std::filesystem::exists(temporary, ignored)) {
-            // Metal writes no file when the archive holds nothing new since it was loaded or last
-            // written (two threads that built one pipeline at once both add it): the file is current.
-            state.pending = 0;
-            return true;
+            // Metal writes no file when it considers the archive unchanged since it was loaded or last
+            // written (two threads that built one pipeline at once both add it).
+            return Serialized::NothingNew;
         }
         if (!written) {
             std::filesystem::remove(temporary, ignored);
             ReportArchiveFailure("writing the Metal pipeline archive", error);
-            return false;
+            return Serialized::Failed;
         }
         std::error_code renamed;
         std::filesystem::rename(temporary, state.path, renamed);
         if (renamed) {
             std::filesystem::remove(temporary, ignored);
             ReportArchiveFailure("replacing the Metal pipeline archive", nil);
+            return Serialized::Failed;
+        }
+        archiveWrites.fetch_add(1, std::memory_order_relaxed);
+        return Serialized::Wrote;
+    }
+}
+
+struct FileCheck {
+    std::vector<Recorded> missing;
+    id<MTLBinaryArchive> stored = nil;
+};
+
+// Reads the archive file back and returns the recorded pipelines it does not hold. Metal's
+// serializeToURL: occasionally leaves out a pipeline that was added successfully (seen as one missing
+// pipeline in roughly one write in fifty while other threads compile), and says nothing about it.
+FileCheck CheckFile(const Archive& state) {
+    @autoreleasepool {
+        id<MTLBinaryArchive> stored = nil;
+        std::error_code ignored;
+        if (std::filesystem::is_regular_file(state.path, ignored)) {
+            MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
+            descriptor.url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:state.path.c_str()]];
+            NSError* error = nil;
+            stored = [state.device newBinaryArchiveWithDescriptor:descriptor error:&error];
+        }
+        FileCheck check;
+        check.stored = stored;
+        for (const auto& recorded : state.unverified) {
+            if (stored == nil || !recorded.present(stored)) check.missing.push_back(recorded);
+        }
+        return check;
+    }
+}
+
+// Requires archiveMutex. Replaces the archive with the file's contents plus `missing`, so that the next
+// write has something new to write.
+bool RebuildArchive(Archive& state, const std::vector<Recorded>& missing) {
+    @autoreleasepool {
+        MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
+        std::error_code ignored;
+        if (std::filesystem::is_regular_file(state.path, ignored)) {
+            descriptor.url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:state.path.c_str()]];
+        }
+        NSError* error = nil;
+        id<MTLBinaryArchive> fresh = [state.device newBinaryArchiveWithDescriptor:descriptor error:&error];
+        if (fresh == nil && descriptor.url != nil) {
+            descriptor.url = nil;
+            error = nil;
+            fresh = [state.device newBinaryArchiveWithDescriptor:descriptor error:&error];
+        }
+        if (fresh == nil) {
+            ReportArchiveFailure("rebuilding the Metal pipeline archive", error);
             return false;
         }
-        state.pending = 0;
-        archiveWrites.fetch_add(1, std::memory_order_relaxed);
+        for (const auto& recorded : missing) {
+            bool added = false;
+            error = nil;
+            @try {
+                added = recorded.add(fresh, &error);
+            } @catch (NSException*) {
+                added = false;
+            }
+            if (!added) {
+                ReportArchiveFailure("re-adding a pipeline to the Metal pipeline archive", error);
+                return false;
+            }
+        }
+        state.archive = fresh;
+        state.unverified = missing;
+        state.pending = missing.size();
         return true;
     }
+}
+
+// Requires archiveMutex. The archive file ends up holding every pipeline added to the archive.
+bool WriteArchive(Archive& state) {
+    if (state.archive == nil || state.pending == 0) return true;
+    constexpr int Attempts = 4;
+    for (int attempt = 0; attempt < Attempts; ++attempt) {
+        const auto result = SerializeArchive(state);
+        if (result == Serialized::Failed) return false;
+        const auto check = CheckFile(state);
+        const auto& missing = check.missing;
+        if (missing.empty()) {
+            // Metal keeps reading an archive from the file it was loaded from or last serialized to, and
+            // that file has just been moved: carry on with the copy read back from the archive path.
+            state.archive = check.stored;
+            state.pending = 0;
+            state.unverified.clear();
+            return true;
+        }
+        if (!RebuildArchive(state, missing)) return false;
+    }
+    // Give up on these pipelines rather than retry them on every later write.
+    state.pending = 0;
+    state.unverified.clear();
+    ReportArchiveFailure("completing the Metal pipeline archive", nil);
+    return false;
 }
 
 bool FlushLocked() {
@@ -325,6 +429,7 @@ Archive& ArchiveFor(id<MTLDevice> device) {
     const auto identity = reinterpret_cast<std::uintptr_t>((__bridge void*)device);
     if (const auto found = archives.find(identity); found != archives.end()) return found->second;
     auto& state = archives[identity];
+    state.device = device;
     const auto directory = ShaderRecompiler::ShaderCacheDirectory();
     if (directory.empty()) return state;
     std::error_code error;
@@ -365,17 +470,20 @@ id<MTLBinaryArchive> ArchiveHandle(id<MTLDevice> device) {
     return ArchiveFor(device).archive;
 }
 
-template<class Add>
-void Record(id<MTLDevice> device, id<MTLBinaryArchive> archive, Add&& add) {
+// `archive` is the handle the pipeline was created against (nil when the disk cache is off).
+void Record(id<MTLDevice> device, id<MTLBinaryArchive> archive, Recorded recorded) {
     if (archive == nil) return;
     std::unique_lock use(archiveUse);
     std::lock_guard lock(archiveMutex);
     auto& state = ArchiveFor(device);
-    if (state.archive != archive) return;
+    // A cache clear may have replaced the archive while the pipeline was being created. The pipeline is
+    // cached afterwards all the same, so it goes into the archive that replaced it: skipping it would
+    // leave a cached pipeline missing from the file for good.
+    if (state.archive == nil) return;
     NSError* error = nil;
     bool added = false;
     @try {
-        added = add(&error);
+        added = recorded.add(state.archive, &error);
     } @catch (NSException*) {
         added = false;
     }
@@ -383,6 +491,7 @@ void Record(id<MTLDevice> device, id<MTLBinaryArchive> archive, Add&& add) {
         ReportArchiveFailure("adding a pipeline to the Metal pipeline archive", error);
         return;
     }
+    state.unverified.push_back(std::move(recorded));
     archiveAdditions.fetch_add(1, std::memory_order_relaxed);
     if (++state.pending >= ArchiveWriteBatch) static_cast<void>(WriteArchive(state));
 }
@@ -451,7 +560,19 @@ CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComput
                                                        reflection:&reflection error:error];
     }
     if (state == nil || !cacheable) return {state, reflection};
-    Record(device, archive, [&](NSError** failure) { return [archive addComputePipelineFunctionsWithDescriptor:native error:failure]; });
+    {
+        // Recorded without the archive it was created against: adding must not depend on any archive.
+        MTLComputePipelineDescriptor* plain = [native copy];
+        plain.binaryArchives = nil;
+        Record(device, archive, Recorded{
+            [plain](id<MTLBinaryArchive> target, NSError** failure) { return [target addComputePipelineFunctionsWithDescriptor:plain error:failure]; },
+            [device, plain](id<MTLBinaryArchive> stored) {
+                MTLComputePipelineDescriptor* probe = [plain copy];
+                probe.binaryArchives = @[stored];
+                NSError* ignored = nil;
+                return [device newComputePipelineStateWithDescriptor:probe options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:&ignored] != nil;
+            }});
+    }
     const auto entry = ComputePipelines().Insert(std::move(key), ComputeEntry{state, reflection, native}, ObjectBytes);
     return {entry.state, entry.reflection};
 }
@@ -475,7 +596,19 @@ CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPi
                                                      reflection:&reflection error:error];
     }
     if (state == nil || !cacheable) return {state, reflection};
-    Record(device, archive, [&](NSError** failure) { return [archive addRenderPipelineFunctionsWithDescriptor:native error:failure]; });
+    {
+        // Recorded without the archive it was created against: adding must not depend on any archive.
+        MTLRenderPipelineDescriptor* plain = [native copy];
+        plain.binaryArchives = nil;
+        Record(device, archive, Recorded{
+            [plain](id<MTLBinaryArchive> target, NSError** failure) { return [target addRenderPipelineFunctionsWithDescriptor:plain error:failure]; },
+            [device, plain](id<MTLBinaryArchive> stored) {
+                MTLRenderPipelineDescriptor* probe = [plain copy];
+                probe.binaryArchives = @[stored];
+                NSError* ignored = nil;
+                return [device newRenderPipelineStateWithDescriptor:probe options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:&ignored] != nil;
+            }});
+    }
     const auto entry = RenderPipelines().Insert(std::move(key), RenderEntry{state, reflection, native}, ObjectBytes);
     return {entry.state, entry.reflection};
 }
@@ -499,7 +632,19 @@ CachedRenderPipeline CachedMeshPipelineState(id<MTLDevice> device, MTLMeshRender
                                                          reflection:&reflection error:error];
     }
     if (state == nil || !cacheable) return {state, reflection};
-    Record(device, archive, [&](NSError** failure) { return [archive addMeshRenderPipelineFunctionsWithDescriptor:native error:failure]; });
+    {
+        // Recorded without the archive it was created against: adding must not depend on any archive.
+        MTLMeshRenderPipelineDescriptor* plain = [native copy];
+        plain.binaryArchives = nil;
+        Record(device, archive, Recorded{
+            [plain](id<MTLBinaryArchive> target, NSError** failure) { return [target addMeshRenderPipelineFunctionsWithDescriptor:plain error:failure]; },
+            [device, plain](id<MTLBinaryArchive> stored) {
+                MTLMeshRenderPipelineDescriptor* probe = [plain copy];
+                probe.binaryArchives = @[stored];
+                NSError* ignored = nil;
+                return [device newRenderPipelineStateWithMeshDescriptor:probe options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:&ignored] != nil;
+            }});
+    }
     const auto entry = RenderPipelines().Insert(std::move(key), RenderEntry{state, reflection, native}, ObjectBytes);
     return {entry.state, entry.reflection};
 }
