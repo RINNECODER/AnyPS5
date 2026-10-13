@@ -95,6 +95,11 @@ class Image:
         for segment in self.elf.iter_segments():
             if segment['p_type'] == 0x61000001:
                 self.process_parameters.append((segment['p_vaddr'], segment['p_filesz']))
+                # The SCE process-parameter segment is not PT_LOAD but the runtime must map it and
+                # read the title's libc parameters and allocator table from it.
+                if segment['p_filesz'] and segment['p_memsz'] >= segment['p_filesz']:
+                    self.segments.append(segment)
+                continue
             if segment['p_type'] == 'PT_TLS':
                 require(segment['p_memsz'] == 0 or contracts.get('allow_unlowered_tls', False),
                         'TLS requires native TLS lowering')
@@ -215,6 +220,9 @@ class Image:
 
     def segment(self, address, size=1):
         matches = [s for s in self.segments if s['p_vaddr'] <= address and address + size <= s['p_vaddr'] + s['p_memsz']]
+        loads = [s for s in matches if s['p_type'] == 'PT_LOAD']
+        if loads:
+            matches = loads
         require(len(matches) == 1, f'ambiguous or unmapped address 0x{address:x}')
         return matches[0]
 
@@ -233,6 +241,10 @@ class Image:
                 if self.guest_data:
                     return f'inttoptr (i64 {self.guest_base + address} to ptr)'
                 return f"getelementptr (i8, ptr @data_{spec['address']:x}, i64 {address - spec['address']})"
+        if self.guest_data and any(spec['p_vaddr'] <= address and address + size <= spec['p_vaddr'] + spec['p_filesz']
+                                   for spec in self.segments):
+            # Any other mapped segment (the SCE process-parameter segment).
+            return f'inttoptr (i64 {self.guest_base + address} to ptr)'
         raise Rejected(f'no native pointer contract for 0x{address:x}')
 
     def callee(self, address):
