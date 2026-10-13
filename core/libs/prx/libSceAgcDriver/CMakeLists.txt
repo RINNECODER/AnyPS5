@@ -877,6 +877,12 @@ if(BUILD_TESTING)
     add_test(NAME agc_descriptor_pool_recycling COMMAND agc_driver_recorder_tests --descriptor-pool-only)
     set_tests_properties(agc_descriptor_pool_recycling PROPERTIES SKIP_RETURN_CODE 77)
     add_test(NAME agc_queued_write_groups COMMAND agc_driver_recorder_tests --queued-write-groups-only)
+    add_test(NAME agc_pending_write_snapshot COMMAND agc_driver_recorder_tests --pending-write-snapshot-only)
+    set_tests_properties(agc_pending_write_snapshot PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(agc_pending_write_snapshot PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     if(WIN32)
         set_tests_properties(agc_host_import_unmap agc_parked_import_unmap agc_unit_shadow agc_descriptor_pool_recycling agc_queued_write_groups PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
