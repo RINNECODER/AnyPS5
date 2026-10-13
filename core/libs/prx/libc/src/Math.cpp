@@ -383,15 +383,10 @@ short APS5_VABI _FDtest_nid_postfix(const float* value) {
 }
 int APS5_VABI __isnanf_nid_postfix(float x) { return std::isnan(x) ? 1 : 0; }
 int APS5_VABI isnanf_nid_postfix(float x) { return __isnanf_nid_postfix(x); }
-int APS5_VABI __fpclassifyf_nid_postfix(float x) {
-    constexpr int Infinite = 0x01, NotANumber = 0x02, Normal = 0x04, Subnormal = 0x08, Zero = 0x10;
-    std::uint32_t bits;
-    std::memcpy(&bits, &x, sizeof(bits));
-    const auto exponent = bits & 0x7f800000u;
-    const auto fraction = bits & 0x007fffffu;
-    if (exponent == 0) return fraction != 0 ? Subnormal : Zero;
-    if (exponent == 0x7f800000u) return fraction != 0 ? NotANumber : Infinite;
-    return Normal;
+int APS5_VABI __fpclassifyf_nid_postfix(float x) { return SonyFpclassify(x); }
+int APS5_VABI __fpclassifyl_nid_postfix(long double x) {
+    static_assert(sizeof(long double) == 16, "guest long double requires x87 extended precision storage");
+    return SonyFpclassify(x);
 }
 int APS5_VABI __signbitf_nid_postfix(float x) { return std::signbit(x) ? 1 : 0; }
 int APS5_VABI __signbitl_nid_postfix(long double x) {
@@ -429,7 +424,7 @@ void APS5_VABI srand_nid_postfix(unsigned int seed) {
 }
 
 int APS5_VABI __fpclassifyd_nid_postfix(double value) {
-    return SonyFpclassifyd(value);
+    return SonyFpclassify(value);
 }
 
 double APS5_VABI _Sinh_nid_postfix(double x, double y) {
