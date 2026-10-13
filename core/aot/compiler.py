@@ -91,12 +91,14 @@ class Image:
             if segment['p_type'] == 0x61000001:
                 self.process_parameters.append((segment['p_vaddr'], segment['p_filesz']))
             if segment['p_type'] == 'PT_TLS':
-                require(segment['p_memsz'] == 0, 'TLS requires native TLS lowering')
+                require(segment['p_memsz'] == 0 or contracts.get('allow_unlowered_tls', False),
+                        'TLS requires native TLS lowering')
             if segment['p_type'] != 'PT_LOAD':
                 continue
             require(segment['p_filesz'] <= segment['p_memsz'], 'segment file size exceeds memory size')
             require(segment['p_offset'] + segment['p_filesz'] <= len(self.bytes), 'truncated segment')
-            require(segment['p_memsz'] <= 64 * 1024 * 1024, 'segment exceeds current offline allocation limit')
+            require(segment['p_memsz'] <= contracts.get('max_segment_bytes', 64 * 1024 * 1024),
+                    'segment exceeds current offline allocation limit')
             self.segments.append(segment)
         self.functions = {}
         for function in contracts['functions']:
@@ -122,6 +124,7 @@ class Image:
             require(left['address'] + left['size'] <= right['address'], 'overlapping function contracts')
         require(self.elf['e_entry'] in self.functions, 'entry function has no contract')
         self.imports = contracts['imports']
+        self.data_bindings = contracts.get('data_bindings', {})
         for contract in self.imports.values():
             signature(contract)
             try:
@@ -137,6 +140,7 @@ class Image:
             require(spec['address'] == seg['p_vaddr'] and spec['size'] == seg['p_memsz'], 'data contract must cover the complete segment')
             self.data.append(spec)
         self.import_slots = {}
+        self.data_import_slots = {}
         self.relocations = []
         try:
             self.dynamic = parse_dynamic(self.elf, self.read)
@@ -155,6 +159,7 @@ class Image:
         require(tags.get('DT_INIT_ARRAYSZ', 0) == 0 and tags.get('DT_FINI_ARRAYSZ', 0) == 0 and tags.get('DT_PREINIT_ARRAYSZ', 0) == 0,
                 'initializer arrays require native lifecycle lowering')
         referenced_imports = set()
+        referenced_data = set()
         for relocation in self.dynamic['relocations']:
             slot, kind, index, addend = (relocation[key] for key in ('slot', 'kind', 'symbol_index', 'addend'))
             if kind == 0:
@@ -162,17 +167,30 @@ class Image:
             if kind in (6, 7):
                 require(addend == 0, 'function import relocation has a nonzero addend')
                 symbol = self.dynamic['symbols'][index]
-                require(symbol['info'] & 15 in (0, 2), 'data or TLS import requires a separate native binding')
                 name = symbol['name']
-                require(name in self.imports, f'missing import ABI: {name}')
-                self.import_slots[slot] = self.imports[name]
-                referenced_imports.add(name)
+                if symbol['info'] & 15 == 1:
+                    require(name in self.data_bindings, f'missing data binding: {name}')
+                    self.data_import_slots[slot] = self.data_bindings[name]
+                    referenced_data.add(name)
+                else:
+                    require(symbol['info'] & 15 in (0, 2), 'unsupported import symbol type')
+                    require(name in self.imports, f'missing import ABI: {name}')
+                    self.import_slots[slot] = self.imports[name]
+                    referenced_imports.add(name)
+            elif kind == 1:
+                symbol = self.dynamic['symbols'][index]
+                require(symbol['info'] & 15 in (0, 1, 2), 'unsupported data import symbol type')
+                name = symbol['name']
+                require(name in self.data_bindings, f'missing data binding: {name}')
+                self.data_import_slots[slot] = self.data_bindings[name]
+                referenced_data.add(name)
             else:
                 require(kind == 8 and index == 0, 'unsupported data relocation')
                 self.relocations.append((slot, addend))
         expected = {tuple(pair) for pair in contracts['pointer_relocations']}
         require(set(self.relocations) == expected and len(expected) == len(self.relocations), 'pointer relocation contracts do not match the image')
         require(referenced_imports == set(self.imports), 'unused import contracts')
+        require(referenced_data == set(self.data_bindings), 'unused data bindings')
         self.decoder = Cs(CS_ARCH_X86, CS_MODE_64)
         self.decoder.detail = True
         self.call_contracts = {}
@@ -257,8 +275,13 @@ class Function:
         self.lines = []
         self.serial = 0
         self.depth = max([128] + [-obj['offset'] for obj in contract.get('stack_objects', [])])
-        self.argument_locations = abi.locations(contract['parameters'])
-        self.stack_end = max([8] + [loc['offset'] + 8 for loc in self.argument_locations if loc['kind'] == 'stack'])
+        self.uniform = abi.uniform(contract)
+        if self.uniform:
+            contract.setdefault('result', 'void')
+            contract.setdefault('parameters', [])
+        self.argument_locations = abi.uniform_locations() if self.uniform else abi.locations(contract['parameters'])
+        self.stack_end = (abi.uniform_stack_end() if self.uniform else
+                          max([8] + [loc['offset'] + 8 for loc in self.argument_locations if loc['kind'] == 'stack']))
         self.image.annotated_calls(contract)
         self.discover()
         try:
@@ -348,9 +371,9 @@ class Function:
                     self.check_register(ins, state, *ALIASES[name])
             base_name = ins.reg_name(mem.base)
             index_name = ins.reg_name(mem.index)
-            if ins.mnemonic != 'lea' and state.get('constants', {}).get(base_name, 0) != 0 and not (index_name in state['pointers'] and mem.scale == 1):
+            if not self.uniform and ins.mnemonic != 'lea' and state.get('constants', {}).get(base_name, 0) != 0 and not (index_name in state['pointers'] and mem.scale == 1):
                 self.fail(ins, 'literal-derived memory address requires an instruction-bound pointer contract')
-            if ins.mnemonic != 'lea' and base_name not in ('', 'rip') and base_name not in state['native_pointers'] and not (index_name in state['native_pointers'] and mem.scale == 1) and not (checked_stack.lookup(self, ins, operand) or {}).get('dynamic_base', False) and checked_pointers.base_record(self, ins, operand) is None:
+            if not self.uniform and ins.mnemonic != 'lea' and base_name not in ('', 'rip') and base_name not in state['native_pointers'] and not (index_name in state['native_pointers'] and mem.scale == 1) and not (checked_stack.lookup(self, ins, operand) or {}).get('dynamic_base', False) and checked_pointers.base_record(self, ins, operand) is None:
                 self.fail_pointer(ins, 'memory address has no proven native pointer origin')
             frame = state['pointers'].get(base_name)
             if base_name in ('rsp', 'rbp') or (frame and frame[0] == 'frame'):
@@ -360,7 +383,7 @@ class Function:
                 offset = base + mem.disp
                 if not mem.index and ins.mnemonic != 'lea' and offset + operand.size > 0:
                     valid = any(loc['kind'] == 'stack' and loc['offset'] <= offset and offset + operand.size <= loc['offset'] + loc['bits'] // 8 for loc in self.argument_locations)
-                    if not valid:
+                    if not valid and not self.uniform:
                         self.fail(ins, 'read or write of return address or undeclared stack arguments')
                 self.depth = max(self.depth, -(base + mem.disp) + 128)
         elif operand.type != X86_OP_IMM:
@@ -424,15 +447,19 @@ class Function:
             self.fail(ins, 'import target has no proven native pointer origin')
         if state['rsp'] != 0 or state['saved']:
             self.fail(ins, 'tail call requires a balanced native frame')
-        if abi.result_type(callee['result']) != abi.result_type(self.contract['result']) or abi.return_register(callee['result']) != abi.return_register(self.contract['result']):
+        if not self.uniform and (
+                abi.result_type(callee['result']) != abi.result_type(self.contract['result'])
+                or abi.return_register(callee['result']) != abi.return_register(self.contract['result'])):
             self.fail(ins, 'tail-call return ABI is incompatible with the owner')
         incoming = {loc['offset']: loc for loc in self.argument_locations if loc['kind'] == 'stack'}
         for loc in abi.locations(callee['parameters']):
             if loc['kind'] == 'register':
                 self.check_register(ins, state, loc['name'], loc['bits'])
-                if loc['type'] == 'ptr' and loc['name'] not in state['native_pointers'] and state['constants'].get(loc['name']) != 0:
+                if loc['type'] == 'ptr' and loc['name'] not in state['native_pointers'] and state['constants'].get(loc['name']) != 0 and not self.uniform:
                     self.fail_pointer(ins, 'pointer argument has no proven native pointer origin')
             else:
+                if self.uniform:
+                    continue
                 original = incoming.get(loc['offset'])
                 if original is None or abi.parameter_type(original['type']) != abi.parameter_type(loc['type']):
                     self.fail(ins, 'tail stack argument lacks a compatible declared incoming slot')
@@ -500,9 +527,9 @@ class Function:
                 self.fail(ins, 'native callee requires original provider bindings')
             if slot == 'operand':
                 self.read_operand(ins, state, args[0])
-                if (args[0].type == X86_OP_REG or self.memory_origin(ins, state, args[0]) is not None) and not self.pointer_operand(ins, state, args[0]):
+                if not self.uniform and (args[0].type == X86_OP_REG or self.memory_origin(ins, state, args[0]) is not None) and not self.pointer_operand(ins, state, args[0]):
                     self.fail(ins, 'indirect call target has no proven native pointer origin')
-                if args[0].type == X86_OP_MEM and self.memory_origin(ins, state, args[0]) is None:
+                if not self.uniform and args[0].type == X86_OP_MEM and self.memory_origin(ins, state, args[0]) is None:
                     base, index = ins.reg_name(args[0].mem.base), ins.reg_name(args[0].mem.index)
                     provenance = state['pointers'].get(base)
                     if not provenance or provenance[0] != 'parameter' or index in state['native_pointers']:
@@ -514,13 +541,13 @@ class Function:
             for index, loc in enumerate(abi.locations(callee['parameters'])):
                 if loc['kind'] == 'register':
                     self.check_register(ins, state, loc['name'], loc['bits'])
-                    if loc['type'] == 'ptr' and loc['name'] not in state['native_pointers'] and state['constants'].get(loc['name']) != 0 and not checked_pointers.argument_allowed(self, ins, index):
+                    if loc['type'] == 'ptr' and loc['name'] not in state['native_pointers'] and state['constants'].get(loc['name']) != 0 and not checked_pointers.argument_allowed(self, ins, index) and not self.uniform:
                         self.fail_pointer(ins, 'pointer argument has no proven native pointer origin')
                 else:
                     offset = state['rsp'] + loc['offset'] - 8
                     if offset + 8 > 0:
                         self.fail(ins, 'outgoing stack argument is not allocated')
-                    if loc['type'] == 'ptr' and offset not in state['stack_pointers'] and stack_values.read(state, offset, 8) != 0 and not checked_pointers.argument_allowed(self, ins, index):
+                    if loc['type'] == 'ptr' and offset not in state['stack_pointers'] and stack_values.read(state, offset, 8) != 0 and not checked_pointers.argument_allowed(self, ins, index) and not self.uniform:
                         self.fail_pointer(ins, 'stack pointer argument has no proven native pointer origin')
             for reg in VOLATILE | set(VECTOR_STORAGE):
                 state['known'].pop(reg, None)
@@ -531,7 +558,10 @@ class Function:
             if memory_effects is None or memory_effects.parameter_writes or any(kind == 'frame' for kind, _, _ in memory_effects.writes):
                 self.invalidate_stack_aliases(state)
             state['flags'] = set()
-            if callee['result'] != 'void':
+            if abi.uniform(callee):
+                for reg in VOLATILE | set(VECTOR_STORAGE):
+                    state['known'][reg] = (1 << 128) - 1 if reg in VECTOR_STORAGE else MASK64
+            elif callee['result'] != 'void':
                 state['known'][abi.return_register(callee['result'])] = (1 << abi.bits(callee['result'])) - 1
             return state
         if op == 'ret':
@@ -1062,11 +1092,66 @@ class Function:
             return self.emit(f'bitcast {abi.llvm_type(typ)} {value} to i{abi.bits(typ)}')
         return value
 
+    def uniform_gep(self, block, bank, index):
+        return self.emit(f'getelementptr inbounds %regfile, ptr {block}, i64 0, i32 {bank}, i64 {index}')
+
+    def uniform_load_registers(self, block, skip=()):
+        for index, reg in enumerate(REGISTERS):
+            if reg in skip:
+                continue
+            gep = self.uniform_gep(block, 0, index)
+            value = self.emit(f'load i64, ptr {gep}, align 8')
+            self.lines.append(f'  store i64 {value}, ptr %{reg}, align 8')
+        for index, reg in enumerate(VECTOR_REGISTERS):
+            gep = self.uniform_gep(block, 1, index)
+            value = self.emit(f'load i128, ptr {gep}, align 16')
+            self.lines.append(f'  store i128 {value}, ptr %{reg}, align 16')
+
+    def uniform_store_registers(self, block):
+        for index, reg in enumerate(REGISTERS):
+            value = self.emit(f'load i64, ptr %{reg}, align 8')
+            gep = self.uniform_gep(block, 0, index)
+            self.lines.append(f'  store i64 {value}, ptr {gep}, align 8')
+        for index, reg in enumerate(VECTOR_REGISTERS):
+            value = self.emit(f'load i128, ptr %{reg}, align 16')
+            gep = self.uniform_gep(block, 1, index)
+            self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
+
+    def uniform_stack_out(self, block, rsp):
+        for index in range(abi.UNIFORM_STACK_SLOTS):
+            offset = abi.UNIFORM_STACK_BASE + 8 * index
+            value = self.emit(f'load i64, ptr {self.frame_pointer(rsp + offset - 8)}, align 1')
+            gep = self.uniform_gep(block, 2, index)
+            self.lines.append(f'  store i64 {value}, ptr {gep}, align 8')
+
+    def uniform_stack_in(self, block):
+        for index in range(abi.UNIFORM_STACK_SLOTS):
+            offset = abi.UNIFORM_STACK_BASE + 8 * index
+            gep = self.uniform_gep(block, 2, index)
+            value = self.emit(f'load i64, ptr {gep}, align 8')
+            self.lines.append(f'  store i64 {value}, ptr {self.frame_pointer(offset)}, align 1')
+
+    def uniform_call(self, ins, callee, slot, state, tail, result):
+        self.uniform_store_registers('%rf_out')
+        self.uniform_stack_out('%rf_out', state['rsp'])
+        if slot == 'operand':
+            target = self.emit(f'inttoptr i64 {self.read(ins, ins.operands[0], 64)} to ptr')
+        else:
+            target = '@' + callee['name']
+        self.lines.append(f'  call void {target}(ptr %rf_out)')
+        self.uniform_load_registers('%rf_out', skip=('rsp',))
+        if tail:
+            self.uniform_store_registers('%rf')
+            self.lines.append('  ret void')
+
     def lower(self):
         result, parameters = signature(self.contract)
         name = self.contract['name']
-        args = ', '.join(f'{abi.parameter_type(typ)} %arg{i}' for i, typ in enumerate(parameters))
-        self.lines = [f'define {abi.result_type(result)} @{name}({args}) uwtable {{', 'entry:']
+        if self.uniform:
+            self.lines = [f'define void @{name}(ptr %rf) uwtable {{', 'entry:']
+        else:
+            args = ', '.join(f'{abi.parameter_type(typ)} %arg{i}' for i, typ in enumerate(parameters))
+            self.lines = [f'define {abi.result_type(result)} @{name}({args}) uwtable {{', 'entry:']
         for reg in REGISTERS:
             self.lines.append(f'  %{reg} = alloca i64, align 8')
             unknown = self.emit('freeze i64 poison')
@@ -1078,15 +1163,21 @@ class Function:
         for flag in ('zf', 'sf', 'cf', 'of', 'pf'):
             self.lines.append(f'  %{flag} = alloca i1, align 1')
         self.lines.append(f'  %frame = alloca [{self.depth + self.stack_end} x i8], align 16')
-        self.store('rsp', self.emit(f'ptrtoint ptr {self.frame_pointer(0)} to i64'))
-        for i, loc in enumerate(self.argument_locations):
-            value = self.machine_value(loc['type'], f'%arg{i}')
-            if loc['kind'] == 'stack':
-                self.lines.append(f"  store i{loc['bits']} {value}, ptr {self.frame_pointer(loc['offset'])}, align 1")
-            elif loc['name'] in VECTOR_REGISTERS:
-                self.store_vector(loc['name'], value, loc['bits'], zero_upper=True)
-            else:
-                self.store(loc['name'], value, loc['bits'])
+        if self.uniform:
+            self.lines.append('  %rf_out = alloca %regfile, align 16')
+            self.uniform_load_registers('%rf')
+            self.uniform_stack_in('%rf')
+            self.store('rsp', self.emit(f'ptrtoint ptr {self.frame_pointer(0)} to i64'))
+        else:
+            self.store('rsp', self.emit(f'ptrtoint ptr {self.frame_pointer(0)} to i64'))
+            for i, loc in enumerate(self.argument_locations):
+                value = self.machine_value(loc['type'], f'%arg{i}')
+                if loc['kind'] == 'stack':
+                    self.lines.append(f"  store i{loc['bits']} {value}, ptr {self.frame_pointer(loc['offset'])}, align 1")
+                elif loc['name'] in VECTOR_REGISTERS:
+                    self.store_vector(loc['name'], value, loc['bits'], zero_upper=True)
+                else:
+                    self.store(loc['name'], value, loc['bits'])
         if self.contract.get('floating_point'):
             control = self.emit('call i64 asm sideeffect "mrs $0, FPCR", "=r"()')
             mask = (3 << 22) | (1 << 24) | 0x9f03
@@ -1141,45 +1232,63 @@ class Function:
             elif op == 'call' or address in self.tail_calls:
                 tail = address in self.tail_calls
                 callee, slot = self.tail_calls[address] if tail else self.image.call(ins, self.contract)
-                arguments = []
-                native_arguments = []
-                for index, loc in enumerate(abi.locations(callee['parameters'])):
-                    if loc['kind'] == 'stack':
-                        offset = loc['offset'] if tail else state['rsp'] + loc['offset'] - 8
-                        value = self.emit(f"load i{loc['bits']}, ptr {self.frame_pointer(offset)}, align 1")
-                    else:
-                        value = self.load(loc['name'], loc['bits'])
-                    value = self.native_value(loc['type'], value)
-                    if not tail and loc['type'] == 'ptr':
-                        checked_pointers.emit_argument(self, ins, index, callee, value)
-                    arguments.append(f"{abi.parameter_type(loc['type'])} {value}")
-                    native_arguments.append(value)
-                if slot == 'operand':
-                    target = self.emit(f'inttoptr i64 {self.read(ins, args[0], 64)} to ptr')
+                if abi.uniform(callee):
+                    self.uniform_call(ins, callee, slot, state, tail, result)
+                    terminal = tail
                 else:
-                    target = '@' + callee['name'] if slot is None else self.emit(f'load ptr, ptr {self.image.pointer(slot, 8)}, align 1')
-                expression = f"call {abi.result_type(callee['result'])} {target}({', '.join(arguments)})"
-                if callee['result'] == 'void':
-                    self.lines.append('  ' + expression)
-                    value = None
-                else:
-                    value = self.emit(expression)
-                if value is not None and not callee.get('noreturn'):
-                    pointer_outputs.emit_checks(self, ins, callee, native_arguments, value)
-                if callee.get('noreturn'):
-                    self.lines.append('  unreachable')
-                    terminal = True
-                elif tail:
-                    self.lines.append('  ret void' if value is None else f"  ret {abi.llvm_type(result)} {value}")
-                    terminal = True
-                elif value is not None:
-                    value = self.machine_value(callee['result'], value)
-                    if callee['result'] in abi.FLOAT_TYPES:
-                        self.store_vector('xmm0', value, abi.bits(callee['result']), zero_upper=True)
+                    arguments = []
+                    native_arguments = []
+                    for index, loc in enumerate(abi.locations(callee['parameters'])):
+                        if loc['kind'] == 'stack':
+                            offset = loc['offset'] if tail else state['rsp'] + loc['offset'] - 8
+                            value = self.emit(f"load i{loc['bits']}, ptr {self.frame_pointer(offset)}, align 1")
+                        else:
+                            value = self.load(loc['name'], loc['bits'])
+                        value = self.native_value(loc['type'], value)
+                        if not tail and loc['type'] == 'ptr':
+                            checked_pointers.emit_argument(self, ins, index, callee, value)
+                        arguments.append(f"{abi.parameter_type(loc['type'])} {value}")
+                        native_arguments.append(value)
+                    if slot == 'operand':
+                        target = self.emit(f'inttoptr i64 {self.read(ins, args[0], 64)} to ptr')
                     else:
-                        self.store('rax', value, abi.bits(callee['result']))
+                        target = '@' + callee['name'] if slot is None else self.emit(f'load ptr, ptr {self.image.pointer(slot, 8)}, align 1')
+                    expression = f"call {abi.result_type(callee['result'])} {target}({', '.join(arguments)})"
+                    if callee['result'] == 'void':
+                        self.lines.append('  ' + expression)
+                        value = None
+                    else:
+                        value = self.emit(expression)
+                    if value is not None and not callee.get('noreturn'):
+                        pointer_outputs.emit_checks(self, ins, callee, native_arguments, value)
+                    if callee.get('noreturn'):
+                        self.lines.append('  unreachable')
+                        terminal = True
+                    elif tail:
+                        if self.uniform:
+                            if value is not None:
+                                value = self.machine_value(callee['result'], value)
+                                if callee['result'] in abi.FLOAT_TYPES:
+                                    self.store_vector('xmm0', value, abi.bits(callee['result']), zero_upper=True)
+                                else:
+                                    self.store('rax', value, abi.bits(callee['result']))
+                            self.uniform_store_registers('%rf')
+                            self.lines.append('  ret void')
+                        else:
+                            self.lines.append('  ret void' if value is None else f"  ret {abi.llvm_type(result)} {value}")
+                        terminal = True
+                    elif value is not None:
+                        value = self.machine_value(callee['result'], value)
+                        if callee['result'] in abi.FLOAT_TYPES:
+                            self.store_vector('xmm0', value, abi.bits(callee['result']), zero_upper=True)
+                        else:
+                            self.store('rax', value, abi.bits(callee['result']))
             elif op == 'ret':
-                if result == 'void': self.lines.append('  ret void')
+                if self.uniform:
+                    self.uniform_store_registers('%rf')
+                    self.lines.append('  ret void')
+                elif result == 'void':
+                    self.lines.append('  ret void')
                 else:
                     value = self.load(abi.return_register(result), abi.bits(result))
                     value = self.native_value(result, value)
@@ -1209,6 +1318,8 @@ def compile_image(image):
     except ValueError as error:
         raise Rejected(str(error)) from error
     lines = [f'target triple = "{image.target_spec["triple"]}"', 'declare void @llvm.trap()', 'declare i8 @llvm.ctpop.i8(i8)']
+    if any(abi.uniform(spec) for spec in image.functions.values()):
+        lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     if image.contracts.get('guard_diagnostics', False):
         lines.append('declare void @NativeAotReportGuardFailure_nid_no_patch(i64, i32)')
     if any(f.checked_pointer_loads or f.checked_pointer_arguments or f.checked_pointer_bases for f in functions):
@@ -1218,8 +1329,19 @@ def compile_image(image):
         result, parameters = signature(contract)
         require(contract['name'] not in names, 'duplicate native name')
         names.add(contract['name'])
-        suffix = ' noreturn' if contract.get('noreturn') else ''
-        lines.append(f"declare {abi.result_type(result)} @{contract['name']}({', '.join(abi.parameter_type(t) for t in parameters)}){suffix}")
+        argument_types = ', '.join(abi.parameter_type(t) for t in parameters)
+        if contract.get('stub'):
+            if result == 'void':
+                lines.append(f"define void @{contract['name']}({argument_types}) {{ entry: ret void }}")
+            elif result == 'ptr':
+                lines.append(f"define ptr @{contract['name']}({argument_types}) {{ entry: ret ptr null }}")
+            elif result in abi.FLOAT_TYPES:
+                lines.append(f"define {abi.result_type(result)} @{contract['name']}({argument_types}) {{ entry: ret {abi.llvm_type(result)} 0.0 }}")
+            else:
+                lines.append(f"define {abi.result_type(result)} @{contract['name']}({argument_types}) {{ entry: ret i{abi.bits(result)} 0 }}")
+        else:
+            suffix = ' noreturn' if contract.get('noreturn') else ''
+            lines.append(f"declare {abi.result_type(result)} @{contract['name']}({argument_types}){suffix}")
     for spec in image.data:
         if spec['address'] in image.immutable_initializers:
             lines.append(immutable_data.declaration(image, spec))
@@ -1228,11 +1350,13 @@ def compile_image(image):
         value = ''.join(f'\\{byte:02X}' for byte in raw)
         writable = image.segment(spec['address'])['p_flags'] & 2 or any(spec['address'] <= slot < spec['address'] + spec['size'] for slot in [*image.import_slots, *(slot for slot, _ in image.relocations)])
         lines.append(f"@data_{spec['address']:x} = {'global' if writable else 'constant'} [{len(raw)} x i8] c\"{value}\", align 16")
+    for name, binding in image.data_bindings.items():
+        lines.append(f"@{binding['name']} = global [{binding['size']} x i8] zeroinitializer, align 16")
     if descriptor is not None:
         lines.extend(native_image.declarations(image, descriptor))
     if image.immutable_regions:
         lines.extend(immutable_data.declarations(image))
-    if image.relocations or image.import_slots or descriptor is not None or image.immutable_regions:
+    if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions:
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
         for slot, target in image.relocations:
@@ -1243,6 +1367,10 @@ def compile_image(image):
             if slot in image.immutable_cells:
                 continue
             lines.append(f"  store ptr @{contract['name']}, ptr {image.pointer(slot, 8)}, align 1")
+        for slot, binding in image.data_import_slots.items():
+            if slot in image.immutable_cells:
+                continue
+            lines.append(f"  store ptr @{binding['name']}, ptr {image.pointer(slot, 8)}, align 1")
         if image.immutable_regions:
             lines.append(f'  call void @NativeAotRequireReadOnly_nid_no_patch(ptr @__aps5_aot_readonly_ranges, i64 {len(image.immutable_regions)})')
         if descriptor is not None:
