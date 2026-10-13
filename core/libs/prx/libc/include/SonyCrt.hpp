@@ -159,13 +159,20 @@ inline SonyLconv* SonyLocaleconv(void) {
     return &value;
 }
 
-inline int SonyFpclassifyd(double value) {
-    if (std::isnan(value)) return 2;
-    if (std::isinf(value)) return 1;
-    if (value == 0.0) return 0;
-    if (std::fpclassify(value) == FP_SUBNORMAL) return -2;
-    return -1;
+// Sony's fpclassify codes (Dinkumware): FP_SUBNORMAL -2, FP_NORMAL -1, FP_ZERO 0,
+// FP_INFINITE 1, FP_NAN 2, the codes _FDtest also returns.
+template <typename Float>
+inline int SonyFpclassify(Float value) {
+    switch (std::fpclassify(value)) {
+    case FP_NAN: return 2;
+    case FP_INFINITE: return 1;
+    case FP_ZERO: return 0;
+    case FP_SUBNORMAL: return -2;
+    default: return -1;
+    }
 }
+
+inline int SonyFpclassifyd(double value) { return SonyFpclassify(value); }
 
 inline double SonySinh(double x, double y) {
     return y * std::sinh(x);
