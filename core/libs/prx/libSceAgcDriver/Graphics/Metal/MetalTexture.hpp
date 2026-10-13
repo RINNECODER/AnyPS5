@@ -23,6 +23,9 @@ public:
     MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor, bool compare = false);
     MetalTexture(const MetalDevice& backend, std::span<const std::uint32_t> words, bool compare = false);
     [[nodiscard]] bool CanShareBacking(const Graphics::GuestTextureResource& descriptor) const;
+    // CanShareBacking, except that the two descriptors may name different DCC metadata. Only valid
+    // when every DCC-bearing side's keys say "uncompressed" (plain texels): MetalShaderResources checks.
+    [[nodiscard]] bool CanShareBackingIgnoringDcc(const Graphics::GuestTextureResource& descriptor) const;
     // Why CanShareBacking(descriptor) is false, for error messages.
     [[nodiscard]] std::string ShareMismatch(const Graphics::GuestTextureResource& descriptor) const;
     [[nodiscard]] std::shared_ptr<MetalTexture> CreateView(const Graphics::GuestTextureResource& descriptor, bool compare = false) const;
@@ -61,7 +64,8 @@ private:
     MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor,
                  bool compare, bool minimumLodLowered);
     [[nodiscard]] std::shared_ptr<MetalTexture> CreateView(const Graphics::GuestTextureResource& descriptor,
-                                                        bool compare, bool minimumLodLowered) const;
+                                                        bool compare, bool minimumLodLowered, bool ignoreDcc = false) const;
+    [[nodiscard]] bool canShareBacking(const Graphics::GuestTextureResource& descriptor, bool ignoreDcc) const;
     struct Backing {
         Graphics::GuestTextureResource descriptor;
         Graphics::SurfaceGeometry geometry;

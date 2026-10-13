@@ -369,6 +369,23 @@ Graphics::DccKeys MetalShaderResources::textureKeys(const Graphics::GuestTexture
     throw std::runtime_error(message);
 }
 
+// A mip-chain pass binds one surface twice at the same base: a render target view of one level
+// that names the surface's DCC metadata and a sampled view of every level that names none (or the
+// reverse). While the metadata says "uncompressed" both views mean the same plain texels, so they
+// share one backing; a written view leaves the keys uncompressed (markDccUncompressed).
+bool MetalShaderResources::sharesPlainTexels(const Image& image, const Graphics::GuestTextureResource& descriptor) {
+    const auto& original = image.texture->Descriptor();
+    if (original.dccAddress == descriptor.dccAddress) return false;
+    if (original.dccAddress != 0 && descriptor.dccAddress != 0) return false;
+    if (!image.texture->CanShareBackingIgnoringDcc(descriptor)) return false;
+    if (original.dccAddress != 0) return image.keys == Graphics::DccKeys::Uncompressed;
+    try {
+        return textureKeys(descriptor, image.texture->GuestBytes()) == Graphics::DccKeys::Uncompressed;
+    } catch (const std::exception&) {
+        return false;  // compressed or aliased metadata: the overlap is reported as before
+    }
+}
+
 void MetalShaderResources::validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys) {
     if (descriptor.dccAddress == 0) return;
     if (!GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.baseAddress), bytes, true)) {
@@ -423,7 +440,8 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         throw std::invalid_argument("Metal texture atomics require one 32-bit component");
     }
     for (auto& image : images) {
-        if (!image.texture->CanShareBacking(descriptor)) continue;
+        const bool dccDiffers = !image.texture->CanShareBacking(descriptor) && sharesPlainTexels(image, descriptor);
+        if (!dccDiffers && !image.texture->CanShareBacking(descriptor)) continue;
         if (Graphics::IsDccClear(image.keys)) {
             const auto& original = image.texture->Descriptor();
             const auto elementBytes = Graphics::BytesPerElement(original.format);
@@ -452,7 +470,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         for (const auto& view : imageViews) {
             if (textureKey(view.texture->Descriptor(), view.compare) == textureKey(descriptor, compare)) return view.texture;
         }
-        auto view = image.texture->CreateView(descriptor, compare, minimumLodLowered);
+        auto view = image.texture->CreateView(descriptor, compare, minimumLodLowered, dccDiffers);
         imageViews.push_back({view, compare});
         resident.push_back(view->Texture());
         return view;
