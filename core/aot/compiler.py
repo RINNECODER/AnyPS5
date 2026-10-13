@@ -1402,6 +1402,7 @@ def compile_image(image):
     except ValueError as error:
         raise Rejected(str(error)) from error
     lines = [f'target triple = "{image.target_spec["triple"]}"', 'declare void @llvm.trap()', 'declare i8 @llvm.ctpop.i8(i8)']
+    lines.extend(avx.INTRINSIC_DECLARATIONS)
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     dispatch_enabled = bool(image.contracts.get('dispatch'))
