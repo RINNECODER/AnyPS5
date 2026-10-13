@@ -9,10 +9,18 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace AgcDriver::Metal {
+
+// Thrown to callers once the driver has been stopped. Entry points for guest threads
+// translate it into LibcAwaitExit so it never unwinds through guest frames.
+class DriverStopped final : public std::runtime_error {
+public:
+    DriverStopped() : std::runtime_error("Metal driver has shut down") {}
+};
 
 struct ReadableGuestRange {
     std::uint64_t address;

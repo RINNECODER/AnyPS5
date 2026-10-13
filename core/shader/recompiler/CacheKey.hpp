@@ -243,6 +243,7 @@ private:
         append(key, value.float64DenormPreserve);
         append(key, value.registrationModules);
         append(key, value.registrationWordLimit);
+        append(key, value.vertexSubgroups);
     }
 };
 
