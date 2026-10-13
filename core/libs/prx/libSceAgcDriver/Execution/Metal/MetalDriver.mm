@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 
 namespace AgcDriver::Metal {
 namespace {
@@ -429,6 +430,53 @@ void MetalDriver::SubmitCommandBuffer(std::uint64_t commandAddress, std::uint32_
     submit({commandAddress, wordCount, flags}, queue, std::nullopt);
 }
 
+namespace {
+
+// The GPU fetches a submitted command buffer some time after the submit call, so a title may still
+// be writing the last words of one when it submits it (a job thread finishing a buffer the
+// submitting thread hands over): the console reads them in time. This capture runs inside the
+// call. One that fails validation is read again for up to RecaptureMs before the error stands;
+// the log says whether the words changed, which tells a late writer from a malformed buffer.
+constexpr int RecaptureMs = 20;
+
+void CaptureAndValidate(DriverDetail::Submission& submission, std::uint64_t address, std::size_t words) {
+    const auto capture = [&] {
+        submission.rewindTail = nullptr;
+        submission.rewindWords = 0;
+        if (words != 0) CaptureSubmissionCommands(submission, address, words);
+    };
+    capture();
+    std::exception_ptr rejected;
+    try {
+        ValidateSubmission(submission, address);
+        return;
+    } catch (const std::exception&) {
+        rejected = std::current_exception();
+    }
+    if (words == 0) std::rethrow_exception(rejected);
+    const auto first = submission.commands;
+    bool changed = false;
+    for (int waited = 1; waited <= RecaptureMs; ++waited) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        capture();
+        if (submission.commands == first) continue;
+        changed = true;
+        try {
+            ValidateSubmission(submission, address);
+        } catch (const std::exception&) {
+            continue;
+        }
+        std::fprintf(stderr, "[metal] submission at 0x%llx (%zu words) was still being written at submit: valid %d ms later\n",
+            static_cast<unsigned long long>(address), words, waited);
+        return;
+    }
+    std::fprintf(stderr, "[metal] submission at 0x%llx (%zu words) rejected; its words %s over %d ms\n", static_cast<unsigned long long>(address),
+        words, changed ? "changed but stayed invalid" : "did not change", RecaptureMs);
+    std::rethrow_exception(rejected);
+}
+
+}
+
 void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue,
     std::optional<std::uint64_t> guestPacketAddress) {
     impl->CheckFailureAndStopping();
@@ -446,8 +494,7 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
             descriptor = {reinterpret_cast<std::uintptr_t>(guestDescriptor.addr), guestDescriptor.dw_num, guestDescriptor.flags};
         }
         require(descriptor.flags == 0, "nonzero submission flags are not implemented");
-        if (descriptor.words != 0) CaptureSubmissionCommands(submission, descriptor.address, descriptor.words);
-        ValidateSubmission(submission, descriptor.address);
+        CaptureAndValidate(submission, descriptor.address, descriptor.words);
         CaptureIndirectRegisterLists(submission);
     }
     impl->WaitForFlipRoom(submission);
@@ -1066,8 +1113,7 @@ void MetalDriver::Impl::ExecuteRewindTail(const Submission& stalled, QueueState&
     {
         std::lock_guard gpuLock(gpuMutex);
         NativeGuestMemory::BorrowedRangesScope current(ranges);
-        CaptureSubmissionCommands(tail, tailAddress, stalled.rewindWords);
-        ValidateSubmission(tail, tailAddress);
+        CaptureAndValidate(tail, tailAddress, stalled.rewindWords);
         CaptureIndirectRegisterLists(tail);
     }
     WaitForFlipRoom(tail);

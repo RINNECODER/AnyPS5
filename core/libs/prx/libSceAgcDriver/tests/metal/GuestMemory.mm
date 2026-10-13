@@ -259,11 +259,83 @@ void workingSetCases(const MetalTests::Context& context) {
     ::munmap(mapping, mappingBytes + granule);
 }
 
+
+// Adjacent guest mappings registered as separate spans (identity-mapped, as on the Rosetta path):
+// a binding across their boundary is one host run, bound through a cached bridge alias of the same
+// host pages, so GPU writes land in place and nothing is copied.
+void bridgeCases(const MetalTests::Context& context) {
+    using AgcDriver::Metal::MetalGuestHostAliases;
+    namespace Native = AgcDriver::NativeGuestMemory;
+    constexpr std::size_t spanBytes = 64 << 10;
+    void* mapping = ::mmap(nullptr, 3 * spanBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    MetalTests::Require(mapping != MAP_FAILED, "Bridge host mapping failed");
+    auto* base = static_cast<std::byte*>(mapping);
+    const auto guest = reinterpret_cast<std::uint64_t>(base);
+    const std::span<std::byte> first(base, spanBytes), second(base + spanBytes, spanBytes), third(base + 2 * spanBytes, spanBytes);
+    constexpr std::uint64_t boundaryOffset = spanBytes - 256, boundaryBytes = 512;
+    const auto boundary = guest + boundaryOffset;
+
+#if ANYPS5_METAL_GUEST_REPLAY
+    // NativeGuestMemory is linked with the guest replay (and the Rosetta driver).
+    {
+        const std::vector<Native::BorrowedRange> borrowed{{guest, first, true}, {guest + spanBytes, second, true}};
+        Native::BorrowedRangesScope scope(borrowed);
+        const auto host = Native::ContiguousBorrowedRange(boundary, boundaryBytes, true);
+        MetalTests::Require(host.data() == base + boundaryOffset && host.size() == boundaryBytes, "Range across adjacent host-contiguous spans was not one host run");
+    }
+    {
+        // Adjacent in guest memory but not in host memory: still two runs.
+        const std::vector<Native::BorrowedRange> borrowed{{guest, first, true}, {guest + spanBytes, third, true}};
+        Native::BorrowedRangesScope scope(borrowed);
+        Reject([&] { static_cast<void>(Native::ContiguousBorrowedRange(boundary, boundaryBytes)); }, "Range across host-discontiguous spans was accepted");
+    }
+    {
+        const std::vector<Native::BorrowedRange> borrowed{{guest, first, true}, {guest + spanBytes, second, false}};
+        Native::BorrowedRangesScope scope(borrowed);
+        static_cast<void>(Native::ContiguousBorrowedRange(boundary, boundaryBytes, false));
+        Reject([&] { static_cast<void>(Native::ContiguousBorrowedRange(boundary, boundaryBytes, true)); }, "Writable range across a read-only span was accepted");
+    }
+#endif
+
+    MetalGuestHostAliases aliases(context.device);
+    GuestMemory memory(context.device);
+    memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(guest, first, true);
+    memory.RegisterBorrowedHostSpanUntilSnapshotsComplete(guest + spanBytes, second, true);
+    auto snapshot = memory.CaptureAfterPriorSnapshotsComplete(&aliases);
+    MetalTests::Require(snapshot.Buffers().count == 2 && snapshot.CopiedBytes() == 0, "Adjacent spans were not bound as two aliases");
+    MetalTests::Require(!snapshot.Bridge(boundary, boundaryBytes, nullptr), "A bridge was made without host aliases");
+    const auto bridged = snapshot.Bridge(boundary, boundaryBytes, &aliases);
+    MetalTests::Require(bridged.has_value() && static_cast<std::byte*>(bridged->first.contents) + bridged->second == base + boundaryOffset,
+        "Range across adjacent aliased spans was not bridged over the same host bytes");
+    MetalTests::Require(aliases.BridgeCount() == 1, "Bridge was not cached");
+    const auto inner = snapshot.Bridge(boundary + 16, 64, &aliases);
+    MetalTests::Require(inner && inner->first == bridged->first && aliases.BridgeCount() == 1, "A range inside a cached bridge made another one");
+    MetalTests::Require(!snapshot.Bridge(guest + 2 * spanBytes - 16, 32, &aliases), "Range past the registered spans was bridged");
+
+    // A GPU write through the bridge lands in the host pages of both spans.
+    auto commands = [context.queue commandBuffer];
+    auto blit = [commands blitCommandEncoder];
+    [blit fillBuffer:bridged->first range:NSMakeRange(bridged->second, boundaryBytes) value:0xa5];
+    [blit endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    MetalTests::Require(commands.status == MTLCommandBufferStatusCompleted, "Bridge write did not complete");
+    const bool landed = std::all_of(base + boundaryOffset, base + boundaryOffset + boundaryBytes, [](std::byte value) { return value == std::byte{0xa5}; });
+    MetalTests::Require(landed && base[boundaryOffset - 1] == std::byte{0} && base[boundaryOffset + boundaryBytes] == std::byte{0},
+        "GPU write through the bridge did not land exactly in the host bytes");
+    static_cast<void>(snapshot.CompleteAndCopyDirtyPagesToBorrowedHost(commands));
+
+    // Changed host pages drop the bridge with the component aliases.
+    aliases.Invalidate(base + spanBytes, 4);
+    MetalTests::Require(aliases.BridgeCount() == 0, "Invalidated host pages kept their bridge");
+    ::munmap(mapping, 3 * spanBytes);
+}
 }
 
 void RunGuestMemoryTests(const MetalTests::Context& context) {
     guestAliasCases(context);
     workingSetCases(context);
+    bridgeCases(context);
     std::vector<std::byte> host(8192 + 24, std::byte{0x31});
     std::array<std::byte, 32> readOnly;
     readOnly.fill(std::byte{0x72});
