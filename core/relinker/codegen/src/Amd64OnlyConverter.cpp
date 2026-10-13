@@ -292,10 +292,10 @@ void Amd64OnlyConverter::_convertSegment(
     const std::vector<Domain::ProgramHeader>& segments,
     ConvertResult& result
 ) const {
+    if (ph.Offset > fileBytes.size() || ph.FileSize > fileBytes.size() - ph.Offset)
+        throw CodegenException("Code segment exceeds the file", ph.Offset);
     const auto segOffset = static_cast<std::size_t>(ph.Offset);
     const auto segSize = static_cast<std::size_t>(ph.FileSize);
-    if (segOffset > fileBytes.size() || segSize > fileBytes.size() - segOffset)
-        throw CodegenException("Code segment exceeds the file", ph.Offset);
 
     std::vector<std::uint8_t> seg(
         fileBytes.begin() + static_cast<std::ptrdiff_t>(segOffset),
