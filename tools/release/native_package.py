@@ -27,6 +27,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import plistlib
 import re
 import shutil
 import subprocess
@@ -131,6 +132,42 @@ def check_ctest(results):
     releaselib.require(len(results) >= MIN_TESTS, "only %d native tests ran (expected at least %d)" % (len(results), MIN_TESTS))
     missing = [name for name in REQUIRED_TESTS if name not in results]
     releaselib.require(not missing, "required native tests did not run: " + ", ".join(missing))
+
+
+class Skipped(Exception):
+    """The release cannot be validated on this host right now (not a failure); nothing is published."""
+
+
+# Wall-clock bounds (seconds) so a wedged step fails the build instead of hanging the runner.
+STEP_TIMEOUTS = {"configure": 900, "build": 3600, "ctest": 1800, "gpu-cube-check": 300}
+
+
+def gui_session_unavailable():
+    """Reason string when this process has no unlocked console GUI session, else None.
+
+    Same condition the AppKit focus test skips on (exit 77): a self-hosted laptop runner with a locked screen.
+    ``ioreg`` lists the console users with ``CGSSessionScreenIsLocked`` / ``kCGSSessionOnConsoleKey``."""
+    result = subprocess.run(["ioreg", "-n", "Root", "-d1", "-a"], capture_output=True, timeout=30)
+    if result.returncode != 0:
+        return None
+    root = plistlib.loads(result.stdout)
+    root = root[0] if isinstance(root, list) else root  # `ioreg -a` prints one dict, or an array holding it
+    users = root.get("IOConsoleUsers", [])
+    if root.get("IOConsoleLocked"):
+        return "the screen is locked"
+    if not users:
+        return "there is no console GUI session"
+    if any(user.get("CGSSessionScreenIsLocked") for user in users):
+        return "the screen is locked"
+    if not any(user.get("kCGSSessionOnConsoleKey") for user in users):
+        return "this account is not on the console"
+    return None
+
+
+def require_gui_session(step):
+    reason = gui_session_unavailable()
+    if reason:
+        raise Skipped("%s needs a GUI session but %s" % (step, reason))
 
 
 def host_check():
@@ -292,6 +329,7 @@ def build(source, commit, version, work, log=print, jobs=None):
     releaselib.require(not any(marker in str(work.resolve()).encode() for marker in build_package.private_markers()),
                        "--work must not contain the home path or user name (it is embedded in the binaries)")
     host = host_check()
+    require_gui_session("the native release (hello_notify, gpu_cube)")
     work.mkdir(parents=True, exist_ok=False)
     work = work.resolve()
     logs = work / "logs"
@@ -304,17 +342,22 @@ def build(source, commit, version, work, log=print, jobs=None):
 
     build_dir = work / "build"
     log(json.dumps({"step": "build", "version": version}))
-    build_package.run_logged("configure", ["cmake", "-S", checkout, "-B", build_dir, *CONFIGURE], logs, log)
+    build_package.run_logged("configure", ["cmake", "-S", checkout, "-B", build_dir, *CONFIGURE], logs, log,
+                            timeout=STEP_TIMEOUTS["configure"])
     parallel = ["--parallel", str(jobs)] if jobs else ["--parallel"]
-    build_package.run_logged("build", ["cmake", "--build", build_dir, *parallel, "--target", *BUILD_TARGETS], logs, log)
+    build_package.run_logged("build", ["cmake", "--build", build_dir, *parallel, "--target", *BUILD_TARGETS], logs, log,
+                            timeout=STEP_TIMEOUTS["build"])
 
     log(json.dumps({"step": "test", "filter": CTEST_FILTER}))
     ctest_log = build_package.run_logged("ctest", ["ctest", "--test-dir", build_dir, "-R", CTEST_FILTER, "-j", "4",
-                                                   "--timeout", "120", "--output-on-failure"], logs, log)
+                                                   "--timeout", "120", "--output-on-failure"], logs, log,
+                                       timeout=STEP_TIMEOUTS["ctest"])
     results = parse_ctest(ctest_log.read_text())
     check_ctest(results)
+    require_gui_session("native_gpu_cube_check")  # the screen may have locked during the build
     log(json.dumps({"step": "gpu_cube", "target": "native_gpu_cube_check"}))
-    build_package.run_logged("gpu-cube-check", ["cmake", "--build", build_dir, "--target", "native_gpu_cube_check"], logs, log)
+    build_package.run_logged("gpu-cube-check", ["cmake", "--build", build_dir, "--target", "native_gpu_cube_check"], logs, log,
+                             timeout=STEP_TIMEOUTS["gpu-cube-check"])
     cube = cube_summary(build_dir / "core" / "libs" / "native" / "graphics-runs")
     validation = {"host": host, "ctest": {"filter": CTEST_FILTER, "passed": len(results), "failed": 0,
                                           "required": list(REQUIRED_TESTS)},
@@ -363,6 +406,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         info = build(args.source, args.commit, args.version, args.work, jobs=args.jobs)
+    except Skipped as skipped:
+        print(json.dumps({"status": "SKIPPED", "reason": str(skipped)}), file=sys.stderr)
+        return 0
     except (releaselib.ReleaseError, verify.VerificationError, subprocess.CalledProcessError, OSError, KeyError, ValueError) as error:
         print(json.dumps({"status": "FAILED", "error": str(error)}), file=sys.stderr)
         return 1
