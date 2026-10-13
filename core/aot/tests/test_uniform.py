@@ -126,6 +126,19 @@ class UniformABITests(unittest.TestCase):
         function(ctypes.byref(registers))
         self.assertEqual(registers.gpr[GPR['rax']], 15)
 
+    def test_uniform_pointer_argument_loads_the_register_not_an_undefined_arg(self):
+        # mov rax, [rdi] ; ret -> rax = *(u64*)rdi. The uniform ABI keeps rdi in its
+        # own alloca; a pointer dereference must use that value, not a typed %argN.
+        code = bytes.fromhex('488b07c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        self.assertNotIn('%arg', ir)
+        target = ctypes.c_uint64(0x1234)
+        registers = RegisterFile()
+        registers.gpr[GPR['rdi']] = ctypes.addressof(target)
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 0x1234)
+
     def test_uniform_call_passes_the_register_file(self):
         # 0x1000: call 0x1010 ; ret        0x1010: mov rax, rdi ; add rax, rsi ; ret
         code = bytearray(0x17)

@@ -900,7 +900,7 @@ class Function:
         for loc in self.argument_locations:
             if loc['kind'] == 'register':
                 known[loc['name']] = (1 << loc['bits']) - 1
-        pointers = {loc['name']: ('parameter', index, 0) for index, loc in enumerate(self.argument_locations) if loc['kind'] == 'register' and loc['type'] == 'ptr'}
+        pointers = {loc['name']: ('uniform' if self.uniform else 'parameter', index, 0) for index, loc in enumerate(self.argument_locations) if loc['kind'] == 'register' and loc['type'] == 'ptr'}
         initial = {'known': known, 'rsp': 0, 'rbp': None, 'saved': {}, 'flags': set(), 'pointers': pointers, 'constants': {},
                    'tail_stack_clean': frozenset(loc['offset'] for loc in self.argument_locations if loc['kind'] == 'stack'),
                    'native_pointers': {'rsp'} | set(pointers),
@@ -1038,8 +1038,20 @@ class Function:
             offset = '0'
         elif base in state['pointers']:
             kind, argument, displacement = state['pointers'][base]
-            pointer = self.image.pointer(displacement) if kind == 'image' else (self.frame_pointer(displacement) if kind == 'frame' else f'%arg{argument}')
-            offset = str(mem.disp + (displacement if kind == 'parameter' else 0))
+            if kind == 'image':
+                pointer = self.image.pointer(displacement)
+                offset = str(mem.disp)
+            elif kind == 'frame':
+                pointer = self.frame_pointer(displacement)
+                offset = str(mem.disp)
+            elif kind == 'uniform':
+                # The uniform ABI keeps every GPR in its own alloca; a pointer in
+                # a register is the loaded guest pointer, not a typed %argN.
+                pointer = self.emit(f'inttoptr i64 {self.load(base)} to ptr')
+                offset = str(mem.disp)
+            else:
+                pointer = f'%arg{argument}'
+                offset = str(mem.disp + displacement)
         elif base:
             pointer = self.emit(f'inttoptr i64 {self.load(base)} to ptr')
             offset = str(mem.disp)
