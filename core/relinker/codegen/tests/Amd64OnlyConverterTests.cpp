@@ -959,16 +959,41 @@ void reciprocalOperands() {
     require(vex2High && vex2High->Operation == Codegen::ReciprocalOperation::Reciprocal && vex2High->Destination == 8 && vex2High->Source == 1, "VEX2 VRCPPS with a high destination was not decoded");
     const auto vex3 = Codegen::DecodeReciprocal(Bytes{0xC4, 0x41, 0x78, 0x52, 0xC9}.data(), 5);
     require(vex3 && vex3->Destination == 9 && vex3->Source == 9, "VEX3 VRSQRTPS with high registers was not decoded");
-    require(!Codegen::DecodeReciprocal(Bytes{0xC5, 0xFC, 0x52, 0xD5}.data(), 4), "256-bit VRSQRTPS must stay native");
-    require(!Codegen::DecodeReciprocal(Bytes{0xC5, 0xFA, 0x52, 0xD5}.data(), 4), "VRSQRTSS must stay native");
-    require(!Codegen::DecodeReciprocal(Bytes{0xC5, 0xF8, 0x52, 0x10}.data(), 4), "Memory form must stay native");
+    using Codegen::ReciprocalWidth;
+    require(vex2->Width == ReciprocalWidth::Packed128 && !vex2->Memory, "VEX.128 VRSQRTPS has the wrong width");
+    const auto ymm = Codegen::DecodeReciprocal(Bytes{0xC5, 0xFC, 0x52, 0xD5}.data(), 4);
+    require(ymm && ymm->Vex && ymm->Width == ReciprocalWidth::Packed256 && ymm->Destination == 2 && ymm->Source == 5, "VEX.256 VRSQRTPS was not decoded");
+    const auto ymmHigh = Codegen::DecodeReciprocal(Bytes{0xC4, 0x41, 0x7C, 0x53, 0xC9}.data(), 5);
+    require(ymmHigh && ymmHigh->Width == ReciprocalWidth::Packed256 && ymmHigh->Operation == Codegen::ReciprocalOperation::Reciprocal && ymmHigh->Destination == 9 && ymmHigh->Source == 9, "VEX3 VRCPPS ymm with high registers was not decoded");
+    const auto vrsqrtss = Codegen::DecodeReciprocal(Bytes{0xC5, 0xEA, 0x52, 0xD5}.data(), 4);
+    require(vrsqrtss && vrsqrtss->Vex && vrsqrtss->Width == ReciprocalWidth::Scalar && vrsqrtss->Operation == Codegen::ReciprocalOperation::ReciprocalSquareRoot && vrsqrtss->Destination == 2 && vrsqrtss->Source == 5 && vrsqrtss->FirstSource == 2, "VRSQRTSS was not decoded");
+    const auto vrcpssHigh = Codegen::DecodeReciprocal(Bytes{0xC4, 0x41, 0x72, 0x53, 0xC1}.data(), 5);
+    require(vrcpssHigh && vrcpssHigh->Width == ReciprocalWidth::Scalar && vrcpssHigh->Operation == Codegen::ReciprocalOperation::Reciprocal && vrcpssHigh->Destination == 8 && vrcpssHigh->Source == 9 && vrcpssHigh->FirstSource == 1, "VEX3 VRCPSS with high registers was not decoded");
+    require(!Codegen::DecodeReciprocal(Bytes{0xC5, 0xF9, 0x52, 0xD5}.data(), 4), "A 66-prefixed VEX reciprocal is not a reciprocal");
+    require(!Codegen::DecodeReciprocal(Bytes{0xC5, 0xE8, 0x52, 0xD5}.data(), 4), "A packed VEX reciprocal with a source in vvvv is not valid");
+    const auto vmem = Codegen::DecodeReciprocal(Bytes{0xC5, 0xFC, 0x52, 0x50, 0x10}.data(), 5);
+    require(vmem && vmem->Width == ReciprocalWidth::Packed256 && vmem->Memory && vmem->Destination == 2 && vmem->Memory->Rm == 0 && vmem->Memory->Displacement == 0x10, "VEX.256 VRSQRTPS with a memory source was not decoded");
+    const auto vmemIndexed = Codegen::DecodeReciprocal(Bytes{0xC4, 0xA1, 0x78, 0x53, 0x44, 0x8D, 0x00}.data(), 7);
+    require(vmemIndexed && vmemIndexed->Memory && vmemIndexed->Memory->RexIndexBase == 0x02 && vmemIndexed->Memory->Sib == 0x8D, "VEX3 VRCPPS with an extended index register was not decoded");
+    require(!Codegen::DecodeReciprocal(Bytes{0xC5, 0xFC, 0x52, 0x50}.data(), 4), "A truncated memory operand was accepted");
+    require(!Codegen::DecodeReciprocal(Bytes{0xC5, 0xFC, 0x52, 0xD5, 0x90}.data(), 5), "Trailing bytes after a register operand were accepted");
+    const auto scalarMem = Codegen::DecodeReciprocal(Bytes{0xC5, 0xEA, 0x53, 0x05, 0x10, 0x00, 0x00, 0x00}.data(), 8);
+    require(scalarMem && scalarMem->Width == ReciprocalWidth::Scalar && scalarMem->Memory && scalarMem->Memory->RipRelative && scalarMem->Memory->InstructionLength == 8, "VRCPSS with a RIP-relative source was not decoded");
     require(!Codegen::DecodeReciprocal(Bytes{0xC5, 0xF8, 0x51, 0xD5}.data(), 4), "VSQRTPS is not a reciprocal");
     require(vex2->Vex && vex2High->Vex && vex3->Vex, "VEX reciprocals must clear the upper vector bits");
     const auto legacy = Codegen::DecodeReciprocal(Bytes{0x0F, 0x52, 0xD5}.data(), 3);
     require(legacy && !legacy->Vex && legacy->Operation == Codegen::ReciprocalOperation::ReciprocalSquareRoot && legacy->Destination == 2 && legacy->Source == 5, "Legacy RSQRTPS was not decoded");
     const auto legacyHigh = Codegen::DecodeReciprocal(Bytes{0x45, 0x0F, 0x53, 0xC9}.data(), 4);
     require(legacyHigh && !legacyHigh->Vex && legacyHigh->Operation == Codegen::ReciprocalOperation::Reciprocal && legacyHigh->Destination == 9 && legacyHigh->Source == 9, "Legacy RCPPS with high registers was not decoded");
-    for (const Bytes& unsupported : {Bytes{0xF3, 0x0F, 0x52, 0xD5}, Bytes{0xF3, 0x0F, 0x53, 0xD5}, Bytes{0x0F, 0x52, 0x10}, Bytes{0x0F, 0x53, 0x10}, Bytes{0x0F, 0x51, 0xD5}, Bytes{0x0F, 0x52}, Bytes{0x45, 0x0F, 0x53}})
+    const auto rsqrtss = Codegen::DecodeReciprocal(Bytes{0xF3, 0x0F, 0x52, 0xD5}.data(), 4);
+    require(rsqrtss && !rsqrtss->Vex && rsqrtss->Width == ReciprocalWidth::Scalar && rsqrtss->Operation == Codegen::ReciprocalOperation::ReciprocalSquareRoot && rsqrtss->Destination == 2 && rsqrtss->Source == 5 && rsqrtss->FirstSource == 2, "Legacy RSQRTSS was not decoded");
+    const auto rcpssHigh = Codegen::DecodeReciprocal(Bytes{0xF3, 0x45, 0x0F, 0x53, 0xC1}.data(), 5);
+    require(rcpssHigh && !rcpssHigh->Vex && rcpssHigh->Width == ReciprocalWidth::Scalar && rcpssHigh->Destination == 8 && rcpssHigh->Source == 9, "Legacy RCPSS with high registers was not decoded");
+    const auto rcppsMem = Codegen::DecodeReciprocal(Bytes{0x0F, 0x53, 0x10}.data(), 3);
+    require(rcppsMem && !rcppsMem->Vex && rcppsMem->Width == ReciprocalWidth::Packed128 && rcppsMem->Memory && rcppsMem->Destination == 2, "Legacy RCPPS with a memory source was not decoded");
+    const auto rsqrtssSeg = Codegen::DecodeReciprocal(Bytes{0xF3, 0x64, 0x0F, 0x52, 0x10}.data(), 5);
+    require(rsqrtssSeg && rsqrtssSeg->Width == ReciprocalWidth::Scalar && rsqrtssSeg->Memory && rsqrtssSeg->Memory->Prefixes == Bytes{0x64}, "RSQRTSS with a segment override was not decoded");
+    for (const Bytes& unsupported : {Bytes{0x66, 0x0F, 0x52, 0xD5}, Bytes{0xF2, 0x0F, 0x53, 0xD5}, Bytes{0xF3, 0xF3, 0x0F, 0x53, 0xD5}, Bytes{0x67, 0x0F, 0x52, 0x10}, Bytes{0x0F, 0x51, 0xD5}, Bytes{0x0F, 0x52}, Bytes{0x45, 0x0F, 0x53}, Bytes{0xF3, 0x0F, 0x53}, Bytes{0x0F, 0x52, 0x10, 0x90}})
         require(!Codegen::DecodeReciprocal(unsupported.data(), unsupported.size()), "An unsupported legacy reciprocal encoding was accepted");
 }
 
@@ -1018,6 +1043,18 @@ void converterReciprocal() {
             const auto kept = converter->Convert(legacyFile, {segmentHeader(legacyText.size())});
             require(kept.Trampolines.empty() && kept.KeptCount == 1 && kept.Bytes == legacyFile && kept.Reports[0].InstructionName == name, "Legacy reciprocal before a return must stay native");
         }
+    }
+    struct NewForm {
+        Bytes Instruction;
+        const char* Name;
+    };
+    for (const NewForm& form : {NewForm{{0xC5, 0xFC, 0x52, 0xD5}, "VRSQRTPS"}, NewForm{{0xC5, 0xEA, 0x53, 0xD5}, "VRCPSS"}, NewForm{{0xC5, 0xEA, 0x52, 0xD5}, "VRSQRTSS"}, NewForm{{0xF3, 0x0F, 0x53, 0xD5}, "RCPSS"}, NewForm{{0xF3, 0x0F, 0x52, 0xD5}, "RSQRTSS"}, NewForm{{0xC5, 0xFC, 0x53, 0x10}, "VRCPPS"}, NewForm{{0x0F, 0x52, 0x10}, "RSQRTPS"}}) {
+        auto formFile = file;
+        Bytes formText = form.Instruction;
+        formText.insert(formText.end(), {0x90, 0x90, 0x90, 0x90, 0xC3});
+        std::copy(formText.begin(), formText.end(), formFile.begin() + 0x200);
+        const auto lowered = converter->Convert(formFile, {segmentHeader(formText.size())});
+        require(lowered.Trampolines.size() == 1 && lowered.KeptCount == 0 && lowered.Reports[0].InstructionName == form.Name, "A scalar, 256-bit or memory reciprocal was not lowered");
     }
     auto sequenceFile = file;
     const Bytes sequenceText = {0x0F, 0x52, 0xD5, 0xC5, 0xF8, 0x53, 0xC1, 0xC3};

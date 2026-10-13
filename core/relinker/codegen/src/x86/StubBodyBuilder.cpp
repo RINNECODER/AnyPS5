@@ -137,17 +137,36 @@ void StubBodyBuilder::RipOperand(const std::initializer_list<std::uint8_t> opcod
 }
 
 void StubBodyBuilder::Load(const std::uint8_t reg, const MemoryOperand& operand) {
+    SseMemory(kPrefixScalar, {0x0F, kMovdqu}, reg, operand);
+}
+
+void StubBodyBuilder::SseMemory(const std::uint8_t prefix, const std::initializer_list<std::uint8_t> opcode, const std::uint8_t reg, const MemoryOperand& operand) {
+    _bytes.insert(_bytes.end(), operand.Prefixes.begin(), operand.Prefixes.end());
+    if (prefix != 0)
+        _bytes.push_back(prefix);
+    const auto rex = static_cast<std::uint8_t>(kRexBase | ((reg & 8) != 0 ? kRexR : 0) | operand.RexIndexBase);
+    if (rex != kRexBase)
+        _bytes.push_back(rex);
+    _bytes.insert(_bytes.end(), opcode.begin(), opcode.end());
+    _memoryTail(reg, operand);
+}
+
+void StubBodyBuilder::VexMemory(const std::uint8_t pp, const bool ymm, const std::uint8_t opcode, const std::uint8_t reg, const std::uint8_t vvvv, const MemoryOperand& operand) {
+    _bytes.insert(_bytes.end(), operand.Prefixes.begin(), operand.Prefixes.end());
+    _bytes.push_back(X64OpcodeConstants::OneByteVex3);
+    _bytes.push_back(static_cast<std::uint8_t>(((reg & 8) != 0 ? 0x00 : 0x80) | ((operand.RexIndexBase & kRexX) != 0 ? 0x00 : 0x40) | ((operand.RexIndexBase & kRexB) != 0 ? 0x00 : 0x20) | 0x01));
+    _bytes.push_back(static_cast<std::uint8_t>((((~vvvv) & 0x0F) << 3) | (ymm ? 0x04 : 0x00) | pp));
+    _bytes.push_back(opcode);
+    _memoryTail(reg, operand);
+}
+
+void StubBodyBuilder::_memoryTail(const std::uint8_t reg, const MemoryOperand& operand) {
     using namespace X64OpcodeConstants;
     const auto displacement = static_cast<std::int64_t>(operand.Displacement) + static_cast<std::int64_t>(operand.StackBase ? _stackDepth : 0);
     if (displacement > std::numeric_limits<std::int32_t>::max())
         throw CodegenException("Stack displacement does not fit after spilling");
     const auto mod = operand.StackBase && _stackDepth != 0 ? ModRmModDisp32 : operand.Mod;
-    _bytes.insert(_bytes.end(), operand.Prefixes.begin(), operand.Prefixes.end());
-    _bytes.push_back(kPrefixScalar);
-    const auto rex = static_cast<std::uint8_t>(kRexBase | ((reg & 8) != 0 ? kRexR : 0) | operand.RexIndexBase);
-    if (rex != kRexBase)
-        _bytes.push_back(rex);
-    _bytes.insert(_bytes.end(), {TwoByteOpcodeEscape, kMovdqu, static_cast<std::uint8_t>((mod << ModRmModShift) | ((reg & 7) << ModRmRegShift) | operand.Rm)});
+    _bytes.push_back(static_cast<std::uint8_t>((mod << ModRmModShift) | ((reg & 7) << ModRmRegShift) | operand.Rm));
     if (operand.Rm == ModRmRmSibPresent)
         _bytes.push_back(operand.Sib);
     if (operand.RipRelative) {
@@ -158,6 +177,17 @@ void StubBodyBuilder::Load(const std::uint8_t reg, const MemoryOperand& operand)
     const auto value = static_cast<std::uint32_t>(static_cast<std::int32_t>(displacement));
     for (std::size_t index = 0; index < _displacementSize(mod, operand.Rm, operand.Sib); ++index)
         _bytes.push_back(static_cast<std::uint8_t>(value >> (index * 8)));
+}
+
+void StubBodyBuilder::Reserve(const std::size_t bytes) {
+    const auto value = static_cast<std::uint32_t>(-static_cast<std::int32_t>(bytes));
+    _bytes.insert(_bytes.end(), {0x48, 0x8D, 0xA4, 0x24, static_cast<std::uint8_t>(value), static_cast<std::uint8_t>(value >> 8), static_cast<std::uint8_t>(value >> 16), static_cast<std::uint8_t>(value >> 24)});
+    _stackDepth += bytes;
+}
+
+void StubBodyBuilder::Release(const std::size_t bytes) {
+    _bytes.insert(_bytes.end(), {0x48, 0x8D, 0xA4, 0x24, static_cast<std::uint8_t>(bytes), static_cast<std::uint8_t>(bytes >> 8), static_cast<std::uint8_t>(bytes >> 16), static_cast<std::uint8_t>(bytes >> 24)});
+    _stackDepth -= bytes;
 }
 
 void StubBodyBuilder::Spill(const std::uint8_t reg) {
