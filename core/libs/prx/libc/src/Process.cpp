@@ -91,6 +91,7 @@ extern "C" void LibcRunShutdown_nid_postfix() {
     std::exception_ptr error;
     for (auto it = callbacks.rbegin(); it != callbacks.rend(); ++it) {
         try { (*it)(); }
+        catch (const ProcessShutdown&) { /* the requested stop, not a failure */ }
         catch (...) { if (!error) error = std::current_exception(); }
     }
     lock.lock();
