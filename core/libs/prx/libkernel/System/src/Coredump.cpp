@@ -10,7 +10,6 @@
 // The handler is recorded but never invoked: host crashes are not turned into guest core dumps.
 static std::atomic<uint64_t> g_coredumpHandler{0};
 static std::atomic<uint64_t> g_coredumpContext{0};
-static constexpr int COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER = static_cast<int>(0x81180003);
 
 static constexpr int SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER = static_cast<int>(0x81180003u);
 
@@ -80,9 +79,10 @@ int64_t APS5_VABI sceCoredumpWriteUserData(const void* data, size_t size) {
 }
 
 int APS5_VABI sceCoredumpGetStopInfoCpu(void* info, size_t size) {
-    (void)info;
-    (void)size;
-    return COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
+    const auto address = reinterpret_cast<uintptr_t>(info);
+    if (info == nullptr || size != 16 || address % alignof(uint64_t) != 0 || size > UINTPTR_MAX - address)
+        throw std::runtime_error(std::string(__func__) + ": null, unaligned, wrapping or unsupported CPU stop-info buffer outside the core dump handler");
+    return SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
 }
 
 int APS5_VABI sceCoredumpGetThreadContextInfo(void* threadContextInfo, size_t threadContextInfoSize) {
