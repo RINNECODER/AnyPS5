@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <pthread/qos.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -272,15 +273,20 @@ struct IndirectTraceSite {
 };
 
 struct IndirectTraceState {
-    bool enabled = false;
+    std::atomic<bool> enabled{false};
     int fd = -1;
     std::uint64_t limit = 2000000;
     double afterSeconds = 0.0;
+    double startSeconds = 0.0;
+    double stopSeconds = 0.0;
+    std::string triggerPath;
+    std::size_t pageSize = 0;
     std::uint64_t written = 0;
     std::uint64_t guestBase = 0;
     std::uint64_t codeMin = 0;
     std::uint64_t codeMax = 0;
     std::vector<IndirectTraceSite> sites;
+    std::vector<std::uint64_t> pages;
 };
 
 IndirectTraceState indirectTrace;
@@ -289,6 +295,54 @@ const IndirectTraceSite* FindIndirectSite(const std::uint64_t guestOpcode) {
     const auto found = std::lower_bound(indirectTrace.sites.begin(), indirectTrace.sites.end(), guestOpcode,
         [](const IndirectTraceSite& site, const std::uint64_t value) { return site.OpcodeAddress < value; });
     return found != indirectTrace.sites.end() && found->OpcodeAddress == guestOpcode ? &*found : nullptr;
+}
+
+// Restores the original instruction bytes (patched=false) or writes `int3` plus
+// one-byte NOPs (patched=true). Only the pages that hold sites are made writable,
+// and they are put back to read/execute. Used to run the load untraced and patch
+// only at the trace window.
+void ApplySitePatch(const bool patched) {
+    if (indirectTrace.sites.empty() || indirectTrace.pages.empty()) return;
+    for (const std::uint64_t page : indirectTrace.pages) {
+        if (::mprotect(reinterpret_cast<void*>(page), indirectTrace.pageSize, PROT_READ | PROT_WRITE) != 0) {
+            Write("[rosetta] indirect trace: mprotect(rw) failed for %#llx: %d %s\n", static_cast<unsigned long long>(page), errno, std::strerror(errno));
+            return;
+        }
+    }
+    for (const auto& site : indirectTrace.sites) {
+        auto* code = reinterpret_cast<std::uint8_t*>(indirectTrace.guestBase + site.OpcodeAddress);
+        const std::uint32_t count = site.Length > site.PrefixLength ? site.Length - site.PrefixLength : 0;
+        if (patched) {
+            code[0] = 0xCC;
+            for (std::uint32_t index = 1; index < count; ++index) code[index] = 0x90;
+        } else {
+            for (std::uint32_t index = 0; index < count; ++index) code[index] = site.Bytes[site.PrefixLength + index];
+        }
+    }
+    for (const std::uint64_t page : indirectTrace.pages)
+        (void)::mprotect(reinterpret_cast<void*>(page), indirectTrace.pageSize, PROT_READ | PROT_EXEC);
+}
+
+void* TraceWindowThread(void*) {
+    const auto base = std::chrono::steady_clock::now();
+    const auto elapsed = [&base] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - base).count(); };
+    if (indirectTrace.startSeconds > 0.0) {
+        while (elapsed() < indirectTrace.startSeconds) ::usleep(50000);
+    } else {
+        while (::access(indirectTrace.triggerPath.c_str(), F_OK) != 0) ::usleep(100000);
+    }
+    ApplySitePatch(true);
+    indirectTrace.enabled = true;
+    Write("[rosetta] indirect trace: tracing started after %.3fs\n", elapsed());
+    if (indirectTrace.stopSeconds > 0.0) {
+        const auto stopBase = std::chrono::steady_clock::now();
+        const auto stopElapsed = [&stopBase] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - stopBase).count(); };
+        while (stopElapsed() < indirectTrace.stopSeconds) ::usleep(50000);
+        ApplySitePatch(false);
+        indirectTrace.enabled = false;
+        Write("[rosetta] indirect trace: tracing stopped after %.3fs\n", stopElapsed());
+    }
+    return nullptr;
 }
 
 bool ReadMemory(std::uint64_t address, void* buffer, std::size_t size) {
@@ -380,10 +434,36 @@ void InitializeIndirectTrace() {
         Write("[rosetta] indirect trace: cannot open %s\n", path);
         return;
     }
-    indirectTrace.enabled = true;
-    Write("[rosetta] indirect trace: %zu trapped branches, limit %llu, guest base %#llx -> %s\n",
+    if (const char* start = std::getenv("ANYPS5_TRACE_INDIRECT_START")) indirectTrace.startSeconds = std::strtod(start, nullptr);
+    if (const char* stop = std::getenv("ANYPS5_TRACE_INDIRECT_STOP")) indirectTrace.stopSeconds = std::strtod(stop, nullptr);
+    if (const char* trigger = std::getenv("ANYPS5_TRACE_INDIRECT_TRIGGER")) indirectTrace.triggerPath = trigger;
+    Write("[rosetta] indirect trace: window start=%.1f stop=%.1f trigger=%s\n", indirectTrace.startSeconds, indirectTrace.stopSeconds, indirectTrace.triggerPath.c_str());
+    const bool window = indirectTrace.startSeconds > 0.0 || !indirectTrace.triggerPath.empty();
+    if (window) {
+        indirectTrace.pageSize = static_cast<std::size_t>(::getpagesize());
+        for (const auto& site : indirectTrace.sites) {
+            const std::uint64_t address = indirectTrace.guestBase + site.OpcodeAddress;
+            indirectTrace.pages.push_back(address & ~(static_cast<std::uint64_t>(indirectTrace.pageSize) - 1));
+        }
+        std::sort(indirectTrace.pages.begin(), indirectTrace.pages.end());
+        indirectTrace.pages.erase(std::unique(indirectTrace.pages.begin(), indirectTrace.pages.end()), indirectTrace.pages.end());
+        // The relinker patched the image; put the original bytes back so the load runs untraced.
+        ApplySitePatch(false);
+        indirectTrace.enabled = false;
+        pthread_t thread{};
+        if (::pthread_create(&thread, nullptr, TraceWindowThread, nullptr) != 0) {
+            Write("[rosetta] indirect trace: cannot start the trace-window thread; tracing from the start\n");
+            ApplySitePatch(true);
+            indirectTrace.enabled = true;
+        } else {
+            ::pthread_detach(thread);
+        }
+    } else {
+        indirectTrace.enabled = true;
+    }
+    Write("[rosetta] indirect trace: %zu trapped branches, limit %llu, guest base %#llx%s -> %s\n",
         indirectTrace.sites.size(), static_cast<unsigned long long>(indirectTrace.limit),
-        static_cast<unsigned long long>(indirectTrace.guestBase), path);
+        static_cast<unsigned long long>(indirectTrace.guestBase), window ? " (trace window)" : "", path);
 }
 
 std::uint64_t RegisterValue(const ucontext_t* context, const unsigned index) {
@@ -487,14 +567,14 @@ bool HandleIndirectTrap(ucontext_t* context) {
             position += 4;
             address += static_cast<std::int64_t>(displacement);
         }
-        if (!ReadMemory(address, &target, sizeof(target))) return false;
+        target = *reinterpret_cast<const volatile std::uint64_t*>(address);
     }
 
     const bool isCall = reg == 2;
     if (isCall) {
         const std::uint64_t stack = state.__rsp - sizeof(std::uint64_t);
         const std::uint64_t returnAddress = opcodeAddress - prefix + length;
-        if (!WriteMemory(stack, &returnAddress, sizeof(returnAddress))) return false;
+        *reinterpret_cast<volatile std::uint64_t*>(stack) = returnAddress;
         state.__rsp = stack;
     }
     state.__rip = target;
@@ -642,6 +722,8 @@ extern "C" {
     if (std::getenv("APS5_ROSETTA_QUIET") == nullptr)
         Write("[rosetta] guest entry %#llx after %.3fs of image start-up, %zu TLS images\n",
             static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(entry)), Seconds(), Aps5Darwin::RegisteredTlsImages());
+    if (const char* script = std::getenv("ANYPS5_INPUT_SCRIPT"); script != nullptr && *script != '\0')
+        Write("[rosetta] input script env: present (%zu bytes)\n", std::strlen(script));
     // The engine launcher (anyps5_rosetta_run --diagnostics-json) asks for the startup event.
     if (const char* json = std::getenv("ANYPS5_DIAGNOSTICS_JSON"); json != nullptr && json[0] == '1')
         Write("{\"schema_version\":1,\"event\":\"startup\",\"entry\":1,\"seconds\":%.3f}\n", Seconds());

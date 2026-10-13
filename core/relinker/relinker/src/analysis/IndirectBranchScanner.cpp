@@ -2,7 +2,11 @@
 #include <codegen/IInstructionScanner.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
+#include <set>
+#include <string>
 
 namespace Relinker {
 
@@ -20,10 +24,26 @@ bool IsTracedIndirect(const Codegen::DecodedInstructionInfo& info) {
 
 class IndirectBranchScanner : public IIndirectBranchScanner {
 public:
+    IndirectBranchScanner() {
+        // The load runs untraced by leaving the sites it hammers alone
+        // (ANYPS5_TRACE_INDIRECT_EXCLUDE, one hex opcode address per line).
+        const char* path = std::getenv("ANYPS5_TRACE_INDIRECT_EXCLUDE");
+        if (path == nullptr || *path == '\0') return;
+        std::ifstream stream(path);
+        std::string line;
+        while (std::getline(stream, line)) {
+            if (line.empty()) continue;
+            _exclude.insert(static_cast<VirtualAddress>(std::strtoull(line.c_str(), nullptr, 16)));
+        }
+    }
+
     std::vector<IndirectBranchSite> ScanCodeSectionForIndirectBranches(
         const std::vector<std::uint8_t>& codeSection,
         FileByteOffset codeSectionOffset,
         FileByteOffset codeSectionSize) override;
+
+private:
+    std::set<VirtualAddress> _exclude;
 };
 
 std::vector<IndirectBranchSite> IndirectBranchScanner::ScanCodeSectionForIndirectBranches(
@@ -43,7 +63,9 @@ std::vector<IndirectBranchSite> IndirectBranchScanner::ScanCodeSectionForIndirec
         if (!IsTracedIndirect(info))
             continue;
         const std::size_t opcode = start + info.OpcodeOffset;
-        sites.push_back({start, opcode, match.Length, codeSectionOffset + opcode, info.FlowKind == Codegen::ControlFlowKind::IndirectCall});
+        const VirtualAddress address = codeSectionOffset + opcode;
+        if (!_exclude.empty() && _exclude.count(address) != 0) continue;
+        sites.push_back({start, opcode, match.Length, address, info.FlowKind == Codegen::ControlFlowKind::IndirectCall});
     }
     return sites;
 }
