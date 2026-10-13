@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <vector>
 #ifdef _WIN32
 #include <windows.h>
 #elif defined(__APPLE__)
