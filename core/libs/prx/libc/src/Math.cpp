@@ -183,6 +183,12 @@ float APS5_VABI asinf_nid_postfix(float x) {
     return result;
 }
 float APS5_VABI acosf_nid_postfix(float x) {
+    if (std::isnan(x)) {
+        return std::bit_cast<float>(std::bit_cast<std::uint32_t>(x) | 0x00400000u);
+    }
+    if (std::fabs(x) > 1.0f) {
+        return std::bit_cast<float>(0xffc00000u);
+    }
     const int saved_errno = errno;
     const float result = std::acos(x);
     errno = saved_errno;
