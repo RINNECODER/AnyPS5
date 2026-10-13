@@ -4,6 +4,7 @@
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -314,12 +315,12 @@ static void AllocateHostStack(Fiber* fiber) {
     const auto page = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
     const auto bytes = (fiber->contextSize + FIBER_HOST_STACK_MARGIN + page - 1) / page * page + page;
     void* mapping = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
-    if (mapping == MAP_FAILED) {
-        std::fprintf(stderr, "[fiber] no host stack for '%s' (0x%llx bytes); it runs in its 0x%llx byte context\n", fiber->name,
-                     static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(fiber->contextSize));
-        return;
+    if (mapping == MAP_FAILED) throw std::runtime_error(std::string("sceFiberInitialize: no host stack of ") + std::to_string(bytes) + " bytes for fiber '" + fiber->name + "' (errno " + std::to_string(errno) + ")");
+    if (mprotect(mapping, page, PROT_NONE) != 0) {
+        const int error = errno;
+        munmap(mapping, bytes);
+        throw std::runtime_error(std::string("sceFiberInitialize: cannot protect the guard page of the host stack of fiber '") + fiber->name + "' (errno " + std::to_string(error) + ")");
     }
-    mprotect(mapping, page, PROT_NONE);
     fiber->hostStack = static_cast<std::uint8_t*>(mapping);
     fiber->hostStackBytes = bytes;
 }
