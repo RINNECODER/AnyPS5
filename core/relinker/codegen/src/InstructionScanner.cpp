@@ -2,6 +2,7 @@
 #include <codegen/CodegenException.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -21,6 +22,7 @@ std::vector<InstructionMatch> InstructionScanner::ScanCodeSection(
     const Domain::FileByteOffset codeSectionOffset,
     const Domain::FileByteOffset codeSectionSize
 ) const {
+    if (codeSectionSize > std::numeric_limits<Domain::FileByteOffset>::max() - codeSectionOffset) throw CodegenException("Code section offset overflow", codeSectionOffset);
     const std::size_t limit = std::min(codeSection.size(), static_cast<std::size_t>(codeSectionSize));
 
     const X64InstructionDecoder decoder;
