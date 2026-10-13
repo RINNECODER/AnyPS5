@@ -15,11 +15,13 @@ import replay  # noqa: E402
 
 def main():
     ir_path, image_path, address = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3], 16)
+    uniform = len(sys.argv) > 4 and sys.argv[4] == "uniform"
     ir = ir_path.read_text()
     image = image_path.read_bytes()
+    name = f"sub_{address:x}" if uniform else f"func_{address:x}"
     with tempfile.TemporaryDirectory(prefix="anyps5-replay-one-") as directory:
-        outcome = replay.replay_case(Path(directory), ir, f"func_{address:x}", image, address,
-                                     {name: 0 for name in replay.REGISTERS}, bytes(1 << 16))
+        outcome = replay.replay_case(Path(directory), ir, name, image, address,
+                                     {name: 0 for name in replay.REGISTERS}, bytes(1 << 16), uniform=uniform)
     print(json.dumps(outcome))
 
 

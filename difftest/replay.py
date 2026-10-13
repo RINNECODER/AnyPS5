@@ -72,12 +72,14 @@ int main(int argc, char** argv) {
     }
     uint64_t page = BASE + (address & ~0xfffull);
     if (mprotect((void*)page, 0x1000, PROT_READ | PROT_EXEC) != 0) { perror("mprotect"); return 5; }
-    struct regs in, out; uint64_t stack[4096];
+    struct regs in, out;
+    void* guest_stack = mmap((void*)(BASE + 0x70000000), 0x100000, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (guest_stack == MAP_FAILED) { perror("stack mmap"); return 7; }
     FILE* input = fopen(argv[3], "rb");
     if (fread(&in, 1, sizeof(in), input) != sizeof(in)) return 6;
-    fread(stack, 1, sizeof(stack), input);
     memset(&out, 0, sizeof(out));
-    invoke((void*)(BASE + address), &in, &out, stack, 4096);
+    invoke((void*)(BASE + address), &in, &out, (uint64_t*)(BASE + 0x70080000), 0x10000);
     FILE* output = fopen(argv[4], "wb");
     fwrite(&out, 1, sizeof(out), output);
     fclose(output); fclose(input); fclose(segments);
@@ -116,7 +118,19 @@ def call_arm64(dylib, name, address, arguments):
     base = runtime - address
     function.restype = ctypes.c_uint64
     function.argtypes = [ctypes.c_uint64] * len(arguments)
-    return function(*arguments), base
+    return function(*arguments), base, library
+
+
+def normalize_pointer(library, value, data_ranges):
+    """Map an AOT data pointer back to the guest vaddr it represents."""
+    for vaddr, size in data_ranges:
+        try:
+            runtime = ctypes.cast(getattr(library, f"data_{vaddr:x}"), ctypes.c_void_p).value
+        except AttributeError:
+            continue
+        if runtime is not None and runtime <= value < runtime + size:
+            return vaddr + (value - runtime)
+    return None
 
 
 def build_x86_runner(directory):
@@ -145,22 +159,45 @@ def run_x86(directory, runner, image, address, registers, memory):
     return {name: int.from_bytes(raw[index * 8:index * 8 + 8], "little") for index, name in enumerate(REGISTERS)}, 0
 
 
-def replay_case(directory, ir, name, image, address, registers, memory):
+def uniform_call(dylib, name, registers):
+    """Call a uniform-ABI function (void @f(ptr %rf)); returns RAX and the library."""
+    library = ctypes.CDLL(str(dylib))
+    function = getattr(library, name)
+    function.restype = None
+    function.argtypes = [ctypes.c_void_p]
+    libc = ctypes.CDLL(None)
+    libc.mmap.restype = ctypes.c_void_p
+    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.mmap(ctypes.c_void_p(BASE + 0x70000000), 0x100000, 1 | 2, 0x02 | 0x1000 | 0x10, -1, 0)
+    regfile = (ctypes.c_uint64 * 48)()
+    for index, register in enumerate(UNIFORM_GPRS):
+        regfile[index] = registers.get(register, 0)
+    regfile[4] = BASE + 0x700FFFF8  # rsp, matching the x86 runner
+    function(ctypes.byref(regfile))
+    return regfile[0], library
+
+
+UNIFORM_GPRS = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi") + tuple(f"r{i}" for i in range(8, 16))
+
+
+def replay_case(directory, ir, name, image, address, registers, memory, uniform=False):
     dylib = build_arm64(ir, directory)
-    arguments = [int(registers.get(register, 0)) for register in ("rdi", "rsi", "rdx", "rcx", "r8", "r9")]
-    arm, dylib_base = call_arm64(dylib, name, address, arguments)
+    if uniform:
+        arm, library = uniform_call(dylib, name, registers)
+    else:
+        arguments = [int(registers.get(register, 0)) for register in ("rdi", "rsi", "rdx", "rcx", "r8", "r9")]
+        arm, dylib_base, library = call_arm64(dylib, name, address, arguments)
     runner = build_x86_runner(directory)
     x86, code = run_x86(directory, runner, image, address, registers, memory)
     if x86 is None:
         return {"arm64_rax": arm, "status": "x86-fault", "x86_exit": code}
     x86_rax = x86["rax"]
-    # The AOT dylib materializes pointers relative to its own load base; the x86
-    # reference runs at BASE. Compare the guest-space (vaddr) values.
     mask = 0xffffffffffffffff
-    arm_vaddr = (arm - dylib_base) & mask
     x86_vaddr = (x86_rax - BASE) & mask
-    matches = arm == x86_rax or arm_vaddr == x86_vaddr
-    return {"arm64_rax": arm, "arm64_vaddr": arm_vaddr, "x86_rax": x86_rax, "x86_vaddr": x86_vaddr,
+    data_ranges = [(vaddr, memsz) for vaddr, _filesz, memsz, _data in elf_segments(image) if memsz]
+    normalized = normalize_pointer(library, arm, data_ranges)
+    matches = arm == x86_rax or (normalized is not None and normalized == x86_vaddr)
+    return {"arm64_rax": arm, "arm64_vaddr": normalized, "x86_rax": x86_rax, "x86_vaddr": x86_vaddr,
             "match": matches, "x86_registers": x86}
 
 
