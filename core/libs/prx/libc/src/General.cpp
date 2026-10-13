@@ -360,6 +360,13 @@ extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
     return Resolve(state, path);
 }
 
+extern "C" std::filesystem::path RelinkedModulePath_nid_no_patch(const std::filesystem::path& path) {
+    auto relinked = path;
+    relinked += ".guest.prx";
+    std::error_code error;
+    return std::filesystem::is_regular_file(relinked, error) ? relinked : path;
+}
+
 extern "C" int SetWorkingDirectory_nid_no_patch(const char* resolved) {
     if (resolved == nullptr) return 14;
     auto& state = Directories();

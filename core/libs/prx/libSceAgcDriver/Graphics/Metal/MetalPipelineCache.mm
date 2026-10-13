@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <stdexcept>
 #include <system_error>
 
@@ -238,6 +239,10 @@ struct Archive {
 
 std::mutex archiveMutex;
 std::map<std::uintptr_t, Archive> archives;
+// Metal does not document MTLBinaryArchive as safe to read (a pipeline created with it in
+// binaryArchives) while another thread adds to or serializes it. Creations share this lock; adding
+// and writing take it exclusively. Taken before archiveMutex, never while holding it.
+std::shared_mutex archiveUse;
 std::atomic<std::uint64_t> archiveLoads{0};
 std::atomic<std::uint64_t> archiveAdditions{0};
 std::atomic<std::uint64_t> archiveWrites{0};
@@ -279,6 +284,12 @@ bool WriteArchive(Archive& state) {
             written = false;
         }
         std::error_code ignored;
+        if (written && !std::filesystem::exists(temporary, ignored)) {
+            // Metal writes no file when the archive holds nothing new since it was loaded or last
+            // written (two threads that built one pipeline at once both add it): the file is current.
+            state.pending = 0;
+            return true;
+        }
         if (!written) {
             std::filesystem::remove(temporary, ignored);
             ReportArchiveFailure("writing the Metal pipeline archive", error);
@@ -304,6 +315,7 @@ bool FlushLocked() {
 }
 
 void FlushAtExit() {
+    std::unique_lock use(archiveUse);
     std::lock_guard lock(archiveMutex);
     static_cast<void>(FlushLocked());
 }
@@ -356,6 +368,7 @@ id<MTLBinaryArchive> ArchiveHandle(id<MTLDevice> device) {
 template<class Add>
 void Record(id<MTLDevice> device, id<MTLBinaryArchive> archive, Add&& add) {
     if (archive == nil) return;
+    std::unique_lock use(archiveUse);
     std::lock_guard lock(archiveMutex);
     auto& state = ArchiveFor(device);
     if (state.archive != archive) return;
@@ -430,8 +443,13 @@ CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComput
     const auto archive = cacheable ? ArchiveHandle(device) : nil;
     if (archive != nil) native.binaryArchives = @[archive];
     MTLComputePipelineReflection* reflection = nil;
-    id<MTLComputePipelineState> state = [device newComputePipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
-                                                                          reflection:&reflection error:error];
+    id<MTLComputePipelineState> state = nil;
+    {
+        std::shared_lock use(archiveUse, std::defer_lock);
+        if (archive != nil) use.lock();
+        state = [device newComputePipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
+                                                       reflection:&reflection error:error];
+    }
     if (state == nil || !cacheable) return {state, reflection};
     Record(device, archive, [&](NSError** failure) { return [archive addComputePipelineFunctionsWithDescriptor:native error:failure]; });
     const auto entry = ComputePipelines().Insert(std::move(key), ComputeEntry{state, reflection, native}, ObjectBytes);
@@ -449,8 +467,13 @@ CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPi
     const auto archive = cacheable ? ArchiveHandle(device) : nil;
     if (archive != nil) native.binaryArchives = @[archive];
     MTLRenderPipelineReflection* reflection = nil;
-    id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
-                                                                        reflection:&reflection error:error];
+    id<MTLRenderPipelineState> state = nil;
+    {
+        std::shared_lock use(archiveUse, std::defer_lock);
+        if (archive != nil) use.lock();
+        state = [device newRenderPipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
+                                                     reflection:&reflection error:error];
+    }
     if (state == nil || !cacheable) return {state, reflection};
     Record(device, archive, [&](NSError** failure) { return [archive addRenderPipelineFunctionsWithDescriptor:native error:failure]; });
     const auto entry = RenderPipelines().Insert(std::move(key), RenderEntry{state, reflection, native}, ObjectBytes);
@@ -468,8 +491,13 @@ CachedRenderPipeline CachedMeshPipelineState(id<MTLDevice> device, MTLMeshRender
     const auto archive = cacheable ? ArchiveHandle(device) : nil;
     if (archive != nil) native.binaryArchives = @[archive];
     MTLRenderPipelineReflection* reflection = nil;
-    id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithMeshDescriptor:native options:MTLPipelineOptionBindingInfo
-                                                                            reflection:&reflection error:error];
+    id<MTLRenderPipelineState> state = nil;
+    {
+        std::shared_lock use(archiveUse, std::defer_lock);
+        if (archive != nil) use.lock();
+        state = [device newRenderPipelineStateWithMeshDescriptor:native options:MTLPipelineOptionBindingInfo
+                                                         reflection:&reflection error:error];
+    }
     if (state == nil || !cacheable) return {state, reflection};
     Record(device, archive, [&](NSError** failure) { return [archive addMeshRenderPipelineFunctionsWithDescriptor:native error:failure]; });
     const auto entry = RenderPipelines().Insert(std::move(key), RenderEntry{state, reflection, native}, ObjectBytes);
@@ -541,12 +569,14 @@ std::filesystem::path MetalPipelineArchivePath(id<MTLDevice> device) {
 }
 
 bool FlushMetalPipelineArchives() {
+    std::unique_lock use(archiveUse);
     std::lock_guard lock(archiveMutex);
     return FlushLocked();
 }
 
 void ClearMetalPipelineCaches() {
     {
+        std::unique_lock use(archiveUse);
         std::lock_guard lock(archiveMutex);
         static_cast<void>(FlushLocked());
         archives.clear();

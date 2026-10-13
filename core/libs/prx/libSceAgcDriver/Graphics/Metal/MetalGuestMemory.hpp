@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -55,6 +56,8 @@ public:
     [[nodiscard]] std::uint64_t WorkingSetBytes() const;
     // Disjoint, non-adjacent host intervals of the working set, in address order.
     [[nodiscard]] std::vector<std::pair<std::uintptr_t, std::uintptr_t>> WorkingSet() const;
+    // Bridges made so far that are still cached (tests).
+    [[nodiscard]] std::size_t BridgeCount() const;
 
 private:
     friend class MetalGuestMemory;
@@ -73,10 +76,18 @@ private:
     };
     // Under `mutex`: the alias of the page-rounded [begin, end), nil when it cannot alias.
     id<MTLBuffer> alias(std::uintptr_t begin, std::uintptr_t end, std::uint64_t epoch);
+    // A no-copy buffer over host pages [first, last), nil when Metal cannot alias them.
+    id<MTLBuffer> newAlias(std::uintptr_t first, std::uintptr_t last) const;
+    // One alias over host [begin, end) where a binding spans several aliased components (adjacent
+    // guest mappings): kept across captures, up to MaxBridges, until its pages change.
+    id<MTLBuffer> bridge(std::uintptr_t begin, std::uintptr_t end);
+    static constexpr std::size_t MaxBridges = 32;
     id<MTLDevice> device;
     std::uintptr_t pageBytes;
     mutable std::mutex mutex;
     std::vector<Entry> entries;
+    std::vector<Entry> bridges;
+    std::uint64_t bridgeUses = 0;
     std::uint64_t epoch = 0;
     // The last BDA table a capture built, and its entries (DispatchSnapshot reuses it unchanged).
     id<MTLBuffer> table = nil;
@@ -116,6 +127,11 @@ public:
         // Guest bytes this snapshot copied into fresh buffers (0 when every component aliases).
         [[nodiscard]] std::uint64_t CopiedBytes() const;
         [[nodiscard]] ShaderRecompiler::BdaAbi::Fault CompleteAndCopyDirtyPagesToBorrowedHost(id<MTLCommandBuffer> completedCommands);
+        // Guest [address, address + bytes) as one buffer and offset when it spans several mirrors
+        // (adjacent guest mappings) that alias consecutive host bytes: a bridge alias of `aliases`
+        // over the same host pages, so nothing is copied. Empty when it cannot be bridged.
+        [[nodiscard]] std::optional<std::pair<id<MTLBuffer>, std::size_t>> Bridge(std::uint64_t address, std::uint64_t bytes,
+            MetalGuestHostAliases* aliases) const;
 
     private:
         id<MTLDevice> device;

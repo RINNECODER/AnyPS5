@@ -66,6 +66,7 @@ struct Control {
     std::uint32_t dcb[16];
     std::uint32_t* dcbAddress;
     std::uint32_t dcbWords;
+    std::uint32_t marker;
     VideoOutBufferAttribute2 attribute;
     VideoOutBuffers buffers;
 };
@@ -120,6 +121,26 @@ void Guest(const std::filesystem::path& captureDirectory) {
     std::memcpy(&first, display, 4);
     std::memcpy(&last, display + DisplayBytes - 4, 4);
     Require(first == ClearColor && last == ClearColor, "the Metal driver cleared the whole display buffer");
+
+    // The console's GPU reads a submitted buffer after the submit call, so a title can still be
+    // writing its last packet then (another thread finishing it). Here the packet's header is a
+    // type-0 word at submit and the DMA_DATA header 3 ms later: the driver must run the packet.
+    constexpr std::uint32_t LateValue = 0x5a17e0c4u;
+    const auto marker = reinterpret_cast<std::uint64_t>(&control->marker);
+    const std::uint32_t late[] = {0x00000001u, 2u << 29u, LateValue, 0, static_cast<std::uint32_t>(marker),
+        static_cast<std::uint32_t>(marker >> 32u), 4u};
+    control->marker = 0;
+    std::memcpy(control->dcb, late, sizeof(late));
+    control->dcbWords = sizeof(late) / sizeof(late[0]);
+    std::thread writer([control] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        std::atomic_ref<std::uint32_t>(control->dcb[0]).store(0xc0055000u, std::memory_order_release);
+    });
+    const int lateSubmit = sceAgcDriverSubmitMultiDcbs(&control->dcbAddress, &control->dcbWords, 1);
+    writer.join();
+    Require(lateSubmit == 0, "a buffer whose first packet header is written 3 ms after submit is accepted");
+    AgcDriverWaitIdle_nid_postfix();
+    Require(std::atomic_ref<std::uint32_t>(control->marker).load(std::memory_order_acquire) == LateValue, "the packet written after submit ran");
 
     const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
     Require(handle > 0, "open the video output");
