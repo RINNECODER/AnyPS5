@@ -23,6 +23,8 @@
 #include <atomic>
 #include <filesystem>
 #else
+#include <atomic>
+#include <cstdio>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -137,8 +139,23 @@ int DuplicateDescriptor(int descriptor) {
 }
 #else
 int CreateBacking(std::size_t bytes, int* descriptor, std::shared_ptr<JitObject>* object) {
+#ifdef __APPLE__
+    // Darwin has no memfd_create: use an unlinked POSIX shared memory object.
+    static std::atomic<unsigned> sequence{0};
+    char name[48];
+    std::snprintf(name, sizeof(name), "/aps5-jit-%d-%u", static_cast<int>(getpid()), sequence.fetch_add(1));
+    const int file = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (file < 0) return HostFailure("create JIT shared memory", errno);
+    shm_unlink(name);
+    if (fcntl(file, F_SETFD, FD_CLOEXEC) != 0) {
+        const int error = errno;
+        ::close(file);
+        return HostFailure("create JIT shared memory", error);
+    }
+#else
     const int file = memfd_create("anyps5 jit shared memory", MFD_CLOEXEC);
     if (file < 0) return HostFailure("create JIT shared memory", errno);
+#endif
     const bool representable = bytes <= static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
     if (!representable || ftruncate(file, static_cast<off_t>(bytes)) != 0) {
         const int error = !representable || errno == EFBIG ? ENOMEM : errno;

@@ -266,7 +266,12 @@ std::uint64_t GuestSegmentBytes() {
 }
 
 bool SystemImage(const GuestImage& image) {
+#ifdef __APPLE__
+    Dl_info symbol{};
+    const char* name = dladdr(image.native, &symbol) ? symbol.dli_fname : nullptr;
+#else
     const auto* name = static_cast<const link_map*>(image.native)->l_name;
+#endif
     const std::string_view path = name ? name : "";
     return !path.empty() && !path.ends_with(GuestModuleSuffix);
 }
