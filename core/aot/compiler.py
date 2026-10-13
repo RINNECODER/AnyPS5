@@ -1281,6 +1281,10 @@ class Function:
         name = self.contract['name']
         if self.uniform:
             self.lines = [f'define void @{name}(ptr %rf) uwtable {{', 'entry:']
+            if getattr(self, 'entry_index', None) is not None:
+                index = self.entry_index
+                self.lines.append(f'  %count_ptr_{index} = getelementptr i64, ptr @__aps5_aot_counts, i64 {index}')
+                self.lines.append(f'  %count_old_{index} = atomicrmw add ptr %count_ptr_{index}, i64 1 monotonic')
         else:
             args = ', '.join(f'{abi.parameter_type(typ)} %arg{i}' for i, typ in enumerate(parameters))
             self.lines = [f'define {abi.result_type(result)} @{name}({args}) uwtable {{', 'entry:']
@@ -1543,6 +1547,14 @@ def compile_image(image):
         lines.append('declare void @NativeAotRegisterDispatch_nid_no_patch(ptr, i64)')
     if stubs:
         lines.append('declare void @NativeAotReportUnimplemented_nid_no_patch(i64)')
+    if image.contracts.get('count_entries'):
+        ordered = sorted(image.functions.values(), key=lambda spec: spec['address'])
+        addresses = ', '.join(f'i64 {image.guest_base + spec["address"]}' for spec in ordered)
+        lines.append(f'@__aps5_aot_counts = global [{len(ordered)} x i64] zeroinitializer, align 8')
+        lines.append(f'@__aps5_aot_count_addresses = private constant [{len(ordered)} x i64] [{addresses}], align 8')
+        lines.append('declare void @NativeAotRegisterEntryCounts_nid_no_patch(ptr, i64, ptr)')
+        for index, spec in enumerate(ordered):
+            spec['entry_index'] = index
     if image.contracts.get('guard_diagnostics', False):
         lines.append('declare void @NativeAotReportGuardFailure_nid_no_patch(i64, i32)')
     if any(f.checked_pointer_loads or f.checked_pointer_arguments or f.checked_pointer_bases for f in functions):
@@ -1613,11 +1625,15 @@ def compile_image(image):
             lines.append(f"  store ptr @{binding['name']}, ptr {image.pointer(slot, 8)}, align 1")
         if dispatch_enabled:
             lines.append(f'  call void @NativeAotRegisterDispatch_nid_no_patch(ptr @__aps5_aot_dispatch, i64 {len(dispatch_entries)})')
+        if image.contracts.get('count_entries'):
+            lines.append(f'  call void @NativeAotRegisterEntryCounts_nid_no_patch(ptr @__aps5_aot_counts, i64 {len(image.functions)}, ptr @__aps5_aot_count_addresses)')
         if image.immutable_regions:
             lines.append(f'  call void @NativeAotRequireReadOnly_nid_no_patch(ptr @__aps5_aot_readonly_ranges, i64 {len(image.immutable_regions)})')
         if descriptor is not None:
             lines.append('  call void @NativeAotRegisterImage_nid_no_patch(ptr @__aps5_aot_image)')
         lines.extend(['  ret void', '}'])
+    for function in functions:
+        function.entry_index = function.contract.get('entry_index')
     bodies = []
     late_stubs = []
     for function in functions:

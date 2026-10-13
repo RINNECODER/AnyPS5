@@ -87,14 +87,20 @@ def main():
     order, frontier = reachable(image, entries, args.limit)
     native = set(order)
     lifecycle = contracts.get('lifecycle', {})
-    keep = native | frontier | {lifecycle.get('init'), lifecycle.get('fini')} - {None}
+    # DT_INIT/DT_FINI run before and after the entry, so they are native even when the bounded
+    # walk does not reach them.
+    native |= {lifecycle.get('init'), lifecycle.get('fini')} - {None}
+    keep = native | frontier
     contracts['functions'] = [spec for spec in image.functions.values() if spec['address'] in keep]
     for spec in contracts['functions']:
-        if spec['address'] not in native:
+        if spec['address'] in native:
+            spec.pop('stub', None)
+        else:
             spec['stub'] = True
     contracts['allow_unimplemented'] = True
     contracts['guest_data'] = True
     contracts['guest_base'] = args.guest_base
+    contracts['count_entries'] = True
     # HLE NID binding: point a typed import at the runtime's <name>_nid_postfix symbol when
     # that exists (the arm64 libs define every guest entry point with that suffix).
     if args.nid_symbols:
