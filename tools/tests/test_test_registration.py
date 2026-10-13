@@ -32,6 +32,19 @@ class RegistrationTests(unittest.TestCase):
         self.assertIn("buffer_bounds_tests", names)
         self.assertNotIn("missing_tests", names)
 
+    def test_multi_config_branches_register_the_executable(self):
+        names = self.registered(
+            'if(CTEST_CONFIGURATION_TYPE MATCHES "^([Dd][Ee][Bb][Uu][Gg])$")\n'
+            '  add_test([=[bounds]=] "/build/tests/Debug/buffer_bounds_tests")\n'
+            '  set_tests_properties([=[bounds]=] PROPERTIES  TIMEOUT "20")\n'
+            'elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Rr][Ee][Ll][Ee][Aa][Ss][Ee])$")\n'
+            '  add_test([=[bounds]=] "/build/tests/Release/buffer_bounds_tests")\n'
+            '  set_tests_properties([=[bounds]=] PROPERTIES  TIMEOUT "20")\n'
+            'else()\n'
+            '  add_test([=[bounds]=] NOT_AVAILABLE)\n'
+            'endif()\n')
+        self.assertIn("buffer_bounds_tests", names)
+
 
 if __name__ == "__main__":
     unittest.main()
