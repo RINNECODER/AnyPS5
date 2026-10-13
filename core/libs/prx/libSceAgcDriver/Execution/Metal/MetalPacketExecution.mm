@@ -428,6 +428,20 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         if (BindTrace::Active()) BindTrace::Log("empty draw: count %u instances %u", parameters.indexCount, parameters.instanceCount);
         return;
     }
+    // A CB resolve draws nothing of its own: CB0's resident samples are resolved into CB1.
+    if (const auto control = queue.context.find(0x202); control != queue.context.end() && ((control->second >> 4u) & 7u) == 3u) {
+        if (const auto pass = Graphics::DecodeColorMetadataPass(queue); pass && pass->mode == Graphics::ColorMetadataPass::Mode::Resolve) {
+            if (parameters.indirect) throw std::runtime_error("AGC graphics: indirect CB resolves are unsupported");
+            if (BindTrace::Active()) {
+                BindTrace::Log("CB resolve 0x%llx (%u samples) -> 0x%llx %ux%u", static_cast<unsigned long long>(pass->source->address),
+                    pass->source->samples, static_cast<unsigned long long>(pass->targets.front().address),
+                    pass->targets.front().extent.width, pass->targets.front().extent.height);
+            }
+            checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges,
+                [&] { return draw->ResolveSynchronously(*pass->source, pass->targets.front(), ranges); }));
+            return;
+        }
+    }
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
     GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Draw, decoded.programs.empty() ? 0 : decoded.programs.back().binary.codeAddress));
     GpuStallWatch::Note(2, decoded.programs.empty() ? 0 : decoded.programs.front().binary.codeAddress, parameters.indexCount);
