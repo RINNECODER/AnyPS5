@@ -125,9 +125,9 @@ static int SetTimes(HANDLE handle, const KernelTimeval* times) {
     }
     return SetFileTime(handle, nullptr, &access, &modified) ? 0 : File::WindowsFileTime::Failure(GetLastError());
 }
-static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
+static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times, bool followLink = true) {
     const auto handle = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | (followLink ? 0 : FILE_FLAG_OPEN_REPARSE_POINT), nullptr);
     if (handle == INVALID_HANDLE_VALUE) return File::WindowsFileTime::Failure(GetLastError());
     const int result = SetTimes(handle, times);
     CloseHandle(handle);
@@ -256,11 +256,11 @@ static int NativeFtruncate(int descriptor, std::int64_t length) {
 static int NativeTruncate(const std::filesystem::path& path, std::int64_t length) {
     return ::truncate(path.c_str(), static_cast<off_t>(length)) == 0 ? 0 : errno;
 }
-static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
-    if (times == nullptr) return ::utimes(path.c_str(), nullptr);
+static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times, bool followLink = true) {
+    if (times == nullptr) return followLink ? ::utimes(path.c_str(), nullptr) : ::lutimes(path.c_str(), nullptr);
     struct timeval values[2]{{static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)},
         {static_cast<time_t>(times[1].tv_sec), static_cast<suseconds_t>(times[1].tv_usec)}};
-    return ::utimes(path.c_str(), values);
+    return followLink ? ::utimes(path.c_str(), values) : ::lutimes(path.c_str(), values);
 }
 static int NativeFutimes(int descriptor, const KernelTimeval* times) {
     if (times == nullptr) return ::futimes(descriptor, nullptr);
@@ -534,15 +534,13 @@ void PreserveHostStandardError() {
 #ifdef _WIN32
     const int saved = WithoutParameterHandler([] { return ::_dup(2); });
 #else
-    const int saved = ::dup(2);
+    const int saved = KeepHostStandardError_nid_no_patch();
 #endif
     if (saved < 0) throw std::runtime_error("dup2: cannot keep the host standard error");
     int expected = -1;
     if (!g_hostStandardError.compare_exchange_strong(expected, saved)) {
 #ifdef _WIN32
         _close(saved);
-#else
-        ::close(saved);
 #endif
     }
 }
@@ -591,7 +589,10 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
     if (WithoutParameterHandler([from] { return ::_get_osfhandle(from) == -1 ? -1 : 0; }) != 0) return PosixFailure(GUEST_EBADF);
     if (from == to) return to;
     if (to == 2) PreserveHostStandardError();
-    if (WithoutParameterHandler([from, to] { return ::_dup2(from, to); }) != 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
+    auto* const standard = HostStandardHandle_nid_no_patch(to);
+    const int duplicated = WithoutParameterHandler([from, to] { return ::_dup2(from, to); });
+    KeepStandardHandle_nid_no_patch(to, standard);
+    if (duplicated != 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
     EqueueDescriptorClosed(to);
     GuestSockets::Forget(to);
     File::ForgetDirectoryDescriptor(to);
@@ -1174,10 +1175,16 @@ int APS5_VABI sceKernelRename(const char* from, const char* to) {
     std::filesystem::path source;
     if (const int error = ResolvePathError_nid_no_patch(from, source)) return SceKernelError(error);
     std::error_code error;
-    if (!std::filesystem::exists(source, error)) return SceErrorFromErrno(GUEST_ENOENT);
+    const auto sourceStatus = std::filesystem::status(source, error);
+    if (!std::filesystem::exists(sourceStatus)) return SceErrorFromErrno(GUEST_ENOENT);
     std::filesystem::path destination;
     if (const int result = ResolvePathError_nid_no_patch(to, destination)) return SceKernelError(result);
-    std::filesystem::rename(source, destination, error);
+    bool replacesFile = false;
+#ifdef _WIN32
+    const auto destinationStatus = std::filesystem::symlink_status(destination, error);
+    replacesFile = !std::filesystem::is_directory(sourceStatus) && std::filesystem::exists(destinationStatus) && !std::filesystem::is_directory(destinationStatus);
+#endif
+    error = RenameNative_nid_no_patch(source, destination, replacesFile);
     if (error) return SceErrorFromErrno(GUEST_EIO);
     RecordWrittenPath_nid_no_patch(source);
     RecordWrittenPath_nid_no_patch(destination);
@@ -1267,6 +1274,19 @@ int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval*
 int APS5_VABI utimes_nid_postfix(const char* path, const KernelTimeval* times) {
     if (const int error = PathError(path)) return PosixFailure(error);
     return PosixResult(sceKernelUtimes_nid_postfix(path, times));
+}
+
+int APS5_VABI lutimes_nid_postfix(const char* path, const KernelTimeval* times) {
+    if (const int error = PathError(path)) return PosixFailure(error);
+    if (times != nullptr) {
+        for (int i = 0; i < 2; ++i) {
+            if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return PosixFailure(GUEST_EINVAL);
+        }
+    }
+    std::filesystem::path native;
+    if (const int error = ResolvePathError_nid_no_patch(path, native)) return PosixFailure(error);
+    if (NativeUtimes(native, times, false) != 0) return PosixResult(SceErrorFromErrno(errno));
+    return 0;
 }
 
 int APS5_VABI sceKernelFutimes(int d, const KernelTimeval* times) {

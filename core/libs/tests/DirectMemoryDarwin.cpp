@@ -11,6 +11,7 @@
 
 bool GuestThreadStack(std::uintptr_t, std::uintptr_t*, std::uintptr_t*) { return false; }
 void NoteGuestStackProtection(std::uintptr_t, std::size_t, bool) {}
+bool GuestThreadStackHostRangeOverlaps(std::uintptr_t, std::uintptr_t) { return false; }
 
 namespace {
 

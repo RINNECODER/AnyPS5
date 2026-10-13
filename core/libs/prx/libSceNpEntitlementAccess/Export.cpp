@@ -31,10 +31,14 @@ std::filesystem::path EntitlementsPath() {
     if (length == 0 || length == MAX_PATH) throw std::runtime_error("NpEntitlementAccess: cannot locate the executable");
     return std::filesystem::path(module).parent_path() / "anyps5-entitlements.ini";
 #elif defined(__APPLE__)
-    char executable[4096];
-    std::uint32_t size = sizeof(executable);
-    if (_NSGetExecutablePath(executable, &size) != 0) throw std::runtime_error("NpEntitlementAccess: cannot locate the executable");
-    return std::filesystem::path(executable).parent_path() / "anyps5-entitlements.ini";
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> executable(size);
+    std::error_code error;
+    std::filesystem::path path;
+    if (_NSGetExecutablePath(executable.data(), &size) == 0) path = std::filesystem::canonical(executable.data(), error);
+    if (path.empty()) throw std::runtime_error("NpEntitlementAccess: cannot locate the executable");
+    return path.parent_path() / "anyps5-entitlements.ini";
 #else
     return std::filesystem::read_symlink("/proc/self/exe").parent_path() / "anyps5-entitlements.ini";
 #endif

@@ -36,6 +36,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Tsd.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Rwlock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Sem.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Atfork.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Attr.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Barrier.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Cond.cpp
@@ -65,6 +66,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SystemConfiguration.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Login.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SoftwareVersion.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/System/src/ThermalSensors.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Signals.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SignalSets.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Notification.cpp
@@ -80,7 +82,7 @@ target_include_directories(libkernel PRIVATE ${LIBS_INCLUDE_DIR}/nid/include)
 target_link_libraries(libkernel PRIVATE ${CMAKE_DL_LIBS})
 target_link_libraries(libkernel PRIVATE libc)
 if(WIN32)
-    target_link_libraries(libkernel PRIVATE ws2_32 shell32 advapi32)
+    target_link_libraries(libkernel PRIVATE ws2_32 shell32 advapi32 wbemuuid ole32 oleaut32)
     target_compile_definitions(libkernel PRIVATE _WIN32_WINNT=0x0602)
 endif()
 configure_windows_unwind(libkernel)
@@ -237,6 +239,13 @@ if(BUILD_TESTING)
         set_tests_properties(guest_filesystem PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    if(UNIX)
+        add_test_executable(guest_host_standard_error_tests ${LIBS_INCLUDE_DIR}/tests/GuestHostStandardError.cpp)
+        target_include_directories(guest_host_standard_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_host_standard_error_tests PRIVATE libkernel libc)
+        add_test(NAME guest_host_standard_error COMMAND guest_host_standard_error_tests)
+        set_tests_properties(guest_host_standard_error PROPERTIES TIMEOUT 10)
+    endif()
     add_test_executable(guest_truncate_tests ${LIBS_INCLUDE_DIR}/tests/GuestTruncate.cpp)
     target_include_directories(guest_truncate_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_truncate_tests PRIVATE libkernel libc)
@@ -376,6 +385,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_pthread_attr PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_pthread_attr PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_pthread_schedparam_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadSchedparam.cpp)
+    target_include_directories(guest_pthread_schedparam_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_pthread_schedparam_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_pthread_schedparam_tests)
+    add_test(NAME guest_pthread_schedparam COMMAND guest_pthread_schedparam_tests)
+    set_tests_properties(guest_pthread_schedparam PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_pthread_schedparam PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_pthread_mutexattr_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadMutexattr.cpp)
@@ -638,6 +657,15 @@ if(BUILD_TESTING)
         set_tests_properties(guest_parent_process PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(guest_pthread_atfork_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadAtfork.cpp)
+    target_include_directories(guest_pthread_atfork_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_pthread_atfork_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_pthread_atfork_tests)
+    add_test(NAME guest_pthread_atfork COMMAND guest_pthread_atfork_tests)
+    if(WIN32)
+        set_tests_properties(guest_pthread_atfork PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_kill_tests ${LIBS_INCLUDE_DIR}/tests/GuestKill.cpp)
     target_include_directories(guest_kill_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_kill_tests PRIVATE libkernel libc)
@@ -773,6 +801,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_getrusage PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_getrusage PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_thermal_sensors_tests ${LIBS_INCLUDE_DIR}/tests/GuestThermalSensors.cpp)
+    target_include_directories(guest_thermal_sensors_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_thermal_sensors_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_thermal_sensors_tests)
+    add_test(NAME guest_thermal_sensors COMMAND guest_thermal_sensors_tests)
+    set_tests_properties(guest_thermal_sensors PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_thermal_sensors PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_getlogin_tests ${LIBS_INCLUDE_DIR}/tests/GuestGetlogin.cpp)
