@@ -275,6 +275,7 @@ struct IndirectTraceSite {
 struct IndirectTraceState {
     std::atomic<bool> enabled{false};
     int fd = -1;
+    int entryFd = -1;
     std::uint64_t limit = 2000000;
     double afterSeconds = 0.0;
     double startSeconds = 0.0;
@@ -430,6 +431,7 @@ void InitializeIndirectTrace() {
         indirectTrace.codeMax = hostEnd > indirectTrace.guestBase ? hostEnd - indirectTrace.guestBase : 0;
     }
     indirectTrace.fd = ::open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    indirectTrace.entryFd = ::open((std::string(path) + ".entries").c_str(), O_CREAT | O_WRONLY | O_APPEND, 0644);
     if (indirectTrace.fd < 0) {
         Write("[rosetta] indirect trace: cannot open %s\n", path);
         return;
@@ -500,6 +502,24 @@ void AppendIndirectRecord(const std::uint64_t from, const std::uint64_t to, cons
     ++indirectTrace.written;
 }
 
+// One function-entry record: the entry address and the 16 general-purpose
+// registers at entry, in the harness order (rax rbx rcx rdx rsi rdi rbp rsp
+// r8..r15).
+void AppendEntryRecord(const std::uint64_t entry, const ucontext_t* context) {
+    if (indirectTrace.entryFd < 0) return;
+    const auto& state = context->uc_mcontext->__ss;
+    struct Entry {
+        std::uint64_t Entry;
+        std::uint64_t Registers[16];
+    } record{};
+    record.Entry = entry;
+    const std::uint64_t values[16] = {state.__rax, state.__rbx, state.__rcx, state.__rdx, state.__rsi, state.__rdi,
+                                      state.__rbp, state.__rsp, state.__r8, state.__r9, state.__r10, state.__r11,
+                                      state.__r12, state.__r13, state.__r14, state.__r15};
+    std::memcpy(record.Registers, values, sizeof(values));
+    (void)!::write(indirectTrace.entryFd, &record, sizeof(record));
+}
+
 // Returns true when the faulting instruction is one of our trapped indirect
 // branches and the context has been advanced past it.
 bool HandleIndirectTrap(ucontext_t* context) {
@@ -519,8 +539,23 @@ bool HandleIndirectTrap(ucontext_t* context) {
     if (site == nullptr) return false;
 
     const std::uint8_t* bytes = site->Bytes;
-    const std::uint32_t prefix = site->PrefixLength;
+    const bool isEntry = (site->PrefixLength & 0x80000000u) != 0;
+    const std::uint32_t prefix = site->PrefixLength & 0x7fffffffu;
     const std::uint32_t length = site->Length;
+    if (isEntry) {
+        // A trapped `push r64` prologue: record the entry registers and emulate it.
+        AppendEntryRecord(opcodeAddress - indirectTrace.guestBase, context);
+        const std::uint8_t opcode = bytes[prefix];
+        std::uint8_t rex = 0;
+        for (std::uint32_t index = 0; index < prefix; ++index)
+            if (bytes[index] >= 0x40 && bytes[index] <= 0x4F) rex = bytes[index];
+        const unsigned index = (opcode & 7) | ((rex & 1) << 3);
+        const std::uint64_t stack = state.__rsp - sizeof(std::uint64_t);
+        *reinterpret_cast<volatile std::uint64_t*>(stack) = RegisterValue(context, index);
+        state.__rsp = stack;
+        state.__rip = opcodeAddress - prefix + length;
+        return true;
+    }
     if (prefix + 2 > length) return false;
     const std::uint8_t modrm = bytes[prefix + 1];
     const std::uint8_t mod = modrm >> 6;

@@ -17,6 +17,7 @@ struct IndirectBranchSite {
     std::size_t Length;
     VirtualAddress Address;
     bool IsCall;
+    bool IsEntry = false;  // function-entry record (ANYPS5_TRACE_ENTRY)
 };
 
 class IIndirectBranchScanner {

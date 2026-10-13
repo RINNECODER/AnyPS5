@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import struct
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -187,7 +188,7 @@ def build_synthetic(functions, referenced):
     return bytes(image), contracts
 
 
-def compile_one(title, sizes, address, limit):
+def compile_one(title, sizes, address, limit, work_dir=None):
     functions = closure(title, sizes, address, limit)
     codes = [(a, title.code(a, sizes[a])) for a in functions]
     codes = [(a, c) for a, c in codes if c]
@@ -203,8 +204,14 @@ def compile_one(title, sizes, address, limit):
             ir, report = compile_image(Image(path, contracts))
         except (Rejected, KeyError, ValueError) as error:
             return {"status": "rejected", "reason": str(error)[:400], "closure": len(codes), "references": len(referenced)}
+    image_path = ""
+    if work_dir is not None:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        saved = work_dir / f"{address:x}.elf"
+        saved.write_bytes(image)
+        image_path = str(saved)
     return {"status": "compiled", "closure": len(codes), "references": len(referenced),
-            "ir": ir, "ir_lines": ir.count("\n"), "functions": report["functions"]}
+            "image": image_path, "ir": ir, "ir_lines": ir.count("\n"), "functions": report["functions"]}
 
 
 def main():
@@ -217,6 +224,7 @@ def main():
     sizes = fde_sizes(starts_path)
     title = Title(elf_path)
     selected = json.loads(selection_path.read_text())
+    images = out_dir / "images"
     results = {}
     compiled = 0
     for item in selected:
@@ -226,7 +234,7 @@ def main():
             results[item["function"]] = {"status": "no-fde-range", "hits": item["hits"]}
             continue
         try:
-            result = compile_one(title, sizes, address, limit)
+            result = compile_one(title, sizes, address, limit, images)
         except Exception as error:
             result = {"status": "harness-error", "reason": str(error)[:400]}
         result["hits"] = item["hits"]
@@ -241,32 +249,37 @@ def main():
     return 0
 
 
-def replay_compiled(title, sizes, results, out_dir, cases=25):
+def replay_compiled(title, sizes, results, out_dir, cases=1000):
     """Replay each compiled function with a zeroed register/memory case: the AOT
-    ARM64 function against the original x86 bytes under Rosetta."""
-    import replay
-    matched = mismatched = failed = 0
+    ARM64 function against the original x86 bytes in a Rosetta-relinked layout.
+    Each case runs in its own process so a crash is contained."""
+    matched = mismatched = x86_fault = arm_fault = 0
+    replay_dir = out_dir / "replay"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    script = Path(__file__).resolve().parent / "replay_one.py"
     for address_hex, result in list(results.items()):
-        if result["status"] != "compiled" or cases <= 0:
+        if result["status"] != "compiled" or cases <= 0 or not result.get("image"):
             continue
         cases -= 1
         address = int(address_hex, 16)
-        code = title.code(address, sizes[address])
-        with tempfile.TemporaryDirectory(prefix="anyps5-replay-") as directory:
-            try:
-                outcome = replay.replay_case(Path(directory), result["ir"], f"func_{address:x}", code, address,
-                                             {name: 0 for name in replay.REGISTERS}, bytes(1 << 16))
-            except Exception as error:
-                result["replay"] = {"status": "error", "reason": str(error)[:200]}
-                failed += 1
-                continue
+        ir_path = replay_dir / f"{address:x}.ll"
+        ir_path.write_text(result["ir"])
+        completed = subprocess.run([sys.executable, str(script), str(ir_path), result["image"], address_hex],
+                                   capture_output=True, text=True)
+        if completed.returncode != 0:
+            result["replay"] = {"status": "arm64-fault", "exit": completed.returncode, "stderr": completed.stderr[-200:]}
+            arm_fault += 1
+            continue
+        outcome = json.loads(completed.stdout)
         result["replay"] = outcome
-        if outcome["match"]:
+        if outcome.get("status") == "x86-fault":
+            x86_fault += 1
+        elif outcome["match"]:
             matched += 1
         else:
             mismatched += 1
     (out_dir / "compile-results.json").write_text(json.dumps(results, indent=1))
-    print(f"replay: matched={matched} mismatched={mismatched} failed={failed}")
+    print(f"replay: matched={matched} mismatched={mismatched} x86_fault={x86_fault} arm64_fault={arm_fault}")
 
 
 if __name__ == "__main__":

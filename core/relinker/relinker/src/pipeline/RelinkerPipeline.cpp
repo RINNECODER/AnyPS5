@@ -342,6 +342,7 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
             RelinkResult::IndirectTraceSite record;
             record.OpcodeAddress = site.Address;
             record.PrefixLength = static_cast<std::uint32_t>(site.OpcodeOffset - site.InstructionOffset);
+            if (site.IsEntry) record.PrefixLength |= 0x80000000u;  // entry record
             record.Length = static_cast<std::uint32_t>(site.Length);
             for (std::size_t index = 0; index < site.Length; ++index) record.Bytes[index] = segment[site.InstructionOffset + index];
             // `int3` plus one-byte NOPs: the same length, so the linear decoder stays in sync.
