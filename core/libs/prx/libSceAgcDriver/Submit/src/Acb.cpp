@@ -14,7 +14,7 @@ int APS5_VABI sceAgcDriverSubmitMultiAcbs(uint32_t queue, uint32_t* const* acbs,
     if (queue < 0x20 || queue >= 0x58) {
         throw std::runtime_error(std::string(__func__) + ": unsupported compute queue");
     }
-    return AgcDriver::SubmitMany(acbs, sizes_in_dwords, count, queue);
+    return AgcDriver::SubmitMany(acbs, sizes_in_dwords, count, queue, __func__);
 }
 
 }

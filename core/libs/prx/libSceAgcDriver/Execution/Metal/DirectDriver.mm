@@ -11,6 +11,8 @@
 #include <mach/mach_vm.h>
 #include <sys/mman.h>
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
@@ -20,23 +22,54 @@
 #include <stdexcept>
 #include <string>
 
+namespace {
+
+// Whether every page of [address, address + bytes) is mapped with the needed access.
+bool HostAccessible(std::uint64_t address, std::size_t bytes, bool writable) {
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    const auto end = address + bytes;
+    for (auto cursor = address; cursor < end;) {
+        mach_vm_address_t region = cursor;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS)
+            return false;
+        if (region > cursor || (info.protection & VM_PROT_READ) == 0 || (writable && (info.protection & VM_PROT_WRITE) == 0)) return false;
+        cursor = region + size;
+    }
+    return true;
+}
+
+}
+
 namespace AgcDriver::Metal {
 namespace {
 
 using Ranges = std::vector<NativeGuestMemory::BorrowedRange>;
 
-// Host-built command words (VideoOut's flip packet) are copied here before submission. The driver
-// captures submitted words during the call, so one buffer under a lock is enough.
+// Command words outside the GPU-visible guest allocations (VideoOut's flip packet, a DCB in CPU-only
+// or host memory) are copied here before submission. The driver captures submitted words during
+// the call, so one buffer under a lock is enough. It starts at StagingBytes and grows to the
+// largest such buffer, up to MaxStagingBytes (the capture's own limit is larger).
 constexpr std::size_t StagingBytes = 64 * 1024;
+constexpr std::size_t MaxStagingBytes = 64 * 1024 * 1024;
+
+std::byte* MapStaging(std::size_t bytes) {
+    void* mapping = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (mapping == MAP_FAILED) throw std::runtime_error("Rosetta direct path: cannot map the command staging buffer");
+    return static_cast<std::byte*>(mapping);
+}
 
 struct DirectState {
-    DirectState() {
-        void* mapping = ::mmap(nullptr, StagingBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (mapping == MAP_FAILED) throw std::runtime_error("Rosetta direct path: cannot map the command staging buffer");
-        staging = static_cast<std::byte*>(mapping);
-    }
+    // Held while the staging buffer is filled and submitted.
     std::mutex stagingMutex;
-    std::byte* staging = nullptr;
+    // Guards staging/stagingBytes for readers outside stagingMutex (IdentityRanges); never held
+    // while taking another lock.
+    std::mutex stagingRegionMutex;
+    std::byte* staging = MapStaging(StagingBytes);
+    std::size_t stagingBytes = StagingBytes;
 
     std::mutex rangesMutex;
     std::uint64_t allocationGeneration = std::numeric_limits<std::uint64_t>::max();
@@ -92,19 +125,43 @@ Ranges IdentityRanges() {
     }
     result = SplitBorrowedRanges(result, MetalRangeLimit());
     // The staging buffer is a fresh host mapping, so it never overlaps a guest allocation.
-    const auto staging = reinterpret_cast<std::uint64_t>(State().staging);
-    const auto position = std::lower_bound(result.begin(), result.end(), staging,
+    std::span<std::byte> staging;
+    {
+        auto& state = State();
+        std::lock_guard lock(state.stagingRegionMutex);
+        staging = {state.staging, state.stagingBytes};
+    }
+    const auto stagingAddress = reinterpret_cast<std::uint64_t>(staging.data());
+    const auto position = std::lower_bound(result.begin(), result.end(), stagingAddress,
         [](const NativeGuestMemory::BorrowedRange& range, std::uint64_t address) { return range.guestAddress < address; });
-    result.insert(position, {staging, {State().staging, StagingBytes}, false});
+    result.insert(position, {stagingAddress, staging, false});
     return result;
 }
 
-bool Covered(const Ranges& ranges, std::uint64_t address, std::size_t bytes) {
-    const auto found = std::upper_bound(ranges.begin(), ranges.end(), address,
-        [](std::uint64_t value, const NativeGuestMemory::BorrowedRange& range) { return value < range.guestAddress; });
-    if (found == ranges.begin()) return false;
-    const auto& range = *std::prev(found);
-    return address - range.guestAddress <= range.host.size() && bytes <= range.host.size() - (address - range.guestAddress);
+// Replaces the staging buffer with one of at least `bytes` (caller holds stagingMutex) and makes
+// the next DirectGuestRanges() rebuild, so the next DirectDriver() hands the driver the new range.
+// The old mapping stays mapped: ranges already handed out (a worker's snapshot) may still name it.
+void GrowStaging(DirectState& state, std::size_t bytes) {
+    auto size = state.stagingBytes;
+    while (size < bytes) size *= 2;
+    auto* mapping = MapStaging(size);
+    {
+        std::lock_guard lock(state.stagingRegionMutex);
+        state.staging = mapping;
+        state.stagingBytes = size;
+    }
+    std::lock_guard lock(state.rangesMutex);
+    state.allocationGeneration = std::numeric_limits<std::uint64_t>::max();
+}
+
+// A submission whose words cannot be read is dropped with a log line instead of aborting the title.
+void SkipSubmission(const char* call, const Packet& packet, std::uint32_t queue, const char* reason) {
+    static std::atomic<std::uint64_t> skipped{0};
+    const auto count = ++skipped;
+    if (count > 16 && (count & (count - 1)) != 0) return;
+    std::fprintf(stderr, "[rosetta] %s: skipped the command buffer at %p (%u words, %zu bytes, flags 0x%x, queue %u): %s (skip %llu)\n",
+        call != nullptr ? call : "submit", packet.addr, packet.dw_num, std::size_t{packet.dw_num} * sizeof(std::uint32_t),
+        static_cast<unsigned>(packet.flags), queue, reason, static_cast<unsigned long long>(count));
 }
 
 std::shared_ptr<const std::vector<NativeGuestMemory::BorrowedRange>> ProcessRanges() { return DirectGuestRanges(); }
@@ -165,6 +222,24 @@ void Configure(DirectState& state, MetalDriver& driver, const std::shared_ptr<co
 
 }
 
+bool RangesCover(const std::vector<NativeGuestMemory::BorrowedRange>& ranges, std::uint64_t address, std::size_t bytes) {
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    const auto end = address + bytes;
+    auto found = std::upper_bound(ranges.begin(), ranges.end(), address,
+        [](std::uint64_t value, const NativeGuestMemory::BorrowedRange& range) { return value < range.guestAddress; });
+    if (found == ranges.begin()) return false;
+    --found;
+    // A buffer may run on through adjacent ranges: mappings with different access are never merged,
+    // and long ones are split at the buffer limit, but the driver reads across both.
+    for (auto cursor = address;;) {
+        const auto rangeEnd = found->guestAddress + found->host.size();
+        if (cursor > rangeEnd) return false;
+        if (end <= rangeEnd) return true;
+        cursor = rangeEnd;
+        if (++found == ranges.end() || found->guestAddress != cursor) return false;
+    }
+}
+
 std::vector<NativeGuestMemory::BorrowedRange> SplitBorrowedRanges(const std::vector<NativeGuestMemory::BorrowedRange>& ranges, std::uint64_t limit) {
     if (limit == 0 || (limit & (limit - 1)) != 0) throw std::invalid_argument("Rosetta direct path: range limit must be a power of two");
     std::vector<NativeGuestMemory::BorrowedRange> result;
@@ -194,20 +269,28 @@ std::shared_ptr<const std::vector<NativeGuestMemory::BorrowedRange>> DirectGuest
     return state.ranges;
 }
 
-void DirectSubmit(const Packet& packet, std::uint32_t queue) {
-    auto& driver = DirectDriver();
+void DirectSubmit(const Packet& packet, std::uint32_t queue, const char* call) {
+    auto* driver = &DirectDriver();
     const auto address = reinterpret_cast<std::uint64_t>(packet.addr);
     const auto bytes = std::size_t{packet.dw_num} * sizeof(std::uint32_t);
-    if (bytes == 0 || Covered(*DirectGuestRanges(), address, bytes)) {
-        driver.SubmitCommandBuffer(address, packet.dw_num, packet.flags, queue);
+    if (bytes == 0 || RangesCover(*DirectGuestRanges(), address, bytes)) {
+        driver->SubmitCommandBuffer(address, packet.dw_num, packet.flags, queue);
         return;
     }
-    if (packet.addr == nullptr || bytes > StagingBytes)
-        throw std::runtime_error("Rosetta direct path: command buffer outside guest memory is null or exceeds the staging buffer");
+    if (packet.addr == nullptr) return SkipSubmission(call, packet, queue, "null address");
+    if (bytes > MaxStagingBytes) return SkipSubmission(call, packet, queue, "larger than the staging limit");
+    if (!HostAccessible(address, bytes, false)) return SkipSubmission(call, packet, queue, "not readable memory");
     auto& state = State();
     std::lock_guard lock(state.stagingMutex);
+    if (bytes > state.stagingBytes) {
+        // A worker keeps the ranges it runs with, so it cannot hand the driver a new staging range.
+        if (MetalDriver::OnDriverWorkerThread())
+            return SkipSubmission(call, packet, queue, "needs a larger staging buffer on a driver worker thread");
+        GrowStaging(state, bytes);
+        driver = &DirectDriver();
+    }
     std::memcpy(state.staging, packet.addr, bytes);
-    driver.SubmitCommandBuffer(reinterpret_cast<std::uint64_t>(state.staging), packet.dw_num, packet.flags, queue);
+    driver->SubmitCommandBuffer(reinterpret_cast<std::uint64_t>(state.staging), packet.dw_num, packet.flags, queue);
 }
 
 MetalDriver& DirectDriver() {
@@ -228,26 +311,6 @@ MetalDriver& DirectDriver() {
 
 }
 
-namespace {
-
-// Whether every page of [address, address + bytes) is mapped with the needed access.
-bool HostAccessible(std::uint64_t address, std::size_t bytes, bool writable) {
-    const auto end = address + bytes;
-    for (auto cursor = address; cursor < end;) {
-        mach_vm_address_t region = cursor;
-        mach_vm_size_t size = 0;
-        vm_region_basic_info_data_64_t info{};
-        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t object = MACH_PORT_NULL;
-        if (mach_vm_region(mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS)
-            return false;
-        if (region > cursor || (info.protection & VM_PROT_READ) == 0 || (writable && (info.protection & VM_PROT_WRITE) == 0)) return false;
-        cursor = region + size;
-    }
-    return true;
-}
-
-}
 
 // libSceVideoOut validates guest buffers through this export (upstream defines it next to the
 // Vulkan driver's guest memory, which this build does not link). Guest pointers are host pointers
