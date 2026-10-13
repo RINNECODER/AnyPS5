@@ -42,6 +42,8 @@ class Emitter:
                 self.lines.append(f'  store i128 {value}, ptr %{name}, align 16')
                 self.state['known'][name] = avx.MASK128
         self.lines.extend(['  %rax = alloca i64, align 8', '  store i64 0, ptr %rax, align 8'])
+        for flag in ('cf', 'pf', 'zf', 'sf', 'of'):
+            self.lines.extend([f'  %{flag} = alloca i1, align 1', f'  store i1 false, ptr %{flag}, align 1'])
 
     def emit(self, expression):
         self.serial += 1
@@ -123,6 +125,14 @@ class Emitter:
                 self.lines.append(f'  store i128 {value}, ptr {pointer}, align 1')
         pointer = self.emit('getelementptr i8, ptr %out, i64 128')
         self.lines.append(f'  store i64 {self.load("rax", 64)}, ptr {pointer}, align 1')
+        result = '0'
+        for name, shift in [('cf', 0), ('pf', 2), ('zf', 6), ('sf', 7), ('of', 11)]:
+            flag = self.emit(f'load i1, ptr %{name}, align 1')
+            value = self.emit(f'zext i1 {flag} to i64')
+            shifted = self.emit(f'shl i64 {value}, {shift}')
+            result = self.emit(f'or i64 {result}, {shifted}')
+        pointer = self.emit('getelementptr i8, ptr %out, i64 136')
+        self.lines.append(f'  store i64 {result}, ptr {pointer}, align 1')
         self.lines.extend(['  ret void', '}'])
         return '\n'.join(self.lines) + '\n'
 
@@ -343,7 +353,9 @@ fn(*addresses, output, 0)
         emitter = Emitter()
         with self.assertRaisesRegex(ValueError, 'EVEX'):
             avx.analyze(emitter, instructions[0], emitter.state)
-        instructions, _ = self.instructions('vaddps ymm0, ymm1, ymm2')
+        instructions, _ = self.instructions('vfmadd213ps ymm0, ymm1, ymm2')
+        self.assertFalse(avx.analyze(emitter, instructions[0], emitter.state))
+        instructions, _ = self.instructions('vroundps ymm0, ymm1, 0')
         self.assertFalse(avx.analyze(emitter, instructions[0], emitter.state))
 
 
