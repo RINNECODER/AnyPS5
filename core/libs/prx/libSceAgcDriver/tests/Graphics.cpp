@@ -4800,6 +4800,13 @@ void storeAtFlipTests() {
     for (const char* value : {"0", "", "true", "11"}) expectFailure([&] { StorageTexture::StoreAtFlipRequested(value); }, "expected 1");
 }
 
+void storeAtLabelTests() {
+    using AgcDriver::Graphics::StorageTexture;
+    Require(!StorageTexture::StoreAtLabelRequested(nullptr), "an unset APS5_STORE_AT_LABEL stored at each label");
+    Require(StorageTexture::StoreAtLabelRequested("1"), "APS5_STORE_AT_LABEL=1 did not store at each label");
+    for (const char* value : {"0", "", "true", "11"}) expectFailure([&] { StorageTexture::StoreAtLabelRequested(value); }, "expected 1");
+}
+
 void nullVertexDescriptorTests() {
     using AgcDriver::Graphics::DecodeVertexFormat;
     constexpr std::array formats{VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT};
@@ -5117,6 +5124,7 @@ int main(int argc, char** argv) {
         vertexCopyTests();
         highestDrawIndexTests();
         storeAtFlipTests();
+        storeAtLabelTests();
         nullVertexDescriptorTests();
         vertexZeroFillTests();
         vertexZeroFillMergeTests();

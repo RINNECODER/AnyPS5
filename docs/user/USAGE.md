@@ -138,6 +138,8 @@ The game runs on the first Vulkan 1.1 device with graphics and compute queues an
 
 GPU results in storage images and render targets stay on the GPU until something reads their memory. A title that frees such an image after waiting for its GPU work and reuses the memory can have its new data overwritten when the results are stored later ([TechnicalDebt](../dev/TechnicalDebt.md)). `APS5_STORE_AT_FLIP=1` stores every pending result when a display buffer is flipped, at the cost of one write-back per pending image and frame. Any other value stops the title at its first flip.
 
+A title's own CPU reads of that memory are not seen, so a title that waits for a GPU label and then reads the results reads stale memory. `APS5_STORE_AT_LABEL=1` stores every pending result before each label the GPU writes (`RELEASE_MEM`, `WRITE_DATA`, `DMA_DATA`), at the cost of a write-back of every pending image per label. Any other value stops the title at its first label.
+
 ## Exit codes
 
 `0`: conversion succeeded or help was displayed. `1`: invalid arguments. `2`: conversion failed; the error is printed to stderr. With `--autorun`, successful conversion returns the launched application's exit code.
