@@ -300,6 +300,25 @@ static void CheckUnspecifiedIpv6() {
     Require(sceNetSocketClose(receiver) == 0);
 }
 
+static void CheckIpv6SocketsAreIpv6Only() {
+    const int inet = sceNetSocket("ipv4-any", 2, 2, 17);
+    Require(inet >= 0);
+    std::array<std::uint8_t, 16> any{16, 2};
+    Require(sceNetBind_nid_postfix(inet, any.data(), any.size()) == 0);
+    std::uint32_t size = any.size();
+    Require(sceNetGetsockname(inet, any.data(), &size) == 0 && size == any.size());
+    const int inet6 = sceNetSocket("ipv6-any-same-port", 28, 2, 17);
+    Require(inet6 >= 0);
+    std::array<std::uint8_t, 28> any6{28, 28, any[2], any[3]};
+    if (sceNetBind_nid_postfix(inet6, any6.data(), any6.size()) != 0) {
+        std::fprintf(stderr, "sceNetBind of [::]:%d failed with errno %d while an IPv4 socket holds 0.0.0.0:%d\n",
+            (any[2] << 8) | any[3], *sceNetErrnoLoc(), (any[2] << 8) | any[3]);
+        std::abort();
+    }
+    Require(sceNetSocketClose(inet6) == 0);
+    Require(sceNetSocketClose(inet) == 0);
+}
+
 int main() {
     const auto epoch = std::chrono::steady_clock::time_point{};
     Require(KernelSocketSelect::DeadlineAfter(epoch, 2, 250000) == epoch + std::chrono::milliseconds(2250));
@@ -320,6 +339,7 @@ int main() {
     CheckAddressText(28, "::1");
     CheckAddressText(28, "1234:5678:9abc:def0:1234:5678:9abc:def0");
     CheckUnspecifiedIpv6();
+    if (!ipv6Unavailable) CheckIpv6SocketsAreIpv6Only();
 
     const int listener = sceNetSocket(nullptr, 2, 1, 6);
     Require(listener >= 0);

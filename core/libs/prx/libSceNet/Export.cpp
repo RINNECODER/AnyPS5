@@ -32,6 +32,7 @@
 #include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
 
 // Guest socket descriptors retain PS5 semantics while their transport is backed by host sockets.
@@ -478,6 +479,13 @@ int APS5_VABI sceNetSocket(const char* name, int family, int type, int protocol)
     if (!initialize_sockets()) return fail(5);
     const NativeSocket native = ::socket(family == NET_AF_INET ? AF_INET : AF_INET6, type, protocol);
     if (native == INVALID_NATIVE_SOCKET) return fail(native_error());
+    const int ipv6_only = 1;
+    if (family == NET_AF_INET6 &&
+        ::setsockopt(native, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&ipv6_only), sizeof(ipv6_only)) != 0) {
+        const int error = native_error();
+        close_socket(native);
+        return fail(error);
+    }
     std::shared_ptr<NativeSocketHandle> handle;
     try {
         handle = std::make_shared<NativeSocketHandle>(native);
@@ -643,6 +651,8 @@ int64_t APS5_VABI sceNetRecv(int s, void* buf, size_t len, int flags) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+    const GuestArena::HostWrite destination(len == 0 ? nullptr : buf, len);
+    if (!destination.Open()) return fail(NET_EFAULT);
     const int native_flags = flags == 2 ? MSG_PEEK : 0;
     const int result = ::recv(socket.native->value, static_cast<char*>(buf), static_cast<int>(len), native_flags);
     return result >= 0 ? result : fail(native_error());
@@ -660,6 +670,8 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+    const GuestArena::HostWrite destination(len == 0 ? nullptr : buf, len);
+    if (!destination.Open()) return fail(NET_EFAULT);
     sockaddr_storage peer{};
     NativeLength peer_length = sizeof(peer);
     const int native_flags = flags == 2 ? MSG_PEEK : 0;
