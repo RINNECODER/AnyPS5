@@ -75,7 +75,9 @@ extern "C" void NativeAotMapImage_nid_no_patch(const NativeAotSegment* segments,
     for (std::size_t index = 0; index < count; ++index) {
         const auto& segment = segments[index];
         Require(segment.memsz >= segment.filesz, "native AOT segment file size exceeds memory size");
-        if (segment.memsz == 0) continue;
+        // The executable segment is native code here; its guest bytes (rodata, jump tables) are not
+        // mapped because its vaddr overlaps the process image. Data references into it are a gap.
+        if (segment.memsz == 0 || (segment.flags & 1)) continue;
         void* base = ::mmap(reinterpret_cast<void*>(static_cast<std::uintptr_t>(segment.vaddr)),
                             static_cast<std::size_t>(segment.memsz), PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
