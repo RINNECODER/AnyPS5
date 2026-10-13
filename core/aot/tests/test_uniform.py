@@ -259,8 +259,9 @@ class UniformABITests(unittest.TestCase):
         # Contract: with allow_unimplemented (the whole-title build), a body the lifter rejects
         # becomes a stub that reports its guest address and traps, so one image covers the whole
         # eboot. Without the flag the image is still rejected (the SDK-sample default).
-        functions = [uniform_function('sub_1000', 0x1000, 3)]
-        raw, contracts = fixture(bytes.fromhex('d907c3'), functions)
+        # fxsave [rdi] has no lowering (x87 loads such as fld now do).
+        functions = [uniform_function('sub_1000', 0x1000, 4)]
+        raw, contracts = fixture(bytes.fromhex('0fae07c3'), functions)
         source = self.directory / 'input.elf'
         source.write_bytes(raw)
         with self.assertRaises(Exception):
