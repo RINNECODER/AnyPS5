@@ -28,6 +28,7 @@ LABELS = {
     "regression": ("d73a4a", "A released engine/app version regressed; blocks beta and stable promotion"),
     "release:stable-candidate": ("0e8a16", "Opened by the release promoter: a beta proposed for stable"),
     "release:approved": ("5319e7", "Maintainer-only stable approval. Agents must never add this label."),
+    "native-regression": ("d73a4a", "A released native engine regressed; blocks native-beta and native-stable promotion"),
 }
 DEFAULT_KEY = Path.home() / "Documents/ChatGPT/metal/anyps5-ops/keys/release-signing.key"
 
@@ -62,11 +63,11 @@ def version_key(version):
     return tuple(int(part) for part in version.split("."))
 
 
-def next_version(existing_tags, today):
-    """``YYYY.MM.DD.n``: n counts up per UTC day from 1, past every existing engine tag of that day."""
+def next_version(existing_tags, today, product="engine"):
+    """``YYYY.MM.DD.n``: n counts up per UTC day from 1, past every existing ``<product>-`` tag of that day."""
     prefix = today.strftime("%Y.%m.%d") + "."
-    used = [int(tag[len("engine-") + len(prefix):]) for tag in existing_tags
-            if tag.startswith("engine-" + prefix) and tag[len("engine-") + len(prefix):].isdigit()]
+    lead = product + "-" + prefix
+    used = [int(tag[len(lead):]) for tag in existing_tags if tag.startswith(lead) and tag[len(lead):].isdigit()]
     return prefix + str(max(used, default=0) + 1)
 
 
@@ -79,17 +80,20 @@ def encode_json(value):
     return (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def release_record(version, commit, built_at, asset_path, manifest_sha256, notes, channel="alpha", min_macps=None):
-    name = verify.asset_name("engine", version)
+def release_record(version, commit, built_at, asset_path, manifest_sha256, notes, channel="alpha", min_macps=None,
+                   product="engine"):
+    name = verify.asset_name(product, version)
     require(Path(asset_path).name == name, "asset file must be named " + name)
     record = {
-        "schema": 1, "product": "engine", "version": version, "channel_at_build": channel, "commit": commit,
+        "schema": 1, "product": product, "version": version, "channel_at_build": channel, "commit": commit,
         "built_at": rfc3339(built_at), "min_macps": min_macps,
-        "asset": {"name": name, "url": verify.DOWNLOAD_BASE + "engine-" + version + "/" + name,
+        "asset": {"name": name, "url": verify.DOWNLOAD_BASE + product + "-" + version + "/" + name,
                   "sha256": sha256_file(asset_path), "size": Path(asset_path).stat().st_size},
         "package_manifest_sha256": manifest_sha256, "notes": notes,
     }
-    return verify.check_release(record, "engine")
+    if product == "native":
+        record["kind"], record["arch"] = "native", "arm64"
+    return verify.check_release(record, product)
 
 
 def feed_document(product, channel, sequence, record, updated_at):
@@ -213,8 +217,8 @@ class GitHub:
     def release(self, tag):
         return self.api("repos/%s/releases/tags/%s" % (self.repo, tag), allow_missing=True)
 
-    def engine_tags(self, day_prefix):
-        refs = self.api("repos/%s/git/matching-refs/tags/engine-%s" % (self.repo, day_prefix)) or []
+    def engine_tags(self, day_prefix, product="engine"):
+        refs = self.api("repos/%s/git/matching-refs/tags/%s-%s" % (self.repo, product, day_prefix)) or []
         return [ref["ref"][len("refs/tags/"):] for ref in refs]
 
     def asset_bytes(self, release, name):
@@ -269,15 +273,15 @@ class GitHub:
         return self.api("repos/%s/compare/%s...%s" % (self.repo, base, head))
 
 
-def verified_release_record(github, release):
+def verified_release_record(github, release, product="engine"):
     """Read and verify ``release.json`` + ``.sig`` of a build release; None when absent."""
     tag = release["tag_name"]
     data, signature = github.asset_bytes(release, "release.json"), github.asset_bytes(release, "release.json.sig")
     if data is None or signature is None:
         return None
     verify.verify_signed(data, signature)
-    record = verify.check_release(verify.parse_json(data), "engine")
-    require("engine-" + record["version"] == tag, "release.json version does not match tag " + tag)
+    record = verify.check_release(verify.parse_json(data), product)
+    require(product + "-" + record["version"] == tag, "release.json version does not match tag " + tag)
     return record
 
 
@@ -427,13 +431,13 @@ def publish_feed(github, signer, product, channel, record, work, now=None, check
     return feed
 
 
-def engine_releases(github):
-    """Published (non-draft) engine build releases with verified records, newest first."""
+def engine_releases(github, product="engine"):
+    """Published (non-draft) ``product`` build releases with verified records, newest first."""
     result = []
     for release in github.releases():
-        if release.get("draft") or not re.fullmatch(r"engine-" + verify.VERSION.pattern, release["tag_name"]):
+        if release.get("draft") or not re.fullmatch(product + "-" + verify.VERSION.pattern, release["tag_name"]):
             continue
-        record = verified_release_record(github, release)
+        record = verified_release_record(github, release, product)
         if record is not None:
             result.append((release, record))
     result.sort(key=lambda item: version_key(item[1]["version"]), reverse=True)
@@ -443,7 +447,7 @@ def engine_releases(github):
 VERSION_MENTION = re.compile(r"(?<![0-9.])([0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*)(?![0-9])")
 
 
-def blocking_regressions(github, version):
+def blocking_regressions(github, version, label="regression"):
     """Open ``regression`` issues filed against ``version`` or an earlier version.
 
     An issue names the versions it affects anywhere in its title or body. One that names
@@ -451,7 +455,7 @@ def blocking_regressions(github, version):
     this one. Issue text is only regex-scanned, never executed or interpreted further.
     """
     blocking = []
-    for issue in github.open_issues("regression"):
+    for issue in github.open_issues(label):
         text = (issue.get("title") or "") + "\n" + (issue.get("body") or "")
         named = [match for match in VERSION_MENTION.findall(text)]
         if not named or min(version_key(item) for item in named) <= version_key(version):

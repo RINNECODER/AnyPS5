@@ -68,4 +68,4 @@ no Vulkan loader or MoltenVK.
    path** (the fork builds no Vulkan driver): `--capture metal` reads the driver's PNG captures
    and JSON manifest instead of `APS5_DUMP_FRAMES` BMPs plus the `capture-trace.log` flip lines.
    `images.read_png` decodes the PNGs to the same RGB the BMP reader returns. The BMP path and
-   all its checks are unchanged. See `anyps5-native-work/lanes/vtables/REPORT5.md`.
+   all its checks are unchanged.

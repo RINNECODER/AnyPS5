@@ -1,0 +1,77 @@
+# Native engine promotion: native alpha -> native-beta -> native-stable. Manual only.
+# See docs/design/native-releases.md and tools/release/native_promote.py.
+#
+# Mirrors "Engine release (promote)" with the gates the native plan sets:
+#   to=beta    a native alpha build moves to native-beta after at least 24 h on alpha (unless
+#              skip_beta_age is set), with no open native-regression issue, a verified package whose
+#              manifest records the build gates (arm64 not under Rosetta, AOT tests incl. hello_notify,
+#              gpu_cube pixel-identical) and a packaged compiler that starts.
+#   to=stable  only the current native-beta build, only with confirm_stable set (the maintainer's
+#              explicit approval of the Phase 4 gate), only when RINNECODER triggers the run.
+# Not a required check anywhere and never runs on main. The signing key lives on the runner.
+name: Native engine release (promote)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Native build to promote, e.g. 2026.10.12.1 (required for stable; for beta empty means the newest aged alpha)"
+        type: string
+        default: ""
+      to:
+        description: "Target channel"
+        type: choice
+        options: [beta, stable]
+        required: true
+      skip_beta_age:
+        description: "beta only: promote without the 24 h wait on alpha (other gates still apply)"
+        type: boolean
+        default: false
+      confirm_stable:
+        description: "stable only: I confirm the Phase 4 gate holds and approve this build for native-stable"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: native-engine-release-promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote native engine channels
+    if: github.repository == 'RINNECODER/AnyPS5' && github.ref == 'refs/heads/native/arm64'
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ANYPS5_UNOBTRUSIVE_WINDOWS: "1"
+      VERSION: ${{ inputs.version }}
+      TARGET: ${{ inputs.to }}
+      SKIP_BETA_AGE: ${{ inputs.skip_beta_age }}
+      CONFIRM_STABLE: ${{ inputs.confirm_stable }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: native/arm64
+      - name: Release labels
+        run: python3 tools/release/promote.py labels
+      - name: Promote
+        # Inputs reach the script only through the environment, never interpolated into the command.
+        run: |
+          args=()
+          if [ "$TARGET" = stable ]; then
+            if [ "$CONFIRM_STABLE" = true ]; then args+=(--confirm); fi
+            python3 tools/release/native_promote.py stable --version "$VERSION" "${args[@]}"
+          else
+            if [ -n "$VERSION" ]; then args+=(--version "$VERSION"); fi
+            if [ "$SKIP_BETA_AGE" = true ]; then args+=(--skip-beta-age); fi
+            python3 tools/release/native_promote.py beta "${args[@]}"
+          fi

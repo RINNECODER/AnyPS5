@@ -7,6 +7,14 @@ class ABIError(ValueError):
 
 INTEGER_REGISTERS = ('rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9')
 FLOAT_REGISTERS = tuple(f'xmm{index}' for index in range(8))
+# Uniform guest-register ABI: every internal function takes a pointer to a guest register
+# file and returns through it, so no per-function result/parameter types are required. The
+# HLE import boundary keeps the typed SysV ABI above.
+UNIFORM_GPRS = ('rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi') + tuple(f'r{i}' for i in range(8, 16))
+UNIFORM_VECTORS = tuple(f'xmm{index}' for index in range(16))
+UNIFORM_STACK_SLOTS = 32
+UNIFORM_STACK_BASE = 8
+UNIFORM_CONVENTION = 'x86_64-uniform'
 INTEGER_TYPES = {'i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64', 'ptr'}
 FLOAT_TYPES = {'f32', 'f64'}
 TYPES = INTEGER_TYPES | FLOAT_TYPES | {'void'}
@@ -77,8 +85,32 @@ def locations(parameters):
     return result
 
 
+def uniform(contract):
+    require(isinstance(contract, dict), 'function contract must be an object')
+    return contract.get('guest_calling_convention') == UNIFORM_CONVENTION or bool(contract.get('uniform'))
+
+
+def uniform_locations():
+    """Every GPR (as a native pointer), every XMM, and a fixed incoming-stack window."""
+    result = [{'kind': 'register', 'name': name, 'bits': 64, 'type': 'ptr'} for name in UNIFORM_GPRS]
+    result += [{'kind': 'register', 'name': name, 'bits': 128, 'type': 'f64'} for name in UNIFORM_VECTORS]
+    result += [{'kind': 'stack', 'offset': UNIFORM_STACK_BASE + 8 * index, 'bits': 64, 'type': 'i64'}
+               for index in range(UNIFORM_STACK_SLOTS)]
+    return result
+
+
+def uniform_stack_end():
+    return UNIFORM_STACK_BASE + 8 * UNIFORM_STACK_SLOTS
+
+
 def signature(contract):
     require(isinstance(contract, dict), 'function contract must be an object')
+    if uniform(contract):
+        require(contract.get('result', 'void') == 'void' and not contract.get('parameters'),
+                'uniform ABI must declare a void result and no scalar parameters')
+        require(isinstance(contract.get('name'), str)
+                and re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', contract['name']), 'invalid native symbol')
+        return 'void', []
     require(not contract.get('variadic', False), 'variadic ABI requires argument and va_list reconstruction')
     require(not contract.get('sret') and not contract.get('byval'), 'aggregate ABI requires type layout reconstruction')
     result, parameters = contract.get('result'), contract.get('parameters')
@@ -87,7 +119,7 @@ def signature(contract):
     name = contract.get('name')
     require(isinstance(name, str) and re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', name), 'invalid native symbol')
     convention = contract.get('guest_calling_convention', 'x86_64-sysv')
-    require(convention in ('x86_64-sysv', 'x86_64-llvm-fastcc'), 'unsupported guest calling convention')
+    require(convention in ('x86_64-sysv', 'x86_64-llvm-fastcc', UNIFORM_CONVENTION), 'unsupported guest calling convention')
     if convention != 'x86_64-sysv' or 'guest_locations' in contract:
         require(contract.get('guest_locations') == expected,
                 'nonstandard guest ABI requires explicit verified SysV-compatible parameter locations')

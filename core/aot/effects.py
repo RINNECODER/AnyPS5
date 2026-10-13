@@ -109,7 +109,8 @@ def call_targets(function, ins):
 
 
 def required_bindings(function, ins):
-    return frozenset().union(*(function.image.provider_requirements[target] for target in call_targets(function, ins)))
+    return frozenset().union(*(function.image.provider_requirements.get(target, frozenset())
+                              for target in call_targets(function, ins)))
 
 
 def infer_requirements(functions):
@@ -120,6 +121,8 @@ def infer_requirements(functions):
         address = function.contract['address']
         for ins in function.instructions.values():
             if ins.mnemonic != 'call' and ins.address not in function.tail_calls:
+                continue
+            if ins.address in getattr(function, 'dispatch_calls', {}):
                 continue
             contract, slot = image.call(ins, function.contract)
             effects = contract.get('memory_effects')
@@ -188,6 +191,8 @@ def merge_ranges(ranges):
 
 
 def call_writes(function, ins, state=None):
+    if ins.address in getattr(function, 'dispatch_calls', {}):
+        return None
     state = function.states[ins.address] if state is None else state
     target = direct_target(function, ins)
     if target is not None:

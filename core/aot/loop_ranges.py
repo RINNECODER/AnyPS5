@@ -38,7 +38,7 @@ def discover(function, aliases, volatile):
         if branch.mnemonic != 'jmp' or latch in function.tail_calls or branch.operands[0].type != X86_OP_IMM:
             continue
         header = branch.operands[0].imm
-        if header >= latch:
+        if header >= latch or header not in function.instructions:
             continue
         path, guard, address, visited = [], None, header, set()
         while address not in visited:
