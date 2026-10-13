@@ -20,7 +20,8 @@ from collections import deque
 from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 from capstone.x86 import X86_OP_IMM
 
-sys.path.insert(0, "/Users/luisfernandorubiopadilla/Documents/ChatGPT/metal/anyps5-native/.lanes/vtables/core/aot")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core" / "aot"))
 from compiler import Image, compile_image, Rejected  # noqa: E402
 from toolchain import build_native_object  # noqa: E402
 
