@@ -79,6 +79,23 @@ int main(int argc, char** argv) {
     void* scratch = mmap((void*)(BASE + 0x60000000), 0x100000, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (scratch == MAP_FAILED) { perror("scratch mmap"); return 8; }
+    if (argc > 5) {
+        FILE* pages = fopen(argv[5], "rb");
+        if (pages != NULL) {
+            uint32_t page_count = 0;
+            if (fread(&page_count, 4, 1, pages) == 1) {
+                for (uint32_t index = 0; index < page_count; ++index) {
+                    uint64_t vaddr = 0, bytes = 0;
+                    if (fread(&vaddr, 8, 1, pages) != 1 || fread(&bytes, 8, 1, pages) != 1) break;
+                    void* mapped = mmap((void*)vaddr, bytes, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+                    if (mapped == MAP_FAILED) break;
+                    if (fread(mapped, 1, bytes, pages) != bytes) break;
+                }
+            }
+            fclose(pages);
+        }
+    }
     FILE* input = fopen(argv[3], "rb");
     if (fread(&in, 1, sizeof(in), input) != sizeof(in)) return 6;
     memset(&out, 0, sizeof(out));
@@ -151,7 +168,7 @@ def build_x86_runner(directory):
     return binary
 
 
-def run_x86(directory, runner, image, address, registers, memory):
+def run_x86(directory, runner, image, address, registers, memory, pages=None):
     segments = directory / "segments.bin"
     with segments.open("wb") as stream:
         entries = elf_segments(image)
@@ -162,7 +179,13 @@ def run_x86(directory, runner, image, address, registers, memory):
     input_file = directory / "case.bin"
     input_file.write_bytes(b"".join(int(registers.get(name, 0)).to_bytes(8, "little") for name in REGISTERS) + memory)
     output_file = directory / "out.bin"
-    result = subprocess.run([str(runner), str(segments), hex(address), str(input_file), str(output_file)], capture_output=True)
+    pages_file = directory / "pages.bin"
+    with pages_file.open("wb") as stream:
+        stream.write(struct.pack("<I", len(pages) if pages else 0))
+        for vaddr, data in pages or []:
+            stream.write(struct.pack("<QQ", vaddr, len(data)))
+            stream.write(data)
+    result = subprocess.run([str(runner), str(segments), hex(address), str(input_file), str(output_file), str(pages_file)], capture_output=True)
     if result.returncode != 0:
         return None, result.returncode
     raw = output_file.read_bytes()
