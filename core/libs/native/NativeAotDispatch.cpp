@@ -77,6 +77,9 @@ static void ReportEntryCounts() {
     std::fflush(stderr);
 }
 
+// The launcher calls this from a fatal-signal handler too, so a trap still reports the counts.
+extern "C" void NativeAotReportEntryCounts_nid_no_patch() { ReportEntryCounts(); }
+
 // Registered by the generated native_image_init; reports at exit when ANYPS5_AOT_COUNT is set.
 extern "C" void NativeAotRegisterEntryCounts_nid_no_patch(const std::uint64_t* counts, std::size_t number,
                                                           const std::uint64_t* addresses) {
