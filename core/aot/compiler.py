@@ -881,15 +881,31 @@ class Function:
         op, args = ins.mnemonic, ins.operands
         call_writes = effects.call_writes(self, ins, original) if op == 'call' else None
         # image_pointers (~250k entries) and import_bindings are usually unchanged by an
-        # instruction; copy each one only when this instruction actually writes to it.
+        # instruction; copy each one only when this instruction actually changes it.
         image = original['image_pointers']
         bindings = original['import_bindings']
 
-        def image_cells():
+        def image_discard(begin, end):
             nonlocal image
+            removed = [offset for offset in range(begin - 7, end) if offset in image]
+            if not removed:
+                return
             if image is original['image_pointers']:
                 image = image.copy()
-            return image
+            for offset in removed:
+                image.discard(offset)
+
+        def image_add(offset):
+            nonlocal image
+            if offset in image:
+                return
+            if image is original['image_pointers']:
+                image = image.copy()
+            image.add(offset)
+
+        def image_clear():
+            nonlocal image
+            image = set()
 
         def import_bindings():
             nonlocal bindings
@@ -897,39 +913,44 @@ class Function:
                 bindings = bindings.copy()
             return bindings
 
+        def bindings_clear():
+            nonlocal bindings
+            bindings = set()
+
         callback_memory_unmodified = original['callback_memory_unmodified']
         for operand in self.memory_writes.get(ins.address, ()):
             origin = self.memory_write_region(ins, original, operand)
             if origin is None or origin[0] != 'frame':
                 callback_memory_unmodified = False
             if origin is not None and origin[0] == 'outside_frame':
-                image_cells().clear()
-                import_bindings().clear()
+                image_clear()
+                bindings_clear()
                 continue
             if origin is None:
                 stack.clear()
                 origins.clear()
-                image_cells().clear()
-                import_bindings().clear()
+                image_clear()
+                bindings_clear()
             else:
                 begin, end = origin[1], origin[2]
+                add_cell = (op == 'mov' and checked_stack.lookup(self, ins, operand) is None and not operand.mem.index
+                            and operand is args[0] and self.pointer_operand(ins, original, args[1]))
                 if origin[0] == 'frame':
-                    cells = stack
                     for offset in range(begin - 7, end):
-                        cells.discard(offset)
+                        stack.discard(offset)
                     origins = {offset: pointer for offset, pointer in origins.items() if not (begin < offset + 8 and offset < end)}
+                    if add_cell:
+                        stack.add(begin)
+                        pointer = self.pointer_origin(ins, original, args[1])
+                        if pointer is not None:
+                            origins[begin] = pointer
                 else:
-                    cells = image_cells()
-                    for offset in range(begin - 7, end):
-                        cells.discard(offset)
+                    image_discard(begin, end)
                     bindings = import_bindings()
                     for offset in range(begin - 7, end):
                         bindings.discard(offset)
-                if op == 'mov' and checked_stack.lookup(self, ins, operand) is None and not operand.mem.index and operand is args[0] and self.pointer_operand(ins, original, args[1]):
-                    cells.add(begin)
-                    pointer = self.pointer_origin(ins, original, args[1])
-                    if origin[0] == 'frame' and pointer is not None:
-                        origins[begin] = pointer
+                    if add_cell:
+                        image_add(begin)
         if op == 'push':
             offset = original['rsp'] - 8
             stack = {saved for saved in stack if not (offset < saved + 8 and saved < offset + 8)}
@@ -958,27 +979,27 @@ class Function:
             if call_writes is None or call_writes.parameter_writes:
                 stack.clear()
                 origins.clear()
-                image_cells().clear()
-                import_bindings().clear()
+                image_clear()
+                bindings_clear()
                 callback_memory_unmodified = False
             else:
                 for kind, begin, end in call_writes.writes:
                     if kind == 'frame':
-                        cells = stack
                         for offset in range(begin - 7, end):
-                            cells.discard(offset)
+                            stack.discard(offset)
                         origins = {offset: pointer for offset, pointer in origins.items() if not (begin < offset + 8 and offset < end)}
                     else:
-                        cells = image_cells()
-                        for offset in range(begin - 7, end):
-                            cells.discard(offset)
+                        image_discard(begin, end)
                         bindings = import_bindings()
                         for offset in range(begin - 7, end):
                             bindings.discard(offset)
                         callback_memory_unmodified = False
             for _, predicate, kind, offset in state['pending_outputs']:
                 if predicate == 'always':
-                    (stack if kind == 'frame' else image_cells()).add(offset)
+                    if kind == 'frame':
+                        stack.add(offset)
+                    else:
+                        image_add(offset)
             if ins.address not in self.dispatch_calls:
                 callee, _ = self.image.call(ins, self.contract)
                 if callee['result'] == 'ptr':
@@ -1009,11 +1030,20 @@ class Function:
             native.add(self.reg(ins, args[0])[0])
             checked_cell = self.memory_origin(ins, original, args[1])
             if checked_cell is not None:
-                (stack if checked_cell[0] == 'frame' else image_cells()).add(checked_cell[1])
+                if checked_cell[0] == 'frame':
+                    stack.add(checked_cell[1])
+                else:
+                    image_add(checked_cell[1])
         if self.image.immutable_cells:
-            image_cells().update(self.image.immutable_cells)
+            missing = self.image.immutable_cells - image
+            if missing:
+                image = image.copy() if image is original['image_pointers'] else image
+                image.update(missing)
         if self.image.immutable_bindings:
-            import_bindings().update(self.image.immutable_bindings)
+            missing = self.image.immutable_bindings - bindings
+            if missing:
+                bindings = bindings.copy() if bindings is original['import_bindings'] else bindings
+                bindings.update(missing)
         state['native_pointers'], state['stack_pointers'], state['image_pointers'] = native, stack, image
         state['callback_memory_unmodified'] = callback_memory_unmodified
         state['import_bindings'] = bindings
