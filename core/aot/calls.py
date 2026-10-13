@@ -41,6 +41,10 @@ def validate_indirect_calls(image, owner_contract):
             'invalid indirect call owner range')
     descriptors = {}
     pool = image.contracts.get('target_sets')
+    # A uniform indirect call's target set is shared by many owners; resolve its names once.
+    name_cache = getattr(image, '_target_set_names', None)
+    if name_cache is None:
+        name_cache = image._target_set_names = {}
 
     def targets_of(record):
         targets = record.get('targets')
@@ -68,14 +72,27 @@ def validate_indirect_calls(image, owner_contract):
             require(all(type(target) is int and 0 <= target <= (1 << 64) - 1 for target in targets),
                     'invalid indirect call target address')
             require(len(set(targets)) == len(targets), 'duplicate indirect call target address')
+            index = record.get('target_set')
+            entry = name_cache.get(index) if index is not None else None
+            if entry is None:
+                # Resolving a target and its uniform contract depends only on the address, not on
+                # the owner, so cache it per shared target set; the owner-range filter stays here.
+                entry = []
+                for target in targets:
+                    try:
+                        contract = image.functions[target] if target in image.functions else image.callee(target)
+                    except ValueError as error:
+                        entry.append((target, None, error))
+                    else:
+                        entry.append((target, contract, None))
+                if index is not None:
+                    name_cache[index] = entry
             names = []
             seen = set()
-            for target in targets:
+            for target, contract, error in entry:
                 if start <= target < start + size:
                     continue
-                try:
-                    contract = image.functions[target] if target in image.functions else image.callee(target)
-                except ValueError as error:
+                if error is not None:
                     raise CallError(f'unresolved indirect call target 0x{target:x}: {error}') from error
                 require(abi.uniform(contract),
                         f'uniform indirect call target {contract["name"]} is not a uniform function')
@@ -83,6 +100,7 @@ def validate_indirect_calls(image, owner_contract):
                     seen.add(contract['name'])
                     names.append(contract['name'])
             descriptors[address] = {'contract': candidate, 'kind': 'operand', 'targets': names,
+                                    'target_set': index,
                                     'target_addresses': list(targets),
                                     'qualification': 'declared-target-set-not-inferred',
                                     'source_qualification': 'Caller-supplied closed-world target set; no automatic target proof or runtime membership check',
@@ -119,6 +137,7 @@ def validate_indirect_calls(image, owner_contract):
         if all_noreturn:
             candidate['noreturn'] = True
         descriptors[address] = {'contract': candidate, 'kind': 'operand', 'targets': names,
+                                'target_set': record.get('target_set'),
                                 'target_addresses': list(targets),
                                 'qualification': 'declared-target-set-not-inferred',
                                 'source_qualification': 'Caller-supplied closed-world target set; no automatic target proof or runtime membership check',
