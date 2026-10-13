@@ -221,8 +221,11 @@ std::shared_ptr<Socket> Lookup(int descriptor) {
     return {};
 }
 bool Address(const void* input, std::uint32_t length, sockaddr_storage& native, socklen_t& size) {
-    if (!input || length < 2) { Fail(14); return false; }
+    if (length > 255) { Fail(63); return false; }
+    if (length < 2) { Fail(22); return false; }
+    if (!input) { Fail(14); return false; }
     const auto* bytes = static_cast<const unsigned char*>(input);
+    if ((bytes[1] == 2 && length < 16) || (bytes[1] == 28 && length < 28)) { Fail(22); return false; }
     if (bytes[1] == 2 && length >= 16) {
         auto& v4 = reinterpret_cast<sockaddr_in&>(native);
         v4.sin_family = AF_INET;
