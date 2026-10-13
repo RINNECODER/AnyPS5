@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ThreadPriority.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #endif
+#include "prx/libc/include/Shutdown.hpp"
 #include <mutex>
 
 namespace {
@@ -25,7 +26,14 @@ using BackendDriver = AgcDriver::DriverDetail::Driver;
 template <typename Operation>
 void InvokeEntry(Operation&& operation) {
 #if defined(ANYPS5_METAL_BACKEND)
-    operation();
+    try {
+        operation();
+    } catch (const AgcDriver::Metal::DriverStopped&) {
+        // The driver stopped under this guest thread: park it rather than unwind through guest frames.
+        LibcAwaitExit_nid_postfix();
+    } catch (const ProcessShutdown&) {
+        LibcAwaitExit_nid_postfix();
+    }
 #else
     try {
         operation();
@@ -65,7 +73,7 @@ void SuspendPoint() {
 }
 
 void RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
-    BackendDriver::Get().RegisterVideoOutput(handle, output);
+    InvokeEntry([&] { BackendDriver::Get().RegisterVideoOutput(handle, output); });
 }
 
 void UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
@@ -82,11 +90,11 @@ void AttachWindow(const PresentationWindow& window) {
 }
 
 void PresentClear(const PresentationWindow& window, bool opaque, void (*gpuReady)(void*), void* context) {
-    BackendDriver::Get().Present(window, nullptr, opaque, gpuReady, context);
+    InvokeEntry([&] { BackendDriver::Get().Present(window, nullptr, opaque, gpuReady, context); });
 }
 
 void PresentBuffer(const PresentationWindow& window, const DisplayBuffer& buffer, void (*gpuReady)(void*), void* context) {
-    BackendDriver::Get().Present(window, &buffer, true, gpuReady, context);
+    InvokeEntry([&] { BackendDriver::Get().Present(window, &buffer, true, gpuReady, context); });
 }
 
 void ReleaseWindow(void* window) {
