@@ -82,13 +82,13 @@ constexpr int NET_EPOLL_CTL_DEL = 3;
 constexpr int NET_SOL_SOCKET = 0xFFFF;
 constexpr int NET_SO_SNDTIMEO = 0x1005;
 constexpr int NET_SO_RCVTIMEO = 0x1006;
-constexpr int NET_SO_SCE_SNDTIMEO = 0x1105;
-constexpr int NET_SO_SCE_RCVTIMEO = 0x1106;
 constexpr int NET_SO_NBIO = 0x1200;
 constexpr int NET_SO_REUSEADDR = 0x4;
 constexpr int NET_SO_BROADCAST = 0x20;
 constexpr int NET_SO_SNDBUF = 0x1001;
 constexpr int NET_SO_RCVBUF = 0x1002;
+constexpr int NET_SO_SCE_SNDTIMEO = 0x1105;
+constexpr int NET_SO_SCE_RCVTIMEO = 0x1106;
 constexpr int NET_MSG_PEEK = 0x2;
 constexpr int NET_MSG_TRUNC = 0x10;
 constexpr int NET_UIO_MAXIOV = 1024;
@@ -439,6 +439,12 @@ struct NetMsghdr {
 static_assert(sizeof(NetMsghdr) == 48 && offsetof(NetMsghdr, iov) == 16 && offsetof(NetMsghdr, control) == 32 &&
     offsetof(NetMsghdr, flags) == 44);
 
+int timeout_option(int optname) {
+    if (optname == NET_SO_SCE_SNDTIMEO) return NET_SO_SNDTIMEO;
+    if (optname == NET_SO_SCE_RCVTIMEO) return NET_SO_RCVTIMEO;
+    return optname;
+}
+
 std::int64_t message_length(const NetMsghdr* message) {
     if (!message) return fail(NET_EFAULT);
     if (message->iov_length < 0 || message->iov_length > NET_UIO_MAXIOV) return fail(NET_EMSGSIZE);
@@ -451,12 +457,6 @@ std::int64_t message_length(const NetMsghdr* message) {
         total += entry.length;
     }
     return static_cast<std::int64_t>(total);
-}
-
-int timeout_option(int optname) {
-    if (optname == NET_SO_SCE_SNDTIMEO) return NET_SO_SNDTIMEO;
-    if (optname == NET_SO_SCE_RCVTIMEO) return NET_SO_RCVTIMEO;
-    return optname;
 }
 
 int receive_error(const Sock& socket) {
