@@ -15,6 +15,7 @@ struct SwappcInfo {
     std::uint32_t userDataBaseRegister = 0;
     std::uint32_t userDataCount = 0;
     std::uint32_t waveSize = 0;
+    std::span<const std::uint32_t> linkedCallFallbacks;
 };
 
 struct SwappcCall {
@@ -53,7 +54,12 @@ struct TableCallee {
 [[nodiscard]] std::optional<std::uint32_t> UserDataCalleeLength(std::span<const std::uint32_t> callee, std::uint32_t linkRegister);
 [[nodiscard]] std::vector<std::uint32_t> LinkUserDataCalls(const RdnaProgram& program, std::span<const UserDataCall> calls, std::span<const std::vector<std::uint32_t>> callees);
 [[nodiscard]] std::vector<TableCall> FindTableCalls(const RdnaProgram& program, const SwappcInfo& swappc);
-[[nodiscard]] std::vector<std::uint32_t> LinkCalls(const RdnaProgram& program, std::span<const UserDataCall> userDataCalls, std::span<const std::vector<std::uint32_t>> userDataCallees,
+struct LinkedCalls {
+    std::vector<std::uint32_t> code;
+    std::vector<std::uint32_t> fallbacks;
+};
+
+[[nodiscard]] LinkedCalls LinkCalls(const RdnaProgram& program, std::span<const UserDataCall> userDataCalls, std::span<const std::vector<std::uint32_t>> userDataCallees,
     std::span<const TableCall> tableCalls, std::span<const std::vector<TableCallee>> tableCallees);
 
 class GraphBuilder {

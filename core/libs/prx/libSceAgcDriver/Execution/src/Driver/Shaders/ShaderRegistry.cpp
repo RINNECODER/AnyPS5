@@ -440,7 +440,7 @@ std::vector<ShaderRecompiler::TableCallee> ReadTableCallees(const ShaderRecompil
     return callees;
 }
 
-std::vector<std::uint32_t> LinkUserDataCallees(const ShaderRecompiler::RecompileRequest& request) {
+ShaderRecompiler::LinkedCalls LinkUserDataCallees(const ShaderRecompiler::RecompileRequest& request) {
     if (request.shader.stage != ShaderRecompiler::ShaderStage::Compute) return {};
     const auto code = request.shader.code;
     if (std::none_of(code.begin(), code.end(), [](std::uint32_t word) { return (word & 0xff80ff00u) == 0xbe802100u; })) return {};
@@ -477,9 +477,12 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
     require(codeOffset < snapshot.code.size(), "prepared shader code offset is outside the snapshot");
     const auto code = std::span(snapshot.code).subspan(codeOffset);
     require(request.shader.code.data() == code.data() && request.shader.code.size() == code.size(), "prepared invocation does not refer to registered code");
-    const auto linked = LinkUserDataCallees(request);
+    auto linked = LinkUserDataCallees(request);
     auto source = request;
-    if (!linked.empty()) source.shader.code = linked;
+    if (!linked.code.empty()) {
+        source.shader.code = linked.code;
+        source.context.linkedCallFallbacks = linked.fallbacks;
+    }
     auto invocationRequest = source;
     struct PreparedKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
@@ -489,7 +492,7 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
     for (const auto& entry : snapshot.prepared->entries) {
         if (entry.codeOffset != codeOffset) continue;
         invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*entry.handle);
-        if (!linked.empty() && !std::ranges::equal(invocationRequest.shader.code, linked)) continue;
+        if (!linked.code.empty() && !std::ranges::equal(invocationRequest.shader.code, linked.code)) continue;
         if (auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(invocationRequest, entry.handle, key)) return std::move(*invocation);
     }
     ReportPreparedAtUse(snapshot, source);

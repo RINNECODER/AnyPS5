@@ -794,8 +794,15 @@ std::vector<SwappcCall> analyzeSwappcCalls(const RdnaProgram& program, const Swa
             continue;
         }
         if (!staticTarget || call.targetIndex == InvalidControlFlowId) {
-            unlinked.push_back(index);
-            continue;
+            if (swappc != nullptr && std::ranges::find(swappc->linkedCallFallbacks, instruction.programCounter) != swappc->linkedCallFallbacks.end()) {
+                unlinked.push_back(index);
+                continue;
+            }
+            if (std::ranges::any_of(calls, [&](const SwappcCall& other) { return other.linkRegister == call.linkRegister; })) {
+                throw std::invalid_argument("unclosable scalar call/return pairing at program counter " + toHexString(instruction.programCounter) +
+                    ": link register s[" + std::to_string(call.linkRegister) + "] is shared with another call");
+            }
+            throw std::invalid_argument("computed/data-dependent s_swappc_b64 call target at program counter " + toHexString(instruction.programCounter) + " is not statically resolvable");
         }
         call.targetProgramCounter = target;
         calls.push_back(call);
@@ -1380,7 +1387,7 @@ std::optional<std::uint32_t> UserDataCalleeLength(std::span<const std::uint32_t>
 }
 
 std::vector<std::uint32_t> LinkUserDataCalls(const RdnaProgram& program, std::span<const UserDataCall> calls, std::span<const std::vector<std::uint32_t>> callees) {
-    return LinkCalls(program, calls, callees, {}, {});
+    return LinkCalls(program, calls, callees, {}, {}).code;
 }
 
 std::vector<TableCall> FindTableCalls(const RdnaProgram& program, const SwappcInfo& swappc) {
@@ -1427,7 +1434,7 @@ std::vector<TableCall> FindTableCalls(const RdnaProgram& program, const SwappcIn
     return calls;
 }
 
-std::vector<std::uint32_t> LinkCalls(const RdnaProgram& program, std::span<const UserDataCall> userDataCalls, std::span<const std::vector<std::uint32_t>> userDataCallees,
+LinkedCalls LinkCalls(const RdnaProgram& program, std::span<const UserDataCall> userDataCalls, std::span<const std::vector<std::uint32_t>> userDataCallees,
     std::span<const TableCall> tableCalls, std::span<const std::vector<TableCallee>> tableCallees) {
     if (userDataCalls.size() != userDataCallees.size()) throw std::logic_error("user-data calls and callees differ in number");
     if (tableCalls.size() != tableCallees.size()) throw std::logic_error("table calls and callees differ in number");
@@ -1439,6 +1446,7 @@ std::vector<std::uint32_t> LinkCalls(const RdnaProgram& program, std::span<const
     }
     const auto end = instructionEndProgramCounter(program.instructions.back()) / 4u;
     std::vector<std::uint32_t> linked(program.code.begin(), program.code.begin() + end);
+    std::vector<std::uint32_t> fallbacks;
     const auto callWord = [&](std::uint32_t programCounter, const char* kind) {
         const auto index = instructionIndexOfProgramCounter(program, programCounter);
         if (index == InvalidControlFlowId || program.instructions[index].op != RdnaOpcode::SSwappcB64 || program.instructions[index].wordCount != 1u) {
@@ -1485,6 +1493,7 @@ std::vector<std::uint32_t> LinkCalls(const RdnaProgram& program, std::span<const
             linked.push_back(0u);
             branch(0xbf820000u, word + 1u);
         }
+        fallbacks.push_back(static_cast<std::uint32_t>(linked.size() * 4u));
         linked.push_back(original);
         branch(0xbf820000u, word + 1u);
         for (std::size_t callee = 0; callee < count; ++callee) {
@@ -1496,7 +1505,7 @@ std::vector<std::uint32_t> LinkCalls(const RdnaProgram& program, std::span<const
         }
     }
     linked.push_back(0xbf9f0000u);
-    return linked;
+    return {std::move(linked), std::move(fallbacks)};
 }
 
 ControlFlowGraph GraphBuilder::Build(const RdnaProgram& program, const SwappcInfo* swappc) const {

@@ -117,7 +117,7 @@ static void CheckUserDataCalls() {
     Require(calls.size() == 2u);
     Require(calls[0].programCounter == 0x10u && calls[0].linkRegister == 14u && calls[0].userDataRegister == 0u);
     Require(calls[1].programCounter == 0x1cu && calls[1].linkRegister == 14u && calls[1].userDataRegister == 2u);
-    Require(GraphBuilder{}.Build(program, &swappc).unlinkedCallProgramCounters == std::vector<std::uint32_t>{0x10u, 0x1cu});
+    ExpectThrow("not statically resolvable", [&] { static_cast<void>(GraphBuilder{}.Build(program, &swappc)); });
 
     auto overwritten = caller;
     overwritten[1] = 0xbe800380u;
@@ -224,27 +224,36 @@ static void CheckTableCalls() {
     Require(FindTableCalls(readsLaneProgram, SwappcInfo{false, 0u, 16u, 32u}).size() == 1u);
     Require(FindTableCalls(readsLaneProgram, SwappcInfo{false, 0u, 16u, 64u}).empty());
 
-    Require(BuildCode(caller, swappc).unlinkedCallProgramCounters == std::vector<std::uint32_t>{0x24u});
-    const auto unlinked = TranslateCode(caller, swappc);
+    ExpectThrow("not statically resolvable", [&] { static_cast<void>(BuildCode(caller, swappc)); });
+    const std::array<std::uint32_t, 1> fallback{0x24u};
+    SwappcInfo listed = swappc;
+    listed.linkedCallFallbacks = fallback;
+    Require(BuildCode(caller, listed).unlinkedCallProgramCounters == std::vector<std::uint32_t>{0x24u});
+    const auto unlinked = TranslateCode(caller, listed);
     Require(unlinked.Info().usesFaultBuffer && ProgramToString(unlinked).find("UnlinkedCall") != std::string::npos);
 
     const std::vector<std::uint32_t> first{0xbf068000u, 0x4a020285u, 0xbe80200eu};
     const std::vector<std::uint32_t> second{0x4a0202c0u, 0xbf068001u, 0xbe80200eu};
     const std::vector<std::vector<TableCallee>> callees{{{0x1122334455ull, first}, {0x66778899aaull, second}}};
-    const auto linked = LinkCalls(program, {}, {}, calls, callees);
+    const auto linkedCalls = LinkCalls(program, {}, {}, calls, callees);
+    const auto& linked = linkedCalls.code;
+    Require(linkedCalls.fallbacks == std::vector<std::uint32_t>{50u * 4u});
+    ExpectThrow("is shared with another call", [&] { static_cast<void>(BuildCode(linked, swappc)); });
+    SwappcInfo linkedSwappc = swappc;
+    linkedSwappc.linkedCallFallbacks = linkedCalls.fallbacks;
     Require(linked.size() == 59u && linked[9] == 0xbf820001u && linked[11] == 0xbf850010u && linked[58] == 0xbf9f0000u);
     Require(linked[12] == 0xbf07ff0eu && linked[13] == 0x22334455u && linked[14] == 0xbf850004u && linked[15] == 0xbf07ff0fu && linked[16] == 0x11u && linked[17] == 0xbf850001u && linked[18] == 0xbf82001bu);
     Require(linked[20] == 0x778899aau && linked[26] == 0xbf078080u && linked[27] == 0xbf820016u && linked[34] == 0xbf068080u && linked[35] == 0xbf82000au && linked[44] == 0xbf068080u && linked[45] == 0xbf820004u);
     Require(linked[46] == 0xbb0e0005u && linked[47] == 0xbf82ffdau && linked[48] == 0xbb0e0006u && linked[49] == 0xbf82ffd8u && linked[50] == 0xbe8e210eu && linked[51] == 0xbf82ffd6u);
     Require(std::equal(first.begin(), first.end(), linked.begin() + 52) && std::equal(second.begin(), second.end(), linked.begin() + 55));
-    const auto cfg = BuildCode(linked, swappc);
+    const auto cfg = BuildCode(linked, linkedSwappc);
     const auto block = [&](std::uint32_t word) { return cfg.FindBlockByProgramCounter(word * 4u).id; };
     Require(cfg.FindBlockByProgramCounter(46u * 4u).terminator.trueBlock == block(52u));
     Require(cfg.FindBlockByProgramCounter(52u * 4u).terminator.trueBlock == block(47u));
     Require(cfg.FindBlockByProgramCounter(48u * 4u).terminator.trueBlock == block(55u));
     Require(cfg.FindBlockByProgramCounter(55u * 4u).terminator.trueBlock == block(49u));
     Require(cfg.unlinkedCallProgramCounters == std::vector<std::uint32_t>{50u * 4u});
-    static_cast<void>(TranslateCode(linked, swappc));
+    static_cast<void>(TranslateCode(linked, linkedSwappc));
 
     std::vector<std::uint32_t> large(0x8000u, 0xbf800000u);
     const std::vector<std::vector<TableCallee>> far{{{0x10ull, large}, {0x20ull, first}}};
