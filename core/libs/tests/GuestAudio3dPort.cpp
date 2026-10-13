@@ -269,12 +269,17 @@ void CheckAudioOutPorts() {
     Require(Open(parameters, &id) == 0 && id == 0, "open");
     Require(sceAudio3dAudioOutOpen(1, SYSTEM_USER, 126, 0, granularity, 48000, 1) == INVALID_PORT, "audio out open on port 1");
     Require(sceAudio3dAudioOutOpen(0, SYSTEM_USER, 126, 0, granularity + 0x100, 48000, 1) == INVALID_PARAMETER, "len must equal the granularity");
+    Require(sceAudio3dAudioOutOpen(0, SYSTEM_USER, 126, 1, granularity, 48000, 1) == INVALID_PARAMETER, "index must be 0");
+    Require(sceAudio3dAudioOutOpen(0, SYSTEM_USER, 126, 0, granularity, 48000, 8) == INVALID_PARAMETER, "unknown format");
     const int handle = sceAudio3dAudioOutOpen(0, SYSTEM_USER, 126, 0, granularity, 48000, 1);
     Require(handle > 0, "audio out open returns a handle");
     const std::vector<std::int16_t> block(static_cast<std::size_t>(granularity) * 2, 256);
-    Require(sceAudio3dAudioOutOutput(handle, block.data()) == static_cast<int>(granularity), "audio out output returns the sample count");
-    Require(sceAudio3dAudioOutOutput(handle, block.data()) == static_cast<int>(granularity), "a second output fills the pending queue");
+    for (std::uint32_t i = 0; i < parameters.queue_depth; ++i) {
+        Require(sceAudio3dAudioOutOutput(handle, block.data()) == static_cast<int>(granularity), "audio out output returns the sample count");
+    }
     Require(sceAudio3dAudioOutOutput(handle, block.data()) == NOT_READY, "a full pending queue must be NOT_READY");
+    Require(sceAudio3dPortPush(0, 1) == 0, "sync push drains the associated ports");
+    Require(sceAudio3dAudioOutOutput(handle, block.data()) == static_cast<int>(granularity), "push drains the pending queue");
     Require(sceAudio3dPortFlush(0) == 0, "flush drains the associated ports");
     Require(sceAudio3dAudioOutOutput(handle, block.data()) == static_cast<int>(granularity), "flush resets the pending queue");
     Require(sceAudio3dAudioOutOutputs(nullptr, 0) == INVALID_PARAMETER, "outputs rejects an empty batch");
