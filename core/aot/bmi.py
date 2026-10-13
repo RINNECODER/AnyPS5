@@ -77,13 +77,13 @@ def analyze(function, ins, state):
             function.fail(ins, 'unsupported movbe operands')
         return True
     if op in ('rol', 'ror'):
-        if len(args) != 2 or args[0].type != X86_OP_REG or args[0].size not in (2, 4, 8):
+        if len(args) != 2 or args[0].type != X86_OP_REG or args[0].size not in (1, 2, 4, 8):
             function.fail(ins, f'unsupported {op} operands')
         _general(function, ins, args[0], op)
         function.read_operand(ins, state, args[0])
         function.read_operand(ins, state, args[1])
         function.define(ins, state, args[0])
-        mask = 63 if width == 64 else 31
+        mask = width - 1
         flags = {'cf'}
         if args[1].type == X86_OP_IMM and (args[1].imm & mask) == 1:
             flags.add('of')
@@ -221,8 +221,12 @@ def lower(function, ins):
         return True
     if op in ('rol', 'ror'):
         width = args[0].size * 8
-        mask = 63 if width == 64 else 31
+        mask = width - 1
         count = _shift_amount(function, ins, args[1], width, width)
+        if args[1].type == X86_OP_IMM:
+            count = str(args[1].imm & mask)
+        else:
+            count = function.emit(f'and i{width} {count}, {mask}')
         value = function.read(ins, args[0], width)
         if args[1].type == X86_OP_IMM and (args[1].imm & mask) == 0:
             return True
