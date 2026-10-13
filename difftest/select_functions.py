@@ -6,7 +6,7 @@
 --simple:  scan the FDE ranges for functions with no calls and no indirect
            branches, so the AOT compiler can compile them without a call graph.
 
-Run: PYTHONPATH=<work>/tools-py python3 difftest/select.py <targets.json> <fde-ranges.json> <eboot.elf> <out.json> hottest|simple [count]
+Run: PYTHONPATH=<work>/tools-py python3 difftest/select_functions.py <targets.json> <fde-ranges.json> <eboot.elf> <out.json> hottest|simple [count]
 """
 import bisect
 import json
