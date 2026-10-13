@@ -457,6 +457,16 @@ void verifyLayoutPair() {
     const auto otherCode = pixelCode(variant++);
     static_cast<void>(PrepareResourceProgram(LayoutPairRequest(otherCode, buffer, true, defaultLimit), &preparation));
     require(preparation.ResourcePrograms() == 3u && retained - colored->source.use_count() == (reuse ? 1 : 0), "layout pair: the context kept a program while it built another");
+
+    const std::vector<std::uint32_t> computeCode{0xbf800000u, 0xbf810000u};
+    auto compute = FrontendRequest(computeCode, buffer);
+    compute.context.userDataBaseRegister = 2u;
+    compute.context.compute->scratchDwords = 64u;
+    auto program = PrepareResourceProgram(compute);
+    const auto copied = program.CompiledInfo();
+    const auto taken = std::move(program).TakeCompiledInfo();
+    require(taken.userDataBase == 2u && taken.scratchDwords == 64u, "layout pair: the compute fixture did not set a user-data base and scratch");
+    require(copied.stage == taken.stage && copied.shaderHash == taken.shaderHash && copied.waveSize == taken.waveSize && copied.userDataBase == taken.userDataBase && copied.userDataCount == taken.userDataCount && copied.scratchDwords == taken.scratchDwords && copied.paramExportMask == taken.paramExportMask && copied.info == taken.info && copied.bindings == taken.bindings, "layout pair: the copied compiled information differs from the moved one");
 }
 
 void verifyRegisterSources() {
