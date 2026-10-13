@@ -154,6 +154,38 @@ template<class F> std::exception_ptr PublicationError(F&& action) {
     return {};
 }
 
+// Upstream 326e0bc29: a flip raises the graphics end-of-pipe event after the work before it, even
+// when no release asks for an interrupt.
+void FlipRaisesEop(id<MTLDevice> device, id<MTLLibrary> library) {
+    constexpr std::uint64_t CommandsAddress = 0x950000;
+    struct Output final : AgcDriver::IVideoOutput, AgcDriver::IFlipRequest, std::enable_shared_from_this<Output> {
+        std::atomic<unsigned> ready{0};
+        std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo&) override { return shared_from_this(); }
+        void GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>&) override { ++ready; }
+        void Fail(std::exception_ptr) noexcept override {}
+    };
+    std::array<std::uint32_t, 6> commands{AgcDriver::FlipPacketHeader, 7, 0xfffffffeu, 1, 0, 0};
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 1> ranges{{
+        {CommandsAddress, std::as_writable_bytes(std::span(commands)), false}}};
+    std::atomic<unsigned> interrupts{0};
+    std::atomic<unsigned> readyAtInterrupt{0};
+    const auto output = std::make_shared<Output>();
+    AgcDriver::Metal::MetalDriver driver;
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges,
+        [&](std::uint32_t queue) {
+            Require(queue == 0, "the flip raised the end-of-pipe event of another queue");
+            readyAtInterrupt = output->ready.load();
+            ++interrupts;
+        });
+    driver.RegisterVideoOutput(7, output);
+    driver.SubmitCommandBuffer(CommandsAddress, commands.size(), 0, 0);
+    driver.WaitIdle();
+    driver.UnregisterVideoOutput(7, output);
+    Require(output->ready == 1, "the flip was not handed to its output");
+    Require(interrupts == 1 && readyAtInterrupt == 1, "the flip did not raise exactly one end-of-pipe event after handing over its frame");
+    std::cout << "Flip end-of-pipe: a flip without a release interrupt raised the graphics end-of-pipe event once\n";
+}
+
 void PublicationFailureReplay(id<MTLDevice> device, id<MTLLibrary> library) {
     constexpr std::uint64_t CommandsAddress = 0x910000, LabelAddress = 0x920000,
         HeaderAddress = 0x930000, CodeAddress = 0x940000;
@@ -1286,6 +1318,7 @@ int main(int argc, char** argv) {
             Require(library != nil, error ? error.localizedDescription.UTF8String : "PM4 utility library failed to load");
             PublicationFailureReplay(device, library);
             if (argc == 3) return 0;
+            FlipRaisesEop(device, library);
             OriginalSubmitExports(device, library);
             OriginalWave32Subgroup(device, library);
             RetainedSubgroupReplays(device, library);

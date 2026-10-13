@@ -821,6 +821,10 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             frame->SetFlip(submission.serial, cursor, now, now);
             lock.unlock();
             flip->GpuReady(frame);
+            // A flip raises the queue's end-of-pipe event once the work before it completes, as a
+            // RELEASE_MEM with INT_SEL does (upstream 326e0bc29); that work completed above. A driver
+            // configured without an interrupt callback (presentation-only replays) has no event to raise.
+            if (eopInterrupt) DeliverEopInterrupt(submission.queue);
         } else if (opcode == 0x15) {
             Tolerate(SkippedDispatch, [&] { ExecuteDispatchSynchronously(queue, packet, submission); });
         } else if (opcode == 0x16) {
