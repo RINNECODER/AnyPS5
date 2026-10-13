@@ -90,6 +90,7 @@ def main():
         if spec['address'] not in native:
             spec['stub'] = True
     contracts['allow_unimplemented'] = True
+    contracts['guest_data'] = True
     image = Image(args.elf, contracts)
     print(f'native {len(order)} stub {len(frontier)} entries {[hex(e) for e in entries]} ({time.time() - start:.1f}s)', flush=True)
     start = time.time()

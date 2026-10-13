@@ -72,7 +72,7 @@ def describe(image):
 
 
 def declarations(image, descriptor):
-    ranges = ', '.join(f"{{ ptr, i64 }} {{ ptr @data_{spec['address']:x}, i64 {spec['size']} }}" for spec in image.data)
+    ranges = ', '.join(f"{{ ptr, i64 }} {{ ptr {image.pointer(spec['address'])}, i64 {spec['size']} }}" for spec in image.data)
     functions = ', '.join(f'ptr @{name}' for name in descriptor['native_functions'])
     count = len(descriptor['native_functions'])
     process, size = descriptor['process_parameters'], descriptor['process_parameter_bytes']
