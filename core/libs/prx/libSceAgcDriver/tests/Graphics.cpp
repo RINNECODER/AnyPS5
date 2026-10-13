@@ -2277,6 +2277,8 @@ struct MockVulkan {
     VkDeviceSize allocatedBytes = 0;
     std::optional<VkDeviceSize> memoryLimit;
     std::uint64_t allocationAttempts = 0;
+    std::uint32_t bufferMemoryTypeBits = 1;
+    std::vector<std::uint32_t> allocationTypes;
     std::vector<VkDescriptorSetLayoutBinding> layoutBindings;
     VkDescriptorSetLayoutCreateFlags layoutFlags = 0;
     std::vector<VkDescriptorBindingFlags> layoutBindingFlags;
@@ -2325,11 +2327,12 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateBuffer(VkDevice, const VkBufferCreateIn
 }
 
 VKAPI_ATTR void VKAPI_CALL mockGetBufferMemoryRequirements(VkDevice, VkBuffer buffer, VkMemoryRequirements* requirements) {
-    *requirements = {mock.bufferSizes.at(buffer), 1, 1};
+    *requirements = {mock.bufferSizes.at(buffer), 1, mock.bufferMemoryTypeBits};
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockAllocateMemory(VkDevice, const VkMemoryAllocateInfo* info, const VkAllocationCallbacks*, VkDeviceMemory* memory) {
     ++mock.allocationAttempts;
+    mock.allocationTypes.push_back(info->memoryTypeIndex);
     if (mock.memoryLimit.has_value() && mock.allocatedBytes + info->allocationSize > *mock.memoryLimit) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     *memory = makeHandle<VkDeviceMemory>();
     mock.memories[*memory] = std::vector<std::byte>(info->allocationSize);
@@ -2628,6 +2631,45 @@ void addressSpaceTeardownTests() {
 }
 
 using Role = ShaderRecompiler::DescriptorRole;
+
+void bufferBudgetPlacementTests() {
+    using namespace AgcDriver::Graphics;
+    for (const std::size_t bytes : {std::size_t{512}, std::size_t{3} << 20u}) {
+        for (const bool fail : {false, true}) {
+            mock = MockVulkan{};
+            mock.bufferMemoryTypeBits = 3;
+            if (fail) mock.memoryLimit = 0;
+            {
+                auto context = mockContext();
+                constexpr auto coherent = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                context.memory.memoryTypeCount = 2;
+                context.memory.memoryHeapCount = 2;
+                context.memory.memoryHeaps[0] = {4u << 20u, 0};
+                context.memory.memoryHeaps[1] = {8u << 20u, 0};
+                context.memory.memoryTypes[0] = {coherent | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, 0};
+                context.memory.memoryTypes[1] = {coherent, 1};
+                context.physical = reinterpret_cast<VkPhysicalDevice>(std::uintptr_t{1});
+                context.memoryProperties2 = [](VkPhysicalDevice, VkPhysicalDeviceMemoryProperties2* properties) {
+                    auto* reported = static_cast<VkPhysicalDeviceMemoryBudgetPropertiesEXT*>(properties->pNext);
+                    reported->heapBudget[0] = 1u << 20u;
+                    reported->heapUsage[0] = reported->heapBudget[0] - 1024u;
+                    reported->heapBudget[1] = 8u << 20u;
+                };
+                const auto allocate = [&] {
+                    Buffer buffer(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                    Require(buffer.Mapped() && buffer.Bytes().size() == bytes, "a budget-selected buffer lost its mapping or size");
+                    buffer.Bytes().front() = std::byte{0x5a};
+                    Require(mockBufferMemory(buffer.Handle()).front() == std::byte{0x5a}, "a budget-selected buffer bound the wrong allocation");
+                };
+                if (fail) expectFailure(allocate, "Vulkan result -2");
+                else allocate();
+                Require(mock.allocationTypes == std::vector<std::uint32_t>{1} && mock.allocationAttempts == 1, "a coherent buffer did not select the other heap before its single allocation attempt");
+                if (!fail) Require(mock.allocatedBytes == (bytes == 512 ? BufferPool::SlabBlockBytes(512) : bytes), "a coherent buffer budget check lost its full allocation extent");
+            }
+            Require(mock.live == 0, "a budget-selected buffer leaked Vulkan objects");
+        }
+    }
+}
 using Kind = ShaderRecompiler::DescriptorKind;
 
 alignas(16) std::array<std::uint32_t, 4> guestFirst{0x11111111, 0x22222222, 0x33333333, 0x44444444};
@@ -4883,6 +4925,10 @@ int main(int argc, char** argv) {
             std::cout << "address-space device teardown releases cached guest allocations\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--buffer-budget-placement") {
+            bufferBudgetPlacementTests();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-pool-reset-failure") {
             descriptorPoolResetFailureTest();
             std::cerr << "descriptor pool reset failure did not terminate\n";
@@ -4970,6 +5016,7 @@ int main(int argc, char** argv) {
         resourceTests();
         descriptorSnapshotTests();
         descriptorCacheTests();
+        bufferBudgetPlacementTests();
         misalignedShaderDataTests();
         debugBranchTests();
         textureCacheBudgetTests();
