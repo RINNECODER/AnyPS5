@@ -504,7 +504,9 @@ class Function:
             self.fail(ins, 'native callee requires original provider bindings')
         if slot is not None and slot not in state['image_pointers']:
             self.fail(ins, 'import target has no proven native pointer origin')
-        if state['rsp'] != 0 or state['saved']:
+        balanced = state['rsp'] == 0 and not state['saved']
+        branch = ins.mnemonic in ('call', 'jmp') or ins.mnemonic.startswith('j')
+        if not balanced and not (self.uniform and branch):
             self.fail(ins, 'tail call requires a balanced native frame')
         if not self.uniform and (
                 abi.result_type(callee['result']) != abi.result_type(self.contract['result'])
@@ -641,8 +643,8 @@ class Function:
                 state['known'][abi.return_register(callee['result'])] = (1 << abi.bits(callee['result'])) - 1
             return state
         if op == 'ret':
-            if args:
-                self.fail(ins, 'callee stack cleanup requires a separate ABI contract')
+            # `ret imm16` is callee stack cleanup; in the uniform ABI the caller restores its own
+            # rsp around a call, so the immediate is redundant and can be ignored.
             if state['rsp'] != 0 or state['saved']:
                 self.fail(ins, 'unbalanced native frame')
             if self.contract['result'] != 'void':
@@ -1278,6 +1280,21 @@ class Function:
         self.lines.append('  call void @llvm.trap()')
         self.lines.append('  unreachable')
 
+    def repair_frame(self, state):
+        """Restore the saved guest registers and rsp so a tail call sees a balanced frame."""
+        if state['rsp'] == 0 and not state['saved']:
+            return state
+        for offset in sorted(state['saved'], reverse=True):
+            name = state['saved'][offset][0]
+            if name is None:
+                continue
+            value = self.emit(f"load i64, ptr {self.frame_pointer(offset)}, align 1")
+            self.store(name, value, 64)
+        repaired = dict(state)
+        repaired['rsp'] = 0
+        repaired['saved'] = {}
+        return repaired
+
     def uniform_call(self, ins, callee, slot, state, tail, result):
         self.uniform_store_registers('%rf_out')
         self.uniform_stack_out('%rf_out', state['rsp'])
@@ -1399,13 +1416,13 @@ class Function:
                 label = f'ctc_{address:x}'
                 self.lines.append(f'  br i1 {self.condition(op)}, label %{label}, label %b{address + ins.size:x}')
                 self.lines.append(f'{label}:')
-                self.uniform_call(ins, callee, slot, state, True, result)
+                self.uniform_call(ins, callee, slot, self.repair_frame(state), True, result)
                 terminal = True
             elif op == 'call' or address in self.tail_calls:
                 tail = address in self.tail_calls
                 callee, slot = self.tail_calls[address] if tail else self.image.call(ins, self.contract)
                 if abi.uniform(callee):
-                    self.uniform_call(ins, callee, slot, state, tail, result)
+                    self.uniform_call(ins, callee, slot, self.repair_frame(state) if tail else state, tail, result)
                     terminal = tail
                 else:
                     arguments = []
@@ -1476,6 +1493,13 @@ class Function:
                 terminal = True
             elif op != 'nop':
                 self.fail(ins, 'missing lowering')
+            if not terminal and address in self.tail_calls:
+                # A fall-through into another function is a tail call: the instruction was lowered
+                # above, then the frame is repaired and control transfers to the callee.
+                callee, slot = self.tail_calls[address]
+                require(abi.uniform(callee), 'fall-through tail call requires a uniform callee')
+                self.uniform_call(ins, callee, slot, self.repair_frame(state), True, result)
+                terminal = True
             if not terminal:
                 self.lines.append(f'  br label %b{address + ins.size:x}')
         self.lines.append('}')

@@ -179,6 +179,21 @@ class UniformABITests(unittest.TestCase):
         function(ctypes.byref(registers))
         self.assertEqual(registers.gpr[GPR['rax']], 42)
 
+    def test_uniform_frame_repair_tail_call(self):
+        # 0x1000: push rbx ; mov rbx,rdi ; jmp 0x1010   0x1010: mov rax,rdi ; ret
+        code = bytearray(0x14)
+        code[0x00:0x09] = bytes.fromhex('534889fbe907000000')
+        code[0x10:0x14] = bytes.fromhex('4889f8c3')
+        functions = [uniform_function('sub_1000', 0x1000, 0x10),
+                     uniform_function('sub_1010', 0x1010, 4)]
+        raw, contracts = fixture(bytes(code), functions)
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        self.assertIn('call void @sub_1010(ptr %rf_out)', ir)
+        registers = RegisterFile()
+        registers.gpr[GPR['rdi']] = 42
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 42)
+
     def test_uniform_indirect_call_uses_the_declared_target_set(self):
         # 0x1000: call rax ; ret          0x1010: mov rax, rdi ; ret
         code = bytearray(0x14)
