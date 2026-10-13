@@ -50,6 +50,8 @@ std::string ModuleStem(std::string name, const bool windows) {
     return {};
 }
 
+enum class GuestModuleFormat { Elf, Self, Other };
+
 }
 
 std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path& inputPath, const std::filesystem::path& outputPath, Domain::SysVDynamicSection& dynamic, const bool windows, const bool macos, const bool toIntel, const bool toRosetta, ISyscallScanner& syscallScanner, const bool lazyBinding, const std::string& runPath, const std::set<std::string>& excludedModules, const std::filesystem::path& sceModulePath, const std::vector<std::string>& moduleDirectories) const {
@@ -82,16 +84,20 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     }
     std::vector<std::filesystem::path> paths;
     std::set<std::string> unmatchedExclusions = excludedModules;
-    const auto isElf = [](const std::filesystem::path& path) {
+    const auto classifyGuestModule = [](const std::filesystem::path& path) {
         std::ifstream stream(path, std::ios::binary);
         if (!stream) throw Domain::RelinkerException("Cannot read guest candidate: " + Io::Utf8Path(path));
         char magic[4]{};
         stream.read(magic, 4);
         if (stream.bad()) throw Domain::RelinkerException("Cannot read guest candidate magic: " + Io::Utf8Path(path));
-        if (stream.gcount() != 4) return false;
+        if (stream.gcount() != 4) return GuestModuleFormat::Other;
         const auto byte = [&](const std::size_t index) { return static_cast<unsigned char>(magic[index]); };
-        const bool self = (byte(0) == 0x4f && byte(1) == 0x15 && byte(2) == 0x3d && byte(3) == 0x1d) || (byte(0) == 0x54 && byte(1) == 0x14 && byte(2) == 0xf5 && byte(3) == 0xee);
-        return byte(0) == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
+        if ((byte(0) == 0x4f && byte(1) == 0x15 && byte(2) == 0x3d && byte(3) == 0x1d) ||
+            (byte(0) == 0x54 && byte(1) == 0x14 && byte(2) == 0xf5 && byte(3) == 0xee))
+            return GuestModuleFormat::Self;
+        if (byte(0) == 0x7f && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F')
+            return GuestModuleFormat::Elf;
+        return GuestModuleFormat::Other;
     };
     for (const auto& directory : directories) {
         if (!std::filesystem::is_directory(directory)) throw Domain::RelinkerException("Guest module path is not a directory: " + Io::Utf8Path(directory));
@@ -103,7 +109,11 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
             }
             if (!entry.is_regular_file()) continue;
             if (std::filesystem::equivalent(entry.path(), inputPath)) continue;
-            if (isElf(entry.path())) paths.push_back(entry.path());
+            const auto format = classifyGuestModule(entry.path());
+            if (format == GuestModuleFormat::Elf) paths.push_back(entry.path());
+            else if (format == GuestModuleFormat::Self)
+                std::cout << "Skipping SELF container: " << entry.path().lexically_relative(root).generic_string()
+                          << " (unwrap it before relinking)\n";
         }
     }
     const auto neededNames = ReadNeededNames(dynamic);
