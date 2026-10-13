@@ -9,6 +9,11 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <atomic>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -503,6 +508,100 @@ void Archive(const MetalTests::Context& context) {
     std::filesystem::remove_all(directory);
 }
 
+// Many threads build the same and different compute pipelines while the binary archive is written
+// (every batch and on flush) and dropped and re-read from disk (clear): every returned pipeline is a
+// live object of the device, every write succeeds, and the final archive holds every pipeline.
+void ConcurrentArchive(const MetalTests::Context& context) {
+    const auto directory = std::filesystem::temp_directory_path() / ("aps5-metal-archive-stress-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(directory);
+    SetEnvironment("ANYPS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("APS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.c_str());
+    ClearMetalPipelineCaches();
+    constexpr std::size_t Kernels = 96;
+    constexpr std::size_t Workers = 8;
+    constexpr std::size_t Requests = 160;
+    std::vector<std::string> sources;
+    for (std::size_t i = 0; i < Kernels; ++i) {
+        sources.push_back("#include <metal_stdlib>\nusing namespace metal;\nkernel void stress(device uint* out [[buffer(0)]], uint i [[thread_position_in_grid]]) { out[i] = i * " +
+                          std::to_string(i + 3) + "u + " + std::to_string(i * 7) + "u; }\n");
+    }
+    std::atomic<bool> stop{false};
+    std::atomic<std::size_t> built{0};
+    std::atomic<bool> failed{false};
+    std::string failure;
+    std::mutex failureMutex;
+    const auto fail = [&](const std::string& what) {
+        std::lock_guard lock(failureMutex);
+        if (!failed.exchange(true)) failure = what;
+    };
+    const auto request = [&](std::size_t index) {
+        id<MTLFunction> function = CachedShaderFunction(context.device, sources[index], "stress", false);
+        auto descriptor = [MTLComputePipelineDescriptor new];
+        descriptor.computeFunction = function;
+        NSError* error = nil;
+        const auto created = CachedComputePipelineState(context.device, descriptor, &error);
+        if (created.state == nil || created.reflection == nil || created.state.device != context.device ||
+            created.state.maxTotalThreadsPerThreadgroup == 0 || created.reflection.bindings.count != 1) {
+            fail("a concurrent compute pipeline request returned no live pipeline or reflection");
+        }
+    };
+    std::vector<std::thread> workers;
+    for (std::size_t worker = 0; worker < Workers; ++worker) {
+        workers.emplace_back([&, worker] {
+            std::mt19937 random(static_cast<std::uint32_t>(worker * 7919 + 1));
+            for (std::size_t iteration = 0; iteration < Requests && !failed.load(); ++iteration) {
+                @autoreleasepool {
+                    // Half the requests go to a few shared kernels, the rest spread over all of them.
+                    try {
+                        request((iteration % 2 == 0) ? random() % 4 : random() % Kernels);
+                        built.fetch_add(1);
+                    } catch (const std::exception& error) {
+                        fail(std::string("a concurrent compute pipeline request threw: ") + error.what());
+                    }
+                }
+            }
+        });
+    }
+    std::thread writer([&] {
+        for (std::size_t round = 0; !stop.load(); ++round) {
+            @autoreleasepool {
+                if (!FlushMetalPipelineArchives()) fail("writing the pipeline archive failed under concurrent pipeline creation");
+                if (round % 8 == 7) ClearMetalPipelineCaches();
+            }
+        }
+    });
+    for (auto& worker : workers) worker.join();
+    stop = true;
+    writer.join();
+    MetalTests::Require(!failed.load(), failure.c_str());
+    MetalTests::Require(built.load() == Workers * Requests, "not every concurrent pipeline request completed");
+    // Every kernel once more, then the written archive must hold each one (creation fails on a miss).
+    for (std::size_t i = 0; i < Kernels; ++i) request(i);
+    MetalTests::Require(!failed.load(), failure.c_str());
+    const auto path = MetalPipelineArchivePath(context.device);
+    MetalTests::Require(FlushMetalPipelineArchives() && std::filesystem::is_regular_file(path), "the final pipeline archive write failed");
+    @autoreleasepool {
+        MTLBinaryArchiveDescriptor* archiveDescriptor = [MTLBinaryArchiveDescriptor new];
+        archiveDescriptor.url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
+        NSError* error = nil;
+        id<MTLBinaryArchive> archive = [context.device newBinaryArchiveWithDescriptor:archiveDescriptor error:&error];
+        MetalTests::Require(archive != nil, "the pipeline archive written under concurrent creation does not load");
+        for (std::size_t i = 0; i < Kernels; ++i) {
+            auto descriptor = [MTLComputePipelineDescriptor new];
+            descriptor.computeFunction = CachedShaderFunction(context.device, sources[i], "stress", false);
+            descriptor.binaryArchives = @[archive];
+            id<MTLComputePipelineState> state = [context.device newComputePipelineStateWithDescriptor:descriptor
+                options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:&error];
+            MetalTests::Require(state != nil, "the pipeline archive written under concurrent creation misses a pipeline");
+        }
+    }
+    ClearMetalPipelineCaches();
+    SetEnvironment("ANYPS5_SHADER_CACHE_DIR", nullptr);
+    SetEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
+    std::filesystem::remove_all(directory);
+}
+
 // A relinked title declares an old SDK, so the process default is MSL 2.3; converted shaders still
 // compile as MSL 3.2, which the bridge's workgroup acquire/release fences need.
 void LanguageVersion(const MetalTests::Context& context) {
@@ -538,4 +637,5 @@ void RunShaderPipelineTests(const MetalTests::Context& context) {
     Render(context, true);
     Caches(context);
     Archive(context);
+    ConcurrentArchive(context);
 }
