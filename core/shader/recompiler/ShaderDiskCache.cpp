@@ -1,6 +1,7 @@
 #include "ShaderDiskCache.hpp"
 #include "CacheKey.hpp"
 #include "ShaderCacheDirectory.hpp"
+#include "ShaderCacheEviction.hpp"
 #include "ThreadOwned.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #ifdef _WIN32
@@ -56,9 +57,9 @@ std::filesystem::path ShaderCacheDirectory() {
 namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
-static_assert(sizeof(CompiledShaderArtifact) == 192, "CompiledShaderArtifact changed: update the artifact encoder");
+static_assert(sizeof(CompiledShaderArtifact) == 200, "CompiledShaderArtifact changed: update the artifact encoder");
 static_assert(sizeof(ShaderInvocation) == 112, "ShaderInvocation changed: update the invocation encoder");
-static_assert(sizeof(RecompileResult) == 312, "RecompileResult changed: update EncodeResult and DecodeResult");
+static_assert(sizeof(RecompileResult) == 320, "RecompileResult changed: update EncodeResult and DecodeResult");
 static_assert(sizeof(DescriptorBinding) == 640, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
@@ -411,6 +412,7 @@ void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
     writer.Value(result.imageMetadataDword);
     writer.Value(result.runtimeImageCount);
     writer.Values(std::span<const std::uint32_t>(result.runtimeImageResources));
+    writer.Value(result.registrationModule);
     writer.List(result.vertexInputPatches, [](Writer& out, const VertexInputPatch& patch) {
         out.Value(patch.location);
         out.Value(patch.word);
@@ -453,6 +455,7 @@ void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
     reader.Value(result.imageMetadataDword);
     reader.Value(result.runtimeImageCount);
     reader.Values(result.runtimeImageResources);
+    reader.Value(result.registrationModule);
     reader.List(result.vertexInputPatches, 20, [](Reader& in, VertexInputPatch& patch) {
         in.Value(patch.location);
         in.Value(patch.word);
@@ -530,6 +533,7 @@ void encodeLayout(Writer& writer, const IrBindingLayout& layout) {
     writer.Value(layout.memoryOffsetCount);
     writer.Value(layout.dispatchThreadLimit);
     writer.Value(layout.runtimeImageCount);
+    writer.Value(layout.runtimeStateDwords);
     writer.Values(std::span<const std::uint32_t>(layout.userDataRegisters));
     writer.List(layout.descriptors, [](Writer& out, const IrDescriptorBinding& descriptor) {
         out.Value(descriptor.kind);
@@ -543,6 +547,7 @@ void decodeLayout(Reader& reader, IrBindingLayout& layout) {
     reader.Value(layout.memoryOffsetCount);
     reader.Value(layout.dispatchThreadLimit);
     reader.Value(layout.runtimeImageCount);
+    reader.Value(layout.runtimeStateDwords);
     reader.Values(layout.userDataRegisters);
     reader.List(layout.descriptors, 12, [](Reader& in, IrDescriptorBinding& descriptor) {
         in.Value(descriptor.kind);
@@ -793,6 +798,7 @@ constexpr std::string_view NeutralSwitches[] = {
     "APS5_NO_FAILURE_MEMO",
     "APS5_NO_PERF_FRONTEND_PAIR",
     "APS5_NO_PERF_DOM_INTERSECTION",
+    "APS5_NO_PERF_ITERATION_SELECTION",
     "APS5_NO_RESULT_MEMO",
 };
 
@@ -842,6 +848,7 @@ public:
         } else {
             switch (DecodeEntry(file, key, variant)) {
                 case LoadStatus::Loaded:
+                    CacheEviction::Touch(directory / name);
                     hits.fetch_add(1, std::memory_order_relaxed);
                     bytesRead.fetch_add(file.size(), std::memory_order_relaxed);
                     loaded = true;
@@ -922,6 +929,7 @@ private:
         if (WriteFileAtomically(directory / EntryName(job.key), file)) {
             writes.fetch_add(1, std::memory_order_relaxed);
             bytesWritten.fetch_add(file.size(), std::memory_order_relaxed);
+            CacheEviction::SharedBudget().NoteWrite(root, file.size());
         } else {
             const auto failures = writeFailures.fetch_add(1, std::memory_order_relaxed);
             if (failures < 4) std::fprintf(stderr, "[shader-disk-cache] cannot write %s\n", (directory / EntryName(job.key)).string().c_str());
@@ -931,21 +939,13 @@ private:
     void housekeeping() {
         std::error_code error;
         std::filesystem::create_directories(directory, error);
-        const auto stamp = directory / "last-used";
-        std::ofstream(stamp, std::ios::binary | std::ios::trunc).close();
-        std::filesystem::last_write_time(stamp, std::filesystem::file_time_type::clock::now(), error);
+        CacheEviction::MarkInUse(directory);
         const auto now = std::filesystem::file_time_type::clock::now();
-        for (std::filesystem::directory_iterator it(root, error), end; !error && it != end; it.increment(error)) {
-            const auto name = it->path().filename().string();
-            if (it->path() == directory || name.size() != 16 || name.find_first_not_of("0123456789abcdef") != std::string::npos || !it->is_directory(error)) continue;
-            std::error_code timeError;
-            auto used = std::filesystem::last_write_time(it->path() / "last-used", timeError);
-            if (timeError) used = std::filesystem::last_write_time(it->path(), timeError);
-            if (!timeError && now - used > std::chrono::hours(24 * 14)) {
-                std::error_code removeError;
-                std::filesystem::remove_all(it->path(), removeError);
-            }
-        }
+        // Other source versions' directories can never hit for this build.
+        CacheEviction::RemoveStaleVersions(root, directory, [](const std::string& name) {
+            return name.size() == 16 && name.find_first_not_of("0123456789abcdef") == std::string::npos;
+        });
+        CacheEviction::SharedBudget().Startup(root);
         error.clear();
         for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
             if (it->path().filename().string().find(".tmp.") == std::string::npos) continue;
