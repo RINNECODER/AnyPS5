@@ -279,11 +279,63 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
 // A materialized result of one variant over one snapshot (Recompile(request, capture)): the
 // shared immutable object every later capture that reproduces the snapshot receives, so Populate
 // and the per-request copy run once per distinct snapshot.
+namespace {
+
+std::array<std::uint32_t, 3> partialThreads(const RecompileRequest& request);
+
 struct ResultMemoEntry {
+    ResultMemoEntry(std::uint64_t variantId, std::uint64_t hash, const RecompileRequest& request, const ResourceSnapshot& snapshot, const std::shared_ptr<const RecompileResult>& result)
+        : variantId(variantId), hash(hash), snapshot(snapshot), threads(partialThreads(request)),
+          pushOffset(request.layout.pushConstantOffsetBytes), hasPixel(request.context.pixel.has_value()),
+          hasVertex(request.context.vertex.has_value()), result(result) {
+        if (request.context.pixel) {
+            exportMapping = request.context.pixel->targetExportMapping;
+            exportPacking = request.context.pixel->targetExportPacking;
+            dualSourceBlend = request.context.pixel->dualSourceBlend;
+        }
+        if (request.context.vertex) {
+            const auto& vertex = *request.context.vertex;
+            const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
+            vertexResources.reserve(count);
+            for (std::uint32_t index = 0; index < count; ++index) {
+                const auto& fields = vertex.resources[index].fields;
+                vertexResources.push_back({fields[0], fields[1], fields[2], fields[3], vertex.resourcesDst[index].fetchIndex});
+            }
+        }
+    }
+
+    bool Matches(const RecompileRequest& request, const ResourceSnapshot& current) const {
+        if (snapshot != current || threads != partialThreads(request) || pushOffset != request.layout.pushConstantOffsetBytes ||
+            hasPixel != request.context.pixel.has_value() || hasVertex != request.context.vertex.has_value()) return false;
+        if (request.context.pixel && (exportMapping != request.context.pixel->targetExportMapping ||
+            exportPacking != request.context.pixel->targetExportPacking || dualSourceBlend != request.context.pixel->dualSourceBlend)) return false;
+        if (request.context.vertex) {
+            const auto& vertex = *request.context.vertex;
+            const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
+            if (count != vertexResources.size()) return false;
+            for (std::uint32_t index = 0; index < count; ++index) {
+                if (!std::equal(vertex.resources[index].fields.begin(), vertex.resources[index].fields.end(), vertexResources[index].begin()) ||
+                    vertex.resourcesDst[index].fetchIndex != vertexResources[index][4]) return false;
+            }
+        }
+        return true;
+    }
+
     std::uint64_t variantId;
     std::uint64_t hash;
+    ResourceSnapshot snapshot;
+    std::array<std::uint32_t, 3> threads;
+    std::uint32_t pushOffset;
+    std::array<std::uint8_t, 8> exportMapping {};
+    std::array<ColorExportPacking, 8> exportPacking {};
+    bool dualSourceBlend = false;
+    bool hasPixel;
+    bool hasVertex;
+    std::vector<std::array<std::uint32_t, 5>> vertexResources;
     std::shared_ptr<const RecompileResult> result;
 };
+
+}
 
 struct EmissionFailure {
     std::uint64_t codeAddress;
@@ -1071,7 +1123,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         std::lock_guard lock(source.mutex);
         index = (variant->artifact.variantId * 0x9e3779b97f4a7c15ull) ^ hash;
         const auto found = source.memoIndex.find(index);
-        if (found != source.memoIndex.end() && found->second->variantId == variant->artifact.variantId && found->second->hash == hash) {
+        if (found != source.memoIndex.end() && found->second->variantId == variant->artifact.variantId && found->second->hash == hash && found->second->Matches(request, snapshot)) {
             source.memo.splice(source.memo.begin(), source.memo, found->second);
             counters.hits.fetch_add(1, std::memory_order_relaxed);
             if (memoHit != nullptr) *memoHit = true;
@@ -1089,7 +1141,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         std::lock_guard lock(source.mutex);
         const auto found = source.memoIndex.find(index);
         if (found != source.memoIndex.end()) {
-            if (found->second->variantId == variant->artifact.variantId && found->second->hash == hash) {
+            if (found->second->variantId == variant->artifact.variantId && found->second->hash == hash && found->second->Matches(request, snapshot)) {
                 source.memo.splice(source.memo.begin(), source.memo, found->second);
                 shared = found->second->result;
             } else {
@@ -1098,7 +1150,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
             }
         }
         if (source.memoIndex.find(index) == source.memoIndex.end()) {
-            source.memo.push_front({variant->artifact.variantId, hash, shared});
+            source.memo.emplace_front(variant->artifact.variantId, hash, request, snapshot, shared);
             source.memoIndex.emplace(index, source.memo.begin());
             while (source.memo.size() > ResultMemoEntries) {
                 const auto& last = source.memo.back();

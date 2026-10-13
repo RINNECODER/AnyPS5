@@ -43,6 +43,8 @@ struct ResourceSnapshot {
     UniformFill uniformFill;
     std::vector<SrtReadPoison> srtPoison;
     std::uint32_t nullRootReads = 0;
+
+    bool operator==(const ResourceSnapshot& other) const = default;
 };
 
 struct UniformFillPlan {
