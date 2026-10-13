@@ -96,7 +96,6 @@ void buildGraph(
                 info = decoder.DecodeInstruction(text.data() + bufOff, available);
             }
             reachable.insert(va);
-            visited.erase(va);
 
             VirtualAddress nextVaddr = va + static_cast<VirtualAddress>(info.Length);
 
