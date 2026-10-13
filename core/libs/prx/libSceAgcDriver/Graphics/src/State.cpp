@@ -692,7 +692,8 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     result.rasterSamples = rasterSamples(cx);
     // MSAA_ENABLE on a single-sample scan is accepted when its samples sit at the pixel center (see singleSampleMsaaRejection).
     zero(cx, 0x292, ScanModeMask & ~1u, "scan conversion mode");
-    const bool singleSampleMsaa = result.rasterSamples == 1 && (read(cx, 0x292) & 1u) != 0;
+    const auto scanMode = find(cx, 0x292);
+    const bool singleSampleMsaa = result.rasterSamples == 1 && scanMode != cx.end() && (scanMode->second & 1u) != 0;
     if (singleSampleMsaa) {
         for (std::uint32_t pixel = 0; pixel < 4; ++pixel) static_cast<void>(read(cx, 0x2feu + pixel * 4u));
         if (auto reason = singleSampleMsaaRejection(queue); !reason.empty()) throw std::runtime_error(reason);
