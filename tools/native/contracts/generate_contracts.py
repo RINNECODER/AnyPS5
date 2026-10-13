@@ -150,8 +150,16 @@ def main():
     ap.add_argument("--code-relocs")
     ap.add_argument("--import-relocs")
     ap.add_argument("--conflicts")
+    ap.add_argument("--abi")
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
+
+    abi_functions, abi_imports, abi_counts = {}, {}, {}
+    if args.abi:
+        abi_doc = json.load(open(args.abi))
+        abi_functions = {int(k, 16): v for k, v in abi_doc.get("functions", {}).items()}
+        abi_imports = abi_doc.get("imports", {})
+        abi_counts = abi_doc.get("counts", {})
 
     raw, phdrs, entry = load_elf(args.elf)
     sha256 = hashlib.sha256(raw).hexdigest()
@@ -268,6 +276,8 @@ def main():
     functions_with_jumps = 0
     functions_jumps_all_resolved = 0
     conflict_count = 0
+    abi_verified = abi_inferred = abi_unknown = 0
+    complete_verified = complete_with_inferred = 0
     for a in in_code:
         body_end, padding_tail = bodies[a]
         size = body_end - a
@@ -275,6 +285,14 @@ def main():
         jumps = indirect_jumps.get(a, [])
         unresolved_calls = sum(1 for c in calls if not c["target_count"])
         unresolved_jumps = sum(1 for j in jumps if not j["target_count"])
+        abi = abi_functions.get(a, {"status": "unknown", "reason": "no ABI evidence"})
+        abi_status = abi.get("status", "unknown")
+        if abi_status == "verified":
+            abi_verified += 1
+        elif abi_status == "inferred":
+            abi_inferred += 1
+        else:
+            abi_unknown += 1
         missing = []
         if size <= 0:
             padding_only += 1
@@ -286,9 +304,17 @@ def main():
         if a in conflicts:
             conflict_count += 1
             missing.append("conflict")
-        missing.append("abi")
-        if size > 0 and not unresolved_calls and not unresolved_jumps and a not in conflicts:
+        if abi_status == "unknown":
+            missing.append("abi")
+        elif abi_status == "inferred":
+            missing.append("abi_verified")
+        structural_ok = size > 0 and not unresolved_calls and not unresolved_jumps and a not in conflicts
+        if structural_ok:
             complete += 1
+            if abi_status == "verified":
+                complete_verified += 1
+            if abi_status in ("verified", "inferred"):
+                complete_with_inferred += 1
         if calls:
             functions_with_calls += 1
             if not unresolved_calls:
@@ -302,6 +328,7 @@ def main():
             "padding_tail": padding_tail,
             "symbol": None,
             "evidence": [{"kind": "merged-start", "sources": starts[a]}],
+            "abi": abi, "abi_status": abi_status,
             "indirect_calls": calls,
             "indirect_jumps": jumps,
             "missing": missing,
@@ -322,7 +349,11 @@ def main():
                            "functions_with_jumps": functions_with_jumps,
                            "functions_all_resolved": functions_jumps_all_resolved},
         "complete_structural": complete,
-        "missing_abi": len(in_code),
+        "abi": {"verified": abi_verified, "inferred": abi_inferred, "unknown": abi_unknown,
+                "annotations": abi_counts},
+        "complete_verified_abi": complete_verified,
+        "complete_with_inferred_abi": complete_with_inferred,
+        "missing_abi": abi_unknown,
         "pointer_relocations": len(pointer_relocations),
         "imports": len(imports),
         "data_segments": len(data_segments),
@@ -331,7 +362,7 @@ def main():
 
     output = {
         "schema": "anyps5.aot.recovery.v1",
-        "contract_status": "structural: starts, bodies, indirect target sets, relocations; ABI annotations absent",
+        "contract_status": "structural: starts, bodies, indirect target sets, relocations; ABI annotations are verified (HLE signature/import thunk) or inferred (call-site register layout), never guessed",
         "sha256": sha256,
         "entry": entry,
         "source": args.elf.split("/")[-1],
@@ -339,14 +370,15 @@ def main():
         "starts_source": args.starts.split("/")[-1],
         "functions": functions,
         "target_sets": target_sets,
-        "imports": imports,
+        "imports": {name: dict(spec, abi=abi_imports.get(name, {"status": "unknown"}))
+                    for name, spec in imports.items()},
         "data": data_segments,
         "pointer_relocations": pointer_relocations,
         "coverage": coverage,
         "limitations": [
             "Function bodies are start-to-next-start ranges with trailing 00/90/CC padding trimmed; interior padding and data tables are not split out.",
             "Indirect-call target sets are closed-world unions from relocation tables; register-form and unknown-provenance sites have no target set.",
-            "No ABI (result/parameters) is inferred; upstream core/aot materialize_contracts still requires source-verified annotations.",
+            "Verified ABI comes only from HLE APS5_VABI signatures (imports and their thunks); inferred ABI is a call-site register layout with placeholder types and must not be treated as source-verified.",
         ],
     }
     with open(args.output, "w") as fh:
