@@ -1,5 +1,6 @@
 #include "prx/libSceVideoOut/include/VideoOutState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -267,6 +268,11 @@ void CompleteFlip(FlipRequest& req, const VideoOutCompletionCallbacks& callbacks
     req.cfg->flipStatus.processTime = callbacks.processTime(callbacks.context);
     req.cfg->flipStatus.processTimeCounter = callbacks.processTimeCounter(callbacks.context);
     req.cfg->flipStatus.flipArg = req.flipArg;
+    const auto previous = req.cfg->flipStatus.currentBuffer;
+    if (previous >= 0) {
+        auto& label = req.cfg->bufferLabels[previous];
+        AgcDriverStoreGuestLabel_nid_postfix(&label, 0);
+    }
     req.cfg->flipStatus.currentBuffer = req.index;
     req.cfg->width = req.width;
     req.cfg->height = req.height;

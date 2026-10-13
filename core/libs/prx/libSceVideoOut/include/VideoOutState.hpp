@@ -118,6 +118,7 @@ struct VideoOutConfig {
     VideoOutVblankStatus preVblankStatus{};
 
     std::array<VideoOutBuffer, VIDEO_OUT_BUFFER_NUM_MAX> buffers{};
+    alignas(std::atomic_ref<std::uint64_t>::required_alignment) std::array<std::uint64_t, VIDEO_OUT_BUFFER_NUM_MAX> bufferLabels{};
     std::array<uint32_t, VIDEO_OUT_BUFFER_NUM_MAX> bufferPending{};
     std::array<BufferReuseTracker, VIDEO_OUT_BUFFER_NUM_MAX> bufferReuse;
     std::array<BufferAttributeGroup, VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX> groups{};

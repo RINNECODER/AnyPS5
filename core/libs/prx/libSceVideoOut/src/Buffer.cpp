@@ -11,6 +11,21 @@
 
 extern "C" {
 
+int APS5_VABI sceVideoOutGetBufferLabelAddress(int handle, uintptr_t* address) try {
+    if (address == nullptr) return VIDEO_OUT_ERROR_INVALID_ADDRESS;
+    auto& driver = VideoOutDriver::Get();
+    if (!driver.HasConfig(handle)) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+    auto cfg = driver.GetConfig(handle);
+    std::lock_guard lock(cfg->mutex);
+    cfg->CheckAlive();
+    if (cfg->Closed()) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+    const auto labels = reinterpret_cast<uintptr_t>(cfg->bufferLabels.data());
+    std::memcpy(address, &labels, sizeof(labels));
+    return VIDEO_OUT_BUFFER_NUM_MAX;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
+}
+
 void APS5_VABI sceVideoOutSetBufferAttribute2(VideoOutBufferAttribute2* attribute, uint64_t pixelFormat, uint32_t tilingMode, uint32_t width, uint32_t height, uint64_t option, uint32_t dccControl, uint64_t dccCbRegisterClearColor) {
     if (attribute == nullptr) {
         throw std::runtime_error("sceVideoOutSetBufferAttribute2: null attribute");
@@ -84,6 +99,8 @@ int APS5_VABI sceVideoOutRegisterBuffers2(int handle, int setIndex, int bufferIn
     cfg->height = attribute->height;
     for (int i = 0; i < bufferNum; i++) {
         cfg->buffers[bufferIndexStart + i] = registered[i];
+        auto& label = cfg->bufferLabels[bufferIndexStart + i];
+        AgcDriverStoreGuestLabel_nid_postfix(&label, 0);
     }
     return 0;
 } catch (const ProcessShutdown&) {

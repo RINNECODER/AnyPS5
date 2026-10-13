@@ -39,7 +39,7 @@ if(BUILD_TESTING)
         "SDL video driver for VideoOut flip tests")
 
     set_target_properties(video_out_flip_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
-    foreach(flipMode IN ITEMS lifetime reopen decode controls overlay unopened)
+    foreach(flipMode IN ITEMS lifetime reopen decode controls overlay unopened labels labels_main)
         if(flipMode STREQUAL "lifetime")
             add_test(NAME video_out_flip_${flipMode} COMMAND video_out_flip_tests)
         else()
