@@ -19,12 +19,37 @@ const IrValue* maskedOperand(const IrValue* value, IrOpcode opcode, std::uint32_
     return nullptr;
 }
 
+bool setsExponentBit(const IrValue& value) {
+    if (value.ArgumentCount() != 2u) return false;
+    for (std::size_t index = 0; index < 2u; ++index) {
+        const IrValue* operand = value.Argument(index)->Resolve();
+        if (operand->HasImmediate() && (operand->ImmediateU32() & 0x7f800000u) != 0u) return true;
+    }
+    return false;
+}
+
 IrValue* flushedSource(const IrValue& value) {
     if (value.Opcode() != IrOpcode::SelectU32 || value.ArgumentCount() != 3u) return nullptr;
     IrValue* source = value.Argument(2)->Resolve();
     const IrValue* exponent = maskedOperand(value.Argument(0)->Resolve(), IrOpcode::IEqual32, 0u);
     if (exponent == nullptr || maskedOperand(exponent, IrOpcode::BitwiseAnd32, 0x7f800000u) != source) return nullptr;
     return maskedOperand(value.Argument(1)->Resolve(), IrOpcode::BitwiseAnd32, 0x80000000u) == source ? source : nullptr;
+}
+
+const IrValue* bitsOf(const IrValue* value) {
+    value = value->Resolve();
+    while (value->Opcode() == IrOpcode::BitCastF32U32 || value->Opcode() == IrOpcode::BitCastU32F32) value = value->Argument(0)->Resolve();
+    return value;
+}
+
+bool nanOnlyTrueArm(const IrValue& select) {
+    const IrValue* condition = select.Argument(0)->Resolve();
+    if (condition->Opcode() != IrOpcode::FPIsNan32) return false;
+    const IrValue* tested = bitsOf(condition->Argument(0));
+    const IrValue* chosen = bitsOf(select.Argument(1));
+    if (chosen == tested) return true;
+    const IrValue* quieted = maskedOperand(chosen, IrOpcode::BitwiseOr32, 0x00400000u);
+    return quieted != nullptr && bitsOf(quieted) == tested;
 }
 
 class DenormalFreeValues {
@@ -51,6 +76,12 @@ private:
             case IrOpcode::ConvertF32S32:
             case IrOpcode::ConvertF32U32:
             case IrOpcode::ConvertF32F16:
+            case IrOpcode::FPFloor32:
+            case IrOpcode::FPCeil32:
+            case IrOpcode::FPTrunc32:
+            case IrOpcode::FPRoundEven32:
+            case IrOpcode::FPSqrt:
+            case IrOpcode::FPRecipSqrt32:
                 return true;
             case IrOpcode::BitCastU32F32:
             case IrOpcode::BitCastF32U32:
@@ -62,11 +93,35 @@ private:
                 if (const IrValue* operand = maskedOperand(&value, IrOpcode::BitwiseXor32, 0x80000000u)) return Contains(operand);
                 return false;
             case IrOpcode::BitwiseAnd32:
+                if (maskedOperand(&value, IrOpcode::BitwiseAnd32, 0x80000000u) != nullptr) return true;
                 if (const IrValue* operand = maskedOperand(&value, IrOpcode::BitwiseAnd32, 0x7fffffffu)) return Contains(operand);
                 return false;
+            case IrOpcode::FPMul32: {
+                const auto keepsMagnitude = [&](const IrValue* factor, const IrValue* other) {
+                    factor = factor->Resolve();
+                    if (!factor->HasImmediate()) return false;
+                    const std::uint32_t bits = factor->ImmediateU32();
+                    return ((bits & 0x7fffffffu) == 0u || ((bits >> 23u) & 0xffu) >= 127u) && Contains(other);
+                };
+                return keepsMagnitude(value.Argument(0), value.Argument(1)) || keepsMagnitude(value.Argument(1), value.Argument(0));
+            }
+            case IrOpcode::BitwiseOr32:
+                return setsExponentBit(value);
             case IrOpcode::SelectU32:
-            case IrOpcode::SelectF32:
+            case IrOpcode::SelectF32: {
+                const auto flags = value.Opcode() == IrOpcode::SelectF32 ? value.Flags<SelectFlags>() : SelectFlags{};
+                if (flags.notDenormal) return true;
+                if (nanOnlyTrueArm(value)) return Contains(value.Argument(2));
                 return Contains(value.Argument(1)) && Contains(value.Argument(2));
+            }
+            case IrOpcode::FPMin32:
+            case IrOpcode::FPMax32:
+            case IrOpcode::FPMinTri32:
+            case IrOpcode::FPMaxTri32:
+            case IrOpcode::FPMedTri32:
+            case IrOpcode::FPFract32:
+            case IrOpcode::FPSin:
+            case IrOpcode::FPCos:
             case IrOpcode::Phi:
                 for (std::size_t index = 0; index < value.ArgumentCount(); ++index) {
                     if (!Contains(value.Argument(index))) return false;

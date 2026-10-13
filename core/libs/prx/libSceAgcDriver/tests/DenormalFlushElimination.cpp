@@ -57,6 +57,20 @@ struct Builder {
         return created;
     }
 
+    IrValue& select(IrOpcode opcode, IrType type, IrValue& condition, IrValue& whenTrue, IrValue& whenFalse, SelectFlags flags = {}) {
+        auto& created = emit(opcode, type, {&condition, &whenTrue, &whenFalse});
+        created.SetFlags(flags);
+        return created;
+    }
+
+    IrValue& asF32(IrValue& bits) {
+        return emit(IrOpcode::BitCastF32U32, IrType::F32, {&bits});
+    }
+
+    IrValue& asU32(IrValue& value) {
+        return emit(IrOpcode::BitCastU32F32, IrType::U32, {&value});
+    }
+
     void keep(IrValue& value) {
         (void)emit(IrOpcode::ReferenceU32, IrType::Void, {&value});
     }
@@ -150,6 +164,116 @@ int main() {
         return b.eliminate() == 1u && !clamped.HasUses() && product.HasUses();
     });
 
+    passed &= run("a min, max, min3, max3 or med3 of flushed values needs no flush, one with an unknown operand does", [] {
+        Builder b;
+        const auto value = [&](IrValue& bits) -> IrValue& { return b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&bits}); };
+        const auto flushedResult = [&](IrOpcode opcode, std::initializer_list<IrValue*> arguments) -> IrValue& {
+            return b.flush(b.emit(IrOpcode::BitCastU32F32, IrType::U32, {&b.emit(opcode, IrType::F32, arguments)}));
+        };
+        auto& x = value(b.flush(b.unknown()));
+        auto& y = value(b.flush(b.unknown()));
+        auto& z = value(b.flush(b.unknown()));
+        auto& raw = value(b.unknown());
+        IrValue* removed[] = {
+            &flushedResult(IrOpcode::FPMin32, {&x, &y}),
+            &flushedResult(IrOpcode::FPMax32, {&y, &x}),
+            &flushedResult(IrOpcode::FPMinTri32, {&x, &y, &z}),
+            &flushedResult(IrOpcode::FPMaxTri32, {&z, &y, &x}),
+            &flushedResult(IrOpcode::FPMedTri32, {&x, &z, &y}),
+        };
+        auto& mixedPair = flushedResult(IrOpcode::FPMax32, {&x, &raw});
+        auto& mixedMedian = flushedResult(IrOpcode::FPMedTri32, {&x, &y, &raw});
+        for (auto* flushed : removed) b.keep(*flushed);
+        b.keep(mixedPair);
+        b.keep(mixedMedian);
+        const bool counted = b.eliminate() == 5u;
+        bool kept = false;
+        for (auto* flushed : removed) kept |= flushed->HasUses();
+        return counted && !kept && mixedPair.HasUses() && mixedMedian.HasUses();
+    });
+
+    passed &= run("a floor or ceil needs no flush, even of an unknown value", [] {
+        Builder b;
+        auto& raw = b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&b.unknown()});
+        auto& floored = b.flush(b.emit(IrOpcode::BitCastU32F32, IrType::U32, {&b.emit(IrOpcode::FPFloor32, IrType::F32, {&raw})}));
+        auto& ceiled = b.flush(b.emit(IrOpcode::BitCastU32F32, IrType::U32, {&b.emit(IrOpcode::FPCeil32, IrType::F32, {&raw})}));
+        b.keep(floored);
+        b.keep(ceiled);
+        return b.eliminate() == 2u && !floored.HasUses() && !ceiled.HasUses();
+    });
+
+    passed &= run("a fract, sin or cos of a flushed value needs no flush, one of an unknown value does", [] {
+        Builder b;
+        auto& flushedInput = b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&b.flush(b.unknown())});
+        auto& raw = b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&b.unknown()});
+        const auto flushedResult = [&](IrOpcode opcode, IrValue& argument) -> IrValue& {
+            return b.flush(b.emit(IrOpcode::BitCastU32F32, IrType::U32, {&b.emit(opcode, IrType::F32, {&argument})}));
+        };
+        IrValue* removed[] = {
+            &flushedResult(IrOpcode::FPFract32, flushedInput),
+            &flushedResult(IrOpcode::FPSin, flushedInput),
+            &flushedResult(IrOpcode::FPCos, flushedInput),
+        };
+        IrValue* kept[] = {
+            &flushedResult(IrOpcode::FPFract32, raw),
+            &flushedResult(IrOpcode::FPSin, raw),
+            &flushedResult(IrOpcode::FPCos, raw),
+        };
+        for (auto* flushed : removed) b.keep(*flushed);
+        for (auto* flushed : kept) b.keep(*flushed);
+        bool result = b.eliminate() == 3u;
+        for (auto* flushed : removed) result &= !flushed->HasUses();
+        for (auto* flushed : kept) result &= flushed->HasUses();
+        return result;
+    });
+
+    passed &= run("a max carried around a loop without a flush keeps its flush and the search ends", [] {
+        Builder b;
+        IrBlock& head = *b.block;
+        IrBlock& body = b.newBlock();
+        IrBlock& exit = b.newBlock();
+        head.AddBranch(&body);
+        body.AddBranch(&body);
+        body.AddBranch(&exit);
+        auto& initial = b.flush(b.unknown());
+        b.block = &body;
+        auto& carried = b.program.CreateValue(IrOpcode::Phi, IrType::U32);
+        body.AppendInstruction(&carried);
+        auto& step = b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&b.flush(b.unknown())});
+        auto& maximum = b.emit(IrOpcode::BitCastU32F32, IrType::U32, {&b.emit(IrOpcode::FPMax32, IrType::F32, {&b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&carried}), &step})});
+        carried.AddPhiOperand(&head, &initial);
+        carried.AddPhiOperand(&body, &maximum);
+        auto& flushed = b.flush(maximum);
+        b.block = &exit;
+        b.keep(flushed);
+        return b.eliminate() == 0u && flushed.HasUses();
+    });
+
+    passed &= run("a truncated or round-even value, a square root or a reciprocal square root needs no flush", [] {
+        Builder b;
+        auto& unknown = b.emit(IrOpcode::BitCastF32U32, IrType::F32, {&b.unknown()});
+        std::uint32_t kept = 0u;
+        for (const auto opcode : {IrOpcode::FPTrunc32, IrOpcode::FPRoundEven32, IrOpcode::FPSqrt, IrOpcode::FPRecipSqrt32}) {
+            b.keep(b.flush(b.emit(IrOpcode::BitCastU32F32, IrType::U32, {&b.emit(opcode, IrType::F32, {&unknown})})));
+            ++kept;
+        }
+        auto& reciprocal = b.flush(b.emit(IrOpcode::BitCastU32F32, IrType::U32, {&b.emit(IrOpcode::FPRecip32, IrType::F32, {&unknown})}));
+        b.keep(reciprocal);
+        return b.eliminate() == kept && reciprocal.HasUses();
+    });
+
+    passed &= run("a sign bit alone or a value with an exponent bit set needs no flush, other masks do", [] {
+        Builder b;
+        auto& sign = b.flush(b.emit(IrOpcode::BitwiseAnd32, IrType::U32, {&b.unknown(), &b.constant(0x80000000u)}));
+        auto& infinity = b.flush(b.emit(IrOpcode::BitwiseOr32, IrType::U32, {&b.constant(0x7f800000u), &b.unknown()}));
+        auto& lowExponent = b.flush(b.emit(IrOpcode::BitwiseOr32, IrType::U32, {&b.unknown(), &b.constant(0x00800000u)}));
+        auto& quiet = b.flush(b.emit(IrOpcode::BitwiseOr32, IrType::U32, {&b.flush(b.unknown()), &b.constant(0x00400000u)}));
+        auto& unknownOr = b.flush(b.emit(IrOpcode::BitwiseOr32, IrType::U32, {&b.unknown(), &b.unknown()}));
+        auto& mantissa = b.flush(b.emit(IrOpcode::BitwiseAnd32, IrType::U32, {&b.unknown(), &b.constant(0x807fffffu)}));
+        for (auto* value : {&sign, &infinity, &lowExponent, &quiet, &unknownOr, &mantissa}) b.keep(*value);
+        return b.eliminate() == 3u && !sign.HasUses() && !infinity.HasUses() && !lowExponent.HasUses() && quiet.HasUses() && unknownOr.HasUses() && mantissa.HasUses();
+    });
+
     passed &= run("a phi of flushed values needs no flush", [] {
         Builder b;
         IrBlock& head = *b.block;
@@ -190,6 +314,42 @@ int main() {
             return !next.HasUses();
         };
         return loop(true) && !loop(false);
+    });
+
+    passed &= run("a product flushed when tiny needs no flush", [] {
+        Builder b;
+        auto& lhs = b.asF32(b.flush(b.unknown()));
+        auto& product = b.emit(IrOpcode::FPMul32, IrType::F32, {&lhs, &lhs});
+        auto& tiny = b.emit(IrOpcode::ULessThan32, IrType::Bool, {&b.unknown(), &b.constant(0x207fffffu)});
+        auto& flushed = b.flush(b.asU32(b.select(IrOpcode::SelectF32, IrType::F32, tiny, b.asF32(b.constant(0u)), product, SelectFlags{true})));
+        auto& unflagged = b.flush(b.asU32(b.select(IrOpcode::SelectF32, IrType::F32, tiny, b.asF32(b.constant(0u)), product)));
+        b.keep(flushed);
+        b.keep(unflagged);
+        return b.eliminate() == 1u && !flushed.HasUses() && unflagged.HasUses();
+    });
+
+    passed &= run("a NaN choice of a quieted operand is as denormal-free as its fallback", [] {
+        Builder b;
+        auto& candidate = b.unknown();
+        auto& isNan = b.emit(IrOpcode::FPIsNan32, IrType::Bool, {&b.asF32(candidate)});
+        auto& quieted = b.emit(IrOpcode::BitwiseOr32, IrType::U32, {&candidate, &b.constant(0x00400000u)});
+        auto& flushedFallback = b.flush(b.select(IrOpcode::SelectU32, IrType::U32, isNan, quieted, b.flush(b.unknown())));
+        auto& unknownFallback = b.flush(b.select(IrOpcode::SelectU32, IrType::U32, isNan, quieted, b.unknown()));
+        auto& otherValue = b.flush(b.select(IrOpcode::SelectU32, IrType::U32, isNan, b.unknown(), b.flush(b.unknown())));
+        b.keep(flushedFallback);
+        b.keep(unknownFallback);
+        b.keep(otherValue);
+        return b.eliminate() == 1u && !flushedFallback.HasUses() && unknownFallback.HasUses() && otherValue.HasUses();
+    });
+
+    passed &= run("a flushed value times a constant of at least one needs no flush, times a half it does", [] {
+        Builder b;
+        auto& value = b.asF32(b.flush(b.unknown()));
+        auto& scaled = b.flush(b.asU32(b.emit(IrOpcode::FPMul32, IrType::F32, {&value, &b.constant(0x40000000u)})));
+        auto& halved = b.flush(b.asU32(b.emit(IrOpcode::FPMul32, IrType::F32, {&b.constant(0x3f000000u), &value})));
+        b.keep(scaled);
+        b.keep(halved);
+        return b.eliminate() == 1u && !scaled.HasUses() && halved.HasUses();
     });
 
     return passed ? 0 : 1;

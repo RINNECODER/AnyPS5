@@ -937,8 +937,10 @@ std::uint32_t SharedAtomicUpdate(SpirvValueEmitContext& ctx, const IrValue& inst
     const auto& mem = SharedMemory(ctx, inst);
     return EmitAtomicAccess(ctx, inst, mem, [&](std::uint32_t pointer) {
         const auto old = AtomicUpdate(state, pointer, mem.kind, [&](std::uint32_t current) { return replacement(state, current); });
-        const std::uint32_t semantics = spv::MemorySemanticsAcquireReleaseMask | LdsMemorySemantics(state);
-        state.module.AddFunction(spv::OpMemoryBarrier, ConstantU32(state, spv::ScopeWorkgroup), ConstantU32(state, semantics));
+        if (mem.kind != ResourceKind::Lds) {
+            const std::uint32_t semantics = spv::MemorySemanticsAcquireReleaseMask | LdsMemorySemantics(state);
+            state.module.AddFunction(spv::OpMemoryBarrier, ConstantU32(state, spv::ScopeWorkgroup), ConstantU32(state, semantics));
+        }
         return old;
     });
 }
