@@ -13,6 +13,7 @@ int APS5_VABI unlink_nid_postfix(const char*);
 int APS5_VABI rename_nid_postfix(const char*, const char*);
 int APS5_VABI stat_nid_postfix(const char*, void*);
 int APS5_VABI access_nid_postfix(const char*, int);
+int APS5_VABI chflags_nid_postfix(const char*, std::uint64_t);
 int* APS5_VABI __error_nid_postfix();
 }
 
@@ -60,6 +61,7 @@ int main() {
     Require(Fails(stat_nid_postfix((longName + "/x").c_str(), status), ErrorNameTooLong), "stat of a long first component must fail with ENAMETOOLONG (63)");
     Require(Fails(stat_nid_postfix(longPath.c_str(), status), ErrorNameTooLong), "stat of a path of 1100 bytes must fail with ENAMETOOLONG (63)");
     Require(Fails(access_nid_postfix(longName.c_str(), 0), ErrorNameTooLong), "access of a long name must fail with ENAMETOOLONG (63)");
+    Require(Fails(chflags_nid_postfix(longName.c_str(), 0), ErrorNameTooLong), "chflags of a long name must fail with ENAMETOOLONG (63)");
     Require(Fails(unlink_nid_postfix(longName.c_str()), ErrorNameTooLong), "unlink of a long name must fail with ENAMETOOLONG (63)");
     Require(Fails(mkdir_nid_postfix(longName.c_str(), 0755), ErrorNameTooLong), "mkdir of a long name must fail with ENAMETOOLONG (63)");
     Require(Fails(rmdir_nid_postfix(longName.c_str()), ErrorNameTooLong), "rmdir of a long name must fail with ENAMETOOLONG (63)");

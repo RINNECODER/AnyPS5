@@ -592,7 +592,9 @@ int APS5_VABI chmod_nid_postfix(const char* path, int mode) {
 
 int APS5_VABI chflags_nid_postfix(const char* path, std::uint64_t flags) {
     if (const int error = PathError(path)) return PosixFailure(error);
-    if (const int error = LookupError(ResolvePath_nid_no_patch(path))) return PosixFailure(error);
+    std::filesystem::path native;
+    if (const int error = ResolvePathError_nid_no_patch(path, native)) return PosixFailure(error);
+    if (const int error = LookupError(native)) return PosixFailure(error);
     std::uint64_t known = 0;
     for (const auto& entry : GUEST_FILE_FLAGS) known |= entry.first;
     if ((flags & ~known) != 0) return PosixFailure(GUEST_EOPNOTSUPP);
