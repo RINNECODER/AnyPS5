@@ -537,6 +537,44 @@ public:
         return result;
     }
 
+    // Metal vertex and post-tessellation vertex functions have no [[thread_index_in_simdgroup]] input, so
+    // SPIRV-Cross refuses SubgroupLocalInvocationId there ("Subgroup builtins are not available in this type
+    // of function"), though every SIMD-group function works in them. A vertex function starts with its
+    // live lanes active and packed from lane 0, so the lane index is the number of active lanes below this
+    // one: define the guest lane builtin once at entry as simd_prefix_exclusive_sum(1u), before any
+    // divergence. Guest replay checks it against the hardware lane with a simd_shuffle round trip.
+    // Returns whether the shader declared the builtin.
+    bool DefineVertexSubgroupLane() {
+        std::vector<std::uint32_t> lanes;
+        ir.for_each_typed_id<spirv_cross::SPIRVariable>([&](std::uint32_t id, const spirv_cross::SPIRVariable& variable) {
+            if (variable.storage == spv::StorageClassInput && has_decoration(id, spv::DecorationBuiltIn) &&
+                get_decoration(id, spv::DecorationBuiltIn) == spv::BuiltInSubgroupLocalInvocationId)
+                lanes.push_back(id);
+        });
+        for (const auto lane : lanes) {
+            const auto& type = get_variable_data_type(get<spirv_cross::SPIRVariable>(lane));
+            if (type.basetype != spirv_cross::SPIRType::UInt || type.width != 32 || type.vecsize != 1 ||
+                type.columns != 1 || !type.array.empty())
+                Fail("subgroup lane builtin is not a 32-bit unsigned scalar");
+            const auto pointerId = ir.increase_bound_by(1);
+            auto pointer = get<spirv_cross::SPIRType>(get<spirv_cross::SPIRVariable>(lane).basetype);
+            pointer.storage = spv::StorageClassPrivate;
+            set<spirv_cross::SPIRType>(pointerId, pointer);
+            auto& variable = get<spirv_cross::SPIRVariable>(lane);
+            variable.basetype = pointerId;
+            variable.storage = spv::StorageClassPrivate;
+            unset_decoration(lane, spv::DecorationBuiltIn);
+            unset_decoration(lane, spv::DecorationFlat);
+            auto& interface = get_entry_point().interface_variables;
+            interface.erase(std::remove(interface.begin(), interface.end(), spirv_cross::VariableID(lane)), interface.end());
+            get<spirv_cross::SPIRFunction>(ir.default_entry_point).fixup_hooks_in.push_back([this, lane]() {
+                statement("uint ", to_name(lane), " = simd_prefix_exclusive_sum(1u);");
+                get<spirv_cross::SPIRVariable>(lane).deferred_declaration = false;
+            });
+        }
+        return !lanes.empty();
+    }
+
     void ConfigureMeshPosition(std::uint32_t position, std::uint32_t vertices, bool flipY, bool fixupDepth) {
         meshPosition = position;
         meshVertices = vertices;
@@ -1472,6 +1510,17 @@ static Result ConvertToMetalUncached(const RecompileResult& guest, ShaderStage s
     }
     if (!compiler.MinimumLodPairs().empty() && !result.samplerArgumentBuffer) Fail("minimum LOD shadow samplers require native argument bank");
     compiler.InstallMinimumLodBank(sampler, execution);
+    if (result.nativeExecutionKind == NativeExecutionKind::Vertex) {
+        // A Metal vertex function runs in fixed 32-wide SIMD-groups with no threads_per_simdgroup input, and
+        // its pipeline exposes no execution width to check, so guest lane work is valid only for a 32-wide
+        // host subgroup layout (wave64 runs as paired 32-lane halves there).
+        const bool lane = compiler.DefineVertexSubgroupLane();
+        if ((lane || result.requiresSimdGroups) && guest.hostSubgroupSize != 0 && guest.hostSubgroupSize != 32)
+            Fail("vertex SIMD-group work requires the 32-wide host subgroup contract");
+        auto options = compiler.get_msl_options();
+        options.fixed_subgroup_size = 32;
+        compiler.set_msl_options(options);
+    }
     result.samplerArgumentCount += static_cast<std::uint32_t>(compiler.MinimumLodPairs().size()) * 2u;
     for (const auto& pair : compiler.MinimumLodPairs()) result.minimumLodPairs.push_back({pair.imageSet, pair.imageBinding, pair.imageElement, pair.samplerSet, pair.samplerBinding, pair.samplerElement, pair.magArgument, pair.minArgument, pair.relativeViewMin});
     try { result.source = compiler.compile(); }
@@ -1662,6 +1711,7 @@ std::string ConversionKey(const RecompileResult& guest, ShaderStage stage, const
     key.Value(guest.runtimeAbiVersion);
     key.Value(guest.bdaAbiVersion);
     key.Value(guest.runtimeImageCount);
+    key.Value(guest.hostSubgroupSize);
     if (stable) key.Value<std::uint64_t>(guest.pushConstants.size());
     else WriteWords(key, guest.pushConstants);
     key.Value<std::uint64_t>(guest.vertexAttributes.size());
