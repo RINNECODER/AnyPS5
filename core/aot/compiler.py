@@ -279,6 +279,10 @@ class Function:
         if self.uniform:
             contract.setdefault('result', 'void')
             contract.setdefault('parameters', [])
+        self.dispatch = bool(self.image.contracts.get('dispatch'))
+        self.dispatch_calls = {}
+        self.dispatch_jumps = {}
+        self.switch_jumps = {}
         self.argument_locations = abi.uniform_locations() if self.uniform else abi.locations(contract['parameters'])
         self.stack_end = (abi.uniform_stack_end() if self.uniform else
                           max([8] + [loc['offset'] + 8 for loc in self.argument_locations if loc['kind'] == 'stack']))
@@ -325,23 +329,48 @@ class Function:
                 if operand.type == X86_OP_IMM and start <= operand.imm < end:
                     successors = [operand.imm]
                 else:
-                    if operand.type not in (X86_OP_IMM, X86_OP_MEM) or (operand.type == X86_OP_MEM and operand.size != 8):
-                        self.fail(ins, 'indirect branches require a proven direct function or GOT import target')
-                    try:
-                        self.tail_calls[address] = self.image.call(ins)
-                    except Rejected as error:
-                        self.fail(ins, f'unresolved native tail-call target: {error}')
-                    successors = []
+                    targets = self.indirect_targets(ins)
+                    if targets and all(start <= target < end for target in targets):
+                        self.switch_jumps[address] = list(targets)
+                        successors = list(targets)
+                    else:
+                        if operand.type == X86_OP_REG and not self.dispatch:
+                            self.fail(ins, 'indirect branches require a proven direct function or GOT import target')
+                        try:
+                            self.tail_calls[address] = self.image.call(ins)
+                        except Rejected as error:
+                            if not self.dispatch:
+                                self.fail(ins, f'unresolved native tail-call target: {error}')
+                            self.dispatch_jumps[address] = True
+                        successors = []
             elif ins.mnemonic.startswith('j'):
                 require(ins.operands[0].type == X86_OP_IMM, 'indirect branches require target-set reconstruction')
                 successors = [ins.operands[0].imm, next_address]
             elif ins.mnemonic == 'call':
-                callee, _ = self.image.call(ins, self.contract)
-                successors = [] if callee.get('noreturn') else [next_address]
+                try:
+                    callee, _ = self.image.call(ins, self.contract)
+                    successors = [] if callee.get('noreturn') else [next_address]
+                except Rejected:
+                    if not self.dispatch:
+                        raise
+                    self.dispatch_calls[address] = True
+                    successors = [next_address]
             else:
                 successors = [next_address]
             self.successors[address] = successors
             pending.extend(successors)
+
+    def indirect_targets(self, ins):
+        try:
+            site = self.image.annotated_calls(self.contract).get(ins.address)
+        except CallError:
+            return None
+        return site.get('target_addresses') if site else None
+
+    def dispatch_value(self, ins, operand):
+        if operand.type == X86_OP_IMM:
+            return str(operand.imm & MASK64)
+        return self.read(ins, operand, 64)
 
     def reg(self, ins, operand):
         name = ins.reg_name(operand.reg)
@@ -518,10 +547,21 @@ class Function:
                     state['pointers'][name] = saved[3]
                 state['rsp'] += 8
             return state
+        if ins.address in self.dispatch_jumps:
+            return state
         if ins.address in self.tail_calls:
             self.check_tail_call(ins, state)
             return state
         if op == 'call':
+            if ins.address in self.dispatch_calls:
+                for reg in VOLATILE | set(VECTOR_STORAGE):
+                    state['known'].pop(reg, None)
+                    state['pointers'].pop(reg, None)
+                    state['constants'].pop(reg, None)
+                for reg in VOLATILE | set(VECTOR_STORAGE):
+                    state['known'][reg] = (1 << 128) - 1 if reg in VECTOR_STORAGE else MASK64
+                state['flags'] = set()
+                return state
             callee, slot = self.image.call(ins, self.contract)
             if not effects.required_bindings(self, ins) <= state['import_bindings']:
                 self.fail(ins, 'native callee requires original provider bindings')
@@ -792,9 +832,10 @@ class Function:
             for _, predicate, kind, offset in state['pending_outputs']:
                 if predicate == 'always':
                     (stack if kind == 'frame' else image).add(offset)
-            callee, _ = self.image.call(ins, self.contract)
-            if callee['result'] == 'ptr':
-                native.add('rax')
+            if ins.address not in self.dispatch_calls:
+                callee, _ = self.image.call(ins, self.contract)
+                if callee['result'] == 'ptr':
+                    native.add('rax')
             native.add('rsp')
         elif args and args[0].type == X86_OP_REG and args[0].size == 8:
             destination = self.reg(ins, args[0])[0]
@@ -1131,6 +1172,41 @@ class Function:
             value = self.emit(f'load i64, ptr {gep}, align 8')
             self.lines.append(f'  store i64 {value}, ptr {self.frame_pointer(offset)}, align 1')
 
+    def lower_dispatch(self, ins, state, jump, result):
+        value = self.dispatch_value(ins, ins.operands[0])
+        native = self.emit(f'call ptr @NativeAotDispatch_nid_no_patch(i64 {value})')
+        ok = self.emit(f'icmp ne ptr {native}, null')
+        label = f'dispatch_{ins.address:x}'
+        self.lines.append(f'  br i1 {ok}, label %{label}_ok, label %{label}_trap')
+        self.lines.append(f'{label}_trap:')
+        self.lines.append(f'  call void @NativeAotReportDispatchFailure_nid_no_patch(i64 {ins.address}, i64 {value})')
+        self.lines.append('  call void @llvm.trap()')
+        self.lines.append('  unreachable')
+        self.lines.append(f'{label}_ok:')
+        self.uniform_store_registers('%rf_out')
+        self.uniform_stack_out('%rf_out', state['rsp'])
+        self.lines.append(f'  call void {native}(ptr %rf_out)')
+        self.uniform_load_registers('%rf_out', skip=('rsp',))
+        if jump:
+            self.uniform_store_registers('%rf')
+            self.lines.append('  ret void')
+
+    def lower_switch(self, ins, state, address):
+        targets = self.switch_jumps[address]
+        value = self.dispatch_value(ins, ins.operands[0])
+        label = f'switch_{address:x}'
+        for index, target in enumerate(targets):
+            match = self.emit(f'icmp eq i64 {value}, {target}')
+            if index + 1 < len(targets):
+                self.lines.append(f'  br i1 {match}, label %b{target:x}, label %{label}_{index}')
+                self.lines.append(f'{label}_{index}:')
+            else:
+                self.lines.append(f'  br i1 {match}, label %b{target:x}, label %{label}_trap')
+        self.lines.append(f'{label}_trap:')
+        self.lines.append(f'  call void @NativeAotReportDispatchFailure_nid_no_patch(i64 {address}, i64 {value})')
+        self.lines.append('  call void @llvm.trap()')
+        self.lines.append('  unreachable')
+
     def uniform_call(self, ins, callee, slot, state, tail, result):
         self.uniform_store_registers('%rf_out')
         self.uniform_stack_out('%rf_out', state['rsp'])
@@ -1229,6 +1305,14 @@ class Function:
                 if op not in ('cmp', 'test'):
                     self.write(ins, args[0], value)
                 self.flags(op, bits, left, right, value)
+            elif op == 'call' and address in self.dispatch_calls:
+                self.lower_dispatch(ins, state, False, result)
+            elif address in self.dispatch_jumps:
+                self.lower_dispatch(ins, state, True, result)
+                terminal = True
+            elif address in self.switch_jumps:
+                self.lower_switch(ins, state, address)
+                terminal = True
             elif op == 'call' or address in self.tail_calls:
                 tail = address in self.tail_calls
                 callee, slot = self.tail_calls[address] if tail else self.image.call(ins, self.contract)
@@ -1320,6 +1404,14 @@ def compile_image(image):
     lines = [f'target triple = "{image.target_spec["triple"]}"', 'declare void @llvm.trap()', 'declare i8 @llvm.ctpop.i8(i8)']
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
+    dispatch_enabled = bool(image.contracts.get('dispatch'))
+    dispatch_entries = sorted((spec['address'], spec['name']) for spec in image.functions.values()) if dispatch_enabled else []
+    if dispatch_enabled:
+        table = ', '.join(f'{{ i64 {address}, ptr @{name} }}' for address, name in dispatch_entries)
+        lines.append(f'@__aps5_aot_dispatch = private constant [{len(dispatch_entries)} x {{ i64, ptr }}] [{table}], align 8')
+        lines.append('declare ptr @NativeAotDispatch_nid_no_patch(i64)')
+        lines.append('declare void @NativeAotReportDispatchFailure_nid_no_patch(i64, i64)')
+        lines.append('declare void @NativeAotRegisterDispatch_nid_no_patch(ptr, i64)')
     if image.contracts.get('guard_diagnostics', False):
         lines.append('declare void @NativeAotReportGuardFailure_nid_no_patch(i64, i32)')
     if any(f.checked_pointer_loads or f.checked_pointer_arguments or f.checked_pointer_bases for f in functions):
@@ -1356,7 +1448,7 @@ def compile_image(image):
         lines.extend(native_image.declarations(image, descriptor))
     if image.immutable_regions:
         lines.extend(immutable_data.declarations(image))
-    if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions:
+    if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
         for slot, target in image.relocations:
@@ -1371,6 +1463,8 @@ def compile_image(image):
             if slot in image.immutable_cells:
                 continue
             lines.append(f"  store ptr @{binding['name']}, ptr {image.pointer(slot, 8)}, align 1")
+        if dispatch_enabled:
+            lines.append(f'  call void @NativeAotRegisterDispatch_nid_no_patch(ptr @__aps5_aot_dispatch, i64 {len(dispatch_entries)})')
         if image.immutable_regions:
             lines.append(f'  call void @NativeAotRequireReadOnly_nid_no_patch(ptr @__aps5_aot_readonly_ranges, i64 {len(image.immutable_regions)})')
         if descriptor is not None:

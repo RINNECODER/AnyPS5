@@ -56,6 +56,8 @@ def parse_arguments(function):
         ins = function.instructions.get(address) if type(address) is int else None
         if ins is None or ins.mnemonic != 'call':
             raise ValueError('checked pointer argument must identify a call')
+        if ins.address in getattr(function, 'dispatch_calls', {}):
+            continue
         contract, _ = function.image.call(ins, function.contract)
         if type(index) is not int or not 0 <= index < len(contract['parameters']) or contract['parameters'][index] != 'ptr':
             raise ValueError('checked argument is not a pointer in the declared native ABI')
@@ -87,6 +89,8 @@ def emit_argument(function, ins, index, contract, pointer):
 
 
 def validated_registers(function, ins, state):
+    if ins.address in getattr(function, 'dispatch_calls', {}):
+        return set()
     contract, _ = function.image.call(ins, function.contract)
     result = set()
     for index, location in enumerate(abi.locations(contract['parameters'])):

@@ -23,7 +23,8 @@ def structural_signature(contract):
 
 
 def validate_operand(ins):
-    require(ins.mnemonic == 'call' and len(ins.operands) == 1, 'indirect annotation does not identify a call')
+    require(ins.mnemonic in ('call', 'jmp') and len(ins.operands) == 1,
+            'indirect annotation does not identify a call or jump')
     operand = ins.operands[0]
     require(operand.type in (X86_OP_REG, X86_OP_MEM) and operand.size == 8,
             'indirect annotation requires a 64-bit register or memory call')
@@ -33,7 +34,7 @@ def validate_operand(ins):
 
 
 def validate_indirect_calls(image, owner_contract):
-    records = owner_contract.get('indirect_calls', [])
+    records = list(owner_contract.get('indirect_calls', [])) + list(owner_contract.get('indirect_jumps', []))
     require(isinstance(records, list), 'indirect_calls must be a list')
     start, size = owner_contract['address'], owner_contract['size']
     require(type(start) is int and type(size) is int and start >= 0 and size > 0,
@@ -69,6 +70,8 @@ def validate_indirect_calls(image, owner_contract):
             require(len(set(targets)) == len(targets), 'duplicate indirect call target address')
             names = []
             for target in targets:
+                if start <= target < start + size:
+                    continue
                 try:
                     contract = image.functions[target] if target in image.functions else image.callee(target)
                 except ValueError as error:

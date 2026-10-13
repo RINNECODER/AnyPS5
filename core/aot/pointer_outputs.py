@@ -36,6 +36,8 @@ def validate(contract, internal=False):
 
 
 def capture(function, ins, original):
+    if ins.address in getattr(function, 'dispatch_calls', {}):
+        return frozenset()
     contract, slot = function.image.call(ins, function.contract)
     record = contract.get('pointer_outputs')
     inferred = function.image.pointer_output_summaries.get(effects.direct_target(function, ins), ())
