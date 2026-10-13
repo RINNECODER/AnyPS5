@@ -48,6 +48,9 @@ std::uint32_t EmitBuiltinU32(SpirvEmitterState& state, StageInputKind kind, std:
     if (kind == StageInputKind::RasterPrimitive) {
         return state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::RasterPrimitive, static_cast<std::uint32_t>(RasterPrimitive::Triangle));
     }
+    if (kind == StageInputKind::LayerExported) {
+        return state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::LayerExported, 0u);
+    }
     if (state.laneCount == 2 && (kind == StageInputKind::LocalInvocationId || kind == StageInputKind::GlobalInvocationId)) {
         const auto* workgroup = ShaderWorkgroupInputFor(state);
         if (workgroup == nullptr) {
@@ -949,26 +952,6 @@ std::uint32_t EmitMinMaxF32Value(SpirvEmitterState& state, std::uint32_t lhs, st
     return Unary(state, spv::OpBitcast, TypeF32(state), resultBits);
 }
 
-std::uint32_t EmitFlushF32DenormToSignedZero(SpirvEmitterState& state, std::uint32_t value) {
-    const auto bits = state.module.AllocateId();
-    const auto absBits = state.module.AllocateId();
-    const auto signBits = state.module.AllocateId();
-    const auto nonZero = state.module.AllocateId();
-    const auto subnormal = state.module.AllocateId();
-    const auto flush = state.module.AllocateId();
-    const auto selected = state.module.AllocateId();
-    const auto result = state.module.AllocateId();
-    state.module.AddFunction(spv::OpBitcast, TypeU32(state), bits, value);
-    state.module.AddFunction(spv::OpBitwiseAnd, TypeU32(state), absBits, bits, ConstantU32(state, 0x7fffffffu));
-    state.module.AddFunction(spv::OpBitwiseAnd, TypeU32(state), signBits, bits, ConstantU32(state, 0x80000000u));
-    state.module.AddFunction(spv::OpINotEqual, TypeBool(state), nonZero, absBits, ConstantU32(state, 0u));
-    state.module.AddFunction(spv::OpULessThan, TypeBool(state), subnormal, absBits, ConstantU32(state, 0x00800000u));
-    state.module.AddFunction(spv::OpLogicalAnd, TypeBool(state), flush, nonZero, subnormal);
-    state.module.AddFunction(spv::OpSelect, TypeU32(state), selected, flush, signBits, bits);
-    state.module.AddFunction(spv::OpBitcast, TypeF32(state), result, selected);
-    return result;
-}
-
 std::uint32_t EmitTrigCycleF32(SpirvEmitterState& state, std::uint32_t src, bool preserveSignedZero) {
     const auto rounded = state.module.AllocateId();
     const auto reduced = state.module.AllocateId();
@@ -988,7 +971,37 @@ std::uint32_t EmitTrigCycleF32(SpirvEmitterState& state, std::uint32_t src, bool
     return result;
 }
 
+void EmitF16DenormPreserve(SpirvEmitterState& state) {
+    if (state.f16DenormPreserveEmitted) return;
+    state.module.EmitCapability(spv::CapabilityDenormPreserve);
+    state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeDenormPreserve, 16u);
+    state.f16DenormPreserveEmitted = true;
+}
+
+static std::uint32_t UnpackF16BitsToF32(SpirvEmitterState& state, std::uint32_t bits, bool nanBits) {
+    if (!state.float16DenormPreserve) return EmitF16BitsToF32Decoded(state, bits);
+    EmitF16DenormPreserve(state);
+    const auto u32 = TypeU32(state);
+    const auto f32 = TypeF32(state);
+    const auto unpacked = state.module.AllocateId();
+    const auto value = state.module.AllocateId();
+    state.module.AddFunction(spv::OpExtInst, TypeF32Vector(state, 2), unpacked, GlslStd450(state), GLSLstd450UnpackHalf2x16, bits);
+    state.module.AddFunction(spv::OpCompositeExtract, f32, value, unpacked, 0u);
+    if (!nanBits) return value;
+    const auto signAndPayload = Binary(state, spv::OpShiftRightArithmetic, u32, Binary(state, spv::OpShiftLeftLogical, u32, bits, ConstantU32(state, 16u)), ConstantU32(state, 3u));
+    const auto nan = Unary(state, spv::OpBitcast, f32, Binary(state, spv::OpBitwiseOr, u32, signAndPayload, ConstantU32(state, 0x7f800000u)));
+    return Select(state, f32, Unary(state, spv::OpIsNan, TypeBool(state), value), nan, value);
+}
+
 std::uint32_t EmitF16BitsToF32(SpirvEmitterState& state, std::uint32_t bits) {
+    return UnpackF16BitsToF32(state, bits, true);
+}
+
+std::uint32_t EmitF16BitsToF32AnyNan(SpirvEmitterState& state, std::uint32_t bits) {
+    return UnpackF16BitsToF32(state, bits, false);
+}
+
+std::uint32_t EmitF16BitsToF32Decoded(SpirvEmitterState& state, std::uint32_t bits) {
     const auto u32 = TypeU32(state);
     const auto f32 = TypeF32(state);
     const auto op = [&](spv::Op opcode, std::uint32_t lhs, std::uint32_t rhs) { return Binary(state, opcode, u32, lhs, rhs); };
