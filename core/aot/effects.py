@@ -40,7 +40,11 @@ def validate_provider(contract):
 
 
 def argument_pointer(function, ins, contract, index, state):
-    location = abi.locations(contract['parameters'])[index]
+    locations = abi.locations(contract['parameters'])
+    if not 0 <= index < len(locations):
+        # A uniform callee has no typed parameter list (the register file is the ABI).
+        return None
+    location = locations[index]
     if location['kind'] == 'stack':
         offset = state['rsp'] + location['offset'] - (8 if ins.mnemonic == 'call' else 0)
         return state['stack_origins'].get(offset) if offset in state['stack_pointers'] else None
@@ -129,7 +133,9 @@ def infer_requirements(functions):
             if type(slot) is int and effects is not None and not effects['callbacks']:
                 requirements[address].add(slot)
             for target in call_targets(function, ins):
-                callers[target].add(address)
+                # A whole-title image stubs rejected callees, which are not in this set.
+                if target in callers:
+                    callers[target].add(address)
     pending = deque(address for address, slots in requirements.items() if slots)
     while pending:
         target = pending.popleft()
@@ -196,6 +202,10 @@ def call_writes(function, ins, state=None):
     state = function.states[ins.address] if state is None else state
     target = direct_target(function, ins)
     if target is not None:
+        # A uniform callee passes the whole register file, so the caller has no typed parameter
+        # list to resolve against; its effects stay unknown.
+        if abi.uniform(function.image.functions[target]):
+            return None
         result = function.image.memory_effects.get(target)
         if result is None or not result.bindings <= state['import_bindings']:
             return None
@@ -237,7 +247,12 @@ def summarize(function):
     return MemoryEffects(tuple(('image', begin, end) for begin, end in merge_ranges(writes)), frozenset(bindings), merged_parameters)
 
 
-def analyze(functions):
+def analyze(functions, reject=None):
+    """Compute per-function effects in callee order.
+
+    `reject(function, error)` (whole-title builds) marks a function whose dataflow fails instead of
+    aborting the image; the caller removes it afterwards and emits a trap stub.
+    """
     if not functions:
         return
     image = functions[0].image
@@ -248,7 +263,7 @@ def analyze(functions):
     dependencies, callers = {}, {address: set() for address in by_address}
     for address, function in by_address.items():
         dependencies[address] = {target for ins in function.instructions.values()
-                                 if (target := direct_target(function, ins)) is not None}
+                                 if (target := direct_target(function, ins)) is not None and target in by_address}
         for target in dependencies[address]:
             callers[target].add(address)
     ready = deque(sorted(address for address, targets in dependencies.items() if not targets))
@@ -256,16 +271,33 @@ def analyze(functions):
     while ready:
         address = ready.popleft()
         function = by_address[address]
-        function.analyze()
+        try:
+            function.analyze()
+        except ValueError as error:
+            if reject is None:
+                raise
+            reject(function, error)
+            image.memory_effects[address] = None
+            analyzed.add(address)
+            for caller in sorted(callers[address]):
+                dependencies[caller].discard(address)
+                if not dependencies[caller] and caller not in analyzed:
+                    ready.append(caller)
+            continue
         image.memory_effects[address] = summarize(function)
         image.pointer_output_summaries[address] = parameter_pointers.summarize(function)
         analyzed.add(address)
         for caller in sorted(callers[address]):
-            dependencies[caller].remove(address)
-            if not dependencies[caller]:
+            dependencies[caller].discard(address)
+            if not dependencies[caller] and caller not in analyzed:
                 ready.append(caller)
     for address in sorted(by_address.keys() - analyzed):
-        by_address[address].analyze()
+        try:
+            by_address[address].analyze()
+        except ValueError as error:
+            if reject is None:
+                raise
+            reject(by_address[address], error)
         image.memory_effects[address] = None
 
 
