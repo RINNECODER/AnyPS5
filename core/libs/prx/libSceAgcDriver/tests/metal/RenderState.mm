@@ -2,6 +2,7 @@
 #include "MetalRenderState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -9,6 +10,7 @@
 #include <iostream>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -382,6 +384,241 @@ void DepthBiasReset(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibra
 
 }
 
+constexpr auto GuestColorStride = 3u * 0xfu;
+
+// A guest draw of one RGBA8 color target at MRT slot 3 (8x8 at colorAddress), viewport and scissor
+// covering it, no depth, no blending.
+QueueState GuestDraw(std::uintptr_t colorAddress) {
+    constexpr auto stride = GuestColorStride;
+    QueueState guest;
+    auto& cx = guest.context;
+    guest.userConfig[0x242] = 4;
+    cx[0x2d5] = 0x2000;
+    cx[0x204] = 0x80000;
+    cx[0x205] = 0;
+    cx[0x200] = 0;
+    cx[0x010] = 0;
+    cx[0x011] = 0;
+    cx[0x8e] = 0xf000;
+    cx[0x8f] = 0xffff;
+    cx[0x1c3] = 4;
+    cx[0x1c5] = 0x9000;
+    cx[0x318 + stride] = static_cast<std::uint32_t>(colorAddress >> 8u);
+    cx[0x390 + 3] = static_cast<std::uint32_t>(colorAddress >> 40u);
+    cx[0x31b + stride] = 0;
+    cx[0x31c + stride] = 0x8028; // RGBA8 UNORM, clamped.
+    cx[0x31d + stride] = 0;
+    cx[0x3b0 + 3] = (7u << 14u) | 7u;
+    cx[0x3b8 + 3] = 0x09000000;
+    for (const auto offset : {0x10fu, 0x110u, 0x111u, 0x112u}) cx[offset] = std::bit_cast<std::uint32_t>(4.0f);
+    cx[0x113] = std::bit_cast<std::uint32_t>(1.0f);
+    cx[0x114] = 0;
+    cx[0xb5] = std::bit_cast<std::uint32_t>(1.0f);
+    for (std::uint32_t constant = 0x105; constant < 0x109; ++constant) cx[constant] = 0;
+    return guest;
+}
+
+// Shared State decode fixes ported from upstream, checked on the Metal path: CB_COLOR_INFO BLEND_BYPASS
+// turns blending off (upstream PR 4862), and MSAA_ENABLE on a single-sample scan whose samples sit at
+// the pixel center rasterizes like a plain single-sample draw (upstream fdfbeba8a).
+void SharedStateDecode(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library) {
+    alignas(256) std::array<std::byte, 2048> colorMemory{};
+    const auto colorAddress = reinterpret_cast<std::uintptr_t>(colorMemory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{colorAddress, colorMemory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    constexpr auto stride = GuestColorStride;
+    auto guest = GuestDraw(colorAddress);
+    auto& cx = guest.context;
+    // SRC_ALPHA, ADD, ONE_MINUS_SRC_ALPHA for color and alpha.
+    cx[0x1e0 + 3] = (1u << 30u) | 4u | (5u << 8u);
+
+    const auto blended = Graphics::DecodeState(guest);
+    Require(blended.blends.at(3).blendEnable, "Enabled blending was not decoded");
+    cx[0x31c + stride] |= 0x10000u;
+    const auto bypassed = Graphics::DecodeState(guest);
+    Require(!bypassed.blends.at(3).blendEnable && bypassed.blends.at(3).colorWriteMask != 0, "A target with BLEND_BYPASS still blends");
+    const std::array<float, 4> halfRed{1, 0, 0, 0.5f};
+    const std::array<Draw, 1> blendDraw{{{blended, {halfRed, 0.5f}}}};
+    for (const auto pixel : Render(device, queue, library, blendDraw, MTLClearColorMake(0, 1, 0, 1))) {
+        Match(pixel, {128, 128, 0, 191}, "Enabled blending did not mix the draw over the clear color", 2);
+    }
+    const std::array<Draw, 1> bypassDraw{{{bypassed, {halfRed, 0.5f}}}};
+    for (const auto pixel : Render(device, queue, library, bypassDraw, MTLClearColorMake(0, 1, 0, 1))) {
+        Match(pixel, {255, 0, 0, 128}, "BLEND_BYPASS did not write the shader color unblended", 2);
+    }
+    cx[0x1e0 + 3] = 0;
+    cx[0x31c + stride] &= ~0x10000u;
+
+    const auto plain = Graphics::DecodeState(guest);
+    const auto plainRejection = Graphics::DrawRejection(guest, false);
+    cx[0x292] = 1; // MSAA_ENABLE on a single-sample scan.
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) cx[0x2fe + pixel * 4u] = 0;
+    const auto centered = Graphics::DecodeState(guest);
+    Require(centered.rasterSamples == 1 && centered.colors.size() == 1 && centered.colors[0].samples == 1, "MSAA_ENABLE at the pixel center did not decode as single-sampled");
+    Require(Graphics::DrawRejection(guest, false) == plainRejection, "MSAA_ENABLE at the pixel center changed the draw precheck");
+    const std::array<Draw, 1> plainDraw{{{plain, {{0, 0, 1, 1}, 0.5f}}}};
+    const std::array<Draw, 1> centeredDraw{{{centered, {{0, 0, 1, 1}, 0.5f}}}};
+    const auto plainPixels = Render(device, queue, library, plainDraw, MTLClearColorMake(0, 0, 0, 1));
+    const auto centeredPixels = Render(device, queue, library, centeredDraw, MTLClearColorMake(0, 0, 0, 1));
+    Require(plainPixels == centeredPixels, "MSAA_ENABLE at the pixel center changed the rendered pixels");
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+        cx[0x2fe + pixel * 4u] = 0x04;
+        bool refused = false;
+        try {
+            static_cast<void>(Graphics::DecodeState(guest));
+        } catch (const std::exception& error) {
+            refused = std::string(error.what()).find("off the pixel center") != std::string::npos;
+        }
+        Require(refused, "MSAA_ENABLE with a sample off the pixel center was not refused");
+        cx[0x2fe + pixel * 4u] = 0;
+    }
+    std::cout << "PASS: BLEND_BYPASS disables decoded blending (native blend=128,128,0,191 bypass=255,0,0,128); MSAA_ENABLE single-sample at the pixel center renders as single-sample, off-center refused\n";
+}
+
+// Renders one draw of `state` (rasterSamples > 1) into a multisampled RGBA8 target with the pass's
+// sample positions from ConfigureSamplePositions, and returns the resolved pixels.
+std::array<Pixel, 64> RenderResolved(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library,
+                                     const Graphics::State& state, Parameters parameters) {
+    auto descriptor = [MTLRenderPipelineDescriptor new];
+    Metal::ConfigureRenderPipelineDescriptor(descriptor, state);
+    descriptor.vertexFunction = [library newFunctionWithName:@"renderStateVertex"];
+    descriptor.fragmentFunction = [library newFunctionWithName:@"renderStateFragment"];
+    NSError* error = nil;
+    auto pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (pipeline == nil) throw std::runtime_error(error.localizedDescription.UTF8String ?: "Multisampled fixture pipeline creation failed");
+    auto msDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];
+    msDescriptor.textureType = MTLTextureType2DMultisample;
+    msDescriptor.sampleCount = state.rasterSamples;
+    msDescriptor.storageMode = MTLStorageModePrivate;
+    msDescriptor.usage = MTLTextureUsageRenderTarget;
+    auto multisampled = [device newTextureWithDescriptor:msDescriptor];
+    auto resolveDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];
+    resolveDescriptor.storageMode = MTLStorageModeShared;
+    resolveDescriptor.usage = MTLTextureUsageRenderTarget;
+    auto resolved = [device newTextureWithDescriptor:resolveDescriptor];
+    Require(multisampled != nil && resolved != nil, "Multisampled fixture allocation failed");
+    auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[3].texture = multisampled;
+    pass.colorAttachments[3].resolveTexture = resolved;
+    pass.colorAttachments[3].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[3].storeAction = MTLStoreActionMultisampleResolve;
+    pass.colorAttachments[3].clearColor = MTLClearColorMake(0, 0, 0, 1);
+    Metal::ConfigureSamplePositions(pass, device, state);
+    auto commands = [queue commandBuffer];
+    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    Require(encoder != nil, "Multisampled fixture encoder allocation failed");
+    [encoder setRenderPipelineState:pipeline];
+    Metal::BindRenderState(encoder, state, Metal::CreateDepthStencilState(device, state));
+    parameters.flags = state.viewport.height > 0 ? 1u : 0u;
+    [encoder setVertexBytes:&parameters length:sizeof(parameters) atIndex:0];
+    [encoder setFragmentBytes:&parameters length:sizeof(parameters) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    if (commands.status != MTLCommandBufferStatusCompleted) throw std::runtime_error(commands.error.localizedDescription.UTF8String ?: "Multisampled fixture GPU command failed");
+    std::array<Pixel, 64> result{};
+    [resolved getBytes:result.data() bytesPerRow:8 * sizeof(Pixel) fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
+    return result;
+}
+
+// PA_SC_AA_SAMPLE_LOCS on the Metal path (upstream c9e48e5ae, ae6dfd907): the standard 2x/4x/8x patterns,
+// 8x's last sample at (7, -7) included, decode as standard and equal Metal's default positions; a
+// uniform custom pattern is rasterized at its positions through programmable sample positions; a
+// pattern varying over the 2x2 pixel grid, or a custom one on a pass whose attachments fix another
+// sample count, is refused. Multisampling with MSAA_ENABLE clear rasterizes every sample at the pixel
+// center, covering what a single-sample draw covers.
+void CustomSampleLocations(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library) {
+    alignas(256) std::array<std::byte, 2048> colorMemory{};
+    const auto colorAddress = reinterpret_cast<std::uintptr_t>(colorMemory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{colorAddress, colorMemory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    auto guest = GuestDraw(colorAddress);
+    auto& cx = guest.context;
+    cx[0x292] = 1; // MSAA_ENABLE
+    const auto setLocations = [&](std::uint32_t low, std::uint32_t high) {
+        for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+            cx[0x2fe + pixel * 4u] = low;
+            cx[0x2ff + pixel * 4u] = high;
+            cx[0x300 + pixel * 4u] = 0;
+            cx[0x301 + pixel * 4u] = 0;
+        }
+    };
+    const auto refusal = [&](const char* expected) {
+        try {
+            static_cast<void>(Graphics::DecodeState(guest));
+        } catch (const std::exception& error) {
+            return std::string(error.what()).find(expected) != std::string::npos;
+        }
+        return false;
+    };
+    struct Standard {
+        std::uint32_t log2, low, high;
+    };
+    for (const auto& standard : {Standard{1, 0xcc44u, 0}, Standard{2, 0x622ae6aeu, 0}, Standard{3, 0xbd153fd1u, 0x9773f95bu}}) {
+        const auto samples = 1u << standard.log2;
+        cx[0x2f8] = (standard.log2 << 20u) | standard.log2;
+        setLocations(standard.low, standard.high);
+        const auto state = Graphics::DecodeState(guest);
+        Require(state.rasterSamples == samples && !state.customSampleLocations, "a standard sample pattern decoded as custom");
+        const auto locations = Graphics::SampleLocations(state);
+        std::array<MTLSamplePosition, 8> defaults{};
+        [device getDefaultSamplePositions:defaults.data() count:samples];
+        for (std::uint32_t sample = 0; sample < samples; ++sample) {
+            Require(locations[sample].x == defaults[sample].x && locations[sample].y == defaults[sample].y, "a standard sample location differs from Metal's default position");
+        }
+    }
+
+    cx[0x2f8] = 0x00200002; // 4x
+    cx[0x31d + GuestColorStride] = 0; // one fragment: the pass rasterizes at PA_SC_AA_CONFIG's 4 samples
+    setLocations(0x622ae6aeu, 0);
+    const auto standard = Graphics::DecodeState(guest);
+    setLocations(0x88888888u, 0); // every sample at (-8, -8): the pixel's top-left corner
+    const auto topLeft = Graphics::DecodeState(guest);
+    setLocations(0x77777777u, 0); // every sample at (7, 7)
+    const auto bottomRight = Graphics::DecodeState(guest);
+    Require(topLeft.customSampleLocations && bottomRight.customSampleLocations && topLeft.rasterSamples == 4, "a uniform custom pattern did not decode as custom");
+    const auto corner = Graphics::SampleLocations(bottomRight);
+    Require(corner[3].x == 15.0f / 16.0f && corner[3].y == 15.0f / 16.0f && Graphics::SampleLocations(topLeft)[0].x == 0.0f, "custom sample coordinates changed");
+
+    const Parameters edge{{1, 1, 1, 1}, 0.5f, 1};
+    const auto partial = [](const std::array<Pixel, 64>& pixels) {
+        return std::count_if(pixels.begin(), pixels.end(), [](Pixel pixel) { return pixel[0] != 0 && pixel[0] != 255; });
+    };
+    const auto covered = [](const std::array<Pixel, 64>& pixels) {
+        return std::count_if(pixels.begin(), pixels.end(), [](Pixel pixel) { return pixel[0] == 255; });
+    };
+    const auto standardPixels = RenderResolved(device, queue, library, standard, edge);
+    const auto topLeftPixels = RenderResolved(device, queue, library, topLeft, edge);
+    const auto bottomRightPixels = RenderResolved(device, queue, library, bottomRight, edge);
+    Require(partial(standardPixels) > 0, "the standard 4x pattern left no partly covered edge pixel");
+    Require(partial(topLeftPixels) == 0 && partial(bottomRightPixels) == 0, "samples at one custom position still gave partial coverage");
+    Require(covered(topLeftPixels) != covered(bottomRightPixels), "custom sample positions did not move the covered pixels");
+
+    cx[0x292] = 0; // MSAA_ENABLE clear: every sample at the pixel center, whatever the pattern registers say
+    setLocations(0x622ae6aeu, 0);
+    const auto centered = Graphics::DecodeState(guest);
+    cx[0x292] = 1;
+    Require(centered.customSampleLocations && centered.rasterSamples == 4 && Graphics::SampleLocations(centered)[2].x == 0.5f && Graphics::SampleLocations(centered)[2].y == 0.5f, "multisampling without MSAA_ENABLE did not decode as centered samples");
+    const auto centeredPixels = RenderResolved(device, queue, library, centered, edge);
+    auto single = standard;
+    single.rasterSamples = 1;
+    single.customSampleLocations = false;
+    const std::array<Draw, 1> singleDraw{{{single, edge}}};
+    const auto singlePixels = Render(device, queue, library, singleDraw, MTLClearColorMake(0, 0, 0, 1));
+    Require(partial(centeredPixels) == 0 && covered(centeredPixels) == covered(singlePixels), "multisampling without MSAA_ENABLE did not cover the pixels a single-sample draw covers");
+
+    setLocations(0x88888888u, 0);
+    cx[0x30a] = 0x77777777u; // pixel (1, 1) differs
+    Require(refusal("varying between pixels"), "a sample pattern varying over the pixel grid was not refused");
+    setLocations(0x88888888u, 0);
+    cx[0x31d + GuestColorStride] = (1u << 12u) | (1u << 15u); // a 2-fragment target fixes a 2-sample pass
+    Require(refusal("fix another sample count"), "a custom pattern on a pass of another sample count was not refused");
+    std::cout << "PASS: standard 2x/4x/8x sample patterns equal Metal defaults; custom 4x positions (partial edge pixels standard="
+              << partial(standardPixels) << ", covered top-left=" << covered(topLeftPixels) << " bottom-right=" << covered(bottomRightPixels)
+              << "); MSAA_ENABLE clear renders as single-sample coverage (" << covered(centeredPixels) << " pixels); varying or mismatched patterns refused\n";
+}
+
 // Depth/stencil states are shared by draws whose native descriptor matches; the dynamic stencil reference
 // is encoder state and must not split them, while any compare, write or stencil operation change must.
 void DepthStencilCache(id<MTLDevice> device) {
@@ -430,6 +667,8 @@ int main() {
             UnrestrictedViewportDepth(device, queue, library);
             DepthBounds(device, queue, library);
             DepthBiasReset(device, queue, library);
+            SharedStateDecode(device, queue, library);
+            CustomSampleLocations(device, queue, library);
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {

@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -86,6 +87,61 @@ id<MTLTexture> MetalDepthSurface::StencilTexture() const { return stencil; }
 id<MTLTexture> MetalDepthSurface::SampledDepthView() const { return depth; }
 id<MTLTexture> MetalDepthSurface::SampledStencilView() const { return sampledStencil; }
 const Graphics::DepthTarget& MetalDepthSurface::Target() const { return target; }
+
+id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std::shared_ptr<MetalDepthSurface>> surfaces,
+    const MetalDepthSurface& base, std::uint32_t first, std::uint32_t last, id<MTLTexture> reuse) {
+    const auto& shape = base.Target();
+    if (last < first || shape.samples != 1) throw std::invalid_argument("Metal depth array slices need a single-sample range");
+    const bool d16 = shape.format == VK_FORMAT_D16_UNORM || shape.format == VK_FORMAT_D16_UNORM_S8_UINT;
+    const auto sliceBytes = Graphics::DepthSliceBytes(shape.extent, d16 ? 2u : 4u);
+    std::vector<id<MTLTexture>> sources;
+    for (std::uint32_t layer = first; layer <= last; ++layer) {
+        const auto address = shape.address + layer * sliceBytes;
+        // The newest surface at an address is the one draws render into (MetalDraw keeps them in order).
+        const auto found = std::find_if(surfaces.rbegin(), surfaces.rend(), [&](const auto& surface) { return surface->Target().address == address; });
+        if (found == surfaces.rend() || (*found)->Target().extent.width != shape.extent.width ||
+            (*found)->Target().extent.height != shape.extent.height || (*found)->Target().format != shape.format || (*found)->Target().samples != 1) {
+            // Name the surfaces that do follow the base, which shows a slice layout this does not model.
+            std::string nearby;
+            for (const auto& surface : surfaces) {
+                const auto& other = surface->Target();
+                if (other.address <= shape.address || other.address - shape.address > (last + 1ull) * sliceBytes) continue;
+                char text[96];
+                std::snprintf(text, sizeof text, " +0x%llx %ux%u fmt %d;", static_cast<unsigned long long>(other.address - shape.address),
+                    other.extent.width, other.extent.height, static_cast<int>(other.format));
+                nearby += text;
+            }
+            char text[160];
+            std::snprintf(text, sizeof text, "Metal depth array slice %u has no resident surface of the base slice's shape (%ux%u fmt %d, slice 0x%llx bytes); after the base:",
+                layer, shape.extent.width, shape.extent.height, static_cast<int>(shape.format), static_cast<unsigned long long>(sliceBytes));
+            throw std::invalid_argument(text + (nearby.empty() ? std::string(" none") : nearby));
+        }
+        sources.push_back((*found)->SampledDepthView());
+    }
+    const auto format = sources.front().pixelFormat;
+    const auto layers = static_cast<NSUInteger>(sources.size());
+    id<MTLTexture> array = reuse;
+    if (array == nil || array.textureType != MTLTextureType2DArray || array.pixelFormat != format || array.arrayLength != layers ||
+        array.width != shape.extent.width || array.height != shape.extent.height) {
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+            width:shape.extent.width height:shape.extent.height mipmapped:NO];
+        descriptor.textureType = MTLTextureType2DArray;
+        descriptor.arrayLength = layers;
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        array = [backend.Device() newTextureWithDescriptor:descriptor];
+        if (array == nil) throw std::runtime_error("Metal depth array texture creation failed");
+    }
+    auto commands = backend.CommandBuffer();
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (blit == nil) throw MetalGpuExecutionError("Metal depth array blit encoder creation failed");
+    for (NSUInteger i = 0; i < layers; ++i) {
+        [blit copyFromTexture:sources[i] sourceSlice:0 sourceLevel:0 toTexture:array destinationSlice:i destinationLevel:0 sliceCount:1 levelCount:1];
+    }
+    [blit endEncoding];
+    [commands commit];
+    return array;
+}
 
 bool MetalDepthSurface::OverlapsMappings(std::span<const NativeGuestMemory::BorrowedRange> changed) const {
     const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;

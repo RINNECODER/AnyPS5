@@ -8,6 +8,8 @@
 #include "prx/libSceAgcDriver/Execution/include/ThreadPriority.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #endif
+#include "prx/libc/include/Shutdown.hpp"
+#include <condition_variable>
 #include <mutex>
 
 namespace {
@@ -22,10 +24,33 @@ using BackendDriver = AgcDriver::Metal::MetalDriver;
 using BackendDriver = AgcDriver::DriverDetail::Driver;
 #endif
 
+#if defined(ANYPS5_METAL_BACKEND)
+// Parks a guest thread whose driver stopped. The Rosetta library links libc and parks in
+// LibcAwaitExit; the guest-replay and host-fixture builds have no libc (no process exit to await),
+// so their threads block for good.
+[[noreturn]] void ParkGuestThread() {
+#if defined(ANYPS5_ROSETTA_DIRECT)
+    LibcAwaitExit_nid_postfix();
+#else
+    std::mutex mutex;
+    std::condition_variable never;
+    std::unique_lock lock(mutex);
+    for (;;) never.wait(lock);
+#endif
+}
+#endif
+
 template <typename Operation>
 void InvokeEntry(Operation&& operation) {
 #if defined(ANYPS5_METAL_BACKEND)
-    operation();
+    try {
+        operation();
+    } catch (const AgcDriver::Metal::DriverStopped&) {
+        // The driver stopped under this guest thread: park it rather than unwind through guest frames.
+        ParkGuestThread();
+    } catch (const ProcessShutdown&) {
+        ParkGuestThread();
+    }
 #else
     try {
         operation();
@@ -65,7 +90,7 @@ void SuspendPoint() {
 }
 
 void RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
-    BackendDriver::Get().RegisterVideoOutput(handle, output);
+    InvokeEntry([&] { BackendDriver::Get().RegisterVideoOutput(handle, output); });
 }
 
 void UnregisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
@@ -82,11 +107,11 @@ void AttachWindow(const PresentationWindow& window) {
 }
 
 void PresentClear(const PresentationWindow& window, bool opaque, void (*gpuReady)(void*), void* context) {
-    BackendDriver::Get().Present(window, nullptr, opaque, gpuReady, context);
+    InvokeEntry([&] { BackendDriver::Get().Present(window, nullptr, opaque, gpuReady, context); });
 }
 
 void PresentBuffer(const PresentationWindow& window, const DisplayBuffer& buffer, void (*gpuReady)(void*), void* context) {
-    BackendDriver::Get().Present(window, &buffer, true, gpuReady, context);
+    InvokeEntry([&] { BackendDriver::Get().Present(window, &buffer, true, gpuReady, context); });
 }
 
 void ReleaseWindow(void* window) {
@@ -174,7 +199,11 @@ extern "C" void AgcDriverResolveShaderAbi_nid_postfix(const Shader* shader, std:
     static_cast<void>(context);
     static_cast<void>(primitive);
 #else
-    AgcDriver::DriverDetail::Driver::Get().ResolveShaderAbi(shader, context, primitive);
+    try {
+        AgcDriver::DriverDetail::Driver::Get().ResolveShaderAbi(shader, context, primitive);
+    } catch (const ProcessShutdown&) {
+        LibcAwaitExit_nid_postfix();
+    }
 #endif
 }
 
@@ -184,7 +213,11 @@ extern "C" void AgcDriverResolveGraphicsAbi_nid_postfix(const Shader* vertex, co
     static_cast<void>(pixel);
     static_cast<void>(primitiveType);
 #else
-    AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsAbi(vertex, pixel, primitiveType);
+    try {
+        AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsAbi(vertex, pixel, primitiveType);
+    } catch (const ProcessShutdown&) {
+        LibcAwaitExit_nid_postfix();
+    }
 #endif
 }
 
@@ -194,6 +227,10 @@ extern "C" void AgcDriverResolveGraphicsStagesAbi_nid_postfix(std::span<const Sh
     static_cast<void>(context);
     static_cast<void>(primitive);
 #else
-    AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsStagesAbi(stages, context, primitive);
+    try {
+        AgcDriver::DriverDetail::Driver::Get().ResolveGraphicsStagesAbi(stages, context, primitive);
+    } catch (const ProcessShutdown&) {
+        LibcAwaitExit_nid_postfix();
+    }
 #endif
 }

@@ -2,6 +2,7 @@
 #include "MetalShaderPipeline.hpp"
 #include "MetalGuestMemory.hpp"
 #include "Recompiler.hpp"
+#include "SubgroupVertexFixture.hpp"
 #include "IntermediateRepresentation/IrMetadata/ShaderStage.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
@@ -11,6 +12,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 using namespace ShaderRecompiler;
@@ -441,6 +443,76 @@ void Replay(id<MTLDevice> device, id<MTLCommandQueue> queue) {
 }
 }
 
+// A converted vertex function derives the guest lane from an entry-time prefix count, since Metal vertex
+// functions have no [[thread_index_in_simdgroup]]. A simd_shuffle by that lane must read back the vertex's
+// own index on every vertex (the lane is the hardware lane), ballots must contain it, and live lanes must
+// start at lane 0. 999 vertices leave a partial last SIMD-group; indexed draws scramble the vertex order.
+void VertexSubgroupLanes(id<MTLDevice> device, id<MTLCommandQueue> queue) {
+    MetalBackend::TargetOptions options;
+    options.supportsSimdGroups = true;
+    const auto shader = MetalBackend::ConvertToMetal(MetalBackend::Fixtures::SubgroupLaneVertex(), ShaderStage::Vertex, options);
+    Require(shader.resources.size() == 1 && shader.resources[0].active && shader.resources[0].buffer, "Vertex lane fixture lost its output binding");
+    NSError* error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:@(shader.source.c_str()) options:nil error:&error];
+    Require(library != nil, std::string("Converted vertex lane MSL failed to compile: ") +
+            (error.localizedDescription.UTF8String ?: "unknown error"));
+    id<MTLLibrary> fragmentLibrary = [device newLibraryWithSource:
+        @"#include <metal_stdlib>\nfragment float4 laneFragment() { return float4(1.0f); }\n" options:nil error:&error];
+    Require(fragmentLibrary != nil, "Vertex lane fragment failed to compile");
+    MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+    descriptor.vertexFunction = [library newFunctionWithName:@(shader.entryPoint.c_str())];
+    descriptor.fragmentFunction = [fragmentLibrary newFunctionWithName:@"laneFragment"];
+    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    Require(descriptor.vertexFunction != nil, "Converted vertex lane entry point is missing");
+    id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    Require(pipeline != nil, std::string("Vertex lane pipeline creation failed: ") + (error.localizedDescription.UTF8String ?: "unknown error"));
+    MTLTextureDescriptor* targetDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                                 width:4 height:4 mipmapped:NO];
+    targetDescriptor.usage = MTLTextureUsageRenderTarget;
+    targetDescriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> color = [device newTextureWithDescriptor:targetDescriptor];
+    constexpr std::uint32_t Vertices = 999;
+    std::vector<std::uint32_t> indices;
+    std::vector<bool> referenced(Vertices, false);
+    for (std::uint32_t i = 0; i < Vertices * 3u; ++i) {
+        indices.push_back((i * 7919u + (i % 5u) * 13u) % Vertices);
+        referenced[indices.back()] = true;
+    }
+    id<MTLBuffer> indexBuffer = [device newBufferWithBytes:indices.data() length:indices.size() * sizeof(std::uint32_t)
+                                                   options:MTLResourceStorageModeShared];
+    for (const bool indexed : {false, true}) {
+        id<MTLBuffer> output = [device newBufferWithLength:Vertices * 16u options:MTLResourceStorageModeShared];
+        Require(color != nil && indexBuffer != nil && output != nil, "Vertex lane replay allocation failed");
+        std::memset(output.contents, 0xff, output.length);
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = color;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+        auto commands = [queue commandBuffer];
+        auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:pipeline];
+        [encoder setVertexBuffer:output offset:0 atIndex:*shader.resources[0].buffer];
+        if (indexed)
+            [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:indices.size() indexType:MTLIndexTypeUInt32
+                               indexBuffer:indexBuffer indexBufferOffset:0];
+        else
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:Vertices];
+        [encoder endEncoding];
+        Wait(commands);
+        const auto* words = static_cast<const std::uint32_t*>(output.contents);
+        for (std::uint32_t vertex = 0; vertex < Vertices; ++vertex) {
+            if (indexed && !referenced[vertex]) continue;
+            const auto* row = words + vertex * 4u;
+            const auto at = std::string(indexed ? "indexed" : "linear") + " vertex " + std::to_string(vertex);
+            Require(row[0] < 32u, "Vertex lane out of SIMD-group range at " + at);
+            Require(row[1] == vertex, "Vertex lane is not the hardware lane (shuffle round trip) at " + at);
+            Require(((row[2] >> row[0]) & 1u) != 0u, "Vertex ballot omits its own lane at " + at);
+            Require(row[3] == 0u, "Vertex SIMD-group live lanes do not start at lane 0 at " + at);
+        }
+    }
+    std::cout << "Vertex subgroup lanes: prefix lane equals hardware lane for linear and indexed draws (999 vertices)\n";
+}
+
 void RejectSubgroupMismatch(id<MTLDevice> device) {
     const std::array<std::uint32_t, 8> userData{
         0x100000, 0, 16, 0x31016fac, 0x200000, 0, 256, 0x31016fac};
@@ -471,6 +543,7 @@ int main() {
             BdaReplay(device, queue, true);
             BdaReplay(device, queue, false);
             RejectSubgroupMismatch(device);
+            VertexSubgroupLanes(device, queue);
             LdsAtomics64::Replay(device, queue);
             return 0;
         } catch (const std::exception& error) {

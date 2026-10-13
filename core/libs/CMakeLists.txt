@@ -188,6 +188,36 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceHttp>")
     endif()
 
+    add_test_executable(guest_signin_dialog_tests tests/GuestSigninDialog.cpp)
+    target_include_directories(guest_signin_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_signin_dialog_tests PRIVATE libSceSigninDialog libc)
+    configure_windows_unwind(guest_signin_dialog_tests)
+    add_test(NAME guest_signin_dialog COMMAND guest_signin_dialog_tests)
+    if(WIN32)
+        set_tests_properties(guest_signin_dialog PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSigninDialog>")
+    endif()
+
+    add_test_executable(guest_netctl_ap_dialog_tests tests/GuestNetCtlApDialog.cpp)
+    target_include_directories(guest_netctl_ap_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_netctl_ap_dialog_tests PRIVATE libSceNetCtlApDialog libc)
+    configure_windows_unwind(guest_netctl_ap_dialog_tests)
+    add_test(NAME guest_netctl_ap_dialog COMMAND guest_netctl_ap_dialog_tests)
+    if(WIN32)
+        set_tests_properties(guest_netctl_ap_dialog PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNetCtlApDialog>")
+    endif()
+
+    add_test_executable(guest_np_auth_tests tests/GuestNpAuth.cpp)
+    target_include_directories(guest_np_auth_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_np_auth_tests PRIVATE libSceNpAuth libc)
+    configure_windows_unwind(guest_np_auth_tests)
+    add_test(NAME guest_np_auth COMMAND guest_np_auth_tests)
+    if(WIN32)
+        set_tests_properties(guest_np_auth PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNpAuth>")
+    endif()
+
     add_test_executable(guest_rudp_status_tests tests/GuestRudpStatus.cpp)
     target_include_directories(guest_rudp_status_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_rudp_status_tests PRIVATE libSceRudp libc)
@@ -338,5 +368,15 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(guest_posix_random PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libScePosixForWebKit>")
+    endif()
+
+    add_test_executable(guest_acm_tests tests/GuestAcm.cpp)
+    target_include_directories(guest_acm_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_acm_tests PRIVATE libSceAcm libc)
+    configure_windows_unwind(guest_acm_tests)
+    add_test(NAME guest_acm COMMAND guest_acm_tests)
+    if(WIN32)
+        set_tests_properties(guest_acm PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAcm>")
     endif()
 endif()

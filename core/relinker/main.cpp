@@ -31,6 +31,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,100 @@
 #endif
 
 namespace {
+
+#ifdef _WIN32
+
+class OutputIdentityDirectory {
+public:
+    OutputIdentityDirectory(const OutputIdentityDirectory&) = delete;
+    OutputIdentityDirectory& operator=(const OutputIdentityDirectory&) = delete;
+
+    explicit OutputIdentityDirectory(const std::filesystem::path& parent) {
+        std::random_device random;
+        for (unsigned attempt = 0; attempt < 64; ++attempt) {
+            const auto candidate = parent / (".anyps5-output-identity-" + std::to_string(random()) + "-" + std::to_string(random()));
+            std::error_code error;
+            if (std::filesystem::create_directory(candidate, error)) {
+                directory = candidate;
+                return;
+            }
+            if (error && error != std::errc::file_exists)
+                throw std::filesystem::filesystem_error("Cannot create output identity directory", candidate, error);
+        }
+        throw Domain::RelinkerException("Cannot reserve an output identity directory in " + Io::Utf8Path(parent));
+    }
+
+    ~OutputIdentityDirectory() {
+        if (directory.empty()) return;
+        try {
+            Remove();
+        } catch (const std::exception& error) {
+            std::cerr << "FAIL: Output identity cleanup: " << error.what() << '\n';
+        }
+    }
+
+    std::filesystem::path GetPath() const { return directory / "file"; }
+    const std::filesystem::path& GetDirectory() const { return directory; }
+
+    void Remove() {
+        std::filesystem::remove(GetPath());
+        std::filesystem::remove(directory);
+        directory.clear();
+    }
+
+private:
+    std::filesystem::path directory;
+};
+
+#endif
+
+bool SameOutputFile(const std::filesystem::path& first, const std::filesystem::path& second) {
+    if (std::filesystem::equivalent(first, second)) return true;
+#ifdef _WIN32
+    if (std::filesystem::status(first).permissions() != std::filesystem::status(second).permissions() &&
+        std::filesystem::hard_link_count(first) > 1 && std::filesystem::hard_link_count(second) > 1) {
+        for (const auto& path : {first, second}) {
+            if ((std::filesystem::status(path).permissions() & std::filesystem::perms::owner_write) == std::filesystem::perms::none)
+                throw Domain::RelinkerException("Cannot compare read-only output identities: " + Io::Utf8Path(path));
+        }
+        OutputIdentityDirectory firstDirectory(first.parent_path());
+        OutputIdentityDirectory secondDirectory(second.parent_path());
+        std::filesystem::create_hard_link(first, firstDirectory.GetPath());
+        std::filesystem::create_hard_link(second, secondDirectory.GetPath());
+        const bool same = std::filesystem::equivalent(firstDirectory.GetPath(), secondDirectory.GetPath());
+        secondDirectory.Remove();
+        firstDirectory.Remove();
+        return same;
+    }
+#endif
+    return false;
+}
+
+bool SameOutputDestination(const std::filesystem::path& first, const std::filesystem::path& second) {
+    const auto firstPath = std::filesystem::weakly_canonical(first);
+    const auto secondPath = std::filesystem::weakly_canonical(second);
+    if (firstPath == secondPath) return true;
+    if (std::filesystem::exists(first) && std::filesystem::exists(second)) return SameOutputFile(first, second);
+#ifdef _WIN32
+    auto firstName = Io::Utf8Path(firstPath.filename());
+    auto secondName = Io::Utf8Path(secondPath.filename());
+    for (auto* name : {&firstName, &secondName})
+        for (auto& character : *name)
+            if (character >= 'A' && character <= 'Z') character = static_cast<char>(character + ('a' - 'A'));
+    if (firstName == secondName && std::filesystem::exists(firstPath.parent_path()) &&
+        std::filesystem::exists(secondPath.parent_path()) && std::filesystem::equivalent(firstPath.parent_path(), secondPath.parent_path())) {
+        OutputIdentityDirectory probe(firstPath.parent_path());
+        auto alternateName = Io::Utf8Path(probe.GetDirectory().filename());
+        for (auto& character : alternateName)
+            if (character >= 'a' && character <= 'z') character = static_cast<char>(character - ('a' - 'A'));
+        const auto alternate = firstPath.parent_path() / Io::NativePath(alternateName);
+        const bool same = std::filesystem::exists(alternate) && std::filesystem::equivalent(probe.GetDirectory(), alternate);
+        probe.Remove();
+        return same;
+    }
+#endif
+    return false;
+}
 
 int Run(const int argc, char* argv[]) {
     Cli::Args args;
@@ -69,15 +164,16 @@ int Run(const int argc, char* argv[]) {
 
         std::vector<Codegen::TrampolineSite> trampolines;
         if (args.toIntel) {
-            const auto codeSegments = Relinker::ElfReader(sourceBytes).ReadCodeSegments();
-            auto converted = Codegen::MakeAmd64OnlyConverter(args.toRosetta ? Codegen::Amd64OnlyTarget::Rosetta : Codegen::Amd64OnlyTarget::Intel)->Convert(std::move(sourceBytes), codeSegments);
+            const auto segments = Relinker::ElfReader(sourceBytes).ReadProgramHeaders();
+            auto converted = Codegen::MakeAmd64OnlyConverter(args.toRosetta ? Codegen::Amd64OnlyTarget::Rosetta : Codegen::Amd64OnlyTarget::Intel)->Convert(std::move(sourceBytes), segments);
             sourceBytes = std::move(converted.Bytes);
             trampolines = std::move(converted.Trampolines);
             std::map<std::string, std::size_t> stubsByName;
+            const auto counted = [](const std::string& name) { return name == "VRSQRTPS" || name == "VRCPPS" || name == "256-bit store"; };
             for (const auto& report : converted.Reports) {
                 if (report.Lowering == Codegen::Amd64OnlyLowering::Kept)
                     std::cout << "Intel substitution: " << report.InstructionName << " at 0x" << std::hex << report.Offset << std::dec << " (" << report.OriginalLength << " bytes) kept: no room for a jump\n";
-                else if (report.InstructionName == "VRSQRTPS" || report.InstructionName == "VRCPPS")
+                else if (counted(report.InstructionName))
                     ++stubsByName[report.InstructionName];
                 else
                     std::cout << "Intel substitution: " << report.InstructionName << " at 0x" << std::hex << report.Offset << std::dec << " (" << report.OriginalLength << " bytes) -> " << (report.Lowering == Codegen::Amd64OnlyLowering::InPlace ? "in place " : "stub ") << report.ReplacementLength << " bytes\n";
@@ -161,19 +257,33 @@ int Run(const int argc, char* argv[]) {
             checkOutputInputs(desktopEntry->IconPath, "Icon");
             checkOutputInputs(desktopEntry->EntryPath, "Desktop entry");
         }
+        if (args.windowsDiagnostics)
+            checkOutputInputs(std::filesystem::absolute("windows-diagnostics-imports.txt"), "Windows import diagnostics");
 
+        std::vector<std::filesystem::path> registryPaths;
         if (args.writeRegistry) {
             const std::filesystem::path outFsPath = Io::NativePath(absPath);
-            std::vector<std::filesystem::path> registryPaths{
-                outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + ".registry.json")
-            };
+            registryPaths.push_back(outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + ".registry.json"));
             for (const auto& artifact : guestArtifacts)
                 registryPaths.push_back(outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + "." + Io::Utf8Path(artifact.Path.filename()) + ".registry.json"));
             for (const auto& path : registryPaths) checkOutputInputs(path, "Registry");
-            const auto registryWriter = std::make_shared<Relinker::CallRegistryWriter>();
-            fileWriter.Write(Io::Utf8Path(registryPaths.front()), registryWriter->WriteCallRegistry(result.RegistryEntries));
-            for (std::size_t index = 0; index < guestArtifacts.size(); ++index)
-                fileWriter.Write(Io::Utf8Path(registryPaths[index + 1]), registryWriter->WriteModuleImports(guestArtifacts[index].Imports));
+        }
+
+        std::vector<std::filesystem::path> outputPaths{Io::NativePath(absPath)};
+        for (const auto& artifact : guestArtifacts) outputPaths.push_back(artifact.Path);
+        outputPaths.insert(outputPaths.end(), registryPaths.begin(), registryPaths.end());
+        if (desktopEntry) {
+            outputPaths.push_back(desktopEntry->IconPath);
+            outputPaths.push_back(desktopEntry->EntryPath);
+        }
+        if (args.windowsDiagnostics) outputPaths.push_back(std::filesystem::absolute("windows-diagnostics-imports.txt"));
+        for (std::size_t index = 0; index < outputPaths.size(); ++index) {
+            for (std::size_t previous = 0; previous < index; ++previous) {
+                const auto& first = outputPaths[index];
+                const auto& second = outputPaths[previous];
+                if (SameOutputDestination(first, second))
+                    throw Domain::RelinkerException("Output paths collide: " + Io::Utf8Path(first) + " and " + Io::Utf8Path(second));
+            }
         }
 
         auto byteWriter = std::make_shared<Io::ByteWriter>();
@@ -208,6 +318,12 @@ int Run(const int argc, char* argv[]) {
             std::cout << "Guest module: " << Io::Utf8Path(artifact.Path) << '\n';
         }
         fileWriter.Write(absPath, executableBytes);
+        if (args.writeRegistry) {
+            const auto registryWriter = std::make_shared<Relinker::CallRegistryWriter>();
+            fileWriter.Write(Io::Utf8Path(registryPaths.front()), registryWriter->WriteCallRegistry(result.RegistryEntries));
+            for (std::size_t index = 0; index < guestArtifacts.size(); ++index)
+                fileWriter.Write(Io::Utf8Path(registryPaths[index + 1]), registryWriter->WriteModuleImports(guestArtifacts[index].Imports));
+        }
         if (desktopEntry) std::cout << "Desktop entry: " << Io::Utf8Path(desktopEntryWriter.Write(*desktopEntry)) << '\n';
         std::cout << "External prx references: " << result.RegistryEntries.size() << "\nOutput file: " << absPath << '\n';
         std::cout << "Expected runtime layout (relative to the output executable):\n"

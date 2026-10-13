@@ -2,6 +2,7 @@
 #include "MetalPipelineCache.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -372,6 +373,16 @@ void BindRenderState(id<MTLRenderCommandEncoder> encoder, const Graphics::State&
     [encoder setDepthStencilState:depthStencilState];
     [encoder setStencilFrontReferenceValue:state.stencilTest ? state.stencilFront.reference : 0
                       backReferenceValue:state.stencilTest ? state.stencilBack.reference : 0];
+}
+
+void ConfigureSamplePositions(MTLRenderPassDescriptor* pass, id<MTLDevice> device, const Graphics::State& state) {
+    Require(pass != nil, "render pass descriptor is missing");
+    if (!state.customSampleLocations || state.rasterSamples == 1) return;
+    Require(device != nil && device.programmableSamplePositionsSupported, "custom sample locations require programmable sample positions");
+    const auto locations = Graphics::SampleLocations(state);
+    std::array<MTLSamplePosition, 8> positions{};
+    for (std::uint32_t sample = 0; sample < state.rasterSamples; ++sample) positions[sample] = MTLSamplePositionMake(locations[sample].x, locations[sample].y);
+    [pass setSamplePositions:positions.data() count:state.rasterSamples];
 }
 
 }

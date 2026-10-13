@@ -18,7 +18,11 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#if defined(__x86_64__)
 #include <x86intrin.h>
+#else
+#include <mach/mach_time.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -560,12 +564,14 @@ static constexpr int SceKernelErrorEfault = static_cast<int>(0x8002000e);
 
 int APS5_VABI sceKernelClockGetres(KernelClockid clock_id, KernelTimespec* tp) {
     if (tp == nullptr) return SceKernelErrorEfault;
-    return clock_getres_nid_postfix(static_cast<int>(clock_id), tp);
+    if (clock_getres_nid_postfix(static_cast<int>(clock_id), tp) != 0) return SceKernelError(*__error_nid_postfix());
+    return 0;
 }
 
 int APS5_VABI sceKernelClockGettime(KernelClockid clock_id, KernelTimespec* tp) {
     if (tp == nullptr) return SceKernelErrorEfault;
-    return clock_gettime_nid_postfix(static_cast<int>(clock_id), tp);
+    if (clock_gettime_nid_postfix(static_cast<int>(clock_id), tp) != 0) return SceKernelError(*__error_nid_postfix());
+    return 0;
 }
 
 int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimesec* timezone, int32_t* dst_seconds) {
@@ -594,22 +600,38 @@ int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
     return 0;
 }
 
+namespace {
+// Native ARM64 AOT build: the guest-visible TSC is the host monotonic counter (the x86
+// Rosetta path keeps __rdtsc). Only sceKernelReadTsc / sceKernelGetTscFrequency use it.
+uint64_t HostTsc() {
+#if defined(__x86_64__)
+    return __rdtsc();
+#else
+    return mach_absolute_time();
+#endif
+}
+}
+
 uint64_t APS5_VABI sceKernelReadTsc(void) {
-    if (TimeScale() == 1.0) return __rdtsc();
-    static const std::uint64_t origin = __rdtsc();
-    return origin + static_cast<std::uint64_t>(static_cast<double>(__rdtsc() - origin) * TimeScale());
+    if (TimeScale() == 1.0) return HostTsc();
+    static const std::uint64_t origin = HostTsc();
+    return origin + static_cast<std::uint64_t>(static_cast<double>(HostTsc() - origin) * TimeScale());
 }
 
 uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
     static const std::uint64_t frequency = [] {
         const std::uint64_t startNanos = RawMonotonicNanos();
-        const std::uint64_t startTicks = __rdtsc();
+        const std::uint64_t startTicks = HostTsc();
         TimedWait::SleepNanos(20000000ULL);
         const std::uint64_t elapsedNanos = RawMonotonicNanos() - startNanos;
-        const std::uint64_t elapsedTicks = __rdtsc() - startTicks;
+        const std::uint64_t elapsedTicks = HostTsc() - startTicks;
         return static_cast<std::uint64_t>(static_cast<long double>(elapsedTicks) * 1000000000.0L / static_cast<long double>(elapsedNanos));
     }();
     return frequency;
+}
+
+std::int64_t APS5_VABI sceKernelGetCpuFrequency(void) {
+    return static_cast<std::int64_t>(sceKernelGetTscFrequency());
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {

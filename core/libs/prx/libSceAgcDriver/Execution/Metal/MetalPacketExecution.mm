@@ -11,13 +11,16 @@
 #include "prx/libSceAgcDriver/Graphics/include/MeshDraw.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/GpuStallWatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GpuTiming.hpp"
 #include "PacketStoreRange.hpp"
 #include <spirv/unified1/spirv.hpp>
+#include <deque>
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <optional>
@@ -109,6 +112,17 @@ BdaAbi::Fault runInWorkingSet(MetalGuestHostAliases& aliases, std::span<const Na
 }
 
 constexpr std::string_view SkippedDraw = "draw", SkippedDispatch = "dispatch";
+
+// Packets Pm4::Execute handles without reading or storing guest memory (state and register updates).
+bool RegisterOnlyPacket(std::uint32_t opcode) {
+    switch (opcode) {
+        case 0x10: case 0x11: case 0x12: case 0x13: case 0x20: case 0x26: case 0x28: case 0x2a: case 0x2f:
+        case 0x59: case 0x69: case 0x76: case 0x79: case 0x7a: case 0x81:
+            return true;
+        default:
+            return false;
+    }
+}
 constexpr std::size_t MaxSkipReasonBytes = 240;
 
 // Log the first skip of each reason, then every power of ten, so a draw that fails
@@ -202,9 +216,66 @@ SkippedWorkDiagnostics MetalDriver::SkippedWork() const {
     return impl->skipped;
 }
 
+namespace {
+
+// ANYPS5_METAL_STALL_DUMP: the user data and the first words of each bound buffer, appended to the
+// stuck dispatch's source as a comment.
+std::string DescribeDispatch(std::span<const std::uint32_t> userData, std::span<const MetalShaderResourceBinding> descriptors) {
+    std::string text = "\n/* user data:";
+    char word[48];
+    for (const auto value : userData) {
+        std::snprintf(word, sizeof word, " %08x", value);
+        text += word;
+    }
+    for (const auto& descriptor : descriptors) {
+        for (std::size_t i = 0; i < descriptor.buffers.size(); ++i) {
+            const auto& binding = descriptor.buffers[i];
+            if (binding.buffer == nil || binding.buffer.storageMode != MTLStorageModeShared) continue;
+            const auto available = binding.buffer.length > binding.offset ? binding.buffer.length - binding.offset : 0;
+            std::snprintf(word, sizeof word, "\n set %u binding %u[%zu] %llu bytes:", descriptor.descriptorSet, descriptor.binding, i,
+                static_cast<unsigned long long>(binding.length.value_or(available)));
+            text += word;
+            const auto* words = reinterpret_cast<const std::uint32_t*>(static_cast<const std::byte*>(binding.buffer.contents) + binding.offset);
+            for (std::size_t at = 0; at < std::min<std::size_t>(64, available / 4); ++at) {
+                std::snprintf(word, sizeof word, " %08x", words[at]);
+                text += word;
+            }
+        }
+    }
+    return text + "\n*/\n";
+}
+
+// ANYPS5_METAL_STALL_DUMP: the buffer ranges (host addresses) the last dispatches bound, oldest first,
+// so a stuck dispatch's inputs can be traced to the work that produced them.
+std::string RememberDispatch(std::uint64_t program, std::span<const std::uint32_t, 3> groups, std::span<const MetalShaderResourceBinding> descriptors) {
+    static std::deque<std::string> history;
+    char text[96];
+    std::snprintf(text, sizeof text, "\n cs 0x%llx groups %ux%ux%u:", static_cast<unsigned long long>(program), groups[0], groups[1], groups[2]);
+    std::string line = text;
+    for (const auto& descriptor : descriptors) {
+        for (const auto& binding : descriptor.buffers) {
+            if (binding.buffer == nil || binding.buffer.storageMode != MTLStorageModeShared) continue;
+            const auto available = binding.buffer.length > binding.offset ? binding.buffer.length - binding.offset : 0;
+            std::snprintf(text, sizeof text, " [0x%llx +0x%llx]",
+                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(binding.buffer.contents) + binding.offset),
+                static_cast<unsigned long long>(binding.length.value_or(available)));
+            line += text;
+        }
+    }
+    history.push_back(std::move(line));
+    if (history.size() > 64) history.pop_front();
+    std::string all = "\n/* recent dispatches (buffer host ranges), oldest first:";
+    for (const auto& entry : history) all += entry;
+    return all + "\n*/\n";
+}
+
+}
+
 void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
     GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
+    // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
+    if (timeline.UnknownWritesPending()) { ++drainsBy[0x101]; timeline.Drain(); }
     // Find the registered shader first so the dispatch decodes against its AGC header, as the Vulkan
     // Driver::dispatch does (SCRATCH_EN takes its per-lane size from the header).
     const auto programAddress = DecodeComputeProgramAddress(queue.shader);
@@ -213,6 +284,9 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     const auto decoded = DecodeComputeDispatch(queue, packet,
         captured != nullptr ? std::span<const std::byte>(captured->header) : std::span<const std::byte>{});
     if (std::any_of(decoded.groups.begin(), decoded.groups.end(), [](auto value) { return value == 0; })) return;
+    GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Dispatch, decoded.programAddress));
+    GpuStallWatch::Note(1, decoded.programAddress, std::uint64_t{decoded.groups[0] & 0x1fffffu} |
+        std::uint64_t{decoded.groups[1] & 0x1fffffu} << 21 | std::uint64_t{decoded.groups[2] & 0x1fffffu} << 42);
     if (BindTrace::Active()) {
         BindTrace::Log("dispatch cs 0x%llx groups %ux%ux%u", static_cast<unsigned long long>(decoded.programAddress),
             decoded.groups[0], decoded.groups[1], decoded.groups[2]);
@@ -242,15 +316,33 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     memory = capture.Regions();
     request.context.memory = memory;
     const auto guest = Recompile(request, *resources);
-    MetalBackend::TargetOptions options;
-    if (@available(macOS 15.0, *))
-        options.supportsWorkgroupAtomicFences = [nativeDevice supportsFamily:MTLGPUFamilyApple1];
-    options.supportsInt64 = true;
-    options.supportsGpuAddresses = true;
-    options.supportsSimdGroups = true;
-    configureSamplerArguments(options, *guest, nativeDevice);
-    const auto converted = MetalBackend::ConvertToMetal(*guest, ShaderStage::Compute, options);
-    MetalComputePipeline pipeline(nativeDevice, converted);
+    // The recompiler memoizes its results: the same result object means the same conversion and
+    // pipeline, so a repeated dispatch skips building and hashing the conversion key (the whole
+    // SPIR-V) and the Metal source (the function cache key).
+    auto [pipeline, bdaStores] = [&]() -> std::pair<std::shared_ptr<const MetalComputePipeline>, bool> {
+        std::lock_guard lock(computePipelinesMutex);
+        const auto found = computePipelines.find(guest.get());
+        if (found != computePipelines.end() && !found->second.guest.expired()) return {found->second.pipeline, found->second.bdaStores};
+        MetalBackend::TargetOptions options;
+        if (@available(macOS 15.0, *))
+            options.supportsWorkgroupAtomicFences = [nativeDevice supportsFamily:MTLGPUFamilyApple1];
+        options.supportsInt64 = true;
+        options.supportsGpuAddresses = true;
+        options.supportsSimdGroups = true;
+        configureSamplerArguments(options, *guest, nativeDevice);
+        const auto converted = MetalBackend::ConvertToMetal(*guest, ShaderStage::Compute, options);
+        GpuStallWatch::SourceScope stallSource(converted.source);
+        auto created = std::make_shared<const MetalComputePipeline>(nativeDevice, converted);
+        const bool stores = StoresThroughBda(converted);
+        if (computePipelines.size() >= 1024) {
+            std::erase_if(computePipelines, [](const auto& entry) { return entry.second.guest.expired(); });
+            if (computePipelines.size() >= 1024) computePipelines.clear();
+        }
+        computePipelines[guest.get()] = {guest, created, stores};
+        return {created, stores};
+    }();
+    const auto& converted = pipeline->Reflection();
+    GpuStallWatch::SourceScope stallSource(converted.source);
     // Depth/stencil and multisampled color targets live only in the draw executor's resident
     // textures, so a dispatch reading one (an MSAA resolve, a depth-based post pass) binds that
     // texture like a draw does; guest memory at those addresses never holds the rendered pixels.
@@ -272,29 +364,73 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
         if (threads > std::numeric_limits<std::uint32_t>::max()) throw std::invalid_argument("Native Metal compute grid exceeds shader integer range");
         grid[axis] = static_cast<NSUInteger>(threads);
     }
-    const auto run = [&] {
-        MetalShaderResources bindings(*backend, ranges, resident, draw ? &draw->HostAliases() : nullptr,
+    const auto size = MTLSizeMake(grid[0], grid[1], grid[2]);
+    // One run of the dispatch; with `deferred` it is committed without waiting when its results need
+    // no CPU copy into guest memory, and `completed` gets its fault at the timeline's next drain.
+    const auto encode = [this, pipeline, resident, size,
+        stallUserData = GpuStallWatch::DumpPath() != nullptr ? decoded.userData : std::vector<std::uint32_t>{},
+        stallProgram = decoded.programAddress, stallGroups = decoded.groups](bool deferred, MetalDraw::Completed completed, bool stores)
+        -> std::optional<BdaAbi::Fault> {
+        auto bindings = std::make_shared<MetalShaderResources>(*backend, ranges, resident, draw ? &draw->HostAliases() : nullptr,
             draw ? draw->ImageCache() : nullptr);
-        const auto descriptors = bindings.Bindings(converted);
+        bindings->SetCpuReadHook([this](std::uint64_t address, std::uint64_t bytes) { BeforeCpuRead(address, bytes); });
+        const auto descriptors = bindings->Bindings(pipeline->Reflection());
+        if (GpuStallWatch::DumpPath() != nullptr) {
+            GpuStallWatch::SetDetail(DescribeDispatch(stallUserData, descriptors) +
+                RememberDispatch(stallProgram, std::span<const std::uint32_t, 3>(stallGroups.data(), 3), descriptors));
+        }
         id<MTLCommandBuffer> commands = backend->CommandBuffer();
-        pipeline.Encode(commands, descriptors, MTLSizeMake(grid[0], grid[1], grid[2]), {}, bindings.Residency());
-        bindings.EncodeReadbacks(commands);
+        pipeline->Encode(commands, descriptors, size, {}, bindings->Residency());
+        bindings->EncodeReadbacks(commands);
+        if (deferred && !bindings->NeedsSynchronousCompletion()) {
+            bindings->CommittedWithoutWaiting();
+            timeline.Commit(commands, [bindings, commands, completed = std::move(completed)] {
+                const auto fault = CompleteCommittedWork([&] { return bindings->Complete(commands); });
+                completed(fault);
+            }, stores, bindings->WrittenGuestRanges());
+            return std::nullopt;
+        }
         [commands commit];
         backend->Wait(commands);
-        return CompleteCommittedWork([&] { return bindings.Complete(commands); });
+        return CompleteCommittedWork([&] { return bindings->Complete(commands); });
     };
-    checkGpuFault(draw ? runInWorkingSet(draw->HostAliases(), ranges, run) : run());
+    const auto synchronous = [this, encode] {
+        const auto once = [&] { return *encode(false, {}, false); };
+        checkGpuFault(draw ? runInWorkingSet(draw->HostAliases(), ranges, once) : once());
+    };
+    if (!DeferWork() || draw == nullptr) return synchronous();
+    // A deferred run that touched guest bytes outside the alias working set admits them and runs
+    // again, synchronously, when the drain finds the fault (see runInWorkingSet).
+    MetalDraw::Completed completed = [this, synchronous](BdaAbi::Fault fault) {
+        if (fault.state == BdaAbi::FaultState::Empty) return;
+        if (fault.reason == BdaAbi::FaultReason::Unmapped &&
+            draw->HostAliases().AdmitGuest(ranges, fault.address, std::max<std::uint32_t>(fault.bytes, 1u))) {
+            ++deferredReruns;
+            // The rerun runs inside a drain, often from a later packet: a failure that would
+            // have skipped this work skips it here instead of stopping the drain (which would
+            // drop the label stores and retirements queued behind it).
+            return Tolerate(SkippedDispatch, synchronous);
+        }
+        checkGpuFault(fault);
+    };
+    checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges, [&] {
+        return encode(true, completed, bdaStores).value_or(BdaAbi::Fault{});
+    }));
 }
 
 void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
     GpuTiming::Scope timing(GpuTiming::Kind::Draw);
     if (draw == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal draw executor is not configured");
+    // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
+    if (timeline.UnknownWritesPending()) { ++drainsBy[0x100]; timeline.Drain(); }
     auto parameters = Pm4::ResolveDraw(packet, queue);
     if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) {
         if (BindTrace::Active()) BindTrace::Log("empty draw: count %u instances %u", parameters.indexCount, parameters.instanceCount);
         return;
     }
     auto decoded = DecodeDrawDispatch(queue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
+    GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Draw, decoded.programs.empty() ? 0 : decoded.programs.back().binary.codeAddress));
+    GpuStallWatch::Note(2, decoded.programs.empty() ? 0 : decoded.programs.front().binary.codeAddress, parameters.indexCount);
     if (BindTrace::Active()) {
         std::string programs;
         for (const auto& program : decoded.programs) {
@@ -405,8 +541,41 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             stages.insert(stages.begin() + 1, {{ShaderStage::TessellationControl, &programs[2], 0},
                 {ShaderStage::TessellationEvaluation, &programs[3], 0}});
         }
-        checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges,
-            [&] { return draw->DrawSynchronously(decoded.state, direct, stages, ranges, meshArguments); }));
+        if (!DeferWork()) {
+            checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges,
+                [&] { return draw->DrawSynchronously(decoded.state, direct, stages, ranges, meshArguments); }));
+            return;
+        }
+        // The draw may be committed without waiting; what a synchronous rerun needs (after a
+        // working-set fault found at the drain) stays alive with its completion.
+        struct Job {
+            Graphics::State state;
+            Pm4::DrawParameters direct;
+            std::vector<RecompileResult> programs;
+            std::vector<Graphics::CompiledShader> stages;
+            std::optional<std::array<std::uint32_t, 5>> meshArguments;
+        };
+        auto job = std::make_shared<Job>(Job{decoded.state, direct, std::move(programs), std::move(stages), meshArguments});
+        const auto synchronous = [this, job] {
+            checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges,
+                [&] { return draw->DrawSynchronously(job->state, job->direct, job->stages, ranges, job->meshArguments); }));
+        };
+        MetalDraw::Completed completed = [this, synchronous](BdaAbi::Fault fault) {
+            if (fault.state == BdaAbi::FaultState::Empty) return;
+            if (fault.reason == BdaAbi::FaultReason::Unmapped &&
+                draw->HostAliases().AdmitGuest(ranges, fault.address, std::max<std::uint32_t>(fault.bytes, 1u))) {
+                ++deferredReruns;
+                // The rerun runs inside a drain, often from a later packet: a failure that would
+                // have skipped this work skips it here instead of stopping the drain (which would
+                // drop the label stores and retirements queued behind it).
+                return Tolerate(SkippedDraw, synchronous);
+            }
+            checkGpuFault(fault);
+        };
+        checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges, [&] {
+            return draw->Draw(job->state, job->direct, job->stages, ranges, job->meshArguments, &timeline, completed)
+                .value_or(BdaAbi::Fault{});
+        }));
     };
     if (!parameters.indirect) {
         executeDirect(parameters);
@@ -445,6 +614,58 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     }
 }
 
+bool MetalDriver::Impl::DeferLabelStore(std::span<const std::uint32_t> packet, std::uint32_t queueId) {
+    const auto opcode = (packet[0] >> 8u) & 0xffu;
+    const bool interrupt = opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0;
+    const auto label = Pm4::DecodeLabelWrite(packet);
+    const auto store = PacketStoreRange(packet);
+    const auto storeBytes = store ? store->bytes : 0;
+    if (label ? storeBytes == 0 || storeBytes > 64 || label->Bytes().size() > 64 : storeBytes != 0) return false;
+    if (label) {
+        // The destination stops matching cached images in packet order, as when it runs now.
+        ForgetCachedImages(*store);
+        PendingLabel pending{label->address, {}, label->Bytes().size(), timeline.Epoch()};
+        std::copy(label->Bytes().begin(), label->Bytes().end(), pending.bytes.begin());
+        std::erase_if(pendingLabels, [&](const PendingLabel& other) { return other.epoch != pending.epoch; });
+        if (pendingLabels.size() >= 256) pendingLabels.erase(pendingLabels.begin());
+        pendingLabels.push_back(pending);
+    }
+    std::vector<std::uint32_t> copy(packet.begin(), packet.end());
+    timeline.Defer([this, copy = std::move(copy), stores = label.has_value(), interrupt, queueId] {
+        // RELEASE_MEM and WRITE_DATA use no queue state; a timestamp is taken now, after the work.
+        static QueueState* const scratch = new QueueState();
+        Pm4::Execute(copy, *scratch);
+        if (stores) {
+            if (const auto range = PacketStoreRange(copy); range && range->bytes != 0 && range->bytes <= 64) {
+                std::array<std::byte, 64> stored{};
+                const auto written = std::span(stored).first(static_cast<std::size_t>(range->bytes));
+                GuestMemory::Read(range->begin, written, 1);
+                ownLabels.Record(range->begin, written);
+            }
+        }
+        NotifyLabelStore();
+        if (interrupt) {
+            ForgetCachedImages(ForgetReason::Event);
+            DeliverEopInterrupt(queueId);
+        }
+    });
+    return true;
+}
+
+bool MetalDriver::Impl::PendingLabelSatisfies(std::span<const std::uint32_t> packet) const {
+    const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+    const auto bytes = Pm4::WaitAwaitedBytes(packet);
+    for (auto label = pendingLabels.rbegin(); label != pendingLabels.rend(); ++label) {
+        if (label->epoch != timeline.Epoch()) break;
+        if (address + bytes <= label->address || label->address + label->size <= address) continue;
+        if (address < label->address || address + bytes > label->address + label->size) return false;
+        std::uint64_t value = 0;
+        std::memcpy(&value, label->bytes.data() + (address - label->address), bytes);
+        return Pm4::WaitComparesValue(packet, value);
+    }
+    return false;
+}
+
 void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueState& queue) {
     // #293: a mapping change no longer waits for the GPU to idle; it swaps
     // `ranges` with gpuMutex held. Every guest access below holds gpuMutex, and
@@ -476,6 +697,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             static_cast<unsigned long long>(submission.serial), submission.commands.size(), submission.flips.size());
     }
     for (std::size_t cursor = 0; cursor < submission.commands.size();) {
+        progress.fetch_add(1, std::memory_order_relaxed);
         CheckFailureAndStopping();
         const auto header = submission.commands[cursor];
         const auto count = Pm4::PacketWords(header);
@@ -488,6 +710,10 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         std::unique_lock lock(gpuMutex);
         borrowCurrentRanges();
         CheckFailureAndStopping();
+        // Retire what the GPU finished meanwhile (labels, interrupts, earlier submissions) without waiting.
+        if (!timeline.Empty()) timeline.Reap();
+        // The predicate is guest memory earlier GPU work may write.
+        if (Pm4::Predicated(header) && queue.predication.operation != 0) CompletePriorGpuWorkAndCopyBack(0x108);
         if (Pm4::Predicated(header) && queue.predication.operation != 0 && !Pm4::PredicationPasses(queue)) {
             const auto skippedFrom = cursor;
             cursor = opcode == 0x3f ? submission.conditionalEnds.at(cursor) : next;
@@ -500,7 +726,12 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         }
         if (opcode == 0x3f) { cursor = next; continue; }
         if (header == RenderingWaitPacketHeader) {
-            CompletePriorGpuWorkAndCopyBack();
+            // Waits until video out no longer shows the display buffer the following work renders
+            // into: a host condition that GPU work committed so far neither satisfies nor observes,
+            // and work committed after the wait runs after that work on the queue. So the wait no
+            // longer drains the timeline first (flips still do, so no deferred flip is pending
+            // here), and the GPU keeps executing the frame meanwhile.
+            if (!DeferWork()) CompletePriorGpuWorkAndCopyBack(0x105);
             ForgetCachedImages(ForgetReason::Wait);
             const auto wait = submission.renderingWaits.at(cursor);
             if (wait == nullptr) throw std::runtime_error("Native Metal rendering wait reservation is null");
@@ -516,19 +747,32 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             }
             NoteWaitBlocked(submission.queue, 0, false);
         } else if (header == FlipPacketHeader) {
-            CompletePriorGpuWorkAndCopyBack();
+            CompletePriorGpuWorkAndCopyBack(0x106);
             ForgetCachedImages(ForgetReason::Flip);
             if (draw != nullptr && draw->ImageCache() != nullptr && GpuTiming::Enabled()) {
                 static std::uint64_t flips = 0;
                 if (++flips % 16 == 0) {
                     const auto cache = draw->ImageCache()->TakeStatistics();
-                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}\n",
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"verified\":%llu,\"rejected\":%llu,\"hashed_mib\":%.1f,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}\n",
                         static_cast<unsigned long long>(cache.hits), static_cast<unsigned long long>(cache.misses),
                         static_cast<unsigned long long>(cache.inserts), static_cast<unsigned long long>(cache.clears),
+                        static_cast<unsigned long long>(cache.verified), static_cast<unsigned long long>(cache.rejected),
+                        static_cast<double>(cache.hashedBytes) / (1024.0 * 1024.0),
                         static_cast<unsigned long long>(cache.clearsBy[0]), static_cast<unsigned long long>(cache.clearsBy[1]),
                         static_cast<unsigned long long>(cache.clearsBy[2]), static_cast<unsigned long long>(cache.clearsBy[3]),
                         static_cast<unsigned long long>(cache.clearsBy[4]), static_cast<unsigned long long>(cache.clearsBy[5]),
                         static_cast<unsigned long long>(cache.clearsBy[6]), static_cast<unsigned long long>(cache.clearsBy[7]));
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"gpu_timeline\",\"committed\":%llu,\"drains\":%llu,\"reruns\":%llu}\n",
+                        static_cast<unsigned long long>(timeline.Committed()), static_cast<unsigned long long>(timeline.Drains()),
+                        static_cast<unsigned long long>(deferredReruns));
+                    std::string top;
+                    for (std::size_t i = 0; i < drainsBy.size(); ++i) {
+                        if (drainsBy[i] == 0) continue;
+                        char item[32];
+                        std::snprintf(item, sizeof item, " %zx:%llu", i, static_cast<unsigned long long>(drainsBy[i]));
+                        top += item;
+                    }
+                    std::fprintf(stderr, "[agc] drains by cause:%s; barrier waits %llu\n", top.c_str(), static_cast<unsigned long long>(barrierWaits));
                 }
             }
             CheckFailureAndStopping();
@@ -544,6 +788,8 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         } else if (opcode == 0x15) {
             Tolerate(SkippedDispatch, [&] { ExecuteDispatchSynchronously(queue, packet, submission); });
         } else if (opcode == 0x16) {
+            // The indirect arguments are guest memory earlier GPU work may write.
+            CompletePriorGpuWorkAndCopyBack(opcode);
             Tolerate(SkippedDispatch, [&] {
                 const auto direct = Pm4::ResolveDispatch(packet, queue);
                 ExecuteDispatchSynchronously(queue, direct, submission);
@@ -551,7 +797,12 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         } else if (Pm4::DrawOpcode(opcode)) {
             Tolerate(SkippedDraw, [&] { ExecuteDrawSynchronously(queue, packet, submission); });
         } else if (opcode == 0x3c || opcode == 0x93) {
-            CompletePriorGpuWorkAndCopyBack();
+            if (!timeline.Empty() && PendingLabelSatisfies(packet)) {
+                ++barrierWaits;
+                cursor = next;
+                continue;
+            }
+            CompletePriorGpuWorkAndCopyBack(opcode);
             const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
             bool blocked = false;
             try {
@@ -579,6 +830,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             const bool ours = !blocked && [&] { std::lock_guard lock(gpuMutex); return ownLabels.Holds(address, awaitedBytes); }();
             if (!ours) ForgetCachedImages(ForgetReason::Wait);
         } else if (opcode == 0x22) {
+            CompletePriorGpuWorkAndCopyBack(opcode);
             if (Pm4::ReadCondition(packet) == 0) {
                 next = submission.conditionalEnds.at(cursor);
                 if (next < cursor + count || next > submission.commands.size()) throw std::invalid_argument("Native Metal conditional execution end is invalid");
@@ -587,22 +839,31 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                 }
             }
         } else if (opcode == 0x42 || opcode == 0x58 || opcode == 0x46) {
-            CompletePriorGpuWorkAndCopyBack();
+            // Cache flushes and pipeline barriers store nothing here, and the Metal queue already
+            // runs committed work in order; only the sample counter dump reads results on the CPU.
             if (opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u) {
+                CompletePriorGpuWorkAndCopyBack(opcode);
                 if (draw == nullptr) throw std::runtime_error("Native Metal sample counter executor is not configured");
                 const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
                 ForgetCachedImages(ForgetReason::Event);
                 draw->DumpSamplesSynchronously(address);
             }
         } else {
-            if (opcode == 0x49 || opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x83) {
-                CompletePriorGpuWorkAndCopyBack();
+            if ((opcode == 0x49 || opcode == 0x37) && DeferWork() && !timeline.Empty() && DeferLabelStore(packet, submission.queue)) {
+                cursor = next;
+                continue;
             }
+            // Packets the CPU executes that read or store guest memory wait for committed work first.
+            // SET_*_REG_INDIRECT lists were read at submit time (CaptureIndirectRegisterLists), so these
+            // packets only update registers here.
+            const bool indirectRegisters = Pm4::IndirectRegisterOpcode(opcode);
+            if (!indirectRegisters && !RegisterOnlyPacket(opcode)) CompletePriorGpuWorkAndCopyBack(opcode);
             // A store the driver performs itself: only its destination stops matching cached images.
             // (A label it writes lets the guest go on, but guest writes reach later work of this
             // submission only behind a wait, which forgets everything.)
             if (const auto store = PacketStoreRange(packet)) ForgetCachedImages(*store);
-            Pm4::Execute(packet, queue);
+            if (indirectRegisters) Pm4::ExecuteIndirectRegisters(packet, submission.registerLists.at(cursor), queue);
+            else Pm4::Execute(packet, queue);
             // Remember label values this driver wrote (RELEASE_MEM data, WRITE_DATA), for the wait above.
             if (opcode == 0x49 || opcode == 0x37) {
                 if (const auto store = PacketStoreRange(packet); store && store->bytes != 0 && store->bytes <= 64) {
@@ -626,7 +887,9 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         std::lock_guard lock(gpuMutex);
         borrowCurrentRanges();
         CheckFailureAndStopping();
-        CompletePriorGpuWorkAndCopyBack();
+        // With deferred work the worker goes on to the next submission; MetalDriver::Impl::Run
+        // retires this one once its GPU work completed.
+        if (!DeferWork()) CompletePriorGpuWorkAndCopyBack(0x107);
         ForgetCachedImages(ForgetReason::Submission);
     }
     borrowed.reset();

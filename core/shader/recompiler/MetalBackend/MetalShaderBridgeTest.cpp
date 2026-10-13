@@ -1,4 +1,5 @@
 #include "MetalShaderBridge.hpp"
+#include "SubgroupVertexFixture.hpp"
 #include <spirv.hpp>
 #include <cstring>
 #include <algorithm>
@@ -178,6 +179,8 @@ int main() {
         Reject([&] { static_cast<void>(ConvertToMetal(sample, ShaderStage::Vertex)); }, "matching the requested stage");
         Reject([&] { static_cast<void>(ConvertToMetal(sample, ShaderStage::TessellationControl)); }, "unimplemented native Metal scheduling");
         Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityFloat64}), ShaderStage::Compute)); }, "Float64");
+        // A rejected conversion is remembered: the same input fails again with the same error.
+        Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityFloat64}), ShaderStage::Compute)); }, "Float64");
         Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityInt64Atomics}), ShaderStage::Compute)); }, "64-bit atomics");
         Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityInt64}), ShaderStage::Compute)); }, "lacks 64-bit integer");
         Reject([&] { static_cast<void>(ConvertToMetal(Sample({spv::CapabilityPhysicalStorageBufferAddresses}), ShaderStage::Compute)); }, "lacks GPU-address");
@@ -187,7 +190,23 @@ int main() {
         invalid.bdaAbiVersion = 1;
         Reject([&] { static_cast<void>(ConvertToMetal(invalid, ShaderStage::Compute)); }, "incompatible BDA ABI");
         VerifyConversionCache(sample, pushGuest, target);
-        std::cout << "PASS: descriptor reflection, implicit buffer lengths, preserved guest metadata, unsupported-contract rejection, and conversion cache keys\n";
+        {
+            // Guest lane work in a vertex function: Metal has no [[thread_index_in_simdgroup]] or
+            // [[threads_per_simdgroup]] vertex input, so the lane comes from an entry-time prefix count.
+            TargetOptions simd;
+            simd.supportsSimdGroups = true;
+            const auto lane = ConvertToMetal(Fixtures::SubgroupLaneVertex(), ShaderStage::Vertex, simd);
+            Require(lane.requiresSimdGroups && lane.nativeExecutionKind == NativeExecutionKind::Vertex, "lost vertex SIMD-group contract");
+            Require(lane.source.find("= simd_prefix_exclusive_sum(1u);") != std::string::npos &&
+                    lane.source.find("simd_shuffle(") != std::string::npos && lane.source.find("simd_ballot(") != std::string::npos,
+                    "vertex lane, shuffle or ballot was not lowered to SIMD-group functions");
+            Require(lane.source.find("thread_index_in_simdgroup") == std::string::npos &&
+                    lane.source.find("threads_per_simdgroup") == std::string::npos && lane.source.find("thread_execution_width") == std::string::npos,
+                    "vertex function declares a SIMD-group input Metal does not provide");
+            Reject([&] { static_cast<void>(ConvertToMetal(Fixtures::SubgroupLaneVertex(64), ShaderStage::Vertex, simd)); }, "32-wide host subgroup");
+            Reject([&] { static_cast<void>(ConvertToMetal(Fixtures::SubgroupLaneVertex(), ShaderStage::Vertex)); }, "lacks SIMD-group");
+        }
+        std::cout << "PASS: descriptor reflection, implicit buffer lengths, preserved guest metadata, unsupported-contract rejection, conversion cache keys, and vertex subgroup lanes\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

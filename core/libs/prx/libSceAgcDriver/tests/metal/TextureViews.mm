@@ -403,6 +403,67 @@ void DccTypedViews(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
     }
 }
 
+// A mip-chain pass binds one surface at the same base twice: one view names its DCC metadata, the
+// other names none. With "uncompressed" keys both mean the same plain texels and share one backing
+// (a write through either is seen by the other and copied back with the keys left uncompressed);
+// with clear keys they disagree and the second binding is refused.
+void DccMetadataViews(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    for(bool dccFirst:{false,true}) for(unsigned key:{0xffu,0x00u}) {
+        auto plain=Descriptor(),dcc=Descriptor(); dcc.dccAddress=0x400000;
+        const auto geometry=Graphics::DescribeSurface(plain);
+        std::vector<std::byte> guest(geometry.guestBytes,std::byte{0x93});
+        std::vector<std::byte> keys(geometry.guestBytes/256,std::byte(key));
+        const auto expectedGuest=guest,expectedKeys=keys;
+        std::array<NativeGuestMemory::BorrowedRange,2> ranges{{{plain.baseAddress,guest,true},{dcc.dccAddress,keys,true}}};
+        Metal::MetalShaderResources resources(backend,ranges);
+        auto first=resources.Texture(dccFirst?dcc:plain);
+        std::shared_ptr<Metal::MetalTexture> second;
+        bool rejected=false;
+        try {second=resources.Texture(dccFirst?plain:dcc,true);} catch(const std::invalid_argument&) {rejected=true;}
+        if(key!=0xff) {
+            Require(rejected,"a plain view shared the backing of a DCC-cleared view");
+            auto commands=backend.CommandBuffer();
+            backend.Wait(commands);
+            Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"refused DCC/plain view left a completion fault");
+            Require(guest==expectedGuest&&keys==expectedKeys,"refused DCC/plain view changed texels or keys");
+            continue;
+        }
+        Require(!rejected&&second!=nullptr,"DCC and plain views of uncompressed texels did not share a backing");
+        auto output=backend.Buffer(256);
+        auto commands=backend.CommandBuffer();
+        Encode(backend,library,commands,@"write2D",second->StorageView(),nil,MTLSizeMake(8,8,1));
+        Encode(backend,library,commands,@"read2D",first->SampledView(),output,MTLSizeMake(8,8,1));
+        backend.Wait(commands);
+        Pixels(output.contents,{17,31,73,127},64,"a write through one view of a shared DCC/plain backing was not seen by the other");
+        Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"shared DCC/plain view completion faulted");
+        auto expected=expectedGuest;
+        const std::array<std::uint8_t,4> color{17,31,73,127};
+        for(unsigned y=0;y<8;++y) for(unsigned x=0;x<8;++x) std::memcpy(expected.data()+y*geometry.mips[0].pitchBytes+x*4,color.data(),4);
+        Require(guest==expected,"shared DCC/plain view copy-back lost texels");
+        Require(std::all_of(keys.begin(),keys.end(),[](auto k){return k==std::byte{0xff};}),"shared DCC/plain view left compressed metadata");
+    }
+    // A mip-chain pass: this work renders one level of a mipmapped color target (bound without DCC)
+    // and samples another level through a descriptor naming the target's stale cleared keys.
+    for(bool written:{true,false}) {
+        auto target=Descriptor(); target.mipCount=target.allocatedMipCount=4; target.lastLevel=3;
+        const auto geometry=Graphics::DescribeSurface(target);
+        std::vector<std::byte> guest(geometry.guestBytes,std::byte{0x93});
+        std::vector<std::byte> keys(geometry.guestBytes/256,std::byte{0x00});
+        std::array<NativeGuestMemory::BorrowedRange,2> ranges{{{target.baseAddress,guest,true},{0x400000,keys,true}}};
+        Metal::MetalShaderResources resources(backend,ranges);
+        auto level=target; level.baseLevel=level.lastLevel=1;
+        auto rendered=resources.Texture(level,written,false,false,written?std::optional<std::uint32_t>(1):std::nullopt);
+        auto sampled=target; sampled.baseLevel=sampled.lastLevel=0; sampled.dccAddress=0x400000;
+        bool rejected=false;
+        try {static_cast<void>(resources.Texture(sampled));} catch(const std::invalid_argument&) {rejected=true;}
+        Require(rejected!=written,written?"a sampled level of a written mipmapped target was refused over its stale DCC keys":
+            "a plain unwritten mipmapped view shared the backing of a DCC-cleared view");
+        auto commands=backend.CommandBuffer();
+        backend.Wait(commands);
+        Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"mip-chain DCC/plain views left a completion fault");
+    }
+}
+
 MetalBackend::Result AliasProgram(const Metal::MetalDevice& backend,bool global,std::uint64_t address) {
     constexpr std::array<std::uint32_t,17> descriptorCode{
         0x34020082,0xe0302000,0x80000401,0xbf8c3f70,0x7e000000,0x7e003600,0x7e008200,0x4a080881,
@@ -684,6 +745,48 @@ void ArraySliceDescriptors(const Metal::MetalDevice& backend,id<MTLLibrary> libr
     }
 }
 
+// A per-slice pass binds "array k-k" (k + 1 layers) of a four-layer array whose whole texture the
+// image cache already holds: the view shares that backing, addresses only slice k, and its copy-back
+// rewrites only slice k's guest bytes.
+void ArrayPrefixViews(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    auto d=Descriptor(); d.dimension=Graphics::TextureDimension::k2DArray; d.depthOrLastArray=3;
+    const auto geometry=Graphics::DescribeSurface(d);
+    Require(geometry.layers==4,"four-slice array geometry has the wrong slice count");
+    std::vector<std::byte> guest(geometry.guestBytes);
+    for(std::uint32_t layer=0;layer<4;++layer) for(std::uint32_t y=0;y<8;++y) for(std::uint32_t x=0;x<8;++x) {
+        const std::array<std::uint8_t,4> color{std::uint8_t(10+layer),std::uint8_t(20+layer),std::uint8_t(30+layer),255};
+        std::memcpy(guest.data()+geometry.GuestLayerOffset(layer)+y*geometry.mips[0].pitchBytes+x*4,color.data(),4);
+    }
+    const NativeGuestMemory::BorrowedRange range{d.baseAddress,guest,true};
+    Metal::GuestImageCache<Metal::MetalTexture> cache;
+    {
+        Metal::MetalShaderResources whole(backend,std::span(&range,1),{},nullptr,&cache);
+        static_cast<void>(whole.Texture(d));
+        auto commands=backend.CommandBuffer();
+        backend.Wait(commands);
+        Require(whole.Complete(commands).state==BdaAbi::FaultState::Empty,"whole array upload faulted");
+    }
+    auto expected=guest;
+    auto slice=d; slice.baseArray=2; slice.depthOrLastArray=2;
+    Metal::MetalShaderResources resources(backend,std::span(&range,1),{},nullptr,&cache);
+    auto view=resources.Texture(slice,true);
+    Require(view->GuestBytes()==geometry.guestBytes,"a view of the first layers did not share the cached whole array");
+    Require(view->StorageView().arrayLength==1&&view->SampledView().arrayLength==1,"a one-slice view of a larger backing addresses other slices");
+    const std::array<float,4> color{200/255.0f,100/255.0f,50/255.0f,1};
+    auto commands=backend.CommandBuffer();
+    Encode(backend,library,commands,@"writeArrayColor",view->StorageView(),nil,MTLSizeMake(8,8,1),color.data(),sizeof color);
+    resources.EncodeReadbacks(commands);
+    backend.Wait(commands);
+    Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"array slice view write faulted");
+    for(std::uint32_t y=0;y<8;++y) for(std::uint32_t x=0;x<8;++x) {
+        const std::array<std::uint8_t,4> written{200,100,50,255};
+        std::memcpy(expected.data()+geometry.GuestLayerOffset(2)+y*geometry.mips[0].pitchBytes+x*4,written.data(),4);
+    }
+    Require(guest==expected,"the slice view's copy-back did not write exactly its slice");
+    auto larger=d; larger.depthOrLastArray=4;
+    Require(!view->CanShareBacking(larger),"a backing served a view with more layers than it has");
+}
+
 }
 
 void RunTextureViewsTests(const MetalTests::Context& context) {
@@ -695,10 +798,12 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     for(auto format:{7u,22u}) Comparison(backend,library,format);
     Dcc(backend,library);
     DccTypedViews(backend,library);
+    DccMetadataViews(backend,library);
     PhysicalAllowed(backend,library);
     PhysicalGuards(backend);
     PhysicalBdaGuards(backend,library);
     StoragePermissions(backend,library);
     ArraySliceDescriptors(backend,library);
+    ArrayPrefixViews(backend,library);
     AccessGuards(backend);
 }

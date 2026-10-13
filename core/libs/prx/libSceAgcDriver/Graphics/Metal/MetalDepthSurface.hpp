@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include <memory>
 #include <mutex>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,16 @@ private:
     id<MTLTexture> stencil;
     id<MTLTexture> sampledStencil;
 };
+
+// Cascaded shadow maps: each slice of a depth array is rendered through DB_DEPTH_VIEW SLICE_START as a
+// resident surface of its own (State.cpp offsets the address by whole slices), and a later pass samples
+// all of them through one 2D-array descriptor at the address of slice 0, `base`. Copies the depth plane
+// of slices first..last into a 2D array texture (reusing `reuse` when it has that shape) with a blit
+// committed on the backend's queue, so it runs after the passes that rendered the slices and before
+// work committed later that samples the array. Throws std::invalid_argument when a slice has no
+// resident surface of the base slice's extent, format and sample count.
+[[nodiscard]] id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std::shared_ptr<MetalDepthSurface>> surfaces,
+    const MetalDepthSurface& base, std::uint32_t first, std::uint32_t last, id<MTLTexture> reuse);
 
 // A color target with several fragments (CB_COLOR_ATTRIB NUM_FRAGMENTS) renders into a resident 2D
 // multisample texture, like multisampled depth: the guest's interleaved fragment and FMASK layout is

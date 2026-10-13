@@ -1,4 +1,5 @@
 #include "MetalDriverInternal.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderCapture.hpp"
@@ -45,11 +46,6 @@ public:
     ~DriverCallbackScope() { driverCallback = previous; }
 private:
     bool previous;
-};
-
-class DriverStopped final : public std::runtime_error {
-public:
-    DriverStopped() : std::runtime_error("Metal driver has shut down") {}
 };
 
 void require(bool condition, const char* reason) {
@@ -135,8 +131,12 @@ void MetalDriver::Configure(void* device, void* library,
     std::vector<NativeGuestMemory::BorrowedRange> captured(ranges.begin(), ranges.end());
     std::sort(captured.begin(), captured.end(), [](const auto& a, const auto& b) { return a.guestAddress < b.guestAddress; });
     auto backend = std::make_unique<MetalDevice>(nativeDevice, nativeLibrary);
-    auto presentation = std::make_unique<MetalPresentation>(*backend, nativeLibrary);
-    auto draw = std::make_unique<MetalDraw>(nativeDevice, nativeLibrary);
+    // Presentation uploads pixels the CPU already read: its own queue keeps a present from waiting
+    // behind draws and dispatches the workers committed meanwhile.
+    auto presentationBackend = std::make_unique<MetalDevice>(nativeDevice, nativeLibrary);
+    auto presentation = std::make_unique<MetalPresentation>(*presentationBackend, nativeLibrary);
+    auto draw = std::make_unique<MetalDraw>(*backend);
+    draw->SetCpuReadHook([impl = impl.get()](std::uint64_t address, std::uint64_t bytes) { impl->BeforeCpuRead(address, bytes); });
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>();
     auto nullPixel = DriverDetail::CaptureNullPixelShader();
     const auto nullPixelAddress = nullPixel->codeAddress;
@@ -146,8 +146,18 @@ void MetalDriver::Configure(void* device, void* library,
     impl->nativeDevice = nativeDevice;
     impl->nativeLibrary = nativeLibrary;
     impl->backend = std::move(backend);
+    impl->presentationBackend = std::move(presentationBackend);
     impl->presentation = std::move(presentation);
     impl->draw = std::move(draw);
+    // A worker with nothing to execute still retires submissions as their GPU work completes.
+    impl->timeline.SetCompletionSignal([impl = impl.get()] {
+        impl->progress.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard lock(impl->mutex);
+            impl->reapSignal = true;
+        }
+        impl->changed.notify_all();
+    });
     impl->eopInterrupt = std::move(interrupt);
     impl->shaders = std::move(registry);
     impl->configured = true;
@@ -200,7 +210,15 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
         // Workers touch guest memory only with gpuMutex held and re-borrow the
         // ranges when rangesRevision moves, so holding it is enough to swap them.
         std::unique_lock<std::recursive_mutex> gpuLock;
-        if (visible) gpuLock = std::unique_lock(impl->gpuMutex);
+        if (visible) {
+            gpuLock = std::unique_lock(impl->gpuMutex);
+            // Work committed without waiting still reads the old mapping: let it finish first.
+            try {
+                impl->timeline.Drain();
+            } catch (...) {
+                impl->ReportFailure(std::current_exception());
+            }
+        }
         std::shared_ptr<DriverDetail::ShaderRegistry> registry;
         {
             std::lock_guard lock(impl->mutex);
@@ -430,6 +448,7 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
         require(descriptor.flags == 0, "nonzero submission flags are not implemented");
         if (descriptor.words != 0) CaptureSubmissionCommands(submission, descriptor.address, descriptor.words);
         ValidateSubmission(submission, descriptor.address);
+        CaptureIndirectRegisterLists(submission);
     }
     impl->WaitForFlipRoom(submission);
     {
@@ -454,9 +473,13 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
 // several submissions ahead and rewrote ring entries before the draws that read them ran: UI
 // draws then rendered with later vertex or constant data, clearing or filling the wrong regions
 // of a layer the guest only repaints where it changed. Submitting therefore waits until at most
-// `ANYPS5_METAL_MAX_QUEUED` (default 1) submissions of the queue are waiting or running. The wait
-// is bounded (250 ms), so a guest that submits work gated on a label it writes only after the
-// submit returns still makes progress. A negative value turns the bound off.
+// `ANYPS5_METAL_MAX_QUEUED` (default 1) submissions of the queue are waiting or running. A guest
+// that submits work gated on a label it writes only after the submit returns still makes progress:
+// the wait also ends once the queue's worker is parked on such a host-satisfied wait (WAIT_REG_MEM,
+// RenderingWait). It used to end after 250 ms instead, which a title loading its map outran: a
+// dispatch that takes longer let the guest rewrite the constants of work still queued, and a
+// dispatch that then read a tile table as its loop bounds never finished. Giving up after 10 s
+// without worker progress (60 s at most) only guards against waits this does not model. A negative value turns the bound off.
 void MetalDriver::Impl::WaitForQueueRoom(std::uint32_t queue) {
     static const long maxQueued = [] {
         const char* value = std::getenv("ANYPS5_METAL_MAX_QUEUED");
@@ -467,9 +490,30 @@ void MetalDriver::Impl::WaitForQueueRoom(std::uint32_t queue) {
     const auto found = workers.find(queue);
     if (found == workers.end()) return;
     const auto& worker = found->second;
-    changed.wait_for(lock, std::chrono::milliseconds(250), [&] {
-        return stopping || failure || static_cast<long>(worker.pending.size() + (worker.active ? 1u : 0u)) <= maxQueued;
-    });
+    const auto hasRoom = [&] {
+        return stopping || failure || static_cast<long>(worker.pending.size() + worker.unretired) <= maxQueued ||
+            (worker.active && !worker.running);
+    };
+    // Gives up when the workers made no progress for 10 s (a wait this does not model): a worker
+    // busy converting a burst of new shaders can take longer than that to retire one submission,
+    // and submitting past it then let the guest rewrite data queued work reads. `progress` is
+    // shared by every queue, so another queue's work could keep it moving while this one is stuck
+    // on such a wait: 60 s in all ends the wait regardless.
+    bool room = false;
+    bool stalled = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    for (auto seen = progress.load(std::memory_order_relaxed);;) {
+        room = changed.wait_for(lock, std::chrono::seconds(10), hasRoom);
+        const auto now = progress.load(std::memory_order_relaxed);
+        stalled = now == seen;
+        if (room || stalled || std::chrono::steady_clock::now() >= deadline) break;
+        seen = now;
+    }
+    static std::atomic<unsigned> reports{0};
+    if (!room && reports.fetch_add(1) < 4) {
+        std::fprintf(stderr, "[metal] queue %u %s with %zu submissions waiting; submitting anyway\n", queue,
+            stalled ? "made no progress for 10 s" : "had no room for 60 s", worker.pending.size());
+    }
 }
 
 void MetalDriver::Impl::Enqueue(Submission submission) {
@@ -547,10 +591,44 @@ void MetalDriver::Impl::AwaitMappingDrain() {
             static_cast<unsigned long long>(target - completed));
     }
 }
-void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack() { std::lock_guard lock(gpuMutex); }
+void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack(std::uint32_t cause) {
+    std::lock_guard lock(gpuMutex);
+    if (!timeline.Empty()) ++drainsBy[std::min<std::uint32_t>(cause, drainsBy.size() - 1)];
+    timeline.Drain();
+}
+
+void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes) {
+    const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
+    if (timeline.MayHaveWritten(address, end)) {
+        if (BindTrace::Active()) {
+            BindTrace::Log("  drain before CPU read 0x%llx +0x%llx%s", static_cast<unsigned long long>(address),
+                static_cast<unsigned long long>(bytes), timeline.UnknownWritesPending() ? " (unknown writes pending)" : "");
+        }
+        ++drainsBy[0x102];
+        timeline.Drain();
+    }
+}
+
+bool MetalDriver::Impl::DeferWork() {
+    static const bool defer = [] {
+        const char* value = std::getenv("ANYPS5_METAL_DEFER");
+        return value == nullptr || *value == '\0' || *value != '0';
+    }();
+    return defer;
+}
 
 void MetalDriver::Impl::ForgetCachedImages(ForgetReason reason) {
-    if (draw != nullptr && draw->ImageCache() != nullptr) draw->ImageCache()->Clear(static_cast<unsigned>(reason));
+    if (draw == nullptr || draw->ImageCache() == nullptr) return;
+    // The guest may have written memory at these points: cached surfaces prove their bytes before
+    // their next use (GuestImageCache::Expire). ANYPS5_METAL_IMAGE_CACHE_EXPIRE=0 drops them instead.
+    static const bool expire = [] {
+        const char* value = std::getenv("ANYPS5_METAL_IMAGE_CACHE_EXPIRE");
+        return value == nullptr || *value != '0';
+    }();
+    const bool guestPoint = reason == ForgetReason::Submission || reason == ForgetReason::Wait || reason == ForgetReason::Flip ||
+        reason == ForgetReason::Event;
+    if (expire && guestPoint) draw->ImageCache()->Expire(static_cast<unsigned>(reason));
+    else draw->ImageCache()->Clear(static_cast<unsigned>(reason));
 }
 
 void MetalDriver::Impl::ForgetCachedImages(const GuestStoreRange& store) {
@@ -567,6 +645,27 @@ void MetalDriver::Impl::ForgetCachedImages(const GuestStoreRange& store) {
 void MetalDriver::Impl::DeliverEopInterrupt(std::uint32_t queue) {
     if (!eopInterrupt) throw std::runtime_error("Metal driver EOP interrupt requires a configured native host callback");
     eopInterrupt(queue);
+}
+
+void MetalDriver::Impl::RetireSubmission(Worker& worker, const Submission& submission,
+    std::vector<std::shared_ptr<IVideoOutput>>& releasedOutputs) {
+    MarkCompleted(submission.serial);
+    const auto retained = submissionOutputs.find(submission.serial);
+    if (retained != submissionOutputs.end()) {
+        releasedOutputs = std::move(retained->second);
+        submissionOutputs.erase(retained);
+    }
+    for (const auto address : submission.labelWrites) {
+        const auto found = worker.unfinishedWrites.find(address);
+        if (found != worker.unfinishedWrites.end() && --found->second == 0) worker.unfinishedWrites.erase(found);
+    }
+    if (worker.unretired != 0) --worker.unretired;
+}
+
+void MetalDriver::Impl::ReapTimeline() {
+    std::lock_guard lock(gpuMutex);
+    NativeGuestMemory::BorrowedRangesScope scope(ranges);
+    timeline.Reap();
 }
 
 void MetalDriver::Impl::MarkCompleted(std::uint64_t serial) {
@@ -589,12 +688,20 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                 {
                     std::unique_lock lock(mutex);
                     worker = &workers.at(id);
-                    changed.wait(lock, [&] { return stopping || failure || !worker->pending.empty(); });
+                    changed.wait(lock, [&] { return stopping || failure || !worker->pending.empty() || reapSignal; });
                     if (failure) std::rethrow_exception(failure);
                     if (stopping) break;
+                    if (worker->pending.empty()) {
+                        // GPU work behind a deferred retirement finished while this worker was idle.
+                        reapSignal = false;
+                        lock.unlock();
+                        ReapTimeline();
+                        continue;
+                    }
                     submission = std::move(worker->pending.front());
                     worker->pending.pop_front();
                     worker->active = true;
+                    ++worker->unretired;
                     if (id == 0) queue0Executing = submission.suspend ? 0 : submission.received;
                     if (submission.waitFree) {
                         changed.wait(lock, [&] { return stopping || failure || OrderReleased(id, submission.received); });
@@ -609,23 +716,34 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                         resetGraphics = false;
                     }
                 }
-                if (!submission.suspend) {
+                bool retireLater = false;
+                if (submission.suspend) {
+                    // A suspend point needs the GPU idle.
+                    NativeGuestMemory::BorrowedRangesScope scope(capturedRanges);
+                    CompletePriorGpuWorkAndCopyBack();
+                } else {
                     NativeGuestMemory::BorrowedRangesScope scope(capturedRanges);
                     ExecuteSubmission(submission, worker->state);
+                    // GPU work may still be running: retire the submission (and so let the guest
+                    // submit past it, MAX_QUEUED) when it completed, while this worker goes on.
+                    std::lock_guard gpuLock(gpuMutex);
+                    if (!timeline.Empty()) {
+                        retireLater = true;
+                        auto retired = std::make_shared<Submission>(std::move(submission));
+                        timeline.Defer([this, worker, retired] {
+                            std::vector<std::shared_ptr<IVideoOutput>> outputs;
+                            {
+                                std::lock_guard lock(mutex);
+                                RetireSubmission(*worker, *retired, outputs);
+                            }
+                            changed.notify_all();
+                        });
+                    }
                 }
                 {
                     std::lock_guard lock(mutex);
                     if (failure) std::rethrow_exception(failure);
-                    MarkCompleted(submission.serial);
-                    const auto retained = submissionOutputs.find(submission.serial);
-                    if (retained != submissionOutputs.end()) {
-                        releasedOutputs = std::move(retained->second);
-                        submissionOutputs.erase(retained);
-                    }
-                    for (const auto address : submission.labelWrites) {
-                        const auto found = worker->unfinishedWrites.find(address);
-                        if (found != worker->unfinishedWrites.end() && --found->second == 0) worker->unfinishedWrites.erase(found);
-                    }
+                    if (!retireLater) RetireSubmission(*worker, submission, releasedOutputs);
                     worker->running = false;
                     worker->active = false;
                     if (id == 0) { queue0Executing = 0; queue0Awaited = 0; }
@@ -635,7 +753,7 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
             }
         }
     } catch (const DriverStopped&) {
-        const auto error = std::current_exception();
+        const auto error = std::make_exception_ptr(ProcessShutdown{});
         for (const auto& [offset, flip] : submission.flips) { static_cast<void>(offset); flip->Fail(error); }
     } catch (const ProcessShutdown&) {
         // VideoOut throws this once the process stop fires (RenderingWait::Wait,
@@ -823,7 +941,8 @@ void MetalDriver::Impl::Stop() {
     require(!OnWorkerThread(), "worker cannot stop itself");
     std::unique_lock shutdownLock(shutdownMutex);
     if (stopped) return;
-    const auto error = std::make_exception_ptr(DriverStopped{});
+    // Waiters on outputs/flips see the same requested-stop signal VideoOut already handles, never a driver failure.
+    const auto error = std::make_exception_ptr(ProcessShutdown{});
     std::vector<std::shared_ptr<IVideoOutput>> failedOutputs;
     std::vector<std::shared_ptr<IFlipRequest>> failedFlips;
     {
@@ -884,14 +1003,32 @@ void MetalDriver::Present(const PresentationWindow& window, const DisplayBuffer*
     impl->RejectMappingReentry();
     impl->CheckFailureAndStopping();
     DriverCallbackScope callbackScope;
-    std::unique_lock gpuLock(impl->gpuMutex);
-    impl->CheckFailureAndStopping();
-    bool ready = false;
+    // Only reading the display buffer needs the guest ranges (gpuMutex). The upload, the wait for a
+    // drawable and for the present run on the presentation's own queue without it, so the queue
+    // workers keep encoding meanwhile.
+    std::vector<std::byte> pixels;
+    // Whether `pixels` holds the display buffer's pixels, or is empty because the window is
+    // minimized (an empty drawable presents nothing, so nothing is read: the display buffer may
+    // not be readable then). Otherwise Present validates the request and throws.
+    bool decided = false;
     {
-        NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
-        impl->presentation->Present(window, buffer, opaque, gpuReady ? +[](void* value) { *static_cast<bool*>(value) = true; } : nullptr, &ready);
+        std::unique_lock gpuLock(impl->gpuMutex);
+        impl->CheckFailureAndStopping();
+        if (buffer != nullptr && window.context != nullptr && window.getDrawableSize != nullptr && buffer->width == window.width &&
+            buffer->height == window.height) {
+            std::uint32_t width = 0;
+            std::uint32_t height = 0;
+            window.getDrawableSize(window.context, &width, &height);
+            decided = true;
+            if (width != 0 && height != 0) {
+                NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
+                pixels = MetalPresentation::ReadPixels(*buffer);
+            }
+        }
     }
-    gpuLock.unlock();
+    bool ready = false;
+    impl->presentation->Present(window, buffer, opaque, gpuReady ? +[](void* value) { *static_cast<bool*>(value) = true; } : nullptr, &ready,
+        decided ? &pixels : nullptr);
     if (ready) gpuReady(context);
 }
 
@@ -931,6 +1068,7 @@ void MetalDriver::Impl::ExecuteRewindTail(const Submission& stalled, QueueState&
         NativeGuestMemory::BorrowedRangesScope current(ranges);
         CaptureSubmissionCommands(tail, tailAddress, stalled.rewindWords);
         ValidateSubmission(tail, tailAddress);
+        CaptureIndirectRegisterLists(tail);
     }
     WaitForFlipRoom(tail);
     {

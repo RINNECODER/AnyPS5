@@ -66,6 +66,23 @@ if(ANYPS5_ROSETTA_LIBS)
     return()
 endif()
 
+# Fork-only native ARM64 AOT path (core/aot, vendored from upstream PR #3891). The offline
+# compiler turns the guest x86-64 ELF into native ARM64 functions; the runtime links the
+# fork's Metal graphics backend instead of upstream's Vulkan closure (see cmake/NativeAotGraphics.cmake).
+option(ANYPS5_NATIVE_AOT "Build the experimental offline x86-64 to ARM64 compiler and its SDK examples" OFF)
+option(ANYPS5_NATIVE_AOT_GRAPHICS "Build the native ARM64 Metal graphics runtime and the gpu_cube fixture" OFF)
+if(ANYPS5_NATIVE_AOT_GRAPHICS AND NOT ANYPS5_NATIVE_AOT)
+    message(FATAL_ERROR "ANYPS5_NATIVE_AOT_GRAPHICS requires ANYPS5_NATIVE_AOT=ON")
+endif()
+if(ANYPS5_NATIVE_AOT_GRAPHICS)
+    include(cmake/NativeAotGraphics.cmake)
+    return()
+endif()
+if(ANYPS5_NATIVE_AOT)
+    add_subdirectory(core/aot)
+    return()
+endif()
+
 if(NOT APPLE)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
 endif()
