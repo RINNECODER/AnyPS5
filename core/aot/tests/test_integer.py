@@ -243,11 +243,10 @@ class IntegerTests(unittest.TestCase):
                 self.assertEqual(result, merge_register(value, ~value & mask, width))
                 self.assertTrue(all(flags.values()))
 
-    def test_division_requires_explicit_qualification(self):
+    def test_division_quotes_and_traps(self):
         ins = self.decode('48f7f1')
         harness = Harness(ins)
-        with self.assertRaisesRegex(Rejected, 'nonzero-no-overflow'):
-            integer.analyze(harness, ins, harness.states[ins.address])
+        self.assertTrue(integer.analyze(harness, ins, harness.states[ins.address]))
         randoms = random.Random(987)
         for width, prefix, opcode in [(8, '', 'f6'), (16, '66', 'f7'), (32, '', 'f7'), (64, '48', 'f7')]:
             run = self.native(prefix + opcode + 'f1', division='nonzero-no-overflow')

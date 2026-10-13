@@ -13,7 +13,10 @@ from elftools.elf.elffile import ELFFile
 import abi
 import vector
 import avx
+import fma
 import integer
+import bmi
+import system
 import effects
 import loop_ranges
 import native_image
@@ -507,9 +510,9 @@ class Function:
                  'stack_origins': original['stack_origins'].copy(), 'stack_values': original['stack_values'].copy(),
                  'image_pointers': original['image_pointers'].copy(), 'import_bindings': original['import_bindings'].copy(), 'callback_memory_unmodified': original['callback_memory_unmodified']}
         op, args = ins.mnemonic, ins.operands
-        if avx.analyze(self, ins, state) or vector.analyze(self, ins, state):
+        if fma.analyze(self, ins, state) or avx.analyze(self, ins, state) or vector.analyze(self, ins, state):
             return state
-        if integer.analyze(self, ins, state):
+        if integer.analyze(self, ins, state) or bmi.analyze(self, ins, state) or system.analyze(self, ins, state):
             for register in ins.regs_access()[1]:
                 name = ins.reg_name(register)
                 if name in ALIASES:
@@ -1280,9 +1283,9 @@ class Function:
             self.lines.append(f'b{address:x}:')
             state = self.states[address]
             terminal = False
-            if avx.lower(self, ins) or vector.lower(self, ins):
+            if fma.lower(self, ins) or avx.lower(self, ins) or vector.lower(self, ins):
                 pass
-            elif integer.lower(self, ins):
+            elif integer.lower(self, ins) or bmi.lower(self, ins) or system.lower(self, ins):
                 pass
             elif op in ('push', 'pop'):
                 reg = self.reg(ins, args[0])[0] if args[0].type == X86_OP_REG else None
@@ -1414,6 +1417,18 @@ def compile_image(image):
     except ValueError as error:
         raise Rejected(str(error)) from error
     lines = [f'target triple = "{image.target_spec["triple"]}"', 'declare void @llvm.trap()', 'declare i8 @llvm.ctpop.i8(i8)']
+    for width in (16, 32, 64):
+        lines.append(f'declare i{width} @llvm.ctpop.i{width}(i{width})')
+        lines.append(f'declare i{width} @llvm.ctlz.i{width}(i{width}, i1)')
+        lines.append(f'declare i{width} @llvm.cttz.i{width}(i{width}, i1)')
+        lines.append(f'declare i{width} @llvm.bswap.i{width}(i{width})')
+    for lanes in (2, 4, 8):
+        lines.append(f'declare <{lanes} x float> @llvm.fma.v{lanes}f32(<{lanes} x float>, <{lanes} x float>, <{lanes} x float>)')
+    for lanes in (2, 4):
+        lines.append(f'declare <{lanes} x double> @llvm.fma.v{lanes}f64(<{lanes} x double>, <{lanes} x double>, <{lanes} x double>)')
+    lines.append('declare float @llvm.fma.f32(float, float, float)')
+    lines.append('declare double @llvm.fma.f64(double, double, double)')
+    lines.append('declare i64 @llvm.readcyclecounter()')
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     dispatch_enabled = bool(image.contracts.get('dispatch'))
