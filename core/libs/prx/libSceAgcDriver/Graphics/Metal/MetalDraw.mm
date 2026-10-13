@@ -543,6 +543,50 @@ BdaAbi::Fault MetalDraw::DrawSynchronously(const Graphics::State& state, const P
     return *Draw(state, draw, shaders, ranges, meshArguments, nullptr, {});
 }
 
+BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& source, const Graphics::ColorTarget& destination,
+    std::span<const NativeGuestMemory::BorrowedRange> ranges) {
+    std::lock_guard<std::recursive_mutex> lock(drawMutex);
+    if (source.samples < 2 || destination.samples != 1 || destination.depth != 1 || source.format != destination.format ||
+        source.extent.width != destination.extent.width || source.extent.height != destination.extent.height) {
+        throw std::invalid_argument("Metal CB resolve needs a multisampled source and a single-sample 2D destination of its format and extent");
+    }
+    auto surface = depthCache->Acquire(source);
+    if (std::find(colorSurfaces.begin(), colorSurfaces.end(), surface) == colorSurfaces.end()) colorSurfaces.push_back(surface);
+    auto resourcesOwner = std::make_shared<MetalShaderResources>(backend, ranges,
+        [this](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
+            return residentTexture(resource, storage, compare);
+        }, hostAliases.get(), ImageCache());
+    auto& resources = *resourcesOwner;
+    if (cpuReadHook) resources.SetCpuReadHook(cpuReadHook);
+    auto texture = resources.Texture(colorSurface(destination), true, false, false, destination.mip);
+    id<MTLTexture> handle = ColorAttachmentView(texture->Texture(), RenderPixelFormat(destination.format));
+    switch (handle.pixelFormat) {
+    case MTLPixelFormatR8Uint: case MTLPixelFormatR16Uint: case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint:
+    case MTLPixelFormatRG16Uint: case MTLPixelFormatRG32Uint: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA32Uint:
+        throw std::invalid_argument("Metal CB resolve of an integer color target is unsupported");
+    default:
+        break;
+    }
+    id<MTLTexture> level = [handle newTextureViewWithPixelFormat:handle.pixelFormat textureType:MTLTextureType2D
+        levels:NSMakeRange(destination.mip, 1) slices:NSMakeRange(0, 1)];
+    if (level == nil) throw std::runtime_error("Metal CB resolve destination view creation failed");
+    // A pass with no draws that loads the samples and stores them resolved.
+    auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
+    renderPass.renderTargetWidth = source.extent.width;
+    renderPass.renderTargetHeight = source.extent.height;
+    renderPass.colorAttachments[0].texture = surface->Texture();
+    renderPass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    renderPass.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+    renderPass.colorAttachments[0].resolveTexture = level;
+    id<MTLCommandBuffer> commands = backend.CommandBuffer();
+    auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
+    if (encoder == nil) throw MetalGpuExecutionError("Metal CB resolve render encoder allocation failed");
+    [encoder endEncoding];
+    resources.EncodeReadbacks(commands);
+    backend.Wait(commands);
+    return CompleteCommittedWork([&] { return resources.Complete(commands); });
+}
+
 std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
     std::span<const NativeGuestMemory::BorrowedRange> ranges,

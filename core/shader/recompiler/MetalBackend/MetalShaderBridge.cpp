@@ -672,11 +672,36 @@ protected:
         return true;
     }
 
+    // SPIRV-Cross widens a control barrier's execution scope to its memory scope, so a SIMD-group
+    // barrier over threadgroup memory (the converter's wave LDS ordering: OpControlBarrier Subgroup,
+    // Workgroup) became threadgroup_barrier. Such barriers sit wherever one guest wave's control flow
+    // is uniform, including EXEC-skipped regions other waves never enter; there a threadgroup barrier
+    // pairs with the other waves' next s_barrier, and they read LDS before this wave wrote it.
+    // simdgroup_barrier orders the SIMD-group's threadgroup memory accesses, which is all it promises.
+    bool EmitSimdGroupControlBarrier(const spirv_cross::Instruction& instruction) {
+        if (instruction.op != spv::OpControlBarrier) return false;
+        const auto model = get_execution_model();
+        if (model != spv::ExecutionModelGLCompute && model != spv::ExecutionModelTaskEXT && model != spv::ExecutionModelMeshEXT) return false;
+        const auto* words = stream(instruction);
+        if (evaluate_constant_u32(words[0]) != spv::ScopeSubgroup || evaluate_constant_u32(words[1]) >= spv::ScopeSubgroup) return false;
+        const auto semantics = evaluate_constant_u32(words[2]);
+        std::string flags;
+        const auto add = [&](const char* flag) { flags += (flags.empty() ? "" : " | ") + std::string(flag); };
+        if (semantics & (spv::MemorySemanticsUniformMemoryMask | spv::MemorySemanticsCrossWorkgroupMemoryMask)) add("mem_flags::mem_device");
+        if (semantics & (spv::MemorySemanticsSubgroupMemoryMask | spv::MemorySemanticsWorkgroupMemoryMask)) add("mem_flags::mem_threadgroup");
+        if (semantics & spv::MemorySemanticsImageMemoryMask) add("mem_flags::mem_texture");
+        statement("simdgroup_barrier(", flags.empty() ? "mem_flags::mem_none" : flags, ");");
+        flush_control_dependent_expressions(current_emitting_block->self);
+        flush_all_active_variables();
+        return true;
+    }
+
     void emit_instruction(const spirv_cross::Instruction& instruction) override {
         if (instruction.op == spv::OpGroupNonUniformShuffle) {
             forced_temporaries.insert(stream(instruction)[1]);
         }
         if (EmitWorkgroupAtomicFence(instruction)) return;
+        if (EmitSimdGroupControlBarrier(instruction)) return;
         if (instruction.op != spv::OpImageQueryLod) {
             CompilerMSL::emit_instruction(instruction);
             return;

@@ -513,6 +513,52 @@ void VertexSubgroupLanes(id<MTLDevice> device, id<MTLCommandQueue> queue) {
     std::cout << "Vertex subgroup lanes: prefix lane equals hardware lane for linear and indexed draws (999 vertices)\n";
 }
 
+// wave64 at two lanes per invocation, workgroup of two waves (128 lanes). Wave 0 (v0 < 64) writes LDS
+// inside an EXEC-skipped region: v_cmp_gt_u32 vcc, 64, v0; s_and_saveexec_b64 s[8:9], vcc;
+// s_cbranch_execz; two ds_write_b32 (the second holds v0 + 1 at v0 * 4); then, joined,
+// s_or_b64 exec, exec, s[8:9]; s_barrier; every lane reads LDS[(v0 & 63) * 4] and stores it.
+// Wave 1 skips the region, so the barriers the converter adds between one wave's LDS accesses must
+// synchronize only that wave's SIMD-group: as threadgroup barriers wave 1 never reaches, they paired
+// with its s_barrier and wave 1 read LDS before wave 0 wrote it (zeros in every second wave).
+constexpr std::array<std::uint32_t, 19> SkippedWaveLdsCode{
+    0x34020082, 0x4a040081, 0x7d8800c0, 0xbe88246a, 0xbf880004, 0xd8340200, 0x00000201, 0xd8340000,
+    0x00000201, 0x88fe087e, 0xbf8a0000, 0x360600bf, 0x34060682, 0xd8d80000, 0x04000003, 0xbf8cc07f,
+    0xe0702000, 0x80010401, 0xbf810000,
+};
+
+void SkippedWaveLdsOrder(id<MTLDevice> device, id<MTLCommandQueue> queue) {
+    constexpr std::uint32_t lanes = 128, sentinel = 0xdeadbeef;
+    std::array<std::uint32_t, lanes * 4> output;
+    output.fill(sentinel);
+    const std::array<std::uint32_t, 8> userData{0x100000, 4u << 16u, 256u, 0x01016facu, 0x200000, 4u << 16u, lanes * 4u, 0x01016facu};
+    const auto shader = Compile(device, SkippedWaveLdsCode, userData, 0, 64, 32, lanes, 256);
+    Require(shader.source.find("simdgroup_barrier(mem_flags::mem_threadgroup)") != std::string::npos,
+            "Wave LDS ordering barrier was not converted to a SIMD-group barrier");
+    MetalComputePipeline pipeline(device, shader);
+    auto outBuffer = [device newBufferWithBytes:output.data() length:sizeof(output) options:MTLResourceStorageModeShared];
+    Require(outBuffer != nil, "Skipped-wave LDS replay buffer allocation failed");
+    std::vector<MetalShaderResourceBinding> bindings;
+    for (const auto& binding : shader.guest.bindings) {
+        Require(binding.role == DescriptorRole::GuestBuffers && binding.guestDescriptor.size() == binding.count * 4u,
+                "Unexpected skipped-wave LDS descriptor binding");
+        MetalShaderResourceBinding native{binding.descriptorSet, binding.binding};
+        for (std::uint32_t i = 0; i < binding.count; ++i) native.buffers.push_back({outBuffer, 0, outBuffer.length});
+        bindings.push_back(std::move(native));
+    }
+    for (std::uint32_t round = 0; round < 8; ++round) {
+        std::memcpy(outBuffer.contents, output.data(), sizeof(output));
+        auto commands = [queue commandBuffer];
+        pipeline.Encode(commands, bindings, MTLSizeMake(shader.threadsPerThreadgroup[0], 1, 1));
+        Wait(commands);
+        const auto* result = static_cast<const std::uint32_t*>(outBuffer.contents);
+        for (std::uint32_t lane = 0; lane < lanes; ++lane) {
+            Require(result[lane * 4] == (lane & 63u) + 1u, "Skipped-wave LDS replay read " + std::to_string(result[lane * 4]) +
+                    " at lane " + std::to_string(lane) + " (wave " + std::to_string(lane / 64u) + "), expected " + std::to_string((lane & 63u) + 1u));
+        }
+    }
+    std::cout << "Existing RDNA wave LDS fixture: a wave that skips the LDS writes reads them after s_barrier passed\n";
+}
+
 void RejectSubgroupMismatch(id<MTLDevice> device) {
     const std::array<std::uint32_t, 8> userData{
         0x100000, 0, 16, 0x31016fac, 0x200000, 0, 256, 0x31016fac};
@@ -544,6 +590,7 @@ int main() {
             BdaReplay(device, queue, false);
             RejectSubgroupMismatch(device);
             VertexSubgroupLanes(device, queue);
+            SkippedWaveLdsOrder(device, queue);
             LdsAtomics64::Replay(device, queue);
             return 0;
         } catch (const std::exception& error) {

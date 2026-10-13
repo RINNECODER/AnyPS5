@@ -171,7 +171,9 @@ if(BUILD_TESTING)
     set_tests_properties(anyps5_metal_image_1d_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_presentation_replay COMMAND anyps5_metal_presentation_replay "${metalUtilityLibrary}")
     set_tests_properties(anyps5_metal_presentation_replay PROPERTIES TIMEOUT 240 RUN_SERIAL TRUE
-        RESOURCE_LOCK appkit_focus LABELS gui)
+        RESOURCE_LOCK appkit_focus LABELS gui
+        # Exit 77 = screen locked / no console session (self-hosted laptop runner): reported as Skipped.
+        SKIP_RETURN_CODE 77)
     add_test(NAME anyps5_metal_pm4_compute_replay COMMAND anyps5_metal_pm4_compute_replay "${metalUtilityLibrary}")
     set_tests_properties(anyps5_metal_pm4_compute_replay PROPERTIES TIMEOUT 120)
     add_test(NAME anyps5_metal_render_state COMMAND anyps5_metal_render_state_tests)
@@ -179,8 +181,8 @@ if(BUILD_TESTING)
     add_test(NAME anyps5_metal_msaa_depth COMMAND anyps5_metal_msaa_depth_tests)
     set_tests_properties(anyps5_metal_msaa_depth PROPERTIES TIMEOUT 120
         ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
-    foreach(colorMode IN ITEMS format_view eqaa msaa_color msaa_read)
-        add_test(NAME anyps5_metal_color_${colorMode} COMMAND anyps5_metal_msaa_color_tests "${colorMode}")
+    foreach(colorMode IN ITEMS format_view eqaa msaa_color msaa_read cb_resolve)
+        add_test(NAME anyps5_metal_color_${colorMode} COMMAND anyps5_metal_msaa_color_tests "${colorMode}" "${metalUtilityLibrary}")
         set_tests_properties(anyps5_metal_color_${colorMode} PROPERTIES TIMEOUT 120
             ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
     endforeach()

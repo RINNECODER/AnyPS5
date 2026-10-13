@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -233,7 +234,63 @@ std::uint32_t ChannelMask(std::size_t channels) {
     }
 }
 
+// ANYPS5_AUDIO_STATS=1: decode counters, reported and reset by the first batch that starts 10 s or more
+// after the previous report, so slow or failing decodes can be told apart from output underruns.
+struct DecodeStats {
+    std::mutex lock;
+    std::chrono::steady_clock::time_point windowStart = std::chrono::steady_clock::now();
+    std::uint64_t batches = 0;
+    std::uint64_t runs = 0;
+    std::uint64_t frames = 0;
+    std::uint64_t invalidData = 0;
+    std::uint64_t notEnoughRoom = 0;
+    std::uint64_t otherErrors = 0;
+    double decodeSeconds = 0.0;
+    double maxBatchSeconds = 0.0;
+};
+
+bool StatsEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_AUDIO_STATS");
+        return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+DecodeStats& g_decodeStats = *new DecodeStats();
+
+void CountResult(std::int32_t result, std::uint32_t frames, bool run) {
+    if (!StatsEnabled()) return;
+    std::lock_guard lock(g_decodeStats.lock);
+    if (run) g_decodeStats.runs++;
+    g_decodeStats.frames += frames;
+    if (result & (AJM_RESULT_INVALID_DATA | AJM_RESULT_CODEC_ERROR)) g_decodeStats.invalidData++;
+    if (result & AJM_RESULT_NOT_ENOUGH_ROOM) g_decodeStats.notEnoughRoom++;
+    if (result & (AJM_RESULT_NOT_INITIALIZED | AJM_RESULT_INVALID_PARAMETER)) g_decodeStats.otherErrors++;
+}
+
+void CountBatch(std::chrono::steady_clock::time_point start) {
+    if (!StatsEnabled()) return;
+    const auto now = std::chrono::steady_clock::now();
+    const auto seconds = std::chrono::duration<double>(now - start).count();
+    std::lock_guard lock(g_decodeStats.lock);
+    auto& stats = g_decodeStats;
+    stats.batches++;
+    stats.decodeSeconds += seconds;
+    stats.maxBatchSeconds = std::max(stats.maxBatchSeconds, seconds);
+    const auto window = std::chrono::duration<double>(now - stats.windowStart).count();
+    if (window < 10.0) return;
+    std::fprintf(stderr, "[audio] ajm %.1f s: batches %llu, decode runs %llu, frames %llu, invalid data %llu, no room %llu, other errors %llu; decode time %.2f s (%.1f%% of the window), longest batch %.1f ms\n",
+        window, static_cast<unsigned long long>(stats.batches), static_cast<unsigned long long>(stats.runs), static_cast<unsigned long long>(stats.frames),
+        static_cast<unsigned long long>(stats.invalidData), static_cast<unsigned long long>(stats.notEnoughRoom), static_cast<unsigned long long>(stats.otherErrors),
+        stats.decodeSeconds, 100.0 * stats.decodeSeconds / window, 1000.0 * stats.maxBatchSeconds);
+    stats.batches = stats.runs = stats.frames = stats.invalidData = stats.notEnoughRoom = stats.otherErrors = 0;
+    stats.decodeSeconds = stats.maxBatchSeconds = 0.0;
+    stats.windowStart = now;
+}
+
 void WriteResult(void* sideband, std::uint64_t size, std::int32_t result) {
+    CountResult(result, 0, false);
     if (!sideband || size < sizeof(SidebandResult)) return;
     const SidebandResult value{result, 0};
     std::memcpy(sideband, &value, sizeof(value));
@@ -600,6 +657,7 @@ SidebandAt9CodecInfo At9CodecInfo(const Instance& instance) {
 }
 
 void WriteRunSideband(const JobHeader& job, const Instance& instance, std::int32_t result, std::size_t consumed, std::size_t produced, std::uint32_t frames, const SidebandFormat& format) {
+    CountResult(result, frames, true);
     auto* sideband = static_cast<std::uint8_t*>(job.sideband);
     std::size_t offset = 0;
     const auto write = [&](const void* value, std::size_t size) {
@@ -1435,6 +1493,7 @@ int APS5_VABI sceAjmBatchStart(uint32_t context, const AjmBatchInfo* info, int p
     (void)context;
     (void)priority;
     if (!info || !batch) return SCE_AJM_ERROR_INVALID_PARAMETER;
+    const auto started = std::chrono::steady_clock::now();
     AJM_TRACE("[ajm] batch start: context %u, priority %d, %llu of %llu buffer bytes used\n", context, priority, static_cast<unsigned long long>(info->offset), static_cast<unsigned long long>(info->size));
     const auto* cursor = static_cast<const std::uint8_t*>(info->p_buffer);
     const auto* end = cursor + info->offset;
@@ -1459,6 +1518,7 @@ int APS5_VABI sceAjmBatchStart(uint32_t context, const AjmBatchInfo* info, int p
         cursor += record.bytes;
     }
     if (error) std::memset(error, 0, sizeof(*error));
+    CountBatch(started);
     const auto id = g_nextBatch.fetch_add(1, std::memory_order_relaxed);
     {
         std::lock_guard lock(g_batchLock);

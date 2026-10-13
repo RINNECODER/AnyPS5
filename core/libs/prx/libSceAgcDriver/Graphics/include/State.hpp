@@ -152,9 +152,11 @@ std::uint32_t ColorWriteMask(const Registers& context);
 std::uint32_t AttachmentSampleCount(std::uint32_t rasterSamples, std::uint32_t depthSamples, std::span<const ColorTarget> colors);
 
 struct ColorMetadataPass {
-    enum class Mode { EliminateFastClear, DccDecompress };
+    enum class Mode { EliminateFastClear, DccDecompress, Resolve };
     Mode mode;
     std::vector<ColorTarget> targets;
+    // A Resolve's multisampled CB0; `targets` then holds its single-sample CB1 destination.
+    std::optional<ColorTarget> source;
 };
 std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState& queue);
 std::string DepthMaintenanceRejection(const QueueState& queue);

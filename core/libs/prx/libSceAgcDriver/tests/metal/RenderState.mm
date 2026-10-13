@@ -489,6 +489,52 @@ void SharedStateDecode(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLi
     std::cout << "PASS: BLEND_BYPASS disables decoded blending (native blend=128,128,0,191 bypass=255,0,0,128); MSAA_ENABLE single-sample at the pixel center renders as single-sample, off-center refused\n";
 }
 
+// CB_COLOR_VIEW SLICE_START..SLICE_MAX over several array slices, without a render target index
+// export, renders into SLICE_START (upstream 1d8749d00, 257ff1e38): the decoded target is the one-slice
+// view's. Layered draws into such a view and views of several 3D slices stay refused.
+void ColorViewSlices() {
+    alignas(65536) static std::array<std::byte, 1u << 20u> sliceMemory{};
+    const auto address = reinterpret_cast<std::uintptr_t>(sliceMemory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{address, sliceMemory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    constexpr auto stride = GuestColorStride;
+    auto guest = GuestDraw(address);
+    auto& cx = guest.context;
+    const auto refused = [&](const char* reason) {
+        try {
+            static_cast<void>(Graphics::DecodeState(guest));
+        } catch (const std::exception& error) {
+            return std::string(error.what()).find(reason) != std::string::npos;
+        }
+        return false;
+    };
+    const auto plain = Graphics::DecodeState(guest).colors.at(0);
+    cx[0x31b + stride] = 35u << 13u;
+    const auto plainRange = Graphics::DecodeState(guest).colors.at(0);
+    Require(plainRange.address == plain.address && plainRange.bytes == plain.bytes, "a view of slices 0..35 of a target with no array slices did not render into its only slice");
+    cx[0x31b + stride] = 1u;
+    Require(refused("ends before its first slice"), "a color view ending before its first slice was not refused");
+    cx[0x3b8 + 3] = 0x09000001; // Two array slices.
+    cx[0x31b + stride] = 1u | (1u << 13u);
+    const auto second = Graphics::DecodeState(guest).colors.at(0);
+    Require(second.address > address && second.bytes == plain.bytes, "a view of slice 1 did not move the target by one slice");
+    cx[0x31b + stride] = 1u << 13u;
+    const auto range = Graphics::DecodeState(guest).colors.at(0);
+    Require(range.address == address && range.bytes == plain.bytes && range.arraySlice == 0, "a view of slices 0..1 did not render into slice 0");
+    cx[0x31b + stride] = 1u | (1u << 13u);
+    Require(Graphics::DecodeState(guest).colors.at(0).address == second.address, "a view of slices 1..1 changed after a range view");
+    cx[0x31b + stride] = 1u << 14u;
+    Require(refused("beyond the array surface"), "a view past the last array slice was not refused");
+    cx[0x31b + stride] = 1u << 13u;
+    cx[0x207] = 1u << 18u;
+    Require(refused("layered draws into a color view of several array slices"), "a layered draw into a view of several slices was not refused");
+    cx[0x207] = 0;
+    cx[0x3b8 + 3] = 0x0a000003; // A 3D target of depth 4.
+    cx[0x31b + stride] = 2u | (3u << 13u);
+    Require(refused("several 3D slices"), "a view of several 3D slices was not refused");
+    std::cout << "PASS: color views of several array slices render into their first slice; layered and 3D ranges refused\n";
+}
+
 // Renders one draw of `state` (rasterSamples > 1) into a multisampled RGBA8 target with the pass's
 // sample positions from ConfigureSamplePositions, and returns the resolved pixels.
 std::array<Pixel, 64> RenderResolved(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library,
@@ -683,6 +729,7 @@ int main() {
             DepthBiasReset(device, queue, library);
             SharedStateDecode(device, queue, library);
             CustomSampleLocations(device, queue, library);
+            ColorViewSlices();
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {
