@@ -130,6 +130,9 @@ public:
     static bool ReadTracking();
     void NotePendingRead(std::uint64_t address, std::size_t bytes, ReadKind kind);
     void NotePendingReads(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges, ReadKind kind);
+    using ReadList = std::vector<std::pair<std::uint64_t, std::uint64_t>>;
+    void NotePendingReadList(std::shared_ptr<const ReadList> ranges, ReadKind kind);
+    static bool ValidReadList(const ReadList& ranges);
     // Whether an unexecuted batch (open, or in flight with its fence unsignaled) reads the range in
     // place. A hit in an in-flight batch whose fence signaled meanwhile is a miss (one status
     // query per hit). `ignoreSignaled` false: every in-flight batch counts, whatever its fence.
@@ -528,6 +531,12 @@ private:
             ReadKind kind;
         };
         std::vector<Read> reads;
+        struct ReadListNote {
+            std::shared_ptr<const ReadList> ranges;
+            std::size_t position;
+            ReadKind kind;
+        };
+        std::vector<ReadListNote> readLists;
         // Submission number (1-based): identifies a batch after its allocation may have been reused.
         std::uint64_t serial = 0;
         bool submitted = false;
@@ -731,8 +740,8 @@ private:
     void finish(std::unique_ptr<Batch> batch, bool wait, int source, bool releaseNow = false);
     void release(Batch& batch) noexcept;
     static bool overlaps(const Batch& batch, std::uint64_t address, std::uint64_t end);
-    // The first noted read of `batch` overlapping [address, end), or null.
-    static const Batch::Read* readOverlap(const Batch& batch, std::uint64_t address, std::uint64_t end);
+    static std::optional<ReadKind> readOverlap(const Batch& batch, std::uint64_t address, std::uint64_t end);
+    static std::vector<std::pair<std::uint64_t, std::uint64_t>> notedReads(const Batch& batch);
     bool signaled(const Batch& batch) const;
     // Rebuilds the lock-free snapshot of pending writes from open, inFlight and finishing.
     void publishPendingWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> additions = {}) const;

@@ -486,6 +486,80 @@ void pendingWriteSnapshotBenchmark(Recorder& recorder) {
     recorder.Sync();
 }
 
+void readListTests(const Device& device, Recorder& recorder) {
+    using Ranges = Recorder::ReadList;
+    Require(Recorder::ValidReadList({{0x1000, 0x2000}, {0x2000, 0x2100}}) && Recorder::ValidReadList({}), "a sorted disjoint list is refused");
+    Require(!Recorder::ValidReadList({{0x2000, 0x2100}, {0x1000, 0x2000}}) && !Recorder::ValidReadList({{0x1000, 0x2001}, {0x2000, 0x2100}}) && !Recorder::ValidReadList({{0x1000, 0x1000}}), "an unsorted, overlapping or empty list is accepted");
+    std::uint64_t seed = 0x9e3779b97f4a7c15ull;
+    const auto next = [&](std::uint64_t bound) {
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        return (seed >> 33u) % bound;
+    };
+    const auto makeList = [&](std::uint64_t base, std::size_t count) {
+        auto list = std::make_shared<Ranges>();
+        auto at = base;
+        for (std::size_t index = 0; index < count; ++index) {
+            at += next(3) * 0x100;
+            const auto bytes = (next(16) + 1) * 0x10;
+            list->emplace_back(at, at + bytes);
+            at += bytes;
+        }
+        return list;
+    };
+    const auto first = makeList(0x100000, 300);
+    const auto second = makeList(0x100000, 120);
+    const Ranges before{{0x100400, 0x100410}, {0x200000, 0x200100}};
+    const Ranges between{{0x100800, 0x100900}, {0x300000, 0x300040}};
+    const Ranges after{{0x100000, 0x180000}};
+    const auto note = [&](bool listed) {
+        recorder.NotePendingReads(before, Kind::DispatchElement);
+        if (listed) recorder.NotePendingReadList(first, Kind::AddressBased);
+        else recorder.NotePendingReads(*first, Kind::AddressBased);
+        recorder.NotePendingReads(between, Kind::GpuCopy);
+        if (listed) {
+            recorder.NotePendingReadList(second, Kind::Indirect);
+            recorder.NotePendingReadList(first, Kind::AddressBased);
+        } else {
+            recorder.NotePendingReads(*second, Kind::Indirect);
+        }
+        recorder.NotePendingReads(after, Kind::CopySource);
+    };
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> queries;
+    for (const auto* list : {first.get(), second.get()}) {
+        for (const auto& [begin, end] : *list) {
+            for (const auto at : {begin - 1, begin, end - 1, end}) queries.emplace_back(at, 1 + next(0x80));
+        }
+    }
+    for (int query = 0; query < 2000; ++query) queries.emplace_back(0xff000 + next(0x300000), 1 + next(0x2000));
+    const auto answers = [&] {
+        std::vector<int> result;
+        for (const auto& [address, bytes] : queries) {
+            const auto described = recorder.DescribePendingRead(address, bytes);
+            result.push_back(recorder.PendingReadOverlaps(address, bytes) ? 1 : 0);
+            result.push_back(described.has_value() ? 10 + static_cast<int>(described->kind) : -1);
+        }
+        recorder.Submit();
+        for (const auto& [address, bytes] : queries) result.push_back(recorder.PendingReadOverlaps(address, bytes, false) ? 1 : 0);
+        recorder.Sync();
+        Require(recorder.Idle() && !recorder.PendingReadOverlaps(0x100000, 0x200000, false), "listed reads outlived their batch");
+        return result;
+    };
+    const auto notedBefore = Recorder::ReadCounts().noted;
+    note(false);
+    const auto plain = answers();
+    const auto notedPlain = Recorder::ReadCounts().noted - notedBefore;
+    note(true);
+    const auto listed = answers();
+    const auto notedListed = Recorder::ReadCounts().noted - notedBefore - notedPlain;
+    Require(plain == listed, "reads noted by reference answer a query differently from the same ranges noted one by one");
+    Require(notedListed == notedPlain + first->size(), "a list's ranges are not counted as noted");
+    for (const auto kind : {Kind::DispatchElement, Kind::AddressBased, Kind::CopySource}) Require(std::count(plain.begin(), plain.end(), 10 + static_cast<int>(kind)) != 0, "the queries miss a reader kind: the comparison proves too little");
+    recorder.NotePendingReadList(std::make_shared<Ranges>(), Kind::AddressBased);
+    recorder.NotePendingReadList(nullptr, Kind::AddressBased);
+    Require(!recorder.Recording(), "an empty list opened a batch");
+    static_cast<void>(device);
+}
+
 void writeSettledTests(const Device& device, Recorder& recorder) {
     Require(recorder.PendingWriteSettled(0x50000, 0x100), "an unwritten range is not settled");
     recorder.NotePendingWrite(0x50000, 0x100);
@@ -5364,6 +5438,11 @@ int main(int argc, char** argv) {
             std::cout << "Completion label storage and ordering tests passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--read-list-only") {
+            readListTests(device, recorder);
+            std::cout << "Read list tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--host-import-unmap-only") {
             gpu.unlock();
             hostImportUnmapTests(device, recorder);
@@ -5399,6 +5478,7 @@ int main(int argc, char** argv) {
         }
 
         readTrackingTests(device, recorder);
+        readListTests(device, recorder);
         writeSettledTests(device, recorder);
         completionCountTests(device, recorder);
         afterRecordedWorkTests(device, recorder);

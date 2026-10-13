@@ -1,4 +1,5 @@
 #include "BdaTests.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestHeap.hpp"
@@ -19,6 +20,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <new>
 #include <string>
 
@@ -225,6 +227,62 @@ void failedImportRemapTests(const Context& context, const BdaTestAccess& access)
     Require(shortened != nullptr && shortened->bytes == piece, "a failed span suppressed an import of its remaining range");
     remove(0);
     ClearHostImports(importing.device);
+    ::operator delete(block, std::align_val_t{piece});
+}
+
+void spaceReadListTests(const Context& context) {
+    if (!AddressSpaceCounters().enabled) return;
+    constexpr std::size_t piece = 65536;
+    void* block = ::operator new(3 * piece, std::align_val_t{piece});
+    std::memset(block, 0x5c, 3 * piece);
+    auto importing = context;
+    importing.hostImportAlignment = piece;
+    auto* guest = static_cast<std::uint8_t*>(block);
+    const auto change = [&](std::uint8_t* range, bool add) {
+        auto* mutation = GuestAllocations::GuestAllocationsBegin_nid_postfix();
+        if (add) GuestAllocations::GuestAllocationsAdd_nid_postfix(mutation, range, piece, true, true, true);
+        else GuestAllocations::GuestAllocationsRemove_nid_postfix(mutation, range);
+        GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
+    };
+    const auto build = [&](const char* step) {
+        GuestBufferMemory leased(importing);
+        leased.AcquireRegistered();
+        leased.Upload(true);
+        const auto split = leased.SplitInPlaceReads();
+        Require(split.has_value() && split->space != nullptr, std::string("an address-based build that took the space whole has no split reads: ") + step);
+        auto joined = *split->space;
+        joined.insert(joined.end(), split->own.begin(), split->own.end());
+        Require(joined == leased.InPlaceReads(), std::string("the split reads differ from InPlaceReads: ") + step);
+        Require(Recorder::ValidReadList(*split->space), std::string("the space's read list is not sorted and disjoint: ") + step);
+        leased.WriteBack();
+        Require(!leased.SplitInPlaceReads().has_value(), "a committed build still offers split reads");
+        return split->space;
+    };
+    const auto lists = [&](const std::shared_ptr<const Recorder::ReadList>& list, const std::uint8_t* range) {
+        const auto begin = reinterpret_cast<std::uintptr_t>(range);
+        return std::any_of(list->begin(), list->end(), [&](const auto& read) { return read.first <= begin && begin + piece <= read.second; });
+    };
+    change(guest, true);
+    change(guest + piece, true);
+    const auto first = build("first build");
+    Require(lists(first, guest) && lists(first, guest + piece) && !lists(first, guest + 2 * piece), "the space's read list does not hold exactly the registered pieces");
+    const auto again = build("unchanged registry");
+    Require(again == first, "a build in an unchanged registry did not share the space's read list");
+    change(guest + 2 * piece, true);
+    const auto added = build("range added");
+    Require(added != first && lists(added, guest + 2 * piece), "a registered range is missing from the read list after the registry changed");
+    change(guest + piece, false);
+    const auto removed = build("range removed");
+    Require(removed != added && !lists(removed, guest + piece) && lists(removed, guest), "a removed range is still in the read list");
+    {
+        GuestBufferMemory plain(importing);
+        plain.AddReadable(reinterpret_cast<std::uintptr_t>(guest), 256);
+        plain.Upload(false);
+        Require(!plain.SplitInPlaceReads().has_value(), "a build without the address space offers split reads");
+        plain.WriteBack();
+    }
+    change(guest, false);
+    change(guest + 2 * piece, false);
     ::operator delete(block, std::align_val_t{piece});
 }
 
@@ -1180,6 +1238,7 @@ void RunBdaResourceTests(const Context& context, const BdaTestAccess& access) {
     importSpanTests(context);
     failedImportRemapTests(context, access);
     spaceWritableWritesTests(context);
+    spaceReadListTests(context);
     importWindowTests(context);
     heapMirrorTests(context, access);
     importedHeapMirrorTests(context, access);
