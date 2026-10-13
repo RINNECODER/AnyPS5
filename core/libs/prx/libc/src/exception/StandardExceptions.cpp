@@ -94,7 +94,6 @@ const char* PlainWhat(const ExceptionObject* object) {
     if (std::strcmp(name, "St12bad_weak_ptr") == 0) return "bad_weak_ptr";
     if (std::strcmp(name, "St19bad_optional_access") == 0) return "bad optional access";
     if (std::strcmp(name, "St18bad_variant_access") == 0) return "bad_variant_access";
-    if (std::strcmp(name, "St19bad_optional_access") == 0) return "bad_optional_access";
     return name;
 }
 const char* MessageWhat(const ExceptionObject* object) { return object->message ? object->message : ""; }
