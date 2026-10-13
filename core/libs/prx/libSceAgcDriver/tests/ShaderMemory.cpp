@@ -957,6 +957,7 @@ void verifyBindlessTable() {
     AgcDriver::ShaderMemory queryMemory({});
     const auto queryCapture = queryMemory.Capture(query);
     const auto queryDirect = static_cast<std::uint32_t>(queryPlan->info.images.size());
+    require(queryDirect == 1u, "bindless: the queried and sampled T# became more than one image");
     const auto queryRoot = tableRoot(*queryCapture, queryDirect);
     require(queryCapture->snapshot.images[queryRoot].dwords == heap[0] && queryCapture->snapshot.images[queryDirect].dwords == heap[1], "bindless: the queried and sampled table slots are wrong");
     query.context.memory = queryMemory.Regions();
