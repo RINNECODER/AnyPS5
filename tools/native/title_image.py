@@ -87,14 +87,41 @@ def main():
     order, frontier = reachable(image, entries, args.limit)
     native = set(order)
     lifecycle = contracts.get('lifecycle', {})
-    keep = native | frontier | {lifecycle.get('init'), lifecycle.get('fini')} - {None}
+    # DT_INIT/DT_FINI run before and after the entry, so they are native even when the bounded
+    # walk does not reach them.
+    native |= {lifecycle.get('init'), lifecycle.get('fini')} - {None}
+    keep = native | frontier
     contracts['functions'] = [spec for spec in image.functions.values() if spec['address'] in keep]
     for spec in contracts['functions']:
-        if spec['address'] not in native:
+        if spec['address'] in native:
+            spec.pop('stub', None)
+        else:
             spec['stub'] = True
+    # DT_INIT/DT_FINI are init-array loops; their body can run past the next declared start (a
+    # spurious interior label), which makes the compiler reject them for escaping the contract.
+    # Extend each lifecycle contract to its decoded body and drop the interior starts it covers.
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    for address in sorted({lifecycle.get('init'), lifecycle.get('fini')} - {None}):
+        spec = next((item for item in contracts['functions'] if item['address'] == address), None)
+        if spec is None:
+            continue
+        end = address
+        for insn in decoder.disasm(image.read(address, min(0x400, 0x44AC1CC - address)), address):
+            end = insn.address + insn.size
+            if insn.mnemonic in ('ret', 'ud2', 'int3'):
+                break
+        if end <= address + spec['size']:
+            continue
+        spec['size'] = end - address
+        dropped = [item['address'] for item in contracts['functions']
+                   if item is not spec and address < item['address'] < end]
+        contracts['functions'] = [item for item in contracts['functions'] if item['address'] not in dropped]
+        print('extended lifecycle 0x%x to 0x%x, dropped %s' % (address, end, [hex(a) for a in dropped]), flush=True)
     contracts['allow_unimplemented'] = True
     contracts['guest_data'] = True
     contracts['guest_base'] = args.guest_base
+    contracts['count_entries'] = True
     # HLE NID binding: point a typed import at the runtime's <name>_nid_postfix symbol when
     # that exists (the arm64 libs define every guest entry point with that suffix).
     if args.nid_symbols:
@@ -103,7 +130,7 @@ def main():
             if not contract.get('stub') and contract['name'] + '_nid_postfix' in known:
                 contract['name'] = contract['name'] + '_nid_postfix'
     image = Image(args.elf, contracts)
-    print(f'native {len(order)} stub {len(frontier)} entries {[hex(e) for e in entries]} ({time.time() - start:.1f}s)', flush=True)
+    print('native %d stub %d entries %s native_has %s (%.1fs)' % (len(order), len(frontier), [hex(e) for e in entries], [hex(a) in [hex(x) for x in native] for a in entries], time.time() - start), flush=True)
     start = time.time()
     ir, report = compile_image(image)
     open(args.output, 'w').write(ir)

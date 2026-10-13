@@ -19,6 +19,7 @@ def main():
     elf, contracts, compile_results, entries, pages, ranges, out_dir = (Path(sys.argv[1]), Path(sys.argv[2]),
                                                                         Path(sys.argv[3]), Path(sys.argv[4]),
                                                                         Path(sys.argv[5]), Path(sys.argv[6]), Path(sys.argv[7]))
+    snapshot = Path(sys.argv[8]) if len(sys.argv) > 8 else None
     out_dir.mkdir(parents=True, exist_ok=True)
     results = json.loads(compile_results.read_text())
     import struct
@@ -34,9 +35,11 @@ def main():
         single = out_dir / f"{address_hex}.compile.json"
         single.write_text(json.dumps({address_hex: results[address_hex]}))
         run_dir = out_dir / address_hex
-        completed = subprocess.run([sys.executable, str(HERE / "dispatch_replay.py"), str(elf), str(contracts),
-                                    str(single), str(run_dir), str(ranges), str(entries), str(pages)],
-                                   capture_output=True, text=True)
+        command = [sys.executable, str(HERE / "dispatch_replay.py"), str(elf), str(contracts),
+                   str(single), str(run_dir), str(ranges), str(entries), str(pages)]
+        if snapshot is not None:
+            command.append(str(snapshot))
+        completed = subprocess.run(command, capture_output=True, text=True)
         report_path = run_dir / "dispatch-replay.json"
         if completed.returncode != 0 or not report_path.exists():
             aggregate["arm64_fault"] += 1

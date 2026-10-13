@@ -10,7 +10,9 @@ CONDITIONS = {
 ALIASES = {'z': 'e', 'nz': 'ne', 'c': 'b', 'nc': 'ae', 'na': 'be', 'nbe': 'a',
            'nb': 'ae', 'nae': 'b', 'ng': 'le', 'nge': 'l', 'nl': 'ge', 'nle': 'g', 'pe': 'p', 'po': 'np'}
 SHIFTS = {'shl', 'sal', 'shr', 'sar'}
-OPERATIONS = {'inc', 'dec', 'imul', 'sbb', 'adc', 'cdqe', 'cdq', 'cwd', 'cqo', 'neg', 'not', 'div', 'idiv', 'blsr', 'bt'} | SHIFTS
+OPERATIONS = {'inc', 'dec', 'imul', 'sbb', 'adc', 'cdqe', 'cdq', 'cwd', 'cqo', 'neg', 'not', 'div', 'idiv', 'blsr', 'bt', 'bts', 'btr', 'btc', 'bsf', 'bsr', 'mul', 'cwde', 'bswap',
+              'shld', 'shrd', 'cld', 'std',
+              'prefetchnta', 'prefetcht0', 'prefetcht1', 'prefetcht2', 'prefetchw'} | SHIFTS
 
 
 def condition(ins):
@@ -63,6 +65,54 @@ def analyze(function, ins, state):
             function.read_operand(ins, state, args[1])
             function.define(ins, state, args[0])
             state['flags'] = {'cf', 'zf', 'sf', 'of'}
+        return True
+    if op in ('bts', 'btr', 'btc'):
+        if len(args) != 2 or args[0].size not in (2, 4, 8) or args[1].type not in (X86_OP_REG, X86_OP_IMM):
+            function.fail(ins, 'unsupported bit set/reset operands')
+        for operand in args:
+            function.read_operand(ins, state, operand)
+        function.define(ins, state, args[0])
+        state['flags'] = {'cf'}
+        return True
+    if op in ('bsf', 'bsr'):
+        if len(args) != 2 or args[0].type != X86_OP_REG or args[0].size != args[1].size:
+            function.fail(ins, 'unsupported bit scan operands')
+        function.read_operand(ins, state, args[0])
+        function.read_operand(ins, state, args[1])
+        function.define(ins, state, args[0])
+        state['flags'] = {'zf'}
+        return True
+    if op in ('cld', 'std') or op.startswith('prefetch'):
+        return True
+    if op == 'cwde':
+        function.check_register(ins, state, 'rax', 16)
+        implicit_define(state, 'rax', 32)
+        return True
+    if op == 'bswap':
+        width = args[0].size * 8
+        if width not in (32, 64):
+            function.fail(ins, 'unsupported byte swap width')
+        function.read_operand(ins, state, args[0])
+        function.define(ins, state, args[0])
+        return True
+    if op in ('shld', 'shrd'):
+        width = args[0].size * 8
+        if width not in (16, 32, 64) or len(args) != 3:
+            function.fail(ins, 'unsupported double shift operands')
+        for operand in args[:2]:
+            function.read_operand(ins, state, operand)
+        if args[2].type == X86_OP_IMM:
+            function.read_operand(ins, state, args[2])
+        function.define(ins, state, args[0])
+        state['flags'] = {'cf', 'of', 'zf', 'sf', 'pf'}
+        return True
+    if op == 'mul' and len(args) == 1:
+        width = args[0].size * 8
+        function.read_operand(ins, state, args[0])
+        function.check_register(ins, state, 'rax', width)
+        implicit_define(state, 'rax', width)
+        implicit_define(state, 'rdx', width)
+        state['flags'] = {'cf', 'of'}
         return True
     if op in ('cdqe', 'cdq', 'cwd', 'cqo'):
         width = {'cdqe': 32, 'cdq': 32, 'cwd': 16, 'cqo': 64}[op]
@@ -261,6 +311,95 @@ def lower(function, ins):
         index = extension(function, index, index_width, width)
         shifted = function.emit(f'lshr i{width} {source}, {index}')
         store_flag(function, 'cf', function.emit(f'trunc i{width} {shifted} to i1'))
+    elif op in ('bts', 'btr', 'btc'):
+        width = args[0].size * 8
+        target = None
+        if args[0].type == X86_OP_MEM:
+            pointer = function.address(ins, args[0])
+            base = function.emit(f'ptrtoint ptr {pointer} to i64')
+            raw = args[1].imm if args[1].type == X86_OP_IMM else function.read(ins, args[1])
+            index = extension(function, raw, args[1].size * 8, 64) if args[1].type != X86_OP_IMM else raw
+            shift = function.emit(f'lshr i64 {index}, {width.bit_length() - 1}')
+            offset = function.emit(f'mul i64 {shift}, {width // 8}')
+            target = function.emit(f'inttoptr i64 {function.emit(f"add i64 {base}, {offset}")} to ptr')
+            source = function.emit(f'load i{width}, ptr {target}, align 1')
+            bit = function.emit(f'trunc i64 {function.emit(f"and i64 {index}, {width - 1}")} to i{width}')
+        else:
+            source = function.read(ins, args[0])
+            if args[1].type == X86_OP_IMM:
+                bit = args[1].imm & (width - 1)
+            else:
+                bit = function.emit(f'and i{args[1].size * 8} {function.read(ins, args[1])}, {width - 1}')
+                bit = extension(function, bit, args[1].size * 8, width)
+        shifted = function.emit(f'lshr i{width} {source}, {bit}')
+        store_flag(function, 'cf', function.emit(f'trunc i{width} {shifted} to i1'))
+        mask = function.emit(f'shl i{width} 1, {bit}')
+        if op == 'bts':
+            result = function.emit(f'or i{width} {source}, {mask}')
+        elif op == 'btr':
+            result = function.emit(f'and i{width} {source}, {function.emit(f"xor i{width} {mask}, -1")}')
+        else:
+            result = function.emit(f'xor i{width} {source}, {mask}')
+        if target is None:
+            function.write(ins, args[0], result)
+        else:
+            function.lines.append(f'  store i{width} {result}, ptr {target}, align 1')
+    elif op in ('bsf', 'bsr'):
+        width = args[0].size * 8
+        source = function.read(ins, args[1])
+        zero = function.emit(f'icmp eq i{width} {source}, 0')
+        if op == 'bsf':
+            count = function.emit(f'call i{width} @llvm.cttz.i{width}(i{width} {source}, i1 false)')
+        else:
+            leading = function.emit(f'call i{width} @llvm.ctlz.i{width}(i{width} {source}, i1 false)')
+            count = function.emit(f'sub i{width} {width - 1}, {leading}')
+        previous = function.read(ins, args[0])
+        result = function.emit(f'select i1 {zero}, i{width} {previous}, i{width} {count}')
+        store_flag(function, 'zf', zero)
+        function.write(ins, args[0], result)
+    elif op in ('cld', 'std') or op.startswith('prefetch'):
+        return True
+    elif op == 'cwde':
+        function.store('rax', function.emit(f'sext i16 {function.load("rax", 16)} to i32'), 32)
+    elif op == 'bswap':
+        width = args[0].size * 8
+        function.write(ins, args[0], function.emit(f'call i{width} @llvm.bswap.i{width}(i{width} {function.read(ins, args[0], width)})'))
+    elif op in ('shld', 'shrd'):
+        width = args[0].size * 8
+        mask = width - 1
+        value = function.read(ins, args[0])
+        source = function.read(ins, args[1])
+        if args[2].type == X86_OP_IMM:
+            count = args[2].imm & mask
+        else:
+            count = function.emit(f'and i{args[2].size * 8} {function.read(ins, args[2])}, {mask}')
+            count = extension(function, count, args[2].size * 8, width)
+        zero = function.emit(f'icmp eq i{width} {count}, 0')
+        inverse = function.emit(f'sub i{width} {width}, {count}')
+        if op == 'shld':
+            shifted = function.emit(f'shl i{width} {value}, {count}')
+            fill = function.emit(f'lshr i{width} {source}, {inverse}')
+            carry = function.emit(f'lshr i{width} {value}, {inverse}')
+        else:
+            shifted = function.emit(f'lshr i{width} {value}, {count}')
+            fill = function.emit(f'shl i{width} {source}, {inverse}')
+            carry = function.emit(f'lshr i{width} {value}, {function.emit(f"sub i{width} {count}, 1")}')
+        result = function.emit(f'select i1 {zero}, i{width} {value}, i{width} {function.emit(f"or i{width} {shifted}, {fill}")}')
+        store_flag(function, 'cf', function.emit(f'trunc i{width} {carry} to i1'))
+        store_flag(function, 'of', 'false')
+        function.write(ins, args[0], result)
+    elif op == 'mul':
+        width = args[0].size * 8
+        left = extension(function, function.load('rax', width), width, width * 2)
+        right = extension(function, function.read(ins, args[0], width), width, width * 2)
+        product = function.emit(f'mul i{width * 2} {left}, {right}')
+        low = function.emit(f'trunc i{width * 2} {product} to i{width}')
+        high = function.emit(f'trunc i{width * 2} {function.emit(f"lshr i{width * 2} {product}, {width}")} to i{width}')
+        overflow = function.emit(f'icmp ne i{width} {high}, 0')
+        store_flag(function, 'cf', overflow)
+        store_flag(function, 'of', overflow)
+        function.store('rax', low, width)
+        function.store('rdx', high, width)
     elif op in ('cdqe', 'cdq', 'cwd', 'cqo'):
         width = {'cdqe': 32, 'cdq': 32, 'cwd': 16, 'cqo': 64}[op]
         value = function.load('rax', width)

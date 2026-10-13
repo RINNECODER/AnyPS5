@@ -6,7 +6,7 @@ BITWISE = {'vpand': 'and', 'vpor': 'or', 'vpxor': 'xor', 'vxorps': 'xor', 'vxorp
            'vandps': 'and', 'vandpd': 'and', 'vorps': 'or', 'vorpd': 'or'}
 ANDNOT = {'vpandn', 'vandnps', 'vandnpd'}
 SCALAR_MOVES = {'vmovss', 'vmovsd'}
-BROADCASTS = {'vbroadcastss', 'vbroadcastsd', 'vpbroadcastq'}
+BROADCASTS = {'vbroadcastss': 32, 'vbroadcastsd': 64, 'vpbroadcastb': 8, 'vpbroadcastw': 16, 'vpbroadcastq': 64}
 INT_CONVERSIONS = {'vcvtsi2ss': (32, 'ss'), 'vcvtsi2sd': (64, 'sd'),
                    'vcvtss2sd': (32, 'extend'), 'vcvtsd2ss': (64, 'truncate')}
 PACKED_FLOAT = {'vaddps': ('fadd', 32), 'vsubps': ('fsub', 32), 'vmulps': ('fmul', 32), 'vdivps': ('fdiv', 32),
@@ -35,18 +35,26 @@ SHIFTS_IMM = {'vpsllw': ('shl', 16), 'vpslld': ('shl', 32), 'vpsllq': ('shl', 64
 SHIFTS_VAR = {'vpsllvd': ('shl', 32), 'vpsllvq': ('shl', 64), 'vpsrlvd': ('lshr', 32),
               'vpsrlvq': ('lshr', 64), 'vpsravd': ('ashr', 32)}
 BYTE_SHIFTS = {'vpslldq': 'shl', 'vpsrldq': 'lshr'}
-PACKS = {'vpackuswb': (16, 8, False), 'vpacksswb': (16, 8, True)}
+PACKS = {'vpackuswb': (16, 8, False), 'vpacksswb': (16, 8, True),
+         'vpackssdw': (32, 16, True), 'vpackusdw': (32, 16, False)}
+SHUF_WORDS = {'vpshuflw', 'vpshufhw'}
+MUL64 = {'vpmuludq': False, 'vpmuldq': True}
 EXTENDS = {'vpmovsxbw': (8, 16, True), 'vpmovzxbw': (8, 16, False),
            'vpmovsxwd': (16, 32, True), 'vpmovzxwd': (16, 32, False),
-           'vpmovsxdq': (32, 64, True), 'vpmovzxdq': (32, 64, False)}
+           'vpmovsxdq': (32, 64, True), 'vpmovzxdq': (32, 64, False),
+           'vpmovsxbd': (8, 32, True), 'vpmovzxbd': (8, 32, False),
+           'vpmovsxwq': (16, 64, True), 'vpmovzxwq': (16, 64, False),
+           'vpmovsxbq': (8, 64, True), 'vpmovzxbq': (8, 64, False)}
 ABS = {'vpabsb': 8, 'vpabsw': 16, 'vpabsd': 32}
 PTEST = {'vptest'}
 BLENDS_IMM = {'vblendps': 32, 'vblendpd': 64, 'vpblendw': 16, 'vpblendd': 32}
 BLENDS_VAR = {'vblendvps': 32, 'vblendvpd': 64, 'vpblendvb': 8}
 PERMIL_IMM = {'vpermilps': 32, 'vpermilpd': 64}
-PERMS = {'vperm2f128', 'vinsertf128', 'vextractf128', 'vpermq', 'vpermd', 'vpermpd', 'vpermps'}
+PERMS = {'vperm2f128', 'vperm2i128', 'vinsertf128', 'vextractf128', 'vpermq', 'vpermd', 'vpermpd', 'vpermps'}
 DUPS = {'vmovshdup': 32, 'vmovsldup': 32, 'vmovddup': 64}
 BROADCAST128 = {'vbroadcastf128', 'vbroadcasti128'}
+ADDSUB = {'vaddsubps': 32, 'vaddsubpd': 64}
+MADD = {'vpmaddwd'}
 CMP_PREDICATES = ['oeq', 'olt', 'ole', 'uno', 'une', 'uge', 'ugt', 'ord',
                   'ueq', 'ult', 'ule', 'false', 'one', 'oge', 'ogt', 'true',
                   'oeq', 'olt', 'ole', 'uno', 'une', 'uge', 'ugt', 'ord',
@@ -59,14 +67,15 @@ CMP = {f'vcmp{suffix}{kind}': (lane, index)
        for index, suffix in enumerate(CMP_SUFFIXES)
        for kind, lane in (('ps', 32), ('pd', 64), ('ss', 32), ('sd', 64))}
 FLAGS_COMPARE = {'vucomiss': 32, 'vucomisd': 64, 'vcomiss': 32, 'vcomisd': 64}
-MOVMSK = {'vmovmskps': 32, 'vmovmskpd': 64, 'movmskps': 32, 'movmskpd': 64, 'pmovmskb': 8}
+MOVMSK = {'vmovmskps': 32, 'vmovmskpd': 64, 'movmskps': 32, 'movmskpd': 64,
+          'pmovmskb': 8, 'vpmovmskb': 8}
 LEGACY = {'movmskps', 'movmskpd', 'pmovmskb'}
 VTEST = {'vtestps': 32, 'vtestpd': 64}
 ROUNDS = {'vroundps': 32, 'vroundpd': 64, 'vroundss': 32, 'vroundsd': 64}
 SQRT = {'vsqrtps': 32, 'vsqrtpd': 64, 'vsqrtss': 32, 'vsqrtsd': 64}
 RECIP = {'vrcpps': 32, 'vrcpss': 32, 'vrsqrtps': 32, 'vrsqrtss': 32}
 CVT_ROUND = {'vcvtps2dq': 32, 'vcvttps2dq': 32, 'vcvtpd2dq': 64, 'vcvttpd2dq': 64,
-             'vcvtdq2ps': 32, 'vcvtpd2ps': 64, 'vcvtps2pd': 32}
+             'vcvtdq2ps': 32, 'vcvtpd2ps': 64, 'vcvtps2pd': 32, 'vcvtdq2pd': 32}
 TO_INT = {'vcvttss2si': 32, 'vcvttsd2si': 64, 'vcvtss2si': 32, 'vcvtsd2si': 64}
 EXTRACT_ELEM = {'vpextrb': 8, 'vpextrw': 16, 'vpextrd': 32, 'vpextrq': 64, 'vextractps': 32}
 INSERT_ELEM = {'vpinsrb': 8, 'vpinsrw': 16, 'vpinsrd': 32, 'vpinsrq': 64, 'vinsertps': 32}
@@ -76,7 +85,7 @@ PSHUFB = {'vpshufb'}
 PALIGNR = {'vpalignr'}
 HALF = {'vcvtph2ps', 'vcvtps2ph'}
 LEGACY_MOVES = {'vmovlps', 'vmovhps', 'vmovlpd', 'vmovhpd'}
-SUPPORTED = (MOVES | set(BITWISE) | ANDNOT | SCALAR_MOVES | BROADCASTS
+SUPPORTED = (MOVES | set(BITWISE) | ANDNOT | SCALAR_MOVES | set(BROADCASTS)
              | {'vmovd', 'vmovq', 'vpbroadcastd', 'vpshufd', 'vpsllvd', 'vzeroupper'}
              | set(INT_CONVERSIONS) | set(PACKED_FLOAT) | set(PACKED_MINMAX) | set(SCALAR_FLOAT)
              | set(SCALAR_MINMAX) | set(PACKED_INT) | set(PACKED_CMPEQ) | set(PACKED_CMPGT)
@@ -86,7 +95,8 @@ SUPPORTED = (MOVES | set(BITWISE) | ANDNOT | SCALAR_MOVES | BROADCASTS
              | set(FLAGS_COMPARE) | set(MOVMSK) | set(VTEST) | set(ROUNDS) | set(SQRT)
              | set(RECIP) | set(CVT_ROUND) | set(TO_INT) | set(EXTRACT_ELEM) | set(INSERT_ELEM)
              | EXTRACT128 | INSERT128 | set(PSHUFB) | set(PALIGNR) | HALF | set(LEGACY_MOVES)
-             | set(DUPS) | BROADCAST128 | set(CMP))
+             | set(DUPS) | BROADCAST128 | set(CMP) | set(SHUF_WORDS) | set(MUL64)
+             | set(ADDSUB) | set(MADD))
 MASK128 = (1 << 128) - 1
 MASK256 = (1 << 256) - 1
 
@@ -262,7 +272,7 @@ def analyze(function, ins, state):
             known = (1 << width) - 1
         _define(function, ins, state, args[0], known, width)
     elif op in BROADCASTS:
-        lane = 64 if op in ('vbroadcastsd', 'vpbroadcastq') else 32
+        lane = BROADCASTS[op]
         scalar = _known(function, ins, state, args[1], lane)
         known = sum(scalar << offset for offset in range(0, bits, lane))
         _define(function, ins, state, args[0], known, bits)
@@ -309,7 +319,8 @@ def analyze(function, ins, state):
     elif op in PACKS:
         _define(function, ins, state, args[0], _binary_mask(function, ins, state, bits), bits)
     elif op in EXTENDS:
-        source_bits = bits // 2
+        source_width, target_width, _signed = EXTENDS[op]
+        source_bits = (bits // target_width) * source_width
         _require(function, ins, state, args[1], source_bits)
         _define(function, ins, state, args[0], (1 << bits) - 1, bits)
     elif op in ABS:
@@ -391,6 +402,17 @@ def analyze(function, ins, state):
                 _known(function, ins, state, operand, operand.size * 8)
         _define(function, ins, state, args[0], (1 << bits) - 1, bits)
     elif op in PSHUFB or op in PALIGNR:
+        _known(function, ins, state, args[1], bits)
+        _known(function, ins, state, args[2], bits)
+        _define(function, ins, state, args[0], (1 << bits) - 1, bits)
+    elif op in SHUF_WORDS:
+        _known(function, ins, state, args[1], bits)
+        _define(function, ins, state, args[0], (1 << bits) - 1, bits)
+    elif op in MUL64:
+        _known(function, ins, state, args[1], bits)
+        _known(function, ins, state, args[2], bits)
+        _define(function, ins, state, args[0], (1 << bits) - 1, bits)
+    elif op in ADDSUB or op in MADD:
         _known(function, ins, state, args[1], bits)
         _known(function, ins, state, args[2], bits)
         _define(function, ins, state, args[0], (1 << bits) - 1, bits)
@@ -586,7 +608,7 @@ def lower(function, ins):
         width = 32 if op == 'vmovd' else 64
         _write(function, ins, args[0], read(args[1], width), width)
     elif op in BROADCASTS:
-        lane = 64 if op in ('vbroadcastsd', 'vpbroadcastq') else 32
+        lane = BROADCASTS[op]
         count = bits // lane
         kind = f'<{count} x i{lane}>'
         scalar = read(args[1], lane)
@@ -813,8 +835,8 @@ def lower(function, ins):
         _write(function, ins, args[0], function.emit(f'bitcast <{total} x i{target_width}> {result} to i{bits}'), bits)
     elif op in EXTENDS:
         source_width, target_width, signed = EXTENDS[op]
-        source_bits = bits // 2
-        count = source_bits // source_width
+        count = bits // target_width
+        source_bits = count * source_width
         source = f'<{count} x i{source_width}>'
         target = f'<{count} x i{target_width}>'
         value = function.emit(f'bitcast i{source_bits} {read(args[1], source_bits)} to {source}')
@@ -1052,7 +1074,7 @@ def _lower_perm(function, ins, bits):
         insert = function.emit(f'shl i256 {insert}, {args[3].imm * 128}')
         keep = function.emit(f'and i256 {base}, {((1 << 256) - 1) ^ (MASK128 << (args[3].imm * 128))}')
         _write(function, ins, args[0], function.emit(f'or i256 {keep}, {insert}'), 256)
-    elif op == 'vperm2f128':
+    elif op in ('vperm2f128', 'vperm2i128'):
         control = args[3].imm
         left = read(args[1], 256)
         right = read(args[2], 256)
