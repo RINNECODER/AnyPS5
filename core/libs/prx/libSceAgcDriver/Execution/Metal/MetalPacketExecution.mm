@@ -406,7 +406,10 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
         if (fault.reason == BdaAbi::FaultReason::Unmapped &&
             draw->HostAliases().AdmitGuest(ranges, fault.address, std::max<std::uint32_t>(fault.bytes, 1u))) {
             ++deferredReruns;
-            return synchronous();
+            // The rerun runs inside a drain, often from a later packet: a failure that would
+            // have skipped this work skips it here instead of stopping the drain (which would
+            // drop the label stores and retirements queued behind it).
+            return Tolerate(SkippedDispatch, synchronous);
         }
         checkGpuFault(fault);
     };
@@ -562,7 +565,10 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             if (fault.reason == BdaAbi::FaultReason::Unmapped &&
                 draw->HostAliases().AdmitGuest(ranges, fault.address, std::max<std::uint32_t>(fault.bytes, 1u))) {
                 ++deferredReruns;
-                return synchronous();
+                // The rerun runs inside a drain, often from a later packet: a failure that would
+                // have skipped this work skips it here instead of stopping the drain (which would
+                // drop the label stores and retirements queued behind it).
+                return Tolerate(SkippedDraw, synchronous);
             }
             checkGpuFault(fault);
         };
