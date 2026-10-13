@@ -269,6 +269,8 @@ MetalBufferBinding MetalShaderResources::mirror(std::uint64_t address, std::size
         if (offset >= buffer.length || bytes > buffer.length - offset) throw std::runtime_error("Metal draw mirror extent is invalid");
         return {buffer, static_cast<NSUInteger>(offset), bytes};
     }
+    // Bytes of adjacent guest mappings that alias consecutive host pages: one alias over them.
+    if (const auto bridged = snapshot.Bridge(address, bytes, aliases)) return {bridged->first, static_cast<NSUInteger>(bridged->second), bytes};
     // Borrowed bytes outside the alias working set: admit them and let the caller set up again.
     if (aliases != nullptr && aliases->AdmitGuest(borrowedRanges, address, bytes)) {
         throw MetalWorkingSetMiss("Metal draw guest range is outside the alias working set");

@@ -35,6 +35,8 @@ private:
     std::vector<BorrowedRange> previous;
 };
 
+// The host bytes of guest [address, address + bytes). The range may cross adjacent borrowed spans
+// whose host bytes are adjacent too; otherwise it must lie in one span.
 std::span<std::byte> ContiguousBorrowedRange(std::uint64_t address, std::size_t bytes, bool writable = false);
 std::size_t ReadableBorrowedBytes(std::uint64_t address, std::size_t maxBytes);
 

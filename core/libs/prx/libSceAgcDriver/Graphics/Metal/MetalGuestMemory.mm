@@ -84,11 +84,18 @@ void MetalGuestHostAliases::Invalidate(const void* host, std::size_t bytes) {
     const auto end = bytes > std::numeric_limits<std::uintptr_t>::max() - begin ? std::numeric_limits<std::uintptr_t>::max() : begin + bytes;
     std::lock_guard lock(mutex);
     std::erase_if(entries, [&](const Entry& entry) { return entry.begin < end && begin < entry.end; });
+    std::erase_if(bridges, [&](const Entry& entry) { return entry.begin < end && begin < entry.end; });
 }
 
 void MetalGuestHostAliases::Clear() {
     std::lock_guard lock(mutex);
     entries.clear();
+    bridges.clear();
+}
+
+std::size_t MetalGuestHostAliases::BridgeCount() const {
+    std::lock_guard lock(mutex);
+    return bridges.size();
 }
 
 std::size_t MetalGuestHostAliases::Count() const {
@@ -189,17 +196,39 @@ id<MTLBuffer> MetalGuestHostAliases::alias(std::uintptr_t begin, std::uintptr_t 
         entry.epoch = now;
         return entry.buffer;
     }
-    id<MTLBuffer> buffer = nil;
-    if (last - first <= device.maxBufferLength && !fileBacked(first, last)) {
-        buffer = [device newBufferWithBytesNoCopy:reinterpret_cast<void*>(first) length:last - first
-                                          options:MTLResourceStorageModeShared deallocator:nil];
-        if (buffer != nil && (buffer.contents != reinterpret_cast<void*>(first) || buffer.gpuAddress == 0 ||
-                                 buffer.gpuAddress > std::numeric_limits<std::uint64_t>::max() - buffer.length)) {
-            buffer = nil;
-        }
-    }
+    id<MTLBuffer> buffer = newAlias(first, last);
     // A refusal is remembered too, so an unaliasable component is not retried on every capture.
     entries.push_back({first, last, buffer, now});
+    return buffer;
+}
+
+id<MTLBuffer> MetalGuestHostAliases::newAlias(std::uintptr_t first, std::uintptr_t last) const {
+    if (last - first > device.maxBufferLength || fileBacked(first, last)) return nil;
+    id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:reinterpret_cast<void*>(first) length:last - first
+                                                   options:MTLResourceStorageModeShared deallocator:nil];
+    if (buffer != nil && (buffer.contents != reinterpret_cast<void*>(first) || buffer.gpuAddress == 0 ||
+                             buffer.gpuAddress > std::numeric_limits<std::uint64_t>::max() - buffer.length)) {
+        return nil;
+    }
+    return buffer;
+}
+
+id<MTLBuffer> MetalGuestHostAliases::bridge(std::uintptr_t begin, std::uintptr_t end) {
+    if (end <= begin || end > std::numeric_limits<std::uintptr_t>::max() - (pageBytes - 1)) return nil;
+    const auto first = begin & ~(pageBytes - 1);
+    const auto last = (end + pageBytes - 1) & ~(pageBytes - 1);
+    std::lock_guard lock(mutex);
+    const auto use = ++bridgeUses;
+    for (auto& entry : bridges) {
+        if (entry.begin > first || entry.end < last) continue;
+        entry.epoch = use;
+        return entry.buffer;
+    }
+    if (bridges.size() >= MaxBridges) {
+        bridges.erase(std::min_element(bridges.begin(), bridges.end(), [](const Entry& a, const Entry& b) { return a.epoch < b.epoch; }));
+    }
+    id<MTLBuffer> buffer = newAlias(first, last);
+    bridges.push_back({first, last, buffer, use});
     return buffer;
 }
 
@@ -387,6 +416,36 @@ void MetalGuestMemory::DispatchSnapshot::DeclareResources(id<MTLComputeCommandEn
         const bool writable = std::any_of(mirrors.begin(), mirrors.end(), [&mirror](const Mirror& alias) { return alias.buffer == mirror.buffer && alias.range.writable; });
         [encoder useResource:mirror.buffer usage:MTLResourceUsageRead | (writable ? MTLResourceUsageWrite : 0)];
     }
+}
+
+std::optional<std::pair<id<MTLBuffer>, std::size_t>> MetalGuestMemory::DispatchSnapshot::Bridge(std::uint64_t address, std::uint64_t bytes,
+    MetalGuestHostAliases* aliases) const {
+    if (aliases == nullptr || aliases->device != device || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return std::nullopt;
+    const auto end = address + bytes;
+    // Mirrors are in guest address order (one per part of each sorted, disjoint guest range).
+    auto mirror = std::upper_bound(mirrors.begin(), mirrors.end(), address,
+        [](std::uint64_t value, const Mirror& candidate) { return value < candidate.range.begin; });
+    if (mirror == mirrors.begin()) return std::nullopt;
+    --mirror;
+    if (address - mirror->range.begin >= mirror->range.borrowedHost.size()) return std::nullopt;
+    const auto hostBegin = reinterpret_cast<std::uintptr_t>(mirror->range.borrowedHost.data()) + (address - mirror->range.begin);
+    auto guest = mirror->range.begin;
+    auto host = reinterpret_cast<std::uintptr_t>(mirror->range.borrowedHost.data());
+    // Only aliased mirrors: a copied one holds bytes the bridge would not see (or write) in place.
+    for (; guest < end; ++mirror) {
+        if (mirror == mirrors.end() || !mirror->aliased || mirror->range.begin != guest ||
+            reinterpret_cast<std::uintptr_t>(mirror->range.borrowedHost.data()) != host) {
+            return std::nullopt;
+        }
+        guest += mirror->range.borrowedHost.size();
+        host += mirror->range.borrowedHost.size();
+    }
+    id<MTLBuffer> buffer = aliases->bridge(hostBegin, hostBegin + bytes);
+    if (buffer == nil) return std::nullopt;
+    const auto offset = static_cast<std::size_t>(hostBegin - reinterpret_cast<std::uintptr_t>(buffer.contents));
+    // Like a component alias, the bridge stands in only where GPU and guest addresses agree modulo 16.
+    if (((buffer.gpuAddress + offset - address) & (addressAlignment - 1)) != 0 || offset + bytes > buffer.length) return std::nullopt;
+    return std::pair{buffer, offset};
 }
 
 Abi::Fault MetalGuestMemory::DispatchSnapshot::CompleteAndCopyDirtyPagesToBorrowedHost(id<MTLCommandBuffer> completedCommands) {
