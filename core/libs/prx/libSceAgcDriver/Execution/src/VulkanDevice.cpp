@@ -538,13 +538,19 @@ struct VulkanDevice::State {
 
     void WriteFrameDump(const PresentSlot& slot) {
         require(slot.dumpBuffer != nullptr, "frame dump was not recorded");
-        std::vector<std::byte> full(slot.dumpBuffer->Bytes().begin(), slot.dumpBuffer->Bytes().end());
+        const auto full = slot.dumpBuffer->Bytes();
         const auto index = slot.dumpIndex;
-        const auto width = slot.dumpWidth;
-        const auto height = slot.dumpHeight;
+        const auto scale = slot.dumpScale;
+        require(scale != 0 && full.size() == static_cast<std::size_t>(slot.dumpWidth) * slot.dumpHeight * 4, "invalid frame dump pixels");
+        const auto width = (slot.dumpWidth + scale - 1) / scale;
+        const auto height = (slot.dumpHeight + scale - 1) / scale;
+        std::vector<std::byte> pixels(static_cast<std::size_t>(width) * height * 4);
+        for (std::uint32_t y = 0; y < height; ++y) {
+            for (std::uint32_t x = 0; x < width; ++x) std::memcpy(pixels.data() + (static_cast<std::size_t>(y) * width + x) * 4, full.data() + (static_cast<std::size_t>(y) * scale * slot.dumpWidth + static_cast<std::size_t>(x) * scale) * 4, 4);
+        }
         static const auto start = std::chrono::steady_clock::now();
-        std::fprintf(stderr, "[gpu] frame_%03d.bmp: %ux%u display read back on the GPU at %.1f s\n", index, width, height, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
-        dumpWriter.Enqueue(index, width, height, slot.dumpScale, std::move(full));
+        std::fprintf(stderr, "[gpu] frame_%03d.bmp: %ux%u display read back on the GPU at %.1f s\n", index, slot.dumpWidth, slot.dumpHeight, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        dumpWriter.Enqueue(index, width, height, 1, std::move(pixels));
     }
 
     // Blocks on the fence, or polls it every 50 us with APS5_PRESENT_POLL_FENCE=1 (the difference
