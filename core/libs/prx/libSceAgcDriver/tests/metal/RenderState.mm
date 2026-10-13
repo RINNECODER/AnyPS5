@@ -1,7 +1,9 @@
 #import <Foundation/Foundation.h>
 #include "MetalRenderState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 
 #include <algorithm>
 #include <array>
@@ -535,6 +537,103 @@ void ColorViewSlices() {
     std::cout << "PASS: color views of several array slices render into their first slice; layered and 3D ranges refused\n";
 }
 
+// Upstream 04138f50a: clip and cull distance enables reach State::paClVsOutCntl (the Metal draw passes
+// them to the vertex program); more than eight distances stay refused.
+void ClipCullDecode() {
+    alignas(65536) static std::array<std::byte, 1u << 20u> memory{};
+    const auto address = reinterpret_cast<std::uintptr_t>(memory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{address, memory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    auto guest = GuestDraw(address);
+    const auto baseline = Graphics::DrawRejection(guest, false);
+    guest.context[0x207] = 0x0040000fu;
+    Require(Graphics::DecodeState(guest).paClVsOutCntl == 0x0040000fu, "four clip distances were not decoded");
+    Require(Graphics::DrawRejection(guest, false) == baseline, "the precheck rejected four clip distances");
+    guest.context[0x207] = 0x004001ffu;
+    bool refused = false;
+    try {
+        static_cast<void>(Graphics::DecodeState(guest));
+    } catch (const std::exception& error) {
+        refused = std::string(error.what()).find("more than eight clip and cull distances") != std::string::npos;
+    }
+    Require(refused && Graphics::DrawRejection(guest, false).find("more than eight clip and cull distances") != std::string::npos, "nine clip and cull distances were not refused");
+    std::cout << "PASS: clip and cull distance enables decode; more than eight are refused\n";
+}
+
+// Upstream 44c4b3f8b: PA_SC_AA_CONFIG COVERED_CENTROID_IS_CENTER is admitted while the pixel program
+// reads no centroid input, and refused (decode and precheck) when it does.
+void CoveredCentroid() {
+    alignas(65536) static std::array<std::byte, 1u << 20u> memory{};
+    const auto address = reinterpret_cast<std::uintptr_t>(memory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{address, memory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    auto guest = GuestDraw(address);
+    guest.shader[0x008] = 0x1000;
+    guest.context[0x1b3] = 2u;
+    guest.context[0x1b4] = 2u;
+    const auto baseline = Graphics::DrawRejection(guest, false);
+    Require(baseline.find("COVERED_CENTROID") == std::string::npos, "the base draw already mentions covered-centroid mode");
+    guest.context[0x2f8] = 1u << 29u;
+    Require(Graphics::DecodeState(guest).rasterSamples == 1 && Graphics::DrawRejection(guest, false) == baseline, "covered-centroid mode without centroid inputs was refused");
+    const auto refused = [&] {
+        try {
+            static_cast<void>(Graphics::DecodeState(guest));
+        } catch (const std::exception& error) {
+            return std::string(error.what()).find("COVERED_CENTROID_IS_CENTER") != std::string::npos &&
+                Graphics::DrawRejection(guest, false).find("COVERED_CENTROID_IS_CENTER") != std::string::npos;
+        }
+        return false;
+    };
+    for (const auto centroid : {4u, 64u}) {
+        guest.context[0x1b3] = 2u | centroid;
+        guest.context[0x1b4] = 2u | centroid;
+        Require(refused(), "covered-centroid mode with an active centroid input was not refused");
+        guest.context[0x1b4] = 2u;
+        Require(Graphics::DrawRejection(guest, false) == baseline, "an unaddressed centroid input refused covered-centroid mode");
+    }
+    guest.context[0x1b3] = 2u;
+    guest.context.erase(0x1b4);
+    Require(refused(), "covered-centroid mode with unspecified centroid inputs was not refused");
+    std::cout << "PASS: covered-centroid mode is admitted without centroid inputs and refused with them\n";
+}
+
+// Upstream 320bd37c9: DB_SHADER_CONTROL.DEPTH_BEFORE_SHADER and Z_ORDER 3 test depth before the pixel
+// shader. On Metal a depth-exporting shader stays late ([[depth]] is not allowed with
+// [[early_fragment_tests]]).
+void EarlyDepthDecode() {
+    Registers cx;
+    cx[0x1b3] = 2u;
+    cx[0x1b4] = 2u;
+    cx[0x1b6] = 0u;
+    cx[0x1c5] = 0u;
+    std::array<std::uint8_t, 8> exports{};
+    const auto early = [&](std::uint32_t shaderControl) {
+        cx[0x203] = shaderControl;
+        return Graphics::DecodePixelStageInfo(cx, exports).earlyZ;
+    };
+    constexpr std::uint32_t depthExport = 1u, kill = 1u << 6u, maskExport = 1u << 8u, depthBeforeShader = 1u << 12u;
+    Require(!early(0) && early(1u << 4u) && early(3u << 4u) && !early(2u << 4u), "Z_ORDER 1 and 3 must be early, 0 and 2 late");
+    Require(!early((1u << 4u) | kill) && !early((3u << 4u) | maskExport), "a killing or mask-exporting shader without DEPTH_BEFORE_SHADER must stay late");
+    Require(early(depthBeforeShader) && early(depthBeforeShader | kill) && early(depthBeforeShader | maskExport), "DEPTH_BEFORE_SHADER must test depth early");
+    Require(!early(depthBeforeShader | depthExport) && !early((1u << 4u) | depthExport), "a depth-exporting shader must stay late on Metal");
+    std::cout << "PASS: DEPTH_BEFORE_SHADER and Z_ORDER 3 decode as early depth; depth exports stay late\n";
+}
+
+// Upstream a96f8bd64, in the fork's shared DccClearEncoding.cpp: packed R11G11B10 float targets get a
+// DCC fast-clear encoding (RGB zero or one; the format has no alpha).
+void PackedFloatDccClear() {
+    for (const bool alphaOnMsb : {false, true}) {
+        for (const auto keys : {Graphics::DccKeys::Clear0000, Graphics::DccKeys::Clear0001, Graphics::DccKeys::Clear1110, Graphics::DccKeys::Clear1111}) {
+            std::array<std::uint32_t, 4> texels{};
+            texels.fill(0xdeadbeefu);
+            Require(Graphics::FillDccClear(VK_FORMAT_B10G11R11_UFLOAT_PACK32, keys, alphaOnMsb, std::as_writable_bytes(std::span(texels))), "a packed float fast clear was not encoded");
+            const std::uint32_t expected = keys == Graphics::DccKeys::Clear1110 || keys == Graphics::DccKeys::Clear1111 ? 0x781e03c0u : 0u;
+            for (const auto texel : texels) Require(texel == expected, "a packed float DCC clear did not encode RGB zero or one");
+        }
+    }
+    std::cout << "PASS: packed R11G11B10 float DCC fast clears encode\n";
+}
+
 // Renders one draw of `state` (rasterSamples > 1) into a multisampled RGBA8 target with the pass's
 // sample positions from ConfigureSamplePositions, and returns the resolved pixels.
 std::array<Pixel, 64> RenderResolved(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library,
@@ -730,6 +829,10 @@ int main() {
             SharedStateDecode(device, queue, library);
             CustomSampleLocations(device, queue, library);
             ColorViewSlices();
+            ClipCullDecode();
+            CoveredCentroid();
+            EarlyDepthDecode();
+            PackedFloatDccClear();
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {

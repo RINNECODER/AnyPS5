@@ -20,6 +20,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 extern "C" int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size);
@@ -245,6 +248,80 @@ void testAutoDraw() {
     expectFailure([&] { AgcDriver::Pm4::ResolveDraw(makePacket(0x2d, {1, 2}), state); }, "GE_INDX_OFFSET");
 }
 
+class GuardedIndexTail {
+public:
+    GuardedIndexTail() {
+#ifdef _WIN32
+        SYSTEM_INFO info{};
+        GetSystemInfo(&info);
+        pageSize = info.dwPageSize;
+        memory = static_cast<std::byte*>(VirtualAlloc(nullptr, pageSize * 2, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        check(memory != nullptr, "index guard allocation failed");
+        DWORD previous = 0;
+        check(VirtualProtect(memory + pageSize, pageSize, PAGE_NOACCESS, &previous) != 0, "index guard protection failed");
+#else
+        pageSize = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+        auto* mapped = mmap(nullptr, pageSize * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        check(mapped != MAP_FAILED, "index guard allocation failed");
+        memory = static_cast<std::byte*>(mapped);
+        check(mprotect(memory + pageSize, pageSize, PROT_NONE) == 0, "index guard protection failed");
+#endif
+    }
+    ~GuardedIndexTail() {
+#ifdef _WIN32
+        if (memory != nullptr) VirtualFree(memory, 0, MEM_RELEASE);
+#else
+        if (memory != nullptr) munmap(memory, pageSize * 2);
+#endif
+    }
+    std::byte* Tail(std::size_t bytes) const { return memory + pageSize - bytes; }
+private:
+    std::byte* memory = nullptr;
+    std::size_t pageSize = 0;
+};
+
+void testBoundedIndexedDraw() {
+    GuardedIndexTail memory;
+    AgcDriver::QueueState state;
+    state.instanceCount = 2;
+    state.userConfig[0x24a] = 7;
+    for (std::uint32_t type = 0; type < 3; ++type) {
+        state.indexType = type;
+        const auto size = type == 0 ? 2u : type == 1 ? 4u : 1u;
+        auto* tail = memory.Tail(size);
+        const auto packet = makePacket(0x27, {1, low(tail), high(tail), 42, 0});
+        const auto direct = AgcDriver::Pm4::ResolveDraw(packet, state);
+        check(direct.indexCount == 42 && direct.IndexReadCount() == 1 && direct.indexSize == size && direct.firstVertex == 7 && direct.instanceCount == 2,
+              "bounded direct draw lost requested count or readable range");
+        state.indexBase = reinterpret_cast<std::uintptr_t>(memory.Tail(3 * size));
+        const auto offset = AgcDriver::Pm4::ResolveDraw(makePacket(0x35, {1, 2, 42, 0}), state);
+        check(offset.indexAddress == reinterpret_cast<std::uintptr_t>(tail) && offset.indexCount == 42 && offset.IndexReadCount() == 1,
+              "offset draw subtracted its offset from the already-remaining maximum");
+        for (const auto opcode : {0x27u, 0x35u}) {
+            state.indexBase = reinterpret_cast<std::uintptr_t>(memory.Tail(2 * size));
+            const auto zeroPacket = opcode == 0x27 ? makePacket(opcode, {0, low(memory.Tail(0)), high(memory.Tail(0)), 42, 0}) : makePacket(opcode, {0, 2, 42, 0});
+            const auto zero = AgcDriver::Pm4::ResolveDraw(zeroPacket, state);
+            check(zero.indexCount == 42 && zero.IndexReadCount() == 0, "zero-readable draw accessed guest memory or dropped invocations");
+        }
+        const auto nullZero = AgcDriver::Pm4::ResolveDraw(makePacket(0x27, {0, 0, 0, 42, 0}), state);
+        check(nullZero.indexCount == 42 && nullZero.IndexReadCount() == 0 && nullZero.indexAddress == 0,
+              "zero-readable null base did not resolve to a canonical empty range");
+        state.indexBase = UINT64_MAX;
+        const auto overflowZero = AgcDriver::Pm4::ResolveDraw(makePacket(0x35, {0, UINT32_MAX, 42, 0}), state);
+        check(overflowZero.indexCount == 42 && overflowZero.IndexReadCount() == 0 && overflowZero.indexAddress == 0,
+              "zero-readable offset draw performed unused address arithmetic");
+        state.indexBase = UINT64_MAX - (size - 1u);
+        expectFailure([&] { AgcDriver::Pm4::ResolveDraw(makePacket(0x35, {1, UINT32_MAX, 42, 0}), state); }, "index address overflow");
+        if (size > 1) {
+            const auto unaligned = reinterpret_cast<std::uintptr_t>(tail) + 1;
+            expectFailure([&] { AgcDriver::Pm4::ResolveDraw(makePacket(0x27, {1, static_cast<std::uint32_t>(unaligned), static_cast<std::uint32_t>(unaligned >> 32), 42, 0}), state); }, "misaligned index base");
+        }
+        auto* three = memory.Tail(3 * size);
+        const auto complete = AgcDriver::Pm4::ResolveDraw(makePacket(0x27, {8, low(three), high(three), 3, 0}), state);
+        check(complete.indexCount == 3 && complete.IndexReadCount() == 3, "maximum larger than count expanded the readable range");
+    }
+}
+
 void testIndexedDraw() {
     AgcDriver::QueueState state;
     alignas(4) std::array<std::uint32_t, 8> indices{};
@@ -269,7 +346,7 @@ void testIndexedDraw() {
     expectFailure([&] { AgcDriver::Pm4::ResolveDraw(packet, state); }, "GE_INDX_OFFSET");
     state.userConfig[0x24a] = 0;
     expectFailure([&] { AgcDriver::Pm4::Validate(packet, 0x20); }, "compute queue");
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x35, {3, 0, 4, 0}), 0); }, "maximum index size");
+    AgcDriver::Pm4::Validate(makePacket(0x35, {3, 0, 4, 0}), 0);
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x35, {4, 0, 4, 1}), 0); }, "draw flags");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x35, {4, 0, 4}), 0); }, "packet size");
     state.indexType = 3;
@@ -1130,6 +1207,7 @@ int main(int argc, char** argv) {
         testRegisters();
         testRegisterFile();
         testContextAndBases();
+        testBoundedIndexedDraw();
         testIndexedDraw();
         testAutoDraw();
         testIndirectDraw();

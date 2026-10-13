@@ -297,7 +297,6 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             graphics();
             size(6);
             require(packet[3] <= 0xffffu, "unsupported index address bits");
-            require(packet[4] <= packet[1], "index count exceeds maximum index size");
             require((packet[5] & ~0x20u) == 0, "unsupported indexed draw flags");
             break;
         case 0x2a: graphics(); size(2); require(packet[1] <= 3, "unsupported index-type modifiers"); break;
@@ -309,7 +308,6 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         case 0x35:
             graphics();
             size(5);
-            require(packet[3] <= packet[1], "index count exceeds maximum index size");
             require((packet[4] & ~0x20u) == 0, "unsupported indexed draw flags");
             break;
         case 0x24: case 0x25:
@@ -782,17 +780,20 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
     const std::uint32_t indexSize = queue.indexType == 0 ? 2 : queue.indexType == 1 ? 4 : 1;
     const auto base = explicitAddress ? address(packet[2], packet[3]) : queue.indexBase;
     const auto count = explicitAddress ? packet[4] : packet[3];
-    require(base != 0 && base % indexSize == 0, "null or misaligned index base");
+    const auto readableCount = std::min(count, packet[1]);
+    require(readableCount == 0 || (base != 0 && base % indexSize == 0), "null or misaligned index base");
     const auto offset = explicitAddress ? 0 : static_cast<std::uint64_t>(packet[2]) * indexSize;
-    require(offset <= std::numeric_limits<std::uint64_t>::max() - base, "index address overflow");
-    const auto address = base + offset;
-    const auto bytes = static_cast<std::uint64_t>(count) * indexSize;
+    require(readableCount == 0 || offset <= std::numeric_limits<std::uint64_t>::max() - base, "index address overflow");
+    const auto address = readableCount == 0 ? 0 : base + offset;
+    const auto bytes = static_cast<std::uint64_t>(readableCount) * indexSize;
     require(bytes <= std::numeric_limits<std::size_t>::max(), "index range size overflow");
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes), indexSize);
+    if (bytes != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes), indexSize);
     APS5_LOG_OUT_DEBUG("ResolveDraw context targetMask=0x%x shaderMask=0x%x indexCount=%u indexType=%u instances=%u", queue.context.contains(0x8e) ? queue.context.at(0x8e) : 0u, queue.context.contains(0x8f) ? queue.context.at(0x8f) : 0u, count, queue.indexType, queue.instanceCount);
     const auto indexOffset = queue.userConfig.find(0x24a);
     require(indexOffset != queue.userConfig.end(), "missing GE_INDX_OFFSET register");
-    return {address, count, indexSize, queue.instanceCount, packet.back(), true, indexOffset->second, 0};
+    DrawParameters draw{address, count, indexSize, queue.instanceCount, packet.back(), true, indexOffset->second, 0};
+    draw.readableIndexCount = readableCount;
+    return draw;
 }
 
 std::vector<std::uint32_t> ReadIndirectRegisters(std::span<const std::uint32_t> packet) {

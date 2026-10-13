@@ -14,6 +14,7 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/GpuStallWatch.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GpuTiming.hpp"
 #include "PacketStoreRange.hpp"
+#include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <deque>
 #include <algorithm>
@@ -217,6 +218,20 @@ SkippedWorkDiagnostics MetalDriver::SkippedWork() const {
 }
 
 namespace {
+
+// The PA_CL_VS_OUT_CNTL position export bits a vertex program is compiled with (upstream's
+// PositionExportLayout, without the snapshot cache): none for a program without pos1..pos3
+// exports, so its artifact does not depend on the register. Only draws that enable clip or cull
+// distances, the misc vector or the distance vectors pay for the scan.
+std::uint32_t PositionExportLayout(std::span<const std::uint32_t> code, std::uint32_t paClVsOutCntl) {
+    const auto bits = paClVsOutCntl & Graphics::PositionExportLayoutBits;
+    if (bits == 0) return 0;
+    const auto decoded = RdnaInstructionDecoder{}.Decode(code);
+    const bool used = std::any_of(decoded.instructions.begin(), decoded.instructions.end(), [](const auto& instruction) {
+        return instruction.family == RdnaInstructionFamily::EXP && instruction.exportTarget >= 0x0du && instruction.exportTarget <= 0x0fu && instruction.exportEnableMask != 0;
+    });
+    return used ? bits : 0;
+}
 
 // ANYPS5_METAL_STALL_DUMP: the user data and the first words of each bound buffer, appended to the
 // stuck dispatch's source as a comment.
@@ -525,6 +540,13 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             std::optional<ShaderVertexStageInfo> vertex;
             if (program.binary.stage != ShaderStage::Fragment) {
                 vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData);
+                if (vertex) {
+                    vertex->paClVsOutCntl = PositionExportLayout(program.binary.code, decoded.state.paClVsOutCntl);
+                    // MSL has clip distances but no cull distances.
+                    if ((vertex->paClVsOutCntl & 0xff00u) != 0) {
+                        throw std::runtime_error("AGC graphics: vertex cull distances are unsupported on Metal");
+                    }
+                }
             }
             auto request = BuildDrawRecompileRequest(program.binary, program.firstUserSgpr, program.userData,
                 decoded.state, decoded.pixel, vertex, target, pushOffset, direct, memory, linked);
@@ -799,6 +821,10 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             frame->SetFlip(submission.serial, cursor, now, now);
             lock.unlock();
             flip->GpuReady(frame);
+            // A flip raises the queue's end-of-pipe event once the work before it completes, as a
+            // RELEASE_MEM with INT_SEL does (upstream 326e0bc29); that work completed above. A driver
+            // configured without an interrupt callback (presentation-only replays) has no event to raise.
+            if (eopInterrupt) DeliverEopInterrupt(submission.queue);
         } else if (opcode == 0x15) {
             Tolerate(SkippedDispatch, [&] { ExecuteDispatchSynchronously(queue, packet, submission); });
         } else if (opcode == 0x16) {

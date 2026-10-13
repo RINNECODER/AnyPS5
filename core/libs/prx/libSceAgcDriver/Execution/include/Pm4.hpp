@@ -60,6 +60,8 @@ struct DrawParameters {
         std::uint32_t InstanceDwordOffset() const { return recordBytes == 20 ? 16u : 12u; }
     };
     std::optional<IndirectDraw> indirect;
+    std::optional<std::uint32_t> readableIndexCount;
+    std::uint32_t IndexReadCount() const { return readableIndexCount.value_or(indexCount); }
 };
 
 // One indirect draw record as the CP reads it (firstVertexOrIndex is startVertex for the
