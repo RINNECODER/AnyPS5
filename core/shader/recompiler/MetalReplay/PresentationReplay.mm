@@ -10,6 +10,7 @@
 #include "prx/libSceVideoOut/include/UnobtrusiveWindows.hpp"
 #include "prx/libSceVideoOut/include/ControllerSource.hpp"
 #import <GameController/GameController.h>
+#import <CoreGraphics/CGSession.h>
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include <algorithm>
 #include <future>
@@ -905,6 +906,24 @@ void Run(id<MTLDevice> device, id<MTLLibrary> library) {
 }
 }
 
+// Exit code ctest maps to "Skipped" (SKIP_RETURN_CODE in CMakeLists.txt).
+constexpr int kSkipExitCode = 77;
+
+// True when real AppKit focus cannot be obtained because nobody can be looking at the display: the
+// screen is locked or this process has no console GUI session (a self-hosted runner on a locked
+// laptop). An unlocked session that never delivers focus is still a genuine failure.
+static bool ScreenLockedOrNoConsoleSession() {
+    CFDictionaryRef session = CGSessionCopyCurrentDictionary();
+    if (!session) return true;
+    bool unavailable = false;
+    const void* onConsole = CFDictionaryGetValue(session, kCGSessionOnConsoleKey);
+    if (onConsole && !CFBooleanGetValue(static_cast<CFBooleanRef>(onConsole))) unavailable = true;
+    const void* locked = CFDictionaryGetValue(session, CFSTR("CGSSessionScreenIsLocked"));
+    if (locked && CFBooleanGetValue(static_cast<CFBooleanRef>(locked))) unavailable = true;
+    CFRelease(session);
+    return unavailable;
+}
+
 int main(int argc, const char* argv[]) {
     @autoreleasepool {
         try {
@@ -915,6 +934,10 @@ int main(int argc, const char* argv[]) {
             auto library = [device newLibraryWithURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[1]]] error:&error];
             Require(library != nil, error.localizedDescription.UTF8String ?: "Utility library load failed");
             setenv("APS5_SYNC_FLIP", "1", 1);
+            if (ScreenLockedOrNoConsoleSession()) {
+                std::cout << "SKIP: screen is locked or there is no console GUI session, so the native host cannot receive real AppKit focus\n";
+                return kSkipExitCode;
+            }
             // The native host replay asserts real AppKit activation, key-window and focus transitions.
             AnyPS5::Host::RequireRealFocusForThisProcess();
             Run(device, library);
