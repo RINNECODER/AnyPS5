@@ -122,6 +122,8 @@ def infer_requirements(functions):
         for ins in function.instructions.values():
             if ins.mnemonic != 'call' and ins.address not in function.tail_calls:
                 continue
+            if ins.address in getattr(function, 'dispatch_calls', {}):
+                continue
             contract, slot = image.call(ins, function.contract)
             effects = contract.get('memory_effects')
             if type(slot) is int and effects is not None and not effects['callbacks']:
@@ -189,6 +191,8 @@ def merge_ranges(ranges):
 
 
 def call_writes(function, ins, state=None):
+    if ins.address in getattr(function, 'dispatch_calls', {}):
+        return None
     state = function.states[ins.address] if state is None else state
     target = direct_target(function, ins)
     if target is not None:

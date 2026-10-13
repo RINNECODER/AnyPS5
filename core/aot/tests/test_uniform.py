@@ -10,7 +10,7 @@ from abi import (ABIError, UNIFORM_STACK_SLOTS, uniform, uniform_locations, sign
 from compiler import Image, compile_image
 
 
-def fixture(code, functions, imports=None, relocations=None, data_bindings=None, bindings=None):
+def fixture(code, functions, imports=None, relocations=None, data_bindings=None, bindings=None, dispatch=False):
     """One executable segment with `code`, plus the data/dynamic scaffolding the image needs."""
     image = bytearray(0x5200)
     imports = imports or {}
@@ -56,7 +56,7 @@ def fixture(code, functions, imports=None, relocations=None, data_bindings=None,
     contracts = {'schema': 1, 'sha256': hashlib.sha256(image).hexdigest(),
                  'functions': functions, 'imports': imports,
                  'data': [{'address': 0x2000, 'size': 0x3000}], 'pointer_relocations': relocations,
-                 'data_bindings': data_bindings or {}}
+                 'data_bindings': data_bindings or {}, 'dispatch': dispatch}
     return bytes(image), contracts
 
 
@@ -159,6 +159,34 @@ class UniformABITests(unittest.TestCase):
         registers.gpr[GPR['rax']] = ctypes.cast(library.sub_1010, ctypes.c_void_p).value
         function(ctypes.byref(registers))
         self.assertEqual(registers.gpr[GPR['rax']], 7)
+
+    def test_uniform_unannotated_indirect_call_dispatches(self):
+        # 0x1000: call rax ; ret  — no target set, so it lowers to the runtime dispatch table
+        code = bytearray(0x04)
+        code[0x00:0x03] = bytes.fromhex('ffd0c3')
+        raw, contracts = fixture(bytes(code), [uniform_function('sub_1000', 0x1000, 3)], dispatch=True)
+        source = self.directory / 'input.elf'
+        source.write_bytes(raw)
+        ir, report = compile_image(Image(source, contracts))
+        self.assertIn('@NativeAotDispatch_nid_no_patch', ir)
+        self.assertIn('@NativeAotReportDispatchFailure_nid_no_patch', ir)
+        self.assertIn('call ptr @NativeAotDispatch_nid_no_patch', ir)
+
+    def test_uniform_annotated_indirect_jump_is_a_switch(self):
+        # 0x1000: jmp rax   0x1010: mov eax, 1 ; ret   0x1020: mov eax, 2 ; ret
+        code = bytearray(0x30)
+        code[0x00:0x02] = bytes.fromhex('ffe0')
+        code[0x10:0x16] = bytes.fromhex('b801000000c3')
+        code[0x20:0x26] = bytes.fromhex('b802000000c3')
+        function = uniform_function('sub_1000', 0x1000, 0x30,
+                                    indirect_jumps=[{'address': 0x1000, 'targets': [0x1010, 0x1020]}])
+        raw, contracts = fixture(bytes(code), [function])
+        source = self.directory / 'input.elf'
+        source.write_bytes(raw)
+        ir, report = compile_image(Image(source, contracts))
+        self.assertIn('switch_1000', ir)
+        self.assertIn('label %b1010', ir)
+        self.assertIn('label %b1020', ir)
 
     def test_uniform_calls_return_zero_stub_import(self):
         # 0x1000: call 0x1010 ; ret     0x1010: jmp [rip + slot]  (PLT stub for an import)
