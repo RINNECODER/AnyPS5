@@ -48,6 +48,8 @@ extern LibcFloatConstant _FInf_nid_postfix;
 extern LibcFloatConstant _FNan_nid_postfix;
 short APS5_VABI _FDtest_nid_postfix(const float*);
 int APS5_VABI __fpclassifyf_nid_postfix(float);
+int APS5_VABI __fpclassifyd_nid_postfix(double);
+int APS5_VABI __fpclassifyl_nid_postfix(long double);
 int APS5_VABI isnanf_nid_postfix(float);
 int APS5_VABI __signbitl_nid_postfix(long double);
 float APS5_VABI fmodf_nid_postfix(float, float);
@@ -651,14 +653,23 @@ static void CheckFloatClassification() {
             std::fprintf(stderr, "Guest _FDtest failed for %08x\n", test.bits);
             std::abort();
         }
-        const int fpclass = test.code == 0 ? 0x10 : test.code == -2 ? 0x08 : test.code == -1 ? 0x04 : test.code == 1 ? 0x01 : 0x02;
-        if (__fpclassifyf_nid_postfix(value) != fpclass) {
-            std::fprintf(stderr, "Guest __fpclassifyf failed for %08x\n", test.bits);
+        // The fpclassify family shares _FDtest's codes: FP_SUBNORMAL -2, FP_NORMAL -1,
+        // FP_ZERO 0, FP_INFINITE 1, FP_NAN 2 (not the FreeBSD bit flags).
+        // A float subnormal widens to a normal double or long double.
+        const int wide = test.code == -2 ? -1 : test.code;
+        if (__fpclassifyf_nid_postfix(value) != test.code || __fpclassifyd_nid_postfix(value) != wide
+            || __fpclassifyl_nid_postfix(value) != wide) {
+            std::fprintf(stderr, "Guest __fpclassify[fdl] failed for %08x\n", test.bits);
             std::abort();
         }
     }
     Require(_FDtest_nid_postfix(reinterpret_cast<const float*>(&_FInf_nid_postfix)) == 1);
     Require(_FDtest_nid_postfix(reinterpret_cast<const float*>(&_FNan_nid_postfix)) == 2);
+    Require(__fpclassifyd_nid_postfix(std::numeric_limits<double>::denorm_min()) == -2);
+    Require(__fpclassifyd_nid_postfix(std::numeric_limits<double>::max()) == -1);
+    Require(__fpclassifyl_nid_postfix(std::numeric_limits<long double>::denorm_min()) == -2);
+    Require(__fpclassifyl_nid_postfix(std::numeric_limits<long double>::max()) == -1);
+    Require(__fpclassifyl_nid_postfix(-std::numeric_limits<long double>::infinity()) == 1);
 }
 
 static void CheckMissingClassificationExports() {

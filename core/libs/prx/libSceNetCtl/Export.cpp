@@ -8,7 +8,6 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #ifdef __linux__
-#include <linux/if_link.h>
 #include <netpacket/packet.h>
 #endif
 #endif
@@ -16,8 +15,10 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include <fstream>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #ifdef _WIN32
 #include <vector>
 #endif
@@ -83,6 +84,13 @@ static bool HostHasAddress(int family) {
 #endif
 }
 
+extern "C" std::uint64_t NetCtlReadByteCounter_nid_no_patch(const char* path) {
+    std::ifstream file(path);
+    std::uint64_t value = 0;
+    if (!(file >> value)) throw std::runtime_error(std::string("sceNetCtlGetIfStat: no byte counter in ") + path);
+    return value;
+}
+
 static void HostTraffic(std::uint64_t& sent, std::uint64_t& received) {
     sent = 0;
     received = 0;
@@ -100,11 +108,11 @@ static void HostTraffic(std::uint64_t& sent, std::uint64_t& received) {
     ifaddrs* interfaces = nullptr;
     if (getifaddrs(&interfaces) != 0) throw std::runtime_error("sceNetCtlGetIfStat: the host interface list is unavailable");
     for (auto* item = interfaces; item; item = item->ifa_next) {
-        if (!item->ifa_addr || item->ifa_addr->sa_family != AF_PACKET || !item->ifa_data) continue;
+        if (!item->ifa_addr || item->ifa_addr->sa_family != AF_PACKET) continue;
         if (!(item->ifa_flags & IFF_UP) || (item->ifa_flags & IFF_LOOPBACK)) continue;
-        const auto* stats = static_cast<const rtnl_link_stats*>(item->ifa_data);
-        sent += stats->tx_bytes;
-        received += stats->rx_bytes;
+        const std::string statistics = std::string("/sys/class/net/") + item->ifa_name + "/statistics/";
+        sent += NetCtlReadByteCounter_nid_no_patch((statistics + "tx_bytes").c_str());
+        received += NetCtlReadByteCounter_nid_no_patch((statistics + "rx_bytes").c_str());
     }
     freeifaddrs(interfaces);
 #else
