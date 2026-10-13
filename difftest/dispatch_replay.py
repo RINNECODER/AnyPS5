@@ -54,6 +54,22 @@ def load_entries(path):
     return result
 
 
+def load_snapshot(path):
+    data = Path(path).read_bytes()
+    if len(data) < 4:
+        return []
+    offset = 4
+    regions = []
+    while offset + 16 <= len(data):
+        base, size = struct.unpack_from("<QQ", data, offset)
+        offset += 16
+        if offset + size > len(data):
+            break
+        regions.append((base, data[offset:offset + size]))
+        offset += size
+    return regions
+
+
 def load_pages(path):
     data = Path(path).read_bytes()
     result = {}
@@ -71,6 +87,7 @@ def main():
                                                                Path(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5]))
     entries_path = Path(sys.argv[6]) if len(sys.argv) > 6 else None
     pages_path = Path(sys.argv[7]) if len(sys.argv) > 7 else None
+    snapshot_path = Path(sys.argv[8]) if len(sys.argv) > 8 else None
     out_dir.mkdir(parents=True, exist_ok=True)
     contracts = json.loads(contracts_path.read_text())
     results = json.loads(compile_path.read_text())
@@ -115,7 +132,7 @@ def main():
         for a, code in codes:
             for target, size in difftest.references(code, a).items():
                 referenced[target] = max(referenced.get(target, 1), size)
-        image, reduced = difftest.build_synthetic(codes, referenced, uniform=True, dispatch=True)
+        image, reduced = difftest.build_synthetic(codes, referenced, uniform=True, dispatch=True, guest_base=BASE)
         source = work / "input.elf"
         source.write_bytes(image)
         try:
@@ -171,13 +188,13 @@ def main():
             native = ctypes.cast(getattr(library, f"sub_{address:x}"), ctypes.c_void_p).value
         except AttributeError:
             continue
-        entries.append((address, native))
+        entries.append((BASE + address, native))
     for target in sorted(targets):
         try:
             native = ctypes.cast(getattr(stub_library, f"aps5_stub_{target:x}"), ctypes.c_void_p).value
         except AttributeError:
             continue
-        entries.append((target, native))
+        entries.append((BASE + target, native))
     entries.sort()
     table = (ctypes.c_uint64 * (2 * len(entries)))()
     for index, (guest, native) in enumerate(entries):
@@ -196,14 +213,15 @@ def main():
 
     recorded_entries = load_entries(entries_path) if entries_path and entries_path.exists() else {}
     recorded_pages = load_pages(pages_path) if pages_path and pages_path.exists() else {}
-    print(f"recorded entries {len(recorded_entries)}, page sets {len(recorded_pages)}", flush=True)
+    snapshot = load_snapshot(snapshot_path) if snapshot_path and snapshot_path.exists() else []
+    print(f"recorded entries {len(recorded_entries)}, page sets {len(recorded_pages)}, snapshot regions {len(snapshot)}", flush=True)
 
     runner = replay.build_x86_runner(work)
     matched = mismatched = x86_fault = arm_fault = executed = 0
     details = []
     for address, _code in codes:
         recorded = recorded_entries.get(address)
-        pages = recorded_pages.get(address)
+        pages = snapshot if snapshot else recorded_pages.get(address)
         if recorded is not None:
             registers = {name: recorded[index] for index, name in enumerate(replay.UNIFORM_GPRS)}
         else:

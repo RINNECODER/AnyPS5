@@ -12,6 +12,7 @@ the production code. The package downloads are replaced by a small real package 
 import datetime as dt
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -107,6 +108,31 @@ class PackagedCompilerSmokeTests(unittest.TestCase):
             before = sorted(str(path.relative_to(package)) for path in package.rglob("*"))
             self.assertEqual(native_package.smoke(package, logs, print, "smoke"), "PASS")
             self.assertEqual(sorted(str(path.relative_to(package)) for path in package.rglob("*")), before)
+
+
+class HangGuardTests(unittest.TestCase):
+    def test_a_hung_step_is_killed_with_its_children_and_fails(self):
+        import build_package
+        with tempfile.TemporaryDirectory() as folder:
+            logs = Path(folder)
+            with self.assertRaisesRegex(releaselib.ReleaseError, "timed out"):
+                build_package.run_logged("hang", ["sh", "-c", "sleep 60 & wait"], logs, lambda *_: None, timeout=1)
+
+    def _ioreg(self, users):
+        import plistlib
+        return subprocess.CompletedProcess([], 0, plistlib.dumps({"IOConsoleUsers": users}))
+
+    def test_a_locked_or_missing_console_session_is_reported(self):
+        locked = [{"kCGSSessionOnConsoleKey": True, "CGSSessionScreenIsLocked": True}]
+        with patch.object(native_package.subprocess, "run", return_value=self._ioreg(locked)):
+            self.assertIn("locked", native_package.gui_session_unavailable())
+            with self.assertRaises(native_package.Skipped):
+                native_package.require_gui_session("gpu_cube")
+        with patch.object(native_package.subprocess, "run", return_value=self._ioreg([])):
+            self.assertIn("no console", native_package.gui_session_unavailable())
+        unlocked = [{"kCGSSessionOnConsoleKey": True}]
+        with patch.object(native_package.subprocess, "run", return_value=self._ioreg(unlocked)):
+            self.assertIsNone(native_package.gui_session_unavailable())
 
 
 class TestGateTests(unittest.TestCase):

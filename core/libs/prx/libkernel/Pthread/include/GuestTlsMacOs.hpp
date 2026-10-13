@@ -23,6 +23,7 @@ extern "C" {
 void Aps5GuestTlsRegister_nid_no_patch(GuestTlsDescriptor* descriptor);
 void* Aps5GuestTlsAllocateThreadPointer_nid_no_patch(const GuestTlsDescriptor* descriptor);
 void* Aps5GuestTlsGetAddr_nid_no_patch(const GuestTlsIndex* index);
+void Aps5GuestTlsReleaseCurrentThread_nid_no_patch(const GuestTlsDescriptor* descriptor);
 }
 
 #endif

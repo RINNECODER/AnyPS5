@@ -112,7 +112,7 @@ def page_region(address, size, page=0x1000):
     return start, end - start
 
 
-def build_synthetic(functions, referenced, uniform=False, dispatch=False):
+def build_synthetic(functions, referenced, uniform=False, dispatch=False, guest_base=0):
     """functions: [(address, code)]; referenced: {address: size}."""
     regions = {}
     function_ranges = [(a, a + len(c)) for a, c in functions]
@@ -188,6 +188,8 @@ def build_synthetic(functions, referenced, uniform=False, dispatch=False):
     }
     if dispatch:
         contracts["dispatch"] = True
+    if guest_base:
+        contracts["guest_base"] = guest_base
     return bytes(image), contracts
 
 

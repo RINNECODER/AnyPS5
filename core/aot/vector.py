@@ -14,7 +14,7 @@ SQRT_OPS = {'sqrtss': 32, 'sqrtsd': 64}
 CONVERTS = {'cvtsi2ss': 32, 'cvtsi2sd': 64, 'cvtsd2ss': 64, 'cvtss2sd': 32}
 TO_INT = {'cvttss2si': 32, 'cvttsd2si': 64, 'cvtss2si': 32, 'cvtsd2si': 64}
 COMPARES = {'comiss': 32, 'ucomiss': 32, 'comisd': 64, 'ucomisd': 64}
-PACKED_BINARY = {'paddq': ('add', 64), 'psubd': ('sub', 32), 'psubq': ('sub', 64)}
+PACKED_BINARY = {'paddb': ('add', 8), 'paddq': ('add', 64), 'psubd': ('sub', 32), 'psubq': ('sub', 64)}
 PACKED_MINMAX_INT = {'pmaxub': (8, False), 'pminub': (8, True), 'pmaxuw': (16, False), 'pminuw': (16, True)}
 PACKED_MUL = {'pmuludq': False, 'pmuldq': True}
 PACKS = {'packsswb': (16, 8), 'packssdw': (32, 16)}
@@ -44,14 +44,14 @@ CMP_MNEMONICS = {f'cmp{suffix}{kind}': (lane, index)
                  for index, suffix in enumerate(CMP_PREDICATES)
                  for kind, lane in (('ps', 32), ('pd', 64), ('ss', 32), ('sd', 64))}
 SHUFFLES = {'shufps', 'pshufd', 'unpcklps', 'unpckhps', 'unpcklpd', 'unpckhpd',
-            'punpcklqdq', 'punpckhqdq', 'movlhps', 'movhlps'}
+            'punpcklbw', 'punpcklwd', 'punpcklqdq', 'punpckhqdq', 'movlhps', 'movhlps'}
 SUPPORTED = (FULL_MOVES | set(BITWISE) | set(FLOAT_OPS) | SHUFFLES | set(SQRT_OPS)
              | set(CONVERTS) | set(TO_INT) | set(COMPARES) | set(PACKED_SHIFTS) | set(PACKED_BINARY) | set(PACKED_MINMAX_INT) | set(PACKED_MUL)
              | set(PACKS) | SHUF_WORDS | set(PACKED_CMPEQ) | set(PACKED_CMPGT)
              | set(PACKED_MINMAX) | set(PACKED_UNPACKS) | set(CMP_MNEMONICS) | set(CMP_GENERIC)
              | set(CVT_PACKED) | {
     'movd', 'movq', 'movss', 'movsd', 'movlps', 'movlpd', 'psrld', 'paddd', 'pcmpgtd',
-    'packuswb'})
+    'packuswb', 'ucomiss', 'cvtsi2ss', 'paddb', 'pmaxub', 'pcmpeqb', 'pcmpeqd', 'psrad', 'movmskps'})
 FP_POLICY = {'rounding': 'nearest-even', 'subnormals': 'preserve', 'exceptions': 'masked',
              'status_flags': 'unobserved', 'nan_payloads': 'unobserved'}
 MASK128 = (1 << 128) - 1
@@ -123,6 +123,10 @@ def _policy(function, ins):
 
 def _shuffle(ins):
     op, args = ins.mnemonic, ins.operands
+    if op in ('punpcklbw', 'punpcklwd'):
+        width = 8 if op == 'punpcklbw' else 16
+        count = 128 // width
+        return width, [value for i in range(count // 2) for value in (i, i + count)]
     if op == 'shufps':
         control = args[2].imm
         return 32, [control & 3, (control >> 2) & 3, 4 + ((control >> 4) & 3), 4 + ((control >> 6) & 3)]
@@ -173,6 +177,9 @@ def analyze(function, ins, state):
             source_mask = sources[1 if index >= count else 0]
             known |= ((source_mask >> ((index % count) * width)) & lane_mask) << (lane * width)
         _copy_mask(ins, state, args[0], known)
+    elif op == 'movmskps':
+        _check(function, ins, state, args[1], 128)
+        _define(function, ins, state, args[0], 32)
     elif op in SHUF_WORDS:
         source = _mask(function, ins, state, args[1])
         control = args[2].imm
@@ -357,6 +364,16 @@ def lower(function, ins):
         indices = ', '.join(f'i32 {index}' for index in mask)
         result = function.emit(f'shufflevector <{count} x i{width}> {left}, <{count} x i{width}> {right}, <{count} x i32> <{indices}>')
         _write(function, ins, args[0], _pack(function, result, width))
+    elif op == 'movmskps':
+        source = read(args[1])
+        value = '0'
+        for lane in range(4):
+            bit = function.emit(f'lshr i128 {source}, {lane * 32 + 31}')
+            bit = function.emit(f'trunc i128 {bit} to i32')
+            bit = function.emit(f'and i32 {bit}, 1')
+            bit = function.emit(f'shl i32 {bit}, {lane}')
+            value = function.emit(f'or i32 {value}, {bit}')
+        function.write(ins, args[0], value)
     elif op in SHUF_WORDS:
         source = function.emit(f'bitcast i128 {read(args[1])} to <8 x i16>')
         control = args[2].imm
@@ -431,6 +448,7 @@ def lower(function, ins):
             else:
                 result = function.emit(f'select i1 {valid}, {kind} {shifted}, {kind} zeroinitializer')
         _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i128'))
+
     elif op in ('paddd', 'pcmpgtd'):
         left, right = (_unpack(function, read(operand)) for operand in args[:2])
         if op == 'paddd':

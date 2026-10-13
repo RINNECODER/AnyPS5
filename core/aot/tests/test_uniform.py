@@ -255,6 +255,21 @@ class UniformABITests(unittest.TestCase):
         with self.assertRaises(Exception):
             compile_image(Image(source, contracts))
 
+    def test_unresolvable_annotated_indirect_target_falls_back_to_dispatch(self):
+        # Contract: with dispatch enabled, an indirect call whose annotated target set names an
+        # address that is neither a function nor a PLT stub dispatches through the runtime table
+        # instead of rejecting the function (the whole-title behaviour).
+        code = bytes.fromhex('ffd0c3')
+        functions = [uniform_function('sub_1000', 0x1000, 3, indirect_calls=[{'address': 0x1000, 'targets': [0x2000]}])]
+        raw, contracts = fixture(code, functions, dispatch=True)
+        source = self.directory / 'input.elf'
+        source.write_bytes(raw)
+        ir, report = compile_image(Image(source, contracts))
+        self.assertIn('NativeAotDispatch_nid_no_patch', ir)
+        contracts['dispatch'] = False
+        with self.assertRaises(Exception):
+            compile_image(Image(source, contracts))
+
     def test_unimplemented_function_becomes_a_reporting_stub(self):
         # Contract: with allow_unimplemented (the whole-title build), a body the lifter rejects
         # becomes a stub that reports its guest address and traps, so one image covers the whole
