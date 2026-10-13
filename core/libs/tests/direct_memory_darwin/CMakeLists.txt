@@ -10,6 +10,7 @@ find_package(Threads REQUIRED)
 add_executable(direct_memory_darwin_tests
     ../DirectMemoryDarwin.cpp
     ../../prx/libkernel/DirectMemory/DirectMemory.cpp
+    ../../prx/libkernel/DirectMemory/Export.cpp
     ../../prx/libkernel/DirectMemory/MemoryPool.cpp
     ../../prx/libc/src/GuestAllocations.cpp
     ../../prx/libc/src/GuestArena.cpp

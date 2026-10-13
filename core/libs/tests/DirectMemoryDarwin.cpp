@@ -1,3 +1,5 @@
+#include "SceTypes.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 
 #include <cerrno>
@@ -11,6 +13,12 @@
 
 bool GuestThreadStack(std::uintptr_t, std::uintptr_t*, std::uintptr_t*) { return false; }
 void NoteGuestStackProtection(std::uintptr_t, std::size_t, bool) {}
+
+// Export.cpp's own dependencies, which this harness does not link.
+extern "C" std::uint64_t GuestImageSegmentBytes_nid_no_patch() { return 0; }
+extern "C" void* mmap_nid_postfix(void*, std::size_t, int, int, int, std::int64_t) noexcept { return MAP_FAILED; }
+extern "C" int* __error_nid_postfix() { return &errno; }
+extern "C" int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, std::uint64_t infoSize);
 
 namespace {
 
@@ -125,6 +133,47 @@ void FixedInRefusedRangeRelocates() {
     DirectMemoryFree(phys, Length);
 }
 
+void VirtualQueryDescribesHostMemory() {
+    // Memory the guest registry does not know (a title's own heap block) is described by the host's region.
+    const std::size_t bytes = 3 * 0x4000;
+    void* block = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    Check(block != MAP_FAILED, "map a host block");
+    if (block == MAP_FAILED) return;
+    const auto address = reinterpret_cast<std::uintptr_t>(block);
+    VirtualQueryInfo info{};
+    Check(sceKernelVirtualQuery(reinterpret_cast<void*>(address + 0x4010), 0, &info, sizeof(info)) == 0, "query a host block");
+    Check(info.start <= address && info.end >= address + bytes, "the extent covers the host block");
+    Check((info.protection & 3) == 3, "the host block is readable and writable");
+    mprotect(block, bytes, PROT_NONE);
+    Check(sceKernelVirtualQuery(block, 0, &info, sizeof(info)) == SCE_KERNEL_ERROR_EACCES, "an unreadable host block is refused");
+    munmap(block, bytes);
+    Check(sceKernelVirtualQuery(block, 0, &info, sizeof(info)) == SCE_KERNEL_ERROR_EACCES, "unmapped memory is refused");
+}
+
+void LookupFindsAllocationByAddress() {
+    void* first = nullptr;
+    Check(DoMapAnon(&first, Length, ProtCpuReadWrite, 0) == 0, "map an anonymous range");
+    const auto base = reinterpret_cast<std::uintptr_t>(first);
+    {
+        // A found range pins its allocation while it is held.
+        const auto inside = GuestAllocations::GuestAllocationsLookup_nid_postfix(base + 0x123, false);
+        Check(inside && inside->address <= base && inside->address + inside->bytes >= base + Length, "an address inside a range finds it");
+    }
+    Check(GuestAllocations::GuestAllocationsLookup_nid_postfix(base + Length + (1ull << 40), false) == nullptr, "an address past every range finds nothing");
+    Check(DoMunmap(static_cast<unsigned char*>(first) + PS5_PAGE_SIZE, PS5_PAGE_SIZE) == 0, "unmap the second page");
+    {
+        const auto head = GuestAllocations::GuestAllocationsLookup_nid_postfix(base, false);
+        const auto hole = GuestAllocations::GuestAllocationsLookup_nid_postfix(base + PS5_PAGE_SIZE, false);
+        const auto tail = GuestAllocations::GuestAllocationsLookup_nid_postfix(base + 2 * PS5_PAGE_SIZE, false);
+        Check(head && head->address + head->bytes <= base + PS5_PAGE_SIZE, "the head keeps only the first page");
+        Check(!hole, "the unmapped page finds nothing");
+        Check(tail && tail->address == base + 2 * PS5_PAGE_SIZE, "the tail starts after the hole");
+    }
+    DoMunmap(first, PS5_PAGE_SIZE);
+    DoMunmap(static_cast<unsigned char*>(first) + 2 * PS5_PAGE_SIZE, Length - 2 * PS5_PAGE_SIZE);
+    Check(!GuestAllocations::GuestAllocationsLookup_nid_postfix(base, false), "nothing is left after unmapping every page");
+}
+
 void Run(const char* name, void (*test)()) {
     try {
         test();
@@ -141,6 +190,8 @@ int main() {
     Run("no-overwrite keeps host mapping", NoOverwriteKeepsHostMapping);
     Run("hint skips refused range", HintSkipsRefusedRange);
     Run("fixed in refused range relocates", FixedInRefusedRangeRelocates);
+    Run("virtual query describes host memory", VirtualQueryDescribesHostMemory);
+    Run("lookup finds an allocation by address", LookupFindsAllocationByAddress);
     if (g_failures != 0) {
         std::fprintf(stderr, "%d direct memory check(s) failed\n", g_failures);
         return 1;

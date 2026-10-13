@@ -175,6 +175,17 @@ static int OpenNative(const std::filesystem::path& native, int flags, std::uint1
         if (std::filesystem::is_symlink(native, error)) return SceErrorFromErrno(GuestEmlink);
     }
     int fd = NativeOpen(native, MapFlags(flags), mode);
+#ifdef __APPLE__
+    // Darwin opens an existing directory despite O_CREAT; the guest kernel refuses it.
+    if (fd >= 0 && (flags & SCE_KERNEL_O_CREAT) != 0) {
+        std::error_code error;
+        if (std::filesystem::is_directory(native, error)) {
+            NativeClose(fd);
+            fd = -1;
+            errno = EISDIR;
+        }
+    }
+#endif
 #ifdef _WIN32
     if (fd < 0 && (errno != ENOENT || !native.has_filename())) {
         auto directory = native;
