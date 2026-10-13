@@ -30,7 +30,7 @@ def analyze(function, ins, state):
     if op not in OPERATIONS and not conditional:
         return False
     if conditional:
-        if args and args[0].type == X86_OP_REG and function.reg(ins, args[0])[0] in ('rsp', 'rbp'):
+        if args and args[0].type == X86_OP_REG and function.reg(ins, args[0])[0] in ('rsp', 'rbp') and not getattr(function, 'uniform', False):
             function.fail(ins, 'conditional operation cannot reconstruct a dynamic native frame')
         suffix = condition(ins)
         if suffix not in CONDITIONS:
@@ -58,7 +58,7 @@ def analyze(function, ins, state):
         else:
             if args[0].size not in (4, 8) or args[1].size != args[0].size:
                 function.fail(ins, 'unsupported reset-lowest-bit width')
-            if function.reg(ins, args[0])[0] in ('rsp', 'rbp'):
+            if function.reg(ins, args[0])[0] in ('rsp', 'rbp') and not getattr(function, 'uniform', False):
                 function.fail(ins, 'bit operation cannot reconstruct a dynamic native frame')
             function.read_operand(ins, state, args[1])
             function.define(ins, state, args[0])
@@ -81,7 +81,9 @@ def analyze(function, ins, state):
         state['flags'] = set()
         return True
     if args[0].type == X86_OP_REG and function.reg(ins, args[0])[0] in ('rsp', 'rbp'):
-        function.fail(ins, 'integer operation cannot reconstruct a dynamic native frame')
+        if not getattr(function, 'uniform', False):
+            function.fail(ins, 'integer operation cannot reconstruct a dynamic native frame')
+        state[function.reg(ins, args[0])[0]] = None
     if op == 'imul' and len(args) == 1:
         width = args[0].size * 8
         function.read_operand(ins, state, args[0])

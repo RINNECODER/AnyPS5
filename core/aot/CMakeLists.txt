@@ -37,7 +37,8 @@ configure_file(launcher.py.in native_aot.py @ONLY)
 add_custom_target(native_aot ALL DEPENDS capstone_shared)
 add_library(anyps5_native_image STATIC "${CMAKE_SOURCE_DIR}/core/libs/native/NativeAotImage.cpp"
     "${CMAKE_SOURCE_DIR}/core/libs/native/NativeAotPointer.cpp"
-    "${CMAKE_SOURCE_DIR}/core/libs/native/NativeAotDispatch.cpp")
+    "${CMAKE_SOURCE_DIR}/core/libs/native/NativeAotDispatch.cpp"
+    "${CMAKE_SOURCE_DIR}/core/libs/native/NativeAotTls.cpp")
 if(APPLE)
     target_sources(anyps5_native_image PRIVATE "${CMAKE_SOURCE_DIR}/core/libs/native/NativeAotReadonly.cpp")
 else()

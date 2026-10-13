@@ -14,6 +14,7 @@ import abi
 import vector
 import avx
 import fma
+import x87
 import integer
 import bmi
 import system
@@ -395,7 +396,7 @@ class Function:
             mem = operand.mem
             if ins.mnemonic != 'lea' and ins.addr_size != 8:
                 self.fail(ins, '32-bit memory addressing requires pointer reconstruction')
-            if mem.segment and ins.mnemonic != 'lea':
+            if mem.segment and ins.mnemonic != 'lea' and ins.reg_name(mem.segment) != 'fs':
                 self.fail(ins, 'segment-relative addressing needs TLS lowering')
             for register in (mem.base, mem.index):
                 name = ins.reg_name(register)
@@ -411,13 +412,15 @@ class Function:
             if base_name in ('rsp', 'rbp') or (frame and frame[0] == 'frame'):
                 base = state[base_name] if base_name in ('rsp', 'rbp') else frame[2]
                 if base is None:
-                    self.fail(ins, 'dynamic frame offset')
-                offset = base + mem.disp
-                if not mem.index and ins.mnemonic != 'lea' and offset + operand.size > 0:
-                    valid = any(loc['kind'] == 'stack' and loc['offset'] <= offset and offset + operand.size <= loc['offset'] + loc['bits'] // 8 for loc in self.argument_locations)
-                    if not valid and not self.uniform:
-                        self.fail(ins, 'read or write of return address or undeclared stack arguments')
-                self.depth = max(self.depth, -(base + mem.disp) + 128)
+                    if not self.uniform:
+                        self.fail(ins, 'dynamic frame offset')
+                else:
+                    offset = base + mem.disp
+                    if not mem.index and ins.mnemonic != 'lea' and offset + operand.size > 0:
+                        valid = any(loc['kind'] == 'stack' and loc['offset'] <= offset and offset + operand.size <= loc['offset'] + loc['bits'] // 8 for loc in self.argument_locations)
+                        if not valid and not self.uniform:
+                            self.fail(ins, 'read or write of return address or undeclared stack arguments')
+                    self.depth = max(self.depth, -(base + mem.disp) + 128)
         elif operand.type != X86_OP_IMM:
             self.fail(ins, 'unsupported operand')
 
@@ -444,7 +447,7 @@ class Function:
                 state['tail_stack_clean'] = frozenset(loc['offset'] for loc in self.argument_locations if loc['kind'] == 'stack' and loc['offset'] in clean and not (begin < loc['offset'] + loc['bits'] // 8 and loc['offset'] < begin + operand.size))
             elif base_name == 'rip' and not operand.mem.index:
                 state['tail_stack_clean'] = clean
-            if base_name in ('rsp', 'rbp') and not operand.mem.index:
+            if base_name in ('rsp', 'rbp') and not operand.mem.index and state[base_name] is not None:
                 begin = state[base_name] + operand.mem.disp
                 for offset, saved in list(state['saved'].items()):
                     low, high = max(begin, offset), min(begin + operand.size, offset + 8)
@@ -510,7 +513,7 @@ class Function:
                  'stack_origins': original['stack_origins'].copy(), 'stack_values': original['stack_values'].copy(),
                  'image_pointers': original['image_pointers'].copy(), 'import_bindings': original['import_bindings'].copy(), 'callback_memory_unmodified': original['callback_memory_unmodified']}
         op, args = ins.mnemonic, ins.operands
-        if fma.analyze(self, ins, state) or avx.analyze(self, ins, state) or vector.analyze(self, ins, state):
+        if fma.analyze(self, ins, state) or avx.analyze(self, ins, state) or vector.analyze(self, ins, state) or x87.analyze(self, ins, state):
             return state
         if integer.analyze(self, ins, state) or bmi.analyze(self, ins, state) or system.analyze(self, ins, state):
             for register in ins.regs_access()[1]:
@@ -640,7 +643,7 @@ class Function:
                     source_name = self.reg(ins, args[1])[0]
                     source = original['pointers'].get(source_name)
                     if source_name in ('rsp', 'rbp'):
-                        source = ('frame', 0, original[source_name])
+                        source = ('frame', 0, original[source_name]) if original[source_name] is not None else None
                     if source is not None:
                         state['pointers'][dest] = source
                 if op == 'lea' and args[0].size == 8 and not args[1].mem.index:
@@ -648,7 +651,12 @@ class Function:
                     if base == 'rip':
                         state['pointers'][dest] = ('image', 0, ins.address + ins.size + args[1].mem.disp)
                     elif base in ('rsp', 'rbp'):
-                        state['pointers'][dest] = ('frame', 0, original[base] + args[1].mem.disp)
+                        if original[base] is not None:
+                            state['pointers'][dest] = ('frame', 0, original[base] + args[1].mem.disp)
+                        elif not self.uniform:
+                            self.fail(ins, 'dynamic frame offset')
+                        else:
+                            state['pointers'].pop(dest, None)
                     elif base in original['pointers']:
                         kind, index, offset = original['pointers'][base]
                         state['pointers'][dest] = (kind, index, offset + args[1].mem.disp)
@@ -657,6 +665,8 @@ class Function:
                         state[dest] = original[ins.reg_name(args[1].mem.base)] + args[1].mem.disp
                     elif op == 'mov' and args[0].size == 8 and args[1].type == X86_OP_REG and self.reg(ins, args[1])[0] in ('rsp', 'rbp'):
                         state[dest] = original[self.reg(ins, args[1])[0]]
+                    elif self.uniform and dest == 'rbp':
+                        state[dest] = None
                     else:
                         self.fail(ins, 'unsupported frame manipulation')
             return state
@@ -682,12 +692,15 @@ class Function:
                     self.constant_write(ins, original, state, args[0], value)
                 if args[0].type == X86_OP_REG and self.reg(ins, args[0])[0] in ('rsp', 'rbp'):
                     dest = self.reg(ins, args[0])[0]
-                    if op not in ('add', 'sub') or args[1].type != X86_OP_IMM or state[dest] is None:
+                    if op in ('add', 'sub') and args[1].type == X86_OP_IMM and state[dest] is not None:
+                        state[dest] += args[1].imm * (1 if op == 'add' else -1)
+                        if dest == 'rsp' and state['rsp'] > original['rsp']:
+                            state['saved'] = {offset: saved for offset, saved in state['saved'].items() if offset >= state['rsp']}
+                        self.depth = max(self.depth, -state[dest] + 128)
+                    elif self.uniform:
+                        state[dest] = None
+                    else:
                         self.fail(ins, 'dynamic frame allocation')
-                    state[dest] += args[1].imm * (1 if op == 'add' else -1)
-                    if dest == 'rsp' and state['rsp'] > original['rsp']:
-                        state['saved'] = {offset: saved for offset, saved in state['saved'].items() if offset >= state['rsp']}
-                    self.depth = max(self.depth, -state[dest] + 128)
             state['flags'] = set(FLAGS)
             return state
         self.fail(ins, 'instruction semantics are not implemented')
@@ -1031,14 +1044,27 @@ class Function:
         state = self.states[ins.address]
         base = ins.reg_name(mem.base)
         index = ins.reg_name(mem.index)
+        if mem.segment and ins.reg_name(mem.segment) == 'fs':
+            pointer = self.emit('call ptr @NativeAotTlsBase_nid_no_patch()')
+            offset = str(mem.disp)
+            if index:
+                value = self.load(index)
+                if mem.scale != 1:
+                    value = self.emit(f'mul i64 {value}, {mem.scale}')
+                offset = self.emit(f'add i64 {value}, {offset}')
+            address = self.emit(f'getelementptr i8, ptr {pointer}, i64 {offset}') if offset != '0' else pointer
+            return checked_stack.guard(self, ins, operand, address)
         if base == 'rip':
             require(not index, 'invalid RIP-relative index')
             return self.image.pointer(ins.address + ins.size + mem.disp, 1 if ins.mnemonic == 'lea' else operand.size)
         if base not in state['pointers'] and index in state['pointers'] and mem.scale == 1:
             base, index = index, base
-        if base in ('rsp', 'rbp'):
+        if base in ('rsp', 'rbp') and state[base] is not None:
             pointer = self.frame_pointer(state[base] + mem.disp)
             offset = '0'
+        elif base in ('rsp', 'rbp'):
+            pointer = self.emit(f'inttoptr i64 {self.load(base)} to ptr')
+            offset = str(mem.disp)
         elif base in state['pointers']:
             kind, argument, displacement = state['pointers'][base]
             if kind == 'image':
@@ -1256,6 +1282,12 @@ class Function:
         self.lines.append(f'  %frame = alloca [{self.depth + self.stack_end} x i8], align 16')
         if self.uniform:
             self.lines.append('  %rf_out = alloca %regfile, align 16')
+            self.lines.append('  %x87 = alloca [8 x double], align 16')
+            self.lines.append('  %x87_top = alloca i32, align 4')
+            self.lines.append('  store i32 0, ptr %x87_top, align 4')
+            for flag in ('c0', 'c1', 'c2', 'c3'):
+                self.lines.append(f'  %{flag} = alloca i1, align 1')
+                self.lines.append(f'  store i1 false, ptr %{flag}, align 1')
             self.uniform_load_registers('%rf')
             self.uniform_stack_in('%rf')
             self.store('rsp', self.emit(f'ptrtoint ptr {self.frame_pointer(0)} to i64'))
@@ -1283,7 +1315,7 @@ class Function:
             self.lines.append(f'b{address:x}:')
             state = self.states[address]
             terminal = False
-            if fma.lower(self, ins) or avx.lower(self, ins) or vector.lower(self, ins):
+            if fma.lower(self, ins) or avx.lower(self, ins) or vector.lower(self, ins) or x87.lower(self, ins):
                 pass
             elif integer.lower(self, ins) or bmi.lower(self, ins) or system.lower(self, ins):
                 pass
@@ -1429,6 +1461,10 @@ def compile_image(image):
     lines.append('declare float @llvm.fma.f32(float, float, float)')
     lines.append('declare double @llvm.fma.f64(double, double, double)')
     lines.append('declare i64 @llvm.readcyclecounter()')
+    lines.append('declare ptr @NativeAotTlsBase_nid_no_patch()')
+    lines.append('declare double @llvm.fabs.f64(double)')
+    lines.append('declare double @llvm.sqrt.f64(double)')
+    lines.append('declare double @fmod(double, double)')
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     dispatch_enabled = bool(image.contracts.get('dispatch'))
