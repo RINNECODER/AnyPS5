@@ -49,7 +49,7 @@ def merge_constant_stores(ir):
     for line in ir.splitlines():
         allocation = re.match(r'\s*(%[-\w.]+) = alloca \[([0-9]+) x i8\],', line)
         gep = re.match(r'\s*(%[-\w.]+) = getelementptr(?: inbounds)?(?: nuw)? i8, ptr (%[-\w.]+), i64 (-?[0-9]+)$', line)
-        store = re.fullmatch(r'\s*store i(8|16|32|64) (-?[0-9]+), ptr (%[-\w.]+), align [0-9]+', line)
+        store = re.fullmatch(r'\s*store (?:atomic )?i(8|16|32|64) (-?[0-9]+), ptr (%[-\w.]+)(?: (?:monotonic|acquire|release|acq_rel|seq_cst))?, align [0-9]+', line)
         if allocation:
             flush()
             pointers[allocation[1]] = (allocation[1], 0, int(allocation[2]))

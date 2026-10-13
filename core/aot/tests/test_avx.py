@@ -25,8 +25,9 @@ MASK256 = (1 << 256) - 1
 class Emitter:
     def __init__(self):
         self.serial = 0
-        self.lines = ['target triple = "arm64-apple-macosx13.0.0"', 'declare void @llvm.trap()',
-                      'define void @test_entry(ptr %a, ptr %b, ptr %c, ptr %out, i64 %scalar) {', 'entry:']
+        self.lines = ['target triple = "arm64-apple-macosx13.0.0"', 'declare void @llvm.trap()']
+        self.lines.extend(avx.INTRINSIC_DECLARATIONS)
+        self.lines.extend(['define void @test_entry(ptr %a, ptr %b, ptr %c, ptr %out, i64 %scalar) {', 'entry:'])
         self.memory = self.emit('getelementptr i8, ptr %out, i64 96')
         self.state = {'known': {'rcx': (1 << 64) - 1}, 'flags': {'cf', 'zf', 'pf', 'sf', 'of'}}
         for index in range(16):
@@ -355,7 +356,7 @@ fn(*addresses, output, 0)
             avx.analyze(emitter, instructions[0], emitter.state)
         instructions, _ = self.instructions('vfmadd213ps ymm0, ymm1, ymm2')
         self.assertFalse(avx.analyze(emitter, instructions[0], emitter.state))
-        instructions, _ = self.instructions('vroundps ymm0, ymm1, 0')
+        instructions, _ = self.instructions('vpmaddwd ymm0, ymm1, ymm2')
         self.assertFalse(avx.analyze(emitter, instructions[0], emitter.state))
 
 

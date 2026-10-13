@@ -45,7 +45,7 @@ set(nativeUnsupportedSources
     "${LIBS_INCLUDE_DIR}/prx/libc/src/JumpBuffer.cpp"
     "${LIBS_INCLUDE_DIR}/prx/libkernel/System/src/Exception.cpp"
     "${LIBS_INCLUDE_DIR}/prx/libkernel/System/src/UserContext.cpp"
-    "${LIBS_INCLUDE_DIR}/prx/libc/src/exception/Exports.cpp"
+
     # Fork-only x86_64 inline asm in libkernel sources; the fixture does not use the signal set calls.
     "${LIBS_INCLUDE_DIR}/prx/libkernel/System/src/SignalSets.cpp")
 foreach(component IN LISTS nativeComponents)

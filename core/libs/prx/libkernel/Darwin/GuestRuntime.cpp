@@ -276,6 +276,10 @@ struct IndirectTraceState {
     std::atomic<bool> enabled{false};
     int fd = -1;
     int entryFd = -1;
+    int pageFd = -1;
+    std::uint64_t pagesWritten = 0;
+    std::uint64_t seenEntries[4096] = {};
+    std::size_t seenEntryCount = 0;
     std::uint64_t limit = 2000000;
     double afterSeconds = 0.0;
     double startSeconds = 0.0;
@@ -432,6 +436,7 @@ void InitializeIndirectTrace() {
     }
     indirectTrace.fd = ::open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
     indirectTrace.entryFd = ::open((std::string(path) + ".entries").c_str(), O_CREAT | O_WRONLY | O_APPEND, 0644);
+    indirectTrace.pageFd = ::open((std::string(path) + ".pages").c_str(), O_CREAT | O_WRONLY | O_APPEND, 0644);
     if (indirectTrace.fd < 0) {
         Write("[rosetta] indirect trace: cannot open %s\n", path);
         return;
@@ -518,6 +523,46 @@ void AppendEntryRecord(const std::uint64_t entry, const ucontext_t* context) {
                                       state.__r12, state.__r13, state.__r14, state.__r15};
     std::memcpy(record.Registers, values, sizeof(values));
     (void)!::write(indirectTrace.entryFd, &record, sizeof(record));
+
+    // Snapshot the pages reachable from the pointer registers and the stack,
+    // page-granular and bounded, so the replay can map the same memory.
+    if (indirectTrace.pageFd < 0 || indirectTrace.pagesWritten >= 30000) return;
+    // One page set per entry: repeated entries would otherwise fill the file.
+    for (std::size_t index = 0; index < indirectTrace.seenEntryCount; ++index)
+        if (indirectTrace.seenEntries[index] == entry) return;
+    if (indirectTrace.seenEntryCount < 4096) indirectTrace.seenEntries[indirectTrace.seenEntryCount++] = entry;
+    constexpr std::uint64_t PageSize = 0x4000;
+    constexpr std::size_t MaxPages = 64;
+    std::uint64_t pages[MaxPages];
+    std::size_t count = 0;
+    for (const std::uint64_t value : values) {
+        const std::uint64_t base = value & ~(PageSize - 1);
+        if (base < indirectTrace.guestBase) continue;
+        // A window around each pointer, not just the page it names: the body
+        // dereferences [reg + offset] across struct fields and stack frames.
+        for (std::int64_t step = -1; step <= 14; ++step) {
+            const std::uint64_t page = static_cast<std::uint64_t>(static_cast<std::int64_t>(base) + step * static_cast<std::int64_t>(PageSize));
+            if (page < indirectTrace.guestBase) continue;
+            bool seen = false;
+            for (std::size_t index = 0; index < count; ++index) if (pages[index] == page) { seen = true; break; }
+            if (seen) continue;
+            pages[count++] = page;
+            if (count == MaxPages) break;
+        }
+        if (count == MaxPages) break;
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        std::uint8_t buffer[PageSize];
+        if (!ReadMemory(pages[index], buffer, sizeof(buffer))) continue;
+        const std::uint64_t guestPage = pages[index] - indirectTrace.guestBase;
+        struct PageRecord {
+            std::uint64_t Entry;
+            std::uint64_t Page;
+        } record{entry, guestPage};
+        (void)!::write(indirectTrace.pageFd, &record, sizeof(record));
+        (void)!::write(indirectTrace.pageFd, buffer, sizeof(buffer));
+        ++indirectTrace.pagesWritten;
+    }
 }
 
 // Returns true when the faulting instruction is one of our trapped indirect
