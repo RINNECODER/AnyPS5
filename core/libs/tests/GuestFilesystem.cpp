@@ -174,8 +174,36 @@ static void TestParentTraversal() {
     std::filesystem::remove_all(root);
 }
 
+static void TestRelinkedModuleNames() {
+    const auto root = std::filesystem::path("anyps5-relinked-names-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    Require(std::filesystem::create_directories(root));
+    const auto original = (root / "Plugin.prx").generic_string();
+    const auto relinked = original + ".guest.prx";
+    FileStat status{};
+    Require(sceKernelStat(original.c_str(), &status) == static_cast<int>(0x80020002u));
+    Require(sceKernelCheckReachability(original.c_str()) == static_cast<int>(0x80020002u));
+    Require(sceKernelOpen(original.c_str(), 0, 0) == static_cast<int>(0x80020002u));
+    { std::ofstream file(relinked); file << "relinked"; }
+    Require(sceKernelStat(original.c_str(), &status) == 0 && status.st_size == 8);
+    Require(stat_nid_postfix(original.c_str(), &status) == 0 && status.st_size == 8);
+    Require(sceKernelCheckReachability(original.c_str()) == 0);
+    const int opened = sceKernelOpen(original.c_str(), 0, 0);
+    Require(opened >= 0 && sceKernelClose(opened) == 0);
+    Require(sceKernelStat((root / "Other.prx").generic_string().c_str(), &status) == static_cast<int>(0x80020002u));
+    Require(!std::filesystem::exists(original));
+    { std::ofstream file(original); file << "original-bytes"; }
+    Require(sceKernelStat(original.c_str(), &status) == 0 && status.st_size == 14);
+    Require(std::filesystem::remove(original));
+    const int created = sceKernelOpen(original.c_str(), 0x601, 0600);
+    Require(created >= 0 && sceKernelClose(created) == 0);
+    Require(std::filesystem::file_size(original) == 0 && std::filesystem::file_size(relinked) == 8);
+    std::filesystem::remove_all(root);
+}
+
 int main() {
     TestParentTraversal();
+    TestRelinkedModuleNames();
     Require(chmod_nid_postfix(nullptr, 0600) == -1 && *__error_nid_postfix() == 14);
     Require(sceKernelChmod_nid_postfix(nullptr, 0600) == static_cast<int>(0x8002000eu));
     Require(chmod_nid_postfix("", 0600) == -1 && *__error_nid_postfix() == 2);
