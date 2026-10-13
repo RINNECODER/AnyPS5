@@ -57,6 +57,14 @@ RUNNER = (
     '  return ferror(stdin) ? 1 : 0;\n}\n')
 
 
+def _normalize_nan(blob):
+    value = bytearray(blob)
+    for lane in range(34):
+        bits = struct.unpack_from('<I', value, lane * 4)[0]
+        if bits & 0x7f800000 == 0x7f800000 and bits & 0x007fffff:
+            struct.pack_into('<I', value, lane * 4, 0x7fc00000)
+    return bytes(value)
+
 class NativeAvxHarness(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -85,13 +93,15 @@ class NativeAvxHarness(unittest.TestCase):
         return [(randoms.randbytes(32), randoms.randbytes(32), randoms.randbytes(32),
                  randoms.getrandbits(64)) for _ in range(count)]
 
-    def compare_native(self, assembly, samples, flag_mask=None):
+    def compare_native(self, assembly, samples, flag_mask=None, nan_normalize=False):
         instructions, stem = self.instructions(assembly)
         emitter = Emitter()
         for ins in instructions:
-            module = avx if ins.mnemonic.startswith('v') else vector
-            self.assertTrue(module.analyze(emitter, ins, emitter.state))
-            self.assertTrue(module.lower(emitter, ins))
+            if avx.analyze(emitter, ins, emitter.state):
+                self.assertTrue(avx.lower(emitter, ins))
+            else:
+                self.assertTrue(vector.analyze(emitter, ins, emitter.state))
+                self.assertTrue(vector.lower(emitter, ins))
         ir = stem.with_suffix('.ll')
         ir.write_text(emitter.finish())
         native = stem.with_suffix('.dylib')
@@ -123,6 +133,9 @@ class NativeAvxHarness(unittest.TestCase):
             function(*addresses, out_address, scalar)
             actual = ctypes.string_at(out_address, 144)
             reference = expected[index * 144:(index + 1) * 144]
+            if nan_normalize:
+                actual = _normalize_nan(actual)
+                reference = _normalize_nan(reference)
             self.assertEqual(actual[:136], reference[:136],
                              (assembly, index, a.hex(), b.hex(), c.hex(), scalar))
             if flag_mask is not None:

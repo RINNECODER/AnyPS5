@@ -1465,6 +1465,7 @@ def compile_image(image):
     lines.append('declare double @llvm.fabs.f64(double)')
     lines.append('declare double @llvm.sqrt.f64(double)')
     lines.append('declare double @fmod(double, double)')
+    lines.extend(d for d in avx.INTRINSIC_DECLARATIONS if d not in lines)
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     dispatch_enabled = bool(image.contracts.get('dispatch'))
