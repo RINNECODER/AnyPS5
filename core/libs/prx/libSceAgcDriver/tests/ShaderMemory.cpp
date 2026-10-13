@@ -3006,10 +3006,10 @@ void verifyBdaReadFallbackFunctions() {
     alignas(256) static std::array<std::uint32_t, 32> output{};
     const auto outputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
     const std::array<std::uint32_t, 8> userData{0x10000000u, 0u, 0u, 0u, static_cast<std::uint32_t>(outputAddress), static_cast<std::uint32_t>((outputAddress >> 32u) & 0xffffu), 128u, 0x01016facu};
-    const auto compile = [&](std::uint32_t loads, bool barrier, bool coherent) {
+    const auto compile = [&](std::uint32_t loads, bool barrier, bool coherent, std::uint32_t stride) {
         std::vector<std::uint32_t> code{0x7e020200u, 0x7e040201u};
         for (std::uint32_t load = 0; load < loads; ++load) {
-            code.push_back(0xdc308000u | (coherent ? 0x10000u : 0u) | (4u * load + 4u));
+            code.push_back(0xdc308000u | (coherent ? 0x10000u : 0u) | (stride * load + 4u));
             code.push_back(((3u + load) << 24u) | 0x007d0001u);
         }
         code.push_back(0xbf8c3f70u);
@@ -3035,8 +3035,9 @@ void verifyBdaReadFallbackFunctions() {
     };
     for (const bool barrier : {false, true}) {
         for (const bool coherent : {false, true}) {
-            const auto one = compile(1u, barrier, coherent);
-            const auto five = compile(5u, barrier, coherent);
+            const auto one = compile(1u, barrier, coherent, 32u);
+            const auto five = compile(5u, barrier, coherent, 32u);
+            const auto adjacent = compile(5u, barrier, coherent, 4u);
             std::map<std::uint32_t, std::string> names;
             std::map<std::string, std::uint32_t> definitions;
             const auto reader = std::string("read_bda_dword_bytes") + (barrier ? "" : "_stop") + (coherent ? "_coherent" : "");
@@ -3047,6 +3048,9 @@ void verifyBdaReadFallbackFunctions() {
             std::size_t mainProbes = 0;
             std::size_t spanCalls = 0;
             std::array<std::size_t, 2> readerLoads{};
+            std::size_t lookupFaults = 0;
+            std::size_t lookupVariables = 0;
+            std::size_t readerLookups = 0;
             for (std::size_t cursor = 5; cursor < five.size();) {
                 const auto length = five[cursor] >> 16u;
                 require(length != 0 && length <= five.size() - cursor, "BDA read functions: truncated SPIR-V instruction");
@@ -3067,16 +3071,35 @@ void verifyBdaReadFallbackFunctions() {
                     if (callee == span) ++spanCalls;
                 }
                 if (op == spv::OpLoad && function == reader) ++readerLoads[length > 4u && (five[cursor + 4] & spv::MemoryAccessVolatileMask) != 0u];
+                if (op == spv::OpFunctionCall && function == "get_bda_pointer" && names[five[cursor + 3]] == "record_bda_fault") ++lookupFaults;
+                if (op == spv::OpVariable && function == "get_bda_pointer") ++lookupVariables;
+                if (op == spv::OpFunctionCall && function == reader && names[five[cursor + 3]] == "get_bda_pointer") ++readerLookups;
                 cursor += length;
             }
             require(definitions["record_bda_fault"] == 1u && definitions[reader] == 1u && definitions[span] == 1u, "BDA read functions: the fault, byte read and span read functions are not defined");
             for (const auto& [name, count] : definitions) require(count == 1u, "BDA read functions: a function is defined twice");
             require(compareExchanges == 1u, "BDA read functions: a fault is recorded outside record_bda_fault");
             require(mainLookups == 0u, "BDA read functions: a read site looks up its bytes inline");
-            require(readerLoads[coherent] == 4u && readerLoads[!coherent] == 0u, "BDA read functions: the byte loads do not keep the access's coherence");
+            require(readerLoads[coherent] == 1u && readerLoads[!coherent] == 0u, "BDA read functions: the byte loads do not keep the access's coherence");
+            require(lookupFaults <= 4u, "BDA read functions: the page-table lookup records its faults from more than 4 call sites");
+            require(lookupVariables == 0u, "BDA read functions: the page-table lookup keeps its search bounds in function variables");
+            require(readerLookups == 1u, "BDA read functions: the byte read does not look up its bytes once, in a loop");
             require(mainProbes == 0u, "BDA read functions: a read site probes or reads bytes outside its span read function");
             require(spanCalls == 5u, "BDA read functions: a read site does not call its span read function once");
             require(five.size() - one.size() < 4u * 150u, "BDA read functions: a read site takes 150 SPIR-V words or more");
+            std::size_t adjacentSpanCalls = 0;
+            names.clear();
+            function.clear();
+            for (std::size_t cursor = 5; cursor < adjacent.size();) {
+                const auto length = adjacent[cursor] >> 16u;
+                require(length != 0 && length <= adjacent.size() - cursor, "BDA read functions: truncated SPIR-V instruction");
+                const auto op = adjacent[cursor] & 0xffffu;
+                if (op == spv::OpName) names[adjacent[cursor + 1]] = reinterpret_cast<const char*>(&adjacent[cursor + 2]);
+                if (op == spv::OpFunction) function = names[adjacent[cursor + 2]];
+                if (op == spv::OpFunctionCall && function == "main" && names[adjacent[cursor + 3]] == span) ++adjacentSpanCalls;
+                cursor += length;
+            }
+            require(adjacentSpanCalls == 2u, "BDA read functions: five adjacent dwords of one address do not share two span reads");
         }
     }
 }
