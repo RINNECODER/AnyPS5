@@ -1,0 +1,94 @@
+# Native engine alpha channel (experimental, separate from the Rosetta "Engine release (alpha)").
+# Every push to native/arm64 builds the arm64 AOT toolchain and runtime, runs the AOT test suite
+# and native_gpu_cube_check, packages them as a signed code-only package (kind native, arch arm64)
+# and publishes native-<YYYY.MM.DD>.<n> plus the rolling native-alpha.json feed. See
+# docs/design/native-releases.md.
+#
+# Not a required check anywhere and never runs on main: the push trigger is limited to
+# native/arm64 and the job re-checks the ref. Runs only on the self-hosted Apple Silicon runners,
+# which hold the signing key locally (never a GitHub secret). Pull requests into native/arm64 only
+# run the release tooling unit tests; workflow_dispatch with dry_run builds, tests, packages and
+# signs but writes nothing to GitHub. Same fork-approval policy as the engine release workflows.
+name: Native engine release (alpha)
+
+on:
+  push:
+    branches: [native/arm64]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, test, package and sign, but publish nothing (no release, no feed)"
+        type: boolean
+        default: true
+  pull_request:
+    branches: [native/arm64]
+    paths:
+      - "tools/release/**"
+      - "tools/tests/test_native_release.py"
+      - "tools/tests/test_release_channels.py"
+      - ".github/workflows/native-release-*.yml"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    name: Native release tooling preflight
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Release tooling tests
+        run: python3 -m unittest discover -s tools/tests -p 'test_*release*.py' -v
+
+  alpha:
+    name: Publish native engine alpha
+    if: >-
+      github.repository == 'RINNECODER/AnyPS5' && (
+        (github.event_name == 'push' && github.ref == 'refs/heads/native/arm64') ||
+        (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/native/arm64' || inputs.dry_run)))
+    runs-on: [self-hosted, anyps5-metal]
+    timeout-minutes: 240
+    # One native alpha at a time so two builds can never race the tag number or feed sequence.
+    concurrency:
+      group: native-engine-release-alpha
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ANYPS5_UNOBTRUSIVE_WINDOWS: "1"
+      RELEASE_COMMIT: ${{ github.sha }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Initialize submodules
+        # The Rosetta engine job's submodules plus the AOT compiler's (capstone, pyelftools, ps5link-sdk).
+        run: >-
+          git submodule update --init --depth 1
+          3rdparty/SDL2 3rdparty/SPIRV-Cross 3rdparty/SPIRV-Headers 3rdparty/Vulkan-Headers
+          3rdparty/glslang 3rdparty/LibAtrac9 3rdparty/ffmpeg-core 3rdparty/freetype
+          3rdparty/libjpeg-turbo 3rdparty/stb 3rdparty/capstone 3rdparty/pyelftools 3rdparty/ps5link-sdk
+      - name: Clean submodules
+        # The package build requires a pristine source tree; checkout only cleans the superproject.
+        run: git submodule foreach --quiet 'git reset --quiet --hard && git clean -qffdx'
+      - name: Release tooling tests
+        run: python3 -m unittest discover -s tools/tests -p 'test_*release*.py'
+      - name: Build, test, package, sign and publish
+        run: |
+          args=()
+          if [ "$DRY_RUN" = true ]; then args+=(--dry-run); fi
+          nice -n 10 python3 tools/release/native_alpha.py --source "$GITHUB_WORKSPACE" --commit "$RELEASE_COMMIT" \
+            --work-root "/private/tmp/anyps5-release/native-run-$GITHUB_RUN_ID" --jobs 6 "${args[@]}"
+      - name: Remove build directories
+        if: always()
+        run: |
+          dir="/private/tmp/anyps5-release/native-run-$GITHUB_RUN_ID"
+          if [ -e "$dir" ]; then chmod -R u+w "$dir"; rm -rf "$dir"; fi

@@ -33,7 +33,7 @@ import zipfile
 PUBLIC_KEY_B64 = "8CH+bArwdc+38zujG9xU/pD1W7tRoi5UAeGSschuCpc="
 REPO = "RINNECODER/AnyPS5"
 DOWNLOAD_BASE = "https://github.com/" + REPO + "/releases/download/"
-FEED_NAME = re.compile(r"(engine|macps)-(alpha|beta|stable)\.json")
+FEED_NAME = re.compile(r"(engine|macps|native)-(alpha|beta|stable)\.json")
 VERSION = re.compile(r"[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*")
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -178,14 +178,15 @@ def _integer(value):
 
 
 def asset_name(product, version):
-    return ("anyps5-engine-" if product == "engine" else "MacPS-") + version + "-macos-arm64.zip"
+    prefix = {"engine": "anyps5-engine-", "native": "anyps5-native-"}.get(product, "MacPS-")
+    return prefix + version + "-macos-arm64.zip"
 
 
 def check_release(record, product=None):
     """Structural checks for a schema-1 ``release.json`` object."""
     require(isinstance(record, dict), "release record must be an object")
     require(record.get("schema") == 1 and _integer(record.get("schema")), "release schema must be 1")
-    require(record.get("product") in ("engine", "macps"), "unknown release product")
+    require(record.get("product") in ("engine", "macps", "native"), "unknown release product")
     require(product is None or record["product"] == product, "release product does not match the feed")
     version = record.get("version")
     require(isinstance(version, str) and VERSION.fullmatch(version) is not None, "malformed release version")
@@ -198,19 +199,22 @@ def check_release(record, product=None):
     asset = record.get("asset")
     require(isinstance(asset, dict), "release asset must be an object")
     require(asset.get("name") == asset_name(record["product"], version), "unexpected asset name")
-    if record["product"] == "engine":
-        tag = "engine-" + version
+    if record["product"] in ("engine", "native"):
+        tag = record["product"] + "-" + version
         require(asset.get("url") == DOWNLOAD_BASE + tag + "/" + asset["name"],
-                "engine asset URL is not the immutable build release download")
+                "%s asset URL is not the immutable build release download" % record["product"])
     else:
         require(isinstance(asset.get("url"), str) and asset["url"].startswith("https://"), "malformed asset URL")
     require(isinstance(asset.get("sha256"), str) and HEX64.fullmatch(asset["sha256"]) is not None,
             "asset sha256 must be 64 lowercase hex characters")
     require(_integer(asset.get("size")) and 0 < asset["size"] <= MAX_ASSET_BYTES, "asset size out of range")
     manifest = record.get("package_manifest_sha256")
-    require(record["product"] != "engine" or (isinstance(manifest, str) and HEX64.fullmatch(manifest) is not None),
+    require(record["product"] == "macps" or (isinstance(manifest, str) and HEX64.fullmatch(manifest) is not None),
             "package_manifest_sha256 must be 64 lowercase hex characters")
     require(isinstance(record.get("notes"), str), "notes must be a string")
+    if record["product"] == "native":
+        # A native build is a different kind of package: MacPS must never install it as an engine.
+        require(record.get("kind") == "native" and record.get("arch") == "arm64", "native release needs kind native and arch arm64")
     return record
 
 
@@ -314,11 +318,11 @@ def main(argv=None):
                    "sequence": feed["sequence"], "updated_at": feed["updated_at"], "version": release["version"],
                    "commit": release["commit"], "asset": release["asset"]["name"], "asset_sha256": release["asset"]["sha256"],
                    "asset_size": release["asset"]["size"]}
-        if feed["product"] == "engine":
-            base = DOWNLOAD_BASE + "engine-" + release["version"] + "/release.json"
+        if feed["product"] in ("engine", "native"):
+            base = DOWNLOAD_BASE + feed["product"] + "-" + release["version"] + "/release.json"
             record_bytes = fetch(base)
             verify_signed(record_bytes, fetch(base + ".sig", 4096))
-            require(check_release(parse_json(record_bytes), "engine") == release,
+            require(check_release(parse_json(record_bytes), feed["product"]) == release,
                     "feed release object differs from the signed build release.json")
             summary["release_json"] = "valid and identical to the feed"
         if not args.no_download or args.extract:
@@ -328,7 +332,7 @@ def main(argv=None):
                 summary["asset_download"] = "size and sha256 match"
                 if args.extract:
                     root = safe_extract(archive, args.extract)
-                    if feed["product"] == "engine":
+                    if feed["product"] in ("engine", "native"):
                         require(sha256_file(root / "manifest.json") == release["package_manifest_sha256"],
                                 "extracted manifest SHA-256 differs from package_manifest_sha256")
                         summary["package_manifest"] = "matches"
