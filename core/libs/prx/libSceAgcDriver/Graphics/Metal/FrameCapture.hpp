@@ -9,7 +9,8 @@ namespace AgcDriver::Metal {
 // Opt-in diagnostics: captures the final composited image presented to the engine's own
 // game window (the drawable texture), never the display or any other window.
 // Off unless ANYPS5_FRAME_CAPTURE_DIR is set. ANYPS5_FRAME_CAPTURE_INTERVAL_MS (default
-// 30000) spaces captures and the periodic frames_presented event; the first presented
+// 30000) spaces captures and the periodic frames_presented event; ANYPS5_FRAME_CAPTURE_EVERY
+// captures every Nth presented frame instead (deterministic across runs); the first presented
 // frame is always captured. Events are JSON lines on stderr.
 class FrameCapture {
 public:
@@ -31,6 +32,8 @@ public:
 
 private:
     FrameCapture();
+    // Emits the final frames_presented count at process exit, so the last count is authoritative.
+    void ReportFinal();
     struct State;
     bool enabled = false;
     State* state = nullptr;
