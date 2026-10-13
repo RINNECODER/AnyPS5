@@ -19,6 +19,8 @@ std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel);
 // blocks than a single-sample one: it is not DepthSliceBytes(extent) * samples, which overstates it
 // (4x 1920x1080 D32: 33.4 MB, not 35.4 MB) and reaches into the next allocation.
 std::uint64_t DepthPlaneBytes(VkExtent2D extent, std::uint32_t bytesPerTexel, std::uint32_t samples);
+std::uint64_t MultisampledDepthBytes_nid_no_patch(VkExtent2D extent, std::uint32_t bytesPerTexel, std::uint32_t samples);
+void RequireNoResidentDepthRead_nid_no_patch(std::uint64_t address, std::size_t bytes);
 void ClearDepthSurfaces(VkDevice device);
 bool DepthSurfaceAt(std::uint64_t address);
 std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);
@@ -29,6 +31,9 @@ VkImageAspectFlags HtileFillClears(std::uint32_t pattern, bool stencilInHtile);
 std::uint64_t HtileMetadataBytes(VkExtent2D extent);
 bool HtileFillCovers(std::uint64_t htile, VkExtent2D extent, std::uint64_t address, std::size_t bytes);
 std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components);
+bool SampleLocationsCompatibleDepth(const Context& context, VkFormat format, std::uint32_t samples);
+VkFormat HostDepthFormat(const Context& context, VkFormat format);
+float HostDepthBiasConstant(const Context& context, VkFormat format, float constant);
 
 }
 
