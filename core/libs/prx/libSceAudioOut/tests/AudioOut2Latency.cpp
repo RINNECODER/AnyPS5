@@ -61,6 +61,11 @@ void TestMasteringSetParam() {
     Require(ThrowsRuntimeError([] { sceAudioOut2MasteringSetParam(nullptr, 0, 0); }), "null mastering parameters must throw");
 }
 
+void TestEnableChat() {
+    Require(sceAudioOut2EnableChat() == 0, "enabling chat must be accepted");
+    Require(sceAudioOut2EnableChat() == 0, "enabling chat again must be accepted");
+}
+
 }
 
 int main() {
