@@ -535,9 +535,9 @@ class Function:
                  'zero_vectors': original.get('zero_vectors', set()).copy(),
                  'pending_outputs': original.get('pending_outputs', frozenset()),
                  'constants': original.get('constants', {}).copy(), 'tail_stack_clean': original['tail_stack_clean'],
-                 'native_pointers': original['native_pointers'].copy(), 'stack_pointers': original['stack_pointers'].copy(),
+                 'native_pointers': original['native_pointers'].copy(), 'stack_pointers': original['stack_pointers'],
                  'stack_origins': original['stack_origins'].copy(), 'stack_values': original['stack_values'].copy(),
-                 'image_pointers': original['image_pointers'].copy(), 'import_bindings': original['import_bindings'].copy(), 'callback_memory_unmodified': original['callback_memory_unmodified']}
+                 'image_pointers': original['image_pointers'], 'import_bindings': original['import_bindings'].copy(), 'callback_memory_unmodified': original['callback_memory_unmodified']}
         op, args = ins.mnemonic, ins.operands
         if fma.analyze(self, ins, state) or avx.analyze(self, ins, state) or vector.analyze(self, ins, state) or x87.analyze(self, ins, state):
             return state
@@ -807,10 +807,18 @@ class Function:
                 native.discard(ALIASES[name][0])
         stack = original['stack_pointers'].copy()
         origins = original['stack_origins'].copy()
-        image = original['image_pointers'].copy()
+        op, args = ins.mnemonic, ins.operands
+        call_writes = effects.call_writes(self, ins, original) if op == 'call' else None
+        # The image-pointer set has ~250k entries; copy it only when this instruction can change it.
+        if (self.memory_writes.get(ins.address) or state['pending_outputs']
+                or (op == 'call' and (call_writes is None or call_writes.parameter_writes
+                                      or any(kind == 'image' for kind, _, _ in call_writes.writes)))
+                or ins.address in getattr(self, 'checked_pointer_loads', {}) or self.image.immutable_cells):
+            image = original['image_pointers'].copy()
+        else:
+            image = original['image_pointers']
         bindings = original['import_bindings'].copy()
         callback_memory_unmodified = original['callback_memory_unmodified']
-        op, args = ins.mnemonic, ins.operands
         for operand in self.memory_writes.get(ins.address, ()):
             origin = self.memory_write_region(ins, original, operand)
             if origin is None or origin[0] != 'frame':
@@ -861,15 +869,14 @@ class Function:
             native.update(checked_pointers.validated_registers(self, ins, original))
             state['pending_outputs'] = pointer_outputs.capture(self, ins, original)
             native.difference_update(VOLATILE | set(VECTOR_STORAGE))
-            writes = effects.call_writes(self, ins, original)
-            if writes is None or writes.parameter_writes:
+            if call_writes is None or call_writes.parameter_writes:
                 stack.clear()
                 origins.clear()
                 image.clear()
                 bindings.clear()
                 callback_memory_unmodified = False
             else:
-                for kind, begin, end in writes.writes:
+                for kind, begin, end in call_writes.writes:
                     cells = stack if kind == 'frame' else image
                     cells.difference_update(offset for offset in list(cells) if begin < offset + 8 and offset < end)
                     if kind == 'frame':
@@ -989,7 +996,8 @@ class Function:
                     new['stack_pointers'] = old['stack_pointers'] & state['stack_pointers']
                     new['stack_origins'] = {offset: pointer for offset, pointer in state['stack_origins'].items() if old['stack_origins'].get(offset) == pointer}
                     new['stack_values'] = {offset: value for offset, value in state['stack_values'].items() if old['stack_values'].get(offset) == value}
-                    new['image_pointers'] = old['image_pointers'] & state['image_pointers']
+                    new['image_pointers'] = (old['image_pointers'] if old['image_pointers'] is state['image_pointers']
+                                             else old['image_pointers'] & state['image_pointers'])
                     new['import_bindings'] = old['import_bindings'] & state['import_bindings']
                     new['callback_memory_unmodified'] = old['callback_memory_unmodified'] and state['callback_memory_unmodified']
                     new['pointers'] = {name: pointer for name, pointer in state['pointers'].items() if old['pointers'].get(name) == pointer}
