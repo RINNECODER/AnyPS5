@@ -6,6 +6,7 @@ BITWISE = {'xorps': 'xor', 'xorpd': 'xor', 'pxor': 'xor', 'andps': 'and', 'andpd
            'pand': 'and', 'orps': 'or', 'orpd': 'or', 'por': 'or', 'pandn': 'andnot',
            'andnps': 'andnot', 'andnpd': 'andnot'}
 FLOAT_OPS = {'addps': ('fadd', 128), 'mulps': ('fmul', 128), 'subps': ('fsub', 128),
+             'addpd': ('fadd', 128), 'mulpd': ('fmul', 128), 'subpd': ('fsub', 128), 'divpd': ('fdiv', 128),
              'addss': ('fadd', 32), 'mulss': ('fmul', 32), 'subss': ('fsub', 32),
              'addsd': ('fadd', 64), 'mulsd': ('fmul', 64), 'subsd': ('fsub', 64),
              'divss': ('fdiv', 32), 'divsd': ('fdiv', 64)}
@@ -13,10 +14,33 @@ SQRT_OPS = {'sqrtss': 32, 'sqrtsd': 64}
 CONVERTS = {'cvtsi2ss': 32, 'cvtsi2sd': 64, 'cvtsd2ss': 64, 'cvtss2sd': 32}
 TO_INT = {'cvttss2si': 32, 'cvttsd2si': 64, 'cvtss2si': 32, 'cvtsd2si': 64}
 COMPARES = {'comiss': 32, 'ucomiss': 32, 'comisd': 64, 'ucomisd': 64}
+PACKED_CMPEQ = {'pcmpeqb': 8, 'pcmpeqw': 16, 'pcmpeqd': 32, 'pcmpeqq': 64}
+PACKED_CMPGT = {'pcmpgtb': 8, 'pcmpgtw': 16, 'pcmpgtd': 32, 'pcmpgtq': 64}
+PACKED_MINMAX = {'minps': (32, True), 'maxps': (32, False), 'minpd': (64, True), 'maxpd': (64, False),
+                 'minss': (32, True), 'maxss': (32, False), 'minsd': (64, True), 'maxsd': (64, False)}
+PACKED_UNPACKS = {'punpcklbw': (8, 0), 'punpckhbw': (8, 1), 'punpcklwd': (16, 0), 'punpckhwd': (16, 1),
+                  'punpckldq': (32, 0), 'punpckhdq': (32, 1), 'punpcklqdq': (64, 0), 'punpckhqdq': (64, 1)}
+CMP_PREDICATES = ['eq', 'lt', 'le', 'unord', 'neq', 'nlt', 'nle', 'ord', 'eq_uq', 'nge', 'ngt',
+                  'false', 'neq_oq', 'ge', 'gt', 'true', 'eq_os', 'lt_oq', 'le_oq', 'unord_s',
+                  'neq_us', 'nlt_uq', 'nle_uq', 'ord_s', 'eq_us', 'nge_uq', 'ngt_uq', 'false_os',
+                  'neq_os', 'ge_oq', 'gt_oq', 'true_us']
+CMP_LLVM = ['oeq', 'olt', 'ole', 'uno', 'une', 'uge', 'ugt', 'ord', 'ueq', 'ult', 'ule',
+            'false', 'one', 'oge', 'ogt', 'true', 'oeq', 'olt', 'ole', 'uno', 'une', 'uge',
+            'ugt', 'ord', 'ueq', 'ult', 'ule', 'false', 'one', 'oge', 'ogt', 'true']
+CVT_PACKED = {'cvtdq2pd': (32, 64, 2, 'sitofp'), 'cvtpd2dq': (64, 32, 2, 'fptosi'),
+              'cvttpd2dq': (64, 32, 2, 'trunc'), 'cvtpd2ps': (64, 32, 2, 'fptrunc'),
+              'cvtps2pd': (32, 64, 2, 'fpext'), 'cvtdq2ps': (32, 32, 4, 'sitofp'),
+              'cvtps2dq': (32, 32, 4, 'fptosi'), 'cvttps2dq': (32, 32, 4, 'trunc')}
+CMP_GENERIC = {'cmpps': 32, 'cmppd': 64, 'cmpss': 32, 'cmpsd': 64}
+CMP_MNEMONICS = {f'cmp{suffix}{kind}': (lane, index)
+                 for index, suffix in enumerate(CMP_PREDICATES)
+                 for kind, lane in (('ps', 32), ('pd', 64), ('ss', 32), ('sd', 64))}
 SHUFFLES = {'shufps', 'pshufd', 'unpcklps', 'unpckhps', 'unpcklpd', 'unpckhpd',
             'punpcklqdq', 'punpckhqdq', 'movlhps', 'movhlps'}
 SUPPORTED = (FULL_MOVES | set(BITWISE) | set(FLOAT_OPS) | SHUFFLES | set(SQRT_OPS)
-             | set(CONVERTS) | set(TO_INT) | set(COMPARES) | {
+             | set(CONVERTS) | set(TO_INT) | set(COMPARES) | set(PACKED_CMPEQ) | set(PACKED_CMPGT)
+             | set(PACKED_MINMAX) | set(PACKED_UNPACKS) | set(CMP_MNEMONICS) | set(CMP_GENERIC)
+             | set(CVT_PACKED) | {
     'movd', 'movq', 'movss', 'movsd', 'movlps', 'movlpd', 'psrld', 'paddd', 'pcmpgtd',
     'packuswb'})
 FP_POLICY = {'rounding': 'nearest-even', 'subnormals': 'preserve', 'exceptions': 'masked',
@@ -164,12 +188,52 @@ def analyze(function, ins, state):
         else:
             known = _complete_lanes(left & right, 32)
         _copy_mask(ins, state, args[0], known)
+    elif op in PACKED_CMPEQ or op in PACKED_CMPGT:
+        lane = (PACKED_CMPEQ | PACKED_CMPGT)[op]
+        left, right = (_mask(function, ins, state, operand) for operand in args[:2])
+        _copy_mask(ins, state, args[0], _complete_lanes(left & right, lane, lane))
+    elif op in PACKED_UNPACKS:
+        width, high = PACKED_UNPACKS[op]
+        count = 128 // width
+        sources = [_mask(function, ins, state, args[0]), _mask(function, ins, state, args[1])]
+        lane_mask = (1 << width) - 1
+        known = 0
+        for lane in range(count):
+            source = 1 if lane % 2 else 0
+            source_lane = (count // 2 + lane // 2) if high else (lane // 2)
+            known |= ((sources[source] >> (source_lane * width)) & lane_mask) << (lane * width)
+        _copy_mask(ins, state, args[0], known)
+    elif op in PACKED_MINMAX:
+        lane, _is_min = PACKED_MINMAX[op]
+        if op.endswith(('ss', 'sd')):
+            _policy(function, ins)
+            _check(function, ins, state, args[0], lane)
+            _check(function, ins, state, args[1], lane)
+            _define(function, ins, state, args[0], lane)
+        else:
+            left, right = (_mask(function, ins, state, operand) for operand in args[:2])
+            _copy_mask(ins, state, args[0], _complete_lanes(left & right, lane))
+    elif op in CVT_PACKED:
+        _policy(function, ins)
+        source_bits, target_bits, count, _kind = CVT_PACKED[op]
+        _check(function, ins, state, args[1], count * source_bits)
+        _define(function, ins, state, args[0], count * target_bits, zero_upper=(count * target_bits < 128))
+    elif op in CMP_MNEMONICS or op in CMP_GENERIC:
+        _policy(function, ins)
+        lane = CMP_GENERIC[op] if op in CMP_GENERIC else CMP_MNEMONICS[op][0]
+        if op.endswith(('ss', 'sd')):
+            _check(function, ins, state, args[0], lane)
+            _check(function, ins, state, args[1], lane)
+            _define(function, ins, state, args[0], lane)
+        else:
+            left, right = (_mask(function, ins, state, operand) for operand in args[:2])
+            _copy_mask(ins, state, args[0], _complete_lanes(left & right, lane, lane))
     elif op in FLOAT_OPS:
         _policy(function, ins)
         bits = FLOAT_OPS[op][1]
         if bits == 128:
             left, right = (_mask(function, ins, state, operand) for operand in args[:2])
-            _copy_mask(ins, state, args[0], _complete_lanes(left & right, 32))
+            _copy_mask(ins, state, args[0], _complete_lanes(left & right, 64 if op.endswith(('pd', 'sd')) else 32))
         else:
             _check(function, ins, state, args[0], bits)
             _check(function, ins, state, args[1], bits)
@@ -279,6 +343,101 @@ def lower(function, ins):
             mask = function.emit(f'icmp sgt <4 x i32> {left}, {right}')
             result = function.emit(f'sext <4 x i1> {mask} to <4 x i32>')
         _write(function, ins, args[0], _pack(function, result))
+    elif op in PACKED_CMPEQ or op in PACKED_CMPGT:
+        lane = (PACKED_CMPEQ | PACKED_CMPGT)[op]
+        count = 128 // lane
+        kind = f'<{count} x i{lane}>'
+        left = function.emit(f'bitcast i128 {read(args[0])} to {kind}')
+        right = function.emit(f'bitcast i128 {read(args[1])} to {kind}')
+        compare = function.emit(f'icmp {"eq" if op in PACKED_CMPEQ else "sgt"} {kind} {left}, {right}')
+        result = function.emit(f'sext <{count} x i1> {compare} to {kind}')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i128'))
+    elif op in PACKED_UNPACKS:
+        width, high = PACKED_UNPACKS[op]
+        count = 128 // width
+        kind = f'<{count} x i{width}>'
+        left = function.emit(f'bitcast i128 {read(args[0])} to {kind}')
+        right = function.emit(f'bitcast i128 {read(args[1])} to {kind}')
+        indices = []
+        for lane in range(count):
+            source_lane = (count // 2 + lane // 2) if high else (lane // 2)
+            indices.append(source_lane + (0 if lane % 2 == 0 else count))
+        mask = ', '.join(f'i32 {index}' for index in indices)
+        result = function.emit(f'shufflevector {kind} {left}, {kind} {right}, <{count} x i32> <{mask}>')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i128'))
+    elif op in PACKED_MINMAX:
+        lane, is_min = PACKED_MINMAX[op]
+        predicate = 'olt' if is_min else 'ogt'
+        if op.endswith(('ss', 'sd')):
+            kind = 'float' if lane == 32 else 'double'
+            left = function.emit(f'bitcast i{lane} {read(args[0], lane)} to {kind}')
+            right = function.emit(f'bitcast i{lane} {read(args[1], lane)} to {kind}')
+            compare = function.emit(f'fcmp {predicate} {kind} {left}, {right}')
+            result = function.emit(f'select i1 {compare}, {kind} {left}, {kind} {right}')
+            _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i{lane}'), lane)
+        else:
+            count = 128 // lane
+            kind = f'<{count} x {"float" if lane == 32 else "double"}>'
+            left = function.emit(f'bitcast i128 {read(args[0])} to {kind}')
+            right = function.emit(f'bitcast i128 {read(args[1])} to {kind}')
+            compare = function.emit(f'fcmp {predicate} {kind} {left}, {right}')
+            result = function.emit(f'select <{count} x i1> {compare}, {kind} {left}, {kind} {right}')
+            _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i128'))
+    elif op in CVT_PACKED:
+        source_bits, target_bits, count, kind = CVT_PACKED[op]
+        source = f'<{count} x {"float" if source_bits == 32 else "double"}>' if source_bits in (32, 64) else None
+        if kind == 'sitofp':
+            source = f'<{count} x i{source_bits}>'
+            value = function.emit(f'bitcast i{count * source_bits} {read(args[1], count * source_bits)} to {source}')
+            result = function.emit(f'sitofp {source} {value} to <{count} x {"float" if target_bits == 32 else "double"}>')
+            packed = function.emit(f'bitcast <{count} x {"float" if target_bits == 32 else "double"}> {result} to i{count * target_bits}')
+        elif kind == 'fpext':
+            value = function.emit(f'bitcast i{count * source_bits} {read(args[1], count * source_bits)} to <{count} x float>')
+            result = function.emit(f'fpext <{count} x float> {value} to <{count} x double>')
+            packed = function.emit(f'bitcast <{count} x double> {result} to i{count * target_bits}')
+        elif kind == 'fptrunc':
+            value = function.emit(f'bitcast i{count * source_bits} {read(args[1], count * source_bits)} to <{count} x double>')
+            result = function.emit(f'fptrunc <{count} x double> {value} to <{count} x float>')
+            packed = function.emit(f'bitcast <{count} x float> {result} to i{count * target_bits}')
+        else:
+            source_kind = 'float' if source_bits == 32 else 'double'
+            value = function.emit(f'bitcast i{count * source_bits} {read(args[1], count * source_bits)} to <{count} x {source_kind}>')
+            if kind == 'fptosi':
+                value = function.emit(f'call <{count} x {source_kind}> @llvm.rint.v{count}f{source_bits}(<{count} x {source_kind}> {value})')
+            low, high = -2147483648.0, 2147483648.0
+            below = function.emit(f'fcmp oge <{count} x {source_kind}> {value}, <{", ".join([f"{source_kind} {low}"] * count)}>')
+            above = function.emit(f'fcmp olt <{count} x {source_kind}> {value}, <{", ".join([f"{source_kind} {high}"] * count)}>')
+            in_range = function.emit(f'and <{count} x i1> {below}, {above}')
+            clamped = function.emit(f'select <{count} x i1> {in_range}, <{count} x {source_kind}> {value}, <{count} x {source_kind}> zeroinitializer')
+            converted = function.emit(f'fptosi <{count} x {source_kind}> {clamped} to <{count} x i32>')
+            indefinite = '<' + ', '.join(['i32 -2147483648'] * count) + '>'
+            result = function.emit(f'select <{count} x i1> {in_range}, <{count} x i32> {converted}, <{count} x i32> {indefinite}')
+            packed = function.emit(f'bitcast <{count} x i32> {result} to i{count * target_bits}')
+        _write(function, ins, args[0], packed, count * target_bits, zero_upper=(count * target_bits < 128))
+    elif op in CMP_MNEMONICS or op in CMP_GENERIC:
+        _policy(function, ins)
+        if op in CMP_GENERIC:
+            lane, index = CMP_GENERIC[op], args[2].imm & 0x07
+        else:
+            lane, index = CMP_MNEMONICS[op]
+        predicate = CMP_LLVM[index]
+        if op.endswith(('ss', 'sd')):
+            kind = 'float' if lane == 32 else 'double'
+            left = function.emit(f'bitcast i{lane} {read(args[0], lane)} to {kind}')
+            right = function.emit(f'bitcast i{lane} {read(args[1], lane)} to {kind}')
+            compare = function.emit(f'fcmp {predicate} {kind} {left}, {right}')
+            mask = function.emit(f'sext i1 {compare} to i{lane}')
+            base = function.emit(f'bitcast i128 {read(args[0])} to <{128 // lane} x i{lane}>')
+            merged = function.emit(f'insertelement <{128 // lane} x i{lane}> {base}, i{lane} {mask}, i32 0')
+            _write(function, ins, args[0], function.emit(f'bitcast <{128 // lane} x i{lane}> {merged} to i128'))
+        else:
+            count = 128 // lane
+            kind = f'<{count} x {"float" if lane == 32 else "double"}>'
+            left = function.emit(f'bitcast i128 {read(args[0])} to {kind}')
+            right = function.emit(f'bitcast i128 {read(args[1])} to {kind}')
+            compare = function.emit(f'fcmp {predicate} {kind} {left}, {right}')
+            result = function.emit(f'sext <{count} x i1> {compare} to <{count} x i{lane}>')
+            _write(function, ins, args[0], function.emit(f'bitcast <{count} x i{lane}> {result} to i128'))
     elif op == 'packuswb':
         values = []
         limit = '<' + ', '.join(['i16 255'] * 8) + '>'
@@ -294,7 +453,8 @@ def lower(function, ins):
         _write(function, ins, args[0], function.emit(f'bitcast <16 x i8> {combined} to i128'))
     elif op in FLOAT_OPS:
         instruction, bits = FLOAT_OPS[op]
-        kind = '<4 x float>' if bits == 128 else ('float' if bits == 32 else 'double')
+        element = 'double' if op.endswith(('pd', 'sd')) else 'float'
+        kind = f'<{bits // (64 if element == "double" else 32)} x {element}>' if bits == 128 else element
         left, right = (_cast(function, read(operand, bits), bits, kind) for operand in args[:2])
         result = function.emit(f'{instruction} {kind} {left}, {right}')
         _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i{bits}'), bits)

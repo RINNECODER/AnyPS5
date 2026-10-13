@@ -10,7 +10,8 @@ import avx
 
 LOWERED = (set(avx.ROUNDS) | set(avx.SQRT) | set(avx.RECIP) | set(avx.CVT_ROUND)
            | set(avx.TO_INT) | avx.EXTRACT128 | avx.INSERT128 | set(avx.PSHUFB)
-           | set(avx.PALIGNR) | avx.HALF | set(avx.SHUF_WORDS) | set(avx.MUL64))
+           | set(avx.PALIGNR) | avx.HALF | set(avx.SHUF_WORDS) | set(avx.MUL64)
+           | set(avx.ADDSUB) | set(avx.MADD))
 MASK128 = avx.MASK128
 MASK256 = avx.MASK256
 
@@ -148,6 +149,13 @@ def lower(function, ins):
             result = function.emit(f'fptrunc {kind} {value} to <{count} x float>')
             packed = function.emit(f'bitcast <{count} x float> {result} to i{count * 32}')
             write(args[0], _pack(function, packed, count * 32, bits), bits)
+        elif op == 'vcvtdq2pd':
+            count = bits // 64
+            source_bits = count * 32
+            kind = f'<{count} x i32>'
+            value = function.emit(f'bitcast i{source_bits} {read(args[1], source_bits)} to {kind}')
+            result = function.emit(f'sitofp {kind} {value} to <{count} x double>')
+            write(args[0], function.emit(f'bitcast <{count} x double> {result} to i{bits}'), bits)
         elif op == 'vcvtps2pd':
             count = source_bits // 32
             kind = f'<{count} x float>'
@@ -264,6 +272,31 @@ def lower(function, ins):
         right64 = function.emit(f'{extension} {even_kind} {right_even} to {kind64}')
         product = function.emit(f'mul {kind64} {left64}, {right64}')
         write(args[0], function.emit(f'bitcast {kind64} {product} to i{bits}'), bits)
+    elif op in avx.ADDSUB:
+        lane = avx.ADDSUB[op]
+        count = bits // lane
+        kind = f'<{count} x {"float" if lane == 32 else "double"}>'
+        left = function.emit(f'bitcast i{bits} {read(args[1])} to {kind}')
+        right = function.emit(f'bitcast i{bits} {read(args[2])} to {kind}')
+        added = function.emit(f'fadd {kind} {left}, {right}')
+        subtracted = function.emit(f'fsub {kind} {left}, {right}')
+        condition = '<' + ', '.join('i1 false' if index % 2 == 0 else 'i1 true' for index in range(count)) + '>'
+        result = function.emit(f'select <{count} x i1> {condition}, {kind} {added}, {kind} {subtracted}')
+        write(args[0], function.emit(f'bitcast {kind} {result} to i{bits}'), bits)
+    elif op in avx.MADD:
+        count = bits // 32
+        wide = f'<{bits // 16} x i16>'
+        left = function.emit(f'bitcast i{bits} {read(args[1])} to {wide}')
+        right = function.emit(f'bitcast i{bits} {read(args[2])} to {wide}')
+        left32 = function.emit(f'sext {wide} {left} to <{bits // 16} x i32>')
+        right32 = function.emit(f'sext {wide} {right} to <{bits // 16} x i32>')
+        product = function.emit(f'mul <{bits // 16} x i32> {left32}, {right32}')
+        even = ', '.join(f'i32 {index * 2}' for index in range(count))
+        odd = ', '.join(f'i32 {index * 2 + 1}' for index in range(count))
+        even_values = function.emit(f'shufflevector <{bits // 16} x i32> {product}, <{bits // 16} x i32> zeroinitializer, <{count} x i32> <{even}>')
+        odd_values = function.emit(f'shufflevector <{bits // 16} x i32> {product}, <{bits // 16} x i32> zeroinitializer, <{count} x i32> <{odd}>')
+        result = function.emit(f'add <{count} x i32> {even_values}, {odd_values}')
+        write(args[0], function.emit(f'bitcast <{count} x i32> {result} to i{bits}'), bits)
     else:
         return False
     return True

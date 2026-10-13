@@ -53,6 +53,8 @@ PERMIL_IMM = {'vpermilps': 32, 'vpermilpd': 64}
 PERMS = {'vperm2f128', 'vperm2i128', 'vinsertf128', 'vextractf128', 'vpermq', 'vpermd', 'vpermpd', 'vpermps'}
 DUPS = {'vmovshdup': 32, 'vmovsldup': 32, 'vmovddup': 64}
 BROADCAST128 = {'vbroadcastf128', 'vbroadcasti128'}
+ADDSUB = {'vaddsubps': 32, 'vaddsubpd': 64}
+MADD = {'vpmaddwd'}
 CMP_PREDICATES = ['oeq', 'olt', 'ole', 'uno', 'une', 'uge', 'ugt', 'ord',
                   'ueq', 'ult', 'ule', 'false', 'one', 'oge', 'ogt', 'true',
                   'oeq', 'olt', 'ole', 'uno', 'une', 'uge', 'ugt', 'ord',
@@ -65,14 +67,15 @@ CMP = {f'vcmp{suffix}{kind}': (lane, index)
        for index, suffix in enumerate(CMP_SUFFIXES)
        for kind, lane in (('ps', 32), ('pd', 64), ('ss', 32), ('sd', 64))}
 FLAGS_COMPARE = {'vucomiss': 32, 'vucomisd': 64, 'vcomiss': 32, 'vcomisd': 64}
-MOVMSK = {'vmovmskps': 32, 'vmovmskpd': 64, 'movmskps': 32, 'movmskpd': 64, 'pmovmskb': 8}
+MOVMSK = {'vmovmskps': 32, 'vmovmskpd': 64, 'movmskps': 32, 'movmskpd': 64,
+          'pmovmskb': 8, 'vpmovmskb': 8}
 LEGACY = {'movmskps', 'movmskpd', 'pmovmskb'}
 VTEST = {'vtestps': 32, 'vtestpd': 64}
 ROUNDS = {'vroundps': 32, 'vroundpd': 64, 'vroundss': 32, 'vroundsd': 64}
 SQRT = {'vsqrtps': 32, 'vsqrtpd': 64, 'vsqrtss': 32, 'vsqrtsd': 64}
 RECIP = {'vrcpps': 32, 'vrcpss': 32, 'vrsqrtps': 32, 'vrsqrtss': 32}
 CVT_ROUND = {'vcvtps2dq': 32, 'vcvttps2dq': 32, 'vcvtpd2dq': 64, 'vcvttpd2dq': 64,
-             'vcvtdq2ps': 32, 'vcvtpd2ps': 64, 'vcvtps2pd': 32}
+             'vcvtdq2ps': 32, 'vcvtpd2ps': 64, 'vcvtps2pd': 32, 'vcvtdq2pd': 32}
 TO_INT = {'vcvttss2si': 32, 'vcvttsd2si': 64, 'vcvtss2si': 32, 'vcvtsd2si': 64}
 EXTRACT_ELEM = {'vpextrb': 8, 'vpextrw': 16, 'vpextrd': 32, 'vpextrq': 64, 'vextractps': 32}
 INSERT_ELEM = {'vpinsrb': 8, 'vpinsrw': 16, 'vpinsrd': 32, 'vpinsrq': 64, 'vinsertps': 32}
@@ -92,7 +95,8 @@ SUPPORTED = (MOVES | set(BITWISE) | ANDNOT | SCALAR_MOVES | set(BROADCASTS)
              | set(FLAGS_COMPARE) | set(MOVMSK) | set(VTEST) | set(ROUNDS) | set(SQRT)
              | set(RECIP) | set(CVT_ROUND) | set(TO_INT) | set(EXTRACT_ELEM) | set(INSERT_ELEM)
              | EXTRACT128 | INSERT128 | set(PSHUFB) | set(PALIGNR) | HALF | set(LEGACY_MOVES)
-             | set(DUPS) | BROADCAST128 | set(CMP) | set(SHUF_WORDS) | set(MUL64))
+             | set(DUPS) | BROADCAST128 | set(CMP) | set(SHUF_WORDS) | set(MUL64)
+             | set(ADDSUB) | set(MADD))
 MASK128 = (1 << 128) - 1
 MASK256 = (1 << 256) - 1
 
@@ -405,6 +409,10 @@ def analyze(function, ins, state):
         _known(function, ins, state, args[1], bits)
         _define(function, ins, state, args[0], (1 << bits) - 1, bits)
     elif op in MUL64:
+        _known(function, ins, state, args[1], bits)
+        _known(function, ins, state, args[2], bits)
+        _define(function, ins, state, args[0], (1 << bits) - 1, bits)
+    elif op in ADDSUB or op in MADD:
         _known(function, ins, state, args[1], bits)
         _known(function, ins, state, args[2], bits)
         _define(function, ins, state, args[0], (1 << bits) - 1, bits)
