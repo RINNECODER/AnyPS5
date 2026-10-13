@@ -3489,6 +3489,11 @@ void rectListTests() {
     const Context context{};
     const AgcDriver::Pm4::DrawParameters draw{0, 4, 0, 1, 0, false};
     expectFailure([&] { Draw(context, state, draw, {}); }, "incomplete rect-list");
+    std::array<std::uint16_t, 8> indices{};
+    const AgcDriver::Pm4::DrawParameters noIndices{reinterpret_cast<std::uint64_t>(indices.data()), 0, 2, 1, 0, true};
+    Draw(context, state, noIndices, {});
+    const AgcDriver::Pm4::DrawParameters noInstances{reinterpret_cast<std::uint64_t>(indices.data()), 3, 2, 0, 0, true};
+    Draw(context, state, noInstances, {});
 }
 
 ShaderRecompiler::RecompileResult recompilePixel(std::initializer_list<std::uint32_t> controls, std::span<const std::uint32_t> code) {
