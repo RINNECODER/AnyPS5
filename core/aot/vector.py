@@ -6,12 +6,19 @@ BITWISE = {'xorps': 'xor', 'xorpd': 'xor', 'pxor': 'xor', 'andps': 'and', 'andpd
            'pand': 'and', 'orps': 'or', 'orpd': 'or', 'por': 'or', 'pandn': 'andnot',
            'andnps': 'andnot', 'andnpd': 'andnot'}
 FLOAT_OPS = {'addps': ('fadd', 128), 'mulps': ('fmul', 128), 'subps': ('fsub', 128),
-             'addss': ('fadd', 32), 'mulss': ('fmul', 32), 'subss': ('fsub', 32)}
+             'addss': ('fadd', 32), 'mulss': ('fmul', 32), 'subss': ('fsub', 32),
+             'addsd': ('fadd', 64), 'mulsd': ('fmul', 64), 'subsd': ('fsub', 64),
+             'divss': ('fdiv', 32), 'divsd': ('fdiv', 64)}
+SQRT_OPS = {'sqrtss': 32, 'sqrtsd': 64}
+CONVERTS = {'cvtsi2ss': 32, 'cvtsi2sd': 64, 'cvtsd2ss': 64, 'cvtss2sd': 32}
+TO_INT = {'cvttss2si': 32, 'cvttsd2si': 64, 'cvtss2si': 32, 'cvtsd2si': 64}
+COMPARES = {'comiss': 32, 'ucomiss': 32, 'comisd': 64, 'ucomisd': 64}
 SHUFFLES = {'shufps', 'pshufd', 'unpcklps', 'unpckhps', 'unpcklpd', 'unpckhpd',
             'punpcklqdq', 'punpckhqdq', 'movlhps', 'movhlps'}
-SUPPORTED = FULL_MOVES | set(BITWISE) | set(FLOAT_OPS) | SHUFFLES | {
+SUPPORTED = (FULL_MOVES | set(BITWISE) | set(FLOAT_OPS) | SHUFFLES | set(SQRT_OPS)
+             | set(CONVERTS) | set(TO_INT) | set(COMPARES) | {
     'movd', 'movq', 'movss', 'movsd', 'movlps', 'movlpd', 'psrld', 'paddd', 'pcmpgtd',
-    'packuswb', 'ucomiss', 'cvtsi2ss'}
+    'packuswb'})
 FP_POLICY = {'rounding': 'nearest-even', 'subnormals': 'preserve', 'exceptions': 'masked',
              'status_flags': 'unobserved', 'nan_payloads': 'unobserved'}
 MASK128 = (1 << 128) - 1
@@ -167,14 +174,29 @@ def analyze(function, ins, state):
             _check(function, ins, state, args[0], bits)
             _check(function, ins, state, args[1], bits)
             _define(function, ins, state, args[0], bits)
-    elif op == 'cvtsi2ss':
+    elif op in SQRT_OPS:
         _policy(function, ins)
-        _check(function, ins, state, args[1], args[1].size * 8)
-        _define(function, ins, state, args[0], 32)
-    elif op == 'ucomiss':
+        _check(function, ins, state, args[1], SQRT_OPS[op])
+        _define(function, ins, state, args[0], SQRT_OPS[op])
+    elif op in CONVERTS:
         _policy(function, ins)
-        _check(function, ins, state, args[0], 32)
-        _check(function, ins, state, args[1], 32)
+        if op in ('cvtsi2ss', 'cvtsi2sd'):
+            _check(function, ins, state, args[1], args[1].size * 8)
+            _define(function, ins, state, args[0], CONVERTS[op])
+        elif op == 'cvtsd2ss':
+            _check(function, ins, state, args[1], 64)
+            _define(function, ins, state, args[0], 32)
+        else:
+            _check(function, ins, state, args[1], 32)
+            _define(function, ins, state, args[0], 64)
+    elif op in TO_INT:
+        _policy(function, ins)
+        _check(function, ins, state, args[1], TO_INT[op])
+        function.define(ins, state, args[0])
+    elif op in COMPARES:
+        _policy(function, ins)
+        _check(function, ins, state, args[0], COMPARES[op])
+        _check(function, ins, state, args[1], COMPARES[op])
         state['flags'] = {'cf', 'zf', 'pf', 'of', 'sf'}
     return True
 
@@ -272,17 +294,49 @@ def lower(function, ins):
         _write(function, ins, args[0], function.emit(f'bitcast <16 x i8> {combined} to i128'))
     elif op in FLOAT_OPS:
         instruction, bits = FLOAT_OPS[op]
-        kind = '<4 x float>' if bits == 128 else 'float'
+        kind = '<4 x float>' if bits == 128 else ('float' if bits == 32 else 'double')
         left, right = (_cast(function, read(operand, bits), bits, kind) for operand in args[:2])
         result = function.emit(f'{instruction} {kind} {left}, {right}')
         _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i{bits}'), bits)
-    elif op == 'cvtsi2ss':
-        bits = args[1].size * 8
-        value = function.emit(f'sitofp i{bits} {read(args[1], bits)} to float')
-        _write(function, ins, args[0], function.emit(f'bitcast float {value} to i32'), 32)
-    elif op == 'ucomiss':
-        left, right = (_cast(function, read(operand, 32), 32, 'float') for operand in args[:2])
-        flags = {name: function.emit(f'fcmp {predicate} float {left}, {right}')
+    elif op in SQRT_OPS:
+        lane = SQRT_OPS[op]
+        kind = 'float' if lane == 32 else 'double'
+        scalar = function.emit(f'bitcast i{lane} {read(args[1], lane)} to {kind}')
+        root = function.emit(f'call {kind} @llvm.sqrt.{"f32" if lane == 32 else "f64"}({kind} {scalar})')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind} {root} to i{lane}'), lane)
+    elif op in CONVERTS:
+        if op in ('cvtsi2ss', 'cvtsi2sd'):
+            bits = args[1].size * 8
+            lane = CONVERTS[op]
+            kind = 'float' if lane == 32 else 'double'
+            value = function.emit(f'sitofp i{bits} {read(args[1], bits)} to {kind}')
+            _write(function, ins, args[0], function.emit(f'bitcast {kind} {value} to i{lane}'), lane)
+        elif op == 'cvtsd2ss':
+            value = function.emit(f'fptrunc double {function.emit(f"bitcast i64 {read(args[1], 64)} to double")} to float')
+            _write(function, ins, args[0], function.emit(f'bitcast float {value} to i32'), 32)
+        else:
+            value = function.emit(f'fpext float {function.emit(f"bitcast i32 {read(args[1], 32)} to float")} to double')
+            _write(function, ins, args[0], function.emit(f'bitcast double {value} to i64'), 64)
+    elif op in TO_INT:
+        lane = TO_INT[op]
+        kind = 'float' if lane == 32 else 'double'
+        dest_bits = args[0].size * 8
+        scalar = function.emit(f'bitcast i{lane} {read(args[1], lane)} to {kind}')
+        if op in ('cvtss2si', 'cvtsd2si'):
+            scalar = function.emit(f'call {kind} @llvm.rint.{"f32" if lane == 32 else "f64"}({kind} {scalar})')
+        low, high = (-2147483648.0, 2147483648.0) if dest_bits == 32 else (-9223372036854775808.0, 9223372036854775808.0)
+        above = function.emit(f'fcmp oge {kind} {scalar}, {low}')
+        below = function.emit(f'fcmp olt {kind} {scalar}, {high}')
+        in_range = function.emit(f'and i1 {above}, {below}')
+        clamped = function.emit(f'select i1 {in_range}, {kind} {scalar}, {kind} 0.000000e+00')
+        converted = function.emit(f'fptosi {kind} {clamped} to i{dest_bits}')
+        result = function.emit(f'select i1 {in_range}, i{dest_bits} {converted}, i{dest_bits} {-2 ** (dest_bits - 1)}')
+        _write(function, ins, args[0], result, dest_bits)
+    elif op in COMPARES:
+        lane = COMPARES[op]
+        kind = 'float' if lane == 32 else 'double'
+        left, right = (_cast(function, read(operand, lane), lane, kind) for operand in args[:2])
+        flags = {name: function.emit(f'fcmp {predicate} {kind} {left}, {right}')
                  for name, predicate in [('zf', 'ueq'), ('pf', 'uno'), ('cf', 'ult')]}
         flags.update({'of': 'false', 'sf': 'false'})
         for name, value in flags.items():
