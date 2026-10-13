@@ -94,6 +94,21 @@ class InstallTreeGuardTests(unittest.TestCase):
             native_package.check_zip_tree(archive, self.root)
 
 
+class PackagedCompilerSmokeTests(unittest.TestCase):
+    def test_smoke_runs_the_launcher_and_leaves_the_package_byte_for_byte_unchanged(self):
+        with tempfile.TemporaryDirectory(prefix="native-smoke-") as scratch:
+            package, logs = Path(scratch) / "package", Path(scratch) / "logs"
+            logs.mkdir()
+            (package / "bin").mkdir(parents=True)
+            (package / "compiler").mkdir()
+            (package / "python").mkdir()
+            (package / "bin/native_aot").write_text(native_package.LAUNCHER)
+            (package / "compiler/compiler.py").write_text("def main():\n    print('usage: native_aot [-h]')\n")
+            before = sorted(str(path.relative_to(package)) for path in package.rglob("*"))
+            self.assertEqual(native_package.smoke(package, logs, print, "smoke"), "PASS")
+            self.assertEqual(sorted(str(path.relative_to(package)) for path in package.rglob("*")), before)
+
+
 class TestGateTests(unittest.TestCase):
     NAMES = ["native_aot_unit_%d" % i for i in range(120)] + list(native_package.REQUIRED_TESTS)
 

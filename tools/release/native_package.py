@@ -264,9 +264,10 @@ def write_manifest(package, version, revision, link, validation):
 
 
 def smoke(package, logs, log, name):
-    """The packaged compiler starts from the package alone (clean environment, no checkout paths)."""
+    """The packaged compiler starts from the package alone (clean environment, no checkout paths).
+    ``-B``: running it must not write bytecode caches into the package it is about to ship."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("DYLD_", "LD_", "PYTHON", "LIBCAPSTONE"))}
-    path = build_package.run_logged(name, [sys.executable, "-I", package / "bin" / "native_aot", "--help"], logs, log, env=env)
+    path = build_package.run_logged(name, [sys.executable, "-I", "-B", package / "bin" / "native_aot", "--help"], logs, log, env=env)
     releaselib.require("usage:" in path.read_text(), name + ": the packaged compiler printed no usage")
     return "PASS"
 
