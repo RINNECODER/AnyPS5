@@ -1010,17 +1010,28 @@ void MetalDriver::Present(const PresentationWindow& window, const DisplayBuffer*
     // drawable and for the present run on the presentation's own queue without it, so the queue
     // workers keep encoding meanwhile.
     std::vector<std::byte> pixels;
+    // Whether `pixels` holds the display buffer's pixels, or is empty because the window is
+    // minimized (an empty drawable presents nothing, so nothing is read: the display buffer may
+    // not be readable then). Otherwise Present validates the request and throws.
+    bool decided = false;
     {
         std::unique_lock gpuLock(impl->gpuMutex);
         impl->CheckFailureAndStopping();
-        if (buffer != nullptr) {
-            NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
-            pixels = MetalPresentation::ReadPixels(*buffer);
+        if (buffer != nullptr && window.context != nullptr && window.getDrawableSize != nullptr && buffer->width == window.width &&
+            buffer->height == window.height) {
+            std::uint32_t width = 0;
+            std::uint32_t height = 0;
+            window.getDrawableSize(window.context, &width, &height);
+            decided = true;
+            if (width != 0 && height != 0) {
+                NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
+                pixels = MetalPresentation::ReadPixels(*buffer);
+            }
         }
     }
     bool ready = false;
     impl->presentation->Present(window, buffer, opaque, gpuReady ? +[](void* value) { *static_cast<bool*>(value) = true; } : nullptr, &ready,
-        buffer != nullptr ? &pixels : nullptr);
+        decided ? &pixels : nullptr);
     if (ready) gpuReady(context);
 }
 

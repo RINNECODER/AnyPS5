@@ -97,7 +97,10 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
     // A throw before the readback is encoded must not wedge the single in-flight slot.
     struct Slot { FrameCapture& capture; bool active; const bool& encoded; ~Slot() { if (active && !encoded) capture.Abandon(); } }
         slot{frameCapture, ticket.has_value(), captureEncoded};
-    if (width != 0 && height != 0) {
+    // Empty `decoded` pixels: the caller saw a minimized window and read nothing; the window
+    // grew since, so this frame is skipped like a minimized one.
+    const bool unread = buffer != nullptr && decoded != nullptr && decoded->empty();
+    if (width != 0 && height != 0 && !unread) {
         if (buffer != nullptr) {
             const auto pixels = decoded != nullptr ? *decoded : displayPixels(*buffer);
             auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:buffer->width height:buffer->height mipmapped:NO];
