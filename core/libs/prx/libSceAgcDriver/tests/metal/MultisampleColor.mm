@@ -24,6 +24,9 @@
 //   msaa_read   - a 2D MSAA image descriptor of an address no draw has rendered (a target cleared only
 //                 through DCC, read by a post pass) binds a new resident 4x surface whose samples read
 //                 zero, and a second lookup binds that same surface.
+//   cb_resolve  - a CB_COLOR_CONTROL resolve pass (CB0 4x, CB1 1x) decodes as a Resolve, also with the
+//                 rasterizer at one sample, and MetalDraw::ResolveSynchronously averages the resident
+//                 4x surface of CB0 into CB1's guest memory (upstream ebf361103, d57f9cfb0).
 namespace {
 
 using namespace AgcDriver;
@@ -48,6 +51,7 @@ void Rejects(const char* name, const char* reason, Action&& action) {
 struct Guest {
     alignas(256) std::array<std::byte, 2048> color{};
     alignas(256) std::array<std::byte, Edge * Edge * Samples * 4> depth{};
+    alignas(256) std::array<std::byte, 2048> resolved{};
 };
 
 // An 8x8 draw into CB slot 3 (export 3) with a Z32F depth surface tested LESS with writes.
@@ -313,20 +317,131 @@ void MultisampleRead(id<MTLDevice> device, id<MTLLibrary> library, const Guest& 
     std::cout << "PASS: a never-drawn 4x image binds a zeroed resident surface\n";
 }
 
+// A CB resolve pass: CB0 is the 4x RGBA8 target at memory.color, CB1 the 1x RGBA8 target at
+// memory.resolved, both 8x8 and fully covered by the viewport and scissors.
+QueueState ResolvePass(const Guest& memory, std::uint32_t aaConfig, std::uint32_t destinationAttrib) {
+    QueueState guest;
+    auto& cx = guest.context;
+    cx[0x202] = 0xcc0000u | (3u << 4u);
+    cx[0x000] = 0;
+    cx[0x200] = 0;
+    cx[0x010] = 0;
+    cx[0x011] = 0;
+    cx[0x2f8] = aaConfig;
+    cx[0x292] = 0;
+    cx[0x80] = 0;
+    cx[0x206] = 0x43f;
+    for (const auto offset : {0x10fu, 0x110u, 0x112u}) cx[offset] = std::bit_cast<std::uint32_t>(Edge / 2.0f);
+    cx[0x111] = std::bit_cast<std::uint32_t>(-(Edge / 2.0f));
+    for (const auto offset : {0x0cu, 0x81u, 0x90u}) {
+        cx[offset] = 0;
+        cx[offset + 1] = (Edge << 16u) | Edge;
+    }
+    const std::array<std::uintptr_t, 2> addresses{reinterpret_cast<std::uintptr_t>(memory.color.data()), reinterpret_cast<std::uintptr_t>(memory.resolved.data())};
+    for (std::uint32_t slot = 0; slot < 2; ++slot) {
+        const auto stride = slot * 0xfu;
+        cx[0x318 + stride] = static_cast<std::uint32_t>(addresses[slot] >> 8u);
+        cx[0x390 + slot] = static_cast<std::uint32_t>(addresses[slot] >> 40u);
+        cx[0x31b + stride] = 0;
+        cx[0x31c + stride] = Rgba8Info;
+        cx[0x31d + stride] = slot == 0 ? Attrib4x : destinationAttrib;
+        cx[0x3b0 + slot] = ((Edge - 1) << 14u) | (Edge - 1);
+        cx[0x3b8 + slot] = 0x09000000;
+    }
+    return guest;
+}
+
+void CbResolve(id<MTLDevice> device, id<MTLLibrary> library, Guest& memory,
+    std::span<const NativeGuestMemory::BorrowedRange> ranges, const std::string& utilityPath) {
+    const auto pass = Graphics::DecodeColorMetadataPass(ResolvePass(memory, 2, 0));
+    Require(pass && pass->mode == Graphics::ColorMetadataPass::Mode::Resolve && pass->source && pass->targets.size() == 1,
+            "a CB_COLOR_CONTROL resolve with a 4x rasterizer did not decode as a CB resolve");
+    Require(pass->source->samples == Samples && pass->source->address == reinterpret_cast<std::uintptr_t>(memory.color.data()) &&
+            pass->targets[0].samples == 1 && pass->targets[0].address == reinterpret_cast<std::uintptr_t>(memory.resolved.data()),
+            "the CB resolve did not take CB0 as its 4x source and CB1 as its destination");
+    const auto singleRasterizer = Graphics::DecodeColorMetadataPass(ResolvePass(memory, 0, 0));
+    Require(singleRasterizer && singleRasterizer->mode == Graphics::ColorMetadataPass::Mode::Resolve && singleRasterizer->source->samples == Samples,
+            "a CB resolve with the rasterizer at one sample did not take its sample count from CB0");
+    Rejects("a CB resolve into a 4x target", "into a multisampled target", [&] {
+        static_cast<void>(Graphics::DecodeColorMetadataPass(ResolvePass(memory, 2, Attrib4x)));
+    });
+    Rejects("a CB resolve whose rasterizer disagrees with CB0", "differs from the rasterizer", [&] {
+        static_cast<void>(Graphics::DecodeColorMetadataPass(ResolvePass(memory, 1, 0)));
+    });
+
+    NSError* error = nil;
+    id<MTLLibrary> utilities = [device newLibraryWithURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:utilityPath.c_str()]] error:&error];
+    Require(utilities != nil, "cb_resolve needs the compiled utility metallib as its second argument");
+    Metal::MetalDraw draw(device, utilities);
+    // CB1 is linear: rows at its pitch (the 256-byte aligned row of an 8-texel RGBA8 surface).
+    const auto pitch = pass->targets[0].bytes / Edge;
+    Require(pitch >= Edge * 4 && pass->targets[0].bytes <= memory.resolved.size(), "the CB resolve destination layout is unexpected");
+    const auto texel = [&](std::uint32_t pixel, std::uint32_t channel) {
+        return std::to_integer<std::uint32_t>(memory.resolved[(pixel / Edge) * pitch + (pixel % Edge) * 4 + channel]);
+    };
+    // Never drawn: the source resolves from the zeroed surface a first draw would create.
+    std::memset(memory.resolved.data(), 0xab, memory.resolved.size());
+    Require(draw.ResolveSynchronously(*pass->source, pass->targets[0], ranges).state == ShaderRecompiler::BdaAbi::FaultState::Empty,
+            "the CB resolve of a new surface faulted");
+    for (std::uint32_t pixel = 0; pixel < Edge * Edge; ++pixel) {
+        for (std::uint32_t channel = 0; channel < 4; ++channel) {
+            Require(texel(pixel, channel) == 0, "the CB resolve of a never-drawn 4x target did not write zero into CB1");
+        }
+    }
+    // Draw half the target into the resident surface, then resolve it again.
+    Graphics::GuestTextureResource image{};
+    image.baseAddress = pass->source->address;
+    image.width = image.height = Edge;
+    image.mipCount = image.allocatedMipCount = 1;
+    image.dimension = Graphics::TextureDimension::k2D;
+    image.tileMode = Graphics::TextureTileMode::kLinear;
+    image.format = *Graphics::FindGuestColorTargetFormat(VK_FORMAT_R8G8B8A8_UNORM, 4);
+    image.samples = Samples;
+    image.dstSelX = 4; image.dstSelY = 5; image.dstSelZ = 6; image.dstSelW = 7;
+    id<MTLTexture> view = draw.ResidentTexture(image, false, false);
+    Require(view != nil, "the CB resolve source has no resident surface");
+    id<MTLTexture> surface = view.parentTexture ?: view;
+    auto queue = [device newCommandQueue];
+    auto commands = [queue commandBuffer];
+    auto render = [MTLRenderPassDescriptor renderPassDescriptor];
+    render.colorAttachments[0].texture = surface;
+    render.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    render.colorAttachments[0].storeAction = MTLStoreActionStore;
+    auto encoder = [commands renderCommandEncoderWithDescriptor:render];
+    [encoder setRenderPipelineState:SolidPipeline(device, library, surface.pixelFormat, Samples)];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [encoder endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    Require(draw.ResolveSynchronously(*pass->source, pass->targets[0], ranges).state == ShaderRecompiler::BdaAbi::FaultState::Empty,
+            "the CB resolve of a drawn surface faulted");
+    std::uint32_t covered = 0, empty = 0, partial = 0;
+    for (std::uint32_t pixel = 0; pixel < Edge * Edge; ++pixel) {
+        const auto red = texel(pixel, 0);
+        const auto alpha = texel(pixel, 3);
+        Require(red == alpha, "a resolved pixel is not the drawn color averaged with zero");
+        (red == 255 ? covered : red == 0 ? empty : partial) += 1;
+    }
+    Require(covered != 0 && empty != 0 && partial != 0, "the CB resolve did not average the samples into CB1 (covered " +
+            std::to_string(covered) + ", empty " + std::to_string(empty) + ", partial " + std::to_string(partial) + ")");
+    std::cout << "PASS: CB resolve of a 4x target into guest memory: " << covered << " covered, " << empty << " empty, " << partial << " averaged pixels\n";
+}
+
 }
 
 int main(int argc, char** argv) {
     @autoreleasepool {
         try {
             const std::string mode = argc > 1 ? argv[1] : "all";
-            Require(mode == "all" || mode == "format_view" || mode == "eqaa" || mode == "msaa_color" || mode == "msaa_read", "Unknown multisample color mode");
+            Require(mode == "all" || mode == "format_view" || mode == "eqaa" || mode == "msaa_color" || mode == "msaa_read" || mode == "cb_resolve", "Unknown multisample color mode");
             auto device = MTLCreateSystemDefaultDevice();
             Require(device != nil, "Multisample color tests require a Metal device");
             Require([device supportsTextureSampleCount:Samples], "Metal device lacks 4x multisampling");
             static Guest memory;
-            const std::array<NativeGuestMemory::BorrowedRange, 2> ranges{{
+            const std::array<NativeGuestMemory::BorrowedRange, 3> ranges{{
                 {reinterpret_cast<std::uintptr_t>(memory.color.data()), memory.color, true},
                 {reinterpret_cast<std::uintptr_t>(memory.depth.data()), memory.depth, true},
+                {reinterpret_cast<std::uintptr_t>(memory.resolved.data()), memory.resolved, true},
             }};
             const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
             auto library = Library(device);
@@ -334,6 +449,7 @@ int main(int argc, char** argv) {
             if (mode == "all" || mode == "eqaa") Eqaa(device, library, memory);
             if (mode == "all" || mode == "msaa_color") MultisampleColor(device, library, memory);
             if (mode == "all" || mode == "msaa_read") MultisampleRead(device, library, memory);
+            if ((mode == "all" && argc > 2) || mode == "cb_resolve") CbResolve(device, library, memory, ranges, argc > 2 ? argv[2] : "");
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

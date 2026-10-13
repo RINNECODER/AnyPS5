@@ -59,6 +59,11 @@ public:
     // guest memory is committed without waiting: it returns nullopt and `completed` receives the
     // fault (possibly empty) at the timeline's next drain.
     using Completed = std::function<void(ShaderRecompiler::BdaAbi::Fault)>;
+    // A CB resolve (CB_COLOR_CONTROL mode 3, Graphics::DecodeColorMetadataPass): averages the samples
+    // of `source`'s resident multisampled surface into the single-sample `destination` in guest
+    // memory. A source no draw has rendered resolves from the zeroed surface a first draw would create.
+    [[nodiscard]] ShaderRecompiler::BdaAbi::Fault ResolveSynchronously(const Graphics::ColorTarget& source,
+        const Graphics::ColorTarget& destination, std::span<const NativeGuestMemory::BorrowedRange> ranges);
     // Called before a draw reads guest bytes on the CPU (indices, DCC keys, staged or unaligned
     // surfaces), so the driver can first finish committed work that may write them. It may run
     // completions that draw again, hence the recursive drawMutex.
