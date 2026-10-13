@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <clocale>
 #include <cstring>
 #include <new>
 #include <stdexcept>
