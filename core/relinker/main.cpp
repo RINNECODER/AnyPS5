@@ -15,6 +15,7 @@
 #include <relinker/parsing/ElfReader.hpp>
 #include <relinker/analysis/ValidationPolicy.hpp>
 #include <relinker/analysis/SyscallScanner.hpp>
+#include <relinker/analysis/IndirectBranchScanner.hpp>
 #include <relinker/analysis/CallSiteResolver.hpp>
 #include <relinker/analysis/UnusedNidFilter.hpp>
 #include <relinker/output/SysVDynamicSectionBuilder.hpp>
@@ -25,7 +26,9 @@
 #include <map>
 #include <codegen/CodegenException.hpp>
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -86,10 +89,14 @@ int Run(const int argc, char* argv[]) {
 
         auto elfReader = std::make_shared<Relinker::ElfReader>(sourceBytes);
         const std::shared_ptr<Relinker::ISyscallScanner> syscallScanner = args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner(args.trapSdkSyscallStubs);
+        const char* indirectTracePath = std::getenv("ANYPS5_TRACE_INDIRECT");
+        const bool traceIndirect = indirectTracePath != nullptr && *indirectTracePath != '\0';
+        const std::shared_ptr<Relinker::IIndirectBranchScanner> indirectBranchScanner = traceIndirect ? Relinker::MakeIndirectBranchScanner() : Relinker::MakeNullIndirectBranchScanner();
 
         const auto pipeline = std::make_shared<Relinker::RelinkerPipeline>(
             elfReader,
             syscallScanner,
+            indirectBranchScanner,
             Relinker::MakeCallSiteResolver(),
             std::make_shared<Relinker::ValidationPolicy>(),
             std::make_shared<Relinker::SysVDynamicSectionBuilder>(),
@@ -105,6 +112,26 @@ int Run(const int argc, char* argv[]) {
             if (patch.Offset > sourceBytes.size() || patch.Bytes.size() > sourceBytes.size() - patch.Offset)
                 throw Domain::RelinkerException("Relinker patch exceeds source image", patch.Offset);
             for (std::size_t index = 0; index < patch.Bytes.size(); ++index) sourceBytes[patch.Offset + index] = patch.Bytes[index];
+        }
+        if (traceIndirect) {
+            const std::string sitesPath = std::string(indirectTracePath) + ".sites";
+            const std::filesystem::path sitesFsPath = Io::NativePath(sitesPath);
+            std::filesystem::create_directories(sitesFsPath.parent_path());
+            std::ofstream stream(sitesFsPath, std::ios::binary | std::ios::trunc);
+            const std::uint32_t magic = 0x49355041;  // 'AP5I'
+            const std::uint32_t count = static_cast<std::uint32_t>(result.IndirectTraceSites.size());
+            const std::uint64_t begin = result.ExecutableBegin;
+            const std::uint64_t end = result.ExecutableEnd;
+            stream.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+            stream.write(reinterpret_cast<const char*>(&count), sizeof(count));
+            stream.write(reinterpret_cast<const char*>(&begin), sizeof(begin));
+            stream.write(reinterpret_cast<const char*>(&end), sizeof(end));
+            for (const auto address : result.IndirectTraceSites) {
+                const std::uint64_t value = address;
+                stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
+            }
+            if (!stream) throw Domain::RelinkerException("Cannot write the indirect trace site list");
+            std::cout << "Indirect trace sites: " << count << " -> " << sitesPath << '\n';
         }
 
         std::vector<Relinker::GuestArtifact> guestArtifacts;

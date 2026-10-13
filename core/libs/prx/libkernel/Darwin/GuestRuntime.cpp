@@ -26,6 +26,7 @@
 #include "prx/libkernel/Darwin/GuestRuntime.hpp"
 
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
@@ -44,6 +45,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -253,6 +255,230 @@ void Describe(std::uint64_t address, char* out, std::size_t size) {
         info.dli_sname != nullptr ? " " : "", info.dli_sname != nullptr ? info.dli_sname : "");
 }
 
+// ---- indirect branch tracing (ANYPS5_TRACE_INDIRECT, Phase 1) --------------
+//
+// The opt-in relinker rewrites each computed `call r/m64` / `jmp r/m64` opcode
+// byte to `int3` and writes the site list to <ANYPS5_TRACE_INDIRECT>.sites. The
+// SIGTRAP handler below emulates the branch from the saved context and appends a
+// fixed 24-byte record (from, to, kind, pad), kind 0=call 1=jmp, for targets that
+// land in the main image's executable range. It never allocates or logs from the
+// hot path beyond the record write.
+
+struct IndirectTraceState {
+    bool enabled = false;
+    int fd = -1;
+    std::uint64_t limit = 2000000;
+    double afterSeconds = 0.0;
+    std::uint64_t written = 0;
+    std::uint64_t guestBase = 0;
+    std::uint64_t codeMin = 0;
+    std::uint64_t codeMax = 0;
+    std::vector<std::uint64_t> sites;
+};
+
+IndirectTraceState indirectTrace;
+
+bool ReadMemory(std::uint64_t address, void* buffer, std::size_t size) {
+    mach_vm_size_t read = 0;
+    return mach_vm_read_overwrite(mach_task_self(), address, size, reinterpret_cast<mach_vm_address_t>(buffer), &read) == KERN_SUCCESS && read == size;
+}
+
+bool WriteMemory(std::uint64_t address, const void* buffer, std::size_t size) {
+    return mach_vm_write(mach_task_self(), address, reinterpret_cast<vm_offset_t>(const_cast<void*>(buffer)), static_cast<mach_msg_type_number_t>(size)) == KERN_SUCCESS;
+}
+
+std::uint64_t MainImageGuestBase() {
+    const auto* header = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(0));
+    if (header == nullptr) return 0;
+    unsigned long size = 0;
+    const auto* meta = reinterpret_cast<const std::uint64_t*>(getsectiondata(header, "__APS5DATA", "__meta", &size));
+    return meta != nullptr && size >= 16 ? meta[1] : 0;
+}
+
+void MainImageCodeRange(std::uint64_t* begin, std::uint64_t* end) {
+    *begin = 0;
+    *end = 0;
+    const auto* header = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(0));
+    if (header == nullptr) return;
+    const std::uint64_t base = reinterpret_cast<std::uint64_t>(header);
+    const auto* cursor = reinterpret_cast<const std::uint8_t*>(header) + sizeof(mach_header_64);
+    for (std::uint32_t index = 0; index < header->ncmds; ++index) {
+        const auto* command = reinterpret_cast<const load_command*>(cursor);
+        if (command->cmd == LC_SEGMENT_64) {
+            const auto* segment = reinterpret_cast<const segment_command_64*>(command);
+            if (std::strncmp(segment->segname, "__TEXT", sizeof(segment->segname)) == 0) {
+                *begin = base;
+                *end = base + segment->vmsize;
+                return;
+            }
+        }
+        cursor += command->cmdsize;
+    }
+}
+
+void InitializeIndirectTrace() {
+    const char* path = std::getenv("ANYPS5_TRACE_INDIRECT");
+    if (path == nullptr || *path == '\0') return;
+    indirectTrace.guestBase = MainImageGuestBase();
+    std::uint64_t hostBegin = 0;
+    std::uint64_t hostEnd = 0;
+    MainImageCodeRange(&hostBegin, &hostEnd);
+    indirectTrace.codeMin = hostBegin - indirectTrace.guestBase;
+    indirectTrace.codeMax = hostEnd - indirectTrace.guestBase;
+    if (const char* limit = std::getenv("ANYPS5_TRACE_INDIRECT_LIMIT")) indirectTrace.limit = std::strtoull(limit, nullptr, 0);
+    if (const char* after = std::getenv("ANYPS5_TRACE_INDIRECT_AFTER")) indirectTrace.afterSeconds = std::strtod(after, nullptr);
+
+    const std::string sitesPath = std::string(path) + ".sites";
+    std::ifstream stream(sitesPath, std::ios::binary);
+    std::uint32_t magic = 0;
+    std::uint32_t count = 0;
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    if (stream.read(reinterpret_cast<char*>(&magic), sizeof(magic)) && magic == 0x49355041
+        && stream.read(reinterpret_cast<char*>(&count), sizeof(count)) && count <= (1u << 24)
+        && stream.read(reinterpret_cast<char*>(&begin), sizeof(begin))
+        && stream.read(reinterpret_cast<char*>(&end), sizeof(end))) {
+        indirectTrace.sites.resize(count);
+        stream.read(reinterpret_cast<char*>(indirectTrace.sites.data()), static_cast<std::streamsize>(count * sizeof(std::uint64_t)));
+        std::sort(indirectTrace.sites.begin(), indirectTrace.sites.end());
+        indirectTrace.codeMin = begin;
+        indirectTrace.codeMax = end;
+    } else {
+        Write("[rosetta] indirect trace: no usable site list at %s; tracing without validation\n", sitesPath.c_str());
+        std::uint64_t hostBegin = 0;
+        std::uint64_t hostEnd = 0;
+        MainImageCodeRange(&hostBegin, &hostEnd);
+        indirectTrace.codeMin = 0;
+        indirectTrace.codeMax = hostEnd > indirectTrace.guestBase ? hostEnd - indirectTrace.guestBase : 0;
+    }
+    indirectTrace.fd = ::open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (indirectTrace.fd < 0) {
+        Write("[rosetta] indirect trace: cannot open %s\n", path);
+        return;
+    }
+    indirectTrace.enabled = true;
+    Write("[rosetta] indirect trace: %zu trapped branches, limit %llu, guest base %#llx -> %s\n",
+        indirectTrace.sites.size(), static_cast<unsigned long long>(indirectTrace.limit),
+        static_cast<unsigned long long>(indirectTrace.guestBase), path);
+}
+
+std::uint64_t RegisterValue(const ucontext_t* context, const unsigned index) {
+    const auto& state = context->uc_mcontext->__ss;
+    switch (index) {
+    case 0: return state.__rax;
+    case 1: return state.__rcx;
+    case 2: return state.__rdx;
+    case 3: return state.__rbx;
+    case 4: return state.__rsp;
+    case 5: return state.__rbp;
+    case 6: return state.__rsi;
+    case 7: return state.__rdi;
+    case 8: return state.__r8;
+    case 9: return state.__r9;
+    case 10: return state.__r10;
+    case 11: return state.__r11;
+    case 12: return state.__r12;
+    case 13: return state.__r13;
+    case 14: return state.__r14;
+    default: return state.__r15;
+    }
+}
+
+void AppendIndirectRecord(const std::uint64_t from, const std::uint64_t to, const std::uint32_t kind) {
+    if (indirectTrace.written >= indirectTrace.limit) return;
+    struct Record {
+        std::uint64_t From;
+        std::uint64_t To;
+        std::uint32_t Kind;
+        std::uint32_t Pad;
+    } record{from, to, kind, 0};
+    (void)!::write(indirectTrace.fd, &record, sizeof(record));
+    ++indirectTrace.written;
+}
+
+// Returns true when the faulting instruction is one of our trapped indirect
+// branches and the context has been advanced past it.
+bool HandleIndirectTrap(ucontext_t* context) {
+    if (!indirectTrace.enabled) return false;
+    auto& state = context->uc_mcontext->__ss;
+    std::uint8_t bytes[16];
+    // int3 saves the address after the opcode; accept both layouts.
+    std::uint64_t trap = 0;
+    if (state.__rip > 0 && ReadMemory(state.__rip - 1, bytes, sizeof(bytes)) && bytes[0] == 0xCC) {
+        trap = state.__rip - 1;
+    } else if (ReadMemory(state.__rip, bytes, sizeof(bytes)) && bytes[0] == 0xCC) {
+        trap = state.__rip;
+    } else {
+        return false;
+    }
+
+    const std::uint64_t guestTrap = trap - indirectTrace.guestBase;
+    if (!indirectTrace.sites.empty() && !std::binary_search(indirectTrace.sites.begin(), indirectTrace.sites.end(), guestTrap)) return false;
+
+    const std::uint8_t modrm = bytes[1];
+    const std::uint8_t mod = modrm >> 6;
+    const std::uint8_t reg = (modrm >> 3) & 7;
+    if (reg != 2 && reg != 4) return false;
+    std::uint8_t rex = 0;
+    std::uint8_t previous = 0;
+    if (trap > 0 && ReadMemory(trap - 1, &previous, 1) && previous >= 0x40 && previous <= 0x4F) rex = previous;
+
+    const std::uint8_t rm = modrm & 7;
+    std::size_t position = 2;
+    std::uint64_t target = 0;
+    if (mod == 3) {
+        target = RegisterValue(context, rm | ((rex & 1) << 3));
+    } else {
+        std::uint64_t address = 0;
+        if (rm == 4) {
+            const std::uint8_t sib = bytes[position++];
+            const unsigned indexRegister = ((sib >> 3) & 7) | (((rex >> 1) & 1) << 3);
+            const unsigned baseRegister = (sib & 7) | ((rex & 1) << 3);
+            std::uint64_t index = 0;
+            if (indexRegister != 4) index = RegisterValue(context, indexRegister) << (sib >> 6);
+            if ((sib & 7) == 5 && mod == 0) {
+                std::int32_t displacement = 0;
+                std::memcpy(&displacement, bytes + position, sizeof(displacement));
+                position += 4;
+                address = static_cast<std::uint64_t>(static_cast<std::int64_t>(displacement)) + index;
+            } else {
+                address = RegisterValue(context, baseRegister) + index;
+            }
+        } else if (mod == 0 && rm == 5) {
+            std::int32_t displacement = 0;
+            std::memcpy(&displacement, bytes + position, sizeof(displacement));
+            position += 4;
+            address = trap + position + static_cast<std::int64_t>(displacement);
+        } else {
+            address = RegisterValue(context, rm | ((rex & 1) << 3));
+        }
+        if (mod == 1) {
+            address += static_cast<std::int8_t>(bytes[position++]);
+        } else if (mod == 2) {
+            std::int32_t displacement = 0;
+            std::memcpy(&displacement, bytes + position, sizeof(displacement));
+            position += 4;
+            address += static_cast<std::int64_t>(displacement);
+        }
+        if (!ReadMemory(address, &target, sizeof(target))) return false;
+    }
+
+    const bool isCall = reg == 2;
+    if (isCall) {
+        const std::uint64_t stack = state.__rsp - sizeof(std::uint64_t);
+        const std::uint64_t returnAddress = trap + position;
+        if (!WriteMemory(stack, &returnAddress, sizeof(returnAddress))) return false;
+        state.__rsp = stack;
+    }
+    state.__rip = target;
+    if (Seconds() >= indirectTrace.afterSeconds && target >= indirectTrace.guestBase) {
+        const std::uint64_t guestTarget = target - indirectTrace.guestBase;
+        if (guestTarget >= indirectTrace.codeMin && guestTarget < indirectTrace.codeMax)
+            AppendIndirectRecord(guestTrap, guestTarget, isCall ? 0u : 1u);
+    }
+    return true;
+}
+
 void Diagnose(int signal, siginfo_t* info, ucontext_t* context) {
     const auto& state = context->uc_mcontext->__ss;
     char where[256];
@@ -280,6 +506,7 @@ void Diagnose(int signal, siginfo_t* info, ucontext_t* context) {
 
 void OnFault(int signal, siginfo_t* info, void* raw) {
     auto* context = static_cast<ucontext_t*>(raw);
+    if (signal == SIGTRAP && HandleIndirectTrap(context)) return;
     const auto& previous = previousActions[signal];
     // Chain first (the libc write watch resolves its own faults); a handler that
     // gives up restores SIG_DFL, which marks the fault as unhandled.
@@ -297,6 +524,8 @@ void OnFault(int signal, siginfo_t* info, void* raw) {
 
 void InstallFaultDiagnostics() {
     if (std::getenv("APS5_ROSETTA_NO_FAULT_REPORT") != nullptr) return;
+    static const bool traceInitialized = [] { InitializeIndirectTrace(); return true; }();
+    static_cast<void>(traceInitialized);
     struct sigaction action {};
     action.sa_sigaction = OnFault;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;

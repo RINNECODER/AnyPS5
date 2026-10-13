@@ -17,6 +17,13 @@ struct RelinkResult {
     SysVDynamicSection DynamicSection;
     VirtualAddress OriginalPltGotVaddr;
     std::vector<RelinkPatch> Patches;
+    // Guest addresses of the `int3` sites the opt-in indirect tracer wrote
+    // (ANYPS5_TRACE_INDIRECT). Empty unless the tracer is enabled.
+    std::vector<VirtualAddress> IndirectTraceSites;
+    // Guest range of the executable segments the tracer scanned, for the runtime
+    // to discard targets outside the main image.
+    VirtualAddress ExecutableBegin = 0;
+    VirtualAddress ExecutableEnd = 0;
 };
 
 }
