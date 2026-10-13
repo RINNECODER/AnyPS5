@@ -22,6 +22,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Execution/src/ShaderMemory.cpp"
     "${agcDriverRoot}/Execution/src/Driver/EntryPoints.cpp"
     "${agcDriverRoot}/Submit/src/Submission.cpp"
+    "${agcDriverRoot}/Resource/src/Registration.cpp"
     "${agcDriverRoot}/Execution/src/DisplayBuffer.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/BufferMetadata.cpp"
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/VideoOutState.cpp"
