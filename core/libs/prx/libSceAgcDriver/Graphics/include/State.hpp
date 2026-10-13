@@ -79,6 +79,11 @@ struct DepthTarget {
     // DB_Z_INFO NUM_SAMPLES; a multisampled surface renders into a 2D multisample texture.
     std::uint32_t samples = 1;
     bool htileStencil = false;
+    // DB_DEPTH_VIEW SLICE_START and SLICE_MAX: `address` is already advanced to slice `slice` of a depth
+    // array whose slice 0 lies `slice` whole slices lower. A layered draw (State::layered) renders
+    // slices slice..lastSlice, picked per primitive by the render target index export.
+    std::uint32_t slice = 0;
+    std::uint32_t lastSlice = 0;
 };
 
 struct State {
@@ -105,6 +110,9 @@ struct State {
     std::vector<VkPipelineColorBlendAttachmentState> blends;
     bool hasColorTarget;
     bool rectList = false;
+    // PA_CL_VS_OUT_CNTL USE_VTX_RENDER_TARGET_INDX: the vertex (or mesh) stage exports a render target
+    // index, the slice of a layered depth target (DepthTarget::slice..lastSlice) each primitive renders to.
+    bool layered = false;
     bool dualSourceBlend = false;
     VkExtent2D renderExtent;
     // PA_SC_AA_CONFIG MSAA_NUM_SAMPLES as a count (1 when multisampling is off).
