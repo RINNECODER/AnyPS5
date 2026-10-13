@@ -112,7 +112,7 @@ def page_region(address, size, page=0x1000):
     return start, end - start
 
 
-def build_synthetic(functions, referenced):
+def build_synthetic(functions, referenced, uniform=False):
     """functions: [(address, code)]; referenced: {address: size}."""
     regions = {}
     function_ranges = [(a, a + len(c)) for a, c in functions]
@@ -179,8 +179,9 @@ def build_synthetic(functions, referenced):
     contracts = {
         "schema": 1,
         "sha256": hashlib.sha256(image).hexdigest(),
-        "functions": [{"name": f"func_{address:x}", "address": address, "size": len(code),
-                       "result": "i64", "parameters": []} for address, code in functions],
+        "functions": [{"name": (f"sub_{address:x}" if uniform else f"func_{address:x}"), "address": address, "size": len(code),
+                       **({"uniform": True, "result": "void"} if uniform else {"result": "i64"}), "parameters": []}
+                      for address, code in functions],
         "imports": {},
         "data": data,
         "pointer_relocations": [],
@@ -188,7 +189,7 @@ def build_synthetic(functions, referenced):
     return bytes(image), contracts
 
 
-def compile_one(title, sizes, address, limit, work_dir=None):
+def compile_one(title, sizes, address, limit, work_dir=None, uniform=False):
     functions = closure(title, sizes, address, limit)
     codes = [(a, title.code(a, sizes[a])) for a in functions]
     codes = [(a, c) for a, c in codes if c]
@@ -196,7 +197,7 @@ def compile_one(title, sizes, address, limit, work_dir=None):
     for a, c in codes:
         for target, size in references(c, a).items():
             referenced[target] = max(referenced.get(target, 1), size)
-    image, contracts = build_synthetic(codes, referenced)
+    image, contracts = build_synthetic(codes, referenced, uniform)
     with tempfile.TemporaryDirectory(prefix="anyps5-difftest-") as directory:
         path = Path(directory) / "input.elf"
         path.write_bytes(image)
@@ -220,6 +221,7 @@ def main():
     elf_path, selection_path, starts_path, out_dir = (Path(sys.argv[1]), Path(sys.argv[2]),
                                                        Path(sys.argv[3]), Path(sys.argv[4]))
     limit = int(sys.argv[5]) if len(sys.argv) > 5 else 200
+    uniform = "--uniform" in sys.argv
     out_dir.mkdir(parents=True, exist_ok=True)
     sizes = fde_sizes(starts_path)
     title = Title(elf_path)
@@ -234,7 +236,7 @@ def main():
             results[item["function"]] = {"status": "no-fde-range", "hits": item["hits"]}
             continue
         try:
-            result = compile_one(title, sizes, address, limit, images)
+            result = compile_one(title, sizes, address, limit, images, uniform)
         except Exception as error:
             result = {"status": "harness-error", "reason": str(error)[:400]}
         result["hits"] = item["hits"]
@@ -245,11 +247,11 @@ def main():
     (out_dir / "compile-results.json").write_text(json.dumps(results, indent=1))
     print(f"selected={len(selected)} compiled={compiled} rejected={sum(1 for r in results.values() if r['status'] == 'rejected')}")
     if "--replay" in sys.argv:
-        replay_compiled(title, sizes, results, out_dir)
+        replay_compiled(title, sizes, results, out_dir, uniform=uniform)
     return 0
 
 
-def replay_compiled(title, sizes, results, out_dir, cases=1000):
+def replay_compiled(title, sizes, results, out_dir, cases=1000, uniform=False):
     """Replay each compiled function with a zeroed register/memory case: the AOT
     ARM64 function against the original x86 bytes in a Rosetta-relinked layout.
     Each case runs in its own process so a crash is contained."""
@@ -264,7 +266,7 @@ def replay_compiled(title, sizes, results, out_dir, cases=1000):
         address = int(address_hex, 16)
         ir_path = replay_dir / f"{address:x}.ll"
         ir_path.write_text(result["ir"])
-        completed = subprocess.run([sys.executable, str(script), str(ir_path), result["image"], address_hex],
+        completed = subprocess.run([sys.executable, str(script), str(ir_path), result["image"], address_hex] + (["uniform"] if uniform else []),
                                    capture_output=True, text=True)
         if completed.returncode != 0:
             result["replay"] = {"status": "arm64-fault", "exit": completed.returncode, "stderr": completed.stderr[-200:]}
