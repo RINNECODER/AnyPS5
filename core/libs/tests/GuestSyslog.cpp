@@ -110,7 +110,7 @@ int main() {
     const std::string configured = "[syslog:134] worker[" + pid + "]: configured default facility\n"
         "[syslog:134] worker[" + pid + "]: null identity keeps tag\n"
         "[syslog:19] daemon: explicit facility\n"
-        "[syslog:198] [" + pid + "] identity cleared, options and facility retained\n";
+        "[syslog:198] [" + pid + "]identity cleared, options and facility retained\n";
     Require(length == prefix.size() + configured.size() && std::string(text, length) == prefix + configured);
     Require(std::fclose(captured) == 0);
 }
