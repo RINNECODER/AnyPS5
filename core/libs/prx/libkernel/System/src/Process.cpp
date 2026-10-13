@@ -344,6 +344,13 @@ int APS5_VABI execvp_nid_postfix(const char* file, char* const* arguments) {
     return -1;
 }
 
+int APS5_VABI execv_nid_postfix(const char* path, char* const* arguments) {
+    (void)path;
+    (void)arguments;
+    NotImplemented_nid_no_patch("execv: executable replacement");
+    return -1;
+}
+
 int APS5_VABI execve_nid_postfix(const char* path, char* const* arguments, char* const* environment) {
     (void)path;
     (void)arguments;
