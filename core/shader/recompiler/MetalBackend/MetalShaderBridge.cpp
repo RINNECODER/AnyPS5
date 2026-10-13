@@ -1766,11 +1766,10 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         if (failed != Failures().failures.end()) std::rethrow_exception(failed->second);
     }
     if (auto stable = StableConversionCache().Find(diskKey); stable && RestorePushConstants(*stable, guest, target)) {
+        // Cached results hold no guest program; attach it only to the returned copy.
+        const auto bytes = ResultBytes(*stable);
+        ConversionCache().Insert(std::move(key), *stable, bytes);
         stable->guest = guest;
-        auto stored = *stable;
-        stored.guest = {};
-        const auto bytes = ResultBytes(stored);
-        ConversionCache().Insert(std::move(key), std::move(stored), bytes);
         return std::move(*stable);
     }
     if (ConversionDiskCache::Load(diskKey, result) && RestorePushConstants(result, guest, target)) {
