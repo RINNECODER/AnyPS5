@@ -945,6 +945,112 @@ void RegisteredFloatModeReplay(id<MTLDevice> device, id<MTLLibrary> library) {
 // packet, records why, and runs the rest of the command buffer, its EOP and
 // later submissions. Two failure kinds sit between valid dispatches: a program
 // whose code does not translate, and a SCRATCH_EN dispatch Metal refuses.
+// #186 (upstream de651c628 on the Metal path): a SET_SH_REG_INDIRECT list is read when the command buffer
+// is submitted. The queue worker is held at a WAIT_REG_MEM while the guest rewrites the list to point the
+// dispatch's output descriptor elsewhere; the dispatch must still use the submit-time descriptor. With
+// `rewind` the packets are the tail of a REWIND, captured when the guest sets the REWIND's valid bit.
+void IndirectRegistersAtSubmit(id<MTLDevice> device, id<MTLLibrary> library, bool rewind) {
+    constexpr std::uint32_t Sentinel = 0xdeadbeef, Threads = 64, Expected = 0x7fc12345u;
+    constexpr std::uint64_t CodeAddress = 0xc00000, HeaderAddress = 0xc10000, FirstOutputAddress = 0xc20000,
+        SecondOutputAddress = 0xc30000, ListAddress = 0xc40000, CommandsAddress = 0xc50000, PacketAddress = 0xc60000,
+        GateAddress = 0xc70000, LabelAddress = 0xc80000;
+    constexpr std::size_t HeaderBytes = sizeof(Shader) + sizeof(ShaderUserData) + sizeof(ShaderRegister);
+    auto code = FloatModeCode;
+    std::array<std::byte, HeaderBytes> header{};
+    {
+        Shader shader{};
+        shader.file_header = 0x34333231;
+        shader.version = 0x18;
+        shader.code = reinterpret_cast<const volatile void*>(CodeAddress);
+        shader.user_data = reinterpret_cast<ShaderUserData*>(HeaderAddress + sizeof(Shader));
+        shader.sh_registers = reinterpret_cast<ShaderRegister*>(HeaderAddress + sizeof(Shader) + sizeof(ShaderUserData));
+        shader.num_sh_registers = 1;
+        shader.header_size = HeaderBytes;
+        shader.shader_size = sizeof(code);
+        std::memcpy(header.data(), &shader, sizeof(shader));
+        const ShaderRegister rsrc1{0x212, 1u << 23u};
+        std::memcpy(header.data() + sizeof(Shader) + sizeof(ShaderUserData), &rsrc1, sizeof(rsrc1));
+    }
+    std::array<std::uint32_t, Threads> first, second;
+    first.fill(Sentinel);
+    second.fill(Sentinel);
+    // (offset, value) pairs for COMPUTE_USER_DATA_4..7: the output buffer descriptor.
+    const auto pairs = [](std::uint64_t output) {
+        const auto descriptor = Descriptor(output, Threads);
+        std::array<std::uint32_t, 8> list{};
+        for (std::uint32_t i = 0; i < 4; ++i) list[i * 2] = 0x244 + i, list[i * 2 + 1] = descriptor[i];
+        return list;
+    };
+    auto list = pairs(FirstOutputAddress);
+    std::vector<std::uint32_t> words;
+    const auto append = [&](const std::vector<std::uint32_t>& packet) { words.insert(words.end(), packet.begin(), packet.end()); };
+    const auto registers = [&](std::uint32_t firstRegister, std::span<const std::uint32_t> values) {
+        std::vector<std::uint32_t> payload{firstRegister};
+        payload.insert(payload.end(), values.begin(), values.end());
+        append(Packet(0x76, payload));
+    };
+    const std::array<std::uint32_t, 6> wait{0x13, static_cast<std::uint32_t>(GateAddress), 0, 1, 0xffffffff, 0x10};
+    const std::array<std::uint32_t, 1> rewindControl{0};
+    if (rewind) append(Packet(0x59, rewindControl));
+    append(Packet(0x3c, wait));
+    const std::array<std::uint32_t, 3> threads{Threads, 1, 1};
+    const std::array<std::uint32_t, 2> program{static_cast<std::uint32_t>(CodeAddress >> 8u), 0};
+    const std::array<std::uint32_t, 1> rsrc2{8u << 1u};
+    const std::array<std::uint32_t, 4> unusedUserData{};
+    registers(0x207, threads);
+    registers(0x20c, program);
+    registers(0x213, rsrc2);
+    registers(0x240, unusedUserData);
+    const std::array<std::uint32_t, 4> indirect{static_cast<std::uint32_t>(ListAddress), 0, 0x80000000u, 4};
+    append(Packet(0x63, indirect));
+    const std::array<std::uint32_t, 4> dispatch{1, 1, 1, 0x8041};
+    append(Packet(0x15, dispatch));
+    const std::array<std::uint32_t, 8> eop{0xc0064900, 0, (1u << 29) | (1u << 24), static_cast<std::uint32_t>(LabelAddress + 4), 0, 1, 0, 0};
+    words.insert(words.end(), eop.begin(), eop.end());
+    const ::Packet packet{reinterpret_cast<std::uint32_t*>(CommandsAddress), static_cast<std::uint32_t>(words.size()), 0, {}};
+    std::array<std::byte, sizeof(::Packet)> packetBytes;
+    std::memcpy(packetBytes.data(), &packet, sizeof(packet));
+    std::array<std::uint32_t, 2> gate{0, 0};
+    std::array<std::uint32_t, 3> label{Sentinel, 0, Sentinel};
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 9> ranges{{
+        {CodeAddress, std::as_writable_bytes(std::span(code)), false},
+        {HeaderAddress, header, false},
+        {FirstOutputAddress, std::as_writable_bytes(std::span(first)), true},
+        {SecondOutputAddress, std::as_writable_bytes(std::span(second)), true},
+        {ListAddress, std::as_writable_bytes(std::span(list)), true},
+        {CommandsAddress, std::as_writable_bytes(std::span(words)), false},
+        {PacketAddress, packetBytes, false},
+        {GateAddress, std::as_writable_bytes(std::span(gate)), true},
+        {LabelAddress, std::as_writable_bytes(std::span(label)), true}}};
+    AgcDriver::Metal::MetalDriver driver;
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [](std::uint32_t) {});
+    try {
+        driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
+        driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+        if (rewind) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::atomic_ref(words[1]).store(0x80000000u, std::memory_order_release);
+        }
+        // The worker is held at the WAIT_REG_MEM; the guest reuses the list memory before releasing it.
+        std::this_thread::sleep_for(std::chrono::milliseconds(rewind ? 200 : 50));
+        const auto rewritten = pairs(SecondOutputAddress);
+        for (std::size_t i = 0; i < list.size(); ++i) std::atomic_ref(list[i]).store(rewritten[i], std::memory_order_release);
+        std::atomic_ref(gate[0]).store(1, std::memory_order_release);
+        driver.WaitIdle();
+        driver.Shutdown();
+    } catch (...) {
+        try { driver.Shutdown(); } catch (...) {}
+        throw;
+    }
+    Require(label[1] == 1, "The indirect-register submission did not reach its EOP");
+    Require(std::all_of(second.begin(), second.end(), [](auto value) { return value == Sentinel; }),
+        "SET_SH_REG_INDIRECT used the list rewritten after Submit (read when the worker reached the packet)");
+    Require(std::all_of(first.begin(), first.end(), [](auto value) { return value == Expected; }),
+        "SET_SH_REG_INDIRECT did not apply the submit-time list to the dispatch");
+    std::cout << "Indirect registers" << (rewind ? " (rewind tail)" : "") << ": SET_SH_REG_INDIRECT applied the list read at "
+              << (rewind ? "tail capture" : "Submit") << ", not the one rewritten before the worker reached it\n";
+}
+
 void FailSoftDispatchReplay(id<MTLDevice> device, id<MTLLibrary> library) {
     constexpr std::uint32_t Sentinel = 0xdeadbeef, Threads = 64, Expected = 0x7fc12345u;
     constexpr std::uint64_t GoodCodeAddress = 0xb00000, ScratchCodeAddress = 0xb10000, BadCodeAddress = 0xb20000,
@@ -1184,6 +1290,8 @@ int main(int argc, char** argv) {
             OriginalWave32Subgroup(device, library);
             RetainedSubgroupReplays(device, library);
             CheckedPm4Memory();
+            IndirectRegistersAtSubmit(device, library, false);
+            IndirectRegistersAtSubmit(device, library, true);
             Pm4DescriptorReplay(device);
             Pm4BdaReplay(device, true);
             Pm4BdaReplay(device, false);

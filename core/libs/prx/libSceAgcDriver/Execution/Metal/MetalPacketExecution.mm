@@ -854,18 +854,16 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                 continue;
             }
             // Packets the CPU executes that read or store guest memory wait for committed work first.
-            if (Pm4::IndirectRegisterOpcode(opcode)) {
-                // Register values loaded from guest memory: wait only for work that may write them.
-                BeforeCpuRead(static_cast<std::uint64_t>(packet[1]) | (static_cast<std::uint64_t>(packet[2]) << 32u),
-                    std::uint64_t{packet[4]} * (packet[3] != 0x80000000u ? 4u : 8u));
-            } else if (!RegisterOnlyPacket(opcode)) {
-                CompletePriorGpuWorkAndCopyBack(opcode);
-            }
+            // SET_*_REG_INDIRECT lists were read at submit time (CaptureIndirectRegisterLists), so these
+            // packets only update registers here.
+            const bool indirectRegisters = Pm4::IndirectRegisterOpcode(opcode);
+            if (!indirectRegisters && !RegisterOnlyPacket(opcode)) CompletePriorGpuWorkAndCopyBack(opcode);
             // A store the driver performs itself: only its destination stops matching cached images.
             // (A label it writes lets the guest go on, but guest writes reach later work of this
             // submission only behind a wait, which forgets everything.)
             if (const auto store = PacketStoreRange(packet)) ForgetCachedImages(*store);
-            Pm4::Execute(packet, queue);
+            if (indirectRegisters) Pm4::ExecuteIndirectRegisters(packet, submission.registerLists.at(cursor), queue);
+            else Pm4::Execute(packet, queue);
             // Remember label values this driver wrote (RELEASE_MEM data, WRITE_DATA), for the wait above.
             if (opcode == 0x49 || opcode == 0x37) {
                 if (const auto store = PacketStoreRange(packet); store && store->bytes != 0 && store->bytes <= 64) {

@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <bitset>
 #include <cmath>
@@ -209,6 +210,41 @@ constexpr std::uint32_t AaConfigMask = ~(0x7u | 0x10u | 0x1e000u | 0x700000u);
 std::uint32_t rasterSamples(const Registers& cx) {
     const auto config = find(cx, 0x2f8);
     return config == cx.end() ? 1u : 1u << (config->second & 7u);
+}
+
+// The standard 2x/4x/8x patterns as signed sixteenths of a pixel from its center (the D3D/Vulkan
+// standard locations; Metal's default sample positions are the same).
+constexpr std::array<std::array<std::int8_t, 2>, 2> StandardLocations2{{{4, 4}, {-4, -4}}};
+constexpr std::array<std::array<std::int8_t, 2>, 4> StandardLocations4{{{-2, -6}, {6, -2}, {-6, 2}, {2, 6}}};
+constexpr std::array<std::array<std::int8_t, 2>, 8> StandardLocations8{{{1, -3}, {-1, 3}, {5, 1}, {-3, -5}, {-5, 5}, {-7, -1}, {3, 7}, {7, -7}}};
+
+const std::array<std::int8_t, 2>& standardLocation(std::uint32_t samples, std::uint32_t sample) {
+    return samples == 2 ? StandardLocations2[sample] : samples == 4 ? StandardLocations4[sample] : StandardLocations8[sample];
+}
+
+// PA_SC_AA_SAMPLE_LOCS_PIXEL_X{0,1}Y{0,1}_{0..3}: four words a pixel of the 2x2 grid, a byte a sample.
+// A pattern that differs between the four pixels is refused; a uniform one is kept (as custom when it
+// is not the standard pattern for the sample count). A context that never wrote pixel 0's first word
+// keeps the standard pattern, as multisampled draws rasterized before these registers were decoded.
+void decodeSampleLocations(const Registers& cx, std::uint32_t samples, State& state) {
+    state.sampleLocations = {};
+    state.customSampleLocations = false;
+    if (samples == 1 || find(cx, 0x2fe) == cx.end()) return;
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) {
+        for (std::uint32_t sample = 0; sample < samples; ++sample) {
+            const auto word = read(cx, 0x2fe + pixel * 4u + sample / 4u);
+            const auto bits = static_cast<std::uint8_t>((word >> (8u * (sample % 4u))) & 0xffu);
+            if (pixel == 0) {
+                const auto x = static_cast<std::int8_t>(static_cast<std::uint8_t>(bits << 4u)) >> 4;
+                const auto y = static_cast<std::int8_t>(static_cast<std::uint8_t>(bits & 0xf0u)) >> 4;
+                const auto& standard = standardLocation(samples, sample);
+                state.sampleLocations[sample] = bits;
+                state.customSampleLocations |= x != standard[0] || y != standard[1];
+            } else {
+                Require(bits == state.sampleLocations[sample], "nonstandard sample locations varying between pixels are unsupported");
+            }
+        }
+    }
 }
 
 // DB_Z_INFO: FORMAT [1:0], NUM_SAMPLES [3:2], SW_MODE [8:4], PARTIALLY_RESIDENT [12], MAXMIP [19:16],
@@ -546,6 +582,23 @@ void intersect(VkRect2D& result, const Registers& registers, std::uint32_t offse
 
 }
 
+std::array<VkSampleLocationEXT, 8> SampleLocations(const State& state) {
+    Require(state.rasterSamples == 1 || state.rasterSamples == 2 || state.rasterSamples == 4 || state.rasterSamples == 8, "invalid sample count");
+    std::array<VkSampleLocationEXT, 8> locations{};
+    for (std::uint32_t sample = 0; sample < state.rasterSamples; ++sample) {
+        std::array<int, 2> position{};
+        if (state.customSampleLocations) {
+            const auto bits = state.sampleLocations[sample];
+            position = {static_cast<int>(bits & 7u) - static_cast<int>(bits & 8u), static_cast<int>((bits >> 4u) & 7u) - static_cast<int>((bits >> 4u) & 8u)};
+        } else if (state.rasterSamples != 1) {
+            const auto& standard = standardLocation(state.rasterSamples, sample);
+            position = {standard[0], standard[1]};
+        }
+        locations[sample] = {0.5f + static_cast<float>(position[0]) / 16.0f, 0.5f + static_cast<float>(position[1]) / 16.0f};
+    }
+    return locations;
+}
+
 ShaderStages DecodeShaderStages(const QueueState& queue, bool vertexWorkgroup) {
     const auto value = read(queue.context, 0x2d5);
     const auto validate = [&](bool condition, const char* reason) {
@@ -690,6 +743,15 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     if (!result.alphaToCoverage) zero(cx, 0x2dc, AlphaToCoverageMask, "dithered or rounded alpha-to-coverage");
     zero(cx, 0x2f8, AaConfigMask, "coverage conversion or over-8x multisampling");
     result.rasterSamples = rasterSamples(cx);
+    const auto guestSamples = result.rasterSamples;
+    // Multisampling with MSAA_ENABLE clear rasterizes every sample at the pixel center (upstream refuses
+    // it): a custom pattern with all samples at (0, 0), which suits a pass of any sample count.
+    if (const auto mode = find(cx, 0x292); guestSamples > 1 && mode != cx.end() && (mode->second & 1u) == 0) {
+        result.sampleLocations = {};
+        result.customSampleLocations = true;
+    } else {
+        decodeSampleLocations(cx, guestSamples, result);
+    }
     // MSAA_ENABLE on a single-sample scan is accepted when its samples sit at the pixel center (see singleSampleMsaaRejection).
     zero(cx, 0x292, ScanModeMask & ~1u, "scan conversion mode");
     const auto scanMode = find(cx, 0x292);
@@ -769,6 +831,11 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     result.rasterSamples = AttachmentSampleCount(result.rasterSamples, result.depth ? result.depth->samples : 0u, result.colors);
     Require(!singleSampleMsaa || result.rasterSamples == 1, "MSAA_ENABLE on a single-sample scan into multisampled targets is unsupported");
+    // The pattern is PA_SC_AA_CONFIG's; a pass whose attachments fix another sample count (EQAA depth,
+    // see AttachmentSampleCount) rasterizes at that count's standard locations, which a custom pattern
+    // does not describe.
+    const bool centered = std::all_of(result.sampleLocations.begin(), result.sampleLocations.end(), [](std::uint8_t location) { return location == 0; });
+    Require(!result.customSampleLocations || centered || result.rasterSamples == guestSamples, "custom sample locations on a pass whose attachments fix another sample count are unsupported");
     if (result.hasColorTarget) {
         result.color = result.colors.front();
         if (result.depth) result.renderExtent = {std::min(result.renderExtent.width, result.depth->extent.width), std::min(result.renderExtent.height, result.depth->extent.height)};

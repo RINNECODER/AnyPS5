@@ -453,6 +453,7 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
         require(descriptor.flags == 0, "nonzero submission flags are not implemented");
         if (descriptor.words != 0) CaptureSubmissionCommands(submission, descriptor.address, descriptor.words);
         ValidateSubmission(submission, descriptor.address);
+        CaptureIndirectRegisterLists(submission);
     }
     impl->WaitForFlipRoom(submission);
     {
@@ -1071,6 +1072,7 @@ void MetalDriver::Impl::ExecuteRewindTail(const Submission& stalled, QueueState&
         NativeGuestMemory::BorrowedRangesScope current(ranges);
         CaptureSubmissionCommands(tail, tailAddress, stalled.rewindWords);
         ValidateSubmission(tail, tailAddress);
+        CaptureIndirectRegisterLists(tail);
     }
     WaitForFlipRoom(tail);
     {

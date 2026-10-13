@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace AgcDriver {
 namespace {
@@ -117,6 +118,21 @@ void CaptureSubmissionCommands(DriverDetail::Submission& submission, std::uint64
     submission.conditionalEnds.clear();
     std::size_t budget = std::size_t{1} << 26u;
     CaptureSegment(submission, guestAddress, words, budget);
+}
+
+void CaptureIndirectRegisterLists(DriverDetail::Submission& submission) {
+    submission.registerLists.clear();
+    for (std::size_t cursor = 0; cursor < submission.commands.size(); cursor += Pm4::PacketWords(submission.commands[cursor])) {
+        const auto header = submission.commands[cursor];
+        if ((header >> 30u) != 3u || !Pm4::IndirectRegisterOpcode((header >> 8u) & 0xffu)) continue;
+        const auto words = Pm4::PacketWords(header);
+        require(words <= submission.commands.size() - cursor, "indirect register packet extends past the command buffer");
+        try {
+            submission.registerLists.emplace(cursor, Pm4::ReadIndirectRegisters(std::span<const std::uint32_t>(submission.commands).subspan(cursor, words)));
+        } catch (const std::exception& error) {
+            throw std::runtime_error("AGC driver: " + Pm4::Name(header) + " at DWORD " + std::to_string(cursor) + ": " + error.what());
+        }
+    }
 }
 
 }
