@@ -758,11 +758,14 @@ Layout LayOut(const Options& options, const Paths& paths, const fs::path& cache,
     for (const auto& name : imported)
         if (!available.count(name) && !kHooks.count(name) && std::regex_search(name, kNidSymbol)) layout.unresolved.push_back(name);
     const auto names = NidNames();
+    std::string tracePattern = options.trace;
+    if (tracePattern.empty() && std::getenv("ANYPS5_HLE_LOG") != nullptr && *std::getenv("ANYPS5_HLE_LOG") != '\0')
+        tracePattern = ".";
     std::vector<std::string> traced;
-    if (!options.trace.empty()) {
+    if (!tracePattern.empty()) {
         std::regex pattern;
         try {
-            pattern = std::regex(options.trace);
+            pattern = std::regex(tracePattern);
         } catch (const std::regex_error&) {
             throw InvalidArguments("--trace is not a valid regular expression");
         }
@@ -775,7 +778,7 @@ Layout LayOut(const Options& options, const Paths& paths, const fs::path& cache,
             if (std::regex_search(name, kDataName)) continue;
             if (std::regex_search(nid, pattern) || std::regex_search(name, pattern)) traced.push_back(symbol);
         }
-        Log("tracing %zu imports matching %s", traced.size(), options.trace.c_str());
+        Log("tracing %zu imports matching %s", traced.size(), tracePattern.c_str());
     }
     if (!layout.unresolved.empty() || !traced.empty()) {
         StubDylib stubs;
