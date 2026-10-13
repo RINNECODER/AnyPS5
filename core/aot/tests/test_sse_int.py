@@ -25,6 +25,20 @@ class SsePackedTests(NativeAvxHarness):
             with self.subTest(mnemonic=mnemonic):
                 self.compare_native(f'{mnemonic} xmm0, xmm1', self.samples(), nan_normalize=True)
 
+    def test_packed_integer_ops(self):
+        for mnemonic in ('paddq', 'psubd', 'psubq', 'pmaxub', 'pminub', 'pmaxuw', 'pminuw',
+                         'pmuludq', 'pmuldq'):
+            with self.subTest(mnemonic=mnemonic):
+                self.compare_native(f'{mnemonic} xmm0, xmm1', self.samples())
+
+    def test_packed_shifts(self):
+        for mnemonic in ('psrlw', 'psrld', 'psrlq', 'psraw', 'psrad', 'psllw', 'pslld', 'psllq'):
+            for amount in (0, 1, 5, 15):
+                with self.subTest(mnemonic=mnemonic, amount=amount):
+                    self.compare_native(f'{mnemonic} xmm0, {amount}', self.samples())
+            with self.subTest(mnemonic=mnemonic, count='xmm'):
+                self.compare_native(f'{mnemonic} xmm0, xmm1', self.samples())
+
     def test_packed_conversions(self):
         for mnemonic in ('cvtdq2pd', 'cvtpd2dq', 'cvttpd2dq', 'cvtpd2ps', 'cvtps2pd',
                          'cvtdq2ps', 'cvtps2dq', 'cvttps2dq'):
