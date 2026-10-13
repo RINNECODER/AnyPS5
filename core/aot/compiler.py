@@ -11,6 +11,7 @@ from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_OP_REG
 from elftools.elf.elffile import ELFFile
 import abi
+import atomics
 import vector
 import avx
 import integer
@@ -464,6 +465,12 @@ class Function:
                 if pointer:
                     kind, index, offset = pointer
                     state['pointers'][name] = (kind, index, offset + (1 if ins.mnemonic == 'inc' else -1))
+            return state
+        if atomics.analyze(self, ins, state):
+            for register in ins.regs_access()[1]:
+                name = ins.reg_name(register)
+                if name in ALIASES:
+                    state['constants'].pop(ALIASES[name][0], None)
             return state
         if op == 'nop':
             return state
@@ -990,7 +997,7 @@ class Function:
             return self.load(name, min(width, bits), shift)
         if operand.type == X86_OP_IMM:
             return str(operand.imm & ((1 << bits) - 1))
-        value = self.emit(f'load i{bits}, ptr {self.address(ins, operand)}, align 1')
+        value = self.emit(atomics.ordered_load(bits, self.address(ins, operand)))
         return checked_pointers.emit(self, ins, operand, value)
 
     def write(self, ins, operand, value):
@@ -999,7 +1006,7 @@ class Function:
             self.store(name, value, bits, shift)
         else:
             pointer = frame_exclusion.guard(self, ins, operand, self.address(ins, operand))
-            self.lines.append(f'  store i{operand.size * 8} {value}, ptr {pointer}, align 1')
+            self.lines.append(atomics.ordered_store(operand.size * 8, value, pointer))
 
     def flags(self, operation, bits, left, right, value):
         zf = self.emit(f'icmp eq i{bits} {value}, 0')
@@ -1104,6 +1111,8 @@ class Function:
             if avx.lower(self, ins) or vector.lower(self, ins):
                 pass
             elif integer.lower(self, ins):
+                pass
+            elif atomics.lower(self, ins):
                 pass
             elif op in ('push', 'pop'):
                 reg = self.reg(ins, args[0])[0] if args[0].type == X86_OP_REG else None
