@@ -134,6 +134,7 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         pixelStorage.psPosZ = pixel.posZ;
         pixelStorage.psPosW = pixel.posW;
         pixelStorage.psFrontFace = pixel.frontFace;
+        pixelStorage.psFrontFaceAllBits = pixel.frontFaceAllBits;
         pixelStorage.psAncillary = pixel.ancillary;
         pixelStorage.psNoPerspective = pixel.noPerspective;
         pixelStorage.psPixelKillEnable = pixel.pixelKillEnable;

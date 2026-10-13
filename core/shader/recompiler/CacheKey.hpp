@@ -165,6 +165,7 @@ private:
         append(key, value.posZ);
         append(key, value.posW);
         append(key, value.frontFace);
+        append(key, value.frontFaceAllBits);
         append(key, value.ancillary);
         append(key, value.sampleShading);
         append(key, value.noPerspective);

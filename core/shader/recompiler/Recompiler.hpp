@@ -132,6 +132,7 @@ struct ShaderPixelStageInfo {
     bool posZ;
     bool posW;
     bool frontFace;
+    bool frontFaceAllBits;
     bool ancillary;
     bool sampleShading;
     bool noPerspective;

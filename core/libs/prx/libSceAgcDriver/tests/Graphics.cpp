@@ -54,7 +54,7 @@ AgcDriver::QueueState makeState() {
     queue.userConfig[0x242] = 4;
     queue.context = {
         {0x2d5, 0x2000},
-        {0x1b6, 0}, {0x207, 0}, {0x200, 0}, {0x203, 0x800},
+        {0x1b6, 0}, {0x1b8, 0}, {0x207, 0}, {0x200, 0}, {0x203, 0x800},
         {0x2dc, 0xaa00}, {0x2f8, 0}, {0x292, 2}, {0x293, 0},
         {0x80, 0}, {0x8d, 0}, {0x83, 0xffff}, {0x8c, 0xa},
         {0x2f9, 0x2d}, {0x313, 0x6000}, {0x30e, 0xffffffff}, {0x30f, 0xffffffff},
@@ -1023,6 +1023,11 @@ void PixelInputLayoutTests() {
     Require(PixelInputVgpr(pixel.inputAddr, PixelInput::PerspectiveCenter) == 0u && PixelInputVgpr(pixel.inputAddr, PixelInput::PerspectiveCentroid) == 2u && PixelInputVgpr(pixel.inputAddr, PixelInput::LinearCenter) == 4u && PixelInputVgpr(pixel.inputAddr, PixelInput::PositionX) == 6u && PixelInputVgpr(pixel.inputAddr, PixelInput::PositionY) == 7u, "the centroid layout moved the inputs");
     pixel = decode(0x1146u, 0x1146u);
     Require(pixel.linearCentroid && !pixel.noPerspective && PixelInputVgpr(pixel.inputAddr, PixelInput::LinearCentroid) == 4u && PixelInputVgpr(pixel.inputAddr, PixelInput::PositionX) == 6u && PixelInputVgpr(pixel.inputAddr, PixelInput::FrontFace) == 7u, "the linear centroid layout moved the inputs");
+    Require(!pixel.frontFaceAllBits, "FRONT_FACE_ALL_BITS was decoded from a clear SPI_BARYC_CNTL");
+    queue.context[0x1b8] = 1u << 24u;
+    Require(decode(0x1146u, 0x1146u).frontFaceAllBits, "SPI_BARYC_CNTL FRONT_FACE_ALL_BITS was not decoded");
+    Require(!decode(0x326u, 0x326u).frontFaceAllBits, "FRONT_FACE_ALL_BITS was decoded for a pixel program without the front-face input");
+    queue.context[0x1b8] = 0u;
     pixel = decode(0x506u, 0x7afu);
     Require(pixel.inputAddr == 0x7afu && !pixel.posY && pixel.posZ && PixelInputVgpr(pixel.inputAddr, PixelInput::PerspectiveCentroid) == 4u && PixelInputVgpr(pixel.inputAddr, PixelInput::PositionX) == 12u && PixelInputVgpr(pixel.inputAddr, PixelInput::PositionZ) == 14u, "ADDR-only inputs did not reserve their VGPRs");
     for (const auto bit : {0x8u, 0x4000u}) {
