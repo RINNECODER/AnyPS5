@@ -876,8 +876,9 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME agc_descriptor_pool_recycling COMMAND agc_driver_recorder_tests --descriptor-pool-only)
     set_tests_properties(agc_descriptor_pool_recycling PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME agc_queued_write_groups COMMAND agc_driver_recorder_tests --queued-write-groups-only)
     if(WIN32)
-        set_tests_properties(agc_host_import_unmap agc_parked_import_unmap agc_unit_shadow agc_descriptor_pool_recycling PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_host_import_unmap agc_parked_import_unmap agc_unit_shadow agc_descriptor_pool_recycling agc_queued_write_groups PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
