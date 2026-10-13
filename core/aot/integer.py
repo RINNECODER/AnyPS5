@@ -10,7 +10,7 @@ CONDITIONS = {
 ALIASES = {'z': 'e', 'nz': 'ne', 'c': 'b', 'nc': 'ae', 'na': 'be', 'nbe': 'a',
            'nb': 'ae', 'nae': 'b', 'ng': 'le', 'nge': 'l', 'nl': 'ge', 'nle': 'g', 'pe': 'p', 'po': 'np'}
 SHIFTS = {'shl', 'sal', 'shr', 'sar'}
-OPERATIONS = {'inc', 'dec', 'imul', 'sbb', 'adc', 'cdqe', 'cdq', 'cwd', 'cqo', 'neg', 'not', 'div', 'blsr', 'bt'} | SHIFTS
+OPERATIONS = {'inc', 'dec', 'imul', 'sbb', 'adc', 'cdqe', 'cdq', 'cwd', 'cqo', 'neg', 'not', 'div', 'idiv', 'blsr', 'bt'} | SHIFTS
 
 
 def condition(ins):
@@ -69,9 +69,7 @@ def analyze(function, ins, state):
         function.check_register(ins, state, 'rax', width)
         implicit_define(state, 'rax' if op == 'cdqe' else 'rdx', 64 if op == 'cdqe' else width)
         return True
-    if op == 'div':
-        if function.contract.get('integer_division') != 'nonzero-no-overflow':
-            function.fail(ins, 'integer division requires a verified nonzero-no-overflow contract')
+    if op in ('div', 'idiv'):
         width = args[0].size * 8
         function.read_operand(ins, state, args[0])
         function.check_register(ins, state, 'rax', 16 if width == 8 else width)
@@ -84,6 +82,14 @@ def analyze(function, ins, state):
         return True
     if args[0].type == X86_OP_REG and function.reg(ins, args[0])[0] in ('rsp', 'rbp'):
         function.fail(ins, 'integer operation cannot reconstruct a dynamic native frame')
+    if op == 'imul' and len(args) == 1:
+        width = args[0].size * 8
+        function.read_operand(ins, state, args[0])
+        function.check_register(ins, state, 'rax', width)
+        implicit_define(state, 'rax', width)
+        implicit_define(state, 'rdx', width)
+        state['flags'] = {'cf', 'of'}
+        return True
     if op == 'imul' and len(args) not in (2, 3):
         function.fail(ins, 'one-operand signed multiplication is not implemented')
     reads = args[1:] if op == 'imul' and len(args) == 3 else args
@@ -185,6 +191,8 @@ def lower_shift(function, ins):
 def lower_divide(function, ins):
     operand = ins.operands[0]
     width = operand.size * 8
+    signed = ins.mnemonic == 'idiv'
+    wide = width * 2
     denominator = function.read(ins, operand)
     low = function.load('rax', 16 if width == 8 else width)
     if width == 8:
@@ -193,19 +201,29 @@ def lower_divide(function, ins):
         high = function.emit(f'trunc i16 {high} to i8')
     else:
         high = function.load('rdx', width)
-        upper = extension(function, high, width, width * 2)
-        upper = function.emit(f'shl i{width * 2} {upper}, {width}')
-        low = extension(function, low, width, width * 2)
-        numerator = function.emit(f'or i{width * 2} {upper}, {low}')
-    valid = function.emit(f'icmp ult i{width} {high}, {denominator}')
+        upper = extension(function, high, width, wide)
+        upper = function.emit(f'shl i{wide} {upper}, {width}')
+        low = extension(function, low, width, wide)
+        numerator = function.emit(f'or i{wide} {upper}, {low}')
     label = f'integer_div_{ins.address:x}_{function.serial}'
+    if signed:
+        denominator = extension(function, denominator, width, wide, True)
+        nonzero = function.emit(f'icmp ne i{wide} {denominator}, 0')
+        quotient = function.emit(f'sdiv i{wide} {numerator}, {denominator}')
+        truncated = function.emit(f'trunc i{wide} {quotient} to i{width}')
+        back = extension(function, truncated, width, wide, True)
+        fits = function.emit(f'icmp eq i{wide} {quotient}, {back}')
+        valid = function.emit(f'and i1 {nonzero}, {fits}')
+        remainder = function.emit(f'srem i{wide} {numerator}, {denominator}')
+    else:
+        valid = function.emit(f'icmp ult i{width} {high}, {denominator}')
+        denominator = extension(function, denominator, width, wide)
+        quotient = function.emit(f'udiv i{wide} {numerator}, {denominator}')
+        remainder = function.emit(f'urem i{wide} {numerator}, {denominator}')
     function.lines.extend([f'  br i1 {valid}, label %{label}_ok, label %{label}_fault',
                            f'{label}_fault:', '  call void @llvm.trap()', '  unreachable', f'{label}_ok:'])
-    denominator = extension(function, denominator, width, width * 2)
-    quotient = function.emit(f'udiv i{width * 2} {numerator}, {denominator}')
-    remainder = function.emit(f'urem i{width * 2} {numerator}, {denominator}')
-    quotient = function.emit(f'trunc i{width * 2} {quotient} to i{width}')
-    remainder = function.emit(f'trunc i{width * 2} {remainder} to i{width}')
+    quotient = function.emit(f'trunc i{wide} {quotient} to i{width}')
+    remainder = function.emit(f'trunc i{wide} {remainder} to i{width}')
     function.store('rax', quotient, width)
     function.store('rax' if width == 8 else 'rdx', remainder, width, 8 if width == 8 else 0)
 
@@ -248,12 +266,28 @@ def lower(function, ins):
             function.store('rax', extension(function, value, 32, 64, True))
         else:
             function.store('rdx', function.emit(f'ashr i{width} {value}, {width - 1}'), width)
-    elif op == 'div':
+    elif op in ('div', 'idiv'):
         lower_divide(function, ins)
     elif op in SHIFTS:
         lower_shift(function, ins)
     elif op == 'imul':
         width = args[0].size * 8
+        if len(args) == 1:
+            left = function.load('rax', width)
+            right = function.read(ins, args[0], width)
+            left = extension(function, left, width, width * 2, True)
+            right = extension(function, right, width, width * 2, True)
+            product = function.emit(f'mul i{width * 2} {left}, {right}')
+            low = function.emit(f'trunc i{width * 2} {product} to i{width}')
+            high = function.emit(f'lshr i{width * 2} {product}, {width}')
+            high = function.emit(f'trunc i{width * 2} {high} to i{width}')
+            sign = function.emit(f'ashr i{width} {low}, {width - 1}')
+            overflow = function.emit(f'icmp ne i{width} {high}, {sign}')
+            store_flag(function, 'cf', overflow)
+            store_flag(function, 'of', overflow)
+            function.store('rax', low, width)
+            function.store('rdx', high, width)
+            return True
         left, right = args if len(args) == 2 else args[1:]
         left = extension(function, function.read(ins, left), width, width * 2, True)
         right = extension(function, function.read(ins, right, width), width, width * 2, True)
