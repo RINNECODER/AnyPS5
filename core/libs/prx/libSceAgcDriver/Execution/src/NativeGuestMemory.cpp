@@ -99,9 +99,20 @@ std::span<std::byte> ContiguousBorrowedRange(std::uint64_t address, std::size_t 
     if (bytes == 0) return {};
     const auto& range = Find(address, writable);
     const auto offset = static_cast<std::size_t>(address - range.guestAddress);
-    if (bytes > range.host.size() - offset)
-        throw std::invalid_argument("Native guest memory range crosses borrowed spans");
-    return range.host.subspan(offset, bytes);
+    auto* host = range.host.data() + offset;
+    // A range may continue into the next borrowed span (separately mapped, adjacent guest memory)
+    // when that span also follows on in host memory: the bytes are then one host run.
+    auto guest = End(range.guestAddress, range.host.size());
+    auto* hostEnd = range.host.data() + range.host.size();
+    const auto end = address + bytes;
+    while (guest < end) {
+        const auto& next = Find(guest, writable);
+        if (next.guestAddress != guest || next.host.data() != hostEnd)
+            throw std::invalid_argument("Native guest memory range crosses borrowed spans that are not contiguous on the host");
+        guest = End(next.guestAddress, next.host.size());
+        hostEnd = next.host.data() + next.host.size();
+    }
+    return {host, bytes};
 }
 
 std::size_t ReadableBorrowedBytes(std::uint64_t address, std::size_t maxBytes) {
