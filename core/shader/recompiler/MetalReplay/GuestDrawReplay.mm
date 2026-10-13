@@ -167,6 +167,72 @@ void DrawGuest(id<MTLDevice> device, id<MTLLibrary> library, bool masked, bool i
                   indexed ? ", indexed vertex fetch with nonzero guest index offset" : ", descriptor vertex fetch") << " passed\n";
 }
 
+// Guest clip distances (upstream 04138f50a): pos1 carries four distances, PA_CL_VS_OUT_CNTL enables
+// them through the distance vector, and Metal clips with [[clip_distance]].
+void DrawClipDistances(id<MTLDevice> device, id<MTLLibrary> library) {
+    // buffer_load_format_xyzw v[0:3] (position) and v[4:7] (offset 16, distances); exp pos0; exp pos1 done.
+    constexpr std::array<std::uint32_t, 10> code{
+        0xe0382000, 0x80000005, 0xe0382010, 0x80000405, 0xbf8c3f70,
+        0xf80000cf, 0x03020100, 0xf80008df, 0x07060504, 0xbf810000,
+    };
+    constexpr std::uint32_t DistanceVector = 1u << 22u;
+    struct Vertex {
+        std::array<float, 4> position;
+        std::array<float, 4> distances;
+    };
+    const auto draw = [&](const std::array<std::array<float, 4>, 3>& distances) {
+        std::array<Vertex, 3> vertices{};
+        for (std::size_t i = 0; i < 3; ++i) vertices[i] = {Triangle[i], distances[i]};
+        const std::array<std::uint32_t, 4> vertexUserData{static_cast<std::uint32_t>(VertexAddress), 32u << 16u, 3, 0x01016fac};
+        const std::array<MemoryRegion, 1> vertexMemory{{{0x500000, std::as_bytes(std::span(code))}}};
+        ShaderVertexStageInfo info{};
+        info.paClVsOutCntl = DistanceVector | 0xfu;
+        RecompileRequest vertex{{ShaderStage::Vertex, 0x500000, code, 0, {}},
+            {32, 0, vertexUserData, {}, {}, info, vertexMemory}, Target(device), {0, 0, 0, 64}, {}};
+        vertex.useCache = false;
+        auto vertexResult = Recompile(vertex);
+        const auto fragmentPush = static_cast<std::uint32_t>(vertexResult.pushConstants.size());
+        const std::array<std::uint32_t, 8> fragmentUserData{};
+        const std::array<MemoryRegion, 1> fragmentMemory{{{0x600000, std::as_bytes(std::span(FullPixelCode))}}};
+        RecompileRequest fragment{{ShaderStage::Fragment, 0x600000, FullPixelCode, 0, {}},
+            {32, 0, fragmentUserData, {}, PixelInfo(), {}, fragmentMemory}, Target(device), {0, 0, fragmentPush, 128u - fragmentPush}, {}};
+        fragment.useCache = false;
+        const auto fragmentResult = Recompile(fragment);
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
+            {ShaderStage::Vertex, &vertexResult, 0}, {ShaderStage::Fragment, &fragmentResult, fragmentPush}}};
+        std::vector<std::byte> pixels(256 + Width * Height * 4 + 256, std::byte{0x7b});
+        std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+        const std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
+            {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true}};
+        AgcDriver::Pm4::DrawParameters parameters{};
+        parameters.indexCount = 3;
+        parameters.instanceCount = 1;
+        AgcDriver::Metal::MetalDraw adapter(device, library);
+        const auto fault = adapter.DrawSynchronously(State(), parameters, shaders, ranges);
+        Require(fault.state == BdaAbi::FaultState::Empty, "The clip distance draw published a GPU memory fault");
+        return pixels;
+    };
+    const auto drawn = [&](const std::vector<std::byte>& pixels, std::uint32_t x, std::uint32_t y) {
+        return pixels[256 + (y * Width + x) * 4] == std::byte{255};
+    };
+    constexpr std::array<float, 4> inside{1, 1, 1, 1};
+    const auto all = draw({inside, inside, inside});
+    for (std::uint32_t y = 0; y < Height; ++y)
+        for (std::uint32_t x = 0; x < Width; ++x) Require(drawn(all, x, y), "Positive clip distances clipped pixel " + std::to_string(x) + "," + std::to_string(y));
+    const auto none = draw({{{1, 1, -1, 1}, {1, 1, -1, 1}, {1, 1, -1, 1}}});
+    for (std::uint32_t y = 0; y < Height; ++y)
+        for (std::uint32_t x = 0; x < Width; ++x) Require(!drawn(none, x, y), "A negative third clip distance left pixel " + std::to_string(x) + "," + std::to_string(y));
+    // The first distance is the vertex's clip-space x (-1, 3, -1): the left half of the target is clipped.
+    const auto half = draw({{{-1, 1, 1, 1}, {3, 1, 1, 1}, {-1, 1, 1, 1}}});
+    for (std::uint32_t y = 0; y < Height; ++y) {
+        for (std::uint32_t x = 0; x < Width; ++x) {
+            if (x == Width / 2 - 1 || x == Width / 2) continue;
+            Require(drawn(half, x, y) == (x >= Width / 2), "A clip distance equal to x drew the wrong coverage at pixel " + std::to_string(x) + "," + std::to_string(y));
+        }
+    }
+    std::cout << "Clip distances: four guest distances in pos1 clip nothing, everything and the left half on Metal\n";
+}
+
 void RegisterPacket(std::vector<std::uint32_t>& commands, std::uint32_t opcode, std::uint32_t offset,
                     std::span<const std::uint32_t> words) {
     std::vector<std::uint32_t> packet{0xc0000000u | (static_cast<std::uint32_t>(words.size()) << 16u) | (opcode << 8u), offset};
@@ -2080,6 +2146,7 @@ int main(int argc, const char* argv[]) {
             DrawSubmittedGuest(device, library);
             DrawInterpolation(device, library);
             DrawPerVertexParameters(device, library);
+            DrawClipDistances(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

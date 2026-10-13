@@ -535,6 +535,28 @@ void ColorViewSlices() {
     std::cout << "PASS: color views of several array slices render into their first slice; layered and 3D ranges refused\n";
 }
 
+// Upstream 04138f50a: clip and cull distance enables reach State::paClVsOutCntl (the Metal draw passes
+// them to the vertex program); more than eight distances stay refused.
+void ClipCullDecode() {
+    alignas(65536) static std::array<std::byte, 1u << 20u> memory{};
+    const auto address = reinterpret_cast<std::uintptr_t>(memory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{address, memory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    auto guest = GuestDraw(address);
+    guest.context[0x207] = 0x0040000fu;
+    Require(Graphics::DecodeState(guest).paClVsOutCntl == 0x0040000fu, "four clip distances were not decoded");
+    Require(Graphics::DrawRejection(guest, false).empty(), "the precheck rejected four clip distances");
+    guest.context[0x207] = 0x004001ffu;
+    bool refused = false;
+    try {
+        static_cast<void>(Graphics::DecodeState(guest));
+    } catch (const std::exception& error) {
+        refused = std::string(error.what()).find("more than eight clip and cull distances") != std::string::npos;
+    }
+    Require(refused && !Graphics::DrawRejection(guest, false).empty(), "nine clip and cull distances were not refused");
+    std::cout << "PASS: clip and cull distance enables decode; more than eight are refused\n";
+}
+
 // Renders one draw of `state` (rasterSamples > 1) into a multisampled RGBA8 target with the pass's
 // sample positions from ConfigureSamplePositions, and returns the resolved pixels.
 std::array<Pixel, 64> RenderResolved(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library,
@@ -730,6 +752,7 @@ int main() {
             SharedStateDecode(device, queue, library);
             CustomSampleLocations(device, queue, library);
             ColorViewSlices();
+            ClipCullDecode();
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {
