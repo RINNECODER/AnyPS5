@@ -139,6 +139,14 @@ if(BUILD_TESTING)
     set_target_properties(anyps5_metal_masked_shift_contract PROPERTIES CXX_EXTENSIONS OFF)
     add_test(NAME anyps5_metal_masked_shift_contract COMMAND anyps5_metal_masked_shift_contract)
     set_tests_properties(anyps5_metal_masked_shift_contract PROPERTIES TIMEOUT 120)
+    # Shader disk cache codec: encode -> decode -> compare, including the fork-only IR arena, execution
+    # plan rebuild and sampler/sampled-pair resource encodings. Runs against the same recompiler the
+    # Metal guest replay links.
+    add_test_executable(anyps5_metal_shader_disk_cache_tests "${agcDriverRoot}/tests/ShaderDiskCache.cpp")
+    target_link_libraries(anyps5_metal_shader_disk_cache_tests PRIVATE anyps5_metal_guest_recompiler)
+    set_target_properties(anyps5_metal_shader_disk_cache_tests PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME anyps5_metal_shader_disk_cache COMMAND anyps5_metal_shader_disk_cache_tests)
+    set_tests_properties(anyps5_metal_shader_disk_cache PROPERTIES TIMEOUT 180 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
     get_target_property(metalUtilityLibrary anyps5_metal_utilities ANYPS5_METALLIB)
     add_test_executable(anyps5_metal_native_session_acceptance NativeMetalSessionAcceptance.mm)
     target_compile_options(anyps5_metal_native_session_acceptance PRIVATE -fobjc-arc)
