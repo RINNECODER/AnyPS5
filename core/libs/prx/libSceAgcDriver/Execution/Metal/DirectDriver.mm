@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/Metal/DirectDriver.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalGuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #import <Foundation/Foundation.h>
@@ -12,6 +13,7 @@
 #include <sys/mman.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -20,7 +22,9 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <optional>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -154,14 +158,61 @@ void GrowStaging(DirectState& state, std::size_t bytes) {
     state.allocationGeneration = std::numeric_limits<std::uint64_t>::max();
 }
 
-// A submission whose words cannot be read is dropped with a log line instead of aborting the title.
-void SkipSubmission(const char* call, const Packet& packet, std::uint32_t queue, const char* reason) {
+// A submission whose words cannot be read or parsed is dropped with a log line instead of aborting
+// the title. ANYPS5_AGC_STRICT_SUBMISSIONS=1 keeps the abort (to catch a driver bug in the act).
+bool StrictSubmissions() {
+    static const bool strict = [] {
+        const char* value = std::getenv("ANYPS5_AGC_STRICT_SUBMISSIONS");
+        return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return strict;
+}
+
+void SkipSubmission(const char* call, const Packet& packet, std::uint32_t queue, bool staged, const std::string& reason) {
     static std::atomic<std::uint64_t> skipped{0};
     const auto count = ++skipped;
     if (count > 16 && (count & (count - 1)) != 0) return;
-    std::fprintf(stderr, "[rosetta] %s: skipped the command buffer at %p (%u words, %zu bytes, flags 0x%x, queue %u): %s (skip %llu)\n",
+    std::fprintf(stderr, "[rosetta] %s: skipped the command buffer at %p (%u words, %zu bytes, flags 0x%x, queue %u, %s): %s (skip %llu)\n",
         call != nullptr ? call : "submit", packet.addr, packet.dw_num, std::size_t{packet.dw_num} * sizeof(std::uint32_t),
-        static_cast<unsigned>(packet.flags), queue, reason, static_cast<unsigned long long>(count));
+        static_cast<unsigned>(packet.flags), queue, staged ? "outside guest memory, staged" : "in guest memory", reason.c_str(),
+        static_cast<unsigned long long>(count));
+}
+
+// Staged words are a copy, so what the driver would otherwise read from the title's memory later
+// must be settled when the copy is taken (#472):
+// - a title may still be writing the last packets of a buffer it submits (the driver re-reads a
+//   rejected buffer for a while, but re-reading a copy never sees the late words), so the copy is
+//   retaken until its packets parse, for up to RestageMs;
+// - the driver reads a REWIND's tail and its release word later, from the address it captured, which
+//   for a staged buffer is the staging buffer: by then the next staged submission has overwritten
+//   it (or a grow replaced it), and the tail parsed garbage ("unsupported PM4 packet type"). The
+//   title releases the tail in its own copy, which the driver cannot see, so such a buffer is skipped.
+constexpr int RestageMs = 20;
+
+struct StagingProblem {
+    std::size_t dword;
+    std::uint32_t header;
+    const char* what;
+    bool rewind;
+};
+
+std::optional<StagingProblem> FirstStagingProblem(std::span<const std::uint32_t> words) {
+    for (std::size_t cursor = 0; cursor < words.size();) {
+        const auto header = words[cursor];
+        if (Pm4::FillerPacket(header)) { ++cursor; continue; }
+        if ((header & 0xc0000000u) != 0xc0000000u) return StagingProblem{cursor, header, "unsupported PM4 packet type", false};
+        const auto count = Pm4::PacketWords(header);
+        if (count > words.size() - cursor) return StagingProblem{cursor, header, "PM4 packet runs past the end of the command buffer", false};
+        if (((header >> 8u) & 0xffu) == 0x59u) return StagingProblem{cursor, header, "a REWIND outside guest memory cannot be followed from a staged copy", true};
+        cursor += count;
+    }
+    return std::nullopt;
+}
+
+std::string Describe(const StagingProblem& problem, std::size_t words) {
+    char text[192];
+    std::snprintf(text, sizeof(text), "%s: header 0x%08x at DWORD %zu of %zu", problem.what, problem.header, problem.dword, words);
+    return text;
 }
 
 std::shared_ptr<const std::vector<NativeGuestMemory::BorrowedRange>> ProcessRanges() { return DirectGuestRanges(); }
@@ -213,6 +264,7 @@ void Configure(DirectState& state, MetalDriver& driver, const std::shared_ptr<co
         }
         driver.Configure((__bridge void*)device, (__bridge void*)library, *ranges,
             [](std::uint32_t queue) { AgcDriverDeliverEopInterrupt(queue); }, state.driverGeneration);
+        driver.SetSkipInvalidCommandBuffers(!StrictSubmissions());
         state.device = device;
         state.library = library;
     }
@@ -273,24 +325,40 @@ void DirectSubmit(const Packet& packet, std::uint32_t queue, const char* call) {
     auto* driver = &DirectDriver();
     const auto address = reinterpret_cast<std::uint64_t>(packet.addr);
     const auto bytes = std::size_t{packet.dw_num} * sizeof(std::uint32_t);
-    if (bytes == 0 || RangesCover(*DirectGuestRanges(), address, bytes)) {
-        driver->SubmitCommandBuffer(address, packet.dw_num, packet.flags, queue);
-        return;
-    }
-    if (packet.addr == nullptr) return SkipSubmission(call, packet, queue, "null address");
-    if (bytes > MaxStagingBytes) return SkipSubmission(call, packet, queue, "larger than the staging limit");
-    if (!HostAccessible(address, bytes, false)) return SkipSubmission(call, packet, queue, "not readable memory");
+    const auto submit = [&](std::uint64_t commands, bool staged) {
+        try {
+            driver->SubmitCommandBuffer(commands, packet.dw_num, packet.flags, queue);
+        } catch (const InvalidCommandBuffer& error) {
+            if (StrictSubmissions()) throw;
+            SkipSubmission(call, packet, queue, staged, error.what());
+        }
+    };
+    if (bytes == 0 || RangesCover(*DirectGuestRanges(), address, bytes)) return submit(address, false);
+    if (packet.addr == nullptr) return SkipSubmission(call, packet, queue, true, "null address");
+    if (bytes > MaxStagingBytes) return SkipSubmission(call, packet, queue, true, "larger than the staging limit");
+    if (!HostAccessible(address, bytes, false)) return SkipSubmission(call, packet, queue, true, "not readable memory");
     auto& state = State();
     std::lock_guard lock(state.stagingMutex);
     if (bytes > state.stagingBytes) {
         // A worker keeps the ranges it runs with, so it cannot hand the driver a new staging range.
         if (MetalDriver::OnDriverWorkerThread())
-            return SkipSubmission(call, packet, queue, "needs a larger staging buffer on a driver worker thread");
+            return SkipSubmission(call, packet, queue, true, "needs a larger staging buffer on a driver worker thread");
         GrowStaging(state, bytes);
         driver = &DirectDriver();
     }
+    const std::span<const std::uint32_t> staged(reinterpret_cast<const std::uint32_t*>(state.staging), packet.dw_num);
     std::memcpy(state.staging, packet.addr, bytes);
-    driver->SubmitCommandBuffer(reinterpret_cast<std::uint64_t>(state.staging), packet.dw_num, packet.flags, queue);
+    auto problem = FirstStagingProblem(staged);
+    for (int waited = 1; problem && !problem->rewind && waited <= RestageMs; ++waited) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::memcpy(state.staging, packet.addr, bytes);
+        problem = FirstStagingProblem(staged);
+    }
+    if (problem) {
+        if (StrictSubmissions() && !problem->rewind) throw std::runtime_error("AGC driver: " + Describe(*problem, packet.dw_num));
+        return SkipSubmission(call, packet, queue, true, Describe(*problem, packet.dw_num));
+    }
+    submit(reinterpret_cast<std::uint64_t>(state.staging), true);
 }
 
 MetalDriver& DirectDriver() {

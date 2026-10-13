@@ -129,6 +129,82 @@ void CheckCommandBufferPlacement(Control* control) {
     control->dcbAddress = control->dcb;
 }
 
+// Staged command buffers (#472). Words outside guest memory are copied into one staging buffer, so
+// the driver must never read them back from it later, and a copy must not freeze words the title is
+// still writing.
+void CheckStagedSubmissions(Control* control) {
+    const auto submit = [&](const std::vector<std::uint32_t>& words) {
+        control->dcbAddress = const_cast<std::uint32_t*>(words.data());
+        control->dcbWords = static_cast<std::uint32_t>(words.size());
+        return sceAgcDriverSubmitMultiDcbs(&control->dcbAddress, &control->dcbWords, 1);
+    };
+    const auto load = [](std::uint32_t& word) { return std::atomic_ref<std::uint32_t>(word).load(std::memory_order_acquire); };
+
+    // A host buffer whose last packet header is written 3 ms after submit: the staged copy is retaken.
+    constexpr std::uint32_t LateValue = 0x472a7eu;
+    auto late = MarkerDcb(3, &control->marker, LateValue);
+    const auto lateHeader = late[3];
+    late[3] = 0;
+    control->marker = 0;
+    std::thread writer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        std::atomic_ref<std::uint32_t>(late[3]).store(lateHeader, std::memory_order_release);
+    });
+    const int lateSubmit = submit(late);
+    writer.join();
+    Require(lateSubmit == 0, "a staged buffer whose last packet header is written 3 ms after submit is accepted");
+    AgcDriverWaitIdle_nid_postfix();
+    Require(load(control->marker) == LateValue, "the staged packet written after submit ran");
+
+    // A staged buffer ending in a REWIND, then another staged buffer with a type-3 header where the
+    // REWIND's release word was and a type-0 word where its tail was. The driver used to poll the
+    // release word and capture the tail from the staging buffer, which by then held the second
+    // buffer: "unsupported PM4 packet type" and an abort. The REWIND buffer is skipped instead.
+    constexpr std::uint32_t RewindValue = 0x472b01u, TailValue = 0x472b02u, NextValue = 0x472b03u;
+    std::uint32_t& rewindMarker = control->dcb[14];
+    auto rewind = MarkerDcb(0, &rewindMarker, RewindValue);
+    rewind.insert(rewind.end(), {0xc0005900u, 0u});
+    const auto tail = MarkerDcb(0, &rewindMarker, TailValue);
+    rewind.insert(rewind.end(), tail.begin(), tail.end());
+    std::vector<std::uint32_t> next(rewind.size() - tail.size() - 1, 0x80000000u);
+    next.insert(next.end(), {0xc0001000u, 0u});
+    const auto nextMarker = MarkerDcb(0, &control->marker, NextValue);
+    next.insert(next.end(), nextMarker.begin(), nextMarker.end());
+    rewindMarker = 0;
+    control->marker = 0;
+    Require(submit(rewind) == 0, "a staged buffer with a REWIND is accepted");
+    Require(submit(next) == 0, "a staged buffer submitted right after it is accepted");
+    AgcDriverWaitIdle_nid_postfix();
+    Require(load(control->marker) == NextValue, "the next staged buffer ran");
+    Require(load(rewindMarker) == 0, "the staged REWIND buffer was skipped whole");
+
+    // Back-to-back staged buffers with a grow of the staging buffer between them.
+    std::uint32_t* const targets[] = {&control->dcb[10], &control->dcb[11], &control->dcb[12]};
+    const std::size_t fillers[] = {5, 768 * 1024, 9};
+    std::vector<std::vector<std::uint32_t>> sequence;
+    for (std::size_t index = 0; index < 3; ++index) {
+        *targets[index] = 0;
+        sequence.push_back(MarkerDcb(fillers[index], targets[index], 0x472c00u + static_cast<std::uint32_t>(index)));
+    }
+    for (const auto& words : sequence) Require(submit(words) == 0, "submit a staged buffer of " + std::to_string(words.size()) + " words");
+    AgcDriverWaitIdle_nid_postfix();
+    for (std::size_t index = 0; index < 3; ++index)
+        Require(load(*targets[index]) == 0x472c00u + index, "staged buffer " + std::to_string(index) + " of a sequence with a grow ran");
+
+    // A malformed buffer in guest memory (a type-0 header) is skipped with a log line, not an abort,
+    // and the driver runs the next one.
+    control->dcb[0] = 0x12345678u;
+    control->dcbAddress = control->dcb;
+    control->dcbWords = 2;
+    Require(sceAgcDriverSubmitMultiDcbs(&control->dcbAddress, &control->dcbWords, 1) == 0, "a malformed command buffer in guest memory is skipped");
+    constexpr std::uint32_t AfterValue = 0x472d01u;
+    control->marker = 0;
+    Require(submit(MarkerDcb(1, &control->marker, AfterValue)) == 0, "submit after the malformed buffer");
+    AgcDriverWaitIdle_nid_postfix();
+    Require(load(control->marker) == AfterValue, "the driver runs submissions after a malformed one");
+    control->dcbAddress = control->dcb;
+}
+
 void Guest(const std::filesystem::path& captureDirectory) {
     std::int64_t physical = -1;
     Require(sceKernelAllocateDirectMemory(0, static_cast<std::int64_t>(sceKernelGetDirectMemorySize()), MappedBytes, 64 * 1024, 0, &physical) == 0, "allocate direct memory");
@@ -201,6 +277,7 @@ void Guest(const std::filesystem::path& captureDirectory) {
     Require(std::atomic_ref<std::uint32_t>(control->marker).load(std::memory_order_acquire) == LateValue, "the packet written after submit ran");
 
     CheckCommandBufferPlacement(control);
+    CheckStagedSubmissions(control);
 
     const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
     Require(handle > 0, "open the video output");

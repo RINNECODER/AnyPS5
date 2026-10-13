@@ -425,6 +425,8 @@ void MetalDriver::Submit(const Packet* packet, std::uint32_t queue) {
     submit({}, queue, reinterpret_cast<std::uintptr_t>(packet));
 }
 
+void MetalDriver::SetSkipInvalidCommandBuffers(bool skip) { impl->skipInvalidCommandBuffers.store(skip, std::memory_order_relaxed); }
+
 void MetalDriver::SubmitCommandBuffer(std::uint64_t commandAddress, std::uint32_t wordCount,
     std::uint8_t flags, std::uint32_t queue) {
     submit({commandAddress, wordCount, flags}, queue, std::nullopt);
@@ -494,8 +496,14 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
             descriptor = {reinterpret_cast<std::uintptr_t>(guestDescriptor.addr), guestDescriptor.dw_num, guestDescriptor.flags};
         }
         require(descriptor.flags == 0, "nonzero submission flags are not implemented");
-        CaptureAndValidate(submission, descriptor.address, descriptor.words);
-        CaptureIndirectRegisterLists(submission);
+        try {
+            CaptureAndValidate(submission, descriptor.address, descriptor.words);
+            CaptureIndirectRegisterLists(submission);
+        } catch (const DriverStopped&) {
+            throw;
+        } catch (const std::exception& error) {
+            throw InvalidCommandBuffer(error.what());
+        }
     }
     impl->WaitForFlipRoom(submission);
     {
@@ -1113,8 +1121,17 @@ void MetalDriver::Impl::ExecuteRewindTail(const Submission& stalled, QueueState&
     {
         std::lock_guard gpuLock(gpuMutex);
         NativeGuestMemory::BorrowedRangesScope current(ranges);
-        CaptureAndValidate(tail, tailAddress, stalled.rewindWords);
-        CaptureIndirectRegisterLists(tail);
+        try {
+            CaptureAndValidate(tail, tailAddress, stalled.rewindWords);
+            CaptureIndirectRegisterLists(tail);
+        } catch (const DriverStopped&) {
+            throw;
+        } catch (const std::exception& error) {
+            if (!skipInvalidCommandBuffers.load(std::memory_order_relaxed)) throw;
+            std::fprintf(stderr, "[metal] skipped the REWIND tail at 0x%llx (%zu words, queue %u): %s\n",
+                static_cast<unsigned long long>(tailAddress), stalled.rewindWords, stalled.queue, error.what());
+            return;
+        }
     }
     WaitForFlipRoom(tail);
     {
