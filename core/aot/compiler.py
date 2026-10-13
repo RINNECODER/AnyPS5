@@ -14,6 +14,7 @@ import abi
 import vector
 import avx
 import fma
+import x87
 import integer
 import bmi
 import system
@@ -395,7 +396,7 @@ class Function:
             mem = operand.mem
             if ins.mnemonic != 'lea' and ins.addr_size != 8:
                 self.fail(ins, '32-bit memory addressing requires pointer reconstruction')
-            if mem.segment and ins.mnemonic != 'lea':
+            if mem.segment and ins.mnemonic != 'lea' and ins.reg_name(mem.segment) != 'fs':
                 self.fail(ins, 'segment-relative addressing needs TLS lowering')
             for register in (mem.base, mem.index):
                 name = ins.reg_name(register)
@@ -512,7 +513,7 @@ class Function:
                  'stack_origins': original['stack_origins'].copy(), 'stack_values': original['stack_values'].copy(),
                  'image_pointers': original['image_pointers'].copy(), 'import_bindings': original['import_bindings'].copy(), 'callback_memory_unmodified': original['callback_memory_unmodified']}
         op, args = ins.mnemonic, ins.operands
-        if fma.analyze(self, ins, state) or avx.analyze(self, ins, state) or vector.analyze(self, ins, state):
+        if fma.analyze(self, ins, state) or avx.analyze(self, ins, state) or vector.analyze(self, ins, state) or x87.analyze(self, ins, state):
             return state
         if integer.analyze(self, ins, state) or bmi.analyze(self, ins, state) or system.analyze(self, ins, state):
             for register in ins.regs_access()[1]:
@@ -1038,6 +1039,16 @@ class Function:
         state = self.states[ins.address]
         base = ins.reg_name(mem.base)
         index = ins.reg_name(mem.index)
+        if mem.segment and ins.reg_name(mem.segment) == 'fs':
+            pointer = self.emit('call ptr @NativeAotTlsBase_nid_no_patch()')
+            offset = str(mem.disp)
+            if index:
+                value = self.load(index)
+                if mem.scale != 1:
+                    value = self.emit(f'mul i64 {value}, {mem.scale}')
+                offset = self.emit(f'add i64 {value}, {offset}')
+            address = self.emit(f'getelementptr i8, ptr {pointer}, i64 {offset}') if offset != '0' else pointer
+            return checked_stack.guard(self, ins, operand, address)
         if base == 'rip':
             require(not index, 'invalid RIP-relative index')
             return self.image.pointer(ins.address + ins.size + mem.disp, 1 if ins.mnemonic == 'lea' else operand.size)
@@ -1266,6 +1277,12 @@ class Function:
         self.lines.append(f'  %frame = alloca [{self.depth + self.stack_end} x i8], align 16')
         if self.uniform:
             self.lines.append('  %rf_out = alloca %regfile, align 16')
+            self.lines.append('  %x87 = alloca [8 x double], align 16')
+            self.lines.append('  %x87_top = alloca i32, align 4')
+            self.lines.append('  store i32 0, ptr %x87_top, align 4')
+            for flag in ('c0', 'c1', 'c2', 'c3'):
+                self.lines.append(f'  %{flag} = alloca i1, align 1')
+                self.lines.append(f'  store i1 false, ptr %{flag}, align 1')
             self.uniform_load_registers('%rf')
             self.uniform_stack_in('%rf')
             self.store('rsp', self.emit(f'ptrtoint ptr {self.frame_pointer(0)} to i64'))
@@ -1293,7 +1310,7 @@ class Function:
             self.lines.append(f'b{address:x}:')
             state = self.states[address]
             terminal = False
-            if fma.lower(self, ins) or avx.lower(self, ins) or vector.lower(self, ins):
+            if fma.lower(self, ins) or avx.lower(self, ins) or vector.lower(self, ins) or x87.lower(self, ins):
                 pass
             elif integer.lower(self, ins) or bmi.lower(self, ins) or system.lower(self, ins):
                 pass
@@ -1439,6 +1456,10 @@ def compile_image(image):
     lines.append('declare float @llvm.fma.f32(float, float, float)')
     lines.append('declare double @llvm.fma.f64(double, double, double)')
     lines.append('declare i64 @llvm.readcyclecounter()')
+    lines.append('declare ptr @NativeAotTlsBase_nid_no_patch()')
+    lines.append('declare double @llvm.fabs.f64(double)')
+    lines.append('declare double @llvm.sqrt.f64(double)')
+    lines.append('declare double @fmod(double, double)')
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     dispatch_enabled = bool(image.contracts.get('dispatch'))
