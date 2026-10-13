@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
     FILE* file = fopen(argv[1], "rb");
     uint64_t address = strtoull(argv[2], 0, 16);
     long size = 0; fseek(file, 0, SEEK_END); size = ftell(file); fseek(file, 0, SEEK_SET);
-    uint64_t low = 0x1000, high = address + size + 0x1000;
+    uint64_t low = address & ~0xfffull, high = address + size + 0x1000;
     if (mmap((void*)low, high - low, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) { perror("mmap"); return 3; }
     if (fread((void*)address, 1, size, file) != (size_t)size) return 4;
     mprotect((void*)(address & ~0xfffull), (size + 0x2fff) & ~0xfffull, PROT_READ | PROT_EXEC);
