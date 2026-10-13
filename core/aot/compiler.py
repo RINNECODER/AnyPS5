@@ -353,7 +353,13 @@ class Function:
                         successors = []
             elif ins.mnemonic.startswith('j'):
                 require(ins.operands[0].type == X86_OP_IMM, 'indirect branches require target-set reconstruction')
-                successors = [ins.operands[0].imm, next_address]
+                target = ins.operands[0].imm
+                if not (start <= target < end) and target in self.image.functions:
+                    # A conditional branch into another function is a conditional tail call.
+                    self.tail_calls[address] = (self.image.functions[target], None)
+                    successors = [next_address]
+                else:
+                    successors = [target, next_address]
             elif ins.mnemonic == 'call':
                 try:
                     callee, _ = self.image.call(ins, self.contract)
@@ -1368,6 +1374,15 @@ class Function:
                 terminal = True
             elif address in self.switch_jumps:
                 self.lower_switch(ins, state, address)
+                terminal = True
+            elif address in self.tail_calls and ins.mnemonic not in ('call', 'jmp'):
+                # Conditional tail call: taken -> tail call, not-taken -> fall through.
+                callee, slot = self.tail_calls[address]
+                require(abi.uniform(callee), 'conditional tail call requires a uniform callee')
+                label = f'ctc_{address:x}'
+                self.lines.append(f'  br i1 {self.condition(op)}, label %{label}, label %b{address + ins.size:x}')
+                self.lines.append(f'{label}:')
+                self.uniform_call(ins, callee, slot, state, True, result)
                 terminal = True
             elif op == 'call' or address in self.tail_calls:
                 tail = address in self.tail_calls
