@@ -185,6 +185,21 @@ class UniformABITests(unittest.TestCase):
         self.assertIn('@NativeAotReportDispatchFailure_nid_no_patch', ir)
         self.assertIn('call ptr @NativeAotDispatch_nid_no_patch', ir)
 
+    def test_uniform_dispatch_table_is_valid_llvm(self):
+        # The dispatch table initializer needs the struct type on each element; without
+        # it clang rejects the module with "expected '}' at end of struct".
+        code = bytearray(0x04)
+        code[0x00:0x03] = bytes.fromhex('ffd0c3')
+        raw, contracts = fixture(bytes(code), [uniform_function('sub_1000', 0x1000, 3)], dispatch=True)
+        source = self.directory / 'input.elf'
+        source.write_bytes(raw)
+        ir, _ = compile_image(Image(source, contracts))
+        self.assertIn('{ i64, ptr } { i64 4096, ptr @sub_1000 }', ir)
+        ll = self.directory / 'output.ll'
+        ll.write_text(ir)
+        subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-O3', '-c', str(ll), '-o', str(self.directory / 'output.o')],
+                       check=True, capture_output=True)
+
     def test_uniform_annotated_indirect_jump_is_a_switch(self):
         # 0x1000: jmp rax   0x1010: mov eax, 1 ; ret   0x1020: mov eax, 2 ; ret
         code = bytearray(0x30)

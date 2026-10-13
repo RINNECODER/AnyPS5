@@ -109,7 +109,14 @@ def build_arm64(ir, directory):
     object_file = directory / "native.o"
     build_native_object(ir, object_file)
     dylib = directory / "native.dylib"
-    subprocess.run(["xcrun", "clang", "-arch", "arm64", "-dynamiclib", str(object_file), "-o", str(dylib)],
+    extra = []
+    if "NativeAotDispatch_nid_no_patch" in ir:
+        dispatch_source = Path(__file__).resolve().parent.parent / "core" / "libs" / "native" / "NativeAotDispatch.cpp"
+        dispatch_object = directory / "dispatch.o"
+        subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-O2", "-c", str(dispatch_source), "-o", str(dispatch_object)],
+                       check=True, capture_output=True)
+        extra = [str(dispatch_object)]
+    subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-dynamiclib", str(object_file), *extra, "-o", str(dylib)],
                    check=True, capture_output=True)
     return dylib
 
@@ -173,7 +180,7 @@ def uniform_call(dylib, name, registers):
     libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
     libc.mmap(ctypes.c_void_p(BASE + 0x70000000), 0x100000, 1 | 2, 0x02 | 0x1000 | 0x10, -1, 0)
     libc.mmap(ctypes.c_void_p(BASE + 0x60000000), 0x100000, 1 | 2, 0x02 | 0x1000 | 0x10, -1, 0)
-    regfile = (ctypes.c_uint64 * 48)()
+    regfile = (ctypes.c_uint64 * 80)()
     for index, register in enumerate(UNIFORM_GPRS):
         regfile[index] = registers.get(register, 0)
     regfile[4] = BASE + 0x700FFFF8  # rsp, matching the x86 runner

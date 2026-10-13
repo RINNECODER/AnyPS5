@@ -112,7 +112,7 @@ def page_region(address, size, page=0x1000):
     return start, end - start
 
 
-def build_synthetic(functions, referenced, uniform=False):
+def build_synthetic(functions, referenced, uniform=False, dispatch=False):
     """functions: [(address, code)]; referenced: {address: size}."""
     regions = {}
     function_ranges = [(a, a + len(c)) for a, c in functions]
@@ -186,18 +186,20 @@ def build_synthetic(functions, referenced, uniform=False):
         "data": data,
         "pointer_relocations": [],
     }
+    if dispatch:
+        contracts["dispatch"] = True
     return bytes(image), contracts
 
 
-def compile_one(title, sizes, address, limit, work_dir=None, uniform=False):
-    functions = closure(title, sizes, address, limit)
+def compile_one(title, sizes, address, limit, work_dir=None, uniform=False, dispatch=False):
+    functions = [address] if dispatch else closure(title, sizes, address, limit)
     codes = [(a, title.code(a, sizes[a])) for a in functions]
     codes = [(a, c) for a, c in codes if c]
     referenced = {}
     for a, c in codes:
         for target, size in references(c, a).items():
             referenced[target] = max(referenced.get(target, 1), size)
-    image, contracts = build_synthetic(codes, referenced, uniform)
+    image, contracts = build_synthetic(codes, referenced, uniform, dispatch)
     with tempfile.TemporaryDirectory(prefix="anyps5-difftest-") as directory:
         path = Path(directory) / "input.elf"
         path.write_bytes(image)
@@ -222,6 +224,7 @@ def main():
                                                        Path(sys.argv[3]), Path(sys.argv[4]))
     limit = int(sys.argv[5]) if len(sys.argv) > 5 else 200
     uniform = "--uniform" in sys.argv
+    dispatch = "--dispatch" in sys.argv
     out_dir.mkdir(parents=True, exist_ok=True)
     sizes = fde_sizes(starts_path)
     title = Title(elf_path)
@@ -236,7 +239,7 @@ def main():
             results[item["function"]] = {"status": "no-fde-range", "hits": item["hits"]}
             continue
         try:
-            result = compile_one(title, sizes, address, limit, images, uniform)
+            result = compile_one(title, sizes, address, limit, images, uniform, dispatch)
         except Exception as error:
             result = {"status": "harness-error", "reason": str(error)[:400]}
         result["hits"] = item["hits"]

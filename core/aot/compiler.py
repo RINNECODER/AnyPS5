@@ -1419,7 +1419,7 @@ def compile_image(image):
     dispatch_enabled = bool(image.contracts.get('dispatch'))
     dispatch_entries = sorted((spec['address'], spec['name']) for spec in image.functions.values()) if dispatch_enabled else []
     if dispatch_enabled:
-        table = ', '.join(f'{{ i64 {address}, ptr @{name} }}' for address, name in dispatch_entries)
+        table = ', '.join(f'{{ i64, ptr }} {{ i64 {address}, ptr @{name} }}' for address, name in dispatch_entries)
         lines.append(f'@__aps5_aot_dispatch = private constant [{len(dispatch_entries)} x {{ i64, ptr }}] [{table}], align 8')
         lines.append('declare ptr @NativeAotDispatch_nid_no_patch(i64)')
         lines.append('declare void @NativeAotReportDispatchFailure_nid_no_patch(i64, i64)')
