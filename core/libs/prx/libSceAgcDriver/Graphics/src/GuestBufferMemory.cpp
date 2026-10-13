@@ -1748,6 +1748,10 @@ MirrorStats MirrorCounters() {
 }
 
 void ClearImageMirrors(VkDevice device) {
+    auto space = Spaces().current.load();
+    if (space != nullptr && space->device == device) {
+        Spaces().current.compare_exchange_strong(space, std::shared_ptr<const GuestBufferMemory::AddressSpace>{});
+    }
     auto& state = Mirrors();
     std::map<std::uint64_t, std::shared_ptr<ImageMirror>> entries;
     {
@@ -1758,7 +1762,6 @@ void ClearImageMirrors(VkDevice device) {
         state.heapBytes = 0;
         state.device = VK_NULL_HANDLE;
     }
-    Spaces().current.store(nullptr);
 }
 
 void ClearHostImports(VkDevice device) {
