@@ -314,7 +314,7 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
     // record its guest address. The runtime's SIGTRAP handler emulates the branch
     // and appends the observed target. One byte, so the operand stays decodable.
     std::vector<RelinkPatch> indirectPatches;
-    std::vector<VirtualAddress> indirectSites;
+    std::vector<RelinkResult::IndirectTraceSite> indirectSites;
     VirtualAddress executableBegin = 0;
     VirtualAddress executableEnd = 0;
     bool haveExecutable = false;
@@ -323,11 +323,21 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
         if (!haveExecutable || segmentVAddr + segment.size() > executableEnd) executableEnd = segmentVAddr + segment.size();
         haveExecutable = true;
         for (const auto& site : _indirectBranchScanner->ScanCodeSectionForIndirectBranches(segment, segmentVAddr, segment.size())) {
-            if (site.OpcodeOffset >= segment.size())
+            const std::size_t patchEnd = site.InstructionOffset + site.Length;
+            if (site.OpcodeOffset >= segment.size() || patchEnd > segment.size() || site.Length > 15 || site.OpcodeOffset < site.InstructionOffset)
                 throw RelinkerException("Indirect branch trap patch exceeds executable segment", segmentVAddr + site.OpcodeOffset);
+            RelinkResult::IndirectTraceSite record;
+            record.OpcodeAddress = site.Address;
+            record.PrefixLength = static_cast<std::uint32_t>(site.OpcodeOffset - site.InstructionOffset);
+            record.Length = static_cast<std::uint32_t>(site.Length);
+            for (std::size_t index = 0; index < site.Length; ++index) record.Bytes[index] = segment[site.InstructionOffset + index];
+            // `int3` plus one-byte NOPs: the same length, so the linear decoder stays in sync.
+            std::vector<std::uint8_t> patched(patchEnd - site.OpcodeOffset, 0x90);
+            patched[0] = 0xCC;
             segment[site.OpcodeOffset] = 0xCC;
-            indirectPatches.push_back({segmentFileOffset + site.OpcodeOffset, {0xCC}});
-            indirectSites.push_back(site.Address);
+            for (std::size_t index = site.OpcodeOffset + 1; index < patchEnd; ++index) segment[index] = 0x90;
+            indirectPatches.push_back({segmentFileOffset + site.OpcodeOffset, std::move(patched)});
+            indirectSites.push_back(record);
         }
     }
     if (!indirectSites.empty())

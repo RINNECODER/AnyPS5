@@ -264,6 +264,13 @@ void Describe(std::uint64_t address, char* out, std::size_t size) {
 // land in the main image's executable range. It never allocates or logs from the
 // hot path beyond the record write.
 
+struct IndirectTraceSite {
+    std::uint64_t OpcodeAddress = 0;
+    std::uint32_t PrefixLength = 0;
+    std::uint32_t Length = 0;
+    std::uint8_t Bytes[16] = {};
+};
+
 struct IndirectTraceState {
     bool enabled = false;
     int fd = -1;
@@ -273,10 +280,16 @@ struct IndirectTraceState {
     std::uint64_t guestBase = 0;
     std::uint64_t codeMin = 0;
     std::uint64_t codeMax = 0;
-    std::vector<std::uint64_t> sites;
+    std::vector<IndirectTraceSite> sites;
 };
 
 IndirectTraceState indirectTrace;
+
+const IndirectTraceSite* FindIndirectSite(const std::uint64_t guestOpcode) {
+    const auto found = std::lower_bound(indirectTrace.sites.begin(), indirectTrace.sites.end(), guestOpcode,
+        [](const IndirectTraceSite& site, const std::uint64_t value) { return site.OpcodeAddress < value; });
+    return found != indirectTrace.sites.end() && found->OpcodeAddress == guestOpcode ? &*found : nullptr;
+}
 
 bool ReadMemory(std::uint64_t address, void* buffer, std::size_t size) {
     mach_vm_size_t read = 0;
@@ -338,11 +351,22 @@ void InitializeIndirectTrace() {
         && stream.read(reinterpret_cast<char*>(&count), sizeof(count)) && count <= (1u << 24)
         && stream.read(reinterpret_cast<char*>(&begin), sizeof(begin))
         && stream.read(reinterpret_cast<char*>(&end), sizeof(end))) {
-        indirectTrace.sites.resize(count);
-        stream.read(reinterpret_cast<char*>(indirectTrace.sites.data()), static_cast<std::streamsize>(count * sizeof(std::uint64_t)));
-        std::sort(indirectTrace.sites.begin(), indirectTrace.sites.end());
-        indirectTrace.codeMin = begin;
-        indirectTrace.codeMax = end;
+        constexpr std::size_t RecordBytes = 32;
+        std::vector<std::uint8_t> raw(static_cast<std::size_t>(count) * RecordBytes);
+        if (stream.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()))) {
+            indirectTrace.sites.resize(count);
+            for (std::size_t index = 0; index < count; ++index) {
+                const std::uint8_t* record = raw.data() + index * RecordBytes;
+                std::memcpy(&indirectTrace.sites[index].OpcodeAddress, record, 8);
+                std::memcpy(&indirectTrace.sites[index].PrefixLength, record + 8, 4);
+                std::memcpy(&indirectTrace.sites[index].Length, record + 12, 4);
+                std::memcpy(indirectTrace.sites[index].Bytes, record + 16, 16);
+            }
+            std::sort(indirectTrace.sites.begin(), indirectTrace.sites.end(),
+                [](const IndirectTraceSite& left, const IndirectTraceSite& right) { return left.OpcodeAddress < right.OpcodeAddress; });
+            indirectTrace.codeMin = begin;
+            indirectTrace.codeMax = end;
+        }
     } else {
         Write("[rosetta] indirect trace: no usable site list at %s; tracing without validation\n", sitesPath.c_str());
         std::uint64_t hostBegin = 0;
@@ -401,30 +425,33 @@ void AppendIndirectRecord(const std::uint64_t from, const std::uint64_t to, cons
 bool HandleIndirectTrap(ucontext_t* context) {
     if (!indirectTrace.enabled) return false;
     auto& state = context->uc_mcontext->__ss;
-    std::uint8_t bytes[16];
     // int3 saves the address after the opcode; accept both layouts.
-    std::uint64_t trap = 0;
-    if (state.__rip > 0 && ReadMemory(state.__rip - 1, bytes, sizeof(bytes)) && bytes[0] == 0xCC) {
-        trap = state.__rip - 1;
-    } else if (ReadMemory(state.__rip, bytes, sizeof(bytes)) && bytes[0] == 0xCC) {
-        trap = state.__rip;
-    } else {
-        return false;
+    const IndirectTraceSite* site = nullptr;
+    std::uint64_t opcodeAddress = 0;
+    if (state.__rip > 0) {
+        site = FindIndirectSite(state.__rip - 1 - indirectTrace.guestBase);
+        if (site != nullptr) opcodeAddress = state.__rip - 1;
     }
+    if (site == nullptr) {
+        site = FindIndirectSite(state.__rip - indirectTrace.guestBase);
+        if (site != nullptr) opcodeAddress = state.__rip;
+    }
+    if (site == nullptr) return false;
 
-    const std::uint64_t guestTrap = trap - indirectTrace.guestBase;
-    if (!indirectTrace.sites.empty() && !std::binary_search(indirectTrace.sites.begin(), indirectTrace.sites.end(), guestTrap)) return false;
-
-    const std::uint8_t modrm = bytes[1];
+    const std::uint8_t* bytes = site->Bytes;
+    const std::uint32_t prefix = site->PrefixLength;
+    const std::uint32_t length = site->Length;
+    if (prefix + 2 > length) return false;
+    const std::uint8_t modrm = bytes[prefix + 1];
     const std::uint8_t mod = modrm >> 6;
     const std::uint8_t reg = (modrm >> 3) & 7;
     if (reg != 2 && reg != 4) return false;
     std::uint8_t rex = 0;
-    std::uint8_t previous = 0;
-    if (trap > 0 && ReadMemory(trap - 1, &previous, 1) && previous >= 0x40 && previous <= 0x4F) rex = previous;
+    for (std::uint32_t index = 0; index < prefix; ++index)
+        if (bytes[index] >= 0x40 && bytes[index] <= 0x4F) rex = bytes[index];
 
     const std::uint8_t rm = modrm & 7;
-    std::size_t position = 2;
+    std::size_t position = prefix + 2;
     std::uint64_t target = 0;
     if (mod == 3) {
         target = RegisterValue(context, rm | ((rex & 1) << 3));
@@ -448,7 +475,7 @@ bool HandleIndirectTrap(ucontext_t* context) {
             std::int32_t displacement = 0;
             std::memcpy(&displacement, bytes + position, sizeof(displacement));
             position += 4;
-            address = trap + position + static_cast<std::int64_t>(displacement);
+            address = (opcodeAddress - prefix) + position + static_cast<std::int64_t>(displacement);
         } else {
             address = RegisterValue(context, rm | ((rex & 1) << 3));
         }
@@ -466,7 +493,7 @@ bool HandleIndirectTrap(ucontext_t* context) {
     const bool isCall = reg == 2;
     if (isCall) {
         const std::uint64_t stack = state.__rsp - sizeof(std::uint64_t);
-        const std::uint64_t returnAddress = trap + position;
+        const std::uint64_t returnAddress = opcodeAddress - prefix + length;
         if (!WriteMemory(stack, &returnAddress, sizeof(returnAddress))) return false;
         state.__rsp = stack;
     }
@@ -474,7 +501,7 @@ bool HandleIndirectTrap(ucontext_t* context) {
     if (Seconds() >= indirectTrace.afterSeconds && target >= indirectTrace.guestBase) {
         const std::uint64_t guestTarget = target - indirectTrace.guestBase;
         if (guestTarget >= indirectTrace.codeMin && guestTarget < indirectTrace.codeMax)
-            AppendIndirectRecord(guestTrap, guestTarget, isCall ? 0u : 1u);
+            AppendIndirectRecord(opcodeAddress - indirectTrace.guestBase, guestTarget, isCall ? 0u : 1u);
     }
     return true;
 }

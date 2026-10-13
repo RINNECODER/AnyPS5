@@ -126,9 +126,16 @@ int Run(const int argc, char* argv[]) {
             stream.write(reinterpret_cast<const char*>(&count), sizeof(count));
             stream.write(reinterpret_cast<const char*>(&begin), sizeof(begin));
             stream.write(reinterpret_cast<const char*>(&end), sizeof(end));
-            for (const auto address : result.IndirectTraceSites) {
-                const std::uint64_t value = address;
-                stream.write(reinterpret_cast<const char*>(&value), sizeof(value));
+            for (const auto& site : result.IndirectTraceSites) {
+                const std::uint64_t opcode = site.OpcodeAddress;
+                const std::uint32_t prefix = site.PrefixLength;
+                const std::uint32_t length = site.Length;
+                std::uint8_t bytes[16] = {};
+                for (std::size_t index = 0; index < site.Bytes.size(); ++index) bytes[index] = site.Bytes[index];
+                stream.write(reinterpret_cast<const char*>(&opcode), sizeof(opcode));
+                stream.write(reinterpret_cast<const char*>(&prefix), sizeof(prefix));
+                stream.write(reinterpret_cast<const char*>(&length), sizeof(length));
+                stream.write(reinterpret_cast<const char*>(bytes), sizeof(bytes));
             }
             if (!stream) throw Domain::RelinkerException("Cannot write the indirect trace site list");
             std::cout << "Indirect trace sites: " << count << " -> " << sitesPath << '\n';

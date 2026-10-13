@@ -43,7 +43,7 @@ std::vector<IndirectBranchSite> IndirectBranchScanner::ScanCodeSectionForIndirec
         if (!IsTracedIndirect(info))
             continue;
         const std::size_t opcode = start + info.OpcodeOffset;
-        sites.push_back({opcode, codeSectionOffset + opcode, info.FlowKind == Codegen::ControlFlowKind::IndirectCall});
+        sites.push_back({start, opcode, match.Length, codeSectionOffset + opcode, info.FlowKind == Codegen::ControlFlowKind::IndirectCall});
     }
     return sites;
 }

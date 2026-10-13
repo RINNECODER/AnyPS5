@@ -9,9 +9,12 @@ namespace Relinker {
 
 // One computed (non-RIP-relative) indirect branch site: `call r/m64` or
 // `jmp r/m64`. Address is the guest virtual address of the opcode byte, the
-// byte the tracer rewrites to `int3`.
+// byte the tracer rewrites to `int3` (the rest of the instruction becomes NOPs
+// so the relinker's own linear decode stays in sync).
 struct IndirectBranchSite {
+    std::size_t InstructionOffset;
     std::size_t OpcodeOffset;
+    std::size_t Length;
     VirtualAddress Address;
     bool IsCall;
 };
