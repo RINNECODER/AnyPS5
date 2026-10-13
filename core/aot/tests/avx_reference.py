@@ -18,7 +18,12 @@ from capstone import Cs, CS_ARCH_X86, CS_MODE_64
 from elftools.elf.elffile import ELFFile
 
 import avx
+import bmi
+import fma
+import integer
+import system
 import vector
+import x87
 from test_avx import Emitter
 
 
@@ -97,11 +102,13 @@ class NativeAvxHarness(unittest.TestCase):
         instructions, stem = self.instructions(assembly)
         emitter = Emitter()
         for ins in instructions:
-            if avx.analyze(emitter, ins, emitter.state):
-                self.assertTrue(avx.lower(emitter, ins))
-            else:
-                self.assertTrue(vector.analyze(emitter, ins, emitter.state))
-                self.assertTrue(vector.lower(emitter, ins))
+            handled = False
+            for module in (fma, avx, vector, x87, integer, bmi, system):
+                if module.analyze(emitter, ins, emitter.state):
+                    self.assertTrue(module.lower(emitter, ins))
+                    handled = True
+                    break
+            self.assertTrue(handled, ins.mnemonic)
         ir = stem.with_suffix('.ll')
         ir.write_text(emitter.finish())
         native = stem.with_suffix('.dylib')

@@ -130,6 +130,12 @@ class Image:
         require(self.elf['e_entry'] in self.functions, 'entry function has no contract')
         self.imports = contracts['imports']
         self.data_bindings = contracts.get('data_bindings', {})
+        # guest_data: the title's data segments are not emitted as IR bytes; the image
+        # references them at their guest vaddrs and the runtime maps the user's eboot there.
+        self.guest_data = bool(contracts.get('guest_data'))
+        # guest_base slides the title image like the Rosetta path's relinked base: a guest
+        # vaddr V lives at guest_base + V, so a guest pointer is already a host pointer.
+        self.guest_base = int(contracts.get('guest_base', 0))
         for contract in self.imports.values():
             signature(contract)
             try:
@@ -224,6 +230,8 @@ class Image:
             return '@' + self.functions[address]['name']
         for spec in self.data:
             if spec['address'] <= address and address + size <= spec['address'] + spec['size']:
+                if self.guest_data:
+                    return f'inttoptr (i64 {self.guest_base + address} to ptr)'
                 return f"getelementptr (i8, ptr @data_{spec['address']:x}, i64 {address - spec['address']})"
         raise Rejected(f'no native pointer contract for 0x{address:x}')
 
@@ -1273,6 +1281,10 @@ class Function:
         name = self.contract['name']
         if self.uniform:
             self.lines = [f'define void @{name}(ptr %rf) uwtable {{', 'entry:']
+            if getattr(self, 'entry_index', None) is not None:
+                index = self.entry_index
+                self.lines.append(f'  %count_ptr_{index} = getelementptr i64, ptr @__aps5_aot_counts, i64 {index}')
+                self.lines.append(f'  %count_old_{index} = atomicrmw add ptr %count_ptr_{index}, i64 1 monotonic')
         else:
             args = ', '.join(f'{abi.parameter_type(typ)} %arg{i}' for i, typ in enumerate(parameters))
             self.lines = [f'define {abi.result_type(result)} @{name}({args}) uwtable {{', 'entry:']
@@ -1518,12 +1530,15 @@ def compile_image(image):
     lines.append('declare ptr @NativeAotTlsBase_nid_no_patch()')
     lines.append('declare double @llvm.fabs.f64(double)')
     lines.append('declare double @llvm.sqrt.f64(double)')
-    lines.append('declare double @fmod(double, double)')
+    # The x87 fprem lowering uses fmod; a title may also import it, so declare it once.
+    if 'fmod' not in {contract['name'] for contract in image.imports.values()}:
+        lines.append('declare double @fmod(double, double)')
     lines.extend(d for d in avx.INTRINSIC_DECLARATIONS if d not in lines)
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     dispatch_enabled = bool(image.contracts.get('dispatch'))
-    dispatch_entries = sorted((spec['address'], spec['name']) for spec in image.functions.values()) if dispatch_enabled else []
+    # The dispatch table is keyed by host address: a relocated vtable entry already holds guest_base + target.
+    dispatch_entries = sorted((image.guest_base + spec['address'], spec['name']) for spec in image.functions.values()) if dispatch_enabled else []
     if dispatch_enabled:
         table = ', '.join(f'{{ i64, ptr }} {{ i64 {address}, ptr @{name} }}' for address, name in dispatch_entries)
         lines.append(f'@__aps5_aot_dispatch = private constant [{len(dispatch_entries)} x {{ i64, ptr }}] [{table}], align 8')
@@ -1532,6 +1547,14 @@ def compile_image(image):
         lines.append('declare void @NativeAotRegisterDispatch_nid_no_patch(ptr, i64)')
     if stubs:
         lines.append('declare void @NativeAotReportUnimplemented_nid_no_patch(i64)')
+    if image.contracts.get('count_entries'):
+        ordered = sorted(image.functions.values(), key=lambda spec: spec['address'])
+        addresses = ', '.join(f'i64 {image.guest_base + spec["address"]}' for spec in ordered)
+        lines.append(f'@__aps5_aot_counts = global [{len(ordered)} x i64] zeroinitializer, align 8')
+        lines.append(f'@__aps5_aot_count_addresses = private constant [{len(ordered)} x i64] [{addresses}], align 8')
+        lines.append('declare void @NativeAotRegisterEntryCounts_nid_no_patch(ptr, i64, ptr)')
+        for index, spec in enumerate(ordered):
+            spec['entry_index'] = index
     if image.contracts.get('guard_diagnostics', False):
         lines.append('declare void @NativeAotReportGuardFailure_nid_no_patch(i64, i32)')
     if any(f.checked_pointer_loads or f.checked_pointer_arguments or f.checked_pointer_bases for f in functions):
@@ -1554,7 +1577,14 @@ def compile_image(image):
         else:
             suffix = ' noreturn' if contract.get('noreturn') else ''
             lines.append(f"declare {abi.result_type(result)} @{contract['name']}({argument_types}){suffix}")
+    if image.guest_data:
+        require(not image.immutable_regions, 'guest data cannot also declare immutable regions')
+        segments = ', '.join(f"{{ i64, i64, i64, i64, i64 }} {{ i64 {image.guest_base + spec['p_vaddr']}, i64 {spec['p_offset']}, i64 {spec['p_filesz']}, i64 {spec['p_memsz']}, i64 {spec['p_flags']} }}" for spec in image.segments)
+        lines.append(f'@__aps5_aot_segments = private constant [{len(image.segments)} x {{ i64, i64, i64, i64, i64 }}] [{segments}], align 8')
+        lines.append('declare void @NativeAotMapImage_nid_no_patch(ptr, i64)')
     for spec in image.data:
+        if image.guest_data:
+            continue
         if spec['address'] in image.immutable_initializers:
             lines.append(immutable_data.declaration(image, spec))
             continue
@@ -1572,6 +1602,8 @@ def compile_image(image):
     if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
+        if image.guest_data:
+            lines.append(f'  call void @NativeAotMapImage_nid_no_patch(ptr @__aps5_aot_segments, i64 {len(image.segments)})')
         for slot, target in image.relocations:
             if slot in image.immutable_cells:
                 continue
@@ -1593,11 +1625,15 @@ def compile_image(image):
             lines.append(f"  store ptr @{binding['name']}, ptr {image.pointer(slot, 8)}, align 1")
         if dispatch_enabled:
             lines.append(f'  call void @NativeAotRegisterDispatch_nid_no_patch(ptr @__aps5_aot_dispatch, i64 {len(dispatch_entries)})')
+        if image.contracts.get('count_entries'):
+            lines.append(f'  call void @NativeAotRegisterEntryCounts_nid_no_patch(ptr @__aps5_aot_counts, i64 {len(image.functions)}, ptr @__aps5_aot_count_addresses)')
         if image.immutable_regions:
             lines.append(f'  call void @NativeAotRequireReadOnly_nid_no_patch(ptr @__aps5_aot_readonly_ranges, i64 {len(image.immutable_regions)})')
         if descriptor is not None:
             lines.append('  call void @NativeAotRegisterImage_nid_no_patch(ptr @__aps5_aot_image)')
         lines.extend(['  ret void', '}'])
+    for function in functions:
+        function.entry_index = function.contract.get('entry_index')
     bodies = []
     late_stubs = []
     for function in functions:
