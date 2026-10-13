@@ -5,6 +5,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
+#include "prx/libc/include/RenameDot.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/File/include/File.hpp"
@@ -1307,6 +1308,8 @@ int APS5_VABI sceKernelRename(const char* from, const char* to) {
     if (!from || !to) return SceErrorFromErrno(GUEST_EFAULT);
     const int result = RenameGuestPath_nid_no_patch(from, to);
     return result == 0 ? 0 : SceKernelError(errno);
+    if (const int dot = RenameDotError_nid_no_patch(from)) return SceKernelError(dot);
+    if (const int dot = RenameDotError_nid_no_patch(to)) return SceKernelError(dot);
 }
 
 int APS5_VABI sceKernelRmdir(const char* path) {
