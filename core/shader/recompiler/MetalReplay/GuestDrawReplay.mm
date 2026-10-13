@@ -207,6 +207,7 @@ void DrawClipDistances(id<MTLDevice> device, id<MTLLibrary> library) {
         AgcDriver::Pm4::DrawParameters parameters{};
         parameters.indexCount = 3;
         parameters.instanceCount = 1;
+        parameters.indexed = false;
         AgcDriver::Metal::MetalDraw adapter(device, library);
         const auto fault = adapter.DrawSynchronously(State(), parameters, shaders, ranges);
         Require(fault.state == BdaAbi::FaultState::Empty, "The clip distance draw published a GPU memory fault");

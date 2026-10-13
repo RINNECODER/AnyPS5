@@ -545,9 +545,10 @@ void ClipCullDecode() {
     const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{address, memory, true}}};
     const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
     auto guest = GuestDraw(address);
+    const auto baseline = Graphics::DrawRejection(guest, false);
     guest.context[0x207] = 0x0040000fu;
     Require(Graphics::DecodeState(guest).paClVsOutCntl == 0x0040000fu, "four clip distances were not decoded");
-    Require(Graphics::DrawRejection(guest, false).empty(), "the precheck rejected four clip distances");
+    Require(Graphics::DrawRejection(guest, false) == baseline, "the precheck rejected four clip distances");
     guest.context[0x207] = 0x004001ffu;
     bool refused = false;
     try {
@@ -555,7 +556,7 @@ void ClipCullDecode() {
     } catch (const std::exception& error) {
         refused = std::string(error.what()).find("more than eight clip and cull distances") != std::string::npos;
     }
-    Require(refused && !Graphics::DrawRejection(guest, false).empty(), "nine clip and cull distances were not refused");
+    Require(refused && Graphics::DrawRejection(guest, false).find("more than eight clip and cull distances") != std::string::npos, "nine clip and cull distances were not refused");
     std::cout << "PASS: clip and cull distance enables decode; more than eight are refused\n";
 }
 
@@ -570,8 +571,10 @@ void CoveredCentroid() {
     guest.shader[0x008] = 0x1000;
     guest.context[0x1b3] = 2u;
     guest.context[0x1b4] = 2u;
+    const auto baseline = Graphics::DrawRejection(guest, false);
+    Require(baseline.find("COVERED_CENTROID") == std::string::npos, "the base draw already mentions covered-centroid mode");
     guest.context[0x2f8] = 1u << 29u;
-    Require(Graphics::DecodeState(guest).samples == 1 && Graphics::DrawRejection(guest, false).empty(), "covered-centroid mode without centroid inputs was refused");
+    Require(Graphics::DecodeState(guest).rasterSamples == 1 && Graphics::DrawRejection(guest, false) == baseline, "covered-centroid mode without centroid inputs was refused");
     const auto refused = [&] {
         try {
             static_cast<void>(Graphics::DecodeState(guest));
@@ -586,7 +589,7 @@ void CoveredCentroid() {
         guest.context[0x1b4] = 2u | centroid;
         Require(refused(), "covered-centroid mode with an active centroid input was not refused");
         guest.context[0x1b4] = 2u;
-        Require(Graphics::DrawRejection(guest, false).empty(), "an unaddressed centroid input refused covered-centroid mode");
+        Require(Graphics::DrawRejection(guest, false) == baseline, "an unaddressed centroid input refused covered-centroid mode");
     }
     guest.context[0x1b3] = 2u;
     guest.context.erase(0x1b4);
@@ -601,6 +604,8 @@ void EarlyDepthDecode() {
     Registers cx;
     cx[0x1b3] = 2u;
     cx[0x1b4] = 2u;
+    cx[0x1b6] = 0u;
+    cx[0x1c5] = 0u;
     std::array<std::uint8_t, 8> exports{};
     const auto early = [&](std::uint32_t shaderControl) {
         cx[0x203] = shaderControl;
