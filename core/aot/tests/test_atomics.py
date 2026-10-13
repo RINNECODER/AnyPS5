@@ -35,6 +35,9 @@ class Harness(Function):
         self.serial, self.depth = 0, 256
         self.memory_writes = {}
         self.checked_accesses = {}
+        # The uniform ABI added by the native/gaps lane; this probe uses the classic contract.
+        self.uniform = False
+        self.dispatch = False
         self.contract = {'name': 'probe'}
         self.lines = ['target triple = "arm64-apple-macosx13.0.0"', 'declare void @llvm.trap()',
                       'define void @probe(ptr %memory, ptr %output, i64 %input_rax, i64 %input_rcx, i64 %input_rdx, i64 %input_flags) {', 'entry:']
