@@ -48,11 +48,6 @@ private:
     bool previous;
 };
 
-class DriverStopped final : public std::runtime_error {
-public:
-    DriverStopped() : std::runtime_error("Metal driver has shut down") {}
-};
-
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("Metal driver: ") + reason);
 }
@@ -758,7 +753,7 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
             }
         }
     } catch (const DriverStopped&) {
-        const auto error = std::current_exception();
+        const auto error = std::make_exception_ptr(ProcessShutdown{});
         for (const auto& [offset, flip] : submission.flips) { static_cast<void>(offset); flip->Fail(error); }
     } catch (const ProcessShutdown&) {
         // VideoOut throws this once the process stop fires (RenderingWait::Wait,
@@ -946,7 +941,8 @@ void MetalDriver::Impl::Stop() {
     require(!OnWorkerThread(), "worker cannot stop itself");
     std::unique_lock shutdownLock(shutdownMutex);
     if (stopped) return;
-    const auto error = std::make_exception_ptr(DriverStopped{});
+    // Waiters on outputs/flips see the same requested-stop signal VideoOut already handles, never a driver failure.
+    const auto error = std::make_exception_ptr(ProcessShutdown{});
     std::vector<std::shared_ptr<IVideoOutput>> failedOutputs;
     std::vector<std::shared_ptr<IFlipRequest>> failedFlips;
     {
