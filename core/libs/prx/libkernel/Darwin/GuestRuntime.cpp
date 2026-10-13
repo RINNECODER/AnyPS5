@@ -510,7 +510,88 @@ void AppendIndirectRecord(const std::uint64_t from, const std::uint64_t to, cons
 // One function-entry record: the entry address and the 16 general-purpose
 // registers at entry, in the harness order (rax rbx rcx rdx rsi rdi rbp rsp
 // r8..r15).
+// ---- whole-process writable snapshot (ANYPS5_TRACE_SNAPSHOT) -----------------
+//
+// At ANYPS5_TRACE_SNAPSHOT_AT seconds the runtime dumps every writable region of
+// the process (guest heap, stacks, data, TLS and the runtime's own) to
+// <path>.snapshot as flat (base, size, data) records, then records hot-function
+// entries for ANYPS5_TRACE_SNAPSHOT_WINDOW seconds so the replay can use the same
+// memory for entries hit just after the snapshot.
+
+struct SnapshotState {
+    bool enabled = false;
+    std::atomic<bool> active{false};
+    double atSeconds = 60.0;
+    double windowSeconds = 1.0;
+    std::string path;
+    std::uint64_t bytes = 0;
+};
+
+SnapshotState snapshotState;
+
+void DumpSnapshot() {
+    const int fd = ::open(snapshotState.path.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) return;
+    const std::uint32_t magic = 0x534e4150;  // 'PANS'
+    (void)!::write(fd, &magic, sizeof(magic));
+    constexpr std::uint64_t Limit = 2ull << 30;
+    mach_vm_address_t address = 0;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info{};
+    mach_port_t object = MACH_PORT_NULL;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    while (snapshotState.bytes < Limit && mach_vm_region(mach_task_self(), &address, &size, VM_REGION_BASIC_INFO_64,
+                                                          reinterpret_cast<vm_region_info_t>(&info), &count, &object) == KERN_SUCCESS) {
+        if (object != MACH_PORT_NULL) { mach_port_deallocate(mach_task_self(), object); object = MACH_PORT_NULL; }
+        count = VM_REGION_BASIC_INFO_COUNT_64;
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size != 0 && size <= (64ull << 20)) {
+            std::vector<std::uint8_t> buffer(static_cast<std::size_t>(size));
+            mach_vm_size_t read = 0;
+            if (mach_vm_read_overwrite(mach_task_self(), address, size, reinterpret_cast<mach_vm_address_t>(buffer.data()), &read) == KERN_SUCCESS && read == size) {
+                const std::uint64_t base = address;
+                const std::uint64_t bytes = size;
+                (void)!::write(fd, &base, sizeof(base));
+                (void)!::write(fd, &bytes, sizeof(bytes));
+                (void)!::write(fd, buffer.data(), buffer.size());
+                snapshotState.bytes += size;
+            }
+        }
+        address += size;
+    }
+    ::close(fd);
+}
+
+void* SnapshotThread(void*) {
+    const auto base = std::chrono::steady_clock::now();
+    const auto elapsed = [&base] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - base).count(); };
+    while (elapsed() < snapshotState.atSeconds) ::usleep(50000);
+    DumpSnapshot();
+    snapshotState.active = true;
+    const double windowEnd = elapsed() + snapshotState.windowSeconds;
+    Write("[rosetta] snapshot: %llu bytes -> %s\n", static_cast<unsigned long long>(snapshotState.bytes), snapshotState.path.c_str());
+    while (elapsed() < windowEnd) ::usleep(20000);
+    snapshotState.active = false;
+    Write("[rosetta] snapshot: window closed at %.3fs\n", elapsed());
+    return nullptr;
+}
+
+void InitializeSnapshot() {
+    const char* path = std::getenv("ANYPS5_TRACE_SNAPSHOT");
+    if (path == nullptr || *path == '\0') return;
+    snapshotState.enabled = true;
+    snapshotState.path = path;
+    if (const char* at = std::getenv("ANYPS5_TRACE_SNAPSHOT_AT")) snapshotState.atSeconds = std::strtod(at, nullptr);
+    if (const char* window = std::getenv("ANYPS5_TRACE_SNAPSHOT_WINDOW")) snapshotState.windowSeconds = std::strtod(window, nullptr);
+    pthread_t thread{};
+    if (::pthread_create(&thread, nullptr, SnapshotThread, nullptr) != 0) {
+        Write("[rosetta] snapshot: cannot start the snapshot thread\n");
+        return;
+    }
+    ::pthread_detach(thread);
+}
+
 void AppendEntryRecord(const std::uint64_t entry, const ucontext_t* context) {
+    if (snapshotState.enabled && !snapshotState.active) return;
     if (indirectTrace.entryFd < 0) return;
     const auto& state = context->uc_mcontext->__ss;
     struct Entry {
@@ -711,7 +792,7 @@ void OnFault(int signal, siginfo_t* info, void* raw) {
 
 void InstallFaultDiagnostics() {
     if (std::getenv("APS5_ROSETTA_NO_FAULT_REPORT") != nullptr) return;
-    static const bool traceInitialized = [] { InitializeIndirectTrace(); return true; }();
+    static const bool traceInitialized = [] { InitializeIndirectTrace(); InitializeSnapshot(); return true; }();
     static_cast<void>(traceInitialized);
     struct sigaction action {};
     action.sa_sigaction = OnFault;
