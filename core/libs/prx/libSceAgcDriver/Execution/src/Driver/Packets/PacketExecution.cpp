@@ -120,6 +120,7 @@ void Driver::execute(const Submission& submission) {
         const auto header = submission.commands[cursor];
         if (Pm4::FillerPacket(header)) { ++cursor; continue; }
         const auto count = Pm4::PacketWords(header);
+        if (Pm4::PureNopPacket(header)) { cursor += count; continue; }
         const auto packet = std::span(submission.commands).subspan(cursor, count);
         const auto opcode = (header >> 8u) & 0xffu;
         auto nextCursor = cursor + count;
@@ -245,6 +246,7 @@ void Driver::execute(const Submission& submission) {
             }
             if (opcode == 0x15) timed(&WorkerProfile::dispatchMs, [&] { dispatch(queue, packet, submission); });
             else timed(&WorkerProfile::dispatchMs, [&] { dispatchIndirect(queue, packet, submission); });
+            Pm4::NoteDispatchRegisters(packet, queue);
             Graphics::Recorder::CountRecordedWork();
             finishDispatchPacket(opcode == 0x16);
         } else if (opcode == 0x3c || opcode == 0x93) {

@@ -86,6 +86,11 @@ void testNopPad() {
     largest[0] = 0xfffe1000u;
     check(AgcDriver::Pm4::PacketWords(largest[0]) == largest.size(), "the largest counted NOP is not sized by its count");
     AgcDriver::Pm4::Validate(largest, 0);
+    check(AgcDriver::Pm4::PureNopPacket(makePacket(0x10, {0})[0]), "makePacket NOP was not detected as pure NOP");
+    check(AgcDriver::Pm4::PureNopPacket(0xc0021000u), "counted NOP was not detected as pure NOP");
+    check(!AgcDriver::Pm4::PureNopPacket(0xffff1000u), "type 2 filler was incorrectly flagged as pure NOP");
+    check(!AgcDriver::Pm4::PureNopPacket(makePacket(0x10, {0}, 0x0b << 2)[0]), "marker NOP was incorrectly flagged as pure NOP");
+    check(!AgcDriver::Pm4::PureNopPacket(0xc0001001u), "predicated NOP was incorrectly flagged as pure NOP");
 }
 
 void testRegisters() {
@@ -168,6 +173,9 @@ void testRegisterFile() {
 
 void testContextAndBases() {
     AgcDriver::QueueState state;
+    for (const auto offset : {0x10bu, 0x10cu, 0x10du}) execute(state, makePacket(0x69, {offset, 0xffffffffu}));
+    execute(state, makePacket(0x12, {0}));
+    for (const auto offset : {0x10bu, 0x10cu, 0x10du}) check(state.context.at(offset) == 0, "CLEAR_STATE did not restore stencil defaults");
     execute(state, makePacket(0x69, {0x10, 17}));
     execute(state, makePacket(0x76, {0x20c, 2}));
     execute(state, makePacket(0x10, {3, 0}, 0x68));
@@ -494,6 +502,29 @@ void testCopies() {
     const auto clockStore =AgcDriver::Pm4::ResolveStore(clockCopy(&clock[0]), state, 64);
     check(clockStore.has_value() && clockStore->Bytes().size() == 8, "GPU clock COPY_DATA did not resolve as an 8-byte store");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x40, {0x1020a, 0, 0, low(&clock[0]), high(&clock[0])}), 0); }, "reference-clock");
+    alignas(8) std::array<std::uint32_t, 2> fromRegister{0xdeadbeef, 0xdeadbeef};
+    const auto registerCopy = [&](std::uint32_t control, std::uint32_t offset) { return makePacket(0x40, {control, offset, 0, low(fromRegister.data()), high(fromRegister.data())}); };
+    execute(state, makePacket(0x76, {0x20c, 0x02754800, 0x2}));
+    execute(state, registerCopy(0x00100200, 0x2e0c));
+    check(fromRegister[0] == 0x02754800 && fromRegister[1] == 0xdeadbeef, "COPY_DATA from a shader register failed");
+    execute(state, registerCopy(0x00110200, 0x2e0c));
+    check(fromRegister[0] == 0x02754800 && fromRegister[1] == 0x2, "64-bit COPY_DATA from two shader registers failed");
+    execute(state, makePacket(0x69, {0x10, 0xabc}));
+    execute(state, registerCopy(0x00100200, 0xa010));
+    check(fromRegister[0] == 0xabc, "COPY_DATA from a context register failed");
+    check(!AgcDriver::Pm4::ResolveStore(registerCopy(0x00100200, 0x2e0c), state, 64).has_value(), "COPY_DATA from a register resolved before its turn");
+    AgcDriver::Pm4::NoteDispatchRegisters(makePacket(0x15, {4, 2, 1, 0x8041}), state);
+    execute(state, registerCopy(0x00100200, 0x2e00));
+    check(fromRegister[0] == 0x8041, "COPY_DATA did not read the last dispatch initiator");
+    execute(state, registerCopy(0x00100200, 0x2e01));
+    check(fromRegister[0] == 4, "COPY_DATA did not read the last direct dispatch's group count");
+    AgcDriver::Pm4::NoteDispatchRegisters(makePacket(0x16, {0, 0x8001}), state);
+    execute(state, registerCopy(0x00100200, 0x2e00));
+    check(fromRegister[0] == 0x8001, "COPY_DATA did not read the last indirect dispatch initiator");
+    expectFailure([&] { execute(state, registerCopy(0x00100200, 0x2e01)); }, "has no known value");
+    expectFailure([&] { execute(state, registerCopy(0x00100200, 0x2e3f)); }, "has no known value");
+    expectFailure([&] { AgcDriver::Pm4::Validate(registerCopy(0x00100200, 0x1000), 0); }, "outside the shader, context and user config");
+    expectFailure([&] { AgcDriver::Pm4::Validate(registerCopy(0x00110200, 0x2fff), 0); }, "outside the shader, context and user config");
     execute(state, makePacket(0x50, {0x60000000, low(source.data()), high(source.data()), low(destination.data()), high(destination.data()), 16}));
     check(source == destination, "DMA_DATA copy failed");
     execute(state, makePacket(0x50, {0x40000000, 0x44332211, 0, low(destination.data()), high(destination.data()), 6}));
@@ -994,7 +1025,7 @@ void testConditionalSubmission() {
 
 void testNopPadSubmission() {
     alignas(8) static std::uint32_t zero = 0;
-    static std::array<std::uint32_t, 3> results{};
+    static std::array<std::uint32_t, 5> results{};
     results.fill(0);
     auto words = joinPackets({{0xffff1000u, 0xc0027904u, 0x342u, 0xce200000u, 0u, 0xc0017904u, 0x342u, 0xcea00000u}, writeWord(results[0], 81), {0xffff1000u}});
     submitWords(words);
@@ -1004,6 +1035,10 @@ void testNopPadSubmission() {
     submitWords(words);
     AgcDriverWaitIdle_nid_postfix();
     check(results[1] == 0 && results[2] == 83, "COND_EXEC did not count a one-dword NOP as one dword");
+    words = joinPackets({makePacket(0x10, {0, 0}), writeWord(results[3], 84), makePacket(0x10, {0, 0, 0, 0}), writeWord(results[4], 85)});
+    submitWords(words);
+    AgcDriverWaitIdle_nid_postfix();
+    check(results[3] == 84 && results[4] == 85, "counted pure NOPs stopped the packets after them");
 }
 
 std::vector<std::uint32_t> branch(std::uint32_t mode, std::uint32_t function, const std::vector<std::uint32_t>* first, const std::vector<std::uint32_t>* second) {

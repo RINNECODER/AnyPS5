@@ -741,6 +741,8 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         const auto packet = std::span(submission.commands).subspan(cursor, count);
         auto next = cursor + count;
         if (Pm4::FillerPacket(header)) { cursor = next; continue; }
+        // A plain NOP carries no state: nothing to validate, order against or execute.
+        if (Pm4::PureNopPacket(header)) { cursor = next; continue; }
         const auto opcode = (header >> 8u) & 0xffu;
         if (header != FlipPacketHeader && header != RenderingWaitPacketHeader) Pm4::Validate(packet, submission.queue);
         std::unique_lock lock(gpuMutex);
@@ -827,6 +829,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             if (eopInterrupt) DeliverEopInterrupt(submission.queue);
         } else if (opcode == 0x15) {
             Tolerate(SkippedDispatch, [&] { ExecuteDispatchSynchronously(queue, packet, submission); });
+            Pm4::NoteDispatchRegisters(packet, queue);
         } else if (opcode == 0x16) {
             // The indirect arguments are guest memory earlier GPU work may write.
             CompletePriorGpuWorkAndCopyBack(opcode);
@@ -834,6 +837,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                 const auto direct = Pm4::ResolveDispatch(packet, queue);
                 ExecuteDispatchSynchronously(queue, direct, submission);
             });
+            Pm4::NoteDispatchRegisters(packet, queue);
         } else if (Pm4::DrawOpcode(opcode)) {
             Tolerate(SkippedDraw, [&] { ExecuteDrawSynchronously(queue, packet, submission); });
         } else if (opcode == 0x3c || opcode == 0x93) {
