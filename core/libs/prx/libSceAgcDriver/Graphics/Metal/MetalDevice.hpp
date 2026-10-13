@@ -12,6 +12,8 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace AgcDriver::Metal {
 
@@ -40,13 +42,38 @@ decltype(auto) CompleteCommittedWork(Work&& work) {
     }
 }
 
+// Shared-storage buffers recycled by exact length. Creating a Metal buffer is a kernel call
+// (IOGPUResourceCreate) and a large one is also zero-filled, and every draw and dispatch used to
+// create several (staging for each surface upload and copy-back, the BDA fault buffer and table),
+// a large share of the queue worker's time. A recycled buffer holds stale bytes: callers write
+// what they read. A buffer goes back with Give once nothing uses it any more, or with
+// GiveWhenCompleted once a command buffer that uses it completed (only for buffers the CPU does not
+// read afterwards). Kept buffers are bounded in total bytes; the rest are released.
+class MetalBufferPool {
+public:
+    static MetalBufferPool& Shared();
+    [[nodiscard]] id<MTLBuffer> Take(id<MTLDevice> device, std::size_t bytes);
+    void Give(id<MTLBuffer> buffer);
+    void GiveWhenCompleted(id<MTLBuffer> buffer, id<MTLCommandBuffer> commands);
+
+private:
+    std::mutex mutex;
+    std::map<std::pair<std::uintptr_t, std::size_t>, std::vector<id<MTLBuffer>>> free;
+    std::size_t freeBytes = 0;
+};
+
 class MetalDevice {
 public:
-    explicit MetalDevice(id<MTLDevice> device, id<MTLLibrary> library);
+    // `queue`, when given, is shared with another MetalDevice (the driver's draws and dispatches
+    // must run on one queue so work committed without waiting stays in order); nil makes a new one.
+    explicit MetalDevice(id<MTLDevice> device, id<MTLLibrary> library, id<MTLCommandQueue> queue = nil);
     MetalDevice(const MetalDevice&) = delete;
     MetalDevice& operator=(const MetalDevice&) = delete;
 
     [[nodiscard]] id<MTLBuffer> Buffer(std::size_t bytes) const;
+    // A buffer of `bytes` (stale contents) that returns to MetalBufferPool once `commands`
+    // completed: for staging the GPU fills and reads within `commands` only.
+    [[nodiscard]] id<MTLBuffer> TransientBuffer(std::size_t bytes, id<MTLCommandBuffer> commands) const;
     [[nodiscard]] id<MTLCommandBuffer> CommandBuffer() const;
     void Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArray<id<MTLBuffer>>* buffers,
                 const void* parameters, std::size_t parameterBytes, MTLSize grid,

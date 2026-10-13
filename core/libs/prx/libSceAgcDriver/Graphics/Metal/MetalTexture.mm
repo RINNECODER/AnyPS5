@@ -205,6 +205,21 @@ void validateDescriptor(const Graphics::GuestTextureResource& descriptor, bool c
         "Metal comparison sampling does not support 3D textures");
 }
 
+// `part` describes the first layers of the array surface `whole`: same per-layer layout, fewer layers.
+bool layerPrefix(const Graphics::SurfaceGeometry& whole, const Graphics::SurfaceGeometry& part) {
+    if (part.layers >= whole.layers || whole.thick || part.thick || whole.imageDepth > 1 || part.imageDepth > 1 ||
+        part.imageLayers != part.layers || whole.imageLayers != whole.layers || part.layerBytes != whole.layerBytes ||
+        part.sliceLinearBytes != whole.sliceLinearBytes || part.blockDepth != whole.blockDepth || part.guestBytes > whole.guestBytes ||
+        part.mips.size() != whole.mips.size()) return false;
+    for (std::size_t i = 0; i < part.mips.size(); ++i) {
+        const auto& x = whole.mips[i];
+        const auto& y = part.mips[i];
+        if (std::tie(x.tiledOffset, x.tiledSize, x.linearOffset, x.linearSize, x.width, x.height, x.blocksPerRow, x.pitchBytes, x.tail, x.tailX, x.tailY) !=
+            std::tie(y.tiledOffset, y.tiledSize, y.linearOffset, y.linearSize, y.width, y.height, y.blocksPerRow, y.pitchBytes, y.tail, y.tailX, y.tailY)) return false;
+    }
+    return true;
+}
+
 bool sameGeometry(const Graphics::SurfaceGeometry& a, const Graphics::SurfaceGeometry& b) {
     if (std::tie(a.layers, a.imageLayers, a.imageDepth, a.guestBytes, a.sliceLinearBytes, a.thick, a.blockDepth, a.layerBytes) !=
         std::tie(b.layers, b.imageLayers, b.imageDepth, b.guestBytes, b.sliceLinearBytes, b.thick, b.blockDepth, b.layerBytes) ||
@@ -300,7 +315,11 @@ void MetalTexture::createViews(bool compare) {
         [backing->texture newTextureViewWithPixelFormat:nativeFormat];
     require(typedTexture != nil, "Metal cannot create the guest texture format view");
     const auto levels = NSMakeRange(descriptor.baseLevel, descriptor.lastLevel - descriptor.baseLevel + 1u);
-    const auto slices = NSMakeRange(descriptor.baseArray, geometry.imageLayers - descriptor.baseArray);
+    // A view of fewer layers than its backing (CanShareBacking) still ends at its own last layer.
+    const auto layers = descriptor.depthOrLastArray == backing->descriptor.depthOrLastArray ? geometry.imageLayers :
+        std::min(geometry.imageLayers, Graphics::DescribeSurface(descriptor).imageLayers);
+    require(descriptor.baseArray < layers, "Metal texture view base array lies outside its layers");
+    const auto slices = NSMakeRange(descriptor.baseArray, layers - descriptor.baseArray);
     if (compare) {
         sampledView = [backing->texture newTextureViewWithPixelFormat:nativeFormat textureType:nativeType levels:levels slices:slices];
     } else {
@@ -320,12 +339,36 @@ void MetalTexture::createViews(bool compare) {
 
 bool MetalTexture::CanShareBacking(const Graphics::GuestTextureResource& resource) const {
     const auto& original = backing->descriptor;
-    if (std::tie(original.baseAddress, original.width, original.height, original.depthOrLastArray, original.mipCount, original.tileMode, original.dimension, original.dccAddress, original.dccAlphaOnMsb, original.dccPipeAligned) !=
-        std::tie(resource.baseAddress, resource.width, resource.height, resource.depthOrLastArray, resource.mipCount, resource.tileMode, resource.dimension, resource.dccAddress, resource.dccAlphaOnMsb, resource.dccPipeAligned)) return false;
+    if (std::tie(original.baseAddress, original.width, original.height, original.mipCount, original.tileMode, original.dimension, original.dccAddress, original.dccAlphaOnMsb, original.dccPipeAligned) !=
+        std::tie(resource.baseAddress, resource.width, resource.height, resource.mipCount, resource.tileMode, resource.dimension, resource.dccAddress, resource.dccAlphaOnMsb, resource.dccPipeAligned)) return false;
     const auto originalAllocation = original.allocatedMipCount == 0 ? original.mipCount : original.allocatedMipCount;
     const auto allocation = resource.allocatedMipCount == 0 ? resource.mipCount : resource.allocatedMipCount;
-    return originalAllocation == allocation && formatFamily(original.format) == formatFamily(resource.format) &&
-        sameGeometry(backing->geometry, Graphics::DescribeSurface(resource));
+    if (originalAllocation != allocation || formatFamily(original.format) != formatFamily(resource.format)) return false;
+    if (original.depthOrLastArray == resource.depthOrLastArray) return sameGeometry(backing->geometry, Graphics::DescribeSurface(resource));
+    // A view of the first layers of an array surface (a per-slice pass binds "array k-k" with k + 1
+    // layers): those layers lie at the same guest offsets in the whole surface's backing.
+    return resource.depthOrLastArray < original.depthOrLastArray && original.dccAddress == 0 &&
+        layerPrefix(backing->geometry, Graphics::DescribeSurface(resource));
+}
+
+std::string MetalTexture::ShareMismatch(const Graphics::GuestTextureResource& resource) const {
+    const auto& original = backing->descriptor;
+    std::string why;
+    const auto field = [&](const char* name, std::uint64_t a, std::uint64_t b) {
+        if (a != b) why += std::string(why.empty() ? "" : ", ") + name + " " + std::to_string(a) + " vs " + std::to_string(b);
+    };
+    field("address", original.baseAddress, resource.baseAddress);
+    field("width", original.width, resource.width);
+    field("height", original.height, resource.height);
+    field("last array", original.depthOrLastArray, resource.depthOrLastArray);
+    field("mips", original.mipCount, resource.mipCount);
+    field("allocated mips", original.allocatedMipCount, resource.allocatedMipCount);
+    field("tile", static_cast<std::uint64_t>(original.tileMode), static_cast<std::uint64_t>(resource.tileMode));
+    field("dimension", static_cast<std::uint64_t>(original.dimension), static_cast<std::uint64_t>(resource.dimension));
+    field("dcc", original.dccAddress, resource.dccAddress);
+    field("format family", formatFamily(original.format), formatFamily(resource.format));
+    if (why.empty()) why = CanShareBacking(resource) ? "shareable" : "surface geometry differs";
+    return why;
 }
 
 std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestTextureResource& resource, bool compare) const {
@@ -339,7 +382,7 @@ std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestText
 }
 
 void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> source, NSUInteger sourceOffset,
-    id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile) const {
+    id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile, Subresources part) const {
     const std::array<NSUInteger, 2> offsets{sourceOffset, destinationOffset};
     const auto& descriptor = backing->descriptor;
     const auto& geometry = backing->geometry;
@@ -367,9 +410,9 @@ void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> s
         constants[2] = 2;
         std::copy(equation->bits.begin(), equation->bits.end(), constants.begin() + 4);
     }
-    for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
+    for (std::uint32_t level = part.levelBegin; level < geometry.mips.size() && level < part.levelEnd; ++level) {
         const auto& mip = geometry.mips[level];
-        for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
+        for (std::uint32_t layer = part.layerBegin; layer < geometry.layers && layer < part.layerEnd; ++layer) {
             if (!geometry.HasLayer(level, layer)) continue;
             const auto tiled = geometry.GuestLayerOffset(layer) + mip.tiledOffset;
             const auto linear = geometry.LinearLayerOffset(layer) + mip.linearOffset;
@@ -394,16 +437,17 @@ void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> s
 // The copies stay on the GPU: replaceRegion/getBytes convert to the texture's internal layout on the
 // CPU inside the Metal driver, which on the Rosetta direct path runs translated (a third of the queue
 // worker's time went there for surfaces uploaded and read back around each draw or dispatch).
-void MetalTexture::encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer> linear, bool toTexture) const {
+void MetalTexture::encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer> linear, bool toTexture, Subresources part) const {
     const auto& descriptor = backing->descriptor;
     const auto& geometry = backing->geometry;
     id<MTLTexture> texture = backing->texture;
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (GpuTiming::Enabled() && blit != nil) blit.label = toTexture ? @"upload linear copy" : @"readback linear copy";
     require(blit != nil, "Metal texture blit encoder creation failed");
     const bool volume = texture.textureType == MTLTextureType3D;
-    for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
+    for (std::uint32_t level = part.levelBegin; level < geometry.mips.size() && level < part.levelEnd; ++level) {
         const auto& mip = geometry.mips[level];
-        for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
+        for (std::uint32_t layer = part.layerBegin; layer < geometry.layers && layer < part.layerEnd; ++layer) {
             if (!geometry.HasLayer(level, layer)) continue;
             const auto size = MTLSizeMake(std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1);
             const auto origin = MTLOriginMake(0, 0, geometry.CopyDepth(layer));
@@ -434,8 +478,8 @@ void MetalTexture::Upload(std::span<const std::byte> guestBytes) {
     auto tiled = backend.Buffer(bufferSize(geometry.guestBytes));
     std::memcpy(tiled.contents, guestBytes.data(), guestBytes.size());
     std::memset(static_cast<std::byte*>(tiled.contents) + guestBytes.size(), 0, tiled.length - guestBytes.size());
+    // The command buffer keeps the staging buffer alive; work that samples the texture runs after it.
     uploadFrom(tiled, 0);
-    FinishUpload();
 }
 
 void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
@@ -450,11 +494,13 @@ void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
 }
 
 void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset) {
+    GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Upload, descriptor.baseAddress));
     const auto& geometry = backing->geometry;
-    // The blit reads only texels the detile wrote, so the linear buffer needs no clearing.
-    auto linear = backend.Buffer(bufferSize(geometry.sliceLinearBytes * geometry.layers));
-    FinishUpload();
+    // The queue runs uploads in commit order: no need to wait for an earlier one of this texture.
+    pendingUpload = nil;
     auto commands = backend.CommandBuffer();
+    // The blit reads only texels the detile wrote, so the (recycled) linear buffer needs no clearing.
+    auto linear = backend.TransientBuffer(bufferSize(geometry.sliceLinearBytes * geometry.layers), commands);
     encodeTransfer(commands, guest, offset, linear, 0, false);
     encodeLinearCopy(commands, linear, true);
     // The draw or dispatch that samples the texture is committed later on the same queue, so it runs
@@ -493,6 +539,7 @@ void MetalTexture::Readback(id<MTLBuffer> guest, std::size_t offset) const {
 }
 
 void MetalTexture::readbackInto(id<MTLBuffer> guest, std::size_t offset) const {
+    GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Readback, descriptor.baseAddress));
     const auto& geometry = backing->geometry;
     FinishUpload();
     // The retile reads only the elements the blit wrote (each level's texel extent in elements), so
@@ -508,11 +555,16 @@ void MetalTexture::readbackInto(id<MTLBuffer> guest, std::size_t offset) const {
 }
 
 bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset) const {
+    return EncodeReadback(commands, guest, offset, {});
+}
+
+bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset, Subresources part) const {
     if (!inPlace(guest, offset)) return false;
     // Uploads commit when they are encoded, so this command buffer runs after them on the queue.
-    auto linear = backend.Buffer(bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers));
-    encodeLinearCopy(commands, linear, false);
-    encodeTransfer(commands, linear, 0, guest, offset, true);
+    // The retile reads only the elements the blit wrote, so the recycled linear buffer needs no clearing.
+    auto linear = backend.TransientBuffer(bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers), commands);
+    encodeLinearCopy(commands, linear, false, part);
+    encodeTransfer(commands, linear, 0, guest, offset, true, part);
     return true;
 }
 

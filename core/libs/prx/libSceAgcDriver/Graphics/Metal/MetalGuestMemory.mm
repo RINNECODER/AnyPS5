@@ -1,4 +1,5 @@
 #include "MetalGuestMemory.hpp"
+#include "MetalDevice.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -242,7 +243,9 @@ MetalGuestMemory::DispatchSnapshot MetalGuestMemory::CaptureAfterPriorSnapshotsC
 
 MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const std::vector<HostRange>& ranges,
     MetalGuestHostAliases* aliases) : device(device) {
-    fault = sharedBuffer(device, Abi::FaultBufferBytes);
+    // Recycled (MetalBufferPool): the destructor gives it back once Complete read it.
+    fault = MetalBufferPool::Shared().Take(device, Abi::FaultBufferBytes);
+    if (fault.gpuAddress == 0) throw std::runtime_error("Metal guest buffer has no GPU address");
     std::memset(fault.contents, 0, fault.length);
     struct PhysicalComponent {
         std::uintptr_t begin;
@@ -339,10 +342,29 @@ MetalGuestMemory::DispatchSnapshot::DispatchSnapshot(id<MTLDevice> device, const
     }
     if (entries.size() > std::numeric_limits<std::uint32_t>::max() ||
         entries.size() > (std::numeric_limits<std::size_t>::max() - sizeof(Abi::Header)) / sizeof(Abi::Range)) throw std::invalid_argument("Metal guest table size overflow");
+    // Consecutive captures over an unchanged working set build the same table, which the GPU only
+    // reads: reuse the last one instead of making and filling a buffer per draw or dispatch.
+    if (aliases != nullptr) {
+        std::lock_guard lock(aliases->mutex);
+        if (aliases->table != nil && aliases->tableEntries.size() == entries.size() &&
+            (entries.empty() || std::memcmp(aliases->tableEntries.data(), entries.data(), entries.size() * sizeof(Abi::Range)) == 0)) {
+            table = aliases->table;
+            return;
+        }
+    }
     table = sharedBuffer(device, sizeof(Abi::Header) + entries.size() * sizeof(Abi::Range));
     const Abi::Header header{Abi::Version, static_cast<std::uint32_t>(entries.size()), sizeof(Abi::Range), 0};
     std::memcpy(table.contents, &header, sizeof(header));
     if (!entries.empty()) std::memcpy(static_cast<std::byte*>(table.contents) + sizeof(header), entries.data(), entries.size() * sizeof(Abi::Range));
+    if (aliases != nullptr) {
+        std::lock_guard lock(aliases->mutex);
+        aliases->table = table;
+        aliases->tableEntries = std::move(entries);
+    }
+}
+
+MetalGuestMemory::DispatchSnapshot::~DispatchSnapshot() {
+    if (fault != nil) MetalBufferPool::Shared().Give(fault);
 }
 
 id<MTLBuffer> MetalGuestMemory::DispatchSnapshot::Table() const { return table; }

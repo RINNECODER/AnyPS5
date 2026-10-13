@@ -14,9 +14,42 @@
 #include <sstream>
 #include <iomanip>
 #include <stdexcept>
+#include <exception>
+#include <mutex>
+#include <string_view>
 
 namespace ShaderRecompiler::MetalBackend {
 namespace {
+
+// SPIRV-Cross keeps NoContraction arithmetic (every guest v_add/v_sub/v_mul_f32 is exact, as on
+// the guest GPU) from being fused by wrapping it in [[clang::optnone]] helpers (spvFMul, spvFAdd,
+// spvFSub and their matrix forms). optnone also means noinline, so each such operation became a
+// real function call with an unoptimized body: hundreds per shader, and most of the GPU time of
+// the heavy compute passes. `#pragma METAL fp contract(off)` forbids the fusion for the whole
+// source instead, so the helpers can inline; they still compute the same fma(l, r, 0) etc., so
+// results are bit-identical.
+void InlineExactArithmetic(std::string& source) {
+    // Only the exact-arithmetic helpers: spvMulExtended keeps optnone (it works around a Metal
+    // compiler fault) and spvQuantizeToF16 / spvReflect keep theirs.
+    static constexpr std::string_view Attribute = "[[clang::optnone]] ";
+    bool found = false;
+    for (auto at = source.find(Attribute); at != std::string::npos; at = source.find(Attribute, at)) {
+        const auto name = source.find(" spvF", at + Attribute.size());
+        const auto line = source.find('\n', at);
+        const auto helper = name != std::string::npos && name < line ? std::string_view(source).substr(name + 1, 8) : std::string_view{};
+        if (helper != "spvFAdd(" && helper != "spvFSub(" && !helper.starts_with("spvFMul")) {
+            at += Attribute.size();
+            continue;
+        }
+        source.erase(at, Attribute.size());
+        found = true;
+    }
+    if (!found) return;
+    static constexpr std::string_view Anchor = "using namespace metal;\n";
+    const auto anchor = source.find(Anchor);
+    if (anchor == std::string::npos) throw std::runtime_error("converted Metal source lacks its metal namespace declaration");
+    source.insert(anchor + Anchor.size(), "#pragma METAL fp contract(off)\n");
+}
 [[noreturn]] void Fail(const std::string& reason) {
     throw std::runtime_error("Metal shader bridge: " + reason);
 }
@@ -1443,6 +1476,7 @@ static Result ConvertToMetalUncached(const RecompileResult& guest, ShaderStage s
     for (const auto& pair : compiler.MinimumLodPairs()) result.minimumLodPairs.push_back({pair.imageSet, pair.imageBinding, pair.imageElement, pair.samplerSet, pair.samplerBinding, pair.samplerElement, pair.magArgument, pair.minArgument, pair.relativeViewMin});
     try { result.source = compiler.compile(); }
     catch (const std::exception& error) { Fail(error.what()); }
+    InlineExactArithmetic(result.source);
     result.requiresTextureLodQueries = compiler.RequiresTextureLodQueries();
     result.minimumLodImages = compiler.MinimumLodImages();
     result.capturedSamplerRequirements = compiler.CapturedSamplers();
@@ -1694,6 +1728,27 @@ BoundedCache<Result>& ConversionCache() {
     return cache;
 }
 
+// By the stable key (what the disk cache uses): a draw whose push constants or descriptor addresses
+// differ from every converted one still finds its shader here instead of reading it from disk
+// again (hundreds of thousands of disk loads per minute on a title's map).
+BoundedCache<Result>& StableConversionCache() {
+    static BoundedCache<Result> cache(8192, std::size_t{512} << 20);
+    return cache;
+}
+
+// Conversions that failed, by stable key. A failure is deterministic, but nothing cached it, so a
+// draw whose shader SPIRV-Cross rejects ran the whole conversion again every time it was drawn
+// (most of the driver's time on a title's map). The same exception is rethrown.
+struct ConversionFailures {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::exception_ptr> failures;
+};
+
+ConversionFailures& Failures() {
+    static ConversionFailures* failures = new ConversionFailures();
+    return *failures;
+}
+
 }
 
 Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
@@ -1705,6 +1760,18 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     // A miss in memory tries the disk before running SPIRV-Cross (most of a warm launch's shader time).
     Result result;
     const auto diskKey = ConversionKey(guest, stage, target, true);
+    {
+        std::lock_guard lock(Failures().mutex);
+        const auto failed = Failures().failures.find(diskKey);
+        if (failed != Failures().failures.end()) std::rethrow_exception(failed->second);
+    }
+    if (auto stable = StableConversionCache().Find(diskKey); stable && RestorePushConstants(*stable, guest, target)) {
+        // Cached results hold no guest program; attach it only to the returned copy.
+        const auto bytes = ResultBytes(*stable);
+        ConversionCache().Insert(std::move(key), *stable, bytes);
+        stable->guest = guest;
+        return std::move(*stable);
+    }
     if (ConversionDiskCache::Load(diskKey, result) && RestorePushConstants(result, guest, target)) {
         result.guest = guest;
         // ANYPS5_MSL_CACHE_VERIFY=1 converts anyway and reports any difference (a field the stable key
@@ -1720,12 +1787,38 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
                 std::fprintf(stderr, "[msl-cache] verify: %u checked, %u different%s\n", count, differences, same ? "" : " (this one differs)");
         }
     } else {
-        result = ConvertToMetalUncached(guest, stage, target);
+        try {
+            result = ConvertToMetalUncached(guest, stage, target);
+        } catch (const std::exception&) {
+            std::lock_guard lock(Failures().mutex);
+            if (Failures().failures.size() >= 4096) Failures().failures.clear();
+            Failures().failures.emplace(diskKey, std::current_exception());
+            throw;
+        }
         ConversionDiskCache::Store(diskKey, result);
+        // ANYPS5_MSL_CACHE_STATS=2: one line per conversion SPIRV-Cross had to run, to tell new
+        // shaders from variants of known ones.
+        static const bool logMisses = [] {
+            const char* value = std::getenv("ANYPS5_MSL_CACHE_STATS");
+            return value != nullptr && value[0] == '2';
+        }();
+        if (logMisses) {
+            const auto fnv = [](const void* data, std::size_t bytes) {
+                std::uint64_t hash = 0xcbf29ce484222325ull;
+                for (std::size_t i = 0; i < bytes; ++i) hash = (hash ^ static_cast<const unsigned char*>(data)[i]) * 0x100000001b3ull;
+                return hash;
+            };
+            const auto& words = guest.spirv.Words();
+            std::fprintf(stderr, "[msl-miss] stage %u variant %llx spirv %zu words %016llx key %016llx bindings %zu\n", static_cast<unsigned>(stage),
+                static_cast<unsigned long long>(guest.variantId), words.size(),
+                static_cast<unsigned long long>(fnv(words.data(), words.size() * 4)),
+                static_cast<unsigned long long>(fnv(diskKey.data(), diskKey.size())), guest.bindings.size());
+        }
     }
     auto stored = result;
     stored.guest = {};
     const auto bytes = ResultBytes(stored);
+    StableConversionCache().Insert(diskKey, stored, bytes);
     ConversionCache().Insert(std::move(key), std::move(stored), bytes);
     return result;
 }
@@ -1737,6 +1830,11 @@ ConversionCacheStatistics GetConversionCacheStatistics() {
 
 void ClearConversionCache() {
     ConversionCache().Clear();
+    StableConversionCache().Clear();
+    {
+        std::lock_guard lock(Failures().mutex);
+        Failures().failures.clear();
+    }
 }
 
 }

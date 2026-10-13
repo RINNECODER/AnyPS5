@@ -5,15 +5,26 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include <cstddef>
 #include <memory>
+#include <string>
 #include <span>
 
 namespace AgcDriver::Metal {
+
+// Levels [levelBegin, levelEnd) and layers [layerBegin, layerEnd) of a texture's backing.
+struct TextureSubresources {
+    std::uint32_t levelBegin = 0;
+    std::uint32_t levelEnd = ~0u;
+    std::uint32_t layerBegin = 0;
+    std::uint32_t layerEnd = ~0u;
+};
 
 class MetalTexture {
 public:
     MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor, bool compare = false);
     MetalTexture(const MetalDevice& backend, std::span<const std::uint32_t> words, bool compare = false);
     [[nodiscard]] bool CanShareBacking(const Graphics::GuestTextureResource& descriptor) const;
+    // Why CanShareBacking(descriptor) is false, for error messages.
+    [[nodiscard]] std::string ShareMismatch(const Graphics::GuestTextureResource& descriptor) const;
     [[nodiscard]] std::shared_ptr<MetalTexture> CreateView(const Graphics::GuestTextureResource& descriptor, bool compare = false) const;
     void Upload(std::span<const std::byte> guestBytes);
     void Readback(std::span<std::byte> guestBytes) const;
@@ -29,6 +40,10 @@ public:
     // the surface converts in place; returns false (encoding nothing) otherwise. The copy-back then
     // completes with that work instead of costing a second command buffer and CPU wait.
     [[nodiscard]] bool EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset) const;
+    // Levels [levelBegin, levelEnd) and layers [layerBegin, layerEnd) of the backing: the part of
+    // the surface a work wrote. The rest of the guest bytes already equal the texture.
+    using Subresources = TextureSubresources;
+    [[nodiscard]] bool EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset, Subresources part) const;
     [[nodiscard]] id<MTLTexture> Texture() const;
     [[nodiscard]] id<MTLTexture> SampledView() const;
     [[nodiscard]] id<MTLTexture> StorageView(bool atomic = false) const;
@@ -37,6 +52,9 @@ public:
     [[nodiscard]] const Graphics::GuestTextureResource& Descriptor() const;
     [[nodiscard]] const Graphics::SurfaceGeometry& Geometry() const;
     [[nodiscard]] std::size_t GuestBytes() const;
+
+    // Whether Upload(buffer, offset) runs on the GPU in place (otherwise it copies on the CPU).
+    [[nodiscard]] bool UploadsInPlace(id<MTLBuffer> buffer, std::size_t offset) const { return inPlace(buffer, offset); }
 
 private:
     friend class MetalShaderResources;
@@ -56,14 +74,14 @@ private:
     void createViews(bool compare);
     // Encodes the guest-tiled <-> linear conversion into `commands` (retile: linear to tiled).
     void encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> source, NSUInteger sourceOffset,
-                        id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile) const;
+                        id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile, Subresources part = {}) const;
     // Whether the tiled surface can be read or written in place at `offset` in `buffer`.
     // The GPU paths of Upload/Readback, without the in-place check (the span overloads stage through a rounded buffer).
     void uploadFrom(id<MTLBuffer> guest, std::size_t offset);
     void readbackInto(id<MTLBuffer> guest, std::size_t offset) const;
     [[nodiscard]] bool inPlace(id<MTLBuffer> buffer, std::size_t offset) const;
     // Encodes a GPU blit between the linear staging buffer and every present level and layer.
-    void encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer> linear, bool toTexture) const;
+    void encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer> linear, bool toTexture, Subresources part = {}) const;
     const MetalDevice& backend;
     Graphics::GuestTextureResource descriptor;
     std::shared_ptr<Backing> backing;

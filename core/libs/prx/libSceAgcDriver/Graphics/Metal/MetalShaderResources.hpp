@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include <memory>
 #include <functional>
+#include <optional>
 
 namespace AgcDriver::Metal {
 
@@ -24,18 +25,37 @@ public:
         MetalGuestHostAliases* aliases = nullptr, ImageCache* imageCache = nullptr);
     [[nodiscard]] std::vector<MetalShaderResourceBinding> Bindings(const ShaderRecompiler::MetalBackend::Result& shader);
     [[nodiscard]] MetalBufferBinding Buffer(std::uint64_t address, std::size_t bytes, bool writable = false);
-    [[nodiscard]] std::shared_ptr<MetalTexture> Texture(const Graphics::GuestTextureResource& descriptor, bool written = false, bool compare = false, bool atomic = false);
+    // `writtenLevel`: the one level a written binding renders into (a color attachment), so only
+    // that level is copied back.
+    [[nodiscard]] std::shared_ptr<MetalTexture> Texture(const Graphics::GuestTextureResource& descriptor, bool written = false, bool compare = false, bool atomic = false,
+        std::optional<std::uint32_t> writtenLevel = std::nullopt);
     [[nodiscard]] std::span<const id<MTLResource>> Residency() const;
     // Encodes the copy-back of every written image into `commands` (after the work that writes
     // them, before the commit), so Complete(commands) need not read them back separately.
     void EncodeReadbacks(id<MTLCommandBuffer> commands);
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault Complete(id<MTLCommandBuffer> commands);
+    // Asynchronous completion (MetalTimeline). True when Complete must copy bytes into guest
+    // memory on the CPU (a staged or copied range, a copy-back that is not encoded, DCC metadata):
+    // later work would read those bytes before a deferred Complete wrote them, so such work waits.
+    [[nodiscard]] bool NeedsSynchronousCompletion() const;
+    // Called once the work is committed without waiting: records the images it binds in the image
+    // cache now (later work on the same queue runs after it, so it sees what this work leaves in
+    // them), so Complete does not, and ends this object's borrowed-range scope so it can outlive
+    // the caller's frame.
+    void CommittedWithoutWaiting();
+    // Guest ranges [begin, end) this work stores to: written images and writable buffers.
+    [[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint64_t>> WrittenGuestRanges() const;
+    // Called before this object reads guest bytes on the CPU (an upload that cannot run in place,
+    // a staged storage image), so the caller can first finish GPU work that may write them.
+    using CpuReadHook = std::function<void(std::uint64_t address, std::uint64_t bytes)>;
+    void SetCpuReadHook(CpuReadHook hook) { cpuRead = std::move(hook); }
     // Guest bytes the snapshot copied instead of aliasing (#291).
     [[nodiscard]] std::uint64_t CopiedBytes() const { return snapshot.CopiedBytes(); }
 
 private:
     [[nodiscard]] std::shared_ptr<MetalTexture> texture(const Graphics::GuestTextureResource& descriptor,
-        bool written, bool compare, bool atomic, bool minimumLodLowered, bool storage);
+        bool written, bool compare, bool atomic, bool minimumLodLowered, bool storage,
+        std::optional<std::uint32_t> writtenLevel = std::nullopt);
     struct BufferWrite {
         std::uint64_t address;
         std::span<std::byte> host;
@@ -59,13 +79,23 @@ private:
         // Uploaded from (or, written, read back into) its whole guest surface in place: what the
         // image cache may hold once the work completes.
         bool cacheable = false;
+        // What the cached texels stand for (GuestImageCache::Find).
+        std::uint64_t content = 0;
+        // The levels and layers this work's bindings may write (copied back), empty when not written.
+        MetalTexture::Subresources writtenPart{~0u, 0, ~0u, 0};
     };
+    // Widens `image.writtenPart` by what binding `descriptor` (as storage, or as a render target
+    // writing `level`) may write.
+    static void noteWrite(Image& image, const Graphics::GuestTextureResource& descriptor, bool storage, std::optional<std::uint32_t> level);
     struct ImageView {
         std::shared_ptr<MetalTexture> texture;
         bool compare;
     };
     const MetalDevice& backend;
-    NativeGuestMemory::BorrowedRangesScope borrowed;
+    std::optional<NativeGuestMemory::BorrowedRangesScope> borrowed;
+    bool committedWithoutWaiting = false;
+    void markDccUncompressed();
+    CpuReadHook cpuRead;
     std::vector<NativeGuestMemory::BorrowedRange> borrowedRanges;
     MetalGuestMemory memory;
     MetalGuestMemory::DispatchSnapshot snapshot;

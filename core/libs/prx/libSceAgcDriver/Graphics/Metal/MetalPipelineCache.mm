@@ -1,6 +1,7 @@
 #include "MetalPipelineCache.hpp"
 #include "MetalBackend/BoundedCache.hpp"
 #include "ShaderCacheDirectory.hpp"
+#include <unordered_map>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -388,6 +389,14 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
     writer.Text(source);
     auto key = writer.Take();
     if (auto cached = Functions().Find(key)) return cached->function;
+    // A source Metal rejects is rejected again: remember the error instead of compiling it for every
+    // draw that uses it.
+    static std::mutex failedMutex;
+    static auto* failed = new std::unordered_map<std::string, std::string>();
+    {
+        std::lock_guard lock(failedMutex);
+        if (const auto found = failed->find(key); found != failed->end()) throw std::runtime_error(found->second);
+    }
     NSString* text = [[NSString alloc] initWithBytes:source.data() length:source.size() encoding:NSUTF8StringEncoding];
     NSString* name = [[NSString alloc] initWithBytes:entryPoint.data() length:entryPoint.size() encoding:NSUTF8StringEncoding];
     if (text == nil || name == nil) throw std::invalid_argument("Metal converted shader source and entry point must be valid UTF-8");
@@ -400,8 +409,11 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
     id<MTLLibrary> library = [device newLibraryWithSource:text options:options error:&error];
     if (library == nil) {
         const char* message = error.localizedDescription.UTF8String;
-        throw std::runtime_error(std::string("Converted Metal shader compilation failed: ") +
-                                 (message == nullptr ? "no Metal error description" : message));
+        auto what = std::string("Converted Metal shader compilation failed: ") + (message == nullptr ? "no Metal error description" : message);
+        std::lock_guard lock(failedMutex);
+        if (failed->size() >= 1024) failed->clear();
+        failed->emplace(key, what);
+        throw std::runtime_error(what);
     }
     id<MTLFunction> function = [library newFunctionWithName:name];
     if (function == nil) return nil;
