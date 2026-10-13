@@ -254,6 +254,36 @@ void TestFullBuffer() {
     Require(sceAmprCommandBufferPopMarker(&unbound) == bufferFull);
 }
 
+void TestOffsetPastBuffer() {
+    constexpr std::array<std::uint32_t, 3> invalidOffsets{33u, 64u, 0xffffffffu};
+    for (const auto offset : invalidOffsets) {
+        Recorder recorder(32);
+        recorder.memory.fill(0xA5);
+        recorder.buffer.offset = offset;
+        recorder.buffer.numCommands = 7;
+        const auto before = recorder.buffer;
+        const auto memory = recorder.memory;
+        const auto rejected = [&](const auto& record) {
+            bool threw = false;
+            try {
+                record();
+            } catch (const std::invalid_argument&) {
+                threw = true;
+            }
+            Require(threw);
+            Require(recorder.memory == memory);
+            Require(recorder.buffer.base == before.base && recorder.buffer.size == before.size);
+            Require(recorder.buffer.offset == before.offset && recorder.buffer.numCommands == before.numCommands);
+            Require(recorder.buffer.type == before.type && recorder.buffer.recording == before.recording);
+        };
+        rejected([&] { sceAmprCommandBufferPopMarker(&recorder.buffer); });
+        rejected([&] { sceAmprCommandBufferNop(&recorder.buffer, 1); });
+        rejected([&] { sceAmprCommandBufferPushMarker(&recorder.buffer, "bounds"); });
+        rejected([&] { sceAmprAmmCommandBufferMap(&recorder.buffer, 0x4000, 0x4000, 0, 3); });
+        rejected([&] { sceAmprAmmCommandBufferMapAsPrt(&recorder.buffer, 0x4000, 0x4000); });
+    }
+}
+
 void TestSubmission() {
     Recorder recorder;
     std::uint64_t first = 0;
@@ -1125,6 +1155,7 @@ int main() {
     TestRecording(std::string(300, 'a'));
     TestRejectedArguments();
     TestFullBuffer();
+    TestOffsetPastBuffer();
     TestSubmission();
     TestKernelEventQueue();
     TestWaits();

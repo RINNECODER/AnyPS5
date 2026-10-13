@@ -46,6 +46,7 @@ int APS5_VABI sceNetEpollWait(int, NetEpollEvent*, int, int);
 int APS5_VABI sceNetEpollDestroy(int);
 int APS5_VABI sceNetEpollAbort(int, int);
 extern const std::uint32_t sce_net_in6addr_any[4];
+extern const std::uint8_t sce_net_in6addr_linklocal_allnodes[16];
 int APS5_VABI sceNetResolverCreate(const char*, int, int);
 int APS5_VABI sceNetResolverStartNtoa(int, const char*, void*, int, int, int);
 int APS5_VABI sceNetResolverStartNtoaMultipleRecordsEx(int, const char*, void*, int, int, int);
@@ -255,6 +256,21 @@ static bool HostIpv6LoopbackUnavailable() {
 #endif
 }
 
+static void CheckLinkLocalAllNodesIpv6() {
+    Require(reinterpret_cast<std::uintptr_t>(sce_net_in6addr_linklocal_allnodes) % alignof(std::uint32_t) == 0);
+    std::array<std::uint8_t, 16> address{};
+    Require(sceNetInetPton(28, "ff02::1", address.data()) == 1);
+    Require(std::memcmp(sce_net_in6addr_linklocal_allnodes, address.data(), address.size()) == 0);
+    std::array<char, 9> text;
+    text.fill('x');
+    Require(sceNetInetNtop(28, sce_net_in6addr_linklocal_allnodes, text.data(), 7) == nullptr && *sceNetErrnoLoc() == 28);
+    Require(sceNetInetNtop(28, sce_net_in6addr_linklocal_allnodes, text.data(), 8) == text.data());
+    Require(std::strcmp(text.data(), "ff02::1") == 0 && text[8] == 'x');
+    address.fill(0xa5);
+    Require(sceNetInetPton(28, text.data(), address.data()) == 1);
+    Require(std::memcmp(sce_net_in6addr_linklocal_allnodes, address.data(), address.size()) == 0);
+}
+
 static void CheckUnspecifiedIpv6() {
     std::array<std::uint8_t, 16> unspecified{};
     Require(sceNetInetPton(28, "::", unspecified.data()) == 1);
@@ -295,9 +311,69 @@ static void CheckUnspecifiedIpv6() {
     Require(sceNetRecvfrom(receiver, received, sizeof(received), 0, peer.data(), &size) == sizeof(received));
     Require(std::memcmp(received, payload, sizeof(payload)) == 0 && size == peer.size() && peer[1] == 28);
     Require(std::memcmp(peer.data() + 8, address.data() + 8, 16) == 0);
+    address[0] = 0;
+    Require(sceNetSendto(sender, payload, sizeof(payload), 0, address.data(), address.size()) == sizeof(payload));
+    Require(sceNetRecvfrom(receiver, received, sizeof(received), 0, nullptr, nullptr) == sizeof(received));
     Require(std::memcmp(sce_net_in6addr_any, unspecified.data(), unspecified.size()) == 0);
     Require(sceNetSocketClose(sender) == 0);
     Require(sceNetSocketClose(receiver) == 0);
+}
+
+static void CheckStreamSender(int family) {
+    const auto addressSize = family == 2 ? 16u : 28u;
+    const int listener = sceNetSocket(nullptr, family, 1, 6);
+    Require(listener >= 0);
+    std::array<std::uint8_t, 28> destination{};
+    destination[0] = static_cast<std::uint8_t>(addressSize);
+    destination[1] = static_cast<std::uint8_t>(family);
+    if (family == 2) { destination[4] = 127; destination[7] = 1; }
+    else destination[23] = 1;
+    Require(sceNetBind_nid_postfix(listener, destination.data(), addressSize) == 0 && sceNetListen(listener, 1) == 0);
+    std::uint32_t size = destination.size();
+    Require(sceNetGetsockname(listener, destination.data(), &size) == 0 && size == addressSize);
+    const int client = sceNetSocket(nullptr, family, 1, 6);
+    Require(client >= 0 && sceNetConnect(client, destination.data(), addressSize) == 0);
+    const int accepted = sceNetAccept(listener, nullptr, nullptr);
+    Require(accepted >= 0);
+    const char payload[] = "stream";
+    for (const auto endpoints : {std::array{accepted, client}, std::array{client, accepted}}) {
+        const auto receiver = endpoints[0], sender = endpoints[1];
+        for (const std::uint32_t capacity : {0u, 1u, 16u, 28u, UINT32_MAX}) {
+            Require(sceNetSend(sender, payload, sizeof(payload), 0) == sizeof(payload));
+            std::array<std::uint8_t, 28> address;
+            address.fill(0xa5);
+            char received[sizeof(payload)]{};
+            size = capacity;
+            *sceNetErrnoLoc() = 123;
+            Require(sceNetRecvfrom(receiver, received, 0, 2, address.data(), &size) == 0);
+            Require(size == 0 && received[0] == 0 && *sceNetErrnoLoc() == 123);
+            Require(std::all_of(address.begin(), address.end(), [](auto byte) { return byte == 0xa5; }));
+            for (const int flags : {2, 0}) {
+                size = capacity;
+                *sceNetErrnoLoc() = 123;
+                Require(sceNetRecvfrom(receiver, received, sizeof(received), flags, address.data(), &size) == sizeof(payload));
+                Require(size == 0 && std::memcmp(received, payload, sizeof(payload)) == 0 && *sceNetErrnoLoc() == 123);
+                Require(std::all_of(address.begin(), address.end(), [](auto byte) { return byte == 0xa5; }));
+            }
+        }
+        Require(sceNetSend(sender, payload, sizeof(payload), 0) == sizeof(payload));
+        std::array<std::uint8_t, 28> address;
+        address.fill(0xa5);
+        char received[sizeof(payload)]{};
+        Require(Failed(sceNetRecvfrom(receiver, received, sizeof(received), 0, address.data(), nullptr), 22));
+        size = 123;
+        Require(sceNetRecvfrom(receiver, received, sizeof(received), 0, nullptr, &size) == sizeof(payload));
+        Require(size == 123 && std::memcmp(received, payload, sizeof(payload)) == 0);
+        Require(sceNetShutdown(sender, 1) == 0);
+        for (const int flags : {2, 0}) {
+            size = address.size();
+            *sceNetErrnoLoc() = 123;
+            Require(sceNetRecvfrom(receiver, received, sizeof(received), flags, address.data(), &size) == 0);
+            Require(size == 0 && *sceNetErrnoLoc() == 123);
+            Require(std::all_of(address.begin(), address.end(), [](auto byte) { return byte == 0xa5; }));
+        }
+    }
+    for (const int descriptor : {client, accepted, listener}) Require(sceNetSocketClose(descriptor) == 0);
 }
 
 static void CheckIpv6SocketsAreIpv6Only() {
@@ -338,7 +414,10 @@ int main() {
     CheckAddressText(2, "255.255.255.255");
     CheckAddressText(28, "::1");
     CheckAddressText(28, "1234:5678:9abc:def0:1234:5678:9abc:def0");
+    CheckLinkLocalAllNodesIpv6();
     CheckUnspecifiedIpv6();
+    CheckStreamSender(2);
+    if (!ipv6Unavailable) CheckStreamSender(28);
     if (!ipv6Unavailable) CheckIpv6SocketsAreIpv6Only();
 
     const int listener = sceNetSocket(nullptr, 2, 1, 6);
@@ -403,6 +482,12 @@ int main() {
     Require(sceNetEpollWait(epoll, &ready, 1, 1000000) == 1 && (ready.events & 1) && ready.ident == static_cast<std::uint64_t>(accepted));
     Require(sceNetShutdown(accepted, 1) == 0);
     Require(Failed(sceNetSend(accepted, request, sizeof(request), 0), 32));
+    registration.data.u32 = 78;
+    Require(sceNetEpollControl(epoll, 2, accepted, &registration) == 0);
+    Require(Failed(sceNetEpollControl(epoll, 2, accepted, nullptr), 22));
+    Require(sceNetEpollControl(epoll, 3, accepted, nullptr) == 0);
+    Require(Failed(sceNetEpollControl(epoll, 3, accepted, nullptr), 2));
+    Require(Failed(sceNetEpollControl(epoll, 2, accepted, &registration), 2));
     Require(sceNetEpollDestroy(epoll) == 0);
     Require(sceNetSocketClose(accepted) == 0);
     bool send_failed = false;
@@ -413,7 +498,9 @@ int main() {
     Require(send_failed);
     Require(sceNetSocketClose(client) == 0);
     Require(sceNetSocketClose(listener) == 0);
+    *__error_nid_postfix() = 0;
     Require(sceNetSocketClose(listener) == static_cast<int>(0x80410109) && *sceNetErrnoLoc() == 9);
+    Require(*__error_nid_postfix() == 9);
 
     const int udp_receiver = sceNetSocket(nullptr, 2, 2, 17);
     const int udp_sender = sceNetSocket(nullptr, 2, 2, 17);
@@ -430,6 +517,10 @@ int main() {
     Require(sceNetRecvfrom(udp_receiver, datagram_result, sizeof(datagram_result), 0,
         source.data(), &address_size) == sizeof(datagram_result));
     Require(std::strcmp(datagram, datagram_result) == 0 && source[1] == 2);
+    std::array<std::uint8_t, 16> unsized = address;
+    unsized[0] = 0;
+    Require(sceNetSendto(udp_sender, datagram, sizeof(datagram), 0, unsized.data(), unsized.size()) == sizeof(datagram));
+    Require(sceNetRecvfrom(udp_receiver, datagram_result, sizeof(datagram_result), 0, nullptr, nullptr) == sizeof(datagram_result));
     std::uint64_t readable[16]{};
     readable[udp_receiver / 64] |= std::uint64_t{1} << (udp_receiver % 64);
     const std::int64_t poll_now[2]{0, 0};
