@@ -71,6 +71,8 @@ def main():
     parser.add_argument('--limit', type=int, default=600)
     parser.add_argument('--entries', default='entry,init')
     parser.add_argument('--nid-symbols', help='file of runtime symbol names (one per line, underscore stripped)')
+    parser.add_argument('--guest-base', type=lambda value: int(value, 0), default=0x140000000,
+                        help='slide added to every guest vaddr (the Rosetta relinked base by default)')
     args = parser.parse_args()
     contracts = json.loads(open(args.contracts).read())
     image = Image(args.elf, contracts)
@@ -92,6 +94,7 @@ def main():
             spec['stub'] = True
     contracts['allow_unimplemented'] = True
     contracts['guest_data'] = True
+    contracts['guest_base'] = args.guest_base
     # HLE NID binding: point a typed import at the runtime's <name>_nid_postfix symbol when
     # that exists (the arm64 libs define every guest entry point with that suffix).
     if args.nid_symbols:

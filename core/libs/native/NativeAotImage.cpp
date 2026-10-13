@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <limits>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
@@ -68,6 +69,7 @@ struct NativeAotSegment {
 // applies the pointer relocations afterwards.
 extern "C" void NativeAotMapImage_nid_no_patch(const NativeAotSegment* segments, std::size_t count) {
     Require(segments != nullptr || count == 0, "native AOT segment table is null");
+    std::fprintf(stderr, "[aot] mapping %zu segments\n", count);
     const char* path = std::getenv("ANYPS5_AOT_EBOOT");
     Require(path != nullptr && *path != 0, "ANYPS5_AOT_EBOOT is not set");
     const int descriptor = ::open(path, O_RDONLY);
@@ -78,13 +80,25 @@ extern "C" void NativeAotMapImage_nid_no_patch(const NativeAotSegment* segments,
         // The executable segment is native code here; its guest bytes (rodata, jump tables) are not
         // mapped because its vaddr overlaps the process image. Data references into it are a gap.
         if (segment.memsz == 0 || (segment.flags & 1)) continue;
-        void* base = ::mmap(reinterpret_cast<void*>(static_cast<std::uintptr_t>(segment.vaddr)),
-                            static_cast<std::size_t>(segment.memsz), PROT_READ | PROT_WRITE,
+        // A PT_LOAD vaddr is congruent to its file offset but not necessarily page aligned;
+        // map the containing page and copy at the difference.
+        constexpr std::uint64_t page = 0x1000;
+        const std::uint64_t aligned = segment.vaddr & ~(page - 1);
+        const std::uint64_t delta = segment.vaddr - aligned;
+        Require(delta <= segment.offset, "native AOT segment alignment exceeds its file offset");
+        void* base = ::mmap(reinterpret_cast<void*>(static_cast<std::uintptr_t>(aligned)),
+                            static_cast<std::size_t>(segment.memsz + delta), PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
-        if (base == MAP_FAILED) throw std::runtime_error("cannot map the title data at its guest address");
+        std::fprintf(stderr, "[aot] map %#llx + %#llx -> %p flags %llu\n", (unsigned long long)segment.vaddr, (unsigned long long)segment.memsz, base, (unsigned long long)segment.flags);
+        if (base == MAP_FAILED) {
+            // Some guest pages collide with host reservations (the SCE relocation blob does);
+            // report and skip instead of failing the whole image.
+            std::fprintf(stderr, "[aot] skipped segment %#llx (map failed)\n", (unsigned long long)segment.vaddr);
+            continue;
+        }
         std::size_t copied = 0;
         while (copied < segment.filesz) {
-            const auto got = ::pread(descriptor, static_cast<char*>(base) + copied,
+            const auto got = ::pread(descriptor, static_cast<char*>(base) + delta + copied,
                                      static_cast<std::size_t>(segment.filesz - copied),
                                      static_cast<off_t>(segment.offset + copied));
             if (got <= 0) { ::close(descriptor); throw std::runtime_error("truncated title eboot while mapping data"); }
