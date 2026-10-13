@@ -28,7 +28,15 @@ void ClearDepthSurfaces(VkDevice device);
 void RetireDepthSurfaces(VkDevice device, std::uint64_t address, std::uint64_t bytes);
 bool DepthSurfaceAt(std::uint64_t address);
 std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);
-void NoteHtileDepthClear(std::uint64_t htileAddress);
+std::size_t HtileDepthClearBytes_nid_no_patch(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, std::span<const std::uint32_t> packet, std::uint64_t indirectArguments);
+void NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes = 0u, std::size_t nativeBytes = 0u);
+struct MemoryValueFill {
+    std::uint64_t address;
+    std::size_t bytes;
+    std::uint64_t valueAddress;
+};
+std::optional<MemoryValueFill> MatchMemoryValueFill(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads, const std::array<std::uint32_t, 3>& groups);
+void NoteMemoryValueFill(const MemoryValueFill& fill);
 bool DepthSurfaceHolds(const Context& context, const GuestTextureResource& resource, const Texture* texture);
 void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
 VkImageAspectFlags HtileFillClears(std::uint32_t pattern, bool stencilInHtile);
