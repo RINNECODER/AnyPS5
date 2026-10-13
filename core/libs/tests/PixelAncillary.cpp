@@ -432,13 +432,16 @@ static void HelperLoopRefused(LoopRead read) {
     }
     Require(false);
 }
-static bool AncillaryRemains(const IrProgram& program) {
+static bool BuiltinRemains(const IrProgram& program, StageInputKind kind) {
     for (const IrBlock* block : program.BlockOrder()) {
         for (const IrValue* inst : block->Instructions()) {
-            if (inst->Opcode() == IrOpcode::GetBuiltin && static_cast<StageInputKind>(inst->Argument(0)->Resolve()->ImmediateU32()) == StageInputKind::PackedAncillary) return true;
+            if (inst->Opcode() == IrOpcode::GetBuiltin && static_cast<StageInputKind>(inst->Argument(0)->Resolve()->ImmediateU32()) == kind) return true;
         }
     }
     return false;
+}
+static bool AncillaryRemains(const IrProgram& program) {
+    return BuiltinRemains(program, StageInputKind::PackedAncillary);
 }
 static void ExportedWholeWord() {
     IrProgram program;
@@ -473,10 +476,11 @@ static void ExportedWholeWord() {
     static_cast<void>(builder.Emit(IrOpcode::Return, IrType::Void, {}));
     LowerMasked(program, true);
     Require(!AncillaryRemains(program) && program.Info().rasterPrimitive);
+    Require(!BuiltinRemains(program, StageInputKind::Layer));
     const IrValue* word = carried.Argument(0)->Resolve();
     constexpr std::array<Row, 5> words {{{0u, 0u, false, RasterPrimitive::Triangle}, {0u, 0u, false, RasterPrimitive::Rectangle}, {0u, 0u, false, RasterPrimitive::Line}, {15u, 0x1FFFu, false, RasterPrimitive::Point}, {3u, 0x7FFu, false, RasterPrimitive::Triangle}}};
     for (const Row& row : words) {
-        Require(Evaluate(word, row) == (static_cast<std::uint32_t>(row.primitive) | (row.sample << 8u) | (row.layer << 16u)));
+        Require(Evaluate(word, row) == (static_cast<std::uint32_t>(row.primitive) | (row.sample << 8u)));
     }
 }
 static void WholeWordReplacesRefusal(HelperRead read) {
@@ -486,7 +490,7 @@ static void WholeWordReplacesRefusal(HelperRead read) {
     Require(!AncillaryRemains(program) && program.Info().rasterPrimitive);
     Require(built.written->Parent() != nullptr);
     const Row row {9u, 0x123u, false, RasterPrimitive::Rectangle};
-    Require(Evaluate(built.written->Argument(2), row) == (3u | (9u << 8u) | (0x123u << 16u)));
+    Require(Evaluate(built.written->Argument(2), row) == (3u | (9u << 8u)));
 }
 enum class StartingQuad { Kept, BallotAfterBranch, BallotOfOtherLanes, ComputeStage };
 

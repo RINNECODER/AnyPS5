@@ -903,9 +903,7 @@ bool ConstantFolder::ComposePackedAncillary(IrProgram& program) const {
     for (IrValue* word : words) {
         IrValue& primitive = insertBuiltin(program, builder, *word, StageInputKind::RasterPrimitive);
         IrValue& sample = insertBefore(program, *word, IrOpcode::ShiftLeftLogical32, insertBuiltin(program, builder, *word, StageInputKind::SampleId), builder.Constant(8u));
-        IrValue& layer = insertBefore(program, *word, IrOpcode::ShiftLeftLogical32, insertBuiltin(program, builder, *word, StageInputKind::Layer), builder.Constant(16u));
-        IrValue& low = insertBefore(program, *word, IrOpcode::BitwiseOr32, primitive, sample);
-        word->ReplaceAllUsesWith(&insertBefore(program, *word, IrOpcode::BitwiseOr32, low, layer));
+        word->ReplaceAllUsesWith(&insertBefore(program, *word, IrOpcode::BitwiseOr32, primitive, sample));
     }
     return !words.empty();
 }
