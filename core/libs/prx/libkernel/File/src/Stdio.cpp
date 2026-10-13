@@ -284,6 +284,26 @@ static_assert(offsetof(KernelIovec, length) == offsetof(struct iovec, iov_len));
 static const struct iovec* NativeIovecs(const KernelIovec* iov) {
     return reinterpret_cast<const struct iovec*>(iov);
 }
+
+// The host view of a guest vector. Darwin rejects an empty vector with EINVAL where the guest
+// expects a successful 0 (after the descriptor check), so it gets one zero-length entry instead.
+class HostVector {
+public:
+    HostVector(const KernelIovec* iov, int count) : base_(NativeIovecs(iov)), count_(count) {
+#ifdef __APPLE__
+        if (count == 0) {
+            base_ = &empty_;
+            count_ = 1;
+        }
+#endif
+    }
+    const struct iovec* Data() const { return base_; }
+    int Count() const { return count_; }
+private:
+    const struct iovec* base_;
+    int count_;
+    struct iovec empty_ {nullptr, 0};
+};
 #endif
 
 static constexpr int GUEST_ENOENT = 2;
@@ -1120,7 +1140,8 @@ int64_t APS5_VABI sceKernelReadv(int d, const KernelIovec* iov, int iovcnt) {
         return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
     }
     if (File::IsRandomDevice(d)) return ReadRandomIovecs(d, iov, iovcnt);
-    const auto result = static_cast<std::int64_t>(::readv(d, NativeIovecs(iov), iovcnt));
+    const HostVector host(iov, iovcnt);
+    const auto result = static_cast<std::int64_t>(::readv(d, host.Data(), host.Count()));
     return result < 0 ? SceErrorFromErrno(errno) : result;
 }
 
@@ -1132,7 +1153,8 @@ int64_t APS5_VABI sceKernelWritev(int d, const KernelIovec* iov, int iovcnt) {
     }
     const auto sharedResult = File::WritevSharedMemory_nid_no_patch(d, NativeIovecs(iov), iovcnt);
     if (sharedResult != -2) return sharedResult < 0 ? SceErrorFromErrno(errno) : sharedResult;
-    const auto result = static_cast<std::int64_t>(::writev(d, NativeIovecs(iov), iovcnt));
+    const HostVector host(iov, iovcnt);
+    const auto result = static_cast<std::int64_t>(::writev(d, host.Data(), host.Count()));
     return result < 0 ? SceErrorFromErrno(errno) : result;
 }
 
@@ -1143,7 +1165,8 @@ int64_t APS5_VABI sceKernelPreadv(int d, const KernelIovec* iov, int iovcnt, int
     std::deque<GuestArena::HostWrite> destinations;
     if (!OpenIovecs(iov, iovcnt, destinations)) return SceErrorFromErrno(GUEST_EFAULT);
     if (File::IsRandomDevice(d)) return ReadRandomIovecs(d, iov, iovcnt);
-    const auto result = static_cast<std::int64_t>(::preadv(d, NativeIovecs(iov), iovcnt, static_cast<off_t>(offset)));
+    const HostVector host(iov, iovcnt);
+    const auto result = static_cast<std::int64_t>(::preadv(d, host.Data(), host.Count(), static_cast<off_t>(offset)));
     return result < 0 ? SceErrorFromErrno(errno) : result;
 }
 
@@ -1153,7 +1176,8 @@ int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* iov, int iovcnt, in
     if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
     const auto sharedResult = File::PwritevSharedMemory_nid_no_patch(d, NativeIovecs(iov), iovcnt, offset);
     if (sharedResult != -2) return sharedResult < 0 ? SceErrorFromErrno(errno) : sharedResult;
-    const auto result = static_cast<std::int64_t>(::pwritev(d, NativeIovecs(iov), iovcnt, static_cast<off_t>(offset)));
+    const HostVector host(iov, iovcnt);
+    const auto result = static_cast<std::int64_t>(::pwritev(d, host.Data(), host.Count(), static_cast<off_t>(offset)));
     return result < 0 ? SceErrorFromErrno(errno) : result;
 }
 
