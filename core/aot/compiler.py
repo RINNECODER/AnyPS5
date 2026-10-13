@@ -411,13 +411,15 @@ class Function:
             if base_name in ('rsp', 'rbp') or (frame and frame[0] == 'frame'):
                 base = state[base_name] if base_name in ('rsp', 'rbp') else frame[2]
                 if base is None:
-                    self.fail(ins, 'dynamic frame offset')
-                offset = base + mem.disp
-                if not mem.index and ins.mnemonic != 'lea' and offset + operand.size > 0:
-                    valid = any(loc['kind'] == 'stack' and loc['offset'] <= offset and offset + operand.size <= loc['offset'] + loc['bits'] // 8 for loc in self.argument_locations)
-                    if not valid and not self.uniform:
-                        self.fail(ins, 'read or write of return address or undeclared stack arguments')
-                self.depth = max(self.depth, -(base + mem.disp) + 128)
+                    if not self.uniform:
+                        self.fail(ins, 'dynamic frame offset')
+                else:
+                    offset = base + mem.disp
+                    if not mem.index and ins.mnemonic != 'lea' and offset + operand.size > 0:
+                        valid = any(loc['kind'] == 'stack' and loc['offset'] <= offset and offset + operand.size <= loc['offset'] + loc['bits'] // 8 for loc in self.argument_locations)
+                        if not valid and not self.uniform:
+                            self.fail(ins, 'read or write of return address or undeclared stack arguments')
+                    self.depth = max(self.depth, -(base + mem.disp) + 128)
         elif operand.type != X86_OP_IMM:
             self.fail(ins, 'unsupported operand')
 
@@ -444,7 +446,7 @@ class Function:
                 state['tail_stack_clean'] = frozenset(loc['offset'] for loc in self.argument_locations if loc['kind'] == 'stack' and loc['offset'] in clean and not (begin < loc['offset'] + loc['bits'] // 8 and loc['offset'] < begin + operand.size))
             elif base_name == 'rip' and not operand.mem.index:
                 state['tail_stack_clean'] = clean
-            if base_name in ('rsp', 'rbp') and not operand.mem.index:
+            if base_name in ('rsp', 'rbp') and not operand.mem.index and state[base_name] is not None:
                 begin = state[base_name] + operand.mem.disp
                 for offset, saved in list(state['saved'].items()):
                     low, high = max(begin, offset), min(begin + operand.size, offset + 8)
@@ -657,6 +659,8 @@ class Function:
                         state[dest] = original[ins.reg_name(args[1].mem.base)] + args[1].mem.disp
                     elif op == 'mov' and args[0].size == 8 and args[1].type == X86_OP_REG and self.reg(ins, args[1])[0] in ('rsp', 'rbp'):
                         state[dest] = original[self.reg(ins, args[1])[0]]
+                    elif self.uniform and dest == 'rbp':
+                        state[dest] = None
                     else:
                         self.fail(ins, 'unsupported frame manipulation')
             return state
@@ -682,12 +686,15 @@ class Function:
                     self.constant_write(ins, original, state, args[0], value)
                 if args[0].type == X86_OP_REG and self.reg(ins, args[0])[0] in ('rsp', 'rbp'):
                     dest = self.reg(ins, args[0])[0]
-                    if op not in ('add', 'sub') or args[1].type != X86_OP_IMM or state[dest] is None:
+                    if op in ('add', 'sub') and args[1].type == X86_OP_IMM and state[dest] is not None:
+                        state[dest] += args[1].imm * (1 if op == 'add' else -1)
+                        if dest == 'rsp' and state['rsp'] > original['rsp']:
+                            state['saved'] = {offset: saved for offset, saved in state['saved'].items() if offset >= state['rsp']}
+                        self.depth = max(self.depth, -state[dest] + 128)
+                    elif self.uniform:
+                        state[dest] = None
+                    else:
                         self.fail(ins, 'dynamic frame allocation')
-                    state[dest] += args[1].imm * (1 if op == 'add' else -1)
-                    if dest == 'rsp' and state['rsp'] > original['rsp']:
-                        state['saved'] = {offset: saved for offset, saved in state['saved'].items() if offset >= state['rsp']}
-                    self.depth = max(self.depth, -state[dest] + 128)
             state['flags'] = set(FLAGS)
             return state
         self.fail(ins, 'instruction semantics are not implemented')
@@ -1036,9 +1043,12 @@ class Function:
             return self.image.pointer(ins.address + ins.size + mem.disp, 1 if ins.mnemonic == 'lea' else operand.size)
         if base not in state['pointers'] and index in state['pointers'] and mem.scale == 1:
             base, index = index, base
-        if base in ('rsp', 'rbp'):
+        if base in ('rsp', 'rbp') and state[base] is not None:
             pointer = self.frame_pointer(state[base] + mem.disp)
             offset = '0'
+        elif base in ('rsp', 'rbp'):
+            pointer = self.emit(f'inttoptr i64 {self.load(base)} to ptr')
+            offset = str(mem.disp)
         elif base in state['pointers']:
             kind, argument, displacement = state['pointers'][base]
             if kind == 'image':
