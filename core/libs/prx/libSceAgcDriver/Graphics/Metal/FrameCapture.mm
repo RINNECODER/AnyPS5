@@ -19,6 +19,8 @@ namespace AgcDriver::Metal {
 struct FrameCapture::State {
     std::string directory;
     std::chrono::milliseconds interval{30000};
+    // 0 = time-spaced captures; N>0 = capture every Nth presented frame (deterministic across runs).
+    std::uint64_t every = 0;
     std::atomic<std::uint64_t> presented{0};
     std::atomic<bool> inFlight{false};
     std::mutex mutex;
@@ -44,6 +46,11 @@ std::string escape(const std::string& text) {
 void emit(const std::string& line) {
     std::fprintf(stderr, "%s\n", line.c_str());
     std::fflush(stderr);
+}
+
+std::string presentedLine(std::uint64_t count, std::int64_t sinceMs) {
+    return "{\"schema_version\":1,\"event\":\"frames_presented\",\"count\":" + std::to_string(count) +
+           ",\"since_ms\":" + std::to_string(sinceMs) + "}";
 }
 
 // 8-bit RGBA from a BGRA8 or BGR10A2 row-padded readback. Alpha is forced opaque.
@@ -116,6 +123,11 @@ FrameCapture::FrameCapture() {
         const auto value = std::strtoll(interval, &end, 10);
         if (end != interval && value > 0) state->interval = std::chrono::milliseconds(value);
     }
+    if (const char* every = std::getenv("ANYPS5_FRAME_CAPTURE_EVERY")) {
+        char* end = nullptr;
+        const auto value = std::strtoll(every, &end, 10);
+        if (end != every && value > 0) state->every = static_cast<std::uint64_t>(value);
+    }
     @autoreleasepool {
         [[NSFileManager defaultManager] createDirectoryAtPath:[NSString stringWithUTF8String:directory]
                                   withIntermediateDirectories:YES attributes:nil error:nil];
@@ -128,10 +140,15 @@ FrameCapture::FrameCapture() {
             const auto now = std::chrono::steady_clock::now();
             const auto since = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
             last = now;
-            emit("{\"schema_version\":1,\"event\":\"frames_presented\",\"count\":" + std::to_string(shared->presented.load()) +
-                 ",\"since_ms\":" + std::to_string(since) + "}");
+            emit(presentedLine(shared->presented.load(), since));
         }
     }).detach();
+    // The guest ends the process with std::exit, so this runs and gives the authoritative count.
+    std::atexit([] { Shared().ReportFinal(); });
+}
+
+void FrameCapture::ReportFinal() {
+    if (enabled) emit(presentedLine(state->presented.load(), 0));
 }
 
 std::optional<FrameCapture::Ticket> FrameCapture::Begin(std::uint32_t guestWidth, std::uint32_t guestHeight) {
@@ -139,7 +156,11 @@ std::optional<FrameCapture::Ticket> FrameCapture::Begin(std::uint32_t guestWidth
     const auto index = state->presented.fetch_add(1);
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard lock(state->mutex);
-    if (state->captured && now - state->lastCapture < state->interval) return std::nullopt;
+    if (state->every != 0) {
+        if (index % state->every != 0) return std::nullopt;
+    } else {
+        if (state->captured && now - state->lastCapture < state->interval) return std::nullopt;
+    }
     bool expected = false;
     if (!state->inFlight.compare_exchange_strong(expected, true)) return std::nullopt;
     state->captured = true;
