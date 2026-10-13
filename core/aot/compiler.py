@@ -880,36 +880,51 @@ class Function:
         origins = original['stack_origins'].copy()
         op, args = ins.mnemonic, ins.operands
         call_writes = effects.call_writes(self, ins, original) if op == 'call' else None
-        # The image-pointer set has ~250k entries; copy it only when this instruction can change it.
-        if (self.memory_writes.get(ins.address) or state['pending_outputs']
-                or (op == 'call' and (call_writes is None or call_writes.parameter_writes
-                                      or any(kind == 'image' for kind, _, _ in call_writes.writes)))
-                or ins.address in getattr(self, 'checked_pointer_loads', {}) or self.image.immutable_cells):
-            image = original['image_pointers'].copy()
-        else:
-            image = original['image_pointers']
-        bindings = original['import_bindings'].copy()
+        # image_pointers (~250k entries) and import_bindings are usually unchanged by an
+        # instruction; copy each one only when this instruction actually writes to it.
+        image = original['image_pointers']
+        bindings = original['import_bindings']
+
+        def image_cells():
+            nonlocal image
+            if image is original['image_pointers']:
+                image = image.copy()
+            return image
+
+        def import_bindings():
+            nonlocal bindings
+            if bindings is original['import_bindings']:
+                bindings = bindings.copy()
+            return bindings
+
         callback_memory_unmodified = original['callback_memory_unmodified']
         for operand in self.memory_writes.get(ins.address, ()):
             origin = self.memory_write_region(ins, original, operand)
             if origin is None or origin[0] != 'frame':
                 callback_memory_unmodified = False
             if origin is not None and origin[0] == 'outside_frame':
-                image.clear()
-                bindings.clear()
+                image_cells().clear()
+                import_bindings().clear()
                 continue
             if origin is None:
                 stack.clear()
                 origins.clear()
-                image.clear()
-                bindings.clear()
+                image_cells().clear()
+                import_bindings().clear()
             else:
-                cells, begin, end = (stack if origin[0] == 'frame' else image), origin[1], origin[2]
-                cells.difference_update(offset for offset in list(cells) if begin < offset + 8 and offset < end)
+                begin, end = origin[1], origin[2]
                 if origin[0] == 'frame':
+                    cells = stack
+                    for offset in range(begin - 7, end):
+                        cells.discard(offset)
                     origins = {offset: pointer for offset, pointer in origins.items() if not (begin < offset + 8 and offset < end)}
-                if origin[0] == 'image':
-                    bindings.difference_update(offset for offset in list(bindings) if begin < offset + 8 and offset < end)
+                else:
+                    cells = image_cells()
+                    for offset in range(begin - 7, end):
+                        cells.discard(offset)
+                    bindings = import_bindings()
+                    for offset in range(begin - 7, end):
+                        bindings.discard(offset)
                 if op == 'mov' and checked_stack.lookup(self, ins, operand) is None and not operand.mem.index and operand is args[0] and self.pointer_operand(ins, original, args[1]):
                     cells.add(begin)
                     pointer = self.pointer_origin(ins, original, args[1])
@@ -943,21 +958,27 @@ class Function:
             if call_writes is None or call_writes.parameter_writes:
                 stack.clear()
                 origins.clear()
-                image.clear()
-                bindings.clear()
+                image_cells().clear()
+                import_bindings().clear()
                 callback_memory_unmodified = False
             else:
                 for kind, begin, end in call_writes.writes:
-                    cells = stack if kind == 'frame' else image
-                    cells.difference_update(offset for offset in list(cells) if begin < offset + 8 and offset < end)
                     if kind == 'frame':
+                        cells = stack
+                        for offset in range(begin - 7, end):
+                            cells.discard(offset)
                         origins = {offset: pointer for offset, pointer in origins.items() if not (begin < offset + 8 and offset < end)}
-                    if kind == 'image':
-                        bindings.difference_update(offset for offset in list(bindings) if begin < offset + 8 and offset < end)
+                    else:
+                        cells = image_cells()
+                        for offset in range(begin - 7, end):
+                            cells.discard(offset)
+                        bindings = import_bindings()
+                        for offset in range(begin - 7, end):
+                            bindings.discard(offset)
                         callback_memory_unmodified = False
             for _, predicate, kind, offset in state['pending_outputs']:
                 if predicate == 'always':
-                    (stack if kind == 'frame' else image).add(offset)
+                    (stack if kind == 'frame' else image_cells()).add(offset)
             if ins.address not in self.dispatch_calls:
                 callee, _ = self.image.call(ins, self.contract)
                 if callee['result'] == 'ptr':
@@ -988,9 +1009,11 @@ class Function:
             native.add(self.reg(ins, args[0])[0])
             checked_cell = self.memory_origin(ins, original, args[1])
             if checked_cell is not None:
-                (stack if checked_cell[0] == 'frame' else image).add(checked_cell[1])
-        image.update(self.image.immutable_cells)
-        bindings.update(self.image.immutable_bindings)
+                (stack if checked_cell[0] == 'frame' else image_cells()).add(checked_cell[1])
+        if self.image.immutable_cells:
+            image_cells().update(self.image.immutable_cells)
+        if self.image.immutable_bindings:
+            import_bindings().update(self.image.immutable_bindings)
         state['native_pointers'], state['stack_pointers'], state['image_pointers'] = native, stack, image
         state['callback_memory_unmodified'] = callback_memory_unmodified
         state['import_bindings'] = bindings
