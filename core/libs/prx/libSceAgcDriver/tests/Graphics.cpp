@@ -1007,6 +1007,15 @@ void ColorPipeBankXorTests() {
         const auto color = AgcDriver::Graphics::DecodeState(queue).color;
         Require(color.tileMode == AgcDriver::Graphics::ColorTileMode::D64KBX && color.address == block && color.surfaceAddress == block && color.pipeBankXor == pipeBankXor, "a SW_64KB_D_X color base did not split its block address and XOR");
     }
+    queue.context[0x3b8] = 0x4dc60000u;
+    for (const std::uint32_t pipeBankXor : {0u, 0x4600u, 0xff00u}) {
+        const auto address = block + pipeBankXor;
+        queue.context[0x318] = static_cast<std::uint32_t>(address >> 8u);
+        queue.context[0x390] = static_cast<std::uint32_t>(address >> 40u);
+        const auto color = AgcDriver::Graphics::DecodeState(queue).color;
+        Require(color.tileMode == AgcDriver::Graphics::ColorTileMode::Z64KBX && color.address == block && color.surfaceAddress == block && color.pipeBankXor == pipeBankXor, "a SW_64KB_Z_X color base did not split its block address and XOR");
+    }
+    queue.context[0x3b8] = 0x0dc68000u;
     for (const std::uint32_t columnBits : {0x1000u, 0x2000u, 0x3000u}) {
         queue.context[0x318] = static_cast<std::uint32_t>((block + columnBits) >> 8u);
         queue.context[0x390] = static_cast<std::uint32_t>((block + columnBits) >> 40u);
