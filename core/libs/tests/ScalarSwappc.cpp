@@ -126,16 +126,14 @@ static void CheckFetchCallAtEntry() {
 }
 
 static void CheckThrows() {
-    ExpectThrow("computed/data-dependent s_swappc_b64", [] {
-        Build(Program({
-            Sop1(0x00u, 8u, 0x21u, 4u),
-            Sopp(0x04u, 0x01u),
-        }));
-    });
+    Require(Build(Program({
+        Sop1(0x00u, 8u, 0x21u, 4u),
+        Sopp(0x04u, 0x01u),
+    })).unlinkedCallProgramCounters == std::vector<std::uint32_t>{0x00u});
     ExpectThrow("escapes the constant-offset call/return model", [] {
         Build(Program({
             Sop1(0x00u, 4u, 0x1fu, 0u),
-            Sop2Literal(0x04u, 4u, 0x00u, 4u, 0x18u),
+            Sop2Literal(0x04u, 4u, 0x00u, 4u, 0x20u),
             Sop2Literal(0x0cu, 5u, 0x04u, 5u, 0u),
             Sop1(0x14u, 8u, 0x21u, 4u),
             Sop1(0x18u, 8u, 0x03u, 8u),
@@ -166,7 +164,7 @@ static void CheckThrows() {
             Sop1(0x24u, 0u, 0x20u, 8u),
         }));
     });
-    ExpectThrow("is shared with another call", [] {
+    ExpectThrow("control flow enters the call region", [] {
         Build(Program({
             Sop1(0x00u, 4u, 0x1fu, 0u),
             Sop2Literal(0x04u, 4u, 0x00u, 4u, 0x18u),
@@ -188,17 +186,17 @@ static void CheckThrows() {
             Sop1(0x1cu, 0u, 0x20u, 8u),
         }));
     });
-    ExpectThrow("computed/data-dependent s_swappc_b64", [] {
+    {
         SwappcInfo info;
         info.fetchCallAllowed = true;
         info.userDataBaseRegister = 16u;
         info.userDataCount = 8u;
-        Build(Program({
+        Require(Build(Program({
             Sopp(0x00u, 0x00u),
             Sop1(0x04u, 2u, 0x21u, 4u),
             Sopp(0x08u, 0x01u),
-        }), &info);
-    });
+        }), &info).unlinkedCallProgramCounters == std::vector<std::uint32_t>{0x04u});
+    }
     ExpectThrow("must live in the fetch-shader code", [] {
         SwappcInfo info;
         info.fetchCallAllowed = true;
