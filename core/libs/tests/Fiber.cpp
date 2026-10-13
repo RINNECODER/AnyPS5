@@ -109,6 +109,43 @@ void RunSmallContextFirst() {
     }
 }
 
+constexpr std::size_t HostCallContextSize = 16 * 1024;
+constexpr std::size_t HostCallStack = 256 * 1024;
+constexpr std::size_t HostCallFrameSize = 4096;
+constexpr unsigned char HostCallGuardFill = 0x5c;
+alignas(16) std::array<unsigned char, HostCallStack + 64 * 1024> g_hostCallArea;
+FiberStorage g_hostCallStorage;
+
+std::size_t DescendHostStack(std::size_t remaining);
+std::size_t (*volatile g_descendHostStack)(std::size_t) = DescendHostStack;
+
+std::size_t DescendHostStack(std::size_t remaining) {
+    volatile unsigned char frame[HostCallFrameSize];
+    frame[0] = 0x11;
+    frame[HostCallFrameSize - 1] = 0x22;
+    const std::size_t frames = remaining > HostCallFrameSize ? g_descendHostStack(remaining - HostCallFrameSize) : 0;
+    Require(frame[0] == 0x11 && frame[HostCallFrameSize - 1] == 0x22, "host call frame intact");
+    return frames + 1;
+}
+
+void APS5_VABI HostCallEntry(std::uint64_t, std::uint64_t) {
+    Require(g_descendHostStack(HostCallStack) == HostCallStack / HostCallFrameSize, "host call depth");
+    std::uint64_t received = 0;
+    for (;;) sceFiberReturnToThread(0, &received);
+}
+
+void RunHostCallOnSmallContext() {
+    auto* fiber = reinterpret_cast<FiberObject*>(&g_hostCallStorage);
+    auto* context = g_hostCallArea.data() + g_hostCallArea.size() - HostCallContextSize;
+    g_hostCallArea.fill(HostCallGuardFill);
+    Require(_sceFiberInitializeImpl_nid_postfix(fiber, "host call", HostCallEntry, 0, context, HostCallContextSize, nullptr, 0) == 0, "initialize host call fiber");
+    Require(sceFiberRun_nid_postfix(fiber, 0, nullptr) == 0, "run a 256 KiB host call from a 16 KiB fiber");
+    Require(sceFiberFinalize(fiber) == 0, "finalize host call fiber");
+    for (auto* byte = g_hostCallArea.data(); byte != context; ++byte) {
+        Require(*byte == HostCallGuardFill, "a host call from a 16 KiB fiber writes nothing below its context");
+    }
+}
+
 [[gnu::noinline]] std::int32_t RunFirst(std::uint64_t* returned) {
     g_threadFramePointer = reinterpret_cast<std::uint64_t>(__builtin_frame_address(0));
     const std::int32_t result = sceFiberRun_nid_postfix(g_first, 100, returned);
@@ -154,4 +191,6 @@ int main() {
     Require(info.size_context_margin > 0 && info.size_context_margin < g_checkedContext.size() - 4096, "margin below the used stack");
     Require(info.size_context_margin % 8 == 0, "margin in whole words");
     Require(sceFiberStopContextSizeCheck() == 0, "stop size check");
+
+    RunHostCallOnSmallContext();
 }
