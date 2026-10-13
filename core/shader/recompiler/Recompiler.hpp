@@ -120,6 +120,19 @@ enum class RasterPrimitive : std::uint8_t {
     Rectangle
 };
 
+namespace ReversedBlendCode {
+
+inline constexpr std::uint32_t Enable = 1u;
+inline constexpr std::uint32_t ClampSource = 2u;
+inline constexpr std::uint32_t Premultiply = 4u;
+inline constexpr std::uint32_t SourceAlphaShift = 4u;
+inline constexpr std::uint32_t SourceColorShift = 8u;
+inline constexpr std::uint32_t SecondAlphaShift = 12u;
+inline constexpr std::uint32_t SecondColorShift = 16u;
+inline constexpr std::uint32_t FactorMask = 7u;
+
+}
+
 struct ShaderPixelStageInfo {
     std::uint32_t interpolatorCount;
     std::array<std::uint32_t, 32> interpolatorSettings;
@@ -154,6 +167,7 @@ struct ShaderPixelStageInfo {
     bool layerExported = false;
     std::uint32_t layerBase = 0;
     std::uint8_t quadPixelMask = 0xf;
+    std::uint32_t reversedBlend = 0;
 };
 
 struct ShaderVertexBufferResource {

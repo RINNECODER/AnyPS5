@@ -727,6 +727,94 @@ std::string DepthMaintenanceRejection(const QueueState& queue) {
     return zeroMessage(0x000, control->second, "DB_RENDER_CONTROL depth copy, resummarize or decompress");
 }
 
+ReversedBlend TranslateReversedBlend(std::uint32_t blendControl, std::uint8_t componentMapping, VkFormat format, bool forceDestinationAlphaOne) {
+    namespace Code = ShaderRecompiler::ReversedBlendCode;
+    const auto refuse = [&](const char* reason) {
+        char text[320];
+        std::snprintf(text, sizeof(text), "AGC graphics: blending into a color target with a reversed component order %s (CB_BLEND_CONTROL 0x%08x, component mapping 0x%02x, VkFormat %d)", reason, blendControl, componentMapping, static_cast<int>(format));
+        throw std::runtime_error(text);
+    };
+    Require(componentMapping == 0x1bu || componentMapping == 0x93u, "a reversed-order blend needs the component mapping 0x1b or 0x93");
+    if (format == VK_FORMAT_R8G8B8A8_SRGB) refuse("is not implemented for sRGB targets");
+    if (format == VK_FORMAT_R8G8B8A8_SNORM || format == VK_FORMAT_R16G16B16A16_SNORM) refuse("is not implemented for signed normalized targets");
+    if (format != VK_FORMAT_R8G8B8A8_UNORM && format != VK_FORMAT_R16G16B16A16_UNORM && format != VK_FORMAT_R16G16B16A16_SFLOAT) refuse("is not implemented for integer targets");
+    const auto alphaControl = (blendControl & 0x20000000u) != 0 ? blendControl >> 16u : blendControl;
+    std::array<VkBlendFactor, 2> color{blendFactor(blendControl & 0x1fu), blendFactor((blendControl >> 8u) & 0x1fu)};
+    std::array<VkBlendFactor, 2> alpha{blendFactor(alphaControl & 0x1fu), blendFactor((alphaControl >> 8u) & 0x1fu)};
+    const auto operation = blendOp((blendControl >> 5u) & 7u);
+    const auto alphaOperation = blendOp((alphaControl >> 5u) & 7u);
+    const auto any = [&](auto predicate) { return predicate(color[0]) || predicate(color[1]) || predicate(alpha[0]) || predicate(alpha[1]); };
+    const auto constant = [](VkBlendFactor factor) { return factor == VK_BLEND_FACTOR_CONSTANT_COLOR || factor == VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR || factor == VK_BLEND_FACTOR_CONSTANT_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA; };
+    if (any(secondSource)) refuse("with a second-source factor is not implemented, as dual-source blending into a component-swapped color target is unsupported");
+    if (any(constant)) refuse("with a constant blend factor is not implemented");
+    if (operation != alphaOperation) refuse("with different color and alpha operations is not implemented");
+    if (forceDestinationAlphaOne) {
+        for (auto& factor : color) factor = colorFactorWithOpaqueDestination(factor);
+        for (auto& factor : alpha) factor = alphaFactorWithOpaqueDestination(factor);
+    }
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.blendEnable = VK_TRUE;
+    blend.colorBlendOp = operation;
+    blend.alphaBlendOp = operation;
+    if (operation == VK_BLEND_OP_MIN || operation == VK_BLEND_OP_MAX) {
+        if (any([](VkBlendFactor factor) { return factor != VK_BLEND_FACTOR_ONE; })) refuse("with a MIN or MAX operation whose factors are not ONE is not implemented");
+        blend.srcColorBlendFactor = blend.dstColorBlendFactor = blend.srcAlphaBlendFactor = blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        return {blend, 0u};
+    }
+    const auto ownAlpha = [](VkBlendFactor factor) {
+        switch (factor) {
+            case VK_BLEND_FACTOR_SRC_COLOR: return VK_BLEND_FACTOR_SRC_ALPHA;
+            case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            case VK_BLEND_FACTOR_DST_COLOR: return VK_BLEND_FACTOR_DST_ALPHA;
+            case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE: return VK_BLEND_FACTOR_ONE;
+            default: return factor;
+        }
+    };
+    const auto computed = [](VkBlendFactor factor) {
+        switch (factor) {
+            case VK_BLEND_FACTOR_ZERO: return 0u;
+            case VK_BLEND_FACTOR_ONE: return 1u;
+            case VK_BLEND_FACTOR_SRC_COLOR: return 2u;
+            case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return 3u;
+            case VK_BLEND_FACTOR_SRC_ALPHA: return 4u;
+            case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: return 5u;
+            default: return 8u;
+        }
+    };
+    std::array<bool, 2> shaded{};
+    for (std::size_t position = 0; position < 2; ++position) {
+        alpha[position] = ownAlpha(alpha[position]);
+        const auto factor = color[position];
+        if (factor == VK_BLEND_FACTOR_DST_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA || factor == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE) refuse("with a factor of the destination alpha in the color equation, which the target keeps in its first channel, is not implemented");
+        const bool channelwise = factor != VK_BLEND_FACTOR_SRC_ALPHA && factor != VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA && ownAlpha(factor) == alpha[position];
+        if (channelwise) continue;
+        if (computed(factor) > 5u || computed(alpha[position]) > 5u) refuse("with a destination factor the color and alpha equations do not share is not implemented");
+        shaded[position] = true;
+    }
+    std::uint32_t shaderCode = 0;
+    const auto second = [&](std::size_t position) {
+        shaderCode |= (computed(alpha[position]) << Code::SecondAlphaShift) | (computed(color[position]) << Code::SecondColorShift);
+        color[position] = VK_BLEND_FACTOR_SRC1_COLOR;
+        alpha[position] = VK_BLEND_FACTOR_SRC1_ALPHA;
+    };
+    if (shaded[0] || shaded[1]) shaderCode = Code::Enable | (format == VK_FORMAT_R16G16B16A16_SFLOAT ? 0u : Code::ClampSource);
+    if (shaded[0] && shaded[1]) {
+        shaderCode |= Code::Premultiply | (computed(alpha[0]) << Code::SourceAlphaShift) | (computed(color[0]) << Code::SourceColorShift);
+        color[0] = alpha[0] = VK_BLEND_FACTOR_ONE;
+        second(1);
+    } else {
+        for (std::size_t position = 0; position < 2; ++position) {
+            if (shaded[position]) second(position);
+        }
+    }
+    blend.srcColorBlendFactor = color[0];
+    blend.dstColorBlendFactor = color[1];
+    blend.srcAlphaBlendFactor = alpha[0];
+    blend.dstAlphaBlendFactor = alpha[1];
+    return {blend, shaderCode};
+}
+
 State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     if (auto reason = DepthMaintenanceRejection(queue); !reason.empty()) throw std::runtime_error(reason);
     const auto& cx = queue.context;
@@ -946,26 +1034,38 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             if (((exportedMask >> ((mapping >> (2u * component)) & 3u)) & 1u) != 0) state.colorWriteMask |= 1u << component;
         }
         state.blendEnable = ((blend >> 30u) & 1u) != 0 && (read(cx, 0x31c + slot * 0xfu) & 0x10000u) == 0;
-        if (state.blendEnable && (mapping == 0x1bu || mapping == 0x93u)) throw std::runtime_error("AGC graphics: blending into a color target with a reversed component order is not implemented");
         Require(!state.blendEnable || !color.uintExport, "blending into an unsigned integer target is unsupported");
+        const bool reversed = mapping == 0x1bu || mapping == 0x93u;
         if (state.blendEnable) {
-            state.srcColorBlendFactor = blendFactor(blend & 0x1fu);
-            state.dstColorBlendFactor = blendFactor((blend >> 8u) & 0x1fu);
-            state.colorBlendOp = blendOp((blend >> 5u) & 7u);
-            const auto alpha = (blend & 0x20000000u) != 0 ? blend >> 16u : blend;
-            state.srcAlphaBlendFactor = blendFactor(alpha & 0x1fu);
-            state.dstAlphaBlendFactor = blendFactor((alpha >> 8u) & 0x1fu);
-            state.alphaBlendOp = blendOp((alpha >> 5u) & 7u);
-            if ((mapping & 3u) == 3u) {
-                state.srcColorBlendFactor = state.srcAlphaBlendFactor;
-                state.dstColorBlendFactor = state.dstAlphaBlendFactor;
-                state.colorBlendOp = state.alphaBlendOp;
-            }
-            if ((read(cx, 0x31d + slot * 0xfu) & 0x20000u) != 0) {
-                state.srcColorBlendFactor = colorFactorWithOpaqueDestination(state.srcColorBlendFactor);
-                state.dstColorBlendFactor = colorFactorWithOpaqueDestination(state.dstColorBlendFactor);
-                state.srcAlphaBlendFactor = alphaFactorWithOpaqueDestination(state.srcAlphaBlendFactor);
-                state.dstAlphaBlendFactor = alphaFactorWithOpaqueDestination(state.dstAlphaBlendFactor);
+            const bool opaqueDestination = (read(cx, 0x31d + slot * 0xfu) & 0x20000u) != 0;
+            if (reversed) {
+                const auto translated = TranslateReversedBlend(blend, mapping, color.format, opaqueDestination);
+                state.srcColorBlendFactor = translated.blend.srcColorBlendFactor;
+                state.dstColorBlendFactor = translated.blend.dstColorBlendFactor;
+                state.colorBlendOp = translated.blend.colorBlendOp;
+                state.srcAlphaBlendFactor = translated.blend.srcAlphaBlendFactor;
+                state.dstAlphaBlendFactor = translated.blend.dstAlphaBlendFactor;
+                state.alphaBlendOp = translated.blend.alphaBlendOp;
+                if (translated.shaderCode != 0u) result.reversedBlend = translated.shaderCode;
+            } else {
+                state.srcColorBlendFactor = blendFactor(blend & 0x1fu);
+                state.dstColorBlendFactor = blendFactor((blend >> 8u) & 0x1fu);
+                state.colorBlendOp = blendOp((blend >> 5u) & 7u);
+                const auto alpha = (blend & 0x20000000u) != 0 ? blend >> 16u : blend;
+                state.srcAlphaBlendFactor = blendFactor(alpha & 0x1fu);
+                state.dstAlphaBlendFactor = blendFactor((alpha >> 8u) & 0x1fu);
+                state.alphaBlendOp = blendOp((alpha >> 5u) & 7u);
+                if ((mapping & 3u) == 3u) {
+                    state.srcColorBlendFactor = state.srcAlphaBlendFactor;
+                    state.dstColorBlendFactor = state.dstAlphaBlendFactor;
+                    state.colorBlendOp = state.alphaBlendOp;
+                }
+                if (opaqueDestination) {
+                    state.srcColorBlendFactor = colorFactorWithOpaqueDestination(state.srcColorBlendFactor);
+                    state.dstColorBlendFactor = colorFactorWithOpaqueDestination(state.dstColorBlendFactor);
+                    state.srcAlphaBlendFactor = alphaFactorWithOpaqueDestination(state.srcAlphaBlendFactor);
+                    state.dstAlphaBlendFactor = alphaFactorWithOpaqueDestination(state.dstAlphaBlendFactor);
+                }
             }
             for (std::uint32_t i = 0; i < 4; ++i) result.blendConstants[i] = readFloat(cx, 0x105 + i);
             const auto constantColor = [](VkBlendFactor factor) { return factor == VK_BLEND_FACTOR_CONSTANT_COLOR || factor == VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR; };
@@ -991,7 +1091,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
             Require(!state.blendEnable, "blending into a 10_11_11 unorm color target is unsupported");
             Require((exportedMask & 7u) == 7u, "partial writes of a 10_11_11 unorm color target are unsupported");
         }
-        if (state.blendEnable && (secondSource(state.srcColorBlendFactor) || secondSource(state.dstColorBlendFactor) || secondSource(state.srcAlphaBlendFactor) || secondSource(state.dstAlphaBlendFactor))) {
+        if (state.blendEnable && !reversed && (secondSource(state.srcColorBlendFactor) || secondSource(state.dstColorBlendFactor) || secondSource(state.srcAlphaBlendFactor) || secondSource(state.dstAlphaBlendFactor))) {
             const auto addition = [](VkBlendOp op) { return op == VK_BLEND_OP_ADD || op == VK_BLEND_OP_SUBTRACT || op == VK_BLEND_OP_REVERSE_SUBTRACT; };
             Require(addition(state.colorBlendOp) && addition(state.alphaBlendOp), "dual-source blending with a MIN or MAX operation is unsupported");
             result.dualSourceBlend = true;
@@ -1002,6 +1102,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         if ((requiredBlendMask & (1u << i)) != 0) result.blendConstants[i] = requiredBlendConstants[i];
     }
     if (!result.colors.empty()) result.blend = result.blends[result.colors.front().exportIndex];
+    Require(result.reversedBlend == 0 || (exportSlots.size() == 1 && exportCount == 1), "blending into a color target with a reversed component order through factors the pixel shader computes needs that target to be the shader's only color export");
     if (result.dualSourceBlend) {
         Require(exportSlots.size() == 2 && exportSlots[0] == 0 && exportSlots[1] == 1 && exportCount == 1, "dual-source blending needs pixel exports to MRT slots 0 and 1 and color writes to slot 0 alone");
         Require(result.colors.front().componentMapping == 0xe4u, "dual-source blending into a component-swapped color target is unsupported");

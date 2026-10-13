@@ -114,6 +114,7 @@ struct State {
     // index, the slice of a layered depth target (DepthTarget::slice..lastSlice) each primitive renders to.
     bool layered = false;
     bool dualSourceBlend = false;
+    std::uint32_t reversedBlend = 0;
     VkExtent2D renderExtent;
     // PA_SC_AA_CONFIG MSAA_NUM_SAMPLES as a count (1 when multisampling is off).
     std::uint32_t rasterSamples = 1;
@@ -153,6 +154,11 @@ ShaderRecompiler::RasterPrimitive RasterPrimitiveOf(const State& state);
 // layered draws (the vertex stage exports the layer) and for draws without a color target.
 std::uint32_t PixelLayerBase(const State& state);
 ColorTarget DecodeColorBuffer(const Registers& context, std::uint32_t slot);
+struct ReversedBlend {
+    VkPipelineColorBlendAttachmentState blend;
+    std::uint32_t shaderCode;
+};
+ReversedBlend TranslateReversedBlend(std::uint32_t blendControl, std::uint8_t componentMapping, VkFormat format, bool forceDestinationAlphaOne);
 std::size_t CmaskBytes(std::uint32_t width, std::uint32_t height);
 std::uint32_t ColorWriteMask(const Registers& context);
 // The one sample count a draw's attachments render at (see State.cpp); throws for color targets whose
