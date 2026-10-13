@@ -108,13 +108,46 @@ def call_targets(function, ins):
     target = direct_target(function, ins)
     if target is not None:
         return {target}
-    site = function.image.annotated_calls(function.contract).get(ins.address)
-    return set() if site is None else set(site['target_addresses']) & function.image.functions.keys()
+    image = function.image
+    site = image.annotated_calls(function.contract).get(ins.address)
+    if site is None:
+        return set()
+    index = site.get('target_set')
+    if index is None:
+        return set(site['target_addresses']) & image.functions.keys()
+    # The filtered target set depends only on the target set, which many owners share.
+    cache = getattr(image, '_call_targets_cache', None)
+    if cache is None:
+        cache = image._call_targets_cache = {}
+    cached = cache.get(index)
+    if cached is None:
+        cached = frozenset(set(site['target_addresses']) & image.functions.keys())
+        cache[index] = cached
+    return cached
 
 
 def required_bindings(function, ins):
-    return frozenset().union(*(function.image.provider_requirements.get(target, frozenset())
-                              for target in call_targets(function, ins)))
+    image = function.image
+    target = direct_target(function, ins)
+    if target is not None:
+        return image.provider_requirements.get(target, frozenset())
+    site = image.annotated_calls(function.contract).get(ins.address)
+    if site is None:
+        return frozenset()
+    # The union depends only on the target set, which many owners share; cache it per set.
+    index = site.get('target_set')
+    if index is None:
+        return frozenset().union(*(image.provider_requirements.get(target, frozenset())
+                                   for target in site['target_addresses']))
+    cache = getattr(image, '_required_bindings_cache', None)
+    if cache is None:
+        cache = image._required_bindings_cache = {}
+    cached = cache.get(index)
+    if cached is None:
+        cached = frozenset().union(*(image.provider_requirements.get(target, frozenset())
+                                     for target in site['target_addresses']))
+        cache[index] = cached
+    return cached
 
 
 def infer_requirements(functions):
