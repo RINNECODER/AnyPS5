@@ -109,7 +109,8 @@ def call_targets(function, ins):
 
 
 def required_bindings(function, ins):
-    return frozenset().union(*(function.image.provider_requirements[target] for target in call_targets(function, ins)))
+    return frozenset().union(*(function.image.provider_requirements.get(target, frozenset())
+                              for target in call_targets(function, ins)))
 
 
 def infer_requirements(functions):

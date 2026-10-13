@@ -39,6 +39,17 @@ def validate_indirect_calls(image, owner_contract):
     require(type(start) is int and type(size) is int and start >= 0 and size > 0,
             'invalid indirect call owner range')
     descriptors = {}
+    pool = image.contracts.get('target_sets')
+
+    def targets_of(record):
+        targets = record.get('targets')
+        if targets is None and 'target_set' in record:
+            index = record['target_set']
+            require(isinstance(pool, list) and type(index) is int and 0 <= index < len(pool),
+                    'invalid indirect target-set reference')
+            targets = pool[index]
+        return targets
+
     for record in records:
         require(isinstance(record, dict), 'indirect call annotation must be an object')
         address = record.get('address')
@@ -49,6 +60,29 @@ def validate_indirect_calls(image, owner_contract):
         require(len(decoded) == 1 and decoded[0].address + decoded[0].size <= start + size,
                 'truncated indirect call instruction')
         validate_operand(decoded[0])
+        if abi.uniform(owner_contract):
+            candidate = {'name': f'indirect_{address:x}', 'uniform': True, 'result': 'void', 'parameters': []}
+            targets = targets_of(record)
+            require(isinstance(targets, list) and targets, 'indirect call requires a nonempty declared target set')
+            require(all(type(target) is int and 0 <= target <= (1 << 64) - 1 for target in targets),
+                    'invalid indirect call target address')
+            require(len(set(targets)) == len(targets), 'duplicate indirect call target address')
+            names = []
+            for target in targets:
+                try:
+                    contract = image.functions[target] if target in image.functions else image.callee(target)
+                except ValueError as error:
+                    raise CallError(f'unresolved indirect call target 0x{target:x}: {error}') from error
+                require(abi.uniform(contract),
+                        f'uniform indirect call target {contract["name"]} is not a uniform function')
+                if contract['name'] not in names:
+                    names.append(contract['name'])
+            descriptors[address] = {'contract': candidate, 'kind': 'operand', 'targets': names,
+                                    'target_addresses': list(targets),
+                                    'qualification': 'declared-target-set-not-inferred',
+                                    'source_qualification': 'Caller-supplied closed-world target set; no automatic target proof or runtime membership check',
+                                    'native_pointer_requirement': 'operand must already contain a native pointer to a declared uniform target'}
+            continue
         candidate = {'name': f'indirect_{address:x}', 'result': record.get('result'),
                      'parameters': record.get('parameters')}
         for field in ('variadic', 'sret', 'byval', 'guest_calling_convention', 'guest_locations', 'guest_return_register'):
@@ -56,7 +90,7 @@ def validate_indirect_calls(image, owner_contract):
                 candidate[field] = record[field]
         expected = structural_signature(candidate)
         candidate['parameters'] = list(candidate['parameters'])
-        targets = record.get('targets')
+        targets = targets_of(record)
         require(isinstance(targets, list) and targets, 'indirect call requires a nonempty declared target set')
         require(all(type(target) is int and 0 <= target <= (1 << 64) - 1 for target in targets),
                 'invalid indirect call target address')
