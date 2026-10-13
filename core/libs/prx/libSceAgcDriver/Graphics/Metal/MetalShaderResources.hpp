@@ -95,6 +95,8 @@ private:
     std::optional<NativeGuestMemory::BorrowedRangesScope> borrowed;
     bool committedWithoutWaiting = false;
     void markDccUncompressed();
+    bool sharesPlainTexels(const Image& image, const Graphics::GuestTextureResource& descriptor);
+    std::string dccKeysNote(const Image& image, const Graphics::GuestTextureResource& descriptor);
     CpuReadHook cpuRead;
     std::vector<NativeGuestMemory::BorrowedRange> borrowedRanges;
     MetalGuestMemory memory;

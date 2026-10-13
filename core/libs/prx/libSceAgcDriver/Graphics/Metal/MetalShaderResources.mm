@@ -369,6 +369,40 @@ Graphics::DccKeys MetalShaderResources::textureKeys(const Graphics::GuestTexture
     throw std::runtime_error(message);
 }
 
+// One surface bound twice at the same base, once by a descriptor that names its DCC metadata and
+// once by one that names none: a mip-chain pass renders one level of a mipmapped color target (bound
+// without DCC) while sampling another level through a texture descriptor that names the keys. While
+// the metadata says "uncompressed" both views mean the same plain texels, so they share one backing;
+// a written DCC view leaves the keys uncompressed (markDccUncompressed).
+bool MetalShaderResources::sharesPlainTexels(const Image& image, const Graphics::GuestTextureResource& descriptor) {
+    const auto& original = image.texture->Descriptor();
+    if (original.dccAddress == descriptor.dccAddress) return false;
+    if (original.dccAddress != 0 && descriptor.dccAddress != 0) return false;
+    if (!image.texture->CanShareBackingIgnoringDcc(descriptor)) return false;
+    if (original.dccAddress != 0) return image.keys == Graphics::DccKeys::Uncompressed;
+    // The keys of a mipmapped color target are ignored (Graphics::State binds it without DCC), so
+    // when this work writes such a surface its plain texels are what it holds, whatever stale keys a
+    // texture descriptor of it names (a downsample pass samples one level while rendering the next).
+    if (image.written && original.mipCount > 1) return true;
+    try {
+        return textureKeys(descriptor, image.texture->GuestBytes()) == Graphics::DccKeys::Uncompressed;
+    } catch (const std::exception&) {
+        return false;  // compressed or aliased metadata: the overlap is reported as before
+    }
+}
+
+// For the overlap error: the keys of whichever view names DCC metadata the other does not.
+std::string MetalShaderResources::dccKeysNote(const Image& image, const Graphics::GuestTextureResource& descriptor) {
+    const auto& original = image.texture->Descriptor();
+    if (original.dccAddress == descriptor.dccAddress) return {};
+    if (original.dccAddress != 0) return std::string("bound DCC keys ") + Graphics::DccKeysName(image.keys) + "; ";
+    try {
+        return std::string("new DCC keys ") + Graphics::DccKeysName(textureKeys(descriptor, image.texture->GuestBytes())) + "; ";
+    } catch (const std::exception& error) {
+        return std::string("new DCC keys: ") + error.what() + "; ";
+    }
+}
+
 void MetalShaderResources::validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys) {
     if (descriptor.dccAddress == 0) return;
     if (!GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.baseAddress), bytes, true)) {
@@ -423,7 +457,8 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         throw std::invalid_argument("Metal texture atomics require one 32-bit component");
     }
     for (auto& image : images) {
-        if (!image.texture->CanShareBacking(descriptor)) continue;
+        const bool dccDiffers = !image.texture->CanShareBacking(descriptor) && sharesPlainTexels(image, descriptor);
+        if (!dccDiffers && !image.texture->CanShareBacking(descriptor)) continue;
         if (Graphics::IsDccClear(image.keys)) {
             const auto& original = image.texture->Descriptor();
             const auto elementBytes = Graphics::BytesPerElement(original.format);
@@ -452,7 +487,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         for (const auto& view : imageViews) {
             if (textureKey(view.texture->Descriptor(), view.compare) == textureKey(descriptor, compare)) return view.texture;
         }
-        auto view = image.texture->CreateView(descriptor, compare, minimumLodLowered);
+        auto view = image.texture->CreateView(descriptor, compare, minimumLodLowered, dccDiffers);
         imageViews.push_back({view, compare});
         resident.push_back(view->Texture());
         return view;
@@ -496,7 +531,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         }
         if (overlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes()) ||
             physicallyOverlaps(descriptor.baseAddress, end, begin, begin + image.texture->GuestBytes())) {
-            throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing (" +
+            throw std::invalid_argument("Metal draw overlapping image views have incompatible captured backing (" + dccKeysNote(image, descriptor) +
                 describeImage(descriptor) + (descriptor.baseAddress == begin ? " at the same base as " : " overlapping ") +
                 describeImage(other) + "; " + image.texture->ShareMismatch(descriptor) + ")");
         }

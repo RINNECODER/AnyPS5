@@ -338,16 +338,26 @@ void MetalTexture::createViews(bool compare) {
 }
 
 bool MetalTexture::CanShareBacking(const Graphics::GuestTextureResource& resource) const {
+    return canShareBacking(resource, false);
+}
+
+bool MetalTexture::CanShareBackingIgnoringDcc(const Graphics::GuestTextureResource& resource) const {
+    return canShareBacking(resource, true);
+}
+
+bool MetalTexture::canShareBacking(const Graphics::GuestTextureResource& resource, bool ignoreDcc) const {
     const auto& original = backing->descriptor;
-    if (std::tie(original.baseAddress, original.width, original.height, original.mipCount, original.tileMode, original.dimension, original.dccAddress, original.dccAlphaOnMsb, original.dccPipeAligned) !=
-        std::tie(resource.baseAddress, resource.width, resource.height, resource.mipCount, resource.tileMode, resource.dimension, resource.dccAddress, resource.dccAlphaOnMsb, resource.dccPipeAligned)) return false;
+    if (std::tie(original.baseAddress, original.width, original.height, original.mipCount, original.tileMode, original.dimension) !=
+        std::tie(resource.baseAddress, resource.width, resource.height, resource.mipCount, resource.tileMode, resource.dimension)) return false;
+    if (!ignoreDcc && std::tie(original.dccAddress, original.dccAlphaOnMsb, original.dccPipeAligned) !=
+        std::tie(resource.dccAddress, resource.dccAlphaOnMsb, resource.dccPipeAligned)) return false;
     const auto originalAllocation = original.allocatedMipCount == 0 ? original.mipCount : original.allocatedMipCount;
     const auto allocation = resource.allocatedMipCount == 0 ? resource.mipCount : resource.allocatedMipCount;
     if (originalAllocation != allocation || formatFamily(original.format) != formatFamily(resource.format)) return false;
     if (original.depthOrLastArray == resource.depthOrLastArray) return sameGeometry(backing->geometry, Graphics::DescribeSurface(resource));
     // A view of the first layers of an array surface (a per-slice pass binds "array k-k" with k + 1
     // layers): those layers lie at the same guest offsets in the whole surface's backing.
-    return resource.depthOrLastArray < original.depthOrLastArray && original.dccAddress == 0 &&
+    return resource.depthOrLastArray < original.depthOrLastArray && (ignoreDcc || original.dccAddress == 0) &&
         layerPrefix(backing->geometry, Graphics::DescribeSurface(resource));
 }
 
@@ -376,8 +386,8 @@ std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestText
 }
 
 std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestTextureResource& resource,
-    bool compare, bool minimumLodLowered) const {
-    require(CanShareBacking(resource), "Metal texture view is incompatible with the captured backing");
+    bool compare, bool minimumLodLowered, bool ignoreDcc) const {
+    require(canShareBacking(resource, ignoreDcc), "Metal texture view is incompatible with the captured backing");
     return std::shared_ptr<MetalTexture>(new MetalTexture(backend, backing, resource, compare, minimumLodLowered));
 }
 
