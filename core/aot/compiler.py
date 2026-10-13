@@ -643,7 +643,7 @@ class Function:
                     source_name = self.reg(ins, args[1])[0]
                     source = original['pointers'].get(source_name)
                     if source_name in ('rsp', 'rbp'):
-                        source = ('frame', 0, original[source_name])
+                        source = ('frame', 0, original[source_name]) if original[source_name] is not None else None
                     if source is not None:
                         state['pointers'][dest] = source
                 if op == 'lea' and args[0].size == 8 and not args[1].mem.index:
@@ -651,7 +651,12 @@ class Function:
                     if base == 'rip':
                         state['pointers'][dest] = ('image', 0, ins.address + ins.size + args[1].mem.disp)
                     elif base in ('rsp', 'rbp'):
-                        state['pointers'][dest] = ('frame', 0, original[base] + args[1].mem.disp)
+                        if original[base] is not None:
+                            state['pointers'][dest] = ('frame', 0, original[base] + args[1].mem.disp)
+                        elif not self.uniform:
+                            self.fail(ins, 'dynamic frame offset')
+                        else:
+                            state['pointers'].pop(dest, None)
                     elif base in original['pointers']:
                         kind, index, offset = original['pointers'][base]
                         state['pointers'][dest] = (kind, index, offset + args[1].mem.disp)
