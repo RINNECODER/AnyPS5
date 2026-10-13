@@ -95,6 +95,11 @@ class Image:
         for segment in self.elf.iter_segments():
             if segment['p_type'] == 0x61000001:
                 self.process_parameters.append((segment['p_vaddr'], segment['p_filesz']))
+                # The SCE process-parameter segment is not PT_LOAD but the runtime must map it and
+                # read the title's libc parameters and allocator table from it.
+                if segment['p_filesz'] and segment['p_memsz'] >= segment['p_filesz']:
+                    self.segments.append(segment)
+                continue
             if segment['p_type'] == 'PT_TLS':
                 require(segment['p_memsz'] == 0 or contracts.get('allow_unlowered_tls', False),
                         'TLS requires native TLS lowering')
@@ -217,6 +222,9 @@ class Image:
 
     def segment(self, address, size=1):
         matches = [s for s in self.segments if s['p_vaddr'] <= address and address + size <= s['p_vaddr'] + s['p_memsz']]
+        loads = [s for s in matches if s['p_type'] == 'PT_LOAD']
+        if loads:
+            matches = loads
         require(len(matches) == 1, f'ambiguous or unmapped address 0x{address:x}')
         return matches[0]
 
@@ -235,6 +243,10 @@ class Image:
                 if self.guest_data:
                     return f'inttoptr (i64 {self.guest_base + address} to ptr)'
                 return f"getelementptr (i8, ptr @data_{spec['address']:x}, i64 {address - spec['address']})"
+        if self.guest_data and any(spec['p_vaddr'] <= address and address + size <= spec['p_vaddr'] + spec['p_filesz']
+                                   for spec in self.segments):
+            # Any other mapped segment (the SCE process-parameter segment).
+            return f'inttoptr (i64 {self.guest_base + address} to ptr)'
         raise Rejected(f'no native pointer contract for 0x{address:x}')
 
     def callee(self, address):
@@ -254,7 +266,12 @@ class Image:
             try:
                 self.call_contracts[address] = validate_indirect_calls(self, owner)
             except CallError as error:
-                raise Rejected(str(error)) from error
+                # A whole-title build (dispatch enabled) falls back to the runtime dispatch table
+                # for an indirect branch whose annotated target set names an address we cannot
+                # resolve, instead of rejecting the whole function.
+                if not self.contracts.get('dispatch'):
+                    raise Rejected(str(error)) from error
+                self.call_contracts[address] = {}
         return self.call_contracts[address]
 
     def call(self, ins, owner=None):
@@ -1217,6 +1234,10 @@ class Function:
             self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
 
     def uniform_stack_out(self, block, rsp):
+        if rsp is None:
+            # A dispatch tail call whose frame the analysis could not track; the outgoing stack
+            # window stays as the caller's.
+            return
         for index in range(abi.UNIFORM_STACK_SLOTS):
             offset = abi.UNIFORM_STACK_BASE + 8 * index
             value = self.emit(f'load i64, ptr {self.frame_pointer(rsp + offset - 8)}, align 1')

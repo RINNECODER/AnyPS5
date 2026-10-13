@@ -35,6 +35,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import zipfile
@@ -115,15 +116,31 @@ def digest(path):
     return verify.sha256_file(path)
 
 
-def run_logged(name, command, logs, log, cwd=None, env=None):
-    """Run a build step with its output in <logs>/<name>.log; show the tail on failure."""
+def run_logged(name, command, logs, log, cwd=None, env=None, timeout=None):
+    """Run a build step with its output in <logs>/<name>.log; show the tail on failure.
+
+    ``timeout`` (seconds) bounds the step: on expiry the whole process group is killed (a hung GUI or GPU child
+    would otherwise outlive its parent) and the step fails instead of hanging the job."""
     path = logs / (name + ".log")
+    timed_out = False
     with open(path, "w") as stream:
-        result = subprocess.run([str(part) for part in command], cwd=cwd, env=env, stdout=stream, stderr=subprocess.STDOUT)
-    if result.returncode != 0:
+        process = subprocess.Popen([str(part) for part in command], cwd=cwd, env=env, stdout=stream,
+                                   stderr=subprocess.STDOUT, start_new_session=timeout is not None)
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            returncode = process.wait()
+    if returncode != 0:
         text = path.read_text(errors="replace").replace(str(Path.home()), "~")
-        log("--- %s failed (exit %d), last lines:\n%s" % (name, result.returncode, "\n".join(text.splitlines()[-40:])))
-    releaselib.require(result.returncode == 0, "%s failed (exit %d)" % (name, result.returncode))
+        log("--- %s failed (%s), last lines:\n%s" % (name, "timed out after %ds" % timeout if timed_out else "exit %d" % returncode,
+                                                    "\n".join(text.splitlines()[-40:])))
+    releaselib.require(not timed_out, "%s timed out after %d seconds" % (name, timeout or 0))
+    releaselib.require(returncode == 0, "%s failed (exit %d)" % (name, returncode))
     return path
 
 
