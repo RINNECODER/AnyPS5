@@ -22,6 +22,13 @@ public:
     DriverStopped() : std::runtime_error("Metal driver has shut down") {}
 };
 
+// Thrown by Submit and SubmitCommandBuffer when the command words cannot be captured or fail PM4
+// validation. Nothing of the submission was queued, so a caller may skip it and carry on.
+class InvalidCommandBuffer final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 struct ReadableGuestRange {
     std::uint64_t address;
     std::size_t bytes;
@@ -66,6 +73,10 @@ public:
     void WithValidatedReadableRanges(std::span<const ReadableGuestRange> ranges, const std::function<void()>& publish);
     void Submit(const Packet* packet, std::uint32_t queue);
     void SubmitCommandBuffer(std::uint64_t commandAddress, std::uint32_t wordCount, std::uint8_t flags, std::uint32_t queue);
+    // Whether a REWIND tail that cannot be captured or fails validation is skipped with a log line
+    // instead of failing the driver. Off by default (tests stay strict); the Rosetta direct path
+    // turns it on.
+    void SetSkipInvalidCommandBuffers(bool skip);
     void WaitIdle();
     void Shutdown();
     void SuspendPoint();
