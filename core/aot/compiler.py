@@ -91,12 +91,15 @@ class Image:
         require(self.elf.elfclass == 64 and self.elf.little_endian and self.elf['e_machine'] == 'EM_X86_64', 'expected little-endian x86-64 ELF')
         self.segments = []
         self.process_parameters = []
+        self.tls_segment = None
         for segment in self.elf.iter_segments():
             if segment['p_type'] == 0x61000001:
                 self.process_parameters.append((segment['p_vaddr'], segment['p_filesz']))
             if segment['p_type'] == 'PT_TLS':
                 require(segment['p_memsz'] == 0 or contracts.get('allow_unlowered_tls', False),
                         'TLS requires native TLS lowering')
+                self.tls_segment = {'address': segment['p_vaddr'], 'filesz': segment['p_filesz'],
+                                    'memsz': segment['p_memsz']}
             if segment['p_type'] != 'PT_LOAD':
                 continue
             require(segment['p_filesz'] <= segment['p_memsz'], 'segment file size exceeds memory size')
@@ -311,13 +314,14 @@ class Function:
 
     def discover(self):
         start, end = self.contract['address'], self.contract['address'] + self.contract['size']
-        pending = [start]
+        pending = [(start, None)]
         occupied = {}
         while pending:
-            address = pending.pop()
+            address, predecessor = pending.pop()
             if address in self.instructions:
                 continue
-            require(start <= address < end, 'control flow escapes function contract')
+            if not (start <= address < end):
+                raise Rejected(f"control flow escapes function contract to 0x{address:x} from {predecessor}")
             decoded = list(self.image.decoder.disasm(self.image.read(address, min(15, end - address)), address, count=1))
             require(len(decoded) == 1, f'cannot decode 0x{address:x}')
             ins = decoded[0]
@@ -359,10 +363,15 @@ class Function:
                         raise
                     self.dispatch_calls[address] = True
                     successors = [next_address]
+            elif next_address >= end and next_address in self.image.functions:
+                # A fall-through into the next function is a tail call (the next function's
+                # return is this function's return).
+                self.tail_calls[address] = (self.image.functions[next_address], None)
+                successors = []
             else:
                 successors = [next_address]
             self.successors[address] = successors
-            pending.extend(successors)
+            pending.extend((successor, address) for successor in successors)
 
     def indirect_targets(self, ins):
         try:
@@ -1475,6 +1484,12 @@ def compile_image(image):
         lines.append('declare ptr @NativeAotDispatch_nid_no_patch(i64)')
         lines.append('declare void @NativeAotReportDispatchFailure_nid_no_patch(i64, i64)')
         lines.append('declare void @NativeAotRegisterDispatch_nid_no_patch(ptr, i64)')
+    tls = getattr(image, 'tls_segment', None)
+    if tls and tls['memsz']:
+        raw_tls = image.read(tls['address'], tls['filesz'])
+        value = ''.join(f'\\{byte:02X}' for byte in raw_tls)
+        lines.append(f'@__aps5_aot_tls_init = private constant [{len(raw_tls)} x i8] c"{value}", align 16')
+        lines.append('declare void @NativeAotRegisterTls_nid_no_patch(ptr, i64, i64)')
     if image.contracts.get('guard_diagnostics', False):
         lines.append('declare void @NativeAotReportGuardFailure_nid_no_patch(i64, i32)')
     if any(f.checked_pointer_loads or f.checked_pointer_arguments or f.checked_pointer_bases for f in functions):
@@ -1511,7 +1526,7 @@ def compile_image(image):
         lines.extend(native_image.declarations(image, descriptor))
     if image.immutable_regions:
         lines.extend(immutable_data.declarations(image))
-    if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
+    if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled or (tls and tls['memsz']):
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
         for slot, target in image.relocations:
@@ -1528,6 +1543,8 @@ def compile_image(image):
             lines.append(f"  store ptr @{binding['name']}, ptr {image.pointer(slot, 8)}, align 1")
         if dispatch_enabled:
             lines.append(f'  call void @NativeAotRegisterDispatch_nid_no_patch(ptr @__aps5_aot_dispatch, i64 {len(dispatch_entries)})')
+        if tls and tls['memsz']:
+            lines.append(f'  call void @NativeAotRegisterTls_nid_no_patch(ptr @__aps5_aot_tls_init, i64 {tls["filesz"]}, i64 {tls["memsz"]})')
         if image.immutable_regions:
             lines.append(f'  call void @NativeAotRequireReadOnly_nid_no_patch(ptr @__aps5_aot_readonly_ranges, i64 {len(image.immutable_regions)})')
         if descriptor is not None:
