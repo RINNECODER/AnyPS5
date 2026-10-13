@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -112,6 +113,52 @@ const bool timeZoneFixed = [] {
 #endif
 
 extern "C" int64_t APS5_VABI libc_mktime_nid_postfix(GuestTm* timeptr);
+extern "C" char* APS5_VABI getenv_nid_postfix(const char* name);
+
+namespace {
+
+bool setHostZone(const char* zone) {
+#ifdef _WIN32
+    return _putenv_s("TZ", zone == nullptr ? "" : zone) == 0;
+#else
+    return zone == nullptr ? ::unsetenv("TZ") == 0 : ::setenv("TZ", zone, 1) == 0;
+#endif
+}
+
+const char* hostZoneFor(const char* guest) {
+#ifdef _WIN32
+    return guest != nullptr && guest[0] == 0 ? "UTC0" : guest;
+#else
+    return guest == nullptr ? ":/etc/localtime" : guest;
+#endif
+}
+
+void applyGuestZone() {
+    static std::mutex mutex;
+    static bool initialized = false;
+    static bool present = false;
+    static std::string current;
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (!initialized) {
+        const char* host = std::getenv("TZ");
+        present = host != nullptr;
+        if (present) current = host;
+        initialized = true;
+    }
+    const char* guest = getenv_nid_postfix("TZ");
+    if ((guest != nullptr) == present && (guest == nullptr || current == guest)) return;
+    if (!setHostZone(hostZoneFor(guest))) throw std::runtime_error("tzset: could not apply the guest TZ");
+    present = guest != nullptr;
+    if (present) current = guest;
+    else current.clear();
+#ifdef _WIN32
+    _tzset();
+#else
+    ::tzset();
+#endif
+}
+
+}  // namespace
 
 namespace {
 
@@ -408,6 +455,7 @@ std::size_t APS5_VABI mbsrtowcs_nid_postfix(std::uint16_t* destination, const ch
 int APS5_VABI ___mb_cur_max_nid_postfix();
 
 void APS5_VABI tzset_nid_postfix(void) {
+    applyGuestZone();
     char** names = HostZoneNames();
     tzname_nid_postfix[0] = names[0];
     tzname_nid_postfix[1] = names[1];
@@ -475,6 +523,7 @@ GuestTm* APS5_VABI localtime_nid_postfix(const int64_t* timer) {
 
 GuestTm* APS5_VABI localtime_s_nid_postfix(const int64_t* timer, GuestTm* result) {
     if (timer == nullptr || result == nullptr) return nullptr;
+    applyGuestZone();
     const std::time_t t = static_cast<std::time_t>(*timer);
     std::tm host{};
     const int callerError = errno;
@@ -516,6 +565,7 @@ GuestTm* APS5_VABI gmtime_nid_postfix(const int64_t* timer) {
 }
 
 int64_t APS5_VABI libc_mktime_nid_postfix(GuestTm* timeptr) {
+    applyGuestZone();
     std::tm host = toHostTm(*timeptr);
     host.tm_wday = -1;
     const std::time_t t = std::mktime(&host);
