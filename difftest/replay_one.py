@@ -19,9 +19,15 @@ def main():
     ir = ir_path.read_text()
     image = image_path.read_bytes()
     name = f"sub_{address:x}" if uniform else f"func_{address:x}"
+    registers = {item: 0 for item in replay.REGISTERS}
+    if uniform:
+        # A zeroed pointer register would segfault on the first dereference; give
+        # every GPR a mapped zeroed scratch region so the body can read/write.
+        registers = {item: replay.BASE + 0x60000000 for item in replay.UNIFORM_GPRS if item != "rsp"}
+        registers["rsp"] = replay.BASE + 0x700FFFF8
     with tempfile.TemporaryDirectory(prefix="anyps5-replay-one-") as directory:
         outcome = replay.replay_case(Path(directory), ir, name, image, address,
-                                     {name: 0 for name in replay.REGISTERS}, bytes(1 << 16), uniform=uniform)
+                                     registers, bytes(1 << 16), uniform=uniform)
     print(json.dumps(outcome))
 
 

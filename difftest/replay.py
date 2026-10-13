@@ -76,6 +76,9 @@ int main(int argc, char** argv) {
     void* guest_stack = mmap((void*)(BASE + 0x70000000), 0x100000, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (guest_stack == MAP_FAILED) { perror("stack mmap"); return 7; }
+    void* scratch = mmap((void*)(BASE + 0x60000000), 0x100000, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (scratch == MAP_FAILED) { perror("scratch mmap"); return 8; }
     FILE* input = fopen(argv[3], "rb");
     if (fread(&in, 1, sizeof(in), input) != sizeof(in)) return 6;
     memset(&out, 0, sizeof(out));
@@ -169,6 +172,7 @@ def uniform_call(dylib, name, registers):
     libc.mmap.restype = ctypes.c_void_p
     libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
     libc.mmap(ctypes.c_void_p(BASE + 0x70000000), 0x100000, 1 | 2, 0x02 | 0x1000 | 0x10, -1, 0)
+    libc.mmap(ctypes.c_void_p(BASE + 0x60000000), 0x100000, 1 | 2, 0x02 | 0x1000 | 0x10, -1, 0)
     regfile = (ctypes.c_uint64 * 48)()
     for index, register in enumerate(UNIFORM_GPRS):
         regfile[index] = registers.get(register, 0)
