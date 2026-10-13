@@ -102,6 +102,14 @@ def _shift_amount(function, ins, operand, width, wide):
     return integer.extension(function, value, source_width, wide)
 
 
+def _rotate_right(function, value, count, width):
+    right = function.emit(f'lshr i{width} {value}, {count}')
+    complement = function.emit(f'sub i{width} {width}, {count}')
+    complement = function.emit(f'and i{width} {complement}, {width - 1}')
+    left = function.emit(f'shl i{width} {value}, {complement}')
+    return function.emit(f'or i{width} {right}, {left}')
+
+
 def lower(function, ins):
     op, args = ins.mnemonic, ins.operands
     if op not in OPERATIONS:

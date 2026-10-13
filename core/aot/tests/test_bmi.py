@@ -110,7 +110,7 @@ class BMITests(unittest.TestCase):
     def test_bmi2_and_scalar_tail_against_x86(self):
         cases = ['andn rax, rdx, rcx', 'mulx rdx, rax, rcx', 'bextr rax, rdx, rcx',
                  'bzhi rax, rdx, rcx', 'shlx rax, rdx, rcx', 'shrx rax, rdx, rcx',
-                 'sarx rax, rdx, rcx', 'popcnt rax, rdx', 'lzcnt rax, rdx', 'tzcnt rax, rdx',
+                 'sarx rax, rdx, rcx', 'rorx rax, rdx, 5', 'popcnt rax, rdx', 'lzcnt rax, rdx', 'tzcnt rax, rdx',
                  'rol rax, cl', 'ror rax, cl']
         values = [0, 1, 2, 0x123456789abcdef0, MASK64, 1 << 63, 0xff00ff00ff00ff00]
         controls = [0, 1, 3, 7, 8, 63, 64, 200]
