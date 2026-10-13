@@ -27,7 +27,9 @@ add_test_executable(rosetta_cpuid_tests
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ClzeroOperands.cpp
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ClzeroLowering.cpp
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ReciprocalOperands.cpp
-    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ReciprocalLowering.cpp)
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ReciprocalLowering.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/WideStoreOperands.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/WideStoreLowering.cpp)
 target_include_directories(rosetta_cpuid_tests PRIVATE ${ANYPS5_RELINKER_ROOT}/domain/include ${ANYPS5_RELINKER_ROOT}/codegen/include)
 target_compile_features(rosetta_cpuid_tests PRIVATE cxx_std_20)
 add_test(NAME rosetta_cpuid COMMAND rosetta_cpuid_tests)
