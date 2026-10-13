@@ -134,6 +134,7 @@ std::uint32_t EmitMinMaxF32Value(SpirvEmitterState& state, std::uint32_t lhs, st
 std::uint32_t EmitTrigCycleF32(SpirvEmitterState& state, std::uint32_t src, bool preserveSignedZero);
 void EmitF16DenormPreserve(SpirvEmitterState& state);
 std::uint32_t EmitF16BitsToF32(SpirvEmitterState& state, std::uint32_t bits);
+std::uint32_t EmitF16BitsToF32AnyNan(SpirvEmitterState& state, std::uint32_t bits);
 std::uint32_t EmitF16BitsToF32Decoded(SpirvEmitterState& state, std::uint32_t bits);
 void EmitProgram(SpirvEmitterState& state);
 void DefineGetBdaPointer(SpirvEmitterState& state);
