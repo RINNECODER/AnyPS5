@@ -71,6 +71,31 @@ struct AudioOut2Port {
     std::uint64_t attributeTraces = 0;
 };
 
+// ANYPS5_AUDIO_STATS=1: per-context counters a monitor thread reports and resets every 10 s, so a
+// dropout can be told apart: the title pushing too slowly or in bursts (pushes against the expected
+// rate, the longest gap between pushes), the device running dry (underruns and the silence they
+// played), grains dropped for running too far ahead, and how long pushes blocked on a full queue.
+bool AudioOut2StatsEnabled();
+
+struct AudioOut2Stats {
+    std::chrono::steady_clock::time_point windowStart;
+    std::chrono::steady_clock::time_point lastPush;
+    std::chrono::steady_clock::time_point lastCallback;
+    std::uint64_t pushes = 0;
+    std::uint64_t underruns = 0;
+    std::uint64_t silentFrames = 0;
+    std::uint64_t dropped = 0;
+    std::uint64_t fullTimeouts = 0;
+    std::uint64_t callbacks = 0;
+    // Host thread id of the last pusher (pthread_threadid_np), to find the title's mixer in a sample.
+    std::uint64_t pushingThread = 0;
+    double blockedSeconds = 0.0;
+    double maxPushGapSeconds = 0.0;
+    double maxCallbackGapSeconds = 0.0;
+    std::uint32_t minUnplayedMs = UINT32_MAX;
+    std::uint32_t maxUnplayedMs = 0;
+};
+
 struct AudioOut2Context {
     std::mutex lock;
     std::uint32_t grain = AUDIO_OUT2_DEFAULT_GRAIN;
@@ -108,6 +133,16 @@ struct AudioOut2Context {
     // Largest sample magnitude of the grains mixed since the last summary: the mixed signal's level.
     float summaryPeak = 0.0f;
     std::chrono::steady_clock::time_point summaryStart;
+    // The device has played mixed audio at least once, so silence it plays after running dry is a dropout.
+    bool played = false;
+    // The jitter buffer in ms (AudioOut2Context.cpp, CUSHION_MS), when it last changed, and whether the
+    // device ran dry since the last push.
+    std::uint32_t cushionMs = 0;
+    std::chrono::steady_clock::time_point cushionChanged;
+    bool underrunPending = false;
+    // When the last push returned, to measure how long the title stays away between pushes.
+    std::chrono::steady_clock::time_point lastPushEnd;
+    AudioOut2Stats stats;
 };
 
 // Mixes every port of the context that carries PCM data into out (stereo float, frames frames), summing

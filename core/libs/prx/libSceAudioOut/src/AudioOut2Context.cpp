@@ -6,10 +6,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+#ifdef __APPLE__
+#include <pthread.h>
+#include <pthread/qos.h>
+#endif
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
@@ -17,7 +22,8 @@
 
 // An AudioOut2 context is the hardware output queue: every push appends a grain (num_grains samples)
 // to a queue of queue_depth grains that plays in real time. Titles pace their mixer on that queue, so
-// the level must follow the output clock. With an SDL device open, a grain's port buffers are read at
+// the level must follow the output clock, and a blocking push returns only once the queue has room
+// for the next grain. With an SDL device open, a grain's port buffers are read at
 // the next push, the device callback plays the mixed grains behind a cushion and the level counts the
 // grains beyond that cushion; otherwise each push is mixed at once and a wall-clock model of the
 // queue stands in.
@@ -28,12 +34,27 @@ static constexpr std::size_t CONTEXT_MEMORY = 0x10000;
 static constexpr std::uint32_t DEFAULT_MAX_PORTS = 16;
 // Pushes, polls and advances traced individually before the trace falls back to the per-second summary.
 static constexpr std::uint64_t CALL_TRACE_FULL = 16;
-// Grains the device waits for before it starts playing (and again whenever it ran dry), so the
-// pushing thread's scheduling jitter does not starve it; the pad device queues as much silence ahead
-// of its first grain.
+// Audio the device waits for before it starts playing (and again whenever it ran dry), so the pushing
+// thread's scheduling jitter does not starve it; the pad device queues CUSHION_MS of silence ahead of
+// its first grain. The cushion is a jitter buffer: it starts at CUSHION_MS, and when the device runs
+// dry anyway because the title's mixer thread was descheduled longer than the queued audio lasts (on
+// a loaded host under Rosetta), the next push grows it so the queue covers a gap like the one that
+// caused it, up to MAX_CUSHION_MS. Gaps longer than MAX_COVERED_GAP_MS are outages (a title that
+// stopped pushing, a load hitch) no sensible latency covers, and leave it alone. After
+// CUSHION_SHRINK_AFTER without running dry it shrinks by CUSHION_SHRINK_MS, so latency comes back
+// down once the host is quiet. Blocking pushes are paced by the device's consumption, so the queue
+// follows the output clock and does not drift.
 static constexpr std::uint32_t CUSHION_MS = 40;
-// Grains the device has not played are not allowed to run further ahead than this; newer ones are dropped.
-static constexpr std::uint32_t MAX_QUEUED_MS = 250;
+static constexpr std::uint32_t MAX_CUSHION_MS = 200;
+static constexpr std::uint32_t MAX_COVERED_GAP_MS = 250;
+static constexpr std::uint32_t CUSHION_GROW_MS = 20;
+// Slack on top of a covered gap for the scheduling jitter of the device and pushing threads.
+static constexpr std::uint32_t CUSHION_SLACK_MS = 40;
+static constexpr std::uint32_t CUSHION_SHRINK_MS = 10;
+static constexpr std::chrono::seconds CUSHION_SHRINK_AFTER{10};
+// Grains the device has not played are not allowed to run further ahead than the cushion plus the
+// queue plus this; newer ones are dropped.
+static constexpr std::uint32_t MAX_AHEAD_MS = 250;
 // A blocking push on a full queue gives up after this long.
 static constexpr std::chrono::milliseconds FULL_WAIT_TIMEOUT{200};
 static constexpr std::chrono::milliseconds FULL_WAIT_STEP{1};
@@ -50,6 +71,14 @@ static constexpr std::uint32_t PAD_SLACK_GRAINS = 2;
 
 bool AudioOut2TraceEnabled() {
     static const bool enabled = std::getenv("APS5_TRACE_AUDIOOUT2") != nullptr;
+    return enabled;
+}
+
+bool AudioOut2StatsEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_AUDIO_STATS");
+        return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0;
+    }();
     return enabled;
 }
 
@@ -71,7 +100,7 @@ static std::uint32_t GrainBytes(const AudioOut2Context& context) {
 }
 
 static std::uint32_t CushionGrains(const AudioOut2Context& context) {
-    return (CUSHION_MS * AUDIO_OUT2_SAMPLE_RATE / 1000 + context.grain - 1) / context.grain;
+    return (context.cushionMs * AUDIO_OUT2_SAMPLE_RATE / 1000 + context.grain - 1) / context.grain;
 }
 
 static std::uint32_t UnplayedGrains(const AudioOut2Context& context) {
@@ -104,6 +133,55 @@ static std::uint32_t QueueLevel(AudioOut2Context& context, Clock::time_point now
 }
 
 static void DeviceCallback(void* userdata, Uint8* stream, int length);
+
+static std::uint32_t MaxQueuedMs(const AudioOut2Context& context) {
+    return context.cushionMs + static_cast<std::uint32_t>(static_cast<std::uint64_t>(context.queueDepth) * context.grain * 1000 / AUDIO_OUT2_SAMPLE_RATE) + MAX_AHEAD_MS;
+}
+
+// Sizes the jitter buffer (see CUSHION_MS) at a push. `gap` is how long the title stayed away from
+// Push before this one. The caller holds the context lock.
+static void AdaptCushion(AudioOut2Context& context, Clock::time_point now, Clock::duration gap) {
+    if (context.underrunPending) {
+        context.underrunPending = false;
+        context.cushionChanged = now;
+        const auto gapMs = std::chrono::duration_cast<std::chrono::milliseconds>(gap).count();
+        if (gapMs > MAX_COVERED_GAP_MS) return;
+        // The queue holds the cushion plus queue_depth grains when the title stops pushing.
+        const auto depthMs = static_cast<std::int64_t>(static_cast<std::uint64_t>(context.queueDepth) * context.grain * 1000 / AUDIO_OUT2_SAMPLE_RATE);
+        const auto covering = std::max<std::int64_t>(0, gapMs - depthMs + CUSHION_SLACK_MS);
+        const auto grown = std::min<std::int64_t>(MAX_CUSHION_MS, std::max<std::int64_t>(context.cushionMs + CUSHION_GROW_MS, covering));
+        AUDIOOUT2_TRACE("t=%.3f ctx %p ran dry after a %lld ms gap between pushes: cushion %u -> %lld ms\n", AudioOut2TraceSeconds(), static_cast<void*>(&context), static_cast<long long>(gapMs), context.cushionMs, static_cast<long long>(grown));
+        context.cushionMs = static_cast<std::uint32_t>(grown);
+        return;
+    }
+    if (context.cushionMs > CUSHION_MS && now - context.cushionChanged >= CUSHION_SHRINK_AFTER) {
+        context.cushionMs = std::max(CUSHION_MS, context.cushionMs - CUSHION_SHRINK_MS);
+        context.cushionChanged = now;
+    }
+}
+
+static std::uint64_t HostThreadId() {
+#ifdef __APPLE__
+    std::uint64_t id = 0;
+    pthread_threadid_np(nullptr, &id);
+    return id;
+#else
+    return 0;
+#endif
+}
+
+// Guest threads run at the host's default priority, and the thread that pushes is the title's audio
+// mixer: under load (Rosetta translation, the GPU worker, other processes) it is descheduled long
+// enough for the device to run dry. Raise it to the interactive class, as a console runs its audio
+// threads above the game's other work.
+static void PrioritizePushingThread() {
+#ifdef __APPLE__
+    thread_local bool raised = false;
+    if (raised) return;
+    raised = true;
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
+}
 
 static void OpenDevice(AudioOut2Context& context) {
     if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
@@ -252,6 +330,18 @@ static void DeviceCallback(void* userdata, Uint8* stream, int length) {
     if (count < samples && !context.priming) {
         context.priming = true;
         context.primes++;
+        context.stats.underruns++;
+        context.underrunPending = true;
+    }
+    if (count > 0) context.played = true;
+    if (context.played) context.stats.silentFrames += (samples - count) / AUDIO_OUT2_OUTPUT_CHANNELS;
+    if (AudioOut2StatsEnabled()) {
+        const auto now = Clock::now();
+        if (context.stats.lastCallback != Clock::time_point{}) {
+            context.stats.maxCallbackGapSeconds = std::max(context.stats.maxCallbackGapSeconds, std::chrono::duration<double>(now - context.stats.lastCallback).count());
+        }
+        context.stats.lastCallback = now;
+        context.stats.callbacks++;
     }
 }
 
@@ -275,6 +365,73 @@ static void TraceSummary(AudioOut2Context& context, Clock::time_point now) {
     context.summaryPeak = 0.0f;
 }
 
+static constexpr std::chrono::seconds STATS_INTERVAL{10};
+
+// Reports and resets one context's ANYPS5_AUDIO_STATS window. The caller holds the context lock.
+static void ReportStats(AudioOut2Context& context, Clock::time_point now) {
+    auto& stats = context.stats;
+    const auto seconds = std::chrono::duration<double>(now - stats.windowStart).count();
+    if (stats.windowStart != Clock::time_point{} && seconds > 0.0) {
+        const double expected = seconds * AUDIO_OUT2_SAMPLE_RATE / context.grain;
+        // A gap still open at the report counts too: a title that stopped pushing shows up here.
+        double pushGap = stats.maxPushGapSeconds;
+        if (stats.lastPush != Clock::time_point{}) pushGap = std::max(pushGap, std::chrono::duration<double>(now - std::max(stats.lastPush, stats.windowStart)).count());
+        char unplayed[48] = "n/a";
+        if (stats.pushes != 0) std::snprintf(unplayed, sizeof(unplayed), "%u..%u ms", stats.minUnplayedMs, stats.maxUnplayedMs);
+        std::fprintf(stderr, "[audio] t=%.1f ctx %p %.1f s: pushes %llu of %.0f expected (%.0f%%), max push gap %.0f ms, blocked %.2f s, full-queue timeouts %llu; "
+                             "underruns %llu (%.0f ms silence), dropped %llu grains, unplayed %s, cushion %u ms, callbacks %llu (max gap %.0f ms), pushing thread %llu\n",
+            AudioOut2TraceSeconds(), static_cast<void*>(&context), seconds, static_cast<unsigned long long>(stats.pushes), expected, 100.0 * static_cast<double>(stats.pushes) / expected,
+            1000.0 * pushGap, stats.blockedSeconds, static_cast<unsigned long long>(stats.fullTimeouts), static_cast<unsigned long long>(stats.underruns),
+            1000.0 * static_cast<double>(stats.silentFrames) / AUDIO_OUT2_SAMPLE_RATE, static_cast<unsigned long long>(stats.dropped), unplayed,
+            context.cushionMs, static_cast<unsigned long long>(stats.callbacks), 1000.0 * stats.maxCallbackGapSeconds, static_cast<unsigned long long>(stats.pushingThread));
+    }
+    const auto lastPush = stats.lastPush;
+    const auto lastCallback = stats.lastCallback;
+    stats = AudioOut2Stats{};
+    stats.windowStart = now;
+    stats.lastPush = lastPush;
+    stats.lastCallback = lastCallback;
+}
+
+// Contexts the ANYPS5_AUDIO_STATS monitor reports on. The monitor thread holds the registry lock while it
+// reports, and destroying a context leaves the registry first, so it never reports on a deleted context.
+static std::mutex& StatsRegistryLock() {
+    static auto* lock = new std::mutex();
+    return *lock;
+}
+
+static std::set<AudioOut2Context*>& StatsRegistry() {
+    static auto* contexts = new std::set<AudioOut2Context*>();
+    return *contexts;
+}
+
+static void StatsMonitor() {
+    for (;;) {
+        std::this_thread::sleep_for(STATS_INTERVAL);
+        std::lock_guard registry(StatsRegistryLock());
+        for (auto* context : StatsRegistry()) {
+            std::lock_guard lock(context->lock);
+            ReportStats(*context, Clock::now());
+        }
+    }
+}
+
+static void RegisterStats(AudioOut2Context& context) {
+    if (!AudioOut2StatsEnabled()) return;
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(StatsMonitor).detach(); });
+    std::lock_guard registry(StatsRegistryLock());
+    AudioOut2TraceSeconds();  // starts the clock the reports print
+    context.stats.windowStart = Clock::now();
+    StatsRegistry().insert(&context);
+}
+
+static void UnregisterStats(AudioOut2Context& context) {
+    if (!AudioOut2StatsEnabled()) return;
+    std::lock_guard registry(StatsRegistryLock());
+    StatsRegistry().erase(&context);
+}
+
 extern "C" {
 
 // The title's per-tick step between setting the ports' data and pushing. A push records the buffers the
@@ -295,11 +452,13 @@ int APS5_VABI sceAudioOut2ContextCreate(const AudioOut2ContextParam* params, voi
     context->grain = params->num_grains ? params->num_grains : AUDIO_OUT2_DEFAULT_GRAIN;
     context->queueDepth = params->queue_depth ? params->queue_depth : 1;
     context->playHead = Clock::now();
+    context->cushionMs = CUSHION_MS;
     context->mix.assign(static_cast<std::size_t>(context->grain) * AUDIO_OUT2_OUTPUT_CHANNELS, 0.0f);
     AUDIOOUT2_TRACE("t=%.3f ContextCreate: max_ports=%u max_object_ports=%u guarantee_object_ports=%u queue_depth=%u num_grains=%u flags=0x%x buffer=%p size=%zu -> ctx %p: %u-sample grains (%.2f ms), %u queued, %u Hz stereo float output\n",
         AudioOut2TraceSeconds(), params->max_ports, params->max_object_ports, params->guarantee_object_ports, params->queue_depth, params->num_grains, params->flags, buffer, buffer_size,
         static_cast<void*>(context), context->grain, 1000.0 * context->grain / AUDIO_OUT2_SAMPLE_RATE, context->queueDepth, AUDIO_OUT2_SAMPLE_RATE);
     OpenDevice(*context);
+    RegisterStats(*context);
     *ctx = reinterpret_cast<AudioOut2ContextHandle>(context);
     return 0;
 }
@@ -308,6 +467,7 @@ int APS5_VABI sceAudioOut2ContextDestroy(AudioOut2ContextHandle ctx) {
     auto* context = FromHandle(ctx);
     if (!context) return SCE_AUDIO_OUT2_ERROR_INVALID_HANDLE;
     AUDIOOUT2_TRACE("t=%.3f ContextDestroy ctx %p after %llu pushes\n", AudioOut2TraceSeconds(), static_cast<void*>(context), static_cast<unsigned long long>(context->pushes));
+    UnregisterStats(*context);
     SDL_AudioDeviceID device = 0;
     {
         std::lock_guard lock(context->lock);
@@ -336,6 +496,7 @@ int APS5_VABI sceAudioOut2ContextGetQueueLevel(AudioOut2ContextHandle ctx, uint3
 int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t blocking) {
     auto* context = FromHandle(ctx);
     if (!context) return SCE_AUDIO_OUT2_ERROR_INVALID_HANDLE;
+    PrioritizePushingThread();
     std::unique_lock lock(context->lock);
     auto now = Clock::now();
     const auto waitStart = now;
@@ -345,12 +506,19 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
             if (context->fullRejects <= CALL_TRACE_FULL) AUDIOOUT2_TRACE("t=%.3f Push ctx %p non-blocking on a full queue (%u): rejected\n", AudioOut2TraceSeconds(), static_cast<void*>(context), context->queueDepth);
             return SCE_AUDIO_OUT2_ERROR_QUEUE_FULL;
         }
-        if (now - waitStart > FULL_WAIT_TIMEOUT) break;
+        if (now - waitStart > FULL_WAIT_TIMEOUT) {
+            context->stats.fullTimeouts++;
+            break;
+        }
         lock.unlock();
         PreciseSleepUs(std::chrono::microseconds(FULL_WAIT_STEP).count());
         lock.lock();
         now = Clock::now();
     }
+    context->stats.blockedSeconds += std::chrono::duration<double>(now - waitStart).count();
+    const auto gap = context->lastPushEnd == Clock::time_point{} ? Clock::duration{} : waitStart - context->lastPushEnd;
+    context->stats.maxPushGapSeconds = std::max(context->stats.maxPushGapSeconds, std::chrono::duration<double>(gap).count());
+    AdaptCushion(*context, now, gap);
     context->queued++;
     context->playHead += GrainDuration(*context);
     UpdateMainDevice(*context, lock, now);
@@ -373,8 +541,9 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
             Render(*context, context->pendingGrains.front());
             context->pendingGrains.pop_front();
             context->pendingSince.pop_front();
-            if (PendingMs(*context) > MAX_QUEUED_MS) {
+            if (PendingMs(*context) > MaxQueuedMs(*context)) {
                 context->dropped++;
+                context->stats.dropped++;
                 continue;
             }
             context->output.insert(context->output.end(), context->mix.begin(), context->mix.end());
@@ -382,6 +551,34 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
     }
     context->pushes++;
     context->summaryPushes++;
+    context->stats.pushes++;
+    context->stats.pushingThread = HostThreadId();
+    const auto unplayedMs = PendingMs(*context);
+    context->stats.minUnplayedMs = std::min(context->stats.minUnplayedMs, unplayedMs);
+    context->stats.maxUnplayedMs = std::max(context->stats.maxUnplayedMs, unplayedMs);
+    // A blocking push returns once the queue has room for the next grain, so it returns at the output
+    // rate once the queue is full. Titles clock their mixer on that: the reference title's audio sink
+    // renders grains only while GetQueueLevel reports room, hands each to a thread that pushes it
+    // blocking and then wakes the renderer. If the push returned as soon as the grain was queued, the
+    // renderer would fill the queue, find no room and sleep until something else (the game's frame
+    // loop) woke it, so the output ran dry for seconds at a time under a slow frame rate.
+    if (blocking) {
+        const auto roomWaitStart = Clock::now();
+        auto roomNow = roomWaitStart;
+        while (QueueLevel(*context, roomNow) >= context->queueDepth) {
+            if (roomNow - roomWaitStart > FULL_WAIT_TIMEOUT) {
+                context->stats.fullTimeouts++;
+                break;
+            }
+            lock.unlock();
+            PreciseSleepUs(std::chrono::microseconds(FULL_WAIT_STEP).count());
+            lock.lock();
+            roomNow = Clock::now();
+        }
+        context->stats.blockedSeconds += std::chrono::duration<double>(roomNow - roomWaitStart).count();
+    }
+    context->lastPushEnd = Clock::now();
+    context->stats.lastPush = context->lastPushEnd;
     if (blocking) context->blockingPushes++;
     if (context->pushes <= CALL_TRACE_FULL) {
         AUDIOOUT2_TRACE("t=%.3f Push ctx %p blocking=%u: grain from %u ports, hw queue %u/%u, unread %u ms\n", AudioOut2TraceSeconds(), static_cast<void*>(context), blocking,
