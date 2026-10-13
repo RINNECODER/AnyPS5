@@ -145,6 +145,9 @@ bool Accessible(const void* pointer, std::size_t bytes, bool writable) {
     }
 }
 
+// Native guest memory keeps no deferred GPU writes: Read and Write go straight to the mapped ranges.
+void FlushGpuWrites(std::uint64_t, std::size_t) {}
+
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment) {
     NativeGuestMemory::Check(address, destination.size(), alignment, false);
     NativeGuestMemory::Visit(address, destination.size(), [&](std::span<std::byte> source, std::size_t offset) {
