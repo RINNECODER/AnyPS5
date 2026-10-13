@@ -16,9 +16,10 @@ namespace Relinker {
 
 using namespace Elfpatcher;
 
-RelinkerPipeline::RelinkerPipeline(std::shared_ptr<IElfReader> elfReader, std::shared_ptr<ISyscallScanner> syscallScanner, std::shared_ptr<ICallSiteResolver> callSiteResolver, std::shared_ptr<IValidationPolicy> validationPolicy, std::shared_ptr<ISysVDynamicSectionBuilder> dynamicSectionBuilder, std::shared_ptr<IUnusedNidFilter> unusedNidFilter, std::uint32_t unusedFilterLevel)
+RelinkerPipeline::RelinkerPipeline(std::shared_ptr<IElfReader> elfReader, std::shared_ptr<ISyscallScanner> syscallScanner, std::shared_ptr<IIndirectBranchScanner> indirectBranchScanner, std::shared_ptr<ICallSiteResolver> callSiteResolver, std::shared_ptr<IValidationPolicy> validationPolicy, std::shared_ptr<ISysVDynamicSectionBuilder> dynamicSectionBuilder, std::shared_ptr<IUnusedNidFilter> unusedNidFilter, std::uint32_t unusedFilterLevel)
     : _elfReader(std::move(elfReader))
     , _syscallScanner(std::move(syscallScanner))
+    , _indirectBranchScanner(std::move(indirectBranchScanner))
     , _callSiteResolver(std::move(callSiteResolver))
     , _validationPolicy(std::move(validationPolicy))
     , _dynamicSectionBuilder(std::move(dynamicSectionBuilder))
@@ -321,6 +322,41 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
         }
     }
 
+    // Opt-in indirect-branch tracer (ANYPS5_TRACE_INDIRECT, Phase 1 dynamic check):
+    // rewrite each computed `call r/m64` / `jmp r/m64` opcode byte to `int3` and
+    // record its guest address. The runtime's SIGTRAP handler emulates the branch
+    // and appends the observed target. One byte, so the operand stays decodable.
+    std::vector<RelinkPatch> indirectPatches;
+    std::vector<RelinkResult::IndirectTraceSite> indirectSites;
+    VirtualAddress executableBegin = 0;
+    VirtualAddress executableEnd = 0;
+    bool haveExecutable = false;
+    for (auto& [segment, segmentVAddr, segmentFileOffset] : executableSegments) {
+        if (!haveExecutable || segmentVAddr < executableBegin) executableBegin = segmentVAddr;
+        if (!haveExecutable || segmentVAddr + segment.size() > executableEnd) executableEnd = segmentVAddr + segment.size();
+        haveExecutable = true;
+        for (const auto& site : _indirectBranchScanner->ScanCodeSectionForIndirectBranches(segment, segmentVAddr, segment.size())) {
+            const std::size_t patchEnd = site.InstructionOffset + site.Length;
+            if (site.OpcodeOffset >= segment.size() || patchEnd > segment.size() || site.Length > 15 || site.OpcodeOffset < site.InstructionOffset)
+                throw RelinkerException("Indirect branch trap patch exceeds executable segment", segmentVAddr + site.OpcodeOffset);
+            RelinkResult::IndirectTraceSite record;
+            record.OpcodeAddress = site.Address;
+            record.PrefixLength = static_cast<std::uint32_t>(site.OpcodeOffset - site.InstructionOffset);
+            if (site.IsEntry) record.PrefixLength |= 0x80000000u;  // entry record
+            record.Length = static_cast<std::uint32_t>(site.Length);
+            for (std::size_t index = 0; index < site.Length; ++index) record.Bytes[index] = segment[site.InstructionOffset + index];
+            // `int3` plus one-byte NOPs: the same length, so the linear decoder stays in sync.
+            std::vector<std::uint8_t> patched(patchEnd - site.OpcodeOffset, 0x90);
+            patched[0] = 0xCC;
+            segment[site.OpcodeOffset] = 0xCC;
+            for (std::size_t index = site.OpcodeOffset + 1; index < patchEnd; ++index) segment[index] = 0x90;
+            indirectPatches.push_back({segmentFileOffset + site.OpcodeOffset, std::move(patched)});
+            indirectSites.push_back(record);
+        }
+    }
+    if (!indirectSites.empty())
+        std::cout << "Indirect trace: " << indirectSites.size() << " computed branches trapped\n";
+
     _validationPolicy->ValidateSyscallAbsence();
 
     const std::size_t originalNidCount = nidRefs.size();
@@ -452,7 +488,8 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
     }
 
     patches.insert(patches.end(), std::make_move_iterator(syscallPatches.begin()), std::make_move_iterator(syscallPatches.end()));
-    return RelinkResult{std::move(entries), std::move(programHeaders), std::move(dynSection), gotVAddr, std::move(patches)};
+    patches.insert(patches.end(), std::make_move_iterator(indirectPatches.begin()), std::make_move_iterator(indirectPatches.end()));
+    return RelinkResult{std::move(entries), std::move(programHeaders), std::move(dynSection), gotVAddr, std::move(patches), std::move(indirectSites), executableBegin, executableEnd};
 }
 
 }
