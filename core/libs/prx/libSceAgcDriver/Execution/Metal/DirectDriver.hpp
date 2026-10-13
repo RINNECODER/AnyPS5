@@ -19,8 +19,12 @@ MetalDriver& DirectDriver();
 // Submits the command words a descriptor names. The descriptor is read as a host pointer (it may be
 // on a thread stack), and words outside guest memory (host-built packets such as VideoOut's flip,
 // or words in CPU-only memory) are staged in a driver-owned range first, which grows to fit; the
-// driver captures them during the call. Words that cannot be read (a null or unmapped address)
-// are skipped with a log line naming `call`, the address and the size.
+// driver captures them during the call. A staged copy is retaken while its packets do not parse
+// (a title still writing the buffer), and a staged buffer holding a REWIND is skipped (the driver
+// would read its tail later from the reused staging buffer). Words that cannot be read (a null or
+// unmapped address) or fail PM4 validation are skipped with a log line naming `call`, the address,
+// the size, whether the words were staged and the failing header and DWORD offset;
+// ANYPS5_AGC_STRICT_SUBMISSIONS=1 makes a validation failure abort instead.
 void DirectSubmit(const Packet& packet, std::uint32_t queue, const char* call = nullptr);
 
 // The current guest allocations as identity ranges (sorted; adjacent ranges with the same access

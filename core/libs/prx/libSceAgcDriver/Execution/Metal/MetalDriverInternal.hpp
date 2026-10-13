@@ -65,6 +65,7 @@ struct MetalDriver::Impl {
     EopInterrupt eopInterrupt;
     std::exception_ptr failure;
     std::atomic<bool> stopping{false};
+    std::atomic<bool> skipInvalidCommandBuffers{false};
     bool configured = false;
     bool stopped = false;
     bool resetGraphics = false;
