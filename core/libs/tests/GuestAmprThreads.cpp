@@ -10,6 +10,10 @@
 #include <cstring>
 #include <stdexcept>
 #include <thread>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 struct GuestXtime {
     std::int64_t sec;
@@ -23,6 +27,20 @@ struct PadTarget {
     int afterRelease;
     unsigned exitCode;
 };
+
+struct GuestTypeInfo {
+    const void* vtable;
+    const char* name;
+};
+
+struct GuestSystemError {
+    const void* vtable;
+    const char* message;
+    int code;
+    const void* category;
+};
+
+using GuestTerminate = void (APS5_VABI*)();
 
 struct TestPad {
     unsigned (APS5_VABI* const* vtable)(TestPad*);
@@ -55,10 +73,14 @@ int APS5_VABI _Mtx_init_nid_postfix(void** handle, int type);
 void APS5_VABI _Mtx_destroy_nid_postfix(void** handle);
 int APS5_VABI _Mtx_lock_nid_postfix(void** handle);
 int APS5_VABI _Mtx_unlock_nid_postfix(void** handle);
+GuestTerminate APS5_VABI _ZSt13set_terminatePFvvE_nid_postfix(GuestTerminate handler);
+const GuestTypeInfo* APS5_VABI __cxa_current_exception_type_nid_postfix();
+void* APS5_VABI __cxa_current_primary_exception_nid_postfix();
 }
 
 static constexpr int ThrdSuccess = 0;
 static constexpr int ThrdError = 4;
+static constexpr int GuestEbusy = 16;
 static constexpr int GuestEinval = 22;
 static constexpr int GuestErange = 34;
 static constexpr int GuestEilseq = 86;
@@ -457,6 +479,28 @@ static void* APS5_VABI DestroyPad(void* arg) {
     return nullptr;
 }
 
+#ifndef _WIN32
+static void APS5_VABI ExitWithSystemErrorCode() {
+    const auto* type = __cxa_current_exception_type_nid_postfix();
+    const auto* error = static_cast<const GuestSystemError*>(__cxa_current_primary_exception_nid_postfix());
+    _exit(type && error && std::strcmp(type->name, "St12system_error") == 0 ? error->code : 1);
+}
+
+template <typename TCall>
+static int GuestSystemErrorCode(TCall call) {
+    const pid_t child = fork();
+    Require(child >= 0);
+    if (child == 0) {
+        _ZSt13set_terminatePFvvE_nid_postfix(ExitWithSystemErrorCode);
+        call();
+        _exit(2);
+    }
+    int status = 0;
+    Require(waitpid(child, &status, 0) == child);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+#endif
+
 static void TestPadErrors() {
     Require(Throws<std::invalid_argument>([] { _ZNSt4_PadC2Ev_nid_postfix(nullptr); }));
     Require(Throws<std::invalid_argument>([] { _ZNSt4_PadD2Ev_nid_postfix(nullptr); }));
@@ -470,7 +514,9 @@ static void TestPadErrors() {
     ConstructPad(pad, order, destroyed, 0, 0);
     Require(Throws<std::invalid_argument>([&] { _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(&pad, nullptr); }));
     Require(!pad.started && order.load() == 0);
-    Require(Throws<std::runtime_error>([&] { _ZNSt4_Pad8_ReleaseEv_nid_postfix(&pad); }));
+#ifndef _WIN32
+    Require(GuestSystemErrorCode([&] { _ZNSt4_Pad8_ReleaseEv_nid_postfix(&pad); }) == GuestEbusy);
+#endif
     Require(!pad.started);
 
     ForeignDestroy context{&pad, false};

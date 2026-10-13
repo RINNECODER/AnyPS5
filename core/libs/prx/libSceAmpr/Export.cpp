@@ -225,7 +225,14 @@ static int RecordWriteAddressFromCounterPair(Apr::CommandBufferObject* buffer, v
 }
 
 static constexpr int ThrdSuccess = 0;
+static constexpr int ThrdNomem = 1;
+static constexpr int ThrdTimedout = 2;
+static constexpr int ThrdBusy = 3;
 static constexpr int ThrdError = 4;
+
+static constexpr int CppDeviceOrResourceBusy = 0;
+static constexpr int CppInvalidArgument = 1;
+static constexpr int CppResourceUnavailableTryAgain = 6;
 
 static constexpr int MtxPlain = 0x1;
 
@@ -262,7 +269,7 @@ int APS5_VABI _Mtx_unlock_nid_postfix(void** handle);
 int APS5_VABI _Cnd_init_nid_postfix(void** handle);
 void APS5_VABI _Cnd_destroy_nid_postfix(void** handle);
 int APS5_VABI _Cnd_wait_nid_postfix(void** condition, void** mutex);
-int APS5_VABI _Cnd_broadcast_nid_postfix(void** handle);
+int APS5_VABI _Cnd_signal_nid_postfix(void** handle);
 int APS5_VABI wcsrtombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t** source, std::size_t limit, void* state);
 int APS5_VABI _Cnd_init_nid_postfix(void** handle);
 int SignalCondition_nid_no_patch(void** handle);
@@ -270,7 +277,18 @@ int SignalCondition_nid_no_patch(void** handle);
 }
 
 static void RequireThrd(int result, const char* what) {
-    if (result != ThrdSuccess) throw std::runtime_error(std::string(what) + " failed with " + std::to_string(result));
+    switch (result) {
+    case ThrdSuccess:
+        return;
+    case ThrdNomem:
+    case ThrdTimedout:
+        ThrowCppError_nid_no_patch(CppResourceUnavailableTryAgain);
+    case ThrdBusy:
+        ThrowCppError_nid_no_patch(CppDeviceOrResourceBusy);
+    case ThrdError:
+        ThrowCppError_nid_no_patch(CppInvalidArgument);
+    }
+    throw std::runtime_error(std::string(what) + " failed with " + std::to_string(result));
 }
 
 static void* APS5_VABI PadEntry_nid_no_patch(void* argument) {
@@ -900,7 +918,7 @@ void APS5_VABI _ZNSt4_Pad8_ReleaseEv_nid_postfix(GuestPad* pad) {
     if (!pad) APS5_INVALID_ARG_EX;
     RequireThrd(_Mtx_lock_nid_postfix(&pad->mutex), "_Pad::_Release: _Mtx_lock");
     pad->started = true;
-    RequireThrd(_Cnd_broadcast_nid_postfix(&pad->condition), "_Pad::_Release: _Cnd_broadcast");
+    RequireThrd(_Cnd_signal_nid_postfix(&pad->condition), "_Pad::_Release: _Cnd_signal");
     RequireThrd(_Mtx_unlock_nid_postfix(&pad->mutex), "_Pad::_Release: _Mtx_unlock");
 }
 
@@ -936,7 +954,7 @@ int APS5_VABI _Thrd_id_nid_postfix(void) {
 void APS5_VABI _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(GuestPad* pad, Pthread* thread) {
     if (!pad || !thread) APS5_INVALID_ARG_EX;
     const int created = pthread_create_nid_postfix(thread, nullptr, PadEntry_nid_no_patch, pad);
-    if (created != 0) throw std::runtime_error("_Pad::_Launch: pthread_create failed with " + std::to_string(created));
+    if (created != 0) ThrowCppError_nid_no_patch(CppResourceUnavailableTryAgain);
     while (!pad->started) RequireThrd(_Cnd_wait_nid_postfix(&pad->condition, &pad->mutex), "_Pad::_Launch: _Cnd_wait");
 }
 
