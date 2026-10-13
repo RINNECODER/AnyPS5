@@ -167,6 +167,42 @@ void DrawGuest(id<MTLDevice> device, id<MTLLibrary> library, bool masked, bool i
                   indexed ? ", indexed vertex fetch with nonzero guest index offset" : ", descriptor vertex fetch") << " passed\n";
 }
 
+// Bounded direct index fetches (upstream PR 4824): DRAW_INDEX_2 with a count past its max_size reads
+// only max_size indices from guest memory; the remaining fetches read index 0. The borrowed index
+// range holds exactly the readable indices, so a read past them would fail.
+void DrawBoundedIndices(id<MTLDevice> device, id<MTLLibrary> library) {
+    for (const std::uint32_t readable : {3u, 0u}) {
+        // Vertex 0 is off screen, so the zero-index triangles (0, 0, 0) draw nothing.
+        std::vector<std::array<float, 4>> vertices{{8, 8, 0.5f, 1}};
+        vertices.insert(vertices.end(), Triangle.begin(), Triangle.end());
+        std::array<std::uint16_t, 3> indices{1, 2, 3};
+        std::vector<std::byte> pixels(256 + Width * Height * 4 + 256, std::byte{0x7b});
+        std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+        const auto compiled = Compile(device, FullPixelCode, static_cast<std::uint32_t>(vertices.size()));
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
+            {ShaderStage::Vertex, &compiled.vertex, 0}, {ShaderStage::Fragment, &compiled.fragment, compiled.fragmentPush}}};
+        std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
+            {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true}};
+        if (readable != 0) ranges.push_back({IndexAddress, std::as_writable_bytes(std::span(indices).first(readable)), false});
+        AgcDriver::Pm4::DrawParameters draw{};
+        draw.indexAddress = readable != 0 ? IndexAddress : 0;
+        draw.indexCount = 6;
+        draw.indexSize = 2;
+        draw.instanceCount = 1;
+        draw.indexed = true;
+        draw.readableIndexCount = readable;
+        AgcDriver::Metal::MetalDraw adapter(device, library);
+        const auto fault = adapter.DrawSynchronously(State(), draw, shaders, ranges);
+        Require(fault.state == BdaAbi::FaultState::Empty, "The bounded index draw published a GPU memory fault");
+        for (std::uint32_t pixel = 0; pixel < Width * Height; ++pixel) {
+            const auto value = pixels[256 + pixel * 4];
+            Require(value == (readable != 0 ? std::byte{255} : std::byte{0x40}),
+                "The bounded index draw with " + std::to_string(readable) + " readable indices drew the wrong pixel " + std::to_string(pixel));
+        }
+    }
+    std::cout << "Bounded index fetches: 3 and 0 readable of 6 indices drew from the readable prefix and zero indices\n";
+}
+
 // Guest clip distances (upstream 04138f50a): pos1 carries four distances, PA_CL_VS_OUT_CNTL enables
 // them through the distance vector, and Metal clips with [[clip_distance]].
 void DrawClipDistances(id<MTLDevice> device, id<MTLLibrary> library) {
@@ -2148,6 +2184,7 @@ int main(int argc, const char* argv[]) {
             DrawInterpolation(device, library);
             DrawPerVertexParameters(device, library);
             DrawClipDistances(device, library);
+            DrawBoundedIndices(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

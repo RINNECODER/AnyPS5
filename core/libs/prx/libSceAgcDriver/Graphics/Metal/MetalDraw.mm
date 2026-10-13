@@ -792,8 +792,27 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         }
         const auto bytes = std::uint64_t{draw.indexCount} * draw.indexSize;
         if (bytes > std::numeric_limits<std::size_t>::max()) throw std::invalid_argument("Metal draw index byte count overflows");
-        if (cpuReadHook) cpuReadHook(draw.indexAddress, bytes);
-        indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
+        const auto readable = draw.IndexReadCount();
+        if (readable > draw.indexCount) throw std::invalid_argument("Metal draw readable index count exceeds the draw count");
+        if (readable < draw.indexCount) {
+            // A direct DRAW_INDEX_2 / DRAW_INDEX_OFFSET_2 whose count passes its max_size (upstream PR
+            // 4824): the first max_size indices come from guest memory and the remaining fetches read
+            // zero, from a buffer of the draw's own.
+            if (meshPath) throw std::invalid_argument("Metal bounded index fetches on a mesh path are unsupported");
+            const auto readBytes = std::uint64_t{readable} * draw.indexSize;
+            id<MTLBuffer> padded = backend.Buffer(static_cast<std::size_t>(bytes));
+            auto* destination = static_cast<std::byte*>(padded.contents);
+            if (readBytes != 0) {
+                if (cpuReadHook) cpuReadHook(draw.indexAddress, readBytes);
+                const auto source = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(readBytes));
+                std::memcpy(destination, static_cast<const std::byte*>(source.buffer.contents) + source.offset, static_cast<std::size_t>(readBytes));
+            }
+            std::memset(destination + readBytes, 0, static_cast<std::size_t>(bytes - readBytes));
+            indexBuffer = {padded, 0, padded.length};
+        } else {
+            if (cpuReadHook) cpuReadHook(draw.indexAddress, bytes);
+            indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
+        }
         const auto* data = static_cast<const std::byte*>(indexBuffer.buffer.contents) + indexBuffer.offset;
         const auto restartIndex = draw.indexSize == 2 ? 0xffffu : 0xffffffffu;
         bool hasVertexIndex = false;

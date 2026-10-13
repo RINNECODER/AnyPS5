@@ -807,7 +807,7 @@ void CheckBufferAliases(std::span<const CompiledShader> shaders, const ColorTarg
                 const auto element = offset / 4;
                 const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
                 Require(!overlap(address, size, target.address, target.bytes), "shader buffer aliases the render target");
-                Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
+                Require(!written || indexBytes == 0 || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
             }
         }
     }
@@ -818,6 +818,7 @@ void CheckBufferAliases(std::span<const CompiledShader> shaders, const ColorTarg
 std::array<std::uint32_t, 4> MeshIndexBufferDescriptor(const Pm4::DrawParameters& draw) {
     constexpr std::uint32_t RawWord3 = 0x31016facu;
     if (!draw.indexed) return {0u, 0u, 0u, RawWord3};
+    Require(draw.IndexReadCount() == draw.indexCount, "bounded index fetches on a mesh path are unsupported");
     const auto address = draw.indexAddress;
     const auto bytes = (static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize + 3u) & ~std::uint64_t{3};
     Require(address != 0 && bytes != 0 && bytes <= 0xffffffffu && (address >> 48u) == 0, "invalid mesh index buffer range");
@@ -950,6 +951,20 @@ DrawInputCopy CopyZeroPaddedDrawInput(const Context& context, std::uint64_t addr
     return copy;
 }
 
+DrawInputCopy CopyBoundedIndexInput(const Context& context, const Pm4::DrawParameters& draw) {
+    Require(draw.indexed && (draw.indexSize == 2 || draw.indexSize == 4), "unsupported bounded index type");
+    Require(draw.IndexReadCount() <= draw.indexCount, "readable index count exceeds the draw count");
+    const auto bytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
+    const auto validBytes = static_cast<std::uint64_t>(draw.IndexReadCount()) * draw.indexSize;
+    Require(bytes <= std::numeric_limits<std::size_t>::max(), "index buffer size overflow");
+    DrawInputCopy copy;
+    copy.buffer = std::make_shared<Buffer>(context, static_cast<std::size_t>(bytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    const auto destination = copy.buffer->Bytes();
+    GuestMemory::Read(draw.indexAddress, destination.first(static_cast<std::size_t>(validBytes)), draw.indexSize);
+    std::fill(destination.begin() + static_cast<std::ptrdiff_t>(validBytes), destination.end(), std::byte{0});
+    return copy;
+}
+
 void KeepDrawInput(Recorder* recorder, std::uint64_t address, const DrawInputCopy& copy, Recorder::SnapshotUse use, std::uint32_t derived) {
     if (recorder == nullptr || copy.reused || copy.generation == 0 || copy.buffer == nullptr) return;
     recorder->KeepDrawSnapshot(address, copy.buffer->Bytes().size(), copy.generation, copy.registryGeneration, copy.buffer, use, derived);
@@ -1029,13 +1044,16 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     }
     if (args == nullptr) Require(draw.indexCount != 0 && draw.instanceCount != 0, "zero-count indexed draws are unsupported");
     else Require((!state.stages.mesh || draw.indexed) && !state.stages.tessellation && !state.rectList, "indirect draw on a non-vertex path must be resolved by the driver");
-    inputs.indexBytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
+    Require(draw.IndexReadCount() <= draw.indexCount, "readable index count exceeds the draw count");
+    inputs.indexBytes = static_cast<std::uint64_t>(draw.IndexReadCount()) * draw.indexSize;
     const auto indexBytes = inputs.indexBytes;
+    const auto drawIndexBytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
+    const bool paddedIndices = draw.indexed && draw.IndexReadCount() < draw.indexCount;
     APS5_LOG_OUT_DEBUG("Index buffer bytes=%llu", static_cast<unsigned long long>(indexBytes));
     Require(indexBytes <= std::numeric_limits<std::size_t>::max(), "index buffer size overflow");
-    if (draw.indexed) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
+    if (draw.indexed && indexBytes != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
     APS5_LOG_CHARS_OUT_DEBUG("Index buffer range OK");
-    Require(!draw.indexed || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.address || state.color.address + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
+    Require(!draw.indexed || indexBytes == 0 || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.address || state.color.address + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
     if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
     APS5_LOG_CHARS_OUT_DEBUG("ValidateShaders");
     if (recipe != nullptr) {
@@ -1072,15 +1090,16 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         const bool fanGeometry = state.stages.mesh && state.stages.mesh->inputPrimitive == 5;
         const bool skipRestart = state.primitiveRestart && (!listTopology || context.primitiveListRestart) && !fanGeometry;
         const auto use = draw.indexSize == 2 ? (skipRestart ? Recorder::SnapshotUse::Index16Restart : Recorder::SnapshotUse::Index16) : (skipRestart ? Recorder::SnapshotUse::Index32Restart : Recorder::SnapshotUse::Index32);
-        const auto* import = InPlaceDrawInput(context, draw.indexAddress, static_cast<std::size_t>(indexBytes), draw.indexSize);
+        const auto* import = paddedIndices ? nullptr : InPlaceDrawInput(context, draw.indexAddress, static_cast<std::size_t>(indexBytes), draw.indexSize);
         DrawInputCopy copy;
-        if (import == nullptr) copy = CopyDrawInput(context, context.recorder, draw.indexAddress, static_cast<std::size_t>(indexBytes), draw.indexSize, use);
+        if (paddedIndices) copy = CopyBoundedIndexInput(context, draw);
+        else if (import == nullptr) copy = CopyDrawInput(context, context.recorder, draw.indexAddress, static_cast<std::size_t>(indexBytes), draw.indexSize, use);
         else GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
         std::optional<std::uint32_t> highest;
         if (!copy.reused) {
-            const auto bytes = import != nullptr ? std::span<const std::byte>(reinterpret_cast<const std::byte*>(draw.indexAddress), static_cast<std::size_t>(indexBytes)) : copy.buffer->Bytes().first(static_cast<std::size_t>(indexBytes));
+            const auto bytes = import != nullptr ? std::span<const std::byte>(reinterpret_cast<const std::byte*>(draw.indexAddress), static_cast<std::size_t>(indexBytes)) : copy.buffer->Bytes().first(static_cast<std::size_t>(drawIndexBytes));
             highest = HighestDrawIndex(bytes, draw.indexSize, skipRestart);
-            if (import == nullptr) KeepDrawInput(context.recorder, draw.indexAddress, copy, use, skipRestart ? (highest ? *highest + 1u : 0u) : highest.value_or(0u));
+            if (import == nullptr && !paddedIndices) KeepDrawInput(context.recorder, draw.indexAddress, copy, use, skipRestart ? (highest ? *highest + 1u : 0u) : highest.value_or(0u));
         } else if (!skipRestart) {
             highest = copy.derived;
         } else if (copy.derived != 0) {
@@ -1095,9 +1114,10 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             const auto limit = *zeroFrom > draw.firstVertex ? *zeroFrom - draw.firstVertex : 0u;
             if (*highest >= limit && *highest - limit >= ZeroFetchSlack) {
                 GuestMemory::FlushGpuWrites(draw.indexAddress, static_cast<std::size_t>(indexBytes));
-                auto clamped = std::make_shared<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-                const auto bytes = clamped->Bytes().first(static_cast<std::size_t>(indexBytes));
-                GuestMemory::Read(draw.indexAddress, bytes, draw.indexSize);
+                auto clamped = std::make_shared<Buffer>(context, static_cast<std::size_t>(drawIndexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+                const auto bytes = clamped->Bytes().first(static_cast<std::size_t>(drawIndexBytes));
+                if (paddedIndices) std::copy_n(copy.buffer->Bytes().begin(), bytes.size(), bytes.begin());
+                else GuestMemory::Read(draw.indexAddress, bytes, draw.indexSize);
                 highest = ClampDrawIndices(bytes, draw.indexSize, skipRestart, limit);
                 import = nullptr;
                 copy = DrawInputCopy{};
