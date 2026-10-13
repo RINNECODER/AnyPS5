@@ -41,10 +41,23 @@ EXTENDS = {'vpmovsxbw': (8, 16, True), 'vpmovzxbw': (8, 16, False),
            'vpmovsxdq': (32, 64, True), 'vpmovzxdq': (32, 64, False)}
 ABS = {'vpabsb': 8, 'vpabsw': 16, 'vpabsd': 32}
 PTEST = {'vptest'}
-BLENDS_IMM = {'vblendps': 32, 'vblendpd': 64, 'vpblendw': 16}
+BLENDS_IMM = {'vblendps': 32, 'vblendpd': 64, 'vpblendw': 16, 'vpblendd': 32}
 BLENDS_VAR = {'vblendvps': 32, 'vblendvpd': 64, 'vpblendvb': 8}
 PERMIL_IMM = {'vpermilps': 32, 'vpermilpd': 64}
-PERMS = {'vperm2f128', 'vinsertf128', 'vextractf128', 'vpermq', 'vpermd'}
+PERMS = {'vperm2f128', 'vinsertf128', 'vextractf128', 'vpermq', 'vpermd', 'vpermpd', 'vpermps'}
+DUPS = {'vmovshdup': 32, 'vmovsldup': 32, 'vmovddup': 64}
+BROADCAST128 = {'vbroadcastf128', 'vbroadcasti128'}
+CMP_PREDICATES = ['oeq', 'olt', 'ole', 'uno', 'une', 'uge', 'ugt', 'ord',
+                  'ueq', 'ult', 'ule', 'false', 'one', 'oge', 'ogt', 'true',
+                  'oeq', 'olt', 'ole', 'uno', 'une', 'uge', 'ugt', 'ord',
+                  'ueq', 'ult', 'ule', 'false', 'one', 'oge', 'ogt', 'true']
+CMP_SUFFIXES = ['eq', 'lt', 'le', 'unord', 'neq', 'nlt', 'nle', 'ord', 'eq_uq', 'nge', 'ngt',
+                'false', 'neq_oq', 'ge', 'gt', 'true', 'eq_os', 'lt_oq', 'le_oq', 'unord_s',
+                'neq_us', 'nlt_uq', 'nle_uq', 'ord_s', 'eq_us', 'nge_uq', 'ngt_uq', 'false_os',
+                'neq_os', 'ge_oq', 'gt_oq', 'true_us']
+CMP = {f'vcmp{suffix}{kind}': (lane, index)
+       for index, suffix in enumerate(CMP_SUFFIXES)
+       for kind, lane in (('ps', 32), ('pd', 64), ('ss', 32), ('sd', 64))}
 FLAGS_COMPARE = {'vucomiss': 32, 'vucomisd': 64, 'vcomiss': 32, 'vcomisd': 64}
 MOVMSK = {'vmovmskps': 32, 'vmovmskpd': 64, 'movmskps': 32, 'movmskpd': 64, 'pmovmskb': 8}
 LEGACY = {'movmskps', 'movmskpd', 'pmovmskb'}
@@ -72,7 +85,8 @@ SUPPORTED = (MOVES | set(BITWISE) | ANDNOT | SCALAR_MOVES | BROADCASTS
              | set(BLENDS_IMM) | set(BLENDS_VAR) | set(PERMIL_IMM) | PERMS
              | set(FLAGS_COMPARE) | set(MOVMSK) | set(VTEST) | set(ROUNDS) | set(SQRT)
              | set(RECIP) | set(CVT_ROUND) | set(TO_INT) | set(EXTRACT_ELEM) | set(INSERT_ELEM)
-             | EXTRACT128 | INSERT128 | set(PSHUFB) | set(PALIGNR) | HALF | set(LEGACY_MOVES))
+             | EXTRACT128 | INSERT128 | set(PSHUFB) | set(PALIGNR) | HALF | set(LEGACY_MOVES)
+             | set(DUPS) | BROADCAST128 | set(CMP))
 MASK128 = (1 << 128) - 1
 MASK256 = (1 << 256) - 1
 
@@ -325,6 +339,24 @@ def analyze(function, ins, state):
         _known(function, ins, state, args[0], bits)
         _known(function, ins, state, args[1], bits)
         state['flags'] = {'zf', 'cf'}
+    elif op in DUPS:
+        _known(function, ins, state, args[1], args[1].size * 8)
+        _define(function, ins, state, args[0], (1 << bits) - 1, bits)
+    elif op in BROADCAST128:
+        _known(function, ins, state, args[1], 128)
+        _define(function, ins, state, args[0], (1 << bits) - 1, bits)
+    elif op in CMP:
+        lane, _predicate = CMP[op]
+        if op.endswith(('ss', 'sd')):
+            src1 = args[1] if len(args) >= 3 else args[0]
+            previous = _known(function, ins, state, src1, 128)
+            _known(function, ins, state, args[2], lane)
+            known = (previous & (MASK128 ^ ((1 << lane) - 1))) | ((1 << lane) - 1)
+            _define(function, ins, state, args[0], known, 128)
+        else:
+            _known(function, ins, state, args[1], bits)
+            _known(function, ins, state, args[2], bits)
+            _define(function, ins, state, args[0], (1 << bits) - 1, bits)
     elif op in ROUNDS or op in SQRT or op in RECIP:
         table = ROUNDS if op in ROUNDS else (SQRT if op in SQRT else RECIP)
         lane = table[op]
@@ -866,6 +898,51 @@ def lower(function, ins):
             shifted = function.emit(f'shl i{dest_bits} {wide}, {index}')
             result = function.emit(f'or i{dest_bits} {result}, {shifted}')
         _write(function, ins, args[0], result, dest_bits)
+    elif op in DUPS:
+        lane = DUPS[op]
+        per_lane = 128 // lane
+        count = bits // lane
+        kind = f'<{count} x i{lane}>'
+        value = function.emit(f'bitcast i{bits} {read(args[1])} to {kind}')
+        indices = []
+        for group in range(bits // 128):
+            base = group * per_lane
+            if op == 'vmovddup':
+                indices.extend([base, base])
+            elif op == 'vmovshdup':
+                indices.extend([base + 1, base + 1, base + 3, base + 3])
+            else:
+                indices.extend([base, base, base + 2, base + 2])
+        mask = ', '.join(f'i32 {index}' for index in indices)
+        result = function.emit(f'shufflevector {kind} {value}, {kind} zeroinitializer, <{count} x i32> <{mask}>')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i{bits}'), bits)
+    elif op in BROADCAST128:
+        value = function.emit(f'zext i128 {read(args[1], 128)} to i256')
+        high = function.emit(f'shl i256 {value}, 128')
+        _write(function, ins, args[0], function.emit(f'or i256 {value}, {high}'), 256)
+    elif op in CMP:
+        lane, _index = CMP[op]
+        predicate = CMP_PREDICATES[_index]
+        if op.endswith(('ss', 'sd')):
+            kind = 'float' if lane == 32 else 'double'
+            count = 128 // lane
+            src1 = args[1] if len(args) >= 3 else args[0]
+            src2 = args[2] if len(args) >= 3 else args[1]
+            left = function.emit(f'bitcast i{lane} {read(src1, lane)} to {kind}')
+            right = function.emit(f'bitcast i{lane} {read(src2, lane)} to {kind}')
+            compare = function.emit(f'fcmp {predicate} {kind} {left}, {right}')
+            mask = function.emit(f'sext i1 {compare} to i{lane}')
+            base = function.emit(f'bitcast i128 {read(src1, 128)} to <{count} x i{lane}>')
+            merged = function.emit(f'insertelement <{count} x i{lane}> {base}, i{lane} {mask}, i32 0')
+            _write(function, ins, args[0], function.emit(f'bitcast <{count} x i{lane}> {merged} to i128'), 128)
+        else:
+            count = bits // lane
+            kind = f'<{count} x {"float" if lane == 32 else "double"}>'
+            left = function.emit(f'bitcast i{bits} {read(args[1])} to {kind}')
+            right = function.emit(f'bitcast i{bits} {read(args[2])} to {kind}')
+            compare = function.emit(f'fcmp {predicate} {kind} {left}, {right}')
+            result = function.emit(f'sext <{count} x i1> {compare} to <{count} x i{lane}>')
+            _write(function, ins, args[0], function.emit(f'bitcast <{count} x i{lane}> {result} to i{bits}'), bits)
     elif op in VTEST:
         lane = VTEST[op]
         count = bits // lane
@@ -998,7 +1075,7 @@ def _lower_perm(function, ins, bits):
             high_value = function.emit(f'zext i128 {high} to i256')
             high_value = function.emit(f'shl i256 {high_value}, 128')
         _write(function, ins, args[0], function.emit(f'or i256 {low_value}, {high_value}'), 256)
-    elif op == 'vpermq':
+    elif op in ('vpermq', 'vpermpd'):
         control = args[2].imm
         lanes = bits // 64
         source = function.emit(f'bitcast i{bits} {read(args[1])} to <{lanes} x i64>')
@@ -1009,7 +1086,7 @@ def _lower_perm(function, ins, bits):
         mask = ', '.join(f'i32 {index}' for index in indices)
         result = function.emit(f'shufflevector <{lanes} x i64> {source}, <{lanes} x i64> zeroinitializer, <{lanes} x i32> <{mask}>')
         _write(function, ins, args[0], function.emit(f'bitcast <{lanes} x i64> {result} to i{bits}'), bits)
-    elif op == 'vpermd':
+    elif op in ('vpermd', 'vpermps'):
         count = bits // 32
         source = function.emit(f'bitcast i{bits} {read(args[2])} to <{count} x i32>')
         indices = function.emit(f'bitcast i{bits} {read(args[1])} to <{count} x i32>')

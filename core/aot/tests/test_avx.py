@@ -356,7 +356,7 @@ fn(*addresses, output, 0)
             avx.analyze(emitter, instructions[0], emitter.state)
         instructions, _ = self.instructions('vfmadd213ps ymm0, ymm1, ymm2')
         self.assertFalse(avx.analyze(emitter, instructions[0], emitter.state))
-        instructions, _ = self.instructions('vpermpd ymm0, ymm1, 0')
+        instructions, _ = self.instructions('vpmaddwd ymm0, ymm1, ymm2')
         self.assertFalse(avx.analyze(emitter, instructions[0], emitter.state))
 
 
