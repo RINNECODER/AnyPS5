@@ -947,14 +947,14 @@ void decodeMemoryInfo(Reader& in, MemoryInfo& memory) {
 }
 
 bool encodePlan(Writer& writer, const IrResourcePlan& plan) {
-    if (std::ranges::any_of(plan.valueStorage, [](const auto& value) { return value == nullptr; }) || std::ranges::any_of(plan.blockStorage, [](const auto& block) { return block == nullptr; })) return false;
+    if (std::ranges::any_of(plan.blockStorage, [](const auto& block) { return block == nullptr; })) return false;
     std::unordered_map<const IrValue*, std::uint32_t> values;
     std::unordered_map<const IrBlock*, std::uint32_t> blocks;
-    values.reserve(plan.valueStorage.size());
+    values.reserve(plan.valueStorage.Size());
     blocks.reserve(plan.blockStorage.size());
-    for (std::size_t index = 0; index < plan.valueStorage.size(); ++index) values.emplace(plan.valueStorage[index].get(), static_cast<std::uint32_t>(index));
+    for (std::size_t index = 0; index < plan.valueStorage.Size(); ++index) values.emplace(plan.valueStorage.begin() + index, static_cast<std::uint32_t>(index));
     for (std::size_t index = 0; index < plan.blockStorage.size(); ++index) blocks.emplace(plan.blockStorage[index].get(), static_cast<std::uint32_t>(index));
-    bool owned = values.size() == plan.valueStorage.size() && blocks.size() == plan.blockStorage.size();
+    bool owned = values.size() == plan.valueStorage.Size() && blocks.size() == plan.blockStorage.size();
     std::uint32_t current = 0;
     const auto valueIndex = [&](const IrValue* value) {
         if (value == nullptr) return NoPlanIndex;
@@ -971,7 +971,11 @@ bool encodePlan(Writer& writer, const IrResourcePlan& plan) {
     writer.Value(plan.userDataCount);
     writer.Value(plan.srgbDecodeFormats);
     writer.List(plan.blockStorage, [](Writer& out, const std::unique_ptr<IrBlock>& block) { out.Value(block->Id()); });
-    writer.List(plan.valueStorage, [&](Writer& out, const std::unique_ptr<IrValue>& value) {
+    // The value arena is not a vector: write its count the way Writer::List does, then each value.
+    writer.Value<std::uint64_t>(plan.valueStorage.Size());
+    for (const IrValue& storedValue : plan.valueStorage) {
+        const IrValue* value = &storedValue;
+        auto& out = writer;
         const auto bank = static_cast<std::uint32_t>(value->Register().bank);
         if (bank > 0xfu) owned = false;
         out.Compact(static_cast<std::uint32_t>(value->Opcode()));
@@ -993,7 +997,7 @@ bool encodePlan(Writer& writer, const IrResourcePlan& plan) {
             out.Compact(found != blocks.end() ? found->second : 0u);
         }
         ++current;
-    });
+    }
     writer.List(plan.memoryInfo, encodeMemoryInfo);
     writer.List(plan.descriptorSources, [&](Writer& out, const DescriptorSource& source) {
         for (const auto* dword : source.dwords) out.Value(valueIndex(dword));
@@ -1107,26 +1111,25 @@ bool decodePlan(Reader& reader, IrResourcePlan& plan) {
     if (!reader.Ok()) return false;
     plan.blockStorage.reserve(blockIds.size());
     for (const auto id : blockIds) plan.blockStorage.push_back(std::make_unique<IrBlock>(id));
-    plan.valueStorage.reserve(records.size());
+    plan.valueStorage.Reserve(records.size());
     for (const auto& record : records) {
-        auto value = std::make_unique<IrValue>(record.opcode, record.type, record.id);
+        auto* value = plan.valueStorage.Create(record.opcode, record.type, record.id);
         value->SetFlags(record.flags);
         if (record.hasImmediate) value->SetImmediateU64(record.immediate);
         value->SetRegister(record.registerValue);
-        plan.valueStorage.push_back(std::move(value));
     }
     bool valid = true;
     const auto valueAt = [&](std::uint32_t index) -> IrValue* {
         if (index == NoPlanIndex) return nullptr;
-        if (index >= plan.valueStorage.size()) {
+        if (index >= plan.valueStorage.Size()) {
             valid = false;
             return nullptr;
         }
-        return plan.valueStorage[index].get();
+        return plan.valueStorage.begin() + index;
     };
     for (std::size_t index = 0; index < records.size(); ++index) {
         const auto& record = records[index];
-        auto& value = *plan.valueStorage[index];
+        auto& value = plan.valueStorage.begin()[index];
         for (std::size_t operand = 0; operand < record.arguments.size(); ++operand) {
             auto* argument = valueAt(record.arguments[operand]);
             if (value.IsPhi()) {
