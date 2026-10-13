@@ -1042,8 +1042,12 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
             Require(draw.firstInstance <= std::numeric_limits<std::uint32_t>::max() - (draw.instanceCount - 1u), "auto draw instance range overflow");
         }
     }
-    if (args == nullptr) Require(draw.indexCount != 0 && draw.instanceCount != 0, "zero-count indexed draws are unsupported");
-    else Require((!state.stages.mesh || draw.indexed) && !state.stages.tessellation && !state.rectList, "indirect draw on a non-vertex path must be resolved by the driver");
+    if (args == nullptr) {
+        if (draw.indexCount == 0 || draw.instanceCount == 0) {
+            inputs.nothing = true;
+            return inputs;
+        }
+    } else Require((!state.stages.mesh || draw.indexed) && !state.stages.tessellation && !state.rectList, "indirect draw on a non-vertex path must be resolved by the driver");
     Require(draw.IndexReadCount() <= draw.indexCount, "readable index count exceeds the draw count");
     inputs.indexBytes = static_cast<std::uint64_t>(draw.IndexReadCount()) * draw.indexSize;
     const auto indexBytes = inputs.indexBytes;
