@@ -98,6 +98,11 @@ def provider_writes(function, ins, contract, state):
 def direct_target(function, ins):
     if ins.mnemonic != 'call' and ins.address not in function.tail_calls:
         return None
+    if ins.mnemonic not in ('call', 'jmp'):
+        callee, _slot = function.tail_calls[ins.address]
+        return callee['address']
+    if not ins.operands:
+        return None
     operand = ins.operands[0]
     if operand.type == X86_OP_IMM and operand.imm in function.image.functions:
         return operand.imm
