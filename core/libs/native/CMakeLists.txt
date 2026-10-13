@@ -190,22 +190,31 @@ add_executable(native_gpu_cube_reference EXCLUDE_FROM_ALL NativeCubeReference.cp
 target_link_libraries(native_gpu_cube PRIVATE anyps5_native_graphics)
 target_link_libraries(native_gpu_cube_reference PRIVATE anyps5_native_graphics)
 # The Metal driver loads AnyPS5Utilities.metallib next to the executable (DirectDriver.mm).
+# One shared copy avoids two POST_BUILD copies racing on the same path.
 get_target_property(anyps5NativeMetallib anyps5_metal_utilities ANYPS5_METALLIB)
+set(cubeMetallib "${CMAKE_CURRENT_BINARY_DIR}/AnyPS5Utilities.metallib")
+add_custom_command(OUTPUT "${cubeMetallib}"
+    COMMAND ${CMAKE_COMMAND} -E copy "${anyps5NativeMetallib}" "${cubeMetallib}"
+    DEPENDS anyps5_metal_shaders "${anyps5NativeMetallib}"
+    VERBATIM)
+add_custom_target(native_gpu_cube_metallib DEPENDS "${cubeMetallib}")
 foreach(cubeTarget IN ITEMS native_gpu_cube native_gpu_cube_reference)
-    add_dependencies(${cubeTarget} anyps5_metal_shaders)
-    add_custom_command(TARGET ${cubeTarget} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy "${anyps5NativeMetallib}" "$<TARGET_FILE_DIR:${cubeTarget}>/AnyPS5Utilities.metallib"
-        VERBATIM)
+    add_dependencies(${cubeTarget} native_gpu_cube_metallib)
 endforeach()
 add_custom_target(native_gpu_cube_build DEPENDS native_gpu_cube native_gpu_cube_reference)
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/gpu-cube-paths.json"
     CONTENT "{\"aot\":\"$<TARGET_FILE:native_gpu_cube>\",\"reference\":\"$<TARGET_FILE:native_gpu_cube_reference>\",\"build\":\"${cubeArtifacts}\"}\n")
 
 add_custom_target(native_gpu_cube_check
-    COMMAND ${Python3_EXECUTABLE} "${cubeExample}/verify.py"
+    COMMAND ${Python3_EXECUTABLE} "${cubeExample}/verify.py" --capture metal
         --paths "${CMAKE_CURRENT_BINARY_DIR}/gpu-cube-paths.json" --output-parent "${CMAKE_CURRENT_BINARY_DIR}/graphics-runs"
     DEPENDS native_gpu_cube native_gpu_cube_reference
     USES_TERMINAL VERBATIM)
+
+add_test(NAME native_graphics_image_comparison COMMAND ${Python3_EXECUTABLE} "${cubeExample}/test_images.py")
+set_tests_properties(native_graphics_image_comparison PROPERTIES TIMEOUT 30)
+add_test(NAME native_graphics_reference_policy COMMAND ${Python3_EXECUTABLE} "${cubeExample}/test_reference.py")
+set_tests_properties(native_graphics_reference_policy PROPERTIES TIMEOUT 30)
 
 foreach(target IN ITEMS native_gpu_cube native_gpu_cube_reference)
     if(target STREQUAL "native_gpu_cube")

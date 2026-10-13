@@ -64,3 +64,8 @@ no Vulkan loader or MoltenVK.
    `SignalSets.cpp` is excluded (fork-only x86_64 inline asm, unused by the fixture);
    `Darwin/GuestRuntime.cpp`, `Pthread/src/MainThreadMacOs.cpp` and
    `Pthread/src/GuestTlsMacOs.cpp` are added explicitly.
+5. **`core/aot/examples/gpu_cube/{verify,images,test_images}.py` extended for the Metal capture
+   path** (the fork builds no Vulkan driver): `--capture metal` reads the driver's PNG captures
+   and JSON manifest instead of `APS5_DUMP_FRAMES` BMPs plus the `capture-trace.log` flip lines.
+   `images.read_png` decodes the PNGs to the same RGB the BMP reader returns. The BMP path and
+   all its checks are unchanged. See `anyps5-native-work/lanes/vtables/REPORT5.md`.

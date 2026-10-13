@@ -4195,14 +4195,14 @@
         },
         "evidence": {
           "path": "core/libs/prx/libc/src/Process.cpp",
-          "sha256": "8b230d157556036d5f66bfbc99f7691aa72ad5ba5e78bae8f6e1da96e67d7da3",
+          "sha256": "d9822bacd07797ff7682ef542943b15afefe2a814b836a13055a16c8cc1e748a",
           "excerpt": "int APS5_VABI atexit_nid_postfix(GuestExitCallback func) {"
         },
         "reason": "Bind the original AnyPS5 guest libc export so guest shutdown and registered callbacks run before host process exit.",
         "dependencies": [
           {
             "path": "core/libs/prx/libc/src/RuntimeSupport.cpp",
-            "sha256": "6103ec5ce6b334f32e749d0423926fac1b1a9a0cbf603e2b18a5b74496cc24df",
+            "sha256": "95dad38236b51667db49b0d25ad43cda5330c760d3d15521087380a2c1680267",
             "excerpt": "int APS5_VABI __cxa_atexit_nid_postfix(void (APS5_VABI *func)(void*), void* arg, void* dsoHandle) {"
           }
         ]
@@ -4231,7 +4231,7 @@
         },
         "evidence": {
           "path": "core/libs/prx/libc/src/Process.cpp",
-          "sha256": "8b230d157556036d5f66bfbc99f7691aa72ad5ba5e78bae8f6e1da96e67d7da3",
+          "sha256": "d9822bacd07797ff7682ef542943b15afefe2a814b836a13055a16c8cc1e748a",
           "excerpt": "void APS5_VABI exit_nid_postfix(int code) {"
         },
         "reason": "Bind the original AnyPS5 guest libc export so guest shutdown and registered callbacks run before host process exit."
@@ -4279,7 +4279,7 @@
         "evidence": [
           {
             "path": "core/libs/prx/libkernel/System/src/Notification.cpp",
-            "sha256": "a235753aa059b038cb827fcb877c1a7af3acded57027d53b0b3c1b379e6abdbf",
+            "sha256": "b6050f45e4d7abf37fc5c11874613d1035c456595b860d6d0cd78d8a811132d2",
             "excerpt": "sceKernelSendNotificationRequest(int device, const void* request, std::size_t size, int flags)"
           }
         ]
