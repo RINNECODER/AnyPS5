@@ -17,13 +17,22 @@ Vendored paths:
   `examples/gpu_cube/`.
 - `core/libs/native/` — the native runtime consumer (`NativeAotImage`, `NativeAotPointer`,
   `NativeAotReadonly`, `NativeAotTime`, `NativeAotMain`, the gpu_cube launchers/reference).
+  `CMakeLists.txt` is rewritten for this fork's Metal backend (see below).
 - `core/libs/prx/libc/include/NativeAotImage.hpp` — the runtime registration header the
   above includes; it is part of the AOT runtime and is absent from this fork's tree.
+- AOT test and runtime sources the vendored CMake references and this fork lacks:
+  `core/libs/tests/{NativeAotGraphicsLayouts,NativeAotImage,NativeAotReadonly,NativeAotRuntime,
+  NativeDirectMemoryAliases,AtomicSharedPointer,HostCounter,GuestTlsMacOs}.cpp`,
+  `core/libs/prx/libkernel/Pthread/{include/GuestTlsMacOs.hpp,src/GuestTlsMacOs.cpp}`.
+- `core/libs/prx/libkernel/Pthread/src/MainThreadMacOs.cpp` — upstream's native arm64 guest
+  start (`Aps5StartGuest` on a guest thread with the main thread in its run loop). The
+  fork's `libkernel/Darwin/GuestRuntime.cpp` is `#if __APPLE__ && __x86_64__` only.
 
-Not vendored: the graphics runtime (`core/libs/native/CMakeLists.txt` and the
-`ANYPS5_NATIVE_GRAPHICS` build path in upstream's top-level `CMakeLists.txt`), which
-compiles the whole `libc`/`libkernel`/`libSceAgc*`/`libSceVideoOut` closure and needs
-the full third-party submodule set. This fork has a Metal backend instead of that path.
+Not vendored: the upstream Vulkan graphics closure. This fork's `core/libs/native/CMakeLists.txt`
+is replaced with a Metal version (`cmake/NativeAotGraphics.cmake`); it builds one static
+`anyps5_native_graphics` from the component sources plus the Metal `libSceAgcDriver` and
+`libSceVideoOut` source lists from `cmake/RosettaGraphics.cmake`, so the gpu_cube fixture needs
+no Vulkan loader or MoltenVK.
 
 ## Local deviations from the upstream ref
 
@@ -47,3 +56,11 @@ the full third-party submodule set. This fork has a Metal backend instead of tha
    - `3rdparty/ps5link-sdk` `ea771e535378740b6a058b8e5419eb8a0e0e0ec8`
    `.gitmodules` gained the matching entries; the other third-party submodules remain
    empty and are untouched.
+3. **`core/libs/prx/libkernel/Time/Time.cpp` arm64 patch.** The fork's file includes
+   `<x86intrin.h>` and calls `__rdtsc()` unconditionally (Rosetta path). Guarded the include
+   and added `HostTsc()` (`mach_absolute_time()` off x86) so the file compiles for arm64;
+   `sceKernelReadTsc`/`sceKernelGetTscFrequency` keep `__rdtsc` on x86_64.
+4. **`core/libs/native/CMakeLists.txt` rewritten for the Metal backend** (see above).
+   `SignalSets.cpp` is excluded (fork-only x86_64 inline asm, unused by the fixture);
+   `Darwin/GuestRuntime.cpp`, `Pthread/src/MainThreadMacOs.cpp` and
+   `Pthread/src/GuestTlsMacOs.cpp` are added explicitly.

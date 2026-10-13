@@ -18,7 +18,11 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#if defined(__x86_64__)
 #include <x86intrin.h>
+#else
+#include <mach/mach_time.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -594,19 +598,31 @@ int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
     return 0;
 }
 
+namespace {
+// Native ARM64 AOT build: the guest-visible TSC is the host monotonic counter (the x86
+// Rosetta path keeps __rdtsc). Only sceKernelReadTsc / sceKernelGetTscFrequency use it.
+uint64_t HostTsc() {
+#if defined(__x86_64__)
+    return __rdtsc();
+#else
+    return mach_absolute_time();
+#endif
+}
+}
+
 uint64_t APS5_VABI sceKernelReadTsc(void) {
-    if (TimeScale() == 1.0) return __rdtsc();
-    static const std::uint64_t origin = __rdtsc();
-    return origin + static_cast<std::uint64_t>(static_cast<double>(__rdtsc() - origin) * TimeScale());
+    if (TimeScale() == 1.0) return HostTsc();
+    static const std::uint64_t origin = HostTsc();
+    return origin + static_cast<std::uint64_t>(static_cast<double>(HostTsc() - origin) * TimeScale());
 }
 
 uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
     static const std::uint64_t frequency = [] {
         const std::uint64_t startNanos = RawMonotonicNanos();
-        const std::uint64_t startTicks = __rdtsc();
+        const std::uint64_t startTicks = HostTsc();
         TimedWait::SleepNanos(20000000ULL);
         const std::uint64_t elapsedNanos = RawMonotonicNanos() - startNanos;
-        const std::uint64_t elapsedTicks = __rdtsc() - startTicks;
+        const std::uint64_t elapsedTicks = HostTsc() - startTicks;
         return static_cast<std::uint64_t>(static_cast<long double>(elapsedTicks) * 1000000000.0L / static_cast<long double>(elapsedNanos));
     }();
     return frequency;
