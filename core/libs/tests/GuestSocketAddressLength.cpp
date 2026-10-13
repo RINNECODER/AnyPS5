@@ -48,10 +48,12 @@ void ShortAddressesAreInvalid() {
     Require(Fails(bind_nid_postfix(stream, address.data(), 15), ErrorInvalid), "bind with an AF_INET address shorter than sockaddr_in must fail with EINVAL (22)");
     Require(Fails(sendto_nid_postfix(datagram, "x", 1, 0, address.data(), 8), ErrorInvalid), "sendto with an AF_INET address shorter than sockaddr_in must fail with EINVAL (22)");
     std::array<std::uint8_t, 28> v6{28, 28};
-    Require(Fails(connect_nid_postfix(socket_nid_postfix(28, Stream, 0), v6.data(), 20), ErrorInvalid), "connect with an AF_INET6 address shorter than sockaddr_in6 must fail with EINVAL (22)");
+    const int stream6 = socket_nid_postfix(28, Stream, 0);
+    Require(stream6 >= 0, "socket failed");
+    Require(Fails(connect_nid_postfix(stream6, v6.data(), 20), ErrorInvalid), "connect with an AF_INET6 address shorter than sockaddr_in6 must fail with EINVAL (22)");
     Require(Fails(bind_nid_postfix(stream, address.data(), 256), ErrorNameTooLong), "an address longer than SOCK_MAXADDRLEN (255) must fail with ENAMETOOLONG (63)");
     Require(Fails(bind_nid_postfix(stream, nullptr, address.size()), ErrorFault), "a null address must fail with EFAULT (14)");
-    Require(close_nid_postfix(stream) == 0 && close_nid_postfix(datagram) == 0, "close failed");
+    Require(close_nid_postfix(stream) == 0 && close_nid_postfix(datagram) == 0 && close_nid_postfix(stream6) == 0, "close failed");
 }
 
 void ArgumentsAreCheckedBeforeTheDescriptor() {
