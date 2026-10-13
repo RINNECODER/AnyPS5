@@ -252,7 +252,12 @@ class Image:
             try:
                 self.call_contracts[address] = validate_indirect_calls(self, owner)
             except CallError as error:
-                raise Rejected(str(error)) from error
+                # A whole-title build (dispatch enabled) falls back to the runtime dispatch table
+                # for an indirect branch whose annotated target set names an address we cannot
+                # resolve, instead of rejecting the whole function.
+                if not self.contracts.get('dispatch'):
+                    raise Rejected(str(error)) from error
+                self.call_contracts[address] = {}
         return self.call_contracts[address]
 
     def call(self, ins, owner=None):
@@ -1215,6 +1220,10 @@ class Function:
             self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
 
     def uniform_stack_out(self, block, rsp):
+        if rsp is None:
+            # A dispatch tail call whose frame the analysis could not track; the outgoing stack
+            # window stays as the caller's.
+            return
         for index in range(abi.UNIFORM_STACK_SLOTS):
             offset = abi.UNIFORM_STACK_BASE + 8 * index
             value = self.emit(f'load i64, ptr {self.frame_pointer(rsp + offset - 8)}, align 1')
