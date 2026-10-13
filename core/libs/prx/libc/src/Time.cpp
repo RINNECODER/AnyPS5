@@ -453,8 +453,12 @@ GuestTm* APS5_VABI localtime_s_nid_postfix(const int64_t* timer, GuestTm* result
     if (timer == nullptr || result == nullptr) return nullptr;
     const std::time_t t = static_cast<std::time_t>(*timer);
     std::tm host{};
+    const int callerError = errno;
 #ifdef _WIN32
-    if (localtime_s(&host, &t) != 0) return nullptr;
+    if (localtime_s(&host, &t) != 0) {
+        errno = callerError;
+        return nullptr;
+    }
     copyCalendarFields(host, *result);
     long standardBias = 0;
     long daylightBias = 0;
@@ -464,7 +468,10 @@ GuestTm* APS5_VABI localtime_s_nid_postfix(const int64_t* timer, GuestTm* result
     result->tm_gmtoff = -static_cast<std::int64_t>(standardBias + (daylight ? daylightBias : 0));
     result->tm_zone = _tzname[daylight ? 1 : 0];
 #else
-    if (localtime_r(&t, &host) == nullptr) return nullptr;
+    if (localtime_r(&t, &host) == nullptr) {
+        errno = callerError;
+        return nullptr;
+    }
     copyCalendarFields(host, *result);
     result->tm_gmtoff = host.tm_gmtoff;
     result->tm_zone = host.tm_zone;
