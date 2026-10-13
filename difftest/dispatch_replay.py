@@ -132,7 +132,7 @@ def main():
         for a, code in codes:
             for target, size in difftest.references(code, a).items():
                 referenced[target] = max(referenced.get(target, 1), size)
-        image, reduced = difftest.build_synthetic(codes, referenced, uniform=True, dispatch=True)
+        image, reduced = difftest.build_synthetic(codes, referenced, uniform=True, dispatch=True, guest_base=BASE)
         source = work / "input.elf"
         source.write_bytes(image)
         try:
@@ -188,13 +188,13 @@ def main():
             native = ctypes.cast(getattr(library, f"sub_{address:x}"), ctypes.c_void_p).value
         except AttributeError:
             continue
-        entries.append((address, native))
+        entries.append((BASE + address, native))
     for target in sorted(targets):
         try:
             native = ctypes.cast(getattr(stub_library, f"aps5_stub_{target:x}"), ctypes.c_void_p).value
         except AttributeError:
             continue
-        entries.append((target, native))
+        entries.append((BASE + target, native))
     entries.sort()
     table = (ctypes.c_uint64 * (2 * len(entries)))()
     for index, (guest, native) in enumerate(entries):

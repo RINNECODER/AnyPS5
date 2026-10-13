@@ -534,7 +534,7 @@ void DumpSnapshot() {
     if (fd < 0) return;
     const std::uint32_t magic = 0x534e4150;  // 'PANS'
     (void)!::write(fd, &magic, sizeof(magic));
-    constexpr std::uint64_t Limit = 2ull << 30;
+    constexpr std::uint64_t Limit = 8ull << 30;
     mach_vm_address_t address = 0;
     mach_vm_size_t size = 0;
     vm_region_basic_info_data_64_t info{};
@@ -544,7 +544,7 @@ void DumpSnapshot() {
                                                           reinterpret_cast<vm_region_info_t>(&info), &count, &object) == KERN_SUCCESS) {
         if (object != MACH_PORT_NULL) { mach_port_deallocate(mach_task_self(), object); object = MACH_PORT_NULL; }
         count = VM_REGION_BASIC_INFO_COUNT_64;
-        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size != 0 && size <= (64ull << 20)) {
+        if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE) && size != 0) {
             std::vector<std::uint8_t> buffer(static_cast<std::size_t>(size));
             mach_vm_size_t read = 0;
             if (mach_vm_read_overwrite(mach_task_self(), address, size, reinterpret_cast<mach_vm_address_t>(buffer.data()), &read) == KERN_SUCCESS && read == size) {
