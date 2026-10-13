@@ -223,18 +223,13 @@ int Run(const int argc, char* argv[]) {
             checkOutputInputs(desktopEntry->EntryPath, "Desktop entry");
         }
 
+        std::vector<std::filesystem::path> registryPaths;
         if (args.writeRegistry) {
             const std::filesystem::path outFsPath = Io::NativePath(absPath);
-            std::vector<std::filesystem::path> registryPaths{
-                outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + ".registry.json")
-            };
+            registryPaths.push_back(outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + ".registry.json"));
             for (const auto& artifact : guestArtifacts)
                 registryPaths.push_back(outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + "." + Io::Utf8Path(artifact.Path.filename()) + ".registry.json"));
             for (const auto& path : registryPaths) checkOutputInputs(path, "Registry");
-            const auto registryWriter = std::make_shared<Relinker::CallRegistryWriter>();
-            fileWriter.Write(Io::Utf8Path(registryPaths.front()), registryWriter->WriteCallRegistry(result.RegistryEntries));
-            for (std::size_t index = 0; index < guestArtifacts.size(); ++index)
-                fileWriter.Write(Io::Utf8Path(registryPaths[index + 1]), registryWriter->WriteModuleImports(guestArtifacts[index].Imports));
         }
 
         std::vector<std::filesystem::path> outputPaths{Io::NativePath(absPath)};
@@ -252,6 +247,13 @@ int Run(const int argc, char* argv[]) {
                 if (SameOutputDestination(first, second))
                     throw Domain::RelinkerException("Output paths collide: " + Io::Utf8Path(first) + " and " + Io::Utf8Path(second));
             }
+        }
+
+        if (args.writeRegistry) {
+            const auto registryWriter = std::make_shared<Relinker::CallRegistryWriter>();
+            fileWriter.Write(Io::Utf8Path(registryPaths.front()), registryWriter->WriteCallRegistry(result.RegistryEntries));
+            for (std::size_t index = 0; index < guestArtifacts.size(); ++index)
+                fileWriter.Write(Io::Utf8Path(registryPaths[index + 1]), registryWriter->WriteModuleImports(guestArtifacts[index].Imports));
         }
 
         auto byteWriter = std::make_shared<Io::ByteWriter>();
