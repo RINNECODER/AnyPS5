@@ -1,6 +1,7 @@
 #include "MetalDevice.hpp"
 #include "GpuStallWatch.hpp"
 #include "GpuTiming.hpp"
+#include "FrameProfile.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -105,6 +106,13 @@ id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
     if (GpuTiming::ProfileTags()) {
         const auto tag = GpuTiming::Tag() != 0 ? GpuTiming::Tag() : GpuTiming::MakeTag(GpuTiming::Current(), 0);
         [commands addCompletedHandler:^(id<MTLCommandBuffer> done) { GpuTiming::RecordTag(tag, done.GPUEndTime - done.GPUStartTime); }];
+    }
+    if (FrameProfile::Enabled()) {
+        const auto kind = GpuTiming::Current();
+        const auto tag = GpuTiming::Tag();
+        [commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
+            FrameProfile::Shared().Completed(kind, tag, done.GPUStartTime, done.GPUEndTime);
+        }];
     }
     return commands;
 }
@@ -215,7 +223,9 @@ void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
     GpuStallWatch::Scope stallWatch;
     if (GpuTiming::Enabled()) {
         const auto start = std::chrono::steady_clock::now();
+        const double hostStart = FrameProfile::Now();
         [commands waitUntilCompleted];
+        FrameProfile::Shared().Waited(0x200u + static_cast<std::uint32_t>(GpuTiming::Current()), hostStart, FrameProfile::Now());
         GpuTiming::Record(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
             commands.GPUEndTime - commands.GPUStartTime, commands.GPUStartTime, commands.GPUEndTime);
     } else {

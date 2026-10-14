@@ -1,6 +1,7 @@
 #pragma once
 
 #import <Metal/Metal.h>
+#include "FrameProfile.hpp"
 #include "GpuTiming.hpp"
 #include "MetalDevice.hpp"
 #include <chrono>
@@ -133,7 +134,8 @@ public:
     }
 
     // Waits for every pending command buffer, then runs the completions in commit order.
-    void Drain() {
+    // `cause` says why (FrameProfile.hpp lists the codes) for ANYPS5_METAL_GPU_TIMING.
+    void Drain(std::uint32_t cause = 0x10f) {
         if (pending.empty()) return;
         ++drains;
         ++epoch;
@@ -143,7 +145,9 @@ public:
         for (auto work = pending.rbegin(); work != pending.rend(); ++work) {
             if (work->commands == nil) continue;
             const auto start = std::chrono::steady_clock::now();
+            const double hostStart = FrameProfile::Enabled() ? FrameProfile::Now() : 0;
             if (work->commands.status < MTLCommandBufferStatusCompleted) [work->commands waitUntilCompleted];
+            if (FrameProfile::Enabled()) FrameProfile::Shared().Waited(cause, hostStart, FrameProfile::Now());
             waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             break;
         }

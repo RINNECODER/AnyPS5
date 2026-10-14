@@ -290,7 +290,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
     // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
-    if (timeline.UnknownWritesPending()) { ++drainsBy[0x101]; timeline.Drain(); }
+    if (timeline.UnknownWritesPending()) { ++drainsBy[0x101]; timeline.Drain(0x101); }
     // Find the registered shader first so the dispatch decodes against its AGC header, as the Vulkan
     // Driver::dispatch does (SCRATCH_EN takes its per-lane size from the header).
     const auto programAddress = DecodeComputeProgramAddress(queue.shader);
@@ -437,7 +437,7 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     GpuTiming::Scope timing(GpuTiming::Kind::Draw);
     if (draw == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal draw executor is not configured");
     // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
-    if (timeline.UnknownWritesPending()) { ++drainsBy[0x100]; timeline.Drain(); }
+    if (timeline.UnknownWritesPending()) { ++drainsBy[0x100]; timeline.Drain(0x100); }
     auto parameters = Pm4::ResolveDraw(packet, queue);
     if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) {
         if (BindTrace::Active()) BindTrace::Log("empty draw: count %u instances %u", parameters.indexCount, parameters.instanceCount);
@@ -787,6 +787,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         } else if (header == FlipPacketHeader) {
             CompletePriorGpuWorkAndCopyBack(0x106);
             ForgetCachedImages(ForgetReason::Flip);
+            if (FrameProfile::Enabled()) FrameProfile::Shared().Flip();
             if (draw != nullptr && draw->ImageCache() != nullptr && GpuTiming::Enabled()) {
                 static std::uint64_t flips = 0;
                 if (++flips % 16 == 0) {

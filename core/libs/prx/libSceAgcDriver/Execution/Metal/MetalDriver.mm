@@ -1,4 +1,5 @@
 #include "MetalDriverInternal.hpp"
+#include <pthread.h>
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -215,7 +216,7 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
             gpuLock = std::unique_lock(impl->gpuMutex);
             // Work committed without waiting still reads the old mapping: let it finish first.
             try {
-                impl->timeline.Drain();
+                impl->timeline.Drain(0x10d);
             } catch (...) {
                 impl->ReportFailure(std::current_exception());
             }
@@ -649,7 +650,7 @@ void MetalDriver::Impl::AwaitMappingDrain() {
 void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack(std::uint32_t cause) {
     std::lock_guard lock(gpuMutex);
     if (!timeline.Empty()) ++drainsBy[std::min<std::uint32_t>(cause, drainsBy.size() - 1)];
-    timeline.Drain();
+    timeline.Drain(cause);
 }
 
 void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes) {
@@ -660,7 +661,7 @@ void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes
                 static_cast<unsigned long long>(bytes), timeline.UnknownWritesPending() ? " (unknown writes pending)" : "");
         }
         ++drainsBy[0x102];
-        timeline.Drain();
+        timeline.Drain(0x102);
     }
 }
 
@@ -733,6 +734,12 @@ void MetalDriver::Impl::MarkCompleted(std::uint64_t serial) {
 
 void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
     OnWorkerThread() = true;
+    {
+        // Named for profiles (ANYPS5_METAL_GPU_TIMING thread breakdown, Instruments).
+        char name[32];
+        std::snprintf(name, sizeof name, "agc-queue-%u", id);
+        pthread_setname_np(name);
+    }
     Submission submission{};
     try {
         for (;;) {
