@@ -1,5 +1,6 @@
 #include "MetalTestSupport.hpp"
 #include "MetalTexture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -542,4 +543,19 @@ void RunTextureResourceTests(const MetalTests::Context& context) {
         rejected = std::string_view(error.what()).find("pipe or bank XOR") != std::string_view::npos;
     }
     Require(rejected,"native XOR texture must reject unimplemented address pipe or bank bits");
+    // 10_10_10_2 SNorm (51) and SInt (55) resolve like UNorm (50) and UInt (54); Metal has no pixel
+    // format for them, so a native texture refuses them by name instead of failing the format lookup.
+    using AgcDriver::Graphics::ResolveTextureFormat;
+    Require(ResolveTextureFormat(51)==VK_FORMAT_A2B10G10R10_SNORM_PACK32 && ResolveTextureFormat(55)==VK_FORMAT_A2B10G10R10_SINT_PACK32,
+        "formats 51 and 55 must resolve to the signed 10_10_10_2 packings");
+    for (const unsigned format : {51u,55u}) {
+        Require(AgcDriver::Graphics::BytesPerElement(format)==4 && !AgcDriver::Graphics::IsBlockCompressed(format),"a 10_10_10_2 format must be four bytes and not block compressed");
+        unsupported = Descriptor(TextureDimension::k2D);
+        unsupported.format = format;
+        rejected = false;
+        try { MetalTexture texture(backend,unsupported); } catch (const std::runtime_error& error) {
+            rejected = std::string_view(error.what()).find("no supported pixel format for guest format "+std::to_string(format)) != std::string_view::npos;
+        }
+        Require(rejected,"native texture must refuse a signed 10_10_10_2 format, which has no Metal pixel format");
+    }
 }
