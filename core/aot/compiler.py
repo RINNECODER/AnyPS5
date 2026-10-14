@@ -1957,9 +1957,12 @@ def compile_image(image, sink=None):
     if sink is None:
         lines.extend(bodies)
         lines.extend(stub_function(spec, reason) for spec, reason in stubs)
+        lines.extend(finite_tables.module_declarations(image))
     else:
         for spec, reason in stubs:
             sink('\n\n' + stub_function(spec, reason))
+        for declaration in finite_tables.module_declarations(image):
+            sink('\n\n' + declaration)
         sink('\n')
     stubs.extend(late_stubs)
     if image.hle_log:
