@@ -17,6 +17,7 @@ int APS5_VABI scePadGetHandle(int, int, int);
 int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool);
 int APS5_VABI scePadSetVibrationMode(int, int);
 int APS5_VABI scePadInit_nid_postfix(void);
+int APS5_VABI scePadUnknown_n3kSX62fgNo();
 int APS5_VABI scePadRead_nid_postfix(int, PadData*, int);
 int APS5_VABI scePadReadState(int, PadData*);
 int APS5_VABI scePadSetTiltCorrectionState(int, bool);
@@ -100,6 +101,7 @@ static float SettleOrientationW() {
 
 static void CheckTiltCorrection(int handle) {
     Require(scePadInit_nid_postfix() == 0);
+    Require(scePadUnknown_n3kSX62fgNo() == static_cast<int>(0x809200ff));
     PadInputState tilted;
     tilted.hasMotion = true;
     tilted.accel = {9.80665f, 0.0f, 0.0f};
@@ -240,6 +242,7 @@ static void CheckInjectedState(const std::filesystem::path& path) {
 
 int main() {
     CheckInputCommands();
+    Require(scePadUnknown_n3kSX62fgNo() == static_cast<int>(0x80920005));
     const auto path = std::filesystem::temp_directory_path() / ("anyps5-pad-state-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     struct Cleanup {
         std::filesystem::path path;
