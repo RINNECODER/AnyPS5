@@ -117,6 +117,8 @@ std::uint32_t DeviceMemoryLdsBytes(const RecompileRequest& request) {
     return bytes + 4u > request.target.maxWorkgroupSharedMemoryBytes ? static_cast<std::uint32_t>(bytes) : 0u;
 }
 
+std::atomic<std::uint64_t> frontEndBuilds{0};
+
 }
 
 struct PreparedControlFlow {
@@ -156,13 +158,26 @@ std::shared_ptr<const PreparedControlFlow> ShaderPreparationContext::AcquireFron
     return prepared;
 }
 
+std::uint32_t ShaderPreparationContext::ResourcePrograms() const {
+    return resourcePrograms;
+}
+
+std::uint64_t FrontEndBuilds() {
+    return frontEndBuilds.load(std::memory_order_relaxed);
+}
+
 IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     return PrepareResourceProgram(request, nullptr);
 }
 
 IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparationContext* preparation) {
+    frontEndBuilds.fetch_add(1, std::memory_order_relaxed);
     ShaderPreparationContext local;
-    const auto frontend = (preparation != nullptr ? *preparation : local).AcquireFrontend(request);
+    auto& context = preparation != nullptr ? *preparation : local;
+    ++context.resourcePrograms;
+    context.interfaceSource.reset();
+    context.interfaceProgram.reset();
+    const auto frontend = context.AcquireFrontend(request);
     const auto stageKind = toShaderStageKind(request.shader.stage);
     const auto inputInfo = RequestInputInfo(request);
     const auto& decoded = frontend->decoded;
@@ -279,11 +294,63 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
 // A materialized result of one variant over one snapshot (Recompile(request, capture)): the
 // shared immutable object every later capture that reproduces the snapshot receives, so Populate
 // and the per-request copy run once per distinct snapshot.
+namespace {
+
+std::array<std::uint32_t, 3> partialThreads(const RecompileRequest& request);
+
 struct ResultMemoEntry {
+    ResultMemoEntry(std::uint64_t variantId, std::uint64_t hash, const RecompileRequest& request, const ResourceSnapshot& snapshot, const std::shared_ptr<const RecompileResult>& result)
+        : variantId(variantId), hash(hash), snapshot(snapshot), threads(partialThreads(request)),
+          pushOffset(request.layout.pushConstantOffsetBytes), hasPixel(request.context.pixel.has_value()),
+          hasVertex(request.context.vertex.has_value()), result(result) {
+        if (request.context.pixel) {
+            exportMapping = request.context.pixel->targetExportMapping;
+            exportPacking = request.context.pixel->targetExportPacking;
+            dualSourceBlend = request.context.pixel->dualSourceBlend;
+        }
+        if (request.context.vertex) {
+            const auto& vertex = *request.context.vertex;
+            const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
+            vertexResources.reserve(count);
+            for (std::uint32_t index = 0; index < count; ++index) {
+                const auto& fields = vertex.resources[index].fields;
+                vertexResources.push_back({fields[0], fields[1], fields[2], fields[3], vertex.resourcesDst[index].fetchIndex});
+            }
+        }
+    }
+
+    bool Matches(const RecompileRequest& request, const ResourceSnapshot& current) const {
+        if (snapshot != current || threads != partialThreads(request) || pushOffset != request.layout.pushConstantOffsetBytes ||
+            hasPixel != request.context.pixel.has_value() || hasVertex != request.context.vertex.has_value()) return false;
+        if (request.context.pixel && (exportMapping != request.context.pixel->targetExportMapping ||
+            exportPacking != request.context.pixel->targetExportPacking || dualSourceBlend != request.context.pixel->dualSourceBlend)) return false;
+        if (request.context.vertex) {
+            const auto& vertex = *request.context.vertex;
+            const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
+            if (count != vertexResources.size()) return false;
+            for (std::uint32_t index = 0; index < count; ++index) {
+                if (!std::equal(vertex.resources[index].fields.begin(), vertex.resources[index].fields.end(), vertexResources[index].begin()) ||
+                    vertex.resourcesDst[index].fetchIndex != vertexResources[index][4]) return false;
+            }
+        }
+        return true;
+    }
+
     std::uint64_t variantId;
     std::uint64_t hash;
+    ResourceSnapshot snapshot;
+    std::array<std::uint32_t, 3> threads;
+    std::uint32_t pushOffset;
+    std::array<std::uint8_t, 8> exportMapping {};
+    std::array<ColorExportPacking, 8> exportPacking {};
+    bool dualSourceBlend = false;
+    bool hasPixel;
+    bool hasVertex;
+    std::vector<std::array<std::uint32_t, 5>> vertexResources;
     std::shared_ptr<const RecompileResult> result;
 };
+
+}
 
 struct EmissionFailure {
     std::uint64_t codeAddress;
@@ -291,7 +358,7 @@ struct EmissionFailure {
     std::exception_ptr failure;
 };
 
-struct SourceEntry {
+struct SourceEntry : std::enable_shared_from_this<SourceEntry> {
     std::mutex mutex;
     // The code the entry was built for: the key carries only a hash of it, so a candidate entry is
     // accepted only when its code matches word for word. Owned here because the request's span
@@ -360,6 +427,14 @@ bool FailureMemo() {
     return memo;
 }
 
+bool diskPlans() {
+    static const bool enabled = [] {
+        const char* dumpIr = std::getenv("APS5_DUMP_IR");
+        return std::getenv("APS5_NO_PERF_DISK_PLANS") == nullptr && (dumpIr == nullptr || *dumpIr == '\0');
+    }();
+    return enabled && ShaderDiskCache::Enabled() && !DebugProbeActive();
+}
+
 std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPreparationContext* preparation = nullptr, bool reclaim = true) {
     static PrimedSharedMutex mutex;
     // Entries whose code hashes alike share a bucket; the code comparison picks the right one.
@@ -403,13 +478,26 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPr
         std::lock_guard lock(source->mutex);
         if (source->plan == nullptr) {
             if (FailureMemo() && source->planFailure) std::rethrow_exception(source->planFailure);
-            try {
-                ResourceProgram resource(request, preparation, reclaim);
-                source->plan = std::move(resource.plan);
-                source->program = std::move(resource.program);
-            } catch (...) {
-                if (FailureMemo()) source->planFailure = std::current_exception();
-                throw;
+            const bool disk = diskPlans();
+            std::vector<std::byte> planKey;
+            if (disk) {
+                ShaderDiskCache::BuildPlanKey(request, HostSubgroupSize(request), planKey);
+                IrResourcePlan loaded;
+                if (ShaderDiskCache::LoadPlan(planKey, loaded)) {
+                    loaded.shaderHash = request.shader.codeAddress;
+                    source->plan = std::make_shared<const IrResourcePlan>(std::move(loaded));
+                }
+            }
+            if (source->plan == nullptr) {
+                try {
+                    ResourceProgram resource(request, preparation, reclaim);
+                    source->plan = std::move(resource.plan);
+                    source->program = std::move(resource.program);
+                } catch (...) {
+                    if (FailureMemo()) source->planFailure = std::current_exception();
+                    throw;
+                }
+                if (disk) ShaderDiskCache::StorePlan(std::move(planKey), source->plan);
             }
         }
     }
@@ -425,7 +513,19 @@ std::uint64_t nextVariantId() {
     return variants.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, std::exception_ptr* emissionFailure = nullptr) try {
+template<typename TStep>
+auto recordEmissionFailure(std::exception_ptr* emissionFailure, TStep&& step) -> decltype(step()) {
+    try {
+        return step();
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (...) {
+        if (emissionFailure != nullptr) *emissionFailure = std::current_exception();
+        throw;
+    }
+}
+
+void prepareInterface(const RecompileRequest& request, IrProgram& program) {
     const auto inputInfo = RequestInputInfo(request);
     constexpr DeadCodeEliminator deadCodeEliminator;
     constexpr ResourceMaterializer resourceMaterializer;
@@ -437,9 +537,13 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
 
     constexpr ShaderInfoCollector shaderInfoCollector;
     shaderInfoCollector.Collect(program, inputInfo);
+}
 
+CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program) {
+    const auto inputInfo = RequestInputInfo(request);
     constexpr BindingAllocator bindingAllocator;
     bool registration = request.target.registrationModules && (request.shader.stage == ShaderStage::Vertex || request.shader.stage == ShaderStage::Fragment);
+    program.Metadata().bindingLayoutComplete = false;
     auto bindings = bindingAllocator.Allocate(program, request.layout, registration);
 
     SpirvTargetOptions targetOptions {};
@@ -523,12 +627,16 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     }
 #endif
 
-    return {request.layout, std::move(program).TakeCompiledInfo(), std::move(static_cast<CompiledBindingLayout&>(bindings)), std::move(result)};
-} catch (const std::bad_alloc&) {
-    throw;
-} catch (...) {
-    if (emissionFailure != nullptr) *emissionFailure = std::current_exception();
-    throw;
+    return {request.layout, {}, std::move(static_cast<CompiledBindingLayout&>(bindings)), std::move(result)};
+}
+
+CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, std::exception_ptr* emissionFailure = nullptr) {
+    return recordEmissionFailure(emissionFailure, [&] {
+        prepareInterface(request, program);
+        auto variant = emitVariant(request, program);
+        variant.info = std::move(program).TakeCompiledInfo();
+        return variant;
+    });
 }
 
 struct SpecializedModule {
@@ -900,6 +1008,29 @@ bool sameLayout(const BindingLayout& left, const BindingLayout& right) {
     return left.descriptorSet == right.descriptorSet && left.firstBinding == right.firstBinding && left.pushConstantOffsetBytes == right.pushConstantOffsetBytes && left.pushConstantSizeBytes == right.pushConstantSizeBytes;
 }
 
+}
+
+struct PreparedInterface {
+    static CompiledVariant Compile(SourceEntry& source, const RecompileRequest& request, ShaderPreparationContext& preparation, std::exception_ptr* emissionFailure) {
+        if (preparation.interfaceSource.get() != &source || preparation.interfaceProgram->Resources().shaderHash != request.shader.codeAddress) {
+            preparation.interfaceSource.reset();
+            preparation.interfaceProgram.reset();
+            auto program = source.program != nullptr ? std::move(source.program) : std::make_unique<IrProgram>(PrepareResourceProgram(request, &preparation));
+            recordEmissionFailure(emissionFailure, [&] { prepareInterface(request, *program); });
+            preparation.interfaceSource = source.shared_from_this();
+            preparation.interfaceProgram = std::move(program);
+        }
+        auto& program = *preparation.interfaceProgram;
+        return recordEmissionFailure(emissionFailure, [&] {
+            auto variant = emitVariant(request, program);
+            variant.info = program.CompiledInfo();
+            return variant;
+        });
+    }
+};
+
+namespace {
+
 std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source, const RecompileRequest& request, bool& cacheHit, ShaderPreparationContext* preparation = nullptr) {
     for (const auto& candidate : source.variants) {
         if (sameLayout(candidate->layout, request.layout)) {
@@ -924,11 +1055,16 @@ std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source,
         }
     }
     if (variant == nullptr) {
-        auto program = source.program != nullptr ? std::move(*source.program) : PrepareResourceProgram(request, preparation);
-        source.program.reset();
+        static const bool layoutPair = std::getenv("APS5_NO_PERF_LAYOUT_PAIR") == nullptr;
         std::exception_ptr emissionFailure;
         try {
-            variant = std::make_shared<const CompiledVariant>(compileVariant(request, std::move(program), &emissionFailure));
+            if (layoutPair && preparation != nullptr) {
+                variant = std::make_shared<const CompiledVariant>(PreparedInterface::Compile(source, request, *preparation, &emissionFailure));
+            } else {
+                auto program = source.program != nullptr ? std::move(*source.program) : PrepareResourceProgram(request, preparation);
+                source.program.reset();
+                variant = std::make_shared<const CompiledVariant>(compileVariant(request, std::move(program), &emissionFailure));
+            }
         } catch (...) {
             if (emissionFailure != nullptr && FailureMemo()) source.emissionFailures.push_back({request.shader.codeAddress, request.layout, emissionFailure});
             throw;
@@ -1071,7 +1207,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         std::lock_guard lock(source.mutex);
         index = (variant->artifact.variantId * 0x9e3779b97f4a7c15ull) ^ hash;
         const auto found = source.memoIndex.find(index);
-        if (found != source.memoIndex.end() && found->second->variantId == variant->artifact.variantId && found->second->hash == hash) {
+        if (found != source.memoIndex.end() && found->second->variantId == variant->artifact.variantId && found->second->hash == hash && found->second->Matches(request, snapshot)) {
             source.memo.splice(source.memo.begin(), source.memo, found->second);
             counters.hits.fetch_add(1, std::memory_order_relaxed);
             if (memoHit != nullptr) *memoHit = true;
@@ -1089,7 +1225,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         std::lock_guard lock(source.mutex);
         const auto found = source.memoIndex.find(index);
         if (found != source.memoIndex.end()) {
-            if (found->second->variantId == variant->artifact.variantId && found->second->hash == hash) {
+            if (found->second->variantId == variant->artifact.variantId && found->second->hash == hash && found->second->Matches(request, snapshot)) {
                 source.memo.splice(source.memo.begin(), source.memo, found->second);
                 shared = found->second->result;
             } else {
@@ -1098,7 +1234,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
             }
         }
         if (source.memoIndex.find(index) == source.memoIndex.end()) {
-            source.memo.push_front({variant->artifact.variantId, hash, shared});
+            source.memo.emplace_front(variant->artifact.variantId, hash, request, snapshot, shared);
             source.memoIndex.emplace(index, source.memo.begin());
             while (source.memo.size() > ResultMemoEntries) {
                 const auto& last = source.memo.back();

@@ -7,6 +7,7 @@
 #include "Optimization/DescriptorBindingBuilder.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
+#include "Optimization/SrtWalker/SrtExecutionPlan.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -403,6 +404,205 @@ void verifyEntryRoundTrip() {
     incompatible.artifact.runtimeAbiVersion = RuntimeAbi::Version + 1u;
     const auto incompatibleFile = ShaderDiskCache::EncodeEntry(key, incompatible);
     require(ShaderDiskCache::DecodeEntry(incompatibleFile, key, decoded) == ShaderDiskCache::LoadStatus::Rejected, "an entry with an incompatible runtime ABI loads");
+}
+
+// Warm-launch resource plans: the value arena, the rebuilt SRT execution plan and the sampler resources
+// must survive EncodePlan -> DecodePlan unchanged, because a plan that decodes wrongly corrupts the
+// descriptors of every warm launch.
+struct SamplePlan {
+    IrResourcePlan plan;
+};
+
+SamplePlan samplePlan() {
+    SamplePlan sample;
+    auto& plan = sample.plan;
+    plan.stage = IrShaderStage::Compute;
+    plan.shaderHash = 0x0123456789abcdefull;
+    plan.userDataBase = 4;
+    plan.userDataCount = 16;
+    plan.srgbDecodeFormats = 0x5u;
+    plan.blockStorage.push_back(std::make_unique<IrBlock>(10u));
+    plan.blockStorage.push_back(std::make_unique<IrBlock>(11u));
+    plan.valueStorage.Reserve(9);
+    const auto make = [&](IrOpcode opcode, IrType type, std::uint32_t id) { return plan.valueStorage.Create(opcode, type, id); };
+    const auto constant = [&](std::uint32_t id, std::uint32_t immediate) {
+        auto* value = make(IrOpcode::Void, IrType::U32, id);
+        value->SetImmediateU32(immediate);
+        return value;
+    };
+    auto* reg = make(IrOpcode::GetScalarRegister, IrType::U32, 1);  // 0
+    reg->SetRegister({RegisterBank::Scalar, 6u});
+    auto* userData = make(IrOpcode::GetUserData, IrType::U32, 2);   // 1
+    userData->AddArgument(reg);
+    auto* offset = constant(3, 0x40u);                               // 2
+    auto* sum = make(IrOpcode::IAdd32, IrType::U32, 4);              // 3
+    sum->AddArgument(userData);
+    sum->AddArgument(offset);
+    auto* scale = constant(5, 0xfffffff0u);                          // 4
+    auto* product = make(IrOpcode::IMul32, IrType::U32, 6);          // 5
+    product->AddArgument(sum);
+    product->AddArgument(scale);
+    auto* phi = make(IrOpcode::Phi, IrType::U32, 7);                 // 6
+    phi->AddPhiOperand(plan.blockStorage[1].get(), product);
+    phi->AddPhiOperand(plan.blockStorage[0].get(), sum);
+    auto* wide = make(IrOpcode::Void, IrType::U64, 8);               // 7
+    wide->SetImmediateU64(0x1122334455667788ull);
+    wide->SetFlags(std::uint64_t{0x8000000000000001ull});
+    auto* base = make(IrOpcode::GetShaderBase, IrType::U64, 9);      // 8
+    plan.memoryInfo.resize(2);
+    plan.memoryInfo[1].offset = 0x24u;
+    plan.descriptorSources.resize(2);
+    plan.descriptorSources[0].dwords = {sum, product, offset, scale};
+    plan.descriptorSources[0].dwordCount = 4;
+    plan.descriptorSources[1].dwords = {phi, nullptr, wide, base};
+    plan.descriptorSources[1].dwordCount = 4;
+    DescriptorSource::IndirectImage table{};
+    table.materialSource = 0;
+    table.heapSource = 0;
+    table.selectorStride = 12;
+    table.selectorOffset = 4;
+    table.keyArg = 2;
+    table.entryOffset = 8;
+    table.hasMaterial = true;
+    plan.descriptorSources[1].indirectImage = table;
+    plan.controlFlow.resize(1);
+    plan.controlFlow[0].sources = {0u, 1u};
+    plan.controlFlow[0].images = {0u};
+    plan.materializationSources = {0u};
+    plan.srtReads = {{sum, 0u}, {product, 1u}};
+    plan.pureFlatSlots = {1, 0};
+    plan.cleanFlatSlots = {0, 0};
+    plan.srtPlanComplete = true;
+    plan.resourceTrackingComplete = true;
+    plan.info = sampleVariant().info.info;
+    for (auto& buffer : plan.info.buffers) buffer.source = 1;
+    for (auto& image : plan.info.images) image.source = 0;
+    plan.info.samplers = {{1, 0x10, 3, true, false, SamplerUseExplicitLod | SamplerUseGather, PixelSamplerUse::Unqualified, 1u, true},
+                          {0, 0x20, SamplerResource::NoCopy, false, true, 2u, 0x80000000u, 7u, false}};
+    plan.info.sampledPairs = {{0, 0, 0x10, PixelSamplerUse::Unqualified, 1u}, {0, 1, 0x20, 0x80000000u, 7u}};
+    plan.uniformFill.fill = {UniformFillKind::Buffer, 0u, {1u, 2u, 3u}, 2u, 0x55u};
+    plan.uniformFill.values = {offset, scale, nullptr, nullptr};
+    plan.executionPlan = Detail::CompileSrtExecutionPlan(plan);
+    return sample;
+}
+
+void requireSamePlanValues(const IrResourcePlan& expected, const IrResourcePlan& actual) {
+    require(expected.valueStorage.Size() == actual.valueStorage.Size(), "plan round trip changed the value count");
+    const auto indexOf = [](const IrResourcePlan& plan, const IrValue* value) -> std::ptrdiff_t {
+        return value == nullptr ? -1 : value - plan.valueStorage.begin();
+    };
+    for (std::size_t index = 0; index < expected.valueStorage.Size(); ++index) {
+        const auto& left = expected.valueStorage.begin()[index];
+        const auto& right = actual.valueStorage.begin()[index];
+        require(left.Opcode() == right.Opcode() && left.Type() == right.Type() && left.Id() == right.Id(), "plan round trip changed a value's opcode, type or id");
+        require(left.Flags<std::uint64_t>() == right.Flags<std::uint64_t>(), "plan round trip changed a value's flags");
+        require(left.HasImmediate() == right.HasImmediate() && (!left.HasImmediate() || left.ImmediateU64() == right.ImmediateU64()), "plan round trip changed a value's immediate");
+        require(left.Register() == right.Register(), "plan round trip changed a value's register");
+        require(left.ArgumentCount() == right.ArgumentCount(), "plan round trip changed an argument count");
+        for (std::size_t operand = 0; operand < left.ArgumentCount(); ++operand) {
+            require(indexOf(expected, left.Argument(operand)) == indexOf(actual, right.Argument(operand)), "plan round trip rewired an argument");
+        }
+        require(left.PhiBlockCount() == right.PhiBlockCount(), "plan round trip changed the phi block count");
+        for (std::size_t operand = 0; operand < left.PhiBlockCount(); ++operand) {
+            require(left.PhiBlock(operand)->Id() == right.PhiBlock(operand)->Id(), "plan round trip changed a phi predecessor");
+        }
+    }
+    require(expected.blockStorage.size() == actual.blockStorage.size(), "plan round trip changed the block count");
+    for (std::size_t index = 0; index < expected.blockStorage.size(); ++index) {
+        require(expected.blockStorage[index]->Id() == actual.blockStorage[index]->Id(), "plan round trip changed a block id");
+    }
+    require(expected.descriptorSources.size() == actual.descriptorSources.size(), "plan round trip changed the descriptor source count");
+    for (std::size_t source = 0; source < expected.descriptorSources.size(); ++source) {
+        const auto& left = expected.descriptorSources[source];
+        const auto& right = actual.descriptorSources[source];
+        require(left.dwordCount == right.dwordCount && left.indirectImage.has_value() == right.indirectImage.has_value(), "plan round trip changed a descriptor source");
+        for (std::size_t dword = 0; dword < left.dwords.size(); ++dword) {
+            require(indexOf(expected, left.dwords[dword]) == indexOf(actual, right.dwords[dword]), "plan round trip rewired a descriptor dword");
+        }
+        if (left.indirectImage.has_value()) {
+            const auto& a = *left.indirectImage;
+            const auto& b = *right.indirectImage;
+            require(a.materialSource == b.materialSource && a.heapSource == b.heapSource && a.selectorStride == b.selectorStride && a.selectorOffset == b.selectorOffset && a.keyArg == b.keyArg && a.entryOffset == b.entryOffset && a.hasMaterial == b.hasMaterial, "plan round trip changed an indirect image table");
+        }
+    }
+    require(expected.srtReads.size() == actual.srtReads.size(), "plan round trip changed the SRT read count");
+    for (std::size_t read = 0; read < expected.srtReads.size(); ++read) {
+        require(expected.srtReads[read].flatOffset == actual.srtReads[read].flatOffset && indexOf(expected, expected.srtReads[read].value) == indexOf(actual, actual.srtReads[read].value), "plan round trip changed an SRT read");
+    }
+    for (std::size_t value = 0; value < expected.uniformFill.values.size(); ++value) {
+        require(indexOf(expected, expected.uniformFill.values[value]) == indexOf(actual, actual.uniformFill.values[value]), "plan round trip rewired a uniform fill value");
+    }
+}
+
+void verifyPlanRoundTrip() {
+    auto sample = samplePlan();
+    const auto& plan = sample.plan;
+    require(plan.executionPlan != nullptr, "the sample plan has no SRT execution plan to compare");
+    std::vector<std::byte> bytes;
+    require(ShaderDiskCache::EncodePlan(plan, bytes), "a plan does not encode");
+    IrResourcePlan decoded;
+    require(ShaderDiskCache::DecodePlan(bytes, decoded), "an encoded plan does not decode");
+
+    require(plan.stage == decoded.stage && plan.shaderHash == decoded.shaderHash && plan.userDataBase == decoded.userDataBase && plan.userDataCount == decoded.userDataCount && plan.srgbDecodeFormats == decoded.srgbDecodeFormats, "plan round trip changed the plan header");
+    requireSamePlanValues(plan, decoded);
+    require(plan.memoryInfo.size() == decoded.memoryInfo.size() && plan.memoryInfo[1].offset == decoded.memoryInfo[1].offset, "plan round trip changed the memory info");
+    require(plan.controlFlow.size() == decoded.controlFlow.size() && plan.controlFlow[0].sources == decoded.controlFlow[0].sources && plan.controlFlow[0].images == decoded.controlFlow[0].images, "plan round trip changed the resource blocks");
+    require(plan.materializationSources == decoded.materializationSources && plan.guardedSrtSlots == decoded.guardedSrtSlots && plan.srtGuardOffset == decoded.srtGuardOffset && plan.cleanFlatSlots == decoded.cleanFlatSlots && plan.pureFlatSlots == decoded.pureFlatSlots, "plan round trip changed the SRT slot lists");
+    require(plan.requiresSpecializationMemory == decoded.requiresSpecializationMemory && plan.srtPlanComplete == decoded.srtPlanComplete && plan.resourceTrackingComplete == decoded.resourceTrackingComplete, "plan round trip changed the completeness flags");
+    require(plan.uniformFill.fill == decoded.uniformFill.fill, "plan round trip changed the uniform fill");
+
+    // The nine SamplerResource fields and five SampledResourcePair fields, one distinct value each.
+    require(decoded.info.samplers.size() == 2u && decoded.info.samplers == plan.info.samplers, "plan round trip changed a sampler resource");
+    require(decoded.info.sampledPairs.size() == 2u && decoded.info.sampledPairs == plan.info.sampledPairs, "plan round trip changed a sampled resource pair");
+    require(decoded.info.samplers[0].uses == (SamplerUseExplicitLod | SamplerUseGather) && decoded.info.samplers[1].copyOf == SamplerResource::NoCopy && decoded.info.samplers[1].liveUseCount == 7u && decoded.info.sampledPairs[1].liveUseMask == 0x80000000u, "a sampler or pair field decoded to the wrong slot");
+
+    // The execution plan is rebuilt, not stored: it must evaluate exactly like the original.
+    require(decoded.executionPlan != nullptr, "decoding did not rebuild the SRT execution plan");
+    require(decoded.executionPlan->operations.size() == plan.executionPlan->operations.size() && decoded.executionPlan->descriptors.size() == plan.executionPlan->descriptors.size() && decoded.executionPlan->flat == plan.executionPlan->flat && decoded.executionPlan->active == plan.executionPlan->active, "the rebuilt SRT execution plan has another shape");
+    const std::array<std::uint32_t, 16> userWords{1u, 2u, 3u, 4u, 5u, 6u, 0x1000u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u};
+    SrtRuntime runtime{};
+    runtime.userData = userWords;
+    std::vector<DescriptorValue> expectedResults, actualResults;
+    std::vector<std::uint32_t> expectedFlat, actualFlat;
+    std::vector<std::uint8_t> expectedActive, actualActive;
+    require(plan.executionPlan->Evaluate(runtime, expectedResults, expectedFlat, expectedActive, nullptr, nullptr), "the original execution plan does not evaluate");
+    require(decoded.executionPlan->Evaluate(runtime, actualResults, actualFlat, actualActive, nullptr, nullptr), "the rebuilt execution plan does not evaluate");
+    require(!expectedResults.empty() && expectedResults == actualResults && expectedFlat == actualFlat && expectedActive == actualActive, "the rebuilt execution plan evaluates to other descriptors");
+    // The first descriptor is {userData[2] + 0x40, that * 0xfffffff0, ...}: nonzero so a dropped operand shows.
+    require(expectedResults[0].dwords[0] == userWords[2] + 0x40u && expectedResults[0].dwords[1] == (userWords[2] + 0x40u) * 0xfffffff0u, "the sample plan no longer exercises the arithmetic it should");
+
+    // Canonical form: decoding then encoding again reproduces the bytes.
+    std::vector<std::byte> again;
+    require(ShaderDiskCache::EncodePlan(decoded, again) && again == bytes, "a decoded plan encodes to other bytes");
+
+    auto key = SampleRequest().Key();
+    const auto file = ShaderDiskCache::EncodePlanEntry(key, plan);
+    require(!file.empty(), "a plan entry does not encode");
+    IrResourcePlan viaEntry;
+    require(ShaderDiskCache::DecodePlanEntry(file, key, viaEntry) == ShaderDiskCache::LoadStatus::Loaded, "an encoded plan entry does not decode");
+    requireSamePlanValues(plan, viaEntry);
+    for (std::size_t size = 0; size < bytes.size(); size += size < 256 ? 1 : 17) {
+        IrResourcePlan partial;
+        require(!ShaderDiskCache::DecodePlan(std::span(bytes).first(size), partial), "a plan truncated to " + std::to_string(size) + " bytes decodes");
+    }
+    for (std::size_t offset = 0; offset < file.size(); offset += offset < 256 ? 1 : 13) {
+        auto damaged = file;
+        damaged[offset] ^= std::byte{0x10};
+        IrResourcePlan broken;
+        require(ShaderDiskCache::DecodePlanEntry(damaged, key, broken) == ShaderDiskCache::LoadStatus::Rejected, "a plan entry with byte " + std::to_string(offset) + " damaged is not rejected");
+    }
+    auto otherKey = key;
+    otherKey.back() ^= std::byte{1};
+    IrResourcePlan foreign;
+    require(ShaderDiskCache::DecodePlanEntry(file, otherKey, foreign) == ShaderDiskCache::LoadStatus::KeyMismatch, "a plan entry for another key loads");
+
+    // A sampler whose descriptor source points past the table must be refused, not dereferenced.
+    auto bad = samplePlan();
+    bad.plan.info.samplers[0].source = 99u;
+    std::vector<std::byte> badBytes;
+    require(ShaderDiskCache::EncodePlan(bad.plan, badBytes), "the out-of-range sample plan does not encode");
+    IrResourcePlan refused;
+    require(!ShaderDiskCache::DecodePlan(badBytes, refused), "a plan with an unknown sampler source decodes");
 }
 
 void verifyArtifactStorageIsolation() {
@@ -1111,6 +1311,7 @@ int main(int argc, char** argv) {
         setEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.string());
         verifyResultRoundTrip();
         verifyEntryRoundTrip();
+        verifyPlanRoundTrip();
         verifyArtifactStorageIsolation();
         verifyKeySensitivity();
         verifyFloatModeSerialization();

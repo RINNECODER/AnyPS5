@@ -2,6 +2,7 @@
 #define CORE_SHADER_RECOMPILER_SHADERDISKCACHE_HPP
 
 #include "CompiledVariant.hpp"
+#include "IntermediateRepresentation/IrMetadata/ResourcePlan.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -15,7 +16,9 @@ namespace ShaderRecompiler::ShaderDiskCache {
 // 29: upstream format 27 plus the native pixel-sampler certificate fields (fork format 26).
 // 30: fork format 29 plus upstream format 28 (the pixel ancillary word reaches the request).
 // 32: fork format 31 plus upstream format 29 (layerExported in the pixel info) and the sync-8 shader output changes.
-inline constexpr std::uint32_t FormatVersion = 33;
+// 33: fork format 32 plus the shader output changes of upstream float and denormal peepholes (U1).
+// 34: fork format 33 plus upstream PR 4883 (stored front-end resource plans).
+inline constexpr std::uint32_t FormatVersion = 34;
 
 enum class LoadStatus {
     Loaded,
@@ -32,6 +35,10 @@ struct Counters {
     std::uint64_t writeFailures = 0;
     std::uint64_t bytesRead = 0;
     std::uint64_t bytesWritten = 0;
+    std::uint64_t planHits = 0;
+    std::uint64_t planMisses = 0;
+    std::uint64_t planWrites = 0;
+    std::uint64_t planLoadFailures = 0;
 };
 
 [[nodiscard]] std::uint64_t SourceVersion();
@@ -46,11 +53,19 @@ void EncodeResult(const RecompileResult& result, std::vector<std::byte>& out);
 [[nodiscard]] std::vector<std::byte> EncodeEntry(std::span<const std::byte> key, const CompiledVariant& variant);
 [[nodiscard]] LoadStatus DecodeEntry(std::span<const std::byte> file, std::span<const std::byte> key, CompiledVariant& variant);
 
+void BuildPlanKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, std::vector<std::byte>& key);
+[[nodiscard]] bool EncodePlan(const IrResourcePlan& plan, std::vector<std::byte>& out);
+[[nodiscard]] bool DecodePlan(std::span<const std::byte> bytes, IrResourcePlan& plan);
+[[nodiscard]] std::vector<std::byte> EncodePlanEntry(std::span<const std::byte> key, const IrResourcePlan& plan);
+[[nodiscard]] LoadStatus DecodePlanEntry(std::span<const std::byte> file, std::span<const std::byte> key, IrResourcePlan& plan);
+
 [[nodiscard]] bool Enabled();
 [[nodiscard]] std::filesystem::path EntryDirectory();
 
 [[nodiscard]] bool Load(std::span<const std::byte> key, CompiledVariant& variant);
 void Store(std::vector<std::byte> key, std::shared_ptr<const CompiledVariant> variant);
+[[nodiscard]] bool LoadPlan(std::span<const std::byte> key, IrResourcePlan& plan);
+void StorePlan(std::vector<std::byte> key, std::shared_ptr<const IrResourcePlan> plan);
 void Flush();
 [[nodiscard]] Counters Totals();
 
