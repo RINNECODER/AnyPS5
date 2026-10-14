@@ -13,9 +13,11 @@
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +27,9 @@
 #include <list>
 #include <pthread.h>
 #include <set>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -697,6 +702,16 @@ std::vector<PreparedShaders::Entry> PrepareRegistered(const ShaderSnapshot& snap
     return plan != nullptr ? PrepareRegistered(*plan) : std::vector<PreparedShaders::Entry>{};
 }
 
+#ifdef __GLIBC__
+void trimFreedMemory() {
+    static std::atomic<std::int64_t> last{0};
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto previous = last.load(std::memory_order_relaxed);
+    if (now - previous < 1000 || !last.compare_exchange_strong(previous, now, std::memory_order_relaxed)) return;
+    malloc_trim(0);
+}
+#endif
+
 class RegistrationPreparePool {
 public:
     static RegistrationPreparePool& Instance() {
@@ -752,11 +767,16 @@ private:
             }
             task();
             task = nullptr;
+            bool drained = false;
             {
                 std::lock_guard lock(pool.mutex);
                 --pool.running;
-                if (pool.tasks.empty() && pool.running == 0) pool.idle.notify_all();
+                drained = pool.tasks.empty() && pool.running == 0;
+                if (drained) pool.idle.notify_all();
             }
+#ifdef __GLIBC__
+            if (drained) trimFreedMemory();
+#endif
         }
         return nullptr;
     }
