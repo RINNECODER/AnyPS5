@@ -14,6 +14,7 @@ void APS5_VABI sceVideoOutAddBufferAttributeOption(VideoOutBufferAttribute2* att
 int APS5_VABI sceVideoOutSubmitChangeBufferAttribute2(int handle, int set_index, const VideoOutBufferAttribute2* attribute, void* option);
 int APS5_VABI sceVideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg);
 int APS5_VABI sceVideoOutUnregisterBuffers(int handle, int set_index);
+int APS5_VABI sceVideoOutGetBufferLabelAddress(int handle, uintptr_t* address);
 
 #endif
 

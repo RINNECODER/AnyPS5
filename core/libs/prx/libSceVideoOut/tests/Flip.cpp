@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <initializer_list>
 #include <string>
 #include <limits>
@@ -664,6 +665,75 @@ void testFlipAfterGpuWork() {
     LibcRunShutdown_nid_postfix();
 }
 
+void testLabels(bool overlay) {
+    std::uintptr_t address = 0x1234;
+    for (const int invalid : {-1, 0, VIDEO_OUT_NUM_MAX, std::numeric_limits<int>::max()}) {
+        check(sceVideoOutGetBufferLabelAddress(invalid, &address) == VIDEO_OUT_ERROR_INVALID_HANDLE && address == 0x1234, "invalid label query changed its output");
+    }
+    check(sceVideoOutGetBufferLabelAddress(1, nullptr) == VIDEO_OUT_ERROR_INVALID_ADDRESS, "null label output was accepted");
+    check(sceVideoOutGetBufferLabelAddress(2, &address) == VIDEO_OUT_ERROR_INVALID_HANDLE && address == 0x1234, "unopened label query changed its output");
+    const int bus = overlay ? VIDEO_OUT_BUS_TYPE_OVERLAY : VIDEO_OUT_BUS_TYPE_MAIN;
+    const int handle = sceVideoOutOpen(255, bus, 0, nullptr);
+    auto cfg = VideoOutDriver::Get().GetConfig(handle);
+    check(sceVideoOutGetBufferLabelAddress(handle, &address) == VIDEO_OUT_BUFFER_NUM_MAX, "label query returned the wrong count");
+    check(address != 0 && address % std::atomic_ref<std::uint64_t>::required_alignment == 0, "label array is absent or unaligned");
+    auto* labels = reinterpret_cast<std::uint64_t*>(address);
+    for (int i = 0; i < VIDEO_OUT_BUFFER_NUM_MAX; ++i) check(std::atomic_ref(labels[i]).load() == 0, "new port has a nonzero label");
+    alignas(std::uintptr_t) std::array<std::byte, sizeof(address) + 2> unaligned;
+    unaligned.fill(std::byte{0x5a});
+    check(sceVideoOutGetBufferLabelAddress(handle, reinterpret_cast<std::uintptr_t*>(unaligned.data() + 1)) == VIDEO_OUT_BUFFER_NUM_MAX, "unaligned label-address output failed");
+    std::uintptr_t repeated = 0;
+    std::memcpy(&repeated, unaligned.data() + 1, sizeof(repeated));
+    check(repeated == address && unaligned.front() == std::byte{0x5a} && unaligned.back() == std::byte{0x5a}, "label query changed its address or output canaries");
+    for (int i : {0, 1, 15}) std::atomic_ref(labels[i]).store(55);
+    std::vector<std::byte> allocation(2 * 65536 + 65535);
+    const auto storage = alignedBuffer(allocation);
+    std::array<VideoOutBuffers, 2> buffers{};
+    buffers[0].data = storage.data();
+    buffers[1].data = storage.data() + 65536;
+    VideoOutBufferAttribute2 attribute{};
+    attribute.width = 64;
+    attribute.height = 64;
+    attribute.pixel_format = 0x8000000000000000ull;
+    check(sceVideoOutRegisterBuffers2(handle, 0, 0, buffers.data(), 2, &attribute, 0, nullptr) == 0, "label-test buffers failed to register");
+    check(std::atomic_ref(labels[0]).load() == 0 && std::atomic_ref(labels[1]).load() == 0 && std::atomic_ref(labels[15]).load() == 55, "registration reset the wrong labels");
+    std::atomic_ref(labels[0]).store(1);
+    std::atomic_ref(labels[1]).store(1);
+    const auto flip = [&](int index, std::uint64_t count) {
+        check(sceVideoOutSubmitFlip(handle, index, VIDEO_OUT_FLIP_MODE_VSYNC, index) == 0, "label-test flip failed to submit");
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        VideoOutFlipStatus status{};
+        do {
+            check(sceVideoOutGetFlipStatus(handle, &status) == 0, "label-test flip status failed");
+            if (status.count >= count) return;
+            std::this_thread::yield();
+        } while (std::chrono::steady_clock::now() < deadline);
+        throw std::runtime_error("label-test flip timed out");
+    };
+    flip(0, 1);
+    check(std::atomic_ref(labels[0]).load() == 1 && std::atomic_ref(labels[1]).load() == 1, "first flip released a label before replacement");
+    flip(1, 2);
+    check(std::atomic_ref(labels[0]).load() == 0 && std::atomic_ref(labels[1]).load() == 1, "replacement flip released the wrong label");
+    flip(VIDEO_OUT_BUFFER_INDEX_BLACK, 3);
+    check(std::atomic_ref(labels[1]).load() == 0 && std::atomic_ref(labels[15]).load() == 55, "black flip did not release only the previous buffer");
+    flip(VIDEO_OUT_BUFFER_INDEX_BLANK, 4);
+    check(std::atomic_ref(labels[15]).load() == 55, "blank flip accessed a negative label index");
+    const int otherHandle = sceVideoOutOpen(255, overlay ? VIDEO_OUT_BUS_TYPE_MAIN : VIDEO_OUT_BUS_TYPE_OVERLAY, 0, nullptr);
+    std::uintptr_t other = 0;
+    check(sceVideoOutGetBufferLabelAddress(otherHandle, &other) == VIDEO_OUT_BUFFER_NUM_MAX && other != address, "ports share their labels");
+    sceVideoOutClose(otherHandle);
+    sceVideoOutClose(handle);
+    repeated = 0x1234;
+    check(sceVideoOutGetBufferLabelAddress(handle, &repeated) == VIDEO_OUT_ERROR_INVALID_HANDLE && repeated == 0x1234, "closed label query changed its output");
+    const int reopened = sceVideoOutOpen(255, bus, 0, nullptr);
+    check(sceVideoOutGetBufferLabelAddress(reopened, &repeated) == VIDEO_OUT_BUFFER_NUM_MAX && repeated != address, "reopened port shares live old-generation labels");
+    auto* fresh = reinterpret_cast<std::uint64_t*>(repeated);
+    for (int i = 0; i < VIDEO_OUT_BUFFER_NUM_MAX; ++i) check(std::atomic_ref(fresh[i]).load() == 0, "reopened port retained an old label");
+    check(std::atomic_ref(labels[15]).load() == 55, "reopening changed old-generation labels");
+    sceVideoOutClose(reopened);
+    LibcRunShutdown_nid_postfix();
+}
+
 void testUnopenedEventRegistration() {
     KernelEqueue eq = 0;
     check(sceKernelCreateEqueue(&eq, "unopened") == 0, "the event queue was not created");
@@ -721,6 +791,8 @@ int main(int argc, char** argv) {
         else if (argc == 2 && std::string(argv[1]) == "pacing") testReleaseVblank();
         else if (argc == 2 && std::string(argv[1]) == "aftergpu") testFlipAfterGpuWork();
         else if (argc == 2 && std::string(argv[1]) == "unavailable") testUnavailable();
+        else if (argc == 2 && std::string(argv[1]) == "labels") testLabels(true);
+        else if (argc == 2 && std::string(argv[1]) == "labels_main") testLabels(false);
         else if (argc == 2 && std::string(argv[1]) == "onedevice") testOneDevice();
         else if (argc == 2 && std::string(argv[1]) == "unopened") testUnopenedEventRegistration();
         else if (argc == 2 && std::string(argv[1]) == "overlay") testOverlay();
