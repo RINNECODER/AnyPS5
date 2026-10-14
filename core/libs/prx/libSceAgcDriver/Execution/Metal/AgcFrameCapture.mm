@@ -54,7 +54,10 @@ Registers ReadRegisters(Reader& in) {
     return registers;
 }
 
-// Residency per host page of [begin, begin + bytes): nonzero when the page may hold data.
+// Residency per host page of [begin, begin + bytes): nonzero when the page may hold data. Any flag
+// counts, including MINCORE_PAGED_OUT, which xnu reports for pages held by the compressor or the
+// swap pager; only a page the process never populated reads as 0, and its contents are zero.
+// ANYPS5_AGC_CAPTURE_READ_ALL=1 reads every page instead.
 std::vector<char> Residency(const std::byte* begin, std::size_t bytes, std::uintptr_t& base, std::size_t& page) {
     page = static_cast<std::size_t>(getpagesize());
     base = reinterpret_cast<std::uintptr_t>(begin) & ~(static_cast<std::uintptr_t>(page) - 1);
@@ -280,65 +283,7 @@ private:
         written = 16;
         std::uint64_t residentBytes = 0;
         std::uint64_t storedChunks = 0;
-        for (const auto& range : context.ranges) {
-            Writer record;
-            record.Put(range.guestAddress);
-            record.Put(static_cast<std::uint64_t>(range.host.size()));
-            record.Put(static_cast<std::uint32_t>(range.writable));
-            record.Put(std::uint32_t{0});
-            Emit(Tag::Range, record);
-            Table table{range.guestAddress, range.host.data(), range.host.size(), {}};
-            table.pages.resize((range.host.size() + PageBytes - 1) / PageBytes);
-            std::uintptr_t base = 0;
-            std::size_t page = 0;
-            const auto resident = Residency(range.host.data(), range.host.size(), base, page);
-            const auto chunks = (range.host.size() + ChunkBytes - 1) / ChunkBytes;
-            // Batches keep at most 256 compressed chunks in memory at once.
-            constexpr std::size_t Batch = 256;
-            for (std::size_t first = 0; first < chunks; first += Batch) {
-                const auto count = std::min<std::size_t>(Batch, chunks - first);
-                std::vector<std::vector<std::byte>> stored(count);
-                std::vector<std::uint64_t> hashes(count);
-                std::vector<char> present(count, 0);
-                auto* storedOut = stored.data();
-                auto* hashesOut = hashes.data();
-                auto* presentOut = present.data();
-                auto* pagesOut = table.pages.data();
-                const auto* residentIn = &resident;
-                const auto* host = range.host.data();
-                const auto hostBytes = range.host.size();
-                dispatch_apply(count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(std::size_t i) {
-                    const auto offset = (first + i) * ChunkBytes;
-                    const auto bytes = std::min<std::size_t>(ChunkBytes, hostBytes - offset);
-                    const auto* data = host + offset;
-                    for (std::size_t p = 0; p < bytes; p += PageBytes) {
-                        const auto pageBytes = std::min<std::size_t>(PageBytes, bytes - p);
-                        pagesOut[(offset + p) / PageBytes] = AnyResident(*residentIn, base, page, data + p, pageBytes)
-                            ? Hash(data + p, pageBytes) : ZeroHash(pageBytes);
-                    }
-                    if (!AnyResident(*residentIn, base, page, data, bytes)) return;
-                    hashesOut[i] = Hash(data, bytes);
-                    if (hashesOut[i] == ZeroHash(bytes) && std::all_of(data, data + bytes, [](std::byte b) { return b == std::byte{0}; })) return;
-                    presentOut[i] = 1;
-                    storedOut[i] = Compress(data, bytes);
-                });
-                for (std::size_t i = 0; i < count; ++i) {
-                    if (!present[i]) continue;
-                    const auto offset = (first + i) * ChunkBytes;
-                    const auto bytes = std::min<std::size_t>(ChunkBytes, range.host.size() - offset);
-                    Writer chunk;
-                    chunk.Put(range.guestAddress + offset);
-                    chunk.Put(static_cast<std::uint32_t>(bytes));
-                    chunk.Put(static_cast<std::uint32_t>(stored[i].size()));
-                    chunk.Put(hashes[i]);
-                    chunk.PutBytes(stored[i].data(), stored[i].size());
-                    Emit(Tag::Chunk, chunk);
-                    residentBytes += bytes;
-                    ++storedChunks;
-                }
-            }
-            tables.push_back(std::move(table));
-        }
+        for (const auto& range : context.ranges) SnapshotRange(range, residentBytes, storedChunks);
         phase = Phase::Recording;
         recording.store(true, std::memory_order_release);
         std::fprintf(stderr, "[agc-capture] flip %llu: snapshot of %zu ranges, %llu MiB in %llu chunks, %.1f MiB written in %.0f ms\n",
@@ -347,9 +292,82 @@ private:
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
     }
 
+    // Records `range` and its resident, non-zero chunks, and starts its page hashes.
+    void SnapshotRange(const NativeGuestMemory::BorrowedRange& range, std::uint64_t& residentBytes, std::uint64_t& storedChunks) {
+        Writer record;
+        record.Put(range.guestAddress);
+        record.Put(static_cast<std::uint64_t>(range.host.size()));
+        record.Put(static_cast<std::uint32_t>(range.writable));
+        record.Put(std::uint32_t{0});
+        Emit(Tag::Range, record);
+        Table table{range.guestAddress, range.host.data(), range.host.size(), {}};
+        table.pages.resize((range.host.size() + PageBytes - 1) / PageBytes);
+        std::uintptr_t base = 0;
+        std::size_t page = 0;
+        const auto resident = Residency(range.host.data(), range.host.size(), base, page);
+        const auto chunks = (range.host.size() + ChunkBytes - 1) / ChunkBytes;
+        // Batches keep at most 256 compressed chunks in memory at once.
+        constexpr std::size_t Batch = 256;
+        for (std::size_t first = 0; first < chunks; first += Batch) {
+            const auto count = std::min<std::size_t>(Batch, chunks - first);
+            std::vector<std::vector<std::byte>> stored(count);
+            std::vector<std::uint64_t> hashes(count);
+            std::vector<char> present(count, 0);
+            auto* storedOut = stored.data();
+            auto* hashesOut = hashes.data();
+            auto* presentOut = present.data();
+            auto* pagesOut = table.pages.data();
+            const auto* residentIn = &resident;
+            const auto* host = range.host.data();
+            const auto hostBytes = range.host.size();
+            dispatch_apply(count, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(std::size_t i) {
+                const auto offset = (first + i) * ChunkBytes;
+                const auto bytes = std::min<std::size_t>(ChunkBytes, hostBytes - offset);
+                const auto* data = host + offset;
+                for (std::size_t p = 0; p < bytes; p += PageBytes) {
+                    const auto pageBytes = std::min<std::size_t>(PageBytes, bytes - p);
+                    pagesOut[(offset + p) / PageBytes] = AnyResident(*residentIn, base, page, data + p, pageBytes)
+                        ? Hash(data + p, pageBytes) : ZeroHash(pageBytes);
+                }
+                if (!AnyResident(*residentIn, base, page, data, bytes)) return;
+                hashesOut[i] = Hash(data, bytes);
+                if (hashesOut[i] == ZeroHash(bytes) && std::all_of(data, data + bytes, [](std::byte b) { return b == std::byte{0}; })) return;
+                presentOut[i] = 1;
+                storedOut[i] = Compress(data, bytes);
+            });
+            for (std::size_t i = 0; i < count; ++i) {
+                if (!present[i]) continue;
+                const auto offset = (first + i) * ChunkBytes;
+                const auto bytes = std::min<std::size_t>(ChunkBytes, range.host.size() - offset);
+                Writer chunk;
+                chunk.Put(range.guestAddress + offset);
+                chunk.Put(static_cast<std::uint32_t>(bytes));
+                chunk.Put(static_cast<std::uint32_t>(stored[i].size()));
+                chunk.Put(hashes[i]);
+                chunk.PutBytes(stored[i].data(), stored[i].size());
+                Emit(Tag::Chunk, chunk);
+                residentBytes += bytes;
+                ++storedChunks;
+            }
+        }
+        tables.push_back(std::move(table));
+    }
+
     // Appends the pages that changed since the previous checkpoint to `record`; returns their count.
     std::uint32_t Deltas(const Context& context, Writer& record) {
         std::uint32_t count = 0;
+        // A range the title mapped after the snapshot: its contents now are its initial state.
+        for (const auto& range : context.ranges) {
+            const bool known = std::any_of(tables.begin(), tables.end(), [&](const Table& table) {
+                return table.guest == range.guestAddress && table.host == range.host.data() && table.bytes == range.host.size();
+            });
+            if (known) continue;
+            std::uint64_t residentBytes = 0;
+            std::uint64_t storedChunks = 0;
+            SnapshotRange(range, residentBytes, storedChunks);
+            std::fprintf(stderr, "[agc-capture] range 0x%llx (+0x%zx) mapped during the frame: %llu MiB recorded\n",
+                static_cast<unsigned long long>(range.guestAddress), range.host.size(), static_cast<unsigned long long>(residentBytes >> 20));
+        }
         for (auto& table : tables) {
             // A range that is no longer borrowed is not read by this submission.
             const auto found = std::find_if(context.ranges.begin(), context.ranges.end(), [&](const auto& range) {

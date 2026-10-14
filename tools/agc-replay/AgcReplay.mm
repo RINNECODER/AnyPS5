@@ -35,6 +35,8 @@
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -77,6 +79,7 @@ struct Submit {
     const std::uint32_t* words;
     std::uint32_t count;
     std::uint32_t frame;
+    std::size_t index;  // position in the capture's global execution order
     std::vector<Block> pages;
 };
 
@@ -415,8 +418,10 @@ int main(int argc, char** argv) {
     if (frames == 0 || frames > captured) frames = captured;
     if (frames == 0) Fail("capture holds no submissions");
     std::vector<const Submit*> submits;
-    for (const auto& submit : capture.submits)
-        if (submit.frame < frames) submits.push_back(&submit);
+    for (std::size_t i = 0; i < capture.submits.size(); ++i) {
+        capture.submits[i].index = i;
+        if (capture.submits[i].frame < frames) submits.push_back(&capture.submits[i]);
+    }
 
     // Guest memory at its guest addresses.
     const auto pageSize = static_cast<std::uint64_t>(getpagesize());
@@ -476,6 +481,11 @@ int main(int argc, char** argv) {
     for (const auto* submit : submits) byQueue[submit->queue].push_back(submit);
     std::map<std::uint32_t, std::size_t> cursor;
     std::mutex cursorMutex;
+    // The capture recorded submissions in one global order across queues, and each page delta's
+    // previous hash follows it: a worker waits until its submission is the next one in that order.
+    std::condition_variable turn;
+    std::size_t globalNext = 0;
+    std::atomic<std::uint64_t> outOfOrder{0};
     DeltaStats deltas;
     Capture::InstallReplay([&](std::uint32_t queue, const Capture::Context& context) {
         const Submit* submit = nullptr;
@@ -492,7 +502,20 @@ int main(int argc, char** argv) {
             pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
             raised = true;
         }
-        if (submit == nullptr || submit->pages.empty()) return;
+        if (submit == nullptr) return;
+        const auto advance = [&] {
+            {
+                std::lock_guard lock(cursorMutex);
+                globalNext = std::max(globalNext, submit->index + 1);
+            }
+            turn.notify_all();
+        };
+        {
+            std::unique_lock lock(cursorMutex);
+            // A wait the capture's order cannot satisfy (a queue blocked on this one) gives up after 5 s.
+            if (!turn.wait_for(lock, std::chrono::seconds(5), [&] { return globalNext >= submit->index; })) ++outOfOrder;
+        }
+        if (submit->pages.empty()) return advance();
         const auto started = ThreadCpuNs();
         const auto startedInstructions = ThreadInstructions();
         std::lock_guard gpu(context.gpuMutex);
@@ -510,6 +533,7 @@ int main(int argc, char** argv) {
         }
         deltas.cpuNs += ThreadCpuNs() - started;
         deltas.instructions += ThreadInstructions() - startedInstructions;
+        advance();
     });
     Capture::EnableGpuBusy(true);
     const auto loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart).count();
@@ -552,6 +576,7 @@ int main(int argc, char** argv) {
         {
             std::lock_guard lock(cursorMutex);
             cursor.clear();
+            globalNext = submits.empty() ? 0 : submits.front()->index;
         }
         std::uint32_t registry = 0xffffffffu;
         std::size_t next = 0;
@@ -598,6 +623,8 @@ int main(int argc, char** argv) {
     }
 
     int status = 0;
+    if (outOfOrder.load() != 0)
+        std::printf("warning: %llu submissions ran out of the captured cross-queue order\n", static_cast<unsigned long long>(outOfOrder.load()));
     std::printf("page deltas: %llu written, %llu kept (replayed GPU work wrote them), %.1f ms CPU (excluded)\n",
         static_cast<unsigned long long>(deltas.written.load()), static_cast<unsigned long long>(deltas.kept.load()),
         static_cast<double>(deltas.cpuNs.load()) / 1e6 / static_cast<double>(repeat));
