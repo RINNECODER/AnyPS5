@@ -443,6 +443,7 @@ struct FragmentParameter {
     bool perVertex;
     bool custom = false;
     bool flatP10 = false;
+    bool vertexOrder = false;
 };
 
 struct BarycentricEmulation {
