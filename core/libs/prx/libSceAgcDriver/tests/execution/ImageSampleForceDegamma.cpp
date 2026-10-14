@@ -44,13 +44,17 @@ std::array<std::uint32_t, 4> BufferDescriptor(const void* data, std::uint32_t by
     return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), bytes, 0x31016facu};
 }
 
-std::array<std::uint32_t, 8> TextureDescriptor(std::uint32_t format) {
+// DST_SEL_X..W in T# word 3: identity (R, G, B, A) and an R/B swap (B, G, R, A).
+constexpr std::uint32_t IdentitySelect = 4u | (5u << 3u) | (6u << 6u) | (7u << 9u);
+constexpr std::uint32_t SwapRbSelect = 6u | (5u << 3u) | (4u << 6u) | (7u << 9u);
+
+std::array<std::uint32_t, 8> TextureDescriptor(std::uint32_t format, std::uint32_t select = IdentitySelect) {
     const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(Texels.data()));
     return {
         static_cast<std::uint32_t>(address >> 8u),
         static_cast<std::uint32_t>((address >> 40u) & 0xffu) | (format << 20u) | (((Size - 1u) & 3u) << 30u),
         ((Size - 1u) >> 2u) | ((Size - 1u) << 14u),
-        0xfacu | (Type2D << 28u),
+        select | (Type2D << 28u),
         0u,
         0u,
         0u,
@@ -93,11 +97,11 @@ float SrgbToLinear(std::uint8_t code) {
     return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
 }
 
-std::array<float, Threads * 4> Sample(AgcDriver::VulkanDevice& device, std::uint32_t format, std::uint32_t filter, std::uint32_t forced) {
+std::array<float, Threads * 4> Sample(AgcDriver::VulkanDevice& device, std::uint32_t format, std::uint32_t filter, std::uint32_t forced, std::uint32_t select = IdentitySelect) {
     std::vector<std::uint32_t> userData(20, 0u);
     const auto input = BufferDescriptor(Input.data(), static_cast<std::uint32_t>(sizeof(Input)));
     const auto output = BufferDescriptor(Output.data(), static_cast<std::uint32_t>(sizeof(Output)));
-    const auto texture = TextureDescriptor(format);
+    const auto texture = TextureDescriptor(format, select);
     const auto sampler = SamplerDescriptor(filter, forced);
     std::copy(input.begin(), input.end(), userData.begin());
     std::copy(output.begin(), output.end(), userData.begin() + 4);
@@ -125,12 +129,12 @@ void RequireSame(const std::array<float, Threads * 4>& forced, const std::array<
     }
 }
 
-void RequireDecoded(const std::array<float, Threads * 4>& sampled, const char* name) {
+void RequireDecoded(const std::array<float, Threads * 4>& sampled, const char* name, bool swapRb = false) {
     for (std::uint32_t tid = 0; tid < Threads; ++tid) {
         const auto x = tid % Size;
         const auto y = (tid / Size) % Size;
         for (std::uint32_t channel = 0; channel < 4u; ++channel) {
-            const auto code = Code8(x, y, channel);
+            const auto code = Code8(x, y, swapRb && channel != 1u && channel != 3u ? 2u - channel : channel);
             const float expected = channel == 3u ? static_cast<float>(code) / 255.0f : SrgbToLinear(code);
             const float value = sampled[tid * 4u + channel];
             Require(std::fabs(value - expected) <= 0.005f, std::string(name) + " through FORCE_DEGAMMA: thread " + std::to_string(tid) + " component " + std::to_string(channel) + " sampled " + std::to_string(value) + ", expected " + std::to_string(expected));
@@ -170,6 +174,10 @@ int main() {
         Require(unormPlain[0] != unormPoint[0] || unormPlain[4] != unormPoint[4], "8_8_8_8_UNORM without FORCE_DEGAMMA sampled the decoded values");
         FillInput(false);
         RequireSame(Sample(*device, Format8888UNorm, FilterBilinear, ForceDegamma), forcedBilinear, "8_8_8_8_UNORM, bilinear");
+        // A swizzled T# (R/B swap) keeps its mapping through the sRGB view: applied once, not composed twice.
+        FillInput(true);
+        RequireDecoded(Sample(*device, Format8888UNorm, FilterPoint, ForceDegamma, SwapRbSelect), "8_8_8_8_UNORM, R/B swapped", true);
+        RequireDecoded(Sample(*device, Format8888Srgb, FilterPoint, ForceDegamma, SwapRbSelect), "8_8_8_8_SRGB, R/B swapped", true);
         Reject(*device, Format32Float, "guest format 22, which is not sRGB and has no sRGB view, is sampled through a sampler that forces sRGB decoding");
         std::puts("image sample force degamma tests passed");
         return 0;
