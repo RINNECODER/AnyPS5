@@ -443,9 +443,11 @@ void DefineDescriptors(SpirvEmitterState& state) {
             break;
         case DescriptorBindingKind::ShaderData:
             state.shaderDataStorageVariable = Define(StorageBufferBlockType(state), "shader_data");
+            state.module.AddAnnotation(spv::OpDecorate, state.shaderDataStorageVariable, spv::DecorationNonWritable);
             break;
         case DescriptorBindingKind::FlattenedSrt:
             state.flattenedSrtVariable = Define(StorageBufferBlockType(state), "flattened_srt");
+            state.module.AddAnnotation(spv::OpDecorate, state.flattenedSrtVariable, spv::DecorationNonWritable);
             break;
         case DescriptorBindingKind::Samplers:
             state.samplerVariable = Define(ArrayType(state.module.Type(spv::OpTypeSampler)), "samplers", spv::StorageClassUniformConstant);

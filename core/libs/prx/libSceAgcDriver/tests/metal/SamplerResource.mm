@@ -273,7 +273,21 @@ void CheckCache(const MetalTests::Context& context) {
 
 }
 
+// The Metal null-image test is the shared one: a nonzero base with a type-0 descriptor is unbound too.
+void CheckNullImageDescriptor() {
+    using AgcDriver::Metal::NullImageDescriptor;
+    const std::array<std::uint32_t, 8> bound{0x1000u, 0u, 0u, 9u << 28u, 0u, 0u, 0u, 0u};
+    auto typeZero = bound;
+    typeZero[3] = 0u;
+    auto noBase = bound;
+    noBase[0] = 0u;
+    MetalTests::Require(!NullImageDescriptor(bound), "a bound image descriptor was classified as null");
+    MetalTests::Require(NullImageDescriptor(typeZero), "a type-0 image descriptor with a nonzero base was not classified as null");
+    MetalTests::Require(NullImageDescriptor(noBase), "an image descriptor without a base was not classified as null");
+}
+
 void RunSamplerResourceTests(const MetalTests::Context& context) {
+    CheckNullImageDescriptor();
     CheckCache(context);
     Probe probe(context);
     CheckAddressing(context, probe);

@@ -2,8 +2,10 @@
 #include "SpirvBackend/SpirvBda.hpp"
 #include "SpirvBackend/SpirvEmitterInstructions.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvSubgroup.hpp"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <queue>
 #include <string>
 #include <spirv/unified1/spirv.hpp>
 #include <cstdint>
@@ -718,16 +720,74 @@ void EmitStructuredInstruction(SpirvValueEmitContext& ctx, StructuredFunctionSta
     EmitDirectInstruction(ctx, inst);
 }
 
+bool IsRareSelect(const IrValue& inst) {
+    return inst.Opcode() == IrOpcode::SelectF32 && inst.ArgumentCount() == 3u && inst.Flags<SelectFlags>().rarelyTrue;
+}
+
+std::unordered_map<const IrValue*, std::vector<const IrValue*>> RareSelectArms(const SpirvEmitterState& state, const IrBlock* block) {
+    std::unordered_map<const IrValue*, std::vector<const IrValue*>> arms;
+    if (std::none_of(block->Instructions().begin(), block->Instructions().end(), [](const IrValue* inst) { return IsRareSelect(*inst); })) return arms;
+    const BlockInfo* info = BlockInfoFor(state.program, block);
+    if (info == nullptr || info->terminator.loopHeader || state.continueTarget) return arms;
+    std::unordered_set<const IrValue*> terminators;
+    for (const auto& other : state.program.Metadata().blockInfo) {
+        terminators.insert(other.condition);
+        terminators.insert(other.indirectTarget);
+    }
+    std::unordered_map<const IrValue*, std::size_t> position;
+    for (const IrValue* inst : block->Instructions()) position.emplace(inst, position.size());
+    for (const IrValue* select : block->Instructions()) {
+        if (!IsRareSelect(*select)) continue;
+        std::unordered_set<const IrValue*> arm;
+        std::unordered_set<const IrValue*> seen;
+        const auto later = [&](const IrValue* lhs, const IrValue* rhs) { return position.at(lhs) < position.at(rhs); };
+        std::priority_queue<const IrValue*, std::vector<const IrValue*>, decltype(later)> pending(later);
+        const auto consider = [&](const IrValue* value) {
+            if (value == nullptr || value->HasImmediate() || value->Parent() != block || !seen.insert(value).second) return;
+            if (value == select->Argument(0) || value == select->Argument(2) || terminators.contains(value)) return;
+            if (value->Opcode() == IrOpcode::Phi || value->Type() == IrType::Void || IrOpcodeHasSideEffects(value->Opcode())) return;
+            if (state.laneCount == 2u && state.sharedLaneValues.contains(value)) return;
+            pending.push(value);
+        };
+        consider(select->Argument(1));
+        while (!pending.empty()) {
+            const IrValue* value = pending.top();
+            pending.pop();
+            const auto& uses = value->Uses();
+            if (uses.empty() || std::any_of(uses.begin(), uses.end(), [&](const IrValue* use) { return use != select && !arm.contains(use); })) continue;
+            arm.insert(value);
+            for (std::size_t index = 0; index < value->ArgumentCount(); ++index) consider(value->Argument(index));
+        }
+        std::vector<const IrValue*> ordered(arm.begin(), arm.end());
+        std::sort(ordered.begin(), ordered.end(), later);
+        if (!ordered.empty()) arms.emplace(select, std::move(ordered));
+    }
+    return arms;
+}
+
+void EmitRareSelect(SpirvValueEmitContext& ctx, StructuredFunctionState& functionState, const IrValue& select, const std::vector<const IrValue*>& arm) {
+    auto& state = ctx.state;
+    const auto value = EmitValueOrDefaultIfCondition(state, ctx.Arg(select, 0), TypeId(state, select.Type()), ctx.Arg(select, 2), [&] {
+        for (const IrValue* inst : arm) EmitStructuredInstruction(ctx, functionState, *inst);
+        return ctx.Arg(select, 1);
+    });
+    ctx.Define(select, value);
+}
+
 void EmitStructuredBlock(SpirvValueEmitContext& ctx, StructuredFunctionState& functionState, const IrBlock* block) {
     auto& state = ctx.state;
     state.currentBlock = block;
     EmitLabel(state, ctx.Label(block));
+    const auto rareArms = RareSelectArms(state, block);
+    std::unordered_set<const IrValue*> deferred;
+    for (const auto& [select, arm] : rareArms) deferred.insert(arm.begin(), arm.end());
     bool emittedNonPhi = false;
     // Wave LDS ordering (see WaveLdsScope): a barrier separates an LDS write from the next LDS access
     // and a read from the next write. The block may be entered right after a write.
     bool ldsWritten = true;
     bool ldsRead = false;
     for (const IrValue* inst : block->Instructions()) {
+        if (deferred.contains(inst)) continue;
         if (inst->Opcode() == IrOpcode::Phi) {
             if (emittedNonPhi) {
                 ctx.Fail(*inst, "appears after a non-Phi instruction");
@@ -764,7 +824,9 @@ void EmitStructuredBlock(SpirvValueEmitContext& ctx, StructuredFunctionState& fu
             }
             SpirvValueEmitContext& lane = half == 0 ? ctx : *ctx.otherHalf;
             state.laneHalf = half;
-            if (half == 0 || (inst->Opcode() != IrOpcode::Barrier && inst->Opcode() != IrOpcode::MeshAllocate)) {
+            if (const auto rare = rareArms.find(inst); rare != rareArms.end()) {
+                EmitRareSelect(lane, functionState, *inst, rare->second);
+            } else if (half == 0 || (inst->Opcode() != IrOpcode::Barrier && inst->Opcode() != IrOpcode::MeshAllocate)) {
                 EmitStructuredInstruction(lane, functionState, *inst);
             }
         }

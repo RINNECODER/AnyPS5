@@ -95,6 +95,90 @@ void expectFailure(TAction action, std::string_view reason) {
     throw std::runtime_error("expected graphics rejection: " + std::string(reason));
 }
 
+void inactiveVertexPointSizeTests() {
+    const auto pointSizeState = [] {
+        auto queue = makeState();
+        queue.context[0x1b3] = queue.context[0x1b4] = 2;
+        queue.context[0x207] = 0x01210000;
+        return queue;
+    };
+    for (const auto primitive : {2u, 4u, 5u, 6u, 7u, 17u}) {
+        auto queue = pointSizeState();
+        queue.userConfig[0x242] = primitive;
+        for (const auto raster : {0u, 0x240u, 0x248u}) {
+            queue.context[0x205] = raster;
+            const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
+            Require(rejection.empty(), "inactive vertex point size failed the draw precheck: " + rejection);
+            static_cast<void>(AgcDriver::Graphics::DecodeState(queue));
+        }
+    }
+    for (const auto raster : {0u, 0x240u, 0x248u}) {
+        auto queue = pointSizeState();
+        queue.userConfig[0x242] = 3;
+        queue.context[0x205] = raster;
+        const auto rejection = AgcDriver::Graphics::DrawRejection(queue, false);
+        Require(rejection.empty(), "inactive line-strip point size failed the draw precheck: " + rejection);
+        const auto state = AgcDriver::Graphics::DecodeState(queue);
+        Require(state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP && !state.primitiveRestart, "inactive point size changed line-strip decoding");
+        Require(AgcDriver::Graphics::RasterPrimitiveOf(state) == ShaderRecompiler::RasterPrimitive::Line, "inactive point size changed the line primitive class");
+        queue.userConfig[0x24b] = 1;
+        queue.context[0x103] = 0xffffffffu;
+        const auto indexedRejection = AgcDriver::Graphics::DrawRejection(queue, true);
+        Require(indexedRejection.empty(), "inactive line-strip point size with primitive restart failed the draw precheck: " + indexedRejection);
+        const auto indexedState = AgcDriver::Graphics::DecodeState(queue);
+        Require(indexedState.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP && indexedState.primitiveRestart, "inactive point size changed indexed line-strip decoding");
+    }
+    const auto rejected = [](AgcDriver::QueueState queue) {
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).find("auxiliary vertex exports") != std::string::npos, "unsupported vertex exports passed the draw precheck");
+        try {
+            static_cast<void>(AgcDriver::Graphics::DecodeState(queue));
+        } catch (const std::runtime_error&) {
+            return;
+        }
+        throw std::runtime_error("potentially active point size passed the state decoder");
+    };
+    for (const auto primitive : {1u, 9u}) {
+        auto queue = pointSizeState();
+        queue.userConfig[0x242] = primitive;
+        rejected(queue);
+    }
+    for (const auto stages : {0x2004u, 0x2020u}) {
+        auto queue = pointSizeState();
+        queue.context[0x2d5] = stages;
+        rejected(queue);
+    }
+    for (const auto raster : {8u, 0x208u, 0x48u}) {
+        auto queue = pointSizeState();
+        queue.context[0x205] = raster;
+        rejected(queue);
+    }
+    for (const auto flag : {1u << 17u, 1u << 20u}) {
+        auto queue = pointSizeState();
+        queue.context[0x207] = 0x01210000 | flag;
+        rejected(queue);
+    }
+    for (const auto distances : {1u, 0x100u, 0x00c000ffu, 0x00c0ff00u}) {
+        auto queue = pointSizeState();
+        queue.context[0x207] |= distances;
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "inactive point size rejected supported clip/cull distances");
+        Require(AgcDriver::Graphics::DecodeState(queue).paClVsOutCntl == queue.context[0x207], "inactive point size discarded clip/cull distance state");
+    }
+    {
+        auto queue = pointSizeState();
+        queue.context[0x207] |= 0x004001ffu;
+        Require(AgcDriver::Graphics::DrawRejection(queue, false).find("more than eight") != std::string::npos, "inactive point size bypassed the clip/cull count limit");
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "more than eight clip and cull distances");
+    }
+    for (const auto offset : {0x2d5u, 0x205u}) {
+        auto queue = pointSizeState();
+        queue.context.erase(offset);
+        rejected(queue);
+    }
+    auto queue = pointSizeState();
+    queue.userConfig.erase(0x242);
+    rejected(queue);
+}
+
 void hdrComponentSwapTests() {
     using namespace AgcDriver::Graphics;
     for (const auto number : {0u, 1u, 4u, 7u}) {
@@ -528,6 +612,22 @@ void ShaderStageTests() {
                 Require(state.stages.fragmentWaveSize == (fragmentWave32 ? 32u : 64u), "incorrect fragment wave size");
             }
         }
+    }
+    {
+        auto vertex = makeState();
+        vertex.context[0x2d5] = 0x02002008u;
+        const auto state = AgcDriver::Graphics::DecodeState(vertex);
+        Require(state.stages.path == AgcDriver::Graphics::ShaderPath::Vertex
+            && state.stages.registerValue == 0x02002008u,
+            "the reported vertex-routing state did not decode as vertex");
+        vertex.context[0x2d5] |= 0x10u;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(vertex); }, "reserved LS_EN, ES_EN or VS_EN");
+        vertex.context[0x2d5] = 0x02002008u | 0x800000u;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(vertex); }, "unsupported vertex routing");
+        vertex.context[0x2d5] = 0x2008u;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(vertex); }, "unsupported vertex routing");
+        vertex.context.erase(0x2d5);
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(vertex); }, "missing register");
     }
     queue = makeState();
     queue.context[0x2d5] = 0x2020;
@@ -1187,6 +1287,28 @@ void DepthStencilTests() {
     for (const auto offset : {0x013u, 0x015u}) queue.context[offset] = 0x200;
     queue.context[0x005] = 0x300;
     queue.context[0x01e] = 0x1;
+    {
+        AgcDriver::QueueState unwritten;
+        unwritten.shader = queue.shader;
+        unwritten.userConfig = queue.userConfig;
+        queue.context[0x200] = 0x00700791;
+        for (int reset = 0; reset < 2; ++reset) {
+            queue.context.ForEach([&](std::uint32_t offset, std::uint32_t value) { unwritten.context[offset] = value; });
+            const auto state = AgcDriver::Graphics::DecodeState(unwritten);
+            Require(state.stencilTest && state.depth, "unwritten stencil registers rejected a stencil draw");
+            for (const auto face : {state.stencilFront, state.stencilBack}) {
+                Require(face.failOp == VK_STENCIL_OP_KEEP && face.passOp == VK_STENCIL_OP_KEEP && face.depthFailOp == VK_STENCIL_OP_KEEP && face.compareOp == VK_COMPARE_OP_ALWAYS, "unwritten stencil operations changed");
+                Require(face.compareMask == 0 && face.writeMask == 0 && face.reference == 0, "unwritten stencil reference or masks changed");
+            }
+            Require(AgcDriver::Graphics::DrawRejection(unwritten, false).empty(), "precheck rejected unwritten stencil registers");
+            unwritten.context[0x10b] = 0x00070070;
+            unwritten.context[0x10c] = unwritten.context[0x10d] = 0x01ffff09;
+            const auto explicitState = AgcDriver::Graphics::DecodeState(unwritten);
+            for (const auto face : {explicitState.stencilFront, explicitState.stencilBack}) Require(face.passOp == VK_STENCIL_OP_INVERT && face.compareMask == 0xff && face.writeMask == 0xff && face.reference == 9, "explicit stencil state was replaced by defaults");
+            unwritten.ClearContext();
+            for (const auto offset : {0x10bu, 0x10cu, 0x10du}) Require(unwritten.context.at(offset) == 0, "context clear did not reset stencil state");
+        }
+    }
     queue.context[0x10b] = 0x00050050;
     queue.context[0x10c] = 0x01ffff01;
     queue.context[0x10d] = 0x01000001;
@@ -4664,6 +4786,7 @@ int main(int argc, char** argv) {
         MsaaEnableSingleSampleTests();
         ShaderStageTests();
         NggVertexWorkgroupTests();
+        inactiveVertexPointSizeTests();
         TuningFieldTests();
         PixelInputLayoutTests();
         UnexportedPixelInputTests();

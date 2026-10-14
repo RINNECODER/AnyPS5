@@ -405,6 +405,95 @@ void OriginalWave32Subgroup(id<MTLDevice> device, id<MTLLibrary> library) {
     std::cout << "Original RDNA wave32 subgroup: public driver RegisterShader/Submit methods, two waves, lane/count/readlane/EXEC goldens and guarded EOP passed\n";
 }
 
+// A plain NOP between state and a dispatch changes nothing, and a dispatch leaves its initiator and (direct only)
+// group counts in the shader registers for a later COPY_DATA, as the CP does.
+void NopSkipAndDispatchRegisters(id<MTLDevice> device, id<MTLLibrary> library) {
+    constexpr std::uint32_t Sentinel = 0xdeadbeef, Threads = 64, Results = 4;
+    constexpr std::uint64_t CodeAddress = 0x900000, OutputAddress = 0x910000, HeaderAddress = 0x920000,
+        CommandsAddress = 0x930000, PacketAddress = 0x940000, LabelAddress = 0x960000, RegistersAddress = 0x970000,
+        ArgumentsAddress = 0x980000;
+    auto code = Wave32SubgroupCode;
+    std::array<std::uint32_t, Threads * Results> output;
+    output.fill(Sentinel);
+    std::array<std::byte, sizeof(Shader) + sizeof(ShaderUserData)> headerBytes{};
+    Shader header{};
+    header.file_header = 0x34333231;
+    header.version = 0x18;
+    header.code = reinterpret_cast<const volatile void*>(CodeAddress);
+    header.user_data = reinterpret_cast<ShaderUserData*>(HeaderAddress + sizeof(Shader));
+    header.header_size = sizeof(Shader) + sizeof(ShaderUserData);
+    header.shader_size = sizeof(Wave32SubgroupCode);
+    std::memcpy(headerBytes.data(), &header, sizeof(header));
+    std::array<std::uint32_t, 8> userData{};
+    const auto descriptor = Descriptor(OutputAddress, Threads * Results);
+    std::copy(descriptor.begin(), descriptor.end(), userData.begin() + 4);
+    std::vector<std::uint32_t> words;
+    const auto append = [&](std::span<const std::uint32_t> packet) { words.insert(words.end(), packet.begin(), packet.end()); };
+    const auto registers = [&](std::uint32_t first, std::span<const std::uint32_t> values) {
+        std::vector<std::uint32_t> payload{first};
+        payload.insert(payload.end(), values.begin(), values.end());
+        append(Packet(0x76, payload));
+    };
+    // COPY_DATA of one shader register to a word of the register log.
+    const auto copyRegister = [&](std::uint32_t offset, std::uint32_t slot) {
+        const std::array<std::uint32_t, 5> payload{0x00100200, offset, 0,
+            static_cast<std::uint32_t>(RegistersAddress + slot * 4), static_cast<std::uint32_t>(RegistersAddress >> 32u)};
+        append(Packet(0x40, payload));
+    };
+    registers(0x207, std::array<std::uint32_t, 3>{Threads, 1, 1});
+    registers(0x20c, std::array<std::uint32_t, 2>{static_cast<std::uint32_t>(CodeAddress >> 8u), 0});
+    registers(0x213, std::array<std::uint32_t, 1>{static_cast<std::uint32_t>(userData.size()) << 1u});
+    registers(0x240, userData);
+    // Pure NOPs (the execution loop skips them) carry no state.
+    append(Packet(0x10, std::array<std::uint32_t, 1>{0x12345678u}));
+    append(Packet(0x10, std::array<std::uint32_t, 3>{1, 2, 3}));
+    append(Packet(0x15, std::array<std::uint32_t, 4>{1, 1, 1, 0x8041}));
+    copyRegister(0x2e00, 0);
+    copyRegister(0x2e01, 1);
+    append(Packet(0x16, std::array<std::uint32_t, 3>{static_cast<std::uint32_t>(ArgumentsAddress), 0, 0x41}));
+    copyRegister(0x2e00, 2);
+    const std::array<std::uint32_t, 8> eop{
+        0xc0064900, 0, (1u << 29) | (1u << 24), static_cast<std::uint32_t>(LabelAddress + 4), 0, 1, 0, 0};
+    append(eop);
+    std::array<std::uint32_t, 128> commands{};
+    Require(words.size() <= commands.size(), "NOP and dispatch register commands exceed their allocation");
+    std::copy(words.begin(), words.end(), commands.begin());
+    std::array<std::byte, sizeof(::Packet)> packetBytes{};
+    const ::Packet packet{reinterpret_cast<std::uint32_t*>(CommandsAddress), static_cast<std::uint32_t>(words.size()), 0, {}};
+    std::memcpy(packetBytes.data(), &packet, sizeof(packet));
+    std::array<std::uint32_t, 2> label{Sentinel, 0};
+    std::array<std::uint32_t, 4> registerLog{Sentinel, Sentinel, Sentinel, Sentinel};
+    std::array<std::uint32_t, 3> arguments{1, 1, 1};
+    const std::array<AgcDriver::NativeGuestMemory::BorrowedRange, 8> ranges{{
+        {CodeAddress, std::as_writable_bytes(std::span(code)), false},
+        {OutputAddress, std::as_writable_bytes(std::span(output)), true},
+        {HeaderAddress, headerBytes, false},
+        {CommandsAddress, std::as_writable_bytes(std::span(commands)), false},
+        {PacketAddress, packetBytes, false},
+        {LabelAddress, std::as_writable_bytes(std::span(label)), true},
+        {RegistersAddress, std::as_writable_bytes(std::span(registerLog)), true},
+        {ArgumentsAddress, std::as_writable_bytes(std::span(arguments)), false}}};
+    std::atomic<unsigned> callbacks{0};
+    AgcDriver::Metal::MetalDriver driver;
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t) { callbacks.fetch_add(1); });
+    try {
+        driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
+        driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
+        driver.WaitIdle();
+        Require(callbacks.load() == 1 && label[1] == 1, "the submission with plain NOPs did not finish");
+        Require(output[0] == 0 && output[4] == 1, "the dispatch after the plain NOP did not run");
+        Require(registerLog[0] == 0x8041, "COPY_DATA did not read the direct dispatch initiator on Metal");
+        Require(registerLog[1] == 1, "COPY_DATA did not read the direct dispatch group count on Metal");
+        Require(registerLog[2] == 0x41, "COPY_DATA did not read the indirect dispatch initiator on Metal");
+        Require(registerLog[3] == Sentinel, "an unrequested register copy wrote the log");
+        driver.Shutdown();
+    } catch (...) {
+        try { driver.Shutdown(); } catch (...) {}
+        throw;
+    }
+    std::cout << "Plain NOP skip and dispatch registers: plain NOPs inert, COPY_DATA read the direct and indirect dispatch registers on Metal\n";
+}
+
 namespace RetainedDsPermute {
 alignas(256) constexpr std::array<std::uint32_t, 37> Code{
     0x34020084, 0x34060086, 0xe0301000, 0x80000401, 0xe0301004, 0x80000501, 0xbf8c3f70, 0x7e1402ff,
@@ -1321,6 +1410,7 @@ int main(int argc, char** argv) {
             FlipRaisesEop(device, library);
             OriginalSubmitExports(device, library);
             OriginalWave32Subgroup(device, library);
+            NopSkipAndDispatchRegisters(device, library);
             RetainedSubgroupReplays(device, library);
             CheckedPm4Memory();
             IndirectRegistersAtSubmit(device, library, false);
