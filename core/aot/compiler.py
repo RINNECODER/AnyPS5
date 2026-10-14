@@ -423,7 +423,7 @@ class Function:
                 occupied[byte] = address
             self.instructions[address] = ins
             next_address = address + ins.size
-            if ins.mnemonic in ('ret', 'ud2'):
+            if ins.mnemonic in ('ret', 'ud2', 'int3'):
                 successors = []
             elif ins.mnemonic == 'jmp' and address in self.image.finite_tables:
                 successors = self.image.finite_tables[address]['targets']
@@ -749,7 +749,7 @@ class Function:
                 if self.contract['result'] == 'ptr' and 'rax' not in state['native_pointers'] and state['constants'].get('rax') != 0:
                     self.fail_pointer(ins, 'pointer return has no proven native pointer origin')
             return state
-        if op == 'ud2':
+        if op in ('ud2', 'int3'):
             return state
         if op.startswith('j'):
             if op != 'jmp' and op[1:] not in CONDITIONS:
@@ -1581,8 +1581,10 @@ class Function:
             elif address in self.switch_jumps:
                 self.lower_switch(ins, state, address)
                 terminal = True
-            elif address in self.tail_calls and ins.mnemonic not in ('call', 'jmp'):
-                # Conditional tail call: taken -> tail call, not-taken -> fall through.
+            elif address in self.tail_calls and ins.mnemonic.startswith('j') and ins.mnemonic != 'jmp':
+                # Conditional tail call (jcc): taken -> tail call, not-taken -> fall through.
+                # A fall-through continuation (a non-branch last instruction) is unconditional
+                # and is handled by the tail-call branch below, not as a condition.
                 callee, slot = self.tail_calls[address]
                 require(abi.uniform(callee), 'conditional tail call requires a uniform callee')
                 label = f'ctc_{address:x}'
@@ -1709,7 +1711,7 @@ class Function:
                 if op == 'jmp': self.lines.append(f'  br label %b{target:x}')
                 else: self.lines.append(f'  br i1 {self.condition(op)}, label %b{target:x}, label %b{address + ins.size:x}')
                 terminal = True
-            elif op == 'ud2':
+            elif op in ('ud2', 'int3'):
                 self.lines.extend(['  call void @llvm.trap()', '  unreachable'])
                 terminal = True
             elif op != 'nop':
