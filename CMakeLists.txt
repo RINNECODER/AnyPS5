@@ -71,6 +71,14 @@ if(NOT APPLE)
 endif()
 
 if(BUILD_TESTING)
+    add_test_executable(request_serializer_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/tests/RequestSerializerTests.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/src/RequestSerializer.cpp)
+    target_include_directories(request_serializer_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/include)
+    add_test(NAME request_serializer COMMAND request_serializer_tests)
+    set_tests_properties(request_serializer PROPERTIES TIMEOUT 20)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     add_test_executable(shader_ir_use_rewrite_tests
         core/shader/recompiler/IntermediateRepresentation/tests/UseRewrite.cpp

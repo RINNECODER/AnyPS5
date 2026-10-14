@@ -279,6 +279,7 @@ CompiledVariant sampleVariant() {
     info.info.usesDma = true;
     info.info.usesFaultBuffer = true;
     info.info.rasterPrimitive = true;
+    info.info.layerExported = true;
     info.bindings.pushDataStartDword = 2;
     info.bindings.memoryOffsetDword = 1;
     info.bindings.memoryOffsetCount = 5;
