@@ -2229,7 +2229,7 @@ void verifyPixelRequestSerialization() {
     pixel.alphaToCoverage = true;
     pixel.layerBase = 0x2a5u;
     pixel.stencilRefExportEnable = true;
-    pixel.reversedBlend = 0x55417u;
+    pixel.reversedBlend = 0x570001u;
     const std::array<std::array<std::uint8_t, 8>, 3> mappings{{
         {0x00u, 0xe4u, 0xc6u, 0x1bu, 0xffu, 0x80u, 0x55u, 0xaau},
         {0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u},

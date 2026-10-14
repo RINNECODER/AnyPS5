@@ -86,6 +86,8 @@ struct Swap {
     std::array<std::uint32_t, 4> memoryChannels;
 };
 
+constexpr Swap Standard{"SWAP_STD", 0u, 0xe4u, {0u, 1u, 2u, 3u}};
+
 constexpr std::array<Swap, 2> Swaps{{
     {"SWAP_STD_REV", 2u, 0x1bu, {3u, 2u, 1u, 0u}},
     {"SWAP_ALT_REV", 3u, 0x93u, {3u, 0u, 1u, 2u}},
@@ -407,6 +409,38 @@ void Check(AgcDriver::VulkanDevice& device, const Block& block, const ColorTarge
     }
 }
 
+std::vector<double> Stored(AgcDriver::VulkanDevice& device, const Block& block, const ColorTargetLayout& layout, const Format& format, const Swap& swap, std::vector<std::uint16_t>& bits) {
+    AgcDriver::Graphics::StorageTexture::FlushPending(block.Address(), block.bytes, nullptr, "test read-back");
+    device.WaitIdle();
+    std::vector<std::uint8_t> stored(block.bytes);
+    AgcDriver::GuestMemory::Read(block.Address(), std::as_writable_bytes(std::span(stored)), 1);
+    std::vector<double> values(static_cast<std::size_t>(Width) * Height * 4u);
+    bits.assign(values.size(), 0u);
+    for (std::uint32_t y = 0; y < Height; ++y) {
+        for (std::uint32_t x = 0; x < Width; ++x) {
+            const auto index = layout.Offset(x, y);
+            for (std::uint32_t component = 0; component < 4; ++component) {
+                const auto at = (static_cast<std::size_t>(y) * Width + x) * 4u + swap.memoryChannels[component];
+                bits[at] = format.normalized ? stored[index + component] : static_cast<std::uint16_t>(stored[index + 2u * component] | (stored[index + 2u * component + 1u] << 8u));
+                values[at] = format.normalized ? static_cast<double>(bits[at]) : static_cast<double>(FromHalf(bits[at]));
+            }
+        }
+    }
+    return values;
+}
+
+void CompareWithStandardOrder(AgcDriver::VulkanDevice& device, const Block& block, const ColorTargetLayout& layout, const Format& format, const Swap& swap, const std::vector<std::uint16_t>& standard, const std::string& what) {
+    std::vector<std::uint16_t> reversed;
+    const auto values = Stored(device, block, layout, format, swap, reversed);
+    for (std::size_t at = 0; at < reversed.size(); ++at) {
+        if (reversed[at] == standard[at]) continue;
+        const auto pixel = at / 4u;
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), ": channel %u of pixel (%u, %u) holds %.6g (bits 0x%04x), while the same draw into a SWAP_STD target, which Vulkan blends alone, holds bits 0x%04x", static_cast<unsigned>(at % 4u), static_cast<unsigned>(pixel % Width), static_cast<unsigned>(pixel / Width), values[at], reversed[at], standard[at]);
+        throw std::runtime_error(what + detail);
+    }
+}
+
 struct BlendCase {
     const char* name;
     std::uint32_t control;
@@ -448,6 +482,12 @@ int main() {
             for (const auto& swap : Swaps) {
                 const auto run = [&](const BlendCase& test, std::uint32_t exportFormat, std::span<const std::uint32_t> program, const Color& values, const char* exports) {
                     const auto what = std::string(format.name) + " " + swap.name + ", " + test.name + ", " + exports;
+                    Fill(block, layout, format, Standard);
+                    const auto plain = AgcDriver::Graphics::DecodeState(Queue(block, format, Standard, test.control, test.targetMask, exportFormat));
+                    Require(plain.colors.size() == 1 && plain.colors[0].componentMapping == Standard.mapping && plain.reversedBlend == 0u && !plain.dualSourceBlend, what + ": the SWAP_STD reference target did not decode as a plain Vulkan blend");
+                    Draw(renderer, plain, exportFormat, program);
+                    std::vector<std::uint16_t> standard;
+                    Stored(*device, block, layout, format, Standard, standard);
                     const auto before = Fill(block, layout, format, swap);
                     const auto decoded = AgcDriver::Graphics::DecodeState(Queue(block, format, swap, test.control, test.targetMask, exportFormat));
                     Require(decoded.colors.size() == 1 && decoded.colors[0].format == format.vkFormat && decoded.colors[0].componentMapping == swap.mapping && decoded.colors[0].bytes == block.bytes, what + ": the target did not decode as a reversed 256x128 surface");
@@ -458,6 +498,7 @@ int main() {
                     }
                     Draw(renderer, decoded, exportFormat, program);
                     Check(*device, block, layout, format, swap, test.targetMask, before, test.control, values, what);
+                    CompareWithStandardOrder(*device, block, layout, format, swap, standard, what);
                 };
                 for (const auto& test : cases) run(test, Float32Export, wide, exported, "32_ABGR exports");
                 run(cases[0], Float16Export, compressed, exported, "FP16_ABGR exports");

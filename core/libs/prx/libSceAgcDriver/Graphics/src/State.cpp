@@ -512,6 +512,142 @@ VkBlendOp blendOp(std::uint32_t value) {
     }
 }
 
+constexpr std::uint8_t TermComplement = 0x80u;
+constexpr std::uint8_t TermUnsupported = 0xffu;
+
+std::uint8_t exportTerm(std::uint32_t component) {
+    return static_cast<std::uint8_t>(1u + component);
+}
+
+std::uint8_t destinationTerm(std::uint32_t component) {
+    return static_cast<std::uint8_t>(5u + component);
+}
+
+std::uint8_t guestBlendTerm(VkBlendFactor factor, std::uint32_t component) {
+    switch (factor) {
+        case VK_BLEND_FACTOR_ZERO: return 0u;
+        case VK_BLEND_FACTOR_ONE: return TermComplement;
+        case VK_BLEND_FACTOR_SRC_COLOR: return exportTerm(component);
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return TermComplement | exportTerm(component);
+        case VK_BLEND_FACTOR_SRC_ALPHA: return exportTerm(0u);
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: return TermComplement | exportTerm(0u);
+        case VK_BLEND_FACTOR_DST_COLOR: return destinationTerm(component);
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return TermComplement | destinationTerm(component);
+        case VK_BLEND_FACTOR_DST_ALPHA: return destinationTerm(0u);
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: return TermComplement | destinationTerm(0u);
+        case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE: return component == 0u ? TermComplement : TermUnsupported;
+        default: return TermUnsupported;
+    }
+}
+
+std::uint8_t routedTerm(std::uint32_t route, std::uint32_t component) {
+    namespace Code = ShaderRecompiler::ReversedBlendCode;
+    switch (route) {
+        case Code::Own: return exportTerm(component);
+        case Code::Component0: return exportTerm(0u);
+        case Code::Zero: return 0u;
+        default: return TermComplement;
+    }
+}
+
+std::uint8_t hostBlendTerm(VkBlendFactor factor, std::uint32_t component, const std::array<std::uint32_t, 4>& color, const std::array<std::uint32_t, 4>& second) {
+    switch (factor) {
+        case VK_BLEND_FACTOR_ZERO: return 0u;
+        case VK_BLEND_FACTOR_ONE: return TermComplement;
+        case VK_BLEND_FACTOR_SRC_COLOR: return routedTerm(color[component], component);
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return TermComplement ^ routedTerm(color[component], component);
+        case VK_BLEND_FACTOR_SRC_ALPHA: return routedTerm(color[3], 3u);
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: return TermComplement ^ routedTerm(color[3], 3u);
+        case VK_BLEND_FACTOR_DST_COLOR: return destinationTerm(component);
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return TermComplement | destinationTerm(component);
+        case VK_BLEND_FACTOR_DST_ALPHA: return destinationTerm(3u);
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: return TermComplement | destinationTerm(3u);
+        case VK_BLEND_FACTOR_SRC1_COLOR: return routedTerm(second[component], component);
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR: return TermComplement ^ routedTerm(second[component], component);
+        case VK_BLEND_FACTOR_SRC1_ALPHA: return routedTerm(second[3], 3u);
+        case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA: return TermComplement ^ routedTerm(second[3], 3u);
+        default: return TermUnsupported;
+    }
+}
+
+struct BlendRouting {
+    std::array<VkBlendFactor, 4> factors;
+    std::uint32_t code;
+};
+
+std::optional<BlendRouting> routeReversedBlend(const std::array<VkBlendFactor, 2>& color, const std::array<VkBlendFactor, 2>& alpha) {
+    namespace Code = ShaderRecompiler::ReversedBlendCode;
+    static constexpr std::array<VkBlendFactor, 14> colorFactors{
+        VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_FACTOR_DST_COLOR,
+        VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_DST_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA};
+    static constexpr std::array<VkBlendFactor, 8> alphaFactors{
+        VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_FACTOR_DST_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA};
+    std::array<std::array<std::uint8_t, 2>, 4> wanted{};
+    std::uint32_t replaceable = 0;
+    for (std::uint32_t component = 0; component < 4; ++component) {
+        for (std::size_t position = 0; position < 2; ++position) {
+            wanted[component][position] = guestBlendTerm(component == 0u ? alpha[position] : color[position], component);
+            if (wanted[component][position] == TermUnsupported) return std::nullopt;
+        }
+        if (wanted[component][0] == TermComplement) replaceable |= 1u << component;
+    }
+    const auto search = [&](bool routed) -> std::optional<BlendRouting> {
+        const auto usable = [&](VkBlendFactor factor) { return routed || !secondSource(factor); };
+        const std::uint32_t routeCount = routed ? 4u : 1u;
+        std::uint32_t ones = 0;
+        do {
+            std::array<std::uint32_t, 4> colorRoutes{};
+            for (std::uint32_t component = 0; component < 4; ++component) colorRoutes[component] = ((ones >> component) & 1u) != 0 ? Code::One : Code::Own;
+            const auto matches = [&](VkBlendFactor factor, std::size_t position, std::uint32_t component, const std::array<std::uint32_t, 4>& second) {
+                const auto term = hostBlendTerm(factor, component, colorRoutes, second);
+                if (position == 1 || colorRoutes[component] == Code::Own) return term == wanted[component][position];
+                return term == exportTerm(component);
+            };
+            for (std::uint32_t secondAlpha = 0; secondAlpha < routeCount; ++secondAlpha) {
+                const std::array<std::uint32_t, 4> second{Code::Own, Code::Own, Code::Own, secondAlpha};
+                std::array<std::optional<VkBlendFactor>, 2> alphaFactor{};
+                for (std::size_t position = 0; position < 2; ++position) {
+                    const auto found = std::find_if(alphaFactors.begin(), alphaFactors.end(), [&](VkBlendFactor factor) { return usable(factor) && matches(factor, position, 3u, second); });
+                    if (found != alphaFactors.end()) alphaFactor[position] = *found;
+                }
+                if (!alphaFactor[0] || !alphaFactor[1]) continue;
+                std::array<std::array<std::array<std::uint8_t, 3>, colorFactors.size()>, 2> masks{};
+                for (std::size_t position = 0; position < 2; ++position) {
+                    for (std::size_t index = 0; index < colorFactors.size(); ++index) {
+                        if (!usable(colorFactors[index])) continue;
+                        for (std::uint32_t component = 0; component < 3; ++component) {
+                            auto routes = second;
+                            for (std::uint32_t route = 0; route < routeCount; ++route) {
+                                routes[component] = route;
+                                if (matches(colorFactors[index], position, component, routes)) masks[position][index][component] |= static_cast<std::uint8_t>(1u << route);
+                            }
+                        }
+                    }
+                }
+                for (std::size_t source = 0; source < colorFactors.size(); ++source) {
+                    for (std::size_t destination = 0; destination < colorFactors.size(); ++destination) {
+                        std::uint32_t code = Code::Enable;
+                        for (std::uint32_t component = 0; component < 4; ++component) {
+                            const auto shared = component == 3u ? 1u << secondAlpha : static_cast<std::uint32_t>(masks[0][source][component] & masks[1][destination][component]);
+                            if (shared == 0u) {
+                                code = 0u;
+                                break;
+                            }
+                            const auto route = static_cast<std::uint32_t>(std::countr_zero(shared));
+                            code |= (colorRoutes[component] << (Code::ColorShift + Code::RouteBits * component)) | (route << (Code::SecondShift + Code::RouteBits * component));
+                        }
+                        if (code != 0u) return BlendRouting{{colorFactors[source], colorFactors[destination], *alphaFactor[0], *alphaFactor[1]}, routed ? code : 0u};
+                    }
+                }
+            }
+            ones = (ones - replaceable) & replaceable;
+        } while (routed && ones != 0u);
+        return std::nullopt;
+    };
+    if (auto native = search(false)) return native;
+    return search(true);
+}
+
 struct DecodedColorFormat {
     VkFormat format;
     std::uint32_t elementBytes;
@@ -728,7 +864,6 @@ std::string DepthMaintenanceRejection(const QueueState& queue) {
 }
 
 ReversedBlend TranslateReversedBlend(std::uint32_t blendControl, std::uint8_t componentMapping, VkFormat format, bool forceDestinationAlphaOne) {
-    namespace Code = ShaderRecompiler::ReversedBlendCode;
     const auto refuse = [&](const char* reason) {
         char text[320];
         std::snprintf(text, sizeof(text), "AGC graphics: blending into a color target with a reversed component order %s (CB_BLEND_CONTROL 0x%08x, component mapping 0x%02x, VkFormat %d)", reason, blendControl, componentMapping, static_cast<int>(format));
@@ -761,58 +896,16 @@ ReversedBlend TranslateReversedBlend(std::uint32_t blendControl, std::uint8_t co
         blend.srcColorBlendFactor = blend.dstColorBlendFactor = blend.srcAlphaBlendFactor = blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         return {blend, 0u};
     }
-    const auto ownAlpha = [](VkBlendFactor factor) {
-        switch (factor) {
-            case VK_BLEND_FACTOR_SRC_COLOR: return VK_BLEND_FACTOR_SRC_ALPHA;
-            case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-            case VK_BLEND_FACTOR_DST_COLOR: return VK_BLEND_FACTOR_DST_ALPHA;
-            case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
-            case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE: return VK_BLEND_FACTOR_ONE;
-            default: return factor;
-        }
-    };
-    const auto computed = [](VkBlendFactor factor) {
-        switch (factor) {
-            case VK_BLEND_FACTOR_ZERO: return 0u;
-            case VK_BLEND_FACTOR_ONE: return 1u;
-            case VK_BLEND_FACTOR_SRC_COLOR: return 2u;
-            case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return 3u;
-            case VK_BLEND_FACTOR_SRC_ALPHA: return 4u;
-            case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: return 5u;
-            default: return 8u;
-        }
-    };
-    std::array<bool, 2> shaded{};
-    for (std::size_t position = 0; position < 2; ++position) {
-        alpha[position] = ownAlpha(alpha[position]);
-        const auto factor = color[position];
+    for (const auto factor : color) {
         if (factor == VK_BLEND_FACTOR_DST_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA || factor == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE) refuse("with a factor of the destination alpha in the color equation, which the target keeps in its first channel, is not implemented");
-        const bool channelwise = factor != VK_BLEND_FACTOR_SRC_ALPHA && factor != VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA && ownAlpha(factor) == alpha[position];
-        if (channelwise) continue;
-        if (computed(factor) > 5u || computed(alpha[position]) > 5u) refuse("with a destination factor the color and alpha equations do not share is not implemented");
-        shaded[position] = true;
     }
-    std::uint32_t shaderCode = 0;
-    const auto second = [&](std::size_t position) {
-        shaderCode |= (computed(alpha[position]) << Code::SecondAlphaShift) | (computed(color[position]) << Code::SecondColorShift);
-        color[position] = VK_BLEND_FACTOR_SRC1_COLOR;
-        alpha[position] = VK_BLEND_FACTOR_SRC1_ALPHA;
-    };
-    if (shaded[0] || shaded[1]) shaderCode = Code::Enable | (format == VK_FORMAT_R16G16B16A16_SFLOAT ? 0u : Code::ClampSource);
-    if (shaded[0] && shaded[1]) {
-        shaderCode |= Code::Premultiply | (computed(alpha[0]) << Code::SourceAlphaShift) | (computed(color[0]) << Code::SourceColorShift);
-        color[0] = alpha[0] = VK_BLEND_FACTOR_ONE;
-        second(1);
-    } else {
-        for (std::size_t position = 0; position < 2; ++position) {
-            if (shaded[position]) second(position);
-        }
-    }
-    blend.srcColorBlendFactor = color[0];
-    blend.dstColorBlendFactor = color[1];
-    blend.srcAlphaBlendFactor = alpha[0];
-    blend.dstAlphaBlendFactor = alpha[1];
-    return {blend, shaderCode};
+    const auto routing = routeReversedBlend(color, alpha);
+    if (!routing) refuse("with factors the host blend cannot form from copies of the export is not implemented");
+    blend.srcColorBlendFactor = routing->factors[0];
+    blend.dstColorBlendFactor = routing->factors[1];
+    blend.srcAlphaBlendFactor = routing->factors[2];
+    blend.dstAlphaBlendFactor = routing->factors[3];
+    return {blend, routing->code};
 }
 
 State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
@@ -1102,7 +1195,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         if ((requiredBlendMask & (1u << i)) != 0) result.blendConstants[i] = requiredBlendConstants[i];
     }
     if (!result.colors.empty()) result.blend = result.blends[result.colors.front().exportIndex];
-    Require(result.reversedBlend == 0 || (exportSlots.size() == 1 && exportCount == 1), "blending into a color target with a reversed component order through factors the pixel shader computes needs that target to be the shader's only color export");
+    Require(result.reversedBlend == 0 || (exportSlots.size() == 1 && exportCount == 1), "blending into a color target with a reversed component order through a second source color needs that target to be the shader's only color export");
     if (result.dualSourceBlend) {
         Require(exportSlots.size() == 2 && exportSlots[0] == 0 && exportSlots[1] == 1 && exportCount == 1, "dual-source blending needs pixel exports to MRT slots 0 and 1 and color writes to slot 0 alone");
         Require(result.colors.front().componentMapping == 0xe4u, "dual-source blending into a component-swapped color target is unsupported");

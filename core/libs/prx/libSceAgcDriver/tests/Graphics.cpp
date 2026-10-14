@@ -1396,7 +1396,6 @@ void ReversedComponentOrderBlendTests() {
         std::uint32_t format;
         std::uint32_t number;
         VkFormat vkFormat;
-        bool clamped;
     };
     struct Case {
         std::uint32_t control;
@@ -1409,23 +1408,26 @@ void ReversedComponentOrderBlendTests() {
         bool opaqueDestination;
     };
     const std::array<Target, 3> targets{{
-        {10u, 0u, VK_FORMAT_R8G8B8A8_UNORM, true}, {12u, 7u, VK_FORMAT_R16G16B16A16_SFLOAT, false}, {12u, 0u, VK_FORMAT_R16G16B16A16_UNORM, true}
+        {10u, 0u, VK_FORMAT_R8G8B8A8_UNORM}, {12u, 7u, VK_FORMAT_R16G16B16A16_SFLOAT}, {12u, 0u, VK_FORMAT_R16G16B16A16_UNORM}
     }};
-    const std::array<Case, 9> cases{{
-        {0x65010504u, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_OP_ADD, 0x55415u, false},
-        {0x65810584u, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_OP_REVERSE_SUBTRACT, 0x55415u, false},
-        {0x40000501u, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_OP_ADD, 0x55001u, false},
-        {0x61000104u, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, 0x40001u, false},
-        {0x61020302u, VK_BLEND_FACTOR_SRC_COLOR, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_OP_ADD, 0x31001u, false},
+    const std::array<Case, 10> cases{{
+        {0x65010504u, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA, VK_BLEND_OP_ADD, 0x570001u, false},
+        {0x65810584u, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA, VK_BLEND_OP_REVERSE_SUBTRACT, 0x570001u, false},
+        {0x40000501u, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA, VK_BLEND_OP_ADD, 0x540001u, false},
+        {0x61000104u, VK_BLEND_FACTOR_SRC1_COLOR, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, 0x560001u, false},
+        {0x61020302u, VK_BLEND_FACTOR_SRC_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR, VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD, 0x020001u, false},
+        {0x61010504u, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR, VK_BLEND_FACTOR_SRC1_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA, VK_BLEND_OP_ADD, 0x560301u, false},
         {0x60060008u, VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_DST_ALPHA, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, 0u, false},
         {0x40000101u, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, 0u, false},
         {0x40000141u, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_MIN, 0u, false},
         {0x40000706u, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, 0u, true},
     }};
-    const std::array<std::pair<std::uint32_t, const char*>, 8> refused{{
+    const std::array<std::pair<std::uint32_t, const char*>, 10> refused{{
         {0x40000706u, "with a factor of the destination alpha in the color equation"},
         {0x4000000au, "with a factor of the destination alpha in the color equation"},
-        {0x61000008u, "with a destination factor the color and alpha equations do not share"},
+        {0x61000008u, "with factors the host blend cannot form from copies of the export is not implemented"},
+        {0x61000501u, "with factors the host blend cannot form from copies of the export is not implemented"},
+        {0x65050302u, "with factors the host blend cannot form from copies of the export is not implemented"},
         {0x4000000du, "with a constant blend factor"},
         {0x40000013u, "with a constant blend factor"},
         {0x4000000fu, "with a second-source factor is not implemented, as dual-source blending into a component-swapped color target is unsupported"},
@@ -1438,7 +1440,7 @@ void ReversedComponentOrderBlendTests() {
                 auto queue = reversedBlendQueue(target.format, target.number, swap, test.control);
                 if (test.opaqueDestination) queue.context[0x31d] = 0x20000u;
                 const auto state = DecodeState(queue);
-                const auto code = test.code == 0u ? 0u : test.code | (target.clamped ? ShaderRecompiler::ReversedBlendCode::ClampSource : 0u);
+                const auto code = test.code;
                 char what[128];
                 std::snprintf(what, sizeof(what), "CB_BLEND0_CONTROL 0x%08x into color format %u number type %u with component mapping 0x%02x", test.control, target.format, target.number, mapping);
                 Require(state.colors.size() == 1 && state.colors[0].format == target.vkFormat && state.colors[0].componentMapping == mapping, std::string(what) + ": the target decoded differently");
@@ -1471,15 +1473,107 @@ void ReversedComponentOrderBlendTests() {
         twoTargets.context[0x8e] = 0xffu;
         twoTargets.context[0x8f] = 0xffu;
         twoTargets.context[0x1e1] = 0;
-        expectFailure([&] { DecodeState(twoTargets); }, "reversed component order through factors the pixel shader computes needs that target to be the shader's only color export");
+        expectFailure([&] { DecodeState(twoTargets); }, "reversed component order through a second source color needs that target to be the shader's only color export");
         twoTargets.context[0x1e0] = 0x40000101u;
         const auto two = DecodeState(twoTargets);
         Require(two.colors.size() == 2 && two.reversedBlend == 0u && two.blends.at(0).srcColorBlendFactor == VK_BLEND_FACTOR_ONE && two.blends.at(0).dstColorBlendFactor == VK_BLEND_FACTOR_ONE, "a reversed target blended by Vulkan alone was refused next to a second target");
         twoTargets.context[0x31c + 0xfu] |= swap << 11u;
         twoTargets.context[0x1e0] = 0x65010504u;
         twoTargets.context[0x1e1] = 0x40000101u;
-        expectFailure([&] { DecodeState(twoTargets); }, "reversed component order through factors the pixel shader computes needs that target to be the shader's only color export");
+        expectFailure([&] { DecodeState(twoTargets); }, "reversed component order through a second source color needs that target to be the shader's only color export");
     }
+}
+
+void ReversedBlendRoutingTests() {
+    namespace Code = ShaderRecompiler::ReversedBlendCode;
+    using Term = std::pair<bool, std::uint32_t>;
+    constexpr Term zero{false, 0u};
+    constexpr Term one{true, 0u};
+    const auto flip = [](Term term) { return Term{!term.first, term.second}; };
+    const auto guest = [&](std::uint32_t factor, std::uint32_t component) -> std::optional<Term> {
+        const std::uint32_t exported = 10u + component;
+        const std::uint32_t stored = 20u + component;
+        switch (factor) {
+            case 0: return zero;
+            case 1: return one;
+            case 2: return Term{false, exported};
+            case 3: return Term{true, exported};
+            case 4: return Term{false, 10u};
+            case 5: return Term{true, 10u};
+            case 6: return Term{false, 20u};
+            case 7: return Term{true, 20u};
+            case 8: return Term{false, stored};
+            case 9: return Term{true, stored};
+            default: return component == 0u ? std::optional<Term>{one} : std::nullopt;
+        }
+    };
+    const auto product = [&](Term first, Term second) {
+        if (first == zero || second == zero) return std::vector<Term>{zero};
+        std::vector<Term> factors;
+        for (const auto term : {first, second}) {
+            if (term != one) factors.push_back(term);
+        }
+        std::sort(factors.begin(), factors.end());
+        return factors;
+    };
+    std::uint32_t routed = 0;
+    std::uint32_t native = 0;
+    for (std::uint32_t factors = 0; factors < 11u * 11u * 11u * 11u; ++factors) {
+        const std::array<std::uint32_t, 4> guestFactors{factors % 11u, factors / 11u % 11u, factors / 121u % 11u, factors / 1331u};
+        const auto control = guestFactors[0] | (guestFactors[1] << 8u) | (guestFactors[2] << 16u) | (guestFactors[3] << 24u) | 0x20000000u;
+        std::optional<AgcDriver::Graphics::ReversedBlend> translated;
+        try {
+            translated = AgcDriver::Graphics::TranslateReversedBlend(control, 0x1bu, VK_FORMAT_R8G8B8A8_UNORM, false);
+        } catch (const std::runtime_error& error) {
+            Require(std::string(error.what()).find("reversed component order with") != std::string::npos, std::string("an unexpected reversed-order blend refusal: ") + error.what());
+            continue;
+        }
+        const auto code = translated->shaderCode;
+        Require(code == 0u || (code & Code::Enable) != 0u, "a routed reversed-order blend code lacks its enable bit");
+        const auto route = [&](std::uint32_t shift, std::uint32_t component) {
+            switch ((code >> (shift + Code::RouteBits * component)) & Code::RouteMask) {
+                case Code::Own: return Term{false, 10u + component};
+                case Code::Component0: return Term{false, 10u};
+                case Code::Zero: return zero;
+                default: return one;
+            }
+        };
+        const auto host = [&](VkBlendFactor factor, std::uint32_t component) -> std::optional<Term> {
+            switch (factor) {
+                case VK_BLEND_FACTOR_ZERO: return zero;
+                case VK_BLEND_FACTOR_ONE: return one;
+                case VK_BLEND_FACTOR_SRC_COLOR: return route(Code::ColorShift, component);
+                case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return flip(route(Code::ColorShift, component));
+                case VK_BLEND_FACTOR_SRC_ALPHA: return route(Code::ColorShift, 3u);
+                case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: return flip(route(Code::ColorShift, 3u));
+                case VK_BLEND_FACTOR_DST_COLOR: return Term{false, 20u + component};
+                case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return Term{true, 20u + component};
+                case VK_BLEND_FACTOR_DST_ALPHA: return Term{false, 23u};
+                case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: return Term{true, 23u};
+                case VK_BLEND_FACTOR_SRC1_COLOR: return route(Code::SecondShift, component);
+                case VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR: return flip(route(Code::SecondShift, component));
+                case VK_BLEND_FACTOR_SRC1_ALPHA: return route(Code::SecondShift, 3u);
+                case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA: return flip(route(Code::SecondShift, 3u));
+                default: return std::nullopt;
+            }
+        };
+        const auto& blend = translated->blend;
+        const auto secondColor = [](VkBlendFactor factor) { return factor == VK_BLEND_FACTOR_SRC1_COLOR || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR || factor == VK_BLEND_FACTOR_SRC1_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA; };
+        Require(code != 0u || !(secondColor(blend.srcColorBlendFactor) || secondColor(blend.dstColorBlendFactor) || secondColor(blend.srcAlphaBlendFactor) || secondColor(blend.dstAlphaBlendFactor)), "a reversed-order blend without a second color reads one");
+        for (std::uint32_t component = 0; component < 4; ++component) {
+            const auto wantedSource = guest(guestFactors[component == 0u ? 2u : 0u], component);
+            const auto wantedDestination = guest(guestFactors[component == 0u ? 3u : 1u], component);
+            const auto source = host(component == 3u ? blend.srcAlphaBlendFactor : blend.srcColorBlendFactor, component);
+            const auto destination = host(component == 3u ? blend.dstAlphaBlendFactor : blend.dstColorBlendFactor, component);
+            Require(wantedSource && wantedDestination && source && destination, "a reversed-order blend was accepted with a factor the routing check cannot express");
+            char what[160];
+            std::snprintf(what, sizeof(what), "CB_BLEND_CONTROL 0x%08x, code 0x%06x, component %u", control, code, component);
+            Require(product(route(Code::ColorShift, component), *source) == product(Term{false, 10u + component}, *wantedSource), std::string(what) + ": the routed source term differs from the guest's");
+            Require(*destination == *wantedDestination, std::string(what) + ": the routed destination factor differs from the guest's");
+        }
+        ++(code == 0u ? native : routed);
+    }
+    Require(native == 121u && routed == 932u, "the reversed-order blend routing accepts " + std::to_string(native) + " native and " + std::to_string(routed) + " routed factor combinations, not 121 and 932");
 }
 
 void Color1555TargetTests() {
@@ -4676,14 +4770,14 @@ void DualSourceBlendTests() {
 void ReversedBlendShaderTests() {
     const auto queue = reversedBlendQueue(10u, 0u, 2u, 0x65010504u);
     const auto state = AgcDriver::Graphics::DecodeState(queue);
-    Require(state.reversedBlend == 0x55417u && !state.dualSourceBlend && state.blends.size() == 1, "the reversed-order source-alpha blend did not decode to a pixel shader blend code");
+    Require(state.reversedBlend == 0x570001u && !state.dualSourceBlend && state.blends.size() == 1, "the reversed-order source-alpha blend did not decode to a pixel shader blend code");
     constexpr std::array<std::uint32_t, 3> code{0xf800180fu, 0x07060504u, 0xbf810000u};
     auto request = packedExportRequest(queue, state, code);
     request.context.pixel->reversedBlend = state.reversedBlend;
     auto plain = request;
     plain.context.pixel->reversedBlend = 0u;
     const ShaderRecompiler::RequestSerializer serializer;
-    Require(serializer.Deserialize(serializer.Serialize(request)).request.context.pixel->reversedBlend == 0x55417u, "the reversed-order blend code was lost in serialization");
+    Require(serializer.Deserialize(serializer.Serialize(request)).request.context.pixel->reversedBlend == 0x570001u, "the reversed-order blend code was lost in serialization");
     std::vector<std::uint64_t> key;
     std::vector<std::uint64_t> plainKey;
     ShaderRecompiler::BuildPreparedShaderKey(request, key);
@@ -4695,11 +4789,22 @@ void ReversedBlendShaderTests() {
     const auto single = ShaderRecompiler::Recompile(plain);
     Require(reversed.variantId == single.variantId && reversed.variantId == ShaderRecompiler::GetPreparedArtifact(*prepared).variantId, "the reversed-order blended draw did not reuse the registered artifact");
     Require(reversed.PipelineVariantId() != single.PipelineVariantId() && ShaderRecompiler::Recompile(request).PipelineVariantId() == reversed.PipelineVariantId(), "the reversed-order blend code did not key its own specialization");
-    for (const auto shaderCode : {0x55417u, 0x55003u, 0x40003u, 0x31001u}) {
+    const auto arithmetic = [](std::span<const std::uint32_t> words) {
+        std::size_t count = 0;
+        for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
+            const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+            if (op == spv::OpFAdd || op == spv::OpFSub || op == spv::OpFMul || op == spv::OpFDiv || op == spv::OpFNegate || op == spv::OpExtInst || op == spv::OpSelect) ++count;
+        }
+        return count;
+    };
+    for (const auto shaderCode : {0x570001u, 0x540001u, 0x560001u, 0x020001u, 0x560301u, 0xffff01u}) {
         auto changed = request;
         changed.context.pixel->reversedBlend = shaderCode;
-        const auto outputs = outputDecorations(ShaderRecompiler::Recompile(changed).spirv.Words());
+        const auto specialized = ShaderRecompiler::Recompile(changed);
+        const auto words = specialized.spirv.Words();
+        const auto outputs = outputDecorations(words);
         Require(outputs.locations.size() == 2 && std::all_of(outputs.locations.begin(), outputs.locations.end(), [](const auto& entry) { return entry.second == 0u; }) && outputs.indices.size() == 1 && outputs.indices.begin()->second == 1u, "blend code " + std::to_string(shaderCode) + " did not add a second color at location 0 index 1");
+        Require(arithmetic(words) == arithmetic(single.spirv.Words()), "blend code " + std::to_string(shaderCode) + " computed in the pixel shader instead of copying the export");
     }
     const auto singleOutputs = outputDecorations(single.spirv.Words());
     Require(singleOutputs.locations.size() == 1 && singleOutputs.locations.begin()->second == 0u && singleOutputs.indices.empty(), "a pixel shader without a reversed-order blend code changed its outputs");
@@ -4715,7 +4820,7 @@ void ReversedBlendShaderTests() {
     auto plainState = state;
     plainState.reversedBlend = 0u;
     expectFailure([&] { validate(reversed, plainState); }, "Index decoration");
-    for (const auto invalid : {0x2u, 0x8u, 0x11u, 0x2001u, 0x60001u, 0x80001u, 0x1000u | (6u << 16u)}) {
+    for (const auto invalid : {0x2u, 0x80u, 0x100u, 0x10000u, 0x1000001u, 0x80000001u}) {
         auto changed = request;
         changed.context.pixel->reversedBlend = invalid;
         expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(changed)); }, "invalid prepared reversed-order blend");
@@ -4724,7 +4829,7 @@ void ReversedBlendShaderTests() {
     const auto twoState = AgcDriver::Graphics::DecodeState(twoQueue);
     constexpr std::array<std::uint32_t, 5> twoExports{0xf800000fu, 0x07060504u, 0xf800181fu, 0x0b0a0908u, 0xbf810000u};
     auto both = packedExportRequest(twoQueue, twoState, twoExports);
-    both.context.pixel->reversedBlend = 0x55417u;
+    both.context.pixel->reversedBlend = 0x570001u;
     expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(both)); }, "reversed-order blending needs MRT0 to be the only color output");
     both.context.pixel->dualSourceBlend = true;
     expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(both)); }, "reversed-order blending cannot be combined with dual-source blending");
@@ -5399,6 +5504,7 @@ int main(int argc, char** argv) {
         CompactedExportTests();
         ReversedComponentOrderTests();
         ReversedComponentOrderBlendTests();
+        ReversedBlendRoutingTests();
         ShadersWriteMemoryTests();
         DualSourceBlendTests();
         ReversedBlendShaderTests();

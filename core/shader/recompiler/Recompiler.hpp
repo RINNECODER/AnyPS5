@@ -123,13 +123,15 @@ enum class RasterPrimitive : std::uint8_t {
 namespace ReversedBlendCode {
 
 inline constexpr std::uint32_t Enable = 1u;
-inline constexpr std::uint32_t ClampSource = 2u;
-inline constexpr std::uint32_t Premultiply = 4u;
-inline constexpr std::uint32_t SourceAlphaShift = 4u;
-inline constexpr std::uint32_t SourceColorShift = 8u;
-inline constexpr std::uint32_t SecondAlphaShift = 12u;
-inline constexpr std::uint32_t SecondColorShift = 16u;
-inline constexpr std::uint32_t FactorMask = 7u;
+inline constexpr std::uint32_t ColorShift = 8u;
+inline constexpr std::uint32_t SecondShift = 16u;
+inline constexpr std::uint32_t RouteBits = 2u;
+inline constexpr std::uint32_t RouteMask = 3u;
+inline constexpr std::uint32_t Routes = 0xffu;
+inline constexpr std::uint32_t Own = 0u;
+inline constexpr std::uint32_t Component0 = 1u;
+inline constexpr std::uint32_t Zero = 2u;
+inline constexpr std::uint32_t One = 3u;
 
 }
 
