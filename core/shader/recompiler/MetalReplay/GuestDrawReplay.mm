@@ -99,12 +99,13 @@ struct ShaderPair {
 };
 
 ShaderPair Compile(id<MTLDevice> device, std::span<const std::uint32_t> fragmentCode, std::uint32_t vertices,
-    const ShaderPixelStageInfo& pixel = PixelInfo(), std::span<const std::uint32_t> vertexCode = VertexCode) {
+    const ShaderPixelStageInfo& pixel = PixelInfo(), std::span<const std::uint32_t> vertexCode = VertexCode,
+    std::uint32_t vertexWave = 32, std::uint32_t vertexUserDataBase = 0) {
     const std::array<std::uint32_t, 4> vertexUserData{
         static_cast<std::uint32_t>(VertexAddress), 16u << 16u, vertices, 0x01016fac};
     const std::array<MemoryRegion, 1> vertexMemory{{{0x500000, std::as_bytes(vertexCode)}}};
     RecompileRequest vertex{{ShaderStage::Vertex, 0x500000, vertexCode, 0, {}},
-        {32, 0, vertexUserData, {}, {}, ShaderVertexStageInfo{}, vertexMemory}, Target(device), {0, 0, 0, 64}, {}};
+        {vertexWave, vertexUserDataBase, vertexUserData, {}, {}, ShaderVertexStageInfo{}, vertexMemory}, Target(device), {0, 0, 0, 64}, {}};
     vertex.useCache = false;
     auto vertexResult = Recompile(vertex);
     const auto fragmentPush = static_cast<std::uint32_t>(vertexResult.pushConstants.size());
@@ -200,6 +201,41 @@ void DrawExport32Ar(id<MTLDevice> device, id<MTLLibrary> library) {
             "32_AR export produced wrong target byte " + std::to_string(offset - 256) + ": " + std::to_string(static_cast<unsigned>(pixels[offset])));
     }
     std::cout << "Actual RDNA guest draw: 32_AR export takes alpha from channel 1 passed\n";
+}
+
+// NGG vertex prologue (upstream PR 5081): the merged-group info in s2 carries the group's thread count
+// at bits 12 and up. The shader builds EXEC from it, so a missing field leaves every lane inactive and
+// nothing draws. User data starts at s8 on this path.
+constexpr std::array<std::uint32_t, 10> NggGroupInfoVertexCode{
+    0x9380ff02, 0x0009000c, 0x8f009000, 0x94fe00c1,
+    0xe0382000, 0x80020005, 0xbf8c3f70, 0xf80008cf, 0x03020100, 0xbf810000,
+};
+void DrawNggGroupInfo(id<MTLDevice> device, id<MTLLibrary> library) {
+    for (const std::uint32_t wave : {32u, 64u}) {
+        std::vector<std::array<float, 4>> vertices(Triangle.begin(), Triangle.end());
+        std::vector<std::byte> pixels(256 + Width * Height * 4 + 256, std::byte{0x7b});
+        std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+        const auto compiled = Compile(device, FullPixelCode, static_cast<std::uint32_t>(vertices.size()), PixelInfo(), NggGroupInfoVertexCode, wave, 8u);
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
+            {ShaderStage::Vertex, &compiled.vertex, 0}, {ShaderStage::Fragment, &compiled.fragment, compiled.fragmentPush}}};
+        std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
+            {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true}};
+        AgcDriver::Pm4::DrawParameters draw{};
+        draw.indexAddress = 0u;
+        draw.indexCount = 3;
+        draw.indexSize = 0u;
+        draw.instanceCount = 1;
+        draw.indexed = false;
+        auto state = State();
+        AgcDriver::Metal::MetalDraw adapter(device, library);
+        const auto fault = adapter.DrawSynchronously(state, draw, shaders, ranges);
+        Require(fault.state == BdaAbi::FaultState::Empty, "NGG group info draw published a GPU memory fault");
+        for (std::size_t offset = 256; offset < 256 + Width * Height * 4; ++offset) {
+            Require(pixels[offset] == std::byte{255},
+                "NGG vertex group info wave" + std::to_string(wave) + " produced wrong target byte " + std::to_string(offset - 256) + ": " + std::to_string(static_cast<unsigned>(pixels[offset])));
+        }
+        std::cout << "Actual RDNA guest draw: NGG vertex group info in s2 wave" << wave << " passed\n";
+    }
 }
 
 // Bounded direct index fetches (upstream PR 4824): DRAW_INDEX_2 with a count past its max_size reads
@@ -2216,6 +2252,7 @@ int main(int argc, const char* argv[]) {
             DrawGuest(device, library, false, true);
             DrawGuest(device, library, false, true, true);
             DrawExport32Ar(device, library);
+            DrawNggGroupInfo(device, library);
             DrawSubmittedGuest(device, library);
             DrawInterpolation(device, library);
             DrawPerVertexParameters(device, library);
