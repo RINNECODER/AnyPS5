@@ -244,6 +244,7 @@ CompiledVariant sampleVariant() {
     image.constantSwizzleCompatible = false;
     image.flatVolumeCompatible = false;
     image.flatLineCompatible = false;
+    image.flatVolumeLineCompatible = false;
     image.foldTexelOffsetsOnly = true;
     image.byElements = 4;
     image.byComponents = 1;
