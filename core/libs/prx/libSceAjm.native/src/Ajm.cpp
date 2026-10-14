@@ -1176,9 +1176,10 @@ void RunOpus(Instance& instance, const JobHeader& job, const AjmBuffer* inputs, 
                 count -= skip;
             }
             if (instance.gapless.totalSamples != 0) {
-                const std::uint64_t remaining = instance.gapless.totalSamples > instance.totalDecodedSamples ? instance.gapless.totalSamples - instance.totalDecodedSamples : 0;
+                const std::uint64_t remaining = instance.gapless.totalSamples > instance.segmentSamples ? instance.gapless.totalSamples - instance.segmentSamples : 0;
                 count = static_cast<std::size_t>(std::min<std::uint64_t>(count, remaining));
             }
+            instance.segmentSamples += count;
             instance.totalDecodedSamples += count;
             if (Resampling(instance)) {
                 std::vector<double> values(count * channels);
