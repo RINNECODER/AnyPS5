@@ -659,27 +659,55 @@ MetalBufferBinding MetalShaderResources::upload(const void* data, std::size_t by
     return {uploadChunks.back(), offset, bytes};
 }
 
+namespace {
+
+// The sRGB pixel format a texture of `format` is sampled through under a sampler that forces sRGB
+// decoding (the Metal counterparts of the Vulkan driver's SrgbTwinFormat), or Invalid.
+MTLPixelFormat SrgbTwin(MTLPixelFormat format) {
+    switch (format) {
+        case MTLPixelFormatR8Unorm: return MTLPixelFormatR8Unorm_sRGB;
+        case MTLPixelFormatRG8Unorm: return MTLPixelFormatRG8Unorm_sRGB;
+        case MTLPixelFormatRGBA8Unorm: return MTLPixelFormatRGBA8Unorm_sRGB;
+        case MTLPixelFormatBGRA8Unorm: return MTLPixelFormatBGRA8Unorm_sRGB;
+        case MTLPixelFormatBC1_RGBA: return MTLPixelFormatBC1_RGBA_sRGB;
+        case MTLPixelFormatBC2_RGBA: return MTLPixelFormatBC2_RGBA_sRGB;
+        case MTLPixelFormatBC3_RGBA: return MTLPixelFormatBC3_RGBA_sRGB;
+        case MTLPixelFormatBC7_RGBAUnorm: return MTLPixelFormatBC7_RGBAUnorm_sRGB;
+        default: return MTLPixelFormatInvalid;
+    }
+}
+
+// The same levels, slices and swizzle of `view` read through `format`.
+id<MTLTexture> SrgbView(id<MTLTexture> view, MTLPixelFormat format) {
+    const auto type = view.textureType;
+    const NSUInteger slices = type == MTLTextureType3D ? 1u : type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray ? view.arrayLength * 6u : view.arrayLength;
+    id<MTLTexture> result = [view newTextureViewWithPixelFormat:format textureType:type levels:NSMakeRange(0, view.mipmapLevelCount)
+                                                         slices:NSMakeRange(0, slices) swizzle:view.swizzle];
+    if (result == nil) throw std::runtime_error("Metal cannot create the sRGB view of a texture sampled through a sampler that forces sRGB decoding");
+    return result;
+}
+
+}
+
 std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const MetalBackend::Result& shader) {
     ValidatePixelSamplerBindings(shader.guest.bindings);
     const auto arrays = widestArrays(shader);
-    // A sampler that forces sRGB decoding (S# FORCE_DEGAMMA) samples correctly only images whose format
-    // is sRGB, which their views already decode; any other format paired with it is refused, as the
-    // Vulkan driver's RequireDegammaFormat does.
+    // A sampler that forces sRGB decoding (S# FORCE_DEGAMMA) samples an sRGB image through its own view.
+    // Any other image paired with it is sampled through an sRGB view of the same texture (SrgbTwin), as
+    // the Vulkan driver's SrgbView does; a format without an sRGB twin is refused.
     const auto samplerBinding = std::find_if(shader.guest.bindings.begin(), shader.guest.bindings.end(),
         [](const auto& binding) { return binding.role == DescriptorRole::GuestSamplers; });
     const auto degammaFormat = [&](const DescriptorBinding& images, std::uint32_t element, std::uint32_t format) {
-        if (images.kind != DescriptorKind::SampledImage || element >= images.imageSamplers.size()) return;
+        if (images.kind != DescriptorKind::SampledImage || element >= images.imageSamplers.size()) return false;
         for (std::uint32_t sampler = 0; sampler < 32u; ++sampler) {
             if (((images.imageSamplers[element] >> sampler) & 1u) == 0u) continue;
             if (samplerBinding == shader.guest.bindings.end() || samplerBinding->guestDescriptor.size() < (sampler + 1u) * 4u) {
                 throw std::invalid_argument("a sampled texture is paired with sampler element " + std::to_string(sampler) + ", which its shader does not bind");
             }
             const bool forced = ((samplerBinding->guestDescriptor[sampler * 4u] >> 20u) & 1u) != 0u;
-            if (forced && !Graphics::IsSrgbTextureFormat(format)) {
-                throw std::invalid_argument("a texture of guest format " + std::to_string(format) +
-                    ", which is not sRGB, is sampled through a sampler that forces sRGB decoding, which is not implemented");
-            }
+            if (forced && !Graphics::IsSrgbTextureFormat(format)) return true;
         }
+        return false;
     };
     std::vector<MetalShaderResourceBinding> result;
     for (const auto& mapping : shader.resources) {
@@ -765,7 +793,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                     continue;
                 }
                 auto descriptor = Graphics::DecodeTextureResource(std::span(found->guestDescriptor).subspan(i * 8u, 8));
-                degammaFormat(*found, i, descriptor.format);
+                const bool forcedSrgb = degammaFormat(*found, i, descriptor.format);
                 for (const auto& array : arrays) {
                     if (sameArrayAllocation(array, descriptor)) descriptor.depthOrLastArray = array.depthOrLastArray;
                 }
@@ -815,6 +843,14 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                         Graphics::ResolveTextureFormat(descriptor.format) == VK_FORMAT_R32_SINT;
                     view = rawSintStorage ? texture->RawSintStorageView() :
                         storage ? texture->StorageView(atomic) : texture->SampledView();
+                }
+                if (forcedSrgb) {
+                    const auto twin = SrgbTwin(view.pixelFormat);
+                    if (twin == MTLPixelFormatInvalid) {
+                        throw std::invalid_argument("a texture of guest format " + std::to_string(descriptor.format) +
+                            ", which is not sRGB and has no sRGB view, is sampled through a sampler that forces sRGB decoding, which is not implemented");
+                    }
+                    view = SrgbView(view, twin);
                 }
                 if (pixel) {
                     if (view.device != backend.Device()) throw std::invalid_argument("Metal pixel sampled view belongs to a different device");
