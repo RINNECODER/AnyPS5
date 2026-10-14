@@ -435,14 +435,18 @@ void stateTests() {
     // the draw key otherwise), and nothing is recorded without a log pointer.
     queue = makeState();
     std::vector<AgcDriver::Graphics::RegisterRead> log;
-    AgcDriver::Graphics::RegisterReadLog() = &log;
-    queue.context[0x1b3] = 2;
-    queue.context[0x1b4] = 2;
-    state = AgcDriver::Graphics::DecodeState(queue);
-    Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "precheck rejected the reference state");
-    static_cast<void>(AgcDriver::Graphics::DecodePixelStageInfo(queue.context, AgcDriver::Graphics::ExportMappings(state)));
-    AgcDriver::Graphics::RegisterReadLog() = nullptr;
+    {
+        const AgcDriver::Graphics::RegisterReadLogScope logScope(&log);
+        queue.context[0x1b3] = 2;
+        queue.context[0x1b4] = 2;
+        state = AgcDriver::Graphics::DecodeState(queue);
+        Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "precheck rejected the reference state");
+        static_cast<void>(AgcDriver::Graphics::DecodePixelStageInfo(queue.context, AgcDriver::Graphics::ExportMappings(state)));
+    }
     Require(!log.empty(), "the register facade recorded nothing");
+    const auto recorded = log.size();
+    static_cast<void>(AgcDriver::Graphics::DecodeState(queue));
+    Require(log.size() == recorded, "the register facade recorded without an open log");
     for (const auto read : log) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a register the decoders read: " + std::string(AgcDriver::Graphics::RegisterBankName(read.bank)) + " " + std::to_string(read.offset));
     Require(!AgcDriver::Graphics::DrawKeyCovers({AgcDriver::Graphics::RegisterBank::Context, 0x100}) && AgcDriver::Graphics::DrawKeyCovers({AgcDriver::Graphics::RegisterBank::Shader, 0xab}) && !AgcDriver::Graphics::DrawKeyCovers({AgcDriver::Graphics::RegisterBank::Shader, 0xac}), "DrawKeyRegisters coverage changed");
     log.clear();
@@ -825,9 +829,10 @@ void ShaderStageTests() {
     queue.context[0x2d5] = 0x0200210d;
     {
         std::vector<AgcDriver::Graphics::RegisterRead> tessellationLog;
-        AgcDriver::Graphics::RegisterReadLog() = &tessellationLog;
-        stages = AgcDriver::Graphics::DecodeState(queue).stages;
-        AgcDriver::Graphics::RegisterReadLog() = nullptr;
+        {
+            const AgcDriver::Graphics::RegisterReadLogScope logScope(&tessellationLog);
+            stages = AgcDriver::Graphics::DecodeState(queue).stages;
+        }
         for (const auto read : tessellationLog) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a tessellation register the decoder reads: " + std::to_string(read.offset));
     }
     Require(stages.path == AgcDriver::Graphics::ShaderPath::Tessellation && stages.tessellation, "tessellation routing changed");
@@ -1670,9 +1675,10 @@ void DepthStencilTests() {
     queue.context[0x10d] = 0x01000001;
     queue.context[0x200] = 0x00700711;
     std::vector<AgcDriver::Graphics::RegisterRead> log;
-    AgcDriver::Graphics::RegisterReadLog() = &log;
-    auto state = AgcDriver::Graphics::DecodeState(queue);
-    AgcDriver::Graphics::RegisterReadLog() = nullptr;
+    auto state = [&] {
+        const AgcDriver::Graphics::RegisterReadLogScope logScope(&log);
+        return AgcDriver::Graphics::DecodeState(queue);
+    }();
     for (const auto read : log) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a depth register the decoder reads: " + std::to_string(read.offset));
     queue.context[0x1b3] = 2;
     queue.context[0x1b4] = 2;
@@ -1730,9 +1736,10 @@ void DepthStencilTests() {
     queue.context[0x005] = 0x300;
     queue.context[0x01e] = 0x01;
     log.clear();
-    AgcDriver::Graphics::RegisterReadLog() = &log;
-    state = AgcDriver::Graphics::DecodeState(queue);
-    AgcDriver::Graphics::RegisterReadLog() = nullptr;
+    {
+        const AgcDriver::Graphics::RegisterReadLogScope logScope(&log);
+        state = AgcDriver::Graphics::DecodeState(queue);
+    }
     for (const auto read : log) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks an HTILE register the decoder reads: " + std::to_string(read.offset));
     Require(state.depth->htileAddress == (0x30000ull | (1ull << 40u)), "the HTILE address was not decoded from DB_HTILE_DATA_BASE and its high byte");
     queue.context[0x010] &= ~0x20000000u;
@@ -2275,9 +2282,10 @@ void cmaskTests() {
     const auto target = DecodeColorBuffer(queue.context, 0);
     Require(target.cmaskAddress == cmaskAddress && target.cmaskBytes == cmaskMemory.size(), "the fast-clear target lost its CMASK");
     std::vector<AgcDriver::Graphics::RegisterRead> log;
-    AgcDriver::Graphics::RegisterReadLog() = &log;
-    static_cast<void>(DecodeColorBuffer(queue.context, 0));
-    AgcDriver::Graphics::RegisterReadLog() = nullptr;
+    {
+        const AgcDriver::Graphics::RegisterReadLogScope logScope(&log);
+        static_cast<void>(DecodeColorBuffer(queue.context, 0));
+    }
     Require(!log.empty(), "the register facade recorded nothing for a fast-clear target");
     for (const auto read : log) Require(AgcDriver::Graphics::DrawKeyCovers(read), "DrawKeyRegisters lacks a register the fast-clear target decode reads: " + std::to_string(read.offset));
     Require(DecodeColorBuffer(makeState().context, 0).cmaskAddress == 0, "a target without FAST_CLEAR got a CMASK");
