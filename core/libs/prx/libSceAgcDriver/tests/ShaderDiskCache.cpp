@@ -224,6 +224,7 @@ CompiledVariant sampleVariant() {
     buffer.scalar = true;
     buffer.descriptorFormatted = true;
     buffer.formattedReadMask = 5u;
+    buffer.formattedWritten = true;
     buffer.typedAlignment = 2u;
     info.info.buffers = {buffer, BufferResource{}};
     ImageResource image{};

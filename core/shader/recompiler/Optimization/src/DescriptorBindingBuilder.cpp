@@ -425,6 +425,9 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
                 if (selector == 2u || selector == 3u) fail("buffer specialization has a reserved component selector");
             }
         }
+        if (buffer.formattedWritten && present && !IsSettledFormattedStoreDstSel(static_cast<IrBufferFormat>(format), descriptor.dwords[3])) {
+            fail("formatted buffer store through a V# whose DST_SEL is neither the identity nor a swizzle measured or conformance-tested for its format");
+        }
     }
     for (std::uint32_t index = 0; index < info.images.size() && !registrationModules; ++index) {
         if (info.images[index].indirectRoot != ImageResource::NoIndirectImage) continue;

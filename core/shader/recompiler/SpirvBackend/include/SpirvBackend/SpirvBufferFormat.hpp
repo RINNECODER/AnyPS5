@@ -4,6 +4,7 @@
 #include "IntermediateRepresentation/IrMetadata/BufferFormat.hpp"
 #include "SpirvBackend/SpirvEmitterState.hpp"
 #include <cstdint>
+#include <optional>
 
 namespace ShaderRecompiler {
 
@@ -21,6 +22,8 @@ struct SpirvFormattedSource {
 [[nodiscard]] IrBufferFormat DecodeTBufferFormat(std::uint32_t dataFormat, std::uint32_t numberFormat);
 [[nodiscard]] SpirvFormatComponentType GetFormatComponentType(IrBufferFormat format);
 [[nodiscard]] SpirvBufferFormatInfo GetFormatInfo(IrBufferFormat format);
+[[nodiscard]] std::optional<std::uint32_t> SettledFormattedStoreSwizzle(IrBufferFormat format);
+[[nodiscard]] bool IsSettledFormattedStoreDstSel(IrBufferFormat format, std::uint32_t word3);
 [[nodiscard]] SpirvFormattedSource ResolveFormattedSource(const SpirvBufferFormatInfo& info, std::uint32_t selector);
 [[nodiscard]] std::uint32_t FormattedConstantBits(const SpirvBufferFormatInfo& info, SpirvFormattedSourceKind kind);
 [[nodiscard]] std::uint32_t GetFormatComponentByteOffset(const SpirvBufferFormatInfo& info, std::uint32_t component);

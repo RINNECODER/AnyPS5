@@ -24,6 +24,7 @@ struct BufferResource {
     bool formatted = false;
     bool descriptorFormatted = false;
     std::uint32_t formattedReadMask = 0;
+    bool formattedWritten = false;
     bool scalar = false;
     std::uint8_t typedAlignment = 1;
 
