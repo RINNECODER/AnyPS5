@@ -269,6 +269,25 @@ void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfac
     std::erase_if(surfaces, [&](const auto& surface) { return surface.get() != keep && surface->Overlaps(address, bytes); });
 }
 
+void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, const Graphics::DepthTarget& target,
+    const MetalDepthSurface* keep) {
+    RetireDepthSurfaces(surfaces, target.address, Graphics::DepthSliceBytes(target.extent, hasD16(target) ? 2u : 4u) * target.samples, keep);
+    if (target.stencilAddress != 0) RetireDepthSurfaces(surfaces, target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples, keep);
+}
+
+Graphics::DepthTarget DepthArraySlice(const Graphics::DepthTarget& target, std::uint32_t layer) {
+    auto slice = target;
+    if (slice.address != 0) slice.address += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, hasD16(target) ? 2u : 4u);
+    if (slice.stencilAddress != 0) slice.stencilAddress += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, 1u);
+    slice.slice += layer;
+    return slice;
+}
+
+void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, const Graphics::ColorTarget& target,
+    const MetalDepthSurface* keep) {
+    RetireDepthSurfaces(surfaces, target.address, target.bytes * std::max(target.samples, 1u), keep);
+}
+
 bool MetalDepthSurface::OverlapsMappings(std::span<const NativeGuestMemory::BorrowedRange> changed) const {
     const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
     const auto overlaps = [&](std::uint64_t address, std::uint64_t bytes) {

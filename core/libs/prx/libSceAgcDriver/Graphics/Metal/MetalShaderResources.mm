@@ -677,7 +677,9 @@ MTLPixelFormat SrgbTwin(MTLPixelFormat format) {
     }
 }
 
-// The same levels, slices and swizzle of `view` read through `format`.
+// The same levels, slices and swizzle of `view` read through `format`. A view of a view takes its swizzle
+// relative to the root texture, not composed with the parent's: passing `view.swizzle` keeps a non-identity
+// T# channel mapping applied once (ImageSampleForceDegamma samples an R/B swap through this view).
 id<MTLTexture> SrgbView(id<MTLTexture> view, MTLPixelFormat format) {
     const auto type = view.textureType;
     const NSUInteger slices = type == MTLTextureType3D ? 1u : type == MTLTextureTypeCube || type == MTLTextureTypeCubeArray ? view.arrayLength * 6u : view.arrayLength;

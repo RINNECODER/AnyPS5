@@ -215,6 +215,14 @@ int main() {
             Draw(*device, integerTexture, forcedSampler, bias);
             Check(true);
         }
+        // A null T# (TYPE=0) reads zero whatever its other words say, also under FORCE_DEGAMMA.
+        auto nullTexture = integerTexture;
+        nullTexture[3] &= ~(0xfu << 28u);
+        nullTexture[4] = 1u;
+        Draw(*device, nullTexture, forcedSampler, 0.0f);
+        for (std::size_t index = 0; index < Pixels.size(); ++index) {
+            Require(std::to_integer<std::uint32_t>(Pixels[index]) == 0u, "a null FORCE_DEGAMMA image read " + std::to_string(std::to_integer<std::uint32_t>(Pixels[index])) + " at byte " + std::to_string(index));
+        }
         std::string mixedRefusal;
         try {
             Draw(*device, integerTexture, forcedSampler, 0.0f, true);
