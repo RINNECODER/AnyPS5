@@ -18,6 +18,7 @@ on:
     branches: [main]
   workflow_dispatch:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "tools/release/**"
       - "tools/tests/test_release_channels.py"
@@ -34,7 +35,7 @@ defaults:
 jobs:
   preflight:
     name: Release tooling preflight
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, anyps5-metal]
     timeout-minutes: 15
     permissions:
