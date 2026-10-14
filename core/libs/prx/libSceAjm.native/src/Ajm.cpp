@@ -1222,6 +1222,8 @@ bool ParseAdtsHeader(const std::uint8_t* data, AdtsHeader& header) {
     return header.frameBytes >= ((data[1] & 1u) ? ADTS_HEADER_BYTES : ADTS_HEADER_BYTES + 2);
 }
 
+constexpr std::size_t AAC_LC_FRAME_SAMPLES = 1024;
+
 std::size_t EmittedSamples(const Instance& instance, std::size_t samples) {
     if (instance.gapless.skippedSamples < instance.gapless.skipSamples) samples -= std::min<std::size_t>(samples, instance.gapless.skipSamples - instance.gapless.skippedSamples);
     if (instance.gapless.totalSamples != 0) {
@@ -1280,8 +1282,17 @@ void RunAac(Instance& instance, const JobHeader& job, const AjmBuffer* inputs, c
             result |= AJM_RESULT_PARTIAL_INPUT;
             break;
         }
-        const std::size_t frameChannelBytes = instance.aacChannels * sampleBytes;
-        if (pcmOutputs.Room() < (Resampling(instance) ? frameChannelBytes : EmittedSamples(instance, instance.aacFrameSamples) * frameChannelBytes)) {
+        std::size_t roomChannels = instance.aacChannels;
+        std::size_t roomSamples = instance.aacFrameSamples;
+        if (instance.aacDelayFrames == 0) {
+            if (roomChannels == 0) {
+                AdtsHeader header{};
+                roomChannels = raw ? AacRawChannels(instance) : ParseAdtsHeader(data, header) ? header.channelConfig : 1;
+            }
+            if (roomSamples == 0) roomSamples = AAC_LC_FRAME_SAMPLES;
+        }
+        const std::size_t frameChannelBytes = roomChannels * sampleBytes;
+        if (pcmOutputs.Room() < (Resampling(instance) ? frameChannelBytes : EmittedSamples(instance, roomSamples) * frameChannelBytes)) {
             if (frames == 0 && pcmOutputs.produced == 0) result |= AJM_RESULT_NOT_ENOUGH_ROOM;
             break;
         }

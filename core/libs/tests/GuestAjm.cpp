@@ -1174,6 +1174,11 @@ void TestM4aacNondelay(std::uint32_t context, const std::vector<std::int16_t>& d
     Require(header.result == 8 && header.inputConsumed == 0 && header.outputWritten == 0);
     Require(sceAjmInstanceDestroy(context, adts) == 0);
 
+    const std::uint32_t fresh = CreateAac(context, M4AAC_STEREO | M4AAC_NONDELAY, 1, 0);
+    const auto firstNoRoom = RunAacFrames(context, fresh, 0, AAC_STEREO, sizeof(AAC_STEREO), small.data(), small.size() * sizeof(std::int16_t));
+    Require(firstNoRoom.result == 0x10 && firstNoRoom.inputConsumed == 0 && firstNoRoom.outputWritten == 0);
+    Require(sceAjmInstanceDestroy(context, fresh) == 0);
+
     const std::uint32_t floating = CreateAac(context, M4AAC_STEREO | M4AAC_NONDELAY | M4AAC_FLOAT, 1, 0);
     std::vector<float> samples(AAC_FRAMES * AAC_FRAME_SAMPLES * 2);
     const auto decodedFloat = RunAacFrames(context, floating, RUN_MULTIPLE_FRAMES, AAC_STEREO, sizeof(AAC_STEREO), samples.data(), samples.size() * sizeof(float));
