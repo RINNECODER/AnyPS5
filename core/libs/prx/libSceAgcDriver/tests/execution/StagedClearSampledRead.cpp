@@ -80,7 +80,7 @@ public:
             if (aligned != begin) munmap(mapped, aligned - begin);
             if (aligned + ArenaBytes != begin + ArenaBytes + alignment) munmap(reinterpret_cast<void*>(aligned + ArenaBytes), begin + alignment - aligned);
             block = reinterpret_cast<std::uint8_t*>(aligned);
-            GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(block, UnalignedBlockBytes);
+            GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(block, ArenaBytes);
         }
 #endif
         Require(block != nullptr, "staged clear sampled read: cannot allocate the guest block");
@@ -95,7 +95,7 @@ public:
         GuestArena::GuestArenaRelease_nid_postfix(block, ArenaBytes);
 #else
         munmap(block, ArenaBytes);
-        GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(block, UnalignedBlockBytes);
+        GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(block, ArenaBytes);
 #endif
     }
 
