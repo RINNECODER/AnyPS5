@@ -1263,9 +1263,10 @@ std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, boo
     const auto& mem = SharedMemory(ctx, inst);
     const bool wave64 = state.laneCount == 2u;
     const bool gds = mem.kind == ResourceKind::Gds;
+    const bool m0Address = gds && !ordered;
     std::uint32_t rawIndex = ConstantU32(state, mem.offset >> 2u);
     std::uint32_t m0Bounds = 0;
-    if (gds) {
+    if (m0Address) {
         const auto m0 = ctx.Arg(inst, 0);
         const auto base = Binary(state, spv::OpShiftRightLogical, TypeU32(state), m0, ConstantU32(state, 16u));
         const auto size = Binary(state, spv::OpBitwiseAnd, TypeU32(state), m0, ConstantU32(state, 0xffffu));
@@ -1291,7 +1292,7 @@ std::uint32_t AppendConsume(SpirvValueEmitContext& ctx, const IrValue& inst, boo
     }
     const auto isFirst = Binary(state, spv::OpIEqual, TypeBool(state), EmitSubgroupLocalInvocationId(state), sourceLane);
     const auto storageBounds = EmitMemoryElementInBounds(state, access, index);
-    const auto bounds = gds ? AndCondition(state, storageBounds, m0Bounds) : storageBounds;
+    const auto bounds = m0Address ? AndCondition(state, storageBounds, m0Bounds) : storageBounds;
     const auto lanesActive = wave64 ? Binary(state, spv::OpINotEqual, TypeBool(state), count, ConstantU32(state, 0u)) : exec;
     const auto condition = AndCondition(state, isFirst, AndCondition(state, lanesActive, bounds));
     const auto atomic = EmitValueOrZeroIfCondition(state, condition, [&]() {

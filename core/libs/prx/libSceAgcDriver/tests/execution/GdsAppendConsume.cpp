@@ -26,6 +26,8 @@ constexpr std::array<std::uint32_t, Counters> Starts{1000, 2000, 3000, 4000};
 constexpr std::uint32_t UntouchedAppend = 0x5eed0001u;
 constexpr std::uint32_t UntouchedConsume = 0x5eed0002u;
 constexpr std::size_t ActiveLanesLiteral = 12;
+constexpr std::size_t OrderedM0Literal = 3;
+constexpr std::array<std::uint32_t, 2> OrderedM0{0u, 7u};
 alignas(256) std::array<std::uint32_t, MaxThreads * Results> Output{};
 alignas(16) std::array<std::uint32_t, Counters> CounterReadback{};
 
@@ -142,9 +144,9 @@ void CheckWaves(const Workgroup& workgroup, std::uint32_t result, std::uint32_t 
     }
 }
 
-void CheckOrdered(const Workgroup& workgroup, const std::array<std::uint32_t, Counters>& counters) {
+void CheckOrdered(const Workgroup& workgroup, std::uint32_t m0, const std::array<std::uint32_t, Counters>& counters) {
     const auto waves = workgroup.threads / workgroup.waveSize;
-    const auto what = workgroup.Name() + " ds_ordered_count";
+    const auto what = workgroup.Name() + " ds_ordered_count with M0 " + std::to_string(m0);
     std::vector<std::uint32_t> order(waves);
     for (std::uint32_t wave = 0; wave < waves; ++wave) {
         order[wave] = wave;
@@ -199,9 +201,12 @@ int main() {
                 Run(*device, workgroup, Code);
                 Check(workgroup, pass, ReadCounters(queue));
             }
-            SetCounters(queue);
-            Run(*device, workgroup, OrderedCode);
-            CheckOrdered(workgroup, ReadCounters(queue));
+            for (const auto m0 : OrderedM0) {
+                SetCounters(queue);
+                OrderedCode[OrderedM0Literal] = m0;
+                Run(*device, workgroup, OrderedCode);
+                CheckOrdered(workgroup, m0, ReadCounters(queue));
+            }
         }
         std::puts("gds append consume tests passed");
         return 0;

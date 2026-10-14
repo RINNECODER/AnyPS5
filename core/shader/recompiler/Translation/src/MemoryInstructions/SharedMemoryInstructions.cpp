@@ -306,12 +306,12 @@ bool TranslationContext::dsOrderedCount(const RdnaInstruction& inst) {
     if (((flags >> 6u) & 3u) != 0u) throw std::runtime_error(location + ": counting more than one dword is not modeled");
     MemoryInfo memory = sharedMemoryInfoFromInstruction(inst);
     memory.offset = inst.memoryOffset & 0xffu;
-    const IrU32 address = readU32(makeM0Operand());
+    IrValue& address = ir.Constant(0u);
     const IrU32 amount = readU32(inst.source0);
     IrValue& active = ir.GetExec();
     IrValue& activeLo = ir.GetExecLo();
     IrValue& activeHi = ir.GetExecHi();
-    IrValue& result = ir.Emit(IrOpcode::DataOrderedCount, IrOpcodeType(IrOpcode::DataOrderedCount), {&address.Value(), &active, &activeLo, &activeHi, &amount.Value()}, addMemoryInfo(memory, inst.programCounter));
+    IrValue& result = ir.Emit(IrOpcode::DataOrderedCount, IrOpcodeType(IrOpcode::DataOrderedCount), {&address, &active, &activeLo, &activeHi, &amount.Value()}, addMemoryInfo(memory, inst.programCounter));
     writeOperand(inst.destination, &result);
     return true;
 }
