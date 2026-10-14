@@ -253,6 +253,20 @@ id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std
     return array;
 }
 
+bool MetalDepthSurface::Overlaps(std::uint64_t address, std::uint64_t bytes) const {
+    const auto overlaps = [&](std::uint64_t plane, std::uint64_t planeBytes) {
+        if (plane == 0 || planeBytes == 0 || bytes == 0) return false;
+        return address <= plane ? plane - address < bytes : address - plane < planeBytes;
+    };
+    return overlaps(target.address, Graphics::DepthSliceBytes(target.extent, hasD16(target) ? 2u : 4u) * target.samples) ||
+        overlaps(target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples);
+}
+
+void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, std::uint64_t address, std::uint64_t bytes,
+    const MetalDepthSurface* keep) {
+    std::erase_if(surfaces, [&](const auto& surface) { return surface.get() != keep && surface->Overlaps(address, bytes); });
+}
+
 bool MetalDepthSurface::OverlapsMappings(std::span<const NativeGuestMemory::BorrowedRange> changed) const {
     const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
     const auto overlaps = [&](std::uint64_t address, std::uint64_t bytes) {

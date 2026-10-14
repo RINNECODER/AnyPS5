@@ -82,7 +82,7 @@ void bytes(const MetalTests::Context& context, const Surface& surface, bool sten
     for (std::size_t i = 0; i < output.length; ++i) {
         const auto row = i / rowBytes, column = i % rowBytes;
         const auto wanted = row < height && column < width * elementBytes ? std::uint8_t(expected >> (8 * (column % elementBytes))) : 0xa5;
-        MetalTests::Require(data[i] == wanted, ("Depth/stencil plane bytes or blit row padding differ from the expected GPU result DBG " + std::to_string(i) + " got " + std::to_string(data[i]) + " want " + std::to_string(wanted) + " fmt " + std::to_string(int(surface.Target().format)) + " addr " + std::to_string(surface.Target().stencilAddress)).c_str());
+        MetalTests::Require(data[i] == wanted, "Depth/stencil plane bytes or blit row padding differ from the expected GPU result");
     }
 }
 
@@ -376,6 +376,33 @@ void sharedPlanes(const MetalTests::Context& context, const AgcDriver::Metal::Me
     auto fresh = cache.Acquire(target(0x400000, 0x900000));
     samples(context, shaders, *fresh, 1, 7);  // a cleared cache forgets which surface held the plane
 }
+
+// A color target or another depth target over a resident depth surface's planes retires it from the
+// surfaces a draw samples; the cache keeps it, so binding its target again brings it back.
+void retiredDepth(const AgcDriver::Metal::MetalDevice& backend) {
+    AgcDriver::Metal::MetalDepthSurfaceCache cache(backend);
+    const AgcDriver::Graphics::DepthTarget target{0x400000, 0x800000, {width, height}, VK_FORMAT_D32_SFLOAT_S8_UINT, 1, 0};
+    const auto depthBytes = AgcDriver::Graphics::DepthSliceBytes(target.extent, 4u);
+    const auto stencilBytes = AgcDriver::Graphics::DepthSliceBytes(target.extent, 1u);
+    auto surface = cache.Acquire(target);
+    std::vector<std::shared_ptr<Surface>> surfaces{surface};
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, target.address + depthBytes, 0x10000);
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, target.address - 0x100, 0x100);
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, target.stencilAddress + stencilBytes, 0x100);
+    MetalTests::Require(surfaces.size() == 1, "A write next to a depth surface's planes retired it");
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, target.address + 0x100, 0x1000, surface.get());
+    MetalTests::Require(surfaces.size() == 1, "The surface being bound retired itself");
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, target.address + 0x100, 0x1000);
+    MetalTests::Require(surfaces.empty(), "A color target inside a depth plane did not retire its surface");
+    MetalTests::Require(cache.Acquire(target) == surface, "A retired depth surface left the cache");
+    surfaces = {surface};
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, target.stencilAddress - 0x40, 0x80);
+    MetalTests::Require(surfaces.empty(), "A writer over the stencil plane did not retire the surface");
+    auto wide = cache.Acquire(AgcDriver::Graphics::DepthTarget{target.address, target.stencilAddress, {width * 2, height}, target.format, 1, 0});
+    surfaces = {surface, wide};
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, wide->Target().address, depthBytes * 2, wide.get());
+    MetalTests::Require(surfaces.size() == 1 && surfaces[0] == wide, "Binding a depth target of another extent at the address kept the other surface");
+}
 }
 
 void RunDepthResourceTests(const MetalTests::Context& context) {
@@ -408,4 +435,5 @@ void RunDepthResourceTests(const MetalTests::Context& context) {
     for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) layeredDepthArray(context, backend, shaders, format);
     replacedDepth(backend);
     for (const auto format : {VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}) sharedPlanes(context, backend, shaders, format);
+    retiredDepth(backend);
 }

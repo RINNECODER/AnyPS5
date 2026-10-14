@@ -671,7 +671,21 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         std::memcpy(pushConstants.data() + MeshDrawPushOffsetBytes, words.data(), sizeof(words));
     }
     auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
-    if (depth && std::find(depthSurfaces.begin(), depthSurfaces.end(), depth) == depthSurfaces.end()) depthSurfaces.push_back(depth);
+    if (depth) {
+        // The surface bound last at an address is the one a view of it reads: it goes last, and the
+        // depth surfaces its planes overlap (another stencil pairing of its depth plane, another extent
+        // at its address) are retired until they are bound again.
+        std::erase(depthSurfaces, depth);
+        const auto& target = depth->Target();
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        RetireDepthSurfaces(depthSurfaces, target.address, Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u) * target.samples);
+        if (target.stencilAddress != 0) {
+            RetireDepthSurfaces(depthSurfaces, target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples);
+        }
+        depthSurfaces.push_back(depth);
+    }
+    // A color target over a depth surface's memory writes where its planes were.
+    for (const auto& color : state.colors) RetireDepthSurfaces(depthSurfaces, color.address, color.bytes, depth.get());
     // A depth-only draw that exports a render target index renders into slices slice..lastSlice of its
     // depth array at once; each slice also gets its surface, so later single-slice and array readers find it.
     const std::uint32_t depthLayers = depth && state.layered && state.colors.empty() && state.depth->samples == 1 ?

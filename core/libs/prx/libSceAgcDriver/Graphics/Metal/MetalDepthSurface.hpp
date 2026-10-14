@@ -56,6 +56,9 @@ public:
     // Moves the surface to layer `layer` of other planes (the caller copies its texels there first).
     void Rebind(std::shared_ptr<MetalDepthPlanes> planes, std::uint32_t layer);
     [[nodiscard]] bool OverlapsMappings(std::span<const NativeGuestMemory::BorrowedRange> changed) const;
+    // Whether guest bytes [address, address + bytes) overlap the depth or stencil plane.
+    [[nodiscard]] bool Overlaps(std::uint64_t address, std::uint64_t bytes) const;
+
 private:
     Graphics::DepthTarget target;
     std::shared_ptr<MetalDepthPlanes> planes;
@@ -91,6 +94,14 @@ class MetalDepthSurfaceCache;
 // surfaces at that address are dropped from `surfaces` and the cache (a later draw makes a new one).
 void DropReplacedDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, MetalDepthSurfaceCache& cache,
     const Graphics::GuestTextureResource& resource);
+
+// Another writer over a depth surface's memory: a depth surface lives only in its Metal textures, so a
+// color target or another depth target bound over its depth or stencil plane leaves it stale. It is
+// retired: dropped from the resident `surfaces` a draw samples and gathers from (all but `keep`), so a
+// view of that memory reads it like any texture. The cache keeps it; binding its depth target again
+// brings it back with the texels it held.
+void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, std::uint64_t address, std::uint64_t bytes,
+    const MetalDepthSurface* keep = nullptr);
 
 // A color target with several fragments (CB_COLOR_ATTRIB NUM_FRAGMENTS) renders into a resident 2D
 // multisample texture, like multisampled depth: the guest's interleaved fragment and FMASK layout is
