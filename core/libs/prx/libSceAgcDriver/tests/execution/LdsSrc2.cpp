@@ -118,15 +118,15 @@ void CheckLanes() {
     }
 }
 
-void CheckFloatRejected(AgcDriver::VulkanDevice& device) {
-    for (const std::uint32_t opcode : {0x92u, 0x93u, 0x95u}) {
+void CheckFloatAddRejected(AgcDriver::VulkanDevice& device) {
+    for (const std::uint32_t opcode : {0x95u}) {
         alignas(256) static std::array<std::uint32_t, 3> code{};
         code = {0xd8000000u | (opcode << 18u) | 1u, 0x00000000u, 0xbf810000u};
         bool refused = false;
         try {
             (void)Compile(device, code);
         } catch (const std::exception& error) {
-            refused = std::string(error.what()).find("f32 denormal mode") != std::string::npos;
+            refused = std::string(error.what()).find("ds_add_src2_f32") != std::string::npos;
         }
         Require(refused, "lds src2: f32 opcode " + Hex(opcode) + " was not refused");
     }
@@ -150,7 +150,7 @@ int main() {
         Run(*device);
         CheckLanes();
         CheckAddressOffsetRejected(*device);
-        CheckFloatRejected(*device);
+        CheckFloatAddRejected(*device);
         std::puts("lds src2 tests passed");
         return 0;
     } catch (const std::exception& error) {

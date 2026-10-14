@@ -344,6 +344,8 @@ std::uint32_t EmitSharedAtomicFMax64(SpirvValueEmitContext& ctx, const IrValue& 
 std::uint32_t EmitSharedAtomicCmpst64(SpirvValueEmitContext& ctx, const IrValue& inst);
 std::uint32_t EmitSharedAtomicCmpstF64(SpirvValueEmitContext& ctx, const IrValue& inst);
 std::uint32_t EmitSharedAtomicMskor64(SpirvValueEmitContext& ctx, const IrValue& inst);
+void EmitSharedSrc2U32(SpirvValueEmitContext& ctx, const IrValue& inst);
+void EmitSharedSrc2U64(SpirvValueEmitContext& ctx, const IrValue& inst);
 std::uint32_t EmitDataAppend(SpirvValueEmitContext& ctx, const IrValue& inst);
 std::uint32_t EmitDataConsume(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageQueryDimensions(SpirvValueEmitContext& ctx, const IrValue& inst);

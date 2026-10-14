@@ -470,6 +470,8 @@ constexpr std::array<OpcodeMeta, static_cast<std::size_t>(IrOpcode::Count)> Meta
     makeMeta("SharedAtomicCmpst64", U64, U32, U64, U64, U1),
     makeMeta("SharedAtomicCmpstF64", U64, U32, U64, U64, U1),
     makeMeta("SharedAtomicMskor64", U64, U32, U64, U64, U1),
+    makeMeta("SharedSrc2U32", Void, U32, U32, U1),
+    makeMeta("SharedSrc2U64", Void, U32, U32, U1),
     makeMeta("DataAppend", U32, U32, U1, U32, U32),
     makeMeta("DataConsume", U32, U32, U1, U32, U32),
     makeMeta("SwizzleU32", U32, U32, U32, U1),
@@ -692,6 +694,8 @@ SharedAccess SharedAccessOf(IrOpcode opcode) {
         case IrOpcode::SharedAtomicFMax64:
         case IrOpcode::SharedAtomicCmpst64:
         case IrOpcode::SharedAtomicCmpstF64:
+        case IrOpcode::SharedSrc2U32:
+        case IrOpcode::SharedSrc2U64:
         case IrOpcode::SharedAtomicMskor64:
             return SharedAccess::Atomic;
         case IrOpcode::DataAppend:
@@ -724,6 +728,7 @@ std::uint32_t SharedComponentCount(IrOpcode opcode) {
         case IrOpcode::SharedAtomicFMax64:
         case IrOpcode::SharedAtomicCmpst64:
         case IrOpcode::SharedAtomicCmpstF64:
+        case IrOpcode::SharedSrc2U64:
         case IrOpcode::SharedAtomicMskor64:
             return 2u;
         case IrOpcode::LoadSharedU32x3:

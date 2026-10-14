@@ -142,6 +142,8 @@ private:
     bool dsWrite(const RdnaInstruction& inst);
     bool dsWrite2(const RdnaInstruction& inst);
     bool dsSrc2(const RdnaInstruction& inst, IrOpcode opcode);
+    bool dsSrc2B64(const RdnaInstruction& inst, IrOpcode opcode);
+    bool emitSharedSrc2(const RdnaInstruction& inst, IrOpcode update, IrOpcode opcode);
     bool dsAtomic2(const RdnaInstruction& inst, IrOpcode opcode, bool returnsValue);
     bool sharedFloatFlush(IrOpcode opcode) const;
     bool dsAtomic64(const RdnaInstruction& inst, IrOpcode opcode, bool returnsValue);

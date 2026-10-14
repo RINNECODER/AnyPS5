@@ -1442,6 +1442,122 @@ std::uint32_t ScalarU64Constant(SpirvEmitterState& state, std::uint32_t value) {
     return state.module.Constant(spv::OpConstant, TypeScalarU64(state), value, 0u);
 }
 
+template<typename TBody>
+void LaneOrderedUpdate(SpirvEmitterState& state, std::uint32_t active, TBody&& body) {
+    const auto boolean = TypeBool(state);
+    const auto entry = state.currentLabel;
+    const auto header = state.module.AllocateId();
+    const auto loopBody = state.module.AllocateId();
+    const auto pending = state.module.AllocateId();
+    const auto elected = state.module.AllocateId();
+    const auto electedMerge = state.module.AllocateId();
+    const auto pendingMerge = state.module.AllocateId();
+    const auto cont = state.module.AllocateId();
+    const auto merge = state.module.AllocateId();
+    const auto done = state.module.AllocateId();
+    const auto doneNext = state.module.AllocateId();
+    const auto waiting = [&](std::uint32_t finished) { return Binary(state, spv::OpLogicalAnd, boolean, active, Unary(state, spv::OpLogicalNot, boolean, finished)); };
+    state.module.AddFunction(spv::OpBranch, header);
+    EmitLabel(state, header);
+    state.module.AddFunction(spv::OpPhi, boolean, done, ConstantBool(state, false), entry, doneNext, cont);
+    state.module.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlMaskNone);
+    state.module.AddFunction(spv::OpBranch, loopBody);
+    EmitLabel(state, loopBody);
+    state.module.AddFunction(spv::OpSelectionMerge, pendingMerge, spv::SelectionControlMaskNone);
+    state.module.AddFunction(spv::OpBranchConditional, waiting(done), pending, pendingMerge);
+    EmitLabel(state, pending);
+    const auto first = state.module.AllocateId();
+    EmitSubgroupElect(state, first);
+    state.module.AddFunction(spv::OpSelectionMerge, electedMerge, spv::SelectionControlMaskNone);
+    state.module.AddFunction(spv::OpBranchConditional, first, elected, electedMerge);
+    EmitLabel(state, elected);
+    body();
+    const auto bodyExit = state.currentLabel;
+    state.module.AddFunction(spv::OpBranch, electedMerge);
+    EmitLabel(state, electedMerge);
+    const auto served = state.module.AllocateId();
+    state.module.AddFunction(spv::OpPhi, boolean, served, ConstantBool(state, true), bodyExit, ConstantBool(state, false), pending);
+    state.module.AddFunction(spv::OpBranch, pendingMerge);
+    EmitLabel(state, pendingMerge);
+    state.module.AddFunction(spv::OpPhi, boolean, doneNext, served, electedMerge, done, loopBody);
+    state.module.AddFunction(spv::OpMemoryBarrier, ConstantU32(state, spv::ScopeWorkgroup), ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | LdsMemorySemantics(state)));
+    const auto ballot = state.module.AllocateId();
+    EmitSubgroupBallot(state, ballot, waiting(doneNext));
+    std::uint32_t remaining = ConstantU32(state, 0u);
+    for (std::uint32_t component = 0; component < 4u; ++component) {
+        const auto word = state.module.AllocateId();
+        state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), word, ballot, component);
+        remaining = Binary(state, spv::OpBitwiseOr, TypeU32(state), remaining, word);
+    }
+    state.module.AddFunction(spv::OpBranchConditional, Binary(state, spv::OpINotEqual, boolean, remaining, ConstantU32(state, 0u)), cont, merge);
+    EmitLabel(state, cont);
+    state.module.AddFunction(spv::OpBranch, header);
+    EmitLabel(state, merge);
+}
+
+IrOpcode Src2Update(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    const auto* update = inst.Argument(1)->Resolve();
+    if (!update->HasImmediate()) ctx.Fail(inst, "has no constant src2 update");
+    return static_cast<IrOpcode>(update->ImmediateU32());
+}
+
+MemoryInfo Src2Source(const MemoryInfo& mem) {
+    MemoryInfo source = mem;
+    source.offset = mem.offset + mem.secondaryOffset;
+    source.secondaryOffset = 0u;
+    return source;
+}
+
+std::uint32_t Src2Replace32(SpirvValueEmitContext& ctx, const IrValue& inst, IrOpcode update, bool flush, std::uint32_t old, std::uint32_t data) {
+    auto& state = ctx.state;
+    const auto u32 = TypeU32(state);
+    const auto pick = [&](spv::Op compare) { return Select(state, u32, Binary(state, compare, TypeBool(state), data, old), data, old); };
+    const AtomicFloatBits bits{state, false};
+    switch (update) {
+    case IrOpcode::SharedAtomicIAdd32: return Binary(state, spv::OpIAdd, u32, old, data);
+    case IrOpcode::SharedAtomicISub32: return Binary(state, spv::OpISub, u32, old, data);
+    case IrOpcode::SharedAtomicRsub32: return Binary(state, spv::OpISub, u32, data, old);
+    case IrOpcode::SharedAtomicInc32: return AtomicIncrement(state, old, data);
+    case IrOpcode::SharedAtomicDec32: return AtomicDecrement(state, old, data);
+    case IrOpcode::SharedAtomicSMin32: return pick(spv::OpSLessThan);
+    case IrOpcode::SharedAtomicSMax32: return pick(spv::OpSGreaterThan);
+    case IrOpcode::SharedAtomicUMin32: return pick(spv::OpULessThan);
+    case IrOpcode::SharedAtomicUMax32: return pick(spv::OpUGreaterThan);
+    case IrOpcode::SharedAtomicAnd32: return Binary(state, spv::OpBitwiseAnd, u32, old, data);
+    case IrOpcode::SharedAtomicOr32: return Binary(state, spv::OpBitwiseOr, u32, old, data);
+    case IrOpcode::SharedAtomicXor32: return Binary(state, spv::OpBitwiseXor, u32, old, data);
+    case IrOpcode::WriteSharedU32: return data;
+    case IrOpcode::SharedAtomicFMin32: return bits.minMax(bits.flush(old, flush), bits.flush(data, flush), false);
+    case IrOpcode::SharedAtomicFMax32: return bits.minMax(bits.flush(old, flush), bits.flush(data, flush), true);
+    default: ctx.Fail(inst, "has an unsupported 32-bit src2 update");
+    }
+}
+
+std::uint32_t Src2Replace64(SpirvValueEmitContext& ctx, const IrValue& inst, IrOpcode update, bool flush, std::uint32_t old, std::uint32_t data) {
+    auto& state = ctx.state;
+    const auto u64 = TypeScalarU64(state);
+    const auto pick = [&](spv::Op compare) { return Select(state, u64, Binary(state, compare, TypeBool(state), data, old), data, old); };
+    const AtomicFloatBits bits{state, true};
+    switch (update) {
+    case IrOpcode::SharedAtomicIAdd64: return Binary(state, spv::OpIAdd, u64, old, data);
+    case IrOpcode::SharedAtomicISub64: return Binary(state, spv::OpISub, u64, old, data);
+    case IrOpcode::SharedAtomicRsub64: return Binary(state, spv::OpISub, u64, data, old);
+    case IrOpcode::SharedAtomicInc64: return bits.increment(old, data);
+    case IrOpcode::SharedAtomicDec64: return bits.decrement(old, data);
+    case IrOpcode::SharedAtomicSMin64: return pick(spv::OpSLessThan);
+    case IrOpcode::SharedAtomicSMax64: return pick(spv::OpSGreaterThan);
+    case IrOpcode::SharedAtomicUMin64: return pick(spv::OpULessThan);
+    case IrOpcode::SharedAtomicUMax64: return pick(spv::OpUGreaterThan);
+    case IrOpcode::SharedAtomicAnd64: return Binary(state, spv::OpBitwiseAnd, u64, old, data);
+    case IrOpcode::SharedAtomicOr64: return Binary(state, spv::OpBitwiseOr, u64, old, data);
+    case IrOpcode::SharedAtomicXor64: return Binary(state, spv::OpBitwiseXor, u64, old, data);
+    case IrOpcode::WriteSharedU32x2: return data;
+    case IrOpcode::SharedAtomicFMin64: return bits.minMax(bits.flush(old, flush), bits.flush(data, flush), false);
+    case IrOpcode::SharedAtomicFMax64: return bits.minMax(bits.flush(old, flush), bits.flush(data, flush), true);
+    default: ctx.Fail(inst, "has an unsupported 64-bit src2 update");
+    }
+}
+
 }
 
 std::uint32_t AtomicIncrement(SpirvEmitterState& state, std::uint32_t old, std::uint32_t limit) {
@@ -2077,6 +2193,66 @@ std::uint32_t EmitBufferAtomicInc64(SpirvValueEmitContext& ctx, const IrValue& i
 std::uint32_t EmitBufferAtomicDec64(SpirvValueEmitContext& ctx, const IrValue& inst) {
     const auto limit = ScalarU64Argument(ctx, inst, 2u);
     return BufferAtomic64Update(ctx, inst, [&](std::uint32_t old) { return AtomicFloatBits{ctx.state, true}.decrement(old, limit); });
+}
+
+void EmitSharedSrc2U32(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    auto& state = ctx.state;
+    const auto& mem = SharedMemory(ctx, inst);
+    const auto update = Src2Update(ctx, inst);
+    const auto source = Src2Source(mem);
+    LaneOrderedUpdate(state, ActiveArgument(ctx, inst), [&]() {
+        const auto from = PrepareMemoryElement(ctx, source, DwordIndex(ctx, inst, source));
+        const auto data = EmitValueOrZeroIfCondition(state, EmitMemoryElementInBounds(state, from.resource, from.index), [&]() { return LoadWordInBounds(ctx, from.resource, from.index); });
+        const auto target = PrepareMemoryElement(ctx, mem, DwordIndex(ctx, inst, mem));
+        (void)EmitValueOrZeroIfCondition(state, EmitMemoryElementInBounds(state, target.resource, target.index), [&]() {
+            return EmitLdsAtomic32(state, mem, [&]() {
+                return AtomicUpdate(state, EmitMemoryElementPointer(state, target.resource, target.index), mem.kind, [&](std::uint32_t old) { return Src2Replace32(ctx, inst, update, mem.flushDenormals, old, data); });
+            });
+        });
+    });
+}
+
+void EmitSharedSrc2U64(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    auto& state = ctx.state;
+    const auto& mem = SharedMemory(ctx, inst);
+    const auto update = Src2Update(ctx, inst);
+    const auto source = Src2Source(mem);
+    const auto aligned = [&](const MemoryInfo& info) { return Binary(state, spv::OpIEqual, TypeBool(state), Binary(state, spv::OpBitwiseAnd, TypeU32(state), ByteAddress(ctx, inst, info), ConstantU32(state, 7u)), ConstantU32(state, 0u)); };
+    LaneOrderedUpdate(state, ActiveArgument(ctx, inst), [&]() {
+        const auto resource = PrepareMemoryResourceAccess(state, mem);
+        const auto pair = [&](const MemoryInfo& info) {
+            const auto raw = DwordIndex(ctx, inst, info);
+            return std::array<std::uint32_t, 2>{EmitMemoryElementIndex(state, resource, raw), EmitMemoryElementIndex(state, resource, Binary(state, spv::OpIAdd, TypeU32(state), raw, ConstantU32(state, 1u)))};
+        };
+        const auto load = [&](const std::array<std::uint32_t, 2>& indices) {
+            std::array<std::uint32_t, 2> words{};
+            for (std::uint32_t word = 0; word < 2u; ++word) {
+                words[word] = state.module.AllocateId();
+                state.module.AddFunction(spv::OpLoad, TypeU32(state), words[word], EmitMemoryElementPointer(state, resource, indices[word]));
+            }
+            const auto value = state.module.AllocateId();
+            state.module.AddFunction(spv::OpCompositeConstruct, TypeU64(state), value, words[0], words[1]);
+            return Unary(state, spv::OpBitcast, TypeScalarU64(state), value);
+        };
+        const auto from = pair(source);
+        const auto readable = AndCondition(state, aligned(source), EmitMemoryElementInBounds(state, resource, from[1]));
+        const auto data = EmitValueOrDefaultIfCondition(state, readable, TypeScalarU64(state), ScalarU64Constant(state, 0u), [&]() { return load(from); });
+        const auto target = pair(mem);
+        const auto writable = AndCondition(state, aligned(mem), EmitMemoryElementInBounds(state, resource, target[1]));
+        (void)EmitValueOrDefaultIfCondition(state, writable, TypeU64(state), ConstantU64(state, 0u), [&]() {
+            const auto write = [&]() {
+                const auto old = load(target);
+                const auto next = Unary(state, spv::OpBitcast, TypeU64(state), Src2Replace64(ctx, inst, update, mem.flushDenormals, old, data));
+                for (std::uint32_t word = 0; word < 2u; ++word) {
+                    const auto part = state.module.AllocateId();
+                    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), part, next, word);
+                    state.module.AddFunction(spv::OpStore, EmitMemoryElementPointer(state, resource, target[word]), part);
+                }
+                return Unary(state, spv::OpBitcast, TypeU64(state), old);
+            };
+            return state.requirements.ldsLock ? LockedLdsUpdate(state, TypeU64(state), ConstantU64(state, 0u), write) : write();
+        });
+    });
 }
 
 }

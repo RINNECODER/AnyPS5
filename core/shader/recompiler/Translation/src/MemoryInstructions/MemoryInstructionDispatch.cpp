@@ -369,9 +369,41 @@ bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
     case RdnaOpcode::DsWriteSrc2B32:
         return dsSrc2(inst, IrOpcode::WriteSharedU32);
     case RdnaOpcode::DsMinSrc2F32:
+        return dsSrc2(inst, IrOpcode::SharedAtomicFMin32);
     case RdnaOpcode::DsMaxSrc2F32:
+        return dsSrc2(inst, IrOpcode::SharedAtomicFMax32);
     case RdnaOpcode::DsAddSrc2F32:
-        throw std::runtime_error("f32 DS src2 operations depend on the f32 denormal mode, which is not modelled for LDS float atomics");
+        throw std::runtime_error("ds_add_src2_f32 flushes f32 denormals like ds_add_f32, which is not modelled for LDS float atomics");
+    case RdnaOpcode::DsAddSrc2U64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicIAdd64);
+    case RdnaOpcode::DsSubSrc2U64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicISub64);
+    case RdnaOpcode::DsRsubSrc2U64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicRsub64);
+    case RdnaOpcode::DsIncSrc2U64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicInc64);
+    case RdnaOpcode::DsDecSrc2U64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicDec64);
+    case RdnaOpcode::DsMinSrc2I64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicSMin64);
+    case RdnaOpcode::DsMaxSrc2I64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicSMax64);
+    case RdnaOpcode::DsMinSrc2U64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicUMin64);
+    case RdnaOpcode::DsMaxSrc2U64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicUMax64);
+    case RdnaOpcode::DsAndSrc2B64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicAnd64);
+    case RdnaOpcode::DsOrSrc2B64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicOr64);
+    case RdnaOpcode::DsXorSrc2B64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicXor64);
+    case RdnaOpcode::DsWriteSrc2B64:
+        return dsSrc2B64(inst, IrOpcode::WriteSharedU32x2);
+    case RdnaOpcode::DsMinSrc2F64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicFMin64);
+    case RdnaOpcode::DsMaxSrc2F64:
+        return dsSrc2B64(inst, IrOpcode::SharedAtomicFMax64);
     case RdnaOpcode::DsWrxchgRtnB32:
         return dsAtomic(inst, IrOpcode::SharedAtomicSwap32, true);
 

@@ -374,6 +374,14 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
             case IrOpcode::Ballot:
                 requirements.subgroupBallot = true;
                 break;
+            case IrOpcode::SharedSrc2U32:
+                requirements.subgroupBallot = true;
+                break;
+            case IrOpcode::SharedSrc2U64:
+                requirements.subgroupBallot = true;
+                requirements.sharedInt64Atomics = true;
+                if (program.Resources().stage == IrShaderStage::Compute || program.Resources().stage == IrShaderStage::Mesh) requirements.ldsLock = true;
+                break;
             case IrOpcode::DppMoveU32:
             case IrOpcode::ReadFirstLane:
             case IrOpcode::ReadLane: {
