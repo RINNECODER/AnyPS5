@@ -3,6 +3,7 @@
 
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -43,6 +44,8 @@ struct Submission {
     std::chrono::steady_clock::time_point orderedAt{};
     const std::uint32_t* rewindTail = nullptr;
     std::size_t rewindWords = 0;
+    // ANYPS5_AGC_PACKET_CENSUS only: {guest address, begin, end} of each inlined INDIRECT_BUFFER target in commands.
+    std::vector<std::array<std::uint64_t, 3>> censusIndirect;
 };
 
 struct QueueWorker {
