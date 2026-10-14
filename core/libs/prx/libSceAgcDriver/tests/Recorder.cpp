@@ -5698,6 +5698,33 @@ int main(int argc, char** argv) {
             std::cout << "Color metadata pass tests passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--pending-key-stores-only") {
+            if (device.GetContext().hostImportAlignment == 0) {
+                std::cout << "skipped, host imports are unavailable\n";
+                return 77;
+            }
+            pendingKeyStoreTests(device, recorder);
+            std::cout << "Pending DCC key store tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--sample-dumps-only") {
+            if (device.GetContext().hostImportAlignment == 0) {
+                std::cout << "skipped, host imports are unavailable\n";
+                return 77;
+            }
+            if (!device.GetContext().bufferDeviceAddress) {
+                std::cout << "skipped, the device lacks buffer device addresses\n";
+                return 77;
+            }
+            sampleDumpTests(device, recorder);
+            std::cout << "Occlusion counter dump tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--draw-inputs-in-place-only") {
+            drawInputInPlaceTests(device, recorder);
+            std::cout << "In-place draw input tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--draw-descriptors-only") {
             drawDescriptorWriteTests(device, recorder);
             std::cout << "Draw descriptor writes and snapshot overrides passed\n";
