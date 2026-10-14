@@ -949,6 +949,24 @@ void verifyBindlessTable() {
     latch.context.memory = latchRegions;
     require(!Recompile(latch, *latchCapture)->spirv.empty(), "bindless: a sample in a loop latch did not compile");
 
+    std::vector<std::uint32_t> queryCode(wholeCode.begin(), wholeCode.begin() + 8);
+    queryCode.insert(queryCode.end(), {0xbea80380u, 0x7e040280u, 0x7e200500u, 0x80102810u, 0x8f108510u, 0xf42c0502u, 0x20000000u, 0xf0380f08u, 0x00050402u, 0xf09c0f08u, 0x00450800u, 0x80288128u, 0xbf0a8228u, 0xbf85fff4u, 0xe0700000u, 0x80070800u, 0xe0700004u, 0x80070400u, 0xbf810000u});
+    auto query = makeRequest(queryCode);
+    const auto queryPlan = GetResourcePlan(query);
+    require(std::ranges::count_if(queryPlan->descriptorSources, [](const DescriptorSource& source) { return source.indirectImage.has_value(); }) == 1, "bindless: a T# both queried and sampled was not planned as one table");
+    AgcDriver::ShaderMemory queryMemory({});
+    const auto queryCapture = queryMemory.Capture(query);
+    const auto queryDirect = static_cast<std::uint32_t>(queryPlan->info.images.size());
+    require(queryDirect == 1u, "bindless: the queried and sampled T# became more than one image");
+    const auto queryRoot = tableRoot(*queryCapture, queryDirect);
+    require(queryCapture->snapshot.images[queryRoot].dwords == heap[0] && queryCapture->snapshot.images[queryDirect].dwords == heap[1], "bindless: the queried and sampled table slots are wrong");
+    query.context.memory = queryMemory.Regions();
+    const auto queried = Recompile(query, *queryCapture);
+    require(!queried->spirv.empty(), "bindless: a T# both queried and sampled did not compile");
+#if ANYPS5_ENABLE_SPIRV_TOOLS
+    static_cast<void>(ValidateAndOptimizeSpirv(queried->spirv, query.target.vulkanVersion, query.target.spirvVersion));
+#endif
+
     // A table wider than the slots without a material pattern is rejected.
     fillSrt(100u);
     AgcDriver::ShaderMemory wideMemory({});
@@ -971,63 +989,6 @@ void verifyBindlessTable() {
     AgcDriver::ShaderMemory partialMemory({});
     expectFailure([&] { static_cast<void>(partialMemory.Capture(request)); }, "partial descriptor", "bindless: a partial heap descriptor was accepted");
     fillSrt(4u);
-}
-
-void verifyUniformTableImage() {
-    using namespace ShaderRecompiler;
-    constexpr std::uint32_t Format8888UNorm = 56;
-    constexpr std::uint32_t Type2D = 9;
-    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
-    static Texture textures[2];
-    struct alignas(4096) GuestTables {
-        std::array<std::array<std::uint32_t, 12>, 3> table{};
-        std::array<std::uint32_t, 4> output{};
-        std::array<std::uint32_t, 16> srt{};
-    };
-    static GuestTables guest;
-    const auto texture = [](const Texture& image) {
-        const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(image.bytes.data()));
-        return std::array<std::uint32_t, 8>{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
-    };
-    const auto first = texture(textures[0]);
-    const auto second = texture(textures[1]);
-    std::copy(first.begin(), first.end(), guest.table[1].begin() + 4);
-    std::copy(second.begin(), second.end(), guest.table[2].begin() + 4);
-    const auto bufferDescriptor = [](const void* base, std::uint32_t records) {
-        const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(base));
-        return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), records, 0xfacu};
-    };
-    const auto tableV = bufferDescriptor(guest.table.data(), static_cast<std::uint32_t>(sizeof(guest.table)));
-    const auto outputV = bufferDescriptor(guest.output.data(), 16u);
-    std::copy(tableV.begin(), tableV.end(), guest.srt.begin());
-    std::copy(outputV.begin(), outputV.end(), guest.srt.begin() + 12);
-    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(guest.srt.data()));
-    std::array<std::uint32_t, 3> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u), 2u};
-    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
-    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
-    const std::vector<std::uint32_t> code{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080700u, 0xfa000030u, 0x9310b002u, 0xf42c0502u, 0x20000010u, 0xf09c0f08u, 0x00450000u, 0xe0700000u, 0x80070000u, 0xbf810000u};
-    RecompileRequest request{};
-    request.shader = {ShaderStage::Compute, 0x20000u, code, 0, {}};
-    request.context.waveSize = 64;
-    request.context.userDataBaseRegister = 0;
-    request.context.userData = userData;
-    request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
-    request.target.vulkanVersion = 0x00401000u;
-    request.target.spirvVersion = 0x00010300u;
-    request.target.subgroupSize = 32;
-    request.target.supportedCapabilities = capabilities;
-    request.target.supportedExtensions = extensions;
-    request.target.bdaAbiVersion = BdaAbi::Version;
-    request.target.fragmentShaderBarycentricEnabled = false;
-    request.layout.pushConstantSizeBytes = 128;
-    const auto plan = GetResourcePlan(request);
-    require(plan->info.images.size() == 1u && !plan->descriptorSources.at(plan->info.images[0].source).indirectImage.has_value(), "uniform table image: the T# read from a constant buffer was not planned as one image");
-    for (const auto& [key, expected] : {std::pair{2u, second}, std::pair{1u, first}}) {
-        userData[2] = key;
-        AgcDriver::ShaderMemory memory({});
-        const auto capture = memory.Capture(request);
-        require(capture->snapshot.images.size() == 1u && std::equal(expected.begin(), expected.end(), capture->snapshot.images[0].dwords.begin()), "uniform table image: the T# of the record the user data selects was not read");
-    }
 }
 
 
@@ -1201,6 +1162,63 @@ void verifyDescriptorPhis() {
     };
     require(planImages(splitReloads(8u)) == 4u, "descriptor Phi: separate reloads of T# dword 7 and dwords 0-6 were not split into their 4 T#s");
     expectFailure([&] { static_cast<void>(planImages(splitReloads(260u))); }, "GetImageResource dword 0 is not a valid runtime value", "descriptor Phi: a web over more than 512 descriptor tuples was accepted");
+}
+
+void verifyUniformTableImage() {
+    using namespace ShaderRecompiler;
+    constexpr std::uint32_t Format8888UNorm = 56;
+    constexpr std::uint32_t Type2D = 9;
+    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
+    static Texture textures[2];
+    struct alignas(4096) GuestTables {
+        std::array<std::array<std::uint32_t, 12>, 3> table{};
+        std::array<std::uint32_t, 4> output{};
+        std::array<std::uint32_t, 16> srt{};
+    };
+    static GuestTables guest;
+    const auto texture = [](const Texture& image) {
+        const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(image.bytes.data()));
+        return std::array<std::uint32_t, 8>{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
+    };
+    const auto first = texture(textures[0]);
+    const auto second = texture(textures[1]);
+    std::copy(first.begin(), first.end(), guest.table[1].begin() + 4);
+    std::copy(second.begin(), second.end(), guest.table[2].begin() + 4);
+    const auto bufferDescriptor = [](const void* base, std::uint32_t records) {
+        const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(base));
+        return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), records, 0xfacu};
+    };
+    const auto tableV = bufferDescriptor(guest.table.data(), static_cast<std::uint32_t>(sizeof(guest.table)));
+    const auto outputV = bufferDescriptor(guest.output.data(), 16u);
+    std::copy(tableV.begin(), tableV.end(), guest.srt.begin());
+    std::copy(outputV.begin(), outputV.end(), guest.srt.begin() + 12);
+    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(guest.srt.data()));
+    std::array<std::uint32_t, 3> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u), 2u};
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    const std::vector<std::uint32_t> code{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080700u, 0xfa000030u, 0x9310b002u, 0xf42c0502u, 0x20000010u, 0xf09c0f08u, 0x00450000u, 0xe0700000u, 0x80070000u, 0xbf810000u};
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Compute, 0x20000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData;
+    request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32;
+    request.target.supportedCapabilities = capabilities;
+    request.target.supportedExtensions = extensions;
+    request.target.bdaAbiVersion = BdaAbi::Version;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+    const auto plan = GetResourcePlan(request);
+    require(plan->info.images.size() == 1u && !plan->descriptorSources.at(plan->info.images[0].source).indirectImage.has_value(), "uniform table image: the T# read from a constant buffer was not planned as one image");
+    for (const auto& [key, expected] : {std::pair{2u, second}, std::pair{1u, first}}) {
+        userData[2] = key;
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::equal(expected.begin(), expected.end(), capture->snapshot.images[0].dwords.begin()), "uniform table image: the T# of the record the user data selects was not read");
+    }
 }
 
 void verifyLaneSelectedDescriptors() {
@@ -3447,6 +3465,13 @@ void verifyFunctionLdsBound() {
     });
     require(unbounded == FunctionLdsDwordLimit && unboundedRequirements.functionLdsDwords == FunctionLdsDwordLimit, "function LDS: an address without a bound must keep the full array");
 
+    const auto [counter, counterRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& m0 = emit(IrOpcode::GetUserData, IrType::U32, {&constant(0u)});
+        emit(IrOpcode::DataAppend, IrType::U32, {&m0, &active}, 2u);
+        emit(IrOpcode::DataConsume, IrType::U32, {&m0, &active}, 1u);
+    });
+    require(counter == 192u && counterRequirements.functionLdsDwords == 192u, "function LDS: an LDS append or consume must size the array by its offset, not by M0");
+
     const auto wrapping = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
         emit(IrOpcode::LoadSharedU32, IrType::U32, {&constant(0x20u), &active}, 3u);
     }).first;
@@ -3839,8 +3864,8 @@ int main(int argc, char** argv) {
         verifyPureFlatSlots();
         verifyGuardedDescriptorSources();
         verifyBindlessTable();
-        verifyUniformTableImage();
         verifyDescriptorPhis();
+        verifyUniformTableImage();
         verifyLaneSelectedDescriptors();
         verifyProgramCounterRelativeData();
         verifyLanesOutsideHostSubgroup();
