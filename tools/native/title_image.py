@@ -16,8 +16,8 @@ import sys
 import time
 from collections import deque
 
-from capstone import Cs, CS_ARCH_X86, CS_MODE_64
-from capstone.x86 import X86_OP_IMM
+from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_AC_WRITE
+from capstone.x86 import X86_OP_IMM, X86_OP_MEM, X86_OP_REG
 
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core" / "aot"))
@@ -94,6 +94,86 @@ def reachable(image, entry_addresses, limit):
     return order, frontier
 
 
+def relocation_table(cells, functions, slot):
+    """The contiguous run of pointer relocation cells around a slot, when every cell names a
+    declared function. A register loaded from the slot is one entry of that run."""
+    if slot not in cells:
+        return []
+    run = set()
+    cursor = slot
+    while cursor in cells:
+        run.add(cells[cursor])
+        cursor -= 8
+    cursor = slot + 8
+    while cursor in cells:
+        run.add(cells[cursor])
+        cursor += 8
+    if not run or len(run) > 65536 or not all(target in functions for target in run):
+        return []
+    return sorted(run)
+
+
+def recover_pointer_slot_calls(image, native):
+    """Declare the target set of every register-form indirect call whose operand register was
+    loaded from a pointer relocation slot.
+
+    A lifecycle loop (or any dispatch loop) loads a function pointer out of a relocation table
+    into a register and calls the register, so recovery records the site with no target set and the
+    bounded image leaves the slot holding a raw guest address. Resolving the loaded slot to its
+    contiguous relocation run gives the call its closed-world target set. Returns every target the
+    recovered sets name, so the caller can keep them in the image as reporting stubs.
+    """
+    cells = dict(image.relocations)
+    functions = image.functions
+    decoder = Cs(CS_ARCH_X86, CS_MODE_64)
+    decoder.detail = True
+    added = set()
+    for address in native:
+        spec = functions.get(address)
+        if spec is None:
+            continue
+        records = spec.setdefault('indirect_calls', [])
+        known_sites = {record['address'] for record in records}
+        known = {}
+        for insn in decoder.disasm(image.read(address, spec['size']), address):
+            operands = insn.operands
+            if insn.mnemonic in ('call', 'jmp'):
+                if len(operands) == 1 and operands[0].type == X86_OP_REG:
+                    state = known.get(insn.reg_name(operands[0].reg))
+                    if state is not None and state[0] == 'load' and insn.address not in known_sites:
+                        targets = relocation_table(cells, functions, state[1])
+                        if targets:
+                            records.append({'address': insn.address, 'targets': targets})
+                            known_sites.add(insn.address)
+                            added.update(targets)
+                if insn.mnemonic == 'call':
+                    # A call clobbers the caller-saved registers; keep the callee-saved base.
+                    for volatile in ('rax', 'rcx', 'rdx', 'rsi', 'rdi') + tuple(f'r{i}' for i in range(8, 12)):
+                        known.pop(volatile, None)
+                continue
+            if not operands:
+                continue
+            destination = operands[0] if operands[0].access & CS_AC_WRITE else None
+            if destination is None or destination.type != X86_OP_REG:
+                continue
+            name = insn.reg_name(destination.reg)
+            previous = known.pop(name, None)
+            if insn.mnemonic == 'lea' and len(operands) == 2 and operands[1].type == X86_OP_MEM:
+                mem = operands[1].mem
+                if insn.reg_name(mem.base) == 'rip' and not mem.index and not mem.segment:
+                    known[name] = ('base', insn.address + insn.size + mem.disp)
+            elif insn.mnemonic == 'mov' and len(operands) == 2 and operands[1].type == X86_OP_MEM:
+                mem = operands[1].mem
+                base = known.get(insn.reg_name(mem.base)) if mem.base else None
+                if base is not None and base[0] == 'base' and not mem.index and not mem.segment:
+                    known[name] = ('load', base[1] + mem.disp)
+            elif insn.mnemonic in ('add', 'sub') and len(operands) == 2 and operands[1].type == X86_OP_IMM:
+                if previous is not None and previous[0] == 'base':
+                    delta = operands[1].imm if insn.mnemonic == 'add' else -operands[1].imm
+                    known[name] = ('base', previous[1] + delta)
+    return added
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--elf', required=True)
@@ -125,22 +205,11 @@ def main():
         # the walk then compiles their callees instead of leaving dispatch misses behind them.
         entries += [binding['target'] - image.guest_base for binding in process_parameters['bindings']]
     start = time.time()
-    order, frontier = reachable(image, entries, args.limit)
-    native = set(order)
     lifecycle = contracts.get('lifecycle', {})
-    # DT_INIT/DT_FINI run before and after the entry, so they are native even when the bounded
-    # walk does not reach them.
-    native |= {lifecycle.get('init'), lifecycle.get('fini')} - {None}
-    keep = native | frontier
-    contracts['functions'] = [spec for spec in image.functions.values() if spec['address'] in keep]
-    for spec in contracts['functions']:
-        if spec['address'] in native:
-            spec.pop('stub', None)
-        else:
-            spec['stub'] = True
     # DT_INIT/DT_FINI are init-array loops; their body can run past the next declared start (a
     # spurious interior label), which makes the compiler reject them for escaping the contract.
-    # Extend each lifecycle contract to its decoded body and drop the interior starts it covers.
+    # Extend each lifecycle contract to its decoded body and drop the interior starts it covers,
+    # before the walk, so the recovery pass and the closure see the whole loop.
     decoder = Cs(CS_ARCH_X86, CS_MODE_64)
     decoder.detail = True
     for address in sorted({lifecycle.get('init'), lifecycle.get('fini')} - {None}):
@@ -158,7 +227,22 @@ def main():
         dropped = [item['address'] for item in contracts['functions']
                    if item is not spec and address < item['address'] < end]
         contracts['functions'] = [item for item in contracts['functions'] if item['address'] not in dropped]
+        for item in dropped:
+            image.functions.pop(item, None)
         print('extended lifecycle 0x%x to 0x%x, dropped %s' % (address, end, [hex(a) for a in dropped]), flush=True)
+    # The walk follows direct calls and the target sets recovery declared. A register-form indirect
+    # call whose operand came from a pointer relocation slot has no declared set; recover it and keep
+    # the run of named functions in the image as reporting stubs, so the call resolves to a named
+    # trap instead of a dispatch miss (the bounded walk itself does not widen).
+    order, frontier = reachable(image, entries, args.limit)
+    native = set(order) | ({lifecycle.get('init'), lifecycle.get('fini')} - {None})
+    keep = native | frontier | recover_pointer_slot_calls(image, native)
+    contracts['functions'] = [spec for spec in image.functions.values() if spec['address'] in keep]
+    for spec in contracts['functions']:
+        if spec['address'] in native:
+            spec.pop('stub', None)
+        else:
+            spec['stub'] = True
     contracts['allow_unimplemented'] = True
     contracts['guest_data'] = True
     contracts['count_entries'] = True
