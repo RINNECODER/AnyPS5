@@ -139,8 +139,14 @@ def module_chunk(job):
     source.write_text(text)
     object_bytes = 0
     if compile_object:
-        subprocess.run(['nice', '-n', '10', *clang_command(), '-O3', '-c', str(source), '-o', str(target)],
-                       check=True, capture_output=True)
+        command = ['nice', '-n', '10', *clang_command(), '-O3', '-c', str(source), '-o', str(target)]
+        # A compile can fail transiently under machine memory pressure; retry once before giving up.
+        for attempt in (1, 2):
+            result = subprocess.run(command, capture_output=True)
+            if result.returncode == 0:
+                break
+            if attempt == 2:
+                raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
         object_bytes = target.stat().st_size
         source.unlink()
     cache.write_text(json.dumps({'ir_bytes': len(text), 'records': records}))
