@@ -72,6 +72,17 @@ endif()
 
 if(BUILD_TESTING)
     find_package(Python3 QUIET COMPONENTS Interpreter)
+    add_test_executable(shader_ir_use_rewrite_tests
+        core/shader/recompiler/IntermediateRepresentation/tests/UseRewrite.cpp
+        core/shader/recompiler/IntermediateRepresentation/tests/UseRewriteAllocation.cpp
+        core/shader/recompiler/IntermediateRepresentation/src/IrValue.cpp
+        core/shader/recompiler/IntermediateRepresentation/src/IrBlock.cpp
+        core/shader/recompiler/IntermediateRepresentation/src/IrOpcode.cpp
+        core/shader/recompiler/IntermediateRepresentation/src/GuestRegister.cpp)
+    target_include_directories(shader_ir_use_rewrite_tests PRIVATE
+        core/shader/recompiler/IntermediateRepresentation/include)
+    add_test(NAME shader_ir_use_rewrite COMMAND shader_ir_use_rewrite_tests)
+    set_tests_properties(shader_ir_use_rewrite PROPERTIES TIMEOUT 20)
     if(Python3_Interpreter_FOUND)
         add_test(NAME pr_overlap_encoding COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_encoding.py)

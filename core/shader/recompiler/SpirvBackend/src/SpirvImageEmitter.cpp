@@ -1875,8 +1875,10 @@ void EmitImageAtomicCmpSwap64(SpirvValueEmitContext& ctx, const IrValue& inst) {
     EmitImage(ctx, inst);
 }
 
-void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
-    auto& state = ctx.state;
+namespace {
+
+template <typename TComponent>
+std::uint32_t EmitBvhQuery(SpirvEmitterState& state, SpirvValueEmitContext* inlineCtx, const IrValue* inlineInst, std::uint32_t descriptor, TComponent&& component, bool a16, bool node64, std::uint32_t pcValue) {
     const auto u32 = TypeU32(state);
     const auto u64 = TypeScalarU64(state);
     const auto f32 = TypeF32(state);
@@ -1902,16 +1904,11 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
     const auto pair = [&](std::uint32_t low, std::uint32_t high) { return op(spv::OpBitwiseOr, u64, widen(low), op(spv::OpShiftLeftLogical, u64, widen(high), BdaConstant(state, 32u))); };
 
     const auto query = [&] {
-        const auto descriptor = ctx.Arg(inst, 0);
         std::array<std::uint32_t, 4> word{};
         for (std::uint32_t i = 0; i < 4u; ++i) {
             word[i] = state.module.AllocateId();
             state.module.AddFunction(spv::OpCompositeExtract, u32, word[i], descriptor, i);
         }
-        const IrValue* address = ctx.ImageAddress(inst.Argument(1));
-        const auto component = [&](std::uint32_t index) { return ctx.Arg(*address, index); };
-        const bool a16 = (ctx.Memory(inst).imageSampleFlags & RdnaImageSampleFlagA16) != 0u;
-        const bool node64 = ctx.Memory(inst).addressIsFull;
         const std::uint32_t ray = node64 ? 2u : 1u;
 
         const auto nodeLow = component(0);
@@ -1956,12 +1953,12 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
             std::vector<std::uint32_t> dwords;
             if (state.bdaProbeFunction == 0) {
                 for (std::uint32_t first = 0; first < count; first += 4u) {
-                    const auto read = EmitBdaDwordReads(ctx, inst, nodeAddress, first * 4u, 4u, true);
+                    const auto read = EmitBdaDwordReads(*inlineCtx, *inlineInst, nodeAddress, first * 4u, 4u, true);
                     dwords.insert(dwords.end(), read.begin(), read.end());
                 }
                 return dwords;
             }
-            const auto pc = uint(inst.Flags<MemoryFlags>().pc);
+            const auto pc = pcValue;
             const auto bytes = uint(count * 4u);
             const auto physical = state.module.AllocateId();
             state.module.AddFunction(spv::OpFunctionCall, u64, physical, state.bdaProbeFunction, nodeAddress, bytes, pc);
@@ -2096,7 +2093,73 @@ void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
         const auto box16 = EmitValueOrDefaultIfCondition(state, isBox16, result4, tested, [&] { return boxes(true); });
         return EmitValueOrDefaultIfCondition(state, isBox32, result4, box16, [&] { return boxes(false); });
     };
-    const auto inactive = compose({invalid, invalid, invalid, invalid});
+    return query();
+}
+
+std::uint32_t BvhVariant(bool a16, bool node64) {
+    return (a16 ? 1u : 0u) | (node64 ? 2u : 0u);
+}
+
+std::uint32_t BvhComponents(bool a16, bool node64) {
+    return (node64 ? 2u : 1u) + (a16 ? 7u : 10u);
+}
+
+}
+
+void DefineBvhIntersectFunctions(SpirvEmitterState& state) {
+    if (state.bdaProbeFunction == 0) return;
+    std::array<bool, 4> used{};
+    for (const IrBlock* block : state.program.BlockOrder()) {
+        for (const IrValue* inst : block->Instructions()) {
+            if (inst->Opcode() != IrOpcode::ImageBvhIntersectRay) continue;
+            const auto& memory = state.program.Resources().memoryInfo.at(inst->Flags<MemoryFlags>().index);
+            used[BvhVariant((memory.imageSampleFlags & RdnaImageSampleFlagA16) != 0u, memory.addressIsFull)] = true;
+        }
+    }
+    const auto u32 = TypeU32(state);
+    const auto result4 = TypeU32Composite(state, 4u);
+    for (std::uint32_t variant = 0; variant < used.size(); ++variant) {
+        if (!used[variant]) continue;
+        const bool a16 = (variant & 1u) != 0u;
+        const bool node64 = (variant & 2u) != 0u;
+        std::vector<std::uint32_t> parameterTypes{result4};
+        parameterTypes.insert(parameterTypes.end(), BvhComponents(a16, node64) + 1u, u32);
+        const auto function = state.module.AllocateId();
+        state.module.AddName(function, "image_bvh_intersect_ray");
+        state.module.AddFunction(spv::OpFunction, result4, function, spv::FunctionControlDontInlineMask, state.module.Type(spv::OpTypeFunction, result4, std::span<const std::uint32_t>(parameterTypes)));
+        std::vector<std::uint32_t> parameters(parameterTypes.size());
+        for (std::size_t i = 0; i < parameters.size(); ++i) {
+            parameters[i] = state.module.AllocateId();
+            state.module.AddFunction(spv::OpFunctionParameter, parameterTypes[i], parameters[i]);
+        }
+        EmitLabel(state, state.module.AllocateId());
+        const auto value = EmitBvhQuery(state, nullptr, nullptr, parameters[0], [&](std::uint32_t index) { return parameters[1u + index]; }, a16, node64, parameters.back());
+        state.module.AddFunction(spv::OpReturnValue, value);
+        state.module.AddFunction(spv::OpFunctionEnd);
+        state.bvhIntersectFunctions[variant] = function;
+    }
+}
+
+void EmitImageBvhIntersectRay(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    auto& state = ctx.state;
+    const auto result4 = TypeU32Composite(state, 4u);
+    const auto invalid = ConstantU32(state, 0xffffffffu);
+    const IrValue* address = ctx.ImageAddress(inst.Argument(1));
+    const bool a16 = (ctx.Memory(inst).imageSampleFlags & RdnaImageSampleFlagA16) != 0u;
+    const bool node64 = ctx.Memory(inst).addressIsFull;
+    const auto pc = ConstantU32(state, inst.Flags<MemoryFlags>().pc);
+    const auto function = state.bvhIntersectFunctions[BvhVariant(a16, node64)];
+    const auto query = [&] {
+        if (function == 0) return EmitBvhQuery(state, &ctx, &inst, ctx.Arg(inst, 0), [&](std::uint32_t index) { return ctx.Arg(*address, index); }, a16, node64, pc);
+        std::vector<std::uint32_t> arguments{ctx.Arg(inst, 0)};
+        for (std::uint32_t i = 0; i < BvhComponents(a16, node64); ++i) arguments.push_back(ctx.Arg(*address, i));
+        arguments.push_back(pc);
+        const auto value = state.module.AllocateId();
+        state.module.AddFunction(spv::OpFunctionCall, result4, value, function, std::span<const std::uint32_t>(arguments));
+        return value;
+    };
+    const auto inactive = state.module.AllocateId();
+    state.module.AddFunction(spv::OpCompositeConstruct, result4, inactive, invalid, invalid, invalid, invalid);
     ctx.Define(inst, EmitValueOrDefaultIfCondition(state, ctx.Arg(inst, 2), result4, inactive, query));
 }
 

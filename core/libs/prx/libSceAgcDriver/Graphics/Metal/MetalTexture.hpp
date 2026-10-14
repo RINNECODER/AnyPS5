@@ -81,7 +81,8 @@ private:
                         id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile, Subresources part = {}) const;
     // Whether the tiled surface can be read or written in place at `offset` in `buffer`.
     // The GPU paths of Upload/Readback, without the in-place check (the span overloads stage through a rounded buffer).
-    void uploadFrom(id<MTLBuffer> guest, std::size_t offset);
+    // `recycleGuest`: `guest` is a MetalBufferPool staging buffer, returned once the upload ran.
+    void uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recycleGuest = false);
     void readbackInto(id<MTLBuffer> guest, std::size_t offset) const;
     [[nodiscard]] bool inPlace(id<MTLBuffer> buffer, std::size_t offset) const;
     // Encodes a GPU blit between the linear staging buffer and every present level and layer.

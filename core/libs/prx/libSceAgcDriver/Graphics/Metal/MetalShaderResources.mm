@@ -637,6 +637,28 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     return view;
 }
 
+MetalBufferBinding MetalShaderResources::upload(const void* data, std::size_t bytes) {
+    constexpr std::size_t ChunkBytes = std::size_t{16} << 10u;
+    // Bound at any offset with this alignment: no native buffer binding needs more.
+    constexpr std::size_t Alignment = 256;
+    if (bytes == 0) throw std::invalid_argument("Metal draw small buffer must not be empty");
+    if (bytes > ChunkBytes / 2) {
+        id<MTLBuffer> buffer = [backend.Device() newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared];
+        if (buffer == nil) throw std::runtime_error("Metal draw captured shader data allocation failed");
+        resident.push_back(buffer);
+        return {buffer, 0, bytes};
+    }
+    std::size_t offset = (uploadUsed + Alignment - 1) & ~(Alignment - 1);
+    if (uploadChunks.empty() || offset + bytes > ChunkBytes) {
+        uploadChunks.push_back(MetalBufferPool::Shared().Take(backend.Device(), ChunkBytes));
+        resident.push_back(uploadChunks.back());
+        offset = 0;
+    }
+    uploadUsed = offset + bytes;
+    std::memcpy(static_cast<std::byte*>(uploadChunks.back().contents) + offset, data, bytes);
+    return {uploadChunks.back(), offset, bytes};
+}
+
 std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const MetalBackend::Result& shader) {
     ValidatePixelSamplerBindings(shader.guest.bindings);
     const auto arrays = widestArrays(shader);
@@ -660,12 +682,12 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 std::copy_n(found->guestDescriptor.begin() + i * 4u, 4, descriptor.fields.begin());
                 const bool written = writtenBuffer(*found, i);
                 if (descriptor.GetSize() == 0 || descriptor.Base48() == 0) {
-                    if (emptyBuffer == nil) {
+                    if (!emptyBuffer) {
                         const std::uint32_t zero = 0;
-                        emptyBuffer = [backend.Device() newBufferWithBytes:&zero length:sizeof(zero) options:MTLResourceStorageModeShared];
-                        if (emptyBuffer == nil) throw std::runtime_error("Metal draw empty descriptor allocation failed");
+                        emptyBuffer = upload(&zero, sizeof(zero));
+                        emptyBuffer->length = 0;
                     }
-                    native.buffers.push_back({emptyBuffer, 0, 0});
+                    native.buffers.push_back(*emptyBuffer);
                 } else {
                     if (BindTrace::Active()) {
                         std::array<std::uint32_t, 16> head{};
@@ -692,10 +714,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
             }
             if (found->role == DescriptorRole::ShaderData) validateRuntimeImages(shader.guest, found->guestDescriptor);
             const auto bytes = found->guestDescriptor.size() * sizeof(std::uint32_t);
-            id<MTLBuffer> buffer = [backend.Device() newBufferWithBytes:found->guestDescriptor.data() length:bytes options:MTLResourceStorageModeShared];
-            if (buffer == nil) throw std::runtime_error("Metal draw captured shader data allocation failed");
-            native.buffers.push_back({buffer, 0, bytes});
-            resident.push_back(buffer);
+            native.buffers.push_back(upload(found->guestDescriptor.data(), bytes));
             break;
         }
         case DescriptorRole::BdaPagetable:
@@ -899,6 +918,9 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
     if (commands == nil || commands.status != MTLCommandBufferStatusCompleted || commands.device != backend.Device()) {
         throw std::invalid_argument("Metal draw resource copyback requires successful GPU completion");
     }
+    // The GPU is done with this work's small buffers.
+    for (id<MTLBuffer> chunk : uploadChunks) MetalBufferPool::Shared().Give(chunk);
+    uploadChunks.clear();
     const auto* words = static_cast<const std::uint32_t*>(snapshot.FaultBuffer().contents);
     constexpr std::uint64_t pageBytes = std::uint64_t{1} << Abi::WrittenPageShift;
     std::vector<std::uint64_t> writtenPages;
