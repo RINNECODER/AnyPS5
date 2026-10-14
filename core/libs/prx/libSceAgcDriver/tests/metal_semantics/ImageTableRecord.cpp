@@ -110,6 +110,7 @@ int main() {
         std::copy(output.begin(), output.end(), Guest.srt.begin() + 12);
         Run(*device, 2u, second, "T# of table record 2");
         Run(*device, 1u, first, "T# of table record 1");
+        Run(*device, 0u, {0u, 0u, 0u, 0u}, "TYPE=0 T# with a nonzero base in table record 0");
         std::puts("image table record tests passed");
         return 0;
     } catch (const std::exception& error) {

@@ -464,6 +464,39 @@ void verifySignedSrtComparison() {
     }
 }
 
+void verifyTypeZeroImageMaterialization() {
+    using namespace ShaderRecompiler;
+    IrResourcePlan plan;
+    plan.srtPlanComplete = true;
+    plan.resourceTrackingComplete = true;
+    plan.userDataCount = 0u;
+    plan.materializationSources = {0u};
+
+    const std::array<std::uint32_t, 8> words{0x12345678u, (56u << 20u) | 0x100u, 0x0000c000u, 0x00000facu, 1u, 2u, 3u, 4u};
+    std::vector<std::unique_ptr<IrValue>> values;
+    DescriptorSource source;
+    source.dwordCount = static_cast<std::uint32_t>(words.size());
+    for (std::uint32_t i = 0u; i < words.size(); ++i) {
+        auto value = std::make_unique<IrValue>(IrOpcode::Void, IrType::U32, i);
+        value->SetImmediateU32(words[i]);
+        source.dwords[i] = value.get();
+        values.push_back(std::move(value));
+    }
+    plan.descriptorSources.push_back(source);
+
+    ImageResource image;
+    image.source = 0u;
+    image.resourceClass = ImageResourceClass::Sampled;
+    image.dimension = RdnaImageDimension::Dim2D;
+    plan.info.images.push_back(image);
+    plan.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(image));
+
+    ResourceSnapshot snapshot;
+    ResourceMaterializer{}.Materialize(plan, SrtRuntime{}, snapshot);
+    require(snapshot.images.size() == 1u && snapshot.images[0].dwordCount == 8u && snapshot.images[0].dwords == words,
+            "TYPE=0 image descriptor with a nonzero base was rejected or altered during materialization");
+}
+
 void verifyOutOfRangeConstantReads() {
     std::vector<std::uint32_t> code{0xf40c0200u, 0xfa000000u, 0xf4080500u, 0xfa000020u, 0xf4080600u, 0xfa000040u, 0xf4000400u, 0xfa000050u, 0xf4080a00u, 0xfa000080u, 0xbf8cc07fu, 0xf42c0814u, 0xfa000000u, 0xbf8cc07fu, 0xbf068010u, 0xbf850008u};
     for (std::uint32_t dword = 0; dword < 8u; dword++) {
@@ -612,7 +645,7 @@ void verifyGuardedDescriptorSources() {
     static Texture texture;
     const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture.bytes.data()));
     const std::array<std::uint32_t, 8> valid{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
-    const std::array<std::uint32_t, 8> invalid{0x12345678u, 0xffffffffu, 0xffffffffu, 0u, 0u, 0u, 0u, 0u};
+    const std::array<std::uint32_t, 8> invalid{0x12345678u, 0xffffffffu, 0xffffffffu, 1u << 28u, 0u, 0u, 0u, 0u};
     const std::array<std::uint32_t, 4> sampler{0u, 0u, 0u, 0u};
     std::array<std::uint32_t, 4> output{};
     const auto outputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
@@ -929,7 +962,7 @@ void verifyBindlessTable() {
     request.context.memory = emptyMemory.Regions();
     require(Recompile(request, *emptyCapture)->variantId == compiled->variantId, "bindless: an empty table changed the artifact");
     heap = savedHeap;
-    heap[0][3] &= 0x0fffffffu;
+    heap[0][3] = (heap[0][3] & 0x0fffffffu) | (1u << 28u);
     AgcDriver::ShaderMemory invalidMemory({});
     expectFailure([&] { static_cast<void>(invalidMemory.Capture(request)); }, "invalid descriptor", "bindless: an invalid T# was accepted");
     heap = savedHeap;
@@ -3661,11 +3694,17 @@ int main(int argc, char** argv) {
             std::cout << "Bindless mapping, indexing capabilities and strict validation passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--type-zero-image-materialization") {
+            verifyTypeZeroImageMaterialization();
+            std::cout << "TYPE=0 image descriptor materialization passed\n";
+            return 0;
+        }
         require(argc == 1, "unknown shader memory test arguments");
         verifyRegisterSources();
         verifyEvaluatedValues();
         verifyFrontendPair();
         verifySignedSrtComparison();
+        verifyTypeZeroImageMaterialization();
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
         verifyPureFlatSlots();
