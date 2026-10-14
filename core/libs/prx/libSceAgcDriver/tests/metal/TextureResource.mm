@@ -1,5 +1,6 @@
 #include "MetalTestSupport.hpp"
 #include "MetalTexture.hpp"
+#include "MetalDeferredCopyBacks.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <array>
 #include <cmath>
@@ -499,7 +500,53 @@ void VerifyPacked(const MetalTests::Context& context, id<MTLLibrary> probes) {
 
 }
 
+// Render-target copy-backs recorded for the open batch: two of one texture into the same bytes
+// become one, a binding of other bytes or of the texture itself leaves it recorded, a reader of
+// its bytes encodes it first, and the batch's commit encodes the rest, so the guest bytes hold
+// the texels once the batch completes either way.
+void VerifyDeferredCopyBacks(const MetalTests::Context& context) {
+    if (!AgcDriver::Metal::MetalDeferredCopyBacks::Enabled()) return;
+    AgcDriver::Metal::MetalDevice backend(context.device,context.library);
+    auto texture = std::make_shared<MetalTexture>(backend,Descriptor(TextureDimension::k2D));
+    std::vector<std::byte> pattern(texture->GuestBytes());
+    for (std::size_t i=0;i<pattern.size();++i) pattern[i]=static_cast<std::byte>(i*7u+3u);
+    texture->Upload(pattern);
+    // What a copy-back over zeroed guest bytes leaves (padding the texels do not cover stays zero).
+    std::vector<std::byte> expected(pattern.size(),std::byte{0});
+    texture->Readback(expected);
+    id<MTLBuffer> guest=[context.device newBufferWithLength:texture->GuestBytes() options:MTLResourceStorageModeShared];
+    id<MTLBuffer> other=[context.device newBufferWithLength:texture->GuestBytes() options:MTLResourceStorageModeShared];
+    const auto holdsTexels=[&] { return std::memcmp(guest.contents,expected.data(),expected.size())==0; };
+    backend.SetBatching(true);
+    auto* deferred=backend.DeferredCopyBacks();
+    Require(deferred!=nullptr,"a batching device has no deferred copy-backs");
+    std::memset(guest.contents,0,guest.length);
+    auto commands=backend.CommandBuffer();
+    Require(deferred->Defer(commands,texture,guest,0,{}) && deferred->Defer(commands,texture,guest,0,{}),"an in-place copy-back is not deferred");
+    deferred->EncodeOverlapping(other.contents,other.length);
+    deferred->EncodeOverlapping(guest.contents,4,texture.get());
+    Require(!deferred->Empty() && deferred->Encoded()==0,"a binding of other bytes or of the texture itself encodes its copy-back");
+    backend.Wait(commands);
+    Require(deferred->Empty() && deferred->Requested()==2 && deferred->Encoded()==1,"two copy-backs of one texture are not merged into one at the commit");
+    Require(holdsTexels(),"the copy-back encoded at the batch's commit does not hold the texels");
+    std::memset(guest.contents,0,guest.length);
+    commands=backend.CommandBuffer();
+    Require(deferred->Defer(commands,texture,guest,0,{}),"an in-place copy-back is not deferred");
+    deferred->EncodeOverlapping(static_cast<const std::byte*>(guest.contents)+8,4);
+    Require(deferred->Empty() && deferred->Encoded()==2,"a reader of the bytes does not encode the copy-back first");
+    backend.Wait(commands);
+    Require(holdsTexels(),"the copy-back encoded for a reader does not hold the texels");
+    std::vector<std::byte> unaligned(texture->GuestBytes()+4);
+    id<MTLBuffer> offset=[context.device newBufferWithLength:unaligned.size() options:MTLResourceStorageModeShared];
+    commands=backend.CommandBuffer();
+    Require(!deferred->Defer(commands,texture,offset,2,{}),"a copy-back that is not in place is deferred");
+    backend.Wait(commands);
+    backend.SetBatching(false);
+    Require(backend.DeferredCopyBacks()==nullptr,"a device that stopped batching keeps deferred copy-backs");
+}
+
 void RunTextureResourceTests(const MetalTests::Context& context) {
+    VerifyDeferredCopyBacks(context);
     NSError* error=nil;
     auto probes=[context.device newLibraryWithSource:[NSString stringWithUTF8String:source] options:nil error:&error];
     Require(probes!=nil,error.localizedDescription.UTF8String ?: "native texture probes do not compile");

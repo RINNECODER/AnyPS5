@@ -1,4 +1,5 @@
 #include "MetalShaderResources.hpp"
+#include "MetalDeferredCopyBacks.hpp"
 #include "GpuTiming.hpp"
 #include "BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
@@ -229,6 +230,19 @@ void MetalShaderResources::forgetCachedImages(std::uint64_t begin, std::uint64_t
     }
 }
 
+void MetalShaderResources::encodeDeferredCopyBacks(std::uint64_t address, std::size_t bytes, const MetalBufferBinding& alias,
+    const MetalTexture* keep) {
+    auto* deferred = backend.DeferredCopyBacks();
+    if (deferred == nullptr || deferred->Empty()) return;
+    if (alias.buffer != nil) deferred->EncodeOverlapping(static_cast<const std::byte*>(alias.buffer.contents) + alias.offset, bytes, keep);
+    const auto end = address + bytes;
+    for (const auto& range : borrowedRanges) {
+        const auto clippedBegin = std::max(address, range.guestAddress);
+        const auto clippedEnd = std::min(end, range.guestAddress + range.host.size());
+        if (clippedBegin < clippedEnd) deferred->EncodeOverlapping(range.host.data() + (clippedBegin - range.guestAddress), clippedEnd - clippedBegin, keep);
+    }
+}
+
 bool MetalShaderResources::physicallyOverlaps(std::uint64_t begin, std::uint64_t end,
     std::uint64_t otherBegin, std::uint64_t otherEnd) const {
     for (const auto& range : borrowedRanges) {
@@ -314,6 +328,8 @@ MetalBufferBinding MetalShaderResources::stageStorageImage(std::uint64_t address
 
 MetalBufferBinding MetalShaderResources::Buffer(std::uint64_t address, std::size_t bytes, bool writable) {
     auto buffer = mirror(address, bytes, writable);
+    // The GPU reads or writes these guest bytes: a deferred copy-back over them goes first.
+    encodeDeferredCopyBacks(address, bytes, buffer);
     for (const auto& image : images) {
         const auto& descriptor = image.texture->Descriptor();
         const auto begin = descriptor.baseAddress;
@@ -424,6 +440,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::Texture(const Graphics::Gues
 void MetalShaderResources::noteWrite(Image& image, const Graphics::GuestTextureResource& descriptor, bool storage,
     std::optional<std::uint32_t> level) {
     auto& part = image.writtenPart;
+    image.storageWrite = image.storageWrite || storage;
     const auto& geometry = image.texture->Geometry();
     // Storage views address one level; a render target, the level it attaches (else every level).
     const auto levelBegin = level.value_or(storage ? descriptor.baseLevel : 0u);
@@ -597,6 +614,9 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     }
     // This work rewrites the surface: no cached texture describes it until the copy-back completes.
     if (written) forgetCachedImages(descriptor.baseAddress, end);
+    // Guest bytes this binding reads (an upload) or writes (its own copy-back) through memory: a
+    // deferred copy-back over them goes first, unless it is this very texture's (which holds them).
+    if (!staged) encodeDeferredCopyBacks(descriptor.baseAddress, bytes, buffer, cached ? cached->texture.get() : nullptr);
     std::shared_ptr<MetalTexture> texture;
     bool textureCompare = compare;
     if (cached) {
@@ -889,7 +909,8 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
 std::span<const id<MTLResource>> MetalShaderResources::Residency() const { return resident; }
 
 void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands) {
-    if (GpuTiming::SplitReadbacks() && std::any_of(images.begin(), images.end(), [](const Image& image) { return image.written; })) {
+    // With deferred copy-backs the batch's flush splits them off instead (MetalDevice::Flush).
+    if (GpuTiming::SplitReadbacks() && backend.DeferredCopyBacks() == nullptr && std::any_of(images.begin(), images.end(), [](const Image& image) { return image.written; })) {
         // Profiling only: the copy-backs run right behind the work, in a command buffer of their own.
         [commands enqueue];
         id<MTLCommandBuffer> readbacks = backend.CommandBuffer();
@@ -910,7 +931,14 @@ void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands) {
         // uncompressed surface read and written in place (a DCC or staged one is copied whole).
         const bool partial = image.original.empty() && image.keys == Graphics::DccKeys::Uncompressed &&
             image.texture->Descriptor().dccAddress == 0 && image.writtenPart.levelBegin < image.writtenPart.levelEnd;
-        if (image.texture->EncodeReadback(commands, image.buffer.buffer, image.buffer.offset, partial ? image.writtenPart : MetalTexture::Subresources{})) {
+        const auto part = partial ? image.writtenPart : MetalTexture::Subresources{};
+        // A render target's copy-back waits for the batch's end, a barrier or a reader of its bytes
+        // (MetalDeferredCopyBacks.hpp); it still runs in `commands`, before anything observes it.
+        auto* deferred = image.storageWrite || !image.original.empty() ? nullptr : backend.DeferredCopyBacks();
+        if (deferred != nullptr && backend.OpenBatch(commands) &&
+            deferred->Defer(commands, image.texture, image.buffer.buffer, image.buffer.offset, part, image.host)) {
+            image.readbackIn = commands;
+        } else if (image.texture->EncodeReadback(commands, image.buffer.buffer, image.buffer.offset, part)) {
             image.readbackIn = commands;
         }
     }

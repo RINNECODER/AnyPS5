@@ -1,4 +1,5 @@
 #include "MetalDevice.hpp"
+#include "MetalDeferredCopyBacks.hpp"
 #include "GpuStallWatch.hpp"
 #include "GpuTiming.hpp"
 #include "FrameProfile.hpp"
@@ -141,6 +142,12 @@ MetalBatchedWork::~MetalBatchedWork() {
 void MetalDevice::SetBatching(bool on) {
     if (!on) Flush();
     batching = on;
+    if (!on) deferredCopyBacks.reset();
+    else if (!deferredCopyBacks && MetalDeferredCopyBacks::Enabled()) deferredCopyBacks = std::make_shared<MetalDeferredCopyBacks>();
+}
+
+void MetalDevice::EncodeDeferredCopyBacks() const {
+    if (deferredCopyBacks && open != nil && open.status == MTLCommandBufferStatusNotEnqueued) deferredCopyBacks->EncodeAll(open);
 }
 
 bool MetalDevice::OpenBatch(id<MTLCommandBuffer> commands) const {
@@ -149,6 +156,32 @@ bool MetalDevice::OpenBatch(id<MTLCommandBuffer> commands) const {
 
 void MetalDevice::Flush() const {
     if (open == nil) return;
+    if (deferredCopyBacks && !deferredCopyBacks->Empty() && open.status == MTLCommandBufferStatusNotEnqueued) {
+        if (GpuTiming::SplitReadbacks()) {
+            // Profiling only: the batch's copy-backs run right behind it, in a command buffer of their own.
+            [open enqueue];
+            id<MTLCommandBuffer> readbacks = [queue commandBuffer];
+            if (readbacks == nil) throw MetalGpuExecutionError("Metal command buffer creation failed");
+            created.fetch_add(1, std::memory_order_relaxed);
+            [readbacks enqueue];
+            deferredCopyBacks->EncodeAll(readbacks);
+            [readbacks addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                GpuTiming::Scope timing(GpuTiming::Kind::Readback);
+                GpuTiming::Record(0, done.GPUEndTime - done.GPUStartTime, done.GPUStartTime, done.GPUEndTime);
+            }];
+            [readbacks commit];
+        } else {
+            deferredCopyBacks->EncodeAll(open);
+        }
+        if (GpuTiming::Enabled()) {
+            static std::uint64_t reported = 0;
+            if (deferredCopyBacks->Requested() >= reported + 4096) {
+                reported = deferredCopyBacks->Requested();
+                std::fprintf(stderr, "[agc] copy-backs: %llu recorded, %llu encoded\n", static_cast<unsigned long long>(deferredCopyBacks->Requested()),
+                    static_cast<unsigned long long>(deferredCopyBacks->Encoded()));
+            }
+        }
+    }
     if (open.status < MTLCommandBufferStatusCommitted) [open commit];
     flushed = open;
     open = nil;

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <stdexcept>
@@ -64,6 +65,7 @@ private:
 };
 
 class MetalDevice;
+class MetalDeferredCopyBacks;
 
 // Held by a work between taking a command buffer and handing it to a wait or the timeline. With
 // batching, a work that stops in between (a throw that skips it, an early return) leaves what it
@@ -127,6 +129,11 @@ public:
     // Whether the open batch holds at least `minimum` works and the batch committed before it has
     // completed: committing now keeps the GPU busy while the CPU encodes on.
     [[nodiscard]] bool GpuStarved(std::uint32_t minimum) const;
+    // Render-target copy-backs deferred to the open batch's end (MetalDeferredCopyBacks.hpp):
+    // non-null while batching, unless ANYPS5_METAL_EAGER_COPYBACK=1.
+    [[nodiscard]] MetalDeferredCopyBacks* DeferredCopyBacks() const { return deferredCopyBacks.get(); }
+    // Encodes the deferred copy-backs into the open batch now (a barrier or cache flush packet).
+    void EncodeDeferredCopyBacks() const;
     // Metal command buffers this device created.
     [[nodiscard]] std::uint64_t CommandBuffersCreated() const { return created.load(std::memory_order_relaxed); }
 
@@ -154,6 +161,7 @@ private:
     mutable id<MTLCommandBuffer> open;
     mutable id<MTLCommandBuffer> flushed;
     mutable std::uint32_t openUses = 0;
+    std::shared_ptr<MetalDeferredCopyBacks> deferredCopyBacks;
     mutable std::atomic<std::uint64_t> created{0};
 };
 

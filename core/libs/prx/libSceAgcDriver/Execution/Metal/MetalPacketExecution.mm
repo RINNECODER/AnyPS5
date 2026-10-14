@@ -407,7 +407,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
             }, stores, bindings->WrittenGuestRanges());
             return std::nullopt;
         }
-        [commands commit];
+        // Wait commits it (as a batch, behind its deferred copy-backs).
         backend->Wait(commands);
         return CompleteCommittedWork([&] { return bindings->Complete(commands); });
     };
@@ -889,6 +889,9 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         } else if (opcode == 0x42 || opcode == 0x58 || opcode == 0x46) {
             // Cache flushes and pipeline barriers store nothing here, and the Metal queue already
             // runs committed work in order; only the sample counter dump reads results on the CPU.
+            // Render-target copy-backs deferred so far land here, so GPU work behind the barrier
+            // that reads those surfaces' memory sees them (MetalDeferredCopyBacks.hpp).
+            backend->EncodeDeferredCopyBacks();
             if (opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u) {
                 CompletePriorGpuWorkAndCopyBack(opcode);
                 if (draw == nullptr) throw std::runtime_error("Native Metal sample counter executor is not configured");

@@ -83,6 +83,8 @@ private:
         std::uint64_t content = 0;
         // The levels and layers this work's bindings may write (copied back), empty when not written.
         MetalTexture::Subresources writtenPart{~0u, 0, ~0u, 0};
+        // Written as a storage image (not only as a render target): its copy-back is never deferred.
+        bool storageWrite = false;
     };
     // Widens `image.writtenPart` by what binding `descriptor` (as storage, or as a render target
     // writing `level`) may write.
@@ -119,6 +121,10 @@ private:
     ImageCache* imageCache = nullptr;
     // Drops cached images whose guest bytes overlap [begin, end) through any borrowed range.
     void forgetCachedImages(std::uint64_t begin, std::uint64_t end);
+    // Encodes the deferred copy-backs (MetalDeferredCopyBacks.hpp) over guest [address, +bytes),
+    // matched at the bytes' canonical host addresses and at `alias`, the buffer this work binds
+    // them through; `keep`'s own stays deferred.
+    void encodeDeferredCopyBacks(std::uint64_t address, std::size_t bytes, const MetalBufferBinding& alias, const MetalTexture* keep = nullptr);
     [[nodiscard]] Graphics::DccKeys textureKeys(const Graphics::GuestTextureResource& descriptor, std::size_t bytes);
     void validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys);
     [[nodiscard]] bool physicallyOverlaps(std::uint64_t begin, std::uint64_t end,
