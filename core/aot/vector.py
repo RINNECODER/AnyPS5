@@ -52,7 +52,7 @@ SUPPORTED = (FULL_MOVES | set(BITWISE) | set(FLOAT_OPS) | SHUFFLES | set(SQRT_OP
              | set(CVT_PACKED) | {
     'movd', 'movq', 'movss', 'movsd', 'movlps', 'movlpd', 'psrld', 'paddd', 'pcmpgtd',
     'packuswb', 'ucomiss', 'cvtsi2ss', 'paddb', 'pmaxub', 'pcmpeqb', 'pcmpeqd', 'psrad', 'movmskps',
-    'pextrw', 'pmulhw', 'psadbw', 'phminposuw'})
+    'pextrw', 'pmulhw', 'psadbw', 'phminposuw', 'pslldq', 'psrldq'})
 FP_POLICY = {'rounding': 'nearest-even', 'subnormals': 'preserve', 'exceptions': 'masked',
              'status_flags': 'unobserved', 'nan_payloads': 'unobserved'}
 MASK128 = (1 << 128) - 1
@@ -198,6 +198,9 @@ def analyze(function, ins, state):
     elif op == 'phminposuw':
         _check(function, ins, state, args[1], 128)
         _copy_mask(ins, state, args[0], MASK128)
+    elif op in ('pslldq', 'psrldq'):
+        _check(function, ins, state, args[0], 128)
+        _copy_mask(ins, state, args[0], _mask(function, ins, state, args[0]))
     elif op in SHUF_WORDS:
         source = _mask(function, ins, state, args[1])
         control = args[2].imm
@@ -344,7 +347,7 @@ def _pack(function, value, width=32):
 
 def lower(function, ins):
     op, args = ins.mnemonic, ins.operands
-    if op not in SUPPORTED or not any(_xmm(ins, operand) for operand in args):
+    if op not in SUPPORTED or (not any(_xmm(ins, operand) for operand in args) and op not in TO_INT):
         return False
     read = lambda operand, bits=128: function.read(ins, operand, bits)
     if op in ('movaps', 'movapd', 'movdqa'):
@@ -430,6 +433,13 @@ def lower(function, ins):
         high = function.emit(f'zext i64 {sums[1]} to i128')
         high = function.emit(f'shl i128 {high}, 64')
         _write(function, ins, args[0], function.emit(f'or i128 {low}, {high}'))
+    elif op in ('pslldq', 'psrldq'):
+        shift = args[1].imm * 8
+        if shift >= 128:
+            _write(function, ins, args[0], '0')
+        else:
+            value = read(args[0])
+            _write(function, ins, args[0], function.emit(f'{"shl" if op == "pslldq" else "lshr"} i128 {value}, {shift}'))
     elif op == 'phminposuw':
         kind = '<8 x i16>'
         source = function.emit(f'bitcast i128 {read(args[1])} to {kind}')
