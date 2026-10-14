@@ -110,7 +110,13 @@ struct GuestBufferMemory::AddressSpace {
     std::vector<ShaderRecompiler::BdaAbi::Range> ranges;
     std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> directReads;
     mutable std::mutex tableMutex;
-    mutable std::map<std::vector<std::uint64_t>, std::pair<std::uint64_t, std::shared_ptr<const std::vector<ShaderRecompiler::BdaAbi::Range>>>> tables;
+    struct Table {
+        std::uint64_t serial;
+        std::shared_ptr<const std::vector<ShaderRecompiler::BdaAbi::Range>> ranges;
+        std::list<const std::vector<std::uint64_t>*>::iterator recent;
+    };
+    mutable std::map<std::vector<std::uint64_t>, Table> tables;
+    mutable std::list<const std::vector<std::uint64_t>*> tableRecency;
 };
 
 namespace {
@@ -922,7 +928,12 @@ struct SnapshotCopies {
     static constexpr std::size_t MaxEntries = 1024;
     std::mutex mutex;
     VkDevice device = VK_NULL_HANDLE;
-    std::map<Key, std::pair<std::shared_ptr<Buffer>, std::list<Key>::iterator>> entries;
+    struct Entry {
+        std::shared_ptr<Buffer> buffer;
+        std::vector<std::byte> bytes;
+        std::list<Key>::iterator recent;
+    };
+    std::map<Key, Entry> entries;
     std::list<Key> recency;
     std::size_t bytes = 0;
     void clear() {
@@ -946,11 +957,11 @@ std::shared_ptr<Buffer> snapshotCopy(const Context& context, std::uint64_t addre
     }
     const SnapshotCopies::Key key{address, bytes.size(), usage};
     if (const auto found = copies.entries.find(key); found != copies.entries.end()) {
-        if (std::memcmp(found->second.first->Bytes().data(), bytes.data(), bytes.size()) == 0) {
-            copies.recency.splice(copies.recency.end(), copies.recency, found->second.second);
-            return found->second.first;
+        if (std::memcmp(found->second.bytes.data(), bytes.data(), bytes.size()) == 0) {
+            copies.recency.splice(copies.recency.end(), copies.recency, found->second.recent);
+            return found->second.buffer;
         }
-        copies.recency.erase(found->second.second);
+        copies.recency.erase(found->second.recent);
         copies.bytes -= bytes.size();
         copies.entries.erase(found);
     }
@@ -964,7 +975,7 @@ std::shared_ptr<Buffer> snapshotCopy(const Context& context, std::uint64_t addre
         copies.recency.pop_front();
     }
     copies.recency.push_back(key);
-    copies.entries.emplace(key, std::pair{buffer, std::prev(copies.recency.end())});
+    copies.entries.emplace(key, SnapshotCopies::Entry{buffer, {bytes.begin(), bytes.end()}, std::prev(copies.recency.end())});
     copies.bytes += bytes.size();
     return buffer;
 }
@@ -3506,8 +3517,9 @@ std::optional<GuestBufferMemory::CachedTable> GuestBufferMemory::CachedAddressTa
     std::lock_guard lock(space->tableMutex);
     const auto found = space->tables.find(key);
     if (found != space->tables.end()) {
-        tableSerial = found->second.first;
-        tableRanges = found->second.second;
+        space->tableRecency.splice(space->tableRecency.end(), space->tableRecency, found->second.recent);
+        tableSerial = found->second.serial;
+        tableRanges = found->second.ranges;
         if (verify) {
             const auto built = AddressRanges();
             Require(built.size() == tableRanges->size() && (built.empty() || std::memcmp(built.data(), tableRanges->data(), built.size() * sizeof(built.front())) == 0), "a cached BDA table differs from the ranges of the build that found it");
@@ -3515,8 +3527,12 @@ std::optional<GuestBufferMemory::CachedTable> GuestBufferMemory::CachedAddressTa
     } else {
         tableRanges = std::make_shared<const std::vector<ShaderRecompiler::BdaAbi::Range>>(AddressRanges());
         tableSerial = Spaces().serials.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (space->tables.size() >= 64u) space->tables.erase(space->tables.begin());
-        space->tables.emplace(std::move(key), std::pair{tableSerial, tableRanges});
+        if (space->tables.size() >= 64u) {
+            space->tables.erase(*space->tableRecency.front());
+            space->tableRecency.pop_front();
+        }
+        const auto inserted = space->tables.emplace(std::move(key), AddressSpace::Table{tableSerial, tableRanges, {}}).first;
+        inserted->second.recent = space->tableRecency.insert(space->tableRecency.end(), &inserted->first);
     }
     return CachedTable{tableSerial, tableRanges.get()};
 }

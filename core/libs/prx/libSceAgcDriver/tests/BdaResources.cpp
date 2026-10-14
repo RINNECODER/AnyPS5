@@ -24,6 +24,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <vector>
 
 #ifndef _WIN32
 #include <sys/mman.h>
@@ -83,20 +84,20 @@ void snapshotTableTests(const Context& context, const BdaTestAccess& access) {
         VkBuffer table = VK_NULL_HANDLE;
         VkBuffer view = VK_NULL_HANDLE;
     };
-    const auto build = [&](std::span<const std::byte> bytes, bool written, bool addressable) {
+    const auto build = [&](std::span<const std::byte> bytes, bool written, bool addressable, std::uint64_t address) {
         Build result;
         result.memory = std::make_unique<GuestBufferMemory>(importing);
         auto& memory = *result.memory;
         if (addressable) memory.AcquireRegistered();
         if (written) memory.AddWritable(reinterpret_cast<std::uint64_t>(block) + 256, 64);
-        memory.AddSnapshot({snapshotAddress, bytes});
+        memory.AddSnapshot({address, bytes});
         memory.Upload(addressable);
         std::uint32_t adjustment = 0;
-        result.view = memory.Descriptor(snapshotAddress, bytes.size(), adjustment).buffer;
+        result.view = memory.Descriptor(address, bytes.size(), adjustment).buffer;
         if (!addressable) return result;
         const auto ranges = memory.AddressRanges();
-        const auto found = std::find_if(ranges.begin(), ranges.end(), [&](const auto& range) { return range.begin == snapshotAddress; });
-        Require(found != ranges.end() && found->end == snapshotAddress + bytes.size(), "the snapshot has no BDA table entry of its own");
+        const auto found = std::find_if(ranges.begin(), ranges.end(), [&](const auto& range) { return range.begin == address; });
+        Require(found != ranges.end() && found->end == address + bytes.size(), "the snapshot has no BDA table entry of its own");
         result.snapshot = found->deviceAddress;
         const auto held = access.addressBytes(result.snapshot);
         Require(held.size() >= bytes.size() && std::memcmp(held.data(), bytes.data(), bytes.size()) == 0, "the snapshot's device copy does not hold its bytes");
@@ -109,11 +110,11 @@ void snapshotTableTests(const Context& context, const BdaTestAccess& access) {
     };
     const bool spaces = AddressSpaceCounters().enabled;
     {
-        auto a = build(first, false, true);
-        auto plain = build(first, false, false);
-        auto d = build(first, true, true);
-        auto b = build(first, false, true);
-        auto c = build(second, false, true);
+        auto a = build(first, false, true, snapshotAddress);
+        auto plain = build(first, false, false, snapshotAddress);
+        auto d = build(first, true, true, snapshotAddress);
+        auto b = build(first, false, true, snapshotAddress);
+        auto c = build(second, false, true, snapshotAddress);
         Require(a.snapshot == b.snapshot && a.view == b.view, "two builds of one snapshot with the same bytes do not share its device copy");
         Require(c.snapshot != a.snapshot, "a snapshot with other bytes took the device copy of the first");
         Require(plain.view != a.view && d.snapshot == a.snapshot, "a snapshot copy made for BDA serves a build bound by descriptor, or a build with written ranges did not share the snapshot copy");
@@ -124,9 +125,31 @@ void snapshotTableTests(const Context& context, const BdaTestAccess& access) {
             Require(a.memory->CachedAddressTable()->serial == b.memory->CachedAddressTable()->serial && c.memory->CachedAddressTable()->serial != a.memory->CachedAddressTable()->serial, "cached BDA table serials do not follow the build's ranges");
         }
         ClearSnapshotCopies(importing.device);
-        auto e = build(first, false, true);
+        auto e = build(first, false, true, snapshotAddress);
         Require(e.snapshot != a.snapshot, "a snapshot copy outlived the teardown of its device's copies");
         for (auto* item : {&a, &b, &c, &d, &e, &plain}) item->memory->WriteBack();
+    }
+    if (spaces) {
+        std::vector<std::array<std::byte, 512>> variants(66);
+        for (std::size_t index = 0; index < variants.size(); ++index) {
+            variants[index].fill(std::byte{0x40});
+            variants[index][0] = static_cast<std::byte>(index);
+            variants[index][1] = static_cast<std::byte>(index >> 8u);
+        }
+        alignas(256) static std::array<std::byte, 66 * 512> sources{};
+        std::vector<Build> builds;
+        const auto serial = [&](std::size_t index) {
+            builds.push_back(build(variants[index], false, true, reinterpret_cast<std::uint64_t>(sources.data()) + index * 512));
+            return builds.back().memory->CachedAddressTable()->serial;
+        };
+        const auto kept = serial(0);
+        const auto evicted = serial(1);
+        for (std::size_t index = 2; index < 64; ++index) serial(index);
+        Require(serial(0) == kept, "a BDA table was dropped before 64 newer tables of its space");
+        serial(64);
+        Require(serial(0) == kept, "the most recently used BDA table of a space was evicted");
+        Require(serial(1) != evicted, "the least recently used BDA table of a space was kept past 64 tables");
+        for (auto& item : builds) item.memory->WriteBack();
     }
     ClearSnapshotCopies(importing.device);
     change(false);
