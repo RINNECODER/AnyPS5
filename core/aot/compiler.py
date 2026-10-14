@@ -835,13 +835,14 @@ class Function:
                         if cleared and (cleared + 1) & cleared == 0 and cleared + 1 <= FRAME_ALIGNMENT:
                             signed = args[1].imm - (1 << 64) if args[1].imm >> 63 else args[1].imm
                             state[dest] &= signed
-                        if dest == 'rsp' and state['rsp'] > original['rsp']:
-                            state['saved'] = {offset: saved for offset, saved in state['saved'].items() if offset >= state['rsp']}
-                        self.depth = max(self.depth, -state[dest] + 128)
                     elif self.uniform:
                         state[dest] = None
                     else:
                         self.fail(ins, 'dynamic frame allocation')
+                    if state[dest] is not None:
+                        if dest == 'rsp' and state['rsp'] > original['rsp']:
+                            state['saved'] = {offset: saved for offset, saved in state['saved'].items() if offset >= state['rsp']}
+                        self.depth = max(self.depth, -state[dest] + 128)
             state['flags'] = set(FLAGS)
             return state
         self.fail(ins, 'instruction semantics are not implemented')
