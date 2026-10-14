@@ -651,7 +651,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
         mode.shaderSwizzle = ShaderImageIdentitySwizzle;
         if (conversion == IrBufferFormat::Format11_11_10UNorm || conversion == IrBufferFormat::Format10_11_11Float) mode.shaderSwizzle = 0x2acu;
         modes.push_back(mode);
-        if (image.dimension == RdnaImageDimension::Dim2D && image.fmaskCompatible && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
+        if (image.dimension == RdnaImageDimension::Dim2D && (image.fmaskCompatible || (image.singleMipPlaneBiasCompatible && !storage && image.indirectRoot == ImageResource::NoIndirectImage && conversion == IrBufferFormat::Invalid)) && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
             auto volume = mode;
             volume.dimension = RdnaImageDimension::Dim3D;
             modes.push_back(volume);
@@ -820,6 +820,9 @@ std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image,
         for (std::uint32_t index = 0u; index < modes.size(); ++index) {
             if (modes[index].constantSwizzle && modes[index].numericClass == decoded.numericClass) return index;
         }
+    }
+    if (image.singleMipPlaneBiasCompatible && image.dimension == RdnaImageDimension::Dim2D && decoded.dimension == RdnaImageDimension::Dim3D) {
+        if ((descriptor.dwords[4] & 0x1fffu) != 0u || (descriptor.dwords[3] & 0xff000u) != 0u || (descriptor.dwords[5] & 0xf0u) != 0u) throw std::runtime_error("2D biased sampling of a volume requires one slice and mip level zero only");
     }
     for (std::uint32_t index = 0u; index < modes.size(); ++index) {
         const auto& mode = modes[index];
