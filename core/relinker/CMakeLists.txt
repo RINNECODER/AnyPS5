@@ -57,6 +57,7 @@ add_executable(relinker
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreOperands.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/ScalarCompareOperands.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/AndnLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/parsing/ElfReader.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/SyscallScanner.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/CallSiteResolver.cpp
@@ -85,6 +86,7 @@ target_include_directories(relinker PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../libs
 )
+
 
 if(BUILD_TESTING AND WIN32)
     get_target_property(windowsAliasTestSources relinker SOURCES)
@@ -152,6 +154,7 @@ if(WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreOperands.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/ScalarCompareOperands.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/AndnLowering.cpp
     )
     target_include_directories(amd64_only_windows_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/include ${CMAKE_CURRENT_SOURCE_DIR}/domain/include ${CMAKE_CURRENT_SOURCE_DIR}/io/include ${CMAKE_CURRENT_SOURCE_DIR}/codegen/include ${CMAKE_CURRENT_SOURCE_DIR}/../libs/prx/libc/src/specifics/windows)
     if(BUILD_TESTING)
@@ -330,6 +333,7 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreOperands.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/WideStoreLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/ScalarCompareOperands.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/AndnLowering.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/linux/LinuxElfPatcher.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/general/SegmentFilter.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/general/EntryStubBuilder.cpp
