@@ -17,22 +17,31 @@ constexpr std::uint8_t kEqOq = 0x00;
 constexpr std::uint8_t kLtOs = 0x01;
 constexpr std::uint8_t kLeOs = 0x02;
 
-bool _segmentPrefix(const std::uint8_t byte) {
+// Legacy prefixes that leave a scalar compare a scalar compare: segment and address-size overrides.
+bool _neutralPrefix(const std::uint8_t byte) {
     using namespace X64OpcodeConstants;
-    return byte == PrefixSegCs || byte == PrefixSegSs || byte == PrefixSegDs || byte == PrefixSegEs || byte == PrefixSegFs || byte == PrefixSegGs;
+    return byte == PrefixSegCs || byte == PrefixSegSs || byte == PrefixSegDs || byte == PrefixSegEs || byte == PrefixSegFs || byte == PrefixSegGs ||
+        byte == PrefixAddressSize;
 }
 
 }
 
 std::optional<ScalarCompare> DecodeScalarCompare(const std::uint8_t* data, const std::size_t length) {
     using namespace X64OpcodeConstants;
+    // Legacy prefixes come in any order; the last F2/F3 among them is the mandatory one.
     std::size_t pos = 0;
-    while (pos < length && _segmentPrefix(data[pos]))
+    std::uint8_t repeat = 0;
+    while (pos < length && (_neutralPrefix(data[pos]) || data[pos] == PrefixRep || data[pos] == PrefixRepne)) {
+        if (data[pos] == PrefixRep || data[pos] == PrefixRepne)
+            repeat = data[pos];
         ++pos;
+    }
     if (pos >= length)
         return std::nullopt;
     // The immediate is the instruction's last byte; the ModRM byte (and any SIB/displacement) sits between it and the opcode.
     if (data[pos] == OneByteVex2 || data[pos] == OneByteVex3) {
+        if (repeat != 0)
+            return std::nullopt;  // F2/F3 before a VEX escape is #UD
         const bool vex3 = data[pos] == OneByteVex3;
         const std::size_t opcodeOffset = pos + (vex3 ? 3 : 2);
         if (opcodeOffset + 2 >= length || data[opcodeOffset] != kOpcodeCmp)
@@ -44,10 +53,9 @@ std::optional<ScalarCompare> DecodeScalarCompare(const std::uint8_t* data, const
             return std::nullopt;
         return ScalarCompare{true, pp == kVexPpF2, static_cast<std::uint8_t>(data[length - 1] & kVexPredicateMask)};
     }
-    if (data[pos] != PrefixRep && data[pos] != PrefixRepne)
+    if (repeat == 0)
         return std::nullopt;
-    const bool isDouble = data[pos] == PrefixRepne;
-    ++pos;
+    const bool isDouble = repeat == PrefixRepne;
     if (pos < length && data[pos] >= RexMin && data[pos] <= RexMax)
         ++pos;
     if (pos + 3 >= length || data[pos] != TwoByteOpcodeEscape || data[pos + 1] != kOpcodeCmp)

@@ -1708,6 +1708,18 @@ void converterScalarCompare() {
     require(Codegen::RosettaSplitsScalarCompare(*unord) && Codegen::RosettaSplitsScalarCompare(*neq) && Codegen::RosettaSplitsScalarCompare(*nle) && Codegen::RosettaSplitsScalarCompare(*trueUs)
         && Codegen::RosettaSplitsScalarCompare(*decoded(vexFalse)), "A compare Rosetta mistranslates is not split");
     require(!Codegen::RosettaSplitsScalarCompare(*lt) && !Codegen::RosettaSplitsScalarCompare(*decoded(vexLe)), "LT or LE was split");
+    // An address-size override (or a segment override) may precede the VEX escape or sit on either side of F2/F3.
+    const Bytes addr32Vex = {0x67, 0xC5, 0xFA, 0xC2, 0x05, 0x10, 0x00, 0x00, 0x00, 0x04};  // vcmpneqss xmm0, xmm0, [eip + 0x10]
+    const Bytes addr32Legacy = {0x67, 0xF3, 0x0F, 0xC2, 0x05, 0x10, 0x00, 0x00, 0x00, 0x04};  // cmpneqss xmm0, [eip + 0x10]
+    const Bytes repThenAddr32 = {0xF2, 0x67, 0x41, 0x0F, 0xC2, 0x00, 0x06};                  // cmpnlesd xmm0, [r8d]
+    const Bytes repBeforeVex = {0xF3, 0xC5, 0xFA, 0xC2, 0xC1, 0x04};                         // #UD, not a compare
+    const auto addr32VexCompare = decoded(addr32Vex);
+    require(addr32VexCompare && addr32VexCompare->Vex && !addr32VexCompare->Double && addr32VexCompare->Predicate == 4, "VCMPNEQSS with an address-size override was not decoded");
+    const auto addr32LegacyCompare = decoded(addr32Legacy);
+    require(addr32LegacyCompare && !addr32LegacyCompare->Vex && !addr32LegacyCompare->Double && addr32LegacyCompare->Predicate == 4, "CMPNEQSS with an address-size override was not decoded");
+    const auto repThenAddr32Compare = decoded(repThenAddr32);
+    require(repThenAddr32Compare && !repThenAddr32Compare->Vex && repThenAddr32Compare->Double && repThenAddr32Compare->Predicate == 6, "CMPNLESD with F2 before an address-size override was not decoded");
+    require(!decoded(repBeforeVex), "A VEX escape after F3 was decoded as a compare");
 
     const auto rosetta = Codegen::MakeAmd64OnlyInstructionMatcher(Codegen::Amd64OnlyTarget::Rosetta);
     const auto lowered = rosetta->Match(vexUnord.data(), vexUnord.size());
@@ -1715,6 +1727,11 @@ void converterScalarCompare() {
     require(lowered && Bytes(lowered->StubBody.begin(), lowered->StubBody.begin() + static_cast<std::ptrdiff_t>(lowered->ReturnBranchOffset)) == vexUnord, "The compare stub does not run the unchanged instruction");
     const auto rip = rosetta->Match(ripNeq.data(), ripNeq.size());
     require(rip && rip->Relocations.size() == 1 && rip->Relocations[0].SiteTarget == 9 + 0x10 && rip->Relocations[0].DisplacementOffset == 4, "A RIP-relative compare does not keep its target in the stub");
+    for (const auto* bytes : {&addr32Vex, &addr32Legacy}) {
+        const auto moved = rosetta->Match(bytes->data(), bytes->size());
+        require(moved && moved->Lowering == Codegen::Amd64OnlyLowering::Trampoline && moved->Relocations.size() == 1 && moved->Relocations[0].SiteTarget == 10 + 0x10
+            && moved->Relocations[0].DisplacementOffset == 5, "An address-size-prefixed compare was not moved out of line with its target");
+    }
     require(!rosetta->Match(vexLe.data(), vexLe.size()) && !rosetta->Match(packed.data(), packed.size()), "VCMPLESS or a packed compare was moved out of line");
     require(!Codegen::MakeAmd64OnlyInstructionMatcher()->Match(vexUnord.data(), vexUnord.size()), "A scalar compare was moved out of line for an Intel host");
 
