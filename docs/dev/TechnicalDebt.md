@@ -1,5 +1,6 @@
 # Project technical debt
 
+- [sceKernelGetSocPowerConsumption](../../core/libs/prx/libkernel/System/src/ThermalSensors.cpp) (libkernel) - returns `EINVAL` and writes nothing, as `sceKernelGetSocSensorTemperature` does when the host has no sensor: the host's package power is not read (Linux RAPL `energy_uj` is readable by root only, and Windows has no general source). The prototype is not documented. PS5LM Plus (PPSA99581) passes a zeroed 128-byte buffer and, on success, reads its first 32-bit word as milliwatts, accepting 1000 to 350000; on failure it shows 0 W
 ### Build
 
 - Building on Windows requires a specific version of mingw - MinGW-w64 GCC 15.2.0 (`winlibs-gcc15`, `x86_64-ucrt-posix-seh`)
