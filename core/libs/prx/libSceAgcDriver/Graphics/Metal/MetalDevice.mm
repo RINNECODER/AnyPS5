@@ -156,11 +156,12 @@ bool MetalDevice::OpenBatch(id<MTLCommandBuffer> commands) const {
 
 void MetalDevice::Flush() const {
     if (open == nil) return;
+    id<MTLCommandBuffer> readbacks = nil;
     if (deferredCopyBacks && !deferredCopyBacks->Empty() && open.status == MTLCommandBufferStatusNotEnqueued) {
         if (GpuTiming::SplitReadbacks()) {
             // Profiling only: the batch's copy-backs run right behind it, in a command buffer of their own.
             [open enqueue];
-            id<MTLCommandBuffer> readbacks = [queue commandBuffer];
+            readbacks = [queue commandBuffer];
             if (readbacks == nil) throw MetalGpuExecutionError("Metal command buffer creation failed");
             created.fetch_add(1, std::memory_order_relaxed);
             [readbacks enqueue];
@@ -186,6 +187,14 @@ void MetalDevice::Flush() const {
     flushed = open;
     open = nil;
     openUses = 0;
+    if (readbacks != nil) {
+        // The batch's completions wait for the batch only: let them run once the copy-backs did,
+        // so nothing observes guest bytes before them (profiling only; the wait shows as CPU time).
+        [readbacks waitUntilCompleted];
+        if (readbacks.status != MTLCommandBufferStatusCompleted) {
+            throw MetalGpuExecutionError(errorMessage("Metal deferred copy-back failed", readbacks.error));
+        }
+    }
 }
 
 void MetalDevice::Submit(id<MTLCommandBuffer> commands) const {
