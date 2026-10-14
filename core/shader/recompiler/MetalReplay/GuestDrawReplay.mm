@@ -167,6 +167,41 @@ void DrawGuest(id<MTLDevice> device, id<MTLLibrary> library, bool masked, bool i
                   indexed ? ", indexed vertex fetch with nonzero guest index offset" : ", descriptor vertex fetch") << " passed\n";
 }
 
+// SPI_SHADER_32_AR (upstream PR 5110): the export carries two channels, the second of which GFX10
+// writes to the alpha component; green and blue stay zero. The shader exports v0 = 1.0, v1 = 0.0 with
+// en = 0x3, so the target must read (255, 0, 0, 0): before the fix alpha kept its default of 1.
+constexpr std::array<std::uint32_t, 5> Export32ArPixelCode{
+    0x7e0002f2, 0x7e020280, 0xf8001803, 0x00000100, 0xbf810000,
+};
+void DrawExport32Ar(id<MTLDevice> device, id<MTLLibrary> library) {
+    std::vector<std::array<float, 4>> vertices(Triangle.begin(), Triangle.end());
+    std::vector<std::byte> pixels(256 + Width * Height * 4 + 256, std::byte{0x7b});
+    std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+    auto pixel = PixelInfo();
+    pixel.targetOutputMode[0] = 3;
+    const auto compiled = Compile(device, Export32ArPixelCode, static_cast<std::uint32_t>(vertices.size()), pixel);
+    const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
+        {ShaderStage::Vertex, &compiled.vertex, 0}, {ShaderStage::Fragment, &compiled.fragment, compiled.fragmentPush}}};
+    std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
+        {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true}};
+    AgcDriver::Pm4::DrawParameters draw{};
+    draw.indexAddress = 0u;
+    draw.indexCount = 3;
+    draw.indexSize = 0u;
+    draw.instanceCount = 1;
+    draw.indexed = false;
+    auto state = State();
+    AgcDriver::Metal::MetalDraw adapter(device, library);
+    const auto fault = adapter.DrawSynchronously(state, draw, shaders, ranges);
+    Require(fault.state == BdaAbi::FaultState::Empty, "32_AR export draw published a GPU memory fault");
+    for (std::size_t offset = 256; offset < 256 + Width * Height * 4; ++offset) {
+        const std::array<std::byte, 4> expected{std::byte{255}, std::byte{0}, std::byte{0}, std::byte{0}};
+        Require(pixels[offset] == expected[offset % 4],
+            "32_AR export produced wrong target byte " + std::to_string(offset - 256) + ": " + std::to_string(static_cast<unsigned>(pixels[offset])));
+    }
+    std::cout << "Actual RDNA guest draw: 32_AR export takes alpha from channel 1 passed\n";
+}
+
 // Bounded direct index fetches (upstream PR 4824): DRAW_INDEX_2 with a count past its max_size reads
 // only max_size indices from guest memory; the remaining fetches read index 0. The borrowed index
 // range holds exactly the readable indices, so a read past them would fail.
@@ -2180,6 +2215,7 @@ int main(int argc, const char* argv[]) {
             DrawGuest(device, library, true, false);
             DrawGuest(device, library, false, true);
             DrawGuest(device, library, false, true, true);
+            DrawExport32Ar(device, library);
             DrawSubmittedGuest(device, library);
             DrawInterpolation(device, library);
             DrawPerVertexParameters(device, library);
