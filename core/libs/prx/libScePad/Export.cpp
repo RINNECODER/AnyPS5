@@ -317,9 +317,6 @@ int APS5_VABI scePadSetAngularVelocityBiasCorrectionState(int handle, bool enabl
 
 APS5_EXPORT("n3kSX62fgNo", scePadUnknown_n3kSX62fgNo);
 int APS5_VABI scePadUnknown_n3kSX62fgNo() {
-    // Firmware 13.60 returns these status values before and after scePadInit.
-    // The NID's name and signature remain unknown; the measured call did not
-    // read or write any argument pointers.
     return g_initialized.load(std::memory_order_acquire) ? PAD_UNKNOWN_N3KSX62FGNO_AFTER_INIT : PAD_UNKNOWN_N3KSX62FGNO_BEFORE_INIT;
 }
 
