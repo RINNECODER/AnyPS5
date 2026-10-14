@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferCopy.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -9,6 +10,7 @@
 namespace AgcDriver::DriverDetail {
 
 std::atomic<std::uint64_t> knownValueEntries{0}, knownValueReads{0}, knownValueVerified{0}, knownValueMismatches{0};
+std::array<std::atomic<std::uint64_t>, CopyPaths> copyPathCounts{};
 
 bool Driver::matchesCopyKernel(std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute) {
     static const bool enabled = std::getenv("APS5_NO_COPY_HLE") == nullptr;
@@ -27,26 +29,34 @@ bool Driver::matchesCopyKernel(std::span<const std::uint32_t> code, const std::v
     return userData[3] == 0x00014004u && userData[7] == 0x00014004u && userData[11] == 0x0004dfacu && stride(1) == 4 && stride(5) == 4 && stride(9) == 16 && !swizzled(1) && !swizzled(5) && !swizzled(9) && userData[10] >= 1;
 }
 
-bool Driver::matchesStreamCopyKernel(std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute) {
+bool MatchesStreamCopyKernel(std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute) {
     static const bool enabled = std::getenv("APS5_NO_COPY_HLE") == nullptr;
     if (!enabled || userData.size() != 8 || compute.numThreads[0] != 64 || compute.numThreads[1] != 1 || compute.numThreads[2] != 1 || !compute.groupIdEnable[0]) return false;
-    static constexpr std::size_t kernelWords = 16;
-    static constexpr std::uint64_t kernelHash = 0x08bcbb6f503a7f87ull;
-    if (code.size() < kernelWords || code[kernelWords - 1] != 0xbf810000u) return false;
-    std::uint64_t hash = 0xcbf29ce484222325ull;
-    for (const auto word : code.first(kernelWords)) {
-        hash ^= word;
-        hash *= 0x100000001b3ull;
-    }
-    if (hash != kernelHash) return false;
+    static constexpr std::array<std::uint32_t, 16> kernel{0xd7460008u, 0x04010e08u, 0x8f6a8708u, 0xd76d0009u, 0x0401806au, 0xe00c2000u, 0x80000008u, 0xe00c2000u, 0x80000409u, 0xbf8c3f71u, 0xe01c2000u, 0x80010008u, 0xbf8c3f70u, 0xe01c2000u, 0x80010409u, 0xbf810000u};
+    if (code.size() < kernel.size() || !std::equal(kernel.begin(), kernel.end(), code.begin())) return false;
     const auto stride = [&](std::size_t word) { return (userData[word] >> 16u) & 0x3fffu; };
     const auto swizzled = [&](std::size_t word) { return ((userData[word] >> 31u) & 1u) != 0; };
-    return stride(1) == 16 && stride(5) == 16 && !swizzled(1) && !swizzled(5) && userData[3] == userData[7];
+    const auto dstSel = userData[3] & 0xfffu;
+    const bool addTid = ((userData[3] >> 23u) & 1u) != 0;
+    const auto outOfBounds = (userData[3] >> 28u) & 3u;
+    const auto type = userData[3] >> 30u;
+    const auto format = (userData[3] >> 12u) & 0x7fu;
+    return stride(1) == 16 && stride(5) == 16 && !swizzled(1) && !swizzled(5) && userData[3] == userData[7] && type == 0 && !addTid && outOfBounds == 0 && dstSel == 0xfacu && format == 0x4bu;
+}
+
+std::optional<StreamCopy> StreamCopyRange(const std::vector<std::uint32_t>& userData, std::uint32_t groups) {
+    const auto base = [&](std::size_t word) { return userData[word] | (static_cast<std::uint64_t>(userData[word + 1] & 0xffffu) << 32u); };
+    const auto elements = std::min<std::uint64_t>(std::uint64_t{groups} * 128u, userData[6]);
+    const StreamCopy copy{base(0), base(4), static_cast<std::size_t>(elements) * 16u};
+    if (copy.bytes == 0 || copy.bytes > (16u << 20u) || userData[2] < elements || copy.source % 16 != 0 || copy.destination % 16 != 0) return std::nullopt;
+    return copy;
 }
 
 void Driver::countCopy(int path, std::size_t bytes, std::chrono::steady_clock::time_point started, std::chrono::steady_clock::time_point locked, const VulkanDevice::CopyOutcome* outcome) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
-    if (!profile || path < 0 || path >= CopyPaths) return;
+    if (path < 0 || path >= CopyPaths) return;
+    copyPathCounts[path].fetch_add(1, std::memory_order_relaxed);
+    if (!profile) return;
     using Outcome = VulkanDevice::CopyOutcome;
     static std::mutex countsMutex;
     static std::uint64_t counts[CopyPaths] = {};
@@ -110,7 +120,7 @@ bool Driver::knownValueVerify() {
 
 bool Driver::copyBuffer(QueueState& queue, std::uint32_t queueId, std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, const std::shared_ptr<VulkanDevice>& localDevice, std::uint64_t programAddress) {
     const bool stream = !matchesCopyKernel(code, userData, compute);
-    if (stream && !matchesStreamCopyKernel(code, userData, compute)) return false;
+    if (stream && !MatchesStreamCopyKernel(code, userData, compute)) return false;
     const auto started = std::chrono::steady_clock::now();
     static const std::size_t cpuMax = [] {
         if (std::getenv("APS5_NO_CPU_COPY") != nullptr) return std::size_t{0};
@@ -152,12 +162,12 @@ bool Driver::copyBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
     };
     std::size_t bytes = 0;
     if (stream) {
-        const auto elements = std::min<std::uint64_t>(std::uint64_t{groups[0]} * 128u, userData[6]);
-        bytes = static_cast<std::size_t>(elements) * 16u;
-        if (bytes == 0 || bytes > (16u << 20u) || userData[2] < elements || source % 16 != 0 || destination % 16 != 0) {
-            countCopy(CopyShape, bytes, started, locked);
+        const auto range = StreamCopyRange(userData, groups[0]);
+        if (!range) {
+            countCopy(CopyShape, 0, started, locked);
             return false;
         }
+        bytes = range->bytes;
     } else {
         const bool recordAccessible = GuestMemory::Accessible(reinterpret_cast<const void*>(record), 8);
 
