@@ -1057,6 +1057,10 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
         socket = it->second;
     }
     if (level != NET_SOL_SOCKET) return fail(NET_EOPNOTSUPP);
+    if (optname == NET_SO_RCVTIMEO || optname == NET_SO_SNDTIMEO) {
+        const int error = set_kernel_timeout(s, optname, optval, optlen);
+        return error == 0 ? 0 : fail(error);
+    }
     optname = timeout_option(optname);
     if (!optval || optlen < sizeof(int)) return fail(NET_EINVAL);
     int value = 0;
@@ -1100,9 +1104,15 @@ int APS5_VABI sceNetGetsockopt(int s, int level, int optname, void* optval, uint
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
-    if (optval == nullptr || optlen == nullptr || *optlen < sizeof(int)) {
-        return fail(NET_EINVAL);
+    if (optval == nullptr || optlen == nullptr) return fail(NET_EINVAL);
+    if (level == NET_SOL_SOCKET && (optname == NET_SO_RCVTIMEO || optname == NET_SO_SNDTIMEO)) {
+        const int microseconds = optname == NET_SO_RCVTIMEO ? socket.rcv_timeout_us : socket.snd_timeout_us;
+        const KernelTimeval timeout{microseconds / 1000000, microseconds % 1000000};
+        *optlen = std::min(*optlen, static_cast<std::uint32_t>(sizeof(timeout)));
+        std::memcpy(optval, &timeout, *optlen);
+        return 0;
     }
+    if (*optlen < sizeof(int)) return fail(NET_EINVAL);
     if (level != NET_SOL_SOCKET) return fail(NET_EOPNOTSUPP);
     int value = 0;
     switch (timeout_option(optname)) {

@@ -313,7 +313,7 @@ static void CheckDontWait() {
     std::uint32_t size = address.size();
     Require(sceNetGetsockname(receiver, address.data(), &size) == 0);
     const int timeout = 2000000;
-    Require(sceNetSetsockopt(receiver, 0xffff, 0x1006, &timeout, sizeof(timeout)) == 0);
+    Require(sceNetSetsockopt(receiver, 0xffff, 0x1106, &timeout, sizeof(timeout)) == 0);
     char buffer[16]{};
     NetIovec in[] = {{buffer, sizeof(buffer)}};
     NetMsghdr receive{nullptr, 0, in, 1, nullptr, 0, 0};
@@ -347,8 +347,11 @@ static void CheckDontWait() {
 }
 
 static void CheckReceiveTimeout(int receiver, int sender, const std::array<std::uint8_t, 16>& address) {
-    const int timeout = 50000;
+    const KernelTimeval timeout{0, 50000};
     Require(sceNetSetsockopt(receiver, 0xffff, 0x1006, &timeout, sizeof(timeout)) == 0);
+    int microseconds = -1;
+    std::uint32_t length = sizeof(microseconds);
+    Require(sceNetGetsockopt(receiver, 0xffff, 0x1106, &microseconds, &length) == 0 && microseconds == 50000);
     char buffer[8]{};
     std::array<std::uint8_t, 16> source{};
     std::uint32_t size = source.size();
@@ -360,7 +363,7 @@ static void CheckReceiveTimeout(int receiver, int sender, const std::array<std::
     const char datagram[] = "late";
     Require(sceNetSendto(sender, datagram, sizeof(datagram), 0, address.data(), address.size()) == sizeof(datagram));
     Require(sceNetRecv(receiver, buffer, sizeof(buffer), 0) == sizeof(datagram) && std::strcmp(buffer, datagram) == 0);
-    const int disabled = 0;
+    const KernelTimeval disabled{0, 0};
     Require(sceNetSetsockopt(receiver, 0xffff, 0x1006, &disabled, sizeof(disabled)) == 0);
 }
 
@@ -471,12 +474,15 @@ static void CheckEpollWritable() {
 }
 
 static void RequireTimeout(int socket, int option, int expected) {
+    KernelTimeval timeout{-1, -1};
+    std::uint32_t size = sizeof(timeout);
+    Require(sceNetGetsockopt(socket, 0xffff, option, &timeout, &size) == 0 && size == sizeof(timeout));
     int microseconds = -1;
-    std::uint32_t size = sizeof(microseconds);
-    Require(sceNetGetsockopt(socket, 0xffff, option, &microseconds, &size) == 0 && size == sizeof(microseconds));
-    if (microseconds != expected) {
-        std::fprintf(stderr, "setsockopt(0x%x) with a struct timeval on a libSceNet socket set %d microseconds, expected %d\n",
-            option, microseconds, expected);
+    std::uint32_t length = sizeof(microseconds);
+    Require(sceNetGetsockopt(socket, 0xffff, option == 0x1006 ? 0x1106 : 0x1105, &microseconds, &length) == 0 && length == sizeof(microseconds));
+    if (timeout.tv_sec * 1000000 + timeout.tv_usec != expected || microseconds != expected) {
+        std::fprintf(stderr, "option 0x%x on a libSceNet socket reads back {%lld, %lld} and %d microseconds, expected %d\n",
+            option, static_cast<long long>(timeout.tv_sec), static_cast<long long>(timeout.tv_usec), microseconds, expected);
         std::abort();
     }
 }
@@ -498,7 +504,18 @@ static void CheckKernelTimeouts() {
     Require(setsockopt_nid_postfix(descriptor, 0xffff, 0x1006, &microseconds, sizeof(microseconds)) == -1 && *__error_nid_postfix() == 22);
     RequireTimeout(descriptor, 0x1006, 1250000);
     RequireTimeout(descriptor, 0x1005, 500000);
-    Require(sceNetSetsockopt(descriptor, 0xffff, 0x1006, &microseconds, sizeof(microseconds)) == 0);
+    Require(Failed(sceNetSetsockopt(descriptor, 0xffff, 0x1006, &microseconds, sizeof(microseconds)), 22));
+    Require(Failed(sceNetSetsockopt(descriptor, 0xffff, 0x1006, &invalid, sizeof(invalid)), 33));
+    Require(Failed(sceNetSetsockopt(descriptor, 0xffff, 0x1005, &negative, sizeof(negative)), 33));
+    RequireTimeout(descriptor, 0x1006, 1250000);
+    RequireTimeout(descriptor, 0x1005, 500000);
+    int seconds = -1;
+    std::uint32_t truncated = sizeof(seconds);
+    Require(sceNetGetsockopt(descriptor, 0xffff, 0x1006, &seconds, &truncated) == 0 && truncated == sizeof(seconds) && seconds == 1);
+    const KernelTimeval quarter{0, 250000};
+    Require(sceNetSetsockopt(descriptor, 0xffff, 0x1006, &quarter, sizeof(quarter)) == 0);
+    RequireTimeout(descriptor, 0x1006, 250000);
+    Require(sceNetSetsockopt(descriptor, 0xffff, 0x1106, &microseconds, sizeof(microseconds)) == 0);
     RequireTimeout(descriptor, 0x1006, microseconds);
 #ifndef _WIN32
     std::array<std::uint8_t, 16> loopback{16, 2, 0, 0, 127, 0, 0, 1};
@@ -840,7 +857,7 @@ static void CheckDatagramDisconnect() {
     Require(local[4] == 0 && local[5] == 0 && local[6] == 0 && local[7] == 0);
 #endif
     const int timeout = 2000000;
-    Require(sceNetSetsockopt(dissolved, 0xffff, 0x1006, &timeout, sizeof(timeout)) == 0);
+    Require(sceNetSetsockopt(dissolved, 0xffff, 0x1106, &timeout, sizeof(timeout)) == 0);
     const char unrelated[] = "unrelated sender";
     Require(sceNetSendto(other, unrelated, sizeof(unrelated), 0, dissolvedAddress.data(), dissolvedAddress.size()) == sizeof(unrelated));
     char buffer[32]{};
