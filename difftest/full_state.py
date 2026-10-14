@@ -21,8 +21,18 @@ import tempfile
 import time
 from pathlib import Path
 
+def work_directory():
+    """The title work directory (never a personal path): the eboot ELF and the FDE starts live
+    under it. Set ANYPS5_NATIVE_WORK, or pass the two paths in ANYPS5_ELF / ANYPS5_FDE_STARTS."""
+    value = os.environ.get("ANYPS5_NATIVE_WORK")
+    if not value and not (os.environ.get("ANYPS5_ELF") and os.environ.get("ANYPS5_FDE_STARTS")):
+        raise SystemExit("set ANYPS5_NATIVE_WORK to the title work directory, or set both "
+                         "ANYPS5_ELF and ANYPS5_FDE_STARTS")
+    return Path(value) if value else Path(os.environ["ANYPS5_ELF"]).parent.parent
+
+
 REPO = Path(__file__).resolve().parent.parent
-W = Path(os.environ.get("ANYPS5_NATIVE_WORK", Path.home() / "Documents/ChatGPT/metal/anyps5-native-work"))
+W = work_directory()
 ELF = Path(os.environ.get("ANYPS5_ELF", W / "out/elf/eboot.elf"))
 STARTS = Path(os.environ.get("ANYPS5_FDE_STARTS", W / "cfg/eboot.fde-starts.txt"))
 sys.path.insert(0, str(REPO / "core" / "aot"))
