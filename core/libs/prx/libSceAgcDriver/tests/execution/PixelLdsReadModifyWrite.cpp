@@ -21,7 +21,8 @@ constexpr std::uint32_t Height = 8;
 constexpr std::uint32_t Results = 8;
 constexpr std::uint32_t Factor = 0x00a5c3e1u;
 constexpr std::uint32_t Counter = 0x1234u;
-constexpr std::uint32_t CounterOffset = 0x2000u;
+constexpr std::uint32_t Slots = 64;
+constexpr std::uint32_t CounterOffset = Slots * 16u;
 alignas(256) std::array<std::byte, Width * Height * 4> Pixels{};
 alignas(256) std::array<std::uint32_t, Width * Height * Results> Outputs{};
 
@@ -39,7 +40,7 @@ std::vector<std::uint32_t> PixelCode() {
         code.push_back(address | (data0 << 8u) | (data1 << 16u) | (destination << 24u));
     };
     vop2(0x36000000, 8, 0xff, 6);
-    code.push_back(Width * Height - 1u);
+    code.push_back(Slots - 1u);
     vop2(0x34000000, 8, 0x84, 8);
     code.push_back(0x7e126f06);
     vop2(0x16000000, 10, 0xff, 6);

@@ -107,6 +107,7 @@ struct GuestBufferMemory::AddressSpace {
     std::vector<CopiedRange> copied;
     // The BDA table entries of `base`, in its order.
     std::vector<ShaderRecompiler::BdaAbi::Range> ranges;
+    std::shared_ptr<const std::vector<std::pair<std::uint64_t, std::uint64_t>>> directReads;
     mutable std::mutex tableMutex;
     mutable std::map<std::vector<std::pair<std::uint64_t, std::uint64_t>>, std::pair<std::uint64_t, std::shared_ptr<const std::vector<ShaderRecompiler::BdaAbi::Range>>>> writeTables;
 };
@@ -2268,6 +2269,13 @@ void GuestBufferMemory::AcquireRegistered() {
                 regions = std::move(extras);
                 lease.clear();
                 planSpaceMirrors(*built);
+                {
+                    auto reads = std::make_shared<Recorder::ReadList>();
+                    for (const auto& region : built->base) {
+                        if (region.direct != nullptr) reads->emplace_back(region.begin, region.end);
+                    }
+                    if (Recorder::ValidReadList(*reads)) built->directReads = std::move(reads);
+                }
                 space = std::move(built);
                 spaces.droppedByWaiter.store(false, std::memory_order_relaxed);
                 spaces.current.store(space);
@@ -3408,6 +3416,15 @@ std::optional<GuestBufferMemory::CachedTable> GuestBufferMemory::CachedAddressTa
     Require(uploaded && !committed, "guest GPU address ranges are not available");
     if (writes.empty()) return CachedTable{space->serial, &space->ranges};
     if (writeTableRanges != nullptr) return CachedTable{writeTableSerial, writeTableRanges.get()};
+    const auto& spaceRanges = space->ranges;
+    const bool inWritable = std::all_of(writes.begin(), writes.end(), [&](const auto& written) {
+        auto at = std::partition_point(spaceRanges.begin(), spaceRanges.end(), [&](const auto& range) { return range.end <= written.first; });
+        for (; at != spaceRanges.end() && at->begin < written.second; ++at) {
+            if ((at->permissions & ShaderRecompiler::BdaAbi::Write) == 0u) return false;
+        }
+        return true;
+    });
+    if (inWritable) return CachedTable{space->serial, &space->ranges};
     std::lock_guard lock(space->tableMutex);
     const auto found = space->writeTables.find(writes);
     if (found != space->writeTables.end()) {
@@ -3648,6 +3665,15 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> GuestBufferMemory::InPlaceR
         if (region.direct != nullptr) result.emplace_back(region.begin, region.end);
     }
     return result;
+}
+
+std::optional<GuestBufferMemory::SplitReads> GuestBufferMemory::SplitInPlaceReads() const {
+    if (!uploaded || committed || space == nullptr || space->directReads == nullptr) return std::nullopt;
+    SplitReads split{space->directReads, {}};
+    for (const auto& region : regions) {
+        if (region.direct != nullptr) split.own.emplace_back(region.begin, region.end);
+    }
+    return split;
 }
 
 std::vector<std::pair<std::uint64_t, std::uint64_t>> GuestBufferMemory::DeviceReads() const {

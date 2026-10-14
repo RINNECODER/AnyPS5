@@ -350,6 +350,12 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     if (!windows && runPath != "$ORIGIN" && !runPath.starts_with("$ORIGIN/") && !runPath.starts_with("$ORIGIN:") && !std::filesystem::path(runPath).is_absolute()) throw Domain::RelinkerException("Guest Linux run path must be absolute or begin with $ORIGIN");
     const auto outputDirectory = std::filesystem::absolute(outputPath).parent_path().lexically_normal();
     std::vector<GuestArtifact> artifacts;
+    std::vector<std::string> moduleHostLibraries;
+    std::set<std::string> uniqueModuleHosts;
+    for (const auto& image : images) for (const auto& dependency : image.Dependencies) {
+        if (findGuest(dependency) == guestNames.end() && uniqueModuleHosts.insert(dependency).second) moduleHostLibraries.push_back(dependency);
+    }
+    if (uniqueModuleHosts.contains("libSceLibcInternal.prx") && uniqueModuleHosts.insert("libc.prx").second) moduleHostLibraries.push_back("libc.prx");
     for (const auto index : order) {
         auto& image = images[index];
         std::ostringstream moduleSize;
@@ -398,7 +404,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
                 const auto dependencyPath = images[dependency].SourcePath.parent_path() / images[dependency].OutputName;
                 needed.push_back("$ORIGIN/" + dependencyPath.lexically_relative(image.SourcePath.parent_path()).generic_string());
             }
-            needed.insert(needed.end(), hostLibraries.begin(), hostLibraries.end());
+            needed.insert(needed.end(), moduleHostLibraries.begin(), moduleHostLibraries.end());
             output = macos ? Elfpatcher::GuestModuleWriter().WriteMacOs(image, needed, guestRunPath) : Elfpatcher::GuestModuleWriter().WriteLinux(image, needed, guestRunPath);
         }
         if (windows) {
