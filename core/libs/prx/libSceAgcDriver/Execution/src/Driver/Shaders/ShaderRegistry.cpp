@@ -24,7 +24,11 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <list>
+#include <map>
+#include <mutex>
+#include <atomic>
 #include <pthread.h>
 #include <set>
 #ifdef __GLIBC__
@@ -113,20 +117,47 @@ std::shared_ptr<const ShaderSnapshot> ReadRawShader(std::uint64_t address) {
 
 std::shared_ptr<const ShaderSnapshot> ProgramSnapshot(const ShaderRegistry& shaders, std::uint64_t address, std::initializer_list<std::uint8_t> types) {
     if (auto registered = RegisteredProgram(shaders, address, types)) return registered;
-    require(shaders.empty(), "graphics program does not belong to a compatible registered shader");
     return ReadRawShader(address);
 }
 
 namespace {
 std::atomic<bool> rawGraphicsDrawn{false};
+std::mutex rawGraphicsMutex;
+std::map<std::uint64_t, std::uint64_t> rawGraphicsRanges;
 }
 
-void NoteRawGraphicsDraw() {
+void NoteRawGraphicsDraw(const ShaderSnapshot& snapshot) {
+    if (snapshot.rawGraphicsNoted->load(std::memory_order_acquire)) return;
+    auto begin = snapshot.codeAddress;
+    auto end = snapshot.codeAddress + snapshot.code.size() * sizeof(std::uint32_t);
+    {
+        std::lock_guard lock(rawGraphicsMutex);
+        auto next = rawGraphicsRanges.upper_bound(begin);
+        if (next != rawGraphicsRanges.begin() && std::prev(next)->second >= begin) {
+            const auto previous = std::prev(next);
+            begin = previous->first;
+            end = std::max(end, previous->second);
+            rawGraphicsRanges.erase(previous);
+        }
+        while (next != rawGraphicsRanges.end() && next->first <= end) {
+            end = std::max(end, next->second);
+            next = rawGraphicsRanges.erase(next);
+        }
+        rawGraphicsRanges.emplace(begin, end);
+    }
+    snapshot.rawGraphicsNoted->store(true, std::memory_order_release);
     rawGraphicsDrawn.store(true, std::memory_order_relaxed);
 }
 
 bool RawGraphicsDrawn() {
     return rawGraphicsDrawn.load(std::memory_order_relaxed);
+}
+
+bool RawGraphicsDrawnIn(std::uint64_t begin, std::uint64_t end) {
+    if (begin >= end) return false;
+    std::lock_guard lock(rawGraphicsMutex);
+    const auto next = rawGraphicsRanges.lower_bound(end);
+    return next != rawGraphicsRanges.begin() && std::prev(next)->second > begin;
 }
 
 namespace {
@@ -1147,10 +1178,10 @@ void Driver::RegisterShader(const Shader* shader) {
     PerformanceTimer timing("Shader.Register");
     ShaderPreparationTransaction transaction;
     CheckFailure();
-    require(!RawGraphicsDrawn(), "a shader was registered after graphics programs were drawn without registration");
     // Read the header and code through GuestMemory (validated, and safe where guest memory is not
     // host-addressable) instead of dereferencing the guest pointers.
     auto snapshot = ReadRegisteredShaderSnapshot(reinterpret_cast<std::uintptr_t>(shader));
+    require(!RawGraphicsDrawnIn(snapshot.codeAddress, snapshot.codeAddress + snapshot.code.size() * sizeof(std::uint32_t)), "a shader was registered over a graphics program that was drawn without registration");
 
     {
         std::lock_guard lock(mutex);
