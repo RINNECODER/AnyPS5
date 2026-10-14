@@ -42,6 +42,27 @@ int main() {
     Require(connect_nid_postfix(listener, address.data(), address.size()) == -1 && *__error_nid_postfix() == ErrorNotSupported,
         "connect on a listening socket must fail with EOPNOTSUPP (45)");
 
+    const int plain = socket_nid_postfix(Inet, Stream, 0);
+    Require(plain >= 0, "socket failed");
+    *__error_nid_postfix() = 0;
+    Require(connect_nid_postfix(plain, nullptr, address.size()) == -1, "connect with a null address must fail");
+    const int nullError = *__error_nid_postfix();
+    *__error_nid_postfix() = 0;
+    Require(connect_nid_postfix(listener, nullptr, address.size()) == -1 && *__error_nid_postfix() == nullError,
+        "connect on a listening socket with a null address must fail as on any socket, not with EOPNOTSUPP");
+    *__error_nid_postfix() = 0;
+    Require(connect_nid_postfix(plain, address.data(), 1) == -1, "connect with a 1-byte address must fail");
+    const int shortError = *__error_nid_postfix();
+    *__error_nid_postfix() = 0;
+    Require(connect_nid_postfix(listener, address.data(), 1) == -1 && *__error_nid_postfix() == shortError,
+        "connect on a listening socket with a 1-byte address must fail as on any socket, not with EOPNOTSUPP");
+    Require(nullError != ErrorNotSupported && shortError != ErrorNotSupported, "address errors must not be EOPNOTSUPP");
+    Require(close_nid_postfix(plain) == 0, "close failed");
+    std::array<std::uint8_t, 28> wrongFamily{28, 28};
+    *__error_nid_postfix() = 0;
+    Require(connect_nid_postfix(listener, wrongFamily.data(), wrongFamily.size()) == -1 && *__error_nid_postfix() == ErrorNotSupported,
+        "connect on a listening socket with an address of another family must fail with EOPNOTSUPP (45)");
+
     const int client = socket_nid_postfix(Inet, Stream, 0);
     Require(client >= 0 && connect_nid_postfix(client, address.data(), address.size()) == 0, "a refused connect must leave the listener working");
     const int accepted = accept_nid_postfix(listener, nullptr, nullptr);
