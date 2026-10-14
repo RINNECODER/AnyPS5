@@ -43,7 +43,8 @@ CONFIGURE = ["-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON", 
              "-DANYPS5_NATIVE_AOT=ON", "-DANYPS5_NATIVE_AOT_GRAPHICS=ON", "-DANYPS5_NATIVE_AOT_EXAMPLE=ON"]
 BUILD_TARGETS = ["native_gpu_cube_build", "native_aot", "anyps5_native_runtime", "anyps5_native_graphics", "aot_ps5link",
                  "native_aot_graphics_layout_tests", "native_aot_readonly_tests", "native_aot_image_tests",
-                 "native_aot_runtime_tests"]
+                 "native_aot_runtime_tests", "native_aot_hle_log_open_tests", "native_aot_image_overlap_tests",
+                 "native_aot_tls_release_tests"]
 CTEST_FILTER = "^native_(aot|graphics)"
 # Tests the gate cannot pass without (the SDK samples and the Metal graphics checks).
 REQUIRED_TESTS = ("native_aot_hello_notify", "native_aot_runtime", "native_graphics_image_comparison",
