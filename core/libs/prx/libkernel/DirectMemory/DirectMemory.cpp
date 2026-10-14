@@ -1012,13 +1012,14 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     return 0;
 }
 
-int DoMapAnon(void** addr, size_t len, int prot, int flags, size_t alignment) {
+int DoMapAnon(void** addr, size_t len, int prot, int flags, size_t alignment, bool exclusive) {
     ValidateOutput(addr);
 #if defined(__APPLE__)
     if (!DarwinRelocateFixed(addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
 #endif
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
+    if (exclusive && mutation.Overlaps(*addr, len)) return SCE_KERNEL_ERROR_ENOMEM;
     flags = PlaceHintInReservation(*addr, len, flags);
     if (FixedNoOverwriteConflict(mutation, *addr, len, flags)) return SCE_KERNEL_ERROR_ENOMEM;
     if (RemapFixedIntoRegistered(mutation, *addr, len, prot, flags)) {
