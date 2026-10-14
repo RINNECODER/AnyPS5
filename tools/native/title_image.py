@@ -105,6 +105,8 @@ def main():
     parser.add_argument('--nid-symbols', help='file of runtime symbol names (one per line, underscore stripped)')
     parser.add_argument('--guest-base', type=lambda value: int(value, 0), default=0x140000000,
                         help='slide added to every guest vaddr (the Rosetta relinked base by default)')
+    parser.add_argument('--hle-log', action='store_true',
+                        help='log every import call and its return through HleLogCall/HleLogReturn')
     args = parser.parse_args()
     contracts = json.loads(open(args.contracts).read())
     # The slide must be set before the first Image so the process-parameter bindings carry it.
@@ -160,6 +162,7 @@ def main():
     contracts['allow_unimplemented'] = True
     contracts['guest_data'] = True
     contracts['count_entries'] = True
+    contracts['hle_log'] = args.hle_log
     if process_parameters:
         contracts['title_process_parameters'] = process_parameters
     # HLE NID binding: point a typed import at the runtime's <name>_nid_postfix symbol when

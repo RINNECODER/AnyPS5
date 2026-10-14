@@ -22,6 +22,7 @@
 // trampoline, so this is opt-in.
 #include <ctype.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <pthread.h>
@@ -74,6 +75,66 @@ static int describe_string(uint64_t address, char* out, size_t size) {
     return 1;
 }
 
+static int g_hle_fd = -2;
+static pthread_mutex_t g_hle_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_hle_sequence = 0;
+
+static void hle_log_open(void) {
+    if (g_hle_fd != -2) return;
+    const char* path = getenv("ANYPS5_HLE_LOG");
+    if (path == NULL || *path == '\0') { g_hle_fd = -1; return; }
+    g_hle_fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (g_hle_fd >= 0) {
+        uint32_t header[2] = { 0x474F4C48u, 1u };
+        (void)!write(g_hle_fd, header, sizeof header);
+    }
+}
+
+static uint64_t hle_log_call(const char* name, const uint64_t* args) {
+    hle_log_open();
+    if (g_hle_fd < 0) return 0;
+    uint64_t thread = 0;
+    pthread_threadid_np(NULL, &thread);
+    pthread_mutex_lock(&g_hle_lock);
+    const uint64_t sequence = ++g_hle_sequence;
+    pthread_mutex_unlock(&g_hle_lock);
+    const uint32_t name_length = (uint32_t)strlen(name);
+    const uint32_t flags = 0;
+    uint64_t args_copy[6] = {0, 0, 0, 0, 0, 0};
+    const uint64_t result = 0;
+    if (args != NULL) memcpy(args_copy, args, sizeof args_copy);
+    pthread_mutex_lock(&g_hle_lock);
+    (void)!write(g_hle_fd, &sequence, 8);
+    (void)!write(g_hle_fd, &thread, 8);
+    (void)!write(g_hle_fd, &name_length, 4);
+    (void)!write(g_hle_fd, &flags, 4);
+    (void)!write(g_hle_fd, args_copy, sizeof args_copy);
+    (void)!write(g_hle_fd, &result, 8);
+    (void)!write(g_hle_fd, name, name_length);
+    static const uint8_t zeros[8] = {0};
+    (void)!write(g_hle_fd, zeros, (8 - (name_length % 8)) % 8);
+    pthread_mutex_unlock(&g_hle_lock);
+    return sequence;
+}
+
+static void hle_log_return(uint64_t sequence, uint64_t result) {
+    hle_log_open();
+    if (g_hle_fd < 0 || sequence == 0) return;
+    uint64_t thread = 0;
+    pthread_threadid_np(NULL, &thread);
+    const uint32_t name_length = 0;
+    const uint32_t flags = 1;
+    uint64_t args_copy[6] = {0, 0, 0, 0, 0, 0};
+    pthread_mutex_lock(&g_hle_lock);
+    (void)!write(g_hle_fd, &sequence, 8);
+    (void)!write(g_hle_fd, &thread, 8);
+    (void)!write(g_hle_fd, &name_length, 4);
+    (void)!write(g_hle_fd, &flags, 4);
+    (void)!write(g_hle_fd, args_copy, sizeof args_copy);
+    (void)!write(g_hle_fd, &result, 8);
+    pthread_mutex_unlock(&g_hle_lock);
+}
+
 static _Atomic(void*)* g_targets;
 static _Atomic unsigned* g_trace_calls;
 static unsigned g_trace_limit = 16;
@@ -87,6 +148,8 @@ struct pending_return {
     uint64_t address;
     unsigned index;
     unsigned call;
+    uint64_t hle_sequence;
+    int logged;
 };
 enum { kPendingReturns = 64 };
 static __thread struct pending_return t_pending[kPendingReturns];
@@ -108,6 +171,8 @@ static void trace_init(void) {
     if (after != NULL && *after != '\0') g_trace_after = strtod(after, NULL);
     const char* returns = getenv("ANYPS5_TRACE_RETURNS");
     g_trace_returns = returns != NULL && *returns != '\0' && *returns != '0';
+    const char* hle = getenv("ANYPS5_HLE_LOG");
+    if (hle != NULL && *hle != '\0') g_trace_returns = 1;
     clock_gettime(CLOCK_MONOTONIC, &g_trace_start);
 }
 
@@ -147,6 +212,20 @@ void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2, uint
         atomic_store_explicit(&g_targets[index], target, memory_order_release);
     }
     const double seconds = trace_seconds();
+    uint64_t hle_sequence = 0;
+    hle_log_open();
+    if (g_hle_fd >= 0) {
+        const uint64_t hle_args[6] = {a0, a1, a2, 0, 0, 0};
+        hle_sequence = hle_log_call(aps5_trace_names[index], hle_args);
+    }
+    // The HLE log needs every call's return, ANYPS5_TRACE_RETURNS only the traced window's.
+    // Either way this is opt-in: a C++ exception cannot unwind through the trampoline.
+    int pending = -1;
+    if ((g_trace_returns || hle_sequence != 0) && t_pending_depth < kPendingReturns) {
+        pending = (int)t_pending_depth++;
+        t_pending[pending] = (struct pending_return){*return_slot, index, 0, hle_sequence, 0};
+        *return_slot = (uint64_t)(uintptr_t)aps5_trace_return;
+    }
     // Calls before ANYPS5_TRACE_AFTER seconds are neither logged nor counted, so the
     // per-import limit applies to the window of interest (a title's steady state).
     if (seconds < g_trace_after) return target;
@@ -163,9 +242,9 @@ void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2, uint
         emit(line, snprintf(line, sizeof line, "[trace] %.3fs tid=%llu #%u %s(%s, %s, %s)%s\n", seconds, (unsigned long long)thread, call,
                             aps5_trace_names[index], text[0], text[1], text[2], call == g_trace_limit ? " (limit reached)" : ""),
              sizeof line);
-        if (g_trace_returns && t_pending_depth < kPendingReturns) {
-            t_pending[t_pending_depth++] = (struct pending_return){*return_slot, index, call};
-            *return_slot = (uint64_t)(uintptr_t)aps5_trace_return;
+        if (pending >= 0) {
+            t_pending[pending].call = call;
+            t_pending[pending].logged = 1;
         }
     }
     return target;
@@ -174,6 +253,8 @@ void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2, uint
 // Called by _aps5_trace_return with the callee's %rax; returns the caller's address.
 uint64_t aps5_trace_returned(uint64_t value) {
     const struct pending_return entry = t_pending[--t_pending_depth];
+    hle_log_return(entry.hle_sequence, value);
+    if (!entry.logged) return entry.address;
     uint64_t thread = 0;
     pthread_threadid_np(NULL, &thread);
     char line[256];
