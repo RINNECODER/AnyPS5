@@ -4,6 +4,7 @@
 #include "MetalConversionDiskCache.hpp"
 #include <spirv_msl.hpp>
 #include <algorithm>
+#include <bit>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -53,6 +54,20 @@ void InlineExactArithmetic(std::string& source) {
 }
 [[noreturn]] void Fail(const std::string& reason) {
     throw std::runtime_error("Metal shader bridge: " + reason);
+}
+
+// The minimum LOD an image descriptor (8 dwords) clamps sampling to, relative to its base level:
+// MIN_LOD (dword 1) capped at the last level the view can reach (LAST_LEVEL in dword 3, lowered to
+// the allocated last level in dword 5 while the base is allocated), minus BASE_LEVEL, never below 0.
+// The only image-descriptor value the conversion reads, so the conversion key holds it instead of
+// the raw dwords (texture streaming rewrites those as mips arrive without changing the shader).
+float RelativeMinimumLod(const std::uint32_t* words) {
+    const auto base = (words[3] >> 12u) & 15u;
+    auto last = (words[3] >> 16u) & 15u;
+    const auto allocatedLast = (words[5] >> 4u) & 15u;
+    if (base <= allocatedLast) last = std::min(last, allocatedLast);
+    const auto absolute = static_cast<float>((words[1] >> 8u) & 4095u) / 256.0f;
+    return std::max(0.0f, std::min(absolute, float(last)) - float(base));
 }
 
 class MetalCompiler final : public spirv_cross::CompilerMSL {
@@ -231,13 +246,7 @@ public:
                 continue;
             }
             for (std::uint32_t i = 0; i < image.count; ++i) {
-                const auto* words = image.guestDescriptor.data() + i * 8u;
-                const auto base = (words[3] >> 12u) & 15u;
-                auto last = (words[3] >> 16u) & 15u;
-                const auto allocatedLast = (words[5] >> 4u) & 15u;
-                if (base <= allocatedLast) last = std::min(last, allocatedLast);
-                const auto minimum = static_cast<float>((words[1] >> 8u) & 4095u) / 256.0f;
-                if (std::min(minimum, float(last)) > float(base))
+                if (RelativeMinimumLod(image.guestDescriptor.data() + i * 8u) > 0.0f)
                     minimumLodImageUses.try_emplace(std::array{image.descriptorSet, image.binding, i});
             }
         }
@@ -264,13 +273,7 @@ public:
             const auto first = resolved->constant.value_or(0u);
             const auto end = resolved->constant ? first + 1u : image->count;
             for (auto i = first; i < end; ++i) {
-                const auto* words = image->guestDescriptor.data() + i * 8u;
-                const auto base = (words[3] >> 12u) & 15u;
-                auto last = (words[3] >> 16u) & 15u;
-                const auto allocatedLast = (words[5] >> 4u) & 15u;
-                if (base <= allocatedLast) last = std::min(last, allocatedLast);
-                const auto minimum = static_cast<float>((words[1] >> 8u) & 4095u) / 256.0f;
-                if (std::min(minimum, float(last)) <= float(base)) continue;
+                if (RelativeMinimumLod(image->guestDescriptor.data() + i * 8u) <= 0.0f) continue;
                 auto& state = minimumLodImageUses[{descriptorSet, binding, i}];
                 state.blocked |= use.blocked || image->kind != DescriptorKind::SampledImage;
                 if (use.required) state.required.insert(use.result);
@@ -349,13 +352,7 @@ public:
             return *found;
         };
         const auto relativeMin = [](const DescriptorBinding& image, std::uint32_t imageElement) {
-            const auto* words = image.guestDescriptor.data() + imageElement * 8u;
-            const auto base = (words[3] >> 12u) & 15u;
-            auto last = (words[3] >> 16u) & 15u;
-            const auto allocatedLast = (words[5] >> 4u) & 15u;
-            if (base <= allocatedLast) last = std::min(last, allocatedLast);
-            const auto absolute = static_cast<float>((words[1] >> 8u) & 4095u) / 256.0f;
-            return std::max(0.0f, std::min(absolute, float(last)) - float(base));
+            return RelativeMinimumLod(image.guestDescriptor.data() + imageElement * 8u);
         };
         struct Access {
             std::uint32_t combined;
@@ -1642,12 +1639,12 @@ void WriteWords(CacheKeyWriter& key, const std::vector<T>& words) {
     key.Bytes(words.data(), words.size() * sizeof(T));
 }
 
-// Only the image-descriptor bits the conversion reads (minimum-LOD metadata in dwords 1, 3 and 5); the
-// rest, such as the base address in dword 0 and the low byte of dword 1, changes from launch to launch.
+// Only what the conversion reads of an image descriptor: its relative minimum LOD (RelativeMinimumLod).
+// The raw dwords change from launch to launch (the base address) and, under texture streaming, from
+// frame to frame (levels and allocated levels as mips arrive), which made every streamed texture's
+// shaders miss the cache and run SPIRV-Cross again on the map without changing the generated shader.
 void WriteImageDescriptorFields(CacheKeyWriter& key, const std::uint32_t* words) {
-    key.Value(words[1] >> 8u);
-    key.Value(words[3]);
-    key.Value(words[5]);
+    key.Value(std::bit_cast<std::uint32_t>(RelativeMinimumLod(words)));
 }
 
 // stable: as above for image descriptors; sampler descriptors carry no addresses and stay whole.
