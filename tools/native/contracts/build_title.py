@@ -44,6 +44,10 @@ def compile_one(spec, keep_ir):
                       native_frame_bytes=function.depth)
         if keep_ir:
             record['ir'] = ir
+    finally:
+        # A worker compiles thousands of functions against one image; the per-owner
+        # indirect-call cache would otherwise keep an entry for every owner it has seen.
+        IMAGE.call_contracts.clear()
     record['cpu_ms'] = round(1000 * (time.process_time() - started), 3)
     return record
 
