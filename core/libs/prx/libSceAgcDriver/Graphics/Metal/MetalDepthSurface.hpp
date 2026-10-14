@@ -102,6 +102,11 @@ void DropReplacedDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& 
 // brings it back with the texels it held.
 void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, std::uint64_t address, std::uint64_t bytes,
     const MetalDepthSurface* keep = nullptr);
+// The same over the depth and stencil planes of a depth target, or over every fragment of a color target.
+void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, const Graphics::DepthTarget& target,
+    const MetalDepthSurface* keep = nullptr);
+void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, const Graphics::ColorTarget& target,
+    const MetalDepthSurface* keep = nullptr);
 
 // A color target with several fragments (CB_COLOR_ATTRIB NUM_FRAGMENTS) renders into a resident 2D
 // multisample texture, like multisampled depth: the guest's interleaved fragment and FMASK layout is

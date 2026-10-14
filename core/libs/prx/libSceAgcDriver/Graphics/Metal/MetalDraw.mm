@@ -678,16 +678,11 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         // depth surfaces its planes overlap (another stencil pairing of its depth plane, another extent
         // at its address) are retired until they are bound again.
         std::erase(depthSurfaces, depth);
-        const auto& target = depth->Target();
-        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
-        RetireDepthSurfaces(depthSurfaces, target.address, Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u) * target.samples);
-        if (target.stencilAddress != 0) {
-            RetireDepthSurfaces(depthSurfaces, target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples);
-        }
+        RetireDepthSurfaces(depthSurfaces, depth->Target());
         depthSurfaces.push_back(depth);
     }
-    // A color target over a depth surface's memory writes where its planes were.
-    for (const auto& color : state.colors) RetireDepthSurfaces(depthSurfaces, color.address, color.bytes, depth.get());
+    // A color target over a depth surface's memory writes where its planes were (all its fragments).
+    for (const auto& color : state.colors) RetireDepthSurfaces(depthSurfaces, color, depth.get());
     // A depth-only draw that exports a render target index renders into slices slice..lastSlice of its
     // depth array at once; each slice also gets its surface, so later single-slice and array readers find it.
     const std::uint32_t depthLayers = depth && state.layered && state.colors.empty() && state.depth->samples == 1 ?
@@ -701,7 +696,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             if (slice.stencilAddress != 0) slice.stencilAddress += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, 1u);
             slice.slice += layer;
             auto surface = depthCache->Acquire(slice);
-            std::erase_if(depthSurfaces, [&](const auto& other) { return other != surface && other->Target().address == slice.address; });
+            RetireDepthSurfaces(depthSurfaces, slice, surface.get());
             if (std::find(depthSurfaces.begin(), depthSurfaces.end(), surface) == depthSurfaces.end()) depthSurfaces.push_back(surface);
         }
     }

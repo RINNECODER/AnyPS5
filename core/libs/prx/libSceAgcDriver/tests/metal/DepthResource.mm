@@ -402,6 +402,32 @@ void retiredDepth(const AgcDriver::Metal::MetalDevice& backend) {
     surfaces = {surface, wide};
     AgcDriver::Metal::RetireDepthSurfaces(surfaces, wide->Target().address, depthBytes * 2, wide.get());
     MetalTests::Require(surfaces.size() == 1 && surfaces[0] == wide, "Binding a depth target of another extent at the address kept the other surface");
+
+    // A multisampled color target covers bytes * samples: one whose later fragments reach a depth plane retires it.
+    AgcDriver::Graphics::ColorTarget color{};
+    color.address = target.address - 0x1000;
+    color.bytes = 0x1000;
+    color.samples = 4;
+    surfaces = {surface};
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, color);
+    MetalTests::Require(surfaces.empty(), "A multisampled color target over a depth plane in its later fragments did not retire it");
+    color.samples = 1;
+    surfaces = {surface};
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, color);
+    MetalTests::Require(surfaces.size() == 1, "A single-sample color target next to a depth plane retired it");
+
+    // A depth target retires surfaces over its stencil plane too, and not only those at its depth address:
+    // a layered draw retires per slice what each slice's planes overlap.
+    auto slice = target;
+    slice.address += depthBytes;
+    slice.stencilAddress += stencilBytes;
+    auto sliceSurface = cache.Acquire(slice);
+    auto insideDepth = cache.Acquire(AgcDriver::Graphics::DepthTarget{slice.address + 0x100, 0, {width, height}, VK_FORMAT_D32_SFLOAT, 1, 0});
+    auto onStencil = cache.Acquire(AgcDriver::Graphics::DepthTarget{0x2000000, slice.stencilAddress + 0x40, {width, height}, target.format, 1, 0});
+    surfaces = {surface, insideDepth, onStencil, sliceSurface};
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, slice, sliceSurface.get());
+    MetalTests::Require(surfaces.size() == 2 && surfaces[0] == surface && surfaces[1] == sliceSurface,
+        "A depth slice did not retire the surfaces inside its depth or stencil plane, or retired its neighbour or itself");
 }
 }
 
