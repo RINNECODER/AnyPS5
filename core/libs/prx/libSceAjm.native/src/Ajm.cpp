@@ -1606,12 +1606,16 @@ int APS5_VABI sceAjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t fl
         created->initialized = true;
     }
     if (codec == CODEC_M4AAC) CheckAacFlags(flags);
-    const std::uint32_t id = (codec << 14) | (g_nextInstance.fetch_add(1, std::memory_order_relaxed) & 0x3FFF);
     std::lock_guard lock(g_lock);
-    g_instances[id] = std::move(created);
-    *instance = id;
-    AJM_TRACE("[ajm] instance create: context %u, codec %u, flags 0x%llx -> instance %u\n", context, codec, static_cast<unsigned long long>(flags), id);
-    return 0;
+    for (std::uint32_t attempt = 0; attempt < 0x4000; ++attempt) {
+        const std::uint32_t id = (codec << 14) | (g_nextInstance.fetch_add(1, std::memory_order_relaxed) & 0x3FFF);
+        if (g_instances.contains(id)) continue;
+        g_instances.emplace(id, std::move(created));
+        *instance = id;
+        AJM_TRACE("[ajm] instance create: context %u, codec %u, flags 0x%llx -> instance %u\n", context, codec, static_cast<unsigned long long>(flags), id);
+        return 0;
+    }
+    return SCE_AJM_ERROR_OUT_OF_RESOURCES;
 }
 
 int APS5_VABI sceAjmInstanceDestroy(uint32_t context, uint32_t instance) {
