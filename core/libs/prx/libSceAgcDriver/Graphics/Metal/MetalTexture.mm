@@ -303,7 +303,44 @@ MetalTexture::MetalTexture(const MetalDevice& backend, std::shared_ptr<Backing> 
     createViews(compare);
 }
 
+namespace {
+
+static_assert(sizeof(Graphics::GuestTextureResource) == 88, "GuestTextureResource changed: update the texture view key");
+
+std::array<std::uint64_t, 21> viewKey(const Graphics::GuestTextureResource& d, bool compare) {
+    return {d.baseAddress, d.width, d.height, d.depthOrLastArray, d.baseArray, d.mipCount, d.baseLevel,
+        static_cast<std::uint64_t>(d.tileMode), static_cast<std::uint64_t>(d.dimension), d.format,
+        std::uint64_t{d.dstSelX} | std::uint64_t{d.dstSelY} << 8u | std::uint64_t{d.dstSelZ} << 16u | std::uint64_t{d.dstSelW} << 24u,
+        d.pipeBankXor, d.bcSwizzle, d.lastLevel, d.dccAddress, d.dccAlphaOnMsb, d.dccPipeAligned, d.minLod,
+        d.allocatedMipCount, d.samples, compare ? 1u : 0u};
+}
+
+// Views kept per backing; a surface is rarely bound through more descriptors than this.
+constexpr std::size_t MaxBackingViews = 32;
+
+}
+
 void MetalTexture::createViews(bool compare) {
+    // The views depend only on the backing, this descriptor and `compare`: reuse the ones made before.
+    const auto key = viewKey(descriptor, compare);
+    {
+        std::lock_guard lock(backing->viewsMutex);
+        for (const auto& [known, views] : backing->views) {
+            if (known != key) continue;
+            typedTexture = views.typed;
+            sampledView = views.sampled;
+            storageView = views.storage;
+            atomicView = views.atomic;
+            return;
+        }
+    }
+    makeViews(compare);
+    std::lock_guard lock(backing->viewsMutex);
+    if (backing->views.size() >= MaxBackingViews) backing->views.erase(backing->views.begin());
+    backing->views.push_back({key, Views{typedTexture, sampledView, storageView, atomicView}});
+}
+
+void MetalTexture::makeViews(bool compare) {
     const auto& geometry = backing->geometry;
     require(descriptor.baseArray < geometry.imageLayers, "Metal texture view base array lies outside the surface");
     const auto nativeFormat = pixelFormat(descriptor.format);
@@ -515,9 +552,10 @@ void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recy
     if (recycleGuest) MetalBufferPool::Shared().GiveWhenCompleted(guest, commands);
     encodeTransfer(commands, guest, offset, linear, 0, false);
     encodeLinearCopy(commands, linear, true);
-    // The draw or dispatch that samples the texture is committed later on the same queue, so it runs
-    // after this; the command buffer keeps the staging buffers alive until then.
-    [commands commit];
+    // The draw or dispatch that samples the texture is committed later on the same queue (or is
+    // encoded after this into the same, batched, command buffer), so it runs after this; the
+    // command buffer keeps the staging buffers alive until then.
+    backend.Submit(commands);
     pendingUpload = commands;
 }
 
@@ -575,7 +613,7 @@ bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> g
 
 bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset, Subresources part) const {
     if (!inPlace(guest, offset)) return false;
-    // Uploads commit when they are encoded, so this command buffer runs after them on the queue.
+    // Uploads are committed, or encoded into the same batched command buffer, before this runs.
     // The retile reads only the elements the blit wrote, so the recycled linear buffer needs no clearing.
     auto linear = backend.TransientBuffer(bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers), commands);
     encodeLinearCopy(commands, linear, false, part);

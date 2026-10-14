@@ -3,8 +3,11 @@
 
 #include "MetalDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include <array>
 #include <cstddef>
 #include <memory>
+#include <mutex>
+#include <vector>
 #include <string>
 #include <span>
 
@@ -66,16 +69,29 @@ private:
     [[nodiscard]] std::shared_ptr<MetalTexture> CreateView(const Graphics::GuestTextureResource& descriptor,
                                                         bool compare, bool minimumLodLowered, bool ignoreDcc = false) const;
     [[nodiscard]] bool canShareBacking(const Graphics::GuestTextureResource& descriptor, bool ignoreDcc) const;
+    // The native views of one descriptor (createViews).
+    struct Views {
+        id<MTLTexture> typed;
+        id<MTLTexture> sampled;
+        id<MTLTexture> storage;
+        id<MTLTexture> atomic;
+    };
+    using ViewKey = std::array<std::uint64_t, 21>;
     struct Backing {
         Graphics::GuestTextureResource descriptor;
         Graphics::SurfaceGeometry geometry;
         std::uint32_t elementBytes;
         id<MTLTexture> texture;
+        // Views already made of this backing, by every descriptor field and the compare flag: a cached
+        // surface bound through another descriptor got new native views for every draw.
+        std::mutex viewsMutex;
+        std::vector<std::pair<ViewKey, Views>> views;
     };
     MetalTexture(const MetalDevice& backend, std::shared_ptr<Backing> backing,
                  const Graphics::GuestTextureResource& descriptor, bool compare, bool minimumLodLowered);
     [[nodiscard]] id<MTLTexture> RawSintStorageView() const;
     void createViews(bool compare);
+    void makeViews(bool compare);
     // Encodes the guest-tiled <-> linear conversion into `commands` (retile: linear to tiled).
     void encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> source, NSUInteger sourceOffset,
                         id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile, Subresources part = {}) const;

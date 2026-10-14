@@ -1,4 +1,5 @@
 #include "MetalDriverInternal.hpp"
+#include <pthread.h>
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -150,6 +151,10 @@ void MetalDriver::Configure(void* device, void* library,
     impl->presentationBackend = std::move(presentationBackend);
     impl->presentation = std::move(presentation);
     impl->draw = std::move(draw);
+    if (Impl::BatchCommandBuffers()) {
+        impl->backend->SetBatching(true);
+        impl->timeline.SetBatchDevice(impl->backend.get(), Impl::BatchMinimum());
+    }
     // A worker with nothing to execute still retires submissions as their GPU work completes.
     impl->timeline.SetCompletionSignal([impl = impl.get()] {
         impl->progress.fetch_add(1, std::memory_order_relaxed);
@@ -215,7 +220,7 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
             gpuLock = std::unique_lock(impl->gpuMutex);
             // Work committed without waiting still reads the old mapping: let it finish first.
             try {
-                impl->timeline.Drain();
+                impl->timeline.Drain(0x10d);
             } catch (...) {
                 impl->ReportFailure(std::current_exception());
             }
@@ -649,7 +654,7 @@ void MetalDriver::Impl::AwaitMappingDrain() {
 void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack(std::uint32_t cause) {
     std::lock_guard lock(gpuMutex);
     if (!timeline.Empty()) ++drainsBy[std::min<std::uint32_t>(cause, drainsBy.size() - 1)];
-    timeline.Drain();
+    timeline.Drain(cause);
 }
 
 void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes) {
@@ -660,8 +665,26 @@ void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes
                 static_cast<unsigned long long>(bytes), timeline.UnknownWritesPending() ? " (unknown writes pending)" : "");
         }
         ++drainsBy[0x102];
-        timeline.Drain();
+        timeline.Drain(0x102);
     }
+}
+
+bool MetalDriver::Impl::BatchCommandBuffers() {
+    static const bool batch = [] {
+        const char* value = std::getenv("ANYPS5_METAL_BATCH");
+        return value == nullptr || *value != '0';
+    }();
+    return batch;
+}
+
+std::uint32_t MetalDriver::Impl::BatchMinimum() {
+    static const std::uint32_t minimum = [] {
+        const char* value = std::getenv("ANYPS5_METAL_BATCH_MIN");
+        if (value == nullptr || *value == '\0') return std::uint32_t{8};
+        const auto parsed = std::strtoul(value, nullptr, 10);
+        return parsed == 0 ? std::numeric_limits<std::uint32_t>::max() : static_cast<std::uint32_t>(std::min<unsigned long>(parsed, 1u << 20));
+    }();
+    return minimum;
 }
 
 bool MetalDriver::Impl::DeferWork() {
@@ -733,6 +756,12 @@ void MetalDriver::Impl::MarkCompleted(std::uint64_t serial) {
 
 void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
     OnWorkerThread() = true;
+    {
+        // Named for profiles (ANYPS5_METAL_GPU_TIMING thread breakdown, Instruments).
+        char name[32];
+        std::snprintf(name, sizeof name, "agc-queue-%u", id);
+        pthread_setname_np(name);
+    }
     Submission submission{};
     try {
         for (;;) {
@@ -782,6 +811,8 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                     // GPU work may still be running: retire the submission (and so let the guest
                     // submit past it, MAX_QUEUED) when it completed, while this worker goes on.
                     std::lock_guard gpuLock(gpuMutex);
+                    // The GPU runs the submission's batched work while this worker waits or goes on.
+                    timeline.Flush();
                     if (!timeline.Empty()) {
                         retireLater = true;
                         auto retired = std::make_shared<Submission>(std::move(submission));
@@ -1025,6 +1056,7 @@ void MetalDriver::Impl::Stop() {
     for (auto& [queue, worker] : workers) { static_cast<void>(queue); if (worker.thread.joinable()) worker.thread.join(); }
     {
         std::lock_guard gpuLock(gpuMutex);
+        timeline.SetBatchDevice(nullptr);
         draw.reset();
         presentation.reset();
         backend.reset();

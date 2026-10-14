@@ -4,6 +4,7 @@
 #include "MetalConversionDiskCache.hpp"
 #include <spirv_msl.hpp>
 #include <algorithm>
+#include <bit>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -53,6 +54,20 @@ void InlineExactArithmetic(std::string& source) {
 }
 [[noreturn]] void Fail(const std::string& reason) {
     throw std::runtime_error("Metal shader bridge: " + reason);
+}
+
+// The minimum LOD an image descriptor (8 dwords) clamps sampling to, relative to its base level:
+// MIN_LOD (dword 1) capped at the last level the view can reach (LAST_LEVEL in dword 3, lowered to
+// the allocated last level in dword 5 while the base is allocated), minus BASE_LEVEL, never below 0.
+// The only image-descriptor value the conversion reads, so the conversion key holds it instead of
+// the raw dwords (texture streaming rewrites those as mips arrive without changing the shader).
+float RelativeMinimumLod(const std::uint32_t* words) {
+    const auto base = (words[3] >> 12u) & 15u;
+    auto last = (words[3] >> 16u) & 15u;
+    const auto allocatedLast = (words[5] >> 4u) & 15u;
+    if (base <= allocatedLast) last = std::min(last, allocatedLast);
+    const auto absolute = static_cast<float>((words[1] >> 8u) & 4095u) / 256.0f;
+    return std::max(0.0f, std::min(absolute, float(last)) - float(base));
 }
 
 class MetalCompiler final : public spirv_cross::CompilerMSL {
@@ -231,13 +246,7 @@ public:
                 continue;
             }
             for (std::uint32_t i = 0; i < image.count; ++i) {
-                const auto* words = image.guestDescriptor.data() + i * 8u;
-                const auto base = (words[3] >> 12u) & 15u;
-                auto last = (words[3] >> 16u) & 15u;
-                const auto allocatedLast = (words[5] >> 4u) & 15u;
-                if (base <= allocatedLast) last = std::min(last, allocatedLast);
-                const auto minimum = static_cast<float>((words[1] >> 8u) & 4095u) / 256.0f;
-                if (std::min(minimum, float(last)) > float(base))
+                if (RelativeMinimumLod(image.guestDescriptor.data() + i * 8u) > 0.0f)
                     minimumLodImageUses.try_emplace(std::array{image.descriptorSet, image.binding, i});
             }
         }
@@ -264,13 +273,7 @@ public:
             const auto first = resolved->constant.value_or(0u);
             const auto end = resolved->constant ? first + 1u : image->count;
             for (auto i = first; i < end; ++i) {
-                const auto* words = image->guestDescriptor.data() + i * 8u;
-                const auto base = (words[3] >> 12u) & 15u;
-                auto last = (words[3] >> 16u) & 15u;
-                const auto allocatedLast = (words[5] >> 4u) & 15u;
-                if (base <= allocatedLast) last = std::min(last, allocatedLast);
-                const auto minimum = static_cast<float>((words[1] >> 8u) & 4095u) / 256.0f;
-                if (std::min(minimum, float(last)) <= float(base)) continue;
+                if (RelativeMinimumLod(image->guestDescriptor.data() + i * 8u) <= 0.0f) continue;
                 auto& state = minimumLodImageUses[{descriptorSet, binding, i}];
                 state.blocked |= use.blocked || image->kind != DescriptorKind::SampledImage;
                 if (use.required) state.required.insert(use.result);
@@ -349,13 +352,7 @@ public:
             return *found;
         };
         const auto relativeMin = [](const DescriptorBinding& image, std::uint32_t imageElement) {
-            const auto* words = image.guestDescriptor.data() + imageElement * 8u;
-            const auto base = (words[3] >> 12u) & 15u;
-            auto last = (words[3] >> 16u) & 15u;
-            const auto allocatedLast = (words[5] >> 4u) & 15u;
-            if (base <= allocatedLast) last = std::min(last, allocatedLast);
-            const auto absolute = static_cast<float>((words[1] >> 8u) & 4095u) / 256.0f;
-            return std::max(0.0f, std::min(absolute, float(last)) - float(base));
+            return RelativeMinimumLod(image.guestDescriptor.data() + imageElement * 8u);
         };
         struct Access {
             std::uint32_t combined;
@@ -1642,12 +1639,12 @@ void WriteWords(CacheKeyWriter& key, const std::vector<T>& words) {
     key.Bytes(words.data(), words.size() * sizeof(T));
 }
 
-// Only the image-descriptor bits the conversion reads (minimum-LOD metadata in dwords 1, 3 and 5); the
-// rest, such as the base address in dword 0 and the low byte of dword 1, changes from launch to launch.
+// Only what the conversion reads of an image descriptor: its relative minimum LOD (RelativeMinimumLod).
+// The raw dwords change from launch to launch (the base address) and, under texture streaming, from
+// frame to frame (levels and allocated levels as mips arrive), which made every streamed texture's
+// shaders miss the cache and run SPIRV-Cross again on the map without changing the generated shader.
 void WriteImageDescriptorFields(CacheKeyWriter& key, const std::uint32_t* words) {
-    key.Value(words[1] >> 8u);
-    key.Value(words[3]);
-    key.Value(words[5]);
+    key.Value(std::bit_cast<std::uint32_t>(RelativeMinimumLod(words)));
 }
 
 // stable: as above for image descriptors; sampler descriptors carry no addresses and stay whole.
@@ -1689,11 +1686,15 @@ void WriteProofs(CacheKeyWriter& key, const std::vector<std::vector<PixelSampler
 // shader: push-constant values (they only fill pushConstantData, which RestorePushConstants rebuilds),
 // vertex-buffer descriptor fields and descriptor addresses. The disk cache uses it so that an entry
 // is found again by the next launch.
-CacheKey ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target, bool stable = false) {
+// module: key the SPIR-V by the identity of these words (ModuleConversionCache) instead of by their
+// contents; the rest of the key is unchanged.
+CacheKey ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target, bool stable = false,
+                       const std::vector<std::uint32_t>* module = nullptr) {
     CacheKeyWriter key;
     // The SPIR-V and descriptor words dominate; reserve them up front so the key is not regrown.
-    key.Reserve(1024 + guest.spirv.Words().size() * sizeof(std::uint32_t) + guest.pushConstants.size() * sizeof(guest.pushConstants[0]) +
+    key.Reserve(1024 + (module ? 0 : guest.spirv.Words().size() * sizeof(std::uint32_t)) + guest.pushConstants.size() * sizeof(guest.pushConstants[0]) +
         guest.vertexAttributes.size() * 64 + guest.bindings.size() * 512);
+    if (module) key.Value(reinterpret_cast<std::uintptr_t>(module));
     key.Value(stage);
     key.Value(target.mslVersion);
     key.Value(target.maxBuffers);
@@ -1738,7 +1739,7 @@ CacheKey ConversionKey(const RecompileResult& guest, ShaderStage stage, const Ta
     key.Value(slots.indirect);
     key.Value(slots.indices);
 
-    WriteWords(key, guest.spirv.Words());
+    if (!module) WriteWords(key, guest.spirv.Words());
     key.Value(guest.runtimeAbiVersion);
     key.Value(guest.bdaAbiVersion);
     key.Value(guest.runtimeImageCount);
@@ -1817,6 +1818,28 @@ BoundedCache<ExactConversion>& ConversionCache() {
     return cache;
 }
 
+// In front of ConversionCache, by the identity of the SPIR-V words (SharedSpirv) instead of their
+// contents: every draw of a shader converts the same shared module again, and copying, hashing and
+// comparing its words was most of a cache hit (about an eighth of the graphics queue thread on a
+// title's map). The entry holds the words, so no other module can take their address and no holder
+// writes them in place while it exists.
+struct ModuleConversion {
+    std::shared_ptr<const std::vector<std::uint32_t>> module;
+    ExactConversion conversion;
+};
+
+BoundedCache<ModuleConversion>& ModuleConversionCache() {
+    static BoundedCache<ModuleConversion> cache(4096, std::size_t{256} << 20);
+    return cache;
+}
+
+void RememberModule(const std::shared_ptr<const std::vector<std::uint32_t>>& module, std::optional<CacheKey>& key, const ExactConversion& conversion) {
+    if (!module || !key) return;
+    const auto bytes = module->size() * sizeof(std::uint32_t) + conversion.pushConstantData.size() + sizeof(ModuleConversion);
+    static_cast<void>(ModuleConversionCache().Insert(std::move(*key), ModuleConversion{module, conversion}, bytes));
+    key.reset();
+}
+
 // By the stable key (what the disk cache uses): a draw whose push constants or descriptor addresses
 // differ from every converted one still finds its shader here instead of reading it from disk
 // again (hundreds of thousands of disk loads per minute on a title's map).
@@ -1850,8 +1873,17 @@ Result Returned(const Result& shader, const RecompileResult& guest, const std::v
 }
 
 Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
+    const auto module = guest.spirv.Share();
+    std::optional<CacheKey> moduleKey;
+    if (module) {
+        moduleKey = ConversionKey(guest, stage, target, false, module.get());
+        if (auto cached = ModuleConversionCache().Find(*moduleKey)) return Returned(*cached->conversion.shader, guest, cached->conversion.pushConstantData);
+    }
     auto key = ConversionKey(guest, stage, target);
-    if (auto cached = ConversionCache().Find(key)) return Returned(*cached->shader, guest, cached->pushConstantData);
+    if (auto cached = ConversionCache().Find(key)) {
+        RememberModule(module, moduleKey, *cached);
+        return Returned(*cached->shader, guest, cached->pushConstantData);
+    }
     // A miss in memory tries the disk before running SPIRV-Cross (most of a warm launch's shader time).
     Result result;
     const auto diskKey = ConversionKey(guest, stage, target, true);
@@ -1863,7 +1895,9 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     if (auto stable = StableConversionCache().Find(diskKey)) {
         Result restored = Returned(**stable, guest, {});
         if (RestorePushConstants(restored, guest, target)) {
-            ConversionCache().Insert(std::move(key), ExactConversion{*stable, restored.pushConstantData}, ResultBytes(restored));
+            ExactConversion conversion{*stable, restored.pushConstantData};
+            RememberModule(module, moduleKey, conversion);
+            ConversionCache().Insert(std::move(key), std::move(conversion), ResultBytes(restored));
             return restored;
         }
     }
@@ -1919,16 +1953,21 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     result.pushConstantData = std::move(pushConstantData);
     const auto bytes = ResultBytes(result);
     StableConversionCache().Insert(diskKey, stored, bytes);
-    ConversionCache().Insert(std::move(key), ExactConversion{stored, result.pushConstantData}, bytes);
+    ExactConversion conversion{stored, result.pushConstantData};
+    RememberModule(module, moduleKey, conversion);
+    ConversionCache().Insert(std::move(key), std::move(conversion), bytes);
     return result;
 }
 
+// A hit in ModuleConversionCache is a hit of the exact cache it stands in front of (its misses go on to
+// that cache and are counted there).
 ConversionCacheStatistics GetConversionCacheStatistics() {
     const auto counters = ConversionCache().Counters();
-    return {counters.hits, counters.misses, counters.entries, counters.bytes};
+    return {counters.hits + ModuleConversionCache().Counters().hits, counters.misses, counters.entries, counters.bytes};
 }
 
 void ClearConversionCache() {
+    ModuleConversionCache().Clear();
     ConversionCache().Clear();
     StableConversionCache().Clear();
     {

@@ -6,6 +6,10 @@
 //   [profile] <samples> <percent> <image>+<offset> [guest=<vaddr>] [symbol]
 // for the hottest addresses and 4 KiB code pages, and per image. Guest code
 // has no symbols: look the guest vaddr up in the unrelinked ELF.
+//
+// ANYPS5_PROFILE_TRIGGER_FILE=<path> holds the N-second window until <path>
+// exists (create it once the scene to profile is on screen) and prints
+// "[profile] window start" when sampling begins.
 
 #if defined(__APPLE__) && defined(__x86_64__)
 
@@ -203,12 +207,18 @@ __attribute__((constructor)) void StartGuestProfiler() {
     action.sa_flags = SA_SIGINFO | SA_RESTART;
     sigemptyset(&action.sa_mask);
     if (::sigaction(SIGPROF, &action, nullptr) != 0) return;
-    g_running.store(true);
-    itimerval timer{};
-    timer.it_interval.tv_usec = 1000;
-    timer.it_value.tv_usec = 1000;
-    ::setitimer(ITIMER_PROF, &timer, nullptr);
-    std::thread([seconds] {
+    const char* trigger = std::getenv("ANYPS5_PROFILE_TRIGGER_FILE");
+    std::string triggerPath = trigger != nullptr ? trigger : "";
+    std::thread([seconds, triggerPath] {
+        while (!triggerPath.empty() && ::access(triggerPath.c_str(), F_OK) != 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        g_running.store(true);
+        itimerval timer{};
+        timer.it_interval.tv_usec = 1000;
+        timer.it_value.tv_usec = 1000;
+        ::setitimer(ITIMER_PROF, &timer, nullptr);
+        if (!triggerPath.empty()) std::fprintf(stderr, "[profile] window start\n");
         std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
         itimerval off{};
         ::setitimer(ITIMER_PROF, &off, nullptr);

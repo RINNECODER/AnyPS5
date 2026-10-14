@@ -472,6 +472,9 @@ public:
     void resize(std::size_t count) { Mutable().resize(count); }
     std::vector<std::uint32_t>::iterator insert(std::vector<std::uint32_t>::const_iterator where, std::initializer_list<std::uint32_t> values) { return Mutable().insert(where, values); }
     friend bool operator==(const SharedSpirv& left, const SharedSpirv& right) { return left.words == right.words || left.Words() == right.Words(); }
+    // The words themselves, for a cache that keys on their identity: while it holds them they stay at
+    // this address and no holder writes them in place (a shared holder copies before its first write).
+    [[nodiscard]] std::shared_ptr<const std::vector<std::uint32_t>> Share() const { return words; }
 
 private:
     static const std::vector<std::uint32_t>& Empty() {

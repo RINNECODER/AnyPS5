@@ -290,7 +290,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
     // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
-    if (timeline.UnknownWritesPending()) { ++drainsBy[0x101]; timeline.Drain(); }
+    if (timeline.UnknownWritesPending()) { ++drainsBy[0x101]; timeline.Drain(0x101); }
     // Find the registered shader first so the dispatch decodes against its AGC header, as the Vulkan
     // Driver::dispatch does (SCRATCH_EN takes its per-lane size from the header).
     const auto programAddress = DecodeComputeProgramAddress(queue.shader);
@@ -395,8 +395,10 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
                 RememberDispatch(stallProgram, std::span<const std::uint32_t, 3>(stallGroups.data(), 3), descriptors));
         }
         id<MTLCommandBuffer> commands = backend->CommandBuffer();
+        MetalBatchedWork batched(*backend, commands);
         pipeline->Encode(commands, descriptors, size, {}, bindings->Residency());
         bindings->EncodeReadbacks(commands);
+        batched.Done();
         if (deferred && !bindings->NeedsSynchronousCompletion()) {
             bindings->CommittedWithoutWaiting();
             timeline.Commit(commands, [bindings, commands, completed = std::move(completed)] {
@@ -437,7 +439,7 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     GpuTiming::Scope timing(GpuTiming::Kind::Draw);
     if (draw == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal draw executor is not configured");
     // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
-    if (timeline.UnknownWritesPending()) { ++drainsBy[0x100]; timeline.Drain(); }
+    if (timeline.UnknownWritesPending()) { ++drainsBy[0x100]; timeline.Drain(0x100); }
     auto parameters = Pm4::ResolveDraw(packet, queue);
     if (!parameters.indirect && (parameters.indexCount == 0 || parameters.instanceCount == 0)) {
         if (BindTrace::Active()) BindTrace::Log("empty draw: count %u instances %u", parameters.indexCount, parameters.instanceCount);
@@ -774,6 +776,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             const auto wait = submission.renderingWaits.at(cursor);
             if (wait == nullptr) throw std::runtime_error("Native Metal rendering wait reservation is null");
             NoteWaitBlocked(submission.queue, 0, true);
+            timeline.Flush();
             lock.unlock();
             try {
                 CheckFailureAndStopping();
@@ -787,6 +790,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         } else if (header == FlipPacketHeader) {
             CompletePriorGpuWorkAndCopyBack(0x106);
             ForgetCachedImages(ForgetReason::Flip);
+            if (FrameProfile::Enabled()) FrameProfile::Shared().Flip();
             if (draw != nullptr && draw->ImageCache() != nullptr && GpuTiming::Enabled()) {
                 static std::uint64_t flips = 0;
                 if (++flips % 16 == 0) {
@@ -800,9 +804,9 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                         static_cast<unsigned long long>(cache.clearsBy[2]), static_cast<unsigned long long>(cache.clearsBy[3]),
                         static_cast<unsigned long long>(cache.clearsBy[4]), static_cast<unsigned long long>(cache.clearsBy[5]),
                         static_cast<unsigned long long>(cache.clearsBy[6]), static_cast<unsigned long long>(cache.clearsBy[7]));
-                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"gpu_timeline\",\"committed\":%llu,\"drains\":%llu,\"reruns\":%llu}\n",
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"gpu_timeline\",\"committed\":%llu,\"drains\":%llu,\"reruns\":%llu,\"command_buffers\":%llu}\n",
                         static_cast<unsigned long long>(timeline.Committed()), static_cast<unsigned long long>(timeline.Drains()),
-                        static_cast<unsigned long long>(deferredReruns));
+                        static_cast<unsigned long long>(deferredReruns), static_cast<unsigned long long>(backend->CommandBuffersCreated()));
                     std::string top;
                     for (std::size_t i = 0; i < drainsBy.size(); ++i) {
                         if (drainsBy[i] == 0) continue;

@@ -130,6 +130,10 @@ struct MetalDriver::Impl {
     std::vector<PendingLabel> pendingLabels;
     // ANYPS5_METAL_DEFER=0 waits for every draw and dispatch as before.
     static bool DeferWork();
+    // Command buffer batching (MetalDevice::SetBatching): on unless ANYPS5_METAL_BATCH=0.
+    static bool BatchCommandBuffers();
+    // Works in the open batch before an idle GPU commits it early (ANYPS5_METAL_BATCH_MIN, 8).
+    static std::uint32_t BatchMinimum();
     // Compute pipelines by recompile result (ExecuteDispatchSynchronously); the weak pointer tells
     // a live result from a new one at a reused address.
     struct ComputePipelineEntry {
