@@ -491,6 +491,35 @@ int native_message_flags(int flags) {
     return native;
 }
 
+#ifdef _WIN32
+bool has_local_address(NativeSocket native) {
+    sockaddr_storage local{};
+    NativeLength local_length = sizeof(local);
+    return ::getsockname(native, reinterpret_cast<sockaddr*>(&local), &local_length) == 0 || WSAGetLastError() != WSAEINVAL;
+}
+
+int wait_for_local_address(int s, const Sock& socket) {
+    if (socket.type == NET_SOCK_STREAM || socket.bound) return 0;
+    const bool named = has_local_address(socket.native->value);
+    if (!named && socket.nonblock) return NET_EAGAIN;
+    const auto deadline = socket.rcv_timeout_us > 0
+        ? std::chrono::steady_clock::now() + std::chrono::microseconds(socket.rcv_timeout_us)
+        : std::chrono::steady_clock::time_point::max();
+    std::unique_lock lk(g_mutex);
+    for (;;) {
+        const auto it = g_socks.find(s);
+        if (it == g_socks.end() || it->second.native != socket.native || it->second.aborted) return 0;
+        if (named || has_local_address(socket.native->value)) {
+            it->second.bound = true;
+            return 0;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return NET_EAGAIN;
+        g_cv.WaitUntil(lk, std::min(deadline, now + std::chrono::milliseconds(10)));
+    }
+}
+#endif
+
 }  // namespace
 
 extern "C" {
@@ -894,6 +923,9 @@ int64_t APS5_VABI sceNetRecv(int s, void* buf, size_t len, int flags) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+#ifdef _WIN32
+    if (const int error = wait_for_local_address(s, socket)) return fail(error);
+#endif
     const GuestArena::HostWrite destination(len == 0 ? nullptr : buf, len);
     if (!destination.Open()) return fail(NET_EFAULT);
     const int native_flags = native_message_flags(flags);
@@ -916,6 +948,9 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+#ifdef _WIN32
+    if (const int error = wait_for_local_address(s, socket)) return fail(error);
+#endif
     const GuestArena::HostWrite destination(len == 0 ? nullptr : buf, len);
     if (!destination.Open()) return fail(NET_EFAULT);
     sockaddr_storage peer{};
@@ -1001,6 +1036,9 @@ int64_t APS5_VABI sceNetRecvmsg(int s, NetMsghdr* msg, int flags) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+#ifdef _WIN32
+    if (const int error = wait_for_local_address(s, socket)) return fail(error);
+#endif
     const bool datagram = socket.type != NET_SOCK_STREAM;
     std::vector<char> buffer;
     try {
