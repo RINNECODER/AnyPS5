@@ -45,6 +45,7 @@ enum class StageInputKind {
     HelperInvocation,
     RasterPrimitive,
     LayerExported,
+    LayerBase,
 };
 
 enum class StageOutputKind {

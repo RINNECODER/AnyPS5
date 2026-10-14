@@ -162,6 +162,7 @@ struct ShaderPixelInputInfo {
     bool psPosZ = false;
     bool psPosW = false;
     bool psFrontFace = false;
+    bool psFrontFaceAllBits = false;
     bool psAncillary = false;
     bool psNoPerspective = false;
     bool psPixelKillEnable = false;

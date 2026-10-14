@@ -1489,6 +1489,25 @@ void verifyHalfWaveReduction() {
     };
     require(reductions(vertex(scan(0xffffffffu, 0x26000000u, 0x83800000u), 32u), spv::OpGroupNonUniformUMin) == 1u, "half-wave reduction: the wave64 vertex UMin scan, whose entry EXEC is every invocation, did not read lane 31 as a subgroup UMin on 32 lanes");
     require(halves(vertex(scan(0x80000000u, 0x24000000u, 0x84000000u), 64u), spv::OpGroupNonUniformSMax, 0x80000000u), "half-wave reduction: the wave64 vertex SMax scan did not read lanes 31 and 63 as reductions of host invocations 0-31 and 32-63 on 64 lanes");
+    const auto domain = [](std::vector<std::uint32_t> code, std::uint32_t subgroupSize) {
+        *std::find(code.begin(), code.end(), 0xf800180fu) = 0xf80008cfu;
+        *std::find(code.begin(), code.end(), 0x7e160f00u) = 0x7e160f01u;
+        RecompileRequest request{};
+        request.shader = {ShaderStage::TessellationEvaluation, 0x10000u, code, 0, {}};
+        request.context.waveSize = 64;
+        request.context.vertex = ShaderVertexStageInfo{};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = subgroupSize;
+        request.target.supportedCapabilities = capabilities;
+        request.target.fragmentShaderBarycentricEnabled = false;
+        request.layout.pushConstantSizeBytes = 128;
+        request.graphics = GraphicsCompileContext{0u, {}, std::nullopt, TessellationConfiguration{3u, 3u, 1u, 2u, 2u}, {}};
+        request.useCache = false;
+        return Recompile(request).spirv;
+    };
+    require(reductions(domain(scan(0xffffffffu, 0x26000000u, 0x83800000u), 32u), spv::OpGroupNonUniformUMin) == 1u, "half-wave reduction: the wave64 domain UMin scan under s_orn2_saveexec_b64 vcc, exec did not read lane 31 as a subgroup UMin on 32 lanes");
+    require(halves(domain(scan(0u, 0x38000000u, 0x88000000u), 64u), spv::OpGroupNonUniformBitwiseOr, 0u), "half-wave reduction: the wave64 domain OR scan did not read lanes 31 and 63 as reductions of host invocations 0-31 and 32-63 on 64 lanes");
     const auto floatScan = [&scan](std::uint32_t identity, std::uint32_t vector, std::uint32_t join) {
         auto code = scan(identity, vector, 0u);
         code[23] = join;
@@ -1530,6 +1549,7 @@ void verifyHalfWaveReduction() {
     auto overwritten = umin;
     overwritten.insert(overwritten.begin() + 17, {0x7ef80500u, 0x7e008514u});
     expectFailure([&] { static_cast<void>(pixel(overwritten, 32u, true)); }, lane63, "half-wave reduction: a scan of window registers read lane 63 after a v_movreld_b32 at a runtime M0 that may overwrite them");
+    require(reductions(domain(divergent, 32u), spv::OpGroupNonUniformUMin) == 1u, "half-wave reduction: domain keys masked inside a divergent branch did not read lane 31 as a subgroup UMin on 32 lanes");
     const char* arithmetic = "v_readlane_b32 of lane 31 of a wave64 half-wave reduction scan needs subgroup arithmetic";
     expectFailure([&] { static_cast<void>(pixel(umin, 32u, false)); }, arithmetic, "half-wave reduction: a device without subgroup arithmetic read lane 31 on 32 lanes");
     expectFailure([&] { static_cast<void>(pixel(umin, 64u, false)); }, arithmetic, "half-wave reduction: a device without subgroup arithmetic read lane 31 on 64 lanes");
@@ -1549,6 +1569,113 @@ void verifyHalfWaveReduction() {
     compared.insert(compared.begin() + 3, {0xd4c50006u, 0x00021680u});
     expectFailure([&] { static_cast<void>(pixel(compared, 32u, true)); }, lane63, "half-wave reduction: a scan selected by a compare under the all-lanes EXEC read lane 63");
     expectFailure([&] { static_cast<void>(pixel(umin, 8u, true)); }, "v_permlanex16_b32 from lanes 16-31 is outside the 8-lane host subgroup", "half-wave reduction: the scan built on an 8-lane subgroup");
+}
+
+// Guest programs of tests/execution/Tessellation.cpp, compiled here without a device: a hull that writes the
+// tessellation factors and a domain shader, both for a three-point triangle patch.
+alignas(256) constexpr std::array<std::uint32_t, 49> TessellationHull{
+    0xd7650000, 0x000100c1, 0xd7660000, 0x000200c1, 0xbf8a0000, 0x7da206f9, 0x81060000, 0xd5480014,
+    0x02151101, 0x362402ff, 0x000000ff, 0x160028a0, 0xd5430015, 0x040224ff, 0x00000060, 0xdbfc0000,
+    0x02000015, 0x162c2890, 0xd5430016, 0x045a24ff, 0x00000030, 0xbf8cc07f, 0xe0781000, 0x02020216,
+    0x7da82881, 0xbe94047e, 0xb06a0060, 0x162602f9, 0x0086066a, 0xd8d80008, 0x06000013, 0xd8dc1008,
+    0x07000013, 0xbf8cc07f, 0x7e300306, 0x7e320306, 0x7e340306, 0x7e360306, 0x34142484, 0xbefe0414,
+    0xe0781000, 0x0403180a, 0x4a162481, 0x16161690, 0x4c1616ff, 0x00008000, 0xe0741000, 0x0202070b,
+    0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint32_t, 30> TessellationDomain{
+    0xf8000941, 0x00000000, 0x34020e84, 0x16020283, 0xe0341000, 0x04030a01, 0xe0341010, 0x04030c01,
+    0xe0341020, 0x04030e01, 0xbf8c3f70, 0x08040af2, 0x08040d02, 0x10201505, 0x3e201906, 0x3e201d02,
+    0x10221705, 0x3e221b06, 0x3e221f02, 0xd5510012, 0x040a0d05, 0x102424ff, 0x40400000, 0x7e260280,
+    0x7e2802f2, 0xf80008cf, 0x14131110, 0xf800020f, 0x14131214, 0xbf810000,
+};
+
+alignas(256) constexpr std::array<std::uint16_t, 9> TessellationIndices{0x100, 0x102, 0x101, 0x010, 0x012, 0x011, 0x520, 0x522, 0x521};
+
+std::vector<std::uint32_t> compileTessellation(ShaderRecompiler::ShaderStage stage, std::span<const std::uint32_t> code, std::uint32_t partitioning, std::uint32_t outputControlPoints = 3u) {
+    using namespace ShaderRecompiler;
+    static constexpr std::array<std::uint32_t, 4> capabilities{spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityGroupNonUniformArithmetic};
+    static const std::array<std::uint32_t, 16> hullUserData{0x1000u};
+    static const std::array<std::uint32_t, 8> domainUserData{};
+    const bool hull = stage == ShaderStage::TessellationControl;
+    const std::array<MemoryRegion, 1> memory{{{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)}}};
+    RecompileRequest request{};
+    request.shader = {stage, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.userDataBaseRegister = hull ? 0u : 8u;
+    request.context.userData = hull ? std::span<const std::uint32_t>(hullUserData) : std::span<const std::uint32_t>(domainUserData);
+    request.context.vertex = ShaderVertexStageInfo{};
+    request.context.memory = memory;
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.target.supportedCapabilities = capabilities;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+    request.graphics = GraphicsCompileContext{hull ? 0u : 8u, {}, std::nullopt, TessellationConfiguration{3u, outputControlPoints, 1u, partitioning, 2u}, {reinterpret_cast<std::uintptr_t>(TessellationIndices.data()), static_cast<std::uint32_t>(TessellationIndices.size()), 2, 1}};
+    request.useCache = false;
+    return Recompile(request).spirv;
+}
+
+struct TessellationFacts {
+    std::vector<std::uint32_t> modes;
+    std::vector<float> minBounds;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> inputComponents;
+};
+
+// Reads the spacing execution modes, the constants every GLSL.std.450 FMin clamps to, and the (row, column)
+// constants of every access chain into an Input variable that has three indices (patch vertex, row, column).
+TessellationFacts readTessellationFacts(const std::vector<std::uint32_t>& spirv) {
+    TessellationFacts facts;
+    std::map<std::uint32_t, std::uint32_t> constants;
+    std::map<std::uint32_t, std::uint32_t> inputVariables;
+    for (int pass = 0; pass < 2; ++pass) {
+        for (std::size_t at = 5; at < spirv.size();) {
+            const auto op = spirv[at] & 0xffffu;
+            const auto count = spirv[at] >> 16u;
+            require(count != 0u && at + count <= spirv.size(), "malformed SPIR-V instruction");
+            if (pass == 0 && op == spv::OpConstant && count == 4u) constants[spirv[at + 2]] = spirv[at + 3];
+            if (pass == 0 && op == spv::OpVariable && spirv[at + 3] == spv::StorageClassInput) inputVariables[spirv[at + 2]] = 1u;
+            if (pass == 1 && op == spv::OpExecutionMode && (spirv[at + 2] == spv::ExecutionModeSpacingEqual || spirv[at + 2] == spv::ExecutionModeSpacingFractionalEven || spirv[at + 2] == spv::ExecutionModeSpacingFractionalOdd)) facts.modes.push_back(spirv[at + 2]);
+            if (pass == 1 && op == spv::OpExtInst && count == 7u && spirv[at + 4] == 37u && constants.count(spirv[at + 6]) != 0u) {
+                float bound;
+                std::memcpy(&bound, &constants.at(spirv[at + 6]), sizeof(bound));
+                facts.minBounds.push_back(bound);
+            }
+            if (pass == 1 && op == spv::OpAccessChain && count == 7u && inputVariables.count(spirv[at + 3]) != 0u && constants.count(spirv[at + 5]) != 0u && constants.count(spirv[at + 6]) != 0u) facts.inputComponents.emplace_back(constants.at(spirv[at + 5]), constants.at(spirv[at + 6]));
+            at += count;
+        }
+    }
+    return facts;
+}
+
+void verifyTessellationPartitioning() {
+    using namespace ShaderRecompiler;
+    const auto contains = [](const auto& values, auto value) { return std::find(values.begin(), values.end(), value) != values.end(); };
+    struct Case { std::uint32_t partitioning; std::uint32_t spacing; float bound; const char* name; };
+    for (const auto& partitioning : {Case{0u, spv::ExecutionModeSpacingEqual, 64.0f, "integer"}, Case{2u, spv::ExecutionModeSpacingFractionalOdd, 63.0f, "fractional-odd"}, Case{3u, spv::ExecutionModeSpacingFractionalEven, 64.0f, "fractional-even"}}) {
+        const auto domain = readTessellationFacts(compileTessellation(ShaderStage::TessellationEvaluation, TessellationDomain, partitioning.partitioning));
+        require(domain.modes.size() == 1u && domain.modes[0] == partitioning.spacing, (std::string(partitioning.name) + " partitioning did not select its spacing execution mode").c_str());
+        const auto hull = readTessellationFacts(compileTessellation(ShaderStage::TessellationControl, TessellationHull, partitioning.partitioning));
+        require(contains(hull.minBounds, partitioning.bound), (std::string(partitioning.name) + " partitioning did not bound the tessellation factors at " + std::to_string(static_cast<int>(partitioning.bound))).c_str());
+        require(!contains(hull.minBounds, partitioning.bound == 64.0f ? 63.0f : 64.0f), (std::string(partitioning.name) + " partitioning also used the other factor bound").c_str());
+    }
+    // A stride of 24 bytes is not a multiple of 16, so a read at a constant past the first control point places
+    // its attribute and component by the offset inside the slot (constant % stride), not by constant % 16. A
+    // single output control point per patch lets the hull read at 32 bytes without a per-invocation vertex term.
+    std::vector<std::uint32_t> narrow(TessellationHull.begin(), TessellationHull.end());
+    narrow[11] = 0x16002898u;  // v_mul_u32_u24 v0, 24, v20: the control point stride
+    narrow[14] = 0x48u;        // three control points of 24 bytes per patch
+    narrow[15] = 0xdbfc0020u;  // ds_read_b128 at byte 32: bytes 8-23 of the second control point
+    narrow[20] = 0x10u;        // one 16-byte output control point per patch
+    narrow[26] = 0xb06a0048u;
+    narrow[31] = 0xd8dc0c06u;
+    const auto slots = readTessellationFacts(compileTessellation(ShaderStage::TessellationControl, narrow, 2u, 1u)).inputComponents;
+    require(slots == std::vector<std::pair<std::uint32_t, std::uint32_t>>{{0u, 2u}, {0u, 3u}, {1u, 0u}, {1u, 1u}}, "a hull read past the first control point of a 24-byte slot did not place its components by the offset inside the slot");
+    for (const std::uint32_t unsupported : {1u, 4u, 7u}) {
+        expectFailure([&] { static_cast<void>(compileTessellation(ShaderStage::TessellationEvaluation, TessellationDomain, unsupported)); }, "unsupported tessellation configuration", "a tessellation partitioning other than integer, fractional-odd and fractional-even was accepted");
+        expectFailure([&] { static_cast<void>(compileTessellation(ShaderStage::TessellationControl, TessellationHull, unsupported)); }, "unsupported tessellation configuration", "a hull of an unsupported tessellation partitioning was accepted");
+    }
 }
 
 void verifyNarrowVertexWave() {
@@ -1816,10 +1943,10 @@ void verifyPixelRequestSerialization() {
     const auto fields = [](const ShaderPixelStageInfo& value) {
         return std::tie(value.interpolatorCount, value.interpolatorSettings, value.wave32, value.inputAddr,
                         value.hasPerspectiveCenterVgpr, value.perspectiveCentroid, value.posX, value.posY,
-                        value.posZ, value.posW, value.frontFace, value.ancillary, value.sampleShading,
+                        value.posZ, value.posW, value.frontFace, value.frontFaceAllBits, value.ancillary, value.sampleShading,
                         value.noPerspective, value.linearCentroid, value.pixelKillEnable, value.depthExportEnable,
                         value.sampleMaskExportEnable, value.earlyZ, value.executeOnNoop, value.conservativeZExport, value.orderedPixelShader,
-                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage);
+                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage, value.layerBase);
     };
     const std::array<std::uint32_t, 1> code{0xbf810000u};
     const std::array<std::uint32_t, 3> userData{0x12345678u, 0xabcdef01u, 0x87654321u};
@@ -1848,6 +1975,7 @@ void verifyPixelRequestSerialization() {
         .posZ = true,
         .posW = true,
         .frontFace = true,
+        .frontFaceAllBits = true,
         .ancillary = true,
         .sampleShading = true,
         .noPerspective = true,
@@ -1863,6 +1991,7 @@ void verifyPixelRequestSerialization() {
     };
     for (std::uint32_t i = 0; i < pixel.interpolatorSettings.size(); ++i) pixel.interpolatorSettings[i] = 0x10101010u + i;
     pixel.alphaToCoverage = true;
+    pixel.layerBase = 0x2a5u;
     const std::array<std::array<std::uint8_t, 8>, 3> mappings{{
         {0x00u, 0xe4u, 0xc6u, 0x1bu, 0xffu, 0x80u, 0x55u, 0xaau},
         {0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u},
@@ -1903,13 +2032,13 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel = ShaderPixelStageInfo{};
     minimal.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRMAAAA=", "new requests did not use serialization version 19");
+    require(requestPrefix(encoded, 8u) == "NVNQQRgAAAA=", "new requests did not use serialization version 24");
     require(serializer.Deserialize(encoded).request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle, "the pixel primitive class did not round-trip");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
     for (std::size_t bytes = 0; bytes < 20u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag or primitive class was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRQAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRkAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{
@@ -3716,6 +3845,7 @@ int main(int argc, char** argv) {
         verifyProgramCounterRelativeData();
         verifyLanesOutsideHostSubgroup();
         verifyHalfWaveReduction();
+        verifyTessellationPartitioning();
         verifyNarrowVertexWave();
         verifySingleLaneVertexWave();
         verifyMeshConfiguration();
