@@ -1,6 +1,7 @@
 #include "prx/libSceAudioOut/src/AudioOut2PadMix.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -93,6 +94,13 @@ int main() {
         Require(out[2] == 1.0f && out[3] == -1.0f, "vibration sum clamps at full scale");
         Require(out[4] == 1.0f && out[6] == 0.0f, "second frame");
         for (std::uint32_t index = 8; index < frames * AUDIO_OUT2_PAD_CHANNELS; index++) Require(out[index] == 0.0f, "silent frame stays silent");
+    }
+
+    {
+        std::array<float, AUDIO_OUT2_PAD_CHANNELS> out = {std::nanf(""), INFINITY, -INFINITY, 0.25f};
+        AudioOut2FinishPadMix(out.data(), 1);
+        Require(out[0] == 0.0f, "a NaN sample plays as silence");
+        Require(out[1] == 1.0f && out[2] == -1.0f && out[3] == 0.25f, "other samples clamp at full scale");
     }
 
     {

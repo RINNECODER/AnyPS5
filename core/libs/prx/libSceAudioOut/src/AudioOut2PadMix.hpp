@@ -28,6 +28,7 @@ struct AudioOut2PadLayout {
 AudioOut2Route AudioOut2RouteForPort(std::uint16_t type, std::uint32_t channels);
 bool AudioOut2IsPadAudioDevice(const char* name);
 void AudioOut2AccumulatePadFrame(AudioOut2Route route, const float* in, std::uint32_t channels, const float* volume, float* pad);
+float AudioOut2ClampSample(float sample);
 void AudioOut2FinishPadMix(float* out, std::uint32_t frames);
 std::array<std::uint8_t, 2> AudioOut2RumbleFromPadFrames(const float* pad, std::uint32_t frames);
 AudioOut2PadLayout AudioOut2PadLayoutForDriver(const char* driver);

@@ -160,6 +160,23 @@ void TestRewrittenBufferRepeats() {
     RequirePlayed(played, {&first, &second});
 }
 
+void TestNanSamplesPlayAsSilence() {
+    auto data = Grain(0.01f);
+    auto expected = data;
+    for (std::size_t sample = 1; sample + 1 < data.size(); sample += 4) {
+        data[sample] = std::nanf("");
+        expected[sample] = 0.0f;
+    }
+    const auto second = Grain(0.02f);
+    const auto played = Play([&](AudioOut2ContextHandle context, AudioOut2PortHandle port) {
+        SetData(port, data.data());
+        Require(sceAudioOut2ContextPush(context, 1) == 0);
+        SetData(port, second.data());
+        Require(sceAudioOut2ContextPush(context, 1) == 0);
+    });
+    RequirePlayed(played, {&expected, &second});
+}
+
 }
 
 int main() {
@@ -168,5 +185,6 @@ int main() {
     TestBurstThenGapKeepsEveryBuffer();
     TestAdvancingPortWithoutNewBufferPlaysSilence();
     TestRewrittenBufferRepeats();
+    TestNanSamplesPlayAsSilence();
     return 0;
 }

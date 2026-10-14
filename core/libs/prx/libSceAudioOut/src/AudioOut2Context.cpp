@@ -210,7 +210,7 @@ static void Render(AudioOut2Context& context, const AudioOut2Grain& grain) {
     std::fill(context.mix.begin(), context.mix.end(), 0.0f);
     AudioOut2MixPorts(context, grain, context.mix.data(), pad, context.grain);
     for (float& sample : context.mix) {
-        sample = std::clamp(sample * MASTER_GAIN, -1.0f, 1.0f);
+        sample = AudioOut2ClampSample(sample * MASTER_GAIN);
         if (AudioOut2TraceEnabled()) context.summaryPeak = std::max(context.summaryPeak, std::abs(sample));
     }
     if (pad != nullptr) {

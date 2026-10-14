@@ -33,9 +33,13 @@ void AudioOut2AccumulatePadFrame(AudioOut2Route route, const float* in, std::uin
     pad[right] += in[rightSource] * volume[rightSource];
 }
 
+float AudioOut2ClampSample(float sample) {
+    return std::isnan(sample) ? 0.0f : std::clamp(sample, -1.0f, 1.0f);
+}
+
 void AudioOut2FinishPadMix(float* out, std::uint32_t frames) {
     const auto samples = static_cast<std::size_t>(frames) * AUDIO_OUT2_PAD_CHANNELS;
-    for (std::size_t index = 0; index < samples; index++) out[index] = std::clamp(out[index], -1.0f, 1.0f);
+    for (std::size_t index = 0; index < samples; index++) out[index] = AudioOut2ClampSample(out[index]);
 }
 
 std::array<std::uint8_t, 2> AudioOut2RumbleFromPadFrames(const float* pad, std::uint32_t frames) {
