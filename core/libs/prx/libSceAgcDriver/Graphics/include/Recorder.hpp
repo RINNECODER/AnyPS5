@@ -96,6 +96,7 @@ public:
     enum class SnapshotUse : std::uint8_t { Storage, Vertex, Index16, Index32, Index16Restart, Index32Restart };
     static constexpr std::size_t DrawSnapshotBudget = std::size_t{1024} << 20u;
     static constexpr std::size_t DrawSnapshotEntries = 1024;
+    static constexpr std::size_t UnwrittenSnapshotEntries = 4096;
     static constexpr std::size_t DrawInputBudget = std::size_t{1024} << 20u;
     static constexpr std::size_t DrawInputEntries = 16384;
     std::shared_ptr<Buffer> UnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp);
@@ -820,10 +821,12 @@ private:
     std::map<DrawSnapshotKey, DrawSnapshot> drawSnapshots;
     struct UnwrittenSnapshot {
         std::size_t bytes;
-        std::array<std::uint64_t, 3> stamp;
         std::shared_ptr<Buffer> buffer;
     };
     std::unordered_map<std::uint64_t, UnwrittenSnapshot> unwrittenSnapshots;
+    std::array<std::uint64_t, 3> unwrittenStamp{};
+    std::size_t unwrittenBytes = 0;
+    void retireUnwrittenSnapshots(const std::array<std::uint64_t, 3>& stamp);
     std::array<DrawSnapshotPool, 2> drawSnapshotPools;
     void eraseDrawSnapshot(std::map<DrawSnapshotKey, DrawSnapshot>::iterator entry);
     bool refreshDrawSnapshot(DrawSnapshot& entry, std::uint64_t address, std::size_t bytes);

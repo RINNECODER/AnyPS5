@@ -2482,22 +2482,29 @@ void Recorder::eraseDrawSnapshot(std::map<DrawSnapshotKey, DrawSnapshot>::iterat
     drawSnapshots.erase(entry);
 }
 
+void Recorder::retireUnwrittenSnapshots(const std::array<std::uint64_t, 3>& stamp) {
+    if (stamp == unwrittenStamp) return;
+    unwrittenSnapshots.clear();
+    unwrittenBytes = 0;
+    unwrittenStamp = stamp;
+}
+
 std::shared_ptr<Buffer> Recorder::UnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp) {
+    retireUnwrittenSnapshots(stamp);
     const auto found = unwrittenSnapshots.find(address);
-    if (found == unwrittenSnapshots.end() || found->second.bytes != bytes || found->second.stamp != stamp) return {};
+    if (found == unwrittenSnapshots.end() || found->second.bytes != bytes) return {};
     return found->second.buffer;
 }
 
 void Recorder::NoteUnwrittenDrawSnapshot(std::uint64_t address, std::size_t bytes, const std::array<std::uint64_t, 3>& stamp, std::shared_ptr<Buffer> buffer) {
-    constexpr std::size_t Limit = 4096;
-    if (unwrittenSnapshots.size() >= Limit) {
-        bool drop = false;
-        for (auto it = unwrittenSnapshots.begin(); it != unwrittenSnapshots.end();) {
-            drop = !drop;
-            it = drop ? unwrittenSnapshots.erase(it) : std::next(it);
-        }
+    retireUnwrittenSnapshots(stamp);
+    if (const auto found = unwrittenSnapshots.find(address); found != unwrittenSnapshots.end()) {
+        unwrittenBytes -= found->second.bytes;
+        unwrittenSnapshots.erase(found);
     }
-    unwrittenSnapshots[address] = {bytes, stamp, std::move(buffer)};
+    if (unwrittenSnapshots.size() >= UnwrittenSnapshotEntries || bytes > DrawSnapshotBudget - unwrittenBytes) return;
+    unwrittenSnapshots.emplace(address, UnwrittenSnapshot{bytes, std::move(buffer)});
+    unwrittenBytes += bytes;
 }
 
 std::shared_ptr<Buffer> Recorder::ReusableDrawSnapshot(std::uint64_t address, std::size_t bytes, SnapshotUse use, std::uint32_t* derived, std::uint64_t generation) {

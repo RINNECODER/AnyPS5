@@ -2264,6 +2264,24 @@ void drawSnapshotEvictionTests(const Device& device) {
     Require(cache.ReusableDrawSnapshot(address, 16) == nullptr && cache.ReusableDrawSnapshot(address, 16) == nullptr, "a snapshot outlived a CPU store");
 }
 
+void unwrittenSnapshotTests(const Device& device) {
+    Recorder cache(device.GetContext());
+    const auto buffer = std::make_shared<Buffer>(device.GetContext(), 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    constexpr std::uint64_t address = 0x10000000;
+    const std::array<std::uint64_t, 3> stamp{1, 1, 1};
+    const std::array<std::uint64_t, 3> next{1, 2, 1};
+    cache.NoteUnwrittenDrawSnapshot(address, 16, stamp, buffer);
+    Require(cache.UnwrittenDrawSnapshot(address, 16, stamp) == buffer, "a noted unwritten snapshot is not found under its stamp");
+    cache.NoteUnwrittenDrawSnapshot(address + 8192, Recorder::DrawSnapshotBudget, stamp, buffer);
+    Require(cache.UnwrittenDrawSnapshot(address + 8192, Recorder::DrawSnapshotBudget, stamp) == nullptr, "unwritten snapshots grew past the byte budget");
+    cache.NoteUnwrittenDrawSnapshot(address, Recorder::DrawSnapshotBudget, stamp, buffer);
+    Require(cache.UnwrittenDrawSnapshot(address, Recorder::DrawSnapshotBudget, stamp) == buffer, "replacing an unwritten snapshot kept the bytes of the old one");
+    Require(cache.UnwrittenDrawSnapshot(address, Recorder::DrawSnapshotBudget, next) == nullptr && cache.UnwrittenDrawSnapshot(address, Recorder::DrawSnapshotBudget, stamp) == nullptr, "an unwritten snapshot outlived a newer stamp");
+    for (std::size_t entry = 0; entry < Recorder::UnwrittenSnapshotEntries; ++entry) cache.NoteUnwrittenDrawSnapshot(address + entry * 16, 1, next, buffer);
+    cache.NoteUnwrittenDrawSnapshot(address + Recorder::UnwrittenSnapshotEntries * 16, 1, next, buffer);
+    Require(cache.UnwrittenDrawSnapshot(address, 1, next) == buffer && cache.UnwrittenDrawSnapshot(address + Recorder::UnwrittenSnapshotEntries * 16, 1, next) == nullptr, "unwritten snapshots grew past the entry cap");
+}
+
 void drawInputReuseTests(const Device& device, Recorder& recorder) {
     using namespace AgcDriver::GuestMemory;
     using Use = Recorder::SnapshotUse;
@@ -5738,6 +5756,7 @@ int main(int argc, char** argv) {
         drawSnapshotReuseTests(device, recorder);
         drawDescriptorWriteTests(device, recorder);
         drawSnapshotEvictionTests(device);
+        unwrittenSnapshotTests(device);
         drawInputReuseTests(device, recorder);
         drawInputInPlaceTests(device, recorder);
         RunResidentPresentTests(device.GetContext());
