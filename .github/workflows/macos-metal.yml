@@ -114,7 +114,11 @@ jobs:
       - name: Build
         run: cmake --build "$BUILD_DIR" --parallel
       - name: Test
-        run: ctest --test-dir "$BUILD_DIR" $CTEST_ARGS
+        run: ctest --test-dir "$BUILD_DIR" $CTEST_ARGS --output-junit "$BUILD_DIR/ctest.xml"
+      - name: Fail if a test was skipped
+        # anyps5_metal_presentation_replay exits 77 (CMake: Skipped) when the runner has no console
+        # session or a locked screen. CI treats that as a failure; local runs keep the skip.
+        run: python3 tools/ci/fail_on_skips.py "$BUILD_DIR/ctest.xml"
 
   # Rosetta direct execution (docs/design/rosetta-direct-execution.md): the system
   # libraries built as x86_64 Mach-O libs/<name>.prx. Compile coverage plus the x86_64
