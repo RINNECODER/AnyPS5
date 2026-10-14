@@ -33,6 +33,12 @@ class StubgenTests(unittest.TestCase):
             with self.subTest(spelling=spelling):
                 self.assertEqual(stubgen.generate(spelling, nids, {}), expected)
 
+    def test_named_stub_reports_its_function_name(self):
+        code = stubgen.generate("libSceAmpr", ["tNn5WBkta60", "AAAAAAAAAAA"], {"tNn5WBkta60": "sceAmprCommandBufferNop"})[0]
+        named = code.split("sceAmprCommandBufferNop(void) {\n", 1)[1].split("\n", 1)[0]
+        self.assertEqual(named, "    NotImplemented_nid_no_patch(__func__);")
+        self.assertIn('NotImplemented_nid_no_patch("AAAAAAAAAAA");', code)
+
 
 if __name__ == "__main__":
     unittest.main()
