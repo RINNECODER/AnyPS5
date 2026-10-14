@@ -395,8 +395,10 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
                 RememberDispatch(stallProgram, std::span<const std::uint32_t, 3>(stallGroups.data(), 3), descriptors));
         }
         id<MTLCommandBuffer> commands = backend->CommandBuffer();
+        MetalBatchedWork batched(*backend, commands);
         pipeline->Encode(commands, descriptors, size, {}, bindings->Residency());
         bindings->EncodeReadbacks(commands);
+        batched.Done();
         if (deferred && !bindings->NeedsSynchronousCompletion()) {
             bindings->CommittedWithoutWaiting();
             timeline.Commit(commands, [bindings, commands, completed = std::move(completed)] {
@@ -774,6 +776,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             const auto wait = submission.renderingWaits.at(cursor);
             if (wait == nullptr) throw std::runtime_error("Native Metal rendering wait reservation is null");
             NoteWaitBlocked(submission.queue, 0, true);
+            timeline.Flush();
             lock.unlock();
             try {
                 CheckFailureAndStopping();
@@ -801,9 +804,9 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                         static_cast<unsigned long long>(cache.clearsBy[2]), static_cast<unsigned long long>(cache.clearsBy[3]),
                         static_cast<unsigned long long>(cache.clearsBy[4]), static_cast<unsigned long long>(cache.clearsBy[5]),
                         static_cast<unsigned long long>(cache.clearsBy[6]), static_cast<unsigned long long>(cache.clearsBy[7]));
-                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"gpu_timeline\",\"committed\":%llu,\"drains\":%llu,\"reruns\":%llu}\n",
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"gpu_timeline\",\"committed\":%llu,\"drains\":%llu,\"reruns\":%llu,\"command_buffers\":%llu}\n",
                         static_cast<unsigned long long>(timeline.Committed()), static_cast<unsigned long long>(timeline.Drains()),
-                        static_cast<unsigned long long>(deferredReruns));
+                        static_cast<unsigned long long>(deferredReruns), static_cast<unsigned long long>(backend->CommandBuffersCreated()));
                     std::string top;
                     for (std::size_t i = 0; i < drainsBy.size(); ++i) {
                         if (drainsBy[i] == 0) continue;

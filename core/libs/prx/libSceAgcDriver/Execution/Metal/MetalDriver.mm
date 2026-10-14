@@ -151,6 +151,10 @@ void MetalDriver::Configure(void* device, void* library,
     impl->presentationBackend = std::move(presentationBackend);
     impl->presentation = std::move(presentation);
     impl->draw = std::move(draw);
+    if (Impl::BatchCommandBuffers()) {
+        impl->backend->SetBatching(true);
+        impl->timeline.SetBatchDevice(impl->backend.get(), Impl::BatchMinimum());
+    }
     // A worker with nothing to execute still retires submissions as their GPU work completes.
     impl->timeline.SetCompletionSignal([impl = impl.get()] {
         impl->progress.fetch_add(1, std::memory_order_relaxed);
@@ -665,6 +669,24 @@ void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes
     }
 }
 
+bool MetalDriver::Impl::BatchCommandBuffers() {
+    static const bool batch = [] {
+        const char* value = std::getenv("ANYPS5_METAL_BATCH");
+        return value == nullptr || *value != '0';
+    }();
+    return batch;
+}
+
+std::uint32_t MetalDriver::Impl::BatchMinimum() {
+    static const std::uint32_t minimum = [] {
+        const char* value = std::getenv("ANYPS5_METAL_BATCH_MIN");
+        if (value == nullptr || *value == '\0') return std::uint32_t{8};
+        const auto parsed = std::strtoul(value, nullptr, 10);
+        return parsed == 0 ? std::numeric_limits<std::uint32_t>::max() : static_cast<std::uint32_t>(std::min<unsigned long>(parsed, 1u << 20));
+    }();
+    return minimum;
+}
+
 bool MetalDriver::Impl::DeferWork() {
     static const bool defer = [] {
         const char* value = std::getenv("ANYPS5_METAL_DEFER");
@@ -789,6 +811,8 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                     // GPU work may still be running: retire the submission (and so let the guest
                     // submit past it, MAX_QUEUED) when it completed, while this worker goes on.
                     std::lock_guard gpuLock(gpuMutex);
+                    // The GPU runs the submission's batched work while this worker waits or goes on.
+                    timeline.Flush();
                     if (!timeline.Empty()) {
                         retireLater = true;
                         auto retired = std::make_shared<Submission>(std::move(submission));
@@ -1032,6 +1056,7 @@ void MetalDriver::Impl::Stop() {
     for (auto& [queue, worker] : workers) { static_cast<void>(queue); if (worker.thread.joinable()) worker.thread.join(); }
     {
         std::lock_guard gpuLock(gpuMutex);
+        timeline.SetBatchDevice(nullptr);
         draw.reset();
         presentation.reset();
         backend.reset();

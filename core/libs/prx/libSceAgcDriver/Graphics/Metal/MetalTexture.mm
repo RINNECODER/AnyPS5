@@ -515,9 +515,10 @@ void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recy
     if (recycleGuest) MetalBufferPool::Shared().GiveWhenCompleted(guest, commands);
     encodeTransfer(commands, guest, offset, linear, 0, false);
     encodeLinearCopy(commands, linear, true);
-    // The draw or dispatch that samples the texture is committed later on the same queue, so it runs
-    // after this; the command buffer keeps the staging buffers alive until then.
-    [commands commit];
+    // The draw or dispatch that samples the texture is committed later on the same queue (or is
+    // encoded after this into the same, batched, command buffer), so it runs after this; the
+    // command buffer keeps the staging buffers alive until then.
+    backend.Submit(commands);
     pendingUpload = commands;
 }
 
@@ -575,7 +576,7 @@ bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> g
 
 bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset, Subresources part) const {
     if (!inPlace(guest, offset)) return false;
-    // Uploads commit when they are encoded, so this command buffer runs after them on the queue.
+    // Uploads are committed, or encoded into the same batched command buffer, before this runs.
     // The retile reads only the elements the blit wrote, so the recycled linear buffer needs no clearing.
     auto linear = backend.TransientBuffer(bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers), commands);
     encodeLinearCopy(commands, linear, false, part);

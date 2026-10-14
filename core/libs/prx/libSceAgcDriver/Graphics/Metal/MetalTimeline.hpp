@@ -38,6 +38,12 @@ template <typename Converted>
 // before a flip, and at the end of every submission, so the guest sees exactly the order and
 // results the synchronous path gave it.
 //
+// With a batching device (SetBatchDevice), the work shares one command buffer per run instead of
+// one each (MetalDevice::SetBatching): Commit leaves the open batch uncommitted, and the batch
+// commits when the drain needs it, when the owner calls Flush (at the end of a submission and
+// before it blocks), or as soon as the GPU has finished the previous batch, so it never idles
+// waiting for the CPU. Completions still run per work, in commit order.
+//
 // A completion that throws stops the drain: the remaining completions are dropped (their
 // command buffers were already waited for) and the exception propagates, as the synchronous
 // wait would have thrown it from the work's own packet.
@@ -64,13 +70,31 @@ public:
         std::vector<std::pair<std::uint64_t, std::uint64_t>> written = {}) {
         if (commands == nil) throw std::invalid_argument("Metal timeline requires a command buffer");
         if (commands.status < MTLCommandBufferStatusCommitted) {
-            if (auto signal = completionSignal) [commands addCompletedHandler:^(id<MTLCommandBuffer>) { (*signal)(); }];
-            [commands commit];
+            // One signal per command buffer: a batch carries many works.
+            if (auto signal = completionSignal; signal && commands != LastCommitted()) {
+                [commands addCompletedHandler:^(id<MTLCommandBuffer>) { (*signal)(); }];
+            }
+            if (batch == nullptr || !batch->OpenBatch(commands)) [commands commit];
         }
         pending.push_back({commands, std::move(complete), GpuTiming::Current()});
         unknown = unknown || unknownWrites;
         writes.insert(writes.end(), written.begin(), written.end());
         ++committed;
+        if (batch != nullptr && batch->GpuStarved(batchMinimum)) batch->Flush();
+    }
+
+    // Shares one command buffer among the work committed here while `device` batches; nullptr
+    // stops. `minimum` works must be in the open batch before an idle GPU commits it early.
+    void SetBatchDevice(const MetalDevice* device, std::uint32_t minimum = 8) {
+        if (batch != nullptr) batch->Flush();
+        batch = device;
+        batchMinimum = minimum;
+    }
+
+    // Commits the open batch without waiting, so the GPU runs it (and Reap can retire it) while
+    // the owner is idle or blocked.
+    void Flush() {
+        if (batch != nullptr) batch->Flush();
     }
 
     // Called (on a Metal thread) whenever a command buffer committed here completes, so an idle
@@ -136,6 +160,7 @@ public:
     // Waits for every pending command buffer, then runs the completions in commit order.
     // `cause` says why (FrameProfile.hpp lists the codes) for ANYPS5_METAL_GPU_TIMING.
     void Drain(std::uint32_t cause = 0x10f) {
+        Flush();
         if (pending.empty()) return;
         ++drains;
         ++epoch;
@@ -194,6 +219,8 @@ private:
     std::uint64_t drains = 0;
     std::uint64_t epoch = 0;
     std::shared_ptr<const std::function<void()>> completionSignal;
+    const MetalDevice* batch = nullptr;
+    std::uint32_t batchMinimum = 8;
 };
 
 }

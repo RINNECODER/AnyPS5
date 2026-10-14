@@ -99,11 +99,17 @@ id<MTLBuffer> MetalDevice::TransientBuffer(std::size_t bytes, id<MTLCommandBuffe
 }
 
 id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
+    if (batching && open != nil && open.status == MTLCommandBufferStatusNotEnqueued) {
+        ++openUses;
+        return open;
+    }
     id<MTLCommandBuffer> commands = [queue commandBuffer];
     if (commands == nil) {
         throw MetalGpuExecutionError("Metal command buffer creation failed");
     }
+    created.fetch_add(1, std::memory_order_relaxed);
     if (GpuTiming::ProfileTags()) {
+        // With batching the tag is the first work's: the command buffer's GPU time is the batch's.
         const auto tag = GpuTiming::Tag() != 0 ? GpuTiming::Tag() : GpuTiming::MakeTag(GpuTiming::Current(), 0);
         [commands addCompletedHandler:^(id<MTLCommandBuffer> done) { GpuTiming::RecordTag(tag, done.GPUEndTime - done.GPUStartTime); }];
     }
@@ -114,7 +120,50 @@ id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
             FrameProfile::Shared().Completed(kind, tag, done.GPUStartTime, done.GPUEndTime);
         }];
     }
+    if (batching) {
+        // The previous batch, if any, was committed (or enqueued) by its last user.
+        if (open != nil) flushed = open;
+        open = commands;
+        openUses = 1;
+    }
     return commands;
+}
+
+MetalBatchedWork::~MetalBatchedWork() {
+    if (done || !backend.OpenBatch(commands)) return;
+    try {
+        backend.Wait(commands);
+    } catch (...) {
+        // The work is already failing or skipped; the next wait on the queue reports a GPU error.
+    }
+}
+
+void MetalDevice::SetBatching(bool on) {
+    if (!on) Flush();
+    batching = on;
+}
+
+bool MetalDevice::OpenBatch(id<MTLCommandBuffer> commands) const {
+    return batching && commands != nil && commands == open && open.status < MTLCommandBufferStatusCommitted;
+}
+
+void MetalDevice::Flush() const {
+    if (open == nil) return;
+    if (open.status < MTLCommandBufferStatusCommitted) [open commit];
+    flushed = open;
+    open = nil;
+    openUses = 0;
+}
+
+void MetalDevice::Submit(id<MTLCommandBuffer> commands) const {
+    validateCommands(commands);
+    if (OpenBatch(commands)) return;
+    if (commands.status < MTLCommandBufferStatusCommitted) [commands commit];
+}
+
+bool MetalDevice::GpuStarved(std::uint32_t minimum) const {
+    if (!batching || open == nil || openUses < minimum || open.status >= MTLCommandBufferStatusCommitted) return false;
+    return flushed == nil || flushed.status >= MTLCommandBufferStatusCompleted;
 }
 
 void MetalDevice::validateCommands(id<MTLCommandBuffer> commands) const {
@@ -217,6 +266,7 @@ void MetalDevice::Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArra
 
 void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
     validateCommands(commands);
+    if (OpenBatch(commands)) Flush();
     if (commands.status < MTLCommandBufferStatusCommitted) {
         [commands commit];
     }
