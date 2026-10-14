@@ -1344,14 +1344,14 @@ void RunAac(Instance& instance, const JobHeader& job, const AjmBuffer* inputs, c
             break;
         }
         // Before the first frame is decoded the geometry is unknown: bound it from below by the ADTS channel
-        // configuration (one channel for raw input) and one AAC-LC frame, so an output that cannot hold even that
+        // configuration (the instance's configured count for raw input) and one AAC-LC frame, so an output that cannot hold even that
         // is refused before FFmpeg consumes the access unit.
         std::size_t roomChannels = instance.aacChannels;
         std::size_t roomSamples = instance.aacFrameSamples;
         if (instance.aacDelayFrames == 0) {
             if (roomChannels == 0) {
                 AdtsHeader header{};
-                roomChannels = !raw && ParseAdtsHeader(data, header) ? header.channelConfig : 1;
+                roomChannels = raw ? AacRawChannels(instance) : ParseAdtsHeader(data, header) ? header.channelConfig : 1;
             }
             if (roomSamples == 0) roomSamples = AAC_LC_FRAME_SAMPLES;
         }
