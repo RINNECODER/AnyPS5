@@ -27,6 +27,7 @@ int APS5_VABI sceKernelChmod_nid_postfix(const char*, unsigned short);
 int APS5_VABI sceKernelFchmod(int, unsigned short);
 int APS5_VABI fchmod_nid_postfix(int, int);
 int APS5_VABI chmod_nid_postfix(const char*, int);
+int APS5_VABI chflags_nid_postfix(const char*, std::uint64_t);
 int APS5_VABI futimes_nid_postfix(int, const KernelTimeval*);
 int APS5_VABI sceKernelFutimes(int, const KernelTimeval*);
 int APS5_VABI socket_nid_postfix(int, int, int);
@@ -92,6 +93,15 @@ static void Check(bool value, int line) {
     }
 }
 #define Require(value) Check((value), __LINE__)
+
+static bool ChflagsThrows(const std::filesystem::path& path, std::uint64_t flags, const char* names) {
+    try {
+        chflags_nid_postfix(path.string().c_str(), flags);
+    } catch (const std::runtime_error& error) {
+        return std::strstr(error.what(), names) != nullptr;
+    }
+    return false;
+}
 
 static void TestParentTraversal() {
     const auto root = std::filesystem::path("anyps5-parent-test-" +
@@ -210,6 +220,8 @@ int main() {
     Require(chmod_nid_postfix("", 0600) == -1 && *__error_nid_postfix() == 2);
     Require(chmod_nid_postfix("anyps5_missing_chmod_path", 0600) == -1 && *__error_nid_postfix() == 2);
     Require(sceKernelChmod_nid_postfix("anyps5_missing_chmod_path", 0600) == static_cast<int>(0x80020002u));
+    Require(sceKernelStat("anyps5_missing_chmod_path", nullptr) == static_cast<int>(0x80020002u));
+    Require(sceKernelStat(".", nullptr) == static_cast<int>(0x8002000eu));
     Require(sceKernelDebugOutText(-1, "text") == static_cast<int>(0x80020016u));
     std::uint64_t throttling[4] = {1, 2, 3, 4};
     Require(sceKernelWriteThrottlingStatus(throttling) == 0);
@@ -329,6 +341,20 @@ int main() {
     Require(mkdir_nid_postfix(nullptr, 0700) == -1 && *__error_nid_postfix() == 14);
     const auto file = root / "file.txt";
     { std::ofstream stream(file); stream << "retained until removal"; }
+    Require(chflags_nid_postfix(nullptr, 0) == -1 && *__error_nid_postfix() == 14);
+    Require(chflags_nid_postfix("", 0) == -1 && *__error_nid_postfix() == 2);
+    Require(chflags_nid_postfix((root / "missing").string().c_str(), 0) == -1 && *__error_nid_postfix() == 2);
+    Require(chflags_nid_postfix((root / "missing").string().c_str(), ~0ULL) == -1 && *__error_nid_postfix() == 2);
+    Require(chflags_nid_postfix((file / "child").string().c_str(), 0) == -1 && *__error_nid_postfix() == 20);
+    Require(chflags_nid_postfix((file.string() + "/").c_str(), 0) == -1 && *__error_nid_postfix() == 20);
+    Require(chflags_nid_postfix(file.string().c_str(), 0) == 0);
+    Require(chflags_nid_postfix(root.string().c_str(), 0) == 0);
+    Require(chflags_nid_postfix(file.string().c_str(), 0x20) == -1 && *__error_nid_postfix() == 45);
+    Require(chflags_nid_postfix(file.string().c_str(), 1ULL << 32) == -1 && *__error_nid_postfix() == 45);
+    Require(chflags_nid_postfix(file.string().c_str(), ~0ULL) == -1 && *__error_nid_postfix() == 45);
+    Require(chflags_nid_postfix(file.string().c_str(), 0x200000) == -1 && *__error_nid_postfix() == 1);
+    Require(ChflagsThrows(file, 0x2, "UF_IMMUTABLE"));
+    Require(ChflagsThrows(file, 0x1000 | 0x40000, "UF_READONLY|SF_APPEND"));
     const auto held = root / "held.txt";
     const auto heldName = held.string();
     { std::ofstream stream(held); stream << "held"; }

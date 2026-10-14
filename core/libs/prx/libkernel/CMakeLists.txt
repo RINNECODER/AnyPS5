@@ -49,6 +49,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Spinlock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Socket/src/Socket.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Socket/src/Udp.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Socket/src/SocketOptions.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Socket/src/AddressConversion.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/EventFlag/src/EventFlag.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/Module.cpp
@@ -1010,6 +1011,16 @@ if(BUILD_TESTING)
     target_include_directories(guest_socket_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
     configure_windows_unwind(guest_socket_error_tests)
     add_test(NAME guest_socket_error COMMAND guest_socket_error_tests)
+    add_test_executable(guest_socket_options_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketOptions.cpp)
+    target_include_directories(guest_socket_options_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_socket_options_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_socket_options_tests)
+    add_test(NAME guest_socket_options COMMAND guest_socket_options_tests)
+    set_tests_properties(guest_socket_options PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_socket_options PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_udp_tests ${LIBS_INCLUDE_DIR}/tests/GuestUdp.cpp)
     target_include_directories(guest_udp_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_udp_tests PRIVATE libkernel libc)
@@ -1038,6 +1049,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_poll PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_poll PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_select_wait_tests ${LIBS_INCLUDE_DIR}/tests/GuestSelectWait.cpp)
+    target_include_directories(guest_select_wait_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_select_wait_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_select_wait_tests)
+    add_test(NAME guest_select_wait COMMAND guest_select_wait_tests)
+    set_tests_properties(guest_select_wait PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_select_wait PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     if(NOT WIN32)
@@ -1150,6 +1171,35 @@ if(BUILD_TESTING)
         set_tests_properties(guest_memory PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(guest_flexible_memory_budget_tests ${LIBS_INCLUDE_DIR}/tests/GuestFlexibleMemoryBudget.cpp)
+    target_include_directories(guest_flexible_memory_budget_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_flexible_memory_budget_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_flexible_memory_budget_tests)
+    add_library(guest_flexible_memory_module SHARED ${LIBS_INCLUDE_DIR}/tests/GuestFlexibleMemoryModule.cpp)
+    set_target_properties(guest_flexible_memory_module PROPERTIES PREFIX "" SUFFIX ".guest.prx")
+    add_dependencies(guest_flexible_memory_budget_tests guest_flexible_memory_module)
+    target_compile_definitions(guest_flexible_memory_budget_tests PRIVATE GUEST_FLEXIBLE_MEMORY_MODULE="$<TARGET_FILE:guest_flexible_memory_module>")
+    foreach(flexibleMemoryCase IN ITEMS declared:838860800 limited:16777216 none:0 missing:0 invalid:true)
+        string(REPLACE ":" ";" flexibleMemoryCase ${flexibleMemoryCase})
+        list(GET flexibleMemoryCase 0 flexibleMemoryName)
+        list(GET flexibleMemoryCase 1 flexibleMemorySize)
+        set(flexibleMemoryRun ${CMAKE_CURRENT_BINARY_DIR}/guest_flexible_memory_${flexibleMemoryName})
+        file(MAKE_DIRECTORY ${flexibleMemoryRun})
+        if(NOT flexibleMemoryName STREQUAL "missing")
+            set(flexibleMemoryField "")
+            if(NOT flexibleMemoryName STREQUAL "none")
+                set(flexibleMemoryField ",\"kernel\":{\"flexibleMemorySize\":${flexibleMemorySize}}")
+            endif()
+            file(WRITE ${flexibleMemoryRun}/app0/sce_sys/param.json
+                "{\"titleId\":\"PPSA00000\",\"localizedParameters\":{\"en-US\":{\"titleName\":\"Example\"}}${flexibleMemoryField}}")
+        endif()
+        add_test(NAME guest_flexible_memory_${flexibleMemoryName} COMMAND guest_flexible_memory_budget_tests ${flexibleMemoryName}
+            WORKING_DIRECTORY ${flexibleMemoryRun})
+        if(WIN32)
+            set_tests_properties(guest_flexible_memory_${flexibleMemoryName} PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        endif()
+    endforeach()
     add_test_executable(guest_mlock_tests ${LIBS_INCLUDE_DIR}/tests/GuestMlock.cpp)
     target_include_directories(guest_mlock_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_mlock_tests PRIVATE libkernel libc)

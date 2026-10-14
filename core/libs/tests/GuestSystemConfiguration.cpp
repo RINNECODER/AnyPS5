@@ -22,6 +22,7 @@ int APS5_VABI sysctl_nid_postfix(const int*, std::uint32_t, void*, std::size_t*,
 int APS5_VABI sysctlbyname_nid_postfix(const char*, void*, std::size_t*, const void*, std::size_t);
 int APS5_VABI sceKernelGetSystemSwVersion_nid_postfix(SceKernelSystemSwVersion*);
 int APS5_VABI getpid_nid_postfix();
+std::uint64_t APS5_VABI sceKernelGetTscFrequency(void);
 extern char** environ_nid_postfix;
 }
 static void Require(bool value) { if (!value) std::abort(); }
@@ -106,6 +107,21 @@ static void CheckModelSysctl() {
     Require(sysctlbyname_nid_postfix("hw.model", model, &length, model, size) == -1 && *__error_nid_postfix() == 1);
 }
 #endif
+static void CheckTscFrequencySysctl() {
+    *__error_nid_postfix() = 13;
+    std::size_t length = 0;
+    Require(sysctlbyname_nid_postfix("machdep.tsc_freq", nullptr, &length, nullptr, 0) == 0 && length == sizeof(std::uint64_t));
+    std::uint64_t value = 0;
+    length = sizeof(value);
+    Require(sysctlbyname_nid_postfix("machdep.tsc_freq", &value, &length, nullptr, 0) == 0);
+    Require(value == sceKernelGetTscFrequency() && value != 0 && length == sizeof(value));
+    Require(*__error_nid_postfix() == 13);
+    std::uint32_t truncated = 0;
+    length = sizeof(truncated);
+    Require(sysctlbyname_nid_postfix("machdep.tsc_freq", &truncated, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 12);
+    length = sizeof(value);
+    Require(sysctlbyname_nid_postfix("machdep.tsc_freq", &value, &length, &value, sizeof(value)) == -1 && *__error_nid_postfix() == 1);
+}
 static void CheckMachdepCachelineSizeSysctl() {
     *__error_nid_postfix() = 13;
     int value = 0x5a5a5a5a;
@@ -126,6 +142,10 @@ static void CheckPathnameSysctl() {
 
     const int mibTooLong[] = {1, 14, 12, -1, 0};
     Require(sysctl_nid_postfix(mibTooLong, 5, buffer, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 22);
+
+    Require(sysctl_nid_postfix(mibTooShort, 3, buffer, &length, buffer, sizeof(buffer)) == -1 && *__error_nid_postfix() == 1);
+    Require(sysctl_nid_postfix(mibTooLong, 5, buffer, &length, buffer, sizeof(buffer)) == -1 && *__error_nid_postfix() == 1);
+    Require(sysctlbyname_nid_postfix("kern.proc.pathname", buffer, &length, buffer, sizeof(buffer)) == -1 && *__error_nid_postfix() == 1);
 
     const int mibSelf[] = {1, 14, 12, -1};
     length = 0;
@@ -156,29 +176,40 @@ static void CheckPathnameSysctl() {
     length = sizeof(buffer);
     Require(sysctl_nid_postfix(mibSelf, 4, buffer, &length, buffer, sizeof(buffer)) == -1 && *__error_nid_postfix() == 1);
 }
+static void CheckLeafWithTrailingComponent() {
+    const int leaves[][2] = {{6, 3}, {6, 2}, {6, 5}, {1, 37}};
+    for (const auto& leaf : leaves) {
+        const int mib[] = {leaf[0], leaf[1], 0};
+        char buffer[8] = {};
+        std::size_t length = sizeof(buffer);
+        *__error_nid_postfix() = 13;
+        Require(sysctl_nid_postfix(mib, 3, buffer, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 20);
+        Require(sysctl_nid_postfix(mib, 3, buffer, &length, buffer, sizeof(buffer)) == -1 && *__error_nid_postfix() == 20);
+        Require(length == sizeof(buffer));
+    }
+}
 static void CheckSystemSwVersion() {
     *__error_nid_postfix() = 13;
     Require(sceKernelGetSystemSwVersion_nid_postfix(nullptr) == SCE_KERNEL_ERROR_EFAULT && *__error_nid_postfix() == 13);
-    SceKernelSystemSwVersion version{};
-    version.size = 0;
-    *__error_nid_postfix() = 13;
-    Require(sceKernelGetSystemSwVersion_nid_postfix(&version) == SCE_KERNEL_ERROR_EINVAL && *__error_nid_postfix() == 13);
-    version.size = sizeof(SceKernelSystemSwVersion) - 1;
-    *__error_nid_postfix() = 13;
-    Require(sceKernelGetSystemSwVersion_nid_postfix(&version) == SCE_KERNEL_ERROR_EINVAL && *__error_nid_postfix() == 13);
-    version.size = sizeof(SceKernelSystemSwVersion) + 1;
-    *__error_nid_postfix() = 13;
-    Require(sceKernelGetSystemSwVersion_nid_postfix(&version) == SCE_KERNEL_ERROR_EINVAL && *__error_nid_postfix() == 13);
-    std::memset(&version, 0xaa, sizeof(version));
-    version.size = sizeof(SceKernelSystemSwVersion);
-    *__error_nid_postfix() = 13;
-    Require(sceKernelGetSystemSwVersion_nid_postfix(&version) == 0 && *__error_nid_postfix() == 13);
-    Require(version.size == sizeof(SceKernelSystemSwVersion));
-    Require(std::strcmp(version.versionString, "01.000.000") == 0);
-    for (std::size_t i = sizeof("01.000.000"); i < sizeof(version.versionString); ++i) {
-        Require(version.versionString[i] == 0);
+    const std::uint64_t sizes[] = {0, 24, 39, 40, 41, 48, 64};
+    for (const std::uint64_t size : sizes) {
+        struct {
+            std::uint64_t prefix;
+            SceKernelSystemSwVersion version;
+            unsigned char suffix[88];
+        } storage;
+        std::memset(&storage, 0xaa, sizeof(storage));
+        storage.version.size = size;
+        *__error_nid_postfix() = 13;
+        Require(sceKernelGetSystemSwVersion_nid_postfix(&storage.version) == 0 && *__error_nid_postfix() == 13);
+        Require(storage.prefix == 0xaaaaaaaaaaaaaaaaull && storage.version.size == size);
+        Require(std::strcmp(storage.version.versionString, "01.000.000") == 0);
+        for (std::size_t i = sizeof("01.000.000"); i < sizeof(storage.version.versionString); ++i) {
+            Require(storage.version.versionString[i] == 0);
+        }
+        Require(storage.version.version == 0x01000000);
+        for (unsigned char byte : storage.suffix) Require(byte == 0xaa);
     }
-    Require(version.version == 0x01000000);
 }
 static void CheckPseudoRandomSysctl() {
     *__error_nid_postfix() = 13;
@@ -255,13 +286,16 @@ int main() {
 #if defined(__x86_64__) || defined(__i386__)
     CheckModelSysctl();
 #endif
+    CheckTscFrequencySysctl();
     CheckMachdepCachelineSizeSysctl();
     CheckPathnameSysctl();
+    CheckLeafWithTrailingComponent();
     CheckSystemSwVersion();
     CheckPseudoRandomSysctl();
     CheckSdkVersionSysctl();
     CheckArandomSysctl();
     *__error_nid_postfix() = 13;
+    Require(sysconf_nid_postfix(3) == 128);
     Require(sysconf_nid_postfix(47) == 0x4000);
     Require(getpagesize_nid_postfix() == sysconf_nid_postfix(47));
     Require(sysconf_nid_postfix(57) > 0);

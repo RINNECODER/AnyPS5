@@ -210,6 +210,25 @@ static void SortElements(unsigned char* base, size_t count, size_t size, GuestCo
     }
 }
 
+namespace {
+
+template<typename TAllocate>
+void* allocationOrNull(TAllocate allocate) {
+    try {
+        return allocate();
+    } catch (const std::bad_alloc&) {
+    } catch (const std::length_error&) {
+    }
+    errno = 12;
+    return nullptr;
+}
+
+bool validAlignment(std::size_t alignment) {
+    return alignment != 0 && (alignment & (alignment - 1)) == 0;
+}
+
+}
+
 extern "C" {
 
 [[noreturn]] void APS5_VABI _ZSt11_Xbad_allocv_nid_postfix();
@@ -274,29 +293,11 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
     }
     std::filesystem::path fpath;
     if (const int error = ResolvePathError_nid_no_patch(filename, fpath)) { errno = error; return nullptr; }
-    const auto abs_path = fpath.string();
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
     if (!handle) {
         const int error = errno;
-        if (error == ENOENT || (parsed->exclusive && error == EEXIST)) {
-            errno = error;
-            return nullptr;
-        }
-        const auto reason = std::strerror(error);
-        std::error_code ec;
-        std::filesystem::path sibling;
-        for (const auto& entry : std::filesystem::directory_iterator(fpath.parent_path(), ec)) {
-            if (ec) break;
-            if (entry.path().stem() == fpath.stem() && entry.path().extension() != fpath.extension()) {
-                sibling = std::filesystem::absolute(entry.path());
-                break;
-            }
-        }
-        if (!sibling.empty()) {
-            // APS5_LOG_OUT("%s: \"%s\": %s. Sibling: \"%s\"", FOPEN_MSG_NOT_FOUND, abs_path.c_str(), reason, sibling.filename().string().c_str());
-            return nullptr;
-        }
-        throw std::runtime_error(std::string(__func__) + ": " + FOPEN_MSG_OPEN_FAILED + ": \"" + abs_path + "\": " + reason);
+        errno = error;
+        return nullptr;
     }
     // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());
     if (parsed->append) static_cast<void>(std::fseek(handle.get(), 0, SEEK_END));
@@ -438,8 +439,9 @@ int APS5_VABI fflush_nid_postfix(FileStream* stream) {
 #ifdef __linux__
     if (native && !__fwriting(native)) return 0;
 #endif
-    if (std::fflush(native) != 0) throw std::runtime_error("fflush: flush failed");
-    return 0;
+    const int result = std::fflush(native);
+    if (stream) stream->SyncStatus();
+    return result;
 }
 
 int APS5_VABI malloc_stats_fast_nid_postfix(void* stats) {
@@ -451,7 +453,7 @@ size_t APS5_VABI malloc_usable_size_nid_postfix(void* pointer) {
 }
 
 void* APS5_VABI malloc_nid_postfix(size_t size) {
-    return ApplicationHeapAllocate_nid_no_patch(size);
+    return allocationOrNull([size] { return ApplicationHeapAllocate_nid_no_patch(size); });
 }
 
 void APS5_VABI free_nid_postfix(void* ptr) {
@@ -459,7 +461,7 @@ void APS5_VABI free_nid_postfix(void* ptr) {
 }
 
 void* APS5_VABI realloc_nid_postfix(void* ptr, size_t newSize) {
-    return ApplicationHeapReallocate_nid_no_patch(ptr, newSize);
+    return allocationOrNull([ptr, newSize] { return ApplicationHeapReallocate_nid_no_patch(ptr, newSize); });
 }
 
 void* APS5_VABI reallocf_nid_postfix(void* ptr, size_t newSize) {
@@ -474,19 +476,27 @@ void* APS5_VABI reallocf_nid_postfix(void* ptr, size_t newSize) {
 }
 
 void* APS5_VABI memalign_nid_postfix(size_t alignment, size_t size) {
-    return ApplicationHeapAlign_nid_no_patch(alignment, size);
+    if (!validAlignment(alignment)) {
+        errno = 22;
+        return nullptr;
+    }
+    return allocationOrNull([alignment, size] { return ApplicationHeapAlign_nid_no_patch(alignment, size); });
 }
 
 void* APS5_VABI aligned_alloc_nid_postfix(size_t alignment, size_t size) {
-    return ApplicationHeapAlign_nid_no_patch(alignment, size);
+    return memalign_nid_postfix(alignment, size);
 }
 
 void* APS5_VABI reallocalign_nid_postfix(void* ptr, size_t size, size_t alignment) {
-    return ApplicationHeapRealign_nid_no_patch(ptr, size, alignment);
+    if (size != 0 && !validAlignment(alignment)) {
+        errno = 22;
+        return nullptr;
+    }
+    return allocationOrNull([ptr, size, alignment] { return ApplicationHeapRealign_nid_no_patch(ptr, size, alignment); });
 }
 
 void* APS5_VABI calloc_nid_postfix(size_t count, size_t size) {
-    return ApplicationHeapCalloc_nid_no_patch(count, size);
+    return allocationOrNull([count, size] { return ApplicationHeapCalloc_nid_no_patch(count, size); });
 }
 
 int APS5_VABI posix_memalign_nid_postfix(void** pointer, size_t alignment, size_t size) {

@@ -51,6 +51,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/RealPath.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/CxxAbiSupport.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Threads.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/Backtrace.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/exception/Exports.cpp
 )
 
@@ -217,7 +218,7 @@ if(BUILD_TESTING)
     endif()
     add_test_executable(guest_libc_threads_tests ${LIBS_INCLUDE_DIR}/tests/GuestLibcThreads.cpp)
     target_include_directories(guest_libc_threads_tests PRIVATE ${LIBS_INCLUDE_DIR})
-    target_link_libraries(guest_libc_threads_tests PRIVATE libc)
+    target_link_libraries(guest_libc_threads_tests PRIVATE libc libkernel)
     configure_windows_unwind(guest_libc_threads_tests)
     add_test(NAME guest_libc_threads COMMAND guest_libc_threads_tests)
     set_tests_properties(guest_libc_threads PROPERTIES TIMEOUT 20)
@@ -586,6 +587,15 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(application_heap_replacement application_heap_invalid_metadata application_heap_default application_heap_exit_order
             PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_allocator_failures_tests ${LIBS_INCLUDE_DIR}/tests/GuestAllocatorFailures.cpp)
+    target_include_directories(guest_allocator_failures_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_allocator_failures_tests PRIVATE libc)
+    configure_windows_unwind(guest_allocator_failures_tests)
+    add_test(NAME guest_allocator_failures COMMAND guest_allocator_failures_tests)
+    if(WIN32)
+        set_tests_properties(guest_allocator_failures PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(application_heap_stats_tests ${LIBS_INCLUDE_DIR}/tests/ApplicationHeapStats.cpp)
     target_include_directories(application_heap_stats_tests PRIVATE ${LIBS_INCLUDE_DIR})
