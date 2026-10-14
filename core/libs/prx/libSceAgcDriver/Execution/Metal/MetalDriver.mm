@@ -1,4 +1,5 @@
 #include "MetalDriverInternal.hpp"
+#include "AgcFrameCapture.hpp"
 #include <pthread.h>
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
@@ -503,6 +504,7 @@ void MetalDriver::submit(CommandBufferSubmission descriptor, std::uint32_t queue
         require(descriptor.flags == 0, "nonzero submission flags are not implemented");
         try {
             CaptureAndValidate(submission, descriptor.address, descriptor.words);
+            submission.commandAddress = descriptor.address;
             CaptureIndirectRegisterLists(submission);
         } catch (const DriverStopped&) {
             throw;
@@ -807,7 +809,10 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                     CompletePriorGpuWorkAndCopyBack();
                 } else {
                     NativeGuestMemory::BorrowedRangesScope scope(capturedRanges);
+                    const AgcCapture::Context capture{capturedRanges, gpuMutex, [this] { CompletePriorGpuWorkAndCopyBack(); }};
+                    AgcCapture::BeforeExecute(submission, worker->state, capture);
                     ExecuteSubmission(submission, worker->state);
+                    AgcCapture::AfterExecute(submission, capture);
                     // GPU work may still be running: retire the submission (and so let the guest
                     // submit past it, MAX_QUEUED) when it completed, while this worker goes on.
                     std::lock_guard gpuLock(gpuMutex);
@@ -867,6 +872,24 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
     }
     OnWorkerThread() = false;
     changed.notify_all();
+}
+
+void MetalDriver::ReplaceShaderRegistryForReplay(std::shared_ptr<const DriverDetail::ShaderRegistry> registry) {
+    require(registry != nullptr, "replay shader registry is null");
+    auto merged = std::make_shared<DriverDetail::ShaderRegistry>(*registry);
+    const auto nullPixelAddress = DriverDetail::NullPixelProgramAddress();
+    std::lock_guard lock(impl->mutex);
+    // Keeps the driver's own null pixel program (and what it prepared) across replacements.
+    if (const auto found = impl->shaders->find(nullPixelAddress); found != impl->shaders->end()) (*merged)[nullPixelAddress] = found->second;
+    else (*merged)[nullPixelAddress] = {DriverDetail::CaptureNullPixelShader()};
+    impl->shaders = std::move(merged);
+}
+
+void MetalDriver::ReplaceQueueStateForReplay(std::uint32_t queue, const QueueState& state) {
+    std::lock_guard lock(impl->mutex);
+    auto& worker = impl->workers[queue];
+    require(!worker.active && worker.pending.empty(), "replay queue state changes need an idle queue");
+    worker.state = state;
 }
 
 void MetalDriver::WaitIdle() {
@@ -1111,6 +1134,10 @@ void MetalDriver::Present(const PresentationWindow& window, const DisplayBuffer*
                 NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
                 pixels = MetalPresentation::ReadPixels(*buffer);
             }
+        }
+        if (AgcCapture::Active()) {
+            const AgcCapture::Context capture{impl->ranges, impl->gpuMutex, [impl = impl.get()] { impl->CompletePriorGpuWorkAndCopyBack(); }};
+            AgcCapture::Presented(buffer, decided && !pixels.empty() ? &pixels : nullptr, capture);
         }
     }
     bool ready = false;

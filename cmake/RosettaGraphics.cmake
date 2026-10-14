@@ -63,6 +63,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
     ${rosettaAgcDriver}/Execution/Metal/MetalDriver.mm
     ${rosettaAgcDriver}/Execution/Metal/MetalPacketExecution.mm
     ${rosettaAgcDriver}/Execution/Metal/DirectDriver.mm
+    ${rosettaAgcDriver}/Execution/Metal/AgcFrameCapture.mm
     ${rosettaAgcDriver}/Graphics/src/ComputeStageInfo.cpp
     ${rosettaAgcDriver}/Graphics/src/State.cpp
     ${rosettaAgcDriver}/Graphics/src/SurfaceMetadata.cpp
@@ -131,6 +132,21 @@ add_custom_command(
     DEPENDS anyps5_metal_shaders ${ANYPS5_ROSETTA_METALLIB}
     VERBATIM)
 add_custom_target(rosetta_metallib DEPENDS ${PATCHED_DIR}/AnyPS5Utilities.metallib)
+
+# Frame-capture replay benchmark (tools/agc-replay): replays a frame captured with
+# ANYPS5_AGC_CAPTURE through this libSceAgcDriver, under Rosetta like the game.
+add_executable(anyps5_agc_replay ${CMAKE_SOURCE_DIR}/tools/agc-replay/AgcReplay.mm)
+target_compile_options(anyps5_agc_replay PRIVATE -fobjc-arc)
+target_compile_features(anyps5_agc_replay PRIVATE cxx_std_20)
+target_compile_definitions(anyps5_agc_replay PRIVATE ANYPS5_METAL_GUEST_REPLAY=1 ANYPS5_METAL_BACKEND=1 ANYPS5_ROSETTA_DIRECT=1
+    ANYPS5_AGC_REPLAY_METALLIB="${PATCHED_DIR}/AnyPS5Utilities.metallib")
+target_include_directories(anyps5_agc_replay PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
+    $<TARGET_PROPERTY:anyps5_rosetta_shader_recompiler,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(anyps5_agc_replay PRIVATE libSceAgcDriver libkernel libc "-framework Metal" "-framework Foundation"
+    "-framework CoreGraphics" "-framework ImageIO")
+set_target_properties(anyps5_agc_replay PROPERTIES CXX_EXTENSIONS OFF BUILD_RPATH ${UNPATCHED_DIR}
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/rosetta/bin)
+add_dependencies(anyps5_agc_replay rosetta_metallib)
 
 function(anyps5_rosetta_graphics_tests)
     if(NOT ANYPS5_ROSETTA_BUILD_TESTING)
