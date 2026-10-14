@@ -559,21 +559,18 @@ void WatchMapping(std::uintptr_t address, std::size_t len) {
         const auto addedPhys = added->second.phys;
         const auto addedPhysEnd = addedPhys + (added->second.end - added->first);
         sharing.clear();
-        // Collect the sharing bases element by element. The range copy of the span's bases read
-        // stale values in the whole-image build, which then failed the g_directMappings lookup.
         for (auto span = g_physicalSpans.lower_bound(addedPhys); span != g_physicalSpans.end() && span->first < addedPhysEnd; ++span)
-            for (const auto base : span->second.bases) sharing.push_back(base);
+            sharing.insert(sharing.end(), span->second.bases.begin(), span->second.bases.end());
         std::sort(sharing.begin(), sharing.end());
         sharing.erase(std::unique(sharing.begin(), sharing.end()), sharing.end());
         for (const auto base : sharing) {
-            const auto other = g_directMappings.find(base);
-            if (other == g_directMappings.end()) continue;
-            if ((base >= address && base < end) || other->second.backing != added->second.backing) continue;
-            const auto first = std::max(addedPhys, other->second.phys);
-            const auto last = std::min(addedPhysEnd, other->second.phys + (other->second.end - base));
+            const auto& other = g_directMappings.at(base);
+            if ((base >= address && base < end) || other.backing != added->second.backing) continue;
+            const auto first = std::max(addedPhys, other.phys);
+            const auto last = std::min(addedPhysEnd, other.phys + (other.end - base));
             if (first >= last) continue;
             GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(added->first + (first - addedPhys)), last - first);
-            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(base + (first - other->second.phys)), last - first);
+            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(base + (first - other.phys)), last - first);
         }
     }
 }
