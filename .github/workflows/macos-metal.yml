@@ -10,6 +10,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -68,7 +69,8 @@ jobs:
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       needs.changes.outputs.shader-bridge == 'true')
     runs-on: [self-hosted, anyps5-metal]
     timeout-minutes: 45
@@ -93,7 +95,8 @@ jobs:
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       needs.changes.outputs.guest-replay == 'true')
     runs-on: [self-hosted, anyps5-metal]
     timeout-minutes: 60
@@ -129,7 +132,8 @@ jobs:
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       needs.changes.outputs.rosetta-libs == 'true')
     runs-on: [self-hosted, anyps5-metal]
     timeout-minutes: 60
