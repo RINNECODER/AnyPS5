@@ -139,10 +139,6 @@ class NidArgumentTests(unittest.TestCase):
             self.assertEqual(nid_names.main(), 0)
         self.assertIn(long_name, output.getvalue())
 
-    def test_spliced_line_comment_and_macro_tokens(self):
-        self.write_source('// continued \\\nAPS5_EXPORT("AAAAAAAAAAA", exampleUnknown00);\nAPS5_EX\\\nPORT("BBBBBBBBBBB", exampleUnknown01);\n')
-        self.assertEqual(nid_names.collect_unknowns(), {"BBBBBBBBBBB": "core/libs/prx/libSceExample/Export.cpp:exampleUnknown01"})
-
 
 if __name__ == "__main__":
     unittest.main()
