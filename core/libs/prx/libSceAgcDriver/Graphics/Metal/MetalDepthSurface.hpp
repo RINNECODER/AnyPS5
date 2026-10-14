@@ -105,6 +105,9 @@ void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfac
 // The same over the depth and stencil planes of a depth target, or over every fragment of a color target.
 void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, const Graphics::DepthTarget& target,
     const MetalDepthSurface* keep = nullptr);
+// Slice `slice + layer` of a target's depth array; an absent plane (address 0, as the depth plane of a
+// stencil-only target) stays absent.
+Graphics::DepthTarget DepthArraySlice(const Graphics::DepthTarget& target, std::uint32_t layer);
 void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, const Graphics::ColorTarget& target,
     const MetalDepthSurface* keep = nullptr);
 

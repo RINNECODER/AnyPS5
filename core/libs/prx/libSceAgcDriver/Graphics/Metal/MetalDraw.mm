@@ -688,13 +688,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     const std::uint32_t depthLayers = depth && state.layered && state.colors.empty() && state.depth->samples == 1 ?
         state.depth->lastSlice - state.depth->slice + 1u : 0u;
     if (depthLayers > 1) {
-        const auto& target = *state.depth;
-        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
         for (std::uint32_t layer = 1; layer < depthLayers; ++layer) {
-            auto slice = target;
-            slice.address += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u);
-            if (slice.stencilAddress != 0) slice.stencilAddress += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, 1u);
-            slice.slice += layer;
+            const auto slice = DepthArraySlice(*state.depth, layer);
             auto surface = depthCache->Acquire(slice);
             RetireDepthSurfaces(depthSurfaces, slice, surface.get());
             if (std::find(depthSurfaces.begin(), depthSurfaces.end(), surface) == depthSurfaces.end()) depthSurfaces.push_back(surface);

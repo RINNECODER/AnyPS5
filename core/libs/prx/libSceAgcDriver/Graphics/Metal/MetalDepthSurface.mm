@@ -273,6 +273,14 @@ void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfac
     if (target.stencilAddress != 0) RetireDepthSurfaces(surfaces, target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples, keep);
 }
 
+Graphics::DepthTarget DepthArraySlice(const Graphics::DepthTarget& target, std::uint32_t layer) {
+    auto slice = target;
+    if (slice.address != 0) slice.address += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, hasD16(target) ? 2u : 4u);
+    if (slice.stencilAddress != 0) slice.stencilAddress += std::uint64_t{layer} * Graphics::DepthSliceBytes(target.extent, 1u);
+    slice.slice += layer;
+    return slice;
+}
+
 void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, const Graphics::ColorTarget& target,
     const MetalDepthSurface* keep) {
     RetireDepthSurfaces(surfaces, target.address, target.bytes * std::max(target.samples, 1u), keep);

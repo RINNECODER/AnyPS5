@@ -418,9 +418,9 @@ void retiredDepth(const AgcDriver::Metal::MetalDevice& backend) {
 
     // A depth target retires surfaces over its stencil plane too, and not only those at its depth address:
     // a layered draw retires per slice what each slice's planes overlap.
-    auto slice = target;
-    slice.address += depthBytes;
-    slice.stencilAddress += stencilBytes;
+    const auto slice = AgcDriver::Metal::DepthArraySlice(target, 1);
+    MetalTests::Require(slice.address == target.address + depthBytes && slice.stencilAddress == target.stencilAddress + stencilBytes && slice.slice == target.slice + 1,
+        "A depth array slice does not start one slice past the target");
     auto sliceSurface = cache.Acquire(slice);
     auto insideDepth = cache.Acquire(AgcDriver::Graphics::DepthTarget{slice.address + 0x100, 0, {width, height}, VK_FORMAT_D32_SFLOAT, 1, 0});
     auto onStencil = cache.Acquire(AgcDriver::Graphics::DepthTarget{0x2000000, slice.stencilAddress + 0x40, {width, height}, target.format, 1, 0});
@@ -428,6 +428,16 @@ void retiredDepth(const AgcDriver::Metal::MetalDevice& backend) {
     AgcDriver::Metal::RetireDepthSurfaces(surfaces, slice, sliceSurface.get());
     MetalTests::Require(surfaces.size() == 2 && surfaces[0] == surface && surfaces[1] == sliceSurface,
         "A depth slice did not retire the surfaces inside its depth or stencil plane, or retired its neighbour or itself");
+
+    // A stencil-only target has no depth plane: its slices have none either, and retire nothing at low addresses.
+    const AgcDriver::Graphics::DepthTarget stencilOnly{0, 0x800000, {width, height}, VK_FORMAT_S8_UINT, 1, 0};
+    const auto stencilSlice = AgcDriver::Metal::DepthArraySlice(stencilOnly, 2);
+    MetalTests::Require(stencilSlice.address == 0 && stencilSlice.stencilAddress == stencilOnly.stencilAddress + 2 * stencilBytes,
+        "A stencil-only slice was given a depth plane");
+    auto low = cache.Acquire(AgcDriver::Graphics::DepthTarget{2 * depthBytes, 0, {width, height}, VK_FORMAT_D32_SFLOAT, 1, 0});
+    surfaces = {low};
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, stencilSlice);
+    MetalTests::Require(surfaces.size() == 1, "A stencil-only slice retired a depth surface at a fabricated depth address");
 }
 }
 
