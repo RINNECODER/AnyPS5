@@ -411,7 +411,7 @@ Throughout the project, every function at every stage either **does exactly what
 
 - [sceNgs2VoiceGetState custom sampler](../../core/libs/prx/libSceNgs2.native/src/Voice.cpp) (libSceNgs2.native, rack 0x4001) - only the size and one field come from a title. PPSA15552 (Dead Cells) calls it on custom sampler voices with a 48-byte buffer at two sites (eboot `0x1740f90`, `0x1741009`) and reads only the 64-bit value at offset 16: the first site keeps it and the second subtracts the kept value, so it is filled with the voice's decoded sample count. Other sizes return `INVALID_OUT_SIZE` as for the other racks. The state flags fill the common voice state; the remaining fields stay zero. shadPS4's `OrbisNgs2CustomSamplerVoiceState` is about 80 bytes and does not match the size this title passes, so the field names and the console's value are unverified
 
-- [sceCesRefersUcsProfileCp1250](../../core/libs/prx/libSceCesCs/Export.cpp) (libSceCesCs) - declared without parameters and returning a pointer, following `sceCesRefersUcsProfileCp1251`; the signature and behavior are unverified. PPSA34501 fails to load without this export (`qYu6y1E0Qbg`).
+- [sceCesRefersUcsProfileCp1250](../../core/libs/prx/libSceCesCs/Export.cpp) (libSceCesCs) - declared without parameters and returning a pointer, following `sceCesRefersUcsProfileCp1251`; the signature and behavior are unverified. PPSA34501 fails to start without this export (`qYu6y1E0Qbg`).
 
 ### Functional
 
