@@ -62,6 +62,7 @@ void DrawPipeline::Enqueue(Commit commit, std::vector<Range> writes, std::uint64
     std::unique_lock lock(mutex);
     rethrowFailure();
     if (items.size() >= Depth()) {
+        if (GuestMemory::GpuMutex().HeldByThisThread()) throw std::runtime_error("draw pipeline full while the enqueuing thread holds the GPU lock");
         const auto start = std::chrono::steady_clock::now();
         ++idleWaiters;
         idle.wait(lock, [&] { return items.size() < Depth(); });

@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include <bit>
 #include <cstdlib>
+#include <initializer_list>
 #include <optional>
 #include <cstring>
 
@@ -161,6 +162,20 @@ void Driver::fillClearCount(const Graphics::StorageTexture::FillCoverage& covera
     std::fprintf(stderr, "%s\n", line.c_str());
 }
 
+namespace {
+
+void drainPendingInputWrites(std::uint32_t queueId, std::initializer_list<std::pair<std::uint64_t, std::size_t>> inputs) {
+    if (queueId != 0 || !DrawPipeline::Active()) return;
+    auto& pipeline = DrawPipeline::Queue0();
+    for (const auto& [address, bytes] : inputs) {
+        if (!pipeline.Overlaps(address, bytes)) continue;
+        pipeline.Drain(DrawPipeline::DrainReason::Capture, 0x15);
+        return;
+    }
+}
+
+}
+
 bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<const std::uint32_t> packet, std::span<const std::uint32_t> code, const std::vector<std::uint32_t>& userData, const ShaderRecompiler::ShaderComputeStageInfo& compute, const std::shared_ptr<VulkanDevice>& localDevice) {
     auto dwordFill = MatchDwordPatternFill(packet, code, userData, compute);
     if (!dwordFill) dwordFill = MatchConstantDwordFill(packet, code, userData, compute);
@@ -177,6 +192,7 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
         const auto range = DecodePatternFillRange(userData, packet);
         if (!range) return false;
         if (range->invocations == 0) return true;
+        drainPendingInputWrites(queueId, {{range->control, 8}, {range->source, 4}});
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Fill);
         inputLock.lock();
         recordLabelsForPacket(localDevice.get(), queueId);
@@ -341,6 +357,7 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
     };
     static const bool orderedFills = std::getenv("APS5_PIPELINE_DRAIN_FILLS") == nullptr;
     if (orderedFills && queueId == 0 && DrawPipeline::Active()) {
+        if (inputLock.owns_lock()) inputLock.unlock();
         DrawPipeline::Queue0().Enqueue([store, queueId] {
             GuestMemory::SetCurrentPacket(0x15, queueId);
             store();
