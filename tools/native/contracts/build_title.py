@@ -15,14 +15,30 @@ import hashlib
 import json
 import multiprocessing
 import re
+import subprocess
 import time
 from pathlib import Path
 
-from compiler import Function, Image
+import abi
+import checked_pointers
+import finite_tables
+from compiler import Function, Image, compile_image, stub_function
+
+# The preamble pass skips discovery and dataflow, so the declares only those passes can reach are
+# added here for the chunk modules.
+EXTRA_DECLARATIONS = [
+    'declare void @llvm.trap()',
+    'declare void @NativeAotReportUnimplemented_nid_no_patch(i64)',
+    'declare void @NativeAotReportGuardFailure_nid_no_patch(i64, i32)',
+    'declare ptr @NativeAotDispatch_nid_no_patch(i64)',
+    'declare void @NativeAotReportDispatchFailure_nid_no_patch(i64, i64)',
+    f'declare zeroext i1 @{checked_pointers.SYMBOL}(ptr, i64, i1 zeroext)',
+]
 
 _ADDRESS = re.compile(r'0x[0-9a-f]+')
 _PREFIX = re.compile(r'^[^ ]+ at 0x[0-9a-f]+ \([^)]*\): ')
 IMAGE = None
+NAMES = None
 
 
 def reason(error):
@@ -57,6 +73,150 @@ def compile_chunk(job):
     return [compile_one(spec, keep_ir) for spec in specs]
 
 
+def clang_command():
+    import os
+    import platform
+    if os.environ.get('ANYPS5_AOT_CLANG'):
+        return [os.environ['ANYPS5_AOT_CLANG']]
+    if platform.system() == 'Darwin':
+        return ['xcrun', 'clang', '-arch', 'arm64']
+    return ['clang']
+
+
+def import_declarations(image):
+    """Declarations for every import, so a chunk module can call a stubbed one it did not define."""
+    lines = []
+    for contract in image.imports.values():
+        result, parameters = abi.signature(contract)
+        arguments = ', '.join(f'{abi.parameter_type(t)} %arg{i}' for i, t in enumerate(parameters))
+        suffix = ' noreturn' if contract.get('noreturn') else ''
+        lines.append(f'declare {abi.result_type(result)} @{contract["name"]}({arguments}){suffix}')
+    return lines
+
+
+def function_declaration(spec):
+    """The declaration a module needs for a function it references but does not define."""
+    if abi.uniform(spec):
+        return f'declare void @{spec["name"]}(ptr)'
+    result, parameters = abi.signature(spec)
+    arguments = ', '.join(abi.parameter_type(t) for t in parameters)
+    suffix = ' noreturn' if spec.get('noreturn') else ''
+    return f'declare {abi.result_type(result)} @{spec["name"]}({arguments}){suffix}'
+
+
+def module_chunk(job):
+    """Lower one chunk and write its self-contained module, optionally compiled to an object.
+
+    The chunk carries its own copy of the shared membership tables and helper, so the module has
+    no cross-chunk reference and the linker never has to merge a private symbol.
+    """
+    specs, index, folder, header, compile_object = job
+    source = folder / f'chunk_{index:04d}.ll'
+    target = source.with_suffix('.o')
+    cache = folder / f'chunk_{index:04d}.json'
+    if compile_object and target.exists() and cache.exists():
+        saved = json.loads(cache.read_text())
+        return index, saved['records'], saved['ir_bytes'], target.stat().st_size
+    records, bodies = [], []
+    for spec in specs:
+        record = compile_one(spec, True)
+        body = record.pop('ir', None)
+        records.append(record)
+        if body is not None:
+            bodies.append(body)
+        else:
+            # A rejected function still needs a body: the dispatch table names every function.
+            bodies.append(stub_function(spec, record['reason']))
+    tables = finite_tables.module_declarations(IMAGE)
+    # A body or a target table can name a function defined by another chunk; declare the ones this
+    # chunk references and does not define.
+    defined = {spec['name'] for spec in specs}
+    referenced = set(re.findall(r'@([A-Za-z_][A-Za-z_0-9]*)', '\n'.join([*bodies, *tables])))
+    declarations = [function_declaration(NAMES[name]) for name in sorted(referenced)
+                    if name in NAMES and name not in defined]
+    text = '\n\n'.join([header[0], *declarations, *header[1:], *bodies, *tables]) + '\n'
+    source = folder / f'chunk_{index:04d}.ll'
+    source.write_text(text)
+    object_bytes = 0
+    if compile_object:
+        command = ['nice', '-n', '10', *clang_command(), '-O3', '-c', str(source), '-o', str(target)]
+        # A compile can fail transiently under machine memory pressure; retry once before giving up.
+        for attempt in (1, 2):
+            result = subprocess.run(command, capture_output=True)
+            if result.returncode == 0:
+                break
+            if attempt == 2:
+                raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
+        object_bytes = target.stat().st_size
+        source.unlink()
+    cache.write_text(json.dumps({'ir_bytes': len(text), 'records': records}))
+    return index, records, len(text), object_bytes
+
+
+def build_modules(args):
+    """Emit a preamble module plus one module per chunk, compile each, and link one image."""
+    folder = args.objects
+    folder.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    global NAMES
+    NAMES = {spec['name']: spec for spec in IMAGE.functions.values()}
+    preamble = folder / 'preamble.ll'
+    pieces = []
+    compile_image(IMAGE, sink=pieces.append, emit_bodies=False, analyze=False)
+    # The dispatch table names every function, so the preamble declares them all, after the
+    # target triple and before the table that references them.
+    triple, rest = ''.join(pieces).split('\n', 1)
+    declarations = '\n'.join(function_declaration(spec) for spec in IMAGE.functions.values())
+    preamble.write_text(f'{triple}\n{declarations}\n\n{rest}')
+    header = list(dict.fromkeys([*IMAGE.module_header, *EXTRA_DECLARATIONS, *IMAGE.module_externs]))
+    # Stub imports are defined (not declared) by the preamble, so a chunk that calls one needs its
+    # own declaration; a name the preamble already declared must not be repeated.
+    declared = {match.group(1) for line in header
+                if (match := re.match(r'declare .*?@([A-Za-z_][A-Za-z_0-9]*)\(', line))}
+    for line in import_declarations(IMAGE):
+        name = re.match(r'declare .*?@([A-Za-z_][A-Za-z_0-9]*)\(', line).group(1)
+        if name not in declared:
+            declared.add(name)
+            header.append(line)
+    chunks = [args.specs[index:index + args.chunk] for index in range(0, len(args.specs), args.chunk)]
+    records, ir_bytes, object_bytes = [], 0, 0
+    context = multiprocessing.get_context('fork')
+    with context.Pool(args.jobs) as pool:
+        jobs = [(chunk, index, folder, header, not args.no_object) for index, chunk in enumerate(chunks)]
+        for _, result, chunk_ir, chunk_object in pool.imap_unordered(module_chunk, jobs):
+            records.extend(result)
+            ir_bytes += chunk_ir
+            object_bytes += chunk_object
+    preamble_object = 0
+    if not args.no_object:
+        target = preamble.with_suffix('.o')
+        subprocess.run(['nice', '-n', '10', *clang_command(), '-O0', '-c', str(preamble), '-o', str(target)],
+                       check=True, capture_output=True)
+        preamble_object = target.stat().st_size
+        objects = sorted(folder.glob('chunk_*.o'))
+        image = folder / 'image.o'
+        subprocess.run(['xcrun', 'ld', '-r', '-arch', 'arm64', '-o', str(image),
+                        str(target), *map(str, objects)], check=True, capture_output=True)
+    wall = time.perf_counter() - started
+    accepted = [record for record in records if record['status'] == 'ok']
+    reasons = {}
+    for record in records:
+        if record['status'] == 'rejected':
+            reasons[record['reason']] = reasons.get(record['reason'], 0) + 1
+    summary = {
+        'functions': len(records), 'accepted': len(accepted), 'rejected': len(records) - len(accepted),
+        'chunks': len(chunks), 'jobs': args.jobs, 'chunk': args.chunk,
+        'wall_seconds': round(wall, 2), 'chunk_ir_bytes': ir_bytes + preamble.stat().st_size,
+        'preamble_bytes': preamble.stat().st_size, 'object_bytes': object_bytes + preamble_object,
+        'image_bytes': (folder / 'image.o').stat().st_size if not args.no_object else 0,
+        'top_rejections': [{'reason': key, 'count': count}
+                           for key, count in sorted(reasons.items(), key=lambda item: -item[1])[:20]],
+    }
+    print(json.dumps(summary, indent=2))
+    if args.summary:
+        args.summary.write_text(json.dumps(summary, indent=2) + '\n')
+
+
 def fingerprint():
     """Hash of the compiler sources, so a compiler change invalidates the cache."""
     root = Path(__file__).resolve().parents[3]
@@ -77,6 +237,10 @@ def main():
     parser.add_argument('--limit', type=int, default=0)
     parser.add_argument('--stride', type=int, default=0)
     parser.add_argument('--keep-ir', action='store_true')
+    parser.add_argument('--objects', type=Path,
+                        help='partitioned build: emit a preamble module plus one module per chunk, '
+                             'compile each and link one image into this directory')
+    parser.add_argument('--no-object', action='store_true', help='emit the modules but do not compile or link')
     parser.add_argument('--summary', type=Path)
     args = parser.parse_args()
 
@@ -88,6 +252,10 @@ def main():
     if args.limit:
         specs = specs[:args.limit]
     IMAGE = Image(args.elf, contracts)
+
+    if args.objects:
+        args.specs = specs
+        return build_modules(args)
 
     key = hashlib.sha256((str(contracts.get('sha256')) + fingerprint()).encode()).hexdigest()[:16]
     cache = args.cache / key
