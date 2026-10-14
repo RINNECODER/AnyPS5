@@ -7,8 +7,10 @@ differ inside a container:
 
   - The inner ELF program headers carry stale offsets. A SELF inserts its own
     metadata blocks between the segments, so the segment data sits at the offsets
-    listed in the SELF segment-record table at file offset 0x40, records of 0x20
-    bytes holding flags, data offset, size and the size again. Segments the table
+    listed in the SELF segment-record table at file offset 0x20 (the entry count is the u16 at 0x18),
+    records of 0x20 bytes holding flags, data offset, size and the size again. A
+    record with flags bit 0x800 is a data record for the program header numbered by
+    flags bits 20-35; the others are digest metadata. Segments the table
     does not cover are placed by the vaddr to file mapping of the PT_LOAD that
     contains them; segments without a vaddr carry the shift of the last mapped one.
   - The segments are packed without honouring p_align, while ELF requires
@@ -31,7 +33,9 @@ from pathlib import Path
 
 SELF_MAGIC = 0x1D3D154F
 SELF_MAGIC_KERNEL = 0xEEF51454
-RECORD_OFFSET = 0x40
+RECORD_OFFSET = 0x20
+RECORD_COUNT_OFFSET = 0x18
+RECORD_DATA = 0x800
 RECORD_SIZE = 0x20
 FIRST_REGION = 0x400
 PT_LOAD = 1
@@ -69,18 +73,21 @@ def entropy(data):
 
 
 def read_records(data):
-    records = []
-    offset = RECORD_OFFSET
-    while offset + RECORD_SIZE <= FIRST_REGION:
-        flags, segment, size, size_again = struct.unpack_from("<QQQQ", data, offset)
-        if size == 0 or size != size_again:
-            break
-        if segment >= len(data) or segment < 0x350 or segment % 0x10 != 0:
-            break
-        if size > len(data):
-            break
-        records.append((flags, segment, size))
-        offset += RECORD_SIZE
+    count = struct.unpack_from("<H", data, RECORD_COUNT_OFFSET)[0]
+    if RECORD_OFFSET + count * RECORD_SIZE > FIRST_REGION:
+        raise Refused("SELF record table of %d entries overruns the header area" % count)
+    records = {}
+    for number in range(count):
+        flags, segment, size, _ = struct.unpack_from("<QQQQ", data, RECORD_OFFSET + number * RECORD_SIZE)
+        if not flags & RECORD_DATA:
+            continue
+        index = (flags >> 20) & 0xFFFF
+        if index in records:
+            raise Refused("SELF records %d and %d both describe program header %d"
+                          % (records[index][2], number, index))
+        if segment + size > len(data):
+            raise Refused("SELF record %d lies outside the file" % number)
+        records[index] = (segment, size, number)
     return records
 
 
@@ -115,17 +122,14 @@ def parse_elf(data):
 
 def place_segments(data, headers, records):
     loads = [header for header in headers if header["type"] == PT_LOAD]
-    used = set()
     for header in loads:
-        if header["size"] == 0:
+        if header["size"] == 0 or header["index"] not in records:
             continue
-        for index, (_, segment, size) in enumerate(records):
-            if index in used:
-                continue
-            if size == header["size"]:
-                used.add(index)
-                header["source"] = segment
-                break
+        segment, size, _ = records[header["index"]]
+        if size < header["size"]:
+            raise Refused("SELF record for program header %d holds %#x bytes, fewer than the %#x it needs"
+                          % (header["index"], size, header["size"]))
+        header["source"] = segment
 
     def load_for(vaddr):
         found = None
