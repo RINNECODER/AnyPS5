@@ -43,8 +43,9 @@ import replay  # noqa: E402
 BASE = replay.BASE
 SCRATCH = BASE + 0x60000000
 SCRATCH_SIZE = 0x10000
+SCRATCH_MAP = 0x100000
 STACK = BASE + 0x700FFFF8
-REGFILE = 122 * 8
+REGFILE = 123 * 8
 STATE = 16 * 8 + 8 + 256 + 256 + 512 + 16 * 16  # gprs, rflags, xmm, ymm upper, fxsave, scratch ptrs
 
 RUNNER = r"""
@@ -162,14 +163,14 @@ def arm_state(dylib, name, registers, memory, timeout=30):
             libc = ctypes.CDLL(None)
             libc.mmap.restype = ctypes.c_void_p
             libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
-            libc.mmap(ctypes.c_void_p(SCRATCH), SCRATCH_SIZE, 3, 0x02 | 0x1000 | 0x10, -1, 0)
+            libc.mmap(ctypes.c_void_p(SCRATCH), SCRATCH_MAP, 3, 0x02 | 0x1000 | 0x10, -1, 0)
             ctypes.memmove(SCRATCH, memory, len(memory))
             libc.mmap(ctypes.c_void_p(BASE + 0x70000000), 0x100000, 3, 0x02 | 0x1000 | 0x10, -1, 0)
             library = ctypes.CDLL(str(dylib))
             function = getattr(library, name)
             function.restype = None
             function.argtypes = [ctypes.c_void_p]
-            regfile = (ctypes.c_uint64 * 122)()
+            regfile = (ctypes.c_uint64 * 123)()
             for index, register in enumerate(replay.UNIFORM_GPRS):
                 regfile[index] = registers.get(register, 0)
             regfile[4] = STACK
@@ -244,6 +245,34 @@ def _segments(image):
     return stream.getvalue()
 
 
+def normalize_nan(blob):
+    """Canonicalize every 4-byte lane that is a NaN: the FP profile leaves the payload and
+    sign of a NaN unobserved, so the two runners may legitimately differ there."""
+    value = bytearray(blob)
+    for offset in range(0, len(value) - 3, 4):
+        bits = int.from_bytes(value[offset:offset + 4], "little")
+        if bits & 0x7f800000 == 0x7f800000 and bits & 0x007fffff:
+            value[offset:offset + 4] = (0x7fc00000).to_bytes(4, "little")
+    return bytes(value)
+
+
+def nan_slot(blob, offset, width):
+    if offset + width > len(blob):
+        return False
+    bits = int.from_bytes(blob[offset:offset + width], "little")
+    if width == 4:
+        return bits & 0x7f800000 == 0x7f800000 and bits & 0x007fffff != 0
+    return bits & 0x7ff0000000000000 == 0x7ff0000000000000 and bits & 0x000fffffffffffff != 0
+
+
+def memory_explained_by_nan(arm, x86, offset):
+    for width in (4, 8):
+        base = offset & ~(width - 1)
+        if nan_slot(arm, base, width) and nan_slot(x86, base, width):
+            return True
+    return False
+
+
 def extended_to_double(raw):
     """The double nearest an x87 80-bit extended value (the AOT stack is f64)."""
     bits = int.from_bytes(raw, "little")
@@ -270,11 +299,13 @@ def compare(arm, x86, library, data_ranges):
     arm_ymm = arm[128 + 256:128 + 512]
     arm_scratch = arm[REGFILE:REGFILE + SCRATCH_SIZE]
     arm_flags = struct.unpack_from("<Q", arm, 640)[0]
-    arm_x87 = struct.unpack_from("<8d", arm, 648)
+    arm_mask = struct.unpack_from("<Q", arm, 648)[0]
+    arm_x87 = struct.unpack_from("<8d", arm, 656)
     differences = []
     mask = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11)
-    if arm_flags & mask != flags & mask:
-        differences.append(f"flags: arm={arm_flags & mask:#x} x86={flags & mask:#x}")
+    # Only the flags the contract defines are compared (the ABI publishes a definedness mask).
+    if (arm_flags ^ flags) & (arm_mask & mask):
+        differences.append(f"flags: arm={arm_flags & arm_mask & mask:#x} x86={flags & arm_mask & mask:#x}")
     if any(arm_x87):
         # The AOT x87 stack is f64; compare only when the function actually used it.
         for index in range(8):
@@ -293,12 +324,14 @@ def compare(arm, x86, library, data_ranges):
         if normalized is not None and normalized == (x86_value - BASE) & 0xffffffffffffffff:
             continue
         differences.append(f"{name}: arm={arm_value:#x} x86={x86_value:#x}")
-    if arm_xmm != xmm:
+    if normalize_nan(arm_xmm) != normalize_nan(xmm):
         differences.append("xmm")
-    if arm_ymm != ymm_upper:
+    if normalize_nan(arm_ymm) != normalize_nan(ymm_upper):
         differences.append("ymm-upper")
-    if arm_scratch != scratch:
-        first = next(i for i in range(SCRATCH_SIZE) if arm_scratch[i] != scratch[i])
+    unexplained = [i for i in range(SCRATCH_SIZE) if arm_scratch[i] != scratch[i]
+                   and not memory_explained_by_nan(arm_scratch, scratch, i)]
+    if unexplained:
+        first = unexplained[0]
         base = first & ~7
         arm_slot = int.from_bytes(arm_scratch[base:base + 8], "little")
         x86_slot = int.from_bytes(scratch[base:base + 8], "little")
