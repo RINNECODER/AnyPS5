@@ -27,3 +27,22 @@ foreach(semanticsTest IN ITEMS ValuMaskInactiveLanes VCvtF32F64ResultModes LdsAd
             ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
     endif()
 endforeach()
+
+# Frontend-only unit tests for the ported decoder and collector fixes. They link the same recompiler
+# the Metal replay uses and need no device.
+foreach(semanticsUnit IN ITEMS
+        "ImageSampleGather|${CMAKE_CURRENT_LIST_DIR}/../../../../tests/ImageSampleGather.cpp"
+        "FlatScratch|${CMAKE_CURRENT_LIST_DIR}/../FlatScratch.cpp"
+        "InterpolationReferenceRange|${CMAKE_CURRENT_LIST_DIR}/../../../../tests/InterpolationReferenceRange.cpp"
+        "Vop3InterpHighHalf|${CMAKE_CURRENT_LIST_DIR}/Vop3InterpHighHalf.cpp")
+    string(REPLACE "|" ";" semanticsUnitParts "${semanticsUnit}")
+    list(GET semanticsUnitParts 0 semanticsUnitName)
+    list(GET semanticsUnitParts 1 semanticsUnitSource)
+    cmake_path(NORMAL_PATH semanticsUnitSource)
+    string(TOLOWER "${semanticsUnitName}" semanticsUnitLower)
+    add_test_executable(anyps5_metal_semantics_${semanticsUnitLower} "${semanticsUnitSource}")
+    target_link_libraries(anyps5_metal_semantics_${semanticsUnitLower} PRIVATE anyps5_metal_guest_recompiler)
+    set_target_properties(anyps5_metal_semantics_${semanticsUnitLower} PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME anyps5_metal_semantics_${semanticsUnitLower} COMMAND anyps5_metal_semantics_${semanticsUnitLower})
+    set_tests_properties(anyps5_metal_semantics_${semanticsUnitLower} PROPERTIES TIMEOUT 60)
+endforeach()
