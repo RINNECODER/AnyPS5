@@ -166,11 +166,10 @@ def infer_requirements(functions):
                 continue
             if ins.address in getattr(function, 'dispatch_calls', {}):
                 continue
-            tail = function.tail_calls.get(ins.address)
-            if tail is not None:
-                # A fall-through or conditional tail call's last instruction is not a call;
-                # discovery already recorded its contract and provider-binding slot.
-                contract, slot = tail
+            target = direct_target(function, ins)
+            if target is not None:
+                # A fall-through tail call has no operand; its callee comes from the tail-call map.
+                contract, slot = image.functions[target], None
             else:
                 contract, slot = image.call(ins, function.contract)
             effects = contract.get('memory_effects')

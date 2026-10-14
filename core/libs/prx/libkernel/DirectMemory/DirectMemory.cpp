@@ -487,7 +487,8 @@ std::map<std::uintptr_t, DirectMapping>::iterator RemoveMapping(std::map<std::ui
     const auto last = first + (mapping->second.end - base);
     for (auto span = g_physicalSpans.lower_bound(first); span != g_physicalSpans.end() && span->first < last;) {
         auto& bases = span->second.bases;
-        bases.erase(std::lower_bound(bases.begin(), bases.end(), base));
+        const auto found = std::lower_bound(bases.begin(), bases.end(), base);
+        if (found != bases.end() && *found == base) bases.erase(found);
         span = bases.empty() ? g_physicalSpans.erase(span) : std::next(span);
     }
     for (auto span = g_physicalSpans.lower_bound(first); span != g_physicalSpans.end() && span->first <= last;) {
@@ -558,17 +559,21 @@ void WatchMapping(std::uintptr_t address, std::size_t len) {
         const auto addedPhys = added->second.phys;
         const auto addedPhysEnd = addedPhys + (added->second.end - added->first);
         sharing.clear();
-        for (auto span = g_physicalSpans.lower_bound(addedPhys); span != g_physicalSpans.end() && span->first < addedPhysEnd; ++span) sharing.insert(sharing.end(), span->second.bases.begin(), span->second.bases.end());
+        // Collect the sharing bases element by element. The range copy of the span's bases read
+        // stale values in the whole-image build, which then failed the g_directMappings lookup.
+        for (auto span = g_physicalSpans.lower_bound(addedPhys); span != g_physicalSpans.end() && span->first < addedPhysEnd; ++span)
+            for (const auto base : span->second.bases) sharing.push_back(base);
         std::sort(sharing.begin(), sharing.end());
         sharing.erase(std::unique(sharing.begin(), sharing.end()), sharing.end());
         for (const auto base : sharing) {
-            const auto& other = g_directMappings.at(base);
-            if ((base >= address && base < end) || other.backing != added->second.backing) continue;
-            const auto first = std::max(addedPhys, other.phys);
-            const auto last = std::min(addedPhysEnd, other.phys + (other.end - base));
+            const auto other = g_directMappings.find(base);
+            if (other == g_directMappings.end()) continue;
+            if ((base >= address && base < end) || other->second.backing != added->second.backing) continue;
+            const auto first = std::max(addedPhys, other->second.phys);
+            const auto last = std::min(addedPhysEnd, other->second.phys + (other->second.end - base));
             if (first >= last) continue;
             GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(added->first + (first - addedPhys)), last - first);
-            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(base + (first - other.phys)), last - first);
+            GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(reinterpret_cast<const void*>(base + (first - other->second.phys)), last - first);
         }
     }
 }
@@ -894,6 +899,34 @@ void ValidateOutput(void** addr) {
     }
 }
 
+}
+
+bool DirectMemorySpanIndexConsistent() {
+#if defined(__linux__) || defined(__APPLE__)
+    std::lock_guard lock(g_directLock);
+    for (const auto& entry : g_physicalSpans) {
+        for (const auto base : entry.second.bases) {
+            const auto mapping = g_directMappings.find(base);
+            if (mapping == g_directMappings.end()) return false;
+            const auto first = mapping->second.phys;
+            const auto last = first + (mapping->second.end - base);
+            if (first > entry.first || last < entry.second.end) return false;
+        }
+    }
+    for (const auto& entry : g_directMappings) {
+        const auto first = entry.second.phys;
+        const auto last = first + (entry.second.end - entry.first);
+        for (auto cursor = first; cursor < last;) {
+            auto span = g_physicalSpans.upper_bound(cursor);
+            if (span == g_physicalSpans.begin()) return false;
+            --span;
+            if (span->second.end <= cursor) return false;
+            if (std::find(span->second.bases.begin(), span->second.bases.end(), entry.first) == span->second.bases.end()) return false;
+            cursor = span->second.end;
+        }
+    }
+#endif
+    return true;
 }
 
 bool Reserved(const void* addr, size_t len) {

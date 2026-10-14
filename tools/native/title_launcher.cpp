@@ -24,7 +24,8 @@ struct Frame {
 
 extern "C" void sub_80(void* rf);
 extern "C" void NativeAotReportEntryCounts_nid_no_patch();
-extern "C" void ApplicationHeapRegister_nid_no_patch(void* const* api);
+extern "C" const void* ApplicationProcessParameters_nid_no_patch();
+extern "C" void ApplicationHeapInitialize_nid_no_patch(const void* processParameters);
 
 static void OnFatal(int signal, siginfo_t* info, void*) {
     std::fprintf(stderr, "[aot] fatal signal %d at %p (code %d)\n", signal,
@@ -57,11 +58,10 @@ int main(int argc, char** argv) {
     rf.stack[0] = static_cast<std::uint64_t>(argc);
     for (int index = 0; index < argc && index + 1 < 32; ++index)
         rf.stack[1 + index] = reinterpret_cast<std::uint64_t>(argv[index]);
-    // The title heap is initialised from the guest process parameters, which this prototype does
-    // not provide; register the runtime default allocator so allocations use the host heap.
-    static void* heapApi[10] = {};
-    try { ApplicationHeapRegister_nid_no_patch(heapApi); std::fprintf(stderr, "[aot] default allocator registered\n"); }
-    catch (const std::exception& error) { std::fprintf(stderr, "[aot] allocator registration skipped: %s\n", error.what()); }
+    // The image registered the guest process parameters from its constructor; initialise the
+    // title's allocator here, once the runtime's own static initialisers have run.
+    try { ApplicationHeapInitialize_nid_no_patch(ApplicationProcessParameters_nid_no_patch()); }
+    catch (const std::exception& error) { std::fprintf(stderr, "[aot] heap initialization failed: %s\n", error.what()); }
     std::fprintf(stderr, "[aot] entering the title entry 0x80 (frame %p, argc %d)\n", (void*)&frame, argc);
     sub_80(&rf);
     std::fprintf(stderr, "[aot] the title entry returned\n");

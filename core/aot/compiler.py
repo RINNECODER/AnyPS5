@@ -104,13 +104,14 @@ class Image:
             raise Rejected(str(error)) from error
         self.segments = []
         self.process_parameters = []
+        process_parameter_segments = []
         for segment in runtime_segments(self.elf):
             if segment['p_type'] == 0x61000001:
                 self.process_parameters.append((segment['p_vaddr'], segment['p_filesz']))
                 # The SCE process-parameter segment is not PT_LOAD but the runtime must map it and
                 # read the title's libc parameters and allocator table from it.
                 if segment['p_filesz'] and segment['p_memsz'] >= segment['p_filesz']:
-                    self.segments.append(segment)
+                    process_parameter_segments.append(segment)
                 continue
             if segment['p_type'] == 'PT_TLS':
                 require(segment['p_memsz'] == 0 or contracts.get('allow_unlowered_tls', False) or self.tls_layout is not None,
@@ -121,6 +122,14 @@ class Image:
             require(segment['p_offset'] + segment['p_filesz'] <= len(self.bytes), 'truncated segment')
             require(segment['p_memsz'] <= contracts.get('max_segment_bytes', 64 * 1024 * 1024),
                     'segment exceeds current offline allocation limit')
+            self.segments.append(segment)
+        for segment in process_parameter_segments:
+            # A process-parameter block a PT_LOAD already covers is mapped with it; mapping it
+            # again with MAP_FIXED would zero the rest of its page.
+            if any(other['p_type'] == 'PT_LOAD' and other['p_vaddr'] <= segment['p_vaddr']
+                   and segment['p_vaddr'] + segment['p_memsz'] <= other['p_vaddr'] + other['p_memsz']
+                   for other in self.segments):
+                continue
             self.segments.append(segment)
         self.functions = {}
         for function in contracts['functions']:
@@ -146,6 +155,8 @@ class Image:
             require(left['address'] + left['size'] <= right['address'], 'overlapping function contracts')
         require(self.elf['e_entry'] in self.functions or (contracts.get('module_image') and self.elf['e_entry'] == 0), 'entry function has no contract')
         self.imports = contracts['imports']
+        self.hle_log = bool(contracts.get('hle_log'))
+        self.hle_names = {}
         self.data_bindings = contracts.get('data_bindings', {})
         # guest_data: the title's data segments are not emitted as IR bytes; the image
         # references them at their guest vaddrs and the runtime maps the user's eboot there.
@@ -412,7 +423,7 @@ class Function:
                 occupied[byte] = address
             self.instructions[address] = ins
             next_address = address + ins.size
-            if ins.mnemonic in ('ret', 'ud2'):
+            if ins.mnemonic in ('ret', 'ud2', 'int3'):
                 successors = []
             elif ins.mnemonic == 'jmp' and address in self.image.finite_tables:
                 successors = self.image.finite_tables[address]['targets']
@@ -577,7 +588,9 @@ class Function:
         self.check_immutable_call(ins, callee, state, effects.call_writes(self, ins, state))
         if not effects.required_bindings(self, ins) <= state['import_bindings']:
             self.fail(ins, 'native callee requires original provider bindings')
-        if slot is not None and slot not in state['image_pointers']:
+        if slot is not None and slot not in state['image_pointers'] and not self.image.contracts.get('allow_unimplemented'):
+            # A whole-title build keeps the import binding installed by native_image_init even after
+            # the dataflow lost track of the GOT slot.
             self.fail(ins, 'import target has no proven native pointer origin')
         balanced = state['rsp'] == 0 and not state['saved']
         branch = ins.mnemonic in ('call', 'jmp') or ins.mnemonic.startswith('j')
@@ -736,7 +749,7 @@ class Function:
                 if self.contract['result'] == 'ptr' and 'rax' not in state['native_pointers'] and state['constants'].get('rax') != 0:
                     self.fail_pointer(ins, 'pointer return has no proven native pointer origin')
             return state
-        if op == 'ud2':
+        if op in ('ud2', 'int3'):
             return state
         if op.startswith('j'):
             if op != 'jmp' and op[1:] not in CONDITIONS:
@@ -1568,8 +1581,10 @@ class Function:
             elif address in self.switch_jumps:
                 self.lower_switch(ins, state, address)
                 terminal = True
-            elif address in self.tail_calls and ins.mnemonic not in ('call', 'jmp'):
-                # Conditional tail call: taken -> tail call, not-taken -> fall through.
+            elif address in self.tail_calls and ins.mnemonic.startswith('j') and ins.mnemonic != 'jmp':
+                # Conditional tail call (jcc): taken -> tail call, not-taken -> fall through.
+                # A fall-through continuation (a non-branch last instruction) is unconditional
+                # and is handled by the tail-call branch below, not as a condition.
                 callee, slot = self.tail_calls[address]
                 require(abi.uniform(callee), 'conditional tail call requires a uniform callee')
                 label = f'ctc_{address:x}'
@@ -1586,7 +1601,8 @@ class Function:
                 else:
                     arguments = []
                     native_arguments = []
-                    for index, loc in enumerate(abi.locations(callee['parameters'])):
+                    parameter_locations = abi.locations(callee['parameters'])
+                    for index, loc in enumerate(parameter_locations):
                         if loc['kind'] == 'stack':
                             offset = loc['offset'] if tail else state['rsp'] + loc['offset'] - 8
                             value = self.emit(f"load i{loc['bits']}, ptr {self.frame_pointer(offset)}, align 1")
@@ -1597,6 +1613,27 @@ class Function:
                             checked_pointers.emit_argument(self, ins, index, callee, value)
                         arguments.append(f"{abi.parameter_type(loc['type'])} {value}")
                         native_arguments.append(value)
+                    hle_sequence = None
+                    if self.image.hle_log and not tail:
+                        hle_name = callee['name']
+                        if hle_name not in self.image.hle_names:
+                            self.image.hle_names[hle_name] = len(self.image.hle_names)
+                        hle_index = self.image.hle_names[hle_name]
+                        hle_args = []
+                        for index in range(6):
+                            if index >= len(native_arguments):
+                                hle_args.append('0')
+                                continue
+                            typ = parameter_locations[index]['type']
+                            if typ == 'ptr':
+                                hle_args.append(self.emit(f'ptrtoint ptr {native_arguments[index]} to i64'))
+                            elif typ in ('f32', 'f64'):
+                                hle_args.append('0')
+                            elif abi.bits(typ) == 64:
+                                hle_args.append(native_arguments[index])
+                            else:
+                                hle_args.append(self.emit(f'zext i{abi.bits(typ)} {native_arguments[index]} to i64'))
+                        hle_sequence = self.emit(f"call i64 @HleLogCall(ptr @__aps5_hle_name_{hle_index}, {', '.join('i64 ' + item for item in hle_args)})")
                     if slot == 'operand':
                         if address in self.image.finite_tables:
                             target = finite_tables.emit_target(self, ins, self.image.finite_tables[address])
@@ -1613,6 +1650,19 @@ class Function:
                         value = None
                     else:
                         value = self.emit(expression)
+                    if hle_sequence is not None:
+                        if value is None:
+                            self.lines.append(f'  call void @HleLogReturn(i64 {hle_sequence}, i64 0)')
+                        elif callee['result'] in ('i8', 'u8', 'i16', 'u16', 'i32', 'u32'):
+                            widened = self.emit(f"zext i{abi.bits(callee['result'])} {value} to i64")
+                            self.lines.append(f'  call void @HleLogReturn(i64 {hle_sequence}, i64 {widened})')
+                        elif callee['result'] == 'ptr':
+                            widened = self.emit(f'ptrtoint ptr {value} to i64')
+                            self.lines.append(f'  call void @HleLogReturn(i64 {hle_sequence}, i64 {widened})')
+                        elif abi.bits(callee['result']) == 64:
+                            self.lines.append(f'  call void @HleLogReturn(i64 {hle_sequence}, i64 {value})')
+                        else:
+                            self.lines.append(f'  call void @HleLogReturn(i64 {hle_sequence}, i64 0)')
                     if value is not None and not callee.get('noreturn'):
                         pointer_outputs.emit_checks(self, ins, callee, native_arguments, value)
                     if callee.get('noreturn'):
@@ -1661,7 +1711,7 @@ class Function:
                 if op == 'jmp': self.lines.append(f'  br label %b{target:x}')
                 else: self.lines.append(f'  br i1 {self.condition(op)}, label %b{target:x}, label %b{address + ins.size:x}')
                 terminal = True
-            elif op == 'ud2':
+            elif op in ('ud2', 'int3'):
                 self.lines.extend(['  call void @llvm.trap()', '  unreachable'])
                 terminal = True
             elif op != 'nop':
@@ -1769,6 +1819,12 @@ def compile_image(image, sink=None):
         lines.append('declare void @NativeAotRegisterDispatch_nid_no_patch(ptr, i64)')
     if stubs:
         lines.append('declare void @NativeAotReportUnimplemented_nid_no_patch(i64)')
+    process_parameters = image.contracts.get('title_process_parameters')
+    if process_parameters:
+        lines.append('declare void @NativeAotBindAllocator_nid_no_patch(ptr, i64, i64)')
+        # The heap is initialised from main, not this constructor: the title's allocator init calls
+        # runtime HLE whose namespace-scope containers are not constructed until after the ctors.
+        lines.append('declare void @NativeAotSetProcessParameters_nid_no_patch(ptr)')
     if image.contracts.get('count_entries'):
         ordered = sorted(image.functions.values(), key=lambda spec: spec['address'])
         addresses = ', '.join(f'i64 {image.guest_base + spec["address"]}' for spec in ordered)
@@ -1826,34 +1882,52 @@ def compile_image(image, sink=None):
     if image.immutable_regions:
         lines.extend(immutable_data.declarations(image))
     unresolved_relocations = []
+    # A whole-title image has hundreds of thousands of pointer slots; one store per slot makes
+    # clang's initializer codegen pathologically slow and memory-hungry. Above a threshold the
+    # slots go into a constant table the runtime applies in a loop instead.
+    pointer_stores = []
+    for slot, target in image.relocations:
+        if slot in image.immutable_cells:
+            continue
+        try:
+            value = image.pointer(target)
+        except Rejected:
+            # A pointer into the middle of a function (jump-table entries) has no native
+            # function to name; leave the slot zero and report it instead of failing the image.
+            unresolved_relocations.append(hex(target))
+            continue
+        pointer_stores.append((image.pointer(slot, 8), value))
+    for slot, contract in image.import_slots.items():
+        if slot not in image.immutable_cells:
+            pointer_stores.append((image.pointer(slot, 8), f"@{contract['name']}"))
+    for slot, binding in image.data_import_slots.items():
+        if slot not in image.immutable_cells:
+            pointer_stores.append((image.pointer(slot, 8), f"@{binding['name']}"))
+    relocation_table = len(pointer_stores) > 1024
+    if relocation_table:
+        entries = ', '.join(f'{{ ptr, ptr }} {{ ptr {slot}, ptr {value} }}' for slot, value in pointer_stores)
+        lines.append(f'@__aps5_aot_relocations = private constant [{len(pointer_stores)} x {{ ptr, ptr }}] [{entries}], align 8')
+        lines.append('declare void @NativeAotApplyRelocations_nid_no_patch(ptr, i64)')
     if image.tls_layout or image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
         if image.guest_data:
             lines.append(f'  call void @NativeAotMapImage_nid_no_patch(ptr @__aps5_aot_segments, i64 {len(image.segments)})')
-        for slot, target in image.relocations:
-            if slot in image.immutable_cells:
-                continue
-            try:
-                value = image.pointer(target)
-            except Rejected:
-                # A pointer into the middle of a function (jump-table entries) has no native
-                # function to name; leave the slot zero and report it instead of failing the image.
-                unresolved_relocations.append(hex(target))
-                continue
-            lines.append(f'  store ptr {value}, ptr {image.pointer(slot, 8)}, align 1')
-        for slot, contract in image.import_slots.items():
-            if slot in image.immutable_cells:
-                continue
-            lines.append(f"  store ptr @{contract['name']}, ptr {image.pointer(slot, 8)}, align 1")
-        for slot, binding in image.data_import_slots.items():
-            if slot in image.immutable_cells:
-                continue
-            lines.append(f"  store ptr @{binding['name']}, ptr {image.pointer(slot, 8)}, align 1")
+        if relocation_table:
+            lines.append(f'  call void @NativeAotApplyRelocations_nid_no_patch(ptr @__aps5_aot_relocations, i64 {len(pointer_stores)})')
+        else:
+            for slot, value in pointer_stores:
+                lines.append(f'  store ptr {value}, ptr {slot}, align 1')
         if dispatch_enabled:
             lines.append(f'  call void @NativeAotRegisterDispatch_nid_no_patch(ptr @__aps5_aot_dispatch, i64 {len(dispatch_entries)})')
         if image.contracts.get('count_entries'):
             lines.append(f'  call void @NativeAotRegisterEntryCounts_nid_no_patch(ptr @__aps5_aot_counts, i64 {len(image.functions)}, ptr @__aps5_aot_count_addresses)')
+        if process_parameters:
+            # Replace the title's allocator table entries with typed wrappers over its natively
+            # compiled guest functions, then let the runtime heap read the mapped parameters.
+            for binding in process_parameters['bindings']:
+                lines.append(f'  call void @NativeAotBindAllocator_nid_no_patch(ptr inttoptr (i64 {binding["slot"]} to ptr), i64 {binding["target"]}, i64 {binding["index"]})')
+            lines.append(f'  call void @NativeAotSetProcessParameters_nid_no_patch(ptr inttoptr (i64 {process_parameters["address"]} to ptr))')
         if image.tls_layout:
             lines.append(f"  call void @{module_tls.REGISTER}(ptr @{image.tls_layout['name']})")
         if image.immutable_regions:
@@ -1888,6 +1962,13 @@ def compile_image(image, sink=None):
             sink('\n\n' + stub_function(spec, reason))
         sink('\n')
     stubs.extend(late_stubs)
+    if image.hle_log:
+        lines.append('declare i64 @HleLogCall(ptr, i64, i64, i64, i64, i64, i64)')
+        lines.append('declare void @HleLogReturn(i64, i64)')
+        for hle_name, hle_index in image.hle_names.items():
+            raw = hle_name.encode() + b'\0'
+            encoded = ''.join(f'\\{byte:02X}' for byte in raw)
+            lines.append(f'@__aps5_hle_name_{hle_index} = private constant [{len(raw)} x i8] c"{encoded}", align 1')
     report = {'schema': 1, 'target': image.target, 'status': 'experimental_native_ir', 'input_sha256': hashlib.sha256(image.bytes).hexdigest(),
               'functions': [{'name': f.contract['name'], 'address': f.contract['address'], 'instructions': len(f.instructions),
                              'native_tail_calls': len(f.tail_calls),

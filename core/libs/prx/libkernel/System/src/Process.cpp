@@ -285,9 +285,11 @@ int APS5_VABI issetugid_nid_postfix(void) {
     return 0;
 }
 
+#if !defined(APS5_NATIVE_LIBC_OWNS_EXIT)
 void APS5_VABI exit_nid_postfix(int code) {
     LibcExit_nid_no_patch(code);
 }
+#endif
 
 [[noreturn]] void APS5_VABI _exit_nid_postfix(int status) {
     LibcTerminate_nid_no_patch(status);
