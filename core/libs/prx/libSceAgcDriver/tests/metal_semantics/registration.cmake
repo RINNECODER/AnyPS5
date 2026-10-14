@@ -34,7 +34,8 @@ foreach(semanticsUnit IN ITEMS
         "ImageSampleGather|${CMAKE_CURRENT_LIST_DIR}/../../../../tests/ImageSampleGather.cpp"
         "FlatScratch|${CMAKE_CURRENT_LIST_DIR}/../FlatScratch.cpp"
         "InterpolationReferenceRange|${CMAKE_CURRENT_LIST_DIR}/../../../../tests/InterpolationReferenceRange.cpp"
-        "Vop3InterpHighHalf|${CMAKE_CURRENT_LIST_DIR}/Vop3InterpHighHalf.cpp")
+        "Vop3InterpHighHalf|${CMAKE_CURRENT_LIST_DIR}/Vop3InterpHighHalf.cpp"
+        "FunctionLdsUpdates|${CMAKE_CURRENT_LIST_DIR}/FunctionLdsUpdates.cpp")
     string(REPLACE "|" ";" semanticsUnitParts "${semanticsUnit}")
     list(GET semanticsUnitParts 0 semanticsUnitName)
     list(GET semanticsUnitParts 1 semanticsUnitSource)
