@@ -22,8 +22,8 @@ void MousePublishInput_nid_postfix(const MouseInputEvent& event) {
     Mouse::Publish(event);
 }
 
-int APS5_VABI sceMouseResetAbsolutePosition(std::int32_t handle) {
-    return Mouse::ResetAbsolutePosition(handle);
+int APS5_VABI sceMouseResetAbsolutePosition(std::int32_t handle, std::uint16_t x, std::uint16_t y) {
+    return Mouse::ResetAbsolutePosition(handle, x, y);
 }
 
 bool MouseIsOpen_nid_postfix() {

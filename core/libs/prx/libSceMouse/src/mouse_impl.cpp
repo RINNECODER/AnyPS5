@@ -82,7 +82,7 @@ int Read(std::int32_t handle, MouseData* data, std::int32_t num) {
     return available;
 }
 
-int ResetAbsolutePosition(std::int32_t handle) {
+int ResetAbsolutePosition(std::int32_t handle, std::uint16_t, std::uint16_t) {
     std::lock_guard lock(mouseMutex);
     if (!initialized) return MOUSE_ERROR_NOT_INITIALIZED;
     if (handle != MOUSE_HANDLE || !opened) return MOUSE_ERROR_INVALID_HANDLE;
