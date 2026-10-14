@@ -464,13 +464,14 @@ int main() {
         const auto compressed = Program(exported, true);
         const auto clamped = Program(outOfRange, false);
         const auto unclamped = Program(strongAlpha, false);
-        const std::array<BlendCase, 9> cases{{
+        const std::array<BlendCase, 10> cases{{
             {"SRC_ALPHA + ONE_MINUS_SRC_ALPHA, alpha ONE + ONE_MINUS_SRC_ALPHA", 0x65010504u, 0xfu, true},
             {"SRC_ALPHA + ONE_MINUS_SRC_ALPHA, alpha ONE + ONE_MINUS_SRC_ALPHA, red, green and blue written", 0x65010504u, 0x7u, true},
             {"SRC_ALPHA reverse-subtract ONE_MINUS_SRC_ALPHA, alpha ONE reverse-subtract ONE_MINUS_SRC_ALPHA", 0x65810584u, 0xfu, true},
             {"ONE + ONE_MINUS_SRC_ALPHA", 0x40000501u, 0xfu, true},
             {"SRC_ALPHA + ONE, alpha ZERO + ONE", 0x61000104u, 0xfu, true},
             {"SRC_COLOR + ONE_MINUS_SRC_COLOR, alpha SRC_COLOR + ONE", 0x61020302u, 0xfu, true},
+            {"SRC_ALPHA + ONE_MINUS_SRC_ALPHA, alpha ONE + ONE", 0x61010504u, 0xfu, true},
             {"DST_COLOR + ZERO, alpha DST_ALPHA + ZERO", 0x60060008u, 0xfu, false},
             {"ONE + ONE", 0x40000101u, 0xfu, false},
             {"ONE MIN ONE", 0x40000141u, 0xfu, false},
