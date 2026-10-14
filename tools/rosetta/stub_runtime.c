@@ -149,6 +149,7 @@ struct pending_return {
     unsigned index;
     unsigned call;
     uint64_t hle_sequence;
+    int logged;
 };
 enum { kPendingReturns = 64 };
 static __thread struct pending_return t_pending[kPendingReturns];
@@ -217,6 +218,14 @@ void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2, uint
         const uint64_t hle_args[6] = {a0, a1, a2, 0, 0, 0};
         hle_sequence = hle_log_call(aps5_trace_names[index], hle_args);
     }
+    // The HLE log needs every call's return, ANYPS5_TRACE_RETURNS only the traced window's.
+    // Either way this is opt-in: a C++ exception cannot unwind through the trampoline.
+    int pending = -1;
+    if ((g_trace_returns || hle_sequence != 0) && t_pending_depth < kPendingReturns) {
+        pending = (int)t_pending_depth++;
+        t_pending[pending] = (struct pending_return){*return_slot, index, 0, hle_sequence, 0};
+        *return_slot = (uint64_t)(uintptr_t)aps5_trace_return;
+    }
     // Calls before ANYPS5_TRACE_AFTER seconds are neither logged nor counted, so the
     // per-import limit applies to the window of interest (a title's steady state).
     if (seconds < g_trace_after) return target;
@@ -233,9 +242,9 @@ void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2, uint
         emit(line, snprintf(line, sizeof line, "[trace] %.3fs tid=%llu #%u %s(%s, %s, %s)%s\n", seconds, (unsigned long long)thread, call,
                             aps5_trace_names[index], text[0], text[1], text[2], call == g_trace_limit ? " (limit reached)" : ""),
              sizeof line);
-        if (g_trace_returns && t_pending_depth < kPendingReturns) {
-            t_pending[t_pending_depth++] = (struct pending_return){*return_slot, index, call, hle_sequence};
-            *return_slot = (uint64_t)(uintptr_t)aps5_trace_return;
+        if (pending >= 0) {
+            t_pending[pending].call = call;
+            t_pending[pending].logged = 1;
         }
     }
     return target;
@@ -245,6 +254,7 @@ void* aps5_trace_hit(unsigned index, uint64_t a0, uint64_t a1, uint64_t a2, uint
 uint64_t aps5_trace_returned(uint64_t value) {
     const struct pending_return entry = t_pending[--t_pending_depth];
     hle_log_return(entry.hle_sequence, value);
+    if (!entry.logged) return entry.address;
     uint64_t thread = 0;
     pthread_threadid_np(NULL, &thread);
     char line[256];

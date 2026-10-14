@@ -73,6 +73,8 @@ def main():
     parser.add_argument('--nid-symbols', help='file of runtime symbol names (one per line, underscore stripped)')
     parser.add_argument('--guest-base', type=lambda value: int(value, 0), default=0x140000000,
                         help='slide added to every guest vaddr (the Rosetta relinked base by default)')
+    parser.add_argument('--hle-log', action='store_true',
+                        help='log every import call and its return through HleLogCall/HleLogReturn')
     args = parser.parse_args()
     contracts = json.loads(open(args.contracts).read())
     image = Image(args.elf, contracts)
@@ -122,6 +124,7 @@ def main():
     contracts['guest_data'] = True
     contracts['guest_base'] = args.guest_base
     contracts['count_entries'] = True
+    contracts['hle_log'] = args.hle_log
     # HLE NID binding: point a typed import at the runtime's <name>_nid_postfix symbol when
     # that exists (the arm64 libs define every guest entry point with that suffix).
     if args.nid_symbols:
