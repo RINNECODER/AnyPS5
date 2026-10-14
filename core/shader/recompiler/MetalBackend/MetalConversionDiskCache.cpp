@@ -24,8 +24,9 @@ constexpr std::uint32_t kMagic = 0x4c534d41u;  // "AMSL"
 constexpr std::uint32_t kFormat = 1;  // header: magic, format, key digest, size, hash, LZ4 size; then the LZ4 payload
 
 // A new field in one of these structs must be added to Write and Read below
-// (and kFormat bumped); these sizes are the reminder.
-static_assert(sizeof(Result) - sizeof(RecompileResult) == 416, "Result changed: update the MSL disk cache encoding");
+// (and kFormat bumped); these sizes are the reminder. Result::sourceHash is not stored: it is
+// derived from the source (ConvertToMetal sets it on every result it returns).
+static_assert(sizeof(Result) - sizeof(RecompileResult) - sizeof(Result::sourceHash) == 416, "Result changed: update the MSL disk cache encoding");
 static_assert(sizeof(ResourceMapping) == 48 && sizeof(RectListInfo) == 104 && sizeof(InterfaceMember) == 32 && sizeof(MinimumLodPair) == 36 &&
                   sizeof(ImplicitBufferMapping) == 12 && sizeof(MeshOutputInfo) == 8 && sizeof(MinimumLodImage) == 12 &&
                   sizeof(CapturedSamplerRequirement) == 12,

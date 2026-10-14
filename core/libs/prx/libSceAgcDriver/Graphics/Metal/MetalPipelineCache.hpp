@@ -45,9 +45,11 @@ struct CachedRenderPipeline {
 [[nodiscard]] MTLLanguageVersion ConvertedShaderLanguageVersion(MTLLanguageVersion processDefault, bool languageVersion32) API_AVAILABLE(macos(15.0));
 // Returns `entryPoint` from the library compiled from `source` with the converted-shader compile options
 // (safe math; ConvertedShaderLanguageVersion). Throws std::runtime_error when compilation fails and
-// returns nil when the entry point is missing.
+// returns nil when the entry point is missing. `sourceHash` is ShaderSourceHash(source) when the caller
+// has it (a converted shader's Result::sourceHash), or 0 to compute it.
 [[nodiscard]] id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& source,
-                                                   const std::string& entryPoint, bool languageVersion32);
+                                                   const std::string& entryPoint, bool languageVersion32,
+                                                   std::size_t sourceHash = 0);
 // Pipeline states with MTLPipelineOptionBindingInfo reflection. They return a nil state and set `error`
 // when creation fails.
 [[nodiscard]] CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComputePipelineDescriptor* descriptor,
