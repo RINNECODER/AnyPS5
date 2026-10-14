@@ -23,6 +23,10 @@ void CreateDirectMemoryBacking(int64_t start, size_t len, int memoryType);
 bool QueryDirectMapping(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end, std::uint64_t* offset, int* memoryType);
 void ForgetDirectMemory(int64_t start, size_t len);
 
+// Test hook: the physical-span index must reference only live direct mappings, and every live
+// mapping must be covered by spans that carry its base.
+bool DirectMemorySpanIndexConsistent();
+
 struct DirectMemoryView {
     std::uintptr_t address;
     std::size_t bytes;
