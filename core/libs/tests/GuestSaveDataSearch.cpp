@@ -158,7 +158,7 @@ static void OtherTitle() {
     for (const bool second : {false, true}) {
         Require(SearchTitle(nullptr, second) == 1, "a search without a title id must find the running title's save");
         Require(SearchTitle("PPSA00000", second) == 1, "a search for the running title must find its save");
-        Require(SearchTitle("PPSA17221", second) == 0, "a search for another title must find none of the running title's saves");
+        Require(SearchTitle("PPSA00001", second) == 0, "a search for another title must find none of the running title's saves");
     }
 }
 

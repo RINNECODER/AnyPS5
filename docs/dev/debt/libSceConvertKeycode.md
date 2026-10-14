@@ -2,7 +2,7 @@
 
 ### Unknown function info
 
-- [sceConvertKeycodeGetCharacter](../../../core/libs/prx/libSceConvertKeycode/Export.cpp) (libSceConvertKeycode) - the signature `(uint16_t keycode, uint32_t, uint32_t keyboardType, char16_t* character)` is inferred from PPSA12361, which passes a 16-bit keycode, 0, the type from `sceConvertKeycodeGetImeKeyboardType` and a pointer it reads one UTF-16 unit from when the result is 0. The meaning of the second argument is unknown; a value other than 0 throws, and so does a keyboard type other than 0.
+- [sceConvertKeycodeGetCharacter](../../../core/libs/prx/libSceConvertKeycode/Export.cpp) (libSceConvertKeycode) - the signature `(uint16_t keycode, uint32_t, uint32_t keyboardType, char16_t* character)` is inferred from a title call that passes a 16-bit keycode, 0, the type from `sceConvertKeycodeGetImeKeyboardType` and a pointer it reads one UTF-16 unit from when the result is 0. The meaning of the second argument is unknown; a value other than 0 throws, and so does a keyboard type other than 0.
 
 ### Functional
 
