@@ -680,10 +680,13 @@ struct AvPlayerVideoEx {
     std::uint8_t luma_bit_depth;
     std::uint8_t chroma_bit_depth;
     bool video_full_range_flag;
-    std::uint8_t reserved1[37];
+    std::uint8_t reserved1[5];
+    double frame_rate;
+    std::uint8_t reserved2[24];
 };
 static_assert(sizeof(AvPlayerVideoEx) == 80);
 static_assert(offsetof(AvPlayerVideoEx, crop_left_offset) == 20 && offsetof(AvPlayerVideoEx, pitch) == 36);
+static_assert(offsetof(AvPlayerVideoEx, frame_rate) == 48);
 
 struct AvPlayerTimedTextEx {
     std::uint8_t language_code[4];

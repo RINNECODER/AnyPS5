@@ -1031,8 +1031,22 @@ void TestPs5ExtendedInitLayout() {
         AvPlayerInternal* player = nullptr;
         Check(sceAvPlayerInitEx(reinterpret_cast<const AvPlayerInitDataEx*>(raw.data()), &player) == 0 && player != nullptr, "PS5 extended init failed");
         Check(sceAvPlayerAddSource(player, "/app0/avplayer.mp4") == 0, "add source after the PS5 extended init failed");
+        AvPlayerStreamInfo audioInfo{};
+        Check(sceAvPlayerGetStreamInfo(player, EnglishAudioStream, &audioInfo) == 0, "PS5 audio stream info failed");
+        Check(audioInfo.type == 2, "PS5 audio stream must use type 2 so Unity enables it");
+        AvPlayerStreamInfoEx audioInfoEx{};
+        audioInfoEx.this_size = sizeof(audioInfoEx);
+        Check(sceAvPlayerGetStreamInfoEx(player, EnglishAudioStream, &audioInfoEx) == 0 && audioInfoEx.type == 2, "PS5 extended audio stream type is incorrect");
+        AvPlayerStreamInfoEx videoInfo{};
+        videoInfo.this_size = sizeof(videoInfo);
+        Check(sceAvPlayerGetStreamInfoEx(player, VideoStream, &videoInfo) == 0, "PS5 video stream info failed");
+        double frameRate = 0;
+        std::memcpy(&frameRate, reinterpret_cast<const std::uint8_t*>(&videoInfo) + 0x40, sizeof(frameRate));
+        Check(std::fabs(frameRate - FrameRate) < 0.01, "PS5 extended video frame rate at 0x40 is missing");
         if (autoStart) {
             Check(WaitFor([&] { return events.Seen(EventPlay); }), "auto start at 0x74 of the PS5 extended init did not start playback");
+            AvPlayerFrameInfo audioFrame{};
+            Check(WaitFor([&] { return sceAvPlayerGetAudioData(player, &audioFrame) != 0; }), "PS5 auto start did not enable audio");
         } else {
             Check(WaitFor([&] { return events.Seen(EventReady); }), "ready event missing after the PS5 extended init");
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -1041,6 +1055,10 @@ void TestPs5ExtendedInitLayout() {
             Check(sceAvPlayerStart(player) == 0, "start after the PS5 extended init failed");
         }
         Check(WaitFor([&] { return TextureCount() == Buffers + DecodeAheadBuffers; }), "video frame buffer count at 0x228 of the PS5 extended init not used");
+        AvPlayerFrameInfoEx videoFrame{};
+        Check(WaitFor([&] { return sceAvPlayerGetVideoDataEx(player, &videoFrame) != 0; }), "PS5 playback did not deliver video");
+        std::memcpy(&frameRate, reinterpret_cast<const std::uint8_t*>(&videoFrame) + 0x48, sizeof(frameRate));
+        Check(std::fabs(frameRate - FrameRate) < 0.01, "PS5 video frame rate at 0x48 is missing");
         Check(sceAvPlayerClose(player) == 0, "close after the PS5 extended init failed");
     };
     run(false);
@@ -1234,6 +1252,55 @@ void TestLoopWarningSharedByStreams() {
     Check(sceAvPlayerClose(player) == 0, "shared loop timing close failed");
 }
 
+void TestUnsyncedVideoDoesNotRunAheadOfAudio() {
+    Events events;
+    AvPlayerInitData init = InitData(&events);
+    auto* player = sceAvPlayerInit(&init);
+    Check(player != nullptr, "init failed");
+    Check(sceAvPlayerSetAvSyncMode(player, 1) == 0, "sync mode rejected");
+    Check(sceAvPlayerAddSource(player, "/app0/avplayer.mp4") == 0, "add source failed");
+    Check(sceAvPlayerEnableStream(player, VideoStream) == 0, "enable video failed");
+    Check(sceAvPlayerEnableStream(player, EnglishAudioStream) == 0, "enable audio failed");
+    Check(sceAvPlayerStart(player) == 0, "start failed");
+    AvPlayerFrameInfo sound{};
+    Check(WaitFor([&] { return sceAvPlayerGetAudioData(player, &sound) != 0; }), "no audio");
+    const auto start = std::chrono::steady_clock::now();
+    const auto first = sound.timestamp;
+    std::uint64_t worst = 0;
+    int frames = 0;
+    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(700)) {
+        const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
+        while (sound.timestamp <= first + elapsed && sceAvPlayerGetAudioData(player, &sound)) CheckEnglishAudio(sound);
+        AvPlayerFrameInfoEx frame{};
+        if (sceAvPlayerGetVideoDataEx(player, &frame)) {
+            CheckVideoFrame(frame);
+            ++frames;
+            if (frame.timestamp > first + elapsed) worst = std::max(worst, frame.timestamp - first - elapsed);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(frames >= 10, "video stalled while following audio");
+    Check(worst <= 67, "video ran " + std::to_string(worst) + " ms ahead of paced audio");
+    Check(sceAvPlayerClose(player) == 0, "close failed");
+}
+
+void TestLoopWarningWaitsForPlayback() {
+    Events events;
+    AvPlayerInitData init = InitData(&events);
+    auto* player = sceAvPlayerInit(&init);
+    Check(player != nullptr, "loop warning init failed");
+    Check(sceAvPlayerAddSource(player, "/app0/avplayer.mp4") == 0, "loop warning source failed");
+    Check(sceAvPlayerSetLooping(player, 1) == 0, "loop warning setting failed");
+    Check(sceAvPlayerEnableStream(player, VideoStream) == 0, "loop warning video failed");
+    Check(sceAvPlayerEnableStream(player, EnglishAudioStream) == 0, "loop warning audio failed");
+    Check(sceAvPlayerStart(player) == 0, "loop warning start failed");
+    AvPlayerFrameInfoEx frame{};
+    Check(WaitFor([&] { return sceAvPlayerGetVideoDataEx(player, &frame) != 0; }), "loop warning first frame missing");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    Check(!events.Seen(EventWarning, LoopingBack), "loop warning arrived while the first playback still had buffered audio and video");
+    Check(sceAvPlayerClose(player) == 0, "loop warning close failed");
+}
+
 void TestEofStopLatency() {
     constexpr int Rounds = 9;
     std::array<std::chrono::steady_clock::duration, Rounds> elapsed{};
@@ -1308,6 +1375,8 @@ int main() {
         TestAutoStartKeepsStartedPlayback();
         TestRestartAfterPausedJumpKeepsClockRunning();
         TestUnsyncedVideoKeepsUpWithAudio();
+        TestUnsyncedVideoDoesNotRunAheadOfAudio();
+        TestLoopWarningWaitsForPlayback();
         TestEofStopLatency();
         std::puts("AvPlayer tests passed");
         return 0;
