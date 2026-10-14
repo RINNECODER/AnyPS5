@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <sstream>
@@ -1688,8 +1689,11 @@ void WriteProofs(CacheKeyWriter& key, const std::vector<std::vector<PixelSampler
 // shader: push-constant values (they only fill pushConstantData, which RestorePushConstants rebuilds),
 // vertex-buffer descriptor fields and descriptor addresses. The disk cache uses it so that an entry
 // is found again by the next launch.
-std::string ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target, bool stable = false) {
+CacheKey ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target, bool stable = false) {
     CacheKeyWriter key;
+    // The SPIR-V and descriptor words dominate; reserve them up front so the key is not regrown.
+    key.Reserve(1024 + guest.spirv.Words().size() * sizeof(std::uint32_t) + guest.pushConstants.size() * sizeof(guest.pushConstants[0]) +
+        guest.vertexAttributes.size() * 64 + guest.bindings.size() * 512);
     key.Value(stage);
     key.Value(target.mslVersion);
     key.Value(target.maxBuffers);
@@ -1778,7 +1782,7 @@ std::string ConversionKey(const RecompileResult& guest, ShaderStage stage, const
         WriteWords(key, binding.imageSamplers);
         WriteBits(key, binding.bufferRead);
     }
-    return key.Take();
+    return key.TakeKey();
 }
 
 std::size_t ResultBytes(const Result& result) {
@@ -1800,16 +1804,24 @@ bool RestorePushConstants(Result& result, const RecompileResult& guest, const Ta
     return true;
 }
 
-BoundedCache<Result>& ConversionCache() {
-    static BoundedCache<Result> cache(4096, std::size_t{256} << 20);
+// By the exact key. Every entry shares its converted shader with the stable entry it came from (a
+// converted shader differs between exact keys of one stable key only in pushConstantData), so a draw
+// whose push constants change does not store another copy of the whole conversion.
+struct ExactConversion {
+    std::shared_ptr<const Result> shader;
+    std::vector<std::byte> pushConstantData;
+};
+
+BoundedCache<ExactConversion>& ConversionCache() {
+    static BoundedCache<ExactConversion> cache(4096, std::size_t{256} << 20);
     return cache;
 }
 
 // By the stable key (what the disk cache uses): a draw whose push constants or descriptor addresses
 // differ from every converted one still finds its shader here instead of reading it from disk
 // again (hundreds of thousands of disk loads per minute on a title's map).
-BoundedCache<Result>& StableConversionCache() {
-    static BoundedCache<Result> cache(8192, std::size_t{512} << 20);
+BoundedCache<std::shared_ptr<const Result>>& StableConversionCache() {
+    static BoundedCache<std::shared_ptr<const Result>> cache(8192, std::size_t{512} << 20);
     return cache;
 }
 
@@ -1818,7 +1830,7 @@ BoundedCache<Result>& StableConversionCache() {
 // (most of the driver's time on a title's map). The same exception is rethrown.
 struct ConversionFailures {
     std::mutex mutex;
-    std::unordered_map<std::string, std::exception_ptr> failures;
+    std::unordered_map<CacheKey, std::exception_ptr, CacheKeyHash, CacheKeyEqual> failures;
 };
 
 ConversionFailures& Failures() {
@@ -1826,14 +1838,20 @@ ConversionFailures& Failures() {
     return *failures;
 }
 
+// The returned copy of a cached conversion (which holds no guest program and no push constants):
+// the caller's guest program and push constants.
+Result Returned(const Result& shader, const RecompileResult& guest, const std::vector<std::byte>& pushConstantData) {
+    Result result = shader;
+    result.guest = guest;
+    result.pushConstantData = pushConstantData;
+    return result;
+}
+
 }
 
 Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
     auto key = ConversionKey(guest, stage, target);
-    if (auto cached = ConversionCache().Find(key)) {
-        cached->guest = guest;
-        return std::move(*cached);
-    }
+    if (auto cached = ConversionCache().Find(key)) return Returned(*cached->shader, guest, cached->pushConstantData);
     // A miss in memory tries the disk before running SPIRV-Cross (most of a warm launch's shader time).
     Result result;
     const auto diskKey = ConversionKey(guest, stage, target, true);
@@ -1842,14 +1860,14 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         const auto failed = Failures().failures.find(diskKey);
         if (failed != Failures().failures.end()) std::rethrow_exception(failed->second);
     }
-    if (auto stable = StableConversionCache().Find(diskKey); stable && RestorePushConstants(*stable, guest, target)) {
-        // Cached results hold no guest program; attach it only to the returned copy.
-        const auto bytes = ResultBytes(*stable);
-        ConversionCache().Insert(std::move(key), *stable, bytes);
-        stable->guest = guest;
-        return std::move(*stable);
+    if (auto stable = StableConversionCache().Find(diskKey)) {
+        Result restored = Returned(**stable, guest, {});
+        if (RestorePushConstants(restored, guest, target)) {
+            ConversionCache().Insert(std::move(key), ExactConversion{*stable, restored.pushConstantData}, ResultBytes(restored));
+            return restored;
+        }
     }
-    if (ConversionDiskCache::Load(diskKey, result) && RestorePushConstants(result, guest, target)) {
+    if (ConversionDiskCache::Load(diskKey.Bytes(), result) && RestorePushConstants(result, guest, target)) {
         result.guest = guest;
         // ANYPS5_MSL_CACHE_VERIFY=1 converts anyway and reports any difference (a field the stable key
         // leaves out that the conversion does read).
@@ -1857,7 +1875,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         if (verify) {
             static std::atomic<std::uint32_t> checked{0}, different{0};
             const auto fresh = ConvertToMetalUncached(guest, stage, target);
-            const bool same = ConversionDiskCache::EncodeEntry(diskKey, fresh) == ConversionDiskCache::EncodeEntry(diskKey, result);
+            const bool same = ConversionDiskCache::EncodeEntry(diskKey.Bytes(), fresh) == ConversionDiskCache::EncodeEntry(diskKey.Bytes(), result);
             const auto count = checked.fetch_add(1) + 1;
             const auto differences = same ? different.load() : different.fetch_add(1) + 1;
             if (!same || count % 100 == 0)
@@ -1872,7 +1890,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
             Failures().failures.emplace(diskKey, std::current_exception());
             throw;
         }
-        ConversionDiskCache::Store(diskKey, result);
+        ConversionDiskCache::Store(diskKey.Bytes(), result);
         // ANYPS5_MSL_CACHE_STATS=2: one line per conversion SPIRV-Cross had to run, to tell new
         // shaders from variants of known ones.
         static const bool logMisses = [] {
@@ -1889,14 +1907,19 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
             std::fprintf(stderr, "[msl-miss] stage %u variant %llx spirv %zu words %016llx key %016llx bindings %zu\n", static_cast<unsigned>(stage),
                 static_cast<unsigned long long>(guest.variantId), words.size(),
                 static_cast<unsigned long long>(fnv(words.data(), words.size() * 4)),
-                static_cast<unsigned long long>(fnv(diskKey.data(), diskKey.size())), guest.bindings.size());
+                static_cast<unsigned long long>(fnv(diskKey.Bytes().data(), diskKey.Size())), guest.bindings.size());
         }
     }
-    auto stored = result;
-    stored.guest = {};
-    const auto bytes = ResultBytes(stored);
+    result.sourceHash = ShaderSourceHash(result.source);
+    // Cached without the guest program and push constants (each hit attaches the caller's).
+    auto guestProgram = std::move(result.guest);
+    auto pushConstantData = std::move(result.pushConstantData);
+    auto stored = std::make_shared<const Result>(result);
+    result.guest = std::move(guestProgram);
+    result.pushConstantData = std::move(pushConstantData);
+    const auto bytes = ResultBytes(result);
     StableConversionCache().Insert(diskKey, stored, bytes);
-    ConversionCache().Insert(std::move(key), std::move(stored), bytes);
+    ConversionCache().Insert(std::move(key), ExactConversion{stored, result.pushConstantData}, bytes);
     return result;
 }
 

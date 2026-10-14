@@ -1,5 +1,6 @@
 #include "MetalPipelineCache.hpp"
 #include "MetalBackend/BoundedCache.hpp"
+#include "MetalBackend/MetalShaderBridge.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include <unordered_map>
 #include <atomic>
@@ -18,6 +19,8 @@ namespace AgcDriver::Metal {
 namespace {
 
 using ShaderRecompiler::MetalBackend::BoundedCache;
+using ShaderRecompiler::MetalBackend::CacheKey;
+using ShaderRecompiler::MetalBackend::CacheKeyProbe;
 using ShaderRecompiler::MetalBackend::CacheKeyWriter;
 
 constexpr NSUInteger BufferSlots = 31;
@@ -158,7 +161,7 @@ bool Linked(NSArray* functions) {
     return functions != nil && functions.count != 0;
 }
 
-std::string ComputeKey(id<MTLDevice> device, MTLComputePipelineDescriptor* descriptor) {
+CacheKey ComputeKey(id<MTLDevice> device, MTLComputePipelineDescriptor* descriptor) {
     CacheKeyWriter key;
     Device(key, device, 'C');
     Object(key, descriptor.computeFunction);
@@ -169,10 +172,10 @@ std::string ComputeKey(id<MTLDevice> device, MTLComputePipelineDescriptor* descr
     key.Value(descriptor.maxCallStackDepth);
     key.Bool(descriptor.supportAddingBinaryFunctions);
     Buffers(key, descriptor.buffers);
-    return key.Take();
+    return key.TakeKey();
 }
 
-std::string RenderKey(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor) {
+CacheKey RenderKey(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor) {
     CacheKeyWriter key;
     Device(key, device, 'R');
     Object(key, descriptor.vertexFunction);
@@ -201,10 +204,10 @@ std::string RenderKey(id<MTLDevice> device, MTLRenderPipelineDescriptor* descrip
     VertexLayout(key, descriptor.vertexDescriptor);
     Buffers(key, descriptor.vertexBuffers);
     Buffers(key, descriptor.fragmentBuffers);
-    return key.Take();
+    return key.TakeKey();
 }
 
-std::string MeshKey(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descriptor) {
+CacheKey MeshKey(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descriptor) {
     CacheKeyWriter key;
     Device(key, device, 'M');
     Object(key, descriptor.objectFunction);
@@ -228,7 +231,7 @@ std::string MeshKey(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descr
     Buffers(key, descriptor.objectBuffers);
     Buffers(key, descriptor.meshBuffers);
     Buffers(key, descriptor.fragmentBuffers);
-    return key.Take();
+    return key.TakeKey();
 }
 
 // ---- Binary archive -------------------------------------------------------------------------------
@@ -503,21 +506,26 @@ MTLLanguageVersion ConvertedShaderLanguageVersion(MTLLanguageVersion processDefa
 }
 
 id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& source, const std::string& entryPoint,
-                                     bool languageVersion32) {
+                                     bool languageVersion32, std::size_t sourceHash) {
+    // The key is this short head followed by the whole source. A draw looks it up without copying
+    // the source into a key, and with the source's hash from its conversion instead of hashing it again.
     CacheKeyWriter writer;
     Device(writer, device, 'F');
     writer.Bool(languageVersion32);
     writer.Text(entryPoint);
-    writer.Text(source);
-    auto key = writer.Take();
-    if (auto cached = Functions().Find(key)) return cached->function;
+    writer.Value<std::uint64_t>(source.size());
+    const auto head = writer.Take();
+    if (sourceHash == 0) sourceHash = ShaderRecompiler::MetalBackend::ShaderSourceHash(source);
+    const std::size_t hash = std::hash<std::string_view>{}(head) * 0x9e3779b97f4a7c15ull ^ sourceHash;
+    if (auto cached = Functions().Find(CacheKeyProbe{head, source, hash})) return cached->function;
+    auto key = CacheKey(head + source, hash);
     // A source Metal rejects is rejected again: remember the error instead of compiling it for every
     // draw that uses it.
     static std::mutex failedMutex;
     static auto* failed = new std::unordered_map<std::string, std::string>();
     {
         std::lock_guard lock(failedMutex);
-        if (const auto found = failed->find(key); found != failed->end()) throw std::runtime_error(found->second);
+        if (const auto found = failed->find(key.Bytes()); found != failed->end()) throw std::runtime_error(found->second);
     }
     NSString* text = [[NSString alloc] initWithBytes:source.data() length:source.size() encoding:NSUTF8StringEncoding];
     NSString* name = [[NSString alloc] initWithBytes:entryPoint.data() length:entryPoint.size() encoding:NSUTF8StringEncoding];
@@ -534,7 +542,7 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
         auto what = std::string("Converted Metal shader compilation failed: ") + (message == nullptr ? "no Metal error description" : message);
         std::lock_guard lock(failedMutex);
         if (failed->size() >= 1024) failed->clear();
-        failed->emplace(key, what);
+        failed->emplace(key.Bytes(), what);
         throw std::runtime_error(what);
     }
     id<MTLFunction> function = [library newFunctionWithName:name];
@@ -544,7 +552,7 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
 
 CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComputePipelineDescriptor* descriptor, NSError** error) {
     const bool cacheable = !Linked(descriptor.linkedFunctions.functions) && !Linked(descriptor.preloadedLibraries);
-    auto key = cacheable ? ComputeKey(device, descriptor) : std::string();
+    auto key = cacheable ? ComputeKey(device, descriptor) : CacheKey();
     if (cacheable) {
         if (auto cached = ComputePipelines().Find(key)) return {cached->state, cached->reflection};
     }
@@ -580,7 +588,7 @@ CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComput
 CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor, NSError** error) {
     const bool cacheable = !Linked(descriptor.vertexLinkedFunctions.functions) && !Linked(descriptor.fragmentLinkedFunctions.functions) &&
                            !Linked(descriptor.vertexPreloadedLibraries) && !Linked(descriptor.fragmentPreloadedLibraries);
-    auto key = cacheable ? RenderKey(device, descriptor) : std::string();
+    auto key = cacheable ? RenderKey(device, descriptor) : CacheKey();
     if (cacheable) {
         if (auto cached = RenderPipelines().Find(key)) return {cached->state, cached->reflection};
     }
@@ -616,7 +624,7 @@ CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPi
 CachedRenderPipeline CachedMeshPipelineState(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descriptor, NSError** error) {
     const bool cacheable = !Linked(descriptor.objectLinkedFunctions.functions) && !Linked(descriptor.meshLinkedFunctions.functions) &&
                            !Linked(descriptor.fragmentLinkedFunctions.functions);
-    auto key = cacheable ? MeshKey(device, descriptor) : std::string();
+    auto key = cacheable ? MeshKey(device, descriptor) : CacheKey();
     if (cacheable) {
         if (auto cached = RenderPipelines().Find(key)) return {cached->state, cached->reflection};
     }
@@ -656,7 +664,7 @@ id<MTLDepthStencilState> CachedDepthStencilState(id<MTLDevice> device, MTLDepthS
     writer.Bool(descriptor.depthWriteEnabled);
     Stencil(writer, descriptor.frontFaceStencil);
     Stencil(writer, descriptor.backFaceStencil);
-    auto key = writer.Take();
+    auto key = writer.TakeKey();
     if (auto cached = DepthStencilStates().Find(key)) return *cached;
     id<MTLDepthStencilState> state = [device newDepthStencilStateWithDescriptor:descriptor];
     if (state == nil) return nil;
@@ -682,7 +690,7 @@ id<MTLSamplerState> CachedSamplerState(id<MTLDevice> device, MTLSamplerDescripto
     writer.Bool(descriptor.supportArgumentBuffers);
     OptionalNumber(writer, descriptor, @"lodBias");
     OptionalNumber(writer, descriptor, @"reductionMode");
-    auto key = writer.Take();
+    auto key = writer.TakeKey();
     if (auto cached = SamplerStates().Find(key)) return *cached;
     id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:descriptor];
     if (sampler == nil) return nil;

@@ -107,7 +107,13 @@ private:
     std::vector<ImageView> imageViews;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> bufferRanges;
     std::vector<std::shared_ptr<MetalSampler>> samplers;
-    id<MTLBuffer> emptyBuffer = nil;
+    // Small per-draw buffers (captured shader data, the empty descriptor buffer) are carved from
+    // recycled chunks instead of each being a new Metal buffer (a kernel allocation per draw); the
+    // chunks return to MetalBufferPool once Complete sees the work finished.
+    [[nodiscard]] MetalBufferBinding upload(const void* data, std::size_t bytes);
+    std::vector<id<MTLBuffer>> uploadChunks;
+    std::size_t uploadUsed = 0;
+    std::optional<MetalBufferBinding> emptyBuffer;
     DepthTextureLookup depthLookup;
     MetalGuestHostAliases* aliases = nullptr;
     ImageCache* imageCache = nullptr;

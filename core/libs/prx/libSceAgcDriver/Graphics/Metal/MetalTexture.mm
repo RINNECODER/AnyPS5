@@ -485,11 +485,12 @@ bool MetalTexture::inPlace(id<MTLBuffer> buffer, std::size_t offset) const {
 void MetalTexture::Upload(std::span<const std::byte> guestBytes) {
     const auto& geometry = backing->geometry;
     require(guestBytes.size() == geometry.guestBytes, "Metal texture upload byte extent differs from guest surface");
-    auto tiled = backend.Buffer(bufferSize(geometry.guestBytes));
+    // A recycled staging buffer (fully rewritten here), back to the pool once the upload has run.
+    auto tiled = MetalBufferPool::Shared().Take(backend.Device(), bufferSize(geometry.guestBytes));
     std::memcpy(tiled.contents, guestBytes.data(), guestBytes.size());
     std::memset(static_cast<std::byte*>(tiled.contents) + guestBytes.size(), 0, tiled.length - guestBytes.size());
-    // The command buffer keeps the staging buffer alive; work that samples the texture runs after it.
-    uploadFrom(tiled, 0);
+    // Work that samples the texture runs after the upload.
+    uploadFrom(tiled, 0, true);
 }
 
 void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
@@ -503,7 +504,7 @@ void MetalTexture::Upload(id<MTLBuffer> guest, std::size_t offset) {
     uploadFrom(guest, offset);
 }
 
-void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset) {
+void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recycleGuest) {
     GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Upload, descriptor.baseAddress));
     const auto& geometry = backing->geometry;
     // The queue runs uploads in commit order: no need to wait for an earlier one of this texture.
@@ -511,6 +512,7 @@ void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset) {
     auto commands = backend.CommandBuffer();
     // The blit reads only texels the detile wrote, so the (recycled) linear buffer needs no clearing.
     auto linear = backend.TransientBuffer(bufferSize(geometry.sliceLinearBytes * geometry.layers), commands);
+    if (recycleGuest) MetalBufferPool::Shared().GiveWhenCompleted(guest, commands);
     encodeTransfer(commands, guest, offset, linear, 0, false);
     encodeLinearCopy(commands, linear, true);
     // The draw or dispatch that samples the texture is committed later on the same queue, so it runs
@@ -530,11 +532,13 @@ void MetalTexture::FinishUpload() const {
 void MetalTexture::Readback(std::span<std::byte> guestBytes) const {
     const auto& geometry = backing->geometry;
     require(guestBytes.size() == geometry.guestBytes, "Metal texture readback byte extent differs from guest surface");
-    auto tiled = backend.Buffer(bufferSize(geometry.guestBytes));
+    // A recycled staging buffer (fully rewritten here); readbackInto waits for the GPU.
+    auto tiled = MetalBufferPool::Shared().Take(backend.Device(), bufferSize(geometry.guestBytes));
     std::memcpy(tiled.contents, guestBytes.data(), guestBytes.size());
     std::memset(static_cast<std::byte*>(tiled.contents) + guestBytes.size(), 0, tiled.length - guestBytes.size());
     readbackInto(tiled, 0);
     std::memcpy(guestBytes.data(), tiled.contents, guestBytes.size());
+    MetalBufferPool::Shared().Give(tiled);
 }
 
 void MetalTexture::Readback(id<MTLBuffer> guest, std::size_t offset) const {
@@ -554,10 +558,11 @@ void MetalTexture::readbackInto(id<MTLBuffer> guest, std::size_t offset) const {
     FinishUpload();
     // The retile reads only the elements the blit wrote (each level's texel extent in elements), so
     // the linear buffer needs no clearing either.
-    auto linear = backend.Buffer(bufferSize(geometry.sliceLinearBytes * geometry.layers));
+    auto linear = MetalBufferPool::Shared().Take(backend.Device(), bufferSize(geometry.sliceLinearBytes * geometry.layers));
     // The queue runs command buffers in commit order, so the blit sees the texture's earlier writes;
     // the retile rewrites only the surface's texels in place.
     auto commands = backend.CommandBuffer();
+    MetalBufferPool::Shared().GiveWhenCompleted(linear, commands);
     encodeLinearCopy(commands, linear, false);
     encodeTransfer(commands, linear, 0, guest, offset, true);
     GpuTiming::Scope timing(GpuTiming::Kind::Readback);

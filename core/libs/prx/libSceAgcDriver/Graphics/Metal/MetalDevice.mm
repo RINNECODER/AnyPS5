@@ -69,14 +69,17 @@ id<MTLBuffer> MetalBufferPool::Take(id<MTLDevice> device, std::size_t bytes) {
 }
 
 void MetalBufferPool::Give(id<MTLBuffer> buffer) {
-    // Enough for a few frames of surface staging; beyond it buffers are simply released.
+    // Enough for a few frames of surface staging; beyond it buffers are simply released. Small
+    // buffers (per-draw shader data chunks) are kept in larger numbers: one per draw in flight.
     constexpr std::size_t LimitBytes = std::size_t{768} << 20u;
     constexpr std::size_t LimitPerLength = 32;
+    constexpr std::size_t SmallBytes = std::size_t{64} << 10u;
+    constexpr std::size_t LimitPerSmallLength = 512;
     if (buffer == nil) return;
     std::lock_guard lock(mutex);
     if (freeBytes + buffer.length > LimitBytes) return;
     auto& list = free[{reinterpret_cast<std::uintptr_t>((__bridge void*)buffer.device), buffer.length}];
-    if (list.size() >= LimitPerLength) return;
+    if (list.size() >= (buffer.length <= SmallBytes ? LimitPerSmallLength : LimitPerLength)) return;
     list.push_back(buffer);
     freeBytes += buffer.length;
 }

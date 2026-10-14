@@ -3,7 +3,10 @@
 #include "../Recompiler.hpp"
 #include <array>
 #include <optional>
+#include <cstddef>
+#include <functional>
 #include <string>
+#include <string_view>
 
 namespace ShaderRecompiler::MetalBackend {
 
@@ -116,6 +119,9 @@ struct Result {
     ShaderStage stage;
     std::uint32_t vertexBufferCount = 0;
     std::string source;
+    // ShaderSourceHash(source), set by ConvertToMetal so that a draw does not hash the source again to
+    // find its compiled function; 0 when not computed. A stale value only makes that lookup miss.
+    std::size_t sourceHash = 0;
     std::string entryPoint;
     RecompileResult guest;
     std::vector<ResourceMapping> resources;
@@ -136,6 +142,10 @@ struct Result {
     NativeExecutionKind nativeExecutionKind = NativeExecutionKind::Compute;
     std::optional<RectListInfo> rectList;
 };
+
+[[nodiscard]] inline std::size_t ShaderSourceHash(std::string_view source) {
+    return std::hash<std::string_view>{}(source);
+}
 
 // Converts guest SPIR-V to MSL. Results are memoized in a bounded in-memory cache keyed exactly on the
 // SPIR-V words, every guest field the conversion reads, the stage and every target option; a cached
