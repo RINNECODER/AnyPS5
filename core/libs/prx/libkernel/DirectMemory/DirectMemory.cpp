@@ -481,7 +481,8 @@ std::map<std::uintptr_t, DirectMapping>::iterator RemoveMapping(std::map<std::ui
     const auto last = first + (mapping->second.end - base);
     for (auto span = g_physicalSpans.lower_bound(first); span != g_physicalSpans.end() && span->first < last;) {
         auto& bases = span->second.bases;
-        bases.erase(std::lower_bound(bases.begin(), bases.end(), base));
+        const auto found = std::lower_bound(bases.begin(), bases.end(), base);
+        if (found != bases.end() && *found == base) bases.erase(found);
         span = bases.empty() ? g_physicalSpans.erase(span) : std::next(span);
     }
     for (auto span = g_physicalSpans.lower_bound(first); span != g_physicalSpans.end() && span->first <= last;) {
@@ -500,8 +501,12 @@ std::map<std::uintptr_t, DirectMapping>::iterator RemoveMapping(std::map<std::ui
 
 std::vector<std::uintptr_t> MappingsSharingPhys(std::uint64_t first, std::uint64_t last) {
     std::vector<std::uintptr_t> bases;
-    for (auto span = g_physicalSpans.lower_bound(first); span != g_physicalSpans.end() && span->first < last; ++span) bases.insert(bases.end(), span->second.bases.begin(), span->second.bases.end());
-    if (auto span = g_physicalSpans.lower_bound(first); span != g_physicalSpans.begin() && (--span)->second.end > first) bases.insert(bases.end(), span->second.bases.begin(), span->second.bases.end());
+    // Collect element by element: a vector range copy of a span's bases read stale values in the
+    // whole-image build, and the stale base then failed the g_directMappings lookup.
+    for (auto span = g_physicalSpans.lower_bound(first); span != g_physicalSpans.end() && span->first < last; ++span)
+        for (const auto base : span->second.bases) bases.push_back(base);
+    if (auto span = g_physicalSpans.lower_bound(first); span != g_physicalSpans.begin() && (--span)->second.end > first)
+        for (const auto base : span->second.bases) bases.push_back(base);
     std::sort(bases.begin(), bases.end());
     bases.erase(std::unique(bases.begin(), bases.end()), bases.end());
     return bases;
@@ -557,7 +562,9 @@ void WatchMapping(std::uintptr_t address, std::size_t len) {
         const auto addedPhys = added->second.phys;
         const auto addedPhysEnd = addedPhys + (added->second.end - added->first);
         for (const auto base : MappingsSharingPhys(addedPhys, addedPhysEnd)) {
-            const auto& other = g_directMappings.at(base);
+            const auto found = g_directMappings.find(base);
+            if (found == g_directMappings.end()) continue;
+            const auto& other = found->second;
             if ((base >= address && base < end) || other.backing != added->second.backing) continue;
             const auto first = std::max(addedPhys, other.phys);
             const auto last = std::min(addedPhysEnd, other.phys + (other.end - base));
@@ -889,6 +896,34 @@ void ValidateOutput(void** addr) {
     }
 }
 
+}
+
+bool DirectMemorySpanIndexConsistent() {
+#if defined(__linux__) || defined(__APPLE__)
+    std::lock_guard lock(g_directLock);
+    for (const auto& entry : g_physicalSpans) {
+        for (const auto base : entry.second.bases) {
+            const auto mapping = g_directMappings.find(base);
+            if (mapping == g_directMappings.end()) return false;
+            const auto first = mapping->second.phys;
+            const auto last = first + (mapping->second.end - base);
+            if (first > entry.first || last < entry.second.end) return false;
+        }
+    }
+    for (const auto& entry : g_directMappings) {
+        const auto first = entry.second.phys;
+        const auto last = first + (entry.second.end - entry.first);
+        for (auto cursor = first; cursor < last;) {
+            auto span = g_physicalSpans.upper_bound(cursor);
+            if (span == g_physicalSpans.begin()) return false;
+            --span;
+            if (span->second.end <= cursor) return false;
+            if (std::find(span->second.bases.begin(), span->second.bases.end(), entry.first) == span->second.bases.end()) return false;
+            cursor = span->second.end;
+        }
+    }
+#endif
+    return true;
 }
 
 bool Reserved(const void* addr, size_t len) {
@@ -1276,7 +1311,9 @@ std::vector<DirectMemoryView> DirectMemoryViews(int64_t start, size_t len) {
     std::vector<DirectMemoryView> views;
     std::lock_guard lock(g_directLock);
     for (const auto base : MappingsSharingPhys(first, last)) {
-        const auto& mapping = g_directMappings.at(base);
+        const auto found = g_directMappings.find(base);
+        if (found == g_directMappings.end()) continue;
+        const auto& mapping = found->second;
         const auto mappingLast = mapping.phys + (mapping.end - base);
         if (mapping.phys >= last || mappingLast <= first) continue;
         const auto viewStart = base + (std::max(first, mapping.phys) - mapping.phys);

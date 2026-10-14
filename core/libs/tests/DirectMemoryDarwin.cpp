@@ -134,6 +134,27 @@ void FixedInRefusedRangeRelocates() {
     DirectMemoryFree(phys, Length);
 }
 
+void SpanIndexStaysConsistent() {
+    constexpr std::size_t Span = 2 * PS5_PAGE_SIZE;
+    std::int64_t phys = -1;
+    Check(DirectMemoryAlloc(0, DIRECT_MEMORY_SIZE, Span, PS5_PAGE_SIZE, 0, &phys) == 0, "allocate for the span index");
+    void* whole = nullptr;
+    Check(DoMapDirect(&whole, Span, ProtCpuReadWrite, 0, phys, 0) == 0, "map the whole range");
+    Check(DirectMemorySpanIndexConsistent(), "index consistent after the first mapping");
+    void* tail = nullptr;
+    Check(DoMapDirect(&tail, PS5_PAGE_SIZE, ProtCpuReadWrite, 0, phys + PS5_PAGE_SIZE, 0) == 0, "map an alias of the tail page");
+    Check(DirectMemorySpanIndexConsistent(), "index consistent after an alias");
+    Check(DoMunmap(tail, PS5_PAGE_SIZE) == 0, "unmap the alias");
+    Check(DirectMemorySpanIndexConsistent(), "index consistent after unmapping the alias");
+    void* again = nullptr;
+    Check(DoMapDirect(&again, PS5_PAGE_SIZE, ProtCpuReadWrite, 0, phys, 0) == 0, "map the head page again");
+    Check(DirectMemorySpanIndexConsistent(), "index consistent after remapping");
+    Check(DoMunmap(again, PS5_PAGE_SIZE) == 0, "unmap the remap");
+    Check(DoMunmap(whole, Span) == 0, "unmap the whole range");
+    Check(DirectMemorySpanIndexConsistent(), "index consistent after unmapping everything");
+    DirectMemoryFree(phys, Span);
+}
+
 void VirtualQueryDescribesHostMemory() {
     // Memory the guest registry does not know (a title's own heap block) is described by the host's region.
     const std::size_t bytes = 3 * 0x4000;
@@ -191,6 +212,7 @@ int main() {
     Run("no-overwrite keeps host mapping", NoOverwriteKeepsHostMapping);
     Run("hint skips refused range", HintSkipsRefusedRange);
     Run("fixed in refused range relocates", FixedInRefusedRangeRelocates);
+    Run("span index stays consistent", SpanIndexStaysConsistent);
     Run("virtual query describes host memory", VirtualQueryDescribesHostMemory);
     Run("lookup finds an allocation by address", LookupFindsAllocationByAddress);
     if (g_failures != 0) {
