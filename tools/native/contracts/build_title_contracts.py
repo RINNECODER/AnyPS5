@@ -138,6 +138,9 @@ def main():
                  'max_segment_bytes': 256 * 1024 * 1024,
                  'floating_point': FLOATING_POINT,
                  'allow_unlowered_tls': True,
+                 # The title is compiled as a module image with a general-dynamic TLS model, the
+                 # profile the native TLS lowering requires for its PT_TLS template.
+                 'module_image': True, 'tls_model': 'general-dynamic',
                  'dispatch': True,
                  'functions': functions, 'imports': imports,
                  'data': recovery['data'], 'pointer_relocations': recovery['pointer_relocations'],
