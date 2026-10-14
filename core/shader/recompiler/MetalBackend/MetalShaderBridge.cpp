@@ -1231,9 +1231,11 @@ static Result ConvertToMetalUncached(const RecompileResult& guest, ShaderStage s
             guest.bindings[0].descriptorSet == 0;
         if (!generatedFault && (guest.bdaAbiVersion != BdaAbi::Version || !result.requiresGpuAddresses))
             Fail("incompatible BDA ABI or missing physical-address capability");
-        for (const auto role : {DescriptorRole::BdaPagetable, DescriptorRole::FaultBuffer})
-            if (!generatedFault && std::none_of(guest.bindings.begin(), guest.bindings.end(), [role](const auto& binding) { return binding.role == role; }))
-                Fail("BDA ABI requires page-table and fault-buffer descriptor metadata");
+        // Specialization drops descriptor variables the final module no longer references, so a
+        // module that never reads the page table (or never records a fault) legitimately lacks that
+        // role; the module must still carry at least one of the two.
+        if (!generatedFault && std::none_of(guest.bindings.begin(), guest.bindings.end(), [](const auto& binding) { return binding.role == DescriptorRole::BdaPagetable || binding.role == DescriptorRole::FaultBuffer; }))
+            Fail("BDA ABI requires page-table or fault-buffer descriptor metadata");
     }
     if (control && (guest.bdaAbiVersion != BdaAbi::Version || result.requiresGpuAddresses ||
         guest.bindings.size() != 1 || guest.bindings[0].kind != DescriptorKind::StorageBuffer ||
