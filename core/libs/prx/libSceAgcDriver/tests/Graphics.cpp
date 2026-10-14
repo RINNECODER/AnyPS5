@@ -4974,6 +4974,7 @@ void ResourceContentKeyTests(bool benchmark) {
                 Require(ShaderResources::ContentKey(shader, dataWords, movable) != original, "content key ignored the last sampler association");
                 --program.bindings[0].imageSamplers.back();
             }
+            Require(original.capacity() == original.size(), "content key reserved a different word count than it serialized");
             std::uint64_t hash = 14695981039346656037ull;
             for (const auto word : original) hash = (hash ^ word) * 1099511628211ull;
             std::cout << "content-key count=" << count << " data=" << dataWords << " movable=" << movable << " words=" << original.size() << " capacity=" << original.capacity() << " hash=" << hash;
