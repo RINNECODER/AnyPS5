@@ -134,13 +134,15 @@ def main():
     options = [option for action in parser._actions for option in action.option_strings]
     args = parser.parse_args(nid_arguments(sys.argv[1:], options))
     if args.name:
+        if args.nid:
+            parser.error("--name/--symbol cannot be combined with --nid")
         rows = [{"name": name, "nid": compute_nid(name)} for name in args.name]
         if args.json:
             print(json.dumps({"symbols": rows}, indent=1))
         else:
             print("%-40s %s" % ("NAME", "NID"))
             for row in rows:
-                print("%-40s %s" % (row["name"][:40], row["nid"]))
+                print("%-40s %s" % (row["name"], row["nid"]))
         return 0
 
     db_path = Path(args.db) if args.db else DEFAULT_CACHE
