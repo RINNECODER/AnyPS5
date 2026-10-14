@@ -175,11 +175,12 @@ CacheKey ComputeKey(id<MTLDevice> device, MTLComputePipelineDescriptor* descript
     return key.TakeKey();
 }
 
-CacheKey RenderKey(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor) {
+CacheKey RenderKey(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor, id<MTLFunction> vertexFunction,
+                   id<MTLFunction> fragmentFunction) {
     CacheKeyWriter key;
     Device(key, device, 'R');
-    Object(key, descriptor.vertexFunction);
-    Object(key, descriptor.fragmentFunction);
+    Object(key, vertexFunction);
+    Object(key, fragmentFunction);
     Colors(key, descriptor.colorAttachments);
     key.Value(descriptor.depthAttachmentPixelFormat);
     key.Value(descriptor.stencilAttachmentPixelFormat);
@@ -585,14 +586,45 @@ CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComput
     return {entry.state, entry.reflection};
 }
 
+namespace {
+
+bool RenderCacheable(MTLRenderPipelineDescriptor* descriptor) {
+    return !Linked(descriptor.vertexLinkedFunctions.functions) && !Linked(descriptor.fragmentLinkedFunctions.functions) &&
+           !Linked(descriptor.vertexPreloadedLibraries) && !Linked(descriptor.fragmentPreloadedLibraries);
+}
+
+// Creates (and, when cacheable, caches under `key`) the pipeline for `native`, a copy the cache may keep.
+CachedRenderPipeline CreateRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* native, bool cacheable, CacheKey key,
+                                               NSError** error);
+
+}
+
 CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor, NSError** error) {
-    const bool cacheable = !Linked(descriptor.vertexLinkedFunctions.functions) && !Linked(descriptor.fragmentLinkedFunctions.functions) &&
-                           !Linked(descriptor.vertexPreloadedLibraries) && !Linked(descriptor.fragmentPreloadedLibraries);
-    auto key = cacheable ? RenderKey(device, descriptor) : CacheKey();
+    const bool cacheable = RenderCacheable(descriptor);
+    auto key = cacheable ? RenderKey(device, descriptor, descriptor.vertexFunction, descriptor.fragmentFunction) : CacheKey();
+    if (cacheable) {
+        if (auto cached = RenderPipelines().Find(key)) return {cached->state, cached->reflection};
+    }
+    return CreateRenderPipelineState(device, [descriptor copy], cacheable, std::move(key), error);
+}
+
+CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor, id<MTLFunction> vertexFunction,
+                                               id<MTLFunction> fragmentFunction, NSError** error) {
+    const bool cacheable = RenderCacheable(descriptor);
+    auto key = cacheable ? RenderKey(device, descriptor, vertexFunction, fragmentFunction) : CacheKey();
     if (cacheable) {
         if (auto cached = RenderPipelines().Find(key)) return {cached->state, cached->reflection};
     }
     MTLRenderPipelineDescriptor* native = [descriptor copy];
+    native.vertexFunction = vertexFunction;
+    native.fragmentFunction = fragmentFunction;
+    return CreateRenderPipelineState(device, native, cacheable, std::move(key), error);
+}
+
+namespace {
+
+CachedRenderPipeline CreateRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* native, bool cacheable, CacheKey key,
+                                               NSError** error) {
     const auto archive = cacheable ? ArchiveHandle(device) : nil;
     if (archive != nil) native.binaryArchives = @[archive];
     MTLRenderPipelineReflection* reflection = nil;
@@ -619,6 +651,8 @@ CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPi
     }
     const auto entry = RenderPipelines().Insert(std::move(key), RenderEntry{state, reflection, native}, ObjectBytes);
     return {entry.state, entry.reflection};
+}
+
 }
 
 CachedRenderPipeline CachedMeshPipelineState(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descriptor, NSError** error) {

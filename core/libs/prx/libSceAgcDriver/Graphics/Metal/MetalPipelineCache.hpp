@@ -56,6 +56,11 @@ struct CachedRenderPipeline {
                                                                NSError** error);
 [[nodiscard]] CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
                                                              NSError** error);
+// The pipeline for `descriptor` with these functions in place of its own. The descriptor is only copied
+// when the pipeline has to be created, so a draw whose pipeline is cached does not copy it.
+[[nodiscard]] CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor,
+                                                             id<MTLFunction> vertexFunction, id<MTLFunction> fragmentFunction,
+                                                             NSError** error);
 [[nodiscard]] CachedRenderPipeline CachedMeshPipelineState(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descriptor,
                                                            NSError** error);
 [[nodiscard]] id<MTLDepthStencilState> CachedDepthStencilState(id<MTLDevice> device, MTLDepthStencilDescriptor* descriptor);

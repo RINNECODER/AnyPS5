@@ -303,7 +303,44 @@ MetalTexture::MetalTexture(const MetalDevice& backend, std::shared_ptr<Backing> 
     createViews(compare);
 }
 
+namespace {
+
+static_assert(sizeof(Graphics::GuestTextureResource) == 88, "GuestTextureResource changed: update the texture view key");
+
+std::array<std::uint64_t, 21> viewKey(const Graphics::GuestTextureResource& d, bool compare) {
+    return {d.baseAddress, d.width, d.height, d.depthOrLastArray, d.baseArray, d.mipCount, d.baseLevel,
+        static_cast<std::uint64_t>(d.tileMode), static_cast<std::uint64_t>(d.dimension), d.format,
+        std::uint64_t{d.dstSelX} | std::uint64_t{d.dstSelY} << 8u | std::uint64_t{d.dstSelZ} << 16u | std::uint64_t{d.dstSelW} << 24u,
+        d.pipeBankXor, d.bcSwizzle, d.lastLevel, d.dccAddress, d.dccAlphaOnMsb, d.dccPipeAligned, d.minLod,
+        d.allocatedMipCount, d.samples, compare ? 1u : 0u};
+}
+
+// Views kept per backing; a surface is rarely bound through more descriptors than this.
+constexpr std::size_t MaxBackingViews = 32;
+
+}
+
 void MetalTexture::createViews(bool compare) {
+    // The views depend only on the backing, this descriptor and `compare`: reuse the ones made before.
+    const auto key = viewKey(descriptor, compare);
+    {
+        std::lock_guard lock(backing->viewsMutex);
+        for (const auto& [known, views] : backing->views) {
+            if (known != key) continue;
+            typedTexture = views.typed;
+            sampledView = views.sampled;
+            storageView = views.storage;
+            atomicView = views.atomic;
+            return;
+        }
+    }
+    makeViews(compare);
+    std::lock_guard lock(backing->viewsMutex);
+    if (backing->views.size() >= MaxBackingViews) backing->views.erase(backing->views.begin());
+    backing->views.push_back({key, Views{typedTexture, sampledView, storageView, atomicView}});
+}
+
+void MetalTexture::makeViews(bool compare) {
     const auto& geometry = backing->geometry;
     require(descriptor.baseArray < geometry.imageLayers, "Metal texture view base array lies outside the surface");
     const auto nativeFormat = pixelFormat(descriptor.format);

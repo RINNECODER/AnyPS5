@@ -11,6 +11,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -114,10 +115,23 @@ id<MTLFunction> samplerBankFunction(id<MTLDevice> device, const ShaderResult& sh
         shader.samplerArgumentCount == 0 || shader.samplerArgumentCount > samplerArgumentCapacity(device)) {
         throw std::invalid_argument("Metal sampler bank exceeds its native per-stage argument capacity or lacks Tier 2");
     }
+    // The encoder only proves the bank's reflection, which is fixed per function and slot: check it once
+    // per function instead of creating an encoder for every draw. The map holds each function, so its
+    // address is not reused while it is listed.
+    static std::mutex checkedMutex;
+    static auto* checked = new std::map<std::tuple<void*, void*, std::uint32_t>, id<MTLFunction>>();
+    const auto key = std::make_tuple((__bridge void*)device, (__bridge void*)function, *shader.samplerArgumentBuffer);
+    {
+        std::lock_guard lock(checkedMutex);
+        if (checked->contains(key)) return function;
+    }
     auto encoder = [function newArgumentEncoderWithBufferIndex:*shader.samplerArgumentBuffer];
     if (encoder == nil || encoder.encodedLength == 0 || encoder.alignment == 0 || encoder.device != device) {
         throw std::runtime_error("Metal sampler bank is missing native argument encoder reflection");
     }
+    std::lock_guard lock(checkedMutex);
+    if (checked->size() >= 4096) checked->clear();
+    checked->emplace(key, function);
     return function;
 }
 
@@ -803,13 +817,13 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
         validateLayout(rect.inputLayout);
     }
     if (this->fragment.rectList) throw std::invalid_argument("Metal fragment pipelines do not accept rectangle auxiliary reflection");
-    MTLRenderPipelineDescriptor* native = [descriptor copy];
-    native.vertexFunction = compile(device, this->vertex, MTLFunctionTypeVertex);
-    vertexSamplerFunction = samplerBankFunction(device, this->vertex, native.vertexFunction);
-    native.fragmentFunction = compile(device, this->fragment, MTLFunctionTypeFragment);
-    fragmentSamplerFunction = samplerBankFunction(device, this->fragment, native.fragmentFunction);
+    id<MTLFunction> vertexFunction = compile(device, this->vertex, MTLFunctionTypeVertex);
+    vertexSamplerFunction = samplerBankFunction(device, this->vertex, vertexFunction);
+    id<MTLFunction> fragmentFunction = compile(device, this->fragment, MTLFunctionTypeFragment);
+    fragmentSamplerFunction = samplerBankFunction(device, this->fragment, fragmentFunction);
     NSError* error = nil;
-    const auto created = CachedRenderPipelineState(device, native, &error);
+    // The descriptor is copied only when the pipeline is not cached yet.
+    const auto created = CachedRenderPipelineState(device, descriptor, vertexFunction, fragmentFunction, &error);
     pipeline = created.state;
     if (pipeline == nil && this->vertex.rectList && descriptor.rasterSampleCount != 1) {
         // Multisampled quad patches are new on this path: report the draw instead of stopping the driver.
@@ -819,8 +833,28 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
         throw std::runtime_error(errorMessage("Converted Metal render pipeline creation failed", error));
     }
     if (created.reflection == nil) throw std::runtime_error("Metal render pipeline did not return native binding reflection");
+    // Read from the reflection once per pipeline state rather than walking its bindings for every draw.
+    // The map holds each state, so its address is not reused while it is listed.
+    struct Alignments {
+        id<MTLRenderPipelineState> state;
+        std::array<NSUInteger, 31> vertex;
+        std::array<NSUInteger, 31> fragment;
+    };
+    static std::mutex alignmentsMutex;
+    static auto* alignments = new std::map<void*, Alignments>();
+    {
+        std::lock_guard lock(alignmentsMutex);
+        if (const auto found = alignments->find((__bridge void*)pipeline); found != alignments->end()) {
+            vertexBufferAlignments = found->second.vertex;
+            fragmentBufferAlignments = found->second.fragment;
+            return;
+        }
+    }
     vertexBufferAlignments = nativeBufferAlignments(created.reflection.vertexBindings);
     fragmentBufferAlignments = nativeBufferAlignments(created.reflection.fragmentBindings);
+    std::lock_guard lock(alignmentsMutex);
+    if (alignments->size() >= 4096) alignments->clear();
+    alignments->emplace((__bridge void*)pipeline, Alignments{pipeline, vertexBufferAlignments, fragmentBufferAlignments});
 }
 
 const ShaderResult& MetalRenderPipeline::VertexReflection() const {
