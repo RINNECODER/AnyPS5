@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -310,6 +311,11 @@ class ImportAuditTests(unittest.TestCase):
             code, out, err = work.run(registry)
         self.assertEqual((code, out), (2, ""))
         self.assertIn(f"FAIL: Permission denied: {library}", err)
+
+    def test_git_stamp_keeps_commit_when_status_cannot_start(self):
+        completed = subprocess.CompletedProcess([], 0, stdout="abcdef\n")
+        with patch.object(import_audit.subprocess, "run", side_effect=[completed, OSError("status unavailable")]):
+            self.assertEqual(import_audit.git_stamp(), ("abcdef", None))
 
 
 if __name__ == "__main__":
