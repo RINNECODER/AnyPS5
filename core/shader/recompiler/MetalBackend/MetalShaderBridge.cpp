@@ -1686,11 +1686,15 @@ void WriteProofs(CacheKeyWriter& key, const std::vector<std::vector<PixelSampler
 // shader: push-constant values (they only fill pushConstantData, which RestorePushConstants rebuilds),
 // vertex-buffer descriptor fields and descriptor addresses. The disk cache uses it so that an entry
 // is found again by the next launch.
-CacheKey ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target, bool stable = false) {
+// module: key the SPIR-V by the identity of these words (ModuleConversionCache) instead of by their
+// contents; the rest of the key is unchanged.
+CacheKey ConversionKey(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target, bool stable = false,
+                       const std::vector<std::uint32_t>* module = nullptr) {
     CacheKeyWriter key;
     // The SPIR-V and descriptor words dominate; reserve them up front so the key is not regrown.
-    key.Reserve(1024 + guest.spirv.Words().size() * sizeof(std::uint32_t) + guest.pushConstants.size() * sizeof(guest.pushConstants[0]) +
+    key.Reserve(1024 + (module ? 0 : guest.spirv.Words().size() * sizeof(std::uint32_t)) + guest.pushConstants.size() * sizeof(guest.pushConstants[0]) +
         guest.vertexAttributes.size() * 64 + guest.bindings.size() * 512);
+    if (module) key.Value(reinterpret_cast<std::uintptr_t>(module));
     key.Value(stage);
     key.Value(target.mslVersion);
     key.Value(target.maxBuffers);
@@ -1735,7 +1739,7 @@ CacheKey ConversionKey(const RecompileResult& guest, ShaderStage stage, const Ta
     key.Value(slots.indirect);
     key.Value(slots.indices);
 
-    WriteWords(key, guest.spirv.Words());
+    if (!module) WriteWords(key, guest.spirv.Words());
     key.Value(guest.runtimeAbiVersion);
     key.Value(guest.bdaAbiVersion);
     key.Value(guest.runtimeImageCount);
@@ -1814,6 +1818,28 @@ BoundedCache<ExactConversion>& ConversionCache() {
     return cache;
 }
 
+// In front of ConversionCache, by the identity of the SPIR-V words (SharedSpirv) instead of their
+// contents: every draw of a shader converts the same shared module again, and copying, hashing and
+// comparing its words was most of a cache hit (about an eighth of the graphics queue thread on a
+// title's map). The entry holds the words, so no other module can take their address and no holder
+// writes them in place while it exists.
+struct ModuleConversion {
+    std::shared_ptr<const std::vector<std::uint32_t>> module;
+    ExactConversion conversion;
+};
+
+BoundedCache<ModuleConversion>& ModuleConversionCache() {
+    static BoundedCache<ModuleConversion> cache(4096, std::size_t{256} << 20);
+    return cache;
+}
+
+void RememberModule(const std::shared_ptr<const std::vector<std::uint32_t>>& module, std::optional<CacheKey>& key, const ExactConversion& conversion) {
+    if (!module || !key) return;
+    const auto bytes = module->size() * sizeof(std::uint32_t) + conversion.pushConstantData.size() + sizeof(ModuleConversion);
+    static_cast<void>(ModuleConversionCache().Insert(std::move(*key), ModuleConversion{module, conversion}, bytes));
+    key.reset();
+}
+
 // By the stable key (what the disk cache uses): a draw whose push constants or descriptor addresses
 // differ from every converted one still finds its shader here instead of reading it from disk
 // again (hundreds of thousands of disk loads per minute on a title's map).
@@ -1847,8 +1873,17 @@ Result Returned(const Result& shader, const RecompileResult& guest, const std::v
 }
 
 Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
+    const auto module = guest.spirv.Share();
+    std::optional<CacheKey> moduleKey;
+    if (module) {
+        moduleKey = ConversionKey(guest, stage, target, false, module.get());
+        if (auto cached = ModuleConversionCache().Find(*moduleKey)) return Returned(*cached->conversion.shader, guest, cached->conversion.pushConstantData);
+    }
     auto key = ConversionKey(guest, stage, target);
-    if (auto cached = ConversionCache().Find(key)) return Returned(*cached->shader, guest, cached->pushConstantData);
+    if (auto cached = ConversionCache().Find(key)) {
+        RememberModule(module, moduleKey, *cached);
+        return Returned(*cached->shader, guest, cached->pushConstantData);
+    }
     // A miss in memory tries the disk before running SPIRV-Cross (most of a warm launch's shader time).
     Result result;
     const auto diskKey = ConversionKey(guest, stage, target, true);
@@ -1860,7 +1895,9 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     if (auto stable = StableConversionCache().Find(diskKey)) {
         Result restored = Returned(**stable, guest, {});
         if (RestorePushConstants(restored, guest, target)) {
-            ConversionCache().Insert(std::move(key), ExactConversion{*stable, restored.pushConstantData}, ResultBytes(restored));
+            ExactConversion conversion{*stable, restored.pushConstantData};
+            RememberModule(module, moduleKey, conversion);
+            ConversionCache().Insert(std::move(key), std::move(conversion), ResultBytes(restored));
             return restored;
         }
     }
@@ -1916,16 +1953,21 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     result.pushConstantData = std::move(pushConstantData);
     const auto bytes = ResultBytes(result);
     StableConversionCache().Insert(diskKey, stored, bytes);
-    ConversionCache().Insert(std::move(key), ExactConversion{stored, result.pushConstantData}, bytes);
+    ExactConversion conversion{stored, result.pushConstantData};
+    RememberModule(module, moduleKey, conversion);
+    ConversionCache().Insert(std::move(key), std::move(conversion), bytes);
     return result;
 }
 
+// A hit in ModuleConversionCache is a hit of the exact cache it stands in front of (its misses go on to
+// that cache and are counted there).
 ConversionCacheStatistics GetConversionCacheStatistics() {
     const auto counters = ConversionCache().Counters();
-    return {counters.hits, counters.misses, counters.entries, counters.bytes};
+    return {counters.hits + ModuleConversionCache().Counters().hits, counters.misses, counters.entries, counters.bytes};
 }
 
 void ClearConversionCache() {
+    ModuleConversionCache().Clear();
     ConversionCache().Clear();
     StableConversionCache().Clear();
     {
