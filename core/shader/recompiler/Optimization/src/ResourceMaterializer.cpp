@@ -616,7 +616,10 @@ void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot, c
         const auto& buffer = plan.info.buffers[i];
         const bool scalarOnly = buffer.scalar && !buffer.written && !buffer.atomic && !buffer.formatted && buffer.imageAlias == BufferResource::NoImageAlias
             && std::none_of(plan.memoryInfo.begin(), plan.memoryInfo.end(), [i](const MemoryInfo& memory) { return memory.kind == ResourceKind::Buffer && memory.resource == i; });
-        if (scalarOnly) snapshot.buffers.at(i).dwords[3] = 0u;
+        if (scalarOnly) {
+            snapshot.buffers.at(i).dwords[1] &= ~0x40000000u;
+            snapshot.buffers.at(i).dwords[3] = 0u;
+        }
         const auto decoded = decodeBufferDescriptor(snapshot.buffers.at(i));
         if (decoded.Type() != 0u) throw std::runtime_error("buffer descriptor uses an unsupported type");
         if (plan.stage != IrShaderStage::Compute && decoded.AddTid()) throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
