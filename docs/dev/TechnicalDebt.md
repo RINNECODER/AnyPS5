@@ -1,6 +1,5 @@
 # Project technical debt
 
-
 ### Build
 
 - Building on Windows requires a specific version of mingw - MinGW-w64 GCC 15.2.0 (`winlibs-gcc15`, `x86_64-ucrt-posix-seh`)
