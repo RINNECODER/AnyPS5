@@ -1,3 +1,4 @@
+from elf_segments import runtime_segments
 import argparse
 import hashlib
 import io
@@ -22,13 +23,17 @@ import system
 import effects
 import loop_ranges
 import native_image
+import module_lifecycle
+import module_tls
 import checked_stack
+import finite_tables
 import immutable_data
 import stack_values
 import pointer_outputs
 import parameter_pointers
 import frame_exclusion
 import checked_pointers
+import register_values
 import register_aliases
 from dynamic import parse_dynamic, DynamicError
 from calls import validate_indirect_calls, CallError
@@ -83,6 +88,9 @@ class Image:
         self.target = target
         self.target_spec = target_spec(target)
         self.contracts = contracts
+        self.namespace = contracts.get('native_namespace', '')
+        require(isinstance(self.namespace, str) and (not self.namespace or re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*_', self.namespace)), 'invalid native namespace')
+        require(type(contracts.get('module_image', False)) is bool, 'module_image must be boolean')
         self.bytes = Path(path).read_bytes()
         require(contracts.get('schema') == 1, 'unsupported contract schema')
         require(type(contracts.get('guard_diagnostics', False)) is bool, 'guard_diagnostics must be a boolean')
@@ -90,18 +98,23 @@ class Image:
         require(hashlib.sha256(self.bytes).hexdigest() == contracts['sha256'], 'input hash does not match contracts')
         self.elf = ELFFile(io.BytesIO(self.bytes))
         require(self.elf.elfclass == 64 and self.elf.little_endian and self.elf['e_machine'] == 'EM_X86_64', 'expected little-endian x86-64 ELF')
+        try:
+            self.tls_layout = module_tls.layout(self.elf, self.bytes, contracts)
+        except ValueError as error:
+            raise Rejected(str(error)) from error
         self.segments = []
         self.process_parameters = []
-        for segment in self.elf.iter_segments():
+        process_parameter_segments = []
+        for segment in runtime_segments(self.elf):
             if segment['p_type'] == 0x61000001:
                 self.process_parameters.append((segment['p_vaddr'], segment['p_filesz']))
                 # The SCE process-parameter segment is not PT_LOAD but the runtime must map it and
                 # read the title's libc parameters and allocator table from it.
                 if segment['p_filesz'] and segment['p_memsz'] >= segment['p_filesz']:
-                    self.segments.append(segment)
+                    process_parameter_segments.append(segment)
                 continue
             if segment['p_type'] == 'PT_TLS':
-                require(segment['p_memsz'] == 0 or contracts.get('allow_unlowered_tls', False),
+                require(segment['p_memsz'] == 0 or contracts.get('allow_unlowered_tls', False) or self.tls_layout is not None,
                         'TLS requires native TLS lowering')
             if segment['p_type'] != 'PT_LOAD':
                 continue
@@ -109,6 +122,14 @@ class Image:
             require(segment['p_offset'] + segment['p_filesz'] <= len(self.bytes), 'truncated segment')
             require(segment['p_memsz'] <= contracts.get('max_segment_bytes', 64 * 1024 * 1024),
                     'segment exceeds current offline allocation limit')
+            self.segments.append(segment)
+        for segment in process_parameter_segments:
+            # A process-parameter block a PT_LOAD already covers is mapped with it; mapping it
+            # again with MAP_FIXED would zero the rest of its page.
+            if any(other['p_type'] == 'PT_LOAD' and other['p_vaddr'] <= segment['p_vaddr']
+                   and segment['p_vaddr'] + segment['p_memsz'] <= other['p_vaddr'] + other['p_memsz']
+                   for other in self.segments):
+                continue
             self.segments.append(segment)
         self.functions = {}
         for function in contracts['functions']:
@@ -132,7 +153,7 @@ class Image:
         ordered = sorted(self.functions.values(), key=lambda f: f['address'])
         for left, right in zip(ordered, ordered[1:]):
             require(left['address'] + left['size'] <= right['address'], 'overlapping function contracts')
-        require(self.elf['e_entry'] in self.functions, 'entry function has no contract')
+        require(self.elf['e_entry'] in self.functions or (contracts.get('module_image') and self.elf['e_entry'] == 0), 'entry function has no contract')
         self.imports = contracts['imports']
         self.hle_log = bool(contracts.get('hle_log'))
         self.hle_names = {}
@@ -159,6 +180,8 @@ class Image:
             self.data.append(spec)
         self.import_slots = {}
         self.data_import_slots = {}
+        self.data_imports = contracts.get('data_imports', {})
+        require(isinstance(self.data_imports, dict), 'data_imports must be a mapping')
         self.relocations = []
         try:
             self.dynamic = parse_dynamic(self.elf, self.read)
@@ -167,24 +190,48 @@ class Image:
         tags = self.dynamic['tags']
         self.needed = self.dynamic['needed']
         lifecycle = contracts.get('lifecycle', {})
-        for tag, field in (('DT_INIT', 'init'), ('DT_FINI', 'fini')):
-            address = tags.get(tag, 0)
-            if address:
-                require(lifecycle.get('owner') == 'entry' and lifecycle.get(field) == address,
-                        'nonzero INIT/FINI requires an explicit entry lifecycle contract')
-                require(address in self.functions and signature(self.functions[address]) == ('void', []),
-                        'lifecycle function lacks a native void() contract')
-        require(tags.get('DT_INIT_ARRAYSZ', 0) == 0 and tags.get('DT_FINI_ARRAYSZ', 0) == 0 and tags.get('DT_PREINIT_ARRAYSZ', 0) == 0,
-                'initializer arrays require native lifecycle lowering')
+        if lifecycle.get('owner') != 'bundle':
+            for tag, field in (('DT_INIT', 'init'), ('DT_FINI', 'fini')):
+                address = tags.get(tag, 0)
+                if address:
+                    require(lifecycle.get('owner') == 'entry' and lifecycle.get(field) == address,
+                            'nonzero INIT/FINI requires an explicit entry lifecycle contract')
+                    require(address in self.functions and signature(self.functions[address]) == ('void', []),
+                            'lifecycle function lacks a native void() contract')
+            require(tags.get('DT_INIT_ARRAYSZ', 0) == 0 and tags.get('DT_FINI_ARRAYSZ', 0) == 0 and tags.get('DT_PREINIT_ARRAYSZ', 0) == 0,
+                    'initializer arrays require native lifecycle lowering')
         referenced_imports = set()
         referenced_data = set()
         for relocation in self.dynamic['relocations']:
             slot, kind, index, addend = (relocation[key] for key in ('slot', 'kind', 'symbol_index', 'addend'))
-            if kind == 0:
+            if kind in (0, 16, 17, 18):
                 continue
             if kind in (6, 7):
                 require(addend == 0, 'function import relocation has a nonzero addend')
                 symbol = self.dynamic['symbols'][index]
+                if contracts.get('module_image') and symbol['section'] != 0 and symbol['info'] & 15 == 1:
+                    require(symbol['info'] >> 4 == 1 and symbol['other'] in (0, 2, 3) and symbol['size'] > 0,
+                            'local data relocation needs a strong bounded object')
+                    self.pointer(symbol['value'], symbol['size'])
+                    self.relocations.append((slot, symbol['value']))
+                    continue
+                if contracts.get('module_image') and symbol['section'] != 0 and symbol['info'] & 15 == 2:
+                    require(symbol['info'] >> 4 == 1 and symbol['other'] in (0, 2, 3), 'local function binding must be strong')
+                    require(symbol['value'] in self.functions, 'local function relocation lacks a qualified ABI')
+                    self.import_slots[slot] = self.functions[symbol['value']]
+                    continue
+                if symbol['info'] & 15 == 1 and symbol['name'] in self.data_imports:
+                    name = symbol['name']
+                    require(name in self.data_imports, 'data import requires a separate native binding')
+                    binding = self.data_imports[name]
+                    require(set(binding) == {'name', 'size', 'evidence'} and re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', binding['name'])
+                            and type(binding['size']) is int and 0 < binding['size'] <= 64 * 1024 * 1024
+                            and isinstance(binding['evidence'], str) and binding['evidence'].strip(), 'invalid native data binding')
+                    require(symbol['info'] >> 4 == 1 and symbol['other'] == 0, 'data binding requires a strong default-visible symbol')
+                    require(symbol['size'] in (0, binding['size']), 'data binding size differs from ELF symbol')
+                    self.data_import_slots[slot] = binding
+                    referenced_data.add(name)
+                    continue
                 name = symbol['name']
                 if symbol['info'] & 15 == 1:
                     require(name in self.data_bindings, f'missing data binding: {name}')
@@ -208,15 +255,28 @@ class Image:
         expected = {tuple(pair) for pair in contracts['pointer_relocations']}
         require(set(self.relocations) == expected and len(expected) == len(self.relocations), 'pointer relocation contracts do not match the image')
         require(referenced_imports == set(self.imports), 'unused import contracts')
-        require(referenced_data == set(self.data_bindings), 'unused data bindings')
+        require(referenced_data == set(self.data_bindings) | set(self.data_imports), 'unused data bindings')
+        try:
+            self.module_lifecycle = module_lifecycle.describe(self) if lifecycle.get('owner') == 'bundle' else {}
+        except ValueError as error:
+            raise Rejected(str(error)) from error
+        try:
+            module_tls.relocations(self)
+        except ValueError as error:
+            raise Rejected(str(error)) from error
         self.decoder = Cs(CS_ARCH_X86, CS_MODE_64)
         self.decoder.detail = True
+        try:
+            self.finite_tables, self.jump_labels = finite_tables.discover(self)
+        except ValueError as error:
+            raise Rejected(str(error)) from error
         self.call_contracts = {}
         self.memory_effects = {}
         self.pointer_output_summaries = {}
         self.provider_requirements = {}
         try:
             immutable_data.configure(self)
+            module_tls.validate_indexes(self)
         except ValueError as error:
             raise Rejected(str(error)) from error
 
@@ -236,13 +296,15 @@ class Image:
         return self.bytes[begin:begin + available] + bytes(size - available)
 
     def pointer(self, address, size=1):
+        if address in getattr(self, 'jump_labels', {}) and size == 1:
+            return f'blockaddress(@{self.jump_labels[address]}, %b{address:x})'
         if address in self.functions and size == 1:
             return '@' + self.functions[address]['name']
         for spec in self.data:
             if spec['address'] <= address and address + size <= spec['address'] + spec['size']:
                 if self.guest_data:
                     return f'inttoptr (i64 {self.guest_base + address} to ptr)'
-                return f"getelementptr (i8, ptr @data_{spec['address']:x}, i64 {address - spec['address']})"
+                return f"getelementptr (i8, ptr @{self.namespace}data_{spec['address']:x}, i64 {address - spec['address']})"
         if self.guest_data and any(spec['p_vaddr'] <= address and address + size <= spec['p_vaddr'] + spec['p_filesz']
                                    for spec in self.segments):
             # Any other mapped segment (the SCE process-parameter segment).
@@ -265,6 +327,12 @@ class Image:
         if address not in self.call_contracts:
             try:
                 self.call_contracts[address] = validate_indirect_calls(self, owner)
+                for site, descriptor in self.finite_tables.items():
+                    if address <= site < address + owner['size'] and descriptor['kind'] == 'call':
+                        require(site not in self.call_contracts[address], 'derived finite call conflicts with a supplied annotation')
+                        self.call_contracts[address][site] = {'contract': descriptor['contract'], 'kind': 'operand',
+                            'targets': [self.functions[target]['name'] for target in descriptor['targets']],
+                            'target_addresses': descriptor['targets'], 'qualification': descriptor['qualification']}
             except CallError as error:
                 # A whole-title build (dispatch enabled) falls back to the runtime dispatch table
                 # for an indirect branch whose annotated target set names an address we cannot
@@ -339,13 +407,14 @@ class Function:
 
     def discover(self):
         start, end = self.contract['address'], self.contract['address'] + self.contract['size']
-        pending = [start]
+        pending = [(start, None)]
         occupied = {}
         while pending:
-            address = pending.pop()
+            address, predecessor = pending.pop()
             if address in self.instructions:
                 continue
-            require(start <= address < end, 'control flow escapes function contract')
+            if not (start <= address < end):
+                raise Rejected(f"control flow escapes function contract to 0x{address:x} from {predecessor}")
             decoded = list(self.image.decoder.disasm(self.image.read(address, min(15, end - address)), address, count=1))
             require(len(decoded) == 1, f'cannot decode 0x{address:x}')
             ins = decoded[0]
@@ -356,6 +425,8 @@ class Function:
             next_address = address + ins.size
             if ins.mnemonic in ('ret', 'ud2'):
                 successors = []
+            elif ins.mnemonic == 'jmp' and address in self.image.finite_tables:
+                successors = self.image.finite_tables[address]['targets']
             elif ins.mnemonic == 'jmp':
                 operand = ins.operands[0]
                 if operand.type == X86_OP_IMM and start <= operand.imm < end:
@@ -377,7 +448,13 @@ class Function:
                         successors = []
             elif ins.mnemonic.startswith('j'):
                 require(ins.operands[0].type == X86_OP_IMM, 'indirect branches require target-set reconstruction')
-                successors = [ins.operands[0].imm, next_address]
+                target = ins.operands[0].imm
+                if not (start <= target < end) and target in self.image.functions:
+                    # A conditional branch into another function is a conditional tail call.
+                    self.tail_calls[address] = (self.image.functions[target], None)
+                    successors = [next_address]
+                else:
+                    successors = [target, next_address]
             elif ins.mnemonic == 'call':
                 try:
                     callee, _ = self.image.call(ins, self.contract)
@@ -387,10 +464,15 @@ class Function:
                         raise
                     self.dispatch_calls[address] = True
                     successors = [next_address]
+            elif next_address >= end and next_address in self.image.functions:
+                # A fall-through into the next function is a tail call (the next function's
+                # return is this function's return).
+                self.tail_calls[address] = (self.image.functions[next_address], None)
+                successors = []
             else:
                 successors = [next_address]
             self.successors[address] = successors
-            pending.extend(successors)
+            pending.extend((successor, address) for successor in successors)
 
     def indirect_targets(self, ins):
         try:
@@ -506,9 +588,13 @@ class Function:
         self.check_immutable_call(ins, callee, state, effects.call_writes(self, ins, state))
         if not effects.required_bindings(self, ins) <= state['import_bindings']:
             self.fail(ins, 'native callee requires original provider bindings')
-        if slot is not None and slot not in state['image_pointers']:
+        if slot is not None and slot not in state['image_pointers'] and not self.image.contracts.get('allow_unimplemented'):
+            # A whole-title build keeps the import binding installed by native_image_init even after
+            # the dataflow lost track of the GOT slot.
             self.fail(ins, 'import target has no proven native pointer origin')
-        if state['rsp'] != 0 or state['saved']:
+        balanced = state['rsp'] == 0 and not state['saved']
+        branch = ins.mnemonic in ('call', 'jmp') or ins.mnemonic.startswith('j')
+        if not balanced and not (self.uniform and branch):
             self.fail(ins, 'tail call requires a balanced native frame')
         if not self.uniform and (
                 abi.result_type(callee['result']) != abi.result_type(self.contract['result'])
@@ -537,9 +623,9 @@ class Function:
                  'zero_vectors': original.get('zero_vectors', set()).copy(),
                  'pending_outputs': original.get('pending_outputs', frozenset()),
                  'constants': original.get('constants', {}).copy(), 'tail_stack_clean': original['tail_stack_clean'],
-                 'native_pointers': original['native_pointers'].copy(), 'stack_pointers': original['stack_pointers'].copy(),
+                 'native_pointers': original['native_pointers'].copy(), 'stack_pointers': original['stack_pointers'],
                  'stack_origins': original['stack_origins'].copy(), 'stack_values': original['stack_values'].copy(),
-                 'image_pointers': original['image_pointers'].copy(), 'import_bindings': original['import_bindings'].copy(), 'callback_memory_unmodified': original['callback_memory_unmodified']}
+                 'image_pointers': original['image_pointers'], 'import_bindings': original['import_bindings'].copy(), 'callback_memory_unmodified': original['callback_memory_unmodified']}
         op, args = ins.mnemonic, ins.operands
         if fma.analyze(self, ins, state) or avx.analyze(self, ins, state) or vector.analyze(self, ins, state) or x87.analyze(self, ins, state):
             return state
@@ -589,6 +675,9 @@ class Function:
             return state
         if ins.address in self.dispatch_jumps:
             return state
+        if op == 'jmp' and ins.address in self.image.finite_tables:
+            self.read_operand(ins, state, args[0])
+            return state
         if ins.address in self.tail_calls:
             self.check_tail_call(ins, state)
             return state
@@ -603,13 +692,19 @@ class Function:
                 state['flags'] = set()
                 return state
             callee, slot = self.image.call(ins, self.contract)
+            if callee.get('tls_resolver'):
+                pointer = effects.argument_pointer(self, ins, callee, 0, original)
+                if pointer is None or pointer[0] != 'image' or pointer[2] not in self.image.tls_indexes:
+                    self.fail(ins, 'TLS resolver argument is not a qualified immutable index')
             if not effects.required_bindings(self, ins) <= state['import_bindings']:
                 self.fail(ins, 'native callee requires original provider bindings')
             if slot == 'operand':
                 self.read_operand(ins, state, args[0])
-                if not self.uniform and (args[0].type == X86_OP_REG or self.memory_origin(ins, state, args[0]) is not None) and not self.pointer_operand(ins, state, args[0]):
+                if ins.address in self.image.finite_tables:
+                    pass
+                elif not self.uniform and (args[0].type == X86_OP_REG or self.memory_origin(ins, state, args[0]) is not None) and not self.pointer_operand(ins, state, args[0]):
                     self.fail(ins, 'indirect call target has no proven native pointer origin')
-                if not self.uniform and args[0].type == X86_OP_MEM and self.memory_origin(ins, state, args[0]) is None:
+                if ins.address not in self.image.finite_tables and not self.uniform and args[0].type == X86_OP_MEM and self.memory_origin(ins, state, args[0]) is None:
                     base, index = ins.reg_name(args[0].mem.base), ins.reg_name(args[0].mem.index)
                     provenance = state['pointers'].get(base)
                     if not provenance or provenance[0] != 'parameter' or index in state['native_pointers']:
@@ -645,8 +740,8 @@ class Function:
                 state['known'][abi.return_register(callee['result'])] = (1 << abi.bits(callee['result'])) - 1
             return state
         if op == 'ret':
-            if args:
-                self.fail(ins, 'callee stack cleanup requires a separate ABI contract')
+            # `ret imm16` is callee stack cleanup; in the uniform ABI the caller restores its own
+            # rsp around a call, so the immediate is redundant and can be ignored.
             if state['rsp'] != 0 or state['saved']:
                 self.fail(ins, 'unbalanced native frame')
             if self.contract['result'] != 'void':
@@ -665,8 +760,9 @@ class Function:
         if op in ('mov', 'movabs', 'movzx', 'movsx', 'movsxd', 'lea'):
             if op == 'lea' and args[1].type != X86_OP_MEM:
                 self.fail(ins, 'invalid address expression')
-            self.read_operand(ins, state, args[1])
-            self.define(ins, state, args[0])
+            if not register_values.transport(self, ins, original, state):
+                self.read_operand(ins, state, args[1])
+                self.define(ins, state, args[0])
             if args[0].type == X86_OP_REG:
                 dest = self.reg(ins, args[0])[0]
                 if op in ('mov', 'movabs'):
@@ -809,35 +905,79 @@ class Function:
                 native.discard(ALIASES[name][0])
         stack = original['stack_pointers'].copy()
         origins = original['stack_origins'].copy()
-        image = original['image_pointers'].copy()
-        bindings = original['import_bindings'].copy()
-        callback_memory_unmodified = original['callback_memory_unmodified']
         op, args = ins.mnemonic, ins.operands
+        call_writes = effects.call_writes(self, ins, original) if op == 'call' else None
+        # image_pointers (~250k entries) and import_bindings are usually unchanged by an
+        # instruction; copy each one only when this instruction actually changes it.
+        image = original['image_pointers']
+        bindings = original['import_bindings']
+
+        def image_discard(begin, end):
+            nonlocal image
+            removed = [offset for offset in range(begin - 7, end) if offset in image]
+            if not removed:
+                return
+            if image is original['image_pointers']:
+                image = image.copy()
+            for offset in removed:
+                image.discard(offset)
+
+        def image_add(offset):
+            nonlocal image
+            if offset in image:
+                return
+            if image is original['image_pointers']:
+                image = image.copy()
+            image.add(offset)
+
+        def image_clear():
+            nonlocal image
+            image = set()
+
+        def import_bindings():
+            nonlocal bindings
+            if bindings is original['import_bindings']:
+                bindings = bindings.copy()
+            return bindings
+
+        def bindings_clear():
+            nonlocal bindings
+            bindings = set()
+
+        callback_memory_unmodified = original['callback_memory_unmodified']
         for operand in self.memory_writes.get(ins.address, ()):
             origin = self.memory_write_region(ins, original, operand)
             if origin is None or origin[0] != 'frame':
                 callback_memory_unmodified = False
             if origin is not None and origin[0] == 'outside_frame':
-                image.clear()
-                bindings.clear()
+                image_clear()
+                bindings_clear()
                 continue
             if origin is None:
                 stack.clear()
                 origins.clear()
-                image.clear()
-                bindings.clear()
+                image_clear()
+                bindings_clear()
             else:
-                cells, begin, end = (stack if origin[0] == 'frame' else image), origin[1], origin[2]
-                cells.difference_update(offset for offset in list(cells) if begin < offset + 8 and offset < end)
+                begin, end = origin[1], origin[2]
+                add_cell = (op == 'mov' and checked_stack.lookup(self, ins, operand) is None and not operand.mem.index
+                            and operand is args[0] and self.pointer_operand(ins, original, args[1]))
                 if origin[0] == 'frame':
+                    for offset in range(begin - 7, end):
+                        stack.discard(offset)
                     origins = {offset: pointer for offset, pointer in origins.items() if not (begin < offset + 8 and offset < end)}
-                if origin[0] == 'image':
-                    bindings.difference_update(offset for offset in list(bindings) if begin < offset + 8 and offset < end)
-                if op == 'mov' and checked_stack.lookup(self, ins, operand) is None and not operand.mem.index and operand is args[0] and self.pointer_operand(ins, original, args[1]):
-                    cells.add(begin)
-                    pointer = self.pointer_origin(ins, original, args[1])
-                    if origin[0] == 'frame' and pointer is not None:
-                        origins[begin] = pointer
+                    if add_cell:
+                        stack.add(begin)
+                        pointer = self.pointer_origin(ins, original, args[1])
+                        if pointer is not None:
+                            origins[begin] = pointer
+                else:
+                    image_discard(begin, end)
+                    bindings = import_bindings()
+                    for offset in range(begin - 7, end):
+                        bindings.discard(offset)
+                    if add_cell:
+                        image_add(begin)
         if op == 'push':
             offset = original['rsp'] - 8
             stack = {saved for saved in stack if not (offset < saved + 8 and saved < offset + 8)}
@@ -863,25 +1003,30 @@ class Function:
             native.update(checked_pointers.validated_registers(self, ins, original))
             state['pending_outputs'] = pointer_outputs.capture(self, ins, original)
             native.difference_update(VOLATILE | set(VECTOR_STORAGE))
-            writes = effects.call_writes(self, ins, original)
-            if writes is None or writes.parameter_writes:
+            if call_writes is None or call_writes.parameter_writes:
                 stack.clear()
                 origins.clear()
-                image.clear()
-                bindings.clear()
+                image_clear()
+                bindings_clear()
                 callback_memory_unmodified = False
             else:
-                for kind, begin, end in writes.writes:
-                    cells = stack if kind == 'frame' else image
-                    cells.difference_update(offset for offset in list(cells) if begin < offset + 8 and offset < end)
+                for kind, begin, end in call_writes.writes:
                     if kind == 'frame':
+                        for offset in range(begin - 7, end):
+                            stack.discard(offset)
                         origins = {offset: pointer for offset, pointer in origins.items() if not (begin < offset + 8 and offset < end)}
-                    if kind == 'image':
-                        bindings.difference_update(offset for offset in list(bindings) if begin < offset + 8 and offset < end)
+                    else:
+                        image_discard(begin, end)
+                        bindings = import_bindings()
+                        for offset in range(begin - 7, end):
+                            bindings.discard(offset)
                         callback_memory_unmodified = False
             for _, predicate, kind, offset in state['pending_outputs']:
                 if predicate == 'always':
-                    (stack if kind == 'frame' else image).add(offset)
+                    if kind == 'frame':
+                        stack.add(offset)
+                    else:
+                        image_add(offset)
             if ins.address not in self.dispatch_calls:
                 callee, _ = self.image.call(ins, self.contract)
                 if callee['result'] == 'ptr':
@@ -912,9 +1057,20 @@ class Function:
             native.add(self.reg(ins, args[0])[0])
             checked_cell = self.memory_origin(ins, original, args[1])
             if checked_cell is not None:
-                (stack if checked_cell[0] == 'frame' else image).add(checked_cell[1])
-        image.update(self.image.immutable_cells)
-        bindings.update(self.image.immutable_bindings)
+                if checked_cell[0] == 'frame':
+                    stack.add(checked_cell[1])
+                else:
+                    image_add(checked_cell[1])
+        if self.image.immutable_cells:
+            missing = self.image.immutable_cells - image
+            if missing:
+                image = image.copy() if image is original['image_pointers'] else image
+                image.update(missing)
+        if self.image.immutable_bindings:
+            missing = self.image.immutable_bindings - bindings
+            if missing:
+                bindings = bindings.copy() if bindings is original['import_bindings'] else bindings
+                bindings.update(missing)
         state['native_pointers'], state['stack_pointers'], state['image_pointers'] = native, stack, image
         state['callback_memory_unmodified'] = callback_memory_unmodified
         state['import_bindings'] = bindings
@@ -956,7 +1112,7 @@ class Function:
                    'native_pointers': {'rsp'} | set(pointers),
                    'stack_pointers': {loc['offset'] for loc in self.argument_locations if loc['kind'] == 'stack' and loc['type'] == 'ptr'},
                    'stack_origins': {loc['offset']: ('parameter', index, 0) for index, loc in enumerate(self.argument_locations) if loc['kind'] == 'stack' and loc['type'] == 'ptr'},
-                   'image_pointers': set(self.image.import_slots) | {slot for slot, _ in self.image.relocations},
+                   'image_pointers': set(self.image.import_slots) | set(self.image.data_import_slots) | {slot for slot, _ in self.image.relocations},
                    'register_aliases': frozenset(), 'stack_values': {}, 'pending_outputs': frozenset(), 'parameter_pointers': {}, 'zero_vectors': set(),
                    'import_bindings': set(self.image.import_slots), 'callback_memory_unmodified': True}
         entry = self.contract['address']
@@ -991,7 +1147,8 @@ class Function:
                     new['stack_pointers'] = old['stack_pointers'] & state['stack_pointers']
                     new['stack_origins'] = {offset: pointer for offset, pointer in state['stack_origins'].items() if old['stack_origins'].get(offset) == pointer}
                     new['stack_values'] = {offset: value for offset, value in state['stack_values'].items() if old['stack_values'].get(offset) == value}
-                    new['image_pointers'] = old['image_pointers'] & state['image_pointers']
+                    new['image_pointers'] = (old['image_pointers'] if old['image_pointers'] is state['image_pointers']
+                                             else old['image_pointers'] & state['image_pointers'])
                     new['import_bindings'] = old['import_bindings'] & state['import_bindings']
                     new['callback_memory_unmodified'] = old['callback_memory_unmodified'] and state['callback_memory_unmodified']
                     new['pointers'] = {name: pointer for name, pointer in state['pointers'].items() if old['pointers'].get(name) == pointer}
@@ -1286,11 +1443,31 @@ class Function:
         self.lines.append('  call void @llvm.trap()')
         self.lines.append('  unreachable')
 
+    def repair_frame(self, state):
+        """Restore the saved guest registers and rsp so a tail call sees a balanced frame."""
+        if state['rsp'] == 0 and not state['saved']:
+            return state
+        for offset in sorted(state['saved'], reverse=True):
+            name = state['saved'][offset][0]
+            if name is None:
+                continue
+            value = self.emit(f"load i64, ptr {self.frame_pointer(offset)}, align 1")
+            self.store(name, value, 64)
+        repaired = dict(state)
+        repaired['rsp'] = 0
+        repaired['saved'] = {}
+        return repaired
+
     def uniform_call(self, ins, callee, slot, state, tail, result):
         self.uniform_store_registers('%rf_out')
         self.uniform_stack_out('%rf_out', state['rsp'])
         if slot == 'operand':
-            target = self.emit(f'inttoptr i64 {self.read(ins, ins.operands[0], 64)} to ptr')
+            if ins.address in self.image.finite_tables:
+                target = finite_tables.emit_target(self, ins, self.image.finite_tables[ins.address])
+            else:
+                target = self.emit(f'inttoptr i64 {self.read(ins, ins.operands[0], 64)} to ptr')
+            if ins.address in self.image.annotated_calls(self.contract):
+                finite_tables.emit_membership(self, ins, target, ['@' + name for name in self.image.annotated_calls(self.contract)[ins.address]['targets']])
         else:
             target = '@' + callee['name']
         self.lines.append(f'  call void {target}(ptr %rf_out)')
@@ -1404,11 +1581,20 @@ class Function:
             elif address in self.switch_jumps:
                 self.lower_switch(ins, state, address)
                 terminal = True
+            elif address in self.tail_calls and ins.mnemonic not in ('call', 'jmp'):
+                # Conditional tail call: taken -> tail call, not-taken -> fall through.
+                callee, slot = self.tail_calls[address]
+                require(abi.uniform(callee), 'conditional tail call requires a uniform callee')
+                label = f'ctc_{address:x}'
+                self.lines.append(f'  br i1 {self.condition(op)}, label %{label}, label %b{address + ins.size:x}')
+                self.lines.append(f'{label}:')
+                self.uniform_call(ins, callee, slot, self.repair_frame(state), True, result)
+                terminal = True
             elif op == 'call' or address in self.tail_calls:
                 tail = address in self.tail_calls
                 callee, slot = self.tail_calls[address] if tail else self.image.call(ins, self.contract)
                 if abi.uniform(callee):
-                    self.uniform_call(ins, callee, slot, state, tail, result)
+                    self.uniform_call(ins, callee, slot, self.repair_frame(state) if tail else state, tail, result)
                     terminal = tail
                 else:
                     arguments = []
@@ -1447,7 +1633,13 @@ class Function:
                                 hle_args.append(self.emit(f'zext i{abi.bits(typ)} {native_arguments[index]} to i64'))
                         hle_sequence = self.emit(f"call i64 @HleLogCall(ptr @__aps5_hle_name_{hle_index}, {', '.join('i64 ' + item for item in hle_args)})")
                     if slot == 'operand':
-                        target = self.emit(f'inttoptr i64 {self.read(ins, args[0], 64)} to ptr')
+                        if address in self.image.finite_tables:
+                            target = finite_tables.emit_target(self, ins, self.image.finite_tables[address])
+                        else:
+                            target = self.emit(f'inttoptr i64 {self.read(ins, args[0], 64)} to ptr')
+                        if address in self.image.annotated_calls(self.contract):
+                            names = self.image.annotated_calls(self.contract)[address]['targets']
+                            finite_tables.emit_membership(self, ins, target, ['@' + name for name in names])
                     else:
                         target = '@' + callee['name'] if slot is None else self.emit(f'load ptr, ptr {self.image.pointer(slot, 8)}, align 1')
                     expression = f"call {abi.result_type(callee['result'])} {target}({', '.join(arguments)})"
@@ -1504,6 +1696,14 @@ class Function:
                     value = self.native_value(result, value)
                     self.lines.append(f'  ret {abi.llvm_type(result)} {value}')
                 terminal = True
+            elif op == 'jmp' and address in self.image.finite_tables:
+                descriptor = self.image.finite_tables[address]
+                target = finite_tables.emit_target(self, ins, descriptor)
+                targets = list(dict.fromkeys(descriptor['targets']))
+                finite_tables.emit_membership(self, ins, target, [self.image.pointer(value) for value in targets])
+                labels = ', '.join(f'label %b{value:x}' for value in targets)
+                self.lines.append(f'  indirectbr ptr {target}, [{labels}]')
+                terminal = True
             elif op.startswith('j'):
                 target = args[0].imm
                 if op == 'jmp': self.lines.append(f'  br label %b{target:x}')
@@ -1514,6 +1714,13 @@ class Function:
                 terminal = True
             elif op != 'nop':
                 self.fail(ins, 'missing lowering')
+            if not terminal and address in self.tail_calls:
+                # A fall-through into another function is a tail call: the instruction was lowered
+                # above, then the frame is repaired and control transfers to the callee.
+                callee, slot = self.tail_calls[address]
+                require(abi.uniform(callee), 'fall-through tail call requires a uniform callee')
+                self.uniform_call(ins, callee, slot, self.repair_frame(state), True, result)
+                terminal = True
             if not terminal:
                 self.lines.append(f'  br label %b{address + ins.size:x}')
         self.lines.append('}')
@@ -1605,6 +1812,12 @@ def compile_image(image):
         lines.append('declare void @NativeAotRegisterDispatch_nid_no_patch(ptr, i64)')
     if stubs:
         lines.append('declare void @NativeAotReportUnimplemented_nid_no_patch(i64)')
+    process_parameters = image.contracts.get('title_process_parameters')
+    if process_parameters:
+        lines.append('declare void @NativeAotBindAllocator_nid_no_patch(ptr, i64, i64)')
+        # The heap is initialised from main, not this constructor: the title's allocator init calls
+        # runtime HLE whose namespace-scope containers are not constructed until after the ctors.
+        lines.append('declare void @NativeAotSetProcessParameters_nid_no_patch(ptr)')
     if image.contracts.get('count_entries'):
         ordered = sorted(image.functions.values(), key=lambda spec: spec['address'])
         addresses = ', '.join(f'i64 {image.guest_base + spec["address"]}' for spec in ordered)
@@ -1613,6 +1826,7 @@ def compile_image(image):
         lines.append('declare void @NativeAotRegisterEntryCounts_nid_no_patch(ptr, i64, ptr)')
         for index, spec in enumerate(ordered):
             spec['entry_index'] = index
+    lines.extend(module_tls.declarations(image))
     if image.contracts.get('guard_diagnostics', False):
         lines.append('declare void @NativeAotReportGuardFailure_nid_no_patch(i64, i32)')
     if any(f.checked_pointer_loads or f.checked_pointer_arguments or f.checked_pointer_bases for f in functions):
@@ -1635,6 +1849,10 @@ def compile_image(image):
         else:
             suffix = ' noreturn' if contract.get('noreturn') else ''
             lines.append(f"declare {abi.result_type(result)} @{contract['name']}({argument_types}){suffix}")
+    for binding in image.data_imports.values():
+        require(binding['name'] not in names, 'duplicate native data symbol')
+        names.add(binding['name'])
+        lines.append(f"@{binding['name']} = external global [{binding['size']} x i8]")
     if image.guest_data:
         require(not image.immutable_regions, 'guest data cannot also declare immutable regions')
         segments = ', '.join(f"{{ i64, i64, i64, i64, i64 }} {{ i64 {image.guest_base + spec['p_vaddr']}, i64 {spec['p_offset']}, i64 {spec['p_filesz']}, i64 {spec['p_memsz']}, i64 {spec['p_flags']} }}" for spec in image.segments)
@@ -1649,7 +1867,7 @@ def compile_image(image):
         raw = image.read(spec['address'], spec['size'])
         value = ''.join(f'\\{byte:02X}' for byte in raw)
         writable = image.segment(spec['address'])['p_flags'] & 2 or any(spec['address'] <= slot < spec['address'] + spec['size'] for slot in [*image.import_slots, *(slot for slot, _ in image.relocations)])
-        lines.append(f"@data_{spec['address']:x} = {'global' if writable else 'constant'} [{len(raw)} x i8] c\"{value}\", align 16")
+        lines.append(f"@{image.namespace}data_{spec['address']:x} = {'global' if writable else 'constant'} [{len(raw)} x i8] c\"{value}\", align 16")
     for name, binding in image.data_bindings.items():
         lines.append(f"@{binding['name']} = global [{binding['size']} x i8] zeroinitializer, align 16")
     if descriptor is not None:
@@ -1657,34 +1875,54 @@ def compile_image(image):
     if image.immutable_regions:
         lines.extend(immutable_data.declarations(image))
     unresolved_relocations = []
-    if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
+    # A whole-title image has hundreds of thousands of pointer slots; one store per slot makes
+    # clang's initializer codegen pathologically slow and memory-hungry. Above a threshold the
+    # slots go into a constant table the runtime applies in a loop instead.
+    pointer_stores = []
+    for slot, target in image.relocations:
+        if slot in image.immutable_cells:
+            continue
+        try:
+            value = image.pointer(target)
+        except Rejected:
+            # A pointer into the middle of a function (jump-table entries) has no native
+            # function to name; leave the slot zero and report it instead of failing the image.
+            unresolved_relocations.append(hex(target))
+            continue
+        pointer_stores.append((image.pointer(slot, 8), value))
+    for slot, contract in image.import_slots.items():
+        if slot not in image.immutable_cells:
+            pointer_stores.append((image.pointer(slot, 8), f"@{contract['name']}"))
+    for slot, binding in image.data_import_slots.items():
+        if slot not in image.immutable_cells:
+            pointer_stores.append((image.pointer(slot, 8), f"@{binding['name']}"))
+    relocation_table = len(pointer_stores) > 1024
+    if relocation_table:
+        entries = ', '.join(f'{{ ptr, ptr }} {{ ptr {slot}, ptr {value} }}' for slot, value in pointer_stores)
+        lines.append(f'@__aps5_aot_relocations = private constant [{len(pointer_stores)} x {{ ptr, ptr }}] [{entries}], align 8')
+        lines.append('declare void @NativeAotApplyRelocations_nid_no_patch(ptr, i64)')
+    if image.tls_layout or image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
         if image.guest_data:
             lines.append(f'  call void @NativeAotMapImage_nid_no_patch(ptr @__aps5_aot_segments, i64 {len(image.segments)})')
-        for slot, target in image.relocations:
-            if slot in image.immutable_cells:
-                continue
-            try:
-                value = image.pointer(target)
-            except Rejected:
-                # A pointer into the middle of a function (jump-table entries) has no native
-                # function to name; leave the slot zero and report it instead of failing the image.
-                unresolved_relocations.append(hex(target))
-                continue
-            lines.append(f'  store ptr {value}, ptr {image.pointer(slot, 8)}, align 1')
-        for slot, contract in image.import_slots.items():
-            if slot in image.immutable_cells:
-                continue
-            lines.append(f"  store ptr @{contract['name']}, ptr {image.pointer(slot, 8)}, align 1")
-        for slot, binding in image.data_import_slots.items():
-            if slot in image.immutable_cells:
-                continue
-            lines.append(f"  store ptr @{binding['name']}, ptr {image.pointer(slot, 8)}, align 1")
+        if relocation_table:
+            lines.append(f'  call void @NativeAotApplyRelocations_nid_no_patch(ptr @__aps5_aot_relocations, i64 {len(pointer_stores)})')
+        else:
+            for slot, value in pointer_stores:
+                lines.append(f'  store ptr {value}, ptr {slot}, align 1')
         if dispatch_enabled:
             lines.append(f'  call void @NativeAotRegisterDispatch_nid_no_patch(ptr @__aps5_aot_dispatch, i64 {len(dispatch_entries)})')
         if image.contracts.get('count_entries'):
             lines.append(f'  call void @NativeAotRegisterEntryCounts_nid_no_patch(ptr @__aps5_aot_counts, i64 {len(image.functions)}, ptr @__aps5_aot_count_addresses)')
+        if process_parameters:
+            # Replace the title's allocator table entries with typed wrappers over its natively
+            # compiled guest functions, then let the runtime heap read the mapped parameters.
+            for binding in process_parameters['bindings']:
+                lines.append(f'  call void @NativeAotBindAllocator_nid_no_patch(ptr inttoptr (i64 {binding["slot"]} to ptr), i64 {binding["target"]}, i64 {binding["index"]})')
+            lines.append(f'  call void @NativeAotSetProcessParameters_nid_no_patch(ptr inttoptr (i64 {process_parameters["address"]} to ptr))')
+        if image.tls_layout:
+            lines.append(f"  call void @{module_tls.REGISTER}(ptr @{image.tls_layout['name']})")
         if image.immutable_regions:
             lines.append(f'  call void @NativeAotRequireReadOnly_nid_no_patch(ptr @__aps5_aot_readonly_ranges, i64 {len(image.immutable_regions)})')
         if descriptor is not None:
@@ -1734,8 +1972,11 @@ def compile_image(image):
               'unimplemented_functions': len(stubs),
               'unresolved_relocations': unresolved_relocations,
               'unimplemented_reasons': _reason_histogram(stubs),
+              'tls': image.tls_layout, 'tls_indexes': sorted(image.tls_indexes),
+              'module_lifecycle': image.module_lifecycle,
+              'finite_tables': list(image.finite_tables.values()),
               'indirect_calls': [site for sites in image.call_contracts.values() for site in sites.values()],
-              'limitations': ['declared function boundaries and ABIs', 'declared scalar, SSE and AVX instruction subsets', 'no guest exception, TLS or computed-jump target recovery', 'indirect call target sets are declared, not inferred',
+              'limitations': ['declared function boundaries and ABIs', 'declared scalar, SSE and AVX instruction subsets', 'no guest exception or TLS recovery', 'computed jumps limited to immutable absolute relocation tables', 'other indirect call target sets remain declared with runtime membership checks',
                               'no game compatibility or performance qualification']}
     return '\n\n'.join(lines) + '\n', report
 

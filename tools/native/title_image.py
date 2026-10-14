@@ -12,7 +12,6 @@ usage: title_image.py --elf eboot.elf --contracts title.contracts.json --output 
 """
 import argparse
 import json
-import struct
 import sys
 import time
 from collections import deque
@@ -24,6 +23,39 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core" / "aot"))
 from compiler import Image, compile_image, Rejected  # noqa: E402
 from toolchain import build_native_object  # noqa: E402
+
+
+def title_process_parameters(image):
+    """The title's process-parameter block with its allocator table resolved to guest addresses.
+
+    The SCE relative relocations that fill the libc parameters and the allocator replacement table
+    are part of the pointer-relocation contract, so ``image.relocations`` resolves them here.
+    """
+    if not image.process_parameters:
+        return None
+    address, size = image.process_parameters[0]
+    relocations = dict(image.relocations)
+
+    libc = relocations.get(address + 0x38, 0)
+    if not libc:
+        return None
+    replacement = relocations.get(libc + 0x30, 0)
+    if not replacement:
+        return None
+    heap_api = replacement + 0x20
+    bindings = []
+    # 0..9: the heap API. 10/11: the table's initialize/finalize callbacks.
+    for index in range(10):
+        target = relocations.get(heap_api + index * 8, 0)
+        if target:
+            bindings.append({'slot': image.guest_base + heap_api + index * 8,
+                             'target': image.guest_base + target, 'index': index})
+    for index, offset in ((10, 0x10), (11, 0x18)):
+        target = relocations.get(replacement + offset, 0)
+        if target:
+            bindings.append({'slot': image.guest_base + replacement + offset,
+                             'target': image.guest_base + target, 'index': index})
+    return {'address': image.guest_base + address, 'bytes': size, 'bindings': bindings}
 
 
 def reachable(image, entry_addresses, limit):
@@ -77,6 +109,8 @@ def main():
                         help='log every import call and its return through HleLogCall/HleLogReturn')
     args = parser.parse_args()
     contracts = json.loads(open(args.contracts).read())
+    # The slide must be set before the first Image so the process-parameter bindings carry it.
+    contracts['guest_base'] = args.guest_base
     image = Image(args.elf, contracts)
     entries = []
     if 'entry' in args.entries:
@@ -85,6 +119,11 @@ def main():
         init = image.contracts.get('lifecycle', {}).get('init')
         if init:
             entries.append(init)
+    process_parameters = title_process_parameters(image)
+    if process_parameters:
+        # The allocator callbacks are reachable only from data, so they are explicit entry roots;
+        # the walk then compiles their callees instead of leaving dispatch misses behind them.
+        entries += [binding['target'] - image.guest_base for binding in process_parameters['bindings']]
     start = time.time()
     order, frontier = reachable(image, entries, args.limit)
     native = set(order)
@@ -122,9 +161,10 @@ def main():
         print('extended lifecycle 0x%x to 0x%x, dropped %s' % (address, end, [hex(a) for a in dropped]), flush=True)
     contracts['allow_unimplemented'] = True
     contracts['guest_data'] = True
-    contracts['guest_base'] = args.guest_base
     contracts['count_entries'] = True
     contracts['hle_log'] = args.hle_log
+    if process_parameters:
+        contracts['title_process_parameters'] = process_parameters
     # HLE NID binding: point a typed import at the runtime's <name>_nid_postfix symbol when
     # that exists (the arm64 libs define every guest entry point with that suffix).
     if args.nid_symbols:

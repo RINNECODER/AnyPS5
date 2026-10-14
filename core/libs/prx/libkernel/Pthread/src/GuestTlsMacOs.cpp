@@ -1,4 +1,4 @@
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(APS5_NATIVE_TLS_POSIX)
 
 #include "prx/libkernel/Pthread/include/GuestTlsMacOs.hpp"
 #include <pthread.h>
@@ -39,7 +39,7 @@ void Release(void* threadPointer) {
 
 extern "C" {
 
-#if defined(__x86_64__)
+#if defined(__APPLE__) && defined(__x86_64__)
 std::uint8_t Aps5GuestTlsAvx_nid_no_patch = __builtin_cpu_supports("avx") ? 1 : 0;
 #endif
 
@@ -70,6 +70,14 @@ void* Aps5GuestTlsAllocateThreadPointer_nid_no_patch(const GuestTlsDescriptor* d
     return threadPointer;
 }
 
+void Aps5GuestTlsReleaseCurrentThread_nid_no_patch(const GuestTlsDescriptor* descriptor) {
+    if (descriptor == nullptr || descriptor->version != 1) Fail("unknown TLS descriptor");
+    void* pointer = pthread_getspecific(static_cast<pthread_key_t>(descriptor->key));
+    if (pointer == nullptr) return;
+    if (pthread_setspecific(static_cast<pthread_key_t>(descriptor->key), nullptr) != 0) Fail("cannot clear the thread pointer");
+    Release(pointer);
+}
+
 // __tls_get_addr for guest modules: the block start plus the offset (DTPOFF is block-relative).
 void* Aps5GuestTlsGetAddr_nid_no_patch(const GuestTlsIndex* index) {
     if (index == nullptr || index->module == nullptr) Fail("missing TLS index");
@@ -82,7 +90,7 @@ void* Aps5GuestTlsGetAddr_nid_no_patch(const GuestTlsIndex* index) {
 
 }
 
-#if defined(__x86_64__)
+#if defined(__APPLE__) && defined(__x86_64__)
 // rax = descriptor in, rax = thread pointer out. Called from rewritten guest code, so every other
 // register is preserved (the stubs keep the flags themselves).
 asm(R"(

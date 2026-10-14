@@ -14,6 +14,14 @@ SQRT_OPS = {'sqrtss': 32, 'sqrtsd': 64}
 CONVERTS = {'cvtsi2ss': 32, 'cvtsi2sd': 64, 'cvtsd2ss': 64, 'cvtss2sd': 32}
 TO_INT = {'cvttss2si': 32, 'cvttsd2si': 64, 'cvtss2si': 32, 'cvtsd2si': 64}
 COMPARES = {'comiss': 32, 'ucomiss': 32, 'comisd': 64, 'ucomisd': 64}
+PACKED_BINARY = {'paddb': ('add', 8), 'paddq': ('add', 64), 'psubd': ('sub', 32), 'psubq': ('sub', 64)}
+PACKED_MINMAX_INT = {'pmaxub': (8, False), 'pminub': (8, True), 'pmaxuw': (16, False), 'pminuw': (16, True)}
+PACKED_MUL = {'pmuludq': False, 'pmuldq': True}
+PACKS = {'packsswb': (16, 8), 'packssdw': (32, 16)}
+SHUF_WORDS = {'pshuflw', 'pshufhw'}
+PACKED_SHIFTS = {'psrlw': ('lshr', 16), 'psrld': ('lshr', 32), 'psrlq': ('lshr', 64),
+                 'psraw': ('ashr', 16), 'psrad': ('ashr', 32), 'psllw': ('shl', 16),
+                 'pslld': ('shl', 32), 'psllq': ('shl', 64)}
 PACKED_CMPEQ = {'pcmpeqb': 8, 'pcmpeqw': 16, 'pcmpeqd': 32, 'pcmpeqq': 64}
 PACKED_CMPGT = {'pcmpgtb': 8, 'pcmpgtw': 16, 'pcmpgtd': 32, 'pcmpgtq': 64}
 PACKED_MINMAX = {'minps': (32, True), 'maxps': (32, False), 'minpd': (64, True), 'maxpd': (64, False),
@@ -36,13 +44,14 @@ CMP_MNEMONICS = {f'cmp{suffix}{kind}': (lane, index)
                  for index, suffix in enumerate(CMP_PREDICATES)
                  for kind, lane in (('ps', 32), ('pd', 64), ('ss', 32), ('sd', 64))}
 SHUFFLES = {'shufps', 'pshufd', 'unpcklps', 'unpckhps', 'unpcklpd', 'unpckhpd',
-            'punpcklqdq', 'punpckhqdq', 'movlhps', 'movhlps'}
+            'punpcklbw', 'punpcklwd', 'punpcklqdq', 'punpckhqdq', 'movlhps', 'movhlps'}
 SUPPORTED = (FULL_MOVES | set(BITWISE) | set(FLOAT_OPS) | SHUFFLES | set(SQRT_OPS)
-             | set(CONVERTS) | set(TO_INT) | set(COMPARES) | set(PACKED_CMPEQ) | set(PACKED_CMPGT)
+             | set(CONVERTS) | set(TO_INT) | set(COMPARES) | set(PACKED_SHIFTS) | set(PACKED_BINARY) | set(PACKED_MINMAX_INT) | set(PACKED_MUL)
+             | set(PACKS) | SHUF_WORDS | set(PACKED_CMPEQ) | set(PACKED_CMPGT)
              | set(PACKED_MINMAX) | set(PACKED_UNPACKS) | set(CMP_MNEMONICS) | set(CMP_GENERIC)
              | set(CVT_PACKED) | {
     'movd', 'movq', 'movss', 'movsd', 'movlps', 'movlpd', 'psrld', 'paddd', 'pcmpgtd',
-    'packuswb'})
+    'packuswb', 'ucomiss', 'cvtsi2ss', 'paddb', 'pmaxub', 'pcmpeqb', 'pcmpeqd', 'psrad', 'movmskps'})
 FP_POLICY = {'rounding': 'nearest-even', 'subnormals': 'preserve', 'exceptions': 'masked',
              'status_flags': 'unobserved', 'nan_payloads': 'unobserved'}
 MASK128 = (1 << 128) - 1
@@ -114,6 +123,10 @@ def _policy(function, ins):
 
 def _shuffle(ins):
     op, args = ins.mnemonic, ins.operands
+    if op in ('punpcklbw', 'punpcklwd'):
+        width = 8 if op == 'punpcklbw' else 16
+        count = 128 // width
+        return width, [value for i in range(count // 2) for value in (i, i + count)]
     if op == 'shufps':
         control = args[2].imm
         return 32, [control & 3, (control >> 2) & 3, 4 + ((control >> 4) & 3), 4 + ((control >> 6) & 3)]
@@ -164,27 +177,54 @@ def analyze(function, ins, state):
             source_mask = sources[1 if index >= count else 0]
             known |= ((source_mask >> ((index % count) * width)) & lane_mask) << (lane * width)
         _copy_mask(ins, state, args[0], known)
-    elif op == 'psrld':
+    elif op == 'movmskps':
+        _check(function, ins, state, args[1], 128)
+        _define(function, ins, state, args[0], 32)
+    elif op in SHUF_WORDS:
+        source = _mask(function, ins, state, args[1])
+        control = args[2].imm
+        known = 0
+        for lane in range(8):
+            if op == 'pshuflw':
+                index = ((control >> (lane * 2)) & 3) if lane < 4 else lane
+            else:
+                index = lane if lane < 4 else 4 + ((control >> ((lane - 4) * 2)) & 3)
+            known |= ((source >> (index * 16)) & 0xffff) << (lane * 16)
+        _copy_mask(ins, state, args[0], known)
+    elif op in PACKED_BINARY:
+        left, right = (_mask(function, ins, state, operand) for operand in args[:2])
+        _copy_mask(ins, state, args[0], _complete_lanes(left & right, PACKED_BINARY[op][1]))
+    elif op in PACKED_MINMAX_INT:
+        left, right = (_mask(function, ins, state, operand) for operand in args[:2])
+        _copy_mask(ins, state, args[0], _complete_lanes(left & right, PACKED_MINMAX_INT[op][0]))
+    elif op in PACKED_MUL:
+        left, right = (_mask(function, ins, state, operand) for operand in args[:2])
+        _copy_mask(ins, state, args[0], _complete_lanes(left & right, 32, 64))
+    elif op in PACKED_SHIFTS:
+        instruction, width = PACKED_SHIFTS[op]
         known = _mask(function, ins, state, args[0])
         if args[1].type == X86_OP_IMM:
             count = args[1].imm
-            if count > 31:
+            if count > width - 1:
                 known = MASK128
             else:
-                lane = (1 << 32) - 1
+                lane = (1 << width) - 1
                 result = 0
-                for index in range(4):
-                    defined = ((known >> (index * 32)) & lane) >> count
-                    result |= (defined | (lane ^ (lane >> count))) << (index * 32)
+                for index in range(128 // width):
+                    defined = ((known >> (index * width)) & lane) >> count
+                    result |= (defined | (lane ^ (lane >> count))) << (index * width)
                 known = result
         else:
             _check(function, ins, state, args[1], 64)
             known = _complete_lanes(known, 32)
         _copy_mask(ins, state, args[0], known)
-    elif op in ('paddd', 'pcmpgtd', 'packuswb'):
+    elif op in ('paddd', 'pcmpgtd', 'packuswb') or op in PACKS:
         left, right = (_mask(function, ins, state, operand) for operand in args[:2])
         if op == 'packuswb':
             known = _complete_lanes(left, 16, 8) | (_complete_lanes(right, 16, 8) << 64)
+        elif op in PACKS:
+            source, target = PACKS[op]
+            known = _complete_lanes(left, source, target) | (_complete_lanes(right, source, target) << 64)
         else:
             known = _complete_lanes(left & right, 32)
         _copy_mask(ins, state, args[0], known)
@@ -324,17 +364,91 @@ def lower(function, ins):
         indices = ', '.join(f'i32 {index}' for index in mask)
         result = function.emit(f'shufflevector <{count} x i{width}> {left}, <{count} x i{width}> {right}, <{count} x i32> <{indices}>')
         _write(function, ins, args[0], _pack(function, result, width))
-    elif op == 'psrld':
-        left = _unpack(function, read(args[0]))
-        count = str(args[1].imm) if args[1].type == X86_OP_IMM else read(args[1], 64)
-        valid = function.emit(f'icmp ult i64 {count}, 32')
-        limited = function.emit(f'and i64 {count}, 31')
-        narrow = function.emit(f'trunc i64 {limited} to i32')
-        lane = function.emit(f'insertelement <4 x i32> zeroinitializer, i32 {narrow}, i32 0')
-        counts = function.emit(f'shufflevector <4 x i32> {lane}, <4 x i32> zeroinitializer, <4 x i32> zeroinitializer')
-        shifted = function.emit(f'lshr <4 x i32> {left}, {counts}')
-        result = function.emit(f'select i1 {valid}, <4 x i32> {shifted}, <4 x i32> zeroinitializer')
-        _write(function, ins, args[0], _pack(function, result))
+    elif op == 'movmskps':
+        source = read(args[1])
+        value = '0'
+        for lane in range(4):
+            bit = function.emit(f'lshr i128 {source}, {lane * 32 + 31}')
+            bit = function.emit(f'trunc i128 {bit} to i32')
+            bit = function.emit(f'and i32 {bit}, 1')
+            bit = function.emit(f'shl i32 {bit}, {lane}')
+            value = function.emit(f'or i32 {value}, {bit}')
+        function.write(ins, args[0], value)
+    elif op in SHUF_WORDS:
+        source = function.emit(f'bitcast i128 {read(args[1])} to <8 x i16>')
+        control = args[2].imm
+        indices = []
+        for lane in range(8):
+            if op == 'pshuflw':
+                indices.append(((control >> (lane * 2)) & 3) if lane < 4 else lane)
+            else:
+                indices.append(lane if lane < 4 else 4 + ((control >> ((lane - 4) * 2)) & 3))
+        mask = ', '.join(f'i32 {index}' for index in indices)
+        result = function.emit(f'shufflevector <8 x i16> {source}, <8 x i16> zeroinitializer, <8 x i32> <{mask}>')
+        _write(function, ins, args[0], function.emit(f'bitcast <8 x i16> {result} to i128'))
+    elif op in PACKED_BINARY:
+        instruction, width = PACKED_BINARY[op]
+        count = 128 // width
+        kind = f'<{count} x i{width}>'
+        left = function.emit(f'bitcast i128 {read(args[0])} to {kind}')
+        right = function.emit(f'bitcast i128 {read(args[1])} to {kind}')
+        result = function.emit(f'{instruction} {kind} {left}, {right}')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i128'))
+    elif op in PACKED_MINMAX_INT:
+        width, is_min = PACKED_MINMAX_INT[op]
+        count = 128 // width
+        kind = f'<{count} x i{width}>'
+        left = function.emit(f'bitcast i128 {read(args[0])} to {kind}')
+        right = function.emit(f'bitcast i128 {read(args[1])} to {kind}')
+        compare = function.emit(f'icmp {"ult" if is_min else "ugt"} {kind} {left}, {right}')
+        result = function.emit(f'select <{count} x i1> {compare}, {kind} {left}, {kind} {right}')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i128'))
+    elif op in PACKED_MUL:
+        signed = PACKED_MUL[op]
+        count = 2
+        kind32 = '<4 x i32>'
+        kind64 = '<2 x i64>'
+        left = function.emit(f'bitcast i128 {read(args[0])} to {kind32}')
+        right = function.emit(f'bitcast i128 {read(args[1])} to {kind32}')
+        left_even = function.emit(f'shufflevector {kind32} {left}, {kind32} zeroinitializer, <2 x i32> <i32 0, i32 2>')
+        right_even = function.emit(f'shufflevector {kind32} {right}, {kind32} zeroinitializer, <2 x i32> <i32 0, i32 2>')
+        extension = 'sext' if signed else 'zext'
+        left64 = function.emit(f'{extension} <2 x i32> {left_even} to {kind64}')
+        right64 = function.emit(f'{extension} <2 x i32> {right_even} to {kind64}')
+        product = function.emit(f'mul {kind64} {left64}, {right64}')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind64} {product} to i128'))
+    elif op in PACKED_SHIFTS:
+        instruction, width = PACKED_SHIFTS[op]
+        count = 128 // width
+        kind = f'<{count} x i{width}>'
+        left = function.emit(f'bitcast i128 {read(args[0])} to {kind}')
+        if args[1].type == X86_OP_IMM:
+            amount = args[1].imm
+            if amount >= width:
+                if instruction == 'ashr':
+                    splat = ', '.join([f'i{width} {width - 1}'] * count)
+                    result = function.emit(f'ashr {kind} {left}, <{splat}>')
+                else:
+                    result = 'zeroinitializer'
+            else:
+                splat = ', '.join([f'i{width} {amount}'] * count)
+                result = function.emit(f'{instruction} {kind} {left}, <{splat}>')
+        else:
+            shift = read(args[1], 64)
+            valid = function.emit(f'icmp ult i64 {shift}, {width}')
+            limited = function.emit(f'and i64 {shift}, {width - 1}')
+            narrow = limited if width == 64 else function.emit(f'trunc i64 {limited} to i{width}')
+            lane = function.emit(f'insertelement <{count} x i{width}> zeroinitializer, i{width} {narrow}, i32 0')
+            counts = function.emit(f'shufflevector <{count} x i{width}> {lane}, <{count} x i{width}> zeroinitializer, <{count} x i32> zeroinitializer')
+            shifted = function.emit(f'{instruction} {kind} {left}, {counts}')
+            if instruction == 'ashr':
+                splat = ', '.join([f'i{width} {width - 1}'] * count)
+                saturated = function.emit(f'ashr {kind} {left}, <{splat}>')
+                result = function.emit(f'select i1 {valid}, {kind} {shifted}, {kind} {saturated}')
+            else:
+                result = function.emit(f'select i1 {valid}, {kind} {shifted}, {kind} zeroinitializer')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i128'))
+
     elif op in ('paddd', 'pcmpgtd'):
         left, right = (_unpack(function, read(operand)) for operand in args[:2])
         if op == 'paddd':
@@ -438,6 +552,25 @@ def lower(function, ins):
             compare = function.emit(f'fcmp {predicate} {kind} {left}, {right}')
             result = function.emit(f'sext <{count} x i1> {compare} to <{count} x i{lane}>')
             _write(function, ins, args[0], function.emit(f'bitcast <{count} x i{lane}> {result} to i128'))
+    elif op in PACKS:
+        source_width, target_width = PACKS[op]
+        count = 128 // source_width
+        kind = f'<{count} x i{source_width}>'
+        target = f'<{count} x i{target_width}>'
+        low_limit = '<' + ', '.join([f'i{source_width} {-((1 << (target_width - 1)))}'] * count) + '>'
+        high_limit = '<' + ', '.join([f'i{source_width} {(1 << (target_width - 1)) - 1}'] * count) + '>'
+        values = []
+        for operand in args[:2]:
+            value = function.emit(f'bitcast i128 {read(operand)} to {kind}')
+            below = function.emit(f'icmp slt {kind} {value}, {low_limit}')
+            above = function.emit(f'icmp sgt {kind} {value}, {high_limit}')
+            low = function.emit(f'select <{count} x i1> {below}, {kind} {low_limit}, {kind} {value}')
+            high = function.emit(f'select <{count} x i1> {above}, {kind} {high_limit}, {kind} {low}')
+            values.append(function.emit(f'trunc {kind} {high} to {target}'))
+        indices = ', '.join(f'i32 {index}' for index in [*range(count), *range(count, 2 * count)])
+        combined_kind = f'<{2 * count} x i{target_width}>'
+        combined = function.emit(f'shufflevector {target} {values[0]}, {target} {values[1]}, <{2 * count} x i32> <{indices}>')
+        _write(function, ins, args[0], function.emit(f'bitcast {combined_kind} {combined} to i128'))
     elif op == 'packuswb':
         values = []
         limit = '<' + ', '.join(['i16 255'] * 8) + '>'
