@@ -145,14 +145,18 @@ static void ApplyFilter(Ngs2Voice& voice, Ngs2Filter& filter, std::uint32_t grai
     }
 }
 
-static void RenderSampler(Ngs2Voice& voice, std::uint32_t grain, std::uint32_t systemRate) {
-    if (voice.waveformType == SCE_NGS2_WAVEFORM_TYPE_ATRAC9) Ngs2ConsumeAtrac9(voice, grain, systemRate);
-    else ConsumeSamples(voice, grain, systemRate);
+static void ApplyFilters(Ngs2Voice& voice, std::uint32_t grain) {
     for (auto& filter : voice.filters) {
         if (!filter.enabled || (!voice.hasSamples && !HasHistory(filter))) continue;
         ApplyFilter(voice, filter, grain);
         voice.hasSamples = true;
     }
+}
+
+static void RenderSampler(Ngs2Voice& voice, std::uint32_t grain, std::uint32_t systemRate) {
+    if (voice.waveformType == SCE_NGS2_WAVEFORM_TYPE_ATRAC9) Ngs2ConsumeAtrac9(voice, grain, systemRate);
+    else ConsumeSamples(voice, grain, systemRate);
+    ApplyFilters(voice, grain);
     const bool buffered = voice.waveformType == SCE_NGS2_WAVEFORM_TYPE_ATRAC9 && voice.atrac9.windowCursor * voice.channels < voice.atrac9.window.size();
     if (voice.state == Ngs2PlayState::Playing && voice.blocks.empty() && !buffered && !voice.acceptsBlocks && std::none_of(voice.filters.begin(), voice.filters.end(), HasHistory)) {
         voice.state = Ngs2PlayState::Empty;
@@ -246,6 +250,7 @@ static void RenderVoice(Ngs2Voice& voice, const std::vector<Ngs2Voice*>& voices,
             RenderSampler(voice, grain, systemRate);
         } else {
             MixInputs(voice, voices, grain, systemRate);
+            if (voice.rack->rackId == SCE_NGS2_RACK_ID_CUSTOM_SUBMIXER) ApplyFilters(voice, grain);
         }
         if (voice.rack->rackId == SCE_NGS2_RACK_ID_REVERB && voice.reverb) voice.hasSamples = Ngs2ProcessReverb(voice, grain, systemRate);
         Ngs2ProcessLegacyUserFx(voice, grain, systemRate);
@@ -317,7 +322,7 @@ void Ngs2RenderSystem(Ngs2System& system, const Ngs2RenderBufferInfo* bufferInfo
     for (auto* voice : voices) {
         if (voice->state == Ngs2PlayState::Stopped) voice->state = Ngs2PlayState::Empty;
         voice->stateFlags = static_cast<std::uint32_t>(voice->state);
-        if (voice->state == Ngs2PlayState::Playing && voice->rack->rackId == SCE_NGS2_RACK_ID_SAMPLER && voice->blocks.empty() && voice->acceptsBlocks) voice->stateFlags |= SCE_NGS2_VOICE_STATE_FLAG_EMPTY;
+        if (voice->state == Ngs2PlayState::Playing && (voice->rack->rackId == SCE_NGS2_RACK_ID_SAMPLER || voice->rack->rackId == SCE_NGS2_RACK_ID_CUSTOM_SAMPLER) && voice->blocks.empty() && voice->acceptsBlocks) voice->stateFlags |= SCE_NGS2_VOICE_STATE_FLAG_EMPTY;
     }
     system.renderCount++;
 }

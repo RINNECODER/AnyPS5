@@ -38,6 +38,7 @@ def build_container(segments, records, payloads, magic=SELF_MAGIC, inner_elf=Tru
     size = max([FIRST_REGION] + [offset + len(block) for offset, block in payloads.items()])
     data = bytearray(size)
     struct.pack_into("<I", data, 0, magic)
+    struct.pack_into("<H", data, unwrap_self.RECORD_COUNT_OFFSET, len(records))
     for index, (flags, offset, block_size) in enumerate(records):
         struct.pack_into("<QQQQ", data, unwrap_self.RECORD_OFFSET + index * unwrap_self.RECORD_SIZE,
                          flags, offset, block_size, block_size)
@@ -116,6 +117,38 @@ class UnwrapTest(unittest.TestCase):
         dynamic = [header for header in headers if header[0] == PT_DYNAMIC][0]
         self.assertEqual(dynamic[2], read_only[2] + (0x1040 - 0x1000))
         self.assertEqual(dynamic[2] % 8, 0x1040 % 8)
+
+    def equal_segments(self):
+        return [(PT_LOAD, 1, 0x1234, 0x0, 0x80, PAGE), (PT_LOAD, 4, 0x1500, 0x1000, 0x80, PAGE)]
+
+    def test_equally_sized_segments_follow_the_encoded_program_index(self):
+        records = [
+            (0x310004, 0x800, 0x80),   # digest block of the same size, not data
+            (0x102804, 0x900, 0x80),   # program header 1 listed first
+            (0x2804, 0xA00, 0x80),     # program header 0
+        ]
+        payloads = {0x800: pattern(7, 0x80), 0x900: pattern(2, 0x80), 0xA00: pattern(4, 0x80)}
+        result, output = self.convert(build_container(self.equal_segments(), records, payloads))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data, headers = read_program_headers(output)
+        self.assertEqual(data[headers[0][2]:headers[0][2] + 0x80], pattern(4, 0x80))
+        self.assertEqual(data[headers[1][2]:headers[1][2] + 0x80], pattern(2, 0x80))
+
+    def test_two_records_for_one_program_header_are_refused(self):
+        records = [(0x2804, 0x800, 0x80), (0x2804, 0x900, 0x80)]
+        payloads = {0x800: pattern(7, 0x80), 0x900: pattern(2, 0x80)}
+        result, _ = self.convert(build_container(self.equal_segments(), records, payloads))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("both describe program header 0", result.stderr)
+
+    def test_the_first_record_sits_at_byte_0x20(self):
+        self.assertEqual(unwrap_self.RECORD_OFFSET, 0x20)
+        records = [(0x2804, 0x800, 0x80)]
+        container = build_container(self.equal_segments()[:1], records, {0x800: pattern(6, 0x80)})
+        result, output = self.convert(container)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data, headers = read_program_headers(output)
+        self.assertEqual(data[headers[0][2]:headers[0][2] + 0x80], pattern(6, 0x80))
 
     def test_declared_offsets_are_used_when_the_container_has_no_records(self):
         segments = [(PT_LOAD, 1, 0x800, 0x0, 0x40, 0x1000), (PT_LOAD, 4, 0x900, 0x1000, 0x40, 0x1000)]
