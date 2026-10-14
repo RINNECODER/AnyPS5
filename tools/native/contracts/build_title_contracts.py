@@ -22,6 +22,8 @@ from elftools.elf.elffile import ELFFile
 from dynamic import parse_dynamic
 
 R_X86_64_64, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT = 1, 6, 7
+
+
 STRONG_EVIDENCE = {'call-target', 'prologue'}
 
 

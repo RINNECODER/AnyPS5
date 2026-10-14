@@ -25,6 +25,7 @@ _IMAGE = None
 
 def reason(error):
     message = _ADDRESS.sub('0xADDR', PREFIX.sub('', str(error)))
+    message = re.sub(r'from \d+', 'from ADDR', message)
     return message.split('\n', 1)[0][:160]
 
 

@@ -127,6 +127,9 @@ def run(args, log=print):
                            record["package_manifest_sha256"], validation["ctest"]["passed"],
                            validation["native_gpu_cube_check"]["frames"])])
         return 0
+    except native_package.Skipped as skipped:
+        alpha.summary(["Native alpha skipped: %s. Nothing was published; re-run once the runner's screen is unlocked." % skipped])
+        return 0
     finally:
         if not args.keep_work:
             releaselib.clean_tree(work)
