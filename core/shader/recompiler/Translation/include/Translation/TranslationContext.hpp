@@ -95,6 +95,7 @@ private:
     IrU1 readMaskValid(const RdnaOperand& operand);
     static bool maskLanesExact(const RdnaOperand& operand);
     std::array<IrU32, 2> writeMask(const RdnaOperand& operand, IrU1 value, bool write64 = false);
+    void writeActiveLaneMask(const RdnaOperand& operand, IrU1 value);
     void writeCompareResult(const RdnaOperand& operand, IrU1 value);
     MemoryFlags addMemoryInfo(const MemoryInfo& memory, std::uint32_t pc);
     ExportFlags addExportInfo(const RdnaInstruction& inst);

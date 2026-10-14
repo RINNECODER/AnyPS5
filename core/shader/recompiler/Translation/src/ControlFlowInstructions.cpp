@@ -135,7 +135,7 @@ void TranslationContext::addU32(const RdnaInstruction& inst, bool vector, bool u
         const IrU1 carryOut(ir.INotEqual(firstCarry.Value(), ir.Constant(0u)));
         writeRawU32(inst.destination, inst.destination.clamp ? IrU32(ir.Select(carryOut.Value(), ir.Constant(0xffffffffu), sum.Value())) : sum);
         if (vector) {
-            writeMask(inst.destination2, carryOut);
+            writeActiveLaneMask(inst.destination2, carryOut);
             return;
         }
         ir.SetScc(carryOut.Value());
@@ -149,7 +149,7 @@ void TranslationContext::addU32(const RdnaInstruction& inst, bool vector, bool u
     const IrU1 carryOut(ir.LogicalOr(ir.INotEqual(firstCarry.Value(), ir.Constant(0u)), ir.INotEqual(secondCarry.Value(), ir.Constant(0u))));
     writeRawU32(inst.destination, inst.destination.clamp ? IrU32(ir.Select(carryOut.Value(), ir.Constant(0xffffffffu), result.Value())) : result);
     if (vector) {
-        writeMask(inst.destination2, carryOut);
+        writeActiveLaneMask(inst.destination2, carryOut);
         return;
     }
     ir.SetScc(carryOut.Value());
@@ -164,7 +164,7 @@ void TranslationContext::subU32(const RdnaInstruction& inst, bool vector, bool r
     const IrU1 borrow(ir.ULessThan(lhs.Value(), rhs.Value()));
     writeRawU32(inst.destination, result);
     if (vector) {
-        writeMask(inst.destination2, borrow);
+        writeActiveLaneMask(inst.destination2, borrow);
         return;
     }
     ir.SetScc(borrow.Value());
@@ -184,7 +184,7 @@ void TranslationContext::subbU32(const RdnaInstruction& inst, bool vector, bool 
     const IrU1 borrowOut(ir.LogicalOr(firstBorrow.Value(), secondBorrow.Value()));
     writeRawU32(inst.destination, inst.destination.clamp ? IrU32(ir.Select(borrowOut.Value(), ir.Constant(0u), result.Value())) : result);
     if (vector) {
-        writeMask(inst.destination2, borrowOut);
+        writeActiveLaneMask(inst.destination2, borrowOut);
         return;
     }
     ir.SetScc(borrowOut.Value());

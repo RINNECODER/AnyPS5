@@ -141,12 +141,16 @@ std::array<IrU32, 2> TranslationContext::writeMask(const RdnaOperand& operand, I
     }
 }
 
+void TranslationContext::writeActiveLaneMask(const RdnaOperand& operand, IrU1 value) {
+    writeMask(operand, IrU1(ir.LogicalAnd(ir.GetExec(), value.Value())));
+}
+
 void TranslationContext::writeCompareResult(const RdnaOperand& operand, IrU1 value) {
     if (operand.kind == RdnaOperandKind::Scc) {
         writeOperand(operand, &value.Value());
         return;
     }
-    writeMask(operand, IrU1(ir.LogicalAnd(ir.GetExec(), value.Value())));
+    writeActiveLaneMask(operand, value);
 }
 
 void TranslationContext::AddBranchCondition(const BasicBlock& source, BlockInfo& info) {
