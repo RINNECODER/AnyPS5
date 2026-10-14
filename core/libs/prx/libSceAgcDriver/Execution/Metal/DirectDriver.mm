@@ -391,3 +391,10 @@ extern "C" void AgcDriverCheckGuestMemory_nid_postfix(const void* pointer, std::
         if (!HostAccessible(reinterpret_cast<std::uint64_t>(pointer), bytes, writable)) throw;
     }
 }
+
+// VideoOut publishes its buffer labels through this export. Guest memory is host memory on this path
+// and there is no write watch to notify, so the store is a checked release store.
+extern "C" void AgcDriverStoreGuestLabel_nid_postfix(std::uint64_t* pointer, std::uint64_t value) {
+    AgcDriverCheckGuestMemory_nid_postfix(pointer, sizeof(*pointer), std::atomic_ref<std::uint64_t>::required_alignment, true);
+    std::atomic_ref(*pointer).store(value, std::memory_order_release);
+}

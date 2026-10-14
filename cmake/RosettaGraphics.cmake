@@ -107,6 +107,7 @@ add_library(libSceVideoOut SHARED EXCLUDE_FROM_ALL
     ${rosettaVideoOut}/src/PadInput.cpp
     ${rosettaVideoOut}/src/MouseInput.cpp
     ${rosettaVideoOut}/src/KeyboardInput.cpp
+    ${rosettaVideoOut}/src/ImeTextInput.cpp
     ${rosettaVideoOut}/src/InputMapping.cpp
     ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libkernel/Time/TimedWait.cpp
     ${rosettaVideoOut}/src/NativeHostWindow.mm
@@ -119,7 +120,7 @@ target_include_directories(libSceVideoOut PRIVATE
     ${ANYPS5_SDL2_INCLUDE_DIR}
     ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
 target_link_libraries(libSceVideoOut PRIVATE
-    libSceAgcDriver libScePad libSceMouse libSceKeyboard SDL2-static
+    libSceAgcDriver libScePad libSceMouse libSceKeyboard libSceIme SDL2-static
     "${ANYPS5_ROSETTA_APPKIT}" "${ANYPS5_ROSETTA_CARBON}" "-framework QuartzCore" "-framework Metal")
 set_target_properties(libSceVideoOut PROPERTIES CXX_EXTENSIONS OFF)
 
