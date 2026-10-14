@@ -92,13 +92,14 @@ class Image:
         require(self.elf.elfclass == 64 and self.elf.little_endian and self.elf['e_machine'] == 'EM_X86_64', 'expected little-endian x86-64 ELF')
         self.segments = []
         self.process_parameters = []
+        process_parameter_segments = []
         for segment in self.elf.iter_segments():
             if segment['p_type'] == 0x61000001:
                 self.process_parameters.append((segment['p_vaddr'], segment['p_filesz']))
                 # The SCE process-parameter segment is not PT_LOAD but the runtime must map it and
                 # read the title's libc parameters and allocator table from it.
                 if segment['p_filesz'] and segment['p_memsz'] >= segment['p_filesz']:
-                    self.segments.append(segment)
+                    process_parameter_segments.append(segment)
                 continue
             if segment['p_type'] == 'PT_TLS':
                 require(segment['p_memsz'] == 0 or contracts.get('allow_unlowered_tls', False),
@@ -109,6 +110,14 @@ class Image:
             require(segment['p_offset'] + segment['p_filesz'] <= len(self.bytes), 'truncated segment')
             require(segment['p_memsz'] <= contracts.get('max_segment_bytes', 64 * 1024 * 1024),
                     'segment exceeds current offline allocation limit')
+            self.segments.append(segment)
+        for segment in process_parameter_segments:
+            # A process-parameter block a PT_LOAD already covers is mapped with it; mapping it
+            # again with MAP_FIXED would zero the rest of its page.
+            if any(other['p_type'] == 'PT_LOAD' and other['p_vaddr'] <= segment['p_vaddr']
+                   and segment['p_vaddr'] + segment['p_memsz'] <= other['p_vaddr'] + other['p_memsz']
+                   for other in self.segments):
+                continue
             self.segments.append(segment)
         self.functions = {}
         for function in contracts['functions']:
@@ -504,7 +513,9 @@ class Function:
         self.check_immutable_call(ins, callee, state, effects.call_writes(self, ins, state))
         if not effects.required_bindings(self, ins) <= state['import_bindings']:
             self.fail(ins, 'native callee requires original provider bindings')
-        if slot is not None and slot not in state['image_pointers']:
+        if slot is not None and slot not in state['image_pointers'] and not self.image.contracts.get('allow_unimplemented'):
+            # A whole-title build keeps the import binding installed by native_image_init even after
+            # the dataflow lost track of the GOT slot.
             self.fail(ins, 'import target has no proven native pointer origin')
         if state['rsp'] != 0 or state['saved']:
             self.fail(ins, 'tail call requires a balanced native frame')
@@ -816,26 +827,30 @@ class Function:
             if origin is None or origin[0] != 'frame':
                 callback_memory_unmodified = False
             if origin is not None and origin[0] == 'outside_frame':
-                image.clear()
-                bindings.clear()
+                image = frozenset()
+                bindings = frozenset()
                 continue
             if origin is None:
                 stack.clear()
                 origins.clear()
-                image.clear()
-                bindings.clear()
+                image = frozenset()
+                bindings = frozenset()
             else:
-                cells, begin, end = (stack if origin[0] == 'frame' else image), origin[1], origin[2]
-                cells.difference_update(offset for offset in list(cells) if begin < offset + 8 and offset < end)
+                begin, end = origin[1], origin[2]
                 if origin[0] == 'frame':
+                    stack.difference_update(offset for offset in list(stack) if begin < offset + 8 and offset < end)
                     origins = {offset: pointer for offset, pointer in origins.items() if not (begin < offset + 8 and offset < end)}
-                if origin[0] == 'image':
-                    bindings.difference_update(offset for offset in list(bindings) if begin < offset + 8 and offset < end)
+                else:
+                    image = frozenset(offset for offset in image if not (begin < offset + 8 and offset < end))
+                    bindings = frozenset(offset for offset in bindings if not (begin < offset + 8 and offset < end))
                 if op == 'mov' and checked_stack.lookup(self, ins, operand) is None and not operand.mem.index and operand is args[0] and self.pointer_operand(ins, original, args[1]):
-                    cells.add(begin)
-                    pointer = self.pointer_origin(ins, original, args[1])
-                    if origin[0] == 'frame' and pointer is not None:
-                        origins[begin] = pointer
+                    if origin[0] == 'frame':
+                        stack.add(begin)
+                        pointer = self.pointer_origin(ins, original, args[1])
+                        if pointer is not None:
+                            origins[begin] = pointer
+                    else:
+                        image = image | {begin}
         if op == 'push':
             offset = original['rsp'] - 8
             stack = {saved for saved in stack if not (offset < saved + 8 and saved < offset + 8)}
@@ -865,21 +880,24 @@ class Function:
             if writes is None or writes.parameter_writes:
                 stack.clear()
                 origins.clear()
-                image.clear()
-                bindings.clear()
+                image = frozenset()
+                bindings = frozenset()
                 callback_memory_unmodified = False
             else:
                 for kind, begin, end in writes.writes:
-                    cells = stack if kind == 'frame' else image
-                    cells.difference_update(offset for offset in list(cells) if begin < offset + 8 and offset < end)
                     if kind == 'frame':
+                        stack.difference_update(offset for offset in list(stack) if begin < offset + 8 and offset < end)
                         origins = {offset: pointer for offset, pointer in origins.items() if not (begin < offset + 8 and offset < end)}
-                    if kind == 'image':
-                        bindings.difference_update(offset for offset in list(bindings) if begin < offset + 8 and offset < end)
+                    else:
+                        image = frozenset(offset for offset in image if not (begin < offset + 8 and offset < end))
+                        bindings = frozenset(offset for offset in bindings if not (begin < offset + 8 and offset < end))
                         callback_memory_unmodified = False
             for _, predicate, kind, offset in state['pending_outputs']:
                 if predicate == 'always':
-                    (stack if kind == 'frame' else image).add(offset)
+                    if kind == 'frame':
+                        stack.add(offset)
+                    else:
+                        image = image | {offset}
             if ins.address not in self.dispatch_calls:
                 callee, _ = self.image.call(ins, self.contract)
                 if callee['result'] == 'ptr':
@@ -910,9 +928,14 @@ class Function:
             native.add(self.reg(ins, args[0])[0])
             checked_cell = self.memory_origin(ins, original, args[1])
             if checked_cell is not None:
-                (stack if checked_cell[0] == 'frame' else image).add(checked_cell[1])
-        image.update(self.image.immutable_cells)
-        bindings.update(self.image.immutable_bindings)
+                if checked_cell[0] == 'frame':
+                    stack.add(checked_cell[1])
+                else:
+                    image = image | {checked_cell[1]}
+        if self.image.immutable_cells:
+            image = image | self.image.immutable_cells
+        if self.image.immutable_bindings:
+            bindings = bindings | self.image.immutable_bindings
         state['native_pointers'], state['stack_pointers'], state['image_pointers'] = native, stack, image
         state['callback_memory_unmodified'] = callback_memory_unmodified
         state['import_bindings'] = bindings
@@ -954,9 +977,9 @@ class Function:
                    'native_pointers': {'rsp'} | set(pointers),
                    'stack_pointers': {loc['offset'] for loc in self.argument_locations if loc['kind'] == 'stack' and loc['type'] == 'ptr'},
                    'stack_origins': {loc['offset']: ('parameter', index, 0) for index, loc in enumerate(self.argument_locations) if loc['kind'] == 'stack' and loc['type'] == 'ptr'},
-                   'image_pointers': set(self.image.import_slots) | {slot for slot, _ in self.image.relocations},
+                   'image_pointers': frozenset(self.image.import_slots) | frozenset(slot for slot, _ in self.image.relocations),
                    'register_aliases': frozenset(), 'stack_values': {}, 'pending_outputs': frozenset(), 'parameter_pointers': {}, 'zero_vectors': set(),
-                   'import_bindings': set(self.image.import_slots), 'callback_memory_unmodified': True}
+                   'import_bindings': frozenset(self.image.import_slots), 'callback_memory_unmodified': True}
         entry = self.contract['address']
         self.states[entry] = initial
         self.collecting = True
@@ -989,8 +1012,8 @@ class Function:
                     new['stack_pointers'] = old['stack_pointers'] & state['stack_pointers']
                     new['stack_origins'] = {offset: pointer for offset, pointer in state['stack_origins'].items() if old['stack_origins'].get(offset) == pointer}
                     new['stack_values'] = {offset: value for offset, value in state['stack_values'].items() if old['stack_values'].get(offset) == value}
-                    new['image_pointers'] = old['image_pointers'] & state['image_pointers']
-                    new['import_bindings'] = old['import_bindings'] & state['import_bindings']
+                    new['image_pointers'] = old['image_pointers'] if old['image_pointers'] is state['image_pointers'] else old['image_pointers'] & state['image_pointers']
+                    new['import_bindings'] = old['import_bindings'] if old['import_bindings'] is state['import_bindings'] else old['import_bindings'] & state['import_bindings']
                     new['callback_memory_unmodified'] = old['callback_memory_unmodified'] and state['callback_memory_unmodified']
                     new['pointers'] = {name: pointer for name, pointer in state['pointers'].items() if old['pointers'].get(name) == pointer}
                     new['constants'] = {name: value for name, value in state['constants'].items() if old['constants'].get(name) == value}
@@ -1568,6 +1591,12 @@ def compile_image(image):
         lines.append('declare void @NativeAotRegisterDispatch_nid_no_patch(ptr, i64)')
     if stubs:
         lines.append('declare void @NativeAotReportUnimplemented_nid_no_patch(i64)')
+    process_parameters = image.contracts.get('title_process_parameters')
+    if process_parameters:
+        lines.append('declare void @NativeAotBindAllocator_nid_no_patch(ptr, i64, i64)')
+        # The heap is initialised from main, not this constructor: the title's allocator init calls
+        # runtime HLE whose namespace-scope containers are not constructed until after the ctors.
+        lines.append('declare void @NativeAotSetProcessParameters_nid_no_patch(ptr)')
     if image.contracts.get('count_entries'):
         ordered = sorted(image.functions.values(), key=lambda spec: spec['address'])
         addresses = ', '.join(f'i64 {image.guest_base + spec["address"]}' for spec in ordered)
@@ -1620,34 +1649,52 @@ def compile_image(image):
     if image.immutable_regions:
         lines.extend(immutable_data.declarations(image))
     unresolved_relocations = []
+    # A whole-title image has hundreds of thousands of pointer slots; one store per slot makes
+    # clang's initializer codegen pathologically slow and memory-hungry. Above a threshold the
+    # slots go into a constant table the runtime applies in a loop instead.
+    pointer_stores = []
+    for slot, target in image.relocations:
+        if slot in image.immutable_cells:
+            continue
+        try:
+            value = image.pointer(target)
+        except Rejected:
+            # A pointer into the middle of a function (jump-table entries) has no native
+            # function to name; leave the slot zero and report it instead of failing the image.
+            unresolved_relocations.append(hex(target))
+            continue
+        pointer_stores.append((image.pointer(slot, 8), value))
+    for slot, contract in image.import_slots.items():
+        if slot not in image.immutable_cells:
+            pointer_stores.append((image.pointer(slot, 8), f"@{contract['name']}"))
+    for slot, binding in image.data_import_slots.items():
+        if slot not in image.immutable_cells:
+            pointer_stores.append((image.pointer(slot, 8), f"@{binding['name']}"))
+    relocation_table = len(pointer_stores) > 1024
+    if relocation_table:
+        entries = ', '.join(f'{{ ptr, ptr }} {{ ptr {slot}, ptr {value} }}' for slot, value in pointer_stores)
+        lines.append(f'@__aps5_aot_relocations = private constant [{len(pointer_stores)} x {{ ptr, ptr }}] [{entries}], align 8')
+        lines.append('declare void @NativeAotApplyRelocations_nid_no_patch(ptr, i64)')
     if image.relocations or image.import_slots or image.data_import_slots or descriptor is not None or image.immutable_regions or dispatch_enabled:
         lines.extend(['@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @native_image_init, ptr null }]',
                       'define internal void @native_image_init() {'])
         if image.guest_data:
             lines.append(f'  call void @NativeAotMapImage_nid_no_patch(ptr @__aps5_aot_segments, i64 {len(image.segments)})')
-        for slot, target in image.relocations:
-            if slot in image.immutable_cells:
-                continue
-            try:
-                value = image.pointer(target)
-            except Rejected:
-                # A pointer into the middle of a function (jump-table entries) has no native
-                # function to name; leave the slot zero and report it instead of failing the image.
-                unresolved_relocations.append(hex(target))
-                continue
-            lines.append(f'  store ptr {value}, ptr {image.pointer(slot, 8)}, align 1')
-        for slot, contract in image.import_slots.items():
-            if slot in image.immutable_cells:
-                continue
-            lines.append(f"  store ptr @{contract['name']}, ptr {image.pointer(slot, 8)}, align 1")
-        for slot, binding in image.data_import_slots.items():
-            if slot in image.immutable_cells:
-                continue
-            lines.append(f"  store ptr @{binding['name']}, ptr {image.pointer(slot, 8)}, align 1")
+        if relocation_table:
+            lines.append(f'  call void @NativeAotApplyRelocations_nid_no_patch(ptr @__aps5_aot_relocations, i64 {len(pointer_stores)})')
+        else:
+            for slot, value in pointer_stores:
+                lines.append(f'  store ptr {value}, ptr {slot}, align 1')
         if dispatch_enabled:
             lines.append(f'  call void @NativeAotRegisterDispatch_nid_no_patch(ptr @__aps5_aot_dispatch, i64 {len(dispatch_entries)})')
         if image.contracts.get('count_entries'):
             lines.append(f'  call void @NativeAotRegisterEntryCounts_nid_no_patch(ptr @__aps5_aot_counts, i64 {len(image.functions)}, ptr @__aps5_aot_count_addresses)')
+        if process_parameters:
+            # Replace the title's allocator table entries with typed wrappers over its natively
+            # compiled guest functions, then let the runtime heap read the mapped parameters.
+            for binding in process_parameters['bindings']:
+                lines.append(f'  call void @NativeAotBindAllocator_nid_no_patch(ptr inttoptr (i64 {binding["slot"]} to ptr), i64 {binding["target"]}, i64 {binding["index"]})')
+            lines.append(f'  call void @NativeAotSetProcessParameters_nid_no_patch(ptr inttoptr (i64 {process_parameters["address"]} to ptr))')
         if image.immutable_regions:
             lines.append(f'  call void @NativeAotRequireReadOnly_nid_no_patch(ptr @__aps5_aot_readonly_ranges, i64 {len(image.immutable_regions)})')
         if descriptor is not None:
