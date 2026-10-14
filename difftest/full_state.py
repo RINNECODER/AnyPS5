@@ -80,14 +80,28 @@ int main(int argc, char** argv) {
     FILE* segments = fopen(argv[1], "rb");
     uint32_t count = 0;
     if (fread(&count, 4, 1, segments) != 1) return 2;
+    struct { uint64_t vaddr, filesz, memsz; unsigned char* data; } seg[4096];
+    if (count > 4096) return 2;
     for (uint32_t index = 0; index < count; ++index) {
-        uint64_t vaddr, filesz, memsz;
-        if (fread(&vaddr,8,1,segments)!=1||fread(&filesz,8,1,segments)!=1||fread(&memsz,8,1,segments)!=1) return 2;
-        void* page = mmap((void*)(BASE + (vaddr & ~0xfffull)), memsz + (vaddr & 0xfff), 3,
-                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-        if (page == MAP_FAILED) return 3;
-        if (filesz && fread((char*)page + (vaddr & 0xfff), 1, filesz, segments) != (size_t)filesz) return 4;
+        if (fread(&seg[index].vaddr,8,1,segments)!=1||fread(&seg[index].filesz,8,1,segments)!=1||fread(&seg[index].memsz,8,1,segments)!=1) return 2;
+        seg[index].data = malloc(seg[index].filesz ? seg[index].filesz : 1);
+        if (seg[index].filesz && fread(seg[index].data, 1, seg[index].filesz, segments) != (size_t)seg[index].filesz) return 4;
     }
+    /* A 4 KiB page can host several segments; map every page once, otherwise the second MAP_FIXED
+       discards the bytes of a segment copied into a page an earlier segment already mapped. */
+    uint64_t low = ~0ull, high = 0;
+    for (uint32_t index = 0; index < count; ++index) {
+        uint64_t page = seg[index].vaddr & ~0xfffull;
+        uint64_t end = page + (seg[index].vaddr & 0xfff) + seg[index].memsz;
+        if (page < low) low = page;
+        if (end > high) high = end;
+    }
+    if (high > low) {
+        void* region = mmap((void*)(BASE + low), high - low, 3, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (region == MAP_FAILED) return 3;
+    }
+    for (uint32_t index = 0; index < count; ++index)
+        if (seg[index].filesz) memcpy((void*)(BASE + seg[index].vaddr), seg[index].data, seg[index].filesz);
     if (mprotect((void*)(BASE + (address & ~0xfffull)), 0x1000, 7) != 0) return 5;
     struct regs in, out;
     mmap((void*)(BASE+0x70000000), 0x100000, 3, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
