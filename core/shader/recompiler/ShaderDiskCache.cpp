@@ -116,7 +116,7 @@ constexpr std::size_t fieldCount() {
 
 static_assert(fieldCount<ShaderInfo>() == 23, "ShaderInfo changed: update the info encoder");
 static_assert(fieldCount<BufferResource>() == 12, "BufferResource changed: update the info encoder");
-static_assert(fieldCount<ImageResource>() == 39, "ImageResource changed: update the info encoder");
+static_assert(fieldCount<ImageResource>() == 40, "ImageResource changed: update the info encoder");
 static_assert(fieldCount<SamplerResource>() == 9, "SamplerResource changed: update the info encoder");
 static_assert(fieldCount<SampledResourcePair>() == 5, "SampledResourcePair changed: update the info encoder");
 static_assert(fieldCount<StageInput>() == 5, "StageInput changed: update the info encoder");
@@ -675,6 +675,7 @@ void encodeShaderInfo(Writer& writer, const ShaderInfo& info) {
         out.Value(image.depthBitsCompatible);
         out.Value(image.constantSwizzle);
         out.Value(image.constantSwizzleCompatible);
+        out.Value(image.cubeFaceCompatible);
         out.Value(image.flatVolumeCompatible);
         out.Value(image.singleMipPlaneBiasCompatible);
         out.Value(image.flatLineCompatible);
@@ -781,6 +782,7 @@ void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
         in.Value(image.depthBitsCompatible);
         in.Value(image.constantSwizzle);
         in.Value(image.constantSwizzleCompatible);
+        in.Value(image.cubeFaceCompatible);
         in.Value(image.flatVolumeCompatible);
         in.Value(image.singleMipPlaneBiasCompatible);
         in.Value(image.flatLineCompatible);
