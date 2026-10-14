@@ -8,6 +8,7 @@
 #include <codegen/x86/ClzeroOperands.hpp>
 #include <codegen/x86/ClzeroLowering.hpp>
 #include <codegen/x86/ReciprocalOperands.hpp>
+#include <codegen/x86/ScalarCompareOperands.hpp>
 #include <codegen/x86/WideStoreOperands.hpp>
 #include <codegen/x86/StubBodyBuilder.hpp>
 #include <codegen/x86/DecodedInstruction.hpp>
@@ -1680,6 +1681,55 @@ void scannerZeroTail() {
     requireFailure([&] { (void)scanner->ScanCodeSection(truncated, 0, truncated.size()); }, "Truncated non-zero tail must still fail");
 }
 
+// Rosetta loses a full-width VEX load into a scalar compare's destination when both are in one block; such compares
+// move out of line unchanged. EQ_OQ, LT_OS and LE_OS stay where they are.
+void converterScalarCompare() {
+    const auto decoded = [](const Bytes& bytes) { return Codegen::DecodeScalarCompare(bytes.data(), bytes.size()); };
+    const Bytes vexUnord = {0xC5, 0xEA, 0xC2, 0xCA, 0x03};              // vcmpunordss xmm1, xmm2, xmm2
+    const Bytes vex3Neq = {0xC4, 0x41, 0x2A, 0xC2, 0x08, 0x04};          // vcmpneqss xmm9, xmm10, [r8]
+    const Bytes legacyLt = {0xF3, 0x0F, 0xC2, 0xC1, 0x01};              // cmpltss xmm0, xmm1
+    const Bytes legacyNleSd = {0xF2, 0x41, 0x0F, 0xC2, 0xC8, 0x06};     // cmpnlesd xmm1, xmm8
+    const Bytes packed = {0xC5, 0xE8, 0xC2, 0xCA, 0x03};                // vcmpunordps xmm1, xmm2, xmm2
+    const Bytes ripNeq = {0xC5, 0xFA, 0xC2, 0x05, 0x10, 0x00, 0x00, 0x00, 0x04};  // vcmpneqss xmm0, xmm0, [rip + 0x10]
+    const Bytes vexLe = {0xC5, 0xEA, 0xC2, 0xCA, 0x02};                 // vcmpless xmm1, xmm2, xmm2
+    const Bytes vexTrueUs = {0xC4, 0xE1, 0x6A, 0xC2, 0xCA, 0x1F};       // vcmptrue_usss xmm1, xmm2, xmm2
+    const Bytes vexFalse = {0xC5, 0xEA, 0xC2, 0xCA, 0x0B};              // vcmpfalse_oqss xmm1, xmm2, xmm2
+    const auto unord = decoded(vexUnord);
+    require(unord && unord->Vex && !unord->Double && unord->Predicate == 3, "VCMPUNORDSS was not decoded");
+    const auto neq = decoded(vex3Neq);
+    require(neq && neq->Vex && !neq->Double && neq->Predicate == 4, "A three-byte VEX VCMPNEQSS with a memory operand was not decoded");
+    const auto lt = decoded(legacyLt);
+    require(lt && !lt->Vex && !lt->Double && lt->Predicate == 1, "CMPLTSS was not decoded");
+    const auto nle = decoded(legacyNleSd);
+    require(nle && !nle->Vex && nle->Double && nle->Predicate == 6, "CMPNLESD with REX was not decoded");
+    require(!decoded(packed), "A packed compare was decoded as a scalar one");
+    const auto trueUs = decoded(vexTrueUs);
+    require(trueUs && trueUs->Predicate == 0x1F, "A VEX predicate above 7 was truncated");
+    require(Codegen::RosettaSplitsScalarCompare(*unord) && Codegen::RosettaSplitsScalarCompare(*neq) && Codegen::RosettaSplitsScalarCompare(*nle) && Codegen::RosettaSplitsScalarCompare(*trueUs)
+        && Codegen::RosettaSplitsScalarCompare(*decoded(vexFalse)), "A compare Rosetta mistranslates is not split");
+    require(!Codegen::RosettaSplitsScalarCompare(*lt) && !Codegen::RosettaSplitsScalarCompare(*decoded(vexLe)), "LT or LE was split");
+
+    const auto rosetta = Codegen::MakeAmd64OnlyInstructionMatcher(Codegen::Amd64OnlyTarget::Rosetta);
+    const auto lowered = rosetta->Match(vexUnord.data(), vexUnord.size());
+    require(lowered && lowered->Lowering == Codegen::Amd64OnlyLowering::Trampoline && lowered->Optional && lowered->InstructionName == "VCMPSS", "VCMPUNORDSS was not moved out of line for Rosetta");
+    require(lowered && Bytes(lowered->StubBody.begin(), lowered->StubBody.begin() + static_cast<std::ptrdiff_t>(lowered->ReturnBranchOffset)) == vexUnord, "The compare stub does not run the unchanged instruction");
+    const auto rip = rosetta->Match(ripNeq.data(), ripNeq.size());
+    require(rip && rip->Relocations.size() == 1 && rip->Relocations[0].SiteTarget == 9 + 0x10 && rip->Relocations[0].DisplacementOffset == 4, "A RIP-relative compare does not keep its target in the stub");
+    require(!rosetta->Match(vexLe.data(), vexLe.size()) && !rosetta->Match(packed.data(), packed.size()), "VCMPLESS or a packed compare was moved out of line");
+    require(!Codegen::MakeAmd64OnlyInstructionMatcher()->Match(vexUnord.data(), vexUnord.size()), "A scalar compare was moved out of line for an Intel host");
+
+    // The title's block: vcmpunordss xmm1, xmm2, xmm2; vmaxss; vblendvps; vmovaps xmm1, [rbp-0x110]; vucomiss xmm1, xmm0; ret
+    const Bytes block = {0xC5, 0xEA, 0xC2, 0xCA, 0x03, 0xC5, 0xFA, 0x5F, 0xD2, 0xC4, 0xE3, 0x69, 0x4A, 0xC0, 0x10,
+                         0xC5, 0xF8, 0x28, 0x8D, 0xF0, 0xFE, 0xFF, 0xFF, 0xC5, 0xF8, 0x2E, 0xC8, 0xC3};
+    Bytes file(0x300, 0xCC);
+    std::copy(block.begin(), block.end(), file.begin() + 0x200);
+    const auto result = Codegen::MakeAmd64OnlyConverter(Codegen::Amd64OnlyTarget::Rosetta)->Convert(file, {segmentHeader(block.size())});
+    require(result.Trampolines.size() == 1 && result.Trampolines[0].Offset == 0x200 && result.Trampolines[0].Length == vexUnord.size()
+        && Bytes(result.Trampolines[0].Body.begin(), result.Trampolines[0].Body.begin() + static_cast<std::ptrdiff_t>(result.Trampolines[0].ReturnBranchOffset)) == vexUnord,
+        "The block's compare is not the only instruction moved to a stub");
+    require(std::equal(block.begin() + 5, block.end(), result.Bytes.begin() + 0x205), "Instructions after the compare changed");
+}
+
 int main() {
     try {
         decoderLengths();
@@ -1713,6 +1763,7 @@ int main() {
         converterWideStoreWindows();
         converterJumpTableTargets();
         converterReciprocal();
+        converterScalarCompare();
         converterStrayRex();
         rewriterStrayRex();
     rewriterReferenceSites();
