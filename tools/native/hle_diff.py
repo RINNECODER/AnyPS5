@@ -161,7 +161,11 @@ def main():
     args = parser.parse_args()
     table = {}
     if args.names:
-        for key, contract in json.loads(args.names.read_text())["imports"].items():
+        names = json.loads(args.names.read_text())
+        # A contracts file carries an "imports" mapping; a flat NID-to-name map is also accepted.
+        entries = names["imports"].items() if "imports" in names else names.items()
+        for key, value in entries:
+            contract = value if isinstance(value, dict) else {"name": value}
             table[key.split("#", 1)[0]] = contract["name"].lstrip("_")
     left = read_log(args.left, args.per_thread)
     right = read_log(args.right, args.per_thread)
