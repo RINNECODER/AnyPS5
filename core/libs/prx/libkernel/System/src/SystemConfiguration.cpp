@@ -74,6 +74,7 @@ struct SystemInteger {
 
 constexpr SystemInteger SystemIntegers[] = {
     {{1, 24}, "kern.osreldate", 1104001},
+    {{6, 7}, "hw.pagesize", PS5_PAGE_SIZE},
 };
 
 const SystemString* FindSystemString(const int* name) {

@@ -76,6 +76,26 @@ static void CheckProcessorCountSysctl() {
     }
     Require(threw);
 }
+static void CheckPageSizeSysctl() {
+    const int mib[] = {6, 7};
+    *__error_nid_postfix() = 13;
+    std::size_t length = 0;
+    Require(sysctl_nid_postfix(mib, 2, nullptr, &length, nullptr, 0) == 0 && length == sizeof(int));
+    int value = 0;
+    length = sizeof(value);
+    Require(sysctl_nid_postfix(mib, 2, &value, &length, nullptr, 0) == 0 && value == 0x4000 && length == sizeof(int));
+    value = 0;
+    length = 16;
+    Require(sysctlbyname_nid_postfix("hw.pagesize", &value, &length, nullptr, 0) == 0 && value == 0x4000 && length == sizeof(int));
+    Require(*__error_nid_postfix() == 13);
+    unsigned char bytes[4] = {0xaa, 0xaa, 0xaa, 0xaa};
+    length = 2;
+    Require(sysctlbyname_nid_postfix("hw.pagesize", bytes, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 12);
+    Require(length == 2 && bytes[2] == 0xaa && bytes[3] == 0xaa);
+    length = sizeof(value);
+    Require(sysctl_nid_postfix(mib, 2, &value, &length, &value, sizeof(value)) == -1 && *__error_nid_postfix() == 1);
+    Require(sysctlbyname_nid_postfix("hw.pagesize", &value, &length, &value, sizeof(value)) == -1 && *__error_nid_postfix() == 1);
+}
 static void CheckPhysicalMemorySysctl() {
     const int mib[] = {6, 5};
     const std::uint64_t expected = static_cast<std::uint64_t>(sysconf_nid_postfix(121)) * 0x4000;
@@ -238,7 +258,7 @@ static void CheckSystemStringNames() {
     }
 }
 static void CheckLeafWithTrailingComponent() {
-    const int leaves[][2] = {{6, 3}, {6, 2}, {6, 5}, {1, 37}};
+    const int leaves[][2] = {{6, 3}, {6, 2}, {6, 5}, {6, 7}, {1, 37}};
     for (const auto& leaf : leaves) {
         const int mib[] = {leaf[0], leaf[1], 0};
         char buffer[8] = {};
@@ -435,6 +455,7 @@ static void CheckNameToMib() {
     const Expected expected[] = {
         {"hw.model", {6, 2}, 2},
         {"hw.ncpu", {6, 3}, 2},
+        {"hw.pagesize", {6, 7}, 2},
         {"hw.physmem", {6, 5}, 2},
         {"hw.realmem", {6, 12}, 2},
         {"kern.arandom", {1, 37}, 2},
@@ -521,6 +542,7 @@ static void CheckNameToMib() {
 int main() {
     CheckProcessorCountSysctl();
     CheckPhysicalMemorySysctl();
+    CheckPageSizeSysctl();
 #if defined(__x86_64__) || defined(__i386__)
     CheckModelSysctl();
 #endif
