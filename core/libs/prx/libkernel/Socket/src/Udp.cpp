@@ -244,6 +244,11 @@ bool Address(const void* input, std::uint32_t length, sockaddr_storage& native, 
 std::uint16_t& PortOf(sockaddr_storage& address) {
     return address.ss_family == AF_INET ? reinterpret_cast<sockaddr_in&>(address).sin_port : reinterpret_cast<sockaddr_in6&>(address).sin6_port;
 }
+bool Listening(const Socket& socket) {
+    int listening = 0;
+    socklen_t size = sizeof(listening);
+    return ::getsockopt(socket.value, SOL_SOCKET, SO_ACCEPTCONN, reinterpret_cast<char*>(&listening), &size) == 0 && listening != 0;
+}
 int Disconnect(const Socket& socket) {
     sockaddr_storage peer{};
     socklen_t peerSize = sizeof(peer);
@@ -950,6 +955,7 @@ int APS5_VABI connect_nid_postfix(int descriptor, const void* address, std::uint
     if (socket->family != GuestUnix && socket->type == 2 && address && length >= 2 && static_cast<const unsigned char*>(address)[1] == 0
         && Disconnect(*socket) != 0)
         return -1;
+    if (socket->type == 1 && Listening(*socket)) return Fail(45);
     sockaddr_storage native{};
     socklen_t size;
     if (!Address(address, length, native, size)) return -1;
