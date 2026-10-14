@@ -21,6 +21,8 @@
 namespace AgcDriver::Graphics {
 namespace {
 
+std::uint64_t depthWrites = 0;
+
 Recorder* RecorderFor(const Context& context) {
     auto* recorder = Recorder::Active();
     return recorder != nullptr && recorder->Device() == context.device ? recorder : nullptr;
@@ -227,6 +229,15 @@ public:
         else Recorder::CountBarriers(Recorder::CommandClass::Draw, 2);
     }
 
+    bool SampledAccepts(std::span<const std::uint32_t> words, const GuestTextureResource& resource) const {
+        const bool stencil = target.stencilAddress != 0 && resource.baseAddress == target.stencilAddress;
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        const auto expected = stencil ? VK_FORMAT_R8_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
+        const bool depthBits = !stencil && words.size() >= 4 && ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) == (d16 ? 16u : 32u);
+        const bool oneSlice = target.samples != 1 ? resource.dimension == TextureDimension::k2DMsaa : resource.dimension == TextureDimension::k2D || (resource.dimension == TextureDimension::k2DArray && resource.depthOrLastArray == 0);
+        return (ResolveTextureFormat(resource.format) == expected || depthBits) && oneSlice && resource.width == target.extent.width && resource.height == target.extent.height && resource.baseLevel == 0 && resource.lastLevel == 0 && resource.baseArray == 0;
+    }
+
     std::shared_ptr<Texture> Sampled(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
         CheckCurrent();
         CheckResource(resource);
@@ -240,17 +251,16 @@ public:
         const bool multisampled = target.samples != 1;
         Require(!multisampled || sampleable, "the device cannot sample the native depth target's format and sample count");
         const bool stencil = target.stencilAddress != 0 && resource.baseAddress == target.stencilAddress;
+        const auto format = ResolveTextureFormat(resource.format);
         const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
         const auto expected = stencil ? VK_FORMAT_R8_UINT : d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT;
-        const auto format = ResolveTextureFormat(resource.format);
         const bool depthBits = !stencil && words.size() >= 4 && ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) == (d16 ? 16u : 32u);
-        const bool oneSlice = multisampled ? resource.dimension == TextureDimension::k2DMsaa : resource.dimension == TextureDimension::k2D || (resource.dimension == TextureDimension::k2DArray && resource.depthOrLastArray == 0);
         if (multisampled) {
             Require(!stencil && !depthBits && format == expected, "native multisampled depth sampling needs a numeric depth-plane format");
             Require(resource.samples == target.samples, "the sampled depth descriptor's sample count differs from its native target");
             Require(hostFormat == target.format, "sampling a native multisampled depth plane that the device stores in another depth format is not implemented");
         }
-        if ((format != expected && !depthBits) || !oneSlice || resource.width != target.extent.width || resource.height != target.extent.height || resource.baseLevel != 0 || resource.lastLevel != 0 || resource.baseArray != 0) {
+        if (!SampledAccepts(words, resource)) {
             char text[448];
             std::snprintf(text, sizeof(text), "AGC graphics: sampling the %s plane of depth surface 0x%llx (%ux%u, vk format %d) as a %ux%u texture of guest format %u (vk %d), tile mode %u, dimension %d, levels %u-%u, slice %u is not implemented (T# %08x %08x %08x %08x %08x %08x %08x %08x)",
                           stencil ? "stencil" : "depth", static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<int>(target.format), resource.width, resource.height, resource.format, static_cast<int>(format),
@@ -271,6 +281,27 @@ public:
         return std::any_of(textures.begin(), textures.end(), [&](const auto& entry) { return entry.second.get() == texture; });
     }
 
+    std::uint64_t written = ++depthWrites;
+    bool retired = false;
+
+    bool Overlaps(std::uint64_t address, std::uint64_t bytes) const {
+        const auto end = address + bytes;
+        if (address < target.address + depthBytes() && target.address < end) return true;
+        return target.stencilAddress != 0 && address < target.stencilAddress + stencilBytes() && target.stencilAddress < end;
+    }
+
+    void NoteMemory() {
+        depthMemory = GuestMemory::CollectWrites(target.address, static_cast<std::size_t>(depthBytes()));
+        stencilMemory = target.stencilAddress != 0 ? GuestMemory::CollectWrites(target.stencilAddress, static_cast<std::size_t>(stencilBytes())) : 0;
+    }
+
+    bool OverwrittenInMemory() const {
+        GuestMemory::CollectWrites(target.address, static_cast<std::size_t>(depthBytes()));
+        if (GuestMemory::WrittenSince(target.address, static_cast<std::size_t>(depthBytes()), depthMemory)) return true;
+        if (target.stencilAddress == 0) return false;
+        GuestMemory::CollectWrites(target.stencilAddress, static_cast<std::size_t>(stencilBytes()));
+        return GuestMemory::WrittenSince(target.stencilAddress, static_cast<std::size_t>(stencilBytes()), stencilMemory);
+    }
     VkImageAspectFlags pendingClear = 0;
     float clearDepth = 0.0f;
     std::uint8_t clearStencil = 0;
@@ -287,6 +318,17 @@ public:
 
 private:
     std::map<std::array<std::uint32_t, 12>, std::shared_ptr<Texture>> textures;
+    std::uint64_t depthMemory = 0;
+    std::uint64_t stencilMemory = 0;
+
+    std::uint64_t depthBytes() const {
+        const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+        return DepthSliceBytes(target.extent, d16 ? 2u : 4u);
+    }
+
+    std::uint64_t stencilBytes() const {
+        return DepthSliceBytes(target.extent, 1u);
+    }
 
     void release() noexcept {
         textures.clear();
@@ -314,6 +356,10 @@ std::mutex& surfacesMutex() {
 std::vector<std::unique_ptr<DepthSurface>>& surfaces() {
     static auto* list = new std::vector<std::unique_ptr<DepthSurface>>();
     return *list;
+}
+
+void retire(DepthSurface& surface) {
+    surface.retired = true;
 }
 
 std::set<std::uint64_t>& clearedHtiles() {
@@ -427,6 +473,7 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target) 
         }
         surface = surfaces().back().get();
     }
+    surface->retired = false;
     surface->clearDepth = target.clearDepth;
     surface->clearStencil = target.clearStencil;
     if (cleared) {
@@ -434,6 +481,8 @@ VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target) 
         surface->pendingClear |= VK_IMAGE_ASPECT_DEPTH_BIT;
     }
     surface->ApplyFastClear();
+    if (!created) surface->written = ++depthWrites;
+    surface->NoteMemory();
     return surface->view;
 }
 
@@ -467,10 +516,18 @@ void ClearDepthSurfaces(VkDevice device) {
 }
 
 std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
+    const auto held = [&](const auto& surface) {
+        return surface->context.device == context.device && !surface->retired && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
+    };
+    {
+        std::lock_guard lock(surfacesMutex());
+        if (std::none_of(surfaces().begin(), surfaces().end(), held)) return nullptr;
+    }
+    std::lock_guard gpu(GuestMemory::GpuMutex());
     std::lock_guard lock(surfacesMutex());
     const auto& list = surfaces();
     const auto found = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) {
-        return surface->context.device == context.device && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
+        return surface->context.device == context.device && !surface->retired && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
     });
     if (found == list.rend()) return nullptr;
     auto* surface = found->get();
@@ -488,11 +545,14 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
         Recorder::CountBarriers(Recorder::CommandClass::Draw, 1);
         return surface->Sampled(words, resource, components);
     }
-    if (resource.width != base.extent.width || resource.height != base.extent.height) return nullptr;
     if (!stencil) {
         const bool d16 = base.format == VK_FORMAT_D16_UNORM || base.format == VK_FORMAT_D16_UNORM_S8_UINT;
         const bool depthBits = words.size() >= 4 && ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) == (d16 ? 16u : 32u);
         if (ResolveTextureFormat(resource.format) != (d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT) && !depthBits) return nullptr;
+    }
+    if (!surface->SampledAccepts(words, resource) && surface->OverwrittenInMemory()) {
+        retire(*surface);
+        return nullptr;
     }
     surface->ApplyFastClear();
     return surface->Sampled(words, resource, components);
@@ -550,9 +610,17 @@ void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
     }
 }
 
+
 bool DepthSurfaceAt(std::uint64_t address) {
     std::lock_guard lock(surfacesMutex());
-    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return surface->target.address == address || surface->target.stencilAddress == address; });
+    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return !surface->retired && (surface->target.address == address || surface->target.stencilAddress == address); });
+}
+
+void RetireDepthSurfaces(VkDevice device, std::uint64_t address, std::uint64_t bytes) {
+    std::lock_guard lock(surfacesMutex());
+    for (const auto& surface : surfaces()) {
+        if (surface->context.device == device && !surface->retired && surface->Overlaps(address, bytes)) retire(*surface);
+    }
 }
 
 }
