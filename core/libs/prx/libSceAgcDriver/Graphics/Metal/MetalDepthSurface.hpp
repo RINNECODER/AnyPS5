@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -55,7 +56,6 @@ public:
     // Moves the surface to layer `layer` of other planes (the caller copies its texels there first).
     void Rebind(std::shared_ptr<MetalDepthPlanes> planes, std::uint32_t layer);
     [[nodiscard]] bool OverlapsMappings(std::span<const NativeGuestMemory::BorrowedRange> changed) const;
-
 private:
     Graphics::DepthTarget target;
     std::shared_ptr<MetalDepthPlanes> planes;
@@ -117,6 +117,10 @@ public:
     // A single-sample target with DB_DEPTH_VIEW slices (DepthTarget::slice/lastSlice) gets a layer of
     // the planes of its depth array, which grow to hold slices 0..max(slice, lastSlice); a surface
     // found at the target's address in other planes moves there with its texels.
+    // A single-sample target without slices takes the current contents of each of its planes: a depth
+    // plane bound with several stencil planes (or a stencil plane with several depth planes) is a
+    // surface per pairing, and binding one copies that plane over from the surface that bound it last
+    // when both have its format and extent.
     [[nodiscard]] std::shared_ptr<MetalDepthSurface> Acquire(const Graphics::DepthTarget& target);
     [[nodiscard]] std::shared_ptr<MetalColorSurface> Acquire(const Graphics::ColorTarget& target);
     void Clear();
@@ -126,7 +130,11 @@ public:
 
 private:
     void growPlanes(const std::shared_ptr<MetalDepthPlanes>& planes, const Graphics::DepthTarget& shape, std::uint32_t layers);
+    void takePlanes(const std::shared_ptr<MetalDepthSurface>& surface);
     const MetalDevice& backend;
+    // The surface whose plane at each guest address holds that plane's current texels.
+    std::unordered_map<std::uint64_t, std::weak_ptr<MetalDepthSurface>> depthOwners;
+    std::unordered_map<std::uint64_t, std::weak_ptr<MetalDepthSurface>> stencilOwners;
     std::mutex mutex;
     std::vector<std::shared_ptr<MetalDepthSurface>> surfaces;
     std::vector<std::shared_ptr<MetalColorSurface>> colorSurfaces;

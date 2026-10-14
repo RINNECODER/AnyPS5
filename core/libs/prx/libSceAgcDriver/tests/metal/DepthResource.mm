@@ -82,7 +82,7 @@ void bytes(const MetalTests::Context& context, const Surface& surface, bool sten
     for (std::size_t i = 0; i < output.length; ++i) {
         const auto row = i / rowBytes, column = i % rowBytes;
         const auto wanted = row < height && column < width * elementBytes ? std::uint8_t(expected >> (8 * (column % elementBytes))) : 0xa5;
-        MetalTests::Require(data[i] == wanted, "Depth/stencil plane bytes or blit row padding differ from the expected GPU result");
+        MetalTests::Require(data[i] == wanted, ("Depth/stencil plane bytes or blit row padding differ from the expected GPU result DBG " + std::to_string(i) + " got " + std::to_string(data[i]) + " want " + std::to_string(wanted) + " fmt " + std::to_string(int(surface.Target().format)) + " addr " + std::to_string(surface.Target().stencilAddress)).c_str());
     }
 }
 
@@ -326,6 +326,56 @@ void replacedDepth(const AgcDriver::Metal::MetalDevice& backend) {
     AgcDriver::Metal::DropReplacedDepthSurfaces(surfaces, cache, resource);
     MetalTests::Require(surfaces.empty(), "A texture of another texel size over a depth surface kept the dead surface");
 }
+
+// Writes `depth` and `stencil` into a surface's planes, as a draw through it would.
+void writePlanes(const MetalTests::Context& context, const Surface& surface, float depth, std::uint32_t stencil) {
+    auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.depthAttachment.texture = surface.DepthTexture();
+    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.depthAttachment.clearDepth = depth;
+    if (surface.StencilTexture() != nil) {
+        pass.stencilAttachment.texture = surface.StencilTexture();
+        pass.stencilAttachment.loadAction = MTLLoadActionClear;
+        pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        pass.stencilAttachment.clearStencil = stencil;
+    }
+    auto commands = [context.queue commandBuffer];
+    [[commands renderCommandEncoderWithDescriptor:pass] endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    MetalTests::Require(commands.status == MTLCommandBufferStatusCompleted, "Depth plane write failed");
+}
+
+// One depth plane bound with two stencil planes (and one stencil plane with two depth planes) is a
+// surface per pairing; each binding takes the plane's current texels from the surface that bound it last.
+void sharedPlanes(const MetalTests::Context& context, const AgcDriver::Metal::MetalDevice& backend, id<MTLLibrary> shaders, VkFormat format) {
+    AgcDriver::Metal::MetalDepthSurfaceCache cache(backend);
+    const auto target = [&](std::uint64_t depth, std::uint64_t stencil) {
+        return AgcDriver::Graphics::DepthTarget{depth, stencil, {width, height}, format, 1, 7};
+    };
+    auto first = cache.Acquire(target(0x400000, 0x800000));
+    writePlanes(context, *first, 0.25f, 3);
+    auto second = cache.Acquire(target(0x400000, 0x900000));
+    MetalTests::Require(second != first, "Two stencil pairings of a depth plane share one surface");
+    samples(context, shaders, *second, 0.25f, 7);
+    bytes(context, *second, true, 7);  // only the depth plane carried over
+    writePlanes(context, *second, 0.5f, 9);
+    MetalTests::Require(cache.Acquire(target(0x400000, 0x900000)) == second, "Binding the same pairing again made another surface");
+    samples(context, shaders, *second, 0.5f, 9);
+    MetalTests::Require(cache.Acquire(target(0x400000, 0x800000)) == first, "Going back to the first pairing made another surface");
+    samples(context, shaders, *first, 0.5f, 3);  // the depth written through the second pairing, its own stencil
+    auto third = cache.Acquire(target(0xa00000, 0x800000));
+    samples(context, shaders, *third, 1, 3);  // a new depth plane starts cleared; the stencil plane carries over
+    bytes(context, *third, true, 3);
+    auto other = cache.Acquire(AgcDriver::Graphics::DepthTarget{0x400000, 0xb00000, {width + 1, height}, format, 1, 7});
+    writePlanes(context, *other, 0.75f, 1);
+    MetalTests::Require(cache.Acquire(target(0x400000, 0x800000)) == first, "A pairing of another extent replaced the first pairing");
+    samples(context, shaders, *first, 0.5f, 3);  // a plane of another extent does not carry over
+    cache.Clear();
+    auto fresh = cache.Acquire(target(0x400000, 0x900000));
+    samples(context, shaders, *fresh, 1, 7);  // a cleared cache forgets which surface held the plane
+}
 }
 
 void RunDepthResourceTests(const MetalTests::Context& context) {
@@ -357,4 +407,5 @@ void RunDepthResourceTests(const MetalTests::Context& context) {
     for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) depthArray(context, backend, shaders, format);
     for (const auto format : {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT}) layeredDepthArray(context, backend, shaders, format);
     replacedDepth(backend);
+    for (const auto format : {VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}) sharedPlanes(context, backend, shaders, format);
 }
