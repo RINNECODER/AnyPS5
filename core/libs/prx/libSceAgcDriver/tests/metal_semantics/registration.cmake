@@ -36,6 +36,13 @@ add_test(NAME anyps5_metal_semantics_tgsizewaveindex COMMAND anyps5_metal_semant
 set_tests_properties(anyps5_metal_semantics_tgsizewaveindex PROPERTIES
     TIMEOUT 180 RUN_SERIAL TRUE ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
 
+add_executable(anyps5_metal_semantics_colorcomparereject "${CMAKE_CURRENT_LIST_DIR}/ColorCompareReject.cpp")
+target_include_directories(anyps5_metal_semantics_colorcomparereject BEFORE PRIVATE "${semanticsDir}/shim")
+target_link_libraries(anyps5_metal_semantics_colorcomparereject PRIVATE anyps5_metal_semantics_device)
+set_target_properties(anyps5_metal_semantics_colorcomparereject PROPERTIES CXX_EXTENSIONS OFF)
+add_test(NAME anyps5_metal_semantics_colorcomparereject COMMAND anyps5_metal_semantics_colorcomparereject)
+set_tests_properties(anyps5_metal_semantics_colorcomparereject PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+
 # Frontend-only unit tests for the ported decoder and collector fixes. They link the same recompiler
 # the Metal replay uses and need no device.
 foreach(semanticsUnit IN ITEMS
