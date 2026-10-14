@@ -23,8 +23,9 @@ struct Row {
     bool layerExported = false;
     std::uint32_t layerBase = 0;
 };
-constexpr std::array<Row, 10> Rows {{{0u, 0u, false}, {0u, 0u, true}, {15u, 0x1FFFu, false}, {15u, 0x1FFFu, true}, {0u, 0x1FFFu, true}, {15u, 0u, false},
-    {0u, 0x1FFFu, false, RasterPrimitive::Triangle, true}, {15u, 0x1FFFu, true, RasterPrimitive::Triangle, true}, {15u, 3u, false, RasterPrimitive::Triangle, true}, {0u, 0u, true, RasterPrimitive::Triangle, true}}};
+constexpr std::array<Row, 12> Rows {{{0u, 0u, false}, {0u, 0u, true}, {15u, 0x1FFFu, false}, {15u, 0x1FFFu, true}, {0u, 0x1FFFu, true}, {15u, 0u, false},
+    {0u, 0x1FFFu, false, RasterPrimitive::Triangle, true}, {15u, 0x1FFFu, true, RasterPrimitive::Triangle, true}, {15u, 3u, false, RasterPrimitive::Triangle, true}, {0u, 0u, true, RasterPrimitive::Triangle, true},
+    {3u, 3u, false, RasterPrimitive::Triangle, true, 5u}, {15u, 9u, true, RasterPrimitive::Triangle, false, 7u}}};
 
 static std::uint32_t Evaluate(const IrValue* value, const Row& row);
 static std::uint32_t BitField(std::uint32_t word, std::uint32_t offset, std::uint32_t count, bool isSigned);
@@ -482,8 +483,8 @@ static void ExportedWholeWord() {
     Require(BuiltinRemains(program, StageInputKind::LayerExported));
     Require(BuiltinRemains(program, StageInputKind::LayerBase));
     const IrValue* word = carried.Argument(0)->Resolve();
-    constexpr std::array<Row, 7> words {{{0u, 0u, false, RasterPrimitive::Triangle}, {0u, 0u, false, RasterPrimitive::Rectangle}, {0u, 0u, false, RasterPrimitive::Line}, {15u, 0x1FFFu, false, RasterPrimitive::Point}, {3u, 0x7FFu, false, RasterPrimitive::Triangle},
-        {15u, 0x7FFu, false, RasterPrimitive::Point, true}, {3u, 5u, false, RasterPrimitive::Triangle, true}}};
+    constexpr std::array<Row, 9> words {{{0u, 0u, false, RasterPrimitive::Triangle}, {0u, 0u, false, RasterPrimitive::Rectangle}, {0u, 0u, false, RasterPrimitive::Line}, {15u, 0x1FFFu, false, RasterPrimitive::Point}, {3u, 0x7FFu, false, RasterPrimitive::Triangle},
+        {15u, 0x7FFu, false, RasterPrimitive::Point, true}, {3u, 5u, false, RasterPrimitive::Triangle, true}, {3u, 5u, false, RasterPrimitive::Triangle, true, 4u}, {0u, 0u, false, RasterPrimitive::Line, false, 6u}}};
     for (const Row& row : words) {
         Require(Evaluate(word, row) == (static_cast<std::uint32_t>(row.primitive) | (row.sample << 8u) | (((row.layerExported ? row.layer : 0u) + row.layerBase) << 16u)));
     }

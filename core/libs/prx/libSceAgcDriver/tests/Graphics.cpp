@@ -3719,6 +3719,25 @@ void orderedPixelShaderTests() {
     expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(orderedPixelRequest(0x30600u, plain))); }, "fragmentShaderPixelInterlock");
 }
 
+void PixelLayerBaseTests() {
+    using namespace AgcDriver::Graphics;
+    // Unlike upstream, which takes the slice of the color view as is, the base is 0 when the vertex stage
+    // exports the layer (it already names the slice) or when there is no color target to take a slice from.
+    State state{};
+    state.hasColorTarget = true;
+    state.color.arraySlice = 3;
+    state.color.depthSlice = 5;
+    state.color.depth = 1;
+    Require(PixelLayerBase(state) == 3u, "a 2D array color view did not start at its array slice");
+    state.color.depth = 4;
+    Require(PixelLayerBase(state) == 5u, "a 3D color view did not start at its depth slice");
+    state.layered = true;
+    Require(PixelLayerBase(state) == 0u, "a layered draw added the color view slice to the exported layer");
+    state.layered = false;
+    state.hasColorTarget = false;
+    Require(PixelLayerBase(state) == 0u, "a draw without a color target got a layer base");
+}
+
 void LineStripTests() {
     using namespace AgcDriver::Graphics;
     auto queue = makeState();
@@ -4777,6 +4796,7 @@ int main(int argc, char** argv) {
         conservativeZExportTests();
         orderedPixelShaderTests();
         LineStripTests();
+        PixelLayerBaseTests();
         ProvokingVertexTests();
         ProvokingVertexRenderPassTests();
         ConservativeRasterizationTests();

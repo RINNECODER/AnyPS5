@@ -366,7 +366,7 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
             setVector(static_cast<VectorReg>(vgpr(PixelInput::PositionW)), entryIr.BitCastU32(w));
         }
         if (loaded(PixelInput::FrontFace)) {
-            // The front value under FRONT_FACE_ALL_BITS is not measured (docs/dev/debt/shader.md).
+            // The front value under FRONT_FACE_ALL_BITS is not measured (docs/dev/TechnicalDebt.md).
             IrValue& facing = builtin(StageInputKind::FrontFacing);
             setVector(static_cast<VectorReg>(vgpr(PixelInput::FrontFace)), ps->psFrontFaceAllBits ? entryIr.Select(entryIr.IEqual(facing, entryIr.Constant(0x3f800000u)), entryIr.Constant(0xffffffffu), entryIr.Constant(0u)) : facing);
         }

@@ -1022,6 +1022,11 @@ std::array<ShaderRecompiler::ColorExportPacking, 8> ExportPackings(const State& 
     return packings;
 }
 
+std::uint32_t PixelLayerBase(const State& state) {
+    if (state.layered || !state.hasColorTarget) return 0u;
+    return state.color.depth > 1 ? state.color.depthSlice : state.color.arraySlice;
+}
+
 ShaderRecompiler::RasterPrimitive RasterPrimitiveOf(const State& state) {
     if (state.rectList) return ShaderRecompiler::RasterPrimitive::Rectangle;
     if (state.stages.mesh.has_value() || state.stages.tessellation.has_value()) return ShaderRecompiler::RasterPrimitive::Triangle;
