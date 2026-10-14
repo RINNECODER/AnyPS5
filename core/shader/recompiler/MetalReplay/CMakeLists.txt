@@ -16,6 +16,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Execution/src/DrawDispatch.cpp"
     "${agcDriverRoot}/Execution/src/IndirectDraw.cpp"
     "${agcDriverRoot}/Execution/src/NativeGuestMemory.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/GuestLabelStore.cpp"
     "${agcDriverRoot}/Execution/src/SubmissionCapture.cpp"
     "${agcDriverRoot}/Execution/src/ShaderCapture.cpp"
     "${agcDriverRoot}/Execution/src/SubmissionValidation.cpp"
