@@ -614,6 +614,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     std::uint32_t meshGroups = 0;
     if (meshPath) {
         const auto& mesh = *state.stages.mesh;
+        // VGT_SHADER_STAGES_EN.GS_FAST_LAUNCH: the shared decode takes one point per subgroup, unindexed.
+        if (((state.stages.registerValue >> 19u) & 3u) != 0 && draw.indexed) throw std::invalid_argument("Metal indexed fast-launch draws are unsupported");
         const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
         const auto step = mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize;
         if (draw.indexCount < inputSize || mesh.primitivesPerGroup == 0) {

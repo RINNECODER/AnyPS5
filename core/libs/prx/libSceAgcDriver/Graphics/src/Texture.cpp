@@ -11,6 +11,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/UnitShadow.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "RdnaDecoder/include/RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -267,7 +268,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         const auto linearBytes = sliceLinearBytes * arrayLayers;
 
         VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        imageInfo.flags = descriptor.dimension == TextureDimension::kCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u;
+        imageInfo.flags = (descriptor.dimension == TextureDimension::kCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u) | (SrgbTwinFormat(context, vkFormat) != VK_FORMAT_UNDEFINED ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0u);
         imageInfo.imageType = ImageTypeFor(descriptor.dimension);
         imageInfo.format = vkFormat;
         imageInfo.extent = {descriptor.width, descriptor.height, geometry.imageDepth};
@@ -446,6 +447,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
         createFirstLayerView(descriptor, viewInfo);
         prepareBaseLevelView(descriptor, viewInfo);
+        prepareSrgbView(descriptor, viewInfo);
         if (profile) {
             auto& totals = Profile();
             totals.view += timer.lap();
@@ -617,7 +619,7 @@ bool Texture::CanCopyFrom(const StorageTexture& source, const GuestTextureResour
     if (IsBlockCompressed(descriptor.format) || IsBlockCompressed(from.format)) return false;
     // Same memory, same layout, same texel size: the GPU copy reinterprets the texels exactly as a
     // guest read through the sampled descriptor would.
-    return descriptor.baseAddress == from.baseAddress && descriptor.pipeBankXor == from.pipeBankXor && descriptor.width == from.width && descriptor.height == from.height && descriptor.dimension == from.dimension && descriptor.tileMode == from.tileMode && descriptor.mipCount <= from.mipCount && descriptor.depthOrLastArray == from.depthOrLastArray && BytesPerElement(descriptor.format) == BytesPerElement(from.format) && BlockWidth(descriptor.format) == BlockWidth(from.format);
+    return descriptor.baseAddress == from.baseAddress && descriptor.pipeBankXor == from.pipeBankXor && descriptor.width == from.width && descriptor.height == from.height && ArrayLayersServeView(from, descriptor) && descriptor.tileMode == from.tileMode && descriptor.mipCount <= from.mipCount && BytesPerElement(descriptor.format) == BytesPerElement(from.format) && BlockWidth(descriptor.format) == BlockWidth(from.format);
 }
 
 Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& source, const GuestTextureResource& descriptor, VkComponentMapping components) : context(context), storageSource(source) {
@@ -648,6 +650,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<StorageTexture>& 
         viewRange = {viewInfo.viewType, viewInfo.subresourceRange.levelCount, viewInfo.subresourceRange.layerCount};
         createFirstLayerView(descriptor, viewInfo);
         prepareBaseLevelView(descriptor, viewInfo);
+        prepareSrgbView(descriptor, viewInfo);
         if (profile) {
             auto& totals = Profile();
             totals.view += timer.lap();
@@ -695,6 +698,44 @@ void Texture::prepareBaseLevelView(const GuestTextureResource& descriptor, VkIma
     baseLevelInfo = viewInfo;
 }
 
+void Texture::prepareSrgbView(const GuestTextureResource& descriptor, VkImageViewCreateInfo viewInfo) {
+    const auto format = SrgbTwinFormat(context, viewInfo.format);
+    if (format == VK_FORMAT_UNDEFINED) return;
+    viewInfo.pNext = nullptr;
+    viewInfo.format = format;
+    srgbInfo = viewInfo;
+    srgbMinLod = EffectiveMinLod(descriptor);
+}
+
+VkImageView Texture::SrgbView(bool firstLayer, bool baseLevel) const {
+    Require(srgbInfo.has_value(), "AGC graphics: a texture of view format " + std::to_string(viewFormat) + " has no sRGB view for a sampler that forces sRGB decoding");
+    std::lock_guard lock(srgbMutex);
+    auto& slot = srgbViews[baseLevel ? 2u : firstLayer ? 1u : 0u];
+    if (slot != VK_NULL_HANDLE) return slot;
+    VkImageViewCreateInfo info = *srgbInfo;
+    VkImageViewUsageCreateInfo usage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+    usage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    info.pNext = &usage;
+    VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
+    if (baseLevel) {
+        info.viewType = info.viewType == VK_IMAGE_VIEW_TYPE_1D || info.viewType == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? VK_IMAGE_VIEW_TYPE_1D : VK_IMAGE_VIEW_TYPE_2D;
+        info.subresourceRange.levelCount = 1;
+        info.subresourceRange.layerCount = 1;
+    } else {
+        if (firstLayer) {
+            info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            info.subresourceRange.layerCount = 1;
+        }
+        if (srgbMinLod != 0.0f) {
+            minLod.minLod = srgbMinLod;
+            minLod.pNext = info.pNext;
+            info.pNext = &minLod;
+        }
+    }
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &info, nullptr, &slot), "vkCreateImageView sRGB");
+    return slot;
+}
+
 VkImageView Texture::BaseLevelView() const {
     Require(baseLevelInfo.has_value(), "a base-level view needs a mipmapped 1D, 2D or 2D array texture");
     std::lock_guard lock(baseLevelMutex);
@@ -710,6 +751,10 @@ void Texture::release() noexcept {
     firstLayerView = VK_NULL_HANDLE;
     if (baseLevelView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, baseLevelView, nullptr);
     baseLevelView = VK_NULL_HANDLE;
+    for (auto& srgbView : srgbViews) {
+        if (srgbView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, srgbView, nullptr);
+        srgbView = VK_NULL_HANDLE;
+    }
     // The image and its memory go with the last holder: this texture, or the batch still uploading it.
     owned.reset();
     image = VK_NULL_HANDLE;
@@ -844,6 +889,23 @@ VkFormat StorageFormatForGuest(const Context& context, std::uint32_t guestFormat
 bool StorageClearAvailable(const Context& context, std::uint32_t guestFormat, DccKeys keys) {
     VkClearColorValue clear{};
     return IsDccClear(keys) && StorageFormatAvailable(context, guestFormat) && ClearColorFor(StorageFormatForGuest(context, guestFormat), keys, clear);
+}
+
+VkFormat SrgbTwinFormat(const Context& context, VkFormat format) {
+    const auto decoded = [&](ShaderRecompiler::IrBufferFormat srgb) { return (context.srgbDecodeFormats & ShaderRecompiler::SrgbDecodeBit(srgb)) != 0u; };
+    switch (format) {
+        case VK_FORMAT_R8_UNORM: return decoded(ShaderRecompiler::IrBufferFormat::Format8Srgb) ? VK_FORMAT_UNDEFINED : VK_FORMAT_R8_SRGB;
+        case VK_FORMAT_R8G8_UNORM: return decoded(ShaderRecompiler::IrBufferFormat::Format8_8Srgb) ? VK_FORMAT_UNDEFINED : VK_FORMAT_R8G8_SRGB;
+        case VK_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_SRGB;
+        case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_SRGB;
+        case VK_FORMAT_A8B8G8R8_UNORM_PACK32: return VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+        case VK_FORMAT_BC1_RGB_UNORM_BLOCK: return VK_FORMAT_BC1_RGB_SRGB_BLOCK;
+        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        case VK_FORMAT_BC2_UNORM_BLOCK: return VK_FORMAT_BC2_SRGB_BLOCK;
+        case VK_FORMAT_BC3_UNORM_BLOCK: return VK_FORMAT_BC3_SRGB_BLOCK;
+        case VK_FORMAT_BC7_UNORM_BLOCK: return VK_FORMAT_BC7_SRGB_BLOCK;
+        default: return VK_FORMAT_UNDEFINED;
+    }
 }
 
 VkFormat AttachmentProxyFormat(const Context& context, VkFormat format) {
@@ -1876,6 +1938,7 @@ void traceKeyStore(const char* path, const GuestTextureResource& descriptor, std
 }
 
 void StorageTexture::captureGuestBytes(const std::vector<bool>* layers) {
+    original.resize(static_cast<std::size_t>(guestBytes));
     comparedGuestBytes = {};
     const bool complete = layers == nullptr || std::all_of(layers->begin(), layers->end(), [](bool selected) { return selected; });
     for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
@@ -1932,7 +1995,6 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     const auto start = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto elementBytes = BytesPerElement(descriptor.format);
     const auto linearBytes = sliceLinearBytes * arrayLayers;
-    original.resize(static_cast<std::size_t>(guestBytes));
     // A layer selection applies to the direct path alone (the others upload everything); it names
     // array layers, which the tracked layers are when there are several.
     if (layers != nullptr && ((!blockUnits && trackedLayers != arrayLayers) || std::all_of(layers->begin(), layers->end(), [](bool selected) { return selected; }))) layers = nullptr;
@@ -2138,6 +2200,7 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     originalValid = true;
     forgetBorrowed(0, trackedLayers);
     stampLayers(false);
+    original.resize(static_cast<std::size_t>(guestBytes));
     GuestMemory::ReadCommitted(descriptor.baseAddress, original);
     {
             Buffer staging(context, original.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
@@ -4205,6 +4268,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         }
         return;
     }
+    original.resize(static_cast<std::size_t>(guestBytes));
     // The store below compares against the guest bytes, read now when `original` does not hold
     // them (a GPU clear, a dropped or kept unit). Reading them says nothing about the image: a
     // stale unit (dropped, or kept for the CPU) still differs from them, so `original` vouches for

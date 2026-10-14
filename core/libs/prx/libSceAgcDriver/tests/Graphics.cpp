@@ -7,6 +7,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ParallelCompare.hpp"
@@ -19,6 +21,7 @@
 #include "Optimization/ResourceProgram.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libc/include/GuestHeap.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -532,6 +535,58 @@ void hardwareScreenOffsetTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
 }
 
+void UnwrittenSampleLocationTests() {
+    using AgcDriver::Graphics::DecodeState;
+    using AgcDriver::Graphics::DrawRejection;
+    using AgcDriver::Graphics::SampleLocations;
+    const auto fresh = [](std::uint32_t config, std::uint32_t attributes, std::uint32_t scanMode = 3) {
+        auto written = makeState();
+        written.context[0x2f8] = config;
+        written.context[0x292] = scanMode;
+        written.context[0x3b8] = 0x0dc00000u;
+        written.context[0x31d] = attributes;
+        written.context[0x1b3] = 2;
+        written.context[0x1b4] = 2;
+        AgcDriver::QueueState queue;
+        queue.shader = written.shader;
+        queue.userConfig = written.userConfig;
+        written.context.ForEach([&](std::uint32_t offset, std::uint32_t value) { queue.context[offset] = value; });
+        return queue;
+    };
+    AgcDriver::QueueState initial;
+    for (std::uint32_t offset = 0x2fe; offset <= 0x30d; ++offset) Require(initial.context.contains(offset) && initial.context.at(offset) == 0, "an unwritten PA_SC_AA_SAMPLE_LOCS register did not hold its clear-state value 0");
+    for (const auto samples : {2u, 4u, 8u}) {
+        const auto log2 = static_cast<std::uint32_t>(std::countr_zero(samples));
+        auto queue = fresh((log2 << 20u) | log2, (log2 << 12u) | (log2 << 15u));
+        const auto state = DecodeState(queue);
+        Require(state.samples == samples && state.colors.size() == 1 && state.colors[0].samples == samples, "a multisampled draw with unwritten sample locations did not decode its sample count");
+        Require(state.customSampleLocations, "unwritten sample locations did not decode as the clear-state pattern");
+        for (std::uint32_t sample = 0; sample < samples; ++sample) Require(state.sampleLocations[sample] == 0, "an unwritten sample location was not at the pixel center");
+        const auto centered = SampleLocations(state);
+        for (std::uint32_t sample = 0; sample < samples; ++sample) Require(centered[sample].x == 0.5f && centered[sample].y == 0.5f, "unwritten sample locations did not place every sample at the pixel center");
+        const auto rejection = DrawRejection(queue, false);
+        Require(rejection.empty(), "the precheck refused a multisampled draw with unwritten sample locations: " + rejection);
+    }
+    auto queue = fresh(0x00200002, 0x12000);
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0x622ae6ae;
+    auto state = DecodeState(queue);
+    Require(state.samples == 4 && !state.customSampleLocations, "explicit standard 4x sample locations changed");
+    queue = fresh(0x00200002, 0x12000);
+    for (std::uint32_t pixel = 0; pixel < 4; ++pixel) queue.context[0x2fe + pixel * 4u] = 0x22eea66a;
+    state = DecodeState(queue);
+    Require(state.samples == 4 && state.customSampleLocations, "explicit custom 4x sample locations changed");
+    const auto custom = SampleLocations(state);
+    const std::array<VkSampleLocationEXT, 4> expected{{{0.125f, 0.875f}, {0.875f, 0.125f}, {0.375f, 0.375f}, {0.625f, 0.625f}}};
+    for (std::size_t sample = 0; sample < expected.size(); ++sample) Require(custom[sample].x == expected[sample].x && custom[sample].y == expected[sample].y, "explicit custom 4x sample coordinates changed");
+    queue.ClearContext();
+    for (std::uint32_t offset = 0x2fe; offset <= 0x30d; ++offset) Require(queue.context.at(offset) == 0, "CLEAR_STATE did not reset PA_SC_AA_SAMPLE_LOCS");
+    expectFailure([&] { DecodeState(fresh(0x00400004, 0x12000)); }, "more than eight samples");
+    expectFailure([&] { DecodeState(fresh(0x00100002, 0x12000)); }, "exposing fewer samples");
+    queue = fresh(0, 0, 3);
+    state = DecodeState(queue);
+    Require(state.samples == 1 && DrawRejection(queue, false).empty(), "MSAA_ENABLE on a single-sample target with unwritten sample locations was refused");
+}
+
 void MsaaEnableSingleSampleTests() {
     using AgcDriver::Graphics::DecodeState;
     using AgcDriver::Graphics::DrawRejection;
@@ -668,6 +723,34 @@ void ShaderStageTests() {
         fan.userConfig[0x25b] = 0x4020;
         fan.userConfig[0x242] = 3;
         expectFailure([&] { AgcDriver::Graphics::DecodeState(fan); }, "unsupported geometry input or output assembly");
+    }
+    {
+        auto fast = makeState();
+        fast.userConfig[0x242] = 1;
+        fast.context[0x2d5] = 0x482030;
+        fast.userConfig[0x25b] = 0x201;
+        fast.context[0x1ff] = 32;
+        fast.context[0x2ce] = 32;
+        fast.context[0x2d3] = 64;
+        fast.context[0x29b] = 2;
+        fast.context[0x2ab] = 4;
+        fast.shader[0x8a] = 0x022c0245;
+        fast.shader[0x8b] = 0x9002a;
+        const auto state = AgcDriver::Graphics::DecodeState(fast);
+        Require(state.stages.path == AgcDriver::Graphics::ShaderPath::Geometry && state.stages.vertexWaveSize == 32 && state.stages.mesh, "a fast-launch draw did not decode as wave32 geometry");
+        const auto& mesh = *state.stages.mesh;
+        Require(mesh.inputPrimitive == 1 && mesh.primitivesPerGroup == 1 && mesh.verticesPerGroup == 1 && mesh.maxVertices == 32 && mesh.maxPrimitives == 64 && mesh.threadsPerGroup == 64 && mesh.ldsSizeDwords == 128, "a fast-launch subgroup did not decode as one point amplified by PRIM_AMP_FACTOR");
+        fast.context[0x2d5] = 0x502030;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(fast); }, "unsupported geometry routing, fast launch or wave-ID state");
+        fast.context[0x2d5] = 0x482030;
+        fast.userConfig[0x25b] = 0x402;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(fast); }, "fast launch other than one point per subgroup");
+        fast.userConfig[0x25b] = 0x201;
+        fast.userConfig[0x242] = 4;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(fast); }, "fast launch other than one point per subgroup");
+        fast.userConfig[0x242] = 1;
+        fast.context[0x2d3] = 0;
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(fast); }, "amplifies to no primitives");
     }
     queue.context[0x2ab] = 0;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "invalid VGT_ESGS_RING_ITEMSIZE");
@@ -1920,6 +2003,16 @@ void cmaskTests() {
     auto mipmapped = queue;
     mipmapped.context[0x3b0] |= 1u << 28u;
     expectFailure([&] { DecodeColorBuffer(mipmapped.context, 0); }, "mipmapped, 3D or array");
+    constexpr std::size_t blockBytes = 65536u;
+    static std::vector<std::byte> mipStorage(16u * blockBytes);
+    const auto mipBase = (reinterpret_cast<std::uintptr_t>(mipStorage.data()) + blockBytes - 1u) / blockBytes * blockBytes;
+    auto higherMip = queue;
+    higherMip.context[0x318] = static_cast<std::uint32_t>(mipBase >> 8u);
+    higherMip.context[0x390] = static_cast<std::uint32_t>(mipBase >> 40u);
+    higherMip.context[0x3b0] = (4u << 28u) | (255u << 14u) | 127u;
+    higherMip.context[0x31b] = 1u << 26u;
+    const auto higherTarget = DecodeColorBuffer(higherMip.context, 0);
+    Require(higherTarget.cmaskAddress == 0, "a higher mip of a fast-clear target decoded a CMASK");
     auto unaddressed = queue;
     unaddressed.context[0x31f] = 0;
     unaddressed.context[0x398] = 0;
@@ -2497,6 +2590,32 @@ AgcDriver::Graphics::Context mockContext() {
     context.limits.maxPerStageResources = 128;
     context.limits.maxDescriptorSetStorageBuffers = 32;
     return context;
+}
+
+void addressSpaceTeardownTests() {
+#ifdef _WIN32
+    _putenv_s("APS5_NO_LEASE_MIRROR", "1");
+#else
+    setenv("APS5_NO_LEASE_MIRROR", "1", 1);
+#endif
+    auto context = mockContext();
+    context.device = makeHandle<VkDevice>();
+    context.bufferDeviceAddress = true;
+    context.limits.maxStorageBufferRange = 1u << 27;
+    void* block = GuestHeap::GuestHeapAlignForGpu_nid_postfix(16, 64);
+    const auto before = AgcDriver::Graphics::LeaseCounters().cacheDrops;
+    {
+        AgcDriver::Graphics::GuestBufferMemory memory(context);
+        memory.AcquireRegistered();
+        Require(memory.HoldsLease(), "address-based build holds no lease before device teardown");
+        memory.Upload(true);
+        memory.WriteBack();
+        Require(!memory.HoldsLease(), "completed address-based build kept its own lease");
+    }
+    AgcDriver::Graphics::ClearImageMirrors(context.device);
+    GuestHeap::GuestHeapFree_nid_postfix(block);
+    Require(AgcDriver::Graphics::LeaseCounters().cacheDrops == before, "device teardown left the cached address space pinning guest allocations");
+    Require(mock.live == 0, "address-space teardown test leaked Vulkan objects");
 }
 
 using Role = ShaderRecompiler::DescriptorRole;
@@ -3460,6 +3579,11 @@ void rectListTests() {
     const Context context{};
     const AgcDriver::Pm4::DrawParameters draw{0, 4, 0, 1, 0, false};
     expectFailure([&] { Draw(context, state, draw, {}); }, "incomplete rect-list");
+    std::array<std::uint16_t, 8> indices{};
+    const AgcDriver::Pm4::DrawParameters noIndices{reinterpret_cast<std::uint64_t>(indices.data()), 0, 2, 1, 0, true};
+    Draw(context, state, noIndices, {});
+    const AgcDriver::Pm4::DrawParameters noInstances{reinterpret_cast<std::uint64_t>(indices.data()), 3, 2, 0, 0, true};
+    Draw(context, state, noInstances, {});
 }
 
 ShaderRecompiler::RecompileResult recompilePixel(std::initializer_list<std::uint32_t> controls, std::span<const std::uint32_t> code) {
@@ -4745,6 +4869,11 @@ int main(int argc, char** argv) {
     setenv("APS5_HEAP_MIRROR_MIB", "4", 1);
 #endif
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--address-space-teardown") {
+            addressSpaceTeardownTests();
+            std::cout << "address-space device teardown releases cached guest allocations\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--descriptor-pool-reset-failure") {
             descriptorPoolResetFailureTest();
             std::cerr << "descriptor pool reset failure did not terminate\n";
@@ -4813,6 +4942,7 @@ int main(int argc, char** argv) {
         uint16ExportTests();
         uint8x4TargetTests();
         MsaaEnableSingleSampleTests();
+        UnwrittenSampleLocationTests();
         ShaderStageTests();
         NggVertexWorkgroupTests();
         inactiveVertexPointSizeTests();

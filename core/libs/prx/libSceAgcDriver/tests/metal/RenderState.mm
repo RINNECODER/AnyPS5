@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #include "MetalRenderState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
@@ -494,6 +495,68 @@ void SharedStateDecode(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLi
 // CB_COLOR_VIEW SLICE_START..SLICE_MAX over several array slices, without a render target index
 // export, renders into SLICE_START (upstream 1d8749d00, 257ff1e38): the decoded target is the one-slice
 // view's. Layered draws into such a view and views of several 3D slices stay refused.
+// Shared decode fixes ported from upstream in sync 9, checked on the Metal path's State.cpp and Pm4.cpp:
+// PA_SC_AA_SAMPLE_LOCS_PIXEL_* start at their clear-state value (0), a single-sample color view of a
+// higher mip decodes no CMASK fast clear, and INDEX_ATTRIBUTES_INDIRECT loads the index base, size and
+// type from its 16-byte record.
+void Sync9SharedDecode() {
+    alignas(65536) static std::array<std::byte, 1u << 20u> memory{};
+    const auto address = reinterpret_cast<std::uintptr_t>(memory.data());
+    const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{address, memory, true}}};
+    const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
+    constexpr auto stride = GuestColorStride;
+    {
+        const QueueState fresh;
+        for (std::uint32_t offset = 0x2fe; offset <= 0x30d; ++offset) {
+            const auto found = fresh.context.find(offset);
+            Require(found != fresh.context.end() && found->second == 0, "a sample location register does not start at its clear-state value 0");
+        }
+        auto guest = GuestDraw(address);
+        guest.context[0x292] = 1;            // MSAA_ENABLE
+        guest.context[0x2f8] = (2u << 20u) | 2u; // 4x, locations never written
+        const auto state = Graphics::DecodeState(guest);
+        Require(state.rasterSamples == 4 && state.customSampleLocations, "a 4x draw with unwritten sample locations did not decode as custom locations");
+    }
+    {
+        auto guest = GuestDraw(address);
+        auto& cx = guest.context;
+        cx[0x3b0 + 3] |= 1u << 28u;      // two mips
+        cx[0x31b + stride] = 1u << 26u;  // view mip 1
+        cx[0x31c + stride] |= 0x2000u;   // FAST_CLEAR
+        const auto color = Graphics::DecodeState(guest).colors.at(0);
+        Require(color.cmaskAddress == 0, "a view of mip 1 of a fast-clear target decoded a CMASK");
+        cx[0x31b + stride] = 0;
+        bool refused = false;
+        try {
+            static_cast<void>(Graphics::DecodeState(guest));
+        } catch (const std::exception& error) {
+            refused = std::string(error.what()).find("CMASK fast clears of a mipmapped") != std::string::npos;
+        }
+        Require(refused, "a fast clear of mip 0 of a mipmapped target was not refused");
+    }
+    {
+        auto* record = reinterpret_cast<std::uint32_t*>(memory.data() + 4096);
+        const std::uint64_t indices = address + 8192;
+        record[16 + 0] = static_cast<std::uint32_t>(indices);
+        record[16 + 1] = static_cast<std::uint32_t>(indices >> 32u);
+        record[16 + 2] = 36;
+        record[16 + 3] = 1;
+        const auto base = address + 4096;
+        const std::array<std::uint32_t, 4> packet{(3u << 30u) | (2u << 16u) | (0x91u << 8u), static_cast<std::uint32_t>(base), static_cast<std::uint32_t>(base >> 32u), 4};
+        QueueState queue;
+        Pm4::Execute(packet, queue);
+        Require(queue.indexBase == indices && queue.indexBufferSize == 36 && queue.indexType == 1, "INDEX_ATTRIBUTES_INDIRECT did not load record 4");
+        record[16 + 3] = 4;
+        bool refused = false;
+        try {
+            Pm4::Execute(packet, queue);
+        } catch (const std::exception& error) {
+            refused = std::string(error.what()).find("index-type modifiers") != std::string::npos;
+        }
+        Require(refused, "an INDEX_ATTRIBUTES_INDIRECT record with index type 4 was accepted");
+    }
+}
+
 void ColorViewSlices() {
     alignas(65536) static std::array<std::byte, 1u << 20u> sliceMemory{};
     const auto address = reinterpret_cast<std::uintptr_t>(sliceMemory.data());
@@ -829,6 +892,7 @@ int main() {
             SharedStateDecode(device, queue, library);
             CustomSampleLocations(device, queue, library);
             ColorViewSlices();
+            Sync9SharedDecode();
             ClipCullDecode();
             CoveredCentroid();
             EarlyDepthDecode();
