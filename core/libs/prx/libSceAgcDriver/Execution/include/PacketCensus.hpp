@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Queues/Submission.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4Opcodes.hpp"
+#include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include <algorithm>
 #include <array>
@@ -134,8 +135,6 @@ struct State {
     // for the near-identical diff.
     std::deque<std::unordered_multimap<std::uint64_t, std::vector<std::uint32_t>>> previousFlips;
     std::unordered_multimap<std::uint64_t, std::vector<std::uint32_t>> currentFlip;
-    // Register shadow per queue: (space << 16 | offset) -> value.
-    std::unordered_map<std::uint32_t, std::unordered_map<std::uint32_t, std::uint32_t>> shadow;
 };
 
 inline State& Shared() {
@@ -149,15 +148,35 @@ inline std::array<std::atomic<std::uint64_t>, KindCount>& KindNanoseconds() {
     return ns;
 }
 
-inline void NoteRegister(State& state, std::uint32_t queue, std::size_t group, std::uint32_t space, std::uint32_t offset, std::uint32_t value) {
-    auto& shadow = state.shadow[queue];
-    const auto key = (space << 16u) | (offset & 0xffffu);
-    ++state.registers[group].writes;
-    const auto [slot, inserted] = shadow.try_emplace(key, value);
-    if (!inserted) {
-        if (slot->second == value) ++state.registers[group].redundant;
-        slot->second = value;
+// Called on the worker just before a register packet executes (so predicated-off and COND_EXEC-skipped
+// packets are not counted): a write is redundant when the queue already holds that value, defaults
+// after CLEAR_STATE included.
+inline void NoteRegisterWrites(std::span<const std::uint32_t> packet, const std::vector<std::uint32_t>* pairs, const QueueState& queue) {
+    const auto header = packet[0];
+    if ((header >> 30u) != 3u || packet.size() < 3) return;
+    const auto opcode = (header >> 8u) & 0xffu;
+    const bool indirect = Pm4::IndirectRegisterOpcode(opcode);
+    if (!indirect && opcode != 0x69u && opcode != 0x76u && opcode != 0x79u && opcode != 0x7au) return;
+    if (KindOf(packet) == KindTag) return;
+    const auto& registers = (opcode == 0x69u || opcode == 0x9fu) ? queue.context : (opcode == 0x76u || opcode == 0x63u) ? queue.shader : queue.userConfig;
+    const std::size_t group = indirect ? 3 : opcode == 0x69u ? 0 : opcode == 0x76u ? 1 : 2;
+    std::uint64_t writes = 0, redundant = 0;
+    const auto note = [&](std::uint32_t offset, std::uint32_t value) {
+        ++writes;
+        if (const auto found = registers.find(offset); found != registers.end() && (*found).second == value) ++redundant;
+    };
+    if (indirect) {
+        if (pairs == nullptr) return;
+        for (std::size_t i = 0; i + 1 < pairs->size(); i += 2) note((*pairs)[i] & ~0x70000000u, (*pairs)[i + 1]);
+    } else {
+        const auto offset = packet[1] & ~0x70000000u;
+        if (offset > 0xffffu) return;
+        for (std::size_t i = 2; i < packet.size(); ++i) note(offset + static_cast<std::uint32_t>(i - 2), packet[i]);
     }
+    auto& state = Shared();
+    std::lock_guard lock(state.mutex);
+    state.registers[group].writes += writes;
+    state.registers[group].redundant += redundant;
 }
 
 // Walks a submission before it executes. The captured words already have INDIRECT_BUFFER targets
@@ -194,7 +213,7 @@ inline void NoteSubmission(const DriverDetail::Submission& submission) {
         if (begin > end || end > words.size()) continue;
         ++state.indirectPackets;
         state.indirectDwords += end - begin;
-        state.indirectSeen.Note(Hash(words.subspan(begin, end - begin)) ^ indirect[0], end - begin, flip, state.indirectRepeats);
+        state.indirectSeen.Note(Hash(words.subspan(begin, end - begin)), end - begin, flip, state.indirectRepeats);
     }
     for (std::size_t chunk = 0; chunk + 128 <= words.size(); chunk += 128) {
         state.chunkSeen.Note(Hash(words.subspan(chunk, 128)), 128, flip, state.chunkRepeats);
@@ -214,27 +233,8 @@ inline void NoteSubmission(const DriverDetail::Submission& submission) {
         state.kinds[kind].dwords += count;
         const auto opcode = (header >> 8u) & 0xffu;
         const bool type3 = (header >> 30u) == 3u;
-        const bool registerPacket = type3 && count >= 2 && (opcode == 0x69u || opcode == 0x76u || opcode == 0x79u || opcode == 0x7au || Pm4::IndirectRegisterOpcode(opcode));
         shape = (shape ^ header) * 0x100000001b3ull;
-        if (registerPacket && !Pm4::IndirectRegisterOpcode(opcode)) shape = (shape ^ packet[1]) * 0x100000001b3ull;
-        if (type3 && opcode == 0x12u) {
-            // CLEAR_STATE resets the context registers to their defaults.
-            std::erase_if(state.shadow[submission.queue], [](const auto& entry) { return (entry.first >> 16u) == 0x69u; });
-        }
-        if (type3 && kind != KindTag && count >= 3 && (opcode == 0x69u || opcode == 0x76u || opcode == 0x79u || opcode == 0x7au)) {
-            const auto offset = packet[1] & ~0x70000000u;
-            const std::size_t group = opcode == 0x69u ? 0 : opcode == 0x76u ? 1 : 2;
-            const auto space = opcode == 0x7au ? 0x79u : opcode;
-            if (offset <= 0xffffu) {
-                for (std::size_t i = 2; i < count; ++i) NoteRegister(state, submission.queue, group, space, offset + static_cast<std::uint32_t>(i - 2), packet[i]);
-            }
-        }
-        if (type3 && Pm4::IndirectRegisterOpcode(opcode)) {
-            if (const auto list = submission.registerLists.find(cursor); list != submission.registerLists.end()) {
-                const auto space = opcode == 0x63u ? 0x76u : opcode == 0x64u ? 0x79u : 0x69u;
-                for (std::size_t i = 0; i + 1 < list->second.size(); i += 2) NoteRegister(state, submission.queue, 3, space, list->second[i] & ~0x70000000u, list->second[i + 1]);
-            }
-        }
+        if (type3 && count >= 2 && (opcode == 0x69u || opcode == 0x76u || opcode == 0x79u || opcode == 0x7au)) shape = (shape ^ packet[1]) * 0x100000001b3ull;
         cursor += count;
         const bool draw = type3 && Pm4::DrawOpcode(opcode);
         const bool dispatch = type3 && (opcode == 0x15u || opcode == 0x16u);
@@ -339,10 +339,13 @@ class PacketTimer {
 public:
     explicit PacketTimer(std::span<const std::uint32_t> packet)
         : kind(Enabled() ? KindOf(packet) : KindCount), start(kind != KindCount ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}) {}
-    ~PacketTimer() {
+    ~PacketTimer() { Finish(); }
+    // Records now (once); the flip packet finishes its timer before Flip() closes the window.
+    void Finish() {
         if (kind == KindCount) return;
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
         KindNanoseconds()[kind].fetch_add(static_cast<std::uint64_t>(ns), std::memory_order_relaxed);
+        kind = KindCount;
     }
     PacketTimer(const PacketTimer&) = delete;
     PacketTimer& operator=(const PacketTimer&) = delete;
