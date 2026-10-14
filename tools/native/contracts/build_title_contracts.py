@@ -26,6 +26,12 @@ R_X86_64_64, R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT = 1, 6, 7
 
 STRONG_EVIDENCE = {'call-target', 'prologue'}
 
+# The title's FP instructions are lowered for a fixed host profile (round-to-nearest-even,
+# subnormals preserved, exceptions masked, status flags and NaN payloads unobserved). The
+# compiler validates the host FPCR at the entry of every function that uses one.
+FLOATING_POINT = {'rounding': 'nearest-even', 'subnormals': 'preserve', 'exceptions': 'masked',
+                  'status_flags': 'unobserved', 'nan_payloads': 'unobserved'}
+
 
 def sanitize(name, used):
     base = re.sub(r'[^0-9A-Za-z_]', '_', name or 'import')
@@ -130,7 +136,11 @@ def main():
 
     contracts = {'schema': 1, 'sha256': hashlib.sha256(raw).hexdigest(),
                  'max_segment_bytes': 256 * 1024 * 1024,
+                 'floating_point': FLOATING_POINT,
                  'allow_unlowered_tls': True,
+                 # The title is compiled as a module image with a general-dynamic TLS model, the
+                 # profile the native TLS lowering requires for its PT_TLS template.
+                 'module_image': True, 'tls_model': 'general-dynamic',
                  'dispatch': True,
                  'functions': functions, 'imports': imports,
                  'data': recovery['data'], 'pointer_relocations': recovery['pointer_relocations'],

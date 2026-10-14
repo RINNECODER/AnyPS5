@@ -724,6 +724,7 @@ class Function:
                         self.fail(ins, 'outgoing stack argument is not allocated')
                     if loc['type'] == 'ptr' and offset not in state['stack_pointers'] and stack_values.read(state, offset, 8) != 0 and not checked_pointers.argument_allowed(self, ins, index) and not self.uniform:
                         self.fail_pointer(ins, 'stack pointer argument has no proven native pointer origin')
+            passed_upper = {reg: state['known'].get(reg, 0) for reg in VECTOR_STORAGE if reg.startswith('ymm_hi')}
             for reg in VOLATILE | set(VECTOR_STORAGE):
                 state['known'].pop(reg, None)
                 state['pointers'].pop(reg, None)
@@ -735,7 +736,13 @@ class Function:
             state['flags'] = set()
             if abi.uniform(callee):
                 for reg in VOLATILE | set(VECTOR_STORAGE):
-                    state['known'][reg] = (1 << 128) - 1 if reg in VECTOR_STORAGE else MASK64
+                    if reg in passed_upper:
+                        # The upper halves are passed to and returned from the callee through the
+                        # register file; the callee can only define them further, so the value the
+                        # caller passed is a sound lower bound rather than assuming them defined.
+                        state['known'][reg] = passed_upper[reg]
+                    else:
+                        state['known'][reg] = (1 << 128) - 1 if reg in VECTOR_STORAGE else MASK64
             elif callee['result'] != 'void':
                 state['known'][abi.return_register(callee['result'])] = (1 << abi.bits(callee['result'])) - 1
             return state
@@ -1379,6 +1386,10 @@ class Function:
             gep = self.uniform_gep(block, 1, index)
             value = self.emit(f'load i128, ptr {gep}, align 16')
             self.lines.append(f'  store i128 {value}, ptr %{reg}, align 16')
+        for index in range(16):
+            gep = self.uniform_gep(block, 2, index)
+            value = self.emit(f'load i128, ptr {gep}, align 16')
+            self.lines.append(f'  store i128 {value}, ptr %ymm_hi{index}, align 16')
 
     def uniform_store_registers(self, block):
         for index, reg in enumerate(REGISTERS):
@@ -1389,6 +1400,10 @@ class Function:
             value = self.emit(f'load i128, ptr %{reg}, align 16')
             gep = self.uniform_gep(block, 1, index)
             self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
+        for index in range(16):
+            value = self.emit(f'load i128, ptr %ymm_hi{index}, align 16')
+            gep = self.uniform_gep(block, 2, index)
+            self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
 
     def uniform_stack_out(self, block, rsp):
         if rsp is None:
@@ -1398,13 +1413,13 @@ class Function:
         for index in range(abi.UNIFORM_STACK_SLOTS):
             offset = abi.UNIFORM_STACK_BASE + 8 * index
             value = self.emit(f'load i64, ptr {self.frame_pointer(rsp + offset - 8)}, align 1')
-            gep = self.uniform_gep(block, 2, index)
+            gep = self.uniform_gep(block, 3, index)
             self.lines.append(f'  store i64 {value}, ptr {gep}, align 8')
 
     def uniform_stack_in(self, block):
         for index in range(abi.UNIFORM_STACK_SLOTS):
             offset = abi.UNIFORM_STACK_BASE + 8 * index
-            gep = self.uniform_gep(block, 2, index)
+            gep = self.uniform_gep(block, 3, index)
             value = self.emit(f'load i64, ptr {gep}, align 8')
             self.lines.append(f'  store i64 {value}, ptr {self.frame_pointer(offset)}, align 1')
 
@@ -1520,7 +1535,9 @@ class Function:
                     self.store_vector(loc['name'], value, loc['bits'], zero_upper=True)
                 else:
                     self.store(loc['name'], value, loc['bits'])
-        if self.contract.get('floating_point'):
+        if getattr(self, 'floating_point_checked', False):
+            # Only functions that actually used a floating-point instruction need the host
+            # FPCR validated (the profile is declared once for the image or per function).
             control = self.emit('call i64 asm sideeffect "mrs $0, FPCR", "=r"()')
             mask = (3 << 22) | (1 << 24) | 0x9f03
             control = self.emit(f'and i64 {control}, {mask}')
@@ -1756,7 +1773,12 @@ def stub_function(spec, reason):
                       '  call void @llvm.trap()', '  unreachable', '}'])
 
 
-def compile_image(image):
+def compile_image(image, sink=None):
+    """Lower the whole image to LLVM IR.
+
+    With `sink`, the preamble, each body and each stub are written out as they are produced and
+    the IR is not returned; a title's module is far too large to assemble in memory.
+    """
     # A whole-title build sets allow_unimplemented so a rejected body becomes a reporting trap
     # stub instead of failing the image; the SDK samples keep the strict default.
     tolerant = bool(image.contracts.get('allow_unimplemented'))
@@ -1787,6 +1809,10 @@ def compile_image(image):
         lines.append(f'declare i{width} @llvm.ctlz.i{width}(i{width}, i1)')
         lines.append(f'declare i{width} @llvm.cttz.i{width}(i{width}, i1)')
         lines.append(f'declare i{width} @llvm.bswap.i{width}(i{width})')
+    # Rotates: rol/ror on the operand width, rcl/rcr on the carry-extended width + 1.
+    for width in (8, 16, 32, 64, 9, 17, 33, 65):
+        lines.append(f'declare i{width} @llvm.fshl.i{width}(i{width}, i{width}, i{width})')
+        lines.append(f'declare i{width} @llvm.fshr.i{width}(i{width}, i{width}, i{width})')
     for lanes in (2, 4, 8):
         lines.append(f'declare <{lanes} x float> @llvm.fma.v{lanes}f32(<{lanes} x float>, <{lanes} x float>, <{lanes} x float>)')
     for lanes in (2, 4):
@@ -1802,7 +1828,7 @@ def compile_image(image):
         lines.append('declare double @fmod(double, double)')
     lines.extend(d for d in avx.INTRINSIC_DECLARATIONS if d not in lines)
     if any(abi.uniform(spec) for spec in image.functions.values()):
-        lines.append('%%regfile = type { [16 x i64], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
+        lines.append('%%regfile = type { [16 x i64], [16 x i128], [16 x i128], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     dispatch_enabled = bool(image.contracts.get('dispatch'))
     # The dispatch table is keyed by host address: a relocated vtable entry already holds guest_base + target.
     dispatch_entries = sorted((image.guest_base + spec['address'], spec['name']) for spec in image.functions.values()) if dispatch_enabled else []
@@ -1934,17 +1960,28 @@ def compile_image(image):
         function.entry_index = function.contract.get('entry_index')
     bodies = []
     late_stubs = []
+    if sink is not None:
+        sink('\n\n'.join(lines))
     for function in functions:
         try:
-            bodies.append(function.lower())
+            body = function.lower()
         except Rejected as error:
             if not tolerant:
                 raise
             # The stub is the body here; do not emit it a second time below.
             late_stubs.append((function.contract, str(error)))
-            bodies.append(stub_function(function.contract, str(error)))
-    lines.extend(bodies)
-    lines.extend(stub_function(spec, reason) for spec, reason in stubs)
+            body = stub_function(function.contract, str(error))
+        if sink is None:
+            bodies.append(body)
+        else:
+            sink('\n\n' + body)
+    if sink is None:
+        lines.extend(bodies)
+        lines.extend(stub_function(spec, reason) for spec, reason in stubs)
+    else:
+        for spec, reason in stubs:
+            sink('\n\n' + stub_function(spec, reason))
+        sink('\n')
     stubs.extend(late_stubs)
     if image.hle_log:
         lines.append('declare i64 @HleLogCall(ptr, i64, i64, i64, i64, i64, i64)')
@@ -1980,6 +2017,8 @@ def compile_image(image):
               'indirect_calls': [site for sites in image.call_contracts.values() for site in sites.values()],
               'limitations': ['declared function boundaries and ABIs', 'declared scalar, SSE and AVX instruction subsets', 'no guest exception or TLS recovery', 'computed jumps limited to immutable absolute relocation tables', 'other indirect call target sets remain declared with runtime membership checks',
                               'no game compatibility or performance qualification']}
+    if sink is not None:
+        return None, report
     return '\n\n'.join(lines) + '\n', report
 
 
@@ -1989,10 +2028,19 @@ def main():
     parser.add_argument('--contracts', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--object', type=Path)
+    parser.add_argument('--stream', action='store_true',
+                        help='write the IR to --output as it is produced instead of assembling it in memory')
     parser.add_argument('--target', choices=TARGETS, default='apple-arm64')
     args = parser.parse_args()
     try:
         image = Image(args.input, json.loads(args.contracts.read_text()), args.target)
+        if args.stream:
+            if args.object:
+                parser.error('--stream cannot be combined with --object')
+            with open(args.output, 'w') as output:
+                _, report = compile_image(image, sink=output.write)
+            args.output.with_suffix('.json').write_text(json.dumps(report, indent=2) + '\n')
+            return
         ir, report = compile_image(image)
         if args.object:
             from toolchain import build_native_object
