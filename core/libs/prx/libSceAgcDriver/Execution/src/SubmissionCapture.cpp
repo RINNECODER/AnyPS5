@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/SubmissionCapture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Queues/Submission.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PacketCensus.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include <algorithm>
 #include <limits>
@@ -59,7 +60,10 @@ bool CaptureSegment(DriverDetail::Submission& submission, std::uint64_t guest, s
             require(!Pm4::Predicated(header), "a predicated COND_INDIRECT_BUFFER is not implemented");
             const auto target = static_cast<std::uint64_t>(packet[8] & ~3u) | (static_cast<std::uint64_t>(packet[9] & 0xffffu) << 32u);
             const std::size_t targetWords = packet[10] & 0xfffffu;
-            if (targetWords != 0 && CaptureSegment(submission, target, targetWords, budget)) {
+            const auto inlinedAt = submission.commands.size();
+            const bool rewound = targetWords != 0 && CaptureSegment(submission, target, targetWords, budget);
+            if (PacketCensus::Enabled()) submission.censusIndirect.push_back({target, inlinedAt, submission.commands.size()});
+            if (rewound) {
                 require(guarded.empty(), "a REWIND inside a conditional execution range is not implemented");
                 return true;
             }
@@ -79,6 +83,7 @@ bool CaptureSegment(DriverDetail::Submission& submission, std::uint64_t guest, s
                 const auto start = submission.commands.size();
                 submission.commands.insert(submission.commands.end(), packet.begin(), packet.end());
                 require(!CaptureSegment(submission, target, targetWords, budget), "a REWIND inside a predicated command buffer is not implemented");
+                if (PacketCensus::Enabled()) submission.censusIndirect.push_back({target, start + count, submission.commands.size()});
                 for (auto inner = start + count; inner < submission.commands.size(); inner += Pm4::PacketWords(submission.commands[inner])) {
                     const auto innerHeader = submission.commands[inner];
                     require(innerHeader != FlipPacketHeader && innerHeader != RenderingWaitPacketHeader, "flips and rendering waits in predicated command buffers are not implemented");
@@ -87,7 +92,10 @@ bool CaptureSegment(DriverDetail::Submission& submission, std::uint64_t guest, s
                 cursor += count;
                 continue;
             }
-            if (CaptureSegment(submission, target, targetWords, budget)) {
+            const auto inlinedAt = submission.commands.size();
+            const bool rewound = CaptureSegment(submission, target, targetWords, budget);
+            if (PacketCensus::Enabled()) submission.censusIndirect.push_back({target, inlinedAt, submission.commands.size()});
+            if (rewound) {
                 require(guarded.empty(), "a REWIND inside a conditional execution range is not implemented");
                 return true;
             }
@@ -116,6 +124,7 @@ bool CaptureSegment(DriverDetail::Submission& submission, std::uint64_t guest, s
 void CaptureSubmissionCommands(DriverDetail::Submission& submission, std::uint64_t guestAddress, std::size_t words) {
     submission.commands.clear();
     submission.conditionalEnds.clear();
+    submission.censusIndirect.clear();
     std::size_t budget = std::size_t{1} << 26u;
     CaptureSegment(submission, guestAddress, words, budget);
 }

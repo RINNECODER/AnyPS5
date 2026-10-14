@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ComputeDispatch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DrawDispatch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/IndirectDraw.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PacketCensus.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
@@ -734,6 +735,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         BindTrace::Log("submission queue %u serial %llu words %zu flips %zu", submission.queue,
             static_cast<unsigned long long>(submission.serial), submission.commands.size(), submission.flips.size());
     }
+    if (PacketCensus::Enabled()) PacketCensus::NoteSubmission(submission);
     for (std::size_t cursor = 0; cursor < submission.commands.size();) {
         progress.fetch_add(1, std::memory_order_relaxed);
         CheckFailureAndStopping();
@@ -746,6 +748,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         // A plain NOP carries no state: nothing to validate, order against or execute.
         if (Pm4::PureNopPacket(header)) { cursor = next; continue; }
         const auto opcode = (header >> 8u) & 0xffu;
+        PacketCensus::PacketTimer censusTimer(packet);
         if (header != FlipPacketHeader && header != RenderingWaitPacketHeader) Pm4::Validate(packet, submission.queue);
         std::unique_lock lock(gpuMutex);
         borrowCurrentRanges();
@@ -791,6 +794,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             CompletePriorGpuWorkAndCopyBack(0x106);
             ForgetCachedImages(ForgetReason::Flip);
             if (FrameProfile::Enabled()) FrameProfile::Shared().Flip();
+            if (PacketCensus::Enabled()) { censusTimer.Finish(); PacketCensus::Flip(); }
             if (draw != nullptr && draw->ImageCache() != nullptr && GpuTiming::Enabled()) {
                 static std::uint64_t flips = 0;
                 if (++flips % 16 == 0) {
@@ -910,6 +914,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             // (A label it writes lets the guest go on, but guest writes reach later work of this
             // submission only behind a wait, which forgets everything.)
             if (const auto store = PacketStoreRange(packet)) ForgetCachedImages(*store);
+            if (PacketCensus::Enabled()) PacketCensus::NoteRegisterWrites(packet, indirectRegisters ? &submission.registerLists.at(cursor) : nullptr, queue);
             if (indirectRegisters) Pm4::ExecuteIndirectRegisters(packet, submission.registerLists.at(cursor), queue);
             else Pm4::Execute(packet, queue);
             // Remember label values this driver wrote (RELEASE_MEM data, WRITE_DATA), for the wait above.
