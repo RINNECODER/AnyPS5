@@ -152,6 +152,7 @@ struct ShaderPixelStageInfo {
     bool stencilRefExportEnable;
     RasterPrimitive rasterPrimitive = RasterPrimitive::Triangle;
     bool layerExported = false;
+    std::uint32_t layerBase = 0;
 };
 
 struct ShaderVertexBufferResource {
