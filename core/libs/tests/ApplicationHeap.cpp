@@ -34,6 +34,7 @@ std::size_t lastSize = 0;
 std::size_t lastAlignment = 0;
 unsigned posixCalls = 0;
 unsigned initializes = 0;
+const void* lastInitializeArgument = nullptr;
 unsigned frees = 0;
 bool fail = false;
 bool recurse = false;
@@ -50,8 +51,8 @@ void reject(TAction action) {
     require(rejected);
 }
 
-void APS5_VABI initialize() { ++initializes; }
-void APS5_VABI finalize() { require(initializes == 1); }
+void APS5_VABI initialize(const void* api) { ++initializes; lastInitializeArgument = api; }
+void APS5_VABI finalize(const void* api) { require(initializes == 1); require(api == lastInitializeArgument); }
 void APS5_VABI exitCallbackAllocates() {
     if (ApplicationHeapAllocate_nid_no_patch(16) != storage.data()) throw std::runtime_error("application heap test failed");
 }
@@ -129,6 +130,9 @@ int main(int argc, char** argv) {
         require(atexit_nid_postfix(exitCallbackAllocates) == 0);
         ApplicationHeapInitialize_nid_no_patch(process.data());
         require(initializes == 1);
+        // The heap API's initialize entry receives the registered heap API block.
+        require(lastInitializeArgument != nullptr);
+        require(static_cast<void* const*>(lastInitializeArgument)[0] == reinterpret_cast<void*>(&allocate));
         return 0;
     }
     if (argc > 1 && std::strcmp(argv[1], "default") == 0) {
