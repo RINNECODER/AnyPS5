@@ -3,6 +3,8 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include <algorithm>
+#include <spirv/unified1/spirv.hpp>
 
 namespace AgcDriver::DriverDetail {
 
@@ -38,7 +40,12 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     product->pixel.alphaToCoverage = product->state.alphaToCoverage;
     product->pixel.quadPixelMask = Graphics::QuadPixelMask(product->state);
     product->pixel.quadSampleMask = Graphics::QuadSampleMasks(product->state);
-    if (Graphics::StencilReferenceUnused(product->state)) product->pixel.stencilRefExportEnable = false;
+    // Only a device without VK_EXT_shader_stencil_export drops the export, so one with it keeps one pixel variant per shader.
+    if (product->pixel.stencilRefExportEnable && Graphics::StencilReferenceUnused(product->state)) {
+        const auto localDevice = device.Load();
+        const auto capabilities = localDevice == nullptr ? std::vector<std::uint32_t>{} : localDevice->Target().supportedCapabilities;
+        if (std::ranges::find(capabilities, static_cast<std::uint32_t>(spv::CapabilityStencilExportEXT)) == capabilities.end()) product->pixel.stencilRefExportEnable = false;
+    }
     if (product->pixel.ancillary) product->pixel.rasterPrimitive = Graphics::RasterPrimitiveOf(product->state);
     if (product->pixel.ancillary) product->pixel.layerBase = Graphics::PixelLayerBase(product->state);
     return product;
