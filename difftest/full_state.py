@@ -192,24 +192,79 @@ def arm_state(dylib, name, registers, memory, timeout=30):
     if status is None:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
-        return None
+        return "timeout"
+    if os.WIFSIGNALED(status):
+        return "fault"  # the guest dereferenced something bad; the handler never ran
     if not out_path.exists():
-        return None
+        return "timeout"
     data = out_path.read_bytes()
     if data[:5] == b"ERROR":
         raise RuntimeError(data[5:].decode("utf-8", "replace")[-400:])
-    if status != 0:
-        return None
+    if os.WEXITSTATUS(status) != 0:
+        return "fault"
     return data
 
 
-def run_case(address, seed, directory):
+def _regfile_geps(ir):
+    """Names of the pointers the uniform epilogue stores through (they come from a %regfile gep)."""
+    geps, pending = set(), None
+    for line in ir.splitlines():
+        text = line.strip()
+        if text.startswith('%') and 'getelementptr inbounds %regfile' in text:
+            pending = text.split(' ', 1)[0]
+            geps.add(pending)
+        elif text.startswith('store ') and pending and pending in text:
+            continue
+    return geps
+
+
+def plant_ir(ir, plant, address):
+    """Plant a defect in the emitted IR, so the harness has to catch a known miscompile. Each plant
+    targets a feature the harness compares; the proof is that the mismatch names that feature."""
+    if plant is None:
+        return ir
+    lines = ir.splitlines()
+    bank = {'gpr1': (0, 0, 'add i64', '1'), 'xmm1': (1, 0, 'xor i128', '1'),
+            'float-ulp': (1, 0, 'xor i128', '1'), 'flags-of': (3, 0, 'xor i64', '2048'),
+            'flags-of-shr1': (3, 0, 'xor i64', '2048')}[plant] if plant != 'store-drop' else None
+    if bank is not None:
+        group, index, operation, value = bank
+        marker = f'getelementptr inbounds %regfile, ptr %rf, i64 0, i32 {group}, i64 {index}'
+        for position, line in enumerate(lines):
+            if marker in line:
+                pointer = line.strip().split(' ', 1)[0]
+                for following in range(position + 1, len(lines)):
+                    if lines[following].strip().startswith('store ') and (pointer + ',') in lines[following]:
+                        original = lines[following].strip().split(' ', 2)[2].split(',')[0]
+                        lines.insert(following, f'  %plant = {operation} {original}, {value}')
+                        lines[following + 1] = lines[following + 1].replace(original, '%plant', 1)
+                        return '\n'.join(lines) + '\n'
+        raise ValueError(f'plant {plant}: no regfile store for the function at 0x{address:x}')
+    if plant == 'store-drop':
+        geps = _regfile_geps(ir)
+        for position in range(len(lines) - 1, -1, -1):
+            text = lines[position].strip()
+            if text.startswith('store ') and not any(gep in text for gep in geps):
+                lines[position] = '  ; dropped store'
+                return '\n'.join(lines) + '\n'
+        raise ValueError(f'plant store-drop: no guest store for the function at 0x{address:x}')
+    raise ValueError(f'unknown plant {plant}')
+
+
+def run_case(address, seed, directory, plant=None):
     sizes = harness.fde_sizes(STARTS)
     title = harness.Title(ELF)
+    # Contracts with the real image's segment map and guest_data (the way tools/native/title_image.py
+    # builds them) were tried here: they do compile the low-address references, but in the synthetic
+    # image the compiler treats the function's own code page as data, and the runtime does not map
+    # every such page, so previously-passing functions hang or fault. Off until the harness builds
+    # contracts from the real image (see REPORT20).
     result = harness.compile_one(title, sizes, address, 200, directory, uniform=True)
     if result["status"] != "compiled":
         return {"status": "rejected", "reason": result.get("reason", "")[:120]}
     ir, image = result["ir"], (directory / f"{address:x}.elf").read_bytes()
+    ir = plant_ir(ir, plant, address)
+    os.environ["ANYPS5_AOT_EBOOT"] = str(directory / f"{address:x}.elf")
     dylib = build_arm64(ir, directory)
     library = ctypes.CDLL(str(dylib))
     data_ranges = [(vaddr, memsz) for vaddr, _filesz, memsz, _data in replay.elf_segments(image) if memsz]
@@ -220,15 +275,22 @@ def run_case(address, seed, directory):
                  for item in replay.UNIFORM_GPRS if item != "rsp"}
     registers["rsp"] = STACK
     arm = arm_state(dylib, f"sub_{address:x}", registers, memory)
-    if arm is None:
-        return {"status": "timeout"}
     (directory / "segments.bin").write_bytes(_segments(image))
     (directory / "case.bin").write_bytes(
         b"".join(int(registers.get(name, 0)).to_bytes(8, "little") for name in replay.REGISTERS))
     (directory / "pages.bin").write_bytes(memory)
-    completed = subprocess.run([str(runner), str(directory / "segments.bin"), hex(address),
-                                str(directory / "case.bin"), str(directory / "out.bin"), str(directory / "pages.bin")],
-                               capture_output=True)
+    try:
+        completed = subprocess.run([str(runner), str(directory / "segments.bin"), hex(address),
+                                    str(directory / "case.bin"), str(directory / "out.bin"), str(directory / "pages.bin")],
+                                   capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return {"status": "x86-timeout"}
+    if arm == "fault" and completed.returncode != 0:
+        # Both runners died on the same wild access: the randomized entry state drove the guest into
+        # undefined behavior, and they agree that it is undefined.
+        return {"status": "both-fault"}
+    if arm in ("timeout", "fault"):
+        return {"status": arm}
     if completed.returncode != 0:
         return {"status": "x86-fault", "code": completed.returncode}
     raw = (directory / "out.bin").read_bytes()
@@ -323,6 +385,9 @@ def compare(arm, x86, library, data_ranges):
         normalized = replay.normalize_pointer(library, arm_value, data_ranges)
         if normalized is not None and normalized == (x86_value - BASE) & 0xffffffffffffffff:
             continue
+        # guest_data: the AOT pointer is the guest vaddr already (or the guest vaddr slid by BASE).
+        if arm_value in ((x86_value - BASE) & 0xffffffffffffffff, x86_value):
+            continue
         differences.append(f"{name}: arm={arm_value:#x} x86={x86_value:#x}")
     if normalize_nan(arm_xmm) != normalize_nan(xmm):
         differences.append("xmm")
@@ -342,12 +407,13 @@ def compare(arm, x86, library, data_ranges):
 
 
 def worker(arguments):
-    address, seed_count = arguments
+    address, seed_count = arguments[:2]
+    plant = arguments[2] if len(arguments) > 2 else None
     directory = Path(tempfile.mkdtemp(prefix=f"full-{address:x}-"))
     outcomes = []
     for seed in range(seed_count):
         try:
-            outcome = run_case(address, seed, directory)
+            outcome = run_case(address, seed, directory, plant)
         except Exception as error:
             outcomes.append({"address": address, "seed": seed, "status": "error", "reason": str(error)[-100:]})
             continue
@@ -375,15 +441,22 @@ def main():
                 if (index + 1) % 100 == 0:
                     print(f"progress {index + 1}/{len(jobs)} mismatches={sum(1 for r in results if r['status'] == 'mismatch')}", flush=True)
         mismatches = [r for r in results if r["status"] == "mismatch"]
-        print(json.dumps({"sample": len(sample), "seeds": seed_count, "mismatches": len(mismatches),
-                          "other": [r for r in results if r["status"] != "mismatch"][:20],
+        counts = {}
+        for entry in results:
+            counts[entry["status"]] = counts.get(entry["status"], 0) + 1
+        compared = len(sample) * seed_count - counts.get("rejected", 0) * seed_count
+        print(json.dumps({"sample": len(sample), "seeds": seed_count, "cases": len(sample) * seed_count,
+                          "mismatches": len(mismatches), "status": counts,
+                          "other": [r for r in results if r["status"] not in ("mismatch",)][:20],
                           "details": mismatches[:40]}, indent=1))
         return
     address = int(sys.argv[1], 16)
     directory = Path(tempfile.mkdtemp(prefix=f"full-{address:x}-"))
-    for seed in [int(value) for value in sys.argv[2:]]:
-        outcome = run_case(address, seed, directory)
-        print(json.dumps({"address": address, "seed": seed, "status": outcome["status"],
+    plant = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].isdigit() else None
+    seeds = [int(value) for value in sys.argv[2 + (1 if plant else 0):]]
+    for seed in seeds:
+        outcome = run_case(address, seed, directory, plant)
+        print(json.dumps({"address": address, "seed": seed, "plant": plant, "status": outcome["status"],
                           "differences": compare(outcome["arm"], outcome["x86"], outcome["library"], outcome["data_ranges"])[1][:6] if outcome["status"] == "ok" else None}))
 
 

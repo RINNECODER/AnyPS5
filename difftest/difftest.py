@@ -112,8 +112,13 @@ def page_region(address, size, page=0x1000):
     return start, end - start
 
 
-def build_synthetic(functions, referenced, uniform=False, dispatch=False, guest_base=0):
-    """functions: [(address, code)]; referenced: {address: size}."""
+def build_synthetic(functions, referenced, uniform=False, dispatch=False, guest_base=0, guest_data=False):
+    """functions: [(address, code)]; referenced: {address: size}.
+
+    With guest_data the compiler does not emit the data segments; it references them at their guest
+    vaddrs and the runtime maps the image's segments. A referenced region that overlaps a mapped
+    function is still skipped: the compiler treats a reference into the function's own code page as
+    data, and mapping a zero-filled page over it drives the code into a wild jump."""
     regions = {}
     function_ranges = [(a, a + len(c)) for a, c in functions]
     for target, size in referenced.items():
@@ -190,10 +195,19 @@ def build_synthetic(functions, referenced, uniform=False, dispatch=False, guest_
         contracts["dispatch"] = True
     if guest_base:
         contracts["guest_base"] = guest_base
+    if guest_data:
+        contracts["guest_data"] = True
     return bytes(image), contracts
 
 
-def compile_one(title, sizes, address, limit, work_dir=None, uniform=False, dispatch=False):
+def build_guest_contracts(raw, codes, uniform=False, guest_base=0):
+    """Placeholder kept for callers that build contracts from the real image; the difftest uses
+    build_synthetic(..., guest_data=True) so the synthetic image stays the single input."""
+    raise NotImplementedError
+
+
+def compile_one(title, sizes, address, limit, work_dir=None, uniform=False, dispatch=False,
+                guest_data=False, guest_base=0):
     functions = [address] if dispatch else closure(title, sizes, address, limit)
     codes = [(a, title.code(a, sizes[a])) for a in functions]
     codes = [(a, c) for a, c in codes if c]
@@ -201,7 +215,7 @@ def compile_one(title, sizes, address, limit, work_dir=None, uniform=False, disp
     for a, c in codes:
         for target, size in references(c, a).items():
             referenced[target] = max(referenced.get(target, 1), size)
-    image, contracts = build_synthetic(codes, referenced, uniform, dispatch)
+    image, contracts = build_synthetic(codes, referenced, uniform, dispatch, guest_base, guest_data)
     with tempfile.TemporaryDirectory(prefix="anyps5-difftest-") as directory:
         path = Path(directory) / "input.elf"
         path.write_bytes(image)
