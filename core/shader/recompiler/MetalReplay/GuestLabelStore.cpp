@@ -1,6 +1,10 @@
-#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+
+namespace AgcDriver::GuestMemory {
+void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable);
+}
 
 // The replay executables run guest memory as plain host memory with no write watch, so VideoOut's
 // buffer-label store is a checked release store.
