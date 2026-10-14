@@ -1036,10 +1036,10 @@ int64_t APS5_VABI sceNetRecvmsg(int s, NetMsghdr* msg, int flags) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+    const bool datagram = socket.type != NET_SOCK_STREAM;
 #ifdef _WIN32
     if (const int error = wait_for_local_address(s, socket)) return fail(error);
 #endif
-    const bool datagram = socket.type != NET_SOCK_STREAM;
     std::vector<char> buffer;
     try {
         buffer.resize(static_cast<std::size_t>(total) + (datagram ? 1u : 0u));
