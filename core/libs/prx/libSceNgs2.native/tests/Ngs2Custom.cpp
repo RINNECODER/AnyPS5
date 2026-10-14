@@ -347,6 +347,7 @@ static void TestCustomFilter() {
 }
 
 
+
 struct LegacyUserFxState {
     std::uint32_t calls = 0;
     std::uint32_t flags = 0;
@@ -458,11 +459,47 @@ static void TestCustomLegacyUserFx() {
     Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
 }
 
+static void TestCustomSamplerReportsEmpty() {
+    const auto system = CreateSystem();
+    const auto master = Mastering(system, 1);
+    Ngs2CustomSamplerRackOption option{};
+    option.custom_rack_option.rack_option.size = sizeof(option);
+    option.custom_rack_option.rack_option.max_grain_samples = 512;
+    option.custom_rack_option.rack_option.max_voices = 1;
+    option.custom_rack_option.rack_option.max_matrices = 1;
+    option.custom_rack_option.rack_option.max_ports = 1;
+    option.custom_rack_option.num_buffers = 1;
+    option.max_channel_works = 1;
+    Ngs2ContextBufferInfo query{};
+    Require(sceNgs2RackQueryBufferSize(SCE_NGS2_RACK_ID_CUSTOM_SAMPLER, &option.custom_rack_option.rack_option, &query) == SCE_NGS2_OK);
+    const auto info = Buffer(query);
+    uintptr_t rack = 0;
+    Require(sceNgs2RackCreate(system, SCE_NGS2_RACK_ID_CUSTOM_SAMPLER, &option.custom_rack_option.rack_option, &info, &rack) == SCE_NGS2_OK);
+    const auto voice = Voice(rack);
+    Control(voice, SCE_NGS2_CUSTOM_SAMPLER_VOICE_PARAM_SETUP,
+            Ngs2SamplerVoiceSetupParam{{}, {SCE_NGS2_WAVEFORM_TYPE_PCM_I16L, 1, 48000, 0, 0, 0}});
+    const std::vector<std::int16_t> pcm(4, 16384);
+    const Ngs2WaveformBlock block{0, pcm.size() * sizeof(std::int16_t), 0, 0, static_cast<std::uint32_t>(pcm.size()), 0, 0};
+    Control(voice, SCE_NGS2_CUSTOM_SAMPLER_VOICE_PARAM_ADD_WAVEFORM_BLOCKS,
+            Ngs2SamplerVoiceWaveformBlocksParam{{}, pcm.data(), SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE, 1, &block});
+    Patch(voice, master);
+    Event(voice, SCE_NGS2_VOICE_EVENT_PLAY);
+    std::vector<float> out(Grain, -1.0f);
+    const Ngs2RenderBufferInfo renderInfo{out.data(), out.size() * sizeof(float), SCE_NGS2_WAVEFORM_TYPE_PCM_F32L, 1};
+    Require(sceNgs2SystemRender(system, &renderInfo, 1) == SCE_NGS2_OK);
+    std::uint32_t flags = 0;
+    Require(sceNgs2VoiceGetStateFlags(voice, &flags) == SCE_NGS2_OK);
+    Require((flags & SCE_NGS2_VOICE_STATE_FLAG_EMPTY) != 0);
+    Require(sceNgs2RackDestroy(rack, nullptr) == SCE_NGS2_OK);
+    Require(sceNgs2SystemDestroy(system, nullptr) == SCE_NGS2_OK);
+}
+
 int main() {
     TestUserFxChain();
     TestRackOptions();
     TestCustomSampler();
     TestCustomFilter();
     TestCustomLegacyUserFx();
+    TestCustomSamplerReportsEmpty();
     return 0;
 }
