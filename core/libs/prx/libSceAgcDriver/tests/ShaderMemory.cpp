@@ -14,6 +14,7 @@
 #include "SpirvBackend/SpirvOptimizer.hpp"
 #endif
 #include "CacheKey.hpp"
+#include "CompiledVariant.hpp"
 #include "BdaAbi.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
@@ -332,6 +333,140 @@ void verifyFrontendPair() {
         verifyResult(pixelReference, *MaterializeShader(pixel, *pixelCapture, *pixelHandle));
         verifyResult(zeroReference, *MaterializeShader(zero, *zeroCapture, *zeroHandle));
     }
+}
+
+ShaderRecompiler::RecompileRequest LayoutPairRequest(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, bool registration, std::uint32_t wordLimit) {
+    using namespace ShaderRecompiler;
+    auto request = FrontendRequest(code, userData);
+    request.shader.stage = ShaderStage::Fragment;
+    request.context.compute.reset();
+    request.context.pixel = ShaderPixelStageInfo{};
+    request.context.pixel->wave32 = true;
+    request.context.pixel->targetOutputMode[0] = 9u;
+    request.context.waveSize = 32u;
+    request.target.registrationModules = registration;
+    request.target.registrationWordLimit = wordLimit;
+    request.useCache = true;
+    return request;
+}
+
+void verifyLayoutPairVariant(const ShaderRecompiler::SourceHandle& paired, const ShaderRecompiler::SourceHandle& isolated) {
+    const auto& left = *paired.artifact;
+    const auto& right = *isolated.artifact;
+    require(left.artifact.spirv == right.artifact.spirv, "layout pair: the SPIR-V differs from an isolated compile");
+    require(left.bindings.layout == right.bindings.layout && left.bindings.layout.UsesPushData() == right.bindings.layout.UsesPushData() && left.bindings.pushConstantOffsetBytes == right.bindings.pushConstantOffsetBytes && left.bindings.pushConstantSizeBytes == right.bindings.pushConstantSizeBytes, "layout pair: the binding layout or push range differs from an isolated compile");
+    const auto& a = left.artifact;
+    const auto& b = right.artifact;
+    const auto sameParameter = [](const ShaderRecompiler::FragmentParameter& p, const ShaderRecompiler::FragmentParameter& q) {
+        return p.location == q.location && p.sourceLocation == q.sourceLocation && p.flat == q.flat && p.perVertex == q.perVertex && p.custom == q.custom && p.flatP10 == q.flatP10;
+    };
+    require(a.vertexInputPatches == b.vertexInputPatches && a.memoryOffsetDword == b.memoryOffsetDword && a.shaderDataDwords == b.shaderDataDwords && a.imageMetadataDword == b.imageMetadataDword && a.runtimeImageCount == b.runtimeImageCount && a.runtimeImageResources == b.runtimeImageResources && a.registrationModule == b.registrationModule && a.bdaAbiVersion == b.bdaAbiVersion && a.runtimeAbiVersion == b.runtimeAbiVersion, "layout pair: the artifact's bindings or ABI differ from an isolated compile");
+    require(a.vertexInputs == b.vertexInputs && a.vertexOffsetSgpr == b.vertexOffsetSgpr && a.instanceOffsetSgpr == b.instanceOffsetSgpr && a.vertexOffsetShared == b.vertexOffsetShared && a.instanceOffsetShared == b.instanceOffsetShared && a.vertexOffsetConflict == b.vertexOffsetConflict && a.instanceOffsetConflict == b.instanceOffsetConflict && a.hostSubgroupSize == b.hostSubgroupSize, "layout pair: the artifact's vertex interface differs from an isolated compile");
+    require(a.parameterExports == b.parameterExports && std::ranges::equal(a.fragmentParameters, b.fragmentParameters, sameParameter) && a.barycentricEmulation.active == b.barycentricEmulation.active && a.barycentricEmulation.smooth == b.barycentricEmulation.smooth && a.barycentricEmulation.linear == b.barycentricEmulation.linear, "layout pair: the artifact's fragment interface differs from an isolated compile");
+    const auto& x = left.info;
+    const auto& y = right.info;
+    require(x.stage == y.stage && x.shaderHash == y.shaderHash && x.waveSize == y.waveSize && x.userDataBase == y.userDataBase && x.userDataCount == y.userDataCount && x.scratchDwords == y.scratchDwords && x.paramExportMask == y.paramExportMask && x.info == y.info && x.bindings == y.bindings, "layout pair: the compiled shader information differs from an isolated compile");
+}
+
+void verifyLayoutPairIsolation(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::SourceHandle& handle, std::uint32_t separateLimit) {
+    using namespace ShaderRecompiler;
+    const std::vector<std::uint32_t> isolatedCode(request.shader.code.begin(), request.shader.code.end());
+    auto isolated = request;
+    isolated.shader.code = isolatedCode;
+    isolated.target.registrationWordLimit = separateLimit;
+    const auto reference = PrepareShader(isolated);
+    require(reference->source != handle.source, "layout pair: the isolated compile shared a source");
+    verifyLayoutPairVariant(handle, *reference);
+    SrtRuntime runtime{};
+    runtime.userData = request.context.userData;
+    runtime.shaderBase = request.shader.codeAddress;
+    auto uncached = request;
+    uncached.useCache = false;
+    verifyResult(Recompile(uncached), *MaterializeShader(request, *CaptureResources(request, runtime, handle), handle));
+}
+
+void verifyLayoutPair() {
+    using namespace ShaderRecompiler;
+    const bool reuse = std::getenv("APS5_NO_PERF_LAYOUT_PAIR") == nullptr;
+    const std::array<std::uint32_t, 4> buffer{0x10000000u, 0u, 0x40u, 0x00027facu};
+    const auto pixelCode = [](std::uint32_t variant) {
+        return std::vector<std::uint32_t>{0xbf800000u | variant, 0xf4200100u, 0xfa000000u, 0xbf8cc07fu, 0x7e000204u, 0xf800180fu, 0u, 0xbf810000u};
+    };
+    const auto interpolatedCode = [](std::uint32_t variant) {
+        return std::vector<std::uint32_t>{0xbf800000u | variant, 0xc8100000u, 0xc8110001u, 0xc8140500u, 0xc8150501u, 0xf4200100u, 0xfa000000u, 0xbf8cc07fu, 0x7e000204u, 0xf800180fu, 0x05040500u, 0xbf810000u};
+    };
+    const auto defaultLimit = SpirvTarget{}.registrationWordLimit;
+    struct Configuration {
+        bool registration;
+        std::uint32_t wordLimit;
+        std::uint32_t pushOffset;
+        bool interpolated;
+    };
+    std::uint32_t variant = 0u;
+    for (const auto& [registration, wordLimit, pushOffset, interpolated] : {Configuration{false, defaultLimit, 0u, false}, Configuration{true, defaultLimit, 0u, false}, Configuration{true, defaultLimit, 128u, false}, Configuration{true, 1u, 128u, false}, Configuration{true, defaultLimit, 128u, true}}) {
+        for (const bool zeroFirst : {false, true}) {
+            const auto code = interpolated ? interpolatedCode(variant++) : pixelCode(variant++);
+            auto pixel = LayoutPairRequest(code, buffer, registration, wordLimit);
+            pixel.layout.pushConstantOffsetBytes = pushOffset;
+            if (interpolated) {
+                pixel.context.pixel->interpolatorCount = 2u;
+                pixel.context.pixel->interpolatorSettings[1] = 1u;
+                pixel.context.pixel->inputAddr = PixelInputBit(PixelInput::PerspectiveCenter);
+                pixel.context.pixel->hasPerspectiveCenterVgpr = true;
+            }
+            auto zero = pixel;
+            zero.layout.pushConstantSizeBytes = 0u;
+            ShaderPreparationContext preparation;
+            const auto first = PrepareShader(zeroFirst ? zero : pixel, &preparation);
+            const auto second = PrepareShader(zeroFirst ? pixel : zero, &preparation);
+            require(first->source == second->source, "layout pair: the two layouts did not share a source");
+            require(preparation.ResourcePrograms() == (reuse ? 1u : 2u), "layout pair: the second layout ignored the reuse switch");
+            const auto& pixelHandle = zeroFirst ? second : first;
+            const auto& zeroHandle = zeroFirst ? first : second;
+            require(pixelHandle->artifact->bindings.layout.UsesPushData() && !zeroHandle->artifact->bindings.layout.UsesPushData(), "layout pair: the fixture does not distinguish the push-constant capacities");
+            const bool module = registration && wordLimit == defaultLimit;
+            require(GetPreparedArtifact(*pixelHandle).registrationModule == module && GetPreparedArtifact(*zeroHandle).registrationModule == module, "layout pair: the word limit did not choose the module mode");
+            require(GetPreparedArtifact(*pixelHandle).fragmentParameters.size() == (interpolated ? 2u : 0u) && GetPreparedArtifact(*zeroHandle).fragmentParameters.size() == (interpolated ? 2u : 0u), "layout pair: the interpolated fixture did not declare its two parameters");
+            verifyLayoutPairIsolation(pixel, *pixelHandle, wordLimit + 1u);
+            verifyLayoutPairIsolation(zero, *zeroHandle, wordLimit + 2u);
+        }
+    }
+
+    const auto code = pixelCode(variant++);
+    const auto pixel = LayoutPairRequest(code, buffer, true, defaultLimit);
+    auto relocated = pixel;
+    relocated.shader.codeAddress += 0x1000u;
+    relocated.layout.pushConstantSizeBytes = 0u;
+    ShaderPreparationContext preparation;
+    const auto first = PrepareShader(pixel, &preparation);
+    const auto moved = PrepareShader(relocated, &preparation);
+    require(first->source == moved->source, "layout pair: relocated code did not share the source");
+    require(preparation.ResourcePrograms() == 2u && moved->artifact->info.shaderHash == relocated.shader.codeAddress, "layout pair: a program translated at another code address was reused");
+    verifyLayoutPairIsolation(relocated, *moved, defaultLimit + 1u);
+
+    const std::vector<std::uint32_t> colorCode{0xbf800000u | variant++, 0x7e000200u, 0xf800180fu, 0u, 0xbf810000u};
+    auto color = LayoutPairRequest(colorCode, std::span(buffer).first(1u), true, defaultLimit);
+    color.shader.codeAddress = relocated.shader.codeAddress;
+    color.layout.pushConstantSizeBytes = 0u;
+    require(ResolveSource(color) != nullptr, "layout pair: the other source was not resolved");
+    const auto colored = PrepareShader(color, &preparation);
+    require(colored->source != first->source && preparation.ResourcePrograms() == 2u, "layout pair: another source at the same code address reused the retained program");
+    verifyLayoutPairIsolation(color, *colored, defaultLimit + 1u);
+
+    const auto retained = colored->source.use_count();
+    const auto otherCode = pixelCode(variant++);
+    static_cast<void>(PrepareResourceProgram(LayoutPairRequest(otherCode, buffer, true, defaultLimit), &preparation));
+    require(preparation.ResourcePrograms() == 3u && retained - colored->source.use_count() == (reuse ? 1 : 0), "layout pair: the context kept a program while it built another");
+
+    const std::vector<std::uint32_t> computeCode{0xbf800000u, 0xbf810000u};
+    auto compute = FrontendRequest(computeCode, buffer);
+    compute.context.userDataBaseRegister = 2u;
+    compute.context.compute->scratchDwords = 64u;
+    auto program = PrepareResourceProgram(compute);
+    const auto copied = program.CompiledInfo();
+    const auto taken = std::move(program).TakeCompiledInfo();
+    require(taken.userDataBase == 2u && taken.scratchDwords == 64u, "layout pair: the compute fixture did not set a user-data base and scratch");
+    require(copied.stage == taken.stage && copied.shaderHash == taken.shaderHash && copied.waveSize == taken.waveSize && copied.userDataBase == taken.userDataBase && copied.userDataCount == taken.userDataCount && copied.scratchDwords == taken.scratchDwords && copied.paramExportMask == taken.paramExportMask && copied.info == taken.info && copied.bindings == taken.bindings, "layout pair: the copied compiled information differs from the moved one");
 }
 
 void verifyRegisterSources() {
@@ -949,6 +1084,24 @@ void verifyBindlessTable() {
     latch.context.memory = latchRegions;
     require(!Recompile(latch, *latchCapture)->spirv.empty(), "bindless: a sample in a loop latch did not compile");
 
+    std::vector<std::uint32_t> queryCode(wholeCode.begin(), wholeCode.begin() + 8);
+    queryCode.insert(queryCode.end(), {0xbea80380u, 0x7e040280u, 0x7e200500u, 0x80102810u, 0x8f108510u, 0xf42c0502u, 0x20000000u, 0xf0380f08u, 0x00050402u, 0xf09c0f08u, 0x00450800u, 0x80288128u, 0xbf0a8228u, 0xbf85fff4u, 0xe0700000u, 0x80070800u, 0xe0700004u, 0x80070400u, 0xbf810000u});
+    auto query = makeRequest(queryCode);
+    const auto queryPlan = GetResourcePlan(query);
+    require(std::ranges::count_if(queryPlan->descriptorSources, [](const DescriptorSource& source) { return source.indirectImage.has_value(); }) == 1, "bindless: a T# both queried and sampled was not planned as one table");
+    AgcDriver::ShaderMemory queryMemory({});
+    const auto queryCapture = queryMemory.Capture(query);
+    const auto queryDirect = static_cast<std::uint32_t>(queryPlan->info.images.size());
+    require(queryDirect == 1u, "bindless: the queried and sampled T# became more than one image");
+    const auto queryRoot = tableRoot(*queryCapture, queryDirect);
+    require(queryCapture->snapshot.images[queryRoot].dwords == heap[0] && queryCapture->snapshot.images[queryDirect].dwords == heap[1], "bindless: the queried and sampled table slots are wrong");
+    query.context.memory = queryMemory.Regions();
+    const auto queried = Recompile(query, *queryCapture);
+    require(!queried->spirv.empty(), "bindless: a T# both queried and sampled did not compile");
+#if ANYPS5_ENABLE_SPIRV_TOOLS
+    static_cast<void>(ValidateAndOptimizeSpirv(queried->spirv, query.target.vulkanVersion, query.target.spirvVersion));
+#endif
+
     // A table wider than the slots without a material pattern is rejected.
     fillSrt(100u);
     AgcDriver::ShaderMemory wideMemory({});
@@ -971,63 +1124,6 @@ void verifyBindlessTable() {
     AgcDriver::ShaderMemory partialMemory({});
     expectFailure([&] { static_cast<void>(partialMemory.Capture(request)); }, "partial descriptor", "bindless: a partial heap descriptor was accepted");
     fillSrt(4u);
-}
-
-void verifyUniformTableImage() {
-    using namespace ShaderRecompiler;
-    constexpr std::uint32_t Format8888UNorm = 56;
-    constexpr std::uint32_t Type2D = 9;
-    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
-    static Texture textures[2];
-    struct alignas(4096) GuestTables {
-        std::array<std::array<std::uint32_t, 12>, 3> table{};
-        std::array<std::uint32_t, 4> output{};
-        std::array<std::uint32_t, 16> srt{};
-    };
-    static GuestTables guest;
-    const auto texture = [](const Texture& image) {
-        const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(image.bytes.data()));
-        return std::array<std::uint32_t, 8>{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
-    };
-    const auto first = texture(textures[0]);
-    const auto second = texture(textures[1]);
-    std::copy(first.begin(), first.end(), guest.table[1].begin() + 4);
-    std::copy(second.begin(), second.end(), guest.table[2].begin() + 4);
-    const auto bufferDescriptor = [](const void* base, std::uint32_t records) {
-        const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(base));
-        return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), records, 0xfacu};
-    };
-    const auto tableV = bufferDescriptor(guest.table.data(), static_cast<std::uint32_t>(sizeof(guest.table)));
-    const auto outputV = bufferDescriptor(guest.output.data(), 16u);
-    std::copy(tableV.begin(), tableV.end(), guest.srt.begin());
-    std::copy(outputV.begin(), outputV.end(), guest.srt.begin() + 12);
-    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(guest.srt.data()));
-    std::array<std::uint32_t, 3> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u), 2u};
-    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
-    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
-    const std::vector<std::uint32_t> code{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080700u, 0xfa000030u, 0x9310b002u, 0xf42c0502u, 0x20000010u, 0xf09c0f08u, 0x00450000u, 0xe0700000u, 0x80070000u, 0xbf810000u};
-    RecompileRequest request{};
-    request.shader = {ShaderStage::Compute, 0x20000u, code, 0, {}};
-    request.context.waveSize = 64;
-    request.context.userDataBaseRegister = 0;
-    request.context.userData = userData;
-    request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
-    request.target.vulkanVersion = 0x00401000u;
-    request.target.spirvVersion = 0x00010300u;
-    request.target.subgroupSize = 32;
-    request.target.supportedCapabilities = capabilities;
-    request.target.supportedExtensions = extensions;
-    request.target.bdaAbiVersion = BdaAbi::Version;
-    request.target.fragmentShaderBarycentricEnabled = false;
-    request.layout.pushConstantSizeBytes = 128;
-    const auto plan = GetResourcePlan(request);
-    require(plan->info.images.size() == 1u && !plan->descriptorSources.at(plan->info.images[0].source).indirectImage.has_value(), "uniform table image: the T# read from a constant buffer was not planned as one image");
-    for (const auto& [key, expected] : {std::pair{2u, second}, std::pair{1u, first}}) {
-        userData[2] = key;
-        AgcDriver::ShaderMemory memory({});
-        const auto capture = memory.Capture(request);
-        require(capture->snapshot.images.size() == 1u && std::equal(expected.begin(), expected.end(), capture->snapshot.images[0].dwords.begin()), "uniform table image: the T# of the record the user data selects was not read");
-    }
 }
 
 
@@ -1201,6 +1297,63 @@ void verifyDescriptorPhis() {
     };
     require(planImages(splitReloads(8u)) == 4u, "descriptor Phi: separate reloads of T# dword 7 and dwords 0-6 were not split into their 4 T#s");
     expectFailure([&] { static_cast<void>(planImages(splitReloads(260u))); }, "GetImageResource dword 0 is not a valid runtime value", "descriptor Phi: a web over more than 512 descriptor tuples was accepted");
+}
+
+void verifyUniformTableImage() {
+    using namespace ShaderRecompiler;
+    constexpr std::uint32_t Format8888UNorm = 56;
+    constexpr std::uint32_t Type2D = 9;
+    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
+    static Texture textures[2];
+    struct alignas(4096) GuestTables {
+        std::array<std::array<std::uint32_t, 12>, 3> table{};
+        std::array<std::uint32_t, 4> output{};
+        std::array<std::uint32_t, 16> srt{};
+    };
+    static GuestTables guest;
+    const auto texture = [](const Texture& image) {
+        const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(image.bytes.data()));
+        return std::array<std::uint32_t, 8>{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
+    };
+    const auto first = texture(textures[0]);
+    const auto second = texture(textures[1]);
+    std::copy(first.begin(), first.end(), guest.table[1].begin() + 4);
+    std::copy(second.begin(), second.end(), guest.table[2].begin() + 4);
+    const auto bufferDescriptor = [](const void* base, std::uint32_t records) {
+        const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(base));
+        return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), records, 0xfacu};
+    };
+    const auto tableV = bufferDescriptor(guest.table.data(), static_cast<std::uint32_t>(sizeof(guest.table)));
+    const auto outputV = bufferDescriptor(guest.output.data(), 16u);
+    std::copy(tableV.begin(), tableV.end(), guest.srt.begin());
+    std::copy(outputV.begin(), outputV.end(), guest.srt.begin() + 12);
+    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(guest.srt.data()));
+    std::array<std::uint32_t, 3> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u), 2u};
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    const std::vector<std::uint32_t> code{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080700u, 0xfa000030u, 0x9310b002u, 0xf42c0502u, 0x20000010u, 0xf09c0f08u, 0x00450000u, 0xe0700000u, 0x80070000u, 0xbf810000u};
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Compute, 0x20000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData;
+    request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32;
+    request.target.supportedCapabilities = capabilities;
+    request.target.supportedExtensions = extensions;
+    request.target.bdaAbiVersion = BdaAbi::Version;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+    const auto plan = GetResourcePlan(request);
+    require(plan->info.images.size() == 1u && !plan->descriptorSources.at(plan->info.images[0].source).indirectImage.has_value(), "uniform table image: the T# read from a constant buffer was not planned as one image");
+    for (const auto& [key, expected] : {std::pair{2u, second}, std::pair{1u, first}}) {
+        userData[2] = key;
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::equal(expected.begin(), expected.end(), capture->snapshot.images[0].dwords.begin()), "uniform table image: the T# of the record the user data selects was not read");
+    }
 }
 
 void verifyLaneSelectedDescriptors() {
@@ -3447,6 +3600,13 @@ void verifyFunctionLdsBound() {
     });
     require(unbounded == FunctionLdsDwordLimit && unboundedRequirements.functionLdsDwords == FunctionLdsDwordLimit, "function LDS: an address without a bound must keep the full array");
 
+    const auto [counter, counterRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& m0 = emit(IrOpcode::GetUserData, IrType::U32, {&constant(0u)});
+        emit(IrOpcode::DataAppend, IrType::U32, {&m0, &active}, 2u);
+        emit(IrOpcode::DataConsume, IrType::U32, {&m0, &active}, 1u);
+    });
+    require(counter == 192u && counterRequirements.functionLdsDwords == 192u, "function LDS: an LDS append or consume must size the array by its offset, not by M0");
+
     const auto wrapping = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
         emit(IrOpcode::LoadSharedU32, IrType::U32, {&constant(0x20u), &active}, 3u);
     }).first;
@@ -3506,7 +3666,7 @@ void verifyFunctionLdsUpdates() {
         request.useCache = false;
         return Recompile(request);
     };
-    const auto violations = [](const std::vector<std::uint32_t>& words) {
+    const auto violations = [](std::span<const std::uint32_t> words) {
         std::map<std::uint32_t, std::uint32_t> storage;
         std::map<std::uint32_t, std::uint32_t> constants;
         std::map<std::uint32_t, std::uint32_t> types;
@@ -3810,12 +3970,39 @@ void verifyCubeDepthCompareMode() {
     require(modes[selected].cube && (modes[selected].emulatedCompare & EmulatedCompare::Enabled) != 0u, "cube color comparison did not select its emulated runtime mode");
 }
 
+void verifyVolumeArrayLoadMode() {
+    using namespace ShaderRecompiler;
+    const DescriptorValue descriptor{{0x02466600u, 0x01400000u, 0u, 0xa0500204u, 1u, 0x00700000u, 0u, 0u}, 8u};
+    ImageResource image{};
+    image.resourceClass = ImageResourceClass::Sampled;
+    image.dimension = RdnaImageDimension::Dim2DArray;
+    const auto modes = ResourceMaterializer::RuntimeImageModes(image);
+    const auto selected = ResourceMaterializer::RuntimeImageMode(image, descriptor, modes);
+    require(modes[selected].dimension == RdnaImageDimension::Dim3D && !modes[selected].cube, "2D-array image load on a 3D T# did not select a volume runtime mode");
+    image.fmaskCompatible = false;
+    expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, descriptor, ResourceMaterializer::RuntimeImageModes(image))); }, "incompatible with the static runtime image interface", "2D-array image sample on a 3D T# was accepted");
+    ImageResource store{};
+    store.resourceClass = ImageResourceClass::Storage;
+    store.dimension = RdnaImageDimension::Dim2DArray;
+    store.written = true;
+    store.fmaskCompatible = false;
+    const auto storeModes = ResourceMaterializer::RuntimeImageModes(store);
+    require(storeModes[ResourceMaterializer::RuntimeImageMode(store, descriptor, storeModes)].dimension == RdnaImageDimension::Dim3D, "2D-array image store on a 3D T# did not select a volume runtime mode");
+    store.atomic = true;
+    expectFailure([&] { static_cast<void>(ResourceMaterializer::RuntimeImageMode(store, descriptor, ResourceMaterializer::RuntimeImageModes(store))); }, "incompatible with the static runtime image interface", "2D-array image atomic on a 3D T# was accepted");
+}
+
 int main(int argc, char** argv) {
     try {
         using namespace ShaderRecompiler;
         if (argc == 2 && std::string_view(argv[1]) == "--frontend-pair") {
             verifyFrontendPair();
             std::cout << "Prepared frontend reuse preserves full and partial-thread programs\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--layout-pair") {
+            verifyLayoutPair();
+            std::cout << "Both push-constant layouts of a pixel shader compile from one program unchanged\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--bindless") {
@@ -3832,6 +4019,7 @@ int main(int argc, char** argv) {
         verifyRegisterSources();
         verifyEvaluatedValues();
         verifyFrontendPair();
+        verifyLayoutPair();
         verifySignedSrtComparison();
         verifyTypeZeroImageMaterialization();
         verifyOutOfRangeConstantReads();
@@ -3839,8 +4027,8 @@ int main(int argc, char** argv) {
         verifyPureFlatSlots();
         verifyGuardedDescriptorSources();
         verifyBindlessTable();
-        verifyUniformTableImage();
         verifyDescriptorPhis();
+        verifyUniformTableImage();
         verifyLaneSelectedDescriptors();
         verifyProgramCounterRelativeData();
         verifyLanesOutsideHostSubgroup();
@@ -3868,6 +4056,7 @@ int main(int argc, char** argv) {
         verifyFunctionLdsUpdates();
         verifyGuardedNullPointers();
         verifyCubeDepthCompareMode();
+        verifyVolumeArrayLoadMode();
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         const std::vector<std::uint32_t> minimalSpirv{
             0x07230203u, 0x00010000u, 0u, 5u, 0u,

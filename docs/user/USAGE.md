@@ -2,7 +2,7 @@
 
 ## Input and conversion
 
-Use a clean ELF executable. Place its bundled ELF modules in `sce_module/`, `sce_modules/`, or `prx/` beside the input executable, or under the parent directory selected with `--sce-module-path <path>`. The option accepts absolute paths and paths relative to the current working directory; do not include the `sce_module` directory itself. Only files directly inside the module directories are processed. SELF/fSELF containers are skipped with a warning; unwrap them before relinking if they need to be included. `prx/` can coexist with either `sce_module/` or `sce_modules/`. Both `sce_module/` and `sce_modules/` present, or all three absent, is an error.
+Use a clean ELF executable. Place its bundled ELF modules in `sce_module/`, `sce_modules/`, or `prx/` beside the input executable, or under the parent directory selected with `--sce-module-path <path>`. The option accepts absolute paths and paths relative to the current working directory; do not include the `sce_module` directory itself. Only files directly inside the module directories are processed. SELF/fSELF containers are skipped with a warning; unwrap them before relinking if they need to be included. `tools/unwrap_self.py <input.self> <output.elf>` does that for a decrypted container: it places the segments at the offsets of the SELF segment records and restores `p_offset % p_align == p_vaddr % p_align`, and it refuses a container whose load segments all look encrypted. `prx/` can coexist with either `sce_module/` or `sce_modules/`. Both `sce_module/` and `sce_modules/` present, or all three absent, is an error.
 
 ```text
 source/
@@ -34,6 +34,8 @@ relinker --macos source/input.elf eboot
 ```
 
 Add `--to-intel` for Intel hosts, or `--to-rosetta` for Rosetta; a title that runs under Rosetta on Apple silicon is relinked with `--macos --to-rosetta`. The output format defaults to Linux ELF regardless of the filename; `.exe` alone does not select Windows.
+
+Titles run natively, so the host CPU needs the extensions of the PS5's Zen 2 CPU that compiled code uses without checking, among them AVX2, FMA, F16C, BMI1, BMI2, LZCNT and MOVBE. On Linux and Windows a converted title logs the host CPU's extensions at start-up and stops before running any title code, naming the CPU and the missing extensions, if one is absent ([list](../dev/TechnicalDebt.md)).
 
 The executable, registry, Windows import diagnostics, icon and desktop entry output files must not refer to the input executable or a bundled module being converted, including through a hard link or symbolic link. These collisions fail before any output is written. An existing output file can be replaced if it is separate from those inputs.
 
@@ -137,6 +139,8 @@ The game runs on the first Vulkan 1.1 device with graphics and compute queues an
 ### Storing GPU results at each flip
 
 GPU results in storage images and render targets stay on the GPU until something reads their memory. A title that frees such an image after waiting for its GPU work and reuses the memory can have its new data overwritten when the results are stored later ([TechnicalDebt](../dev/TechnicalDebt.md)). `APS5_STORE_AT_FLIP=1` stores every pending result when a display buffer is flipped, at the cost of one write-back per pending image and frame. Any other value stops the title at its first flip.
+
+A title's own CPU reads of that memory are not seen, so a title that waits for a GPU label and then reads the results reads stale memory. `APS5_STORE_AT_LABEL=1` stores every pending result before each label the GPU writes (`RELEASE_MEM`, `WRITE_DATA`, `DMA_DATA`), at the cost of a write-back of every pending image per label. Any other value stops the title at its first label.
 
 ## Exit codes
 

@@ -89,7 +89,7 @@ function(anyps5_metal_driver_semantics semanticsTest semanticsSource)
             ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1;ANYPS5_METAL_UTILITY_LIBRARY=${semanticsUtilityLibrary}")
     endif()
 endfunction()
-foreach(semanticsTest IN ITEMS ImagePlaneAddressOnLine ImageVolumeAddressOnPlane ImageVolumeAddressOnLine ImagePlaneBiasOnSingleLevelVolume ImageSampleForceDegamma ImagePlaneAddressOnCube ImagePlaneCompareOnLine BufferStoreFormatDstSel)
+foreach(semanticsTest IN ITEMS ImagePlaneAddressOnLine ImageVolumeAddressOnPlane ImageVolumeAddressOnLine ImagePlaneBiasOnSingleLevelVolume ImageSampleForceDegamma ImagePlaneAddressOnCube ImagePlaneCompareOnLine BufferStoreFormatDstSel ImageAddressDimension)
     set(semanticsWrapper "${CMAKE_CURRENT_BINARY_DIR}/driver_semantics_${semanticsTest}.cpp")
     file(GENERATE OUTPUT "${semanticsWrapper}" CONTENT
 "#define CORE_LIBS_PRX_LIBSCEAGCDRIVER_TESTS_VULKANTESTDEVICE_HPP\n#include \"MetalDriverTestDevice.hpp\"\n#include \"${semanticsUpstreamDir}/${semanticsTest}.cpp\"\n")

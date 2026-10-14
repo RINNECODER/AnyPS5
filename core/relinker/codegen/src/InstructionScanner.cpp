@@ -15,18 +15,24 @@ public:
         Domain::FileByteOffset codeSectionOffset,
         Domain::FileByteOffset codeSectionSize
     ) const override;
+    void VisitCodeSection(
+        const std::vector<std::uint8_t>& codeSection,
+        Domain::FileByteOffset codeSectionOffset,
+        Domain::FileByteOffset codeSectionSize,
+        const std::function<void(const InstructionMatch&)>& visit
+    ) const override;
 };
 
-std::vector<InstructionMatch> InstructionScanner::ScanCodeSection(
+void InstructionScanner::VisitCodeSection(
     const std::vector<std::uint8_t>& codeSection,
     const Domain::FileByteOffset codeSectionOffset,
-    const Domain::FileByteOffset codeSectionSize
+    const Domain::FileByteOffset codeSectionSize,
+    const std::function<void(const InstructionMatch&)>& visit
 ) const {
     if (codeSectionSize > std::numeric_limits<Domain::FileByteOffset>::max() - codeSectionOffset) throw CodegenException("Code section offset overflow", codeSectionOffset);
     const std::size_t limit = std::min(codeSection.size(), static_cast<std::size_t>(codeSectionSize));
 
     const X64InstructionDecoder decoder;
-    std::vector<InstructionMatch> matches;
     std::size_t i = 0;
 
     while (i < limit) {
@@ -41,11 +47,19 @@ std::vector<InstructionMatch> InstructionScanner::ScanCodeSection(
             throw CodegenException(std::string("Cannot decode instruction: ") + e.what(), codeSectionOffset + i);
         }
 
-        matches.push_back({codeSectionOffset + i, length});
+        visit({codeSectionOffset + i, length});
 
         i += length;
     }
+}
 
+std::vector<InstructionMatch> InstructionScanner::ScanCodeSection(
+    const std::vector<std::uint8_t>& codeSection,
+    const Domain::FileByteOffset codeSectionOffset,
+    const Domain::FileByteOffset codeSectionSize
+) const {
+    std::vector<InstructionMatch> matches;
+    VisitCodeSection(codeSection, codeSectionOffset, codeSectionSize, [&](const InstructionMatch& match) { matches.push_back(match); });
     return matches;
 }
 

@@ -64,6 +64,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Rtld.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Process.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Sandbox.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/System/src/HostCpu.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SystemConfiguration.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Login.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SoftwareVersion.cpp
@@ -971,6 +972,15 @@ if(BUILD_TESTING)
         set_tests_properties(guest_jit_shared_memory PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(host_cpu_tests ${LIBS_INCLUDE_DIR}/tests/HostCpu.cpp)
+    target_include_directories(host_cpu_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(host_cpu_tests PRIVATE libkernel libc)
+    configure_windows_unwind(host_cpu_tests)
+    add_test(NAME host_cpu COMMAND host_cpu_tests)
+    if(WIN32)
+        set_tests_properties(host_cpu PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_system_configuration_tests ${LIBS_INCLUDE_DIR}/tests/GuestSystemConfiguration.cpp)
     target_include_directories(guest_system_configuration_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_system_configuration_tests PRIVATE libkernel libc)
@@ -1167,8 +1177,9 @@ if(BUILD_TESTING)
     add_dependencies(guest_memory_tests guest_memory_module)
     target_compile_definitions(guest_memory_tests PRIVATE GUEST_MEMORY_MODULE="$<TARGET_FILE:guest_memory_module>")
     add_test(NAME guest_memory COMMAND guest_memory_tests)
+    add_test(NAME guest_mmap_fixed_anonymous COMMAND guest_memory_tests fixed-anonymous)
     if(WIN32)
-        set_tests_properties(guest_memory PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_memory guest_mmap_fixed_anonymous PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_flexible_memory_budget_tests ${LIBS_INCLUDE_DIR}/tests/GuestFlexibleMemoryBudget.cpp)
@@ -1200,6 +1211,15 @@ if(BUILD_TESTING)
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
         endif()
     endforeach()
+    add_test_executable(guest_page_table_stats_tests ${LIBS_INCLUDE_DIR}/tests/GuestPageTableStats.cpp)
+    target_include_directories(guest_page_table_stats_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_page_table_stats_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_page_table_stats_tests)
+    add_test(NAME guest_page_table_stats COMMAND guest_page_table_stats_tests)
+    if(WIN32)
+        set_tests_properties(guest_page_table_stats PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_mlock_tests ${LIBS_INCLUDE_DIR}/tests/GuestMlock.cpp)
     target_include_directories(guest_mlock_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_mlock_tests PRIVATE libkernel libc)

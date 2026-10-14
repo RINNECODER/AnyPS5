@@ -3,6 +3,7 @@
 
 #include <codegen/CodegenTypes.hpp>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -16,6 +17,13 @@ public:
         const std::vector<std::uint8_t>& codeSection,
         Domain::FileByteOffset codeSectionOffset,
         Domain::FileByteOffset codeSectionSize
+    ) const = 0;
+
+    virtual void VisitCodeSection(
+        const std::vector<std::uint8_t>& codeSection,
+        Domain::FileByteOffset codeSectionOffset,
+        Domain::FileByteOffset codeSectionSize,
+        const std::function<void(const InstructionMatch&)>& visit
     ) const = 0;
 };
 

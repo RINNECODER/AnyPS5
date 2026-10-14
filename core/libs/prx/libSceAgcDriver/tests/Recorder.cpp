@@ -47,6 +47,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -331,6 +332,232 @@ void readTrackingTests(const Device& device, Recorder& recorder) {
     Require(Recorder::ReadCounts().hits[static_cast<std::size_t>(Kind::AddressBased)] >= 2, "address-based hits are not counted");
     recorder.Sync();
     Require(recorder.Idle() && !recorder.PendingReadOverlaps(0x20000, 0x1000, false), "noted ranges outlived their batch");
+}
+
+Recorder::WriteRanges expectedWriteUnion(Recorder::WriteRanges ranges) {
+    std::sort(ranges.begin(), ranges.end());
+    Recorder::WriteRanges result;
+    for (const auto& [begin, end] : ranges) {
+        if (!result.empty() && begin <= result.back().second) result.back().second = std::max(result.back().second, end);
+        else result.emplace_back(begin, end);
+    }
+    return result;
+}
+
+void pendingWriteSnapshotTests(const Device& device, Recorder& recorder) {
+    recorder.Sync();
+    Recorder::WriteRanges expected;
+    const auto check = [&] {
+        const auto snapshot = Recorder::PendingWriteSnapshot();
+        Require(snapshot != nullptr && *snapshot == expectedWriteUnion(expected), "pending write snapshot differs from the full union");
+    };
+    const auto note = [&](std::uint64_t address, std::size_t bytes) {
+        const auto previous = Recorder::PendingWriteSnapshot();
+        const auto saved = previous == nullptr ? Recorder::WriteRanges{} : *previous;
+        recorder.NotePendingWrite(address, bytes);
+        if (bytes != 0) expected.emplace_back(address, address + bytes);
+        check();
+        Require(previous == nullptr || *previous == saved, "publishing a new write modified an older reader's snapshot");
+    };
+    note(0x10000, 16);
+    note(0x10020, 16);
+    note(0x10010, 16);
+    note(0x10004, 4);
+    note(0x10000, 0);
+    note(0, 1);
+    note(UINT64_MAX - 16, 16);
+    const Recorder::WriteRanges additions{{0x20020, 0x20040}, {0x20000, 0x20020}, {0x20010, 0x20030}, {0x20040, 0x20040}, {0x20050, 0x20040}};
+    recorder.NotePendingWrites(additions);
+    for (const auto& range : additions) if (range.second > range.first) expected.push_back(range);
+    check();
+    recorder.NotePendingFill(0x30000, 16, 0xA5);
+    expected.emplace_back(0x30000, 0x30010);
+    check();
+    alignas(64) static std::array<std::byte, 64> labels{};
+    const auto labelAddress = reinterpret_cast<std::uint64_t>(labels.data());
+    const std::array value{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    recorder.NoteLabel(labelAddress, value, 1, 0);
+    expected.emplace_back(labelAddress, labelAddress + value.size());
+    check();
+    recorder.Submit();
+    device.WaitQueue();
+    recorder.AfterCompletions(labelAddress + 8, value, 2, 0, true);
+    expected.emplace_back(labelAddress + 8, labelAddress + 8 + value.size());
+    check();
+    note(0x40000, 16);
+    bool completing = false;
+    recorder.OnComplete([&] {
+        const auto snapshot = Recorder::PendingWriteSnapshot();
+        Require(Recorder::SnapshotOverlaps(snapshot.get(), 0x40000, 16), "a finishing batch left the snapshot before its completion");
+        completing = true;
+    });
+    recorder.Sync();
+    Require(completing && Recorder::PendingWriteSnapshot()->empty(), "completed writes remained published");
+    std::mt19937_64 random(0x41505335u);
+    for (int trial = 0; trial < 16; ++trial) {
+        expected.clear();
+        for (int step = 0; step < 64; ++step) note(0x80000 + random() % 4096, 1 + random() % 128);
+        recorder.Sync();
+        Require(Recorder::PendingWriteSnapshot()->empty(), "random writes survived their GPU batch");
+    }
+    expected.clear();
+    note(0x90000, 16);
+    {
+        std::atomic<bool> invalid{false};
+        std::atomic<unsigned> ready{0};
+        std::atomic<std::uint64_t> reads{0};
+        std::array<std::jthread, 2> readers;
+        for (auto& reader : readers) reader = std::jthread([&](std::stop_token stop) {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!stop.stop_requested()) {
+                const auto snapshot = Recorder::PendingWriteSnapshot();
+                if (snapshot == nullptr || !Recorder::SnapshotOverlaps(snapshot.get(), 0x90000, 16)) invalid.store(true, std::memory_order_relaxed);
+                if (snapshot != nullptr) {
+                    for (std::size_t i = 0; i < snapshot->size(); ++i) {
+                        const auto [begin, end] = (*snapshot)[i];
+                        if (end <= begin || (i != 0 && (*snapshot)[i - 1].second >= begin)) invalid.store(true, std::memory_order_relaxed);
+                    }
+                }
+                reads.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+        while (ready.load(std::memory_order_acquire) != readers.size()) std::this_thread::yield();
+        for (std::uint64_t i = 0; i < 256; ++i) note(0x91000 + i * 128, 32);
+        for (auto& reader : readers) reader.request_stop();
+        for (auto& reader : readers) reader.join();
+        Require(reads.load() != 0 && !invalid.load(), "concurrent snapshot readers observed an invalid or incomplete union");
+    }
+    recorder.Sync();
+    expected.clear();
+    note(UINT64_MAX - 3, 8);
+    note(0x50000, 16);
+    recorder.Sync();
+    recorder.NotePendingWrite(0x58000, 16);
+    {
+        Recorder other(device.GetContext());
+        other.Activate();
+        recorder.NotePendingWrite(0x59000, 16);
+        recorder.Activate();
+        recorder.NotePendingWrite(0x5A000, 16);
+        Require(*Recorder::PendingWriteSnapshot() == Recorder::WriteRanges{{0x58000, 0x58010}, {0x59000, 0x59010}, {0x5A000, 0x5A010}}, "reactivation missed writes recorded while inactive");
+        other.Activate();
+        recorder.Sync();
+        recorder.Activate();
+        recorder.NotePendingWrite(0x5B000, 16);
+        Require(*Recorder::PendingWriteSnapshot() == Recorder::WriteRanges{{0x5B000, 0x5B010}}, "reactivation retained writes completed while inactive");
+        recorder.Sync();
+        other.Activate();
+        other.NotePendingWrite(0x60000, 16);
+        const auto otherSnapshot = Recorder::PendingWriteSnapshot();
+        recorder.Activate();
+        recorder.NotePendingWrite(0x70000, 16);
+        const auto ownSnapshot = Recorder::PendingWriteSnapshot();
+        Require(ownSnapshot != nullptr && *ownSnapshot == Recorder::WriteRanges{{0x70000, 0x70010}}, "a recorder extended another recorder's snapshot");
+        Require(*otherSnapshot == Recorder::WriteRanges{{0x60000, 0x60010}}, "a replaced owner's retained snapshot changed");
+        other.Sync();
+        Require(Recorder::PendingWriteSnapshot() == ownSnapshot, "an inactive recorder replaced the active snapshot");
+        recorder.Sync();
+    }
+    Require(Recorder::PendingWriteSnapshot()->empty(), "snapshot ownership tests left pending writes");
+    std::cout << "Pending write snapshot differential, lifetime, completion and ownership tests passed\n";
+}
+
+void pendingWriteSnapshotBenchmark(Recorder& recorder) {
+    for (std::uint64_t distinct : {8u, 32u, 512u}) {
+        for (int duplicates : {0, 8, 64}) {
+            std::array<double, 5> samples{};
+            for (auto& sample : samples) {
+                recorder.Sync();
+                static_cast<void>(recorder.Commands());
+                const auto start = std::chrono::steady_clock::now();
+                for (std::uint64_t i = 0; i < distinct; ++i) {
+                    const auto address = 0x100000 + i * 4096;
+                    recorder.NotePendingWrite(address, 256);
+                    for (int repeat = 0; repeat < duplicates; ++repeat) recorder.NotePendingWrite(address, 256);
+                }
+                sample = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                const auto snapshot = Recorder::PendingWriteSnapshot();
+                Require(snapshot != nullptr && snapshot->size() == distinct, "snapshot benchmark produced another union");
+            }
+            std::sort(samples.begin(), samples.end());
+            std::cout << "snapshot-note benchmark: " << distinct << " distinct, " << duplicates << " repeats, median " << samples[2] << " ms\n";
+        }
+    }
+    recorder.Sync();
+}
+
+void readListTests(const Device& device, Recorder& recorder) {
+    using Ranges = Recorder::ReadList;
+    Require(Recorder::ValidReadList({{0x1000, 0x2000}, {0x2000, 0x2100}}) && Recorder::ValidReadList({}), "a sorted disjoint list is refused");
+    Require(!Recorder::ValidReadList({{0x2000, 0x2100}, {0x1000, 0x2000}}) && !Recorder::ValidReadList({{0x1000, 0x2001}, {0x2000, 0x2100}}) && !Recorder::ValidReadList({{0x1000, 0x1000}}), "an unsorted, overlapping or empty list is accepted");
+    std::uint64_t seed = 0x9e3779b97f4a7c15ull;
+    const auto next = [&](std::uint64_t bound) {
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        return (seed >> 33u) % bound;
+    };
+    const auto makeList = [&](std::uint64_t base, std::size_t count) {
+        auto list = std::make_shared<Ranges>();
+        auto at = base;
+        for (std::size_t index = 0; index < count; ++index) {
+            at += next(3) * 0x100;
+            const auto bytes = (next(16) + 1) * 0x10;
+            list->emplace_back(at, at + bytes);
+            at += bytes;
+        }
+        return list;
+    };
+    const auto first = makeList(0x100000, 300);
+    const auto second = makeList(0x100000, 120);
+    const Ranges before{{0x100400, 0x100410}, {0x200000, 0x200100}};
+    const Ranges between{{0x100800, 0x100900}, {0x300000, 0x300040}};
+    const Ranges after{{0x100000, 0x180000}};
+    const auto note = [&](bool listed) {
+        recorder.NotePendingReads(before, Kind::DispatchElement);
+        if (listed) recorder.NotePendingReadList(first, Kind::AddressBased);
+        else recorder.NotePendingReads(*first, Kind::AddressBased);
+        recorder.NotePendingReads(between, Kind::GpuCopy);
+        if (listed) {
+            recorder.NotePendingReadList(second, Kind::Indirect);
+            recorder.NotePendingReadList(first, Kind::AddressBased);
+        } else {
+            recorder.NotePendingReads(*second, Kind::Indirect);
+        }
+        recorder.NotePendingReads(after, Kind::CopySource);
+    };
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> queries;
+    for (const auto* list : {first.get(), second.get()}) {
+        for (const auto& [begin, end] : *list) {
+            for (const auto at : {begin - 1, begin, end - 1, end}) queries.emplace_back(at, 1 + next(0x80));
+        }
+    }
+    for (int query = 0; query < 2000; ++query) queries.emplace_back(0xff000 + next(0x300000), 1 + next(0x2000));
+    const auto answers = [&] {
+        std::vector<int> result;
+        for (const auto& [address, bytes] : queries) {
+            const auto described = recorder.DescribePendingRead(address, bytes);
+            result.push_back(recorder.PendingReadOverlaps(address, bytes) ? 1 : 0);
+            result.push_back(described.has_value() ? 10 + static_cast<int>(described->kind) : -1);
+        }
+        recorder.Submit();
+        for (const auto& [address, bytes] : queries) result.push_back(recorder.PendingReadOverlaps(address, bytes, false) ? 1 : 0);
+        recorder.Sync();
+        Require(recorder.Idle() && !recorder.PendingReadOverlaps(0x100000, 0x200000, false), "listed reads outlived their batch");
+        return result;
+    };
+    const auto notedBefore = Recorder::ReadCounts().noted;
+    note(false);
+    const auto plain = answers();
+    const auto notedPlain = Recorder::ReadCounts().noted - notedBefore;
+    note(true);
+    const auto listed = answers();
+    const auto notedListed = Recorder::ReadCounts().noted - notedBefore - notedPlain;
+    Require(plain == listed, "reads noted by reference answer a query differently from the same ranges noted one by one");
+    Require(notedListed == notedPlain + first->size(), "a list's ranges are not counted as noted");
+    for (const auto kind : {Kind::DispatchElement, Kind::AddressBased, Kind::CopySource}) Require(std::count(plain.begin(), plain.end(), 10 + static_cast<int>(kind)) != 0, "the queries miss a reader kind: the comparison proves too little");
+    recorder.NotePendingReadList(std::make_shared<Ranges>(), Kind::AddressBased);
+    recorder.NotePendingReadList(nullptr, Kind::AddressBased);
+    Require(!recorder.Recording(), "an empty list opened a batch");
+    static_cast<void>(device);
 }
 
 void writeSettledTests(const Device& device, Recorder& recorder) {
@@ -4039,7 +4266,9 @@ void metadataPassTests(const Device& device, Recorder& recorder) {
         Require(keys[0] == 0xff, "the recorded key fill landed before its batch ran");
         Require(CurrentDccKeys(color.dccAddress, surfaceBytes) == DccKeys::ClearRegister, "the keys read past a pending fast-clear fill");
     }
+    std::memset(texels, 0x77, surfaceBytes);
     RunColorMetadataPass(context, pass);
+    Require(StorageTexture::FindPending(address, surfaceBytes) != nullptr && texels[0] == 0x77, "a fast clear recorded before the pass fell back to CPU write-back");
     Require(keysUncompressed() && memoryHolds({0x10, 0x20, 0x40, 0x80}), "a fast clear recorded before the pass was not eliminated");
     std::memset(texels, 0x66, surfaceBytes);
     RunColorMetadataPass(context, pass);
@@ -5174,6 +5403,14 @@ int main(int argc, char** argv) {
         std::cout << "host imports " << (PrepareImportWatch(device.GetContext()) == ImportWatch::Unwatch ? "are compared" : "stay watched") << '\n';
         Recorder recorder(device.GetContext());
         recorder.Activate();
+        if (argc == 2 && std::string_view(argv[1]) == "--pending-write-snapshot-only") {
+            pendingWriteSnapshotTests(device, recorder);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--benchmark-pending-write-snapshot") {
+            pendingWriteSnapshotBenchmark(recorder);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--cube-only") {
             singleCubeTests(device, recorder);
             std::cout << "Single cube snapshot and storage sampling tests passed\n";
@@ -5201,6 +5438,11 @@ int main(int argc, char** argv) {
             std::cout << "Completion label storage and ordering tests passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--read-list-only") {
+            readListTests(device, recorder);
+            std::cout << "Read list tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--host-import-unmap-only") {
             gpu.unlock();
             hostImportUnmapTests(device, recorder);
@@ -5224,6 +5466,11 @@ int main(int argc, char** argv) {
             std::cout << "CMASK copied clear, write-back and failure tests passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--metadata-pass-only") {
+            metadataPassTests(device, recorder);
+            std::cout << "Color metadata pass tests passed\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--draw-descriptors-only") {
             drawDescriptorWriteTests(device, recorder);
             std::cout << "Draw descriptor writes and snapshot overrides passed\n";
@@ -5231,6 +5478,7 @@ int main(int argc, char** argv) {
         }
 
         readTrackingTests(device, recorder);
+        readListTests(device, recorder);
         writeSettledTests(device, recorder);
         completionCountTests(device, recorder);
         afterRecordedWorkTests(device, recorder);
