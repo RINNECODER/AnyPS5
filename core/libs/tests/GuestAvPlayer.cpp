@@ -1069,7 +1069,8 @@ void TestAutoStartKeepsStartedPlayback() {
 }
 
 void TestRestartAfterPausedJumpKeepsClockRunning() {
-    AvPlayerInitData init = InitData(nullptr);
+    Events events;
+    AvPlayerInitData init = InitData(&events);
     auto* player = sceAvPlayerInit(&init);
     Check(player != nullptr, "init failed");
     Check(sceAvPlayerAddSource(player, "/app0/avplayer.mp4") == 0, "add source failed");
