@@ -519,6 +519,15 @@ std::optional<ShaderRecompiler::ShaderFloatMode> RegisteredFloatMode(const Shade
     return DecodeFloatMode(*reg, found->second);
 }
 
+std::optional<ShaderRecompiler::ShaderFloatMode> DispatchFloatMode(const ShaderSnapshot& snapshot, const Registers& live) {
+    if (snapshot.registeredState != nullptr) return RegisteredFloatMode(snapshot);
+    const auto reg = FloatModeRegisterFor(snapshot.type);
+    if (!reg) return std::nullopt;
+    const auto found = live.find(reg->offset);
+    if (found == live.end()) return std::nullopt;
+    return DecodeFloatMode(*reg, found->second);
+}
+
 namespace {
 
 template<typename TValue>
