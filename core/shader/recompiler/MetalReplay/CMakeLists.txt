@@ -134,6 +134,8 @@ if(BUILD_TESTING)
             TIMEOUT 120 RUN_SERIAL TRUE
             ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1")
     endforeach()
+    # Upstream execution tests run unchanged through a Metal device shim (libSceAgcDriver/tests/metal_semantics).
+    include("${agcDriverRoot}/tests/metal_semantics/registration.cmake")
     add_test_executable(anyps5_metal_masked_shift_contract "${CMAKE_CURRENT_SOURCE_DIR}/../tests/MaskedShiftContract.cpp")
     target_link_libraries(anyps5_metal_masked_shift_contract PRIVATE anyps5_metal_guest_recompiler)
     set_target_properties(anyps5_metal_masked_shift_contract PROPERTIES CXX_EXTENSIONS OFF)
