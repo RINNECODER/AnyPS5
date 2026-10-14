@@ -299,6 +299,21 @@ constexpr MemoryOpcodeInfo dsOpcodes[] = {
     {0x92u, RdnaOpcode::DsMinSrc2F32, 1, 32, false, false, false},
     {0x93u, RdnaOpcode::DsMaxSrc2F32, 1, 32, false, false, false},
     {0x95u, RdnaOpcode::DsAddSrc2F32, 1, 32, false, false, false},
+    {0xc0u, RdnaOpcode::DsAddSrc2U64, 2, 32, false, false, false},
+    {0xc1u, RdnaOpcode::DsSubSrc2U64, 2, 32, false, false, false},
+    {0xc2u, RdnaOpcode::DsRsubSrc2U64, 2, 32, false, false, false},
+    {0xc3u, RdnaOpcode::DsIncSrc2U64, 2, 32, false, false, false},
+    {0xc4u, RdnaOpcode::DsDecSrc2U64, 2, 32, false, false, false},
+    {0xc5u, RdnaOpcode::DsMinSrc2I64, 2, 32, false, false, false},
+    {0xc6u, RdnaOpcode::DsMaxSrc2I64, 2, 32, false, false, false},
+    {0xc7u, RdnaOpcode::DsMinSrc2U64, 2, 32, false, false, false},
+    {0xc8u, RdnaOpcode::DsMaxSrc2U64, 2, 32, false, false, false},
+    {0xc9u, RdnaOpcode::DsAndSrc2B64, 2, 32, false, false, false},
+    {0xcau, RdnaOpcode::DsOrSrc2B64, 2, 32, false, false, false},
+    {0xcbu, RdnaOpcode::DsXorSrc2B64, 2, 32, false, false, false},
+    {0xcdu, RdnaOpcode::DsWriteSrc2B64, 2, 32, false, false, false},
+    {0xd2u, RdnaOpcode::DsMinSrc2F64, 2, 32, false, false, false},
+    {0xd3u, RdnaOpcode::DsMaxSrc2F64, 2, 32, false, false, false},
     {0x01u, RdnaOpcode::DsSubU32, 1, 32, false, false, false},
     {0x05u, RdnaOpcode::DsMinI32, 1, 32, false, false, false},
     {0x06u, RdnaOpcode::DsMaxI32, 1, 32, false, false, false},
@@ -592,6 +607,21 @@ bool isDsSrc2Opcode(RdnaOpcode opcode) {
         case RdnaOpcode::DsMinSrc2F32:
         case RdnaOpcode::DsMaxSrc2F32:
         case RdnaOpcode::DsAddSrc2F32:
+        case RdnaOpcode::DsAddSrc2U64:
+        case RdnaOpcode::DsSubSrc2U64:
+        case RdnaOpcode::DsRsubSrc2U64:
+        case RdnaOpcode::DsIncSrc2U64:
+        case RdnaOpcode::DsDecSrc2U64:
+        case RdnaOpcode::DsMinSrc2I64:
+        case RdnaOpcode::DsMaxSrc2I64:
+        case RdnaOpcode::DsMinSrc2U64:
+        case RdnaOpcode::DsMaxSrc2U64:
+        case RdnaOpcode::DsAndSrc2B64:
+        case RdnaOpcode::DsOrSrc2B64:
+        case RdnaOpcode::DsXorSrc2B64:
+        case RdnaOpcode::DsWriteSrc2B64:
+        case RdnaOpcode::DsMinSrc2F64:
+        case RdnaOpcode::DsMaxSrc2F64:
             return true;
         default: return false;
     }
@@ -930,6 +960,23 @@ RdnaInstruction DecodeRdnaFlat(std::uint32_t programCounter, std::span<const std
         }
         instruction.source0 = scalarDescriptorBase(saddr, 2u, (name + " supports only an SGPR pair as base address").c_str());
         instruction.sourceCount = 1;
+        return instruction;
+    }
+    if (seg == 1u) {
+        const RdnaOperand zero = scalarSource(128u);
+        instruction.source0 = saddr == 0x7Du ? vectorRegister(addr) : zero;
+        instruction.source1 = zero;
+        if (saddr != 0x7Du && saddr != 0x7Fu) {
+            instruction.source1 = scalarSource(saddr);
+            if (instruction.source1.kind != RdnaOperandKind::ScalarRegister &&
+                instruction.source1.kind != RdnaOperandKind::VccLo &&
+                instruction.source1.kind != RdnaOperandKind::VccHi &&
+                instruction.source1.kind != RdnaOperandKind::M0 &&
+                instruction.source1.kind != RdnaOperandKind::ExecLo) {
+                throw std::runtime_error("FLAT scratch scalar offset register is unsupported");
+            }
+        }
+        instruction.sourceCount = 2;
         return instruction;
     }
     instruction.source0 = vectorRegister(addr);

@@ -429,6 +429,8 @@ enum class IrOpcode : std::uint16_t {
     SharedAtomicCmpst64,
     SharedAtomicCmpstF64,
     SharedAtomicMskor64,
+    SharedSrc2U32,
+    SharedSrc2U64,
     DataAppend,
     DataConsume,
     SwizzleU32,

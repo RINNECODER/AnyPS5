@@ -43,6 +43,7 @@ std::uint32_t TranslationContext::f32DenormalFlushFor(const RdnaInstruction& ins
     case RdnaOpcode::VFrexpMantF32:
     case RdnaOpcode::VSinF32:
     case RdnaOpcode::VCosF32:
+    case RdnaOpcode::VCvtF32F64:
         flush = 3u;
         break;
     case RdnaOpcode::VMacF32:

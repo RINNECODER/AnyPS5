@@ -26,10 +26,8 @@ bool TranslationContext::float64Operation(const RdnaInstruction& inst, IrOpcode 
         writeF64Result(inst.destination, *result);
         return true;
     }
-    rejectHalfOrDoubleOutputModifier(inst.destination);
-    RdnaOperand destination = inst.destination;
-    destination.omod = 0u;
-    writeOperand(destination, result);
+    if (type != IrType::F32 || !outputModifierApplies(4u)) rejectHalfOrDoubleOutputModifier(inst.destination);
+    writeOperand(inst.destination, result);
     return true;
 }
 
@@ -130,7 +128,7 @@ bool TranslationContext::vDivScaleF64(const RdnaInstruction& inst) {
     result[0] = IrU32(ir.Select(zero.Value(), ir.Constant(0u), result[0].Value()));
     result[1] = IrU32(ir.Select(zero.Value(), ir.Constant(0xfff80000u), result[1].Value()));
     writeF64Result(inst.destination, ir.ConstructU64(result[0].Value(), result[1].Value()));
-    writeMask(inst.destination2, IrU1(ir.LogicalOr(nearMax.Value(), ir.LogicalAnd(notDenormal.Value(), nearMin.Value()))));
+    writeActiveLaneMask(inst.destination2, IrU1(ir.LogicalOr(nearMax.Value(), ir.LogicalAnd(notDenormal.Value(), nearMin.Value()))));
     return true;
 }
 

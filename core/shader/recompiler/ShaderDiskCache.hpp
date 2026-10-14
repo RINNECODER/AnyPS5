@@ -18,7 +18,8 @@ namespace ShaderRecompiler::ShaderDiskCache {
 // 32: fork format 31 plus upstream format 29 (layerExported in the pixel info) and the sync-8 shader output changes.
 // 33: fork format 32 plus the shader output changes of upstream float and denormal peepholes (U1).
 // 34: fork format 33 plus upstream PR 4883 (stored front-end resource plans).
-inline constexpr std::uint32_t FormatVersion = 34;
+// 35: fork format 34 plus the shader output changes of upstream PRs 5110-5498 and 907 (U6: shader semantics).
+inline constexpr std::uint32_t FormatVersion = 35;
 
 enum class LoadStatus {
     Loaded,

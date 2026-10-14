@@ -33,6 +33,7 @@ MemoryInfo sharedMemoryInfoFromInstruction(const RdnaInstruction& inst) {
 bool TranslationContext::dsAtomic(const RdnaInstruction& inst, IrOpcode opcode, bool returnsValue) {
     MemoryInfo memory = sharedMemoryInfoFromInstruction(inst);
     memory.flushDenormals = sharedFloatFlush(opcode);
+    memory.flushDenormalResults = opcode == IrOpcode::SharedAtomicFAdd32 && (!floatMode.has_value() || ((floatMode->floatMode >> 5u) & 1u) == 0u);
     const IrU32 address = readU32(inst.source0);
     const IrU32 value = readU32(inst.source1);
     IrValue& active = ir.GetExec();
@@ -196,19 +197,22 @@ bool TranslationContext::dsWrite2(const RdnaInstruction& inst) {
 }
 
 bool TranslationContext::dsSrc2(const RdnaInstruction& inst, IrOpcode opcode) {
+    return emitSharedSrc2(inst, opcode, IrOpcode::SharedSrc2U32);
+}
+
+bool TranslationContext::dsSrc2B64(const RdnaInstruction& inst, IrOpcode opcode) {
+    return emitSharedSrc2(inst, opcode, IrOpcode::SharedSrc2U64);
+}
+
+bool TranslationContext::emitSharedSrc2(const RdnaInstruction& inst, IrOpcode update, IrOpcode opcode) {
     if (inst.gds) {
         throw std::runtime_error("GDS src2 operations are not supported");
     }
-    const MemoryInfo memory = sharedMemoryInfoFromInstruction(inst);
+    MemoryInfo memory = sharedMemoryInfoFromInstruction(inst);
+    memory.flushDenormals = sharedFloatFlush(update);
     const IrU32 address = readU32(inst.source0);
-    MemoryInfo source = memory;
-    source.offset = memory.secondaryOffset;
-    source.secondaryOffset = 0u;
-    IrValue* value = loadSharedU32(1u, address, source, inst.programCounter);
-    MemoryInfo target = memory;
-    target.secondaryOffset = 0u;
     IrValue& active = ir.GetExec();
-    (void)ir.Emit(opcode, IrOpcodeType(opcode), {&address.Value(), value, &active}, addMemoryInfo(target, inst.programCounter));
+    (void)ir.Emit(opcode, IrType::Void, {&address.Value(), &ir.Constant(static_cast<std::uint32_t>(update)), &active}, addMemoryInfo(memory, inst.programCounter));
     return true;
 }
 
@@ -217,6 +221,7 @@ bool TranslationContext::sharedFloatFlush(IrOpcode opcode) const {
     case IrOpcode::SharedAtomicFMin32:
     case IrOpcode::SharedAtomicFMax32:
     case IrOpcode::SharedAtomicCmpstF32:
+    case IrOpcode::SharedAtomicFAdd32:
         return !floatMode.has_value() || ((floatMode->floatMode >> 4u) & 1u) == 0u;
     case IrOpcode::SharedAtomicFMin64:
     case IrOpcode::SharedAtomicFMax64:
