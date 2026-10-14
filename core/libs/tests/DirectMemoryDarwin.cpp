@@ -1,4 +1,5 @@
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 
 #include <cerrno>
 #include <cstdint>
@@ -37,9 +38,25 @@ void AllocateMapFixedAndAlias() {
     Check(DirectMemoryAlloc(0, DIRECT_MEMORY_SIZE, Length, Length, 0, &phys) == 0, "allocate direct memory");
     Check(phys >= 0 && phys % Length == 0, "allocation is aligned");
 
-    void* fixed = reinterpret_cast<void*>(FixedAddress);
+    // A hardcoded fixed address may already be reserved by the host: macOS ignores the hint and
+    // DarwinMapExactly then fails with EEXIST. Ask the guest arena when it is available, otherwise
+    // reserve and release a host range and map there.
+    std::uintptr_t fixedAddress = FixedAddress;
+    if (GuestArena::GuestArenaAvailable_nid_postfix()) {
+        fixedAddress = GuestArena::GuestArenaHighestFree_nid_no_patch(Length, Length);
+        Check(fixedAddress != 0, "the guest arena offers a free fixed range");
+    } else {
+        void* hostRange = mmap(nullptr, Length, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        Check(hostRange != MAP_FAILED, "reserve a host range for the fixed mapping");
+        if (hostRange != MAP_FAILED) {
+            fixedAddress = reinterpret_cast<std::uintptr_t>(hostRange);
+            munmap(hostRange, Length);
+        }
+    }
+
+    void* fixed = reinterpret_cast<void*>(fixedAddress);
     Check(DoMapDirect(&fixed, Length, ProtCpuReadWrite, MapFixed | MapNoOverwrite, phys, 0) == 0, "map direct memory at a fixed address");
-    Check(fixed == reinterpret_cast<void*>(FixedAddress), "fixed view lands at the requested address");
+    Check(fixed == reinterpret_cast<void*>(fixedAddress), "fixed view lands at the requested address");
 
     void* alias = nullptr;
     Check(DoMapDirect(&alias, Length, ProtCpuReadWrite, 0, phys, 0) == 0, "map a second view of the same range");
