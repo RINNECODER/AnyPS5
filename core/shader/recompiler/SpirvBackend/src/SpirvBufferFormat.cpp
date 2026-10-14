@@ -206,6 +206,27 @@ SpirvBufferFormatInfo GetFormatInfo(IrBufferFormat format) {
     }
 }
 
+std::optional<std::uint32_t> SettledFormattedStoreSwizzle(IrBufferFormat format) {
+    switch (format) {
+        case IrBufferFormat::Format8_8_8_8UNorm:
+        case IrBufferFormat::Format16_16_16_16UInt:
+            return 6u | 5u << 3u | 4u << 6u | 7u << 9u;
+        case IrBufferFormat::Format8UNorm:
+        case IrBufferFormat::Format8UInt:
+            return 4u << 9u;
+        default:
+            return std::nullopt;
+    }
+}
+
+bool IsSettledFormattedStoreDstSel(IrBufferFormat format, std::uint32_t word3) {
+    const auto componentCount = GetFormatInfo(format).componentCount;
+    bool identity = true;
+    for (std::uint32_t component = 0; component < componentCount; ++component) identity = identity && ((word3 >> (component * 3u)) & 7u) == 4u + component;
+    const auto swizzle = SettledFormattedStoreSwizzle(format);
+    return identity || (swizzle.has_value() && (word3 & 0xfffu) == *swizzle);
+}
+
 SpirvFormattedSource ResolveFormattedSource(const SpirvBufferFormatInfo& info, std::uint32_t selector) {
     if (selector == 0u) {
         return {SpirvFormattedSourceKind::Zero, 0u};

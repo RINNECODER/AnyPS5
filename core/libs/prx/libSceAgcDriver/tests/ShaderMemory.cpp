@@ -464,6 +464,39 @@ void verifySignedSrtComparison() {
     }
 }
 
+void verifyTypeZeroImageMaterialization() {
+    using namespace ShaderRecompiler;
+    IrResourcePlan plan;
+    plan.srtPlanComplete = true;
+    plan.resourceTrackingComplete = true;
+    plan.userDataCount = 0u;
+    plan.materializationSources = {0u};
+
+    const std::array<std::uint32_t, 8> words{0x12345678u, (56u << 20u) | 0x100u, 0x0000c000u, 0x00000facu, 1u, 2u, 3u, 4u};
+    std::vector<std::unique_ptr<IrValue>> values;
+    DescriptorSource source;
+    source.dwordCount = static_cast<std::uint32_t>(words.size());
+    for (std::uint32_t i = 0u; i < words.size(); ++i) {
+        auto value = std::make_unique<IrValue>(IrOpcode::Void, IrType::U32, i);
+        value->SetImmediateU32(words[i]);
+        source.dwords[i] = value.get();
+        values.push_back(std::move(value));
+    }
+    plan.descriptorSources.push_back(source);
+
+    ImageResource image;
+    image.source = 0u;
+    image.resourceClass = ImageResourceClass::Sampled;
+    image.dimension = RdnaImageDimension::Dim2D;
+    plan.info.images.push_back(image);
+    plan.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(image));
+
+    ResourceSnapshot snapshot;
+    ResourceMaterializer{}.Materialize(plan, SrtRuntime{}, snapshot);
+    require(snapshot.images.size() == 1u && snapshot.images[0].dwordCount == 8u && snapshot.images[0].dwords == words,
+            "TYPE=0 image descriptor with a nonzero base was rejected or altered during materialization");
+}
+
 void verifyOutOfRangeConstantReads() {
     std::vector<std::uint32_t> code{0xf40c0200u, 0xfa000000u, 0xf4080500u, 0xfa000020u, 0xf4080600u, 0xfa000040u, 0xf4000400u, 0xfa000050u, 0xf4080a00u, 0xfa000080u, 0xbf8cc07fu, 0xf42c0814u, 0xfa000000u, 0xbf8cc07fu, 0xbf068010u, 0xbf850008u};
     for (std::uint32_t dword = 0; dword < 8u; dword++) {
@@ -612,7 +645,7 @@ void verifyGuardedDescriptorSources() {
     static Texture texture;
     const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture.bytes.data()));
     const std::array<std::uint32_t, 8> valid{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
-    const std::array<std::uint32_t, 8> invalid{0x12345678u, 0xffffffffu, 0xffffffffu, 0u, 0u, 0u, 0u, 0u};
+    const std::array<std::uint32_t, 8> invalid{0x12345678u, 0xffffffffu, 0xffffffffu, 1u << 28u, 0u, 0u, 0u, 0u};
     const std::array<std::uint32_t, 4> sampler{0u, 0u, 0u, 0u};
     std::array<std::uint32_t, 4> output{};
     const auto outputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
@@ -929,7 +962,7 @@ void verifyBindlessTable() {
     request.context.memory = emptyMemory.Regions();
     require(Recompile(request, *emptyCapture)->variantId == compiled->variantId, "bindless: an empty table changed the artifact");
     heap = savedHeap;
-    heap[0][3] &= 0x0fffffffu;
+    heap[0][3] = (heap[0][3] & 0x0fffffffu) | (1u << 28u);
     AgcDriver::ShaderMemory invalidMemory({});
     expectFailure([&] { static_cast<void>(invalidMemory.Capture(request)); }, "invalid descriptor", "bindless: an invalid T# was accepted");
     heap = savedHeap;
@@ -938,6 +971,63 @@ void verifyBindlessTable() {
     AgcDriver::ShaderMemory partialMemory({});
     expectFailure([&] { static_cast<void>(partialMemory.Capture(request)); }, "partial descriptor", "bindless: a partial heap descriptor was accepted");
     fillSrt(4u);
+}
+
+void verifyUniformTableImage() {
+    using namespace ShaderRecompiler;
+    constexpr std::uint32_t Format8888UNorm = 56;
+    constexpr std::uint32_t Type2D = 9;
+    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
+    static Texture textures[2];
+    struct alignas(4096) GuestTables {
+        std::array<std::array<std::uint32_t, 12>, 3> table{};
+        std::array<std::uint32_t, 4> output{};
+        std::array<std::uint32_t, 16> srt{};
+    };
+    static GuestTables guest;
+    const auto texture = [](const Texture& image) {
+        const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(image.bytes.data()));
+        return std::array<std::uint32_t, 8>{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
+    };
+    const auto first = texture(textures[0]);
+    const auto second = texture(textures[1]);
+    std::copy(first.begin(), first.end(), guest.table[1].begin() + 4);
+    std::copy(second.begin(), second.end(), guest.table[2].begin() + 4);
+    const auto bufferDescriptor = [](const void* base, std::uint32_t records) {
+        const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(base));
+        return std::array<std::uint32_t, 4>{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>((address >> 32u) & 0xffffu), records, 0xfacu};
+    };
+    const auto tableV = bufferDescriptor(guest.table.data(), static_cast<std::uint32_t>(sizeof(guest.table)));
+    const auto outputV = bufferDescriptor(guest.output.data(), 16u);
+    std::copy(tableV.begin(), tableV.end(), guest.srt.begin());
+    std::copy(outputV.begin(), outputV.end(), guest.srt.begin() + 12);
+    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(guest.srt.data()));
+    std::array<std::uint32_t, 3> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u), 2u};
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    const std::vector<std::uint32_t> code{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080700u, 0xfa000030u, 0x9310b002u, 0xf42c0502u, 0x20000010u, 0xf09c0f08u, 0x00450000u, 0xe0700000u, 0x80070000u, 0xbf810000u};
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Compute, 0x20000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData;
+    request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32;
+    request.target.supportedCapabilities = capabilities;
+    request.target.supportedExtensions = extensions;
+    request.target.bdaAbiVersion = BdaAbi::Version;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+    const auto plan = GetResourcePlan(request);
+    require(plan->info.images.size() == 1u && !plan->descriptorSources.at(plan->info.images[0].source).indirectImage.has_value(), "uniform table image: the T# read from a constant buffer was not planned as one image");
+    for (const auto& [key, expected] : {std::pair{2u, second}, std::pair{1u, first}}) {
+        userData[2] = key;
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::equal(expected.begin(), expected.end(), capture->snapshot.images[0].dwords.begin()), "uniform table image: the T# of the record the user data selects was not read");
+    }
 }
 
 
@@ -3604,16 +3694,23 @@ int main(int argc, char** argv) {
             std::cout << "Bindless mapping, indexing capabilities and strict validation passed\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--type-zero-image-materialization") {
+            verifyTypeZeroImageMaterialization();
+            std::cout << "TYPE=0 image descriptor materialization passed\n";
+            return 0;
+        }
         require(argc == 1, "unknown shader memory test arguments");
         verifyRegisterSources();
         verifyEvaluatedValues();
         verifyFrontendPair();
         verifySignedSrtComparison();
+        verifyTypeZeroImageMaterialization();
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
         verifyPureFlatSlots();
         verifyGuardedDescriptorSources();
         verifyBindlessTable();
+        verifyUniformTableImage();
         verifyDescriptorPhis();
         verifyLaneSelectedDescriptors();
         verifyProgramCounterRelativeData();

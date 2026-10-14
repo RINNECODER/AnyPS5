@@ -71,8 +71,8 @@ MTLCompareFunction Compare(VkCompareOp operation) {
 char capturedSamplerAssociation;
 std::mutex capturedSamplerMutex;
 
-Graphics::GuestSamplerResource Decode(std::span<const std::uint32_t> words, bool compareEnable, bool qualified) {
-    auto resource = Graphics::DecodeSamplerResource(words, qualified);
+Graphics::GuestSamplerResource Decode(std::span<const std::uint32_t> words, bool compareEnable, bool qualified, bool forceDegammaPaired) {
+    auto resource = Graphics::DecodeSamplerResource(words, qualified, forceDegammaPaired);
     resource.compareEnable = compareEnable;
     return resource;
 }
@@ -98,8 +98,8 @@ void AddCapturedIdentity(id<MTLSamplerState> sampler, NSData* identity) {
 }
 
 MetalSampler::MetalSampler(id<MTLDevice> device, std::span<const std::uint32_t> words, bool compareEnable,
-    bool unnormalizedQualified)
-    : MetalSampler(device, Decode(words, compareEnable, unnormalizedQualified),
+    bool unnormalizedQualified, bool forceDegammaPaired)
+    : MetalSampler(device, Decode(words, compareEnable, unnormalizedQualified, forceDegammaPaired),
                    CapturedIdentity(words, compareEnable, unnormalizedQualified)) {}
 
 MetalSampler::MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerResource& resource)

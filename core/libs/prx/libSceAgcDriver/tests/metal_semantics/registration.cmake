@@ -68,3 +68,34 @@ foreach(semanticsUnit IN ITEMS
     add_test(NAME anyps5_metal_semantics_${semanticsUnitLower} COMMAND anyps5_metal_semantics_${semanticsUnitLower})
     set_tests_properties(anyps5_metal_semantics_${semanticsUnitLower} PROPERTIES TIMEOUT 60)
 endforeach()
+
+# Upstream execution tests that bind images, samplers or color targets run unchanged through the
+# native Metal driver (MetalShaderResources for dispatches, MetalDraw for draws): see driver_shim/.
+add_library(anyps5_metal_driver_semantics_device STATIC "${semanticsDir}/MetalDriverTestDevice.mm")
+target_compile_options(anyps5_metal_driver_semantics_device PRIVATE -fobjc-arc)
+target_include_directories(anyps5_metal_driver_semantics_device BEFORE PUBLIC "${semanticsDir}/driver_shim")
+target_link_libraries(anyps5_metal_driver_semantics_device PUBLIC anyps5_metal_native_execution)
+get_target_property(semanticsUtilityLibrary anyps5_metal_utilities ANYPS5_METALLIB)
+function(anyps5_metal_driver_semantics semanticsTest semanticsSource)
+    string(TOLOWER "${semanticsTest}" semanticsLower)
+    add_executable(anyps5_metal_driver_semantics_${semanticsLower} "${semanticsSource}")
+    target_include_directories(anyps5_metal_driver_semantics_${semanticsLower} BEFORE PRIVATE "${semanticsDir}/driver_shim")
+    target_link_libraries(anyps5_metal_driver_semantics_${semanticsLower} PRIVATE anyps5_metal_driver_semantics_device)
+    set_target_properties(anyps5_metal_driver_semantics_${semanticsLower} PROPERTIES CXX_EXTENSIONS OFF)
+    if(BUILD_TESTING)
+        add_test(NAME anyps5_metal_driver_semantics_${semanticsLower} COMMAND anyps5_metal_driver_semantics_${semanticsLower})
+        set_tests_properties(anyps5_metal_driver_semantics_${semanticsLower} PROPERTIES
+            TIMEOUT 180 RUN_SERIAL TRUE
+            ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1;ANYPS5_NO_SHADER_CACHE=1;ANYPS5_METAL_UTILITY_LIBRARY=${semanticsUtilityLibrary}")
+    endif()
+endfunction()
+foreach(semanticsTest IN ITEMS ImagePlaneAddressOnLine ImageVolumeAddressOnPlane ImageVolumeAddressOnLine ImagePlaneBiasOnSingleLevelVolume ImageSampleForceDegamma ImagePlaneAddressOnCube ImagePlaneCompareOnLine BufferStoreFormatDstSel)
+    set(semanticsWrapper "${CMAKE_CURRENT_BINARY_DIR}/driver_semantics_${semanticsTest}.cpp")
+    file(GENERATE OUTPUT "${semanticsWrapper}" CONTENT
+"#define CORE_LIBS_PRX_LIBSCEAGCDRIVER_TESTS_VULKANTESTDEVICE_HPP\n#include \"MetalDriverTestDevice.hpp\"\n#include \"${semanticsUpstreamDir}/${semanticsTest}.cpp\"\n")
+    anyps5_metal_driver_semantics(${semanticsTest} "${semanticsWrapper}")
+endforeach()
+# Fork-only variants of upstream tests that cannot run unchanged on Metal.
+foreach(semanticsTest IN ITEMS ImageTableRecord)
+    anyps5_metal_driver_semantics(${semanticsTest} "${semanticsDir}/${semanticsTest}.cpp")
+endforeach()

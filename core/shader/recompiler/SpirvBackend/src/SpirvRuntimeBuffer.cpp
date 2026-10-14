@@ -263,6 +263,20 @@ std::array<std::uint32_t, 4> storeValues(SpirvEmitterState& state, std::uint32_t
     return result;
 }
 
+std::uint32_t storeSource(SpirvEmitterState& state, const std::array<std::uint32_t, 4>& selectors, const std::array<std::uint32_t, 4>& values, std::uint32_t components, std::uint32_t component) {
+    auto source = ConstantU32(state, 0u);
+    for (std::uint32_t slot = components; slot-- > 0u;) source = Select(state, TypeU32(state), equal(state, selectors[slot], ConstantU32(state, 4u + component)), values[slot], source);
+    return source;
+}
+
+std::uint32_t unsettledStoreSelectors(SpirvEmitterState& state, std::uint32_t word3, const SpirvBufferFormatInfo& info) {
+    const auto boolean = TypeBool(state);
+    auto settled = ConstantBool(state, true);
+    for (std::uint32_t component = 0; component < info.componentCount; ++component) settled = both(state, settled, equal(state, field(state, word3, component * 3u, 3u), ConstantU32(state, 4u + component)));
+    if (const auto swizzle = SettledFormattedStoreSwizzle(info.format)) settled = Binary(state, spv::OpLogicalOr, boolean, settled, equal(state, field(state, word3, 0u, 12u), ConstantU32(state, *swizzle)));
+    return Unary(state, spv::OpLogicalNot, boolean, settled);
+}
+
 std::uint32_t formatted(SpirvValueEmitContext& context, const IrValue& instruction, const RuntimeDescriptor& resource, const SpirvBufferFormatInfo& info, std::uint32_t components, bool store, std::uint32_t data) {
     auto& state = context.state;
     const auto& memory = context.Memory(instruction);
@@ -290,10 +304,17 @@ std::uint32_t formatted(SpirvValueEmitContext& context, const IrValue& instructi
     }
     if (store) {
         const auto values = storeValues(state, data, components);
-        EmitIfCondition(state, inBounds, [&] {
+        auto writes = inBounds;
+        if (memory.gpuDescriptor && !memory.typed) {
+            const auto unsettled = both(state, nonzero(state, resource.records), unsettledStoreSelectors(state, resource.word3, info));
+            faultIf(context, instruction, unsettled, resource.base, 0u, BdaAbi::FaultReason::InvalidDescriptor);
+            writes = both(state, writes, Unary(state, spv::OpLogicalNot, TypeBool(state), unsettled));
+        }
+        EmitIfCondition(state, writes, [&] {
             auto packed = ConstantU32(state, 0u);
             for (std::uint32_t component = 0; component < info.componentCount; ++component) {
-                const auto encoded = component >= components ? ConstantU32(state, 0u) : memory.d16 ? EmitD16StoreComponent(state, info, component, values[component]) : EmitFormatStoreComponent(state, info, component, values[component]);
+                const auto source = memory.typed ? (component < components ? values[component] : 0u) : storeSource(state, selectors, values, components, component);
+                const auto encoded = source == 0u ? ConstantU32(state, 0u) : memory.d16 ? EmitD16StoreComponent(state, info, component, source) : EmitFormatStoreComponent(state, info, component, source);
                 if (info.packedBitfield) {
                     packed = EmitOrU32(state, packed, Binary(state, spv::OpShiftLeftLogical, u32, EmitAndConstant(state, encoded, (1u << info.componentBits[component]) - 1u), ConstantU32(state, info.componentBitOffset[component])));
                 } else {
