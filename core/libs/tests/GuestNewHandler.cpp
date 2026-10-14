@@ -15,9 +15,11 @@ Handler APS5_VABI _ZSt15set_new_handlerPFvvE_nid_postfix(Handler);
 Handler APS5_VABI _ZSt15get_new_handlerv_nid_postfix();
 void* APS5_VABI _Znwm_nid_postfix(std::size_t);
 void* APS5_VABI _Znam_nid_postfix(std::size_t);
+void* APS5_VABI _ZnwmSt11align_val_t_nid_postfix(std::size_t, std::size_t);
 void* APS5_VABI _ZnwmRKSt9nothrow_t_nid_postfix(std::size_t, const void*) noexcept;
 void* APS5_VABI _ZnamRKSt9nothrow_t_nid_postfix(std::size_t, const void*) noexcept;
 void APS5_VABI _ZdlPv_nid_postfix(void*);
+void APS5_VABI _ZdlPvSt11align_val_t_nid_postfix(void*, std::size_t);
 }
 
 namespace {
@@ -175,6 +177,13 @@ int main(int argc, char** argv) {
 
     REQUIRE(_ZSt15set_new_handlerPFvvE_nid_postfix(nullptr) == &allocatingHandler);
     REQUIRE(_ZSt15get_new_handlerv_nid_postfix() == nullptr);
+
+    Reset(0);
+    void* aligned = _ZnwmSt11align_val_t_nid_postfix(24, 16);
+    REQUIRE(aligned == storage.data() && lastSize == 24 && allocations == 1);
+    _ZdlPvSt11align_val_t_nid_postfix(aligned, 16);
+    Reset(1);
+    REQUIRE(Throws([] { _ZnwmSt11align_val_t_nid_postfix(8, 32); }) && handlerCalls == 0 && allocations == 1);
 
     std::puts("Guest new handler checks passed");
     return 0;
