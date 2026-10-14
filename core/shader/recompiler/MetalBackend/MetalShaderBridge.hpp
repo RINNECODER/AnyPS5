@@ -5,6 +5,7 @@
 #include <optional>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -111,6 +112,44 @@ struct CapturedSamplerRequirement {
     std::uint32_t descriptorSet, binding, element;
 };
 
+// Generated MSL, shared between copies: a converted shader is copied for every draw and dispatch
+// (each copy carries its caller's guest metadata), and copying the whole source text was a large
+// part of the graphics queue thread on a title's map. The text never changes once set; assigning
+// a new one replaces it for this holder only. Reads look like a const std::string.
+class ShaderSource {
+public:
+    ShaderSource() = default;
+    ShaderSource(std::string value) : text(std::make_shared<const std::string>(std::move(value))) {}
+    ShaderSource(const char* value) : ShaderSource(std::string(value)) {}
+    ShaderSource& operator=(std::string value) {
+        text = std::make_shared<const std::string>(std::move(value));
+        return *this;
+    }
+    ShaderSource& operator=(const char* value) { return *this = std::string(value); }
+
+    [[nodiscard]] const std::string& str() const { return text ? *text : Empty(); }
+    operator const std::string&() const { return str(); }
+    operator std::string_view() const { return str(); }
+    [[nodiscard]] std::size_t size() const { return str().size(); }
+    [[nodiscard]] bool empty() const { return str().empty(); }
+    [[nodiscard]] const char* data() const { return str().data(); }
+    [[nodiscard]] const char* c_str() const { return str().c_str(); }
+    template <typename... Args>
+    [[nodiscard]] std::size_t find(Args&&... args) const { return str().find(std::forward<Args>(args)...); }
+
+    friend bool operator==(const ShaderSource& left, const ShaderSource& right) { return left.text == right.text || left.str() == right.str(); }
+    friend bool operator==(const ShaderSource& left, std::string_view right) { return std::string_view(left.str()) == right; }
+    friend bool operator==(const ShaderSource& left, const std::string& right) { return left.str() == right; }
+    friend bool operator==(const ShaderSource& left, const char* right) { return std::string_view(left.str()) == right; }
+
+private:
+    static const std::string& Empty() {
+        static const std::string empty;
+        return empty;
+    }
+    std::shared_ptr<const std::string> text;
+};
+
 struct Result {
     std::vector<CapturedSamplerRequirement> capturedSamplerRequirements;
     std::vector<MinimumLodImage> minimumLodImages;
@@ -118,7 +157,7 @@ struct Result {
     std::vector<MinimumLodPair> minimumLodPairs;
     ShaderStage stage;
     std::uint32_t vertexBufferCount = 0;
-    std::string source;
+    ShaderSource source;
     // ShaderSourceHash(source), set by ConvertToMetal so that a draw does not hash the source again to
     // find its compiled function; 0 when not computed. A stale value only makes that lookup miss.
     std::size_t sourceHash = 0;

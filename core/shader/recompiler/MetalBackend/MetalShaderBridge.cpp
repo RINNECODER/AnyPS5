@@ -1548,9 +1548,11 @@ static Result ConvertToMetalUncached(const RecompileResult& guest, ShaderStage s
     }
     result.samplerArgumentCount += static_cast<std::uint32_t>(compiler.MinimumLodPairs().size()) * 2u;
     for (const auto& pair : compiler.MinimumLodPairs()) result.minimumLodPairs.push_back({pair.imageSet, pair.imageBinding, pair.imageElement, pair.samplerSet, pair.samplerBinding, pair.samplerElement, pair.magArgument, pair.minArgument, pair.relativeViewMin});
-    try { result.source = compiler.compile(); }
+    std::string source;
+    try { source = compiler.compile(); }
     catch (const std::exception& error) { Fail(error.what()); }
-    InlineExactArithmetic(result.source);
+    InlineExactArithmetic(source);
+    result.source = std::move(source);
     result.requiresTextureLodQueries = compiler.RequiresTextureLodQueries();
     result.minimumLodImages = compiler.MinimumLodImages();
     result.capturedSamplerRequirements = compiler.CapturedSamplers();
@@ -1823,9 +1825,13 @@ BoundedCache<ExactConversion>& ConversionCache() {
 // comparing its words was most of a cache hit (about an eighth of the graphics queue thread on a
 // title's map). The entry holds the words, so no other module can take their address and no holder
 // writes them in place while it exists.
+// It is keyed by the stable key (ConversionKey with stable = true) of the module, and each hit rebuilds
+// pushConstantData for the caller (RestorePushConstants), as a StableConversionCache hit does: push
+// constants, vertex-buffer descriptor fields and descriptor addresses change from draw to draw, so an
+// exact key here missed on most draws and each such draw built three keys and inserted two entries.
 struct ModuleConversion {
     std::shared_ptr<const std::vector<std::uint32_t>> module;
-    ExactConversion conversion;
+    std::shared_ptr<const Result> shader;
 };
 
 BoundedCache<ModuleConversion>& ModuleConversionCache() {
@@ -1833,10 +1839,10 @@ BoundedCache<ModuleConversion>& ModuleConversionCache() {
     return cache;
 }
 
-void RememberModule(const std::shared_ptr<const std::vector<std::uint32_t>>& module, std::optional<CacheKey>& key, const ExactConversion& conversion) {
-    if (!module || !key) return;
-    const auto bytes = module->size() * sizeof(std::uint32_t) + conversion.pushConstantData.size() + sizeof(ModuleConversion);
-    static_cast<void>(ModuleConversionCache().Insert(std::move(*key), ModuleConversion{module, conversion}, bytes));
+void RememberModule(const std::shared_ptr<const std::vector<std::uint32_t>>& module, std::optional<CacheKey>& key, const std::shared_ptr<const Result>& shader) {
+    if (!module || !key || !shader) return;
+    const auto bytes = module->size() * sizeof(std::uint32_t) + sizeof(ModuleConversion);
+    static_cast<void>(ModuleConversionCache().Insert(std::move(*key), ModuleConversion{module, shader}, bytes));
     key.reset();
 }
 
@@ -1876,12 +1882,17 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     const auto module = guest.spirv.Share();
     std::optional<CacheKey> moduleKey;
     if (module) {
-        moduleKey = ConversionKey(guest, stage, target, false, module.get());
-        if (auto cached = ModuleConversionCache().Find(*moduleKey)) return Returned(*cached->conversion.shader, guest, cached->conversion.pushConstantData);
+        moduleKey = ConversionKey(guest, stage, target, true, module.get());
+        if (auto cached = ModuleConversionCache().Find(*moduleKey)) {
+            Result restored = Returned(*cached->shader, guest, {});
+            if (RestorePushConstants(restored, guest, target)) return restored;
+            // Push constants that do not fit the converted block: the exact path decides, as before.
+            moduleKey.reset();
+        }
     }
     auto key = ConversionKey(guest, stage, target);
     if (auto cached = ConversionCache().Find(key)) {
-        RememberModule(module, moduleKey, *cached);
+        RememberModule(module, moduleKey, cached->shader);
         return Returned(*cached->shader, guest, cached->pushConstantData);
     }
     // A miss in memory tries the disk before running SPIRV-Cross (most of a warm launch's shader time).
@@ -1896,7 +1907,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         Result restored = Returned(**stable, guest, {});
         if (RestorePushConstants(restored, guest, target)) {
             ExactConversion conversion{*stable, restored.pushConstantData};
-            RememberModule(module, moduleKey, conversion);
+            RememberModule(module, moduleKey, *stable);
             ConversionCache().Insert(std::move(key), std::move(conversion), ResultBytes(restored));
             return restored;
         }
@@ -1954,7 +1965,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     const auto bytes = ResultBytes(result);
     StableConversionCache().Insert(diskKey, stored, bytes);
     ExactConversion conversion{stored, result.pushConstantData};
-    RememberModule(module, moduleKey, conversion);
+    RememberModule(module, moduleKey, stored);
     ConversionCache().Insert(std::move(key), std::move(conversion), bytes);
     return result;
 }

@@ -127,13 +127,26 @@ static void VerifyConversionCache(const RecompileResult& sample, const Recompile
     auto described = sample;
     described.bindings[0].guestDescriptor.assign(4 * described.bindings[0].count, 0x1234u);
     static_cast<void>(ConvertToMetal(described, ShaderStage::Compute, target));
+    stats = GetConversionCacheStatistics();
+    Require(stats.misses == 5 && stats.hits == 1, "guest descriptor words did not key the cache");
+    // Push-constant values do not change the converted shader: a draw whose push constants differ
+    // hits the conversion of the same module and gets its own values in pushConstantData, exactly
+    // as an uncached conversion materializes them.
     auto pushed = pushGuest;
     pushed.pushConstants[0] = std::byte{0x5a};
-    static_cast<void>(ConvertToMetal(pushed, ShaderStage::Compute, shifted));
+    const auto pushedShifted = ConvertToMetal(pushed, ShaderStage::Compute, shifted);
     stats = GetConversionCacheStatistics();
-    Require(stats.misses == 6 && stats.hits == 1, "guest descriptor words or push constants did not key the cache");
-    Require(ConvertToMetal(pushed, ShaderStage::Compute, shifted).pushConstantData == ConvertToMetal(pushed, ShaderStage::Compute, shifted).pushConstantData &&
-            GetConversionCacheStatistics().hits == 3, "repeated push conversion missed the cache");
+    Require(stats.misses == 5 && stats.hits == 2, "a push-constant variant of a converted module missed the cache");
+    Require(pushedShifted.pushConstantData != pushShifted.pushConstantData && pushedShifted.pushConstantData.size() == 20 &&
+            pushedShifted.pushConstantData[16] == std::byte{0x5a}, "a cached conversion returned another caller's push constants");
+    Require(ConvertToMetal(pushShifted.guest, ShaderStage::Compute, shifted).pushConstantData == pushShifted.pushConstantData,
+            "a cached conversion kept the push constants of the previous caller");
+    ClearConversionCache();
+    const auto pushedFresh = ConvertToMetal(pushed, ShaderStage::Compute, shifted);
+    Require(pushedFresh.pushConstantData == pushedShifted.pushConstantData && pushedFresh.source == pushedShifted.source &&
+            pushedFresh.resources.size() == pushedShifted.resources.size(), "a push-constant variant served from the cache differs from its uncached conversion");
+    Require(ConvertToMetal(pushed, ShaderStage::Compute, shifted).pushConstantData == pushedFresh.pushConstantData &&
+            GetConversionCacheStatistics().hits == 1, "repeated push conversion missed the cache");
     ClearConversionCache();
     stats = GetConversionCacheStatistics();
     Require(stats.entries == 0 && stats.bytes == 0, "clearing the conversion cache kept entries");
