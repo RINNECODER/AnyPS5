@@ -6,6 +6,7 @@
 #include <codegen/IAmd64OnlyConverter.hpp>
 #include <codegen/x86/IAmd64OnlyInstructionMatcher.hpp>
 #include <codegen/x86/RosettaCpuid.hpp>
+#include <codegen/x86/ScalarCompareOperands.hpp>
 #include <codegen/x86/StubBodyBuilder.hpp>
 
 #include <algorithm>
@@ -473,6 +474,173 @@ void ReciprocalExecution() {
     std::printf("rosetta_cpuid: %d reciprocal form executions\n", forms);
 }
 
+
+// ---- CMPSS / CMPSD: Rosetta loses a full-width VEX load into the compare's destination in the same block ----
+
+struct CompareForm {
+    bool Vex;
+    bool Double;
+    std::uint8_t Predicate;
+};
+
+// cmp xmm1, (xmm2,) xmm3, predicate: the legacy form compares xmm1 itself (preloaded with the same value as xmm2).
+Bytes EncodeCompare(const CompareForm& form) {
+    const std::uint8_t pp = form.Double ? 0x03 : 0x02;
+    if (form.Vex)  // VEX.128.F3/F2.0F C2 /r ib; vvvv = xmm2, ModRM reg = xmm1, rm = xmm3
+        return {0xC5, static_cast<std::uint8_t>(0x80 | ((~2u & 0xF) << 3) | pp), 0xC2, 0xCB, form.Predicate};
+    return {static_cast<std::uint8_t>(form.Double ? 0xF2 : 0xF3), 0x0F, 0xC2, 0xCB, form.Predicate};
+}
+
+// x86 compare predicates (imm8[3:0]; bit 4 only selects signalling or quiet).
+bool ComparePredicate(const double a, const double b, const std::uint8_t predicate) {
+    const bool unordered = std::isnan(a) || std::isnan(b);
+    switch (predicate & 0x0F) {
+    case 0: return !unordered && a == b;
+    case 1: return !unordered && a < b;
+    case 2: return !unordered && a <= b;
+    case 3: return unordered;
+    case 4: return unordered || a != b;
+    case 5: return unordered || !(a < b);
+    case 6: return unordered || !(a <= b);
+    case 7: return !unordered;
+    case 8: return unordered || a == b;
+    case 9: return unordered || !(a >= b);
+    case 10: return unordered || !(a > b);
+    case 11: return false;
+    case 12: return !unordered && a != b;
+    case 13: return !unordered && a >= b;
+    case 14: return !unordered && a > b;
+    default: return true;
+    }
+}
+
+// Calls fn with xmm0..xmm3 loaded from x and rdx = memory; returns rax.
+std::uint64_t CallCompare(const std::uint8_t* function, const std::uint8_t (&x)[4][16], const void* memory) {
+    std::uint64_t result = 0;
+    __asm__ volatile(
+        "sub $128, %%rsp\n\t"
+        "movdqu 0(%[x]), %%xmm0\n\t"
+        "movdqu 16(%[x]), %%xmm1\n\t"
+        "movdqu 32(%[x]), %%xmm2\n\t"
+        "movdqu 48(%[x]), %%xmm3\n\t"
+        "call *%[fn]\n\t"
+        "add $128, %%rsp"
+        : "=a"(result)
+        : [fn] "r"(function), [x] "r"(&x), "d"(memory)
+        : "xmm0", "xmm1", "xmm2", "xmm3", "memory", "cc");
+    return result;
+}
+
+// The text as it stands, on its own executable page (no relinking).
+class RawSite {
+public:
+    explicit RawSite(const Bytes& text) {
+        _page = static_cast<std::uint8_t*>(mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0));
+        if (_page == MAP_FAILED) { _page = nullptr; return; }
+        std::memset(_page, 0xCC, 4096);
+        std::copy(text.begin(), text.end(), _page);
+        if (mprotect(_page, 4096, PROT_READ | PROT_EXEC) != 0) { munmap(_page, 4096); _page = nullptr; }
+    }
+    ~RawSite() { if (_page) munmap(_page, 4096); }
+    [[nodiscard]] const std::uint8_t* Address() const { return _page; }
+private:
+    std::uint8_t* _page = nullptr;
+};
+
+template<typename T>
+void Fill(std::uint8_t (&reg)[16], const T low, const std::uint64_t pattern) {
+    std::memcpy(reg, &pattern, 8);
+    std::memcpy(reg + 8, &pattern, 8);
+    std::memcpy(reg, &low, sizeof low);
+}
+
+void ScalarCompareExecution() {
+    if (!Translated())
+        return;
+    const bool avx = Executes("AVX", [] { __asm__ volatile("vxorps %%ymm0, %%ymm0, %%ymm0\n\tvzeroupper" : : : "xmm0"); });
+    if (!avx)
+        return;
+    int lost = 0, sequences = 0, masks = 0;
+    for (const bool isDouble : {false, true}) {
+        for (const bool vex : {false, true}) {
+            for (std::uint8_t predicate = 0; predicate < (vex ? 32 : 8); ++predicate) {
+                const CompareForm form{vex, isDouble, predicate};
+                const Bytes compare = EncodeCompare(form);
+                const auto split = Codegen::DecodeScalarCompare(compare.data(), compare.size());
+                require(split.has_value(), "A generated scalar compare was not decoded");
+                const bool lowered = split && Codegen::RosettaSplitsScalarCompare(*split);
+                char name[64];
+                std::snprintf(name, sizeof name, "%s%s predicate %u", vex ? "VCMP" : "CMP", isDouble ? "SD" : "SS", predicate);
+
+                // 1. compare into xmm1; vmovaps xmm1, [rdx]; v(u)comis xmm1, xmm0; pushfq; pop rax; ret.
+                //    [rdx] and xmm0 hold the same value, so ZF must be set and CF and PF clear.
+                Bytes sequence = compare;
+                const Bytes tail = {0xC5, 0xF8, 0x28, 0x0A, 0xC5, static_cast<std::uint8_t>(isDouble ? 0xF9 : 0xF8), 0x2E, 0xC8, 0x9C, 0x58, 0xC3};
+                sequence.insert(sequence.end(), tail.begin(), tail.end());
+                alignas(16) std::uint8_t loaded[16] = {};
+                std::uint8_t x[4][16] = {};
+                if (isDouble) {
+                    const double value = 309.0;
+                    Fill(x[0], value, 0); std::memcpy(loaded, &value, 8);
+                    Fill(x[1], value, 0); Fill(x[2], value, 0); Fill(x[3], value, 0);
+                } else {
+                    const float value = 309.0f;
+                    Fill(x[0], value, 0); std::memcpy(loaded, &value, 4);
+                    Fill(x[1], value, 0); Fill(x[2], value, 0); Fill(x[3], value, 0);
+                }
+                const auto equal = [](const std::uint64_t flags) { return (flags & 0x45) == 0x40; };
+                const RawSite raw(sequence);
+                const bool rawEqual = raw.Address() && equal(CallCompare(raw.Address(), x, loaded));
+                ++sequences;
+                if (!rawEqual) {
+                    ++lost;
+                    if (!lowered) {
+                        std::fprintf(stderr, "%s: Rosetta loses the load after it, and it is not split\n", name);
+                        require(false, "A scalar compare Rosetta mistranslates is not split");
+                    }
+                }
+                if (lowered) {
+                    const LinkedSite site(sequence);
+                    require(site.Ready() && equal(CallCompare(site.Address(), x, loaded)), "A split scalar compare still loses the following load");
+                }
+
+                // 2. The compare's own result, merge included: vmovq rax, xmm1; ret.
+                Bytes result = compare;
+                const Bytes movq = {0xC4, 0xE1, 0xF9, 0x7E, 0xC8, 0xC3};
+                result.insert(result.end(), movq.begin(), movq.end());
+                const double pairs[][2] = {{1, 2}, {2, 1}, {2, 2}, {NAN, 1}};
+                for (const auto& pair : pairs) {
+                    std::uint8_t in[4][16] = {};
+                    const std::uint64_t first = 0x1111111122222222ull, destination = 0x3333333344444444ull;
+                    if (isDouble) {
+                        Fill(in[1], pair[0], destination); Fill(in[2], pair[0], first); Fill(in[3], pair[1], 0);
+                    } else {
+                        Fill(in[1], static_cast<float>(pair[0]), destination); Fill(in[2], static_cast<float>(pair[0]), first); Fill(in[3], static_cast<float>(pair[1]), 0);
+                    }
+                    const bool truth = ComparePredicate(pair[0], pair[1], vex ? predicate : static_cast<std::uint8_t>(predicate & 7));
+                    // VEX takes bits 63:32 from the first source, the legacy form keeps the destination's.
+                    const std::uint64_t upper = (vex ? first : destination) & 0xFFFFFFFF00000000ull;
+                    const std::uint64_t expected = isDouble ? (truth ? ~0ull : 0ull) : (upper | (truth ? 0xFFFFFFFFull : 0ull));
+                    std::uint64_t got = 0;
+                    if (lowered) {
+                        const LinkedSite site(result);
+                        got = site.Ready() ? CallCompare(site.Address(), in, loaded) : ~expected;
+                    } else {
+                        const RawSite site(result);
+                        got = site.Address() ? CallCompare(site.Address(), in, loaded) : ~expected;
+                    }
+                    ++masks;
+                    if (got != expected) {
+                        std::fprintf(stderr, "%s (%g, %g): got %016llx want %016llx\n", name, pair[0], pair[1], static_cast<unsigned long long>(got), static_cast<unsigned long long>(expected));
+                        require(false, "A scalar compare gives the wrong result");
+                    }
+                }
+            }
+        }
+    }
+    std::printf("rosetta_cpuid: %d compare + load sequences (Rosetta loses the load in %d of them as written); %d compare results\n", sequences, lost, masks);
+}
+
 #endif
 
 }
@@ -482,6 +650,7 @@ int main() {
 #ifdef ROSETTA_CPUID_EXECUTE
     Execution();
     ReciprocalExecution();
+    ScalarCompareExecution();
 #endif
     if (g_failures != 0) return EXIT_FAILURE;
     std::printf("rosetta_cpuid: ok\n");

@@ -8,6 +8,7 @@
 #include <codegen/x86/ReciprocalLowering.hpp>
 #include <codegen/x86/ReciprocalOperands.hpp>
 #include <codegen/x86/RosettaCpuid.hpp>
+#include <codegen/x86/ScalarCompareOperands.hpp>
 #include <codegen/x86/Sha256Lowering.hpp>
 #include <codegen/x86/Sha256Operands.hpp>
 #include <codegen/x86/Sha1Lowering.hpp>
@@ -103,6 +104,26 @@ LoweredBody _outOfLine(const std::size_t length, const std::span<const std::uint
     body.Advance(length);
     _moveTrailing(body, trailing);
     return body.Finish();
+}
+
+// The instruction itself, unchanged, at the current site offset (a RIP-relative operand keeps its target).
+void _emitUnchanged(StubBodyBuilder& body, const DecodedInstruction& instr) {
+    const std::span<const std::uint8_t> bytes(instr.Data, instr.Length);
+    const auto info = X64InstructionDecoder{}.DecodeInstruction(instr.Data, instr.Length);
+    if (!info.HasRipRelativeDisp) {
+        body.Raw(bytes);
+        return;
+    }
+    std::int32_t displacement = 0;
+    for (std::size_t index = 0; index < 4; ++index)
+        displacement |= static_cast<std::int32_t>(static_cast<std::uint32_t>(instr.Data[info.RipRelativeDispOffset + index]) << (index * 8));
+    body.RipRelative(bytes, info.RipRelativeDispOffset, static_cast<std::int64_t>(instr.Length) + displacement);
+}
+
+const Entry& _scalarCompareEntry(const ScalarCompare& compare) {
+    if (compare.Double)
+        return compare.Vex ? kVcmpsd : kCmpsd;
+    return compare.Vex ? kVcmpss : kCmpss;
 }
 
 Amd64OnlyMatch _inPlace(const Entry& entry, const std::size_t length, std::vector<std::uint8_t> replacement) {
@@ -228,6 +249,9 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::_matchRosetta(const D
         return _trampoline(kCpuid.Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { body.Raw(RosettaCpuid::StubBody()); }), true);
     if (const auto wide = DecodeVexWideStore(instr.Data, instr.Length))
         return _trampoline(kWideStore.Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { _wideStoreLowering.EmitOutOfLine(body, *wide); }), false, true);
+    // Out of line, unchanged: the compare and a later full-width load of its destination land in different blocks.
+    if (const auto compare = DecodeScalarCompare(instr.Data, instr.Length); compare && RosettaSplitsScalarCompare(*compare))
+        return _trampoline(_scalarCompareEntry(*compare).Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { _emitUnchanged(body, instr); }), true);
     return std::nullopt;
 }
 
@@ -267,6 +291,10 @@ const char* Amd64OnlyInstructionMatcher::_emitOutOfLine(StubBodyBuilder& body, c
         _wideStoreLowering.EmitOutOfLine(body, *wide);
         return kWideStore.Name;
     }
+    if (const auto compare = _target == Amd64OnlyTarget::Rosetta ? DecodeScalarCompare(instr.Data, instr.Length) : std::nullopt; compare && RosettaSplitsScalarCompare(*compare)) {
+        _emitUnchanged(body, instr);
+        return _scalarCompareEntry(*compare).Name;
+    }
     return nullptr;
 }
 
@@ -295,7 +323,9 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
     }
     _moveTrailing(body, trailing);
     const DecodedInstruction first{instructions.front().data(), instructions.front().size()};
-    const bool optional = DecodeReciprocal(first.Data, first.Length).has_value() || (_target == Amd64OnlyTarget::Rosetta && (first.IsRdpid() || first.IsCpuid()));
+    const auto compare = DecodeScalarCompare(first.Data, first.Length);
+    const bool optional = DecodeReciprocal(first.Data, first.Length).has_value()
+        || (_target == Amd64OnlyTarget::Rosetta && (first.IsRdpid() || first.IsCpuid() || (compare && RosettaSplitsScalarCompare(*compare))));
     return _trampoline(name, instructions.front().size(), body.Finish(), optional);
 }
 

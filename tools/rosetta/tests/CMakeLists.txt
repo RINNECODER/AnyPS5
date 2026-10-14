@@ -27,6 +27,7 @@ add_test_executable(rosetta_cpuid_tests
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ClzeroOperands.cpp
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ClzeroLowering.cpp
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ReciprocalOperands.cpp
+    ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ScalarCompareOperands.cpp
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/ReciprocalLowering.cpp
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/WideStoreOperands.cpp
     ${ANYPS5_RELINKER_ROOT}/codegen/src/x86/WideStoreLowering.cpp)
