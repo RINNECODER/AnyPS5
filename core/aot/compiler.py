@@ -64,9 +64,6 @@ for name in VECTOR_REGISTERS:
     ALIASES[name] = (name, 128, 0)
 TYPES = abi.TYPES
 MASK64 = (1 << 64) - 1
-# Alignment of the native guest-stack frame. `and rsp, mask` realignments that clear only
-# bits below this alignment are modeled exactly on the frame-relative stack offset.
-FRAME_ALIGNMENT = 64
 FLAGS = {'zf', 'sf', 'cf', 'of', 'pf'}
 CONDITIONS = {'e': {'zf'}, 'ne': {'zf'}, 'b': {'cf'}, 'ae': {'cf'}, 'a': {'cf', 'zf'},
               'be': {'cf', 'zf'}, 'l': {'sf', 'of'}, 'ge': {'sf', 'of'}, 'g': {'sf', 'of', 'zf'},
@@ -827,22 +824,13 @@ class Function:
                     dest = self.reg(ins, args[0])[0]
                     if op in ('add', 'sub') and args[1].type == X86_OP_IMM and state[dest] is not None:
                         state[dest] += args[1].imm * (1 if op == 'add' else -1)
-                    elif op == 'and' and args[1].type == X86_OP_IMM and state[dest] is not None:
-                        # Stack realignment (`and rsp, -16`): the native frame is FRAME_ALIGNMENT
-                        # aligned, so masking the frame-relative offset is exact while the
-                        # cleared low bits stay within that alignment.
-                        cleared = ~args[1].imm & ((1 << 64) - 1)
-                        if cleared and (cleared + 1) & cleared == 0 and cleared + 1 <= FRAME_ALIGNMENT:
-                            signed = args[1].imm - (1 << 64) if args[1].imm >> 63 else args[1].imm
-                            state[dest] &= signed
+                        if dest == 'rsp' and state['rsp'] > original['rsp']:
+                            state['saved'] = {offset: saved for offset, saved in state['saved'].items() if offset >= state['rsp']}
+                        self.depth = max(self.depth, -state[dest] + 128)
                     elif self.uniform:
                         state[dest] = None
                     else:
                         self.fail(ins, 'dynamic frame allocation')
-                    if state[dest] is not None:
-                        if dest == 'rsp' and state['rsp'] > original['rsp']:
-                            state['saved'] = {offset: saved for offset, saved in state['saved'].items() if offset >= state['rsp']}
-                        self.depth = max(self.depth, -state[dest] + 128)
             state['flags'] = set(FLAGS)
             return state
         self.fail(ins, 'instruction semantics are not implemented')
@@ -1510,7 +1498,7 @@ class Function:
             self.lines.append(f'  store i128 {unknown}, ptr %{reg}, align 16')
         for flag in ('zf', 'sf', 'cf', 'of', 'pf'):
             self.lines.append(f'  %{flag} = alloca i1, align 1')
-        self.lines.append(f'  %frame = alloca [{self.depth + self.stack_end} x i8], align {FRAME_ALIGNMENT}')
+        self.lines.append(f'  %frame = alloca [{self.depth + self.stack_end} x i8], align 16')
         if self.uniform:
             self.lines.append('  %rf_out = alloca %regfile, align 16')
             self.lines.append('  %x87 = alloca [8 x double], align 16')
