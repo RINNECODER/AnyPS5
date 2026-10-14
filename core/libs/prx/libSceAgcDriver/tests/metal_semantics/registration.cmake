@@ -95,3 +95,7 @@ foreach(semanticsTest IN ITEMS ImagePlaneAddressOnLine ImageVolumeAddressOnPlane
 "#define CORE_LIBS_PRX_LIBSCEAGCDRIVER_TESTS_VULKANTESTDEVICE_HPP\n#include \"MetalDriverTestDevice.hpp\"\n#include \"${semanticsUpstreamDir}/${semanticsTest}.cpp\"\n")
     anyps5_metal_driver_semantics(${semanticsTest} "${semanticsWrapper}")
 endforeach()
+# Fork-only variants of upstream tests that cannot run unchanged on Metal.
+foreach(semanticsTest IN ITEMS ImageTableRecord)
+    anyps5_metal_driver_semantics(${semanticsTest} "${semanticsDir}/${semanticsTest}.cpp")
+endforeach()
