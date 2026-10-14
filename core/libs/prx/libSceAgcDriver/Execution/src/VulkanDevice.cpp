@@ -242,6 +242,7 @@ struct VulkanDevice::State {
     bool dmaBufImport = false;
     std::uint32_t queueFamily = 0;
     VkQueue settleQueue = VK_NULL_HANDLE;
+    std::uint32_t settleFamily = 0;
     VkCommandPool settlePool = VK_NULL_HANDLE;
     std::mutex settleQueueMutex;
     bool memoryBudget = false;
@@ -1103,16 +1104,25 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
 #ifdef _WIN32
     const float priorities[2]{1.0f, 1.0f};
     bool settleQueue = false;
-    {
+    std::uint32_t settleFamily = family;
+    if (std::getenv("APS5_NO_WATCHED_PRIVATE_IMPORTS") == nullptr) {
         std::uint32_t families = 0;
         auto getFamilies = state->InstanceFunction<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
         getFamilies(selected, &families, nullptr);
         std::vector<VkQueueFamilyProperties> queues(families);
         getFamilies(selected, &families, queues.data());
-        if (family < families && queues[family].queueCount >= 2 && std::getenv("APS5_NO_WATCHED_PRIVATE_IMPORTS") == nullptr) {
+        if (family < families && queues[family].queueCount >= 2 && std::getenv("APS5_SETTLE_OTHER_FAMILY") == nullptr) {
             queueInfo.queueCount = 2;
             queueInfo.pQueuePriorities = priorities;
             settleQueue = true;
+        } else {
+            const auto copies = [&](std::uint32_t index) { return index != family && queues[index].queueCount != 0 && (queues[index].queueFlags & (VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) != 0; };
+            for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
+                if (copies(i) && (queues[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) == 0) settleFamily = i, settleQueue = true;
+            }
+            for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
+                if (copies(i)) settleFamily = i, settleQueue = true;
+            }
         }
     }
 #endif
@@ -1141,6 +1151,21 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     // Guest shaders routinely read past descriptor ranges; robust access turns that into zeros
     // instead of a GPU fault that loses the device.
     enabled.robustBufferAccess = available.robustBufferAccess;
+    VkDeviceQueueCreateInfo queueInfos[2]{queueInfo, {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO}};
+    deviceInfo.pQueueCreateInfos = queueInfos;
+#ifdef _WIN32
+    if (settleQueue && settleFamily != family) {
+        if (deviceInfo.queueCreateInfoCount == 1) {
+            queueInfos[1] = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+            queueInfos[1].queueFamilyIndex = settleFamily;
+            queueInfos[1].queueCount = 1;
+            queueInfos[1].pQueuePriorities = &priority;
+            deviceInfo.queueCreateInfoCount = 2;
+        } else {
+            settleQueue = false;
+        }
+    }
+#endif
     // Indirect draw records with a non-zero first instance, and several records per call.
     enabled.drawIndirectFirstInstance = available.drawIndirectFirstInstance;
     enabled.multiDrawIndirect = available.multiDrawIndirect;
@@ -1358,14 +1383,21 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, 0, &state->queue);
     state->queueFamily = family;
 #ifdef _WIN32
-    if (settleQueue) state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, 1, &state->settleQueue);
+    if (settleQueue) {
+        state->settleFamily = settleFamily;
+        state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, settleFamily, settleFamily == family ? 1 : 0, &state->settleQueue);
+    }
 #endif
     APS5_LOG_OUT("Vulkan device ready device=%p queue=%p family=%u", reinterpret_cast<void*>(state->device), reinterpret_cast<void*>(state->queue), family);
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = family;
     check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &poolInfo, nullptr, &state->pool), "vkCreateCommandPool");
-    if (state->settleQueue != VK_NULL_HANDLE) check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &poolInfo, nullptr, &state->settlePool), "vkCreateCommandPool settle");
+    if (state->settleQueue != VK_NULL_HANDLE) {
+        VkCommandPoolCreateInfo settlePoolInfo = poolInfo;
+        settlePoolInfo.queueFamilyIndex = state->settleFamily;
+        check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &settlePoolInfo, nullptr, &state->settlePool), "vkCreateCommandPool settle");
+    }
     static const bool procTable = std::getenv("APS5_NO_PROC_TABLE") == nullptr;
     if (procTable) {
         Graphics::FillDeviceFunctions(graphicsContext(), state->deviceFunctions);
@@ -2811,6 +2843,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.queueFamily = state->queueFamily;
     context.settleQueue = state->settlePool != VK_NULL_HANDLE ? state->settleQueue : VK_NULL_HANDLE;
     context.settlePool = state->settlePool;
+    context.settleFamily = state->settleFamily;
     context.settleQueueMutex = &state->settleQueueMutex;
     context.recorder = state->recorder.get();
     context.descriptorCache = state->descriptorCache.get();
