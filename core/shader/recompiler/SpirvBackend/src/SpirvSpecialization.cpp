@@ -554,6 +554,7 @@ public:
             changed |= propagateCopies();
         }
         removeDeadComputations();
+        removeUnusedFunctions();
         removeUnreachableBlocks();
         removeUnusedConstants();
         orderPhis();
@@ -827,6 +828,79 @@ private:
             }
         }
         return changed;
+    }
+
+    void removeUnusedFunctions() {
+        std::map<std::uint32_t, std::pair<std::size_t, std::size_t>> functions;
+        std::uint32_t current = 0;
+        for (std::size_t index = 0; index < instructions.size(); ++index) {
+            const auto& instruction = instructions[index];
+            if (instruction.empty()) continue;
+            const auto op = Opcode(instruction);
+            if (op == spv::OpFunction) {
+                current = Result(instruction);
+                functions.emplace(current, std::pair{index, instructions.size()});
+            } else if (op == spv::OpFunctionEnd && current != 0) {
+                functions.at(current).second = index + 1u;
+                current = 0;
+            }
+        }
+        if (functions.empty()) return;
+        std::map<std::uint32_t, std::set<std::uint32_t>> references;
+        std::set<std::uint32_t> moduleReferences;
+        std::vector<std::uint32_t> pending;
+        bool hasEntryPoint = false;
+        current = 0;
+        for (const auto& instruction : instructions) {
+            if (instruction.empty()) continue;
+            const auto op = Opcode(instruction);
+            if (op == spv::OpFunction) current = Result(instruction);
+            if (op == spv::OpEntryPoint) hasEntryPoint = true;
+            if (current == 0 && instruction.size() > 2u && ((op == spv::OpDecorate && instruction[2] == spv::DecorationLinkageAttributes) || op == spv::OpDecorateString)) {
+                moduleReferences.insert(instruction[1]);
+                if (functions.contains(instruction[1])) pending.push_back(instruction[1]);
+            }
+            std::uint32_t switchLiteralWords = 1u;
+            if (op == spv::OpSwitch && instruction.size() > 1u) {
+                const auto* selectorType = resultTypes.find(instruction[1]);
+                if (selectorType != nullptr && types.contains(*selectorType) && types.at(*selectorType).width == 64u) switchLiteralWords = 2u;
+            }
+            VisitIdOperands(instruction, switchLiteralWords, [&](std::size_t index) {
+                const auto id = instruction[index];
+                if (current == 0 && op != spv::OpName && op != spv::OpDecorate) moduleReferences.insert(id);
+                if (!functions.contains(id)) return;
+                if (current == 0) pending.push_back(id);
+                else references[current].insert(id);
+            });
+            if (op == spv::OpFunctionEnd) current = 0;
+        }
+        if (!hasEntryPoint) return;
+        for (const auto& [id, range] : functions) {
+            for (auto index = range.first; index < range.second; ++index) {
+                const auto result = Result(instructions[index]);
+                if (result == 0 || !moduleReferences.contains(result)) continue;
+                pending.push_back(id);
+                break;
+            }
+        }
+        std::set<std::uint32_t> live;
+        while (!pending.empty()) {
+            const auto id = pending.back();
+            pending.pop_back();
+            if (!live.insert(id).second) continue;
+            if (const auto found = references.find(id); found != references.end()) pending.insert(pending.end(), found->second.begin(), found->second.end());
+        }
+        for (const auto& [id, range] : functions) {
+            if (live.contains(id)) continue;
+            for (auto index = range.first; index < range.second; ++index) {
+                auto& instruction = instructions[index];
+                if (instruction.empty()) continue;
+                bool hasResult = false, hasType = false;
+                spv::HasResultAndType(Opcode(instruction), &hasResult, &hasType);
+                if (hasResult) removed.insert(instruction.at(hasType ? 2u : 1u));
+                instruction.clear();
+            }
+        }
     }
 
     IdSet referencedIds() const {

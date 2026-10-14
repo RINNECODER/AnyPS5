@@ -286,6 +286,81 @@ void testFoldingLeavesNoDeadBlocksOrConstants() {
     checkFoldedSwitch(foldedSwitchModule(32u, {15u, 16u, 1u}), 32u, "the OpTypeInt width and the LocalSize literals equal the dead ids");
 }
 
+void testUnusedHelperFunctions() {
+    const auto module = [](bool entryPoints) {
+        std::vector<std::uint32_t> words{spv::MagicNumber, 0x00010300u, 0u, 256u, 0u};
+        const auto emit = [&](spv::Op op, std::initializer_list<std::uint32_t> operands) {
+            words.push_back((static_cast<std::uint32_t>(operands.size() + 1u) << 16u) | op);
+            words.insert(words.end(), operands);
+        };
+        emit(spv::OpCapability, {spv::CapabilityShader});
+        emit(spv::OpCapability, {spv::CapabilityLinkage});
+        emit(spv::OpMemoryModel, {spv::AddressingModelLogical, spv::MemoryModelGLSL450});
+        if (entryPoints) {
+            emit(spv::OpEntryPoint, {spv::ExecutionModelGLCompute, 10u, 0x6e69616du, 0u});
+            emit(spv::OpEntryPoint, {spv::ExecutionModelGLCompute, 40u, 0x6568746fu, 0x72u});
+            emit(spv::OpExecutionMode, {10u, spv::ExecutionModeLocalSize, 1u, 1u, 1u});
+            emit(spv::OpExecutionMode, {40u, spv::ExecutionModeLocalSize, 1u, 1u, 1u});
+        }
+        emit(spv::OpName, {32u, 0x64616564u, 0u});
+        emit(spv::OpDecorationGroup, {64u});
+        emit(spv::OpDecorate, {64u, spv::DecorationRelaxedPrecision});
+        emit(spv::OpGroupDecorate, {64u, 62u});
+        emit(spv::OpDecorate, {70u, spv::DecorationLinkageAttributes, 0x6f707865u, 0x64657472u, 0u, spv::LinkageTypeExport});
+        emit(spv::OpTypeVoid, {1u});
+        emit(spv::OpTypeFunction, {2u, 1u});
+        emit(spv::OpTypeInt, {3u, 32u, 0u});
+        emit(spv::OpTypeBool, {5u});
+        emit(spv::OpConstantFalse, {5u, 6u});
+        emit(spv::OpTypePointer, {7u, spv::StorageClassPrivate, 3u});
+        emit(spv::OpConstant, {3u, 8u, 0u});
+        emit(spv::OpVariable, {7u, 9u, spv::StorageClassPrivate, 8u});
+        emit(spv::OpFunction, {1u, 10u, spv::FunctionControlMaskNone, 2u});
+        emit(spv::OpLabel, {11u});
+        emit(spv::OpSelectionMerge, {14u, spv::SelectionControlMaskNone});
+        emit(spv::OpBranchConditional, {6u, 12u, 13u});
+        emit(spv::OpLabel, {12u});
+        emit(spv::OpFunctionCall, {1u, 110u, 32u});
+        emit(spv::OpBranch, {14u});
+        emit(spv::OpLabel, {13u});
+        emit(spv::OpFunctionCall, {1u, 111u, 20u});
+        emit(spv::OpBranch, {14u});
+        emit(spv::OpLabel, {14u});
+        emit(spv::OpReturn, {});
+        emit(spv::OpFunctionEnd, {});
+        const auto function = [&](std::uint32_t id, std::uint32_t label, std::uint32_t callee) {
+            emit(spv::OpFunction, {1u, id, spv::FunctionControlMaskNone, 2u});
+            emit(spv::OpLabel, {label});
+            if (callee != 0) emit(spv::OpFunctionCall, {1u, 100u + id, callee});
+            emit(spv::OpReturn, {});
+            emit(spv::OpFunctionEnd, {});
+        };
+        function(20u, 21u, 22u);
+        function(22u, 23u, 0u);
+        function(32u, 33u, 34u);
+        function(34u, 35u, 0u);
+        function(40u, 41u, 42u);
+        function(42u, 43u, 0u);
+        function(70u, 71u, 0u);
+        emit(spv::OpFunction, {1u, 60u, spv::FunctionControlMaskNone, 2u});
+        emit(spv::OpLabel, {61u});
+        emit(spv::OpLoad, {3u, 62u, 9u});
+        emit(spv::OpReturn, {});
+        emit(spv::OpFunctionEnd, {});
+        return words;
+    };
+    const auto functions = [](const std::vector<std::uint32_t>& words) {
+        std::set<std::uint32_t> result;
+        for (std::size_t index = 5; index < words.size(); index += words[index] >> 16u) if ((words[index] & 0xffffu) == spv::OpFunction) result.insert(words[index + 2u]);
+        return result;
+    };
+    const auto specialized = SpecializeSpirv(module(true));
+    check(functions(specialized) == std::set<std::uint32_t>({10u, 20u, 22u, 40u, 42u, 60u, 70u}), "unused helpers survived a folded-away call or referenced helper chains were removed");
+    for (std::size_t index = 5; index < specialized.size(); index += specialized[index] >> 16u) check((specialized[index] & 0xffffu) != spv::OpName || specialized[index + 1u] != 32u, "removed helper kept a dangling name");
+    check(SpecializeSpirv(specialized) == specialized, "unused helper removal is not stable");
+    check(functions(SpecializeSpirv(module(false))).size() == 9u, "module without entry points lost a helper");
+}
+
 void testIdsBeyondTheBoundAreRejected() {
     auto words = foldedSwitchModule(13u, {1u, 1u, 1u});
     words[3] = 12u;
@@ -299,6 +374,7 @@ void testIdsBeyondTheBoundAreRejected() {
 }
 
 int main() {
+    testUnusedHelperFunctions();
     testFoldingLeavesNoDeadBlocksOrConstants();
     testIdsBeyondTheBoundAreRejected();
     testStructExtractsAreNotShuffled();
