@@ -3641,7 +3641,7 @@ void verifyFunctionLdsUpdates() {
         request.useCache = false;
         return Recompile(request);
     };
-    const auto violations = [](const std::vector<std::uint32_t>& words) {
+    const auto violations = [](std::span<const std::uint32_t> words) {
         std::map<std::uint32_t, std::uint32_t> storage;
         std::map<std::uint32_t, std::uint32_t> constants;
         std::map<std::uint32_t, std::uint32_t> types;
