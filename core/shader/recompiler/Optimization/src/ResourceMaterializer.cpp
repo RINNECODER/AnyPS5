@@ -62,7 +62,7 @@ ShaderBufferResource decodeBufferDescriptor(const DescriptorValue& value) {
 }
 
 bool nullImageDescriptor(const DescriptorValue& descriptor) {
-    return descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u;
+    return ((descriptor.dwords[3] >> 28u) & 0xfu) == 0u || (descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u);
 }
 
 ImageType rawImageType(const DescriptorValue& descriptor) {
@@ -506,6 +506,29 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
     snapshot.samplers.assign(values.begin() + cursor, values.begin() + cursor + plan.info.samplers.size());
 }
 
+void materializeForcedDegamma(const IrResourcePlan& plan, ResourceSnapshot& snapshot) {
+    for (std::uint32_t index = 0; index < plan.info.images.size(); ++index) {
+        auto& descriptor = snapshot.images.at(index);
+        if (((descriptor.dwords[1] >> 20u) & 0x1ffu) != static_cast<std::uint32_t>(IrBufferFormat::Format8_8_8_8UInt)) continue;
+        bool forced = false;
+        bool plain = false;
+        for (const auto& pair : plan.info.sampledPairs) {
+            if (pair.image != index) continue;
+            const auto& sampler = snapshot.samplers.at(pair.sampler);
+            if (sampler.dwordCount != 4u) throw std::runtime_error("FORCE_DEGAMMA requires four sampler descriptor words");
+            const bool enabled = (sampler.dwords[0] & (1u << 20u)) != 0u;
+            forced = forced || enabled;
+            plain = plain || !enabled;
+        }
+        if (!forced) continue;
+        const auto& image = plan.info.images.at(index);
+        if (!image.singleMipPlaneBiasCompatible || image.dimension != RdnaImageDimension::Dim2D || image.indirectRoot != ImageResource::NoIndirectImage || image.resourceClass != ImageResourceClass::Sampled || image.depthCompare || image.packed) throw std::runtime_error("FORCE_DEGAMMA on RGBA8_UINT requires a direct plain biased pixel sample");
+        if (plain) throw std::runtime_error("FORCE_DEGAMMA on RGBA8_UINT with mixed sampler states is not implemented");
+        if ((descriptor.dwords[3] >> 28u) != 10u || (descriptor.dwords[4] & 0x1fffu) != 0u || (descriptor.dwords[3] & 0xff000u) != 0u || (descriptor.dwords[5] & 0xf0u) != 0u) throw std::runtime_error("FORCE_DEGAMMA on RGBA8_UINT requires a one-slice volume at mip zero");
+        descriptor.dwords[1] = (descriptor.dwords[1] & ~(0x1ffu << 20u)) | (static_cast<std::uint32_t>(IrBufferFormat::Format8_8_8_8Srgb) << 20u);
+    }
+}
+
 std::uint32_t colorCompareReference(IrBufferFormat format) {
     switch (format) {
     case IrBufferFormat::Format16_16UNorm:
@@ -651,7 +674,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
         mode.shaderSwizzle = ShaderImageIdentitySwizzle;
         if (conversion == IrBufferFormat::Format11_11_10UNorm || conversion == IrBufferFormat::Format10_11_11Float) mode.shaderSwizzle = 0x2acu;
         modes.push_back(mode);
-        if (image.dimension == RdnaImageDimension::Dim2D && image.fmaskCompatible && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
+        if (image.dimension == RdnaImageDimension::Dim2D && (image.fmaskCompatible || (image.singleMipPlaneBiasCompatible && !storage && image.indirectRoot == ImageResource::NoIndirectImage && conversion == IrBufferFormat::Invalid)) && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
             auto volume = mode;
             volume.dimension = RdnaImageDimension::Dim3D;
             modes.push_back(volume);
@@ -663,10 +686,21 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
                 modes.push_back(plane);
             }
         }
+        if (image.dimension == RdnaImageDimension::Dim3D && image.flatVolumeLineCompatible && !storage && !depth && conversion == IrBufferFormat::Invalid && packed == IrBufferFormat::Invalid) {
+            auto line = mode;
+            line.dimension = RdnaImageDimension::Dim1D;
+            modes.push_back(line);
+        }
         if (image.dimension == RdnaImageDimension::Dim2D && storage && image.written && !image.read && !image.atomic && image.mipMode != ImageMipMode::DynamicStorage && !depth && packed == IrBufferFormat::Invalid && image.byElements == 0u) {
             auto line = mode;
             line.dimension = RdnaImageDimension::Dim1D;
             modes.push_back(line);
+        }
+        if (image.dimension == RdnaImageDimension::Dim2D && image.cubeFaceCompatible && !storage && !depth && conversion == IrBufferFormat::Invalid && packed == IrBufferFormat::Invalid) {
+            auto face = mode;
+            face.dimension = RdnaImageDimension::Dim2DArray;
+            face.cube = true;
+            modes.push_back(face);
         }
         if (image.dimension == RdnaImageDimension::Dim2D && image.flatLineCompatible && !storage && !depth && conversion == IrBufferFormat::Invalid && packed == IrBufferFormat::Invalid) {
             auto line = mode;
@@ -815,6 +849,9 @@ std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image,
         for (std::uint32_t index = 0u; index < modes.size(); ++index) {
             if (modes[index].constantSwizzle && modes[index].numericClass == decoded.numericClass) return index;
         }
+    }
+    if (image.singleMipPlaneBiasCompatible && image.dimension == RdnaImageDimension::Dim2D && decoded.dimension == RdnaImageDimension::Dim3D) {
+        if ((descriptor.dwords[4] & 0x1fffu) != 0u || (descriptor.dwords[3] & 0xff000u) != 0u || (descriptor.dwords[5] & 0xf0u) != 0u) throw std::runtime_error("2D biased sampling of a volume requires one slice and mip level zero only");
     }
     for (std::uint32_t index = 0u; index < modes.size(); ++index) {
         const auto& mode = modes[index];
@@ -1038,6 +1075,7 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
         throw;
     }
     const auto started = MaterializeProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    materializeForcedDegamma(plan, nextSnapshot);
     materializeTables(plan, nextSnapshot, tables);
     materializeSrtGuards(plan, nextSnapshot);
     if (MaterializeProfiled()) specializationNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);

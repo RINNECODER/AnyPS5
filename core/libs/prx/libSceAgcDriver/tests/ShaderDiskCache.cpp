@@ -224,6 +224,7 @@ CompiledVariant sampleVariant() {
     buffer.scalar = true;
     buffer.descriptorFormatted = true;
     buffer.formattedReadMask = 5u;
+    buffer.formattedWritten = true;
     buffer.typedAlignment = 2u;
     info.info.buffers = {buffer, BufferResource{}};
     ImageResource image{};
@@ -242,8 +243,11 @@ CompiledVariant sampleVariant() {
     image.depthBitsCompatible = false;
     image.constantSwizzle = true;
     image.constantSwizzleCompatible = false;
+    image.cubeFaceCompatible = false;
     image.flatVolumeCompatible = false;
+    image.singleMipPlaneBiasCompatible = true;
     image.flatLineCompatible = false;
+    image.flatVolumeLineCompatible = false;
     image.foldTexelOffsetsOnly = true;
     image.byElements = 4;
     image.byComponents = 1;

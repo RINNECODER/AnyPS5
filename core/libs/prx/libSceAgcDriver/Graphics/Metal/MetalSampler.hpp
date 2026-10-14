@@ -9,8 +9,10 @@ namespace AgcDriver::Metal {
 class MetalSampler {
 public:
     MetalSampler(id<MTLDevice> device, const Graphics::GuestSamplerResource& resource);
+    // `forceDegammaPaired`: the caller has checked that every image this sampler is paired with has an
+    // sRGB format, whose view decodes, so a FORCE_DEGAMMA descriptor is accepted (as in the Vulkan driver).
     MetalSampler(id<MTLDevice> device, std::span<const std::uint32_t> words, bool compareEnable = false,
-                 bool unnormalizedQualified = false);
+                 bool unnormalizedQualified = false, bool forceDegammaPaired = false);
     id<MTLSamplerState> Handle() const;
     [[nodiscard]] static bool MatchesCapturedDescriptor(id<MTLSamplerState> sampler,
         std::span<const std::uint32_t> words, bool compareEnable, bool unnormalizedQualified);

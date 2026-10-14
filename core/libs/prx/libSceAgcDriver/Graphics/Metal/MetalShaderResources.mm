@@ -662,6 +662,25 @@ MetalBufferBinding MetalShaderResources::upload(const void* data, std::size_t by
 std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const MetalBackend::Result& shader) {
     ValidatePixelSamplerBindings(shader.guest.bindings);
     const auto arrays = widestArrays(shader);
+    // A sampler that forces sRGB decoding (S# FORCE_DEGAMMA) samples correctly only images whose format
+    // is sRGB, which their views already decode; any other format paired with it is refused, as the
+    // Vulkan driver's RequireDegammaFormat does.
+    const auto samplerBinding = std::find_if(shader.guest.bindings.begin(), shader.guest.bindings.end(),
+        [](const auto& binding) { return binding.role == DescriptorRole::GuestSamplers; });
+    const auto degammaFormat = [&](const DescriptorBinding& images, std::uint32_t element, std::uint32_t format) {
+        if (images.kind != DescriptorKind::SampledImage || element >= images.imageSamplers.size()) return;
+        for (std::uint32_t sampler = 0; sampler < 32u; ++sampler) {
+            if (((images.imageSamplers[element] >> sampler) & 1u) == 0u) continue;
+            if (samplerBinding == shader.guest.bindings.end() || samplerBinding->guestDescriptor.size() < (sampler + 1u) * 4u) {
+                throw std::invalid_argument("a sampled texture is paired with sampler element " + std::to_string(sampler) + ", which its shader does not bind");
+            }
+            const bool forced = ((samplerBinding->guestDescriptor[sampler * 4u] >> 20u) & 1u) != 0u;
+            if (forced && !Graphics::IsSrgbTextureFormat(format)) {
+                throw std::invalid_argument("a texture of guest format " + std::to_string(format) +
+                    ", which is not sRGB, is sampled through a sampler that forces sRGB decoding, which is not implemented");
+            }
+        }
+    };
     std::vector<MetalShaderResourceBinding> result;
     for (const auto& mapping : shader.resources) {
         if (!mapping.active) continue;
@@ -746,6 +765,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                     continue;
                 }
                 auto descriptor = Graphics::DecodeTextureResource(std::span(found->guestDescriptor).subspan(i * 8u, 8));
+                degammaFormat(*found, i, descriptor.format);
                 for (const auto& array : arrays) {
                     if (sameArrayAllocation(array, descriptor)) descriptor.depthOrLastArray = array.depthOrLastArray;
                 }
@@ -815,7 +835,8 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
             for (std::uint32_t i = 0; i < found->count; ++i) {
                 const bool compare = i < found->samplerDepthCompare.size() && found->samplerDepthCompare[i];
                 const bool pixel = !found->samplerUnnormalized.empty() && found->samplerUnnormalized[i];
-                auto sampler = std::make_shared<MetalSampler>(backend.Device(), std::span(found->guestDescriptor).subspan(i * 4u, 4), compare, pixel);
+                // FORCE_DEGAMMA is checked against the paired images' formats (degammaFormat) instead.
+                auto sampler = std::make_shared<MetalSampler>(backend.Device(), std::span(found->guestDescriptor).subspan(i * 4u, 4), compare, pixel, true);
                 native.samplers.push_back(sampler->Handle());
                 samplers.push_back(std::move(sampler));
             }

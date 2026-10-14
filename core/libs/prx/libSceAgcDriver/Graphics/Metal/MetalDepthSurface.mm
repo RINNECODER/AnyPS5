@@ -253,6 +253,20 @@ id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std
     return array;
 }
 
+bool MetalDepthSurface::Overlaps(std::uint64_t address, std::uint64_t bytes) const {
+    const auto overlaps = [&](std::uint64_t plane, std::uint64_t planeBytes) {
+        if (plane == 0 || planeBytes == 0 || bytes == 0) return false;
+        return address <= plane ? plane - address < bytes : address - plane < planeBytes;
+    };
+    return overlaps(target.address, Graphics::DepthSliceBytes(target.extent, hasD16(target) ? 2u : 4u) * target.samples) ||
+        overlaps(target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples);
+}
+
+void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, std::uint64_t address, std::uint64_t bytes,
+    const MetalDepthSurface* keep) {
+    std::erase_if(surfaces, [&](const auto& surface) { return surface.get() != keep && surface->Overlaps(address, bytes); });
+}
+
 bool MetalDepthSurface::OverlapsMappings(std::span<const NativeGuestMemory::BorrowedRange> changed) const {
     const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
     const auto overlaps = [&](std::uint64_t address, std::uint64_t bytes) {
@@ -325,9 +339,9 @@ std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphic
     std::lock_guard lock(mutex);
     auto found = std::find_if(surfaces.begin(), surfaces.end(), [&](const auto& surface) { return sameTarget(surface->Target(), target); });
     if (target.samples > 1 || (target.slice == 0 && target.lastSlice == 0)) {
-        if (found != surfaces.end()) return *found;
-        auto result = std::make_shared<MetalDepthSurface>(backend, target);
-        surfaces.push_back(result);
+        auto result = found != surfaces.end() ? *found : std::make_shared<MetalDepthSurface>(backend, target);
+        if (found == surfaces.end()) surfaces.push_back(result);
+        takePlanes(result);
         return result;
     }
     validate(target);
@@ -372,6 +386,51 @@ std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphic
     return result;
 }
 
+void MetalDepthSurfaceCache::takePlanes(const std::shared_ptr<MetalDepthSurface>& surface) {
+    const auto& target = surface->Target();
+    std::vector<std::pair<std::shared_ptr<MetalDepthSurface>, bool>> copies;
+    const auto take = [&](std::unordered_map<std::uint64_t, std::weak_ptr<MetalDepthSurface>>& owners, std::uint64_t address, bool stencil) {
+        auto& entry = owners[address];
+        auto owner = entry.lock();
+        entry = surface;
+        if (owner == nullptr || owner == surface) return;
+        const auto& other = owner->Target();
+        // The plane's texels only carry over between surfaces that store it the same way; a
+        // multisampled plane keeps its own (blits through a buffer read single-sample textures only).
+        if (other.format != target.format || other.samples != 1 || target.samples != 1 ||
+            other.extent.width != target.extent.width || other.extent.height != target.extent.height) return;
+        if (std::find(surfaces.begin(), surfaces.end(), owner) == surfaces.end()) return;  // dropped: its texels are dead
+        copies.emplace_back(std::move(owner), stencil);
+    };
+    take(depthOwners, target.address, false);
+    if (target.stencilAddress != 0) take(stencilOwners, target.stencilAddress, true);
+    if (copies.empty()) return;
+    auto commands = backend.CommandBuffer();
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    if (blit == nil) throw MetalGpuExecutionError("Metal depth plane carry-over blit encoder creation failed");
+    const MTLSize size = MTLSizeMake(target.extent.width, target.extent.height, 1);
+    for (const auto& [owner, stencil] : copies) {
+        id<MTLTexture> source = stencil ? owner->Planes()->stencil : owner->Planes()->depth;
+        id<MTLTexture> destination = stencil ? surface->Planes()->stencil : surface->Planes()->depth;
+        if (source.pixelFormat != MTLPixelFormatDepth32Float_Stencil8) {
+            [blit copyFromTexture:source sourceSlice:owner->Layer() sourceLevel:0 toTexture:destination
+                destinationSlice:surface->Layer() destinationLevel:0 sliceCount:1 levelCount:1];
+            continue;
+        }
+        // A combined depth/stencil texture: copy only this plane's aspect, through a buffer.
+        const auto option = stencil ? MTLBlitOptionStencilFromDepthStencil : MTLBlitOptionDepthFromDepthStencil;
+        const NSUInteger rowBytes = target.extent.width * (stencil ? 1u : 4u);
+        id<MTLBuffer> staging = [backend.Device() newBufferWithLength:rowBytes * target.extent.height options:MTLResourceStorageModePrivate];
+        if (staging == nil) throw std::runtime_error("Metal depth plane carry-over buffer allocation failed");
+        [blit copyFromTexture:source sourceSlice:owner->Layer() sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:size
+            toBuffer:staging destinationOffset:0 destinationBytesPerRow:rowBytes destinationBytesPerImage:rowBytes * target.extent.height options:option];
+        [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:rowBytes sourceBytesPerImage:rowBytes * target.extent.height sourceSize:size
+            toTexture:destination destinationSlice:surface->Layer() destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:option];
+    }
+    [blit endEncoding];
+    backend.Wait(commands);
+}
+
 void MetalDepthSurfaceCache::growPlanes(const std::shared_ptr<MetalDepthPlanes>& planes, const Graphics::DepthTarget& shape, std::uint32_t layers) {
     // New layers start cleared, like a new surface; the old ones keep their texels. Surfaces viewing
     // these planes make their views again (MetalDepthPlanes::generation).
@@ -407,6 +466,8 @@ void MetalDepthSurfaceCache::Forget(const std::shared_ptr<MetalDepthSurface>& su
 void MetalDepthSurfaceCache::Clear() {
     std::lock_guard lock(mutex);
     surfaces.clear();
+    depthOwners.clear();
+    stencilOwners.clear();
     colorSurfaces.clear();
 }
 
