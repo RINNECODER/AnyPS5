@@ -4,6 +4,7 @@
 #import <Metal/Metal.h>
 
 #include <array>
+#include <atomic>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -62,6 +63,28 @@ private:
     std::size_t freeBytes = 0;
 };
 
+class MetalDevice;
+
+// Held by a work between taking a command buffer and handing it to a wait or the timeline. With
+// batching, a work that stops in between (a throw that skips it, an early return) leaves what it
+// already encoded in the shared command buffer, which still runs; before, its own command buffer
+// was simply dropped. The pooled and transient memory that work binds (its fault buffer, staged
+// guest bytes) goes back when the work is destroyed, so the guard waits for the batch first and
+// nothing is reused while the GPU may still touch it. Done() marks the hand-off.
+class MetalBatchedWork {
+public:
+    MetalBatchedWork(const MetalDevice& backend, id<MTLCommandBuffer> commands) : backend(backend), commands(commands) {}
+    MetalBatchedWork(const MetalBatchedWork&) = delete;
+    MetalBatchedWork& operator=(const MetalBatchedWork&) = delete;
+    ~MetalBatchedWork();
+    void Done() { done = true; }
+
+private:
+    const MetalDevice& backend;
+    id<MTLCommandBuffer> commands;
+    bool done = false;
+};
+
 class MetalDevice {
 public:
     // `queue`, when given, is shared with another MetalDevice (the driver's draws and dispatches
@@ -78,7 +101,35 @@ public:
     void Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArray<id<MTLBuffer>>* buffers,
                 const void* parameters, std::size_t parameterBytes, MTLSize grid,
                 const std::array<std::uint32_t, 22>* constants = nullptr, std::span<const NSUInteger> offsets = {}) const;
+    // Commits `commands` (when not committed yet) and waits for it; the open batch commits first.
     void Wait(id<MTLCommandBuffer> commands) const;
+
+    // Command buffer batching, for the driver's packet workers (off by default).
+    //
+    // Metal charges every command buffer a fixed CPU cost (FramePacing bookkeeping on create and
+    // commit, an IOGPU submit), which dominated the driver thread when each draw, dispatch and
+    // upload had its own. While batching is on, CommandBuffer() hands every caller the same open
+    // command buffer until it is committed: by Flush, by Wait on it, or by any caller's own commit
+    // (the next CommandBuffer() then opens a new one). Encoders in one command buffer run in
+    // encoding order and Metal tracks hazards between them exactly as between command buffers on
+    // one queue, so the GPU runs the same work in the same order as before.
+    //
+    // Not thread-safe: the owner serializes every use of the device while batching (the driver
+    // holds its gpuMutex), and only one encoder is ever open at a time.
+    void SetBatching(bool on);
+    [[nodiscard]] bool Batching() const { return batching; }
+    // Whether `commands` is the open batch (handed out, not committed yet).
+    [[nodiscard]] bool OpenBatch(id<MTLCommandBuffer> commands) const;
+    // Commits the open batch, if any, without waiting.
+    void Flush() const;
+    // Commits `commands` unless it is the open batch, which commits at the next Flush or Wait.
+    void Submit(id<MTLCommandBuffer> commands) const;
+    // Whether the open batch holds at least `minimum` works and the batch committed before it has
+    // completed: committing now keeps the GPU busy while the CPU encodes on.
+    [[nodiscard]] bool GpuStarved(std::uint32_t minimum) const;
+    // Metal command buffers this device created.
+    [[nodiscard]] std::uint64_t CommandBuffersCreated() const { return created.load(std::memory_order_relaxed); }
+
     [[nodiscard]] id<MTLDevice> Device() const;
     [[nodiscard]] id<MTLCommandQueue> Queue() const;
 
@@ -99,6 +150,11 @@ private:
     id<MTLCommandQueue> queue;
     mutable std::mutex pipelineMutex;
     mutable std::map<PipelineKey, id<MTLComputePipelineState>> pipelines;
+    bool batching = false;
+    mutable id<MTLCommandBuffer> open;
+    mutable id<MTLCommandBuffer> flushed;
+    mutable std::uint32_t openUses = 0;
+    mutable std::atomic<std::uint64_t> created{0};
 };
 
 }

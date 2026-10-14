@@ -240,16 +240,18 @@ id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std
         array = [backend.Device() newTextureWithDescriptor:descriptor];
         if (array == nil) throw std::runtime_error("Metal depth array texture creation failed");
     }
+    // Checked before encoding: a throw must not leave an encoder open in a shared command buffer.
+    for (NSUInteger i = 0; i < layers; ++i) {
+        if (sources[i]->Planes()->depth.pixelFormat != format) throw std::invalid_argument("Metal depth array slices disagree on their pixel format");
+    }
     auto commands = backend.CommandBuffer();
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
     if (blit == nil) throw MetalGpuExecutionError("Metal depth array blit encoder creation failed");
     for (NSUInteger i = 0; i < layers; ++i) {
-        const auto& source = sources[i]->Planes()->depth;
-        if (source.pixelFormat != format) throw std::invalid_argument("Metal depth array slices disagree on their pixel format");
-        [blit copyFromTexture:source sourceSlice:sources[i]->Layer() sourceLevel:0 toTexture:array destinationSlice:i destinationLevel:0 sliceCount:1 levelCount:1];
+        [blit copyFromTexture:sources[i]->Planes()->depth sourceSlice:sources[i]->Layer() sourceLevel:0 toTexture:array destinationSlice:i destinationLevel:0 sliceCount:1 levelCount:1];
     }
     [blit endEncoding];
-    [commands commit];
+    backend.Submit(commands);
     return array;
 }
 

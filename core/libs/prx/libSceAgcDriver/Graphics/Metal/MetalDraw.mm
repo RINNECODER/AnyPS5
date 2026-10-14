@@ -1041,13 +1041,22 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     const auto& fragmentReflection = meshPath ? meshPipeline->FragmentReflection() : vertexPipeline->FragmentReflection();
     auto vertexBindings = resources.Bindings(mainReflection);
     auto fragmentBindings = resources.Bindings(fragmentReflection);
+    // Every binding is resolved before the command buffer is taken: resolving may upload, read
+    // guest memory or wait for the GPU, and with batching (MetalDevice::SetBatching) a wait commits
+    // the shared command buffer, which nothing may encode into afterwards.
+    std::vector<MetalShaderResourceBinding> captureBindings;
+    std::vector<MetalShaderResourceBinding> controlBindings;
+    if (baryPath || rectPath) captureBindings = resources.Bindings(capturePipeline->Reflection());
+    if (rectPath) controlBindings = resources.Bindings(controlPipeline->Reflection());
+    // Nothing to draw: decided before any pass is encoded, so no capture pass runs for it.
+    if (noVertexIndices || (fanPath && fanIndices.empty())) return {};
     // The vertex capture and rectangle control passes go into the draw's own command buffer: the
     // queue runs them before the draw, and Complete reads the one fault buffer all passes share
     // (a fault in any pass reports the work as faulted, and it runs again or fails like the draw).
     id<MTLCommandBuffer> commands = backend.CommandBuffer();
+    MetalBatchedWork batched(backend, commands);
     if (baryPath) {
         const auto& captured = capturePipeline->Reflection();
-        const auto captureBindings = resources.Bindings(captured);
         std::vector<MetalImplicitBufferBinding> captureBuffers{{rectSlot(captured, MetalBackend::ImplicitBufferRole::StageOutput), {baryCapture, 0, baryCapture.length}}};
         if (draw.indexed) captureBuffers.push_back({rectSlot(captured, MetalBackend::ImplicitBufferRole::Indices), indexBuffer});
         capturePipeline->Encode(commands, captureBindings, MTLRegionMake3D(draw.firstVertex, draw.firstInstance, 0, draw.indexCount, draw.instanceCount, 1),
@@ -1057,8 +1066,6 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     if (rectPath) {
         const auto& captured = capturePipeline->Reflection();
         const auto& controlled = controlPipeline->Reflection();
-        const auto captureBindings = resources.Bindings(captured);
-        const auto controlBindings = resources.Bindings(controlled);
         std::vector<MetalImplicitBufferBinding> captureBuffers{{rectSlot(captured, MetalBackend::ImplicitBufferRole::StageOutput), {rectCapture, 0, rectCapture.length}}};
         if (draw.indexed) captureBuffers.push_back({rectSlot(captured, MetalBackend::ImplicitBufferRole::Indices), indexBuffer});
         const std::array<MetalImplicitBufferBinding, 4> controlBuffers{{
@@ -1080,7 +1087,6 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         residency = meshResidency;
     }
     auto depthStencilState = CreateDepthStencilState(backend.Device(), state);
-    if (noVertexIndices || (fanPath && fanIndices.empty())) return {};
     if (sampleCounter != nil) {
         std::memset(static_cast<std::byte*>(sampleCounter.contents) + 16, 0, 8);
         renderPass.visibilityResultBuffer = sampleCounter;
@@ -1133,12 +1139,14 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     resources.EncodeReadbacks(commands);
     if (timeline != nullptr && sampleCounter == nil && !resources.NeedsSynchronousCompletion()) {
         resources.CommittedWithoutWaiting();
+        batched.Done();
         timeline->Commit(commands, [resourcesOwner, commands, completed = std::move(completed)] {
             const auto fault = CompleteCommittedWork([&] { return resourcesOwner->Complete(commands); });
             if (completed) completed(fault);
         }, bdaStores, resources.WrittenGuestRanges());
         return std::nullopt;
     }
+    batched.Done();
     backend.Wait(commands);
     if (sampleCounter != nil) samplesPassed.store(sampleTotal(sampleCounter), std::memory_order_release);
     return CompleteCommittedWork([&] { return resources.Complete(commands); });
