@@ -13,6 +13,7 @@ namespace {
 struct RegFile {
     std::uint64_t gpr[16];
     unsigned __int128 xmm[16];
+    unsigned __int128 ymm_hi[16];
     std::uint64_t stack[32];
 };
 
@@ -77,12 +78,14 @@ extern "C" int NativeAotAllocatorPosixAlign(void** out, std::uint64_t alignment,
     return static_cast<int>(Call(allocatorTargets[6], arguments, 3));
 }
 
-extern "C" void NativeAotAllocatorInitialize() {
-    static_cast<void>(Call(allocatorTargets[10], nullptr, 0));
+extern "C" void NativeAotAllocatorInitialize(const void* api) {
+    const std::uint64_t arguments[1] = {reinterpret_cast<std::uint64_t>(api)};
+    static_cast<void>(Call(allocatorTargets[10], arguments, 1));
 }
 
-extern "C" void NativeAotAllocatorFinalize() {
-    static_cast<void>(Call(allocatorTargets[11], nullptr, 0));
+extern "C" void NativeAotAllocatorFinalize(const void* api) {
+    const std::uint64_t arguments[1] = {reinterpret_cast<std::uint64_t>(api)};
+    static_cast<void>(Call(allocatorTargets[11], arguments, 1));
 }
 
 extern "C" void* const nativeAotAllocatorWrappers[kSlots] = {

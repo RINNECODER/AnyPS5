@@ -63,6 +63,25 @@ class Avx2OddsTests(NativeAvxHarness):
             with self.subTest(instruction=instruction):
                 self.compare_native(instruction, self.samples())
 
+    def test_word_multiply_high_and_sum_of_absolute_differences(self):
+        for mnemonic in ('vpmulhw', 'vpsadbw'):
+            for width in ('xmm', 'ymm'):
+                with self.subTest(mnemonic=mnemonic, width=width):
+                    self.compare_native(f'{mnemonic} {width}0, {width}1, {width}2', self.samples())
+
+    def test_horizontal_minimum_position(self):
+        self.compare_native('vphminposuw xmm0, xmm1', self.samples())
+
+    def test_masked_moves(self):
+        for instruction in ('vmaskmovps ymm0, ymm1, ymmword ptr [rsi]',
+                            'vmaskmovps xmm0, xmm1, xmmword ptr [rsi]',
+                            'vpmaskmovd ymm0, ymm1, ymmword ptr [rsi]',
+                            'vpmaskmovd xmm0, xmm1, xmmword ptr [rsi]',
+                            'vmaskmovps ymmword ptr [rdx], ymm1, ymm2',
+                            'vpmaskmovd xmmword ptr [rdx], xmm1, xmm2'):
+            with self.subTest(instruction=instruction):
+                self.compare_native(instruction, self.samples())
+
     def test_perm2i128(self):
         for control in (0x00, 0x20, 0x31, 0x80, 0xff):
             with self.subTest(control=control):
