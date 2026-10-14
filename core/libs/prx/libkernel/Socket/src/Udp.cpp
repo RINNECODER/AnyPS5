@@ -41,7 +41,6 @@
 #include <cstddef>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 extern "C" int* APS5_VABI __error_nid_postfix();
@@ -1415,8 +1414,9 @@ int APS5_VABI poll_nid_postfix(GuestPollDescriptor* descriptors, std::uint32_t c
         if (!native.empty()) {
             for (auto& request : native) request.revents = 0;
             if (WSAPoll(native.data(), static_cast<ULONG>(native.size()), slice) < 0) return Fail(NativeError());
-        } else if (slice > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+        } else if (!ready && !pipeReady) {
+            const auto wake = std::chrono::steady_clock::now() + std::chrono::milliseconds(1);
+            PreciseSleepUntil(timeout < 0 ? wake : std::min(deadline, wake));
         }
         int socketReady = 0;
         for (const auto& request : native)
