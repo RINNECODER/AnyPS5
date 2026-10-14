@@ -38,7 +38,7 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     product->pixel.alphaToCoverage = product->state.alphaToCoverage;
     product->pixel.quadPixelMask = Graphics::QuadPixelMask(product->state);
     product->pixel.quadSampleMask = Graphics::QuadSampleMasks(product->state);
-    if (!product->state.stencilTest) product->pixel.stencilRefExportEnable = false;
+    if (Graphics::StencilReferenceUnused(product->state)) product->pixel.stencilRefExportEnable = false;
     if (product->pixel.ancillary) product->pixel.rasterPrimitive = Graphics::RasterPrimitiveOf(product->state);
     if (product->pixel.ancillary) product->pixel.layerBase = Graphics::PixelLayerBase(product->state);
     return product;

@@ -4280,6 +4280,368 @@ void PixelLayerBaseTests() {
     Require(PixelLayerBase(state) == 0u, "a draw without a color target got a layer base");
 }
 
+constexpr std::array<std::uint32_t, 4> StencilRefExportCode{0x7e0e02f2u, 0xf8001882u, 0x700u, 0xbf810000u};
+constexpr std::array<std::uint32_t, 4> DepthStencilRefExportCode{0x7e0e02f2u, 0xf8001883u, 0x707u, 0xbf810000u};
+
+AgcDriver::QueueState stencilRefExportQueue(std::uint32_t shaderControl, std::uint32_t zFormat) {
+    auto queue = makeState();
+    queue.context[0x1b3] = 0x300u;
+    queue.context[0x1b4] = 0x300u;
+    queue.context[0x1c4] = zFormat;
+    queue.context[0x203] = shaderControl;
+    return queue;
+}
+
+ShaderRecompiler::RecompileRequest stencilRefExportRequest(std::uint32_t shaderControl, std::span<const std::uint32_t> capabilities, std::span<const std::uint32_t> code = StencilRefExportCode) {
+    const auto queue = stencilRefExportQueue(shaderControl, 2u);
+    ShaderRecompiler::RecompileRequest request{};
+    request.shader = {ShaderRecompiler::ShaderStage::Fragment, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.pixel = AgcDriver::Graphics::DecodePixelStageInfo(queue.context, IdentityExports);
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.target.supportedCapabilities = capabilities;
+    request.layout.pushConstantSizeBytes = 128;
+    request.useCache = false;
+    return request;
+}
+
+std::string stencilRefShape(std::span<const std::uint32_t> words) {
+    std::string shape;
+    std::uint32_t variable = 0;
+    for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
+        const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+        if (op == spv::OpCapability && words[at + 1] == spv::CapabilityStencilExportEXT) shape += "capability ";
+        if (op == spv::OpExtension && std::string_view(reinterpret_cast<const char*>(&words[at + 1])) == "SPV_EXT_shader_stencil_export") shape += "extension ";
+        if (op == spv::OpExecutionMode && words[at + 2] == spv::ExecutionModeEarlyFragmentTests) shape += "early ";
+        if (op == spv::OpExecutionMode && words[at + 2] == spv::ExecutionModeDepthReplacing) shape += "depth ";
+        if (op == spv::OpExecutionMode && words[at + 2] == spv::ExecutionModeStencilRefReplacingEXT) shape += "replacing ";
+        if (op == spv::OpDecorate && words[at + 2] == spv::DecorationBuiltIn && words[at + 3] == spv::BuiltInFragStencilRefEXT) {
+            variable = words[at + 1];
+            shape += "builtin ";
+        }
+        if (op == spv::OpStore && variable != 0 && words[at + 1] == variable) shape += "store ";
+    }
+    return shape;
+}
+
+void stencilRefExportTests() {
+    for (const auto shaderControl : {0x52u, 0x12u, 0x02u, 0x03u}) {
+        for (const auto zFormat : {2u, 9u}) {
+            const auto queue = stencilRefExportQueue(shaderControl, zFormat);
+            static_cast<void>(AgcDriver::Graphics::DecodeState(queue));
+            Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck rejected DB_SHADER_CONTROL " + std::to_string(shaderControl) + " with Z format " + std::to_string(zFormat));
+            const auto pixel = AgcDriver::Graphics::DecodePixelStageInfo(queue.context, IdentityExports);
+            Require(pixel.stencilRefExportEnable, "STENCIL_TEST_VAL_EXPORT_ENABLE did not reach the pixel stage");
+            Require(!pixel.earlyZ, "a pixel shader that exports the stencil reference was given early tests");
+        }
+        for (const auto zFormat : {0u, 1u, 3u, 7u}) {
+            const auto queue = stencilRefExportQueue(shaderControl, zFormat);
+            expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeState(queue)); }, "depth export, shader coverage or ordered fragment execution");
+            Require(!AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck accepted a stencil reference export with Z format " + std::to_string(zFormat));
+        }
+    }
+    for (const auto shaderControl : {0x54u, 0x56u}) {
+        const auto queue = stencilRefExportQueue(shaderControl, 2u);
+        expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeState(queue)); }, "depth export, shader coverage or ordered fragment execution");
+        Require(!AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck accepted STENCIL_OP_VAL_EXPORT_ENABLE in DB_SHADER_CONTROL " + std::to_string(shaderControl));
+    }
+    Require(!AgcDriver::Graphics::DecodePixelStageInfo(stencilRefExportQueue(0x50u, 2u).context, IdentityExports).stencilRefExportEnable, "a pixel stage without STENCIL_TEST_VAL_EXPORT_ENABLE exports the stencil reference");
+    Require(AgcDriver::Graphics::DecodePixelStageInfo(stencilRefExportQueue(0x1012u, 2u).context, IdentityExports).earlyZ, "DEPTH_BEFORE_SHADER with a stencil reference export did not get early tests");
+    const std::array<std::uint32_t, 2> stencilExport{spv::CapabilityShader, spv::CapabilityStencilExportEXT};
+    const std::array<std::uint32_t, 1> plain{spv::CapabilityShader};
+    const ShaderRecompiler::RequestSerializer serializer;
+    std::set<std::vector<std::uint64_t>> keys;
+    const std::array<std::pair<std::uint32_t, std::string_view>, 4> cases{{{0x52u, "capability extension replacing builtin store "}, {0x12u, "capability extension replacing builtin store "}, {0x50u, ""}, {0x10u, "early "}}};
+    for (const auto& [shaderControl, expected] : cases) {
+        const auto request = stencilRefExportRequest(shaderControl, stencilExport);
+        const auto replayed = serializer.Deserialize(serializer.Serialize(request));
+        Require(replayed.request.context.pixel->stencilRefExportEnable == ((shaderControl & 2u) != 0), "the serialized request lost STENCIL_TEST_VAL_EXPORT_ENABLE");
+        const auto result = ShaderRecompiler::Recompile(request);
+        Require(stencilRefShape(result.spirv.Words()) == expected && stencilRefShape(ShaderRecompiler::Recompile(replayed.request).spirv.Words()) == expected, "DB_SHADER_CONTROL " + std::to_string(shaderControl) + " declared the wrong stencil reference export: " + stencilRefShape(result.spirv.Words()));
+        std::vector<std::uint64_t> key;
+        ShaderRecompiler::RecompileCacheKey::Build(request, key);
+        keys.insert(key);
+        AgcDriver::Graphics::State state{};
+        state.stages.path = AgcDriver::Graphics::ShaderPath::Vertex;
+        ShaderRecompiler::RecompileResult vertex;
+        vertex.spirv = makeModule({});
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &result, 0}}};
+        AgcDriver::Graphics::ValidateShaders(shaders, state, VkPhysicalDeviceSubgroupProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES}, false);
+    }
+    Require(keys.size() == cases.size(), "the recompile cache key ignores STENCIL_TEST_VAL_EXPORT_ENABLE");
+    const auto both = stencilRefShape(ShaderRecompiler::Recompile(stencilRefExportRequest(0x53u, stencilExport, DepthStencilRefExportCode)).spirv.Words());
+    Require(both == "capability extension depth replacing builtin store ", "a depth and stencil reference export declared the wrong outputs: " + both);
+    const auto depthOnly = stencilRefShape(ShaderRecompiler::Recompile(stencilRefExportRequest(0x51u, stencilExport, DepthStencilRefExportCode)).spirv.Words());
+    Require(depthOnly == "depth ", "an MRTZ stencil channel without STENCIL_TEST_VAL_EXPORT_ENABLE declared the wrong outputs: " + depthOnly);
+    const auto emulated = ShaderRecompiler::Recompile(stencilRefExportRequest(0x52u, plain));
+    Require(emulated.stencilReferences == std::vector<std::uint32_t>{0u} && emulated.stencilReplaySafe && stencilRefShape(emulated.spirv.Words()).empty(), "a constant stencil reference was not lowered to replay");
+    Require(emulated.stencilReferenceDword == 0u && emulated.pushConstants.size() == sizeof(std::uint32_t), "a stencil-only shader did not reserve dynamic reference data");
+    auto replayRequest = stencilRefExportRequest(0x52u, plain);
+    const auto replayHandle = ShaderRecompiler::PrepareShader(replayRequest);
+    const auto replayCapture = ShaderRecompiler::CaptureResources(replayRequest, ShaderRecompiler::SrtRuntime{}, *replayHandle);
+    const auto firstReplay = ShaderRecompiler::MaterializeShader(replayRequest, *replayCapture, *replayHandle);
+    replayRequest.layout.pushConstantOffsetBytes = 128u;
+    Require(ShaderRecompiler::MatchesPreparedShader(replayRequest, *replayHandle), "moving the stencil replay stage slot invalidated the prepared artifact");
+    const auto movedReplay = ShaderRecompiler::MaterializeShader(replayRequest, *replayCapture, *replayHandle);
+    Require(firstReplay->spirv != movedReplay->spirv && firstReplay->variantId == movedReplay->variantId && firstReplay->pushConstants == movedReplay->pushConstants, "prepared stencil replay did not move only the dynamic reference offset");
+    replayRequest.layout.pushConstantSizeBytes = 0u;
+    Require(!ShaderRecompiler::MatchesPreparedShader(replayRequest, *replayHandle), "prepared stencil replay accepted an exhausted push range");
+    expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(replayRequest)); }, "unused push constant dword");
+    const std::array<std::uint32_t, 5> pushedDepthStencil{0x7e000200u, 0x7e0e02f2u, 0xf8001883u, 0x700u, 0xbf810000u};
+    const std::array<std::uint32_t, 1> pushedDepth{0x3f000000u};
+    auto pushedRequest = stencilRefExportRequest(0x53u, plain, pushedDepthStencil);
+    pushedRequest.context.userData = pushedDepth;
+    pushedRequest.layout = {0u, 0u, 96u, 32u};
+    const auto pushedHandle = ShaderRecompiler::PrepareShader(pushedRequest);
+    ShaderRecompiler::SrtRuntime pushedRuntime{};
+    pushedRuntime.userData = pushedDepth;
+    const auto pushedCapture = ShaderRecompiler::CaptureResources(pushedRequest, pushedRuntime, *pushedHandle);
+    const auto pushedResult = ShaderRecompiler::MaterializeShader(pushedRequest, *pushedCapture, *pushedHandle);
+    Require(pushedResult->stencilReferenceDword == 1u && pushedResult->pushConstants.size() == 8u, "a nonaligned replay stage did not reserve its reference after existing push data");
+    for (const auto [offset, bytes] : {std::pair{128u, 128u}, std::pair{120u, 8u}}) {
+        pushedRequest.layout.pushConstantOffsetBytes = offset;
+        pushedRequest.layout.pushConstantSizeBytes = bytes;
+        Require(ShaderRecompiler::MatchesPreparedShader(pushedRequest, *pushedHandle), "a replay payload could not move within a valid stage range");
+        const auto moved = ShaderRecompiler::MaterializeShader(pushedRequest, *pushedCapture, *pushedHandle);
+        Require(moved->pushConstants == pushedResult->pushConstants && moved->spirv != pushedResult->spirv, "moving replay push data changed its payload or retained its old offset");
+    }
+    pushedRequest.layout = {0u, 0u, 124u, 4u};
+    Require(!ShaderRecompiler::MatchesPreparedShader(pushedRequest, *pushedHandle), "a full push budget reused a replay artifact");
+    expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(pushedRequest)); }, "unused push constant dword");
+    pushedRequest.layout.pushConstantSizeBytes = 8u;
+    expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(pushedRequest)); }, "crosses a stage slot");
+    const std::array<std::uint32_t, 4> noStencilExport{0x7e0e02f2u, 0xf800180fu, 0x07070707u, 0xbf810000u};
+    auto noStencilRequest = stencilRefExportRequest(0x52u, plain, noStencilExport);
+    noStencilRequest.layout.pushConstantSizeBytes = 0u;
+    const auto noStencil = ShaderRecompiler::Recompile(noStencilRequest);
+    Require(noStencil.stencilReferences.empty() && noStencil.stencilReferenceDword == 0xffffffffu && noStencil.pushConstants.empty(), "a stencil export flag without a remaining stencil output reserved replay state");
+    auto queue = stencilRefExportQueue(0x52u, 2u);
+    queue.context[0x000] = 0;
+    queue.context[0x002] = 0;
+    queue.context[0x007] = (1u << 16u) | 3u;
+    queue.context[0x00a] = 7;
+    queue.context[0x00b] = 0;
+    queue.context[0x010] = 0x22900983;
+    queue.context[0x011] = 0x20000181;
+    for (const auto offset : {0x012u, 0x014u}) queue.context[offset] = 0x100;
+    for (const auto offset : {0x013u, 0x015u}) queue.context[offset] = 0x200;
+    queue.context[0x10b] = 0x00030030;
+    queue.context[0x10c] = 0x05ffff02;
+    queue.context[0x10d] = 0x05ffff02;
+    queue.context[0x200] = 0x00200211;
+    auto state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilTest && state.stencilFront.compareOp == VK_COMPARE_OP_EQUAL && state.stencilFront.passOp == VK_STENCIL_OP_REPLACE, "a stencil reference export changed the REPLACE_TEST decode");
+    for (const auto ops : {0x00020020u, 0x00040040u, 0x00000200u, 0x00000004u}) {
+        queue.context[0x10b] = ops;
+        expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeState(queue)); }, "exports the stencil test value");
+    }
+    queue.context[0x10b] = 0x00050050;
+    queue.context[0x10c] = 0x01ffff02;
+    state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.stencilFront.passOp == VK_STENCIL_OP_INCREMENT_AND_CLAMP, "a stencil reference export changed the increment decode");
+    queue.context[0x000] = 2;
+    expectFailure([&] { static_cast<void>(AgcDriver::Graphics::DecodeState(queue)); }, "stencil clear with a pixel shader that exports the stencil test value");
+    queue.context[0x203] = 0x50u;
+    static_cast<void>(AgcDriver::Graphics::DecodeState(queue));
+}
+
+bool stencilComparison(VkCompareOp op, std::uint32_t reference, std::uint32_t stencil) {
+    switch (op) {
+        case VK_COMPARE_OP_NEVER: return false;
+        case VK_COMPARE_OP_LESS: return reference < stencil;
+        case VK_COMPARE_OP_EQUAL: return reference == stencil;
+        case VK_COMPARE_OP_LESS_OR_EQUAL: return reference <= stencil;
+        case VK_COMPARE_OP_GREATER: return reference > stencil;
+        case VK_COMPARE_OP_NOT_EQUAL: return reference != stencil;
+        case VK_COMPARE_OP_GREATER_OR_EQUAL: return reference >= stencil;
+        case VK_COMPARE_OP_ALWAYS: return true;
+        default: throw std::runtime_error("invalid stencil comparison in the reference oracle");
+    }
+}
+
+std::pair<std::uint32_t, bool> stencilReferenceOutcome(const AgcDriver::Graphics::State& state, const VkStencilOpState& face, std::uint32_t reference, std::uint32_t stencil, bool depthPass, bool boundsPass) {
+    if (state.depthBoundsTest && !boundsPass) return {stencil, false};
+    const bool stencilPass = stencilComparison(face.compareOp, reference & face.compareMask & 0xffu, stencil & face.compareMask & 0xffu);
+    if (!state.depthTest || state.depthCompare == VK_COMPARE_OP_ALWAYS) depthPass = true;
+    if (state.depthTest && state.depthCompare == VK_COMPARE_OP_NEVER) depthPass = false;
+    const auto op = !stencilPass ? face.failOp : !depthPass ? face.depthFailOp : face.passOp;
+    auto updated = stencil;
+    switch (op) {
+        case VK_STENCIL_OP_KEEP: break;
+        case VK_STENCIL_OP_ZERO: updated = 0; break;
+        case VK_STENCIL_OP_REPLACE: updated = reference; break;
+        case VK_STENCIL_OP_INCREMENT_AND_CLAMP: updated = std::min(stencil + 1u, 255u); break;
+        case VK_STENCIL_OP_DECREMENT_AND_CLAMP: updated = stencil == 0 ? 0 : stencil - 1u; break;
+        case VK_STENCIL_OP_INVERT: updated = ~stencil; break;
+        case VK_STENCIL_OP_INCREMENT_AND_WRAP: updated = stencil + 1u; break;
+        case VK_STENCIL_OP_DECREMENT_AND_WRAP: updated = stencil - 1u; break;
+        default: throw std::runtime_error("invalid stencil operation in the reference oracle");
+    }
+    const auto writeMask = face.writeMask & 0xffu;
+    return {((stencil & ~writeMask) | (updated & writeMask)) & 0xffu, stencilPass && depthPass};
+}
+
+void stencilReferenceUnusedTests() {
+    using AgcDriver::Graphics::StencilReferenceUnused;
+    AgcDriver::Graphics::State state{};
+    state.depth.emplace();
+    state.depth->format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+    state.stencilTest = true;
+    state.stencilFront = {VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 0xffu, 0xffu, 37u};
+    state.stencilBack = state.stencilFront;
+    std::size_t accepted = 0;
+    std::size_t countermodels = 0;
+    const auto verify = [&](const auto& candidate, bool unused, bool witness, std::string_view name) {
+        Require(StencilReferenceUnused(candidate) == unused, "wrong unused stencil reference decision for " + std::string(name));
+        bool changed = false;
+        for (const auto& face : {candidate.stencilFront, candidate.stencilBack}) {
+            for (std::uint32_t stencil = 0; stencil < 256u; ++stencil) {
+                for (const bool depthPass : {false, true}) {
+                    for (const bool boundsPass : {false, true}) {
+                        const auto fixed = stencilReferenceOutcome(candidate, face, face.reference, stencil, depthPass, boundsPass);
+                        for (std::uint32_t reference = 0; reference < 256u; ++reference) {
+                            changed |= stencilReferenceOutcome(candidate, face, reference, stencil, depthPass, boundsPass) != fixed;
+                        }
+                    }
+                }
+            }
+        }
+        Require(!unused || !changed, "dropping the stencil reference changes a sample outcome for " + std::string(name));
+        Require(!witness || changed, "the dependent stencil reference has no countermodel for " + std::string(name));
+        accepted += unused;
+        countermodels += witness;
+    };
+    verify(state, true, false, "ALWAYS with KEEP");
+    for (const auto op : {VK_STENCIL_OP_ZERO, VK_STENCIL_OP_INCREMENT_AND_CLAMP, VK_STENCIL_OP_DECREMENT_AND_CLAMP, VK_STENCIL_OP_INVERT, VK_STENCIL_OP_INCREMENT_AND_WRAP, VK_STENCIL_OP_DECREMENT_AND_WRAP}) {
+        auto independent = state;
+        independent.stencilFront.passOp = op;
+        independent.stencilBack = independent.stencilFront;
+        verify(independent, true, false, "reference-independent update");
+    }
+    for (std::uint32_t comparison = 0; comparison < 8u; ++comparison) {
+        auto masked = state;
+        masked.stencilFront.compareOp = static_cast<VkCompareOp>(comparison);
+        masked.stencilFront.compareMask = 0x100u;
+        masked.stencilBack = masked.stencilFront;
+        verify(masked, true, false, "effective zero compare mask");
+        if (comparison != VK_COMPARE_OP_ALWAYS && comparison != VK_COMPARE_OP_NEVER) {
+            auto dependent = masked;
+            dependent.stencilBack.compareMask = 0x80u;
+            dependent.stencilBack.writeMask = 0;
+            verify(dependent, false, true, "dependent back-face comparison with no writes");
+        }
+    }
+    auto replace = state;
+    replace.stencilFront.passOp = VK_STENCIL_OP_REPLACE;
+    verify(replace, false, true, "reachable front pass REPLACE");
+    replace.stencilFront.passOp = VK_STENCIL_OP_KEEP;
+    replace.stencilBack.failOp = VK_STENCIL_OP_REPLACE;
+    verify(replace, true, false, "unreachable back fail REPLACE");
+    replace.stencilBack.compareOp = VK_COMPARE_OP_NEVER;
+    verify(replace, false, true, "reachable back fail REPLACE");
+    replace.stencilBack.failOp = VK_STENCIL_OP_KEEP;
+    replace.stencilBack.passOp = VK_STENCIL_OP_REPLACE;
+    replace.stencilBack.depthFailOp = VK_STENCIL_OP_REPLACE;
+    verify(replace, true, false, "NEVER with unreachable depth operations");
+    replace = state;
+    replace.stencilBack.passOp = VK_STENCIL_OP_REPLACE;
+    replace.stencilBack.writeMask = 0x100u;
+    verify(replace, true, false, "effective zero write mask");
+    replace.stencilBack.writeMask = 0x80u;
+    verify(replace, false, true, "partially writable REPLACE");
+    replace = state;
+    replace.stencilBack.depthFailOp = VK_STENCIL_OP_REPLACE;
+    verify(replace, true, false, "disabled depth test");
+    replace.depthTest = true;
+    replace.depthCompare = VK_COMPARE_OP_ALWAYS;
+    verify(replace, true, false, "always passing depth test");
+    replace.depthCompare = VK_COMPARE_OP_LESS;
+    verify(replace, false, true, "possibly failing depth test");
+    replace.depthCompare = VK_COMPARE_OP_NEVER;
+    verify(replace, false, true, "always failing depth test");
+    replace.stencilBack.depthFailOp = VK_STENCIL_OP_KEEP;
+    replace.stencilBack.passOp = VK_STENCIL_OP_REPLACE;
+    verify(replace, true, false, "unreachable depth pass REPLACE");
+    replace = state;
+    replace.depthBoundsTest = true;
+    verify(replace, true, false, "bounds with reference-independent operations");
+    replace.stencilBack.depthFailOp = VK_STENCIL_OP_REPLACE;
+    Require(!StencilReferenceUnused(replace), "depth bounds admitted an unchecked REPLACE operation");
+    auto clear = state;
+    clear.stencilFront = {VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_REPLACE, VK_COMPARE_OP_ALWAYS, 0xffu, 0xffu, 7u};
+    clear.stencilBack = clear.stencilFront;
+    verify(clear, false, true, "clear replacement state");
+    for (const bool front : {false, true}) {
+        auto invalid = state;
+        (front ? invalid.stencilFront : invalid.stencilBack).compareOp = static_cast<VkCompareOp>(8u);
+        Require(!StencilReferenceUnused(invalid), "an unknown stencil comparison lost its export");
+        invalid = state;
+        (front ? invalid.stencilFront : invalid.stencilBack).passOp = static_cast<VkStencilOp>(8u);
+        Require(!StencilReferenceUnused(invalid), "an unknown stencil operation lost its export");
+    }
+    auto invalidDepth = state;
+    invalidDepth.depthTest = true;
+    invalidDepth.depthCompare = static_cast<VkCompareOp>(8u);
+    Require(!StencilReferenceUnused(invalidDepth), "an unknown depth comparison lost its stencil export");
+    auto inactive = clear;
+    inactive.stencilTest = false;
+    Require(StencilReferenceUnused(inactive), "a disabled stencil test retained the export");
+    inactive.stencilTest = true;
+    inactive.depth.reset();
+    Require(StencilReferenceUnused(inactive), "an absent attachment retained the export");
+    std::cout << "Unused stencil reference sample equivalence passed: " << accepted << " accepted states, " << countermodels << " dependent countermodels\n";
+}
+
+std::set<std::string> bufferViews(std::span<const std::uint32_t> words) {
+    std::set<std::string> views;
+    for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
+        if (static_cast<spv::Op>(words[at] & 0xffffu) != spv::OpName) continue;
+        const std::string name(reinterpret_cast<const char*>(&words[at + 2]));
+        if (name.starts_with("buffers")) views.insert(name);
+    }
+    return views;
+}
+
+void aliasedBufferViewTests() {
+    constexpr std::array<std::uint32_t, 5> capabilities{spv::CapabilityShader, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess, spv::CapabilityInt64Atomics};
+    constexpr std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    constexpr std::array<std::uint32_t, 12> userData{0u, 0u, 0u, 0u, 0x10000000u, 0u, 0x1000u, 0x31016facu, 0x20000000u, 0u, 0x1000u, 0x31038facu};
+    const auto code = [](std::uint32_t store, std::uint32_t resource) {
+        return std::array<std::uint32_t, 9>{0xe0000000u, 0x80010a00u, 0xbf8c3f70u, store, resource, 0x7e0e02f2u, 0xf800180fu, 0x07070707u, 0xbf810000u};
+    };
+    const std::array<std::pair<std::array<std::uint32_t, 9>, std::set<std::string>>, 2> cases{{
+        {code(0xe0104000u, 0x80010a00u), {"buffers", "buffers_coherent"}},
+        {code(0xe1480000u, 0x80010a00u), {"buffers", "buffers_u64"}},
+    }};
+    AgcDriver::Graphics::State state{};
+    state.stages.path = AgcDriver::Graphics::ShaderPath::Vertex;
+    ShaderRecompiler::RecompileResult vertex;
+    vertex.spirv = makeModule({});
+    const VkPhysicalDeviceSubgroupProperties subgroup{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    for (const auto& [words, views] : cases) {
+        auto request = orderedPixelRequest(0x20600u, capabilities, words);
+        request.target.supportedExtensions = extensions;
+        request.target.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
+        request.context.userDataBaseRegister = 0;
+        request.context.userData = userData;
+        auto pixel = ShaderRecompiler::Recompile(request);
+        const auto declared = bufferViews(pixel.spirv.Words());
+        std::string names;
+        for (const auto& name : declared) names += " " + name;
+        Require(declared == views, "the pixel shader declared the guest buffers as" + names + ", not as the expected " + std::to_string(views.size()) + " aliased variables");
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &pixel, 0}}};
+        AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, false, false, false, false, true);
+        auto unaliased = pixel.spirv.Copy();
+        for (std::size_t at = 5; at < unaliased.size() && (unaliased[at] >> 16u) != 0; at += unaliased[at] >> 16u) {
+            if (static_cast<spv::Op>(unaliased[at] & 0xffffu) == spv::OpDecorate && unaliased[at + 2] == spv::DecorationAliased) unaliased[at + 2] = spv::DecorationRestrict;
+        }
+        pixel.spirv = std::move(unaliased);
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, false, false, false, false, true); }, "duplicate SPIR-V resource binding");
+    }
+}
+
 void LineStripTests() {
     using namespace AgcDriver::Graphics;
     auto queue = makeState();
@@ -5462,6 +5824,10 @@ int main(int argc, char** argv) {
     setenv("APS5_HEAP_MIRROR_MIB", "4", 1);
 #endif
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--unused-stencil-reference") {
+            stencilReferenceUnusedTests();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--address-space-teardown") {
             addressSpaceTeardownTests();
             std::cout << "address-space device teardown releases cached guest allocations\n";
@@ -5527,6 +5893,9 @@ int main(int argc, char** argv) {
         DepthBoundsBiasTests();
         conservativeZExportTests();
         orderedPixelShaderTests();
+        stencilRefExportTests();
+        stencilReferenceUnusedTests();
+        aliasedBufferViewTests();
         LineStripTests();
         PixelLayerBaseTests();
         ProvokingVertexTests();

@@ -1622,6 +1622,26 @@ bool SplitsAlternateAlpha(const State& state) {
     return false;
 }
 
+bool StencilReferenceUnused(const State& state) {
+    if (!state.depth || !state.stencilTest) return true;
+    if (state.depthTest && (state.depthCompare < VK_COMPARE_OP_NEVER || state.depthCompare > VK_COMPARE_OP_ALWAYS)) return false;
+    const auto faceUnused = [&](const VkStencilOpState& face) {
+        if (face.compareOp < VK_COMPARE_OP_NEVER || face.compareOp > VK_COMPARE_OP_ALWAYS) return false;
+        for (const auto op : {face.failOp, face.passOp, face.depthFailOp}) {
+            if (op < VK_STENCIL_OP_KEEP || op > VK_STENCIL_OP_DECREMENT_AND_WRAP) return false;
+        }
+        if (face.compareOp != VK_COMPARE_OP_ALWAYS && face.compareOp != VK_COMPARE_OP_NEVER && (face.compareMask & 0xffu) != 0) return false;
+        if ((face.writeMask & 0xffu) == 0) return true;
+        if (state.depthBoundsTest) return face.failOp != VK_STENCIL_OP_REPLACE && face.passOp != VK_STENCIL_OP_REPLACE && face.depthFailOp != VK_STENCIL_OP_REPLACE;
+        const bool passes = face.compareOp == VK_COMPARE_OP_ALWAYS || face.compareOp == VK_COMPARE_OP_EQUAL || face.compareOp == VK_COMPARE_OP_LESS_OR_EQUAL || face.compareOp == VK_COMPARE_OP_GREATER_OR_EQUAL;
+        if (!passes) return face.failOp != VK_STENCIL_OP_REPLACE;
+        const bool depthPass = !state.depthTest || state.depthCompare != VK_COMPARE_OP_NEVER;
+        const bool depthFail = state.depthTest && state.depthCompare != VK_COMPARE_OP_ALWAYS;
+        return (!depthPass || face.passOp != VK_STENCIL_OP_REPLACE) && (!depthFail || face.depthFailOp != VK_STENCIL_OP_REPLACE);
+    };
+    return faceUnused(state.stencilFront) && faceUnused(state.stencilBack);
+}
+
 bool DrawKeyCovers(RegisterRead read) {
     // One bit per register offset of each bank, set from the table once.
     static const auto covered = [] {
