@@ -993,6 +993,8 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     // Multisampling with MSAA_ENABLE clear rasterizes every sample at the pixel center (upstream refuses
     // it): a custom pattern with all samples at (0, 0), which suits a pass of any sample count.
     if (const auto mode = find(cx, 0x292); guestSamples > 1 && mode != cx.end() && (mode->second & 1u) == 0) {
+        const bool filled = result.topology != VK_PRIMITIVE_TOPOLOGY_POINT_LIST && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_STRIP && result.topology != VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        Require(filled && !result.depth && !result.alphaToCoverage, "multisampled targets rasterized without MSAA_ENABLE are unsupported for points, lines, a depth target or alpha-to-coverage");
         result.sampleLocations = {};
         result.customSampleLocations = true;
     } else {
