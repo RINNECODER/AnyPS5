@@ -631,7 +631,7 @@ void DefineTessellationInterfaces(SpirvEmitterState& state) {
 
 void DefineTessellationExecutionModes(SpirvEmitterState& state) {
     const auto& tess = state.inputInfo.vertex->tess;
-    if (tess.domain != 1u || (tess.partitioning != 0u && tess.partitioning != 2u) || tess.outputTopology != 2u) {
+    if (tess.domain != 1u || (tess.partitioning != 0u && tess.partitioning != 2u && tess.partitioning != 3u) || tess.outputTopology != 2u) {
         throw std::runtime_error("unsupported tessellation domain, partitioning, or output topology");
     }
     state.module.EmitCapability(spv::CapabilityTessellation);
@@ -639,7 +639,7 @@ void DefineTessellationExecutionModes(SpirvEmitterState& state) {
         state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeOutputVertices, tess.outputControlPoints);
     } else {
         state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeTriangles);
-        state.module.AddExecutionMode(state.mainFunc, tess.partitioning == 0u ? spv::ExecutionModeSpacingEqual : spv::ExecutionModeSpacingFractionalOdd);
+        state.module.AddExecutionMode(state.mainFunc, tess.partitioning == 0u ? spv::ExecutionModeSpacingEqual : tess.partitioning == 3u ? spv::ExecutionModeSpacingFractionalEven : spv::ExecutionModeSpacingFractionalOdd);
         state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeVertexOrderCw);
     }
 }
@@ -1246,7 +1246,7 @@ void EmitSetTessellationAttribute(SpirvValueEmitContext& ctx, const IrValue& ins
             const auto inside = state.module.AllocateId();
             state.module.AddFunction(spv::OpFOrdGreaterThan, TypeBool(state), inside, floating, lower);
             const auto clamped = state.module.AllocateId();
-            state.module.AddFunction(spv::OpExtInst, TypeF32(state), clamped, GlslStd450(state), GLSLstd450FMin, floating, ConstantF32Value(state, state.inputInfo.vertex->tess.partitioning == 0u ? 64.0f : 63.0f));
+            state.module.AddFunction(spv::OpExtInst, TypeF32(state), clamped, GlslStd450(state), GLSLstd450FMin, floating, ConstantF32Value(state, state.inputInfo.vertex->tess.partitioning == 2u ? 63.0f : 64.0f));
             value = state.module.AllocateId();
             state.module.AddFunction(spv::OpSelect, TypeF32(state), value, inside, clamped, outer ? floating : lower);
         }
