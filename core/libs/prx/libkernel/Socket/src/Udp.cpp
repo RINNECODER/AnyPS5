@@ -119,6 +119,10 @@ struct Socket {
 struct Waker {
     NativeSocket value = Invalid;
     Waker() {
+#ifdef _WIN32
+        static const int startup = [] { WSADATA data{}; return WSAStartup(MAKEWORD(2, 2), &data); }();
+        if (startup) throw std::runtime_error("equeue waker: WSAStartup failed, error " + std::to_string(startup));
+#endif
         value = ::socket(AF_INET, SOCK_DGRAM, 0);
         sockaddr_in address{};
         address.sin_family = AF_INET;
@@ -332,6 +336,7 @@ bool GuestSockets::WaitAny(const std::vector<Interest>& interests, std::uint64_t
     std::vector<WSAPOLLFD> entries;
     constexpr SHORT ReadMask = POLLRDNORM;
     constexpr SHORT WriteMask = POLLWRNORM;
+    bool pipes = false;
 #else
     std::vector<pollfd> entries;
     constexpr short ReadMask = POLLIN;
@@ -341,7 +346,14 @@ bool GuestSockets::WaitAny(const std::vector<Interest>& interests, std::uint64_t
         std::lock_guard lock(socketsMutex);
         for (const auto& interest : interests) {
             const auto found = sockets.find(interest.descriptor);
-            if (found == sockets.end()) continue;
+            if (found == sockets.end()) {
+#ifdef _WIN32
+                pipes = true;
+#else
+                entries.push_back({interest.descriptor, ReadMask, 0});
+#endif
+                continue;
+            }
             held.push_back(found->second);
             entries.push_back({found->second->value, interest.write ? WriteMask : ReadMask, 0});
         }
@@ -359,6 +371,7 @@ bool GuestSockets::WaitAny(const std::vector<Interest>& interests, std::uint64_t
         if (remaining < 1000000) return false;
         timeout = static_cast<INT>(std::min<std::uint64_t>(remaining / 1000000, INT_MAX));
     }
+    if (pipes && (timeout < 0 || timeout > 1)) timeout = 1;
     if (WSAPoll(entries.data(), static_cast<ULONG>(entries.size()), timeout) == SOCKET_ERROR)
         throw std::runtime_error("equeue wait: WSAPoll failed, guest errno " + std::to_string(NativeError()));
 #elif defined(__APPLE__)
@@ -656,7 +669,7 @@ bool GuestSockets::Ready(int descriptor, bool write, std::int64_t* data, bool* e
     {
         std::lock_guard lock(socketsMutex);
         const auto found = sockets.find(descriptor);
-        if (found == sockets.end()) return false;
+        if (found == sockets.end()) return !write && PipeReadState(descriptor, data, eof) && (*data > 0 || *eof);
         socket = found->second;
     }
 #ifdef _WIN32
@@ -688,6 +701,34 @@ bool GuestSockets::Ready(int descriptor, bool write, std::int64_t* data, bool* e
         if (::ioctl(socket->value, FIONREAD, &available) == 0) *data = available;
 #endif
     }
+    return true;
+}
+
+bool GuestSockets::PipeReadState(int descriptor, std::int64_t* data, bool* eof) {
+#ifdef _WIN32
+    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    if (handle == INVALID_HANDLE_VALUE || GetFileType(handle) != FILE_TYPE_PIPE) return false;
+    static const auto query = reinterpret_cast<QueryInformationFile>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationFile")));
+    if (!query) throw std::runtime_error("kevent: NtQueryInformationFile is unavailable");
+    PipeIoStatus status{};
+    ACCESS_MASK access = 0;
+    PipeLocalInformation pipe{};
+    if (query(handle, &status, &access, sizeof(access), FileAccessInformationClass) < 0 ||
+        query(handle, &status, &pipe, sizeof(pipe), FilePipeLocalInformationClass) < 0)
+        throw std::runtime_error("kevent: querying pipe descriptor " + std::to_string(descriptor) + " failed");
+    if (!(access & FILE_READ_DATA)) return false;
+    *data = pipe.readDataAvailable;
+    *eof = pipe.state == PipeClosingState;
+#else
+    if (!IsPipe(descriptor, 0) || (::fcntl(descriptor, F_GETFL) & O_ACCMODE) == O_WRONLY) return false;
+    pollfd entry{descriptor, POLLIN, 0};
+    int available = 0;
+    if (::poll(&entry, 1, 0) < 0 || ::ioctl(descriptor, FIONREAD, &available) != 0)
+        throw std::runtime_error("kevent: querying pipe descriptor " + std::to_string(descriptor) + " failed");
+    *data = available;
+    *eof = (entry.revents & POLLHUP) != 0;
+#endif
     return true;
 }
 
