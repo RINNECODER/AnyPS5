@@ -139,12 +139,8 @@ private:
     void _mark(uint64_t offset, size_t len, bool used) {
         size_t first = offset / PS5_PAGE_SIZE;
         size_t count = len / PS5_PAGE_SIZE;
-        // Write through a volatile pointer: the arm64 whole-title build lowered the plain loop to a
-        // memset that did not store, so the pool never recorded the allocation and a later Alloc
-        // overlapped it.
-        volatile bool* target = _used + first;
         for (size_t i = 0; i < count; ++i)
-            target[i] = used;
+            _used[first + i] = used;
     }
 
     struct Block {

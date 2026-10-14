@@ -170,8 +170,13 @@ def main():
     if args.nid_symbols:
         known = set(open(args.nid_symbols).read().split())
         for contract in contracts['imports'].values():
-            if not contract.get('stub') and contract['name'] + '_nid_postfix' in known:
+            if contract['name'] + '_nid_postfix' in known:
                 contract['name'] = contract['name'] + '_nid_postfix'
+            elif contract['name'] not in known:
+                # A guest import the runtime does not define must not be emitted under a name the
+                # host C library defines: a global stub would interpose over libSystem for the whole
+                # process. Namespace it so the stub generator can trampoline it to the host function.
+                contract['name'] = '__aps5_guest_' + contract['name']
     image = Image(args.elf, contracts)
     print('native %d stub %d entries %s native_has %s (%.1fs)' % (len(order), len(frontier), [hex(e) for e in entries], [hex(a) in [hex(x) for x in native] for a in entries], time.time() - start), flush=True)
     start = time.time()
