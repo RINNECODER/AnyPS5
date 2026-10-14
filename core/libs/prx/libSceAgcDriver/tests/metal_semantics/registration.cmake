@@ -11,7 +11,7 @@ add_library(anyps5_metal_semantics_device STATIC "${semanticsDir}/MetalTestDevic
 target_compile_options(anyps5_metal_semantics_device PRIVATE -fobjc-arc)
 target_include_directories(anyps5_metal_semantics_device PUBLIC "${semanticsDir}/shim")
 target_link_libraries(anyps5_metal_semantics_device PUBLIC anyps5_metal_guest_recompiler anyps5_metal_utilities)
-foreach(semanticsTest IN ITEMS ValuMaskInactiveLanes VCvtF32F64ResultModes LdsAddF32 LdsSrc2LaneOrder)
+foreach(semanticsTest IN ITEMS ValuMaskInactiveLanes VCvtF32F64ResultModes LdsAddF32 LdsSrc2LaneOrder BarrierGlobalMemory)
     string(TOLOWER "${semanticsTest}" semanticsLower)
     set(semanticsWrapper "${CMAKE_CURRENT_BINARY_DIR}/semantics_${semanticsTest}.cpp")
     file(GENERATE OUTPUT "${semanticsWrapper}" CONTENT
