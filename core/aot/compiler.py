@@ -1885,6 +1885,10 @@ def compile_image(image, sink=None, emit_bodies=True):
         if spec.get('stub'):
             stubs.append((spec, 'declared stub'))
             continue
+        if spec.get('external'):
+            # A function the image declares but does not contain: the differential harness supplies
+            # its native body (a recorded-call replay stub). Emit a declaration only.
+            continue
         try:
             functions.append(Function(image, spec))
         except Rejected as error:
@@ -1958,6 +1962,11 @@ def compile_image(image, sink=None, emit_bodies=True):
     if any(f.checked_pointer_loads or f.checked_pointer_arguments or f.checked_pointer_bases for f in functions):
         lines.append(f'declare zeroext i1 @{checked_pointers.SYMBOL}(ptr, i64, i1 zeroext)')
     names = {spec['name'] for spec in image.functions.values()}
+    for spec in image.functions.values():
+        if not spec.get('external'):
+            continue
+        require(abi.uniform(spec), 'external function requires the uniform register-file ABI')
+        lines.append(f'declare void @{spec["name"]}(ptr)')
     for contract in image.imports.values():
         result, parameters = signature(contract)
         require(contract['name'] not in names, 'duplicate native name')

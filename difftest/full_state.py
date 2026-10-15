@@ -39,6 +39,7 @@ sys.path.insert(0, str(REPO / "core" / "aot"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import difftest as harness  # noqa: E402
 import replay  # noqa: E402
+import call_record  # noqa: E402
 
 BASE = replay.BASE
 SCRATCH = BASE + 0x60000000
@@ -130,7 +131,29 @@ def build_runner(directory):
     return binary
 
 
-def build_arm64(ir, directory):
+def build_arm64(ir, directory, stub_source=None):
+    if stub_source is not None:
+        # The function calls others: link the generated recorded-call replay stubs, plus the TLS
+        # stub because the caller may still reference the runtime TLS base.
+        from toolchain import build_native_object
+        build_native_object(ir, directory / "native.o")
+        (directory / "replay_stubs.c").write_text(stub_source)
+        subprocess.run(["xcrun", "clang", "-arch", "arm64", "-O2", "-c", str(directory / "replay_stubs.c"),
+                        "-o", str(directory / "replay_stubs.o")], check=True, capture_output=True)
+        stub = directory / "tls_stub.cc"
+        stub.write_text(TLS_STUB)
+        stub_object = directory / "tls_stub.o"
+        subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-c", str(stub), "-o", str(stub_object)],
+                       check=True, capture_output=True)
+        extra = [str(directory / "replay_stubs.o"), str(stub_object)]
+        if "NativeAotDispatch_nid_no_patch" in ir:
+            dispatch = REPO / "core" / "libs" / "native" / "NativeAotDispatch.cpp"
+            subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-O2", "-c", str(dispatch),
+                            "-o", str(directory / "d.o")], check=True, capture_output=True)
+            extra.append(str(directory / "d.o"))
+        subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-dynamiclib", str(directory / "native.o"), *extra,
+                        "-o", str(directory / "native.dylib")], check=True, capture_output=True)
+        return directory / "native.dylib"
     try:
         return replay.build_arm64(ir, directory)
     except subprocess.CalledProcessError:
@@ -224,7 +247,7 @@ def plant_ir(ir, plant, address):
     if plant is None:
         return ir
     lines = ir.splitlines()
-    bank = {'gpr1': (0, 0, 'add i64', '1'), 'xmm1': (1, 0, 'xor i128', '1'),
+    bank = {'gpr1': (0, 0, 'add i64', '1'), 'gpr1-caller': (0, 0, 'add i64', '1'), 'xmm1': (1, 0, 'xor i128', '1'),
             'float-ulp': (1, 0, 'xor i128', '1'), 'flags-of': (3, 0, 'xor i64', '2048'),
             'flags-of-shr1': (3, 0, 'xor i64', '2048')}[plant] if plant != 'store-drop' else None
     if bank is not None:
@@ -259,42 +282,59 @@ def run_case(address, seed, directory, plant=None):
     # image the compiler treats the function's own code page as data, and the runtime does not map
     # every such page, so previously-passing functions hang or fault. Off until the harness builds
     # contracts from the real image (see REPORT20).
-    result = harness.compile_one(title, sizes, address, 200, directory, uniform=True)
+    sites = [site for site in call_record.find_sites(title, sizes, address)
+             if site['target'] in sizes and sizes[site['target']] and site['target'] != address]
+    callees = sorted({site['target'] for site in sites})
+    result = harness.compile_one(title, sizes, address, 200, directory, uniform=True,
+                                 external=set(callees), functions=[address] + callees)
     if result["status"] != "compiled":
-        return {"status": "rejected", "reason": result.get("reason", "")[:120]}
+        return {"status": "rejected", "reason": result.get("reason", "")[:120], "call_sites": len(sites)}
     ir, image = result["ir"], (directory / f"{address:x}.elf").read_bytes()
     ir = plant_ir(ir, plant, address)
     os.environ["ANYPS5_AOT_EBOOT"] = str(directory / f"{address:x}.elf")
-    dylib = build_arm64(ir, directory)
-    library = ctypes.CDLL(str(dylib))
-    data_ranges = [(vaddr, memsz) for vaddr, _filesz, memsz, _data in replay.elf_segments(image) if memsz]
-    runner = build_runner(directory)
     rng = random.Random(seed)
     memory = rng.randbytes(SCRATCH_SIZE)
     registers = {item: SCRATCH + (rng.randrange(0, SCRATCH_SIZE // 4) & ~7)
                  for item in replay.UNIFORM_GPRS if item != "rsp"}
     registers["rsp"] = STACK
+    # A function that calls others is verified by recording those calls on the x86 side and
+    # replaying them as native stubs, so its own code is tested without its callees having to
+    # compile. The recorder must run before the ARM dylib is built: it produces the stubs.
+    x86 = None
+    stub_source = None
+    if sites:
+        try:
+            records, x86 = call_record.record_calls(title, sizes, address, sites, registers, memory, directory)
+        except (RuntimeError, subprocess.TimeoutExpired) as error:
+            return {"status": "x86-fault", "reason": str(error)[-120:], "call_sites": len(sites)}
+        stub_source = call_record.replay_stub_source(records, callees)
+    dylib = build_arm64(ir, directory, stub_source)
+    library = ctypes.CDLL(str(dylib))
+    data_ranges = [(vaddr, memsz) for vaddr, _filesz, memsz, _data in replay.elf_segments(image) if memsz]
     arm = arm_state(dylib, f"sub_{address:x}", registers, memory)
-    (directory / "segments.bin").write_bytes(_segments(image))
-    (directory / "case.bin").write_bytes(
-        b"".join(int(registers.get(name, 0)).to_bytes(8, "little") for name in replay.REGISTERS))
-    (directory / "pages.bin").write_bytes(memory)
-    try:
-        completed = subprocess.run([str(runner), str(directory / "segments.bin"), hex(address),
-                                    str(directory / "case.bin"), str(directory / "out.bin"), str(directory / "pages.bin")],
-                                   capture_output=True, timeout=60)
-    except subprocess.TimeoutExpired:
-        return {"status": "x86-timeout"}
-    if arm == "fault" and completed.returncode != 0:
-        # Both runners died on the same wild access: the randomized entry state drove the guest into
-        # undefined behavior, and they agree that it is undefined.
-        return {"status": "both-fault"}
+    if x86 is None:
+        runner = build_runner(directory)
+        (directory / "segments.bin").write_bytes(_segments(image))
+        (directory / "case.bin").write_bytes(
+            b"".join(int(registers.get(name, 0)).to_bytes(8, "little") for name in replay.REGISTERS))
+        (directory / "pages.bin").write_bytes(memory)
+        try:
+            completed = subprocess.run([str(runner), str(directory / "segments.bin"), hex(address),
+                                        str(directory / "case.bin"), str(directory / "out.bin"), str(directory / "pages.bin")],
+                                       capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            return {"status": "x86-timeout", "call_sites": len(sites)}
+        if arm == "fault" and completed.returncode != 0:
+            # Both runners died on the same wild access: the randomized entry state drove the guest
+            # into undefined behavior, and they agree that it is undefined.
+            return {"status": "both-fault", "call_sites": len(sites)}
+        if completed.returncode != 0:
+            return {"status": "x86-fault", "code": completed.returncode, "call_sites": len(sites)}
+        x86 = (directory / "out.bin").read_bytes()
     if arm in ("timeout", "fault"):
-        return {"status": arm}
-    if completed.returncode != 0:
-        return {"status": "x86-fault", "code": completed.returncode}
-    raw = (directory / "out.bin").read_bytes()
-    return {"status": "ok", "arm": arm, "x86": raw, "library": library, "data_ranges": data_ranges}
+        return {"status": arm, "call_sites": len(sites)}
+    return {"status": "ok", "arm": arm, "x86": x86, "library": library, "data_ranges": data_ranges,
+            "call_sites": len(sites)}
 
 
 def _segments(image):

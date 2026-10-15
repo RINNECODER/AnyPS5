@@ -112,13 +112,17 @@ def page_region(address, size, page=0x1000):
     return start, end - start
 
 
-def build_synthetic(functions, referenced, uniform=False, dispatch=False, guest_base=0, guest_data=False):
+def build_synthetic(functions, referenced, uniform=False, dispatch=False, guest_base=0, guest_data=False, external=()):
     """functions: [(address, code)]; referenced: {address: size}.
 
     With guest_data the compiler does not emit the data segments; it references them at their guest
     vaddrs and the runtime maps the image's segments. A referenced region that overlaps a mapped
     function is still skipped: the compiler treats a reference into the function's own code page as
-    data, and mapping a zero-filled page over it drives the code into a wild jump."""
+    data, and mapping a zero-filled page over it drives the code into a wild jump.
+
+    `external` names functions whose bodies the harness supplies natively (recorded-call replay
+    stubs): the image declares them, so a direct call resolves to a uniform call, but no body is
+    emitted."""
     regions = {}
     function_ranges = [(a, a + len(c)) for a, c in functions]
     for target, size in referenced.items():
@@ -185,7 +189,8 @@ def build_synthetic(functions, referenced, uniform=False, dispatch=False, guest_
         "schema": 1,
         "sha256": hashlib.sha256(image).hexdigest(),
         "functions": [{"name": (f"sub_{address:x}" if uniform else f"func_{address:x}"), "address": address, "size": len(code),
-                       **({"uniform": True, "result": "void"} if uniform else {"result": "i64"}), "parameters": []}
+                       **({"uniform": True, "result": "void"} if uniform else {"result": "i64"}), "parameters": [],
+                       **({"external": True} if address in external else {})}
                       for address, code in functions],
         "imports": {},
         "data": data,
@@ -207,15 +212,16 @@ def build_guest_contracts(raw, codes, uniform=False, guest_base=0):
 
 
 def compile_one(title, sizes, address, limit, work_dir=None, uniform=False, dispatch=False,
-                guest_data=False, guest_base=0):
-    functions = [address] if dispatch else closure(title, sizes, address, limit)
+                guest_data=False, guest_base=0, external=(), functions=None):
+    if functions is None:
+        functions = [address] if dispatch else closure(title, sizes, address, limit)
     codes = [(a, title.code(a, sizes[a])) for a in functions]
     codes = [(a, c) for a, c in codes if c]
     referenced = {}
     for a, c in codes:
         for target, size in references(c, a).items():
             referenced[target] = max(referenced.get(target, 1), size)
-    image, contracts = build_synthetic(codes, referenced, uniform, dispatch, guest_base, guest_data)
+    image, contracts = build_synthetic(codes, referenced, uniform, dispatch, guest_base, guest_data, external)
     with tempfile.TemporaryDirectory(prefix="anyps5-difftest-") as directory:
         path = Path(directory) / "input.elf"
         path.write_bytes(image)
