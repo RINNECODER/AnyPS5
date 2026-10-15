@@ -20,7 +20,10 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 sdk=$(xcrun --show-sdk-path)
-nm -g "$sdk"/usr/lib/libSystem.B.tbd "$sdk"/usr/lib/system/*.tbd 2>/dev/null \
+# The arm64e blocks are the ones an arm64 macOS binary links against, and only they list the
+# linkable host functions: the x86_64-only math builtins (___isfinite, ___isinf, ...) are listed
+# in the stub but are not exported on arm64, so a trampoline to one fails the link.
+nm -g -arch arm64e "$sdk"/usr/lib/libSystem.B.tbd "$sdk"/usr/lib/system/*.tbd 2>/dev/null \
     | awk '/^[0-9a-fA-F]+/ { print $3 }' | sort -u > "$work/host"
 
 nm -u "$object" | awk '{print $1}' | grep '^_' | sort -u > "$work/undefined"
@@ -45,7 +48,11 @@ for name in names:
     # private_extern: the image's own code resolves it, but the executable does not export it.
     lines.append(f'.private_extern {name}')
     lines.append(f'{name}:')
-    bare = '_' + name[len(prefix):] if name.startswith(prefix) else None
+    # nm reports Mach-O symbols with one leading underscore; strip it before the guest prefix so a
+    # namespaced guest import of a host C library function gets the trampoline instead of a bare
+    # `ret` (which returned a garbage length from strlen and faulted the heap initialiser).
+    symbol = name[1:] if name.startswith('_') else name
+    bare = '_' + symbol[len(prefix):] if symbol.startswith(prefix) else None
     if bare is not None and bare in host:
         lines.append(f'  b {bare}')
     else:
