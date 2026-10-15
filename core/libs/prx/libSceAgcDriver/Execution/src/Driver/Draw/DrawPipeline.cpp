@@ -127,6 +127,7 @@ void DrawPipeline::run() {
             failed = true;
             static std::atomic<std::uint64_t> reported{0};
             if (reported.fetch_add(1, std::memory_order_relaxed) < 20) std::fprintf(stderr, "[draw] pipelined commit failed: %.200s\n", error.what());
+            fatal = std::current_exception();
         } catch (...) {
             fatal = std::current_exception();
         }
