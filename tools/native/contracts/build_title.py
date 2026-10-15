@@ -22,6 +22,7 @@ from pathlib import Path
 import abi
 import checked_pointers
 import finite_tables
+import registers
 from compiler import Function, Image, compile_image, stub_function
 
 # The preamble pass skips discovery and dataflow, so the declares only those passes can reach are
@@ -252,6 +253,7 @@ def main():
     if args.limit:
         specs = specs[:args.limit]
     IMAGE = Image(args.elf, contracts)
+    registers.prepare(IMAGE)
 
     if args.objects:
         args.specs = specs

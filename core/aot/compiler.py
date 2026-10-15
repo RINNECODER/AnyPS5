@@ -36,6 +36,7 @@ import frame_exclusion
 import checked_pointers
 import register_values
 import register_aliases
+import registers
 from dynamic import parse_dynamic, DynamicError
 from calls import validate_indirect_calls, CallError
 from targets import TARGETS, target_spec
@@ -276,6 +277,7 @@ class Image:
         self.call_contracts = {}
         self.memory_effects = {}
         self.pointer_output_summaries = {}
+        self.register_summaries = {}
         self.provider_requirements = {}
         try:
             immutable_data.configure(self)
@@ -1496,32 +1498,44 @@ class Function:
     def uniform_gep(self, block, bank, index):
         return self.emit(f'getelementptr inbounds %regfile, ptr {block}, i64 0, i32 {bank}, i64 {index}')
 
-    def uniform_load_registers(self, block, skip=()):
+    def uniform_load_registers(self, block, slots=None, skip=()):
+        def selected(name):
+            return name not in skip and (slots is None or name in slots)
         for index, reg in enumerate(REGISTERS):
-            if reg in skip:
+            if not selected(reg):
                 continue
             gep = self.uniform_gep(block, 0, index)
             value = self.emit(f'load i64, ptr {gep}, align 8')
             self.lines.append(f'  store i64 {value}, ptr %{reg}, align 8')
         for index, reg in enumerate(VECTOR_REGISTERS):
+            if not selected(reg):
+                continue
             gep = self.uniform_gep(block, 1, index)
             value = self.emit(f'load i128, ptr {gep}, align 16')
             self.lines.append(f'  store i128 {value}, ptr %{reg}, align 16')
         for index in range(16):
+            if not selected(f'ymm_hi{index}'):
+                continue
             gep = self.uniform_gep(block, 2, index)
             value = self.emit(f'load i128, ptr {gep}, align 16')
             self.lines.append(f'  store i128 {value}, ptr %ymm_hi{index}, align 16')
 
-    def uniform_store_registers(self, block):
+    def uniform_store_registers(self, block, slots=None):
         for index, reg in enumerate(REGISTERS):
+            if slots is not None and reg not in slots:
+                continue
             value = self.emit(f'load i64, ptr %{reg}, align 8')
             gep = self.uniform_gep(block, 0, index)
             self.lines.append(f'  store i64 {value}, ptr {gep}, align 8')
         for index, reg in enumerate(VECTOR_REGISTERS):
+            if slots is not None and reg not in slots:
+                continue
             value = self.emit(f'load i128, ptr %{reg}, align 16')
             gep = self.uniform_gep(block, 1, index)
             self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
         for index in range(16):
+            if slots is not None and f'ymm_hi{index}' not in slots:
+                continue
             value = self.emit(f'load i128, ptr %ymm_hi{index}, align 16')
             gep = self.uniform_gep(block, 2, index)
             self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
@@ -1648,8 +1662,28 @@ class Function:
         repaired['saved'] = {}
         return repaired
 
+    def call_masks(self, ins, callee, slot):
+        """The (store, load) register masks a uniform call site needs.
+
+        A direct call uses its callee's summary; an indirect site unions the summaries over its
+        declared target set. A site the contract does not annotate (the runtime dispatch
+        fallback) stays full, so no register is ever skipped without a proof.
+        """
+        if slot == 'operand':
+            site = self.image.annotated_calls(self.contract).get(ins.address)
+            if site is None:
+                return registers.FULL, registers.FULL
+            store = load = 0
+            for target in site['target_addresses']:
+                target_store, target_load = registers.summary(self.image, target)
+                store |= target_store
+                load |= target_load
+            return store, load
+        return registers.summary(self.image, callee.get('address'))
+
     def uniform_call(self, ins, callee, slot, state, tail, result):
-        self.uniform_store_registers('%rf_out')
+        store, load = self.call_masks(ins, callee, slot)
+        self.uniform_store_registers('%rf_out', registers.names(store) - {'rsp'})
         self.uniform_stack_out('%rf_out', state['rsp'])
         if slot == 'operand':
             if ins.address in self.image.finite_tables:
@@ -1661,7 +1695,7 @@ class Function:
         else:
             target = '@' + callee['name']
         self.lines.append(f'  call void {target}(ptr %rf_out)')
-        self.uniform_load_registers('%rf_out', skip=('rsp',))
+        self.uniform_load_registers('%rf_out', registers.names(load) - {'rsp'})
         if tail:
             self.uniform_store_state('%rf', state['flags'])
             self.uniform_store_registers('%rf')
@@ -1995,6 +2029,7 @@ def compile_image(image, sink=None, emit_bodies=True, analyze=True):
     # A whole-title build sets allow_unimplemented so a rejected body becomes a reporting trap
     # stub instead of failing the image; the SDK samples keep the strict default.
     tolerant = bool(image.contracts.get('allow_unimplemented'))
+    registers.prepare(image)
     functions, stubs = [], []
     if analyze:
         for spec in image.functions.values():

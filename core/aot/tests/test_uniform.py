@@ -9,6 +9,7 @@ from pathlib import Path
 
 from abi import (ABIError, UNIFORM_STACK_SLOTS, uniform, uniform_locations, signature)
 from compiler import Function, Image, Rejected, compile_image
+import registers
 
 
 def fixture(code, functions, imports=None, relocations=None, data_bindings=None, bindings=None, dispatch=False, tls=None):
@@ -631,6 +632,133 @@ class UniformABITests(unittest.TestCase):
         ir, report = compile_image(Image(source, contracts))
         self.assertIn('call void @NativeAotReportUnimplemented_nid_no_patch(i64 4096)', ir)
         self.assertEqual(report['unimplemented_functions'], 1)
+
+    def test_uniform_structural_summary_is_reads_and_writes(self):
+        # mov rax,rdi ; add rax,rsi ; ret — the store set is the callee's reads plus writes, so a
+        # partial write or a written-but-unread slot still sees a defined value.
+        code = bytes.fromhex('4889f84801f0c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        path = self.directory / 'input.elf'
+        path.write_bytes(raw)
+        image = Image(path, contracts)
+        registers.prepare(image)
+        store, load = image.register_summaries[0x1000]
+        self.assertEqual(registers.names(store) - {'rsp'}, {'rax', 'rdi', 'rsi'})
+        self.assertEqual(registers.names(load) - {'rsp'}, {'rax'})
+
+    def test_uniform_partial_summary_unannotated_indirect_is_full(self):
+        # An indirect call with no declared target set (the runtime dispatch fallback) must never
+        # skip a register: its summary stays full.
+        code = bytes.fromhex('ffd0c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, 3)], dispatch=True)
+        path = self.directory / 'input.elf'
+        path.write_bytes(raw)
+        image = Image(path, contracts)
+        registers.prepare(image)
+        self.assertEqual(image.register_summaries[0x1000], (registers.FULL, registers.FULL))
+
+    def test_uniform_partial_summary_preserves_untouched_registers(self):
+        # 0x1000: call 0x1010 ; ret   0x1010: mov rax,rdi ; add rax,rsi ; ret. The call site copies
+        # only the callee's registers; every other register survives the call.
+        code = bytearray(0x17)
+        code[0x00:0x06] = bytes.fromhex('e80b000000c3')
+        code[0x10:0x17] = bytes.fromhex('4889f84801f0c3')
+        functions = [uniform_function('sub_1000', 0x1000, 6),
+                     uniform_function('sub_1010', 0x1010, 7)]
+        raw, contracts = fixture(bytes(code), functions)
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        self.assertNotIn('ptr %rf_out, i64 0, i32 1', ir)  # no XMM copy at a GPR-only call site
+        self.assertNotIn('ptr %rf_out, i64 0, i32 2', ir)  # no YMM upper copy either
+        registers_file = RegisterFile()
+        registers_file.gpr[GPR['rdi']] = 21
+        registers_file.gpr[GPR['rsi']] = 21
+        untouched = {name: 0x1234000000000000 | index
+                     for index, name in enumerate(('rbx', 'r12', 'r13', 'r14', 'r15'))}
+        for name, value in untouched.items():
+            registers_file.gpr[GPR[name]] = value
+        function(ctypes.byref(registers_file))
+        self.assertEqual(registers_file.gpr[GPR['rax']], 42)
+        for name, value in untouched.items():
+            self.assertEqual(registers_file.gpr[GPR[name]], value, name)
+
+    def test_uniform_partial_write_keeps_the_entry_high_bits(self):
+        # 0x1000: mov rax,0x100 ; call 0x1010 ; ret   0x1010: mov al,1 ; ret. A partial write reads
+        # the entry value, so the caller must copy rax into %rf_out for the callee to merge into.
+        code = bytearray(0x13)
+        code[0x00:0x07] = bytes.fromhex('48c7c000010000')
+        code[0x07:0x0C] = bytes.fromhex('e804000000')
+        code[0x0C] = 0xC3
+        code[0x10:0x13] = bytes.fromhex('b001c3')
+        functions = [uniform_function('sub_1000', 0x1000, 0x0D),
+                     uniform_function('sub_1010', 0x1010, 3)]
+        raw, contracts = fixture(bytes(code), functions)
+        function, _, _ = self.compile(raw, contracts, 'sub_1000')
+        registers_file = RegisterFile()
+        function(ctypes.byref(registers_file))
+        self.assertEqual(registers_file.gpr[GPR['rax']], 0x101)
+
+    def test_uniform_partial_summary_is_transitive(self):
+        # 0x1000: call 0x1010 ; ret   0x1010: call 0x1020 ; ret   0x1020: mov rax,rbx ; ret. The
+        # middle frame never touches rbx, but the leaf reads it, so the outermost caller copies it.
+        code = bytearray(0x24)
+        code[0x00:0x06] = bytes.fromhex('e80b000000c3')
+        code[0x10:0x16] = bytes.fromhex('e80b000000c3')
+        code[0x20:0x24] = bytes.fromhex('4889d8c3')
+        functions = [uniform_function('sub_1000', 0x1000, 6),
+                     uniform_function('sub_1010', 0x1010, 6),
+                     uniform_function('sub_1020', 0x1020, 4)]
+        raw, contracts = fixture(bytes(code), functions)
+        path = self.directory / 'input.elf'
+        path.write_bytes(raw)
+        image = Image(path, contracts)
+        registers.prepare(image)
+        self.assertIn('rbx', registers.names(image.register_summaries[0x1000][0]))
+        function, _, _ = self.compile(raw, contracts, 'sub_1000')
+        registers_file = RegisterFile()
+        registers_file.gpr[GPR['rbx']] = 0x1234
+        function(ctypes.byref(registers_file))
+        self.assertEqual(registers_file.gpr[GPR['rax']], 0x1234)
+        self.assertEqual(registers_file.gpr[GPR['rbx']], 0x1234)
+
+    def test_uniform_partial_summary_reads_back_a_write_only_register(self):
+        # 0x1000: call 0x1010 ; ret   0x1010: mov rcx,0x99 ; ret. The callee never reads rcx, but
+        # the caller reads the result back, so rcx must be in the load set.
+        code = bytearray(0x18)
+        code[0x00:0x06] = bytes.fromhex('e80b000000c3')
+        code[0x10:0x18] = bytes.fromhex('48c7c199000000c3')
+        functions = [uniform_function('sub_1000', 0x1000, 6),
+                     uniform_function('sub_1010', 0x1010, 8)]
+        raw, contracts = fixture(bytes(code), functions)
+        function, _, _ = self.compile(raw, contracts, 'sub_1000')
+        registers_file = RegisterFile()
+        function(ctypes.byref(registers_file))
+        self.assertEqual(registers_file.gpr[GPR['rcx']], 0x99)
+
+    def test_uniform_partial_summary_indirect_union(self):
+        # 0x1000: call rax ; ret   0x1010: mov rax,rdi ; ret   0x1020: mov rdx,rsi ; ret. The store
+        # set is the union over the declared target set, so both rdi and rsi are copied.
+        code = bytearray(0x24)
+        code[0x00:0x03] = bytes.fromhex('ffd0c3')
+        code[0x10:0x14] = bytes.fromhex('4889f8c3')
+        code[0x20:0x24] = bytes.fromhex('4889f2c3')
+        functions = [uniform_function('sub_1000', 0x1000, 3,
+                                      indirect_calls=[{'address': 0x1000, 'targets': [0x1010, 0x1020]}]),
+                     uniform_function('sub_1010', 0x1010, 4),
+                     uniform_function('sub_1020', 0x1020, 4)]
+        raw, contracts = fixture(bytes(code), functions)
+        path = self.directory / 'input.elf'
+        path.write_bytes(raw)
+        image = Image(path, contracts)
+        registers.prepare(image)
+        self.assertTrue({'rdi', 'rsi'} <= registers.names(image.register_summaries[0x1000][0]))
+        function, _, library = self.compile(raw, contracts, 'sub_1000')
+        for name, register, expected in (('sub_1010', 'rax', 0x11), ('sub_1020', 'rdx', 0x22)):
+            registers_file = RegisterFile()
+            registers_file.gpr[GPR['rdi']] = 0x11
+            registers_file.gpr[GPR['rsi']] = 0x22
+            registers_file.gpr[GPR['rax']] = ctypes.cast(getattr(library, name), ctypes.c_void_p).value
+            function(ctypes.byref(registers_file))
+            self.assertEqual(registers_file.gpr[GPR[register]], expected)
 
 
 if __name__ == '__main__':

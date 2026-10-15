@@ -14,6 +14,7 @@ import pstats
 import time
 
 from compiler import Function, Image
+import registers
 
 
 def sample_specs(contracts, start, count):
@@ -48,6 +49,7 @@ def main():
     args = ap.parse_args()
     contracts = json.load(open(args.contracts))
     image = Image(args.elf, contracts)
+    registers.prepare(image)
     specs = sample_specs(contracts, args.start, args.count)
     started = time.perf_counter()
     if args.profile:
