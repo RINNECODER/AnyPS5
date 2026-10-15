@@ -46,12 +46,23 @@ def check_tls_data_refused(relinker, directory):
         raise SystemExit(f"empty-tls-data: a read of thread-local data with an empty PT_TLS was not refused: {message}")
 
 
+def check_no_access(relinker, directory):
+    result, output = convert(relinker, directory, "empty-no-access", empty_tls_image(b""))
+    if result.returncode != 0:
+        raise SystemExit(f"empty-no-access: relinker failed: {result.stdout}{result.stderr}")
+    data = output.read_bytes()
+    meta = struct.unpack_from("<12Q", data, MachO(data).sections[("__APS5DATA", "__meta")][2])
+    if meta[4] != 0:
+        raise SystemExit(f"empty-no-access: an empty PT_TLS without accesses got a TLS descriptor {meta[4:9]}")
+
+
 def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="anyps5-macos-empty-tls-") as directory:
         check_converted(relinker, directory, "empty-guard", bytes.fromhex("64 48 8b 04 25 28 00 00 00"))
         check_converted(relinker, directory, "empty-thread-pointer", bytes.fromhex("64 48 8b 04 25 00 00 00 00"))
         check_tls_data_refused(relinker, directory)
+        check_no_access(relinker, directory)
     print("macOS empty TLS checks passed")
 
 
