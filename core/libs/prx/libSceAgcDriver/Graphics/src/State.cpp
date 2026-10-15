@@ -334,13 +334,14 @@ DepthSurfaceInfo depthSurfaceInfo(std::uint32_t zInfo) {
 void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result) {
     zero(cx, 0x000, 0x00001f9cu, "depth copy, resummarize or decompress draws (DB_RENDER_CONTROL)");
     const bool depthClear = (read(cx, 0x000) & 1u) != 0;
-    const bool stencilClear = (read(cx, 0x000) & 2u) != 0;
     const auto view = read(cx, 0x002);
     const auto surface = depthSurfaceInfo(read(cx, 0x010));
     const auto viewMip = (view >> 26u) & 0xfu;
     const auto maxMip = surface.maxMip;
     const auto zFormat = surface.format;
     const bool stencil = (read(cx, 0x011) & 1u) != 0;
+    // A target without a stencil plane has nothing for STENCIL_CLEAR_ENABLE to write.
+    const bool stencilClear = stencil && (read(cx, 0x000) & 2u) != 0;
     if (zFormat == 0) depthControl &= ~6u;
     if (!stencil) depthControl &= ~1u;
     const auto base = [&](std::uint32_t low, std::uint32_t highOffset) {
@@ -349,7 +350,7 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     };
     const bool depthReadOnly = (view & 0x01000000u) != 0;
     const bool stencilReadOnly = (view & 0x02000000u) != 0;
-    Require(!stencilClear || (stencil && !stencilReadOnly), "stencil clear requires a writable stencil plane");
+    Require(!stencilClear || !stencilReadOnly, "stencil clear requires a writable stencil plane");
     Require(!depthClear || (zFormat != 0 && !depthReadOnly), "depth clear requires a writable depth plane");
     DepthTarget depth{};
     depth.samples = surface.samples;
@@ -1662,10 +1663,11 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (value(cx, 0x200, word)) {
         const auto renderControl = find(cx, 0x000);
         const bool depthClear = renderControl != cx.end() && (renderControl->second & 1u) != 0;
-        const bool stencilClear = renderControl != cx.end() && (renderControl->second & 2u) != 0;
+        std::uint32_t stencilInfo = 0;
+        const bool stencilClear = renderControl != cx.end() && (renderControl->second & 2u) != 0 && !(value(cx, 0x011, stencilInfo) && (stencilInfo & 1u) == 0);
         if (stencilClear && !depthPlanesAbsent(cx)) {
-            std::uint32_t stencil = 0, view = 0;
-            if ((value(cx, 0x011, stencil) && (stencil & 1u) == 0) || (value(cx, 0x002, view) && (view & 0x02000000u) != 0)) return require(false, "stencil clear requires a writable stencil plane");
+            std::uint32_t view = 0;
+            if (value(cx, 0x002, view) && (view & 0x02000000u) != 0) return require(false, "stencil clear requires a writable stencil plane");
         }
         if (depthClear && !depthPlanesAbsent(cx)) {
             std::uint32_t z = 0, view = 0;
