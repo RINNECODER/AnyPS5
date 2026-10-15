@@ -975,6 +975,9 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> MetalShaderResources::Writt
         const auto begin = image.texture->Descriptor().baseAddress;
         written.emplace_back(begin, begin + image.texture->GuestBytes());
     }
+    // Lazy copy-backs encoded ahead of this work store their surfaces' guest bytes too: a CPU read
+    // of them waits for this work (the registry no longer names them).
+    for (const auto& done : materialized) written.emplace_back(done.guestAddress, done.guestAddress + done.bytes);
     return written;
 }
 

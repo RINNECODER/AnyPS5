@@ -50,7 +50,8 @@ public:
     // them), so Complete does not, and ends this object's borrowed-range scope so it can outlive
     // the caller's frame.
     void CommittedWithoutWaiting();
-    // Guest ranges [begin, end) this work stores to: written images and writable buffers.
+    // Guest ranges [begin, end) this work stores to: written images, writable buffers and the lazy
+    // copy-backs it encoded ahead of itself.
     [[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint64_t>> WrittenGuestRanges() const;
     // Called before this object reads guest bytes on the CPU (an upload that cannot run in place,
     // a staged storage image), so the caller can first finish GPU work that may write them.
