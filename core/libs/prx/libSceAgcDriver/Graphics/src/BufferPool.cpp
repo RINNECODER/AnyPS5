@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include <limits>
 #include <algorithm>
 #include <bit>
 #include <chrono>
@@ -225,7 +227,6 @@ std::optional<BufferAllocation> BufferPool::Take(std::size_t bytes, VkBufferUsag
     }
     auto result = found->second.back().allocation;
     found->second.pop_back();
-    if (found->second.empty()) tier.free.erase(found);
     --tier.slots;
     tier.retainedBytes -= result.allocationBytes;
     ++tier.hits;
@@ -238,7 +239,6 @@ void BufferPool::evictOldest(Tier& tier, std::vector<BufferAllocation>& evicted)
     evicted.push_back(oldest->second.front().allocation);
     tier.retainedBytes -= oldest->second.front().allocation.allocationBytes;
     oldest->second.pop_front();
-    if (oldest->second.empty()) tier.free.erase(oldest);
     --tier.slots;
     ++tier.evictions;
 }
