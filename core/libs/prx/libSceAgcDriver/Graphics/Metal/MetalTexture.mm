@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -428,9 +429,7 @@ std::shared_ptr<MetalTexture> MetalTexture::CreateView(const Graphics::GuestText
     return std::shared_ptr<MetalTexture>(new MetalTexture(backend, backing, resource, compare, minimumLodLowered));
 }
 
-void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> source, NSUInteger sourceOffset,
-    id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile, Subresources part) const {
-    const std::array<NSUInteger, 2> offsets{sourceOffset, destinationOffset};
+std::array<std::uint32_t, 22> MetalTexture::transferConstants(bool retile) const {
     const auto& descriptor = backing->descriptor;
     const auto& geometry = backing->geometry;
     const auto elementBytes = backing->elementBytes;
@@ -457,26 +456,136 @@ void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> s
         constants[2] = 2;
         std::copy(equation->bits.begin(), equation->bits.end(), constants.begin() + 4);
     }
+    return constants;
+}
+
+void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> source, NSUInteger sourceOffset,
+    id<MTLBuffer> destination, NSUInteger destinationOffset, bool retile, Subresources part) const {
+    const std::array<NSUInteger, 2> offsets{sourceOffset, destinationOffset};
+    const auto& geometry = backing->geometry;
+    const auto elementBytes = backing->elementBytes;
+    const auto constants = transferConstants(retile);
+    // Every level and layer in one compute encoder (an encoder each was most of a frame's encoders).
+    id<MTLComputeCommandEncoder> encoder = nil;
+    try {
+        for (std::uint32_t level = part.levelBegin; level < geometry.mips.size() && level < part.levelEnd; ++level) {
+            const auto& mip = geometry.mips[level];
+            for (std::uint32_t layer = part.layerBegin; layer < geometry.layers && layer < part.layerEnd; ++layer) {
+                if (!geometry.HasLayer(level, layer)) continue;
+                const auto tiled = geometry.GuestLayerOffset(layer) + mip.tiledOffset;
+                const auto linear = geometry.LinearLayerOffset(layer) + mip.linearOffset;
+                Parameters p{};
+                p.srcBase = static_cast<std::uint32_t>(retile ? linear : tiled);
+                p.dstBase = static_cast<std::uint32_t>(retile ? tiled : linear);
+                p.width = mip.width;
+                p.height = mip.height;
+                p.pitchBytes = mip.pitchBytes;
+                p.blocksPerRow = mip.blocksPerRow;
+                p.tail = mip.tail;
+                p.tailX = mip.tailX;
+                p.tailY = mip.tailY;
+                p.elementBytes = elementBytes;
+                p.slice = layer;
+                p.rangeEnd = UINT32_MAX;
+                if (mip.width == 0 || mip.height == 0) continue;
+                if (encoder == nil) encoder = backend.ComputeEncoder(commands, retile ? @"readback retile" : @"upload detile");
+                backend.Dispatch(encoder, @"TextureDetile", @[source, destination], &p, sizeof(p), MTLSizeMake(mip.width, mip.height, 1), &constants, offsets);
+            }
+        }
+    } catch (...) {
+        if (encoder != nil) [encoder endEncoding];
+        throw;
+    }
+    if (encoder != nil) [encoder endEncoding];
+}
+
+namespace {
+
+// The unsigned format of one element's raw bits (one component per 32 bits; R8/R16 below a word).
+MTLPixelFormat rawFormat(std::uint32_t elementBytes) {
+    switch (elementBytes) {
+        case 1: return MTLPixelFormatR8Uint;
+        case 2: return MTLPixelFormatR16Uint;
+        case 4: return MTLPixelFormatR32Uint;
+        case 8: return MTLPixelFormatRG32Uint;
+        case 16: return MTLPixelFormatRGBA32Uint;
+        default: return MTLPixelFormatInvalid;
+    }
+}
+
+bool fusedTransferEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_METAL_FUSED_TRANSFER");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+struct TransferParameters {
+    Parameters tile;
+    std::uint32_t textureSlice;
+    std::uint32_t level;
+};
+
+}
+
+id<MTLTexture> MetalTexture::rawView() const {
+    std::lock_guard lock(backing->viewsMutex);
+    if (backing->rawViewMade) return backing->rawView;
+    backing->rawViewMade = true;
+    const auto& descriptor = backing->descriptor;
+    const auto& geometry = backing->geometry;
+    id<MTLTexture> texture = backing->texture;
+    const auto format = rawFormat(backing->elementBytes);
+    if (!fusedTransferEnabled() || format == MTLPixelFormatInvalid || Graphics::IsBlockCompressed(descriptor.format) ||
+        geometry.thick || geometry.imageDepth > 1 || texture.sampleCount != 1 ||
+        (texture.textureType != MTLTextureType2D && texture.textureType != MTLTextureType2DArray) ||
+        (texture.usage & MTLTextureUsagePixelFormatView) == 0) return nil;
+    // Each level's elements must be its texels: the fused pass addresses the texture by element.
+    for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
+        const auto& mip = geometry.mips[level];
+        if (level >= texture.mipmapLevelCount || mip.width != std::max(descriptor.width >> level, 1u) ||
+            mip.height != std::max(descriptor.height >> level, 1u)) return nil;
+    }
+    if (geometry.layers > texture.arrayLength) return nil;
+    backing->rawView = [texture newTextureViewWithPixelFormat:format textureType:MTLTextureType2DArray
+        levels:NSMakeRange(0, texture.mipmapLevelCount) slices:NSMakeRange(0, texture.arrayLength)];
+    return backing->rawView;
+}
+
+bool MetalTexture::FusesTransfer(bool upload) const {
+    if (upload && (backing->texture.usage & MTLTextureUsageShaderWrite) == 0) return false;
+    return rawView() != nil;
+}
+
+void MetalTexture::encodeFused(id<MTLComputeCommandEncoder> encoder, id<MTLBuffer> guest, NSUInteger offset, bool retile, Subresources part) const {
+    id<MTLTexture> view = rawView();
+    require(view != nil, "Metal texture does not fuse its transfers");
+    const auto& geometry = backing->geometry;
+    const auto constants = transferConstants(retile);
+    const std::array<NSUInteger, 1> offsets{offset};
     for (std::uint32_t level = part.levelBegin; level < geometry.mips.size() && level < part.levelEnd; ++level) {
         const auto& mip = geometry.mips[level];
         for (std::uint32_t layer = part.layerBegin; layer < geometry.layers && layer < part.layerEnd; ++layer) {
-            if (!geometry.HasLayer(level, layer)) continue;
+            if (!geometry.HasLayer(level, layer) || mip.width == 0 || mip.height == 0) continue;
             const auto tiled = geometry.GuestLayerOffset(layer) + mip.tiledOffset;
-            const auto linear = geometry.LinearLayerOffset(layer) + mip.linearOffset;
-            Parameters p{};
-            p.srcBase = static_cast<std::uint32_t>(retile ? linear : tiled);
-            p.dstBase = static_cast<std::uint32_t>(retile ? tiled : linear);
-            p.width = mip.width;
-            p.height = mip.height;
-            p.pitchBytes = mip.pitchBytes;
-            p.blocksPerRow = mip.blocksPerRow;
-            p.tail = mip.tail;
-            p.tailX = mip.tailX;
-            p.tailY = mip.tailY;
-            p.elementBytes = elementBytes;
-            p.slice = layer;
-            p.rangeEnd = UINT32_MAX;
-            backend.Encode(commands, @"TextureDetile", @[source, destination], &p, sizeof(p), MTLSizeMake(mip.width, mip.height, 1), &constants, offsets);
+            TransferParameters p{};
+            p.tile.srcBase = static_cast<std::uint32_t>(tiled);
+            p.tile.dstBase = static_cast<std::uint32_t>(tiled);
+            p.tile.width = mip.width;
+            p.tile.height = mip.height;
+            p.tile.pitchBytes = mip.pitchBytes;
+            p.tile.blocksPerRow = mip.blocksPerRow;
+            p.tile.tail = mip.tail;
+            p.tile.tailX = mip.tailX;
+            p.tile.tailY = mip.tailY;
+            p.tile.elementBytes = backing->elementBytes;
+            p.tile.slice = layer;
+            p.tile.rangeEnd = UINT32_MAX;
+            p.textureSlice = geometry.CopyLayer(layer);
+            p.level = level;
+            backend.Dispatch(encoder, retile ? @"TextureRetileFromTexture" : @"TextureDetileToTexture", @[guest], &p, sizeof(p),
+                MTLSizeMake(mip.width, mip.height, 1), &constants, offsets, view);
         }
     }
 }
@@ -547,11 +656,23 @@ void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recy
     // The queue runs uploads in commit order: no need to wait for an earlier one of this texture.
     pendingUpload = nil;
     auto commands = backend.CommandBuffer();
-    // The blit reads only texels the detile wrote, so the (recycled) linear buffer needs no clearing.
-    auto linear = backend.TransientBuffer(bufferSize(geometry.sliceLinearBytes * geometry.layers), commands);
     if (recycleGuest) MetalBufferPool::Shared().GiveWhenCompleted(guest, commands);
-    encodeTransfer(commands, guest, offset, linear, 0, false);
-    encodeLinearCopy(commands, linear, true);
+    if (FusesTransfer(true)) {
+        // One compute encoder writes every level and layer straight into the texture.
+        id<MTLComputeCommandEncoder> encoder = backend.ComputeEncoder(commands, @"upload detile to texture");
+        try {
+            encodeFused(encoder, guest, offset, false);
+        } catch (...) {
+            [encoder endEncoding];
+            throw;
+        }
+        [encoder endEncoding];
+    } else {
+        // The blit reads only texels the detile wrote, so the (recycled) linear buffer needs no clearing.
+        auto linear = backend.TransientBuffer(bufferSize(geometry.sliceLinearBytes * geometry.layers), commands);
+        encodeTransfer(commands, guest, offset, linear, 0, false);
+        encodeLinearCopy(commands, linear, true);
+    }
     // The draw or dispatch that samples the texture is committed later on the same queue (or is
     // encoded after this into the same, batched, command buffer), so it runs after this; the
     // command buffer keeps the staging buffers alive until then.
@@ -594,15 +715,17 @@ void MetalTexture::readbackInto(id<MTLBuffer> guest, std::size_t offset) const {
     GpuTiming::TagScope tag(GpuTiming::MakeTag(GpuTiming::Kind::Readback, descriptor.baseAddress));
     const auto& geometry = backing->geometry;
     FinishUpload();
-    // The retile reads only the elements the blit wrote (each level's texel extent in elements), so
-    // the linear buffer needs no clearing either.
-    auto linear = MetalBufferPool::Shared().Take(backend.Device(), bufferSize(geometry.sliceLinearBytes * geometry.layers));
-    // The queue runs command buffers in commit order, so the blit sees the texture's earlier writes;
+    // The queue runs command buffers in commit order, so the copy sees the texture's earlier writes;
     // the retile rewrites only the surface's texels in place.
     auto commands = backend.CommandBuffer();
-    MetalBufferPool::Shared().GiveWhenCompleted(linear, commands);
-    encodeLinearCopy(commands, linear, false);
-    encodeTransfer(commands, linear, 0, guest, offset, true);
+    if (!EncodeReadback(commands, guest, offset, {})) {
+        // Not in place (a staging buffer of the span overload is): through the linear buffer. The
+        // retile reads only the elements the blit wrote, so it needs no clearing either.
+        auto linear = MetalBufferPool::Shared().Take(backend.Device(), bufferSize(geometry.sliceLinearBytes * geometry.layers));
+        MetalBufferPool::Shared().GiveWhenCompleted(linear, commands);
+        encodeLinearCopy(commands, linear, false);
+        encodeTransfer(commands, linear, 0, guest, offset, true);
+    }
     GpuTiming::Scope timing(GpuTiming::Kind::Readback);
     backend.Wait(commands);
 }
@@ -614,10 +737,27 @@ bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> g
 bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset, Subresources part) const {
     if (!inPlace(guest, offset)) return false;
     // Uploads are committed, or encoded into the same batched command buffer, before this runs.
+    if (FusesTransfer(false)) {
+        id<MTLComputeCommandEncoder> encoder = backend.ComputeEncoder(commands, @"readback retile from texture");
+        try {
+            encodeFused(encoder, guest, offset, true, part);
+        } catch (...) {
+            [encoder endEncoding];
+            throw;
+        }
+        [encoder endEncoding];
+        return true;
+    }
     // The retile reads only the elements the blit wrote, so the recycled linear buffer needs no clearing.
     auto linear = backend.TransientBuffer(bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers), commands);
     encodeLinearCopy(commands, linear, false, part);
     encodeTransfer(commands, linear, 0, guest, offset, true, part);
+    return true;
+}
+
+bool MetalTexture::EncodeReadback(id<MTLComputeCommandEncoder> encoder, id<MTLBuffer> guest, std::size_t offset, Subresources part) const {
+    if (!inPlace(guest, offset) || !FusesTransfer(false)) return false;
+    encodeFused(encoder, guest, offset, true, part);
     return true;
 }
 

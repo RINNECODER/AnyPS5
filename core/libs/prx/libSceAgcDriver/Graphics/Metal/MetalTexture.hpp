@@ -50,6 +50,15 @@ public:
     // the surface a work wrote. The rest of the guest bytes already equal the texture.
     using Subresources = TextureSubresources;
     [[nodiscard]] bool EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> guest, std::size_t offset, Subresources part) const;
+    // The same into an open compute encoder, when the copy-back fuses into one pass (FusesTransfer)
+    // and converts in place; false (encoding nothing) otherwise. Many surfaces share one encoder.
+    [[nodiscard]] bool EncodeReadback(id<MTLComputeCommandEncoder> encoder, id<MTLBuffer> guest, std::size_t offset, Subresources part) const;
+    // Whether copy-backs (and, `upload`, uploads) of this surface run as one compute pass between
+    // the texture and the guest-tiled bytes (TextureRetileFromTexture / TextureDetileToTexture)
+    // instead of a detile through a linear buffer plus a blit. Single-sample 2D and 2D-array
+    // surfaces of uncompressed formats do; volumes, thick layouts and BC surfaces keep the blit.
+    // ANYPS5_METAL_FUSED_TRANSFER=0 turns the fused passes off.
+    [[nodiscard]] bool FusesTransfer(bool upload) const;
     [[nodiscard]] id<MTLTexture> Texture() const;
     [[nodiscard]] id<MTLTexture> SampledView() const;
     [[nodiscard]] id<MTLTexture> StorageView(bool atomic = false) const;
@@ -86,6 +95,10 @@ private:
         // surface bound through another descriptor got new native views for every draw.
         std::mutex viewsMutex;
         std::vector<std::pair<ViewKey, Views>> views;
+        // The unsigned 2D-array view of every level and layer the fused transfer passes use (nil
+        // when the surface does not fuse); made once, under viewsMutex.
+        id<MTLTexture> rawView = nil;
+        bool rawViewMade = false;
     };
     MetalTexture(const MetalDevice& backend, std::shared_ptr<Backing> backing,
                  const Graphics::GuestTextureResource& descriptor, bool compare, bool minimumLodLowered);
@@ -101,6 +114,11 @@ private:
     void uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recycleGuest = false);
     void readbackInto(id<MTLBuffer> guest, std::size_t offset) const;
     [[nodiscard]] bool inPlace(id<MTLBuffer> buffer, std::size_t offset) const;
+    // The unsigned view the fused passes read or write, or nil.
+    [[nodiscard]] id<MTLTexture> rawView() const;
+    [[nodiscard]] std::array<std::uint32_t, 22> transferConstants(bool retile) const;
+    // Encodes the fused pass (retile: texture to guest-tiled bytes) into `encoder`.
+    void encodeFused(id<MTLComputeCommandEncoder> encoder, id<MTLBuffer> guest, NSUInteger offset, bool retile, Subresources part = {}) const;
     // Encodes a GPU blit between the linear staging buffer and every present level and layer.
     void encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer> linear, bool toTexture, Subresources part = {}) const;
     const MetalDevice& backend;

@@ -3,6 +3,7 @@
 #include "MetalDevice.hpp"
 #include "BdaAbi.hpp"
 #include "GuestImageCache.hpp"
+#include "MetalLazyCopyBacks.hpp"
 #include "MetalTexture.hpp"
 #include "MetalTimeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -51,6 +52,9 @@ public:
     // (GuestImageCache.hpp). The driver clears it wherever guest memory may have changed under it.
     // Null when ANYPS5_METAL_IMAGE_CACHE=0 turns it off (every binding uploads again).
     [[nodiscard]] GuestImageCache<MetalTexture>* ImageCache();
+    // Copy-backs of surfaces draws and dispatches wrote, recorded until someone needs the guest
+    // bytes (MetalLazyCopyBacks.hpp). The driver materializes them at its sync points.
+    [[nodiscard]] MetalLazyCopyBacks& LazyCopyBacks() { return lazyCopyBacks; }
     void DumpSamplesSynchronously(std::uint64_t guestAddress);
     [[nodiscard]] ShaderRecompiler::MeshTargetLimits MeshLimits() const;
     [[nodiscard]] ShaderRecompiler::TessellationTargetLimits TessellationLimits() const;
@@ -77,6 +81,9 @@ public:
     // surfaces), so the driver can first finish committed work that may write them. It may run
     // completions that draw again, hence the recursive drawMutex.
     void SetCpuReadHook(std::function<void(std::uint64_t, std::uint64_t)> hook);
+    // Materializes lazy copy-backs over guest bytes a binding reads through memory
+    // (MetalShaderResources::SetMaterializeHook); the driver commits them to its timeline.
+    void SetMaterializeHook(std::function<void(std::uint64_t, std::uint64_t)> hook);
     [[nodiscard]] std::optional<ShaderRecompiler::BdaAbi::Fault> Draw(
         const Graphics::State& state, const Pm4::DrawParameters& draw,
         std::span<const Graphics::CompiledShader> shaders,
@@ -99,9 +106,11 @@ private:
     std::unique_ptr<MetalMultisampleExpander> multisampleExpander;
     std::recursive_mutex drawMutex;
     std::function<void(std::uint64_t, std::uint64_t)> cpuReadHook;
+    std::function<void(std::uint64_t, std::uint64_t)> materializeHook;
     id<MTLBuffer> sampleCounter = nil;
     id<MTLBuffer> sampleTarget = nil;
-    // Last, so its textures go before the device they were made on.
+    // Last, so their textures go before the device they were made on.
+    MetalLazyCopyBacks lazyCopyBacks;
     GuestImageCache<MetalTexture> imageCache;
 };
 

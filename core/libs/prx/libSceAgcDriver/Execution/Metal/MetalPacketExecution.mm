@@ -455,21 +455,31 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
         auto bindings = std::make_shared<MetalShaderResources>(*backend, ranges, resident, draw ? &draw->HostAliases() : nullptr,
             draw ? draw->ImageCache() : nullptr);
         bindings->SetCpuReadHook([this](std::uint64_t address, std::uint64_t bytes) { BeforeCpuRead(address, bytes); });
+        if (draw) {
+            bindings->SetLazyCopyBacks(&draw->LazyCopyBacks());
+            bindings->SetMaterializeHook([this](std::uint64_t address, std::uint64_t bytes) {
+                MaterializeCopyBacks(MetalLazyCopyBacks::Cause::GpuRead, address, bytes);
+            });
+        }
         const auto descriptors = bindings->Bindings(pipeline->Reflection());
         if (GpuStallWatch::DumpPath() != nullptr) {
             GpuStallWatch::SetDetail(DescribeDispatch(stallUserData, descriptors) +
                 RememberDispatch(stallProgram, std::span<const std::uint32_t, 3>(stallGroups.data(), 3), descriptors));
         }
+        // Bound before the command buffer is taken: a binding over a lazy copy-back commits it to
+        // the timeline, which may commit the open batch.
+        std::optional<MetalBufferBinding> arguments;
+        if (indirectArguments) arguments = bindings->Buffer(*indirectArguments, 3 * sizeof(std::uint32_t));
         id<MTLCommandBuffer> commands = backend->CommandBuffer();
         MetalBatchedWork batched(*backend, commands);
         if (indirectArguments) {
             // The GPU reads the group counts when the dispatch runs, after the work that writes them.
-            const auto arguments = bindings->Buffer(*indirectArguments, 3 * sizeof(std::uint32_t));
-            pipeline->EncodeIndirect(commands, descriptors, arguments.buffer, arguments.offset, {}, bindings->Residency());
+            pipeline->EncodeIndirect(commands, descriptors, arguments->buffer, arguments->offset, {}, bindings->Residency());
         } else {
             pipeline->Encode(commands, descriptors, size, {}, bindings->Residency());
         }
-        bindings->EncodeReadbacks(commands);
+        // Committed to the timeline without waiting: its copy-backs may wait for a reader.
+        bindings->EncodeReadbacks(commands, deferred);
         batched.Done();
         if (deferred && !bindings->NeedsSynchronousCompletion()) {
             bindings->CommittedWithoutWaiting();
@@ -748,6 +758,9 @@ bool MetalDriver::Impl::DeferLabelStore(std::span<const std::uint32_t> packet, s
     const auto store = PacketStoreRange(packet);
     const auto storeBytes = store ? store->bytes : 0;
     if (label ? storeBytes == 0 || storeBytes > 64 || label->Bytes().size() > 64 : storeBytes != 0) return false;
+    // The store is guest-visible once it runs: what the work before it rendered reaches guest
+    // memory ahead of it (MetalLazyCopyBacks rule 1).
+    MaterializeCopyBacks(MetalLazyCopyBacks::Cause::Signal);
     if (label) {
         // The destination stops matching cached images in packet order, as when it runs now.
         ForgetCachedImages(*store);
@@ -902,6 +915,15 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                     std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"gpu_timeline\",\"committed\":%llu,\"drains\":%llu,\"reruns\":%llu,\"command_buffers\":%llu}\n",
                         static_cast<unsigned long long>(timeline.Committed()), static_cast<unsigned long long>(timeline.Drains()),
                         static_cast<unsigned long long>(deferredReruns), static_cast<unsigned long long>(backend->CommandBuffersCreated()));
+                    const auto lazy = draw->LazyCopyBacks().TakeStatistics();
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"lazy_copyback\",\"flips\":16,\"recorded\":%llu,\"merged\":%llu,\"encoded\":%llu,\"fused\":%llu,\"points\":%llu,\"by\":{\"drain\":%llu,\"signal\":%llu,\"retire\":%llu,\"cpu_read\":%llu,\"gpu_read\":%llu,\"overlap\":%llu,\"mapping\":%llu}}\n",
+                        static_cast<unsigned long long>(lazy.recorded), static_cast<unsigned long long>(lazy.merged),
+                        static_cast<unsigned long long>(lazy.encoded), static_cast<unsigned long long>(lazy.fused),
+                        static_cast<unsigned long long>(lazy.points),
+                        static_cast<unsigned long long>(lazy.by[0]), static_cast<unsigned long long>(lazy.by[1]),
+                        static_cast<unsigned long long>(lazy.by[2]), static_cast<unsigned long long>(lazy.by[3]),
+                        static_cast<unsigned long long>(lazy.by[4]), static_cast<unsigned long long>(lazy.by[5]),
+                        static_cast<unsigned long long>(lazy.by[6]));
                     std::string top;
                     for (std::size_t i = 0; i < drainsBy.size(); ++i) {
                         if (drainsBy[i] == 0) continue;

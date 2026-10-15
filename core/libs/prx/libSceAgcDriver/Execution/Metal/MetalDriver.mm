@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderCapture.hpp"
 #include "prx/libSceAgcDriver/Execution/include/SubmissionCapture.hpp"
@@ -140,6 +141,9 @@ void MetalDriver::Configure(void* device, void* library,
     auto presentation = std::make_unique<MetalPresentation>(*presentationBackend, nativeLibrary);
     auto draw = std::make_unique<MetalDraw>(*backend);
     draw->SetCpuReadHook([impl = impl.get()](std::uint64_t address, std::uint64_t bytes) { impl->BeforeCpuRead(address, bytes); });
+    draw->SetMaterializeHook([impl = impl.get()](std::uint64_t address, std::uint64_t bytes) {
+        impl->MaterializeCopyBacks(MetalLazyCopyBacks::Cause::GpuRead, address, bytes);
+    });
     auto registry = std::make_shared<DriverDetail::ShaderRegistry>();
     auto nullPixel = DriverDetail::CaptureNullPixelShader();
     const auto nullPixelAddress = nullPixel->codeAddress;
@@ -221,6 +225,7 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
             gpuLock = std::unique_lock(impl->gpuMutex);
             // Work committed without waiting still reads the old mapping: let it finish first.
             try {
+                impl->MaterializeCopyBacks(MetalLazyCopyBacks::Cause::Mapping);
                 impl->timeline.Drain(0x10d);
             } catch (...) {
                 impl->ReportFailure(std::current_exception());
@@ -655,13 +660,68 @@ void MetalDriver::Impl::AwaitMappingDrain() {
 }
 void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack(std::uint32_t cause) {
     std::lock_guard lock(gpuMutex);
+    MaterializeCopyBacks(MetalLazyCopyBacks::Cause::Drain);
     if (!timeline.Empty()) ++drainsBy[std::min<std::uint32_t>(cause, drainsBy.size() - 1)];
     timeline.Drain(cause);
 }
 
+
+namespace {
+
+void commitMaterialized(MetalTimeline& timeline, id<MTLCommandBuffer> commands,
+    std::vector<MetalLazyCopyBacks::Materialized> done, GuestImageCache<MetalTexture>* cache) {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> written;
+    written.reserve(done.size());
+    for (const auto& entry : done) written.emplace_back(entry.guestAddress, entry.guestAddress + entry.bytes);
+    // The completion runs in timeline order: before any label, interrupt or retirement deferred
+    // after this point, and it keeps the textures alive until the GPU ran the copy-backs.
+    timeline.Commit(commands, [done = std::move(done), cache] {
+        if (cache == nullptr) return;
+        for (const auto& entry : done) cache->Seal(entry.host, entry.texture.get());
+    }, false, std::move(written));
+}
+
+}
+
+void MetalDriver::Impl::MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause) {
+    std::lock_guard lock(gpuMutex);
+    if (draw == nullptr || backend == nullptr || draw->LazyCopyBacks().Empty()) return;
+    id<MTLCommandBuffer> commands = backend->CommandBuffer();
+    MetalBatchedWork batched(*backend, commands);
+    auto done = draw->LazyCopyBacks().EncodeAll(commands, cause);
+    batched.Done();
+    commitMaterialized(timeline, commands, std::move(done), draw->ImageCache());
+}
+
+bool MetalDriver::Impl::MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause, std::uint64_t address, std::uint64_t bytes) {
+    std::lock_guard lock(gpuMutex);
+    if (draw == nullptr || backend == nullptr || bytes == 0 || draw->LazyCopyBacks().Empty()) return false;
+    bool encoded = false;
+    const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
+    for (const auto& range : ranges) {
+        const auto begin = std::max(address, range.guestAddress);
+        const auto limit = std::min(end, range.guestAddress + range.host.size());
+        if (begin >= limit) continue;
+        const auto* host = range.host.data() + (begin - range.guestAddress);
+        const auto size = static_cast<std::size_t>(limit - begin);
+        if (!draw->LazyCopyBacks().Overlaps(host, size)) continue;
+        id<MTLCommandBuffer> commands = backend->CommandBuffer();
+        MetalBatchedWork batched(*backend, commands);
+        auto done = draw->LazyCopyBacks().EncodeOverlapping(commands, host, size, cause);
+        batched.Done();
+        encoded = encoded || !done.empty();
+        commitMaterialized(timeline, commands, std::move(done), draw->ImageCache());
+    }
+    return encoded;
+}
+
 void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes) {
     const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
-    if (timeline.MayHaveWritten(address, end)) {
+    // A surface whose texture is newer than these bytes is copied back first (and then drained).
+    // The copy-back is recorded under the surface's own guest address: a read through another guest
+    // alias of the same host bytes would not match it in MayHaveWritten, so it drains anyway.
+    const bool materialized = MaterializeCopyBacks(MetalLazyCopyBacks::Cause::CpuRead, address, bytes);
+    if (materialized || timeline.MayHaveWritten(address, end)) {
         if (BindTrace::Active()) {
             BindTrace::Log("  drain before CPU read 0x%llx +0x%llx%s", static_cast<unsigned long long>(address),
                 static_cast<unsigned long long>(bytes), timeline.UnknownWritesPending() ? " (unknown writes pending)" : "");
@@ -816,6 +876,9 @@ void MetalDriver::Impl::Run(std::uint32_t id) noexcept {
                     // GPU work may still be running: retire the submission (and so let the guest
                     // submit past it, MAX_QUEUED) when it completed, while this worker goes on.
                     std::lock_guard gpuLock(gpuMutex);
+                    // The retirement is guest-visible (the guest may then read what the submission
+                    // rendered): its copy-backs are committed ahead of it (MetalLazyCopyBacks rule 1).
+                    MaterializeCopyBacks(MetalLazyCopyBacks::Cause::Retire);
                     // The GPU runs the submission's batched work while this worker waits or goes on.
                     timeline.Flush();
                     if (!timeline.Empty()) {
@@ -1132,6 +1195,9 @@ void MetalDriver::Present(const PresentationWindow& window, const DisplayBuffer*
             decided = true;
             if (width != 0 && height != 0) {
                 NativeGuestMemory::BorrowedRangesScope scope(impl->ranges);
+                // The flip drained, so its display buffer is normally in guest memory already; a
+                // surface still newer on the GPU is copied back (and waited for) first.
+                impl->BeforeCpuRead(buffer->address, DisplayBufferSize(*buffer));
                 pixels = MetalPresentation::ReadPixels(*buffer);
             }
         }

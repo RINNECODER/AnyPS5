@@ -101,6 +101,14 @@ public:
     void Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArray<id<MTLBuffer>>* buffers,
                 const void* parameters, std::size_t parameterBytes, MTLSize grid,
                 const std::array<std::uint32_t, 22>* constants = nullptr, std::span<const NSUInteger> offsets = {}) const;
+    // Encode in pieces: one compute encoder (labelled for GPU traces), then any number of
+    // dispatches into it. Encode is one of each. `texture`, when given, binds at texture index 0;
+    // the inline parameters bind after the buffers.
+    [[nodiscard]] id<MTLComputeCommandEncoder> ComputeEncoder(id<MTLCommandBuffer> commands, NSString* label = nil) const;
+    void Dispatch(id<MTLComputeCommandEncoder> encoder, NSString* kernel, NSArray<id<MTLBuffer>>* buffers,
+                  const void* parameters, std::size_t parameterBytes, MTLSize grid,
+                  const std::array<std::uint32_t, 22>* constants = nullptr, std::span<const NSUInteger> offsets = {},
+                  id<MTLTexture> texture = nil) const;
     // Commits `commands` (when not committed yet) and waits for it; the open batch commits first.
     void Wait(id<MTLCommandBuffer> commands) const;
 
@@ -146,6 +154,8 @@ private:
     id<MTLComputePipelineState> pipeline(NSString* kernel,
                                        const std::array<std::uint32_t, 22>* constants) const;
     void validateCommands(id<MTLCommandBuffer> commands) const;
+    void validateDispatch(NSString* kernel, NSArray<id<MTLBuffer>>* buffers, const void* parameters, std::size_t parameterBytes,
+                          std::span<const NSUInteger> offsets) const;
 
     id<MTLDevice> device;
     id<MTLLibrary> library;
