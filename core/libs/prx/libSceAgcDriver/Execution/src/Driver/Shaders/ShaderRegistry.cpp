@@ -24,9 +24,11 @@
 #include <functional>
 #include <list>
 #include <pthread.h>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include "Optimization/ShaderStageInputInfo.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 
 namespace AgcDriver::DriverDetail {
@@ -405,14 +407,48 @@ std::vector<std::uint32_t> ReadUserDataCallee(std::uint64_t address, std::uint32
     throw std::runtime_error("its callee at " + hexText(address) + " does not return within " + std::to_string(limitWords * 4u) + " bytes");
 }
 
-std::vector<std::uint32_t> LinkUserDataCallees(const ShaderRecompiler::RecompileRequest& request) {
+std::vector<std::uint8_t> ReadGuestBytes(std::uint64_t address, std::uint64_t bytes, const char* what) {
+    if (address > UINTPTR_MAX - bytes || !GuestMemory::Accessible(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address)), static_cast<std::size_t>(bytes))) {
+        throw std::runtime_error(std::string("its ") + what + " at " + hexText(address) + " + " + hexText(bytes) + " is not readable");
+    }
+    std::vector<std::uint8_t> data(static_cast<std::size_t>(bytes));
+    GuestMemory::Read(address, std::as_writable_bytes(std::span(data)));
+    return data;
+}
+
+std::vector<ShaderRecompiler::TableCallee> ReadTableCallees(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::TableCall& call) {
+    constexpr std::uint64_t limitBytes = 64u << 20u;
+    constexpr std::size_t limitCallees = 64u;
+    const auto slot = call.userDataRegister - request.context.userDataBaseRegister;
+    const auto pointer = static_cast<std::uint64_t>(request.context.userData[slot]) | static_cast<std::uint64_t>(request.context.userData[slot + 1u]) << 32u;
+    const auto words = ReadGuestBytes(pointer + call.descriptorOffset, 16u, "call table descriptor");
+    ShaderRecompiler::ShaderBufferResource descriptor{};
+    std::memcpy(descriptor.fields.data(), words.data(), words.size());
+    const auto bytes = descriptor.GetSize();
+    if (bytes > limitBytes) throw std::runtime_error("its call table of " + std::to_string(bytes) + " bytes is larger than the " + std::to_string(limitBytes) + " bytes that are searched for callees");
+    const auto table = bytes == 0u ? std::vector<std::uint8_t>{} : ReadGuestBytes(descriptor.Base48(), bytes, "call table");
+    std::set<std::uint64_t> targets;
+    for (std::uint64_t offset = call.entryOffset; offset + 8u <= bytes; offset += call.entryStride) {
+        std::uint64_t target = 0;
+        std::memcpy(&target, table.data() + offset, sizeof(target));
+        if (target != 0u) targets.insert(target);
+        if (call.entryStride == 0u) break;
+    }
+    if (targets.size() > limitCallees) throw std::runtime_error("its call table holds " + std::to_string(targets.size()) + " distinct targets; at most " + std::to_string(limitCallees) + " are linked");
+    std::vector<ShaderRecompiler::TableCallee> callees;
+    for (const auto target : targets) callees.push_back({target, ReadUserDataCallee(target, call.linkRegister)});
+    return callees;
+}
+
+ShaderRecompiler::LinkedCalls LinkUserDataCallees(const ShaderRecompiler::RecompileRequest& request) {
     if (request.shader.stage != ShaderRecompiler::ShaderStage::Compute) return {};
     const auto code = request.shader.code;
     if (std::none_of(code.begin(), code.end(), [](std::uint32_t word) { return (word & 0xff80ff00u) == 0xbe802100u; })) return {};
     const auto program = ShaderRecompiler::RdnaInstructionDecoder{}.Decode(code);
-    const ShaderRecompiler::SwappcInfo swappc{false, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size())};
+    const ShaderRecompiler::SwappcInfo swappc{false, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size()), request.context.waveSize};
     const auto calls = ShaderRecompiler::FindUserDataCalls(program, swappc);
-    if (calls.empty()) return {};
+    const auto tableCalls = ShaderRecompiler::FindTableCalls(program, swappc);
+    if (calls.empty() && tableCalls.empty()) return {};
     std::vector<std::vector<std::uint32_t>> callees;
     for (const auto& call : calls) {
         const auto slot = call.userDataRegister - swappc.userDataBaseRegister;
@@ -424,7 +460,15 @@ std::vector<std::uint32_t> LinkUserDataCallees(const ShaderRecompiler::Recompile
                 std::to_string(call.userDataRegister + 1u) + "] at program counter " + hexText(call.programCounter) + ", but " + error.what());
         }
     }
-    return ShaderRecompiler::LinkUserDataCalls(program, calls, callees);
+    std::vector<std::vector<ShaderRecompiler::TableCallee>> tableCallees;
+    for (const auto& call : tableCalls) {
+        try {
+            tableCallees.push_back(ReadTableCallees(request, call));
+        } catch (const std::exception& error) {
+            throw std::runtime_error("AGC driver: compute shader " + hexText(request.shader.codeAddress) + " calls a target loaded from a table at program counter " + hexText(call.programCounter) + ", but " + error.what());
+        }
+    }
+    return ShaderRecompiler::LinkCalls(program, calls, callees, tableCalls, tableCallees);
 }
 
 }
@@ -433,9 +477,12 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
     require(codeOffset < snapshot.code.size(), "prepared shader code offset is outside the snapshot");
     const auto code = std::span(snapshot.code).subspan(codeOffset);
     require(request.shader.code.data() == code.data() && request.shader.code.size() == code.size(), "prepared invocation does not refer to registered code");
-    const auto linked = LinkUserDataCallees(request);
+    auto linked = LinkUserDataCallees(request);
     auto source = request;
-    if (!linked.empty()) source.shader.code = linked;
+    if (!linked.code.empty()) {
+        source.shader.code = linked.code;
+        source.context.linkedCallFallbacks = linked.fallbacks;
+    }
     auto invocationRequest = source;
     struct PreparedKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
@@ -445,7 +492,7 @@ ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& s
     for (const auto& entry : snapshot.prepared->entries) {
         if (entry.codeOffset != codeOffset) continue;
         invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*entry.handle);
-        if (!linked.empty() && !std::ranges::equal(invocationRequest.shader.code, linked)) continue;
+        if (!linked.code.empty() && !std::ranges::equal(invocationRequest.shader.code, linked.code)) continue;
         if (auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(invocationRequest, entry.handle, key)) return std::move(*invocation);
     }
     ReportPreparedAtUse(snapshot, source);
