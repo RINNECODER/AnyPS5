@@ -852,18 +852,45 @@ void AbiDeferredRectangle() {
     AgcDriverShutdown_nid_postfix();
 }
 
+void AbiDeferredUndecodableState() {
+    static AbiHeader front;
+    DescribeFront(front);
+    front.context[0] = {0x2ce, 3};
+    front.specials = {{0x25b, 0x8040}, {0x2d5, 0x2030}, 0x8000, {}, {}, {0x29b, 1}, {0x262, 0}};
+    AgcDriverRegisterShader_nid_postfix(&front.shader);
+    const std::array<const Shader*, 1> stages{&front.shader};
+    const std::array<ShaderRegister, 2> context{front.specials.vgt_shader_stages_en, front.specials.vgt_gs_out_prim_type};
+    const std::array<ShaderRegister, 3> primitive{front.specials.ge_cntl, front.specials.ge_user_vgpr_en, ShaderRegister{0x242, 4}};
+    const auto before = ShaderRecompiler::FrontEndBuilds();
+    auto log = Logged([&] { AgcDriverResolveGraphicsStagesAbi_nid_postfix(stages, context, primitive); });
+    Require(Deferrals(log) == 1 && log.find("VGT_SHADER_STAGES_EN=0x2030: unsupported geometry input or output assembly") != std::string::npos, "a graphics stage whose pipeline state does not decode was not deferred with the decode's reason");
+    log = Logged([&] { AgcDriverResolveGraphicsStagesAbi_nid_postfix(stages, context, primitive); });
+    Require(ShaderRecompiler::FrontEndBuilds() == before && Deferrals(log) == 0, "a graphics stage deferred for a pipeline state that does not decode was prepared or logged again");
+    std::vector<std::uint32_t> commands;
+    for (std::size_t index = 0; index < front.shader.num_sh_registers; ++index) commands.insert(commands.end(), {0xc0017600u, front.registers[index].offset, front.registers[index].value});
+    commands.insert(commands.end(), {0xc0016900u, 0x2d5, 0x2000u, 0xc0017600u, 0x8, 0, 0xc0016900u, 0xd, 0x00100010u, 0xc0016900u, 0x204, 0x80000u, 0xc0016900u, 0x1c3, 4, 0xc0017900u, 0x242, 4, 0xc0012d00u, 3, 2});
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    log = Logged([&] {
+        Require(sceAgcDriverSubmitDcb(&packet) == 0, "the draw of a graphics stage deferred at its pipeline ABI was not submitted");
+        AgcDriverWaitIdle_nid_postfix();
+    });
+    Require(ShaderRecompiler::FrontEndBuilds() > before && log.find("has no artifact prepared at registration") == std::string::npos, "a graphics stage deferred at its pipeline ABI was not prepared at its first draw, or was reported there as missing a registration artifact");
+    AgcDriverShutdown_nid_postfix();
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         const std::string_view abiMode = argc == 2 ? argv[1] : "";
-        const bool abiDeferred = abiMode == "--abi-deferred-compute" || abiMode == "--abi-deferred-pixel" || abiMode == "--abi-deferred-stages" || abiMode == "--abi-deferred-rectangle";
+        const bool abiDeferred = abiMode == "--abi-deferred-compute" || abiMode == "--abi-deferred-pixel" || abiMode == "--abi-deferred-stages" || abiMode == "--abi-deferred-rectangle" || abiMode == "--abi-deferred-undecodable-state";
         Require(argc == 1 || abiDeferred || (argc == 2 && (std::string_view(argv[1]) == "--indirect" || std::string_view(argv[1]) == "--fail-before-registration" || std::string_view(argv[1]) == "--deferred" || std::string_view(argv[1]) == "--deferred-undecodable")), "invalid test arguments");
         if (abiDeferred) {
             if (!OpenVulkanTestDevice()) return VulkanTestSkipped;
             if (abiMode == "--abi-deferred-compute") AbiDeferredCompute();
             else if (abiMode == "--abi-deferred-pixel") AbiDeferredPixel();
             else if (abiMode == "--abi-deferred-stages") AbiDeferredStages();
+            else if (abiMode == "--abi-deferred-undecodable-state") AbiDeferredUndecodableState();
             else AbiDeferredRectangle();
             std::cout << "shader ABI deferral tests passed: " << abiMode << '\n';
             return 0;
