@@ -509,6 +509,17 @@ void note_local_address(int s, const Sock& socket) {
 
 constexpr int RECEIVE_NOTHING = -1;
 
+int wait_for_datagram(const Sock& socket, std::chrono::steady_clock::time_point deadline) {
+    if (deadline == std::chrono::steady_clock::time_point::max()) return 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) return NET_EAGAIN;
+    const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count();
+    WSAPOLLFD descriptor{};
+    descriptor.fd = socket.native->value;
+    descriptor.events = POLLRDNORM;
+    return WSAPoll(&descriptor, 1, static_cast<INT>(std::min<long long>(remaining, INT_MAX))) == 0 ? NET_EAGAIN : 0;
+}
+
 int wait_for_local_address(int s, const Sock& socket, bool empty) {
     if (socket.type == NET_SOCK_STREAM || socket.bound) return 0;
     const bool named = has_local_address(socket.native->value);
@@ -518,12 +529,13 @@ int wait_for_local_address(int s, const Sock& socket, bool empty) {
         ? std::chrono::steady_clock::now() + std::chrono::microseconds(socket.rcv_timeout_us)
         : std::chrono::steady_clock::time_point::max();
     std::unique_lock lk(g_mutex);
-    for (;;) {
+    for (bool waited = false;; waited = true) {
         const auto it = g_socks.find(s);
         if (it == g_socks.end() || it->second.native != socket.native || it->second.aborted) return 0;
         if (named || has_local_address(socket.native->value)) {
             it->second.bound = true;
-            return 0;
+            lk.unlock();
+            return waited ? wait_for_datagram(socket, deadline) : 0;
         }
         if (it->second.read_shut) return RECEIVE_NOTHING;
         const auto now = std::chrono::steady_clock::now();

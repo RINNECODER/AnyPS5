@@ -381,6 +381,25 @@ static void CheckUnboundDatagramLaterAddress() {
     }
 }
 
+static void CheckUnboundDatagramTimeoutAfterAddress() {
+    const int waiting = sceNetSocket("unbound-timeout", 2, 2, 17);
+    Require(waiting >= 0);
+    const int timeout = 500000;
+    Require(sceNetSetsockopt(waiting, 0xffff, 0x1106, &timeout, sizeof(timeout)) == 0);
+    auto bound = std::async(std::launch::async, [waiting] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};
+        return sceNetBind_nid_postfix(waiting, address.data(), address.size()) == 0;
+    });
+    char buffer[4];
+    const auto start = std::chrono::steady_clock::now();
+    Require(Failed(sceNetRecv(waiting, buffer, sizeof(buffer), 0), 35));
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    Require(bound.get());
+    Require(elapsed >= std::chrono::milliseconds(450) && elapsed < std::chrono::milliseconds(750));
+    Require(sceNetSocketClose(waiting) == 0);
+}
+
 static void CheckEmptyEpoll() {
     const int epoll = sceNetEpollCreate("empty-epoll", 0);
     Require(epoll >= 0);
@@ -1011,6 +1030,7 @@ int main() {
     CheckUnboundDatagramReceive();
     CheckUnboundDatagramShutdown();
     CheckUnboundDatagramLaterAddress();
+    CheckUnboundDatagramTimeoutAfterAddress();
     CheckUnspecifiedIpv6();
     if (!ipv6Unavailable) CheckIpv6SocketsAreIpv6Only();
     CheckDatagramDisconnect();
