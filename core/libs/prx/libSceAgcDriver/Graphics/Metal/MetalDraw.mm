@@ -598,7 +598,7 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
 namespace {
 
 // Whether every vertex buffer of `attributes` can be bound over its descriptor's whole record range
-// (Graphics::WholeVertexReadSize): a valid range of borrowed guest bytes, at most 256 MiB each, whose
+// (Graphics::WholeVertexReadSize): one host run of borrowed guest bytes, at most 256 MiB each, whose
 // record count bounds every index. With OUT_OF_BOUNDS_SELECT 0 or 1 a strided per-vertex fetch may
 // index past the records (VertexBufferReadSize sizes the binding through the largest index), so such
 // a draw still scans.
@@ -613,6 +613,8 @@ bool WholeVertexRangesBindable(std::span<const ShaderRecompiler::VertexAttribute
             const auto& fields = attribute.resource.fields;
             const auto address = fields[0] | (std::uint64_t{fields[1] & 0xffffu} << 32u);
             if (bytes > MaximumBytes || NativeGuestMemory::ReadableBorrowedBytes(address, bytes) < bytes) return false;
+            // One host run, as MetalShaderResources::mirror needs (throws otherwise).
+            static_cast<void>(NativeGuestMemory::ContiguousBorrowedRange(address, bytes, false));
         } catch (const std::exception&) {
             return false;
         }

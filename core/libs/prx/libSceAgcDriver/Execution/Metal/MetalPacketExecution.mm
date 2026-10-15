@@ -448,8 +448,9 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     }
     const auto size = MTLSizeMake(grid[0], grid[1], grid[2]);
     // A constant fill (DCC keys being cleared, most often) tells the timeline what it stores, so a
-    // later draw learns the keys without waiting for it (MetalTimeline::PendingBytes).
-    const auto fill = MatchConstantFill(std::span(snapshot.code).subspan(offset), decoded.userData, decoded.compute.numThreads, decoded.groups,
+    // later draw learns the keys without waiting for it (MetalTimeline::PendingBytes). Not for an
+    // indirect dispatch: its real group counts are in the argument buffer, not in this packet.
+    const auto fill = indirectArguments ? std::nullopt : MatchConstantFill(std::span(snapshot.code).subspan(offset), decoded.userData, decoded.compute.numThreads, decoded.groups,
         decoded.compute.partialThreads);
     // One run of the dispatch; with `deferred` it is committed without waiting when its results need
     // no CPU copy into guest memory, and `completed` gets its fault at the timeline's next drain.
