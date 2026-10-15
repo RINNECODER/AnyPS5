@@ -331,9 +331,10 @@ def run_case(address, seed, directory, plant=None, profile=None, record=True):
     memory = rng.randbytes(SCRATCH_SIZE)
     registers = {item: SCRATCH + (rng.randrange(0, SCRATCH_SIZE // 4) & ~7)
                  for item in replay.UNIFORM_GPRS if item != "rsp"}
-    # The x86 runner reaches the guest through a `call`, so the guest's first instruction sees
-    # rsp = STACK - 8 (the pushed return address). The ARM entry must start there too, or a
-    # stack-adjustment flags result is computed from a different rsp.
+    # The x86 runner reaches the guest through a `call`, so its guest sees rsp = STACK - 8. This is
+    # inert on the ARM side: the AOT lowering overwrites the guest rsp with `&frame + 136` (a host
+    # stack address) at entry, so the harness cannot choose it. See REPORT22 defect (b): that is a
+    # compiler-side rsp emulation gap, and an `add rsp,imm` flag result follows the host address.
     registers["rsp"] = STACK - 8
     # A function that calls others is verified by recording those calls on the x86 side and
     # replaying them as native stubs, so its own code is tested without its callees having to
