@@ -30,4 +30,17 @@ std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel) {
     return width * height * bytesPerTexel;
 }
 
+std::uint64_t DepthPlaneBytes(VkExtent2D extent, std::uint32_t bytesPerTexel, std::uint32_t samples) {
+    if (samples <= 1) return DepthSliceBytes(extent, bytesPerTexel);
+    std::uint32_t pixelBits = 16;  // log2 of the 64 KiB block
+    for (std::uint32_t value = bytesPerTexel; value > 1; value >>= 1) --pixelBits;
+    for (std::uint32_t value = samples; value > 1; value >>= 1) --pixelBits;
+    // Width takes the odd bit, as in the single-sample blocks (256x128 for 2-byte texels).
+    const std::uint32_t blockWidth = 1u << ((pixelBits + 1) / 2);
+    const std::uint32_t blockHeight = 1u << (pixelBits / 2);
+    const auto width = static_cast<std::uint64_t>((extent.width + blockWidth - 1) / blockWidth * blockWidth);
+    const auto height = static_cast<std::uint64_t>((extent.height + blockHeight - 1) / blockHeight * blockHeight);
+    return width * height * bytesPerTexel * samples;
+}
+
 }

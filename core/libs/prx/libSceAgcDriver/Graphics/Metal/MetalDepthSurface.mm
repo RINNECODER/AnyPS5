@@ -260,8 +260,8 @@ bool MetalDepthSurface::Overlaps(std::uint64_t address, std::uint64_t bytes) con
         if (plane == 0 || planeBytes == 0 || bytes == 0) return false;
         return address <= plane ? plane - address < bytes : address - plane < planeBytes;
     };
-    return overlaps(target.address, Graphics::DepthSliceBytes(target.extent, hasD16(target) ? 2u : 4u) * target.samples) ||
-        overlaps(target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples);
+    return overlaps(target.address, Graphics::DepthPlaneBytes(target.extent, hasD16(target) ? 2u : 4u, target.samples)) ||
+        overlaps(target.stencilAddress, Graphics::DepthPlaneBytes(target.extent, 1u, target.samples));
 }
 
 void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, std::uint64_t address, std::uint64_t bytes,
@@ -271,8 +271,8 @@ void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfac
 
 void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfaces, const Graphics::DepthTarget& target,
     const MetalDepthSurface* keep) {
-    RetireDepthSurfaces(surfaces, target.address, Graphics::DepthSliceBytes(target.extent, hasD16(target) ? 2u : 4u) * target.samples, keep);
-    if (target.stencilAddress != 0) RetireDepthSurfaces(surfaces, target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples, keep);
+    RetireDepthSurfaces(surfaces, target.address, Graphics::DepthPlaneBytes(target.extent, hasD16(target) ? 2u : 4u, target.samples), keep);
+    if (target.stencilAddress != 0) RetireDepthSurfaces(surfaces, target.stencilAddress, Graphics::DepthPlaneBytes(target.extent, 1u, target.samples), keep);
 }
 
 Graphics::DepthTarget DepthArraySlice(const Graphics::DepthTarget& target, std::uint32_t layer) {
@@ -297,8 +297,8 @@ bool MetalDepthSurface::OverlapsMappings(std::span<const NativeGuestMemory::Borr
             return address <= range.guestAddress ? range.guestAddress - address < bytes : address - range.guestAddress < range.host.size();
         });
     };
-    return overlaps(target.address, Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u) * target.samples) ||
-        overlaps(target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u) * target.samples);
+    return overlaps(target.address, Graphics::DepthPlaneBytes(target.extent, d16 ? 2u : 4u, target.samples)) ||
+        overlaps(target.stencilAddress, Graphics::DepthPlaneBytes(target.extent, 1u, target.samples));
 }
 
 MetalColorSurface::MetalColorSurface(const MetalDevice& backend, const Graphics::ColorTarget& target) : target(target) {
