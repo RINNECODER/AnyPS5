@@ -1486,6 +1486,25 @@ class Function:
             pointer = frame_exclusion.guard(self, ins, operand, self.address(ins, operand))
             self.lines.append(atomics.ordered_store(operand.size * 8, value, pointer))
 
+    def guest_stack_flags(self, ins, args, state, right):
+        """(left, right, value) from the guest rsp for a flag-setting stack adjustment, else None.
+
+        The frame pointer stands in for the guest stack pointer, but a host address has different
+        low bits, so PF (and AF) from `add/sub/cmp rsp, imm` would be wrong. The analysis tracks the
+        guest rsp as an offset from its entry value, so the guest operand is `rsp_guest + offset`.
+        """
+        if self.rsp_guest is None or state['rsp'] is None:
+            return None
+        if args[0].type != X86_OP_REG or args[0].size != 8 or self.reg(ins, args[0])[0] != 'rsp':
+            return None
+        if args[1].type != X86_OP_IMM or ins.mnemonic not in ('add', 'sub', 'cmp'):
+            return None
+        guest = self.emit(f'load i64, ptr {self.rsp_guest}')
+        left = self.emit(f'add i64 {guest}, {state["rsp"]}')
+        instruction = 'sub' if ins.mnemonic == 'cmp' else ins.mnemonic
+        value = self.emit(f'{instruction} i64 {left}, {right}')
+        return left, right, value
+
     def flags(self, operation, bits, left, right, value):
         zf = self.emit(f'icmp eq i{bits} {value}, 0')
         sf = self.emit(f'icmp slt i{bits} {value}, 0')
@@ -1758,7 +1777,12 @@ class Function:
         for flag in ('zf', 'sf', 'cf', 'of', 'pf'):
             self.lines.append(f'  %{flag} = alloca i1, align 1')
         self.lines.append(f'  %frame = alloca [{self.depth + self.stack_end} x i8], align 16')
+        self.rsp_guest = None
         if self.uniform:
+            # The guest rsp is an x86 stack pointer; the frame below is a host address. An
+            # `add/sub rsp, imm` flag result is defined by the guest value, so the entry copies the
+            # incoming rsp here before the frame pointer replaces it in %rsp.
+            self.lines.append('  %rsp_guest = alloca i64, align 8')
             self.lines.append('  %rf_out = alloca %regfile, align 16')
             self.lines.append('  %x87 = alloca [8 x double], align 16')
             self.lines.append('  %x87_top = alloca i32, align 4')
@@ -1769,6 +1793,9 @@ class Function:
             self.uniform_load_registers('%rf')
             self.uniform_load_state('%rf')
             self.uniform_stack_in('%rf')
+            incoming = self.emit('load i64, ptr %rsp')
+            self.lines.append(f'  store i64 {incoming}, ptr %rsp_guest, align 8')
+            self.rsp_guest = '%rsp_guest'
             self.store('rsp', self.emit(f'ptrtoint ptr {self.frame_pointer(0)} to i64'))
         else:
             self.store('rsp', self.emit(f'ptrtoint ptr {self.frame_pointer(0)} to i64'))
@@ -1862,7 +1889,10 @@ class Function:
                 value = self.emit(f'{instruction} i{bits} {left}, {right}')
                 if op not in ('cmp', 'test'):
                     self.write(ins, args[0], value)
-                self.flags(op, bits, left, right, value)
+                # A stack adjustment's flags follow the guest stack pointer, not the frame pointer
+                # that stands in for it (REPORT22 n11).
+                guest = self.guest_stack_flags(ins, args, state, right)
+                self.flags(op, bits, *(guest or (left, right, value)))
             elif op == 'call' and address in self.dispatch_calls:
                 self.lower_dispatch(ins, state, False, result)
             elif address in self.dispatch_jumps:
