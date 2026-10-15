@@ -156,6 +156,8 @@ class Image:
         for left, right in zip(ordered, ordered[1:]):
             require(left['address'] + left['size'] <= right['address'], 'overlapping function contracts')
         self.function_starts = sorted(self.functions)
+        self.function_ends = {function['address'] + function['size']: function for function in self.functions.values()}
+        self.falls = {}
         require(self.elf['e_entry'] in self.functions or (contracts.get('module_image') and self.elf['e_entry'] == 0), 'entry function has no contract')
         self.imports = contracts['imports']
         self.hle_log = bool(contracts.get('hle_log'))
@@ -326,6 +328,37 @@ class Image:
             return f'inttoptr (i64 {self.guest_base + address} to ptr)'
         raise Rejected(f'no native pointer contract for 0x{address:x}')
 
+    def falls_through(self, function):
+        """Whether the declared function's last instruction falls through into what follows.
+
+        A function whose declared range ends without a terminal (`ret`, `jmp`, a trap) does not
+        return on its own; the bytes after it are its continuation, whether or not the contract
+        table also declares them as a function.
+        """
+        if function['address'] not in self.falls:
+            decoded = list(self.decoder.disasm(self.read(function['address'], function['size']), function['address']))
+            mnemonic = decoded[-1].mnemonic if decoded else ''
+            self.falls[function['address']] = not (mnemonic in ('ret', 'ud2', 'int3') or mnemonic.startswith('j'))
+        return self.falls[function['address']]
+
+    def branches_into(self, function, target):
+        """Whether the declared function conditionally branches to `target`.
+
+        A conditional branch out of a declared range whose fall-through stays in it is an
+        intra-function branch, so the target is a continuation even when the contract table also
+        declares it as a function. An unconditional `jmp` is left out: that is how a real tail
+        call leaves a function.
+        """
+        decoded = list(self.decoder.disasm(self.read(function['address'], function['size']), function['address']))
+        end = function['address'] + function['size']
+        for ins in decoded:
+            if ins.mnemonic == 'jmp' or not ins.mnemonic.startswith('j') or not ins.operands:
+                continue
+            operand = ins.operands[0]
+            if operand.type == X86_OP_IMM and operand.imm == target and function['address'] <= ins.address + ins.size < end:
+                return True
+        return False
+
     def containing_function(self, address):
         """The declared function whose declared range contains the address, if any."""
         index = bisect.bisect_right(self.function_starts, address) - 1
@@ -402,6 +435,21 @@ class Image:
 class Function:
     def __init__(self, image, contract):
         self.image, self.contract = image, contract
+        self.uniform = abi.uniform(contract)
+        if self.uniform:
+            contract.setdefault('result', 'void')
+            contract.setdefault('parameters', [])
+        self.dispatch = bool(self.image.contracts.get('dispatch'))
+        self.argument_locations = abi.uniform_locations() if self.uniform else abi.locations(contract['parameters'])
+        self.stack_end = (abi.uniform_stack_end() if self.uniform else
+                          max([8] + [loc['offset'] + 8 for loc in self.argument_locations if loc['kind'] == 'stack']))
+        self.image.annotated_calls(contract)
+        self.start = contract['address']
+        self.end = contract['address'] + contract['size']
+        self.prepare()
+
+    def prepare(self):
+        """Discover and index the contract at the current `start`/`end` extent."""
         self.instructions = {}
         self.successors = {}
         self.tail_calls = {}
@@ -409,19 +457,11 @@ class Function:
         self.memory_writes = {}
         self.lines = []
         self.serial = 0
-        self.depth = max([128] + [-obj['offset'] for obj in contract.get('stack_objects', [])])
-        self.uniform = abi.uniform(contract)
-        if self.uniform:
-            contract.setdefault('result', 'void')
-            contract.setdefault('parameters', [])
-        self.dispatch = bool(self.image.contracts.get('dispatch'))
+        self.depth = max([128] + [-obj['offset'] for obj in self.contract.get('stack_objects', [])])
         self.dispatch_calls = {}
         self.dispatch_jumps = {}
         self.switch_jumps = {}
-        self.argument_locations = abi.uniform_locations() if self.uniform else abi.locations(contract['parameters'])
-        self.stack_end = (abi.uniform_stack_end() if self.uniform else
-                          max([8] + [loc['offset'] + 8 for loc in self.argument_locations if loc['kind'] == 'stack']))
-        self.image.annotated_calls(contract)
+        self.borrowed = set()
         self.discover()
         try:
             self.checked_accesses = checked_stack.parse(self)
@@ -458,10 +498,17 @@ class Function:
         return owner is not None and owner['address'] != self.contract['address'] and abi.uniform(owner)
 
     def inside(self, address, start, end):
-        return start <= address < end or self.borrowable(address)
+        if start <= address < end:
+            return True
+        if self.borrowable(address):
+            owner = self.image.containing_function(address)
+            if owner is not None:
+                self.borrowed.add(owner['address'])
+            return True
+        return False
 
     def discover(self):
-        start, end = self.contract['address'], self.contract['address'] + self.contract['size']
+        start, end = self.start, self.end
         pending = [(start, None)]
         occupied = {}
         while pending:
@@ -1299,6 +1346,68 @@ class Function:
             state['constants'][name] = (original['constants'][name] & ~mask) | (value << shift)
 
     def analyze(self):
+        """Dataflow the contract, widening the extent across a false function start if needed.
+
+        A fragment that only balances against its neighbour is not a standalone function: when
+        the declared extent fails a frame-balance check, retry with the neighbouring fragments
+        merged. The retry cannot change a contract that already balances, and the extent only
+        ever grows, so the loop terminates.
+        """
+        while True:
+            try:
+                self.dataflow()
+            except Rejected as error:
+                if not self.uniform or 'native frame' not in str(error):
+                    raise
+                wider = self.widen_extent()
+                if wider is None:
+                    raise
+                self.start, self.end = wider
+                self.prepare()
+                continue
+            return
+
+    def widen_extent(self):
+        """The next-wider contract extent, or None.
+
+        A false function start splits one real function into fragments: a fragment's epilogue pops
+        registers an earlier fragment pushed, or its branch reaches the middle of a neighbouring
+        declared function. Merge the fragments the declared extent touches and retry. A fragment
+        the discovery had to borrow is merged whole, and a fall-through boundary on either side is
+        crossed, until the extent stops growing. The extent only grows, so the loop terminates.
+        """
+        start, end = self.start, self.end
+        for _ in range(64):
+            previous, last = self.image.function_ends.get(start), self.image.function_ends.get(end)
+            following = self.image.functions.get(end)
+            if last is not None and following is not None and self.image.falls_through(last):
+                end = following['address'] + following['size']
+                continue
+            if previous is not None and self.image.falls_through(previous):
+                start = previous['address']
+                continue
+            if previous is not None and self.image.branches_into(previous, start):
+                start = previous['address']
+                continue
+            merged = [self.image.functions[address] for address in sorted(self.borrowed)
+                      if address < start or address + self.image.functions[address]['size'] > end]
+            if merged:
+                start = min([start] + [function['address'] for function in merged])
+                end = max([end] + [function['address'] + function['size'] for function in merged])
+                continue
+            overlapping = [self.image.functions[callee['address']] for callee, _ in self.tail_calls.values()
+                           if callee.get('address') in self.image.functions
+                           and not (start <= callee['address'] and callee['address'] + callee['size'] <= end)]
+            if overlapping:
+                start = min([start] + [function['address'] for function in overlapping])
+                end = max([end] + [function['address'] + function['size'] for function in overlapping])
+                continue
+            break
+        if (start, end) == (self.start, self.end):
+            return None
+        return start, end
+
+    def dataflow(self):
         known = {'rsp': MASK64}
         for loc in self.argument_locations:
             if loc['kind'] == 'register':
@@ -1312,7 +1421,7 @@ class Function:
                    'image_pointers': set(self.image.import_slots) | set(self.image.data_import_slots) | {slot for slot, _ in self.image.relocations},
                    'register_aliases': frozenset(), 'stack_values': {}, 'pending_outputs': frozenset(), 'parameter_pointers': {}, 'zero_vectors': set(),
                    'import_bindings': set(self.image.import_slots), 'callback_memory_unmodified': True}
-        entry = self.contract['address']
+        entry = self.start
         self.states[entry] = initial
         self.collecting = True
         pending = deque([entry])
@@ -1831,7 +1940,7 @@ class Function:
             valid = self.emit(f'icmp eq i64 {control}, 0')
             self.lines.extend([f'  br i1 {valid}, label %native_fp_valid, label %native_fp_invalid',
                                'native_fp_invalid:', '  call void @llvm.trap()', '  unreachable', 'native_fp_valid:'])
-        self.lines.append(f"  br label %b{self.contract['address']:x}")
+        self.lines.append(f"  br label %b{self.start:x}")
         for address in sorted(self.instructions):
             ins = self.instructions[address]
             args, op = ins.operands, ins.mnemonic

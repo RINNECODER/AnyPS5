@@ -520,6 +520,8 @@ class UniformABITests(unittest.TestCase):
 
     def test_uniform_fallthrough_tail_call_unbalanced_rejected(self):
         # 0x1000: push rbx ; nops ; cmp rdi,0 (last, falls through)   0x1010: ret
+        # Merging the fragments does not balance the frame either -- nothing pops rbx -- so the
+        # widened contract still has to be rejected rather than emit a native frame that leaks.
         code = bytearray(0x14)
         code[0x00] = 0x53
         code[0x01:0x0C] = bytes([0x90] * 11)
@@ -530,6 +532,58 @@ class UniformABITests(unittest.TestCase):
         raw, contracts = fixture(bytes(code), functions)
         with self.assertRaises(Exception):
             self.compile(raw, contracts, 'sub_1000')
+
+    def fragment_fixture(self):
+        """A real function split into a prologue fragment and an epilogue fragment.
+
+        0x1000: push rbx ; nops ; cmp rdi,0 (last, falls through)
+        0x1010: mov rax,rdi ; pop rbx ; ret
+        Neither declared range balances: the prologue leaves rbx pushed at the fall-through, and
+        the epilogue's ret pops a slot the contract table says is not there.
+        """
+        code = bytearray(0x15)
+        code[0x00] = 0x53
+        code[0x01:0x0C] = bytes([0x90] * 11)
+        code[0x0C:0x10] = bytes.fromhex('4883ff00')
+        code[0x10:0x13] = bytes.fromhex('4889f8')
+        code[0x13] = 0x5B
+        code[0x14] = 0xC3
+        functions = [uniform_function('sub_1000', 0x1000, 0x10),
+                     uniform_function('sub_1010', 0x1010, 5)]
+        raw, contracts = fixture(bytes(code), functions)
+        return bytes(code), raw, contracts
+
+    def body(self, ir, name):
+        """The IR of one emitted function, so a test can assert on that body alone."""
+        start = ir.index(f'define void @{name}(ptr %rf)')
+        return ir[start:ir.index('\n}', start)]
+
+    def test_uniform_fallthrough_tail_call_merges_the_fragment_that_balances_it(self):
+        # The contract table declares a false start at 0x1010, so the real function is split and
+        # the prologue's fall-through tail call leaves rbx pushed. Merging the fragments makes the
+        # fall-through an intra-function edge and the frame balances.
+        code, raw, contracts = self.fragment_fixture()
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        self.assertNotIn('@sub_1010', self.body(ir, 'sub_1000'))
+        for argument in (0, 42):
+            with self.subTest(rdi=argument):
+                registers = RegisterFile()
+                registers.gpr[GPR['rdi']] = argument
+                function(ctypes.byref(registers))
+                self.assertEqual(registers.gpr[GPR['rax']], self.native_guest(code, argument))
+
+    def test_uniform_unbalanced_epilogue_merges_the_fragment_that_pushed(self):
+        # The same split seen from the other side: 0x1010 pops rbx and returns, which does not
+        # balance against its own declared entry, but does against the prologue that pushed it.
+        code, raw, contracts = self.fragment_fixture()
+        function, ir, _ = self.compile(raw, contracts, 'sub_1010')
+        self.assertNotIn('@sub_1000', self.body(ir, 'sub_1010'))
+        for argument in (0, 42):
+            with self.subTest(rdi=argument):
+                registers = RegisterFile()
+                registers.gpr[GPR['rdi']] = argument
+                function(ctypes.byref(registers))
+                self.assertEqual(registers.gpr[GPR['rax']], self.native_guest(code, argument))
 
     def test_int3_terminates_and_traps(self):
         # 0x1000: push rbx ; nops ; int3    0x1010: ret — int3 is a trap terminator, not a
