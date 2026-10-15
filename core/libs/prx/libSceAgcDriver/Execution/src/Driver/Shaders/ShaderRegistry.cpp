@@ -13,9 +13,11 @@
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +27,9 @@
 #include <list>
 #include <pthread.h>
 #include <set>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <sstream>
 #include <stdexcept>
 #include <thread>
@@ -514,6 +519,15 @@ std::optional<ShaderRecompiler::ShaderFloatMode> RegisteredFloatMode(const Shade
     return DecodeFloatMode(*reg, found->second);
 }
 
+std::optional<ShaderRecompiler::ShaderFloatMode> DispatchFloatMode(const ShaderSnapshot& snapshot, const Registers& live) {
+    if (snapshot.registeredState != nullptr) return RegisteredFloatMode(snapshot);
+    const auto reg = FloatModeRegisterFor(snapshot.type);
+    if (!reg) return std::nullopt;
+    const auto found = live.find(reg->offset);
+    if (found == live.end()) return std::nullopt;
+    return DecodeFloatMode(*reg, found->second);
+}
+
 namespace {
 
 template<typename TValue>
@@ -697,6 +711,16 @@ std::vector<PreparedShaders::Entry> PrepareRegistered(const ShaderSnapshot& snap
     return plan != nullptr ? PrepareRegistered(*plan) : std::vector<PreparedShaders::Entry>{};
 }
 
+#ifdef __GLIBC__
+void trimFreedMemory() {
+    static std::atomic<std::int64_t> last{0};
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto previous = last.load(std::memory_order_relaxed);
+    if (now - previous < 1000 || !last.compare_exchange_strong(previous, now, std::memory_order_relaxed)) return;
+    malloc_trim(0);
+}
+#endif
+
 class RegistrationPreparePool {
 public:
     static RegistrationPreparePool& Instance() {
@@ -752,11 +776,16 @@ private:
             }
             task();
             task = nullptr;
+            bool drained = false;
             {
                 std::lock_guard lock(pool.mutex);
                 --pool.running;
-                if (pool.tasks.empty() && pool.running == 0) pool.idle.notify_all();
+                drained = pool.tasks.empty() && pool.running == 0;
+                if (drained) pool.idle.notify_all();
             }
+#ifdef __GLIBC__
+            if (drained) trimFreedMemory();
+#endif
         }
         return nullptr;
     }
@@ -1019,6 +1048,22 @@ void Driver::ResolveGraphicsAbi(const Shader* vertex, const Shader* pixel, std::
     transaction.Commit();
 }
 
+void Driver::SettleShaderPreparations(std::span<const Shader* const> stages) {
+    std::vector<std::shared_ptr<const ShaderSnapshot>> snapshots;
+    {
+        std::lock_guard lock(mutex);
+        if (shaders == nullptr) return;
+        for (const auto* shader : stages) {
+            if (shader == nullptr) continue;
+            if (auto snapshot = RegisteredHeader(*shaders, shader)) snapshots.push_back(std::move(snapshot));
+        }
+    }
+    for (const auto& snapshot : snapshots) {
+        std::unique_lock lock(snapshot->prepared->mutex);
+        AwaitRegisteredPreparation(*snapshot->prepared, lock);
+    }
+}
+
 void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target) {
     ShaderPreparationTransaction transaction;
     require(fragment.get() != &front, "rectangle stages refer to the same shader");
@@ -1177,7 +1222,8 @@ void Driver::RegisterShader(const Shader* shader) {
 
 }
 
-extern "C" AgcDriver::DriverDetail::ShaderPreparationTransaction* AgcDriverBeginShaderPreparation_nid_postfix() {
+extern "C" AgcDriver::DriverDetail::ShaderPreparationTransaction* AgcDriverBeginShaderPreparation_nid_postfix(const Shader* const* shaders, std::size_t count) {
+    AgcDriver::DriverDetail::Driver::Get().SettleShaderPreparations({shaders, count});
     return new AgcDriver::DriverDetail::ShaderPreparationTransaction();
 }
 

@@ -3036,6 +3036,32 @@ void StorageTexture::FlushAllPending(const char* reason) {
     static_cast<void>(FlushPending(0, std::numeric_limits<std::size_t>::max(), nullptr, reason));
 }
 
+std::size_t StorageTexture::StoreSmallPending(const char* reason) {
+    std::vector<std::shared_ptr<StorageTexture>> small;
+    {
+        auto& pending = Pending();
+        std::lock_guard lock(pending.mutex);
+        for (auto* texture : pending.textures) {
+            if (texture->guestBytes > SmallStoreBytes) continue;
+            if (auto alive = texture->weak_from_this().lock()) small.push_back(std::move(alive));
+        }
+    }
+    std::size_t stored = 0;
+    for (const auto& texture : small) {
+        const auto address = texture->descriptor.baseAddress;
+        const auto bytes = static_cast<std::size_t>(texture->guestBytes);
+        if (!HostImportCovers(texture->context, address, bytes)) continue;
+        if (FlushPending(address, bytes, nullptr, reason)) ++stored;
+    }
+    return stored;
+}
+
+bool StorageTexture::AnyPending() {
+    auto& pending = Pending();
+    std::lock_guard lock(pending.mutex);
+    return pending.textures.begin() != pending.textures.end();
+}
+
 bool StorageTexture::StoreAtFlipRequested(const char* value) {
     if (value == nullptr) return false;
     if (std::strcmp(value, "1") == 0) return true;
@@ -4110,18 +4136,16 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
         for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
             if (layers[layer]) layerPending[layer] = false;
         }
-        const bool allKept = std::none_of(skippedLayer.begin(), skippedLayer.end(), [](bool kept) { return kept; });
-        if (allKept || !adjacent.empty()) {
-            const auto now = memoizedCollect ? GuestMemory::CollectWrites(firstStored, static_cast<std::size_t>(lastStored - firstStored)) : GuestMemory::CollectWritesUncached(firstStored, static_cast<std::size_t>(lastStored - firstStored));
-            for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
-                if (layers[layer] && !skippedLayer[layer]) layerGeneration[layer] = now;
-            }
-            refreshGeneration();
-            advanceAdjacent(adjacent, now, firstBlock, lastBlock);
-            if (!shadowed.empty()) MarkShadowed(*shadowImport, shadowed, now);
-        } else if (!shadowed.empty()) {
-            MarkShadowed(*shadowImport, shadowed, GuestMemory::TrackerGeneration());
+        bool advances = false;
+        for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) advances = advances || (layers[layer] && !skippedLayer[layer]);
+        if (!advances && adjacent.empty() && shadowed.empty()) return;
+        const auto now = memoizedCollect ? GuestMemory::CollectWrites(firstStored, static_cast<std::size_t>(lastStored - firstStored)) : GuestMemory::CollectWritesUncached(firstStored, static_cast<std::size_t>(lastStored - firstStored));
+        for (std::uint32_t layer = 0; layer < trackedLayers; ++layer) {
+            if (layers[layer] && !skippedLayer[layer]) layerGeneration[layer] = now;
         }
+        refreshGeneration();
+        advanceAdjacent(adjacent, now, firstBlock, lastBlock);
+        if (!shadowed.empty()) MarkShadowed(*shadowImport, shadowed, now);
     };
     if (keep.empty()) {
         // Every selected block was written by the CPU since the layer's generation: nothing to
@@ -4264,7 +4288,24 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     // the round trip through the CPU below would store stale texels over whatever the memory
     // holds now. Its selected units are dropped instead. APS5_NO_UNREGISTERED_DROP=1 stores.
     static const bool unregisteredDrop = std::getenv("APS5_NO_UNREGISTERED_DROP") == nullptr;
+    bool overhang = false;
     if (unregisteredDrop && !RegisteredReadableCovers(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
+        const auto allocationEnd = RegisteredReadableEnd(descriptor.baseAddress);
+        const auto& level = mips.front();
+        const auto rowBytes = std::uint64_t{level.height} * level.pitchBytes;
+        const auto lastRowTail = mips.size() == 1 && arrayLayers == 1 && !level.tail && level.tiledSize > rowBytes ? level.tiledSize - rowBytes : 0;
+        const auto end = descriptor.baseAddress + guestBytes;
+        if (allocationEnd > descriptor.baseAddress && end - allocationEnd <= lastRowTail) {
+            auto covered = allocationEnd;
+            while (covered < end) {
+                const auto next = RegisteredReadableEnd(covered);
+                if (next <= covered) break;
+                covered = next;
+            }
+            overhang = covered >= end;
+        }
+    }
+    if (unregisteredDrop && !overhang && !RegisteredReadableCovers(descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
         static std::atomic<int> reports{0};
         if (reports.fetch_add(1) < 4) std::fprintf(stderr, "[gpu] storage image 0x%llx+0x%llx: memory no longer registered; %zu pending ranges dropped\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), keep.size());
         unregisteredDropped.fetch_add(1, std::memory_order_relaxed);

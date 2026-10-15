@@ -665,6 +665,9 @@ void CoveredCentroid() {
 // [[early_fragment_tests]]).
 void EarlyDepthDecode() {
     Registers cx;
+    // PA_SC_AA_MASK_X0Y0_X1Y0 / X0Y1_X1Y1: every sample of the quad covered (the pixel stage reads the quad mask).
+    cx[0x30e] = 0xffffffffu;
+    cx[0x30f] = 0xffffffffu;
     cx[0x1b3] = 2u;
     cx[0x1b4] = 2u;
     cx[0x1b6] = 0u;

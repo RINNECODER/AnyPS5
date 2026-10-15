@@ -2039,6 +2039,22 @@ void verifyMeshConfiguration() {
     request.graphics = GraphicsCompileContext{0u, {}, mesh, std::nullopt, {}};
     const auto replay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(request));
     require(replay.request.graphics.has_value() && replay.request.graphics->mesh.has_value() && replay.request.graphics->mesh->esgsItemSize == 12u && replay.request.graphics->mesh->primitivesPerGroup == 21u, "mesh configuration was lost in serialization");
+    {
+        RecompileRequest fragment{};
+        fragment.shader = {ShaderStage::Fragment, 0x10000u, code, 0, {}};
+        fragment.context.waveSize = 64;
+        ShaderPixelStageInfo info{};
+        info.quadPixelMask = 0x2u;
+        fragment.context.pixel = info;
+        const auto back = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(fragment));
+        require(back.request.context.pixel.has_value() && back.request.context.pixel->quadPixelMask == 0x2u, "the quad pixel mask was lost in serialization");
+        std::vector<std::uint64_t> masked;
+        RecompileCacheKey::Build(fragment, masked);
+        fragment.context.pixel->quadPixelMask = 0xfu;
+        std::vector<std::uint64_t> full;
+        RecompileCacheKey::Build(fragment, full);
+        require(masked != full, "the quad pixel mask is not part of the recompile cache key");
+    }
     std::vector<std::uint64_t> key;
     RecompileCacheKey::Build(request, key);
     const auto first = key;
@@ -2185,7 +2201,7 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel = ShaderPixelStageInfo{};
     minimal.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRkAAAA=", "new requests did not use serialization version 25");
+    require(requestPrefix(encoded, 8u) == "NVNQQRoAAAA=", "new requests did not use serialization version 26");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
     withFallbacks.context.linkedCallFallbacks = fallbacks;
@@ -2194,10 +2210,10 @@ void verifyPixelRequestSerialization() {
     require(serializer.Deserialize(encoded).request.context.linkedCallFallbacks.empty(), "a request without linked call fallbacks gained some");
     require(serializer.Deserialize(encoded).request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle, "the pixel primitive class did not round-trip");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
-    for (std::size_t bytes = 0; bytes < 20u; ++bytes) {
+    for (std::size_t bytes = 0; bytes < 21u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag or primitive class was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRoAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRsAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{
@@ -2301,6 +2317,7 @@ void verifyLegacyPixelRequests() {
         require(pixel.inputAddr == 2u && pixel.hasPerspectiveCenterVgpr && pixel.targetOutputMode[0] == 9u, "legacy pixel layout was misread");
         require(pixel.conservativeZExport == (version >= 7u ? ConservativeZExport::GreaterThanZ : ConservativeZExport::AnyZ), "legacy conservative Z layout was misread");
         require(!pixel.orderedPixelShader, "a legacy request became a primitive-ordered pixel shader");
+        require(pixel.quadPixelMask == 0xfu, "a legacy request masked quad pixels");
         require(request.shader.stage == ShaderStage::Fragment && request.shader.code.size() == 1u && request.shader.code[0] == 0xbf810000u && !request.context.vertex.has_value() && request.context.memory.empty(), "legacy guest context was misaligned");
         require(request.target.vulkanVersion == 0x00401000u && request.target.spirvVersion == 0x00010300u && request.target.subgroupSize == 64u && request.layout.firstBinding == 11u && request.layout.pushConstantSizeBytes == 128u, "legacy target or binding layout was misaligned");
         require(request.useCache == (version == 1u) && request.target.nonConstantImageOffsets == (version >= 6u) && request.target.srgbDecodeFormats == 0u && !request.target.narrowSubgroupClock && !request.target.float64DenormPreserve, "legacy request trailer was misread");
@@ -3964,6 +3981,59 @@ void verifyGuardedNullPointers() {
 #endif
 }
 
+void verifyQuadMaskNeighbourReads() {
+    using namespace ShaderRecompiler;
+    constexpr std::array<std::uint32_t, 6> capabilities{spv::CapabilityShader, spv::CapabilityInt64, spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityGroupNonUniformArithmetic};
+    constexpr std::array<std::uint32_t, 7> demoteCapabilities{spv::CapabilityShader, spv::CapabilityInt64, spv::CapabilityGroupNonUniform, spv::CapabilityGroupNonUniformBallot, spv::CapabilityGroupNonUniformShuffle, spv::CapabilityGroupNonUniformArithmetic, spv::CapabilityDemoteToHelperInvocation};
+    constexpr std::array<std::string_view, 1> demoteExtensions{"SPV_EXT_demote_to_helper_invocation"};
+    constexpr std::array<std::uint32_t, 4> constant{0x7e0202f2u, 0xf800180fu, 0x01010101u, 0xbf810000u};
+    constexpr std::array<std::uint32_t, 6> explicitExec{0xbefe04c1u, 0x7e000500u, 0x7e020200u, 0xf800180fu, 0x01010101u, 0xbf810000u};
+    constexpr std::array<std::uint32_t, 6> constantWqm{0xbefe0ac1u, 0x7e000500u, 0x7e020200u, 0xf800180fu, 0x01010101u, 0xbf810000u};
+    constexpr std::array<std::uint32_t, 7> permute{0xbefe04c1u, 0x7e040284u, 0xdac80000u, 0x01000002u, 0xf800180fu, 0x01010101u, 0xbf810000u};
+    constexpr std::array<std::uint32_t, 9> comparisonBallot{0xbe8003ffu, 0x3f000000u, 0xbefe04c1u, 0x7d840000u, 0xbe80046au, 0x7e020200u, 0xf800180fu, 0x01010101u, 0xbf810000u};
+    const auto compile = [&](std::span<const std::uint32_t> code, bool masked, bool demote) {
+        RecompileRequest request{};
+        request.shader = {ShaderStage::Fragment, 0x58000u, code, 0, {}};
+        request.context.waveSize = 32u;
+        request.context.pixel = ShaderPixelStageInfo{};
+        request.context.pixel->inputAddr = PixelInputBit(PixelInput::PositionX);
+        request.context.pixel->posX = true;
+        request.context.pixel->quadPixelMask = masked ? 0x2u : 0xfu;
+        request.context.pixel->targetOutputMode[0] = 9u;
+        request.context.pixel->targetExportMapping.fill(0xe4u);
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = 32u;
+        request.target.supportedCapabilities = demote ? std::span<const std::uint32_t>(demoteCapabilities) : std::span<const std::uint32_t>(capabilities);
+        if (demote) request.target.supportedExtensions = demoteExtensions;
+        request.layout.pushConstantSizeBytes = 128u;
+        request.useCache = false;
+        return Recompile(request);
+    };
+    const auto declares = [](const RecompileResult& result, spv::Op opcode) {
+        const auto& words = result.spirv.Words();
+        for (std::size_t cursor = 5; cursor < words.size();) {
+            const auto count = words[cursor] >> 16u;
+            require(count != 0 && count <= words.size() - cursor, "quad mask: truncated SPIR-V instruction");
+            if ((words[cursor] & 0xffffu) == static_cast<std::uint32_t>(opcode)) return true;
+            cursor += count;
+        }
+        return false;
+    };
+    require(declares(compile(constant, true, false), spv::OpKill), "a quad mask without neighbour reads did not retain its kill fallback");
+    for (const auto code : {std::span<const std::uint32_t>(explicitExec), std::span<const std::uint32_t>(constantWqm), std::span<const std::uint32_t>(permute)}) {
+        const auto unmasked = compile(code, false, false);
+        require(declares(unmasked, spv::OpGroupNonUniformShuffle), "the neighbour-read test did not retain its cross-lane shuffle");
+        expectFailure([&] { static_cast<void>(compile(code, true, false)); }, "shaderDemoteToHelperInvocation", "a quad mask killed helper lanes before a cross-lane read with EXEC enabled for those lanes");
+        const auto masked = compile(code, true, true);
+        require(declares(masked, spv::OpDemoteToHelperInvocation) && declares(masked, spv::OpGroupNonUniformShuffle), "a quad mask with demote did not preserve its cross-lane shuffle path");
+    }
+    require(declares(compile(comparisonBallot, false, false), spv::OpGroupNonUniformBallot), "the comparison test did not retain its subgroup ballot");
+    expectFailure([&] { static_cast<void>(compile(comparisonBallot, true, false)); }, "shaderDemoteToHelperInvocation", "a quad mask killed helper lanes before a ballot with EXEC enabled for those lanes");
+    const auto maskedBallot = compile(comparisonBallot, true, true);
+    require(declares(maskedBallot, spv::OpDemoteToHelperInvocation) && declares(maskedBallot, spv::OpGroupNonUniformBallot), "a quad mask with demote did not preserve its ballot path");
+}
+
 void verifyCubeDepthCompareMode() {
     using namespace ShaderRecompiler;
     ImageResource image{};
@@ -4001,6 +4071,11 @@ void verifyVolumeArrayLoadMode() {
 int main(int argc, char** argv) {
     try {
         using namespace ShaderRecompiler;
+        if (argc == 2 && std::string_view(argv[1]) == "--quad-mask-no-demote") {
+            verifyQuadMaskNeighbourReads();
+            std::cout << "Quad masks preserve neighbour-lane helpers or refuse without demote\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--frontend-pair") {
             verifyFrontendPair();
             std::cout << "Prepared frontend reuse preserves full and partial-thread programs\n";
@@ -4063,6 +4138,7 @@ int main(int argc, char** argv) {
         verifyGuardedNullPointers();
         verifyCubeDepthCompareMode();
         verifyVolumeArrayLoadMode();
+        verifyQuadMaskNeighbourReads();
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         const std::vector<std::uint32_t> minimalSpirv{
             0x07230203u, 0x00010000u, 0u, 5u, 0u,

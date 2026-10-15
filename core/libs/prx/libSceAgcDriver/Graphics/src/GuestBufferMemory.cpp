@@ -10,6 +10,7 @@
 #include "prx/libc/include/CpuTopology.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
+#include "prx/libc/include/general/AtomicSharedPtr.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -115,7 +116,7 @@ struct GuestBufferMemory::AddressSpace {
 namespace {
 
 struct AddressSpaceCache {
-    std::atomic<std::shared_ptr<const GuestBufferMemory::AddressSpace>> current;
+    AtomicSharedPtr<const GuestBufferMemory::AddressSpace> current;
     std::atomic<std::uint64_t> serials{0};
     // Set by the waiter's drop, cleared by the next publish: the rebuild's reason.
     std::atomic<bool> droppedByWaiter{false};
@@ -2034,7 +2035,13 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& 
 bool RegisteredReadableCovers(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
     const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
-    return containingRange(lease, address, address + bytes) != nullptr;
+    const auto end = address + bytes;
+    for (auto at = address; at < end;) {
+        const auto* range = containingRange(lease, at, at + 1);
+        if (range == nullptr) return false;
+        at = range->address + range->bytes;
+    }
+    return true;
 }
 
 std::uint64_t RegisteredReadableEnd(std::uint64_t address) {
@@ -2509,7 +2516,25 @@ void GuestBufferMemory::AddSnapshot(const GuestMemorySnapshot& snapshot) {
         }
         const auto offset = static_cast<std::size_t>(snapshot.address - owner->begin);
         const auto* source = live ? reinterpret_cast<const std::byte*>(snapshot.address) : owner->snapshot.data() + offset;
-        Require(std::memcmp(source, snapshot.bytes.data(), snapshot.bytes.size()) == 0, "guest snapshot differs from registered memory");
+        if (std::memcmp(source, snapshot.bytes.data(), snapshot.bytes.size()) != 0) {
+            std::size_t first = 0;
+            while (first < snapshot.bytes.size() && source[first] == snapshot.bytes[first]) ++first;
+            char text[256];
+            std::snprintf(text, sizeof(text), "guest snapshot differs from registered memory: snapshot 0x%llx+0x%zx (%s region 0x%llx+0x%llx%s%s%s) differs first at +0x%zx", static_cast<unsigned long long>(snapshot.address), snapshot.bytes.size(), live ? "live" : "snapshot-backed", static_cast<unsigned long long>(owner->begin), static_cast<unsigned long long>(owner->end - owner->begin), owner->writable ? ", writable" : "", owner->hostBacked ? ", host-backed" : "", owner->mirror != nullptr ? ", mirrored" : "", first);
+            static const bool fatal = std::getenv("APS5_SNAPSHOT_CHECK_FATAL") != nullptr;
+            if (!live || fatal) throw std::runtime_error(text);
+            static std::mutex reportMutex;
+            static std::uint64_t mismatches = 0;
+            static auto lastReport = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+            std::lock_guard lock(reportMutex);
+            ++mismatches;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - lastReport >= std::chrono::seconds(10)) {
+                lastReport = now;
+                std::fprintf(stderr, "[gpu] %s; the live region serves the GPU (%llu mismatches so far; APS5_SNAPSHOT_CHECK_FATAL=1 fails the dispatch instead)\n", text, static_cast<unsigned long long>(mismatches));
+            }
+            return;
+        }
         if (profile) Snapshots().checked.fetch_add(1, std::memory_order_relaxed);
         return;
     }

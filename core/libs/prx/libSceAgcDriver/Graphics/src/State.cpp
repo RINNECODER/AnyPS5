@@ -128,7 +128,7 @@ constexpr std::uint32_t DepthControlMask = ~0x007007f0u;
 // EXEC_ON_HIER_FAIL / EXEC_ON_NOOP / EXEC_IF_OVERLAPPED (bits 9, 10, 17) only force the pixel shader
 // to run, which it always does here.
 constexpr std::uint32_t ShaderControlMask = ~(0x0000f870u | 0x00020600u | 0x00010000u);
-constexpr std::uint32_t PixelStageRunsMask = 0x00020747u;
+constexpr std::uint32_t PixelStageRunsMask = 0x000207c7u;
 constexpr std::uint32_t AlphaToCoverageMask = ~0x0001ff00u;
 constexpr std::uint32_t AlphaToCoverageUndithered = 0x0000aa01u;
 constexpr std::uint32_t ScanModeMask = ~0x22u;
@@ -818,7 +818,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     Require(read(cx, 0x83) == 0xffffu, "clip rectangles are unsupported");
     Require((read(cx, 0x8c) & 0xfu) == 0xau, "nonstandard triangle edge rules are unsupported");
     Require(read(cx, 0x2f9) == 0x2du, "nonstandard pixel center or vertex quantization is unsupported");
-    Require(read(cx, 0x30e) == 0xffffffffu && read(cx, 0x30f) == 0xffffffffu, "sample masks are unsupported");
+    Require((read(cx, 0x2f8) & 7u) == 0 || (read(cx, 0x30e) == 0xffffffffu && read(cx, 0x30f) == 0xffffffffu), "sample masks of multisampled draws are unsupported");
     const auto viewportControl = read(cx, 0x206);
     if (viewportControl != 0x43fu) throw std::runtime_error(vteMessage(viewportControl));
     zero(cx, 0x204, ClipControlMask, "unsupported PA_CL_CLIP_CNTL flags");
@@ -1357,7 +1357,7 @@ std::string DrawRejection(const QueueState& queue, bool indexed) {
     if (value(cx, 0x2f9, word) && word != 0x2du) return require(false, "nonstandard pixel center or vertex quantization is unsupported");
     if (value(cx, 0x313, word) && (word & ~0x001f6000u) != 0 && word != 0x6001u) return conservativeMessage(word);
     std::uint32_t other = 0;
-    if (value(cx, 0x30e, word) && value(cx, 0x30f, other) && (word != 0xffffffffu || other != 0xffffffffu)) return require(false, "sample masks are unsupported");
+    if (value(cx, 0x2f8, word) && (word & 7u) != 0 && value(cx, 0x30e, word) && value(cx, 0x30f, other) && (word != 0xffffffffu || other != 0xffffffffu)) return require(false, "sample masks of multisampled draws are unsupported");
     if (value(cx, 0x206, word) && word != 0x43fu) return vteMessage(word);
     if (auto reason = nonzero(cx, 0x204, ClipControlMask, "unsupported PA_CL_CLIP_CNTL flags"); !reason.empty()) return reason;
     std::uint32_t targetMask = 0, shaderMask = 0;
@@ -1380,10 +1380,11 @@ bool PixelProgramSkipped(const QueueState& queue) {
     const auto& cx = queue.context;
     const auto targetMask = find(cx, 0x8e);
     const auto shaderMask = find(cx, 0x8f);
-    const auto zFormat = find(cx, 0x1c4);
     const auto shaderControl = find(cx, 0x203);
-    if (targetMask == cx.end() || shaderMask == cx.end() || zFormat == cx.end() || shaderControl == cx.end()) return false;
-    return (targetMask->second & shaderMask->second) == 0 && zFormat->second == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
+    if (targetMask == cx.end() || shaderMask == cx.end() || shaderControl == cx.end()) return false;
+    const auto alphaToMask = find(cx, 0x2dc);
+    if (alphaToMask != cx.end() && (alphaToMask->second & 1u) != 0) return false;
+    return (targetMask->second & shaderMask->second) == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
 }
 
 std::string NullPixelProgramRejection(const QueueState& queue) {

@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferCopy.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
@@ -79,7 +80,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     const bool partialLastGroup = partialGroups != std::array<std::uint32_t, 3>{};
     if (resolving) {
         if (!partialLastGroup && matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
-        if (!partialLastGroup && indirectArguments == 0 && matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
+        if (!partialLastGroup && indirectArguments == 0 && (matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute) || MatchesStreamCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute))) return;
     } else {
         if (const auto htile = Graphics::HtileDepthClearAddress(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads); htile != 0) Graphics::NoteHtileDepthClear(htile);
         if (!partialLastGroup && fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
@@ -94,7 +95,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     if (partialLastGroup) compute.partialThreads = partialGroups;
     ShaderRecompiler::RecompileRequest request{
         {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
-        {decoded.waveSize, 0, userData, compute, std::nullopt, std::nullopt, memory, RegisteredFloatMode(snapshot)},
+        {decoded.waveSize, 0, userData, compute, std::nullopt, std::nullopt, memory, DispatchFloatMode(snapshot, queue.shader)},
         localDevice->ComputeTarget(decoded.waveSize),
         {0, 0, 0, 128}
     };
