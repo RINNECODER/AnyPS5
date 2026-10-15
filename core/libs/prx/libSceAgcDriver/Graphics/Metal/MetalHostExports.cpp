@@ -9,7 +9,9 @@
 // Ahead-of-time shader preparation: the Vulkan driver records prepared artifacts inside these
 // transactions (Driver/Shaders/ShaderRegistry.cpp). The Metal backend compiles its pipelines when
 // a draw or dispatch first uses them, so it keeps no prepared state and the scope is empty.
-extern "C" AgcDriver::DriverDetail::ShaderPreparationTransaction* AgcDriverBeginShaderPreparation_nid_postfix() {
+extern "C" AgcDriver::DriverDetail::ShaderPreparationTransaction* AgcDriverBeginShaderPreparation_nid_postfix(const Shader* const* shaders, std::size_t count) {
+    static_cast<void>(shaders);
+    static_cast<void>(count);
     return nullptr;
 }
 
