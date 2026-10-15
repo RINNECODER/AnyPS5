@@ -469,13 +469,19 @@ def saturated_memory(rng, size=SCRATCH_SIZE):
     return bytes(data)
 
 
-def realistic_state(rng, segments=()):
+def realistic_state(rng, segments=(), recorded=None):
     """An entry state whose pointer registers and scratch slots all name mapped objects.
 
     Registers point into the scratch window (mapped by both runners), with a share pointing at the
-    real image's writable data so a function can read a real object as well.
+    real image's writable data so a function can read a real object as well. `recorded` replaces
+    them with the GPRs a real run had at this function's entry (the rsp stays the runner's: the
+    recorded one names the real run's stack, which this harness does not map).
     """
     memory = saturated_memory(rng)
+    if recorded is not None:
+        registers = {name: recorded.get(name, 0) for name in replay.UNIFORM_GPRS}
+        registers["rsp"] = RUNNER_ENTRY_RSP
+        return registers, memory
     slots = SCRATCH_SIZE // 8
     writable = [(vaddr, memsz) for vaddr, _filesz, memsz, _data, flags in segments
                 if flags & 2 and memsz >= 16]
@@ -492,13 +498,26 @@ def realistic_state(rng, segments=()):
     return registers, memory
 
 
-def run_case_real(address, seed, directory, profile, plant=None):
+def runner_fault(completed):
+    """The `addr=... rip=...` a faulting runner printed, for a fault census."""
+    for line in completed.stderr.decode(errors="replace").splitlines():
+        if "[runner] fault" in line:
+            return line.split("[runner] fault", 1)[1].strip()
+    return ""
+
+
+def run_case_real(address, seed, directory, profile, plant=None, saturate_segments=False,
+                   recorded=None):
     """Verify against the real module image: the compiler reads the real eboot and the real module
     profile (guest_data + dispatch), both runners map the real segments at BASE + vaddr with the
     profile's pointer relocations applied, and an indirect call or a tail call into a function
     outside the closure no longer rejects the function."""
+    rng = random.Random(seed)
     segments = real_image.segments(ELF)
     segments = real_image.patch(segments, profile.relocations)
+    if saturate_segments:
+        segments = real_image.saturate(segments, random.Random(seed ^ 0x5EED),
+                                       extra=[(SCRATCH, SCRATCH_SIZE)])
     title = harness.Title(ELF)
     _closure, contracts = harness.real_contracts(title, profile, address, CLOSURE_LIMIT,
                                                  real_image.sha256(ELF), BASE, title.elf["e_entry"])
@@ -510,8 +529,7 @@ def run_case_real(address, seed, directory, profile, plant=None):
     dylib = build_arm64_real(ir, directory)
     library = ctypes.CDLL(str(dylib))
     data_ranges = [(vaddr, memsz) for vaddr, _filesz, memsz, _data, _flags in segments]
-    rng = random.Random(seed)
-    registers, memory = realistic_state(rng, segments)
+    registers, memory = realistic_state(rng, segments, recorded)
     arm = arm_state(dylib, f"sub_{address:x}", registers, memory, image=segments)
     runner = build_runner(directory)
     (directory / "segments.bin").write_bytes(real_image.blob(segments))
@@ -525,9 +543,10 @@ def run_case_real(address, seed, directory, profile, plant=None):
     except subprocess.TimeoutExpired:
         return {"status": "x86-timeout", "call_sites": 0}
     if arm == "fault" and completed.returncode != 0:
-        return {"status": "both-fault", "call_sites": 0}
+        return {"status": "both-fault", "call_sites": 0, "fault": runner_fault(completed)}
     if completed.returncode != 0:
-        return {"status": "x86-fault", "code": completed.returncode, "call_sites": 0}
+        return {"status": "x86-fault", "code": completed.returncode, "call_sites": 0,
+                "fault": runner_fault(completed)}
     if arm in ("timeout", "fault"):
         return {"status": arm, "call_sites": 0}
     x86 = (directory / "out.bin").read_bytes()

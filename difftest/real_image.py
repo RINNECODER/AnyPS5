@@ -66,6 +66,36 @@ def blob(segments_list):
     return stream.getvalue()
 
 
+def saturate(segments_list, rng, base=BASE, extra=()):
+    """Seed the zero 8-byte slots of the writable segments with pointers into mapped memory.
+
+    The title initialises its own globals at run time, which the harness never does, so a global
+    pointer is zero and the first `mov reg, [rip+disp]; mov reg, [reg]` faults in both runners.
+    A real process does not look like that: an initialised global pointer names a mapped object.
+    Giving those slots plausible pointers lets the guest follow them instead of stopping at null.
+    The writable data is extended to its full memory size so an uninitialised global is covered.
+    """
+    spans = [(base + vaddr, memsz) for vaddr, _filesz, memsz, _data, flags in segments_list
+             if flags & 2 and memsz >= 16]
+    spans.extend(extra)
+    if not spans:
+        return segments_list
+    out = []
+    for vaddr, filesz, memsz, data, flags in segments_list:
+        if not flags & 2 or memsz < 8:
+            out.append((vaddr, filesz, memsz, data, flags))
+            continue
+        buffer = bytearray(memsz)
+        buffer[:filesz] = data
+        for offset in range(0, memsz - 7, 8):
+            if int.from_bytes(buffer[offset:offset + 8], "little"):
+                continue
+            start, size = spans[rng.randrange(len(spans))]
+            buffer[offset:offset + 8] = (start + 8 * rng.randrange(size // 8)).to_bytes(8, "little")
+        out.append((vaddr, memsz, memsz, bytes(buffer), flags))
+    return out
+
+
 def map_segments(segments_list, base=BASE):
     """Map the union of the segments at BASE + vaddr and copy the bytes in (child process only)."""
     if not segments_list:
