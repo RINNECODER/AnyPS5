@@ -246,6 +246,7 @@ struct Sock {
     bool bound = false;
     bool listening = false;
     bool aborted = false;
+    bool read_shut = false;
     int rcv_timeout_us = 0;
     int snd_timeout_us = 0;
     int reported_error = 0;
@@ -498,9 +499,12 @@ bool has_local_address(NativeSocket native) {
     return ::getsockname(native, reinterpret_cast<sockaddr*>(&local), &local_length) == 0 || WSAGetLastError() != WSAEINVAL;
 }
 
-int wait_for_local_address(int s, const Sock& socket) {
+constexpr int RECEIVE_NOTHING = -1;
+
+int wait_for_local_address(int s, const Sock& socket, bool empty) {
     if (socket.type == NET_SOCK_STREAM || socket.bound) return 0;
     const bool named = has_local_address(socket.native->value);
+    if (!named && (socket.read_shut || empty)) return RECEIVE_NOTHING;
     if (!named && socket.nonblock) return NET_EAGAIN;
     const auto deadline = socket.rcv_timeout_us > 0
         ? std::chrono::steady_clock::now() + std::chrono::microseconds(socket.rcv_timeout_us)
@@ -513,6 +517,7 @@ int wait_for_local_address(int s, const Sock& socket) {
             it->second.bound = true;
             return 0;
         }
+        if (it->second.read_shut) return RECEIVE_NOTHING;
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) return NET_EAGAIN;
         g_cv.WaitUntil(lk, std::min(deadline, now + std::chrono::milliseconds(10)));
@@ -924,7 +929,7 @@ int64_t APS5_VABI sceNetRecv(int s, void* buf, size_t len, int flags) {
         socket = it->second;
     }
 #ifdef _WIN32
-    if (const int error = wait_for_local_address(s, socket)) return fail(error);
+    if (const int wait = wait_for_local_address(s, socket, len == 0)) return wait == RECEIVE_NOTHING ? 0 : fail(wait);
 #endif
     const GuestArena::HostWrite destination(len == 0 ? nullptr : buf, len);
     if (!destination.Open()) return fail(NET_EFAULT);
@@ -949,7 +954,11 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
         socket = it->second;
     }
 #ifdef _WIN32
-    if (const int error = wait_for_local_address(s, socket)) return fail(error);
+    if (const int wait = wait_for_local_address(s, socket, len == 0)) {
+        if (wait != RECEIVE_NOTHING) return fail(wait);
+        if (from) *fromlen = 0;
+        return 0;
+    }
 #endif
     const GuestArena::HostWrite destination(len == 0 ? nullptr : buf, len);
     if (!destination.Open()) return fail(NET_EFAULT);
@@ -1038,7 +1047,13 @@ int64_t APS5_VABI sceNetRecvmsg(int s, NetMsghdr* msg, int flags) {
     }
     const bool datagram = socket.type != NET_SOCK_STREAM;
 #ifdef _WIN32
-    if (const int error = wait_for_local_address(s, socket)) return fail(error);
+    if (const int wait = wait_for_local_address(s, socket, total == 0)) {
+        if (wait != RECEIVE_NOTHING) return fail(wait);
+        msg->flags = 0;
+        if (msg->name) msg->name_length = 0;
+        msg->control_length = 0;
+        return 0;
+    }
 #endif
     std::vector<char> buffer;
     try {
@@ -1083,7 +1098,14 @@ int APS5_VABI sceNetShutdown(int s, int how) {
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
-    return ::shutdown(socket.native->value, how) == 0 ? 0 : fail(native_error());
+    const int error = ::shutdown(socket.native->value, how) == 0 ? 0 : native_error();
+    if (how != 1) {
+        std::lock_guard lk(g_mutex);
+        const auto it = g_socks.find(s);
+        if (it != g_socks.end() && it->second.native == socket.native) it->second.read_shut = true;
+        g_cv.NotifyAll();
+    }
+    return error == 0 ? 0 : fail(error);
 }
 
 int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval, uint32_t optlen) {

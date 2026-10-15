@@ -324,6 +324,37 @@ static void CheckUnboundDatagramReceive() {
 #endif
 }
 
+static void CheckUnboundDatagramShutdown() {
+    const int socket = sceNetSocket("unbound-shutdown", 2, 2, 17);
+    Require(socket >= 0);
+    auto waiter = std::async(std::launch::async, [socket] {
+        char ignored[4];
+        return sceNetRecvfrom(socket, ignored, sizeof(ignored), 0, nullptr, nullptr);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    Require(waiter.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
+    sceNetShutdown(socket, 0);
+    Require(waiter.wait_for(std::chrono::seconds(1)) == std::future_status::ready && waiter.get() == 0);
+    char buffer[4]{};
+    Require(sceNetRecv(socket, buffer, sizeof(buffer), 0) == 0);
+    std::array<std::uint8_t, 16> source{};
+    NetIovec in[] = {{buffer, sizeof(buffer)}};
+    NetMsghdr receive{source.data(), static_cast<std::uint32_t>(source.size()), in, 1, nullptr, 0, 0};
+    Require(sceNetRecvmsg(socket, &receive, 0) == 0 && receive.name_length == 0);
+#ifdef _WIN32
+    std::uint32_t size = source.size();
+    Require(sceNetRecvfrom(socket, buffer, sizeof(buffer), 0, source.data(), &size) == 0 && size == 0);
+#endif
+    Require(sceNetSocketClose(socket) == 0);
+#ifdef _WIN32
+    const int empty = sceNetSocket("unbound-empty", 2, 2, 17);
+    Require(empty >= 0);
+    Require(sceNetRecv(empty, buffer, 0, 0) == 0);
+    Require(sceNetRecvfrom(empty, buffer, 0, 0, nullptr, nullptr) == 0);
+    Require(sceNetSocketClose(empty) == 0);
+#endif
+}
+
 static void CheckEmptyEpoll() {
     const int epoll = sceNetEpollCreate("empty-epoll", 0);
     Require(epoll >= 0);
@@ -952,6 +983,7 @@ int main() {
     CheckLinkLocalAllNodesIpv6();
     CheckUnboundSocketName();
     CheckUnboundDatagramReceive();
+    CheckUnboundDatagramShutdown();
     CheckUnspecifiedIpv6();
     if (!ipv6Unavailable) CheckIpv6SocketsAreIpv6Only();
     CheckDatagramDisconnect();
