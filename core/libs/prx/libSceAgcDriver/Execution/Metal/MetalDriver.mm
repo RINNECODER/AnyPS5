@@ -660,6 +660,33 @@ void MetalDriver::Impl::CompletePriorGpuWorkAndCopyBack(std::uint32_t cause) {
     MaterializeCopyBacks(MetalLazyCopyBacks::Cause::Drain);
     if (!timeline.Empty()) ++drainsBy[std::min<std::uint32_t>(cause, drainsBy.size() - 1)];
     timeline.Drain(cause);
+    AwaitEncodedCopyBacks(0, 0, true);
+}
+
+void MetalDriver::Impl::AwaitEncodedCopyBacks(std::uint64_t address, std::uint64_t bytes, bool everything) {
+    std::lock_guard lock(gpuMutex);
+    if (draw == nullptr || backend == nullptr) return;
+    std::vector<id<MTLCommandBuffer>> unfinished;
+    if (everything) {
+        unfinished = draw->LazyCopyBacks().Unfinished();
+    } else {
+        const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
+        for (const auto& range : ranges) {
+            const auto begin = std::max(address, range.guestAddress);
+            const auto limit = std::min(end, range.guestAddress + range.host.size());
+            if (begin >= limit) continue;
+            for (id<MTLCommandBuffer> commands : draw->LazyCopyBacks().Unfinished(range.host.data() + (begin - range.guestAddress),
+                     static_cast<std::size_t>(limit - begin))) {
+                unfinished.push_back(commands);
+            }
+        }
+    }
+    for (id<MTLCommandBuffer> commands : unfinished) {
+        // Still the open batch: commit it (and what is in it) first.
+        if (backend->OpenBatch(commands)) backend->Flush();
+        if (commands.status < MTLCommandBufferStatusCommitted) [commands commit];
+        MetalTimeline::WaitCommitted(commands);
+    }
 }
 
 namespace {
@@ -712,6 +739,7 @@ void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes
     const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
     // A surface whose texture is newer than these bytes is copied back first (and then drained).
     MaterializeCopyBacks(MetalLazyCopyBacks::Cause::CpuRead, address, bytes);
+    AwaitEncodedCopyBacks(address, bytes);
     if (timeline.MayHaveWritten(address, end)) {
         if (BindTrace::Active()) {
             BindTrace::Log("  drain before CPU read 0x%llx +0x%llx%s", static_cast<unsigned long long>(address),

@@ -908,6 +908,21 @@ void LazyCopyBacks(Metal::MetalDevice& backend,id<MTLLibrary> library) {
     auto done=lazy.EncodeAll(commands,Metal::MetalLazyCopyBacks::Cause::Drain);
     backend.Wait(commands);
     Require(done.size()==1 && lazy.Empty() && holds({1,2,3,4}),"encoding every recorded copy-back does not reach the guest bytes");
+    // A binding that encodes a copy-back and is then dropped (a working-set retry) leaves it on no
+    // timeline entry: the registry still names its command buffer until it completed.
+    write({9,9,9,9});
+    backend.SetBatching(true);
+    {
+        Metal::MetalShaderResources pass(backend,std::span(&borrow,1),{},&aliases,&cache);
+        pass.SetLazyCopyBacks(&lazy);
+        static_cast<void>(pass.Buffer(d.baseAddress,32));
+    }
+    auto unfinished=lazy.Unfinished(guest.data(),guest.size());
+    Require(lazy.Empty() && unfinished.size()==1 && backend.OpenBatch(unfinished[0]),"a dropped reader's copy-back is not tracked until it completes");
+    Require(lazy.Unfinished(guest.data()+guest.size(),16).empty(),"an unrelated range waits for a dropped reader's copy-back");
+    backend.Wait(unfinished[0]);
+    backend.SetBatching(false);
+    Require(lazy.Unfinished().empty() && holds({9,9,9,9}),"a completed copy-back is still tracked, or did not reach the guest bytes");
     // The mapping stays: the aliases and cached textures above still name it until they go.
 }
 

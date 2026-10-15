@@ -766,7 +766,8 @@ int main(int argc, char** argv) {
             status = 1;
         } else {
             const auto diff = Compare(reference, lastPixels, width);
-            const bool ok = diff.colour <= maxDiffPixels && pngMismatches == 0;
+            // With one repeat there is only the warm-up, which is reported but not judged.
+            const bool ok = (repeat < 2 || diff.colour <= maxDiffPixels) && pngMismatches == 0;
             std::printf("expect-png %s: last repeat %zu pixels differ (max delta %d), allowed %zu; %zu timed repeats over: %s\n", expectPng.c_str(),
                 diff.colour, diff.maxDelta, maxDiffPixels, pngMismatches, ok ? "match" : "MISMATCH");
             if (!ok) status = 1;

@@ -104,6 +104,10 @@ struct MetalDriver::Impl {
     // once they completed. GPU-side: nothing waits here. Called with gpuMutex held.
     void MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause);
     void MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause, std::uint64_t address, std::uint64_t bytes);
+    // Waits for copy-backs already encoded over guest [address, address + bytes) (every one with
+    // `everything`) whose command buffers have not completed: one a dropped binding encoded is on no
+    // timeline entry (MetalLazyCopyBacks::Unfinished). Called with gpuMutex held.
+    void AwaitEncodedCopyBacks(std::uint64_t address, std::uint64_t bytes, bool everything = false);
     // Clears the draw executor's image cache (GuestImageCache.hpp), or drops the entries a store
     // overlaps. The reason only feeds the ANYPS5_METAL_GPU_TIMING statistics (0 is a mapping change).
     enum class ForgetReason : unsigned { Other, Submission, Wait, Flip, Event, Failure, Store };
