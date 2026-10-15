@@ -962,13 +962,20 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                 continue;
             }
             // Committed work after this wait runs after the work before it on the one Metal queue, so
-            // the CPU waits only for the value itself: a label that is no pending store of ours is the
-            // guest CPU's (or a store of ours that already ran). Meanwhile the GPU goes on and the
-            // timeline retires what it finished, so labels of ours the guest CPU waits on before it
-            // writes this one still reach it. ANYPS5_METAL_GPU_WAITS=0 drains first, as before.
-            if (!GpuWaits()) CompletePriorGpuWorkAndCopyBack(opcode);
-            else timeline.Flush();
+            // when no committed work or pending label store of ours may write the awaited bytes, the
+            // value is the guest CPU's (or a store of ours that already ran) and the CPU waits only for
+            // it. Meanwhile the GPU goes on and the timeline retires what it finished, so labels of
+            // ours the guest CPU waits on before it writes this one still reach it. A value our own
+            // pending work may still write drains first, so the wait never passes on the bytes from
+            // before that work. ANYPS5_METAL_GPU_WAITS=0 always drains first, as before.
             const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
+            const auto awaitedEnd = address + Pm4::WaitAwaitedBytes(packet);
+            const bool oursPending = timeline.MayHaveWritten(address, awaitedEnd) ||
+                std::any_of(pendingLabels.begin(), pendingLabels.end(), [&](const PendingLabel& label) {
+                    return address < label.address + label.size && label.address < awaitedEnd;
+                });
+            if (!GpuWaits() || oursPending) CompletePriorGpuWorkAndCopyBack(opcode);
+            else timeline.Flush();
             bool blocked = false;
             try {
                 while (!Pm4::WaitSatisfied(packet)) {
