@@ -162,6 +162,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup = false);
 // The rasterizer's sample positions in [0, 1) of a pixel, rasterSamples of them: the custom pattern, or
 // the standard 2x/4x/8x pattern (the D3D/Vulkan standard, which is also Metal's default).
 std::array<VkSampleLocationEXT, 8> SampleLocations(const State& state);
+void NormalizeUnusedViewportDepth(State& state, const ShaderRecompiler::ShaderPixelStageInfo& pixel);
 std::array<std::uint8_t, 8> ExportMappings(const State& state);
 std::array<ShaderRecompiler::ColorExportPacking, 8> ExportPackings(const State& state);
 ShaderRecompiler::RasterPrimitive RasterPrimitiveOf(const State& state);
