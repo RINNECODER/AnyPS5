@@ -693,9 +693,10 @@ void MetalDriver::Impl::MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause) {
     commitMaterialized(timeline, commands, std::move(done), draw->ImageCache());
 }
 
-void MetalDriver::Impl::MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause, std::uint64_t address, std::uint64_t bytes) {
+bool MetalDriver::Impl::MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause, std::uint64_t address, std::uint64_t bytes) {
     std::lock_guard lock(gpuMutex);
-    if (draw == nullptr || backend == nullptr || bytes == 0 || draw->LazyCopyBacks().Empty()) return;
+    if (draw == nullptr || backend == nullptr || bytes == 0 || draw->LazyCopyBacks().Empty()) return false;
+    bool encoded = false;
     const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
     for (const auto& range : ranges) {
         const auto begin = std::max(address, range.guestAddress);
@@ -708,15 +709,19 @@ void MetalDriver::Impl::MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause, st
         MetalBatchedWork batched(*backend, commands);
         auto done = draw->LazyCopyBacks().EncodeOverlapping(commands, host, size, cause);
         batched.Done();
+        encoded = encoded || !done.empty();
         commitMaterialized(timeline, commands, std::move(done), draw->ImageCache());
     }
+    return encoded;
 }
 
 void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes) {
     const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
     // A surface whose texture is newer than these bytes is copied back first (and then drained).
-    MaterializeCopyBacks(MetalLazyCopyBacks::Cause::CpuRead, address, bytes);
-    if (timeline.MayHaveWritten(address, end)) {
+    // The copy-back is recorded under the surface's own guest address: a read through another guest
+    // alias of the same host bytes would not match it in MayHaveWritten, so it drains anyway.
+    const bool materialized = MaterializeCopyBacks(MetalLazyCopyBacks::Cause::CpuRead, address, bytes);
+    if (materialized || timeline.MayHaveWritten(address, end)) {
         if (BindTrace::Active()) {
             BindTrace::Log("  drain before CPU read 0x%llx +0x%llx%s", static_cast<unsigned long long>(address),
                 static_cast<unsigned long long>(bytes), timeline.UnknownWritesPending() ? " (unknown writes pending)" : "");
