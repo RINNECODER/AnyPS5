@@ -2,6 +2,7 @@
 #include "GpuStallWatch.hpp"
 #include "GpuTiming.hpp"
 #include "FrameProfile.hpp"
+#include "GpuBusy.hpp"
 
 #include <stdexcept>
 #include <utility>
@@ -112,6 +113,9 @@ id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
         // With batching the tag is the first work's: the command buffer's GPU time is the batch's.
         const auto tag = GpuTiming::Tag() != 0 ? GpuTiming::Tag() : GpuTiming::MakeTag(GpuTiming::Current(), 0);
         [commands addCompletedHandler:^(id<MTLCommandBuffer> done) { GpuTiming::RecordTag(tag, done.GPUEndTime - done.GPUStartTime); }];
+    }
+    if (GpuBusy::Enabled()) {
+        [commands addCompletedHandler:^(id<MTLCommandBuffer> done) { GpuBusy::Record(done.GPUStartTime, done.GPUEndTime); }];
     }
     if (FrameProfile::Enabled()) {
         const auto kind = GpuTiming::Current();

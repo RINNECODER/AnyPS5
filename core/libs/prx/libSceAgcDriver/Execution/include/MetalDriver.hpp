@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -12,6 +13,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+namespace AgcDriver { struct QueueState; }
 
 namespace AgcDriver::Metal {
 
@@ -78,6 +81,10 @@ public:
     // turns it on.
     void SetSkipInvalidCommandBuffers(bool skip);
     void WaitIdle();
+    // Frame replay (tools/agc-replay) only: the shader registry the next submissions are captured
+    // with (the driver's null pixel program is added), and the state of an idle queue.
+    void ReplaceShaderRegistryForReplay(std::shared_ptr<const DriverDetail::ShaderRegistry> registry);
+    void ReplaceQueueStateForReplay(std::uint32_t queue, const QueueState& state);
     void Shutdown();
     void SuspendPoint();
     void RegisterShader(const Shader* shader);

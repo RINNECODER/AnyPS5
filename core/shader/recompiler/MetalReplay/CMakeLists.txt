@@ -33,6 +33,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Execution/src/DisplayFormat.cpp"
     "${agcDriverRoot}/Execution/Metal/MetalDriver.mm"
     "${agcDriverRoot}/Execution/Metal/MetalPacketExecution.mm"
+    "${agcDriverRoot}/Execution/Metal/AgcFrameCapture.mm"
     "${agcDriverRoot}/Graphics/src/ComputeStageInfo.cpp"
     "${agcDriverRoot}/Graphics/src/State.cpp"
     "${agcDriverRoot}/Graphics/src/SurfaceMetadata.cpp"

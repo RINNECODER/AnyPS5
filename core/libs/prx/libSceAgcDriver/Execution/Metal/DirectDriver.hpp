@@ -15,6 +15,9 @@ namespace AgcDriver::Metal {
 // and EOP interrupts delivered to the AGC event queues. Outside the driver's worker threads, each
 // call also hands the driver the current guest allocations when they changed since the last call.
 MetalDriver& DirectDriver();
+// Applies the process working-set mode DirectDriver configures with (ANYPS5_METAL_WORKING_SET_MIB,
+// default 3 GiB in 4 MiB intervals); the frame replay calls it to bind memory as the game does.
+void ApplyDirectWorkingSet();
 
 // Submits the command words a descriptor names. The descriptor is read as a host pointer (it may be
 // on a thread stack), and words outside guest memory (host-built packets such as VideoOut's flip,

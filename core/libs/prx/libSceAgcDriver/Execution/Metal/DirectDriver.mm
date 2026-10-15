@@ -249,8 +249,7 @@ std::uint64_t WorkingSetBudget() {
 }
 
 void Configure(DirectState& state, MetalDriver& driver, const std::shared_ptr<const Ranges>& ranges) {
-    const auto budget = WorkingSetBudget();
-    MetalGuestHostAliases::SetProcessWorkingSet(budget == 0 ? 0 : WorkingSetGranule, budget);
+    ApplyDirectWorkingSet();
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (device == nil) throw std::runtime_error("Rosetta direct path: no Metal device");
@@ -307,6 +306,11 @@ std::vector<NativeGuestMemory::BorrowedRange> SplitBorrowedRanges(const std::vec
         }
     }
     return result;
+}
+
+void ApplyDirectWorkingSet() {
+    const auto budget = WorkingSetBudget();
+    MetalGuestHostAliases::SetProcessWorkingSet(budget == 0 ? 0 : WorkingSetGranule, budget);
 }
 
 std::shared_ptr<const std::vector<NativeGuestMemory::BorrowedRange>> DirectGuestRanges() {
