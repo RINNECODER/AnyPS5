@@ -14,6 +14,11 @@ class Texture;
 
 VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target);
 std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel);
+// Guest bytes of one depth or stencil plane with `samples` fragments per pixel. A 64 KiB swizzle block
+// holds 64 KiB / (bytes per texel * samples) pixels, so a multisampled plane pads its extent to smaller
+// blocks than a single-sample one: it is not DepthSliceBytes(extent) * samples, which overstates it
+// (4x 1920x1080 D32: 33.4 MB, not 35.4 MB) and reaches into the next allocation.
+std::uint64_t DepthPlaneBytes(VkExtent2D extent, std::uint32_t bytesPerTexel, std::uint32_t samples);
 void ClearDepthSurfaces(VkDevice device);
 bool DepthSurfaceAt(std::uint64_t address);
 std::uint64_t HtileDepthClearAddress(std::span<const std::uint32_t> code, std::span<const std::uint32_t> userData, const std::array<std::uint32_t, 3>& numThreads);

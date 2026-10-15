@@ -377,6 +377,36 @@ void sharedPlanes(const MetalTests::Context& context, const AgcDriver::Metal::Me
     samples(context, shaders, *fresh, 1, 7);  // a cleared cache forgets which surface held the plane
 }
 
+// A multisampled depth plane pads its extent to the smaller swizzle blocks of its sample count, not to
+// the single-sample blocks times the samples. A title placed a single-sample 1920x1080 depth target
+// 0x1FF0000 bytes after a 4x one: the overstated 4x extent (35.4 MB) reached it, and binding it
+// retired the 4x scene depth that water and fog then sampled from stale guest memory.
+void multisampledDepthPlane(const AgcDriver::Metal::MetalDevice& backend) {
+    const VkExtent2D extent{1920, 1080};
+    MetalTests::Require(AgcDriver::Graphics::DepthPlaneBytes(extent, 4u, 1u) == AgcDriver::Graphics::DepthSliceBytes(extent, 4u) &&
+        AgcDriver::Graphics::DepthPlaneBytes(extent, 2u, 1u) == AgcDriver::Graphics::DepthSliceBytes(extent, 2u) &&
+        AgcDriver::Graphics::DepthPlaneBytes(extent, 1u, 1u) == AgcDriver::Graphics::DepthSliceBytes(extent, 1u),
+        "A single-sample depth plane changed size");
+    MetalTests::Require(AgcDriver::Graphics::DepthPlaneBytes(extent, 4u, 4u) == 1920ull * 1088u * 4u * 4u &&
+        AgcDriver::Graphics::DepthPlaneBytes(extent, 4u, 2u) == 1920ull * 1088u * 4u * 2u &&
+        AgcDriver::Graphics::DepthPlaneBytes(extent, 2u, 8u) == 1920ull * 1088u * 2u * 8u &&
+        AgcDriver::Graphics::DepthPlaneBytes(extent, 1u, 4u) == 1920ull * 1152u * 4u,
+        "A multisampled depth plane is not padded to its sample count's 64 KiB blocks");
+    AgcDriver::Metal::MetalDepthSurfaceCache cache(backend);
+    AgcDriver::Graphics::DepthTarget scene{0x10000000, 0, extent, VK_FORMAT_D32_SFLOAT, 1, 0};
+    scene.samples = 4;
+    const AgcDriver::Graphics::DepthTarget next{scene.address + 0x1FF0000, 0, extent, VK_FORMAT_D32_SFLOAT, 1, 0};
+    auto sceneSurface = cache.Acquire(scene);
+    auto nextSurface = cache.Acquire(next);
+    std::vector<std::shared_ptr<Surface>> surfaces{sceneSurface, nextSurface};
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, next, nextSurface.get());
+    MetalTests::Require(surfaces.size() == 2, "Binding a depth target after a multisampled one retired it");
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, scene, sceneSurface.get());
+    MetalTests::Require(surfaces.size() == 2, "Binding a multisampled depth target retired the one after it");
+    AgcDriver::Metal::RetireDepthSurfaces(surfaces, scene.address + AgcDriver::Graphics::DepthPlaneBytes(extent, 4u, 4u) - 0x100, 0x100, nextSurface.get());
+    MetalTests::Require(surfaces.size() == 1 && surfaces[0] == nextSurface, "A writer in the last fragments of a multisampled depth plane did not retire it");
+}
+
 // A color target or another depth target over a resident depth surface's planes retires it from the
 // surfaces a draw samples; the cache keeps it, so binding its target again brings it back.
 void retiredDepth(const AgcDriver::Metal::MetalDevice& backend) {
@@ -472,4 +502,5 @@ void RunDepthResourceTests(const MetalTests::Context& context) {
     replacedDepth(backend);
     for (const auto format : {VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}) sharedPlanes(context, backend, shaders, format);
     retiredDepth(backend);
+    multisampledDepthPlane(backend);
 }
