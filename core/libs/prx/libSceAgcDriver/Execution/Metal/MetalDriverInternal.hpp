@@ -120,16 +120,31 @@ struct MetalDriver::Impl {
     // Whether a WAIT_REG_MEM is satisfied by the latest deferred label store to its address. Such a
     // wait is a GPU-to-GPU barrier: everything after it is committed after the work it waits for.
     bool PendingLabelSatisfies(std::span<const std::uint32_t> packet) const;
+    // A deferred label store not run yet: its own completion removes it (by serial) once it stored,
+    // after which the guest may change the label and only guest memory tells its value.
     struct PendingLabel {
         std::uint64_t address;
         std::array<std::byte, 64> bytes;
         std::size_t size;
-        // MetalTimeline::Epoch when recorded: once completions ran, the store may be visible to the guest.
-        std::uint64_t epoch;
+        std::uint64_t serial;
     };
     std::vector<PendingLabel> pendingLabels;
+    std::uint64_t labelSerial = 0;
     // ANYPS5_METAL_DEFER=0 waits for every draw and dispatch as before.
     static bool DeferWork();
+    // Indirect draws and dispatches whose arguments the GPU reads (on unless ANYPS5_METAL_GPU_INDIRECT=0
+    // or ANYPS5_METAL_DEFER=0).
+    static bool GpuIndirect();
+    // WAIT_REG_MEM on a value no pending store of ours provides waits for the value, not for the
+    // GPU to idle (on unless ANYPS5_METAL_GPU_WAITS=0 or ANYPS5_METAL_DEFER=0).
+    static bool GpuWaits();
+    static bool GpuIndirectDispatch(std::uint32_t initiator, std::uint64_t arguments);
+    static bool GpuIndirectDrawPath(const Graphics::State& state, const Pm4::DrawParameters::IndirectDraw& indirect);
+    static bool GpuReadsIndirectRecords(const ShaderRecompiler::RecompileResult& result, std::uint32_t firstUserSgpr,
+        std::span<const std::uint32_t> userData, Pm4::DrawParameters& parameters);
+    // Indirect draws whose records the GPU read, and those that fell back to reading them on the CPU.
+    std::uint64_t gpuIndirectDraws = 0;
+    std::uint64_t cpuIndirectDraws = 0;
     // Command buffer batching (MetalDevice::SetBatching): on unless ANYPS5_METAL_BATCH=0.
     static bool BatchCommandBuffers();
     // Works in the open batch before an idle GPU commits it early (ANYPS5_METAL_BATCH_MIN, 8).
@@ -146,7 +161,10 @@ struct MetalDriver::Impl {
     void DeliverEopInterrupt(std::uint32_t queue);
     std::uint64_t barrierWaits = 0;
     void ExecuteSubmission(const Submission& submission, QueueState& queue);
-    void ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
+    // `indirectArguments`: DISPATCH_INDIRECT whose {x, y, z} group counts the GPU reads at that guest
+    // address (the packet then carries placeholder counts); see GpuIndirectDispatch.
+    void ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission,
+        std::optional<std::uint64_t> indirectArguments = std::nullopt);
     void ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
     void ExecuteRewindTail(const Submission& submission, QueueState& queue);
     void WaitForQueueRoom(std::uint32_t queue);

@@ -10,6 +10,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include <mutex>
+#include <stdexcept>
 #include <map>
 #include <memory>
 #include <tuple>
@@ -24,8 +25,16 @@ class MetalColorSurface;
 class MetalMultisampleExpander;
 class MetalGuestHostAliases;
 
+// Draw throws this for an indirect draw whose records the GPU cannot consume as they are (they need
+// rewriting, counting or reading on the CPU) before it has encoded anything; the caller reads them.
+struct IndirectNeedsCpuRecords : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 class MetalDraw {
 public:
+    // Records of one GPU indirect draw at most (one Metal draw each).
+    static constexpr std::uint32_t MaxGpuIndirectRecords = 256;
     explicit MetalDraw(id<MTLDevice> device, id<MTLLibrary> utilityLibrary);
     // Draws on the driver's own queue. Textures and uploads are shared with dispatches (the image
     // cache, resident surfaces), and a texture encodes its uploads and copy-backs into the caller's

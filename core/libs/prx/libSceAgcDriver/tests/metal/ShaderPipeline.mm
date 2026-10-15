@@ -316,6 +316,40 @@ void Compute(const MetalTests::Context& context) {
         MetalTests::Require(std::memcmp(output.contents, expected.data(), sizeof(expected)) == 0,
                             "Converted SPIRV compute lost descriptor arrays, buffer offsets, explicit zero ArrayLength, push offset, or output bounds");
     }
+    // DISPATCH_INDIRECT: the group counts are zero when encoded and written by earlier GPU work in
+    // the same command buffer; the dispatch must run with the counts the GPU wrote.
+    {
+        bindings[1].buffers[2].length = output.length;
+        std::memset(output.contents, 0xa5, output.length);
+        const auto groups = static_cast<std::uint32_t>(4 / pipeline.Reflection().threadsPerThreadgroup[0]);
+        const std::array<std::uint32_t, 4> counts{groups, 1, 1, 0};
+        auto staged = context.Buffer(sizeof(counts));
+        std::memcpy(staged.contents, counts.data(), sizeof(counts));
+        auto arguments = context.Buffer(4 + sizeof(counts), 0);
+        commands = [context.queue commandBuffer];
+        auto blit = [commands blitCommandEncoder];
+        [blit copyFromBuffer:staged sourceOffset:0 toBuffer:arguments destinationOffset:4 size:sizeof(counts)];
+        [blit endEncoding];
+        rejected = false;
+        try {
+            pipeline.EncodeIndirect(commands, bindings, arguments, 2);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        MetalTests::Require(rejected, "Converted indirect compute accepted misaligned arguments");
+        pipeline.EncodeIndirect(commands, bindings, arguments, 4);
+        Complete(commands);
+        const std::array<std::uint32_t, 7> expected{33, 60, 107, 181, 0xa5a5a5a5u, 0xa5a5a5a5u, 0xa5a5a5a5u};
+        MetalTests::Require(std::memcmp(output.contents, expected.data(), sizeof(expected)) == 0,
+                            "Converted indirect compute did not run with the group counts earlier GPU work wrote");
+        // Zero groups dispatch nothing.
+        std::memset(output.contents, 0xa5, output.length);
+        std::memset(arguments.contents, 0, arguments.length);
+        commands = [context.queue commandBuffer];
+        pipeline.EncodeIndirect(commands, bindings, arguments, 4);
+        Complete(commands);
+        MetalTests::Require(static_cast<const std::uint32_t*>(output.contents)[0] == 0xa5a5a5a5u, "Converted indirect compute with zero groups wrote output");
+    }
     const std::array<std::uint8_t, 16> prefix{0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
                                           0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab};
     MetalTests::Require(std::memcmp(input1.contents, prefix.data(), prefix.size()) == 0 &&

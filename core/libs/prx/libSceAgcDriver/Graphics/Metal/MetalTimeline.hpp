@@ -111,6 +111,54 @@ public:
         pending.push_back({nil, std::move(complete), GpuTiming::Current()});
     }
 
+    // Defer at a label point (RELEASE_MEM, WRITE_DATA): `complete` runs at the first Reap after the
+    // work committed before it completed. When that work is in the open batch, the GPU signals the
+    // point on the timeline's shared event (LabelEvent), so GPU work on another queue can wait for the
+    // label there (encodeWaitForEvent) instead of the CPU draining. With `commitNow` (a label the
+    // guest waits on: an end-of-pipe interrupt), or once the open batch holds the batch minimum of
+    // works, the batch is committed here, so the label does not wait behind work encoded after it: a
+    // guest polling the label sees it about when the GPU passed it. Other labels ride their batch,
+    // which commits as usual (GPU starved, submission end, a drain); committing at every label point
+    // doubled the command buffers of a frame and the worker's encode time. (The CPU orders the store
+    // by command buffer completion, not by the event's value, which may reach the CPU later than the
+    // completion handler.) Returns the event value signalled, or 0 when nothing was signalled: no GPU
+    // work is pending, or the work before the label is committed already and `commitNow` is not set.
+    std::uint64_t DeferSignal(Completion complete, bool commitNow = false) {
+        id<MTLCommandBuffer> last = LastCommitted();
+        const bool open = last != nil && batch != nullptr && batch->OpenBatch(last);
+        if (last == nil || (!open && !commitNow)) {
+            Defer(std::move(complete));
+            return 0;
+        }
+        if (labelEvent == nil) {
+            labelEvent = [last.device newSharedEvent];
+            if (labelEvent == nil) throw MetalGpuExecutionError("Metal shared event creation failed");
+        }
+        const auto value = ++labelValue;
+        if (open) {
+            [last encodeSignalEvent:labelEvent value:value];
+            // The batch's completion (which Reap waits for, through the work before the label) comes
+            // after the signal.
+            pending.push_back({nil, std::move(complete), GpuTiming::Current()});
+            if (commitNow || batch->OpenUses() >= batchMinimum) batch->Flush();
+        } else {
+            // The work before the label is committed already: a command buffer that only signals
+            // goes behind it on the same queue.
+            id<MTLCommandBuffer> signal = [last.commandQueue commandBuffer];
+            if (signal == nil) throw MetalGpuExecutionError("Metal label command buffer creation failed");
+            [signal encodeSignalEvent:labelEvent value:value];
+            if (auto handler = completionSignal) [signal addCompletedHandler:^(id<MTLCommandBuffer>) { (*handler)(); }];
+            [signal commit];
+            pending.push_back({signal, std::move(complete), GpuTiming::Current()});
+        }
+        return value;
+    }
+
+    // The shared event DeferSignal signals (nil before the first label point), and the value it
+    // reached: every label point up to it has been passed by the GPU.
+    [[nodiscard]] id<MTLSharedEvent> LabelEvent() const { return labelEvent; }
+    [[nodiscard]] std::uint64_t LabelsSignalled() const { return labelEvent == nil ? 0 : labelEvent.signaledValue; }
+
     // Whether pending work may store to guest [begin, end) (or anywhere, with unknown writes).
     [[nodiscard]] bool MayHaveWritten(std::uint64_t begin, std::uint64_t end) const {
         if (pending.empty()) return false;
@@ -223,6 +271,8 @@ private:
     std::shared_ptr<const std::function<void()>> completionSignal;
     const MetalDevice* batch = nullptr;
     std::uint32_t batchMinimum = 8;
+    id<MTLSharedEvent> labelEvent = nil;
+    std::uint64_t labelValue = 0;
 };
 
 }

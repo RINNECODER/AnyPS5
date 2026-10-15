@@ -80,6 +80,7 @@ if(BUILD_TESTING)
         "${metalTestDirectory}/Presentation.mm"
         "${metalTestDirectory}/GuestMemory.mm"
         "${metalTestDirectory}/CommandBatching.mm"
+        "${metalTestDirectory}/LabelEvents.mm"
         "${metalTestDirectory}/CaptureLogic.mm"
     )
     target_compile_options(metal_utility_tests PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
