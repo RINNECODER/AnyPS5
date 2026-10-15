@@ -974,6 +974,10 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     if (GuestSockets::IsOpen(fd)) return SceErrorFromErrno(GUEST_EINVAL);
     if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    if (!File::DirectoryDescriptorPath(fd)) {
+        if (WithoutParameterHandler([fd] { return ::_get_osfhandle(fd); }) == -1) return SceErrorFromErrno(GUEST_EBADF);
+        return SceErrorFromErrno(GUEST_EINVAL);
+    }
     if (basep != nullptr) *basep = 0;
     return File::ReadDirectoryDescriptor(fd, buf, nbytes);
 }
@@ -1023,7 +1027,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     std::vector<char> host(static_cast<std::size_t>(nbytes) < 4096 ? 4096 : static_cast<std::size_t>(nbytes));
 #endif
     const auto read = HostGetdents(fd, host.data(), host.size());
-    if (read < 0) return SceErrorFromErrno(errno);
+    if (read < 0) return SceErrorFromErrno(errno == ENOTDIR ? GUEST_EINVAL : errno);
     std::size_t written = 0;
     off_t resume = base;
     for (long offset = 0; offset < read;) {
