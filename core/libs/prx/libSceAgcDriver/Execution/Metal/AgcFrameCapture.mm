@@ -1,4 +1,5 @@
 #include "AgcFrameCapture.hpp"
+#include "AgcCaptureLogic.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderCapture.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GpuBusy.hpp"
@@ -201,17 +202,23 @@ public:
 
     void Present(const DisplayBuffer* buffer, const std::vector<std::byte>* pixels, const Context& context) {
         std::lock_guard lock(mutex);
-        ++presents;
-        if (phase == Phase::Done || phase == Phase::Waiting || buffer == nullptr) return;
-        // Present k scans out flip k: the presents of the recorded flips are target .. target + frames - 1.
-        if (presents < target || presents >= target + frames) return;
+        // A present in the window without a buffer (a blanked output) keeps its slot and counts
+        // towards completion; it only has no Display record.
+        const auto step = presentTracker.Observe(target, frames, phase != Phase::Done && phase != Phase::Waiting, buffer != nullptr);
+        if (!step.inWindow) return;
+        const auto presents = presentTracker.Presents();
+        if (!step.recordDisplay) {
+            std::fprintf(stderr, "[agc-capture] present %llu showed no buffer: frame %u has no display\n",
+                static_cast<unsigned long long>(presents), step.frame);
+            return Complete(step);
+        }
         std::vector<std::byte> read;
         if (pixels == nullptr || pixels->empty()) {
             NativeGuestMemory::BorrowedRangesScope scope(context.ranges);
             read = MetalPresentation::ReadPixels(*buffer);
             pixels = &read;
         }
-        const auto frame = static_cast<std::uint32_t>(presents - target);
+        const auto frame = step.frame;
         const auto hash = Hash(pixels->data(), pixels->size());
         Writer record;
         record.Put(frame);
@@ -228,20 +235,23 @@ public:
         std::fprintf(stderr, "[agc-capture] frame %u shown by present %llu: %ux%u format 0x%llx tiling %u hash %016llx%s\n", frame,
             static_cast<unsigned long long>(presents), buffer->width, buffer->height, static_cast<unsigned long long>(buffer->pixelFormat),
             buffer->tilingMode, static_cast<unsigned long long>(hash), wrote ? "" : " (png not written)");
-        if (++displays == frames) {
-            phase = Phase::Done;
-            Writer end;
-            end.Put(static_cast<std::uint32_t>(frames));
-            end.Put(static_cast<std::uint32_t>(submissions));
-            Emit(Tag::End, end);
-            std::fclose(file);
-            file = nullptr;
-            std::fprintf(stderr, "[agc-capture] done: %s (%.1f MiB)\n", (dir / "frame.agc").c_str(), static_cast<double>(written) / (1 << 20));
-            active.store(false);
-        }
+        Complete(step);
     }
 
 private:
+    void Complete(const AgcCapture::PresentTracker::Step& step) {
+        if (!step.complete) return;
+        phase = Phase::Done;
+        Writer end;
+        end.Put(static_cast<std::uint32_t>(frames));
+        end.Put(static_cast<std::uint32_t>(submissions));
+        Emit(Tag::End, end);
+        std::fclose(file);
+        file = nullptr;
+        std::fprintf(stderr, "[agc-capture] done: %s (%.1f MiB)\n", (dir / "frame.agc").c_str(), static_cast<double>(written) / (1 << 20));
+        active.store(false);
+    }
+
     enum class Phase { Waiting, Recording, AwaitPresent, Done };
     struct Table {
         std::uint64_t guest;
@@ -457,8 +467,7 @@ private:
     std::uint64_t target = 600;
     std::uint64_t frames = 1;
     std::uint64_t flips = 0;
-    std::uint64_t presents = 0;
-    std::uint64_t displays = 0;
+    PresentTracker presentTracker;
     std::uint64_t submissions = 0;
     std::uint64_t deltaPages = 0;
     std::uint64_t written = 0;

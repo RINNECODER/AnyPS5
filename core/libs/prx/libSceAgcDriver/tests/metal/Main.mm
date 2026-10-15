@@ -8,6 +8,7 @@ void RunSampleCounterTests(const MetalTests::Context& context);
 void RunPresentationTests(const MetalTests::Context& context);
 void RunGuestMemoryTests(const MetalTests::Context& context);
 void RunCommandBatchingTests(const MetalTests::Context& context);
+void RunCaptureLogicTests(const MetalTests::Context& context);
 #if ANYPS5_METAL_SHADER_BRIDGE
 void RunShaderPipelineTests(const MetalTests::Context& context);
 void RunShaderAlignmentTests(const MetalTests::Context& context);
@@ -44,6 +45,8 @@ int main(int argc, char** argv) {
             std::cout << "Guest memory GPU output passed\n";
             RunCommandBatchingTests(context);
             std::cout << "Command buffer batching GPU output passed\n";
+            RunCaptureLogicTests(context);
+            std::cout << "Frame capture bookkeeping passed\n";
 #if ANYPS5_METAL_SHADER_BRIDGE
             RunShaderPipelineTests(context);
             std::cout << "Converted shader pipeline GPU output passed\n";

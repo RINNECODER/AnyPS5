@@ -19,6 +19,7 @@
 #import <Metal/Metal.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
+#include "prx/libSceAgcDriver/Execution/Metal/AgcCaptureLogic.hpp"
 #include "prx/libSceAgcDriver/Execution/Metal/AgcFrameCapture.hpp"
 #include "prx/libSceAgcDriver/Execution/Metal/DirectDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
@@ -70,6 +71,9 @@ struct Range {
     bool writable;
     std::vector<const Block*> chunks;  // per 1 MiB chunk, null when the capture had none (zero)
     std::byte* host = nullptr;
+    std::size_t activation = 0;  // global submission index it appeared at (0: part of the pre-frame snapshot)
+    bool live = false;
+    bool filled = false;
 };
 
 struct Submit {
@@ -94,6 +98,7 @@ struct Display {
 struct CaptureFile {
     std::vector<Range> ranges;
     std::vector<Block> chunks;
+    std::vector<std::size_t> chunkRange;  // the range record each chunk belongs to
     std::map<std::uint32_t, std::shared_ptr<const DriverDetail::ShaderSnapshot>> shaders;
     std::map<std::uint32_t, std::shared_ptr<const DriverDetail::ShaderRegistry>> registries;
     std::map<std::uint32_t, QueueState> states;
@@ -135,6 +140,8 @@ CaptureFile Load(const std::string& path) {
         case Capture::Tag::Range: {
             Range range{in.Get<std::uint64_t>(), in.Get<std::uint64_t>(), in.Get<std::uint32_t>() != 0, {}};
             range.chunks.assign((range.bytes + Capture::ChunkBytes - 1) / Capture::ChunkBytes, nullptr);
+            // A range recorded while the frame ran appears just before the submission that introduced it.
+            range.activation = file.submits.size();
             file.ranges.push_back(std::move(range));
             break;
         }
@@ -145,6 +152,15 @@ CaptureFile Load(const std::string& path) {
             block.stored = in.Get<std::uint32_t>();
             block.hash = in.Get<std::uint64_t>();
             block.data = in.Take(block.stored);
+            // The chunk belongs to the latest range record that holds it (an address can be reused).
+            std::size_t owner = file.ranges.size();
+            bool found = false;
+            while (owner > 0 && !found) {
+                const auto& candidate = file.ranges[--owner];
+                found = block.guest >= candidate.guest && block.guest < candidate.guest + candidate.bytes;
+            }
+            if (!found) Fail("chunk outside every range");
+            file.chunkRange.push_back(owner);
             file.chunks.push_back(block);
             break;
         }
@@ -222,11 +238,9 @@ CaptureFile Load(const std::string& path) {
         offset += bytes;
     }
     if (!ended) Fail("capture has no end record (the game exited before the frame was presented?)");
-    for (const auto& chunk : file.chunks) {
-        const auto range = std::find_if(file.ranges.begin(), file.ranges.end(),
-            [&](const Range& r) { return chunk.guest >= r.guest && chunk.guest < r.guest + r.bytes; });
-        if (range == file.ranges.end()) Fail("chunk outside every range");
-        range->chunks[(chunk.guest - range->guest) / Capture::ChunkBytes] = &chunk;
+    for (std::size_t i = 0; i < file.chunks.size(); ++i) {
+        auto& range = file.ranges[file.chunkRange[i]];
+        range.chunks[(file.chunks[i].guest - range.guest) / Capture::ChunkBytes] = &file.chunks[i];
     }
     return file;
 }
@@ -426,6 +440,19 @@ int main(int argc, char** argv) {
     // Guest memory at its guest addresses.
     const auto pageSize = static_cast<std::uint64_t>(getpagesize());
     std::vector<NativeGuestMemory::BorrowedRange> ranges;
+    // Ranges the title mapped during the frame exist only from the submission that introduced them.
+    Capture::RangeTimeline timeline;
+    for (const auto& range : capture.ranges) timeline.Add(range.guest, range.bytes, range.activation);
+    const auto setLive = [&](std::size_t submission) {
+        for (auto& range : capture.ranges) range.live = false;
+        ranges.clear();
+        for (const auto index : timeline.LiveAt(submission)) {
+            auto& range = capture.ranges[index];
+            range.live = true;
+            ranges.push_back({range.guest, {range.host, range.bytes}, range.writable});
+        }
+        std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.guestAddress < b.guestAddress; });
+    };
     // A range the replay process already uses at that address (the driver's staging buffer is a host
     // mapping, which can land where this process has its own) is mapped elsewhere: the driver
     // translates guest addresses through the ranges, so only identity-mapped guest pointers need
@@ -443,18 +470,22 @@ int main(int argc, char** argv) {
         } else {
             range.host = reinterpret_cast<std::byte*>(range.guest);
         }
-        ranges.push_back({range.guest, {range.host, range.bytes}, range.writable});
     }
+    // Only live ranges are looked up, newest first (an address reused by a later range wins).
     const auto host = [&](std::uint64_t guest) {
-        for (const auto& range : capture.ranges)
-            if (guest >= range.guest && guest - range.guest < range.bytes) return range.host + (guest - range.guest);
+        for (auto it = capture.ranges.rbegin(); it != capture.ranges.rend(); ++it)
+            if (it->live && guest >= it->guest && guest - it->guest < it->bytes) return it->host + (guest - it->guest);
         Fail("guest address outside the captured ranges");
     };
-    std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.guestAddress < b.guestAddress; });
+    setLive(0);
     std::uint64_t residentBytes = 0;
-    for (const auto& chunk : capture.chunks) {
-        Capture::Decompress(chunk.data, chunk.stored, host(chunk.guest), chunk.raw);
+    for (std::size_t i = 0; i < capture.chunks.size(); ++i) {
+        auto& range = capture.ranges[capture.chunkRange[i]];
+        if (range.activation != 0) continue;  // filled when its submission is reached
+        const auto& chunk = capture.chunks[i];
+        Capture::Decompress(chunk.data, chunk.stored, range.host + (chunk.guest - range.guest), chunk.raw);
         residentBytes += chunk.raw;
+        range.filled = true;
     }
 
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -553,15 +584,24 @@ int main(int argc, char** argv) {
     std::vector<std::byte> lastPixels;
     std::vector<std::vector<std::byte>> previousPixels(frames);
     const auto zeroChunk = std::vector<std::byte>(Capture::ChunkBytes);
+    std::size_t liveAt = 0;
+    std::uint64_t generation = 1;
     for (std::size_t rep = 0; rep < repeat; ++rep) {
         if (rep != 0) {
+            // Back to the pre-frame set of ranges; ranges the frame introduced do not exist yet and read as zero.
+            if (liveAt != 0 || std::any_of(capture.ranges.begin(), capture.ranges.end(), [](const Range& r) { return r.activation != 0 && r.filled; })) {
+                liveAt = 0;
+                setLive(0);
+                driver.ReplaceBorrowedRanges(ranges, ++generation);
+            }
             // Pre-frame memory: chunks that differ from the capture are written again.
-            for (const auto& range : capture.ranges) {
+            for (auto& range : capture.ranges) {
+                if (range.activation != 0) range.filled = false;
                 for (std::size_t c = 0; c < range.chunks.size(); ++c) {
                     const auto offset = c * Capture::ChunkBytes;
                     auto* data = range.host + offset;
                     const auto bytes = static_cast<std::size_t>(std::min<std::uint64_t>(Capture::ChunkBytes, range.bytes - offset));
-                    if (const auto* chunk = range.chunks[c]) {
+                    if (const auto* chunk = range.activation == 0 ? range.chunks[c] : nullptr) {
                         if (Capture::Hash(data, bytes) != chunk->hash) Capture::Decompress(chunk->data, chunk->stored, data, chunk->raw);
                         continue;
                     }
@@ -588,6 +628,22 @@ int main(int argc, char** argv) {
             const auto wallBefore = std::chrono::steady_clock::now();
             for (; next < submits.size() && submits[next]->frame == frame; ++next) {
                 const auto* submit = submits[next];
+                if (submit->index >= timeline.NextChange(liveAt)) {
+                    // A range the capture recorded just before this submission: it exists from here on,
+                    // with its contents at this point, and not for the submissions before.
+                    driver.WaitIdle();
+                    liveAt = submit->index;
+                    setLive(liveAt);
+                    for (std::size_t r = 0; r < capture.ranges.size(); ++r) {
+                        auto& range = capture.ranges[r];
+                        if (!range.live || range.activation == 0 || range.filled) continue;
+                        for (const auto* chunk : range.chunks)
+                            if (chunk != nullptr) Capture::Decompress(chunk->data, chunk->stored, range.host + (chunk->guest - range.guest), chunk->raw);
+                        range.filled = true;
+                    }
+                    driver.ReplaceBorrowedRanges(ranges, ++generation);
+                    registry = 0xffffffffu;
+                }
                 if (submit->registry != registry && capture.registries.count(submit->registry) != 0) {
                     driver.ReplaceShaderRegistryForReplay(capture.registries.at(submit->registry));
                     registry = submit->registry;
