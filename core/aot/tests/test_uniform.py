@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from abi import (ABIError, UNIFORM_STACK_SLOTS, uniform, uniform_locations, signature)
-from compiler import Function, Image, compile_image
+from compiler import Function, Image, Rejected, compile_image
 
 
 def fixture(code, functions, imports=None, relocations=None, data_bindings=None, bindings=None, dispatch=False, tls=None):
@@ -168,6 +168,70 @@ class UniformABITests(unittest.TestCase):
         self.assertIn(f'{0x140000000 + 0x5ff8}', ir)
         self.assertEqual(report['unimplemented_functions'], 0)
 
+    def test_uniform_dynamic_frame_stack_transfer(self):
+        # mov r14, rsp ; sub rsp, rax ; mov r12, rdi ; push r12 ; pop r13 ; mov rsp, r14 ; ret.
+        # `sub rsp, rax` is a runtime-sized frame, so the push and the pop transfer at the guest rsp
+        # value rather than at a frame offset; r13 has to see the value that was pushed.
+        code = bytes.fromhex('4989e64829c44989fc4154415d4c89f4c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        registers = RegisterFile()
+        registers.gpr[GPR['rdi']] = 0x1234
+        registers.gpr[GPR['rax']] = 0x40
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['r13']], 0x1234)
+
+    def test_uniform_bmi_destination_on_a_frame_register(self):
+        # andn ebp, r15d, ebp ; mov eax, ebp ; ret. The scalar ABI cannot put an arbitrary value into a
+        # frame register; the uniform ABI keeps the guest frame registers in the register file, where
+        # the destination is an ordinary slot that only loses its frame meaning.
+        code = bytes.fromhex('c4e200f2ed89e8c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        registers = RegisterFile()
+        registers.gpr[GPR['r15']] = 0x0f0f0f0f
+        registers.gpr[GPR['rbp']] = 0x00ff00ff
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], ~0x0f0f0f0f & 0x00ff00ff)
+
+    def test_uniform_restores_rsp_from_a_frame_slot(self):
+        # mov rbp, rsp ; sub rsp, 0x20 ; mov [rsp], rbp ; mov [rbp-8], 0x1234 ;
+        # mov rsp, [rsp] ; mov rax, [rbp-8] ; mov rsp, rbp ; ret. The frame pointer is loaded back out
+        # of memory, so the frame is runtime-sized from there on and the load cannot be a frame offset.
+        code = bytes.fromhex('4889e54883ec2048892c2448c745f834120000488b2424488b45f84889ecc3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        registers = RegisterFile()
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 0x1234)
+
+    def test_uniform_borrows_an_interior_entry_of_the_next_function(self):
+        # A false function start splits one real function into fragments, and a branch from one
+        # fragment reaches the middle of another. sub_1000 tests rdi and, when it is nonzero,
+        # branches to 0x1028, which is 8 bytes into sub_1020; the taken path must run the
+        # interior entry's code (mov rax, 3) instead of rejecting the escape.
+        body = bytes.fromhex('4885ff0f851f00000048c7c001000000c3' + '90' * 15)
+        other = bytes.fromhex('48c7c002000000c348c7c003000000c3')
+        raw, contracts = fixture(body + other, [uniform_function('sub_1000', 0x1000, 0x20),
+                                                uniform_function('sub_1020', 0x1020, 0x10)])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        for argument, expected in ((0, 1), (1, 3)):
+            with self.subTest(rdi=argument):
+                registers = RegisterFile()
+                registers.gpr[GPR['rdi']] = argument
+                function(ctypes.byref(registers))
+                self.assertEqual(registers.gpr[GPR['rax']], expected)
+
+    def test_uniform_borrowing_needs_both_contracts_to_be_uniform(self):
+        # The scalar ABI's native frame is the guest frame, so a scalar fragment cannot continue at
+        # another function's interior entry; the escape must still be rejected.
+        body = bytes.fromhex('4885ff0f851f00000048c7c001000000c3' + '90' * 15)
+        other = bytes.fromhex('48c7c002000000c348c7c003000000c3')
+        scalar = {'name': 'sub_1000', 'address': 0x1000, 'size': 0x20, 'parameters': [], 'result': 'void'}
+        raw, contracts = fixture(body + other, [scalar, uniform_function('sub_1020', 0x1020, 0x10)])
+        with self.assertRaisesRegex(Rejected, 'control flow escapes function contract'):
+            self.compile(raw, contracts, 'sub_1000')
+
     def test_uniform_pointer_argument_loads_the_register_not_an_undefined_arg(self):
         # mov rax, [rdi] ; ret -> rax = *(u64*)rdi. The uniform ABI keeps rdi in its
         # own alloca; a pointer dereference must use that value, not a typed %argN.
@@ -278,6 +342,91 @@ class UniformABITests(unittest.TestCase):
             registers.gpr[GPR['rdi']] = argument
             function(ctypes.byref(registers))
             self.assertEqual(registers.gpr[GPR['rax']], expected)
+
+    def test_uniform_unsaved_pop_reads_the_caller_window(self):
+        # 0x1000: add rsp,8 ; pop rax ; sub rsp,16 ; ret — the popped slot was never pushed here,
+        # but it is a declared caller stack slot, so the caller's first stack argument comes back.
+        code = bytes.fromhex('4883c408584883ec10c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        registers = RegisterFile()
+        registers.stack[0] = 0x2A
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 0x2A)
+
+    def test_uniform_unsaved_pop_of_the_return_address_slot(self):
+        # 0x1000: pop r10 ; lea rsp,[rsp+rcx*8+8] ; push r10 ; ret — the popped slot is the guest
+        # return-address slot, which the uniform ABI does not model. The function must lower, and
+        # the value must be an arbitrary but defined one: never a load of memory nothing wrote.
+        code = bytes.fromhex('415a488d64cc084152c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        self.assertIn('freeze i64 poison', ir)
+        self.assertNotIn('load i64, ptr %frame', ir)
+        function(ctypes.byref(RegisterFile()))
+
+    def test_uniform_releases_a_stale_saved_slot(self):
+        # 0x1000: push rbx ; lea rsp,[rsp+8] ; test rdi,rdi ; je 0x1010 ; nops ; 0x1010: mov rax,rbx ; ret
+        # The lea gives the pushed slot back, so both paths into 0x1010 must agree on an empty frame.
+        code = bytearray(0x14)
+        code[0x00:0x0B] = bytes.fromhex('53488d6424084885ff7405')
+        code[0x0B:0x10] = bytes([0x90] * 5)
+        code[0x10:0x14] = bytes.fromhex('4889d8c3')
+        raw, contracts = fixture(bytes(code), [uniform_function('sub_1000', 0x1000, 0x14)])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        registers = RegisterFile()
+        registers.gpr[GPR['rbx']] = 0x99
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 0x99)
+
+    def test_uniform_forwards_a_stack_argument_on_a_tail_call(self):
+        # 0x1000: jmp 0x1010   0x1010: mov rax,[rsp+8] ; ret — a tail jmp leaves the return address at
+        # [rsp], so the callee's first stack argument is the caller's [rsp+8], not its [rsp].
+        code = bytearray(0x14)
+        code[0x00:0x05] = b'\xe9' + (0x1010 - 0x1005).to_bytes(4, 'little', signed=True)
+        code[0x10:0x16] = bytes.fromhex('488b442408c3')
+        functions = [uniform_function('sub_1000', 0x1000, 0x10),
+                     uniform_function('sub_1010', 0x1010, 6)]
+        raw, contracts = fixture(bytes(code), functions)
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        registers = RegisterFile()
+        registers.stack[0] = 0x2A
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 0x2A)
+
+    def test_uniform_runtime_sized_frame_join(self):
+        # 0x1000: mov ecx,edi ; xor edx,edx ; loop{cmp edx,ecx ; jge done ; push rdx ; inc edx ;
+        # jmp loop} ; done: mov rax,[rsp] ; lea rsp,[rsp+rcx*8] ; ret — the loop pushes a runtime
+        # number of values, so the join at the loop head has no static frame; the pushes and the
+        # read then happen at the runtime guest rsp.
+        code = bytearray(0x20)
+        body = bytearray()
+        body += bytes.fromhex('89f9')        # mov ecx, edi
+        body += bytes.fromhex('31d2')        # xor edx, edx
+        loop = 0x1000 + len(body)
+        body += bytes.fromhex('39ca')        # cmp edx, ecx
+        jge_at = 0x1000 + len(body)
+        body += b'\x7d\x00'
+        body += bytes.fromhex('52')          # push rdx
+        body += bytes.fromhex('ffc2')        # inc edx
+        jmp_at = 0x1000 + len(body)
+        body += b'\xeb\x00'
+        done = 0x1000 + len(body)
+        body += bytes.fromhex('488b0424')    # mov rax, [rsp]
+        body += bytes.fromhex('488d0ccc')    # lea rcx, [rsp + rcx*8]
+        body += bytes.fromhex('4889cc')      # mov rsp, rcx
+        body += bytes.fromhex('c3')          # ret
+        body[jge_at - 0x1000 + 1] = (done - (jge_at + 2)) & 0xFF
+        body[jmp_at - 0x1000 + 1] = (loop - (jmp_at + 2)) & 0xFF
+        code[0:len(body)] = body
+        raw, contracts = fixture(bytes(code), [uniform_function('sub_1000', 0x1000, len(body))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        for count in (1, 2, 3):
+            registers = RegisterFile()
+            registers.gpr[GPR['rdi']] = count
+            function(ctypes.byref(registers))
+            self.assertEqual(registers.gpr[GPR['rax']], count - 1)
+            self.assertEqual(registers.gpr[GPR['rax']], self.native_guest(bytes(code), count))
 
     def test_uniform_fallthrough_tail_call_balanced_frame(self):
         # 0x1000: mov rax,rdi ; nops ; cmp rax,0 (last, falls through)   0x1010: ret
