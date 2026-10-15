@@ -55,7 +55,7 @@ std::shared_ptr<FakeTexture> Bind(Cache& cache, std::byte* host, bool& uploaded)
 
 int main() {
     Check(AgcDriver::Metal::GuestImageWriteStamps::Available(), "the guest page write watch is available");
-    const std::size_t mappedBytes = 16 * Block;
+    const std::size_t mappedBytes = 24 * Block;
     void* mapped = mmap(nullptr, mappedBytes + Block, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mapped == MAP_FAILED) return 2;
     // 64 KiB aligned, as the tracker's blocks are: surfaces in separate blocks do not share stamps.
@@ -130,6 +130,22 @@ int main() {
     Check(uploaded, "the first cache over shared pages sees the store");
     Bind(other, c, uploaded);
     Check(uploaded, "the second cache over the same pages still sees it after the first collected them");
+
+    // Bulk stores (memcpy and memset, which Rosetta runs as native routines) over a tracked
+    // surface, in the middle of its pages and over all of it.
+    auto* d = base + 14 * Block;
+    Bind(cache, d, uploaded);
+    std::vector<std::byte> source(TextureBytes / 2, std::byte{0x3c});
+    std::memcpy(d + 12345, source.data(), source.size());
+    cache.Expire(1);
+    Bind(cache, d, uploaded);
+    Check(uploaded, "a memcpy into a tracked surface uploads it again");
+    auto* e = base + 19 * Block;
+    Bind(cache, e, uploaded);
+    std::memset(e + 3 * Block + 100, 0x42, 64);
+    cache.Expire(1);
+    Bind(cache, e, uploaded);
+    Check(uploaded, "a small memset into a tracked surface uploads it again");
 
     std::printf("%s: image cache write tracking (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
     return failures == 0 ? 0 : 1;
