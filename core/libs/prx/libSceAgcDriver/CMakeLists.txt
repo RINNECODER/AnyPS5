@@ -964,8 +964,12 @@ configure_windows_unwind(agc_driver_recorder_tests)
 if(BUILD_TESTING)
     set_target_properties(agc_driver_recorder_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME agc_recorder_device_selection COMMAND agc_driver_recorder_tests --device-selection-only)
+    add_test(NAME agc_gpu_timing_complete COMMAND agc_driver_recorder_tests --gpu-timing-complete-only)
+    add_test(NAME agc_gpu_timing_incomplete COMMAND agc_driver_recorder_tests --gpu-timing-incomplete-only)
+    set_tests_properties(agc_gpu_timing_complete agc_gpu_timing_incomplete PROPERTIES
+        ENVIRONMENT "APS5_PROFILE_GPU=1" TIMEOUT 15 SKIP_RETURN_CODE 77)
     if(WIN32)
-        set_tests_properties(agc_recorder_device_selection PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(agc_recorder_device_selection agc_gpu_timing_complete agc_gpu_timing_incomplete PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME agc_pipeline_cache COMMAND agc_driver_recorder_tests --pipeline-cache-only)
