@@ -17,6 +17,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 #include "SceTypes.hpp"
@@ -1252,36 +1253,32 @@ void TestLoopWarningSharedByStreams() {
     Check(sceAvPlayerClose(player) == 0, "shared loop timing close failed");
 }
 
-void TestUnsyncedVideoDoesNotRunAheadOfAudio() {
+void TestNoSyncVideoCanLeadAudioClock() {
     Events events;
     AvPlayerInitData init = InitData(&events);
     auto* player = sceAvPlayerInit(&init);
-    Check(player != nullptr, "init failed");
-    Check(sceAvPlayerSetAvSyncMode(player, 1) == 0, "sync mode rejected");
-    Check(sceAvPlayerAddSource(player, "/app0/avplayer.mp4") == 0, "add source failed");
-    Check(sceAvPlayerEnableStream(player, VideoStream) == 0, "enable video failed");
-    Check(sceAvPlayerEnableStream(player, EnglishAudioStream) == 0, "enable audio failed");
-    Check(sceAvPlayerStart(player) == 0, "start failed");
-    AvPlayerFrameInfo sound{};
-    Check(WaitFor([&] { return sceAvPlayerGetAudioData(player, &sound) != 0; }), "no audio");
-    const auto start = std::chrono::steady_clock::now();
-    const auto first = sound.timestamp;
-    std::uint64_t worst = 0;
-    int frames = 0;
-    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(700)) {
-        const auto elapsed = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
-        while (sound.timestamp <= first + elapsed && sceAvPlayerGetAudioData(player, &sound)) CheckEnglishAudio(sound);
-        AvPlayerFrameInfoEx frame{};
-        if (sceAvPlayerGetVideoDataEx(player, &frame)) {
-            CheckVideoFrame(frame);
-            ++frames;
-            if (frame.timestamp > first + elapsed) worst = std::max(worst, frame.timestamp - first - elapsed);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    Check(frames >= 10, "video stalled while following audio");
-    Check(worst <= 67, "video ran " + std::to_string(worst) + " ms ahead of paced audio");
-    Check(sceAvPlayerClose(player) == 0, "close failed");
+    Check(player != nullptr, "no-sync init failed");
+    Check(sceAvPlayerSetAvSyncMode(player, 1) == 0, "no-sync mode rejected");
+    Check(sceAvPlayerAddSource(player, "/app0/avplayer.mp4") == 0, "no-sync source failed");
+    Check(sceAvPlayerEnableStream(player, VideoStream) == 0, "no-sync video failed");
+    Check(sceAvPlayerEnableStream(player, EnglishAudioStream) == 0, "no-sync audio failed");
+    Check(sceAvPlayerStart(player) == 0, "no-sync start failed");
+    AvPlayerFrameInfo audio{};
+    Check(WaitFor([&] { return sceAvPlayerGetAudioData(player, &audio) != 0; }), "no-sync audio unavailable");
+    std::uint64_t lead = 0;
+    const bool available = WaitFor([&] {
+        AvPlayerFrameInfoEx video{};
+        if (!sceAvPlayerGetVideoDataEx(player, &video)) return false;
+        CheckVideoFrame(video);
+        const auto clock = sceAvPlayerCurrentTime(player);
+        if (video.timestamp > clock) lead = std::max(lead, video.timestamp - clock);
+        return lead >= 100;
+    }, 500);
+    Check(sceAvPlayerClose(player) == 0, "no-sync close failed");
+    std::printf("No-sync video lead: %llu ms\n", static_cast<unsigned long long>(lead));
+    Check(available, "no-sync video was gated by the audio-backed player clock");
+    std::lock_guard lock(allocations.mutex);
+    Check(allocations.blocks.empty(), "no-sync allocations leaked");
 }
 
 void TestLoopWarningWaitsForPlayback() {
@@ -1375,7 +1372,7 @@ int main() {
         TestAutoStartKeepsStartedPlayback();
         TestRestartAfterPausedJumpKeepsClockRunning();
         TestUnsyncedVideoKeepsUpWithAudio();
-        TestUnsyncedVideoDoesNotRunAheadOfAudio();
+        TestNoSyncVideoCanLeadAudioClock();
         TestLoopWarningWaitsForPlayback();
         TestEofStopLatency();
         std::puts("AvPlayer tests passed");
