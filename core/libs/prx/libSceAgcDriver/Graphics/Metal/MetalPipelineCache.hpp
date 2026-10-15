@@ -5,6 +5,10 @@
 #include <filesystem>
 #include <string>
 
+namespace ShaderRecompiler::MetalBackend {
+class SharedSource;
+}
+
 // Process-wide caches for immutable native Metal objects. Every key is built from the complete native
 // descriptor (and, for libraries, the complete MSL source), never from guest addresses or guest memory
 // contents, so a hit always returns an object equivalent to a freshly created one. Pipelines are also
@@ -50,6 +54,12 @@ struct CachedRenderPipeline {
 [[nodiscard]] id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& source,
                                                    const std::string& entryPoint, bool languageVersion32,
                                                    std::size_t sourceHash = 0);
+// CachedShaderFunction for a converted shader's shared source, found by the identity of the shared
+// text first: every draw of a cached conversion carries the same text, and comparing all of it
+// again was most of a function lookup.
+[[nodiscard]] id<MTLFunction> CachedConvertedShaderFunction(id<MTLDevice> device, const ShaderRecompiler::MetalBackend::SharedSource& source,
+                                                            const std::string& entryPoint, bool languageVersion32,
+                                                            std::size_t sourceHash = 0);
 // Pipeline states with MTLPipelineOptionBindingInfo reflection. They return a nil state and set `error`
 // when creation fails.
 [[nodiscard]] CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComputePipelineDescriptor* descriptor,

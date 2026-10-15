@@ -129,10 +129,16 @@ static void VerifyConversionCache(const RecompileResult& sample, const Recompile
     static_cast<void>(ConvertToMetal(described, ShaderStage::Compute, target));
     auto pushed = pushGuest;
     pushed.pushConstants[0] = std::byte{0x5a};
-    static_cast<void>(ConvertToMetal(pushed, ShaderStage::Compute, shifted));
+    const auto pushedResult = ConvertToMetal(pushed, ShaderStage::Compute, shifted);
     stats = GetConversionCacheStatistics();
-    Require(stats.misses == 6 && stats.hits == 1, "guest descriptor words or push constants did not key the cache");
-    Require(ConvertToMetal(pushed, ShaderStage::Compute, shifted).pushConstantData == ConvertToMetal(pushed, ShaderStage::Compute, shifted).pushConstantData &&
+    // Push-constant values do not change the generated shader: they hit the cache and only fill the
+    // returned pushConstantData, which must be the caller's.
+    Require(stats.misses == 5 && stats.hits == 2, "guest descriptor words did not key the cache, or push-constant values did");
+    auto expectedPush = pushShifted.pushConstantData;
+    expectedPush.at(16) = std::byte{0x5a};
+    Require(pushedResult.source == pushShifted.source && pushedResult.pushConstantData == expectedPush,
+            "a cached conversion returned another caller's push constants");
+    Require(ConvertToMetal(pushed, ShaderStage::Compute, shifted).pushConstantData == expectedPush &&
             GetConversionCacheStatistics().hits == 3, "repeated push conversion missed the cache");
     ClearConversionCache();
     stats = GetConversionCacheStatistics();

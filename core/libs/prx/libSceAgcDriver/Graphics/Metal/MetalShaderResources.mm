@@ -253,17 +253,16 @@ MetalBufferBinding MetalShaderResources::mirror(std::uint64_t address, std::size
         throw std::invalid_argument("Metal draw guest byte range is invalid");
     }
     static_cast<void>(NativeGuestMemory::ContiguousBorrowedRange(address, bytes, writable));
-    auto buffers = snapshot.Buffers();
     Abi::Header header{};
     std::memcpy(&header, snapshot.Table().contents, sizeof(header));
-    if (header.count != buffers.count || header.version != Abi::Version || header.entryBytes != sizeof(Abi::Range)) {
+    if (header.count != snapshot.BufferCount() || header.version != Abi::Version || header.entryBytes != sizeof(Abi::Range)) {
         throw std::runtime_error("Metal draw snapshot table is inconsistent");
     }
     for (std::uint32_t i = 0; i < header.count; ++i) {
         Abi::Range range{};
         std::memcpy(&range, static_cast<const std::byte*>(snapshot.Table().contents) + sizeof(header) + i * sizeof(range), sizeof(range));
         if (address < range.begin || address >= range.end || bytes > range.end - address) continue;
-        id<MTLBuffer> buffer = buffers[i];
+        id<MTLBuffer> buffer = snapshot.Buffer(i);
         if (range.deviceAddress < buffer.gpuAddress) throw std::runtime_error("Metal draw mirror GPU address is invalid");
         const auto offset = range.deviceAddress - buffer.gpuAddress + address - range.begin;
         if (offset >= buffer.length || bytes > buffer.length - offset) throw std::runtime_error("Metal draw mirror extent is invalid");

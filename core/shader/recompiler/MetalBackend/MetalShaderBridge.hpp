@@ -5,6 +5,7 @@
 #include <optional>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -111,6 +112,34 @@ struct CapturedSamplerRequirement {
     std::uint32_t descriptorSet, binding, element;
 };
 
+// Converted MSL text, shared by every copy: a cached conversion is copied into a Result for every
+// draw that hits it, and the text (often tens of KiB) never changes once converted. Reads go
+// through the const std::string it holds.
+class SharedSource {
+public:
+    SharedSource() = default;
+    SharedSource(std::string text) : text(std::make_shared<const std::string>(std::move(text))) {}
+    SharedSource(const char* text) : SharedSource(std::string(text)) {}
+
+    [[nodiscard]] const std::string& Str() const { return text ? *text : Empty(); }
+    // The shared text itself (null when empty): its address identifies this text while it is held.
+    [[nodiscard]] const std::shared_ptr<const std::string>& Shared() const { return text; }
+    operator const std::string&() const { return Str(); }
+    [[nodiscard]] std::size_t size() const { return Str().size(); }
+    [[nodiscard]] bool empty() const { return Str().empty(); }
+    [[nodiscard]] const char* data() const { return Str().data(); }
+    [[nodiscard]] const char* c_str() const { return Str().c_str(); }
+    [[nodiscard]] std::size_t find(std::string_view needle, std::size_t at = 0) const { return Str().find(needle, at); }
+    friend bool operator==(const SharedSource& left, const SharedSource& right) { return left.Str() == right.Str(); }
+
+private:
+    static const std::string& Empty() {
+        static const std::string empty;
+        return empty;
+    }
+    std::shared_ptr<const std::string> text;
+};
+
 struct Result {
     std::vector<CapturedSamplerRequirement> capturedSamplerRequirements;
     std::vector<MinimumLodImage> minimumLodImages;
@@ -118,10 +147,13 @@ struct Result {
     std::vector<MinimumLodPair> minimumLodPairs;
     ShaderStage stage;
     std::uint32_t vertexBufferCount = 0;
-    std::string source;
+    SharedSource source;
     // ShaderSourceHash(source), set by ConvertToMetal so that a draw does not hash the source again to
     // find its compiled function; 0 when not computed. A stale value only makes that lookup miss.
     std::size_t sourceHash = 0;
+    // Whether source stores through BDA pointers (StoresThroughBda), set with sourceHash so that a
+    // draw does not search the source for it; unset when not computed.
+    std::optional<bool> storesThroughBda;
     std::string entryPoint;
     RecompileResult guest;
     std::vector<ResourceMapping> resources;

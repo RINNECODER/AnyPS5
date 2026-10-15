@@ -1548,9 +1548,11 @@ static Result ConvertToMetalUncached(const RecompileResult& guest, ShaderStage s
     }
     result.samplerArgumentCount += static_cast<std::uint32_t>(compiler.MinimumLodPairs().size()) * 2u;
     for (const auto& pair : compiler.MinimumLodPairs()) result.minimumLodPairs.push_back({pair.imageSet, pair.imageBinding, pair.imageElement, pair.samplerSet, pair.samplerBinding, pair.samplerElement, pair.magArgument, pair.minArgument, pair.relativeViewMin});
-    try { result.source = compiler.compile(); }
+    std::string source;
+    try { source = compiler.compile(); }
     catch (const std::exception& error) { Fail(error.what()); }
-    InlineExactArithmetic(result.source);
+    InlineExactArithmetic(source);
+    result.source = std::move(source);
     result.requiresTextureLodQueries = compiler.RequiresTextureLodQueries();
     result.minimumLodImages = compiler.MinimumLodImages();
     result.capturedSamplerRequirements = compiler.CapturedSamplers();
@@ -1818,25 +1820,29 @@ BoundedCache<ExactConversion>& ConversionCache() {
     return cache;
 }
 
-// In front of ConversionCache, by the identity of the SPIR-V words (SharedSpirv) instead of their
-// contents: every draw of a shader converts the same shared module again, and copying, hashing and
-// comparing its words was most of a cache hit (about an eighth of the graphics queue thread on a
-// title's map). The entry holds the words, so no other module can take their address and no holder
-// writes them in place while it exists.
+// In front of every other cache, by the identity of the SPIR-V words (SharedSpirv) and the stable key:
+// every draw of a shader converts the same shared module again, and copying, hashing and comparing
+// its words was most of a cache hit. Keyed by the stable key (no push-constant values, no descriptor
+// addresses) because many draws carry per-draw push constants: an exact key never repeated for them,
+// so each such draw built three keys (one over all its SPIR-V words) and inserted two entries.
+// RestorePushConstants then attaches the draw's own push constants, as for a StableConversionCache hit.
+// The entry holds the words, so no other module can take their address and no holder writes them in
+// place while it exists.
 struct ModuleConversion {
     std::shared_ptr<const std::vector<std::uint32_t>> module;
-    ExactConversion conversion;
+    std::shared_ptr<const Result> shader;
 };
 
 BoundedCache<ModuleConversion>& ModuleConversionCache() {
-    static BoundedCache<ModuleConversion> cache(4096, std::size_t{256} << 20);
+    static BoundedCache<ModuleConversion> cache(8192, std::size_t{256} << 20);
     return cache;
 }
 
-void RememberModule(const std::shared_ptr<const std::vector<std::uint32_t>>& module, std::optional<CacheKey>& key, const ExactConversion& conversion) {
+void RememberModule(const std::shared_ptr<const std::vector<std::uint32_t>>& module, std::optional<CacheKey>& key,
+                    const std::shared_ptr<const Result>& shader) {
     if (!module || !key) return;
-    const auto bytes = module->size() * sizeof(std::uint32_t) + conversion.pushConstantData.size() + sizeof(ModuleConversion);
-    static_cast<void>(ModuleConversionCache().Insert(std::move(*key), ModuleConversion{module, conversion}, bytes));
+    const auto bytes = module->size() * sizeof(std::uint32_t) + sizeof(ModuleConversion);
+    static_cast<void>(ModuleConversionCache().Insert(std::move(*key), ModuleConversion{module, shader}, bytes));
     key.reset();
 }
 
@@ -1876,12 +1882,16 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     const auto module = guest.spirv.Share();
     std::optional<CacheKey> moduleKey;
     if (module) {
-        moduleKey = ConversionKey(guest, stage, target, false, module.get());
-        if (auto cached = ModuleConversionCache().Find(*moduleKey)) return Returned(*cached->conversion.shader, guest, cached->conversion.pushConstantData);
+        moduleKey = ConversionKey(guest, stage, target, true, module.get());
+        if (auto cached = ModuleConversionCache().Find(*moduleKey)) {
+            Result restored = Returned(*cached->shader, guest, {});
+            if (RestorePushConstants(restored, guest, target)) return restored;
+            moduleKey.reset();
+        }
     }
     auto key = ConversionKey(guest, stage, target);
     if (auto cached = ConversionCache().Find(key)) {
-        RememberModule(module, moduleKey, *cached);
+        RememberModule(module, moduleKey, cached->shader);
         return Returned(*cached->shader, guest, cached->pushConstantData);
     }
     // A miss in memory tries the disk before running SPIRV-Cross (most of a warm launch's shader time).
@@ -1896,7 +1906,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
         Result restored = Returned(**stable, guest, {});
         if (RestorePushConstants(restored, guest, target)) {
             ExactConversion conversion{*stable, restored.pushConstantData};
-            RememberModule(module, moduleKey, conversion);
+            RememberModule(module, moduleKey, *stable);
             ConversionCache().Insert(std::move(key), std::move(conversion), ResultBytes(restored));
             return restored;
         }
@@ -1944,7 +1954,8 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
                 static_cast<unsigned long long>(fnv(diskKey.Bytes().data(), diskKey.Size())), guest.bindings.size());
         }
     }
-    result.sourceHash = ShaderSourceHash(result.source);
+    result.sourceHash = ShaderSourceHash(result.source.Str());
+    result.storesThroughBda = result.source.find("bda_write") != std::string::npos;
     // Cached without the guest program and push constants (each hit attaches the caller's).
     auto guestProgram = std::move(result.guest);
     auto pushConstantData = std::move(result.pushConstantData);
@@ -1954,7 +1965,7 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
     const auto bytes = ResultBytes(result);
     StableConversionCache().Insert(diskKey, stored, bytes);
     ExactConversion conversion{stored, result.pushConstantData};
-    RememberModule(module, moduleKey, conversion);
+    RememberModule(module, moduleKey, stored);
     ConversionCache().Insert(std::move(key), std::move(conversion), bytes);
     return result;
 }

@@ -101,17 +101,16 @@ MetalBufferBinding bindGuestRange(const MetalGuestMemory::DispatchSnapshot& snap
         throw std::invalid_argument("Metal guest buffer descriptor byte range is invalid");
     }
     auto host = NativeGuestMemory::ContiguousBorrowedRange(address, static_cast<std::size_t>(bytes), writable);
-    NSArray<id<MTLBuffer>>* buffers = snapshot.Buffers();
     Abi::Header header{};
     std::memcpy(&header, snapshot.Table().contents, sizeof(header));
-    if (header.version != Abi::Version || header.count != buffers.count || header.entryBytes != sizeof(Abi::Range)) {
+    if (header.version != Abi::Version || header.count != snapshot.BufferCount() || header.entryBytes != sizeof(Abi::Range)) {
         throw std::runtime_error("Metal compute snapshot table metadata is invalid");
     }
     for (std::uint32_t i = 0; i < header.count; ++i) {
         Abi::Range range{};
         std::memcpy(&range, static_cast<const std::byte*>(snapshot.Table().contents) + sizeof(header) + i * sizeof(range), sizeof(range));
         if (address < range.begin || address >= range.end || bytes > range.end - address) continue;
-        id<MTLBuffer> buffer = buffers[i];
+        id<MTLBuffer> buffer = snapshot.Buffer(i);
         if (range.deviceAddress < buffer.gpuAddress) throw std::runtime_error("Metal snapshot GPU address offset is invalid");
         const auto offset = range.deviceAddress - buffer.gpuAddress + address - range.begin;
         if (offset % sizeof(std::uint32_t) != 0) {
