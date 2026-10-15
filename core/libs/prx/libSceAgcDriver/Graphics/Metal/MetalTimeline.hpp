@@ -4,6 +4,7 @@
 #include "FrameProfile.hpp"
 #include "GpuTiming.hpp"
 #include "MetalDevice.hpp"
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,6 +54,16 @@ template <typename Converted>
 class MetalTimeline {
 public:
     using Completion = std::function<void()>;
+    // A store whose bytes the driver knows before the GPU runs it: a guest fill kernel's constant
+    // pattern, or DCC keys the driver leaves uncompressed once the work completes. [begin, end)
+    // ends up holding `pattern` repeated from `begin`; `before` is what the range held when the work
+    // was committed (see PendingBytes). The store's range must also be in the work's `written`.
+    struct KnownStore {
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+        std::array<std::byte, 16> pattern{};
+        std::vector<std::byte> before;
+    };
 
     MetalTimeline() = default;
     MetalTimeline(const MetalTimeline&) = delete;
@@ -68,8 +80,9 @@ public:
     // (BDA stores): the driver drains before its next CPU read of guest memory.
     // `written` lists the guest ranges [begin, end) the work stores to (written images, writable
     // buffers): a CPU read of guest memory overlapping one drains first (MayHaveWritten).
+    // `known` lists the stores of the work whose bytes are known now (KnownStore).
     void Commit(id<MTLCommandBuffer> commands, Completion complete, bool unknownWrites = false,
-        std::vector<std::pair<std::uint64_t, std::uint64_t>> written = {}) {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> written = {}, std::vector<KnownStore> known = {}) {
         if (commands == nil) throw std::invalid_argument("Metal timeline requires a command buffer");
         if (commands.status < MTLCommandBufferStatusCommitted) {
             // One signal per command buffer: a batch carries many works.
@@ -78,10 +91,14 @@ public:
             }
             if (batch == nullptr || !batch->OpenBatch(commands)) [commands commit];
         }
-        pending.push_back({commands, std::move(complete), GpuTiming::Current()});
-        unknown = unknown || unknownWrites;
-        writes.insert(writes.end(), written.begin(), written.end());
         ++committed;
+        pending.push_back({commands, std::move(complete), GpuTiming::Current(), committed});
+        unknown = unknown || unknownWrites;
+        for (const auto& [writeBegin, writeEnd] : written) writes.push_back({writeBegin, writeEnd, committed});
+        for (auto& store : known) {
+            if (store.begin >= store.end || store.before.size() != store.end - store.begin) continue;
+            knownStores.push_back({std::move(store), committed});
+        }
         if (batch != nullptr && batch->GpuStarved(batchMinimum)) batch->Flush();
     }
 
@@ -108,7 +125,7 @@ public:
     // Queues CPU work (a label store, an interrupt) to run at the next drain, after the completions
     // of everything committed before it.
     void Defer(Completion complete) {
-        pending.push_back({nil, std::move(complete), GpuTiming::Current()});
+        pending.push_back({nil, std::move(complete), GpuTiming::Current(), committed});
     }
 
     // Defer at a label point (RELEASE_MEM, WRITE_DATA): `complete` runs at the first Reap after the
@@ -139,7 +156,7 @@ public:
             [last encodeSignalEvent:labelEvent value:value];
             // The batch's completion (which Reap waits for, through the work before the label) comes
             // after the signal.
-            pending.push_back({nil, std::move(complete), GpuTiming::Current()});
+            pending.push_back({nil, std::move(complete), GpuTiming::Current(), committed});
             if (commitNow || batch->OpenUses() >= batchMinimum) batch->Flush();
         } else {
             // The work before the label is committed already: a command buffer that only signals
@@ -149,7 +166,7 @@ public:
             [signal encodeSignalEvent:labelEvent value:value];
             if (auto handler = completionSignal) [signal addCompletedHandler:^(id<MTLCommandBuffer>) { (*handler)(); }];
             [signal commit];
-            pending.push_back({signal, std::move(complete), GpuTiming::Current()});
+            pending.push_back({signal, std::move(complete), GpuTiming::Current(), committed});
         }
         return value;
     }
@@ -163,10 +180,52 @@ public:
     [[nodiscard]] bool MayHaveWritten(std::uint64_t begin, std::uint64_t end) const {
         if (pending.empty()) return false;
         if (unknown) return true;
-        for (const auto& [writeBegin, writeEnd] : writes) {
-            if (begin < writeEnd && writeBegin < end) return true;
+        for (const auto& write : writes) {
+            if (begin < write.end && write.begin < end) return true;
         }
         return false;
+    }
+
+    // What guest [begin, begin + out.size()) holds once the pending work completes, when that is known
+    // without waiting for it: the newest pending store over the range is a KnownStore covering all of
+    // it, no work committed after that store writes any of it, and no unknown (BDA) writes are
+    // pending. `visible` is what the CPU sees there now; each of its bytes must be one a pending
+    // known store over it writes or found there when committed. Any other byte is a store nobody
+    // ordered against these (a guest CPU write, or GPU work that is not a known store), so the
+    // answer is false and the caller waits. Fills `out` and returns true when known.
+    [[nodiscard]] bool PendingBytes(std::uint64_t begin, std::span<const std::byte> visible, std::span<std::byte> out) const {
+        if (pending.empty() || unknown || out.empty() || visible.size() != out.size()) return false;
+        if (out.size() > ~std::uint64_t{0} - begin) return false;
+        const auto end = begin + out.size();
+        const PendingKnownStore* newest = nullptr;
+        std::size_t newestAt = knownStores.size();
+        for (auto at = knownStores.size(); at-- > 0;) {
+            const auto& store = knownStores[at].store;
+            if (end <= store.begin || store.end <= begin) continue;
+            if (store.begin > begin || store.end < end) return false;
+            newest = &knownStores[at];
+            newestAt = at;
+            break;
+        }
+        if (newest == nullptr) return false;
+        for (const auto& write : writes) {
+            if (write.serial > newest->serial && begin < write.end && write.begin < end) return false;
+        }
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            const auto address = begin + i;
+            const auto& store = newest->store;
+            out[i] = store.pattern[(address - store.begin) % store.pattern.size()];
+            if (visible[i] == out[i] || visible[i] == store.before[address - store.begin]) continue;
+            bool expected = false;
+            for (auto at = newestAt; !expected && at-- > 0;) {
+                const auto& older = knownStores[at].store;
+                if (address < older.begin || address >= older.end) continue;
+                expected = visible[i] == older.pattern[(address - older.begin) % older.pattern.size()] ||
+                    visible[i] == older.before[address - older.begin];
+            }
+            if (!expected) return false;
+        }
+        return true;
     }
 
     [[nodiscard]] bool Empty() const { return pending.empty(); }
@@ -194,6 +253,7 @@ public:
             if (head.commands != nil && head.commands.status < MTLCommandBufferStatusCompleted) break;
             auto work = std::move(head);
             pending.pop_front();
+            retireStores(work.serial);
             if (!ran) ++epoch;
             ran = true;
             GpuTiming::Scope timing(work.kind);
@@ -203,6 +263,7 @@ public:
         if (pending.empty()) {
             unknown = false;
             writes.clear();
+            knownStores.clear();
         }
         return ran;
     }
@@ -230,6 +291,7 @@ public:
         pending.clear();
         unknown = false;
         writes.clear();
+        knownStores.clear();
         for (auto& work : works) {
             GpuTiming::Scope timing(work.kind);
             if (work.commands != nil) {
@@ -261,9 +323,27 @@ private:
         id<MTLCommandBuffer> commands;
         Completion complete;
         GpuTiming::Kind kind;
+        // `committed` after the work's commit (a deferred entry keeps the last one).
+        std::uint64_t serial;
     };
+    struct PendingKnownStore {
+        KnownStore store;
+        std::uint64_t serial;
+    };
+    struct Write {
+        std::uint64_t begin;
+        std::uint64_t end;
+        std::uint64_t serial;
+    };
+    // A retired work's stores are in guest memory now (its command buffer completed and its
+    // completion runs next, before anything else reads).
+    void retireStores(std::uint64_t serial) {
+        while (!knownStores.empty() && knownStores.front().serial <= serial) knownStores.pop_front();
+        while (!writes.empty() && writes.front().serial <= serial) writes.pop_front();
+    }
     std::deque<Work> pending;
-    std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+    std::deque<Write> writes;
+    std::deque<PendingKnownStore> knownStores;
     bool unknown = false;
     std::uint64_t committed = 0;
     std::uint64_t drains = 0;

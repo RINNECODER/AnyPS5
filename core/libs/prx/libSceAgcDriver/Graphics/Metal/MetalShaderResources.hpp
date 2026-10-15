@@ -4,6 +4,7 @@
 #include "MetalGuestMemory.hpp"
 #include "MetalShaderPipeline.hpp"
 #include "MetalTexture.hpp"
+#include "MetalTimeline.hpp"
 #include "GuestImageCache.hpp"
 #include "MetalLazyCopyBacks.hpp"
 #include "MetalSampler.hpp"
@@ -63,6 +64,28 @@ public:
     // a staged storage image), so the caller can first finish GPU work that may write them.
     using CpuReadHook = std::function<void(std::uint64_t address, std::uint64_t bytes)>;
     void SetCpuReadHook(CpuReadHook hook) { cpuRead = std::move(hook); }
+    // Non-waiting views of the GPU work committed before this one: whether it may store to a guest
+    // range (MetalTimeline::MayHaveWritten), and what a range holds once it completes when that is
+    // known now (MetalTimeline::PendingBytes, given the bytes the CPU sees there). With them, DCC
+    // keys a pending guest fill kernel stores are read without waiting for it.
+    struct PendingStores {
+        std::function<bool(std::uint64_t address, std::uint64_t bytes)> mayHaveWritten;
+        std::function<bool(std::uint64_t address, std::span<const std::byte> visible, std::span<std::byte> out)> known;
+    };
+    void SetPendingStores(PendingStores stores) { pendingStores = std::move(stores); }
+    [[nodiscard]] static PendingStores PendingStoresOf(const MetalTimeline& timeline) {
+        return {[&timeline](std::uint64_t address, std::uint64_t bytes) {
+                    const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
+                    return timeline.MayHaveWritten(address, end);
+                },
+                [&timeline](std::uint64_t address, std::span<const std::byte> visible, std::span<std::byte> out) {
+                    return timeline.PendingBytes(address, visible, out);
+                }};
+    }
+    // The stores this work makes when it completes whose bytes are known now, for
+    // MetalTimeline::Commit after CommittedWithoutWaiting: the DCC keys of written images it leaves
+    // uncompressed while earlier pending work may still store to them.
+    [[nodiscard]] std::vector<MetalTimeline::KnownStore> KnownStores() const;
     // Guest bytes the snapshot copied instead of aliasing (#291).
     [[nodiscard]] std::uint64_t CopiedBytes() const { return snapshot.CopiedBytes(); }
 
@@ -110,7 +133,16 @@ private:
     const MetalDevice& backend;
     std::optional<NativeGuestMemory::BorrowedRangesScope> borrowed;
     bool committedWithoutWaiting = false;
-    void markDccUncompressed();
+    // `committing`: called from CommittedWithoutWaiting, where keys that pending work may still store
+    // to are left to Complete (deferredKeyStores).
+    void markDccUncompressed(bool committing);
+    struct DeferredKeyStore {
+        MetalTimeline::KnownStore known;
+        MetalBufferBinding mirror;
+        std::span<std::byte> host;
+    };
+    std::vector<DeferredKeyStore> deferredKeyStores;
+    PendingStores pendingStores;
     bool sharesPlainTexels(const Image& image, const Graphics::GuestTextureResource& descriptor);
     std::string dccKeysNote(const Image& image, const Graphics::GuestTextureResource& descriptor);
     CpuReadHook cpuRead;

@@ -1,6 +1,7 @@
 #include "MetalDriverInternal.hpp"
 #include "PacketAutoreleasePool.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ComputeDispatch.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ConstantFillKernel.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DrawDispatch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/IndirectDraw.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PacketCensus.hpp"
@@ -446,9 +447,14 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
         grid[axis] = static_cast<NSUInteger>(threads);
     }
     const auto size = MTLSizeMake(grid[0], grid[1], grid[2]);
+    // A constant fill (DCC keys being cleared, most often) tells the timeline what it stores, so a
+    // later draw learns the keys without waiting for it (MetalTimeline::PendingBytes). Not for an
+    // indirect dispatch: its real group counts are in the argument buffer, not in this packet.
+    const auto fill = indirectArguments ? std::nullopt : MatchConstantFill(std::span(snapshot.code).subspan(offset), decoded.userData, decoded.compute.numThreads, decoded.groups,
+        decoded.compute.partialThreads);
     // One run of the dispatch; with `deferred` it is committed without waiting when its results need
     // no CPU copy into guest memory, and `completed` gets its fault at the timeline's next drain.
-    const auto encode = [this, pipeline, resident, size, indirectArguments,
+    const auto encode = [this, pipeline, resident, size, indirectArguments, fill,
         stallUserData = GpuStallWatch::DumpPath() != nullptr ? decoded.userData : std::vector<std::uint32_t>{},
         stallProgram = decoded.programAddress, stallGroups = decoded.groups](bool deferred, MetalDraw::Completed completed, bool stores)
         -> std::optional<BdaAbi::Fault> {
@@ -461,6 +467,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
                 MaterializeCopyBacks(MetalLazyCopyBacks::Cause::GpuRead, address, bytes);
             });
         }
+        if (deferred) bindings->SetPendingStores(MetalShaderResources::PendingStoresOf(timeline));
         const auto descriptors = bindings->Bindings(pipeline->Reflection());
         if (GpuStallWatch::DumpPath() != nullptr) {
             GpuStallWatch::SetDetail(DescribeDispatch(stallUserData, descriptors) +
@@ -482,11 +489,25 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
         bindings->EncodeReadbacks(commands, deferred);
         batched.Done();
         if (deferred && !bindings->NeedsSynchronousCompletion()) {
+            std::vector<MetalTimeline::KnownStore> known;
+            if (fill && fill->bytes <= (std::uint64_t{1} << 20u)) {
+                try {
+                    // What the range holds before the fill (read while this work's borrowed ranges are in scope).
+                    const auto before = NativeGuestMemory::ContiguousBorrowedRange(fill->base, static_cast<std::size_t>(fill->bytes), false);
+                    MetalTimeline::KnownStore store{fill->base, fill->base + fill->bytes, {}, {before.begin(), before.end()}};
+                    std::memcpy(store.pattern.data(), fill->pattern.data(), store.pattern.size());
+                    known.push_back(std::move(store));
+                } catch (const std::exception&) {
+                    known.clear();
+                }
+            }
             bindings->CommittedWithoutWaiting();
+            // Keys of DCC storage images this dispatch leaves uncompressed after earlier pending work.
+            for (auto& store : bindings->KnownStores()) known.push_back(std::move(store));
             timeline.Commit(commands, [bindings, commands, completed = std::move(completed)] {
                 const auto fault = CompleteCommittedWork([&] { return bindings->Complete(commands); });
                 completed(fault);
-            }, stores, bindings->WrittenGuestRanges());
+            }, stores, bindings->WrittenGuestRanges(), std::move(known));
             return std::nullopt;
         }
         [commands commit];

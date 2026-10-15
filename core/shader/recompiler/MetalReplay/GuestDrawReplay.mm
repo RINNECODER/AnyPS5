@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include "MetalDraw.hpp"
+#include "MetalTimeline.hpp"
 #include "Recompiler.hpp"
 #include "SceShaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <future>
@@ -100,9 +102,9 @@ struct ShaderPair {
 
 ShaderPair Compile(id<MTLDevice> device, std::span<const std::uint32_t> fragmentCode, std::uint32_t vertices,
     const ShaderPixelStageInfo& pixel = PixelInfo(), std::span<const std::uint32_t> vertexCode = VertexCode,
-    std::uint32_t vertexWave = 32, std::uint32_t vertexUserDataBase = 0) {
+    std::uint32_t vertexWave = 32, std::uint32_t vertexUserDataBase = 0, std::uint32_t vertexWord3 = 0x01016fac) {
     const std::array<std::uint32_t, 4> vertexUserData{
-        static_cast<std::uint32_t>(VertexAddress), 16u << 16u, vertices, 0x01016fac};
+        static_cast<std::uint32_t>(VertexAddress), 16u << 16u, vertices, vertexWord3};
     const std::array<MemoryRegion, 1> vertexMemory{{{0x500000, std::as_bytes(vertexCode)}}};
     RecompileRequest vertex{{ShaderStage::Vertex, 0x500000, vertexCode, 0, {}},
         {vertexWave, vertexUserDataBase, vertexUserData, {}, {}, ShaderVertexStageInfo{}, vertexMemory}, Target(device), {0, 0, 0, 64}, {}};
@@ -166,6 +168,75 @@ void DrawGuest(id<MTLDevice> device, id<MTLLibrary> library, bool masked, bool i
     std::cout << "Actual RDNA guest draw: " << (masked ? "masked even-column fragment exports" : "full fragment exports")
               << (maximumIndex ? ", uint16 vertex index65535 without primitive restart" :
                   indexed ? ", indexed vertex fetch with nonzero guest index offset" : ", descriptor vertex fetch") << " passed\n";
+}
+
+// An index buffer that committed GPU work may still be writing (GPU culling output) is not read on
+// the CPU, which would wait for that work: the draw binds its vertex buffer over the descriptor's
+// whole record range instead and draws the same pixels. A strip without primitive restart still
+// reads the indices (an index 0xffff must be told apart from Metal's restart).
+void DrawGpuWrittenIndices(id<MTLDevice> device, id<MTLLibrary> library) {
+    for (const bool strip : {false, true}) {
+        std::vector<std::array<float, 4>> vertices(3, {8, 8, 0.5f, 1});
+        vertices.insert(vertices.end(), Triangle.begin(), Triangle.end());
+        // Whole host pages, so the draw binds a no-copy alias of them (a copied snapshot would hold
+        // the bytes from before the producer and is still scanned).
+        constexpr std::size_t PageBytes = 16384;
+        std::unique_ptr<void, decltype(&std::free)> page(std::aligned_alloc(PageBytes, PageBytes), &std::free);
+        Require(page != nullptr, "page allocation failed");
+        std::memset(page.get(), 0, PageBytes);
+        const std::span<std::uint16_t> indices(static_cast<std::uint16_t*>(page.get()), PageBytes / sizeof(std::uint16_t));
+        const std::array<std::uint16_t, 5> used{0, 3, 4, 5, 0xffff};
+        std::copy(used.begin(), used.end(), indices.begin());
+        std::vector<std::byte> pixels(256 + Width * Height * 4 + 256, std::byte{0x7b});
+        std::fill_n(pixels.begin() + 256, Width * Height * 4, std::byte{0x40});
+        // OUT_OF_BOUNDS_SELECT 2: an index must be below the record count (with 0 or 1 the draw still scans).
+        const auto compiled = Compile(device, FullPixelCode, static_cast<std::uint32_t>(vertices.size()), PixelInfo(), VertexCode, 32, 0,
+            0x21016facu);
+        const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
+            {ShaderStage::Vertex, &compiled.vertex, 0}, {ShaderStage::Fragment, &compiled.fragment, compiled.fragmentPush}}};
+        std::vector<AgcDriver::NativeGuestMemory::BorrowedRange> ranges{
+            {VertexAddress, std::as_writable_bytes(std::span(vertices)), false}, {ColorAllocation, pixels, true},
+            {IndexAddress, std::as_writable_bytes(indices), false}};
+        AgcDriver::Pm4::DrawParameters draw{};
+        draw.indexAddress = IndexAddress + 2u;
+        draw.indexCount = 3;
+        draw.indexSize = 2u;
+        draw.instanceCount = 1;
+        draw.indexed = true;
+        auto state = State();
+        if (strip) state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+        AgcDriver::Metal::MetalDraw adapter(device, library);
+        AgcDriver::Metal::MetalTimeline timeline;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> reads;
+        adapter.SetCpuReadHook([&](std::uint64_t address, std::uint64_t bytes) {
+            reads.emplace_back(address, bytes);
+            timeline.Drain();
+        });
+        // The producer: committed work the timeline says stores the indices.
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        timeline.Commit([queue commandBuffer], {}, false, {{IndexAddress, IndexAddress + sizeof(used)}});
+        BdaAbi::Fault fault{};
+        const auto deferred = adapter.Draw(state, draw, shaders, ranges, std::nullopt, &timeline,
+            [&](BdaAbi::Fault completed) { fault = completed; });
+        if (deferred) fault = *deferred;
+        timeline.Drain();
+        // The render target's copy-back may be lazy (MetalLazyCopyBacks): store it now.
+        id<MTLCommandBuffer> copyBacks = [queue commandBuffer];
+        static_cast<void>(adapter.LazyCopyBacks().EncodeAll(copyBacks, AgcDriver::Metal::MetalLazyCopyBacks::Cause::Drain));
+        [copyBacks commit];
+        [copyBacks waitUntilCompleted];
+        Require(fault.state == BdaAbi::FaultState::Empty, "Draw over GPU-written indices published a GPU memory fault");
+        const bool scanned = std::any_of(reads.begin(), reads.end(), [](const auto& read) {
+            return read.first < IndexAddress + sizeof(used) && IndexAddress < read.first + read.second;
+        });
+        Require(scanned == strip, strip ? "A strip without primitive restart did not read its GPU-written indices"
+                                        : "A triangle list waited for GPU work to read its indices on the CPU");
+        for (std::size_t offset = 0; offset < pixels.size(); ++offset) {
+            const auto expected = offset >= 256 && offset < 256 + Width * Height * 4 ? std::byte{255} : std::byte{0x7b};
+            Require(pixels[offset] == expected, "Draw over GPU-written indices produced wrong target byte " + std::to_string(offset));
+        }
+    }
+    std::cout << "Actual RDNA guest draw: GPU-written indices bound unread (whole vertex range) and read for a strip passed\n";
 }
 
 // SPI_SHADER_32_AR (upstream PR 5110): the export carries two channels, the second of which GFX10
@@ -2258,6 +2329,7 @@ int main(int argc, const char* argv[]) {
             DrawPerVertexParameters(device, library);
             DrawClipDistances(device, library);
             DrawBoundedIndices(device, library);
+            DrawGpuWrittenIndices(device, library);
             return 0;
         } catch (const std::exception& error) {
             std::cerr << error.what() << '\n';

@@ -595,6 +595,35 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
     return CompleteCommittedWork([&] { return resources.Complete(commands); });
 }
 
+namespace {
+
+// Whether every vertex buffer of `attributes` can be bound over its descriptor's whole record range
+// (Graphics::WholeVertexReadSize): one host run of borrowed guest bytes, at most 256 MiB each, whose
+// record count bounds every index. With OUT_OF_BOUNDS_SELECT 0 or 1 a strided per-vertex fetch may
+// index past the records (VertexBufferReadSize sizes the binding through the largest index), so such
+// a draw still scans.
+bool WholeVertexRangesBindable(std::span<const ShaderRecompiler::VertexAttribute> attributes, const Pm4::DrawParameters& draw) {
+    constexpr std::size_t MaximumBytes = std::size_t{256} << 20u;
+    for (const auto& attribute : attributes) {
+        if (Graphics::NullVertexDescriptor(attribute)) continue;
+        const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
+        if (attribute.fetchIndex == 0 && stride != 0 && Graphics::VertexBufferOutOfBoundsSelect(attribute) <= 1u) return false;
+        try {
+            const auto bytes = Graphics::WholeVertexReadSize(attribute, draw.instanceCount, draw.firstInstance);
+            const auto& fields = attribute.resource.fields;
+            const auto address = fields[0] | (std::uint64_t{fields[1] & 0xffffu} << 32u);
+            if (bytes > MaximumBytes || NativeGuestMemory::ReadableBorrowedBytes(address, bytes) < bytes) return false;
+            // One host run, as MetalShaderResources::mirror needs (throws otherwise).
+            static_cast<void>(NativeGuestMemory::ContiguousBorrowedRange(address, bytes, false));
+        } catch (const std::exception&) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}
+
 std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
     std::span<const NativeGuestMemory::BorrowedRange> ranges,
@@ -749,6 +778,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     if (cpuReadHook) resources.SetCpuReadHook(cpuReadHook);
     resources.SetLazyCopyBacks(&lazyCopyBacks);
     if (materializeHook) resources.SetMaterializeHook(materializeHook);
+    if (timeline != nullptr) resources.SetPendingStores(MetalShaderResources::PendingStoresOf(*timeline));
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -826,6 +856,9 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     std::uint32_t nativeIndexSize = draw.indexSize;
     std::uint32_t maxIndex = 0;
     bool noVertexIndices = false;
+    // Vertex buffers bound over their descriptors' whole record ranges, instead of up to the
+    // largest index (WholeVertexReadSize): the indices were not read on the CPU.
+    bool wholeVertexRanges = false;
     std::vector<std::uint32_t> fanIndices;
     std::uint32_t fanCenter = 0, fanPrevious = 0, fanVertexCount = 0;
     const auto appendFanVertex = [&](std::uint32_t index) {
@@ -841,7 +874,6 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         if (fanVertexCount < 2) ++fanVertexCount;
     };
     if (draw.indexed) {
-        std::uint32_t minIndex = std::numeric_limits<std::uint32_t>::max();
         if ((draw.indexSize != 2 && draw.indexSize != 4) || draw.indexAddress % draw.indexSize != 0) {
             throw std::invalid_argument("Metal draw index format or address is invalid");
         }
@@ -849,6 +881,16 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         if (bytes > std::numeric_limits<std::size_t>::max()) throw std::invalid_argument("Metal draw index byte count overflows");
         const auto readable = draw.IndexReadCount();
         if (readable > draw.indexCount) throw std::invalid_argument("Metal draw readable index count exceeds the draw count");
+        // Indices that committed GPU work may still be writing (GPU culling output) are not read on
+        // the CPU, which would wait for that work: the scan only bounds the vertex buffer ranges
+        // here, so they are bound whole instead. Fans (expanded on the CPU), strips without restart
+        // (an index 0xffff or 0xffffffff must be told apart from Metal's restart), mesh fans and
+        // bounded fetches (copied on the CPU) still read them.
+        const bool cpuNeedsIndices = fanPath || (nativeStrip && !nativeRestart) ||
+            (meshPath && state.stages.mesh->inputPrimitive == 5 && state.primitiveRestart) || readable < draw.indexCount;
+        bool skipScan = gpuIndirect == nullptr && !cpuNeedsIndices && timeline != nullptr &&
+            timeline->MayHaveWritten(draw.indexAddress, draw.indexAddress + bytes) &&
+            WholeVertexRangesBindable(vertex->program->vertexAttributes, draw);
         if (readable < draw.indexCount) {
             // A direct DRAW_INDEX_2 / DRAW_INDEX_OFFSET_2 whose count passes its max_size (upstream PR
             // 4824): the first max_size indices come from guest memory and the remaining fetches read
@@ -868,9 +910,20 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             // The GPU reads the indices the records select; nothing here reads them.
             indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
         } else {
-            if (cpuReadHook) cpuReadHook(draw.indexAddress, bytes);
+            if (cpuReadHook && !skipScan) cpuReadHook(draw.indexAddress, bytes);
             indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
+            // Only a no-copy alias of the guest bytes sees the producer's stores; a copied snapshot
+            // holds the bytes from before it, so such a draw waits and scans as before.
+            if (skipScan && static_cast<const std::byte*>(indexBuffer.buffer.contents) + indexBuffer.offset !=
+                    NativeGuestMemory::ContiguousBorrowedRange(draw.indexAddress, static_cast<std::size_t>(bytes), false).data()) {
+                skipScan = false;
+                if (cpuReadHook) cpuReadHook(draw.indexAddress, bytes);
+            }
         }
+        wholeVertexRanges = skipScan;
+    }
+    if (draw.indexed && !wholeVertexRanges) {
+        std::uint32_t minIndex = std::numeric_limits<std::uint32_t>::max();
         const auto* data = static_cast<const std::byte*>(indexBuffer.buffer.contents) + indexBuffer.offset;
         const auto restartIndex = draw.indexSize == 2 ? 0xffffu : 0xffffffffu;
         bool hasVertexIndex = gpuIndirect != nullptr;
@@ -917,9 +970,9 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             }
             maxIndex = static_cast<std::uint32_t>(lastIndex);
         }
-    } else if (gpuIndirect != nullptr) {
+    } else if (!draw.indexed && gpuIndirect != nullptr) {
         if (draw.indexAddress != 0 || draw.indexSize != 0) throw std::invalid_argument("Metal draw auto-index parameters are invalid");
-    } else {
+    } else if (!draw.indexed) {
         if (draw.indexAddress != 0 || draw.indexSize != 0 || draw.firstVertex > std::numeric_limits<std::uint32_t>::max() - (draw.indexCount - 1u)) {
             throw std::invalid_argument("Metal draw auto-index parameters are invalid");
         }
@@ -961,7 +1014,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             std::memset(zero.contents, 0, zero.length);
             vertexBuffers.push_back({zero, 0, zero.length});
         } else if (!noVertexIndices) {
-            auto buffer = resources.Buffer(address, gpuIndirect != nullptr ? Graphics::VertexBufferExtent(attribute) :
+            auto buffer = resources.Buffer(address, gpuIndirect != nullptr ? Graphics::VertexBufferExtent(attribute) : wholeVertexRanges ?
+                Graphics::WholeVertexReadSize(attribute, draw.instanceCount, draw.firstInstance) :
                 Graphics::VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance));
             adjustment = buffer.offset % 4;
             buffer.offset -= adjustment;
@@ -1242,7 +1296,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         timeline->Commit(commands, [resourcesOwner, commands, completed = std::move(completed)] {
             const auto fault = CompleteCommittedWork([&] { return resourcesOwner->Complete(commands); });
             if (completed) completed(fault);
-        }, bdaStores, resources.WrittenGuestRanges());
+        }, bdaStores, resources.WrittenGuestRanges(), resources.KnownStores());
         return std::nullopt;
     }
     batched.Done();
