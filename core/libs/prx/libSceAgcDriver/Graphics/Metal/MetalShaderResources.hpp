@@ -40,6 +40,12 @@ public:
     // The deferred copy-backs shared by draws and dispatches. Bindings that read guest bytes
     // through memory (buffers, uploads) materialize the overlapping ones first.
     void SetLazyCopyBacks(MetalLazyCopyBacks* registry) { lazyCopyBacks = registry; }
+    // Materializes the lazy copy-backs over guest [address, address + bytes) for such a binding: the
+    // driver encodes them and commits them to its timeline, which orders them before later signals
+    // and CPU reads whatever happens to this object. Without one (tests), this object encodes them
+    // itself and seals them in Complete.
+    using MaterializeHook = std::function<void(std::uint64_t address, std::uint64_t bytes)>;
+    void SetMaterializeHook(MaterializeHook hook) { materializeHook = std::move(hook); }
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault Complete(id<MTLCommandBuffer> commands);
     // Asynchronous completion (MetalTimeline). True when Complete must copy bytes into guest
     // memory on the CPU (a staged or copied range, a copy-back that is not encoded, DCC metadata):
@@ -109,6 +115,7 @@ private:
     std::string dccKeysNote(const Image& image, const Graphics::GuestTextureResource& descriptor);
     CpuReadHook cpuRead;
     MetalLazyCopyBacks* lazyCopyBacks = nullptr;
+    MaterializeHook materializeHook;
     // Lazy copy-backs this work encoded ahead of its readers: sealed in the image cache once the
     // work completed.
     std::vector<MetalLazyCopyBacks::Materialized> materialized;

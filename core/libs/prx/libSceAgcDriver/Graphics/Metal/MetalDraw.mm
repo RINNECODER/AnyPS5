@@ -337,6 +337,11 @@ void MetalDraw::SetCpuReadHook(std::function<void(std::uint64_t, std::uint64_t)>
     cpuReadHook = std::move(hook);
 }
 
+void MetalDraw::SetMaterializeHook(std::function<void(std::uint64_t, std::uint64_t)> hook) {
+    std::lock_guard<std::recursive_mutex> lock(drawMutex);
+    materializeHook = std::move(hook);
+}
+
 void MetalDraw::InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed) {
     std::lock_guard<std::recursive_mutex> lock(drawMutex);
     imageCache.Clear();
@@ -560,6 +565,7 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
     auto& resources = *resourcesOwner;
     if (cpuReadHook) resources.SetCpuReadHook(cpuReadHook);
     resources.SetLazyCopyBacks(&lazyCopyBacks);
+    if (materializeHook) resources.SetMaterializeHook(materializeHook);
     auto texture = resources.Texture(colorSurface(destination), true, false, false, destination.mip);
     id<MTLTexture> handle = ColorAttachmentView(texture->Texture(), RenderPixelFormat(destination.format));
     switch (handle.pixelFormat) {
@@ -742,6 +748,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     auto& resources = *resourcesOwner;
     if (cpuReadHook) resources.SetCpuReadHook(cpuReadHook);
     resources.SetLazyCopyBacks(&lazyCopyBacks);
+    if (materializeHook) resources.SetMaterializeHook(materializeHook);
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];

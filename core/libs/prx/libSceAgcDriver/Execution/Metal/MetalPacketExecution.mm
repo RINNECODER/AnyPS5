@@ -455,7 +455,12 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
         auto bindings = std::make_shared<MetalShaderResources>(*backend, ranges, resident, draw ? &draw->HostAliases() : nullptr,
             draw ? draw->ImageCache() : nullptr);
         bindings->SetCpuReadHook([this](std::uint64_t address, std::uint64_t bytes) { BeforeCpuRead(address, bytes); });
-        if (draw) bindings->SetLazyCopyBacks(&draw->LazyCopyBacks());
+        if (draw) {
+            bindings->SetLazyCopyBacks(&draw->LazyCopyBacks());
+            bindings->SetMaterializeHook([this](std::uint64_t address, std::uint64_t bytes) {
+                MaterializeCopyBacks(MetalLazyCopyBacks::Cause::GpuRead, address, bytes);
+            });
+        }
         const auto descriptors = bindings->Bindings(pipeline->Reflection());
         if (GpuStallWatch::DumpPath() != nullptr) {
             GpuStallWatch::SetDetail(DescribeDispatch(stallUserData, descriptors) +

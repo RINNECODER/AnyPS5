@@ -81,6 +81,9 @@ public:
     // surfaces), so the driver can first finish committed work that may write them. It may run
     // completions that draw again, hence the recursive drawMutex.
     void SetCpuReadHook(std::function<void(std::uint64_t, std::uint64_t)> hook);
+    // Materializes lazy copy-backs over guest bytes a binding reads through memory
+    // (MetalShaderResources::SetMaterializeHook); the driver commits them to its timeline.
+    void SetMaterializeHook(std::function<void(std::uint64_t, std::uint64_t)> hook);
     [[nodiscard]] std::optional<ShaderRecompiler::BdaAbi::Fault> Draw(
         const Graphics::State& state, const Pm4::DrawParameters& draw,
         std::span<const Graphics::CompiledShader> shaders,
@@ -103,6 +106,7 @@ private:
     std::unique_ptr<MetalMultisampleExpander> multisampleExpander;
     std::recursive_mutex drawMutex;
     std::function<void(std::uint64_t, std::uint64_t)> cpuReadHook;
+    std::function<void(std::uint64_t, std::uint64_t)> materializeHook;
     id<MTLBuffer> sampleCounter = nil;
     id<MTLBuffer> sampleTarget = nil;
     // Last, so their textures go before the device they were made on.

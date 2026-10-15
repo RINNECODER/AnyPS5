@@ -231,6 +231,7 @@ void MetalShaderResources::forgetCachedImages(std::uint64_t begin, std::uint64_t
 
 void MetalShaderResources::materializeBefore(std::uint64_t address, std::uint64_t bytes, const MetalTexture* keep) {
     if (lazyCopyBacks == nullptr || bytes == 0 || lazyCopyBacks->Empty()) return;
+    if (materializeHook && keep == nullptr) return materializeHook(address, bytes);
     const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
     for (const auto& range : borrowedRanges) {
         const auto clippedBegin = std::max(address, range.guestAddress);

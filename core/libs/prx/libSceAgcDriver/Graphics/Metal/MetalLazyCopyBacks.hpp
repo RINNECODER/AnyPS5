@@ -142,27 +142,10 @@ public:
         return done;
     }
 
-    // Command buffers of encoded copy-backs over [begin, begin + bytes) (or anywhere, with a null
-    // `begin`) that have not completed. Whoever encoded a copy-back normally commits it to the
-    // timeline, but a reader's binding may encode one and then be dropped (a working-set retry, a
-    // skipped work): a CPU reader of the bytes waits for these, whatever happened to the encoder.
-    std::vector<id<MTLCommandBuffer>> Unfinished(const void* begin = nullptr, std::size_t bytes = 0) {
-        std::lock_guard lock(mutex);
-        std::erase_if(inFlight, [](const InFlight& copy) { return copy.commands.status >= MTLCommandBufferStatusCompleted; });
-        std::vector<id<MTLCommandBuffer>> result;
-        const auto from = reinterpret_cast<std::uintptr_t>(begin);
-        for (const auto& copy : inFlight) {
-            if (begin != nullptr && !copy.entry.overlaps(from, from + bytes)) continue;
-            if (std::find(result.begin(), result.end(), copy.commands) == result.end()) result.push_back(copy.commands);
-        }
-        return result;
-    }
-
     // Drops every record without encoding it (shutdown, a failed device).
     void Discard() {
         std::lock_guard lock(mutex);
         entries.clear();
-        inFlight.clear();
     }
 
     [[nodiscard]] bool Empty() const {
@@ -243,20 +226,11 @@ private:
             }
         }
         statistics.encoded += taken.size();
-        std::erase_if(inFlight, [](const InFlight& copy) { return copy.commands.status >= MTLCommandBufferStatusCompleted; });
-        for (auto& entry : taken) {
-            inFlight.push_back({commands, {nullptr, nil, 0, {}, entry.host, entry.bytes, entry.alias, entry.guestAddress}});
-            done.push_back({std::move(entry.texture), entry.host, entry.guestAddress, entry.bytes});
-        }
+        for (auto& entry : taken) done.push_back({std::move(entry.texture), entry.host, entry.guestAddress, entry.bytes});
     }
 
-    struct InFlight {
-        id<MTLCommandBuffer> commands;
-        Entry entry;
-    };
     mutable std::mutex mutex;
     std::vector<Entry> entries;
-    std::vector<InFlight> inFlight;
     Statistics statistics;
 };
 
