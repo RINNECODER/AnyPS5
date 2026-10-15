@@ -24,6 +24,7 @@
 #include "prx/libSceAgcDriver/Execution/Metal/DirectDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 #include <mach/mach.h>
 #include <libproc.h>
 #include <pthread.h>
@@ -486,6 +487,14 @@ int main(int argc, char** argv) {
         Capture::Decompress(chunk.data, chunk.stored, range.host + (chunk.guest - range.guest), chunk.raw);
         residentBytes += chunk.raw;
         range.filled = true;
+    }
+    // The game's direct-memory mappings are write-watched (the driver's write tracker sees CPU
+    // stores to them); so are the replay's, so the replay's own stores (page deltas, the pre-frame
+    // restore) reach the tracker as the title's would.
+    for (const auto& range : capture.ranges) {
+        const auto begin = reinterpret_cast<std::uintptr_t>(range.host) & ~(pageSize - 1);
+        const auto end = (reinterpret_cast<std::uintptr_t>(range.host) + range.bytes + pageSize - 1) & ~(pageSize - 1);
+        GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(reinterpret_cast<const void*>(begin), end - begin);
     }
 
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();

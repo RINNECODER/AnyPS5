@@ -1,5 +1,6 @@
 #include "MetalDraw.hpp"
 #include "MetalShaderResources.hpp"
+#include "GuestImageWriteTracker.hpp"
 #include "MetalRenderState.hpp"
 #include "MetalDepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
@@ -327,6 +328,16 @@ MetalDraw::MetalDraw(std::unique_ptr<MetalDevice> owned, MetalDevice* shared)
       hostAliases(std::make_unique<MetalGuestHostAliases>(backend.Device())) {
     if (![backend.Device() supportsFamily:MTLGPUFamilyApple7] || ![backend.Device() supportsFamily:MTLGPUFamilyMetal3]) {
         throw std::invalid_argument("Metal draw requires an Apple GPU with Metal 3 integer and GPU address support");
+    }
+    // Uploaded surfaces prove their bytes with the guest write tracker instead of a hash of all of
+    // them (GuestImageCache.hpp).
+    // ANYPS5_METAL_IMAGE_TRACK=0 hashes them as before.
+    static const bool track = [] {
+        const char* value = std::getenv("ANYPS5_METAL_IMAGE_TRACK");
+        return value == nullptr || *value != '0';
+    }();
+    if (track && GuestImageWriteStamps::Available()) {
+        imageCache.SetWriteTracker(WatchedImageWriteTracker());
     }
 }
 

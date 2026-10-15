@@ -598,9 +598,12 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     if (written) forgetCachedImages(descriptor.baseAddress, end);
     std::shared_ptr<MetalTexture> texture;
     bool textureCompare = compare;
+    // The write-tracker generation an uploaded surface proves its bytes against (GuestImageCache::Track).
+    std::uint64_t tracked = 0;
     if (cached) {
         texture = cached->texture;
         textureCompare = cached->compare;
+        tracked = cached->tracked;
     } else {
         if (BindTrace::Active()) {
             BindTrace::Log("  image miss 0x%llx %s bytes %zu written %d cacheable %d staged %d keys %u content %llx",
@@ -609,6 +612,8 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         }
         texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
         if (keys == Graphics::DccKeys::Uncompressed) {
+            // Collected before the upload reads the bytes: a CPU store after this is seen.
+            if (cacheable && !written) tracked = imageCache->Track(host.data(), bytes);
             if (cpuRead && !texture->UploadsInPlace(buffer.buffer, buffer.offset)) cpuRead(descriptor.baseAddress, bytes);
             texture->Upload(buffer.buffer, buffer.offset);
         } else {
@@ -623,6 +628,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     images.push_back({texture, buffer, host, written, keys, std::move(writableRanges), std::move(original)});
     images.back().compare = textureCompare;
     images.back().cacheable = cacheable;
+    images.back().tracked = written ? 0 : tracked;
     // Once this work writes the surface its texels are the guest bytes again.
     images.back().content = written ? 0 : content;
     if (written) noteWrite(images.back(), descriptor, storage, writtenLevel);
@@ -961,7 +967,7 @@ void MetalShaderResources::CommittedWithoutWaiting() {
         for (const auto& image : images) {
             if (image.cacheable) {
                 imageCache->Insert(image.texture->Descriptor().baseAddress, image.host.data(), image.texture, image.compare,
-                    image.written ? 0 : image.content, image.written);
+                    image.written ? 0 : image.content, image.written, image.tracked);
             }
         }
     }
@@ -1054,7 +1060,7 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         for (const auto& image : images) {
             if (image.cacheable) {
                 imageCache->Insert(image.texture->Descriptor().baseAddress, image.host.data(), image.texture, image.compare,
-                    image.written ? 0 : image.content, image.written);
+                    image.written ? 0 : image.content, image.written, image.tracked);
             }
         }
     }
