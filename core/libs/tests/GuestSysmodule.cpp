@@ -138,7 +138,15 @@ void CheckUnwindInfo() {
     }
     RequireUnwindMatchesRegion(host + 0x2000);
     RequireUnwindMatchesRegion(host);
-    if (reinterpret_cast<std::uintptr_t>(host) >= 0x2000 + reinterpret_cast<std::uintptr_t>(hostRegion.BaseAddress)) RequireUnwindMatchesRegion(host - 0x2000);
+    const auto* anchor = reinterpret_cast<const char*>(&RtlPcToFileHeader);
+    MEMORY_BASIC_INFORMATION anchorRegion{};
+    Require(VirtualQuery(anchor, &anchorRegion, sizeof(anchorRegion)) != 0);
+    if (anchorRegion.RegionSize > 0x4000) {
+        RequireUnwindMatchesRegion(anchor + 0x3000);
+        RequireUnwindMatchesRegion(anchor);
+        RequireUnwindMatchesRegion(anchor + 0x1000);
+        RequireUnwindMatchesRegion(anchor + 0x2000);
+    }
     static int data = 1;
     static const char text[] = "unwind region";
     RequireUnwindMatchesRegion(&data);
