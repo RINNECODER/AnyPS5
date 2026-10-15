@@ -186,7 +186,6 @@ public:
     static std::size_t StoreSmallPending(const char* reason);
     static bool AnyPending();
     static bool StoreAtFlipRequested(const char* value);
-    static bool StoreAtLabelRequested(const char* value);
     // See PendingSerial: a change of a surface's source outside the registry (a unit shadow
     // retile) moves it too.
     static void BumpPendingSerial();
