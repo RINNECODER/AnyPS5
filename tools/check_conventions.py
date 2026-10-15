@@ -38,8 +38,11 @@ STUB_BODY = re.compile(r"^(?:\(void\)\s*\w+\s*;|static_cast<void>\(\s*\w+\s*\)\s
 SYSTEM_DEPENDENCY = re.compile(r"\b(find_package\s*\((?!\s*(Python3|Threads|Git)\b)|pkg_check_modules\b|pkg_search_module\b|find_(library|path|program|file)\b)", re.I)
 TITLE = re.compile(r"\b(PPSA|CUSA)\d{5}\b")
 EXTENSION = re.compile(r"__attribute__|__declspec|#\s*pragma\s+(?!once\b)")
-LINK = re.compile(r"\]\(([^)\s]+)")
-SECTION = re.compile(r"^###\s*(.+?)\s*$", re.M)
+LINK = re.compile(r"\[[^\]]+\]\(([^)\s]+)")
+FENCE = re.compile(r"^ {0,3}(```|~~~).*?^ {0,3}\1[ \t]*\r?$|^ {0,3}(?:```|~~~).*\Z", re.S | re.M)
+INLINE = re.compile(r"`[^`\n]*`")
+SECTION = re.compile(r"^###(?!#)\s*(.+?)\s*$", re.M)
+KEY = re.compile(r"^( *)([A-Za-z0-9_-]+|'[^']*'|\"[^\"]*\"):(?:\s+(.*?))?\s*$")
 
 
 def git(*args, text=True):
