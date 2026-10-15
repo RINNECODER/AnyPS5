@@ -1,5 +1,6 @@
 #include "MetalGuestMemory.hpp"
 #include "MetalDevice.hpp"
+#include "prx/libc/include/GuestWriteWatch.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -204,8 +205,21 @@ id<MTLBuffer> MetalGuestHostAliases::alias(std::uintptr_t begin, std::uintptr_t 
 
 id<MTLBuffer> MetalGuestHostAliases::newAlias(std::uintptr_t first, std::uintptr_t last) const {
     if (last - first > device.maxBufferLength || fileBacked(first, last)) return nil;
-    id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:reinterpret_cast<void*>(first) length:last - first
-                                                   options:MTLResourceStorageModeShared deallocator:nil];
+    const auto create = [&] {
+        return [device newBufferWithBytesNoCopy:reinterpret_cast<void*>(first) length:last - first
+                                        options:MTLResourceStorageModeShared deallocator:nil];
+    };
+    id<MTLBuffer> buffer = create();
+    if (buffer == nil && GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix()) {
+        // Metal refuses a no-copy buffer over pages of mixed protection, and the image cache's
+        // write tracking (GuestImageWriteTracker.hpp) leaves its surfaces' pages write-protected.
+        // A host write over the range makes it writable again and marks its pages written (so
+        // no store is missed while unprotected); an alias that exists keeps working when its
+        // pages are protected again.
+        GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(reinterpret_cast<const void*>(first), last - first);
+        buffer = create();
+        GuestWriteWatch::GuestWriteWatchEndHostWrite_nid_postfix(reinterpret_cast<const void*>(first), last - first);
+    }
     if (buffer != nil && (buffer.contents != reinterpret_cast<void*>(first) || buffer.gpuAddress == 0 ||
                              buffer.gpuAddress > std::numeric_limits<std::uint64_t>::max() - buffer.length)) {
         return nil;

@@ -81,6 +81,8 @@ private:
         bool cacheable = false;
         // What the cached texels stand for (GuestImageCache::Find).
         std::uint64_t content = 0;
+        // The write-tracker generation the uploaded bytes were collected at (0: hashed instead).
+        std::uint64_t tracked = 0;
         // The levels and layers this work's bindings may write (copied back), empty when not written.
         MetalTexture::Subresources writtenPart{~0u, 0, ~0u, 0};
     };

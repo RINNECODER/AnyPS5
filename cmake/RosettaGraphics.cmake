@@ -169,6 +169,14 @@ function(anyps5_rosetta_graphics_tests)
     target_compile_features(rosetta_image_cache_tests PRIVATE cxx_std_20)
     add_test(NAME rosetta_image_cache COMMAND arch -x86_64 $<TARGET_FILE:rosetta_image_cache_tests>)
     set_tests_properties(rosetta_image_cache PROPERTIES TIMEOUT 30 LABELS rosetta)
+    # The image cache with the guest write tracker: real watched pages and write faults, no GPU.
+    add_test_executable(rosetta_image_cache_tracking_tests ${ANYPS5_ROSETTA_LIBS_ROOT}/tests/rosetta_direct_graphics/ImageCacheTrackingTest.cpp)
+    target_include_directories(rosetta_image_cache_tracking_tests PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT})
+    target_compile_features(rosetta_image_cache_tracking_tests PRIVATE cxx_std_20)
+    target_link_libraries(rosetta_image_cache_tracking_tests PRIVATE libc)
+    set_target_properties(rosetta_image_cache_tracking_tests PROPERTIES BUILD_RPATH ${UNPATCHED_DIR})
+    add_test(NAME rosetta_image_cache_tracking COMMAND arch -x86_64 $<TARGET_FILE:rosetta_image_cache_tracking_tests>)
+    set_tests_properties(rosetta_image_cache_tracking PROPERTIES TIMEOUT 30 LABELS rosetta)
 
 
     add_test_executable(rosetta_direct_host_window_tests
