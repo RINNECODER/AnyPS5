@@ -241,11 +241,16 @@ def main():
                         help='partitioned build: emit a preamble module plus one module per chunk, '
                              'compile each and link one image into this directory')
     parser.add_argument('--no-object', action='store_true', help='emit the modules but do not compile or link')
+    parser.add_argument('--abi', type=Path,
+                        help='ABI annotations the contracts were generated from; a stale contracts/ABI '
+                             'pair is rejected instead of stubbing a verified import')
     parser.add_argument('--summary', type=Path)
     args = parser.parse_args()
 
     global IMAGE
     contracts = json.loads(Path(args.contracts).read_text())
+    if args.abi:
+        abi.validate_import_annotations(contracts, json.loads(args.abi.read_text()))
     specs = sorted(contracts['functions'], key=lambda spec: spec['address'])
     if args.stride:
         specs = specs[::args.stride]

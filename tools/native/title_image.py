@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core" / "aot"))
 from compiler import Image, compile_image, Rejected  # noqa: E402
 from toolchain import build_native_object  # noqa: E402
+import abi  # noqa: E402
 
 
 def title_process_parameters(image):
@@ -187,8 +188,12 @@ def main():
                         help='slide added to every guest vaddr (the Rosetta relinked base by default)')
     parser.add_argument('--hle-log', action='store_true',
                         help='log every import call and its return through HleLogCall/HleLogReturn')
+    parser.add_argument('--abi', help='ABI annotations the contracts were generated from; a stale '
+                                      'contracts/ABI pair is rejected instead of stubbing a verified import')
     args = parser.parse_args()
     contracts = json.loads(open(args.contracts).read())
+    if args.abi:
+        abi.validate_import_annotations(contracts, json.loads(open(args.abi).read()))
     # The slide must be set before the first Image so the process-parameter bindings carry it.
     contracts['guest_base'] = args.guest_base
     image = Image(args.elf, contracts)
