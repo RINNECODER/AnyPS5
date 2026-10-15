@@ -1,11 +1,16 @@
 #include "SceTypes.hpp"
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#ifdef _WIN32
+#include <aclapi.h>
+#include <windows.h>
+#endif
 
 extern "C" {
 int APS5_VABI kqueue_nid_postfix();
@@ -106,6 +111,15 @@ template <typename TCall> static bool Throws(TCall call) {
         return true;
     }
     return false;
+}
+
+template <typename TCall> static std::string ThrownMessage(TCall call) {
+    try {
+        call();
+    } catch (const std::runtime_error& error) {
+        return error.what();
+    }
+    return {};
 }
 
 static void CreateAndClose() {
@@ -308,6 +322,68 @@ static void FileWatch() {
     Require(std::filesystem::remove(path));
 }
 
+#ifndef _WIN32
+static void RenameAndDeleteWatchedFile() {
+    const auto path = TemporaryName("moved");
+    const auto renamed = path + "-renamed";
+    const int file = open_nid_postfix(path.c_str(), ReadWrite | Create, 0644);
+    Require(file >= 0);
+    const int kq = kqueue_nid_postfix();
+    KernelEvent events[4]{};
+    const auto ident = static_cast<std::uintptr_t>(file);
+    Require(Apply(kq, Change(ident, EvfiltVnode, EvAdd | EvClear, NoteDelete | NoteRename)) == 0);
+    Require(sceKernelRename(path.c_str(), renamed.c_str()) == SceOk);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    Require(Poll(kq, events, 4) == 1 && events[0].ident == ident && events[0].fflags == NoteRename);
+    Require(unlink_nid_postfix(renamed.c_str()) == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    Require(Poll(kq, events, 4) == 1 && events[0].ident == ident && events[0].fflags == NoteDelete);
+    Require(close_nid_postfix(file) == 0);
+    Require(close_nid_postfix(kq) == 0);
+}
+#endif
+
+#if !defined(_WIN32) && !defined(__APPLE__)
+static std::uint32_t NotesThrough(int kq, std::uintptr_t ident, std::uint32_t last) {
+    std::uint32_t notes = 0;
+    KernelEvent events[4]{};
+    while ((notes & last) == 0) {
+        Require(Wait(kq, events, 4) == 1 && events[0].ident == ident);
+        notes |= events[0].fflags;
+    }
+    return notes;
+}
+
+static void MoveDirectoryEntries() {
+    const auto path = TemporaryName("moves");
+    const auto outside = path + "-outside";
+    Require(mkdir_nid_postfix(path.c_str(), 0755) == 0 && mkdir_nid_postfix(outside.c_str(), 0755) == 0);
+    const int child = open_nid_postfix((path + "/first.bin").c_str(), ReadWrite | Create, 0644);
+    Require(child >= 0 && close_nid_postfix(child) == 0);
+    const int directory = open_nid_postfix(path.c_str(), Directory, 0);
+    Require(directory >= 0);
+    const int kq = kqueue_nid_postfix();
+    KernelEvent events[4]{};
+    const auto ident = static_cast<std::uintptr_t>(directory);
+    Require(Apply(kq, Change(ident, EvfiltVnode, EvAdd | EvClear, NoteWrite | NoteExtend | NoteLink)) == 0);
+    for (int i = 0; i < 64; ++i) {
+        Require(sceKernelRename((path + "/first.bin").c_str(), (path + "/second.bin").c_str()) == SceOk);
+        Require(sceKernelRename((path + "/second.bin").c_str(), (path + "/first.bin").c_str()) == SceOk);
+    }
+    Require(mkdir_nid_postfix((path + "/sub").c_str(), 0755) == 0);
+    Require(NotesThrough(kq, ident, NoteLink) == (NoteWrite | NoteLink));
+    Require(sceKernelRename((path + "/first.bin").c_str(), (outside + "/first.bin").c_str()) == SceOk);
+    Require(Wait(kq, events, 4) == 1 && events[0].ident == ident && events[0].fflags == (NoteWrite | NoteExtend));
+    Require(sceKernelRename((outside + "/first.bin").c_str(), (path + "/first.bin").c_str()) == SceOk);
+    Require(Wait(kq, events, 4) == 1 && events[0].ident == ident && events[0].fflags == (NoteWrite | NoteExtend));
+    Require(sceKernelRename((path + "/sub").c_str(), (outside + "/sub").c_str()) == SceOk);
+    Require(Wait(kq, events, 4) == 1 && events[0].ident == ident && events[0].fflags == (NoteWrite | NoteExtend | NoteLink));
+    Require(close_nid_postfix(directory) == 0);
+    Require(close_nid_postfix(kq) == 0);
+    Require(std::filesystem::remove_all(path) == 2 && std::filesystem::remove_all(outside) == 2);
+}
+#endif
+
 static void DirectoryWatch() {
     const auto path = TemporaryName("directory");
     Require(mkdir_nid_postfix(path.c_str(), 0755) == 0);
@@ -328,6 +404,86 @@ static void DirectoryWatch() {
     Require(std::filesystem::remove_all(path) == 3);
 }
 
+#ifdef _WIN32
+static std::string Utf8(const std::wstring& text) {
+    const int size = ::WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    Require(size > 0);
+    std::string narrow(static_cast<std::size_t>(size), '\0');
+    Require(::WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, narrow.data(), size, nullptr, nullptr) == size);
+    narrow.pop_back();
+    return narrow;
+}
+
+static PACL DenyListing(const std::wstring& directory, PSECURITY_DESCRIPTOR& owner) {
+    wchar_t account[256]{};
+    DWORD count = static_cast<DWORD>(sizeof(account) / sizeof(account[0]));
+    Require(::GetUserNameW(account, &count) != FALSE);
+    PACL original = nullptr;
+    Require(::GetNamedSecurityInfoW(directory.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, &original, nullptr, &owner) == ERROR_SUCCESS);
+    _EXPLICIT_ACCESS_W denied{};
+    denied.grfAccessPermissions = FILE_LIST_DIRECTORY;
+    denied.grfAccessMode = DENY_ACCESS;
+    denied.grfInheritance = NO_INHERITANCE;
+    denied.Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+    denied.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    denied.Trustee.ptstrName = account;
+    PACL blocked = nullptr;
+    Require(::SetEntriesInAclW(1, &denied, original, &blocked) == ERROR_SUCCESS);
+    const DWORD applied = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(directory.c_str()), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION, nullptr, nullptr, blocked, nullptr);
+    ::LocalFree(blocked);
+    Require(applied == ERROR_SUCCESS);
+    return original;
+}
+
+static void RequireContext(const std::string& message, const std::string& context) {
+    if (message.find(context) == std::string::npos) {
+        std::fprintf(stderr, "the vnode watch error lacks \"%s\": %s\n", context.c_str(), message.c_str());
+        std::abort();
+    }
+}
+
+static void RequireContextInsensitive(std::string message, std::string context) {
+    const auto lower = [](char character) { return static_cast<char>(std::tolower(static_cast<unsigned char>(character))); };
+    std::transform(message.begin(), message.end(), message.begin(), lower);
+    std::transform(context.begin(), context.end(), context.begin(), lower);
+    if (message.find(context) == std::string::npos) {
+        std::fprintf(stderr, "the vnode watch error lacks \"%s\"\n", context.c_str());
+        std::abort();
+    }
+}
+
+static void DeniedParentWatch() {
+    const auto path = TemporaryName("denied");
+    Require(mkdir_nid_postfix(path.c_str(), 0755) == 0);
+    const int file = open_nid_postfix((path + "/watched.bin").c_str(), ReadWrite | Create, 0644);
+    Require(file >= 0);
+    PSECURITY_DESCRIPTOR owner = nullptr;
+    const auto directory = std::filesystem::absolute(path).wstring();
+    const PACL original = DenyListing(directory, owner);
+    const int kq = kqueue_nid_postfix();
+    KernelEvent events[4]{};
+    const auto ident = static_cast<std::uintptr_t>(file);
+    const std::string message = ThrownMessage([kq, ident] {
+        Apply(kq, Change(ident, EvfiltVnode, EvAdd, NoteWrite));
+    });
+    const DWORD restored = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(directory.c_str()), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION, nullptr, nullptr, original, nullptr);
+    Require(restored == ERROR_SUCCESS);
+    ::LocalFree(owner);
+    RequireContext(message, "parent");
+    RequireContext(message, "error=5");
+    RequireContextInsensitive(message, Utf8(directory));
+    Require(Apply(kq, Change(ident, EvfiltVnode, EvAdd | EvClear, NoteWrite)) == 0);
+    Require(write_nid_postfix(file, "abc", 3) == 3);
+    Require(Wait(kq, events, 4) == 1 && events[0].ident == ident);
+    Require((events[0].fflags & NoteWrite) != 0);
+    Require(close_nid_postfix(file) == 0);
+    Require(close_nid_postfix(kq) == 0);
+    Require(std::filesystem::remove_all(path) == 2);
+}
+#endif
 static void Timeout() {
     const int kq = kqueue_nid_postfix();
     KernelEvent event{};
@@ -346,7 +502,17 @@ int main() {
     SocketPair();
     Errors();
     FileWatch();
+#ifndef _WIN32
+    RenameAndDeleteWatchedFile();
+#endif
+#if !defined(_WIN32) && !defined(__APPLE__)
+    MoveDirectoryEntries();
+#endif
     DirectoryWatch();
+    DeleteWatchedFile();
+#ifdef _WIN32
+    DeniedParentWatch();
+#endif
     Timeout();
     return 0;
 }

@@ -20,8 +20,8 @@ namespace GuestArena {
 class WindowsMappings {
 public:
     static WindowsMappings& Get() {
-        static WindowsMappings mappings;
-        return mappings;
+        static auto* mappings = new WindowsMappings;
+        return *mappings;
     }
 
     void* Reserve(void* address, std::size_t bytes) {

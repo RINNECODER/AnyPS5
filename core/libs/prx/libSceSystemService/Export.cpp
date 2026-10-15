@@ -85,15 +85,15 @@ extern "C" {
 
 int APS5_VABI sceSystemServiceLoadExec(const char* path, const char* const* arguments) {
     if (!path || !*path) return SYSTEM_SERVICE_ERROR_PARAMETER;
-    const bool exit = std::strcmp(path, "exit") == 0;
-    if (!exit && std::strcmp(path, OwnExecutable) != 0) {
+    if (std::strcmp(path, "exit") == 0) LibcExitWithoutHandlers_nid_no_patch(0);
+    if (std::strcmp(path, OwnExecutable) != 0) {
         NotImplemented_nid_no_patch("sceSystemServiceLoadExec: executable replacement");
     }
-    if (!exit && arguments != nullptr && arguments[0] != nullptr) {
+    if (arguments != nullptr && arguments[0] != nullptr) {
         NotImplemented_nid_no_patch("sceSystemServiceLoadExec: arguments for the relaunched executable");
     }
     LibcRunShutdown_nid_postfix();
-    if (!exit) RelaunchHostExecutable();
+    RelaunchHostExecutable();
     std::exit(0);
 }
 
