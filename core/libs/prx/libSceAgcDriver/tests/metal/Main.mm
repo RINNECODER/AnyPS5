@@ -10,6 +10,7 @@ void RunGuestMemoryTests(const MetalTests::Context& context);
 void RunCommandBatchingTests(const MetalTests::Context& context);
 void RunLabelEventTests(const MetalTests::Context& context);
 void RunCaptureLogicTests(const MetalTests::Context& context);
+void RunKnownStoresTests(const MetalTests::Context& context);
 #if ANYPS5_METAL_SHADER_BRIDGE
 void RunShaderPipelineTests(const MetalTests::Context& context);
 void RunShaderAlignmentTests(const MetalTests::Context& context);
@@ -50,6 +51,8 @@ int main(int argc, char** argv) {
             std::cout << "Label events GPU ordering passed\n";
             RunCaptureLogicTests(context);
             std::cout << "Frame capture bookkeeping passed\n";
+            RunKnownStoresTests(context);
+            std::cout << "Timeline known stores passed\n";
 #if ANYPS5_METAL_SHADER_BRIDGE
             RunShaderPipelineTests(context);
             std::cout << "Converted shader pipeline GPU output passed\n";

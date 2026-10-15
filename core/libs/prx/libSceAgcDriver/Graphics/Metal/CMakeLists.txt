@@ -82,6 +82,7 @@ if(BUILD_TESTING)
         "${metalTestDirectory}/CommandBatching.mm"
         "${metalTestDirectory}/LabelEvents.mm"
         "${metalTestDirectory}/CaptureLogic.mm"
+        "${metalTestDirectory}/KnownStores.mm"
     )
     target_compile_options(metal_utility_tests PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
     target_link_libraries(metal_utility_tests PRIVATE anyps5_metal_utilities)

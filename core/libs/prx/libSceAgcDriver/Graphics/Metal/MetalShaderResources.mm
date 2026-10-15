@@ -362,7 +362,6 @@ Graphics::DccKeys MetalShaderResources::textureKeys(const Graphics::GuestTexture
     if (count > std::numeric_limits<std::uint64_t>::max() - descriptor.dccAddress) {
         throw std::invalid_argument("Metal texture DCC metadata range overflows");
     }
-    if (cpuRead) cpuRead(descriptor.dccAddress, count);
     for (const auto& image : images) {
         const auto begin = image.texture->Descriptor().baseAddress;
         if (overlaps(descriptor.dccAddress, descriptor.dccAddress + count, begin, begin + image.texture->GuestBytes()) ||
@@ -378,8 +377,25 @@ Graphics::DccKeys MetalShaderResources::textureKeys(const Graphics::GuestTexture
     }
     auto keys = Graphics::DccKeys::Unreadable;
     if (count != 0 && GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.dccAddress), count)) {
-        auto buffer = mirror(descriptor.dccAddress, count, false);
-        keys = Graphics::ClassifyDccKeys({static_cast<const std::byte*>(buffer.buffer.contents) + buffer.offset, count});
+        // Keys that pending work stores (a guest fill kernel clearing them, or keys an earlier draw
+        // leaves uncompressed) are known without waiting for it, unless the CPU sees bytes there that
+        // no such store explains (MetalTimeline::PendingBytes).
+        std::vector<std::byte> known;
+        if (pendingStores.mayHaveWritten && pendingStores.known && pendingStores.mayHaveWritten(descriptor.dccAddress, count)) {
+            const auto visible = mirror(descriptor.dccAddress, count, false);
+            known.resize(count);
+            if (!pendingStores.known(descriptor.dccAddress,
+                    {static_cast<const std::byte*>(visible.buffer.contents) + visible.offset, count}, known)) known.clear();
+        }
+        if (!known.empty()) {
+            keys = Graphics::ClassifyDccKeys(known);
+        } else {
+            if (cpuRead) cpuRead(descriptor.dccAddress, count);
+            auto buffer = mirror(descriptor.dccAddress, count, false);
+            keys = Graphics::ClassifyDccKeys({static_cast<const std::byte*>(buffer.buffer.contents) + buffer.offset, count});
+        }
+    } else if (cpuRead) {
+        cpuRead(descriptor.dccAddress, count);
     }
     if (keys == Graphics::DccKeys::Uncompressed) return keys;
     std::array<std::byte, 16> probe{};
@@ -968,8 +984,16 @@ bool MetalShaderResources::NeedsSynchronousCompletion() const {
     return false;
 }
 
+std::vector<MetalTimeline::KnownStore> MetalShaderResources::KnownStores() const {
+    std::vector<MetalTimeline::KnownStore> known;
+    known.reserve(deferredKeyStores.size());
+    for (const auto& store : deferredKeyStores) known.push_back(store.known);
+    return known;
+}
+
 std::vector<std::pair<std::uint64_t, std::uint64_t>> MetalShaderResources::WrittenGuestRanges() const {
     std::vector<std::pair<std::uint64_t, std::uint64_t>> written;
+    for (const auto& store : deferredKeyStores) written.emplace_back(store.known.begin, store.known.end);
     for (const auto& write : bufferWrites) written.emplace_back(write.address, write.address + write.host.size());
     for (const auto& image : images) {
         if (!image.written) continue;
@@ -983,7 +1007,7 @@ std::vector<std::pair<std::uint64_t, std::uint64_t>> MetalShaderResources::Writt
 }
 
 // Written images leave their DCC metadata "uncompressed" (the copy-back stores plain texels).
-void MetalShaderResources::markDccUncompressed() {
+void MetalShaderResources::markDccUncompressed(bool committing) {
     for (const auto& image : images) {
         const auto& descriptor = image.texture->Descriptor();
         if (!image.written || descriptor.dccAddress == 0) continue;
@@ -991,6 +1015,25 @@ void MetalShaderResources::markDccUncompressed() {
         if (count == 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(descriptor.dccAddress), count, true)) continue;
         forgetCachedImages(descriptor.dccAddress, descriptor.dccAddress + count);
         auto buffer = mirror(descriptor.dccAddress, count, true);
+        if (committing && pendingStores.mayHaveWritten && pendingStores.mayHaveWritten(descriptor.dccAddress, count)) {
+            // Earlier pending work may store to the keys (a guest fill kernel clearing them): a CPU
+            // store now would land before it. Complete stores them, after this work and so after
+            // that one; until then later work learns them from the timeline (KnownStores).
+            std::span<std::byte> host;
+            try {
+                host = NativeGuestMemory::ContiguousBorrowedRange(descriptor.dccAddress, count, true);
+            } catch (const std::exception&) {
+                host = {};
+            }
+            if (!host.empty()) {
+                const auto* visible = static_cast<const std::byte*>(buffer.buffer.contents) + buffer.offset;
+                DeferredKeyStore store{{descriptor.dccAddress, descriptor.dccAddress + count, {}, {visible, visible + count}}, buffer, host};
+                store.known.pattern.fill(std::byte{0xff});
+                deferredKeyStores.push_back(std::move(store));
+                continue;
+            }
+            if (cpuRead) cpuRead(descriptor.dccAddress, count);
+        }
         std::memset(static_cast<std::byte*>(buffer.buffer.contents) + buffer.offset, 0xff, count);
         std::vector<std::byte> uncompressed(count, std::byte{0xff});
         GuestMemory::Write(descriptor.dccAddress, uncompressed);
@@ -1008,7 +1051,7 @@ void MetalShaderResources::CommittedWithoutWaiting() {
     }
     // Later work reads the keys on the CPU when it binds the surface, after this point; the GPU
     // never reads them, so they may change before this work's copy-back runs.
-    markDccUncompressed();
+    markDccUncompressed(true);
     committedWithoutWaiting = true;
     borrowed.reset();
 }
@@ -1088,7 +1131,13 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
             }
         }
     }
-    if (!committedWithoutWaiting) markDccUncompressed();
+    if (!committedWithoutWaiting) markDccUncompressed(false);
+    for (const auto& store : deferredKeyStores) {
+        forgetCachedImages(store.known.begin, store.known.end);
+        auto* mirrored = static_cast<std::byte*>(store.mirror.buffer.contents) + store.mirror.offset;
+        std::memset(mirrored, 0xff, store.host.size());
+        if (store.host.data() != mirrored) std::memset(store.host.data(), 0xff, store.host.size());
+    }
     // Every image now matches its guest bytes: read ones were uploaded from them and written ones
     // were copied back over them. Work that faulted runs again and records them then.
     if (imageCache != nullptr && fault.state == Abi::FaultState::Empty && !committedWithoutWaiting) {

@@ -295,6 +295,16 @@ inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute&
     return static_cast<std::size_t>(required);
 }
 
+// What a per-vertex fetch of `attribute` may read for any index its descriptor admits: the whole
+// record range for a strided per-vertex attribute (VertexBufferExtent), else what VertexBufferReadSize
+// gives (it does not depend on the vertex index then). A draw whose index buffer the CPU does not
+// scan (its indices are still being written by the GPU) binds this range.
+inline std::size_t WholeVertexReadSize(const ShaderRecompiler::VertexAttribute& attribute, std::uint32_t instances, std::uint32_t firstInstance = 0) {
+    const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
+    if (NullVertexDescriptor(attribute) || attribute.fetchIndex != 0 || stride == 0) return VertexBufferReadSize(attribute, 0, instances, firstInstance);
+    return VertexBufferExtent(attribute);
+}
+
 struct VertexFetch {
     std::uint64_t begin;
     std::uint64_t end;

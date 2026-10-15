@@ -1,5 +1,6 @@
 #include "MetalTestSupport.hpp"
 #include "MetalShaderResources.hpp"
+#include "MetalTimeline.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -367,6 +368,75 @@ void Dcc(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
         }
         Require(rejected,"unresolved DCC metadata exposed stored texels instead of an explicit categorized failure");
         Require(guest==expectedGuest&&keys==expectedKeys,"unresolved DCC rejection changed guest memory");
+    }
+}
+
+// DCC keys that a guest fill kernel still pending on the GPU stores (a GPU clear) are read without
+// waiting for it (MetalTimeline::PendingBytes), unless the guest CPU wrote keys that fill does not
+// explain: then the read waits and sees them. A written image then leaves its keys uncompressed only
+// when it completes (the pending fill would land over an earlier CPU store), and later work learns that.
+void DccPendingFill(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    auto d=Descriptor(); d.dccAddress=0x400000;
+    const auto geometry=Graphics::DescribeSurface(d);
+    std::vector<std::byte> guest(geometry.guestBytes,std::byte{0x93});
+    std::vector<std::byte> keys(geometry.guestBytes/256,std::byte{0xff});
+    std::array<NativeGuestMemory::BorrowedRange,2> ranges{{{d.baseAddress,guest,true},{d.dccAddress,keys,true}}};
+    Metal::MetalTimeline timeline;
+    id<MTLCommandQueue> queue=[backend.Device() newCommandQueue];
+    const auto fill=[&](std::byte value) {
+        Metal::MetalTimeline::KnownStore store{d.dccAddress,d.dccAddress+keys.size(),{},keys};
+        store.pattern.fill(value);
+        timeline.Commit([queue commandBuffer],{},false,{{store.begin,store.end}},{store});
+    };
+    std::size_t waits=0;
+    const auto bind=[&](Metal::MetalShaderResources& resources) {
+        resources.SetCpuReadHook([&](std::uint64_t address,std::uint64_t bytes) {
+            if(address<d.dccAddress+keys.size()&&d.dccAddress<address+bytes&&timeline.MayHaveWritten(address,address+bytes)) ++waits;
+            timeline.Drain();
+        });
+        resources.SetPendingStores(Metal::MetalShaderResources::PendingStoresOf(timeline));
+    };
+    const auto sample=[&](std::array<std::uint8_t,4> expected,const char* message) {
+        Metal::MetalShaderResources resources(backend,ranges); bind(resources);
+        auto texture=resources.Texture(d);
+        auto output=backend.Buffer(256);
+        auto commands=backend.CommandBuffer();
+        Encode(backend,library,commands,@"read2D",texture->SampledView(),output,MTLSizeMake(8,8,1));
+        backend.Wait(commands);
+        Pixels(output.contents,expected,64,message);
+        Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"DCC read over a pending fill faulted");
+    };
+    fill(std::byte{0x00});
+    sample({0,0,0,0},"keys a pending GPU clear stores did not read as cleared");
+    Require(waits==0,"reading keys a pending GPU clear stores waited for the GPU");
+    std::fill(keys.begin(),keys.end(),std::byte{0x40});
+    sample({255,0,0,0},"keys the guest CPU wrote over a pending GPU clear were not read");
+    Require(waits==1&&!timeline.MayHaveWritten(d.dccAddress,d.dccAddress+keys.size()),"keys the guest CPU wrote over a pending GPU clear were read without waiting");
+    fill(std::byte{0x00});
+    {
+        Metal::MetalShaderResources resources(backend,ranges); bind(resources);
+        auto texture=resources.Texture(d,true);
+        auto commands=backend.CommandBuffer();
+        Encode(backend,library,commands,@"write2D",texture->StorageView(),nil,MTLSizeMake(8,8,1));
+        resources.EncodeReadbacks(commands);
+        resources.CommittedWithoutWaiting();
+        Require(std::all_of(keys.begin(),keys.end(),[](auto key){return key==std::byte{0x40};})&&waits==1,"a written DCC image waited for or stored over the pending GPU clear");
+        const auto known=resources.KnownStores();
+        Require(known.size()==1&&known[0].begin==d.dccAddress&&known[0].end==d.dccAddress+keys.size()&&
+                std::all_of(known[0].pattern.begin(),known[0].pattern.end(),[](auto b){return b==std::byte{0xff};}),
+                "a written DCC image did not report the uncompressed keys it stores when it completes");
+        BdaAbi::Fault fault{};
+        timeline.Commit(commands,[&] { fault=resources.Complete(commands); },false,resources.WrittenGuestRanges(),known);
+        std::vector<std::byte> out(keys.size());
+        std::fill(keys.begin(),keys.end(),std::byte{0x00});  // the GPU clear landed
+        Require(timeline.PendingBytes(d.dccAddress,keys,out)&&std::all_of(out.begin(),out.end(),[](auto b){return b==std::byte{0xff};}),
+                "later work did not learn the keys a pending written image leaves uncompressed");
+        timeline.Drain();
+        Require(fault.state==BdaAbi::FaultState::Empty,"written DCC image over a pending GPU clear faulted");
+        Require(std::all_of(keys.begin(),keys.end(),[](auto key){return key==std::byte{0xff};}),"a written DCC image did not leave its keys uncompressed after the GPU clear");
+        const std::array<std::uint8_t,4> color{17,31,73,127};
+        for(unsigned y=0;y<8;++y) for(unsigned x=0;x<8;++x)
+            Require(std::memcmp(guest.data()+y*geometry.mips[0].pitchBytes+x*4,color.data(),4)==0,"a written DCC image over a pending GPU clear lost its texels");
     }
 }
 
@@ -919,6 +989,7 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     SharedViews(backend,library);
     for(auto format:{7u,22u}) Comparison(backend,library,format);
     Dcc(backend,library);
+    DccPendingFill(backend,library);
     DccTypedViews(backend,library);
     DccMetadataViews(backend,library);
     PhysicalAllowed(backend,library);
