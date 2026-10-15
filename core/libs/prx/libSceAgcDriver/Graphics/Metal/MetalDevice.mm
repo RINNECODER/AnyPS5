@@ -4,6 +4,7 @@
 #include "FrameProfile.hpp"
 #include "GpuBusy.hpp"
 
+#include <mutex>
 #include <stdexcept>
 #include <utility>
 
@@ -14,6 +15,172 @@ namespace {
 std::string errorMessage(const char* operation, NSError* error) {
     const char* detail = error.localizedDescription.UTF8String;
     return std::string(operation) + ": " + (detail == nullptr ? "Metal returned no error description" : detail);
+}
+
+}
+
+namespace MetalEncoders {
+
+namespace {
+
+struct Parked {
+    std::mutex mutex;
+    id<MTLCommandBuffer> commands = nil;
+    id<MTLRenderCommandEncoder> encoder = nil;
+    PassKey key;
+    Statistics statistics;
+};
+
+Parked& parked() {
+    static auto* slot = new Parked;
+    return *slot;
+}
+
+// With the slot's mutex held.
+void endLocked(Parked& slot) {
+    [slot.encoder endEncoding];
+    slot.encoder = nil;
+    slot.commands = nil;
+}
+
+std::uintptr_t address(id object) { return reinterpret_cast<std::uintptr_t>((__bridge void*)object); }
+
+id<MTLTexture> rootOf(id<MTLTexture> texture) {
+    while (texture.parentTexture != nil) texture = texture.parentTexture;
+    return texture;
+}
+
+PassAttachment attachmentOf(MTLRenderPassAttachmentDescriptor* attachment) {
+    PassAttachment result;
+    if (attachment.texture == nil) return result;
+    result.texture = address(attachment.texture);
+    result.resolve = address(attachment.resolveTexture);
+    result.textureRoot = address(rootOf(attachment.texture));
+    result.resolveRoot = attachment.resolveTexture != nil ? address(rootOf(attachment.resolveTexture)) : 0;
+    result.level = attachment.level;
+    result.slice = attachment.slice;
+    result.plane = attachment.depthPlane;
+    result.resolveLevel = attachment.resolveLevel;
+    result.resolveSlice = attachment.resolveSlice;
+    result.resolvePlane = attachment.resolveDepthPlane;
+    result.load = attachment.loadAction;
+    result.store = attachment.storeAction;
+    return result;
+}
+
+bool sameTarget(const PassAttachment& a, const PassAttachment& b) {
+    return a.texture == b.texture && a.resolve == b.resolve && a.level == b.level && a.slice == b.slice && a.plane == b.plane &&
+        a.resolveLevel == b.resolveLevel && a.resolveSlice == b.resolveSlice && a.resolvePlane == b.resolvePlane && a.store == b.store;
+}
+
+}
+
+PassKey KeyOf(MTLRenderPassDescriptor* pass) {
+    PassKey key;
+    key.width = pass.renderTargetWidth;
+    key.height = pass.renderTargetHeight;
+    key.layers = pass.renderTargetArrayLength;
+    key.samples = pass.defaultRasterSampleCount;
+    key.depthResolveFilter = pass.depthAttachment.depthResolveFilter;
+    key.stencilResolveFilter = pass.stencilAttachment.stencilResolveFilter;
+    key.visibility = address(pass.visibilityResultBuffer);
+    for (NSUInteger i = 0; i < 8; ++i) key.attachments[i] = attachmentOf(pass.colorAttachments[i]);
+    key.attachments[8] = attachmentOf(pass.depthAttachment);
+    key.attachments[9] = attachmentOf(pass.stencilAttachment);
+    const NSUInteger positions = [pass getSamplePositions:nil count:0];
+    if (positions > 0) {
+        key.positions = positions;
+        [pass getSamplePositions:key.samplePositions.data() count:std::min<NSUInteger>(positions, key.samplePositions.size())];
+    }
+    return key;
+}
+
+bool Continues(const PassKey& open, const PassKey& next) {
+    if (open.visibility != 0 || next.visibility != 0 || open.width != next.width || open.height != next.height ||
+        open.layers != next.layers || open.samples != next.samples || open.depthResolveFilter != next.depthResolveFilter ||
+        open.stencilResolveFilter != next.stencilResolveFilter || open.positions != next.positions) return false;
+    for (NSUInteger i = 0; i < std::min<NSUInteger>(open.positions, open.samplePositions.size()); ++i) {
+        if (open.samplePositions[i].x != next.samplePositions[i].x || open.samplePositions[i].y != next.samplePositions[i].y) return false;
+    }
+    for (std::size_t i = 0; i < open.attachments.size(); ++i) {
+        const auto& attachment = next.attachments[i];
+        if (!sameTarget(open.attachments[i], attachment)) return false;
+        if (attachment.texture != 0 && attachment.load != MTLLoadActionLoad) return false;
+    }
+    return true;
+}
+
+bool IsAttachment(const PassKey& key, id<MTLResource> resource) {
+    if (resource == nil || ![resource respondsToSelector:@selector(parentTexture)]) return false;
+    const auto root = address(rootOf(static_cast<id<MTLTexture>>(resource)));
+    for (const auto& attachment : key.attachments) {
+        if (attachment.texture != 0 && (attachment.textureRoot == root || (attachment.resolveRoot != 0 && attachment.resolveRoot == root))) return true;
+    }
+    return false;
+}
+
+void EndParked(id<MTLCommandBuffer> commands) {
+    auto& slot = parked();
+    std::lock_guard lock(slot.mutex);
+    if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+}
+
+id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands) {
+    EndParked(commands);
+    return [commands computeCommandEncoder];
+}
+
+id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands) {
+    EndParked(commands);
+    return [commands blitCommandEncoder];
+}
+
+id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass) {
+    EndParked(commands);
+    return [commands renderCommandEncoderWithDescriptor:pass];
+}
+
+id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass,
+                                          const PassKey& key, bool mergeable) {
+    auto& slot = parked();
+    {
+        std::lock_guard lock(slot.mutex);
+        if (slot.encoder != nil && slot.commands == commands) {
+            if (mergeable && batch.OpenBatch(commands) && Continues(slot.key, key)) {
+                id<MTLRenderCommandEncoder> encoder = slot.encoder;
+                slot.encoder = nil;
+                slot.commands = nil;
+                ++slot.statistics.merged;
+                return encoder;
+            }
+            endLocked(slot);
+        }
+        ++slot.statistics.passes;
+    }
+    return [commands renderCommandEncoderWithDescriptor:pass];
+}
+
+void EndOrPark(const MetalDevice& batch, id<MTLCommandBuffer> commands, id<MTLRenderCommandEncoder> encoder, const PassKey& key,
+               bool mergeable) {
+    if (!mergeable || key.visibility != 0 || !batch.OpenBatch(commands)) {
+        [encoder endEncoding];
+        return;
+    }
+    auto& slot = parked();
+    std::lock_guard lock(slot.mutex);
+    // Another command buffer's parked encoder must still end before that one commits.
+    if (slot.encoder != nil && slot.encoder != encoder) endLocked(slot);
+    slot.commands = commands;
+    slot.encoder = encoder;
+    slot.key = key;
+}
+
+Statistics TakeStatistics(bool reset) {
+    auto& slot = parked();
+    std::lock_guard lock(slot.mutex);
+    const auto result = slot.statistics;
+    if (reset) slot.statistics = {};
+    return result;
 }
 
 }
@@ -153,6 +320,7 @@ bool MetalDevice::OpenBatch(id<MTLCommandBuffer> commands) const {
 
 void MetalDevice::Flush() const {
     if (open == nil) return;
+    MetalEncoders::EndParked(open);
     if (open.status < MTLCommandBufferStatusCommitted) [open commit];
     flushed = open;
     open = nil;
@@ -162,6 +330,7 @@ void MetalDevice::Flush() const {
 void MetalDevice::Submit(id<MTLCommandBuffer> commands) const {
     validateCommands(commands);
     if (OpenBatch(commands)) return;
+    MetalEncoders::EndParked(commands);
     if (commands.status < MTLCommandBufferStatusCommitted) [commands commit];
 }
 
@@ -266,7 +435,7 @@ id<MTLComputeCommandEncoder> MetalDevice::ComputeEncoder(id<MTLCommandBuffer> co
     if (commands.status >= MTLCommandBufferStatusCommitted) {
         throw std::invalid_argument("Metal command buffer has already been committed");
     }
-    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = MetalEncoders::Compute(commands);
     if (encoder == nil) {
         throw MetalGpuExecutionError("Metal compute command encoder creation failed");
     }
@@ -311,6 +480,7 @@ void MetalDevice::Dispatch(id<MTLComputeCommandEncoder> encoder, NSString* kerne
 void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {
     validateCommands(commands);
     if (OpenBatch(commands)) Flush();
+    MetalEncoders::EndParked(commands);
     if (commands.status < MTLCommandBufferStatusCommitted) {
         [commands commit];
     }

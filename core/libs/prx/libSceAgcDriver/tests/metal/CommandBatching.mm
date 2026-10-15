@@ -302,6 +302,134 @@ void AbandonedWorkReleasesAfterTheBatch(const MetalTests::Context& context, cons
     backend.Flush();
 }
 
+namespace Encoders = AgcDriver::Metal::MetalEncoders;
+
+MTLRenderPassDescriptor* LoadingPass(id<MTLTexture> target) {
+    auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    return pass;
+}
+
+void DrawFirst(id<MTLRenderCommandEncoder> encoder, const Kernels& kernels, id<MTLBuffer> x) {
+    [encoder setRenderPipelineState:kernels.readFirst];
+    [encoder setFragmentBuffer:x offset:0 atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
+// What lets a draw continue the render pass the previous draw left open, and what splits it.
+id<MTLTexture> ViewableTarget(id<MTLDevice> device) {
+    auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint width:Side height:Side mipmapped:NO];
+    descriptor.storageMode = MTLStorageModePrivate;
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+    auto texture = [device newTextureWithDescriptor:descriptor];
+    Require(texture != nil, "Batching test target allocation failed");
+    return texture;
+}
+
+void PassMergeKeys(const MetalTests::Context& context) {
+    auto target = ViewableTarget(context.device);
+    auto other = ViewableTarget(context.device);
+    const auto open = Encoders::KeyOf(LoadingPass(target));
+    Require(Encoders::Continues(open, Encoders::KeyOf(LoadingPass(target))), "A pass with the same loaded attachments did not continue the open one");
+    Require(!Encoders::Continues(open, Encoders::KeyOf(LoadingPass(other))), "A pass with another target continued the open one");
+    for (const auto load : {MTLLoadActionClear, MTLLoadActionDontCare}) {
+        auto pass = LoadingPass(target);
+        pass.colorAttachments[0].loadAction = load;
+        Require(!Encoders::Continues(open, Encoders::KeyOf(pass)), "A pass that clears or drops its target continued the open one");
+    }
+    auto discarding = LoadingPass(target);
+    discarding.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+    Require(!Encoders::Continues(open, Encoders::KeyOf(discarding)), "A pass with other store actions continued the open one");
+    auto withDepth = LoadingPass(target);
+    auto depthDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:Side height:Side mipmapped:NO];
+    depthDescriptor.storageMode = MTLStorageModePrivate;
+    depthDescriptor.usage = MTLTextureUsageRenderTarget;
+    withDepth.depthAttachment.texture = [context.device newTextureWithDescriptor:depthDescriptor];
+    withDepth.depthAttachment.loadAction = MTLLoadActionLoad;
+    Require(!Encoders::Continues(open, Encoders::KeyOf(withDepth)), "A pass with an extra depth attachment continued the open one");
+    auto counting = LoadingPass(target);
+    counting.visibilityResultBuffer = context.Buffer(64);
+    Require(!Encoders::Continues(Encoders::KeyOf(counting), Encoders::KeyOf(counting)), "A pass with a visibility buffer continued");
+    auto positioned = LoadingPass(target);
+    const std::array<MTLSamplePosition, 4> positions{MTLSamplePositionMake(0.25f, 0.25f), MTLSamplePositionMake(0.75f, 0.25f),
+        MTLSamplePositionMake(0.25f, 0.75f), MTLSamplePositionMake(0.75f, 0.75f)};
+    [positioned setSamplePositions:positions.data() count:positions.size()];
+    Require(!Encoders::Continues(open, Encoders::KeyOf(positioned)), "A pass with other sample positions continued the open one");
+
+    // Read-after-write on an attachment: a draw that samples the target, or any view of it, splits.
+    Require(Encoders::IsAttachment(open, target), "The target itself is not seen as an attachment");
+    Require(Encoders::IsAttachment(open, [target newTextureViewWithPixelFormat:MTLPixelFormatR32Sint]), "A view of the target is not seen as an attachment");
+    Require(!Encoders::IsAttachment(open, other) && !Encoders::IsAttachment(open, nil), "Another texture is seen as an attachment");
+    Require(!Encoders::IsAttachment(open, context.Buffer(16)), "A buffer is seen as an attachment");
+    auto resolving = LoadingPass(target);
+    resolving.colorAttachments[0].resolveTexture = other;
+    Require(Encoders::IsAttachment(Encoders::KeyOf(resolving), [other newTextureViewWithPixelFormat:MTLPixelFormatR32Uint]),
+        "A view of the resolve target is not seen as an attachment");
+}
+
+// Parked encoders: merged draws run in one pass and in order, anything else encoded into the
+// command buffer ends the pass first, and a commit with a parked pass commits it.
+void PassMergeParking(const MetalTests::Context& context, const Kernels& kernels) {
+    MetalDevice backend(context.device, context.library);
+    backend.SetBatching(true);
+    auto target = Target(context.device);
+    auto drawn = backend.Buffer(sizeof(std::uint32_t));
+    auto seven = Filled(backend, 7), nine = Filled(backend, 9), x = Filled(backend, 0);
+    static_cast<void>(Encoders::TakeStatistics());
+
+    backend.Wait(Clear(backend, target, 1));
+    auto commands = backend.CommandBuffer();
+    const auto key = Encoders::KeyOf(LoadingPass(target));
+    auto first = Encoders::RenderMerging(backend, commands, LoadingPass(target), key, true);
+    DrawFirst(first, kernels, seven);
+    Encoders::EndOrPark(backend, commands, first, key, true);
+    auto second = Encoders::RenderMerging(backend, commands, LoadingPass(target), key, true);
+    Require(second == first, "A draw into the same attachments did not continue the parked pass");
+    DrawFirst(second, kernels, nine);
+    Encoders::EndOrPark(backend, commands, second, key, true);
+    // A draw that may not merge (it samples an attachment, say) opens a pass of its own.
+    auto third = Encoders::RenderMerging(backend, commands, LoadingPass(target), key, false);
+    Require(third != first, "A draw that may not merge continued the parked pass");
+    Encoders::EndOrPark(backend, commands, third, key, false);
+    auto fourth = Encoders::RenderMerging(backend, commands, LoadingPass(target), key, true);
+    Require(fourth != third, "A draw continued a pass that was not parked");
+    Encoders::EndOrPark(backend, commands, fourth, key, true);
+    // Another encoder ends the parked pass (Metal allows one open encoder per command buffer).
+    auto compute = backend.ComputeEncoder(commands);
+    const std::array<std::uint32_t, 2> parameters{1, 4};
+    [compute setComputePipelineState:kernels.scaleAdd];
+    [compute setBuffer:x offset:0 atIndex:0];
+    [compute setBytes:parameters.data() length:sizeof(parameters) atIndex:1];
+    [compute dispatchThreads:MTLSizeMake(Elements, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [compute endEncoding];
+    auto fifth = Encoders::RenderMerging(backend, commands, LoadingPass(target), key, true);
+    Require(fifth != fourth, "A draw continued a pass that an encoder in between ended");
+    DrawFirst(fifth, kernels, x);
+    Encoders::EndOrPark(backend, commands, fifth, key, true);
+    const auto statistics = Encoders::TakeStatistics();
+    Require(statistics.merged == 1 && statistics.passes == 4, "Pass merging miscounted its passes and merged draws");
+    // Flushing the batch with a pass parked in it ends the pass and commits.
+    backend.Flush();
+    Require(commands.status >= MTLCommandBufferStatusCommitted, "Flush did not commit a batch with a parked pass");
+    auto readback = backend.CommandBuffer();
+    CopyTexel(readback, target, drawn);
+    backend.Wait(readback);
+    Require(commands.status == MTLCommandBufferStatusCompleted && First(drawn) == 4, "The merged draws or the dispatch between passes did not run in order");
+
+    // Without batching (or outside the open batch) nothing is parked.
+    MetalDevice single(context.device, context.library);
+    auto own = single.CommandBuffer();
+    auto alone = Encoders::RenderMerging(single, own, LoadingPass(target), key, true);
+    Encoders::EndOrPark(single, own, alone, key, true);
+    auto next = Encoders::RenderMerging(single, own, LoadingPass(target), key, true);
+    Require(next != alone, "A pass outside a batch was parked");
+    [next endEncoding];
+    single.Wait(own);
+    Require(own.status == MTLCommandBufferStatusCompleted, "The unbatched passes did not complete");
+}
+
 void RunCommandBatchingTests(const MetalTests::Context& context) {
     const auto kernels = Build(context.device);
     OrderingInOneCommandBuffer(context, kernels);
@@ -309,4 +437,6 @@ void RunCommandBatchingTests(const MetalTests::Context& context) {
     FlipPresentsTheRightFrame(context, kernels);
     BatchingOffAndEarlyCommit(context, kernels);
     AbandonedWorkReleasesAfterTheBatch(context, kernels);
+    PassMergeKeys(context);
+    PassMergeParking(context, kernels);
 }

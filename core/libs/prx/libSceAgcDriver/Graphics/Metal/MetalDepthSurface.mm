@@ -110,7 +110,7 @@ std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, 
     }
     if (target.samples == 1) pass.renderTargetArrayLength = layers;
     auto commands = backend.CommandBuffer();
-    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    auto encoder = MetalEncoders::Render(commands, pass);
     if (encoder == nil) throw MetalGpuExecutionError("Metal depth initial clear encoder creation failed");
     [encoder endEncoding];
     backend.Wait(commands);
@@ -245,7 +245,7 @@ id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std
         if (sources[i]->Planes()->depth.pixelFormat != format) throw std::invalid_argument("Metal depth array slices disagree on their pixel format");
     }
     auto commands = backend.CommandBuffer();
-    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = MetalEncoders::Blit(commands);
     if (blit == nil) throw MetalGpuExecutionError("Metal depth array blit encoder creation failed");
     for (NSUInteger i = 0; i < layers; ++i) {
         [blit copyFromTexture:sources[i]->Planes()->depth sourceSlice:sources[i]->Layer() sourceLevel:0 toTexture:array destinationSlice:i destinationLevel:0 sliceCount:1 levelCount:1];
@@ -321,7 +321,7 @@ MetalColorSurface::MetalColorSurface(const MetalDevice& backend, const Graphics:
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
     auto commands = backend.CommandBuffer();
-    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    auto encoder = MetalEncoders::Render(commands, pass);
     if (encoder == nil) throw MetalGpuExecutionError("Metal color surface initial clear encoder creation failed");
     [encoder endEncoding];
     backend.Wait(commands);
@@ -387,7 +387,7 @@ std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphic
         // array's layer, so every view of these addresses reads one copy.
         if (surface->Planes()->depth.pixelFormat == planes->depth.pixelFormat && surface->Planes()->depth.textureType == MTLTextureType2DArray) {
             auto commands = backend.CommandBuffer();
-            id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+            id<MTLBlitCommandEncoder> blit = MetalEncoders::Blit(commands);
             if (blit == nil) throw MetalGpuExecutionError("Metal depth slice adoption blit encoder creation failed");
             [blit copyFromTexture:surface->Planes()->depth sourceSlice:surface->Layer() sourceLevel:0 toTexture:planes->depth
                 destinationSlice:target.slice destinationLevel:0 sliceCount:1 levelCount:1];
@@ -427,7 +427,7 @@ void MetalDepthSurfaceCache::takePlanes(const std::shared_ptr<MetalDepthSurface>
     if (target.stencilAddress != 0) take(stencilOwners, target.stencilAddress, true);
     if (copies.empty()) return;
     auto commands = backend.CommandBuffer();
-    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = MetalEncoders::Blit(commands);
     if (blit == nil) throw MetalGpuExecutionError("Metal depth plane carry-over blit encoder creation failed");
     const MTLSize size = MTLSizeMake(target.extent.width, target.extent.height, 1);
     for (const auto& [owner, stencil] : copies) {
@@ -457,7 +457,7 @@ void MetalDepthSurfaceCache::growPlanes(const std::shared_ptr<MetalDepthPlanes>&
     // these planes make their views again (MetalDepthPlanes::generation).
     const auto grown = CreateDepthPlanes(backend, shape, layers);
     auto commands = backend.CommandBuffer();
-    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = MetalEncoders::Blit(commands);
     if (blit == nil) throw MetalGpuExecutionError("Metal depth array growth blit encoder creation failed");
     [blit copyFromTexture:planes->depth sourceSlice:0 sourceLevel:0 toTexture:grown->depth destinationSlice:0 destinationLevel:0
         sliceCount:planes->layers levelCount:1];
@@ -561,7 +561,7 @@ id<MTLTexture> MetalMultisampleExpander::Expand(id<MTLCommandBuffer> commands, i
     pass.colorAttachments[0].texture = transient->second;
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    auto encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    auto encoder = MetalEncoders::Render(commands, pass);
     if (encoder == nil) throw MetalGpuExecutionError("Metal multisample expansion encoder creation failed");
     [encoder setRenderPipelineState:pipeline->second];
     [encoder setFragmentTexture:source atIndex:0];

@@ -206,7 +206,7 @@ private:
                     continue;
                 }
                 if (encoder == nil) {
-                    encoder = [commands computeCommandEncoder];
+                    encoder = MetalEncoders::Compute(commands);
                     if (encoder == nil) throw MetalGpuExecutionError("Metal lazy copy-back encoder creation failed");
                     encoder.label = @"lazy copy-back";
                 }

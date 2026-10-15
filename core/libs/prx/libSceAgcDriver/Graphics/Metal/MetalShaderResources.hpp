@@ -60,6 +60,11 @@ public:
     // Guest ranges [begin, end) this work stores to: written images, writable buffers and the lazy
     // copy-backs it encoded ahead of itself.
     [[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint64_t>> WrittenGuestRanges() const;
+    // Whether the work's shaders may store to anything but the attachments of the render pass
+    // `pass` describes: a writable buffer, or a written image that is not one of them (a storage
+    // image; a draw's color targets are written images too). A later draw of the same pass could
+    // read such a store unordered.
+    [[nodiscard]] bool WritesBesides(const MetalEncoders::PassKey& pass) const;
     // Called before this object reads guest bytes on the CPU (an upload that cannot run in place,
     // a staged storage image), so the caller can first finish GPU work that may write them.
     using CpuReadHook = std::function<void(std::uint64_t address, std::uint64_t bytes)>;

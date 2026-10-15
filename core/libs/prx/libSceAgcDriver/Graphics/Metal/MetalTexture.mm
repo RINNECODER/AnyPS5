@@ -597,7 +597,7 @@ void MetalTexture::encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer>
     const auto& descriptor = backing->descriptor;
     const auto& geometry = backing->geometry;
     id<MTLTexture> texture = backing->texture;
-    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    id<MTLBlitCommandEncoder> blit = MetalEncoders::Blit(commands);
     if (GpuTiming::Enabled() && blit != nil) blit.label = toTexture ? @"upload linear copy" : @"readback linear copy";
     require(blit != nil, "Metal texture blit encoder creation failed");
     const bool volume = texture.textureType == MTLTextureType3D;

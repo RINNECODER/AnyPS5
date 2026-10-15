@@ -587,7 +587,7 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
     renderPass.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
     renderPass.colorAttachments[0].resolveTexture = level;
     id<MTLCommandBuffer> commands = backend.CommandBuffer();
-    auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
+    auto encoder = MetalEncoders::Render(commands, renderPass);
     if (encoder == nil) throw MetalGpuExecutionError("Metal CB resolve render encoder allocation failed");
     [encoder endEncoding];
     resources.EncodeReadbacks(commands);
@@ -1172,7 +1172,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
                 if (gpuIndirect->vertexRule == Rule::Constant) words[record * (recordBytes / 4u) + vertexWord] = gpuIndirect->vertexConstant;
                 if (gpuIndirect->instanceRule == Rule::Constant) words[record * (recordBytes / 4u) + instanceWord] = gpuIndirect->instanceConstant;
             }
-            auto blit = [commands blitCommandEncoder];
+            auto blit = MetalEncoders::Blit(commands);
             if (blit == nil) throw MetalGpuExecutionError("Metal indirect record blit encoder allocation failed");
             for (std::uint32_t record = 0; record < gpuIndirect->count; ++record) {
                 const auto source = indirectRecords.offset + NSUInteger{record} * gpuIndirect->stride;
@@ -1235,7 +1235,22 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             renderPass.colorAttachments[expansion.slot].texture = multisampleExpander->Expand(commands, expansion.source, state.rasterSamples, expansion.slot);
         }
     }
-    auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
+    // Render-pass merging (MetalEncoders): the draw continues the pass the previous draw left open
+    // when it has the same attachments, and leaves its own open for the next. Not when the draw
+    // writes memory through its shaders (a later draw of the pass could read it unordered), counts
+    // samples, expands MSAA targets, uses custom sample locations (merging those changed pixels from
+    // run to run) or samples one of its own attachments.
+    const auto passKey = MetalEncoders::KeyOf(renderPass);
+    bool mergeable = sampleCounter == nil && expansions.empty() && !bdaStores && !(state.customSampleLocations && state.rasterSamples > 1) &&
+        !resources.WritesBesides(passKey);
+    // The bindings hold every texture the shaders read or write (the residency also holds the
+    // draw's own color targets).
+    for (const auto* list : {&vertexBindings, &fragmentBindings}) {
+        for (const auto& binding : *list) {
+            for (id<MTLTexture> texture : binding.textures) mergeable = mergeable && !MetalEncoders::IsAttachment(passKey, texture);
+        }
+    }
+    auto encoder = MetalEncoders::RenderMerging(backend, commands, renderPass, passKey, mergeable);
     if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
     try {
         if (meshPath) {
@@ -1283,7 +1298,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         [encoder endEncoding];
         throw;
     }
-    [encoder endEncoding];
+    MetalEncoders::EndOrPark(backend, commands, encoder, passKey, mergeable);
     if (sampleCounter != nil) {
         const SampleCounterParameters parameters{1, 0};
         backend.Encode(commands, @"SampleCounter", @[sampleCounter, sampleTarget], &parameters, sizeof(parameters), MTLSizeMake(1, 1, 1));
