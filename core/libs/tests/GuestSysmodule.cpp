@@ -130,6 +130,15 @@ void CheckUnwindInfo() {
     RequireUnwindMatchesRegion(reinterpret_cast<const void*>(&RequireUnwindMatchesRegion));
     RequireUnwindMatchesRegion(reinterpret_cast<const void*>(&sceSysmoduleGetModuleInfoForUnwind));
     RequireUnwindMatchesRegion(reinterpret_cast<const void*>(&GetModuleHandleW));
+    const auto* host = reinterpret_cast<const char*>(&GetModuleHandleW);
+    MEMORY_BASIC_INFORMATION hostRegion{};
+    Require(VirtualQuery(host, &hostRegion, sizeof(hostRegion)) != 0);
+    for (const std::size_t step : {std::size_t{0x1000}, std::size_t{0x3000}, std::size_t{0x10000}}) {
+        if (hostRegion.RegionSize > step) RequireUnwindMatchesRegion(host + step);
+    }
+    RequireUnwindMatchesRegion(host + 0x2000);
+    RequireUnwindMatchesRegion(host);
+    if (reinterpret_cast<std::uintptr_t>(host) >= 0x2000 + reinterpret_cast<std::uintptr_t>(hostRegion.BaseAddress)) RequireUnwindMatchesRegion(host - 0x2000);
     static int data = 1;
     static const char text[] = "unwind region";
     RequireUnwindMatchesRegion(&data);

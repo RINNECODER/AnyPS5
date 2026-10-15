@@ -91,7 +91,9 @@ bool fillCachedImageRegion(std::uint64_t addr, std::uintptr_t image, ModuleInfoF
         gRegions.erase(found);
         return false;
     }
-    writeUnwindRegion(found->first, region.end - found->first, region.name, info);
+    constexpr std::uint64_t page = 4096;
+    const std::uint64_t begin = addr & ~(page - 1);
+    writeUnwindRegion(begin, region.end - begin, region.name, info);
     return true;
 }
 #endif
