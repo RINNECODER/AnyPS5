@@ -93,6 +93,8 @@ int main() {
         const AgcDriver::Graphics::ColorTargetLayout layout(1920, 1080, color.tileMode, 4);
         color.bytes = layout.Bytes();
         color.dccAddress = 0x380000000ull;
+        color.cmaskAddress = 0x3c0000000ull;
+        color.cmaskBytes = AgcDriver::Graphics::CmaskBytes(1920, 1080);
         AgcDriver::Graphics::DepthTarget depth{};
         depth.address = 0x400000000ull;
         depth.stencilAddress = 0x480000000ull;
@@ -111,6 +113,10 @@ int main() {
         Require(Contains(exact, color.address, color.address + color.bytes), "the exact color range misses the layout");
         Require(!Touches(exact, color.address + color.bytes, color.address + color.bytes + 1), "the exact color range runs past the layout");
         Require(Contains(exact, color.dccAddress, color.dccAddress + color.bytes / 256) && !Touches(exact, color.dccAddress + (color.bytes + 255) / 256, color.dccAddress + (color.bytes + 255) / 256 + 1), "the exact DCC range is not one key byte per 256 surface bytes");
+        for (const auto& ranges : {exact, estimated}) {
+            Require(Contains(ranges, color.cmaskAddress, color.cmaskAddress + color.cmaskBytes), "the CMASK of the color target is not a write range");
+        }
+        Require(!Touches(exact, color.cmaskAddress + color.cmaskBytes, color.cmaskAddress + color.cmaskBytes + 1), "the exact CMASK range runs past CmaskBytes");
         const auto depthBytes = AgcDriver::Graphics::DepthSliceBytes(depth.extent, 4);
         const auto stencilBytes = AgcDriver::Graphics::DepthSliceBytes(depth.extent, 1);
         Require(Contains(exact, depth.address, depth.address + depthBytes) && !Touches(exact, depth.address + depthBytes, depth.address + depthBytes + 1), "the exact depth range is not DepthSliceBytes");
