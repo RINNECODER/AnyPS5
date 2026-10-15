@@ -155,7 +155,7 @@ int Run(const int argc, char* argv[]) {
         Io::FileWriter fileWriter;
 
         auto sourceBytes = fileReader.Read(args.inputPath);
-        if (std::filesystem::exists(Io::NativePath(args.outputPath)) && std::filesystem::equivalent(Io::NativePath(args.inputPath), Io::NativePath(args.outputPath)))
+        if (std::filesystem::exists(Io::NativePath(args.inputPath)) && std::filesystem::exists(Io::NativePath(args.outputPath)) && SameOutputFile(Io::NativePath(args.inputPath), Io::NativePath(args.outputPath)))
             throw Domain::RelinkerException("Executable output would overwrite the input executable");
         if (Io::NativePath(args.outputPath).filename().empty() || std::filesystem::is_directory(Io::NativePath(args.outputPath)))
             throw Domain::RelinkerException("Executable output is a directory: " + args.outputPath);
@@ -215,10 +215,10 @@ int Run(const int argc, char* argv[]) {
 
         const auto checkOutputInputs = [&](const std::filesystem::path& path, const char* kind) {
             if (!std::filesystem::exists(path)) return;
-            if (std::filesystem::equivalent(Io::NativePath(args.inputPath), path))
+            if (SameOutputFile(Io::NativePath(args.inputPath), path))
                 throw Domain::RelinkerException(std::string(kind) + " output would overwrite the input executable: " + Io::Utf8Path(path));
             for (const auto& artifact : guestArtifacts)
-                if (std::filesystem::equivalent(artifact.SourcePath, path))
+                if (SameOutputFile(artifact.SourcePath, path))
                     throw Domain::RelinkerException(std::string(kind) + " output would overwrite an input module: " + Io::Utf8Path(path));
         };
         if (desktopEntry) {
