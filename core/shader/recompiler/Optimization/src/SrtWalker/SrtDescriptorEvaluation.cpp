@@ -205,8 +205,6 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
     return true;
 }
 
-namespace {
-
 void prefetchCompactPlan(const CompactResourcePlan& compact) {
     const auto prefetch = [](const void* data, std::size_t bytes) {
         const auto* bytesData = static_cast<const char*>(data);

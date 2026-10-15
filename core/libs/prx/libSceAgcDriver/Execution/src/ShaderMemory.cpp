@@ -119,6 +119,16 @@ ShaderMemory::~ShaderMemory() {
     }
 }
 
+void ShaderMemory::WordMask::SetRun(std::size_t first, std::size_t count) {
+    while (count != 0) {
+        const auto shift = first % 64u;
+        const auto take = std::min<std::size_t>(count, 64u - shift);
+        bits[first / 64u] |= (take == 64u ? ~std::uint64_t{0} : (std::uint64_t{1} << take) - 1u) << shift;
+        first += take;
+        count -= take;
+    }
+}
+
 bool ShaderMemory::WordMask::None() const {
     return std::all_of(bits.begin(), bits.end(), [](std::uint64_t word) { return word == 0u; });
 }
