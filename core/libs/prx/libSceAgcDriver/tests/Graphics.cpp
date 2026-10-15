@@ -5646,7 +5646,12 @@ int main(int argc, char** argv) {
             },
             [] { return mock.pipelineCreateCount; },
             [] { return mock.pipelineSpecializations.back(); },
-            [] { return mock.descriptorPools.size(); }
+            [] { return mock.descriptorPools.size(); },
+            [] {
+                std::uint32_t resets = 0;
+                for (const auto& [handle, pool] : mock.descriptorPools) resets += pool.resets;
+                return resets;
+            }
         });
         std::cout << "Graphics validation tests passed\n";
         return 0;
