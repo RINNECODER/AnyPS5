@@ -205,6 +205,79 @@ class UniformABITests(unittest.TestCase):
         function(ctypes.byref(registers))
         self.assertEqual(registers.gpr[GPR['rax']], 0x1234)
 
+    def test_uniform_leave_restores_rsp_and_the_frame_pointer(self):
+        # mov r14, rsp ; push rbp ; mov rbp, rsp ; sub rsp, 0x20 ; mov [rbp-8], rdi ;
+        # mov rax, [rbp-8] ; leave ; ret. `leave` must read the local through rbp, then restore
+        # both rsp (to the entry value r14 observed) and rbp (to the value pushed at entry).
+        code = bytes.fromhex('4989e6554889e54883ec2048897df8488b45f8c9c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        registers = RegisterFile()
+        registers.gpr[GPR['rbp']] = 0xdeadbeef
+        registers.gpr[GPR['rdi']] = 0x1234
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 0x1234)
+        self.assertEqual(registers.gpr[GPR['rbp']], 0xdeadbeef)
+        self.assertEqual(registers.gpr[GPR['rsp']], registers.gpr[GPR['r14']])
+
+    def test_uniform_join_merges_a_saved_register_and_a_stack_value(self):
+        # test rdi,rdi ; je B ; A: push rbx ; jmp C ; B: push 1 ; C: pop rax ; ret. The two paths
+        # reach C with a different source pushed at the same offset. The join must keep the slot
+        # (and its known mask) rather than demanding the same source register.
+        code = bytes.fromhex('4885ff740653eb059090906a0158c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        for rdi, rbx, expected in ((0, 0x99, 1), (1, 0x1234, 0x1234)):
+            with self.subTest(rdi=rdi):
+                registers = RegisterFile()
+                registers.gpr[GPR['rdi']] = rdi
+                registers.gpr[GPR['rbx']] = rbx
+                function(ctypes.byref(registers))
+                self.assertEqual(registers.gpr[GPR['rax']], expected)
+
+    def test_uniform_popfq_restores_the_tracked_flags(self):
+        # push <rflags> ; popfq ; set<cc> al ; movzx eax, al ; ret. Only the five tracked flag
+        # bits come back, so a value with exactly one of them set must set exactly that condition.
+        push = {0x0: '6a00', 0x1: '6a01', 0x2: '6a02', 0x4: '6a04', 0x40: '6a40',
+                0x80: '6880000000', 0x800: '6800080000'}
+        condition = {'c': '0f92c0', 'p': '0f9ac0', 'z': '0f94c0', 's': '0f98c0', 'o': '0f90c0'}
+        cases = ((0x1, 'c', 1), (0x4, 'p', 1), (0x40, 'z', 1), (0x80, 's', 1), (0x800, 'o', 1),
+                 (0x2, 'c', 0), (0x40, 'p', 0), (0x0, 'c', 0))
+        for index, (value, flag, expected) in enumerate(cases):
+            with self.subTest(value=value, flag=flag):
+                # A fresh directory per case: ctypes.CDLL caches by path.
+                self.directory = self.directory / str(index)
+                self.directory.mkdir()
+                code = bytes.fromhex(push[value] + '9d' + condition[flag] + '0fb6c0c3')
+                raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+                function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+                registers = RegisterFile()
+                function(ctypes.byref(registers))
+                self.assertEqual(registers.gpr[GPR['rax']], expected)
+
+    def test_uniform_int_immediate_traps(self):
+        # 0x1000: int 0x41 ; ret — a software interrupt is a trap terminator, like int3.
+        code = bytes.fromhex('cd41c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        self.assertIn('call void @llvm.trap()', ir)
+
+    def test_uniform_frame_restored_through_a_runtime_sized_frame_pointer(self):
+        # mov r14, rsp ; lea r15, [rsp + rdi*8 + 8] ; lea rsp, [r15 + 8] ; mov rax, rsp ; ret.
+        # r15 is a frame-derived pointer with a runtime index, so restoring the guest rsp through
+        # it must stay representable as a runtime value rather than a known frame offset.
+        code = bytes.fromhex('4989e64c8d7cfc08498d67084889e0c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        for rdi in (0, 1, 0x20):
+            with self.subTest(rdi=rdi):
+                registers = RegisterFile()
+                registers.gpr[GPR['rdi']] = rdi
+                function(ctypes.byref(registers))
+                entered = registers.gpr[GPR['r14']]
+                self.assertEqual((registers.gpr[GPR['rax']] - entered) & ((1 << 64) - 1), rdi * 8 + 16)
+                self.assertEqual(registers.gpr[GPR['rsp']], registers.gpr[GPR['rax']])
+
     def test_uniform_borrows_an_interior_entry_of_the_next_function(self):
         # A false function start splits one real function into fragments, and a branch from one
         # fragment reaches the middle of another. sub_1000 tests rdi and, when it is nonzero,

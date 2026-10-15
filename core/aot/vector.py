@@ -14,11 +14,13 @@ SQRT_OPS = {'sqrtss': 32, 'sqrtsd': 64}
 CONVERTS = {'cvtsi2ss': 32, 'cvtsi2sd': 64, 'cvtsd2ss': 64, 'cvtss2sd': 32}
 TO_INT = {'cvttss2si': 32, 'cvttsd2si': 64, 'cvtss2si': 32, 'cvtsd2si': 64}
 COMPARES = {'comiss': 32, 'ucomiss': 32, 'comisd': 64, 'ucomisd': 64}
-PACKED_BINARY = {'paddb': ('add', 8), 'paddq': ('add', 64), 'psubd': ('sub', 32), 'psubq': ('sub', 64)}
+PACKED_BINARY = {'paddb': ('add', 8), 'paddw': ('add', 16), 'paddq': ('add', 64), 'psubw': ('sub', 16),
+                 'psubd': ('sub', 32), 'psubq': ('sub', 64)}
 PACKED_MINMAX_INT = {'pmaxub': (8, False), 'pminub': (8, True), 'pmaxuw': (16, False), 'pminuw': (16, True)}
 PACKED_MUL = {'pmuludq': False, 'pmuldq': True}
 PACKS = {'packsswb': (16, 8), 'packssdw': (32, 16)}
 SHUF_WORDS = {'pshuflw', 'pshufhw'}
+DUPS = {'movshdup': 32, 'movsldup': 32, 'movddup': 64}
 PACKED_SHIFTS = {'psrlw': ('lshr', 16), 'psrld': ('lshr', 32), 'psrlq': ('lshr', 64),
                  'psraw': ('ashr', 16), 'psrad': ('ashr', 32), 'psllw': ('shl', 16),
                  'pslld': ('shl', 32), 'psllq': ('shl', 64)}
@@ -49,7 +51,7 @@ SUPPORTED = (FULL_MOVES | set(BITWISE) | set(FLOAT_OPS) | SHUFFLES | set(SQRT_OP
              | set(CONVERTS) | set(TO_INT) | set(COMPARES) | set(PACKED_SHIFTS) | set(PACKED_BINARY) | set(PACKED_MINMAX_INT) | set(PACKED_MUL)
              | set(PACKS) | SHUF_WORDS | set(PACKED_CMPEQ) | set(PACKED_CMPGT)
              | set(PACKED_MINMAX) | set(PACKED_UNPACKS) | set(CMP_MNEMONICS) | set(CMP_GENERIC)
-             | set(CVT_PACKED) | {
+             | set(CVT_PACKED) | set(DUPS) | {
     'movd', 'movq', 'movss', 'movsd', 'movlps', 'movlpd', 'psrld', 'paddd', 'pcmpgtd',
     'packuswb', 'ucomiss', 'cvtsi2ss', 'paddb', 'pmaxub', 'pcmpeqb', 'pcmpeqd', 'psrad', 'movmskps',
     'pextrw', 'pmulhw', 'psadbw', 'phminposuw', 'pslldq', 'psrldq'})
@@ -211,6 +213,15 @@ def analyze(function, ins, state):
             else:
                 index = lane if lane < 4 else 4 + ((control >> ((lane - 4) * 2)) & 3)
             known |= ((source >> (index * 16)) & 0xffff) << (lane * 16)
+        _copy_mask(ins, state, args[0], known)
+    elif op in DUPS:
+        lane = DUPS[op]
+        source = _mask(function, ins, state, args[1])
+        lane_mask = (1 << lane) - 1
+        indices = [0, 0] if op == 'movddup' else ([1, 1, 3, 3] if op == 'movshdup' else [0, 0, 2, 2])
+        known = 0
+        for destination, source_index in enumerate(indices):
+            known |= ((source >> (source_index * lane)) & lane_mask) << (destination * lane)
         _copy_mask(ins, state, args[0], known)
     elif op in PACKED_BINARY:
         left, right = (_mask(function, ins, state, operand) for operand in args[:2])
@@ -466,6 +477,15 @@ def lower(function, ins):
         mask = ', '.join(f'i32 {index}' for index in indices)
         result = function.emit(f'shufflevector <8 x i16> {source}, <8 x i16> zeroinitializer, <8 x i32> <{mask}>')
         _write(function, ins, args[0], function.emit(f'bitcast <8 x i16> {result} to i128'))
+    elif op in DUPS:
+        lane = DUPS[op]
+        count = 128 // lane
+        kind = f'<{count} x i{lane}>'
+        value = function.emit(f'bitcast i128 {read(args[1])} to {kind}')
+        indices = [0, 0] if op == 'movddup' else ([1, 1, 3, 3] if op == 'movshdup' else [0, 0, 2, 2])
+        mask = ', '.join(f'i32 {index}' for index in indices)
+        result = function.emit(f'shufflevector {kind} {value}, {kind} zeroinitializer, <{count} x i32> <{mask}>')
+        _write(function, ins, args[0], function.emit(f'bitcast {kind} {result} to i128'))
     elif op in PACKED_BINARY:
         instruction, width = PACKED_BINARY[op]
         count = 128 // width

@@ -701,7 +701,7 @@ class Function:
                 pointer = original['pointers'].get(name)
                 if pointer:
                     kind, index, offset = pointer
-                    state['pointers'][name] = (kind, index, offset + (1 if ins.mnemonic == 'inc' else -1))
+                    state['pointers'][name] = (kind, index, None if offset is None else offset + (1 if ins.mnemonic == 'inc' else -1))
             return state
         if atomics.analyze(self, ins, state):
             for register in ins.regs_access()[1]:
@@ -710,6 +710,23 @@ class Function:
                     state['constants'].pop(ALIASES[name][0], None)
             return state
         if op == 'nop':
+            return state
+        if op == 'leave':
+            # `mov rsp, rbp; pop rbp`.
+            state['rsp'] = state['rbp']
+            self.release_saved(state, original['rsp'], 'rsp')
+            self.stack_pop(ins, state, 'rbp')
+            return state
+        if op == 'popfq':
+            # Restore the tracked flags from the slot at the guest rsp and advance it.
+            if state['rsp'] is None:
+                if not self.uniform:
+                    self.fail(ins, 'unknown stack transfer')
+                state['flags'] = set()
+                return state
+            state['saved'].pop(state['rsp'], None)
+            state['rsp'] += 8
+            state['flags'] = set(FLAGS)
             return state
         if op in ('push', 'pop'):
             if args[0].size != 8 or (op == 'pop' and args[0].type != X86_OP_REG):
@@ -728,42 +745,7 @@ class Function:
                 state['saved'][state['rsp']] = (name, state['known'].get(name, 0) if name else MASK64, state['rbp'] if name == 'rbp' else None, state['pointers'].get(name))
                 self.depth = max(self.depth, -state['rsp'] + 128)
             else:
-                if state['rsp'] is None:
-                    # Same as push: the transfer happens at the guest rsp, which is a real address in
-                    # this ABI, so the destination becomes unknown instead of rejecting the function.
-                    if not self.uniform:
-                        self.fail(ins, 'unknown stack transfer')
-                    for table in ('known', 'constants', 'pointers'):
-                        state[table].pop(name, None)
-                    if name == 'rbp':
-                        state['rbp'] = None
-                    return state
-                saved = state['saved'].pop(state['rsp'], None)
-                if saved is None:
-                    if not self.uniform:
-                        self.fail(ins, 'unknown stack transfer')
-                    # The uniform ABI keeps the guest stack in the local frame: the caller's window
-                    # at offsets [8, 264) and the guest return-address slot below it. A pop of a
-                    # slot this function never pushed therefore reads a caller-pushed slot (a
-                    # defined frame location) or the return-address slot (not modelled). Either
-                    # way the value is unknown here; the lowering reads the defined slot or
-                    # freezes an arbitrary value rather than reading unwritten memory.
-                    for table in ('known', 'constants', 'pointers'):
-                        state[table].pop(name, None)
-                    state['native_pointers'].discard(name)
-                    if name == 'rbp':
-                        state['rbp'] = None
-                    state['rsp'] += 8
-                    return state
-                state['known'][name] = saved[1]
-                state['constants'].pop(name, None)
-                if name == 'rbp':
-                    state['rbp'] = saved[2]
-                if saved[3] is None:
-                    state['pointers'].pop(name, None)
-                else:
-                    state['pointers'][name] = saved[3]
-                state['rsp'] += 8
+                self.stack_pop(ins, state, name)
             return state
         if ins.address in self.dispatch_jumps:
             return state
@@ -857,7 +839,7 @@ class Function:
                 if self.contract['result'] == 'ptr' and 'rax' not in state['native_pointers'] and state['constants'].get('rax') != 0:
                     self.fail_pointer(ins, 'pointer return has no proven native pointer origin')
             return state
-        if op in ('ud2', 'int3'):
+        if op in ('ud2', 'int3', 'int'):
             return state
         if op.startswith('j'):
             if op != 'jmp' and op[1:] not in CONDITIONS:
@@ -884,20 +866,23 @@ class Function:
                         source = ('frame', 0, original[source_name]) if original[source_name] is not None else None
                     if source is not None:
                         state['pointers'][dest] = source
-                if op == 'lea' and args[0].size == 8 and not args[1].mem.index:
+                if op == 'lea' and args[0].size == 8:
                     base = ins.reg_name(args[1].mem.base)
-                    if base == 'rip':
+                    indexed = bool(args[1].mem.index)
+                    if base == 'rip' and not indexed:
                         state['pointers'][dest] = ('image', 0, ins.address + ins.size + args[1].mem.disp)
                     elif base in ('rsp', 'rbp'):
-                        if original[base] is not None:
-                            state['pointers'][dest] = ('frame', 0, original[base] + args[1].mem.disp)
-                        elif not self.uniform:
-                            self.fail(ins, 'dynamic frame offset')
+                        if indexed or original[base] is None:
+                            # A runtime index (or an already runtime-sized frame) makes the pointer
+                            # frame-derived but not a known offset.
+                            if not self.uniform:
+                                self.fail(ins, 'dynamic frame offset')
+                            state['pointers'][dest] = ('frame', 0, None)
                         else:
-                            state['pointers'].pop(dest, None)
-                    elif base in original['pointers']:
+                            state['pointers'][dest] = ('frame', 0, original[base] + args[1].mem.disp)
+                    elif base in original['pointers'] and not indexed:
                         kind, index, offset = original['pointers'][base]
-                        state['pointers'][dest] = (kind, index, offset + args[1].mem.disp)
+                        state['pointers'][dest] = (kind, index, None if offset is None else offset + args[1].mem.disp)
                 if dest in ('rsp', 'rbp'):
                     source = self.reg(ins, args[1])[0] if args[1].type == X86_OP_REG else None
                     frame = self.frame_relative(original, source)
@@ -917,6 +902,12 @@ class Function:
                         self.release_saved(state, original[dest], dest)
                     elif op == 'mov' and args[0].size == 8 and frame is not None:
                         state[dest] = frame
+                    elif (self.uniform and op == 'lea' and args[0].size == 8 and args[1].type == X86_OP_MEM
+                          and not args[1].mem.index):
+                        # `lea rsp, [reg + disp]`: the uniform ABI keeps the guest rsp in the
+                        # register file, so a frame restored through any register is representable
+                        # as a runtime value.
+                        state[dest] = None
                     elif self.uniform and (dest == 'rbp' or args[1].type == X86_OP_REG):
                         # The uniform ABI keeps the guest rsp in the register file, so a frame the
                         # analysis cannot pin down is representable and `and rsp, -32` / `sub rsp, rax`
@@ -948,7 +939,7 @@ class Function:
                     pointer = original['pointers'].get(dest)
                     if pointer:
                         kind, index, offset = pointer
-                        state['pointers'][dest] = (kind, index, offset + args[1].imm * (1 if op == 'add' else -1))
+                        state['pointers'][dest] = (kind, index, None if offset is None else offset + args[1].imm * (1 if op == 'add' else -1))
                 left, right = self.constant_operand(ins, original, args[0]), self.constant_operand(ins, original, args[1])
                 if zero:
                     self.constant_write(ins, original, state, args[0], 0)
@@ -969,6 +960,46 @@ class Function:
             state['flags'] = set(FLAGS)
             return state
         self.fail(ins, 'instruction semantics are not implemented')
+
+    def stack_pop(self, ins, state, name):
+        """Model `pop name` (also the rbp restore of `leave`): read the slot at the guest rsp and
+        advance it. A slot this function never pushed reads a caller-pushed frame slot or freezes."""
+        if state['rsp'] is None:
+            # Same as push: the transfer happens at the guest rsp, which is a real address in this
+            # ABI, so the destination becomes unknown instead of rejecting the function.
+            if not self.uniform:
+                self.fail(ins, 'unknown stack transfer')
+            for table in ('known', 'constants', 'pointers'):
+                state[table].pop(name, None)
+            if name == 'rbp':
+                state['rbp'] = None
+            return
+        saved = state['saved'].pop(state['rsp'], None)
+        if saved is None:
+            if not self.uniform:
+                self.fail(ins, 'unknown stack transfer')
+            # The uniform ABI keeps the guest stack in the local frame: the caller's window at
+            # offsets [8, 264) and the guest return-address slot below it. A pop of a slot this
+            # function never pushed therefore reads a caller-pushed slot (a defined frame location)
+            # or the return-address slot (not modelled). Either way the value is unknown here; the
+            # lowering reads the defined slot or freezes an arbitrary value rather than reading
+            # unwritten memory.
+            for table in ('known', 'constants', 'pointers'):
+                state[table].pop(name, None)
+            state['native_pointers'].discard(name)
+            if name == 'rbp':
+                state['rbp'] = None
+            state['rsp'] += 8
+            return
+        state['known'][name] = saved[1]
+        state['constants'].pop(name, None)
+        if name == 'rbp':
+            state['rbp'] = saved[2]
+        if saved[3] is None:
+            state['pointers'].pop(name, None)
+        else:
+            state['pointers'][name] = saved[3]
+        state['rsp'] += 8
 
     def release_saved(self, state, previous, name):
         """Drop saved-slot bookkeeping below the guest rsp after the frame is released.
@@ -1006,7 +1037,7 @@ class Function:
         if base in ('rsp', 'rbp') and state[base] is not None:
             return 'frame', state[base] + displacement
         pointer = state['pointers'].get(base)
-        if pointer and pointer[0] in ('image', 'frame'):
+        if pointer and pointer[0] in ('image', 'frame') and pointer[2] is not None:
             return pointer[0], pointer[2] + displacement
         return None
 
@@ -1309,8 +1340,13 @@ class Function:
                     if old['saved'].keys() == state['saved'].keys():
                         for offset, saved in state['saved'].items():
                             before = old['saved'][offset]
-                            require(saved[0] == before[0], 'incompatible saved registers')
-                            new['saved'][offset] = (saved[0], saved[1] & before[1], saved[2] if saved[2] == before[2] else None, saved[3] if saved[3] == before[3] else None)
+                            # The two paths may have pushed different things at this offset: a saved
+                            # register on one side, a stack argument or an immediate on the other. No
+                            # single register can be restored from the merged slot, so keep the name
+                            # only when both paths agree; `repair_frame` already skips a nameless slot.
+                            # The other fields already merge by agreement below.
+                            name = saved[0] if saved[0] == before[0] else None
+                            new['saved'][offset] = (name, saved[1] & before[1], saved[2] if saved[2] == before[2] else None, saved[3] if saved[3] == before[3] else None)
                     new['known'] = {name: old['known'].get(name, 0) & state['known'].get(name, 0) for name in REGISTERS + VECTOR_STORAGE}
                     new['register_aliases'] = old.get('register_aliases', frozenset()) & state.get('register_aliases', frozenset())
                     new['parameter_pointers'] = {cell: kind | old.get('parameter_pointers', {})[cell] for cell, kind in state.get('parameter_pointers', {}).items() if cell in old.get('parameter_pointers', {})}
@@ -1444,8 +1480,14 @@ class Function:
                 pointer = self.image.pointer(displacement)
                 offset = str(mem.disp)
             elif kind == 'frame':
-                pointer = self.frame_pointer(displacement)
-                offset = str(mem.disp)
+                if displacement is None:
+                    # A runtime-sized frame pointer: the value lives in the register, not at a
+                    # known frame offset.
+                    pointer = self.emit(f'inttoptr i64 {self.load(base)} to ptr')
+                    offset = str(mem.disp)
+                else:
+                    pointer = self.frame_pointer(displacement)
+                    offset = str(mem.disp)
             elif kind == 'uniform':
                 # The uniform ABI keeps every GPR in its own alloca; a pointer in
                 # a register is the loaded guest pointer, not a typed %argN.
@@ -1802,6 +1844,35 @@ class Function:
                 pass
             elif atomics.lower(self, ins):
                 pass
+            elif op == 'leave':
+                # `mov rsp, rbp; pop rbp`.
+                rbp = state['rbp']
+                rsp_value = self.load('rbp')
+                self.store('rsp', rsp_value)
+                if rbp is None:
+                    slot = self.emit(f'inttoptr i64 {rsp_value} to ptr')
+                    self.store('rbp', self.emit(f'load i64, ptr {slot}, align 1'))
+                    self.store('rsp', self.emit(f'add i64 {rsp_value}, 8'))
+                else:
+                    entry = state['saved'].get(rbp)
+                    if entry is None:
+                        if abi.UNIFORM_STACK_BASE <= rbp < abi.uniform_stack_end():
+                            value = self.emit(f'load i64, ptr {self.frame_pointer(rbp)}, align 1')
+                        else:
+                            value = self.emit('freeze i64 poison')
+                        self.store('rbp', value, 64)
+                    elif entry[1]:
+                        self.store('rbp', self.emit(f'load i64, ptr {self.frame_pointer(rbp)}, align 1'))
+                    self.store('rsp', self.emit(f'ptrtoint ptr {self.frame_pointer(rbp + 8)} to i64'))
+            elif op == 'popfq':
+                # Restore the tracked flags from the slot at the guest rsp.
+                stack_address = self.load('rsp') if state['rsp'] is None else self.emit(f'ptrtoint ptr {self.frame_pointer(state["rsp"])} to i64')
+                slot = self.emit(f'inttoptr i64 {stack_address} to ptr')
+                value = self.emit(f'load i64, ptr {slot}, align 1')
+                for name, bit in (('cf', 0), ('pf', 2), ('zf', 6), ('sf', 7), ('of', 11)):
+                    shifted = self.emit(f'lshr i64 {value}, {bit}')
+                    integer.store_flag(self, name, self.emit(f'trunc i64 {shifted} to i1'))
+                self.store('rsp', self.emit(f'add i64 {stack_address}, 8'))
             elif op in ('push', 'pop'):
                 reg = self.reg(ins, args[0])[0] if args[0].type == X86_OP_REG else None
                 if state['rsp'] is None:
@@ -2012,7 +2083,7 @@ class Function:
                 if op == 'jmp': self.lines.append(f'  br label %b{target:x}')
                 else: self.lines.append(f'  br i1 {self.condition(op)}, label %b{target:x}, label %b{address + ins.size:x}')
                 terminal = True
-            elif op in ('ud2', 'int3'):
+            elif op in ('ud2', 'int3', 'int'):
                 self.lines.extend(['  call void @llvm.trap()', '  unreachable'])
                 terminal = True
             elif op != 'nop':
