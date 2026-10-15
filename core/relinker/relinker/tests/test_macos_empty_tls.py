@@ -39,11 +39,19 @@ def check_converted(relinker, directory, name, instruction):
         raise SystemExit(f"{name}: the %fs access was left in the code")
 
 
+def check_tls_data_refused(relinker, directory):
+    result, output = convert(relinker, directory, "empty-tls-data", empty_tls_image(bytes.fromhex("64 48 8b 04 25 f8 ff ff ff")))
+    message = result.stdout + result.stderr
+    if result.returncode != 2 or "is not in the thread TLS block" not in message or output.exists():
+        raise SystemExit(f"empty-tls-data: a read of thread-local data with an empty PT_TLS was not refused: {message}")
+
+
 def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="anyps5-macos-empty-tls-") as directory:
         check_converted(relinker, directory, "empty-guard", bytes.fromhex("64 48 8b 04 25 28 00 00 00"))
         check_converted(relinker, directory, "empty-thread-pointer", bytes.fromhex("64 48 8b 04 25 00 00 00 00"))
+        check_tls_data_refused(relinker, directory)
     print("macOS empty TLS checks passed")
 
 
