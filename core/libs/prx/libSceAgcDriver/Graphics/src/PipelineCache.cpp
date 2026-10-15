@@ -30,7 +30,8 @@ bool profiling() {
 
 }
 
-PipelineCache::PipelineCache(const Context& context, const VkPhysicalDeviceProperties& properties) : context(context), properties(properties) {
+PipelineCache::PipelineCache(const Context& context, const VkPhysicalDeviceProperties& properties, bool loadFromFile) : context(context), properties(properties) {
+    static_assert(sizeof(FileHeader) == 24);
     const auto directory = ShaderRecompiler::ShaderCacheDirectory();
     if (!directory.empty()) {
         std::string uuid;
@@ -44,7 +45,7 @@ PipelineCache::PipelineCache(const Context& context, const VkPhysicalDevicePrope
         path = directory / name;
     }
     std::vector<std::byte> initialData;
-    if (!path.empty()) load(initialData);
+    if (!path.empty() && loadFromFile) load(initialData);
     VkPipelineCacheCreateInfo info{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     info.initialDataSize = initialData.size();
     info.pInitialData = initialData.empty() ? nullptr : initialData.data();
@@ -96,7 +97,6 @@ void PipelineCache::load(std::vector<std::byte>& initialData) {
     } vulkan{};
     static_assert(sizeof(VulkanHeader) == 32);
     if (data.size() < sizeof(vulkan)) return reject("no Vulkan header");
-    std::memcpy(&vulkan, data.data(), sizeof(vulkan));
     if (vulkan.headerSize < sizeof(vulkan) || vulkan.headerVersion != VK_PIPELINE_CACHE_HEADER_VERSION_ONE || vulkan.vendorID != properties.vendorID || vulkan.deviceID != properties.deviceID || std::memcmp(vulkan.uuid, properties.pipelineCacheUUID, VK_UUID_SIZE) != 0) return reject("made for another device or driver");
     initialData.assign(data.begin(), data.end());
     savedBytes = initialData.size();
