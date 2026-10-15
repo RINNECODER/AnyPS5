@@ -125,6 +125,7 @@ struct SidebandResampleInfo {
 
 struct Resampler {
     float ratio = 1.0f;
+    float change = 0.0f;
     std::vector<double> frames;
     double position = 1.0;
 };
@@ -597,7 +598,7 @@ void StorePcm(double value, std::uint8_t* out, std::uint32_t encoding) {
 }
 
 bool Resampling(const Instance& instance) {
-    return instance.resampler.ratio != 1.0f || !instance.resampler.frames.empty();
+    return instance.resampler.ratio != 1.0f || instance.resampler.change != 0.0f || !instance.resampler.frames.empty();
 }
 
 std::size_t ResamplerHeld(const Instance& instance, std::size_t channels) {
@@ -635,6 +636,9 @@ void ResamplerProduce(Instance& instance, PcmOutputs& outputs, std::size_t chann
         }
         outputs.Emit(frame.data(), frameBytes);
         resampler.position += resampler.ratio;
+        if (resampler.change != 0.0f) {
+            resampler.ratio = std::max(0.0f, resampler.ratio + resampler.change);
+        }
     }
     const auto index = std::min(static_cast<std::size_t>(resampler.position), available);
     if (index > 1) {
@@ -1503,11 +1507,15 @@ void Execute(const JobHeader& job, const AjmBuffer* inputs, const AjmBuffer* out
     case JobKind::Control:
         Control(*instance, job, inputs);
         break;
-    case JobKind::SetResampleParameters:
-        std::memcpy(&instance->resampler.ratio, job.parameters, sizeof(instance->resampler.ratio));
-        AJM_TRACE("[ajm] instance %u set resample ratio %f\n", job.instance, static_cast<double>(instance->resampler.ratio));
+    case JobKind::SetResampleParameters: {
+        float params[2] = {1.0f, 0.0f};
+        std::memcpy(params, job.parameters, std::min<std::size_t>(job.parameterSize, sizeof(params)));
+        instance->resampler.ratio = params[0];
+        instance->resampler.change = job.parameterSize >= sizeof(float) * 2 ? params[1] : 0.0f;
+        AJM_TRACE("[ajm] instance %u set resample ratio %f change %f\n", job.instance, static_cast<double>(instance->resampler.ratio), static_cast<double>(instance->resampler.change));
         WriteResult(job.sideband, job.sidebandSize, 0);
         break;
+    }
     case JobKind::GetResampleInfo: {
         const SidebandResampleInfo resample{instance->resampler.ratio, static_cast<std::int32_t>(HeldSamples(*instance)), {}};
         WriteResult(job.sideband, job.sidebandSize, 0);
@@ -1696,8 +1704,13 @@ int APS5_VABI sceAjmBatchJobSetResampleParameters(AjmBatchInfo* info, uint32_t i
 }
 
 int APS5_VABI sceAjmBatchJobSetResampleParametersEx(AjmBatchInfo* info, uint32_t instance, float ratio_start, float ratio_change_per_sample, uint32_t flags, void* result) {
-    if (ratio_change_per_sample != 0.0f) throw std::runtime_error("sceAjmBatchJobSetResampleParametersEx: a ratio change per sample is unsupported");
-    return sceAjmBatchJobSetResampleParameters(info, instance, ratio_start, flags, result);
+    (void)flags;
+    if (!std::isfinite(ratio_start) || ratio_start <= 0.0f || !std::isfinite(ratio_change_per_sample)) return SCE_AJM_ERROR_INVALID_PARAMETER;
+    auto header = MakeHeader(JobKind::SetResampleParameters, instance, result, sizeof(SidebandResult));
+    const float parameters[2] = {ratio_start, ratio_change_per_sample};
+    std::memcpy(header.parameters, parameters, sizeof(parameters));
+    header.parameterSize = sizeof(parameters);
+    return Append(info, header, nullptr, nullptr);
 }
 
 int APS5_VABI sceAjmBatchJobGetResampleInfo(AjmBatchInfo* info, uint32_t instance, void* result) {

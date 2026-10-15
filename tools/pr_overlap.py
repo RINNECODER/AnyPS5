@@ -16,7 +16,7 @@ MARKER = "<!-- pr-overlap -->"
 
 
 def git(*args):
-    return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout
+    return subprocess.run(["git", "-c", "core.quotePath=false", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout
 
 
 def gh(*args):
@@ -55,7 +55,7 @@ def fetch(base, prs):
 
 
 def merge(*args):
-    result = subprocess.run(["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", *args],
+    result = subprocess.run(["git", "-c", "core.quotePath=false", "merge-tree", "--write-tree", "--name-only", "--no-messages", *args],
                             capture_output=True, text=True, encoding="utf-8", errors="replace")
     lines = result.stdout.splitlines()
     if result.returncode not in (0, 1) or not lines:
@@ -93,7 +93,11 @@ def scan(pr):
 
 def hunks(pr, path):
     diff = git("diff", "-U0", "--no-color", "refs/pr/base", pr["tree"], "--", path)
-    return [(int(start), int(start) + max(int(count or 1), 1) - 1) for start, count in HUNK.findall(diff)]
+    found = []
+    for start, count in HUNK.findall(diff):
+        start = max(int(start), 1)
+        found.append((start, start + max(int(count or 1), 1) - 1))
+    return found
 
 
 def clashes(a, b, path):

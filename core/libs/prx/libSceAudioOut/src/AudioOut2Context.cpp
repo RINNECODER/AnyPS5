@@ -18,7 +18,9 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
+#include "prx/libc/include/Shutdown.hpp"
 #include "AudioOut2Internal.hpp"
+#include "AudioOutShutdown.hpp"
 #include "prx/libSceAudioOut/include/AudioOutSdl.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 
@@ -34,6 +36,7 @@ using Clock = std::chrono::steady_clock;
 
 static constexpr std::size_t CONTEXT_MEMORY = 0x10000;
 static constexpr std::uint32_t DEFAULT_MAX_PORTS = 16;
+static constexpr std::size_t ADVANCED_GRAINS_MAX = 16;
 // Pushes, polls and advances traced individually before the trace falls back to the per-second summary.
 static constexpr std::uint64_t CALL_TRACE_FULL = 16;
 // Audio the device waits for before it starts playing (and again whenever it ran dry), so the pushing
@@ -441,16 +444,31 @@ static void UnregisterStats(AudioOut2Context& context) {
 
 extern "C" {
 
-// The title's per-tick step between setting the ports' data and pushing. A push records the buffers the
-// ports point at and the next push reads them, and the push paces the clock, so nothing is due here.
-int APS5_VABI sceAudioOut2ContextAdvance(AudioOut2ContextHandle ctx) {
+int APS5_VABI sceAudioOut2ContextAdvance(AudioOut2ContextHandle ctx) try {
+    const AudioOutCall call;
     auto* context = FromHandle(ctx);
     if (!context) return SCE_AUDIO_OUT2_ERROR_INVALID_HANDLE;
     std::lock_guard lock(context->lock);
+    if (context->device != 0) {
+        if (context->advancedGrains.size() >= ADVANCED_GRAINS_MAX) throw std::runtime_error("AudioOut2: more than 16 completed grains await a push");
+        if (!context->advancedMode) {
+            while (!context->pendingGrains.empty()) {
+                Render(*context, context->pendingGrains.front());
+                context->output.insert(context->output.end(), context->mix.begin(), context->mix.end());
+                context->pendingGrains.pop_front();
+                context->pendingSince.pop_front();
+            }
+            context->advancedMode = true;
+        }
+        context->advancedGrains.push_back(AudioOut2CaptureGrain(*context, true));
+        context->grainReady.notify_one();
+    }
     context->advances++;
     context->summaryAdvances++;
     if (context->advances <= CALL_TRACE_FULL) AUDIOOUT2_TRACE("t=%.3f Advance ctx %p (pushes so far %llu)\n", AudioOut2TraceSeconds(), static_cast<void*>(context), static_cast<unsigned long long>(context->pushes));
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceAudioOut2ContextCreate(const AudioOut2ContextParam* params, void* buffer, size_t buffer_size, AudioOut2ContextHandle* ctx) {
@@ -470,7 +488,8 @@ int APS5_VABI sceAudioOut2ContextCreate(const AudioOut2ContextParam* params, voi
     return 0;
 }
 
-int APS5_VABI sceAudioOut2ContextDestroy(AudioOut2ContextHandle ctx) {
+int APS5_VABI sceAudioOut2ContextDestroy(AudioOut2ContextHandle ctx) try {
+    const AudioOutCall call;
     auto* context = FromHandle(ctx);
     if (!context) return SCE_AUDIO_OUT2_ERROR_INVALID_HANDLE;
     AUDIOOUT2_TRACE("t=%.3f ContextDestroy ctx %p after %llu pushes\n", AudioOut2TraceSeconds(), static_cast<void*>(context), static_cast<unsigned long long>(context->pushes));
@@ -485,6 +504,8 @@ int APS5_VABI sceAudioOut2ContextDestroy(AudioOut2ContextHandle ctx) {
     AudioOut2ReleasePorts(*context);
     delete context;
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceAudioOut2ContextGetQueueLevel(AudioOut2ContextHandle ctx, uint32_t* queue_level, uint32_t* available_queue) {
@@ -500,7 +521,8 @@ int APS5_VABI sceAudioOut2ContextGetQueueLevel(AudioOut2ContextHandle ctx, uint3
     return 0;
 }
 
-int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t blocking) {
+int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t blocking) try {
+    const AudioOutCall call;
     auto* context = FromHandle(ctx);
     if (!context) return SCE_AUDIO_OUT2_ERROR_INVALID_HANDLE;
     PrioritizePushingThread();
@@ -526,14 +548,25 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
     const auto gap = context->lastPushEnd == Clock::time_point{} ? Clock::duration{} : waitStart - context->lastPushEnd;
     context->stats.maxPushGapSeconds = std::max(context->stats.maxPushGapSeconds, std::chrono::duration<double>(gap).count());
     AdaptCushion(*context, now, gap);
+    if (context->advancedMode && context->advancedGrains.empty()) {
+        if (!blocking) throw std::runtime_error("AudioOut2: a non-blocking push without a rendered grain is not implemented");
+        if (!context->grainReady.wait(lock, LibcShutdownToken_nid_postfix(), [&] { return !context->advancedGrains.empty(); })) throw ProcessShutdown{};
+        now = Clock::now();
+        Drain(*context, now);
+    }
     context->queued++;
     context->playHead += GrainDuration(*context);
     UpdateMainDevice(*context, lock, now);
     UpdatePadDevice(*context, now);
-    auto grain = AudioOut2CaptureGrain(*context);
+    auto grain = context->advancedMode ? std::move(context->advancedGrains.front()) : AudioOut2CaptureGrain(*context);
+    if (context->advancedMode) context->advancedGrains.pop_front();
     const auto mixed = static_cast<std::uint32_t>(grain.size());
     if (context->device == 0) {
         Render(*context, grain);
+    } else if (context->advancedMode) {
+        Render(*context, grain);
+        if (PendingMs(*context) > MaxQueuedMs(*context)) context->dropped++;
+        else context->output.insert(context->output.end(), context->mix.begin(), context->mix.end());
     } else {
         context->pendingGrains.push_back(std::move(grain));
         context->pendingSince.push_back(Clock::now());
@@ -593,6 +626,8 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
     }
     TraceSummary(*context, now);
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceAudioOut2ContextQueryMemory(const AudioOut2ContextParam* params, size_t* memory_size) {
