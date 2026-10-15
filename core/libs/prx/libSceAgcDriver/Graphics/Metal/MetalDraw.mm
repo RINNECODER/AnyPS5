@@ -593,10 +593,19 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     std::span<const NativeGuestMemory::BorrowedRange> ranges,
     std::optional<std::array<std::uint32_t, 5>> meshArguments, MetalTimeline* timeline, Completed completed) {
     std::lock_guard<std::recursive_mutex> lock(drawMutex);
-    if (draw.indirect) throw std::invalid_argument("Metal draw indirect submission requires a native argument adapter");
+    // An indirect draw here is one whose records the GPU reads (MetalDriver's GpuReadsIndirectRecords):
+    // the CP's counts and first index or vertex come from the guest argument buffer when the draw runs,
+    // and so do the base vertex and first instance where the rule is InPlace (Rule::Constant uses the
+    // driver's constant). indexCount is then the declared INDEX_BUFFER_SIZE and instanceCount unknown.
+    const auto* gpuIndirect = draw.indirect ? &*draw.indirect : nullptr;
+    if (gpuIndirect != nullptr && (gpuIndirect->countIndirect || gpuIndirect->arguments % 4 != 0 || gpuIndirect->stride % 4 != 0 ||
+        gpuIndirect->count > MaxGpuIndirectRecords || meshArguments)) {
+        throw IndirectNeedsCpuRecords("Metal GPU indirect draw needs its records counted on the CPU");
+    }
     if (draw.flags != (draw.indexed ? 0u : (draw.flags & 0x20u))) throw std::invalid_argument("Metal draw packet flags are unsupported");
-    if (draw.indexCount == 0 || draw.instanceCount == 0) return {};
-    if (draw.firstInstance > std::numeric_limits<std::uint32_t>::max() - (draw.instanceCount - 1u)) {
+    if (gpuIndirect != nullptr && (gpuIndirect->count == 0 || (draw.indexed && draw.indexCount == 0))) return {};
+    if (gpuIndirect == nullptr && (draw.indexCount == 0 || draw.instanceCount == 0)) return {};
+    if (gpuIndirect == nullptr && draw.firstInstance > std::numeric_limits<std::uint32_t>::max() - (draw.instanceCount - 1u)) {
         throw std::invalid_argument("Metal draw instance range overflows guest invocation index");
     }
     const bool meshPath = state.stages.mesh.has_value();
@@ -611,6 +620,11 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     const auto primitive = meshPath || rectPath ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
     const bool nativeStrip = !meshPath && !rectPath && (primitive == MTLPrimitiveTypeLineStrip || primitive == MTLPrimitiveTypeTriangleStrip);
     const bool nativeRestart = (nativeStrip || fanPath) && state.primitiveRestart;
+    // Fans are expanded and strips without restart are promoted on the CPU from the indices; the mesh
+    // and rectangle paths size their passes from the counts.
+    if (gpuIndirect != nullptr && (meshPath || rectPath || fanPath || (nativeStrip && !nativeRestart) || draw.IndexReadCount() < draw.indexCount)) {
+        throw IndirectNeedsCpuRecords("Metal GPU indirect draw path needs the records on the CPU");
+    }
     std::uint32_t meshGroups = 0;
     if (meshPath) {
         const auto& mesh = *state.stages.mesh;
@@ -646,6 +660,31 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         throw std::invalid_argument("Metal draw pixel shader needs per-vertex barycentric inputs, which Metal emulates only for complete triangle lists");
     }
     if (rectPath && (control == nullptr || evaluation == nullptr)) throw std::invalid_argument("Metal rectangle draw requires the original generated control and evaluation programs");
+    if (gpuIndirect != nullptr) {
+        // The vertex buffers are bound over their descriptors' whole record ranges (the indices and
+        // counts are not known on the CPU), so those must be borrowed guest bytes.
+        if (baryPath) throw IndirectNeedsCpuRecords("Metal GPU indirect draw cannot capture barycentric vertices");
+        constexpr std::size_t MaximumBytes = std::size_t{256} << 20u;
+        for (const auto& attribute : vertex->program->vertexAttributes) {
+            if (Graphics::NullVertexDescriptor(attribute)) continue;
+            bool bindable = false;
+            try {
+                const auto bytes = Graphics::VertexBufferExtent(attribute);
+                const auto& fields = attribute.resource.fields;
+                const auto address = fields[0] | (std::uint64_t{fields[1] & 0xffffu} << 32u);
+                bindable = bytes <= MaximumBytes && NativeGuestMemory::ReadableBorrowedBytes(address, bytes) >= bytes;
+            } catch (const std::exception&) {
+            }
+            if (!bindable) throw IndirectNeedsCpuRecords("Metal GPU indirect draw vertex buffer range is not bindable whole");
+        }
+        if (draw.indexed && ((draw.indexSize != 2 && draw.indexSize != 4) || draw.indexAddress % draw.indexSize != 0 ||
+            NativeGuestMemory::ReadableBorrowedBytes(draw.indexAddress, std::uint64_t{draw.indexCount} * draw.indexSize) < std::uint64_t{draw.indexCount} * draw.indexSize)) {
+            throw IndirectNeedsCpuRecords("Metal GPU indirect draw index buffer is not bindable whole");
+        }
+        if (NativeGuestMemory::ReadableBorrowedBytes(gpuIndirect->arguments, gpuIndirect->RangeBytes()) < gpuIndirect->RangeBytes()) {
+            throw IndirectNeedsCpuRecords("Metal GPU indirect draw records are not borrowed guest bytes");
+        }
+    }
     auto pushConstants = Graphics::AssemblePushConstants(shaders);
     id<MTLBuffer> meshArgumentBuffer = nil;
     if (meshPath) {
@@ -816,14 +855,17 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             }
             std::memset(destination + readBytes, 0, static_cast<std::size_t>(bytes - readBytes));
             indexBuffer = {padded, 0, padded.length};
+        } else if (gpuIndirect != nullptr) {
+            // The GPU reads the indices the records select; nothing here reads them.
+            indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
         } else {
             if (cpuReadHook) cpuReadHook(draw.indexAddress, bytes);
             indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
         }
         const auto* data = static_cast<const std::byte*>(indexBuffer.buffer.contents) + indexBuffer.offset;
         const auto restartIndex = draw.indexSize == 2 ? 0xffffu : 0xffffffffu;
-        bool hasVertexIndex = false;
-        for (std::uint32_t i = 0; i < draw.indexCount; ++i) {
+        bool hasVertexIndex = gpuIndirect != nullptr;
+        for (std::uint32_t i = 0; gpuIndirect == nullptr && i < draw.indexCount; ++i) {
             std::uint32_t index = 0;
             if (draw.indexSize == 2) { std::uint16_t value; std::memcpy(&value, data + std::size_t{i} * 2u, 2); index = value; }
             else std::memcpy(&index, data + std::size_t{i} * 4u, 4);
@@ -857,7 +899,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             maxIndex == (draw.indexSize == 2 ? 0xffffu : 0xffffffffu)) {
             throw std::invalid_argument("Metal triangle fan geometry draw primitive restart is unsupported");
         }
-        if (!noVertexIndices) {
+        if (!noVertexIndices && gpuIndirect == nullptr) {
             const std::int64_t baseVertex = meshPath ? std::int64_t{draw.firstVertex} : std::bit_cast<std::int32_t>(draw.firstVertex);
             const auto firstIndex = std::int64_t{minIndex} + baseVertex;
             const auto lastIndex = std::int64_t{maxIndex} + baseVertex;
@@ -866,6 +908,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             }
             maxIndex = static_cast<std::uint32_t>(lastIndex);
         }
+    } else if (gpuIndirect != nullptr) {
+        if (draw.indexAddress != 0 || draw.indexSize != 0) throw std::invalid_argument("Metal draw auto-index parameters are invalid");
     } else {
         if (draw.indexAddress != 0 || draw.indexSize != 0 || draw.firstVertex > std::numeric_limits<std::uint32_t>::max() - (draw.indexCount - 1u)) {
             throw std::invalid_argument("Metal draw auto-index parameters are invalid");
@@ -908,7 +952,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             std::memset(zero.contents, 0, zero.length);
             vertexBuffers.push_back({zero, 0, zero.length});
         } else if (!noVertexIndices) {
-            auto buffer = resources.Buffer(address, Graphics::VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance));
+            auto buffer = resources.Buffer(address, gpuIndirect != nullptr ? Graphics::VertexBufferExtent(attribute) :
+                Graphics::VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance));
             adjustment = buffer.offset % 4;
             buffer.offset -= adjustment;
             vertexBuffers.push_back(buffer);
@@ -1038,6 +1083,9 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     std::vector<MetalShaderResourceBinding> controlBindings;
     if (baryPath || rectPath) captureBindings = resources.Bindings(capturePipeline->Reflection());
     if (rectPath) controlBindings = resources.Bindings(controlPipeline->Reflection());
+    MetalBufferBinding indirectRecords;
+    NSUInteger indirectStride = gpuIndirect != nullptr ? gpuIndirect->stride : 0;
+    if (gpuIndirect != nullptr) indirectRecords = resources.Buffer(gpuIndirect->arguments, static_cast<std::size_t>(gpuIndirect->RangeBytes()));
     // Nothing to draw: decided before any pass is encoded, so no capture pass runs for it.
     if (noVertexIndices || (fanPath && fanIndices.empty())) return {};
     // The vertex capture and rectangle control passes go into the draw's own command buffer: the
@@ -1045,6 +1093,43 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     // (a fault in any pass reports the work as faulted, and it runs again or fails like the draw).
     id<MTLCommandBuffer> commands = backend.CommandBuffer();
     MetalBatchedWork batched(backend, commands);
+    if (gpuIndirect != nullptr) {
+        using Rule = Pm4::DrawParameters::IndirectDraw::Rule;
+        if (gpuIndirect->vertexRule == Rule::Constant || gpuIndirect->instanceRule == Rule::Constant) {
+            // A dimension whose CP register write no shader reads (Rule::Constant) draws with the
+            // driver's constant, not the record's dword: the GPU copies each record's other dwords
+            // (written by earlier GPU work) next to the constants, and the draws read the copies.
+            const auto recordBytes = gpuIndirect->recordBytes;
+            id<MTLBuffer> rewritten = backend.TransientBuffer(std::size_t{gpuIndirect->count} * recordBytes, commands);
+            auto* words = static_cast<std::uint32_t*>(rewritten.contents);
+            std::memset(words, 0, rewritten.length);
+            const auto vertexWord = gpuIndirect->VertexDwordOffset() / 4u;
+            const auto instanceWord = gpuIndirect->InstanceDwordOffset() / 4u;
+            for (std::uint32_t record = 0; record < gpuIndirect->count; ++record) {
+                if (gpuIndirect->vertexRule == Rule::Constant) words[record * (recordBytes / 4u) + vertexWord] = gpuIndirect->vertexConstant;
+                if (gpuIndirect->instanceRule == Rule::Constant) words[record * (recordBytes / 4u) + instanceWord] = gpuIndirect->instanceConstant;
+            }
+            auto blit = [commands blitCommandEncoder];
+            if (blit == nil) throw MetalGpuExecutionError("Metal indirect record blit encoder allocation failed");
+            for (std::uint32_t record = 0; record < gpuIndirect->count; ++record) {
+                const auto source = indirectRecords.offset + NSUInteger{record} * gpuIndirect->stride;
+                const auto destination = NSUInteger{record} * recordBytes;
+                // Count, instances and first index or vertex always come from the record.
+                [blit copyFromBuffer:indirectRecords.buffer sourceOffset:source toBuffer:rewritten destinationOffset:destination size:12];
+                if (gpuIndirect->vertexRule == Rule::InPlace) {
+                    [blit copyFromBuffer:indirectRecords.buffer sourceOffset:source + vertexWord * 4u toBuffer:rewritten
+                        destinationOffset:destination + vertexWord * 4u size:4];
+                }
+                if (gpuIndirect->instanceRule == Rule::InPlace) {
+                    [blit copyFromBuffer:indirectRecords.buffer sourceOffset:source + instanceWord * 4u toBuffer:rewritten
+                        destinationOffset:destination + instanceWord * 4u size:4];
+                }
+            }
+            [blit endEncoding];
+            indirectRecords = {rewritten, 0, rewritten.length};
+            indirectStride = recordBytes;
+        }
+    }
     if (baryPath) {
         const auto& captured = capturePipeline->Reflection();
         std::vector<MetalImplicitBufferBinding> captureBuffers{{rectSlot(captured, MetalBackend::ImplicitBufferRole::StageOutput), {baryCapture, 0, baryCapture.length}}};
@@ -1111,6 +1196,20 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         } else if (rectPath) {
             [encoder setTessellationFactorBuffer:rectFactors offset:0 instanceStride:0];
             [encoder drawPatches:4 patchStart:0 patchCount:rectPatches patchIndexBuffer:nil patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];
+        } else if (gpuIndirect != nullptr) {
+            // One Metal draw per record: MTLDrawIndexedPrimitivesIndirectArguments and
+            // MTLDrawPrimitivesIndirectArguments have the CP's record layouts (indexed: count, instances,
+            // first index, base vertex, first instance; auto: count, instances, first vertex, first instance).
+            if (indirectRecords.offset % 4 != 0) throw std::invalid_argument("Metal draw indirect records are misaligned");
+            for (std::uint32_t record = 0; record < gpuIndirect->count; ++record) {
+                const auto offset = indirectRecords.offset + NSUInteger{record} * indirectStride;
+                if (draw.indexed) {
+                    [encoder drawIndexedPrimitives:primitive indexType:nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
+                        indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset indirectBuffer:indirectRecords.buffer indirectBufferOffset:offset];
+                } else {
+                    [encoder drawPrimitives:primitive indirectBuffer:indirectRecords.buffer indirectBufferOffset:offset];
+                }
+            }
         } else if (draw.indexed || fanPath) {
             [encoder drawIndexedPrimitives:primitive indexCount:nativeIndexCount indexType:nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
                 indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset instanceCount:draw.instanceCount baseVertex:draw.indexed ? static_cast<NSInteger>(std::bit_cast<std::int32_t>(draw.firstVertex)) : 0 baseInstance:draw.firstInstance];

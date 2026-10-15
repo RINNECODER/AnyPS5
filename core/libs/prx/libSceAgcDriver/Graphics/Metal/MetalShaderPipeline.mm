@@ -794,6 +794,32 @@ void MetalComputePipeline::Encode(id<MTLCommandBuffer> commands,
     [encoder endEncoding];
 }
 
+void MetalComputePipeline::EncodeIndirect(id<MTLCommandBuffer> commands,
+                                          std::span<const MetalShaderResourceBinding> bindings,
+                                          id<MTLBuffer> arguments, NSUInteger offset, std::span<const std::byte> pushConstants,
+                                          std::span<const id<MTLResource>> indirectResources) const {
+    if (commands == nil || commands.device != device || commands.status >= MTLCommandBufferStatusCommitted) {
+        throw std::invalid_argument("Converted Metal compute encoding requires an uncommitted command buffer on this device");
+    }
+    if (arguments == nil || offset % 4 != 0 || offset > arguments.length || arguments.length - offset < 3 * sizeof(std::uint32_t)) {
+        throw std::invalid_argument("Converted Metal indirect dispatch arguments are invalid");
+    }
+    auto prepared = prepare(device, shader, bufferAlignments, samplerFunction, bindings, pushConstants, indirectResources);
+    const auto& threads = shader.threadsPerThreadgroup;
+    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+    if (encoder == nil) throw MetalGpuExecutionError("Converted Metal compute encoder creation failed");
+    [encoder setComputePipelineState:pipeline];
+    bindCompute(encoder, shader, prepared);
+    for (id<MTLResource> resource : indirectResources) {
+        [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+    }
+    [encoder useResource:arguments usage:MTLResourceUsageRead];
+    // Zero groups in any dimension dispatch nothing, as the CP does.
+    [encoder dispatchThreadgroupsWithIndirectBuffer:arguments indirectBufferOffset:offset
+                              threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+    [encoder endEncoding];
+}
+
 MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vertex,
                                         ShaderResult fragment, MTLRenderPipelineDescriptor* descriptor)
     : device(device), vertex(std::move(vertex)), fragment(std::move(fragment)) {

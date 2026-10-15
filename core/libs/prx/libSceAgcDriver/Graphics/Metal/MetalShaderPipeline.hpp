@@ -53,6 +53,12 @@ public:
     void Encode(id<MTLCommandBuffer> commands, std::span<const MetalShaderResourceBinding> bindings,
                 MTLSize grid, std::span<const std::byte> pushConstants = {},
                 std::span<const id<MTLResource>> indirectResources = {}) const;
+    // Encode, with the threadgroup counts {x, y, z} (three uint32) read by the GPU from `arguments`
+    // at `offset` (a multiple of 4) when the dispatch runs: DISPATCH_INDIRECT with GPU-written
+    // arguments, without the CPU reading them.
+    void EncodeIndirect(id<MTLCommandBuffer> commands, std::span<const MetalShaderResourceBinding> bindings,
+                        id<MTLBuffer> arguments, NSUInteger offset, std::span<const std::byte> pushConstants = {},
+                        std::span<const id<MTLResource>> indirectResources = {}) const;
 
 private:
     id<MTLDevice> device;

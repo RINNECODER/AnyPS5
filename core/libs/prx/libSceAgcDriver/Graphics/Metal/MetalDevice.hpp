@@ -127,6 +127,8 @@ public:
     // Whether the open batch holds at least `minimum` works and the batch committed before it has
     // completed: committing now keeps the GPU busy while the CPU encodes on.
     [[nodiscard]] bool GpuStarved(std::uint32_t minimum) const;
+    // Works handed the open batch so far (0 without one).
+    [[nodiscard]] std::uint32_t OpenUses() const { return open != nil && open.status < MTLCommandBufferStatusCommitted ? openUses : 0; }
     // Metal command buffers this device created.
     [[nodiscard]] std::uint64_t CommandBuffersCreated() const { return created.load(std::memory_order_relaxed); }
 

@@ -287,7 +287,72 @@ std::string RememberDispatch(std::uint64_t program, std::span<const std::uint32_
 
 }
 
-void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
+// Whether a DISPATCH_INDIRECT runs with the GPU reading its group counts (MetalComputePipeline::
+// EncodeIndirect): the counts are whole threadgroups (DISPATCH_INITIATOR.USE_THREAD_DIMENSIONS
+// clear) at a 4-byte aligned address. ANYPS5_METAL_GPU_INDIRECT=0 reads them on the CPU after a drain.
+bool MetalDriver::Impl::GpuIndirectDispatch(std::uint32_t initiator, std::uint64_t arguments) {
+    return GpuIndirect() && (initiator & 0x20u) == 0 && arguments % 4 == 0;
+}
+
+// The draws whose indirect records the GPU may read (MetalDraw::Draw, GpuReadsIndirectRecords decide
+// the rest once the shader is known): the plain vertex path, with the record count in the packet.
+bool MetalDriver::Impl::GpuIndirectDrawPath(const Graphics::State& state, const Pm4::DrawParameters::IndirectDraw& indirect) {
+    return state.stages.path == Graphics::ShaderPath::Vertex && !state.stages.mesh && !state.stages.tessellation && !state.rectList &&
+        !indirect.countIndirect && indirect.count <= MetalDraw::MaxGpuIndirectRecords && !(indirect.drawIndexEnabled && indirect.drawIndexSgpr >= 0);
+}
+
+// Metal's form of Driver::ClassifyIndirectDraw: per dimension (base vertex, first instance), a CP
+// write of the record's dword into an SGPR must be one the recompiler folded into the draw's offset
+// (InPlace: the Metal indirect draw takes it from the record); with no such write (Constant) the
+// draw's offset is the folded user data word (plus GE_INDX_OFFSET for auto draws), which MetalDraw
+// puts in place of the record's dword. Any other write takes the CPU path.
+bool MetalDriver::Impl::GpuReadsIndirectRecords(const RecompileResult& result, std::uint32_t firstUserSgpr,
+    std::span<const std::uint32_t> userData, Pm4::DrawParameters& parameters) {
+    using Rule = Pm4::DrawParameters::IndirectDraw::Rule;
+    auto& indirect = *parameters.indirect;
+    const auto dimension = [&](std::int32_t folded, std::int32_t written, bool shared, bool conflict, std::uint32_t offset, Rule& rule,
+                               std::uint32_t& constant) {
+        if (written < 0) {
+            rule = Rule::Constant;
+            std::uint32_t word = 0;
+            if (folded >= 0) {
+                const auto index = static_cast<std::uint32_t>(folded) - firstUserSgpr;
+                if (folded < static_cast<std::int32_t>(firstUserSgpr) || index >= userData.size()) return false;
+                word = userData[index];
+            }
+            if (word > std::numeric_limits<std::uint32_t>::max() - offset) return false;
+            constant = offset + word;
+            return true;
+        }
+        if (conflict || folded != written || shared || offset != 0) return false;
+        rule = Rule::InPlace;
+        return true;
+    };
+    const bool vertex = dimension(result.vertexOffsetSgpr, indirect.baseVertexSgpr, result.vertexOffsetShared, result.vertexOffsetConflict,
+        parameters.indexed ? 0u : indirect.indxOffset, indirect.vertexRule, indirect.vertexConstant);
+    const bool instance = dimension(result.instanceOffsetSgpr, indirect.startInstanceSgpr, result.instanceOffsetShared,
+        result.instanceOffsetConflict, 0u, indirect.instanceRule, indirect.instanceConstant);
+    return vertex && instance;
+}
+
+bool MetalDriver::Impl::GpuWaits() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_METAL_GPU_WAITS");
+        return value == nullptr || *value != '0';
+    }();
+    return enabled && DeferWork();
+}
+
+bool MetalDriver::Impl::GpuIndirect() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_METAL_GPU_INDIRECT");
+        return value == nullptr || *value != '0';
+    }();
+    return enabled && DeferWork();
+}
+
+void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission,
+    std::optional<std::uint64_t> indirectArguments) {
     GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
     // Decoding reads guest memory (descriptors, user data) that committed BDA stores may change.
@@ -383,7 +448,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
     const auto size = MTLSizeMake(grid[0], grid[1], grid[2]);
     // One run of the dispatch; with `deferred` it is committed without waiting when its results need
     // no CPU copy into guest memory, and `completed` gets its fault at the timeline's next drain.
-    const auto encode = [this, pipeline, resident, size,
+    const auto encode = [this, pipeline, resident, size, indirectArguments,
         stallUserData = GpuStallWatch::DumpPath() != nullptr ? decoded.userData : std::vector<std::uint32_t>{},
         stallProgram = decoded.programAddress, stallGroups = decoded.groups](bool deferred, MetalDraw::Completed completed, bool stores)
         -> std::optional<BdaAbi::Fault> {
@@ -397,7 +462,13 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
         }
         id<MTLCommandBuffer> commands = backend->CommandBuffer();
         MetalBatchedWork batched(*backend, commands);
-        pipeline->Encode(commands, descriptors, size, {}, bindings->Residency());
+        if (indirectArguments) {
+            // The GPU reads the group counts when the dispatch runs, after the work that writes them.
+            const auto arguments = bindings->Buffer(*indirectArguments, 3 * sizeof(std::uint32_t));
+            pipeline->EncodeIndirect(commands, descriptors, arguments.buffer, arguments.offset, {}, bindings->Residency());
+        } else {
+            pipeline->Encode(commands, descriptors, size, {}, bindings->Residency());
+        }
         bindings->EncodeReadbacks(commands);
         batched.Done();
         if (deferred && !bindings->NeedsSynchronousCompletion()) {
@@ -567,7 +638,13 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             }
             stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushOffset});
             pushOffset += static_cast<std::uint32_t>(result.pushConstants.size());
-            if (i == 0) FoldDrawOffsets(result, program.firstUserSgpr, program.userData, direct);
+            if (i == 0 && direct.indirect) {
+                if (!GpuReadsIndirectRecords(result, program.firstUserSgpr, program.userData, direct)) {
+                    throw IndirectNeedsCpuRecords("Native Metal indirect draw offsets need the records on the CPU");
+                }
+            } else if (i == 0) {
+                FoldDrawOffsets(result, program.firstUserSgpr, program.userData, direct);
+            }
         }
         if (rectangle) {
             if (programs.size() != 2 || stages.size() != 2 || stages[0].stage != ShaderStage::Vertex ||
@@ -627,6 +704,17 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         programs.push_back({decoded.roles[i], program.userDataBase, program.firstUserSgpr, program.userData});
     }
     MarkIndirectDrawSgprs(*parameters.indirect, programs);
+    // The GPU reads the records when the draw runs, after the work that writes them (GPU culling
+    // output, most often), so nothing waits here; a draw the GPU cannot take as it is reads them below.
+    if (GpuIndirect() && GpuIndirectDrawPath(decoded.state, *parameters.indirect)) {
+        try {
+            executeDirect(parameters);
+            ++gpuIndirectDraws;
+            return;
+        } catch (const IndirectNeedsCpuRecords&) {
+            ++cpuIndirectDraws;
+        }
+    }
     CompletePriorGpuWorkAndCopyBack();
     const auto records = ReadIndirectDrawRecords(*parameters.indirect);
     for (std::uint32_t record = 0; record < records.size(); ++record) {
@@ -663,14 +751,18 @@ bool MetalDriver::Impl::DeferLabelStore(std::span<const std::uint32_t> packet, s
     if (label) {
         // The destination stops matching cached images in packet order, as when it runs now.
         ForgetCachedImages(*store);
-        PendingLabel pending{label->address, {}, label->Bytes().size(), timeline.Epoch()};
+        PendingLabel pending{label->address, {}, label->Bytes().size(), ++labelSerial};
         std::copy(label->Bytes().begin(), label->Bytes().end(), pending.bytes.begin());
-        std::erase_if(pendingLabels, [&](const PendingLabel& other) { return other.epoch != pending.epoch; });
+        // Forgetting the oldest only makes a later wait on it take the slow path.
         if (pendingLabels.size() >= 256) pendingLabels.erase(pendingLabels.begin());
         pendingLabels.push_back(pending);
     }
+    const auto serial = label ? labelSerial : 0;
     std::vector<std::uint32_t> copy(packet.begin(), packet.end());
-    timeline.Defer([this, copy = std::move(copy), stores = label.has_value(), interrupt, queueId] {
+    // The GPU signals the label point (MetalTimeline::DeferSignal); an end-of-pipe interrupt, which a
+    // guest thread waits on, commits the batch so it is not delivered behind work encoded after it.
+    timeline.DeferSignal([this, copy = std::move(copy), stores = label.has_value(), interrupt, queueId, serial] {
+        if (serial != 0) std::erase_if(pendingLabels, [&](const PendingLabel& other) { return other.serial == serial; });
         // RELEASE_MEM and WRITE_DATA use no queue state; a timestamp is taken now, after the work.
         static QueueState* const scratch = new QueueState();
         Pm4::Execute(copy, *scratch);
@@ -687,7 +779,7 @@ bool MetalDriver::Impl::DeferLabelStore(std::span<const std::uint32_t> packet, s
             ForgetCachedImages(ForgetReason::Event);
             DeliverEopInterrupt(queueId);
         }
-    });
+    }, interrupt);
     return true;
 }
 
@@ -695,7 +787,6 @@ bool MetalDriver::Impl::PendingLabelSatisfies(std::span<const std::uint32_t> pac
     const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
     const auto bytes = Pm4::WaitAwaitedBytes(packet);
     for (auto label = pendingLabels.rbegin(); label != pendingLabels.rend(); ++label) {
-        if (label->epoch != timeline.Epoch()) break;
         if (address + bytes <= label->address || label->address + label->size <= address) continue;
         if (address < label->address || address + bytes > label->address + label->size) return false;
         std::uint64_t value = 0;
@@ -818,7 +909,9 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                         std::snprintf(item, sizeof item, " %zx:%llu", i, static_cast<unsigned long long>(drainsBy[i]));
                         top += item;
                     }
-                    std::fprintf(stderr, "[agc] drains by cause:%s; barrier waits %llu\n", top.c_str(), static_cast<unsigned long long>(barrierWaits));
+                    std::fprintf(stderr, "[agc] drains by cause:%s; barrier waits %llu; indirect draws gpu %llu cpu %llu\n", top.c_str(),
+                        static_cast<unsigned long long>(barrierWaits), static_cast<unsigned long long>(gpuIndirectDraws),
+                        static_cast<unsigned long long>(cpuIndirectDraws));
                 }
             }
             CheckFailureAndStopping();
@@ -839,22 +932,42 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             Tolerate(SkippedDispatch, [&] { ExecuteDispatchSynchronously(queue, packet, submission); });
             Pm4::NoteDispatchRegisters(packet, queue);
         } else if (opcode == 0x16) {
-            // The indirect arguments are guest memory earlier GPU work may write.
-            CompletePriorGpuWorkAndCopyBack(opcode);
-            Tolerate(SkippedDispatch, [&] {
-                const auto direct = Pm4::ResolveDispatch(packet, queue);
-                ExecuteDispatchSynchronously(queue, direct, submission);
-            });
+            // The indirect arguments are guest memory earlier GPU work may write: the GPU reads them
+            // itself when the dispatch runs (GpuIndirectDispatch), so nothing waits here.
+            std::optional<std::uint64_t> arguments;
+            try {
+                arguments = Pm4::DispatchArgumentAddress(packet, queue);
+            } catch (const std::exception&) {
+            }
+            if (arguments && GpuIndirectDispatch(packet.back(), *arguments)) {
+                Tolerate(SkippedDispatch, [&] {
+                    const std::array<std::uint32_t, 5> placeholder{0xc0031500u, 1, 1, 1, packet.back()};
+                    ExecuteDispatchSynchronously(queue, placeholder, submission, arguments);
+                });
+            } else {
+                CompletePriorGpuWorkAndCopyBack(opcode);
+                Tolerate(SkippedDispatch, [&] {
+                    const auto direct = Pm4::ResolveDispatch(packet, queue);
+                    ExecuteDispatchSynchronously(queue, direct, submission);
+                });
+            }
             Pm4::NoteDispatchRegisters(packet, queue);
         } else if (Pm4::DrawOpcode(opcode)) {
             Tolerate(SkippedDraw, [&] { ExecuteDrawSynchronously(queue, packet, submission); });
         } else if (opcode == 0x3c || opcode == 0x93) {
+            if (timeline.Empty()) pendingLabels.clear();
             if (!timeline.Empty() && PendingLabelSatisfies(packet)) {
                 ++barrierWaits;
                 cursor = next;
                 continue;
             }
-            CompletePriorGpuWorkAndCopyBack(opcode);
+            // Committed work after this wait runs after the work before it on the one Metal queue, so
+            // the CPU waits only for the value itself: a label that is no pending store of ours is the
+            // guest CPU's (or a store of ours that already ran). Meanwhile the GPU goes on and the
+            // timeline retires what it finished, so labels of ours the guest CPU waits on before it
+            // writes this one still reach it. ANYPS5_METAL_GPU_WAITS=0 drains first, as before.
+            if (!GpuWaits()) CompletePriorGpuWorkAndCopyBack(opcode);
+            else timeline.Flush();
             const auto address = static_cast<std::uint64_t>(packet[2]) | (static_cast<std::uint64_t>(packet[3]) << 32u);
             bool blocked = false;
             try {
@@ -866,6 +979,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                     CheckFailureAndStopping();
                     lock.lock();
                     borrowCurrentRanges();
+                    if (!timeline.Empty()) timeline.Reap();
                 }
             } catch (...) {
                 if (blocked) NoteWaitBlocked(submission.queue, address, false);
