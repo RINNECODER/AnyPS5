@@ -37,7 +37,7 @@ using AgcDriver::Metal::OwnLabelStores;
 using AgcDriver::Metal::PacketStoreRange;
 
 void CacheTests() {
-    std::vector<std::byte> memory(0x10000);
+    std::vector<std::byte> memory(0x110000);
     auto* host = memory.data();
     Cache cache;
     auto a = std::make_shared<FakeTexture>(FakeTexture{{0x1000, 64}, 0x1000});
@@ -76,11 +76,42 @@ void CacheTests() {
         cache.Insert(0x100 * i, host + 0x100 * i, many.back(), false);
     }
     Check(cache.Find(0, host, Descriptor{0, 1}).has_value(), "a full cache still finds its oldest entry");
-    auto extra = std::make_shared<FakeTexture>(FakeTexture{{0x9000, 1}, 0x100});
-    cache.Insert(0x9000, host + 0x9000, extra, false);
+    auto extra = std::make_shared<FakeTexture>(FakeTexture{{0x100000, 1}, 0x100});
+    cache.Insert(0x100000, host + 0x100000, extra, false);
     Check(cache.Size() == Cache::MaxEntries, "a full cache stays at its bound");
     Check(cache.Find(0, host, Descriptor{0, 1}).has_value(), "the entry used last survives eviction");
     Check(!cache.Find(0x100, host + 0x100, Descriptor{0x100, 1}), "the least recently used entry is evicted");
+    Check(cache.Bytes() == Cache::MaxEntries * 0x100, "the cache counts the guest bytes it covers");
+    cache.Invalidate(host + 0x2ff, 0x101);
+    Check(!cache.Find(0x200, host + 0x200, Descriptor{0x200, 1}) && !cache.Find(0x300, host + 0x300, Descriptor{0x300, 1}),
+        "an invalidation that straddles two surfaces drops both");
+    Check(cache.Find(0x400, host + 0x400, Descriptor{0x400, 1}).has_value(), "the surface after an invalidated range stays");
+    Check(cache.Bytes() == (Cache::MaxEntries - 2) * 0x100, "dropped surfaces leave the byte count");
+    cache.Clear();
+    Check(cache.Bytes() == 0, "clear resets the byte count");
+}
+
+// Bounded by bytes too: one surface larger than the rest pushes out the least recently used ones.
+void ByteBoundTests() {
+    struct Big {
+        Descriptor descriptor;
+        std::size_t bytes;
+        bool CanShareBacking(const Descriptor& other) const { return other.base == descriptor.base; }
+        std::size_t GuestBytes() const { return bytes; }
+    };
+    using BigCache = AgcDriver::Metal::GuestImageCache<Big>;
+    // Content entries take no hash, so the host bytes behind these addresses are never read.
+    const auto at = [](std::uint64_t offset) { return reinterpret_cast<const std::byte*>(std::uintptr_t{0x100000000} + offset); };
+    BigCache cache;
+    constexpr auto quarter = BigCache::MaxBytes / 4;
+    for (std::uint64_t i = 0; i < 4; ++i) cache.Insert(i, at(i * quarter), std::make_shared<Big>(Big{{i, 1}, quarter}), false, 1);
+    Check(cache.Size() == 4 && cache.Bytes() == BigCache::MaxBytes, "surfaces fill the cache up to its byte bound");
+    Check(cache.Find(0, at(0), Descriptor{0, 1}, 1).has_value(), "the first surface is used again");
+    cache.Insert(9, at(4 * quarter), std::make_shared<Big>(Big{{9, 1}, 2 * quarter}), false, 1);
+    Check(cache.Bytes() <= BigCache::MaxBytes && cache.Size() == 3, "a larger surface pushes out enough bytes");
+    Check(cache.Find(0, at(0), Descriptor{0, 1}, 1).has_value(), "the surface used last survives the byte bound");
+    Check(!cache.Find(1, at(quarter), Descriptor{1, 1}, 1) && !cache.Find(2, at(2 * quarter), Descriptor{2, 1}, 1),
+        "the least recently used surfaces go first");
 }
 
 // Expire (a new submission, a wait, a flip) keeps entries that can prove their guest bytes.
@@ -198,6 +229,7 @@ void OwnLabelTests() {
 
 int main() {
     CacheTests();
+    ByteBoundTests();
     ExpiryTests();
     FingerprintTests();
     StoreRangeTests();

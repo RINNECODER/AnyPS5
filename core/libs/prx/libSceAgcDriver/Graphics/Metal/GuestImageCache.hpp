@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -34,11 +36,17 @@ namespace AgcDriver::Metal {
 // - a mapping change or a failure calls Clear, which drops everything.
 // Entries are keyed by guest address and host address (so a remapped range never hits) and
 // invalidated by host range (so a write through another guest alias of the same memory counts).
+// Entries never overlap in host bytes (an insert replaces the ones it overlaps), so they are kept
+// ordered by host address: a lookup or an invalidation touches only the entries at its range.
+// The bound is MaxEntries and MaxBytes of guest bytes, least recently used out first. A live-map
+// frame binds about 350 surfaces; at the old bound of 128 entries every frame re-uploaded about
+// 300 of them (one compute or blit encoder each) although none had changed.
 // `Texture` provides `bool CanShareBacking(const Descriptor&) const` and `std::size_t GuestBytes() const`.
 template <typename Texture>
 class GuestImageCache {
 public:
-    static constexpr std::size_t MaxEntries = 128;
+    static constexpr std::size_t MaxEntries = 1024;
+    static constexpr std::size_t MaxBytes = std::size_t{1} << 30;
 
     struct Hit {
         std::shared_ptr<Texture> texture;
@@ -66,20 +74,23 @@ public:
     template <typename Descriptor>
     std::optional<Hit> Find(std::uint64_t guest, const std::byte* host, const Descriptor& descriptor, std::uint64_t content = 0) {
         std::lock_guard lock(mutex);
-        for (auto entry = entries.begin(); entry != entries.end(); ++entry) {
-            if (entry->guest != guest || entry->host != address(host) || entry->content != content || !entry->texture->CanShareBacking(descriptor)) continue;
-            if (entry->generation != generation) {
-                if (!proves(*entry)) {
-                    ++statistics.rejected;
-                    entries.erase(entry);
-                    break;
+        if (auto found = entries.find(address(host)); found != entries.end()) {
+            auto& entry = found->second;
+            if (entry.guest == guest && entry.content == content && entry.texture->CanShareBacking(descriptor)) {
+                if (entry.generation != generation) {
+                    if (!proves(entry)) {
+                        ++statistics.rejected;
+                        erase(found);
+                        ++statistics.misses;
+                        return std::nullopt;
+                    }
+                    ++statistics.verified;
+                    entry.generation = generation;
                 }
-                ++statistics.verified;
-                entry->generation = generation;
+                entry.stamp = ++clock;
+                ++statistics.hits;
+                return Hit{entry.texture, entry.compare};
             }
-            entry->stamp = ++clock;
-            ++statistics.hits;
-            return Hit{entry->texture, entry->compare};
         }
         ++statistics.misses;
         return std::nullopt;
@@ -96,22 +107,25 @@ public:
         const auto bytes = texture->GuestBytes();
         std::lock_guard lock(mutex);
         const auto proof = content != 0 ? Proof::Content : written ? Proof::Pending : Proof::Hash;
-        for (auto& entry : entries) {
-            if (proof != Proof::Hash || entry.texture != texture || entry.host != address(host) || entry.guest != guest ||
-                entry.content != content || entry.generation != generation) continue;
-            entry.stamp = ++clock;
-            return;
+        if (auto found = entries.find(address(host)); found != entries.end()) {
+            auto& entry = found->second;
+            if (proof == Proof::Hash && entry.texture == texture && entry.guest == guest && entry.content == content && entry.generation == generation) {
+                entry.stamp = ++clock;
+                return;
+            }
         }
         eraseOverlapping(address(host), bytes);
-        if (entries.size() >= MaxEntries) {
-            entries.erase(std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.stamp < b.stamp; }));
+        if (auto same = entries.find(address(host)); same != entries.end()) erase(same);
+        while (!entries.empty() && (entries.size() >= MaxEntries || totalBytes + bytes > MaxBytes)) {
+            erase(std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.second.stamp < b.second.stamp; }));
         }
         std::uint64_t fingerprint = 0;
         if (proof == Proof::Hash) {
             fingerprint = GuestBytesFingerprint::Hash(host, bytes);
             statistics.hashedBytes += bytes;
         }
-        entries.push_back({guest, address(host), bytes, std::move(texture), compare, ++clock, content, generation, generation, proof, fingerprint});
+        entries.emplace(address(host), Entry{guest, address(host), bytes, std::move(texture), compare, ++clock, content, generation, generation, proof, fingerprint});
+        totalBytes += bytes;
         ++statistics.inserts;
     }
 
@@ -120,13 +134,14 @@ public:
     void Seal(const std::byte* host, const Texture* texture) {
         if (host == nullptr || texture == nullptr) return;
         std::lock_guard lock(mutex);
-        for (auto& entry : entries) {
-            // A later write of the same texture may still be in flight; completions run in order,
-            // so the last one's sample stands.
-            if (entry.host != address(host) || entry.texture.get() != texture || (entry.proof != Proof::Pending && entry.proof != Proof::Sample)) continue;
-            entry.proof = Proof::Sample;
-            entry.fingerprint = GuestBytesFingerprint::Sample(host, entry.bytes);
-        }
+        // A later write of the same texture may still be in flight; completions run in order, so
+        // the last one's sample stands.
+        auto found = entries.find(address(host));
+        if (found == entries.end()) return;
+        auto& entry = found->second;
+        if (entry.texture.get() != texture || (entry.proof != Proof::Pending && entry.proof != Proof::Sample)) return;
+        entry.proof = Proof::Sample;
+        entry.fingerprint = GuestBytesFingerprint::Sample(host, entry.bytes);
     }
 
     // Forgets every entry whose host bytes overlap [host, host + bytes).
@@ -141,6 +156,7 @@ public:
         std::lock_guard lock(mutex);
         if (entries.empty()) return;
         entries.clear();
+        totalBytes = 0;
         ++statistics.clears;
         ++statistics.clearsBy[reason % 8];
     }
@@ -158,6 +174,12 @@ public:
     [[nodiscard]] std::size_t Size() const {
         std::lock_guard lock(mutex);
         return entries.size();
+    }
+
+    // Guest bytes the entries cover.
+    [[nodiscard]] std::size_t Bytes() const {
+        std::lock_guard lock(mutex);
+        return totalBytes;
     }
 
     // The counters so far; resets them when `reset`.
@@ -206,13 +228,31 @@ private:
 
     static std::uintptr_t address(const std::byte* host) { return reinterpret_cast<std::uintptr_t>(host); }
 
+    using Entries = std::map<std::uintptr_t, Entry>;
+
+    void erase(typename Entries::iterator entry) {
+        totalBytes -= entry->second.bytes;
+        entries.erase(entry);
+    }
+
     void eraseOverlapping(std::uintptr_t begin, std::size_t bytes) {
         const auto end = begin + bytes;
-        std::erase_if(entries, [&](const Entry& entry) { return entry.host < end && begin < entry.host + entry.bytes; });
+        // Entries are disjoint: only the last one starting before `begin` can reach into the range.
+        auto entry = entries.lower_bound(begin);
+        if (entry != entries.begin()) {
+            const auto before = std::prev(entry);
+            if (begin < before->second.host + before->second.bytes) entry = before;
+        }
+        while (entry != entries.end() && entry->second.host < end) {
+            const auto next = std::next(entry);
+            if (begin < entry->second.host + entry->second.bytes) erase(entry);
+            entry = next;
+        }
     }
 
     mutable std::mutex mutex;
-    std::vector<Entry> entries;
+    Entries entries;
+    std::size_t totalBytes = 0;
     std::uint64_t clock = 0;
     std::uint64_t generation = 1;
     Statistics statistics;
