@@ -19,9 +19,11 @@ namespace AgcDriver::Metal {
 
 // Whether a converted shader may store to guest memory through BDA pointers (the recompiler
 // defines its written-page note, note_bda_write, only for shaders with such stores). Those stores
-// reach pages nobody can name before the work completes.
+// reach pages nobody can name before the work completes. ConvertToMetal records the answer
+// (storesThroughBda) so that a draw does not search the whole source again.
 template <typename Converted>
 [[nodiscard]] bool StoresThroughBda(const Converted& shader) {
+    if (shader.storesThroughBda) return *shader.storesThroughBda;
     return shader.source.find("bda_write") != std::string::npos;
 }
 

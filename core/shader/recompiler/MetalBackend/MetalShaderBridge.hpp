@@ -126,6 +126,8 @@ public:
         return *this;
     }
     ShaderSource& operator=(const char* value) { return *this = std::string(value); }
+    // The shared text itself (null when empty): its address identifies this text while it is held.
+    [[nodiscard]] const std::shared_ptr<const std::string>& Shared() const { return text; }
 
     [[nodiscard]] const std::string& str() const { return text ? *text : Empty(); }
     operator const std::string&() const { return str(); }
@@ -161,6 +163,9 @@ struct Result {
     // ShaderSourceHash(source), set by ConvertToMetal so that a draw does not hash the source again to
     // find its compiled function; 0 when not computed. A stale value only makes that lookup miss.
     std::size_t sourceHash = 0;
+    // Whether source stores through BDA pointers (StoresThroughBda), set with sourceHash so that a
+    // draw does not search the source for it; unset when not computed.
+    std::optional<bool> storesThroughBda;
     std::string entryPoint;
     RecompileResult guest;
     std::vector<ResourceMapping> resources;

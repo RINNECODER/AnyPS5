@@ -59,7 +59,7 @@ id<MTLFunction> compile(id<MTLDevice> device, const ShaderResult& shader, MTLFun
     } else {
         throw std::runtime_error("Converted Metal shader pipelines require macOS 15 or later");
     }
-    id<MTLFunction> function = CachedShaderFunction(device, shader.source, shader.entryPoint, shader.requiresWorkgroupAtomicFences, shader.sourceHash);
+    id<MTLFunction> function = CachedConvertedShaderFunction(device, shader.source, shader.entryPoint, shader.requiresWorkgroupAtomicFences, shader.sourceHash);
     if (function == nil || function.functionType != type) {
         throw std::invalid_argument("Converted Metal shader entry point has the wrong stage or is missing");
     }
