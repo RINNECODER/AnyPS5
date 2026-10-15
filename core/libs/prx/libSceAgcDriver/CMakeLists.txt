@@ -1002,6 +1002,7 @@ target_include_directories(agc_driver_pm4_tests PRIVATE
 
 target_link_libraries(agc_driver_pm4_tests PRIVATE
         libSceAgcDriver
+        shader_recompiler_agc_driver
         libc
         libkernel
 )
