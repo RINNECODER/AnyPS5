@@ -6,6 +6,7 @@ architectural state — GPRs, RFLAGS, xmm/ymm 0-15 and every scratch byte writte
 usage: difftest_full.py <address> <seeds...>      (one function, prints JSON)
        difftest_full.py --campaign <count> <seeds>
 """
+import atexit
 import ctypes
 import importlib.util
 import multiprocessing
@@ -13,6 +14,7 @@ import json
 import os
 import random
 import select
+import shutil
 import signal
 import struct
 import subprocess
@@ -146,6 +148,26 @@ REAL_STUB = ('extern "C" void* NativeAotTlsBase_nid_no_patch(void) { return 0; }
 
 
 _RUNNER = None
+_SCRATCH_DIRS = []
+
+
+def _scratch(prefix):
+    """A per-process scratch directory, removed when the process exits.
+
+    These directories hold a built object or binary, so they are reused for the process's lifetime
+    rather than removed per call; the exit hook keeps a long batch from filling TMPDIR.
+    """
+    directory = Path(tempfile.mkdtemp(prefix=prefix))
+    _SCRATCH_DIRS.append(directory)
+    return directory
+
+
+def _cleanup():
+    while _SCRATCH_DIRS:
+        shutil.rmtree(_SCRATCH_DIRS.pop(), ignore_errors=True)
+
+
+atexit.register(_cleanup)
 
 
 def build_runner(directory):
@@ -155,7 +177,7 @@ def build_runner(directory):
         return _RUNNER
     source = directory / "runner.c"
     source.write_text(RUNNER)
-    binary = Path(tempfile.mkdtemp(prefix="runner-")) / "runner"
+    binary = _scratch("runner-") / "runner"
     subprocess.run(["xcrun", "clang", "-arch", "x86_64", "-O1", str(source), "-o", str(binary)],
                    check=True, capture_output=True)
     _RUNNER = binary
@@ -213,7 +235,17 @@ def arm_state(dylib, name, registers, memory, timeout=30, image=None):
 
     `image` is the real module image's segment list: mapping it at BASE + vaddr is what makes a
     guest_data reference (and the native dispatch table's keys) resolve."""
-    out_path = Path(tempfile.mkdtemp(prefix="arm-")) / "state.bin"
+    out_path = _scratch("arm-") / "state.bin"
+    try:
+        return _arm_state_run(out_path, dylib, name, registers, memory, timeout, image)
+    finally:
+        # One directory per call would otherwise accumulate for the life of a batch.
+        shutil.rmtree(out_path.parent, ignore_errors=True)
+        if out_path.parent in _SCRATCH_DIRS:
+            _SCRATCH_DIRS.remove(out_path.parent)
+
+
+def _arm_state_run(out_path, dylib, name, registers, memory, timeout, image):
     pid = os.fork()
     if pid == 0:
         try:
@@ -386,7 +418,7 @@ def build_arm64_real(ir, directory):
     from toolchain import build_native_object
     build_native_object(ir, directory / "native.o")
     if _REAL_OBJECTS is None or not all(Path(item).exists() for item in _REAL_OBJECTS):
-        folder = Path(tempfile.mkdtemp(prefix="realobj-"))
+        folder = _scratch("realobj-")
         dispatch = REPO / "core" / "libs" / "native" / "NativeAotDispatch.cpp"
         subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-O2", "-c", str(dispatch),
                         "-o", str(folder / "dispatch.o")], check=True, capture_output=True)
@@ -558,6 +590,13 @@ def worker(arguments):
     address, seed_count = arguments[:2]
     plant = arguments[2] if len(arguments) > 2 else None
     directory = Path(tempfile.mkdtemp(prefix=f"full-{address:x}-"))
+    try:
+        return _worker_cases(address, seed_count, plant, directory)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _worker_cases(address, seed_count, plant, directory):
     outcomes = []
     for seed in range(seed_count):
         try:
@@ -602,10 +641,13 @@ def main():
     directory = Path(tempfile.mkdtemp(prefix=f"full-{address:x}-"))
     plant = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].isdigit() else None
     seeds = [int(value) for value in sys.argv[2 + (1 if plant else 0):]]
-    for seed in seeds:
-        outcome = run_case(address, seed, directory, plant)
-        print(json.dumps({"address": address, "seed": seed, "plant": plant, "status": outcome["status"],
-                          "differences": compare(outcome["arm"], outcome["x86"], outcome["library"], outcome["data_ranges"])[1][:6] if outcome["status"] == "ok" else None}))
+    try:
+        for seed in seeds:
+            outcome = run_case(address, seed, directory, plant)
+            print(json.dumps({"address": address, "seed": seed, "plant": plant, "status": outcome["status"],
+                              "differences": compare(outcome["arm"], outcome["x86"], outcome["library"], outcome["data_ranges"])[1][:6] if outcome["status"] == "ok" else None}))
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 if __name__ == "__main__":
