@@ -1835,7 +1835,7 @@ struct ModuleConversion {
 };
 
 BoundedCache<ModuleConversion>& ModuleConversionCache() {
-    static BoundedCache<ModuleConversion> cache(4096, std::size_t{256} << 20);
+    static BoundedCache<ModuleConversion> cache(8192, std::size_t{256} << 20);
     return cache;
 }
 
@@ -1955,7 +1955,8 @@ Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const Tar
                 static_cast<unsigned long long>(fnv(diskKey.Bytes().data(), diskKey.Size())), guest.bindings.size());
         }
     }
-    result.sourceHash = ShaderSourceHash(result.source);
+    result.sourceHash = ShaderSourceHash(result.source.str());
+    result.storesThroughBda = result.source.find("bda_write") != std::string::npos;
     // Cached without the guest program and push constants (each hit attaches the caller's).
     auto guestProgram = std::move(result.guest);
     auto pushConstantData = std::move(result.pushConstantData);

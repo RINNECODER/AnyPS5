@@ -50,6 +50,18 @@ BoundedCache<FunctionEntry>& Functions() {
     return cache;
 }
 
+// In front of Functions(), by the identity of a converted shader's shared source text. The entry
+// holds the text, so no other text can take its address while it is cached.
+struct SharedFunctionEntry {
+    std::shared_ptr<const std::string> source;
+    id<MTLFunction> function;
+};
+
+BoundedCache<SharedFunctionEntry>& SharedFunctions() {
+    static BoundedCache<SharedFunctionEntry> cache(4096, std::size_t{64} << 20);
+    return cache;
+}
+
 BoundedCache<ComputeEntry>& ComputePipelines() {
     static BoundedCache<ComputeEntry> cache(2048, std::size_t{64} << 20);
     return cache;
@@ -551,6 +563,22 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
     return Functions().Insert(std::move(key), FunctionEntry{function}, ObjectBytes).function;
 }
 
+id<MTLFunction> CachedConvertedShaderFunction(id<MTLDevice> device, const ShaderRecompiler::MetalBackend::ShaderSource& source,
+                                              const std::string& entryPoint, bool languageVersion32, std::size_t sourceHash) {
+    const auto& text = source.Shared();
+    if (!text) return CachedShaderFunction(device, source.str(), entryPoint, languageVersion32, sourceHash);
+    CacheKeyWriter writer;
+    Device(writer, device, 'S');
+    writer.Bool(languageVersion32);
+    writer.Text(entryPoint);
+    writer.Value(reinterpret_cast<std::uintptr_t>(text.get()));
+    auto key = writer.TakeKey();
+    if (auto cached = SharedFunctions().Find(key)) return cached->function;
+    id<MTLFunction> function = CachedShaderFunction(device, *text, entryPoint, languageVersion32, sourceHash);
+    if (function != nil) static_cast<void>(SharedFunctions().Insert(std::move(key), SharedFunctionEntry{text, function}, text->size() + ObjectBytes));
+    return function;
+}
+
 CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComputePipelineDescriptor* descriptor, NSError** error) {
     const bool cacheable = !Linked(descriptor.linkedFunctions.functions) && !Linked(descriptor.preloadedLibraries);
     auto key = cacheable ? ComputeKey(device, descriptor) : CacheKey();
@@ -737,7 +765,9 @@ MetalPipelineCacheStatistics GetMetalPipelineCacheStatistics() {
         return MetalCacheCounter{counters.hits, counters.misses};
     };
     MetalPipelineCacheStatistics result;
+    // A hit by shared source is a hit of the library cache it stands in front of.
     result.libraries = counter(Functions());
+    result.libraries.hits += SharedFunctions().Counters().hits;
     result.computePipelines = counter(ComputePipelines());
     result.renderPipelines = counter(RenderPipelines());
     result.depthStencilStates = counter(DepthStencilStates());
@@ -768,6 +798,7 @@ void ClearMetalPipelineCaches() {
         static_cast<void>(FlushLocked());
         archives.clear();
     }
+    SharedFunctions().Clear();
     Functions().Clear();
     ComputePipelines().Clear();
     RenderPipelines().Clear();

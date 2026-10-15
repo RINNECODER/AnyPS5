@@ -123,6 +123,10 @@ public:
         [[nodiscard]] id<MTLBuffer> Table() const;
         [[nodiscard]] id<MTLBuffer> FaultBuffer() const;
         [[nodiscard]] NSArray<id<MTLBuffer>>* Buffers() const;
+        // Buffers()[index] and Buffers().count without building the array (a draw looks up a
+        // mirror for every buffer and texture it binds).
+        [[nodiscard]] id<MTLBuffer> Buffer(std::size_t index) const { return mirrors.at(index).buffer; }
+        [[nodiscard]] std::size_t BufferCount() const { return mirrors.size(); }
         void DeclareResources(id<MTLComputeCommandEncoder> encoder) const;
         // Guest bytes this snapshot copied into fresh buffers (0 when every component aliases).
         [[nodiscard]] std::uint64_t CopiedBytes() const;
