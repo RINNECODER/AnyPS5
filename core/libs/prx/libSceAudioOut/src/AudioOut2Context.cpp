@@ -565,7 +565,7 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
         Render(*context, grain);
     } else if (context->advancedMode) {
         Render(*context, grain);
-        if (PendingMs(*context) > MAX_QUEUED_MS) context->dropped++;
+        if (PendingMs(*context) > MaxQueuedMs(*context)) context->dropped++;
         else context->output.insert(context->output.end(), context->mix.begin(), context->mix.end());
     } else {
         context->pendingGrains.push_back(std::move(grain));
