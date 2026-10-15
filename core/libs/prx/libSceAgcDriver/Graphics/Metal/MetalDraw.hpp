@@ -3,6 +3,7 @@
 #include "MetalDevice.hpp"
 #include "BdaAbi.hpp"
 #include "GuestImageCache.hpp"
+#include "MetalLazyCopyBacks.hpp"
 #include "MetalTexture.hpp"
 #include "MetalTimeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
@@ -51,6 +52,9 @@ public:
     // (GuestImageCache.hpp). The driver clears it wherever guest memory may have changed under it.
     // Null when ANYPS5_METAL_IMAGE_CACHE=0 turns it off (every binding uploads again).
     [[nodiscard]] GuestImageCache<MetalTexture>* ImageCache();
+    // Copy-backs of surfaces draws and dispatches wrote, recorded until someone needs the guest
+    // bytes (MetalLazyCopyBacks.hpp). The driver materializes them at its sync points.
+    [[nodiscard]] MetalLazyCopyBacks& LazyCopyBacks() { return lazyCopyBacks; }
     void DumpSamplesSynchronously(std::uint64_t guestAddress);
     [[nodiscard]] ShaderRecompiler::MeshTargetLimits MeshLimits() const;
     [[nodiscard]] ShaderRecompiler::TessellationTargetLimits TessellationLimits() const;
@@ -101,7 +105,8 @@ private:
     std::function<void(std::uint64_t, std::uint64_t)> cpuReadHook;
     id<MTLBuffer> sampleCounter = nil;
     id<MTLBuffer> sampleTarget = nil;
-    // Last, so its textures go before the device they were made on.
+    // Last, so their textures go before the device they were made on.
+    MetalLazyCopyBacks lazyCopyBacks;
     GuestImageCache<MetalTexture> imageCache;
 };
 

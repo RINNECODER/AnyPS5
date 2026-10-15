@@ -559,6 +559,7 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
         }, hostAliases.get(), ImageCache());
     auto& resources = *resourcesOwner;
     if (cpuReadHook) resources.SetCpuReadHook(cpuReadHook);
+    resources.SetLazyCopyBacks(&lazyCopyBacks);
     auto texture = resources.Texture(colorSurface(destination), true, false, false, destination.mip);
     id<MTLTexture> handle = ColorAttachmentView(texture->Texture(), RenderPixelFormat(destination.format));
     switch (handle.pixelFormat) {
@@ -740,6 +741,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         }, hostAliases.get(), ImageCache());
     auto& resources = *resourcesOwner;
     if (cpuReadHook) resources.SetCpuReadHook(cpuReadHook);
+    resources.SetLazyCopyBacks(&lazyCopyBacks);
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1225,7 +1227,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         const SampleCounterParameters parameters{1, 0};
         backend.Encode(commands, @"SampleCounter", @[sampleCounter, sampleTarget], &parameters, sizeof(parameters), MTLSizeMake(1, 1, 1));
     }
-    resources.EncodeReadbacks(commands);
+    // Committed to the timeline without waiting: its copy-backs may wait for a reader.
+    resources.EncodeReadbacks(commands, timeline != nullptr && sampleCounter == nil);
     if (timeline != nullptr && sampleCounter == nil && !resources.NeedsSynchronousCompletion()) {
         resources.CommittedWithoutWaiting();
         batched.Done();

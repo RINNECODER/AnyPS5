@@ -142,24 +142,17 @@ void copyElement(uint src, uint dst, device const uint* inputBuffer, device uint
     }
 }
 
-kernel void TextureDetile(device const uint* inputBuffer [[buffer(0)]], device uint* outputBuffer [[buffer(1)]], constant TextureDetileParameters& params [[buffer(2)]], uint2 position [[thread_position_in_grid]]) {
-    uint2 p = position + uint2(params.columnBegin, params.rowBegin);
-    if (p.x >= params.width || p.y >= params.height) {
-        return;
-    }
-
-    uint linearOffset = p.y * params.pitchBytes + p.x * ELEMENT_BYTES;
-
+// The tiled and linear byte offsets of element `p` (relative to tiledBase and linearBase), or
+// false when the element lies outside the copied range.
+bool elementOffsets(uint2 p, constant TextureDetileParameters& params, thread uint& tiledOffset, thread uint& linearOffset) {
+    linearOffset = p.y * params.pitchBytes + p.x * ELEMENT_BYTES;
     if (TILE_FAMILY == 0u) {
         if (linearOffset < params.rangeBegin || linearOffset >= params.rangeEnd) {
-            return;
+            return false;
         }
-        if (RETILE != 0u) {
-            copyElement(params.srcBase + linearOffset - params.linearBase, params.dstBase + linearOffset - params.tiledBase, inputBuffer, outputBuffer);
-        } else {
-            copyElement(params.srcBase + linearOffset - params.tiledBase, params.dstBase + linearOffset - params.linearBase, inputBuffer, outputBuffer);
-        }
-        return;
+        tiledOffset = linearOffset - params.tiledBase;
+        linearOffset -= params.linearBase;
+        return true;
     }
 
     uint2 swizzle = p;
@@ -171,16 +164,96 @@ kernel void TextureDetile(device const uint* inputBuffer [[buffer(0)]], device u
     }
 
     uint blockIndex = block.y * params.blocksPerRow + block.x;
-    uint tiledOffset = blockIndex * BLOCK_BYTES + blockOffset(swizzle, params);
+    tiledOffset = blockIndex * BLOCK_BYTES + blockOffset(swizzle, params);
     if (tiledOffset < params.rangeBegin || tiledOffset >= params.rangeEnd) {
-        return;
+        return false;
     }
     tiledOffset -= params.tiledBase;
     linearOffset -= params.linearBase;
+    return true;
+}
 
+kernel void TextureDetile(device const uint* inputBuffer [[buffer(0)]], device uint* outputBuffer [[buffer(1)]], constant TextureDetileParameters& params [[buffer(2)]], uint2 position [[thread_position_in_grid]]) {
+    uint2 p = position + uint2(params.columnBegin, params.rowBegin);
+    if (p.x >= params.width || p.y >= params.height) {
+        return;
+    }
+    uint tiledOffset;
+    uint linearOffset;
+    if (!elementOffsets(p, params, tiledOffset, linearOffset)) {
+        return;
+    }
     if (RETILE != 0u) {
         copyElement(params.srcBase + linearOffset, params.dstBase + tiledOffset, inputBuffer, outputBuffer);
     } else {
         copyElement(params.srcBase + tiledOffset, params.dstBase + linearOffset, inputBuffer, outputBuffer);
     }
+}
+
+// The fused paths: the texture itself is read or written through a view whose unsigned format
+// has one component per 32 bits of the element (R8Uint and R16Uint for 1- and 2-byte elements),
+// so the raw texel bits move without the linear staging buffer and the blit around the detile.
+// `slice` stays the guest layer the swizzle equation XORs in; `textureSlice` and `level` address
+// the view (a 2D array of every level and layer of the backing).
+struct TextureTransferParameters {
+    TextureDetileParameters tile;
+    uint textureSlice;
+    uint level;
+};
+
+uint4 readElement(uint byteOffset, device const uint* buffer) {
+    if (ELEMENT_BYTES >= 4u) {
+        uint4 value = uint4(0u);
+        uint words = ELEMENT_BYTES / 4u;
+        for (uint i = 0u; i < words; ++i) {
+            value[i] = buffer[(byteOffset >> 2) + i];
+        }
+        return value;
+    }
+    uint mask = ELEMENT_BYTES == 1u ? 0xffu : 0xffffu;
+    return uint4((buffer[byteOffset >> 2] >> ((byteOffset & 3u) * 8u)) & mask, 0u, 0u, 0u);
+}
+
+void writeElement(uint byteOffset, uint4 value, device uint* buffer) {
+    if (ELEMENT_BYTES >= 4u) {
+        uint words = ELEMENT_BYTES / 4u;
+        for (uint i = 0u; i < words; ++i) {
+            buffer[(byteOffset >> 2) + i] = value[i];
+        }
+        return;
+    }
+    uint mask = ELEMENT_BYTES == 1u ? 0xffu : 0xffffu;
+    uint shift = (byteOffset & 3u) * 8u;
+    atomic_fetch_and_explicit(reinterpret_cast<device atomic_uint*>(buffer) + (byteOffset >> 2), ~(mask << shift), memory_order_relaxed);
+    atomic_fetch_or_explicit(reinterpret_cast<device atomic_uint*>(buffer) + (byteOffset >> 2), (value.x & mask) << shift, memory_order_relaxed);
+}
+
+// Texture to guest-tiled bytes (a copy-back), in one pass.
+kernel void TextureRetileFromTexture(texture2d_array<uint, access::read> source [[texture(0)]], device uint* outputBuffer [[buffer(0)]],
+    constant TextureTransferParameters& params [[buffer(1)]], uint2 position [[thread_position_in_grid]]) {
+    uint2 p = position + uint2(params.tile.columnBegin, params.tile.rowBegin);
+    if (p.x >= params.tile.width || p.y >= params.tile.height) {
+        return;
+    }
+    uint tiledOffset;
+    uint linearOffset;
+    if (!elementOffsets(p, params.tile, tiledOffset, linearOffset)) {
+        return;
+    }
+    writeElement(params.tile.dstBase + tiledOffset, source.read(p, params.textureSlice, params.level), outputBuffer);
+}
+
+// Guest-tiled bytes to the texture (an upload), in one pass.
+kernel void TextureDetileToTexture(device const uint* inputBuffer [[buffer(0)]], texture2d_array<uint, access::write> destination [[texture(0)]],
+    constant TextureTransferParameters& params [[buffer(1)]], uint2 position [[thread_position_in_grid]]) {
+    uint2 p = position + uint2(params.tile.columnBegin, params.tile.rowBegin);
+    if (p.x >= params.tile.width || p.y >= params.tile.height) {
+        return;
+    }
+    uint tiledOffset;
+    uint linearOffset;
+    if (!elementOffsets(p, params.tile, tiledOffset, linearOffset)) {
+        return;
+    }
+    destination.write(readElement(params.tile.srcBase + tiledOffset, inputBuffer), p, params.textureSlice, params.level);
 }

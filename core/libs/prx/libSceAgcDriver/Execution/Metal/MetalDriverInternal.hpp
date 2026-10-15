@@ -97,7 +97,13 @@ struct MetalDriver::Impl {
     void AwaitMappingDrain();
     void NotifyLabelStore();
     // `cause` only feeds the ANYPS5_METAL_GPU_TIMING drain statistics (a packet opcode or 0x100+).
+    // Materializes every lazy copy-back first (MetalLazyCopyBacks.hpp, rule 2).
     void CompletePriorGpuWorkAndCopyBack(std::uint32_t cause = 0x10f);
+    // Encodes the lazy copy-backs (every one, or those over guest [address, address + bytes)) into
+    // the open command buffer and commits them to the timeline, which seals them in the image cache
+    // once they completed. GPU-side: nothing waits here. Called with gpuMutex held.
+    void MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause);
+    void MaterializeCopyBacks(MetalLazyCopyBacks::Cause cause, std::uint64_t address, std::uint64_t bytes);
     // Clears the draw executor's image cache (GuestImageCache.hpp), or drops the entries a store
     // overlaps. The reason only feeds the ANYPS5_METAL_GPU_TIMING statistics (0 is a mapping change).
     enum class ForgetReason : unsigned { Other, Submission, Wait, Flip, Event, Failure, Store };

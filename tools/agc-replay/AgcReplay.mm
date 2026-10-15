@@ -14,7 +14,8 @@
 // The first repeat is a warm-up for timing and for the hash (cold pipelines and caches render a few
 // hundred pixels 1-3 levels apart); the hash must be stable over the later repeats.
 // --expect-hash checks the last frame's hash in every timed repeat (pixel-exact); --expect-png
-// compares the last repeat against a PNG (e.g. one --dump-png wrote), allowing --max-diff-pixels.
+// compares the last frame of every timed repeat against a PNG (e.g. one --dump-png wrote), allowing
+// --max-diff-pixels in each (the warm-up is compared and reported, not judged).
 // Exit status: 0, 1 on a mismatch or an unstable hash across timed repeats, 2 on errors.
 #import <Metal/Metal.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -582,6 +583,10 @@ int main(int argc, char** argv) {
     };
     std::vector<std::vector<Sample>> samples(frames);
     std::vector<std::byte> lastPixels;
+    // --expect-png, read once: every repeat's last frame is compared against it.
+    std::uint32_t referenceWidth = 0, referenceHeight = 0;
+    const auto reference = expectPng.empty() ? std::vector<std::byte>{} : ReadPng(expectPng, referenceWidth, referenceHeight);
+    std::size_t pngMismatches = 0;
     std::vector<std::vector<std::byte>> previousPixels(frames);
     const auto zeroChunk = std::vector<std::byte>(Capture::ChunkBytes);
     std::size_t liveAt = 0;
@@ -672,6 +677,13 @@ int main(int argc, char** argv) {
                     rep, diff.colour, diff.maxDelta, diff.x0, diff.x1, diff.y0, diff.y1, diff.alpha);
             }
             previousPixels[frame] = lastPixels;
+            if (!reference.empty() && frame + 1 == frames && reference.size() == lastPixels.size()) {
+                const auto diff = Compare(reference, lastPixels, referenceWidth);
+                const bool ok = diff.colour <= maxDiffPixels;
+                if (rep != 0 && !ok) ++pngMismatches;
+                std::printf("  repeat %zu vs expect-png: %zu pixels differ (max delta %d)%s\n", rep + 1, diff.colour, diff.maxDelta,
+                    rep == 0 ? " (warm-up, not judged)" : ok ? "" : ": MISMATCH");
+            }
             if (!quiet)
                 std::printf("repeat %zu frame %zu: wall %.2f ms  worker cpu %.2f ms (%.2f system)  gpu busy %.2f ms  worker %.1f M instructions  hash %016" PRIx64 "\n",
                     rep + 1, frame, wallMs, cpuMs, systemMs, gpuMs, minstr, hash);
@@ -746,8 +758,7 @@ int main(int argc, char** argv) {
         if (!all) status = 1;
     }
     if (!expectPng.empty()) {
-        std::uint32_t width = 0, height = 0;
-        const auto reference = ReadPng(expectPng, width, height);
+        const auto width = referenceWidth, height = referenceHeight;
         const auto display = capture.displays.find(static_cast<std::uint32_t>(frames - 1));
         if (reference.empty() || display == capture.displays.end() || width != display->second.buffer.width || height != display->second.buffer.height ||
             reference.size() != lastPixels.size()) {
@@ -755,9 +766,9 @@ int main(int argc, char** argv) {
             status = 1;
         } else {
             const auto diff = Compare(reference, lastPixels, width);
-            const bool ok = diff.colour <= maxDiffPixels;
-            std::printf("expect-png %s: %zu pixels differ (max delta %d), allowed %zu: %s\n", expectPng.c_str(), diff.colour, diff.maxDelta,
-                maxDiffPixels, ok ? "match" : "MISMATCH");
+            const bool ok = diff.colour <= maxDiffPixels && pngMismatches == 0;
+            std::printf("expect-png %s: last repeat %zu pixels differ (max delta %d), allowed %zu; %zu timed repeats over: %s\n", expectPng.c_str(),
+                diff.colour, diff.maxDelta, maxDiffPixels, pngMismatches, ok ? "match" : "MISMATCH");
             if (!ok) status = 1;
         }
     }

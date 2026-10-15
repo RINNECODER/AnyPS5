@@ -229,6 +229,25 @@ void MetalShaderResources::forgetCachedImages(std::uint64_t begin, std::uint64_t
     }
 }
 
+void MetalShaderResources::materializeBefore(std::uint64_t address, std::uint64_t bytes, const MetalTexture* keep) {
+    if (lazyCopyBacks == nullptr || bytes == 0 || lazyCopyBacks->Empty()) return;
+    const auto end = bytes > ~std::uint64_t{0} - address ? ~std::uint64_t{0} : address + bytes;
+    for (const auto& range : borrowedRanges) {
+        const auto clippedBegin = std::max(address, range.guestAddress);
+        const auto clippedEnd = std::min(end, range.guestAddress + range.host.size());
+        if (clippedBegin >= clippedEnd) continue;
+        const auto* host = range.host.data() + (clippedBegin - range.guestAddress);
+        const auto size = static_cast<std::size_t>(clippedEnd - clippedBegin);
+        if (!lazyCopyBacks->Overlaps(host, size)) continue;
+        // The open batch when batching (the reader encodes after this); else a command buffer
+        // committed ahead of the reader's on the same queue.
+        id<MTLCommandBuffer> commands = backend.CommandBuffer();
+        auto done = lazyCopyBacks->EncodeOverlapping(commands, host, size, MetalLazyCopyBacks::Cause::GpuRead, keep);
+        backend.Submit(commands);
+        materialized.insert(materialized.end(), std::make_move_iterator(done.begin()), std::make_move_iterator(done.end()));
+    }
+}
+
 bool MetalShaderResources::physicallyOverlaps(std::uint64_t begin, std::uint64_t end,
     std::uint64_t otherBegin, std::uint64_t otherEnd) const {
     for (const auto& range : borrowedRanges) {
@@ -313,6 +332,9 @@ MetalBufferBinding MetalShaderResources::stageStorageImage(std::uint64_t address
 
 MetalBufferBinding MetalShaderResources::Buffer(std::uint64_t address, std::size_t bytes, bool writable) {
     auto buffer = mirror(address, bytes, writable);
+    // A surface whose texture is newer than its guest bytes: the buffer reads (or partly
+    // overwrites) the bytes, so they are copied back first.
+    materializeBefore(address, bytes);
     for (const auto& image : images) {
         const auto& descriptor = image.texture->Descriptor();
         const auto begin = descriptor.baseAddress;
@@ -610,6 +632,9 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
         texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
         if (keys == Graphics::DccKeys::Uncompressed) {
             if (cpuRead && !texture->UploadsInPlace(buffer.buffer, buffer.offset)) cpuRead(descriptor.baseAddress, bytes);
+            // Another texture of these bytes may be newer than them (another format or view of a
+            // surface written since): the upload converts through the copied-back bytes, GPU-side.
+            materializeBefore(descriptor.baseAddress, bytes);
             texture->Upload(buffer.buffer, buffer.offset);
         } else {
             std::vector<std::byte> clear(bytes);
@@ -889,7 +914,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
 
 std::span<const id<MTLResource>> MetalShaderResources::Residency() const { return resident; }
 
-void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands) {
+void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands, bool lazy) {
     if (GpuTiming::SplitReadbacks() && std::any_of(images.begin(), images.end(), [](const Image& image) { return image.written; })) {
         // Profiling only: the copy-backs run right behind the work, in a command buffer of their own.
         [commands enqueue];
@@ -905,13 +930,25 @@ void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands) {
         [readbacks commit];
         return;
     }
+    const bool defer = lazy && lazyCopyBacks != nullptr && MetalLazyCopyBacks::Enabled();
     for (auto& image : images) {
         if (!image.written) continue;
         // Only what this work wrote, when the rest of the guest bytes already equal the texture: an
         // uncompressed surface read and written in place (a DCC or staged one is copied whole).
         const bool partial = image.original.empty() && image.keys == Graphics::DccKeys::Uncompressed &&
             image.texture->Descriptor().dccAddress == 0 && image.writtenPart.levelBegin < image.writtenPart.levelEnd;
-        if (image.texture->EncodeReadback(commands, image.buffer.buffer, image.buffer.offset, partial ? image.writtenPart : MetalTexture::Subresources{})) {
+        const auto part = partial ? image.writtenPart : MetalTexture::Subresources{};
+        // Deferred only when the copy-back writes the guest bytes in place through their alias: a
+        // staged surface or one copied through another buffer needs its CPU copy in Complete.
+        const bool aliased = image.original.empty() && !image.host.empty() &&
+            static_cast<const std::byte*>(image.buffer.buffer.contents) + image.buffer.offset == image.host.data();
+        if (defer && aliased &&
+            lazyCopyBacks->Record(commands, image.texture, image.buffer.buffer, image.buffer.offset, part, image.host,
+                image.texture->Descriptor().baseAddress, materialized)) {
+            image.deferred = true;
+            continue;
+        }
+        if (image.texture->EncodeReadback(commands, image.buffer.buffer, image.buffer.offset, part)) {
             image.readbackIn = commands;
         }
     }
@@ -923,7 +960,7 @@ bool MetalShaderResources::NeedsSynchronousCompletion() const {
         if (static_cast<const std::byte*>(write.buffer.buffer.contents) + write.buffer.offset != write.host.data()) return true;
     }
     for (const auto& image : images) {
-        if (!image.written) continue;
+        if (!image.written || image.deferred) continue;
         if (image.readbackIn == nil || !image.original.empty()) return true;
         if (static_cast<const std::byte*>(image.buffer.buffer.contents) + image.buffer.offset != image.host.data()) return true;
     }
@@ -1012,7 +1049,7 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
     }
     for (const auto& image : images) {
         image.texture->FinishUpload();
-        if (image.written && image.readbackIn != commands) {
+        if (image.written && !image.deferred && image.readbackIn != commands) {
             image.texture->Readback(image.buffer.buffer, image.buffer.offset);
         }
     }
@@ -1022,7 +1059,7 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         if (written != write.host.data()) std::memcpy(write.host.data(), written, write.host.size());
     }
     for (const auto& image : images) {
-        if (!image.written) continue;
+        if (!image.written || image.deferred) continue;
         const auto* current = static_cast<const std::byte*>(image.buffer.buffer.contents) + image.buffer.offset;
         if (image.original.empty()) {
             // An in-place copy-back already wrote the guest bytes through the alias.
@@ -1058,12 +1095,17 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
             }
         }
     }
-    // Written surfaces' guest bytes now hold their copy-backs.
+    // Written surfaces' guest bytes now hold their copy-backs (a deferred one's, once it is
+    // materialized: MetalDriver seals those), and so do the lazy copy-backs this work encoded first.
     if (imageCache != nullptr && fault.state == Abi::FaultState::Empty) {
         for (const auto& image : images) {
-            if (image.cacheable && image.written) imageCache->Seal(image.host.data(), image.texture.get());
+            if (image.cacheable && image.written && !image.deferred) imageCache->Seal(image.host.data(), image.texture.get());
         }
     }
+    if (imageCache != nullptr) {
+        for (const auto& done : materialized) imageCache->Seal(done.host, done.texture.get());
+    }
+    materialized.clear();
     if (BindTrace::Active()) {
         for (const auto& image : images) {
             if (!image.written) continue;

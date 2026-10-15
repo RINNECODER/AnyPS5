@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <string_view>
+#include <sys/mman.h>
 #include <spirv/unified1/spirv.hpp>
 
 namespace {
@@ -22,6 +23,8 @@ kernel void readSrgb(texture2d_array<float> t [[texture(0)]],device float4* out 
 kernel void compare(depth2d<float> t [[texture(0)]],device float* out [[buffer(0)]],uint i [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::nearest,compare_func::less_equal); out[i]=t.sample_compare(s,float2(.5f),i==0?.1f:.5f); }
 kernel void read2D(texture2d<float> t [[texture(0)]],device uchar4* out [[buffer(0)]],uint2 p [[thread_position_in_grid]]) { constexpr sampler s(coord::normalized,filter::nearest); out[p.y*8+p.x]=uchar4(round(t.sample(s,(float2(p)+.5f)/8.0f)*255.0f)); }
 kernel void readR32Uint(texture2d<uint,access::read> t [[texture(0)]],device uint* out [[buffer(0)]],uint2 p [[thread_position_in_grid]]) { out[p.y*8+p.x]=t.read(p).x; }
+kernel void writeColor2D(texture2d<float,access::write> t [[texture(0)]],constant uint4& color [[buffer(1)]],uint2 p [[thread_position_in_grid]]) { t.write(float4(color)/255.0f,p); }
+kernel void copyWords(texture2d<float> unused [[texture(0)]],device uint* out [[buffer(0)]],device const uint* in [[buffer(1)]],uint i [[thread_position_in_grid]]) { out[i]=in[i]; }
 kernel void readR32Float(texture2d<float,access::read> t [[texture(0)]],device uint* out [[buffer(0)]],uint2 p [[thread_position_in_grid]]) { out[p.y*8+p.x]=as_type<uint>(t.read(p).x); }
 struct BdaHeader { uint version,count,entryBytes,reserved; };
 struct BdaRange { ulong begin,end; device uchar* address; uint permissions,reserved; };
@@ -789,6 +792,125 @@ void ArrayPrefixViews(const Metal::MetalDevice& backend,id<MTLLibrary> library) 
 
 }
 
+// Lazy copy-backs (MetalLazyCopyBacks.hpp) through the resources a draw or dispatch binds. A
+// deferred work writes a surface and its copy-back is recorded, not run: the guest bytes keep their
+// old contents. A later pass sampling the surface with a compatible descriptor gets the texture
+// itself from the image cache and leaves it recorded; a pass viewing the bytes in a format the
+// texture cannot share converts through the copied-back bytes, and a buffer binding of the bytes
+// (a compute or DMA consumer) copies them back ahead of itself. Two writes of one texture merge.
+void LazyCopyBacks(Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    if(!Metal::MetalLazyCopyBacks::Enabled()) return;
+    auto d=Descriptor();
+    const auto geometry=Graphics::DescribeSurface(d);
+    // Copy-backs defer only into a no-copy alias of the guest bytes: page-aligned host memory.
+    constexpr std::size_t mappingBytes=16384;
+    void* mapping=::mmap(nullptr,mappingBytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    Require(mapping!=MAP_FAILED,"lazy copy-back host mapping failed");
+    const std::span<std::byte> guest(static_cast<std::byte*>(mapping),geometry.guestBytes);
+    std::fill(guest.begin(),guest.end(),std::byte{0x40});
+    const NativeGuestMemory::BorrowedRange borrow{d.baseAddress,guest,true};
+    Metal::MetalGuestHostAliases aliases(backend.Device());
+    Metal::GuestImageCache<Metal::MetalTexture> cache;
+    Metal::MetalLazyCopyBacks lazy;
+    const auto untouched=[&] { return std::all_of(guest.begin(),guest.end(),[](std::byte b) { return b==std::byte{0x40}; }); };
+    // The texels' guest bytes (a linear row may be padded past them) hold `color`.
+    const auto holds=[&](std::array<std::uint8_t,4> color) {
+        const auto& mip=geometry.mips[0];
+        for(unsigned y=0;y<mip.height;++y) for(unsigned x=0;x<mip.width;++x) for(unsigned c=0;c<4;++c)
+            if(guest[y*mip.pitchBytes+x*4+c]!=std::byte{color[c]}) return false;
+        return true;
+    };
+    // A deferred pass writing the whole surface in `color`; returns its texture.
+    const auto write=[&](std::array<std::uint8_t,4> color) {
+        auto pass=std::make_shared<Metal::MetalShaderResources>(backend,std::span(&borrow,1),Metal::MetalShaderResources::DepthTextureLookup{},&aliases,&cache);
+        pass->SetLazyCopyBacks(&lazy);
+        auto target=pass->Texture(d,true);
+        auto commands=backend.CommandBuffer();
+        const std::array<std::uint32_t,4> value{color[0],color[1],color[2],color[3]};
+        Encode(backend,library,commands,@"writeColor2D",target->StorageView(),nil,MTLSizeMake(8,8,1),value.data(),sizeof(value));
+        pass->EncodeReadbacks(commands,true);
+        Require(!pass->NeedsSynchronousCompletion(),"a deferred copy-back makes its work complete synchronously");
+        pass->CommittedWithoutWaiting();
+        backend.Wait(commands);
+        static_cast<void>(pass->Complete(commands));
+        return target;
+    };
+    lazy.TakeStatistics();
+    const auto first=write({17,31,73,127});
+    Require(lazy.Size()==1,"a written surface's copy-back is not deferred");
+    Require(untouched(),"a deferred copy-back wrote the guest bytes before anyone read them");
+    write({17,31,73,127});
+    const auto merged=lazy.TakeStatistics(false);
+    Require(lazy.Size()==1 && merged.recorded==2 && merged.merged==1,"two copy-backs of one texture are not merged");
+    {
+        // A later pass samples the surface: the texture itself, no copy-back.
+        Metal::MetalShaderResources pass(backend,std::span(&borrow,1),{},&aliases,&cache);
+        pass.SetLazyCopyBacks(&lazy);
+        auto sampled=pass.Texture(d);
+        Require(sampled->Texture()==first->Texture(),"a compatible sampler of a deferred surface does not get its texture");
+        auto output=backend.Buffer(64*4);
+        auto commands=backend.CommandBuffer();
+        Encode(backend,library,commands,@"read2D",sampled->SampledView(),output,MTLSizeMake(8,8,1));
+        backend.Wait(commands);
+        Pixels(output.contents,{17,31,73,127},64,"a sampler of a deferred surface does not see what the earlier pass rendered");
+        Require(lazy.Size()==1 && untouched(),"sampling a deferred surface through its texture copied it back");
+    }
+    {
+        // Another format the texture cannot share: converted through the copied-back bytes, on the GPU.
+        Metal::MetalShaderResources pass(backend,std::span(&borrow,1),{},&aliases,&cache);
+        pass.SetLazyCopyBacks(&lazy);
+        auto words=Descriptor(20);
+        auto converted=pass.Texture(words);
+        Require(converted->Texture()!=first->Texture() && lazy.Empty(),"an incompatible view of a deferred surface does not copy it back first");
+        auto output=backend.Buffer(64*4);
+        auto commands=backend.CommandBuffer();
+        Encode(backend,library,commands,@"readR32Uint",converted->SampledView(),output,MTLSizeMake(8,8,1));
+        backend.Wait(commands);
+        for(unsigned i=0;i<64;++i) Require(static_cast<const std::uint32_t*>(output.contents)[i]==0x7f491f11u,"an incompatible view of a deferred surface does not see what the earlier pass rendered");
+        Require(holds({17,31,73,127}),"the copy-back before an incompatible view did not reach the guest bytes");
+    }
+    std::fill(guest.begin(),guest.end(),std::byte{0x40});
+    cache.Clear();
+    write({5,6,7,8});
+    Require(lazy.Size()==1 && untouched(),"a rewritten surface's copy-back is not deferred");
+    {
+        // A buffer binding of the bytes (a compute or DMA consumer): copied back first, GPU-side.
+        Metal::MetalShaderResources pass(backend,std::span(&borrow,1),{},&aliases,&cache);
+        pass.SetLazyCopyBacks(&lazy);
+        // Row 1's texels.
+        auto bytes=pass.Buffer(d.baseAddress+geometry.mips[0].pitchBytes,32);
+        Require(lazy.Empty(),"a buffer binding over a deferred surface does not copy it back first");
+        auto output=backend.Buffer(64);
+        auto commands=backend.CommandBuffer();
+        auto encoder=[commands computeCommandEncoder];
+        [encoder setComputePipelineState:Pipeline(backend,library,@"copyWords")];
+        [encoder setTexture:first->SampledView() atIndex:0];
+        [encoder setBuffer:output offset:0 atIndex:0];
+        [encoder setBuffer:bytes.buffer offset:bytes.offset atIndex:1];
+        [encoder dispatchThreads:MTLSizeMake(8,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+        [encoder endEncoding];
+        backend.Wait(commands);
+        Pixels(output.contents,{5,6,7,8},8,"a buffer reader of a deferred surface does not see what the earlier pass rendered");
+        Require(holds({5,6,7,8}),"the copy-back before a buffer reader did not reach the guest bytes");
+    }
+    // Recorded copy-backs over another texture's bytes stay disjoint: the older one is encoded first.
+    std::fill(guest.begin(),guest.end(),std::byte{0x40});
+    cache.Clear();
+    write({1,2,3,4});
+    auto commands=backend.CommandBuffer();
+    std::vector<Metal::MetalLazyCopyBacks::Materialized> encodedFirst;
+    auto other=std::make_shared<Metal::MetalTexture>(backend,Descriptor(20));
+    auto alias=backend.Buffer(guest.size());
+    Require(!lazy.Record(commands,other,alias,2,{},guest,d.baseAddress,encodedFirst),"a copy-back that is not in place is deferred");
+    Require(lazy.Size()==1,"a refused record changed the recorded copy-backs");
+    backend.Wait(commands);
+    commands=backend.CommandBuffer();
+    auto done=lazy.EncodeAll(commands,Metal::MetalLazyCopyBacks::Cause::Drain);
+    backend.Wait(commands);
+    Require(done.size()==1 && lazy.Empty() && holds({1,2,3,4}),"encoding every recorded copy-back does not reach the guest bytes");
+    // The mapping stays: the aliases and cached textures above still name it until they go.
+}
+
 void RunTextureViewsTests(const MetalTests::Context& context) {
     Metal::MetalDevice backend(context.device,context.library);
     NSError* error=nil;
@@ -806,4 +928,5 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     ArraySliceDescriptors(backend,library);
     ArrayPrefixViews(backend,library);
     AccessGuards(backend);
+    LazyCopyBacks(backend,library);
 }

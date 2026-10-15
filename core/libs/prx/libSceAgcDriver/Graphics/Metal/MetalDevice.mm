@@ -217,11 +217,33 @@ void MetalDevice::Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArra
                          const void* parameters, std::size_t parameterBytes, MTLSize grid,
                          const std::array<std::uint32_t, 22>* constants, std::span<const NSUInteger> offsets) const {
     validateCommands(commands);
-    if (!offsets.empty() && (buffers == nil || offsets.size() != buffers.count)) {
-        throw std::invalid_argument("Metal encoding buffer offsets must match the buffers");
-    }
     if (commands.status >= MTLCommandBufferStatusCommitted) {
         throw std::invalid_argument("Metal command buffer has already been committed");
+    }
+    validateDispatch(kernel, buffers, parameters, parameterBytes, offsets);
+    if (grid.width == 0 || grid.height == 0 || grid.depth == 0) {
+        return;
+    }
+    // Named for GPU traces (Metal System Trace) when ANYPS5_METAL_GPU_TIMING is on.
+    NSString* label = nil;
+    if (GpuTiming::Enabled()) {
+        label = ![kernel isEqualToString:@"TextureDetile"] || constants == nullptr ? kernel :
+            (*constants)[3] != 0 ? @"readback retile" : @"upload detile";
+    }
+    id<MTLComputeCommandEncoder> encoder = ComputeEncoder(commands, label);
+    try {
+        Dispatch(encoder, kernel, buffers, parameters, parameterBytes, grid, constants, offsets);
+    } catch (...) {
+        [encoder endEncoding];
+        throw;
+    }
+    [encoder endEncoding];
+}
+
+void MetalDevice::validateDispatch(NSString* kernel, NSArray<id<MTLBuffer>>* buffers, const void* parameters,
+                                   std::size_t parameterBytes, std::span<const NSUInteger> offsets) const {
+    if (!offsets.empty() && (buffers == nil || offsets.size() != buffers.count)) {
+        throw std::invalid_argument("Metal encoding buffer offsets must match the buffers");
     }
     if (kernel == nil || kernel.length == 0 || buffers == nil) {
         throw std::invalid_argument("Metal encoding requires a kernel name and buffer array");
@@ -237,35 +259,53 @@ void MetalDevice::Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArra
             throw std::invalid_argument("Metal buffers must belong to this device");
         }
     }
+}
+
+id<MTLComputeCommandEncoder> MetalDevice::ComputeEncoder(id<MTLCommandBuffer> commands, NSString* label) const {
+    validateCommands(commands);
+    if (commands.status >= MTLCommandBufferStatusCommitted) {
+        throw std::invalid_argument("Metal command buffer has already been committed");
+    }
+    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+    if (encoder == nil) {
+        throw MetalGpuExecutionError("Metal compute command encoder creation failed");
+    }
+    if (label != nil && GpuTiming::Enabled()) encoder.label = label;
+    return encoder;
+}
+
+void MetalDevice::Dispatch(id<MTLComputeCommandEncoder> encoder, NSString* kernel, NSArray<id<MTLBuffer>>* buffers,
+                           const void* parameters, std::size_t parameterBytes, MTLSize grid,
+                           const std::array<std::uint32_t, 22>* constants, std::span<const NSUInteger> offsets,
+                           id<MTLTexture> texture) const {
+    if (encoder == nil) {
+        throw std::invalid_argument("Metal dispatch requires an open compute encoder");
+    }
+    validateDispatch(kernel, buffers, parameters, parameterBytes, offsets);
+    if (texture != nil && texture.device != device) {
+        throw std::invalid_argument("Metal textures must belong to this device");
+    }
     if (grid.width == 0 || grid.height == 0 || grid.depth == 0) {
         return;
     }
     id<MTLComputePipelineState> state = pipeline(kernel, constants);
-    const bool tileKernel = [kernel isEqualToString:@"TextureDetile"] || [kernel isEqualToString:@"ColorTransfer"];
+    const bool tileKernel = [kernel isEqualToString:@"TextureDetile"] || [kernel isEqualToString:@"ColorTransfer"] ||
+        [kernel isEqualToString:@"TextureRetileFromTexture"] || [kernel isEqualToString:@"TextureDetileToTexture"];
     const MTLSize threads = tileKernel ? MTLSizeMake(8, 8, 1) : MTLSizeMake(1, 1, 1);
     if (threads.width > device.maxThreadsPerThreadgroup.width ||
         threads.height > device.maxThreadsPerThreadgroup.height ||
         threads.width * threads.height > state.maxTotalThreadsPerThreadgroup) {
         throw std::runtime_error("Metal compute pipeline cannot support the required threadgroup size");
     }
-    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
-    if (encoder == nil) {
-        throw MetalGpuExecutionError("Metal compute command encoder creation failed");
-    }
-    // Named for GPU traces (Metal System Trace) when ANYPS5_METAL_GPU_TIMING is on.
-    if (GpuTiming::Enabled()) {
-        encoder.label = ![kernel isEqualToString:@"TextureDetile"] || constants == nullptr ? kernel :
-            (*constants)[3] != 0 ? @"readback retile" : @"upload detile";
-    }
     [encoder setComputePipelineState:state];
     for (NSUInteger i = 0; i < buffers.count; ++i) {
         [encoder setBuffer:buffers[i] offset:offsets.empty() ? 0 : offsets[i] atIndex:i];
     }
+    if (texture != nil) [encoder setTexture:texture atIndex:0];
     if (parameterBytes != 0) {
         [encoder setBytes:parameters length:parameterBytes atIndex:buffers.count];
     }
     [encoder dispatchThreads:grid threadsPerThreadgroup:threads];
-    [encoder endEncoding];
 }
 
 void MetalDevice::Wait(id<MTLCommandBuffer> commands) const {

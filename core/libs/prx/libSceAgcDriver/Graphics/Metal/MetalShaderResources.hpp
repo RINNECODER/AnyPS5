@@ -5,6 +5,7 @@
 #include "MetalShaderPipeline.hpp"
 #include "MetalTexture.hpp"
 #include "GuestImageCache.hpp"
+#include "MetalLazyCopyBacks.hpp"
 #include "MetalSampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
@@ -31,8 +32,14 @@ public:
         std::optional<std::uint32_t> writtenLevel = std::nullopt);
     [[nodiscard]] std::span<const id<MTLResource>> Residency() const;
     // Encodes the copy-back of every written image into `commands` (after the work that writes
-    // them, before the commit), so Complete(commands) need not read them back separately.
-    void EncodeReadbacks(id<MTLCommandBuffer> commands);
+    // them, before the commit), so Complete(commands) need not read them back separately. With
+    // `lazy` (the work is committed to the timeline without waiting) and a registry
+    // (SetLazyCopyBacks), the copy-backs that can be deferred are recorded there instead
+    // (MetalLazyCopyBacks.hpp): the texture stays the newer copy until someone needs the bytes.
+    void EncodeReadbacks(id<MTLCommandBuffer> commands, bool lazy = false);
+    // The deferred copy-backs shared by draws and dispatches. Bindings that read guest bytes
+    // through memory (buffers, uploads) materialize the overlapping ones first.
+    void SetLazyCopyBacks(MetalLazyCopyBacks* registry) { lazyCopyBacks = registry; }
     [[nodiscard]] ShaderRecompiler::BdaAbi::Fault Complete(id<MTLCommandBuffer> commands);
     // Asynchronous completion (MetalTimeline). True when Complete must copy bytes into guest
     // memory on the CPU (a staged or copied range, a copy-back that is not encoded, DCC metadata):
@@ -75,6 +82,8 @@ private:
         std::vector<ImageRange> writableRanges;
         std::vector<std::byte> original;
         id<MTLCommandBuffer> readbackIn = nil;
+        // The copy-back was recorded in the lazy registry instead of encoded.
+        bool deferred = false;
         bool compare = false;
         // Uploaded from (or, written, read back into) its whole guest surface in place: what the
         // image cache may hold once the work completes.
@@ -98,6 +107,13 @@ private:
     bool sharesPlainTexels(const Image& image, const Graphics::GuestTextureResource& descriptor);
     std::string dccKeysNote(const Image& image, const Graphics::GuestTextureResource& descriptor);
     CpuReadHook cpuRead;
+    MetalLazyCopyBacks* lazyCopyBacks = nullptr;
+    // Lazy copy-backs this work encoded ahead of its readers: sealed in the image cache once the
+    // work completed.
+    std::vector<MetalLazyCopyBacks::Materialized> materialized;
+    // Encodes, ahead of this work, the lazy copy-backs over guest [address, address + bytes) that a
+    // binding is about to read through memory (`keep`: a texture binding of that very texture).
+    void materializeBefore(std::uint64_t address, std::uint64_t bytes, const MetalTexture* keep = nullptr);
     std::vector<NativeGuestMemory::BorrowedRange> borrowedRanges;
     MetalGuestMemory memory;
     MetalGuestMemory::DispatchSnapshot snapshot;

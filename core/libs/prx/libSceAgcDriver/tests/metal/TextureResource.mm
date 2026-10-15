@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string_view>
 
@@ -499,7 +500,75 @@ void VerifyPacked(const MetalTests::Context& context, id<MTLLibrary> probes) {
 
 }
 
+// The fused transfer passes (TextureDetileToTexture, TextureRetileFromTexture) for every element
+// size, against the blit (an independent byte copy) on linear surfaces, and as an exact round trip
+// on tiled ones: a copy-back writes the bytes an upload read, and only those.
+void VerifyFusedTransfers(const MetalTests::Context& context) {
+    AgcDriver::Metal::MetalDevice backend(context.device, context.library);
+    for (const unsigned format : {1u, 14u, 36u, 56u, 71u, 77u}) {
+        for (const auto mode : {TextureTileMode::kLinear, TextureTileMode::kStandard4KB, TextureTileMode::kS64KBX}) {
+            auto descriptor = Descriptor(TextureDimension::k2DArray, mode);
+            descriptor.format = format;
+            descriptor.width = 37;
+            descriptor.height = 21;
+            descriptor.mipCount = descriptor.allocatedMipCount = 3;
+            descriptor.lastLevel = 2;
+            MetalTexture texture(backend, descriptor);
+            const char* fusedEnv = std::getenv("ANYPS5_METAL_FUSED_TRANSFER");
+            if (fusedEnv == nullptr || fusedEnv[0] != '0') {
+                Require(texture.FusesTransfer(true) && texture.FusesTransfer(false), "an uncompressed 2D-array surface does not fuse its transfers");
+            }
+            const auto& g = texture.Geometry();
+            const auto elementBytes = AgcDriver::Graphics::BytesPerElement(format);
+            std::vector<std::byte> guest(texture.GuestBytes());
+            for (std::size_t i = 0; i < guest.size(); ++i) guest[i] = static_cast<std::byte>((i * 2654435761u >> 13) ^ (i * 7u + format));
+            texture.Upload(guest);
+            texture.FinishUpload();
+            if (mode == TextureTileMode::kLinear) {
+                for (unsigned level = 0; level < descriptor.mipCount; ++level) {
+                    const auto& mip = g.mips[level];
+                    const auto rowBytes = mip.width * elementBytes;
+                    auto linear = context.Buffer(rowBytes * mip.height * g.layers, 0xa7);
+                    auto commands = [context.queue commandBuffer];
+                    auto blit = [commands blitCommandEncoder];
+                    for (unsigned layer = 0; layer < g.layers; ++layer) {
+                        [blit copyFromTexture:texture.Texture() sourceSlice:layer sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0)
+                            sourceSize:MTLSizeMake(mip.width, mip.height, 1) toBuffer:linear destinationOffset:layer * rowBytes * mip.height
+                            destinationBytesPerRow:rowBytes destinationBytesPerImage:rowBytes * mip.height];
+                    }
+                    [blit endEncoding];
+                    [commands commit];
+                    [commands waitUntilCompleted];
+                    const auto* texels = static_cast<const std::byte*>(linear.contents);
+                    for (unsigned layer = 0; layer < g.layers; ++layer) for (unsigned y = 0; y < mip.height; ++y) {
+                        const auto* expected = guest.data() + g.GuestLayerOffset(layer) + mip.tiledOffset + y * mip.pitchBytes;
+                        Require(std::memcmp(texels + (layer * mip.height + y) * rowBytes, expected, rowBytes) == 0,
+                            "a fused upload put other bytes in the texture than the blit reads back");
+                    }
+                }
+            }
+            // Bytes the copy-back writes equal across two prefills; the rest keep their prefill.
+            std::vector<std::byte> first(guest.size(), std::byte{0xa7}), second(guest.size(), std::byte{0x5c});
+            texture.Readback(first);
+            texture.Readback(second);
+            std::size_t written = 0;
+            for (std::size_t i = 0; i < guest.size(); ++i) {
+                if (first[i] == second[i]) {
+                    Require(first[i] == guest[i], "a fused copy-back wrote bytes the upload did not read");
+                    ++written;
+                } else {
+                    Require(first[i] == std::byte{0xa7} && second[i] == std::byte{0x5c}, "a fused copy-back changed bytes outside the texels");
+                }
+            }
+            std::size_t texels = 0;
+            for (unsigned level = 0; level < descriptor.mipCount; ++level) texels += std::size_t{g.mips[level].width} * g.mips[level].height * g.layers;
+            Require(written == texels * elementBytes, "a fused copy-back does not write every texel exactly once");
+        }
+    }
+}
+
 void RunTextureResourceTests(const MetalTests::Context& context) {
+    VerifyFusedTransfers(context);
     NSError* error=nil;
     auto probes=[context.device newLibraryWithSource:[NSString stringWithUTF8String:source] options:nil error:&error];
     Require(probes!=nil,error.localizedDescription.UTF8String ?: "native texture probes do not compile");
