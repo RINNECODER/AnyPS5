@@ -21,6 +21,19 @@ TARGETS = (("linux", [], b"\x7fELF"), ("windows", ["--windows"], b"MZ"),
            ("macos", ["--macos"], b"\xcf\xfa\xed\xfe"))
 
 
+def guest_provider(code=None):
+    image = provider(42, code=code)
+    aligned = bytearray(0x3000)
+    aligned[:0x400] = image[:0x400]
+    aligned[0x1000:0x1100] = image[0x400:0x500]
+    aligned[0x2000:0x2400] = image[0x600:0xA00]
+    for header, offset in ((64, 0x1000), (120, 0x2000), (176, 0x2000)):
+        struct.pack_into("<Q", aligned, header + 8, offset)
+    for header in (64, 120):
+        struct.pack_into("<Q", aligned, header + 48, 0x1000)
+    return aligned
+
+
 def fixture(sce, relocation_tags=(), plt=False, relative=False, extra_tags=()):
     image = base_fixture()
     strings = b"\0module.prx\0shared\0" if plt else b"\0"
@@ -66,7 +79,7 @@ def main():
                         modules = case / "sce_module"
                         modules.mkdir()
                         code = b"\xcc" if target == "linux" else None
-                        (modules / "module.prx").write_bytes(provider(42, code=code))
+                        (modules / "module.prx").write_bytes(guest_provider(code))
                     output = case / ("output.exe" if target == "windows" else "output.out")
                     result = subprocess.run([str(relinker), "--registry", *options,
                                              *([] if plt else ["--skip-sce-module"]), str(source), str(output)],
@@ -79,6 +92,9 @@ def main():
                     assert [(entry["nid"], entry["relocationType"], entry["targetOffset"]) for entry in registry] == (
                         [("shared", "R_X86_64_JUMP_SLOT", "0x300")] if plt else []), (case.name, registry)
                     if target == "linux":
+                        if plt:
+                            guest = (case / "app0" / "sce_module" / "module.prx.guest.prx").read_bytes()
+                            assert all(load[2] % 0x1000 == load[3] % 0x1000 for load in loads(guest)), case.name
                         dynamic, _ = dynamic_strings(data)
                         assert dynamic.get(8, 0) == (24 if relative else 0), (case.name, dynamic)
                         assert dynamic.get(2, 0) == (24 if plt else 0), (case.name, dynamic)
