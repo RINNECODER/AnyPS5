@@ -355,6 +355,32 @@ static void CheckUnboundDatagramShutdown() {
 #endif
 }
 
+static void CheckUnboundDatagramLaterAddress() {
+    for (const bool connect : {false, true}) {
+        const int waiting = sceNetSocket("unbound-later", 2, 2, 17);
+        const int peer = sceNetSocket("unbound-later-peer", 2, 2, 17);
+        Require(waiting >= 0 && peer >= 0);
+        std::array<std::uint8_t, 16> peerAddress{16, 2, 0, 0, 127, 0, 0, 1};
+        Require(sceNetBind_nid_postfix(peer, peerAddress.data(), peerAddress.size()) == 0);
+        std::uint32_t size = peerAddress.size();
+        Require(sceNetGetsockname(peer, peerAddress.data(), &size) == 0);
+        auto reply = std::async(std::launch::async, [waiting] {
+            char answer[16]{};
+            return sceNetRecv(waiting, answer, sizeof(answer), 0) == 5 && std::strcmp(answer, "pong") == 0;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        Require(reply.wait_for(std::chrono::seconds(0)) == std::future_status::timeout);
+        std::array<std::uint8_t, 16> waitingAddress{16, 2, 0, 0, 127, 0, 0, 1};
+        Require((connect ? sceNetConnect(waiting, peerAddress.data(), peerAddress.size())
+                         : sceNetBind_nid_postfix(waiting, waitingAddress.data(), waitingAddress.size())) == 0);
+        size = waitingAddress.size();
+        Require(sceNetGetsockname(waiting, waitingAddress.data(), &size) == 0);
+        Require(sceNetSendto(peer, "pong", 5, 0, waitingAddress.data(), size) == 5);
+        Require(reply.wait_for(std::chrono::seconds(1)) == std::future_status::ready && reply.get());
+        for (const int descriptor : {waiting, peer}) Require(sceNetSocketClose(descriptor) == 0);
+    }
+}
+
 static void CheckEmptyEpoll() {
     const int epoll = sceNetEpollCreate("empty-epoll", 0);
     Require(epoll >= 0);
@@ -984,6 +1010,7 @@ int main() {
     CheckUnboundSocketName();
     CheckUnboundDatagramReceive();
     CheckUnboundDatagramShutdown();
+    CheckUnboundDatagramLaterAddress();
     CheckUnspecifiedIpv6();
     if (!ipv6Unavailable) CheckIpv6SocketsAreIpv6Only();
     CheckDatagramDisconnect();
