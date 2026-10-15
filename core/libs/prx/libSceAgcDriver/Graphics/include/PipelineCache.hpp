@@ -21,6 +21,7 @@ public:
     PipelineCache(const PipelineCache&) = delete;
     PipelineCache& operator=(const PipelineCache&) = delete;
     VkPipelineCache Handle() const { return cache; }
+    void SaveNow();
 
 private:
     void load(std::vector<std::byte>& initialData);

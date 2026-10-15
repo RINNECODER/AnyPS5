@@ -122,6 +122,10 @@ void PipelineCache::save(bool final) {
     if (final || profiling()) std::fprintf(stderr, "[pipeline-cache] saved %.1f KiB to %s in %.1f ms%s\n", static_cast<double>(size) / 1024.0, path.string().c_str(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(), final ? " (teardown)" : "");
 }
 
+void PipelineCache::SaveNow() {
+    save(false);
+}
+
 void PipelineCache::run() {
     std::unique_lock lock(mutex);
     while (!wake.wait_for(lock, std::chrono::seconds(SaveIntervalSeconds), [&] { return stopping; })) {
