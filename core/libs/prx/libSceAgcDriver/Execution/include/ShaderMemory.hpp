@@ -74,6 +74,10 @@ public:
     [[nodiscard]] std::vector<ShaderRecompiler::MemoryRegion> TakeRecentRegions();
     // The driver's source handle memo outcomes, for the [capture] line (APS5_PROFILE_DRAW).
     static void CountHandleMemo(bool hit);
+    // Whether any capture on this object met guest memory that was not mapped whole (a page read word
+    // by word, an accessibility query answered false): its result then depends on the mapping as well
+    // as on the bytes Regions() reports, so a cache keyed on those bytes must not keep it.
+    [[nodiscard]] bool Partial() const { return partial; }
 
 private:
     std::shared_ptr<const ShaderRecompiler::ResourceCapture> capture(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::SourceHandle* handle, const ShaderRecompiler::PreparedShaderInvocation* invocation);
@@ -116,6 +120,7 @@ private:
     std::vector<std::pair<std::uint64_t, Page*>> pages;
     std::uint64_t lastBase = ~std::uint64_t{0};
     Page* lastPage = nullptr;
+    bool partial = false;
     PendingWriteQuery pendingWrite = nullptr;
     PendingWriteObserver observe = nullptr;
     HookWaitCounter hookWaits = nullptr;

@@ -2,6 +2,7 @@
 #include "PacketAutoreleasePool.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ComputeDispatch.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DrawDispatch.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DrawTranslationCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/IndirectDraw.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -21,6 +22,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -286,6 +288,136 @@ std::string RememberDispatch(std::uint64_t program, std::span<const std::uint32_
 
 }
 
+namespace {
+
+// What a draw derived from its inputs: its recompiled stages (rect-list generated ones included), in
+// the order Draw takes them. Kept by the per-draw translation cache and shared with deferred jobs.
+struct DrawTranslation {
+    std::vector<std::shared_ptr<const DriverDetail::ShaderSnapshot>> snapshots;
+    std::vector<std::shared_ptr<const RecompileResult>> programs;
+    std::vector<Graphics::CompiledShader> stages;
+    // The result FoldDrawOffsets reads (the first decoded program's), or null.
+    const RecompileResult* fold = nullptr;
+};
+
+// ANYPS5_METAL_DRAW_CACHE=0 turns the per-draw translation cache off (every draw captures and
+// recompiles again); ANYPS5_METAL_DRAW_CACHE_STATS=1 prints its counters every 256 lookups.
+bool DrawCacheEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_METAL_DRAW_CACHE");
+        return value == nullptr || std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+DrawTranslationCache<DrawTranslation>& DrawCache() {
+    static DrawTranslationCache<DrawTranslation> cache;
+    return cache;
+}
+
+bool ReadGuestForDrawCache(std::uint64_t address, std::span<std::byte> destination) {
+    if (!GuestMemory::Accessible(reinterpret_cast<const void*>(address), destination.size())) return false;
+    GuestMemory::Read(address, destination, alignof(std::uint32_t));
+    return true;
+}
+
+void ReportDrawCache() {
+    static const bool stats = std::getenv("ANYPS5_METAL_DRAW_CACHE_STATS") != nullptr;
+    if (!stats) return;
+    const auto counters = DrawCache().Snapshot();
+    if (counters.lookups == 0 || counters.lookups % 256 != 0) return;
+    std::fprintf(stderr, "[draw-cache] %llu lookups: %llu hits (%.1f%%), %llu new keys, %llu content misses, %llu inserts, %llu clears\n",
+        static_cast<unsigned long long>(counters.lookups), static_cast<unsigned long long>(counters.hits),
+        100.0 * static_cast<double>(counters.hits) / static_cast<double>(counters.lookups),
+        static_cast<unsigned long long>(counters.absent), static_cast<unsigned long long>(counters.contentMisses),
+        static_cast<unsigned long long>(counters.inserts), static_cast<unsigned long long>(counters.clears));
+}
+
+// Every register-derived input of the draw's capture and recompile (BuildDrawRecompileRequest and
+// what feeds it); the guest bytes the capture reads are validated separately by the cache.
+std::vector<std::uint64_t> DrawTranslationKey(const DrawDispatchState& decoded,
+    std::span<const std::optional<ShaderVertexStageInfo>> vertexInfos, const Pm4::DrawParameters& direct) {
+    std::vector<std::uint64_t> key;
+    key.reserve(256);
+    const auto mix = [&](std::uint64_t value) { key.push_back(value); };
+    const auto& stages = decoded.state.stages;
+    mix(static_cast<std::uint64_t>(stages.path));
+    mix(stages.registerValue);
+    mix(stages.vertexWaveSize);
+    mix(stages.fragmentWaveSize);
+    mix(stages.mesh.has_value());
+    if (stages.mesh) {
+        const auto& mesh = *stages.mesh;
+        for (const auto value : {mesh.inputPrimitive, mesh.primitivesPerGroup, mesh.verticesPerGroup, mesh.maxVertices, mesh.maxPrimitives,
+                 mesh.threadsPerGroup, mesh.ldsSizeDwords, mesh.provokingVertex, mesh.esgsItemSize}) mix(value);
+    }
+    mix(stages.tessellation.has_value());
+    if (stages.tessellation) {
+        const auto& tess = *stages.tessellation;
+        for (const auto value : {tess.inputControlPoints, tess.outputControlPoints, tess.domain, tess.partitioning, tess.outputTopology}) mix(value);
+    }
+    mix(decoded.state.rectList);
+    mix(direct.indexAddress);
+    mix(direct.indexCount);
+    mix(direct.indexSize);
+    mix(direct.instanceCount);
+    mix(decoded.programs.size());
+    for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
+        const auto& program = decoded.programs[i];
+        mix(reinterpret_cast<std::uintptr_t>(program.snapshot.get()));
+        mix(program.codeOffset);
+        mix(static_cast<std::uint64_t>(decoded.roles[i]));
+        mix(static_cast<std::uint64_t>(program.binary.stage));
+        mix(program.binary.codeAddress);
+        mix(program.binary.code.size());
+        mix(program.binary.headerAddress);
+        mix(program.binary.header.size());
+        for (const auto& region : program.memory) {
+            mix(region.guestAddress);
+            mix(region.bytes.size());
+            mix(reinterpret_cast<std::uintptr_t>(region.bytes.data()));
+        }
+        mix(program.userDataBase);
+        mix(program.firstUserSgpr);
+        mix(program.userData.size());
+        for (const auto word : program.userData) mix(word);
+        mix(vertexInfos[i].has_value());
+        if (!vertexInfos[i]) continue;
+        const auto& vertex = *vertexInfos[i];
+        mix(vertex.resourcesNum);
+        mix(vertex.fetchAttribReg);
+        mix(vertex.fetchBufferReg);
+        mix(vertex.fetchEmbedded);
+        mix(vertex.paClVsOutCntl);
+        for (std::uint32_t r = 0; r < std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources); ++r) {
+            for (const auto field : vertex.resources[r].fields) mix(field);
+            const auto& destination = vertex.resourcesDst[r];
+            mix(static_cast<std::uint32_t>(destination.registerStart));
+            mix(static_cast<std::uint32_t>(destination.registersNum));
+            mix(static_cast<std::uint32_t>(destination.attrId));
+            mix(destination.fetchIndex);
+        }
+    }
+    const auto& pixel = decoded.pixel;
+    mix(pixel.interpolatorCount);
+    for (const auto value : pixel.interpolatorSettings) mix(value);
+    mix(pixel.inputAddr);
+    for (const bool flag : {pixel.wave32, pixel.hasPerspectiveCenterVgpr, pixel.perspectiveCentroid, pixel.posX, pixel.posY, pixel.posZ,
+             pixel.posW, pixel.frontFace, pixel.frontFaceAllBits, pixel.ancillary, pixel.sampleShading, pixel.noPerspective,
+             pixel.linearCentroid, pixel.pixelKillEnable, pixel.depthExportEnable, pixel.sampleMaskExportEnable, pixel.earlyZ,
+             pixel.executeOnNoop, pixel.orderedPixelShader, pixel.dualSourceBlend, pixel.alphaToCoverage,
+             pixel.stencilRefExportEnable, pixel.layerExported}) mix(flag);
+    mix(static_cast<std::uint64_t>(pixel.conservativeZExport));
+    for (const auto value : pixel.targetOutputMode) mix(value);
+    for (const auto value : pixel.targetExportMapping) mix(value);
+    for (const auto value : pixel.targetExportPacking) mix(static_cast<std::uint64_t>(value));
+    mix(static_cast<std::uint64_t>(pixel.rasterPrimitive));
+    mix(pixel.layerBase);
+    return key;
+}
+
+}
+
 void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
     GpuTiming::Scope timing(GpuTiming::Kind::Dispatch);
     if (backend == nullptr || submission.shaders == nullptr) throw DriverInvariantError("Native Metal compute executor is not configured");
@@ -523,62 +655,90 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
             target.tessellation = draw->TessellationLimits();
         }
         const auto pushLimit = mesh ? MeshDrawPushOffsetBytes : Graphics::PipelinePushConstantBytes;
-        std::vector<MemoryRegion> memory;
-        std::vector<LinkedProgram> linked;
+        std::vector<std::optional<ShaderVertexStageInfo>> vertexInfos(decoded.programs.size());
         for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
             const auto& program = decoded.programs[i];
-            memory.insert(memory.end(), program.memory.begin(), program.memory.end());
-            linked.push_back({decoded.roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
-        }
-        ShaderMemory capture(memory);
-        std::vector<RecompileResult> programs;
-        programs.reserve(decoded.programs.size() + (rectangle ? 2u : 0u));
-        std::vector<Graphics::CompiledShader> stages;
-        stages.reserve(decoded.programs.size() + (rectangle ? 2u : 0u));
-        std::uint32_t pushOffset = 0;
-        for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
-            if (decoded.roles[i] == ProgramRole::GeometryBack) continue;
-            const auto& program = decoded.programs[i];
-            std::optional<ShaderVertexStageInfo> vertex;
-            if (program.binary.stage != ShaderStage::Fragment) {
-                vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData);
-                if (vertex) {
-                    vertex->paClVsOutCntl = PositionExportLayout(program.binary.code, decoded.state.paClVsOutCntl);
-                    // MSL has clip distances but no cull distances.
-                    if ((vertex->paClVsOutCntl & 0xff00u) != 0) {
-                        throw std::runtime_error("AGC graphics: vertex cull distances are unsupported on Metal");
-                    }
+            if (decoded.roles[i] == ProgramRole::GeometryBack || program.binary.stage == ShaderStage::Fragment) continue;
+            auto& vertex = vertexInfos[i];
+            vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData);
+            if (vertex) {
+                vertex->paClVsOutCntl = PositionExportLayout(program.binary.code, decoded.state.paClVsOutCntl);
+                // MSL has clip distances but no cull distances.
+                if ((vertex->paClVsOutCntl & 0xff00u) != 0) {
+                    throw std::runtime_error("AGC graphics: vertex cull distances are unsupported on Metal");
                 }
             }
-            auto request = BuildDrawRecompileRequest(program.binary, program.firstUserSgpr, program.userData,
-                decoded.state, decoded.pixel, vertex, target, pushOffset, direct, memory, linked);
-            // The Vulkan draw sets RegisteredFloatMode here (DrawCapture.cpp); Metal snapshots carry no
-            // registered state, so the same RSRC1 is read from the captured header.
-            request.context.floatMode = DriverDetail::HeaderFloatMode(program.snapshot->type,
-                program.snapshot->headerAddress, program.snapshot->header);
-            const auto resources = capture.Capture(request);
-            memory = capture.Regions();
-            request.context.memory = memory;
-            programs.push_back(*Recompile(request, *resources));
-            const auto& result = programs.back();
-            if (result.pushConstants.size() > pushLimit - pushOffset) {
-                throw std::runtime_error("Native Metal draw stage push constants exceed the pipeline block");
-            }
-            stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushOffset});
-            pushOffset += static_cast<std::uint32_t>(result.pushConstants.size());
-            if (i == 0) FoldDrawOffsets(result, program.firstUserSgpr, program.userData, direct);
         }
-        if (rectangle) {
-            if (programs.size() != 2 || stages.size() != 2 || stages[0].stage != ShaderStage::Vertex ||
-                stages[1].stage != ShaderStage::Fragment) {
-                throw std::runtime_error("Native Metal rect-list requires vertex and fragment programs");
-            }
-            auto generated = BuildRectListShaders(programs[0], programs[1], target);
-            programs.push_back(std::move(generated.control));
-            programs.push_back(std::move(generated.evaluation));
-            stages.insert(stages.begin() + 1, {{ShaderStage::TessellationControl, &programs[2], 0},
-                {ShaderStage::TessellationEvaluation, &programs[3], 0}});
+        // The per-draw translation cache: a draw whose inputs and captured guest bytes are unchanged
+        // reuses its recompiled stages and skips the capture and the recompile (DrawTranslationCache.hpp).
+        const bool cacheable = DrawCacheEnabled();
+        std::vector<std::uint64_t> key;
+        std::shared_ptr<const DrawTranslation> translation;
+        if (cacheable) {
+            key = DrawTranslationKey(decoded, vertexInfos, direct);
+            translation = DrawCache().Find(key, &ReadGuestForDrawCache);
+            ReportDrawCache();
         }
+        if (translation == nullptr) {
+            auto built = std::make_shared<DrawTranslation>();
+            std::vector<MemoryRegion> memory;
+            std::vector<LinkedProgram> linked;
+            for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
+                const auto& program = decoded.programs[i];
+                memory.insert(memory.end(), program.memory.begin(), program.memory.end());
+                linked.push_back({decoded.roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
+                built->snapshots.push_back(program.snapshot);
+            }
+            ShaderMemory capture(memory);
+            auto& programs = built->programs;
+            auto& stages = built->stages;
+            std::uint32_t pushOffset = 0;
+            for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
+                if (decoded.roles[i] == ProgramRole::GeometryBack) continue;
+                const auto& program = decoded.programs[i];
+                auto request = BuildDrawRecompileRequest(program.binary, program.firstUserSgpr, program.userData,
+                    decoded.state, decoded.pixel, vertexInfos[i], target, pushOffset, direct, memory, linked);
+                // The Vulkan draw sets RegisteredFloatMode here (DrawCapture.cpp); Metal snapshots carry no
+                // registered state, so the same RSRC1 is read from the captured header.
+                request.context.floatMode = DriverDetail::HeaderFloatMode(program.snapshot->type,
+                    program.snapshot->headerAddress, program.snapshot->header);
+                const auto resources = capture.Capture(request);
+                memory = capture.Regions();
+                request.context.memory = memory;
+                programs.push_back(Recompile(request, *resources));
+                const auto& result = *programs.back();
+                if (result.pushConstants.size() > pushLimit - pushOffset) {
+                    throw std::runtime_error("Native Metal draw stage push constants exceed the pipeline block");
+                }
+                stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushOffset});
+                pushOffset += static_cast<std::uint32_t>(result.pushConstants.size());
+                if (i == 0) built->fold = &result;
+            }
+            if (rectangle) {
+                if (programs.size() != 2 || stages.size() != 2 || stages[0].stage != ShaderStage::Vertex ||
+                    stages[1].stage != ShaderStage::Fragment) {
+                    throw std::runtime_error("Native Metal rect-list requires vertex and fragment programs");
+                }
+                auto generated = BuildRectListShaders(*programs[0], *programs[1], target);
+                programs.push_back(std::make_shared<const RecompileResult>(std::move(generated.control)));
+                programs.push_back(std::make_shared<const RecompileResult>(std::move(generated.evaluation)));
+                stages.insert(stages.begin() + 1, {{ShaderStage::TessellationControl, programs[2].get(), 0},
+                    {ShaderStage::TessellationEvaluation, programs[3].get(), 0}});
+            }
+            if (cacheable && !capture.Partial()) {
+                std::vector<DrawTranslationCache<DrawTranslation>::Region> regions;
+                for (const auto& region : capture.TakeRecentRegions()) {
+                    regions.push_back({region.guestAddress, std::vector<std::byte>(region.bytes.begin(), region.bytes.end())});
+                }
+                DrawCache().Insert(key, std::move(regions), built);
+            }
+            translation = std::move(built);
+        }
+        // FoldDrawOffsets changes only the first vertex and instance, which no recompile request reads.
+        if (translation->fold != nullptr) {
+            FoldDrawOffsets(*translation->fold, decoded.programs.front().firstUserSgpr, decoded.programs.front().userData, direct);
+        }
+        const auto& stages = translation->stages;
         if (!DeferWork()) {
             checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges,
                 [&] { return draw->DrawSynchronously(decoded.state, direct, stages, ranges, meshArguments); }));
@@ -589,11 +749,11 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
         struct Job {
             Graphics::State state;
             Pm4::DrawParameters direct;
-            std::vector<RecompileResult> programs;
-            std::vector<Graphics::CompiledShader> stages;
+            std::shared_ptr<const DrawTranslation> translation;
+            std::span<const Graphics::CompiledShader> stages;
             std::optional<std::array<std::uint32_t, 5>> meshArguments;
         };
-        auto job = std::make_shared<Job>(Job{decoded.state, direct, std::move(programs), std::move(stages), meshArguments});
+        auto job = std::make_shared<Job>(Job{decoded.state, direct, translation, translation->stages, meshArguments});
         const auto synchronous = [this, job] {
             checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges,
                 [&] { return draw->DrawSynchronously(job->state, job->direct, job->stages, ranges, job->meshArguments); }));

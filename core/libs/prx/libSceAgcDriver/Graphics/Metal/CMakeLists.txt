@@ -93,4 +93,10 @@ if(BUILD_TESTING)
     # The binary-archive test points the disk cache at a temporary directory itself; nothing else may
     # write pipelines into the per-user cache.
     set_tests_properties(metal_utility_tests PROPERTIES TIMEOUT 120 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+    # The Metal draw path's per-draw translation cache (no GPU needed).
+    add_test_executable(metal_draw_translation_cache_tests "${metalTestDirectory}/DrawTranslationCache.cpp")
+    target_include_directories(metal_draw_translation_cache_tests PRIVATE "${PROJECT_SOURCE_DIR}/core/libs")
+    target_compile_features(metal_draw_translation_cache_tests PRIVATE cxx_std_20)
+    add_test(NAME metal_draw_translation_cache COMMAND metal_draw_translation_cache_tests)
+    set_tests_properties(metal_draw_translation_cache PROPERTIES TIMEOUT 30)
 endif()

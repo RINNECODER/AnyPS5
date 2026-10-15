@@ -169,6 +169,7 @@ ShaderMemory::Page& ShaderMemory::page(std::uint64_t base) {
     if (GuestMemory::Accessible(reinterpret_cast<const void*>(base), PageBytes)) {
         if (WordwisePages() && pendingWrite != nullptr && pendingWrite(base, PageBytes, {}) != PendingWrite::None) {
             page.wordwise = true;
+            partial = true;
             ++CaptureTotals().pagesWordwise;
             return page;
         }
@@ -176,6 +177,8 @@ ShaderMemory::Page& ShaderMemory::page(std::uint64_t base) {
         GuestMemory::FlushGpuWrites(base, PageBytes);
         if (CaptureProfiled()) CaptureTotals().pageReadNanoseconds += NanosecondsSince(started);
         page.lazy = true;
+    } else {
+        partial = true;
     }
     return page;
 }
@@ -275,7 +278,10 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
 
 bool ShaderMemory::accessible(void* context, std::uint64_t address, std::uint64_t bytes) {
     auto& self = *static_cast<ShaderMemory*>(context);
-    if (bytes == 0 || address > std::numeric_limits<std::uint64_t>::max() - bytes) return false;
+    if (bytes == 0 || address > std::numeric_limits<std::uint64_t>::max() - bytes) {
+        self.partial = true;
+        return false;
+    }
     const auto end = address + bytes;
     while (address < end) {
         const auto next = self.initial.upper_bound(address);
@@ -289,7 +295,10 @@ bool ShaderMemory::accessible(void* context, std::uint64_t address, std::uint64_
         const auto base = address & ~static_cast<std::uint64_t>(PageBytes - 1);
         const auto pageEnd = std::min<std::uint64_t>(base + PageBytes, end);
         const auto& page = self.page(base);
-        if (!page.wordwise && !page.valid.All() && !GuestMemory::Accessible(reinterpret_cast<const void*>(address), static_cast<std::size_t>(pageEnd - address))) return false;
+        if (!page.wordwise && !page.valid.All() && !GuestMemory::Accessible(reinterpret_cast<const void*>(address), static_cast<std::size_t>(pageEnd - address))) {
+            self.partial = true;
+            return false;
+        }
         address = pageEnd;
     }
     return true;
