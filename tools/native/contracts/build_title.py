@@ -111,13 +111,16 @@ def module_chunk(job):
     The chunk carries its own copy of the shared membership tables and helper, so the module has
     no cross-chunk reference and the linker never has to merge a private symbol.
     """
-    specs, index, folder, header, compile_object = job
+    specs, index, folder, header, compile_object, fingerprint = job
     source = folder / f'chunk_{index:04d}.ll'
     target = source.with_suffix('.o')
     cache = folder / f'chunk_{index:04d}.json'
     if compile_object and target.exists() and cache.exists():
         saved = json.loads(cache.read_text())
-        return index, saved['records'], saved['ir_bytes'], target.stat().st_size
+        # The chunk cache is keyed by index, so a compiler change must invalidate it: only a chunk
+        # built by the same compiler sources as this run can be resumed.
+        if saved.get('fingerprint') == fingerprint:
+            return index, saved['records'], saved['ir_bytes'], target.stat().st_size
     records, bodies = [], []
     for spec in specs:
         record = compile_one(spec, True)
@@ -150,7 +153,7 @@ def module_chunk(job):
                 raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
         object_bytes = target.stat().st_size
         source.unlink()
-    cache.write_text(json.dumps({'ir_bytes': len(text), 'records': records}))
+    cache.write_text(json.dumps({'fingerprint': fingerprint, 'ir_bytes': len(text), 'records': records}))
     return index, records, len(text), object_bytes
 
 
@@ -182,8 +185,10 @@ def build_modules(args):
     chunks = [args.specs[index:index + args.chunk] for index in range(0, len(args.specs), args.chunk)]
     records, ir_bytes, object_bytes = [], 0, 0
     context = multiprocessing.get_context('fork')
+    fingerprint_value = fingerprint()
     with context.Pool(args.jobs) as pool:
-        jobs = [(chunk, index, folder, header, not args.no_object) for index, chunk in enumerate(chunks)]
+        jobs = [(chunk, index, folder, header, not args.no_object, fingerprint_value)
+                for index, chunk in enumerate(chunks)]
         for _, result, chunk_ir, chunk_object in pool.imap_unordered(module_chunk, jobs):
             records.extend(result)
             ir_bytes += chunk_ir
