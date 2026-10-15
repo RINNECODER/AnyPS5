@@ -181,7 +181,7 @@ def read_registry(path):
         nid = entry["nid"].split("#", 1)[0]
         if not NID.fullmatch(nid):
             raise AuditError(f"{path}: entry {index} has an invalid NID {entry['nid']!r}")
-        imports.append((nid, entry["library"]))
+        imports.append((nid, entry["library"], bool(entry.get("weak", False))))
     return imports
 
 
@@ -194,8 +194,8 @@ def check_conservation(references, records):
 
 def audit(imports, exports, stubs, libraries, modules):
     records = {}
-    for nid, library in imports:
-        record = records.setdefault((nid, library), {"nid": nid, "library": library, "references": 0})
+    for nid, library, weak in imports:
+        record = records.setdefault((nid, library), {"nid": nid, "library": library, "references": 0, "weak": weak})
         record["references"] += 1
     for record in records.values():
         nid, library = record["nid"], record["library"]
