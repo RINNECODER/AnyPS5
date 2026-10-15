@@ -257,5 +257,49 @@ void RunUnmappedGapTests() {
     Require(!GuestMemory::Accessible(reinterpret_cast<const void*>(std::uintptr_t{0x18}), 4), "a near-null address counts as accessible");
     munmap(block, page);
     munmap(block + 2 * page, page);
+    if (!GuestArena::GuestArenaAvailable_nid_postfix()) return;
+    auto* guest = static_cast<std::byte*>(GuestArena::GuestArenaAllocate_nid_postfix(2 * page, page));
+    Require(mmap(guest, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == guest, "cannot map the arena page test pages");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(guest, 2 * page, true, true, true);
+    }
+    Require(GuestMemory::Accessible(guest, page, true), "a mapped arena page is not writable");
+    Require(mprotect(guest, page, PROT_NONE) == 0, "cannot revoke the arena test page behind the registry");
+    Require(GuestMemory::Accessible(guest, page, true), "a checked arena page was queried again instead of read from the page table");
+    Require(mprotect(guest, page, PROT_READ | PROT_WRITE) == 0, "cannot restore the arena test page behind the registry");
+    Require(mprotect(guest + page, page, PROT_READ) == 0, "cannot protect the arena test's second page");
+    Require(!GuestMemory::Accessible(guest + page, page, true), "a check stored arena pages outside its range");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Protect(guest + page, page, true, true, true, [&] { Require(mprotect(guest + page, page, PROT_READ | PROT_WRITE) == 0, "cannot restore the arena test's second page"); });
+    }
+    Require(GuestMemory::Accessible(guest, 2 * page, true), "mapped arena pages are not writable");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Protect(guest, page, true, false, true, [&] { Require(mprotect(guest, page, PROT_READ) == 0, "cannot protect the arena test page"); });
+    }
+    Require(!GuestMemory::Accessible(guest, page, true) && GuestMemory::Accessible(guest, page) && GuestMemory::Accessible(guest + page, page, true), "an arena page protected through the registry kept its old access");
+    {
+        GuestAllocations::Mutation mutation;
+        const auto release = [](const void* pointer, std::size_t bytes, const void*, bool) { Require(munmap(const_cast<void*>(pointer), bytes) == 0, "cannot unmap an arena test page"); };
+        mutation.Unmap(guest, page, release);
+        mutation.Unmap(guest + page, page, release);
+    }
+    Require(!GuestMemory::Accessible(guest, page) && !GuestMemory::Accessible(guest + page, page), "unmapped arena pages are still accessible");
+    Require(mmap(guest, page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == guest, "cannot reserve the arena test page");
+    Require(!GuestMemory::Accessible(guest, page), "a reserved arena page is accessible");
+    Require(mprotect(guest, page, PROT_READ | PROT_WRITE) == 0, "cannot open the reserved arena test page behind the registry");
+    Require(!GuestMemory::Accessible(guest, page), "a checked inaccessible arena page was queried again instead of read from the page table");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(guest, page, true, true, true);
+    }
+    Require(GuestMemory::Accessible(guest, page, true), "an arena page added through the registry kept its inaccessible state");
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Unmap(guest, page, [](const void* pointer, std::size_t bytes, const void*, bool) { Require(munmap(const_cast<void*>(pointer), bytes) == 0, "cannot unmap the arena test page"); });
+    }
+    GuestArena::GuestArenaRelease_nid_postfix(guest, 2 * page);
 #endif
 }
