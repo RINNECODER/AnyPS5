@@ -49,6 +49,13 @@ SCRATCH = BASE + 0x60000000
 SCRATCH_SIZE = 0x10000
 SCRATCH_MAP = 0x100000
 STACK = BASE + 0x700FFFF8
+# The x86 reference runner sets its stack to the top of a fixed buffer and then `callq`s the guest,
+# so the guest's first instruction sees the return address pushed below that top. The ARM side must
+# start on the same value, or a stack-adjustment flag result (and anything derived from the guest
+# stack pointer) is computed from a different address.
+RUNNER_STACK = BASE + 0x70080000
+RUNNER_STACK_WORDS = 0x10000
+RUNNER_ENTRY_RSP = RUNNER_STACK + RUNNER_STACK_WORDS * 8 - 16
 REGFILE = 123 * 8
 CLOSURE_LIMIT = 600
 STATE = 16 * 8 + 8 + 256 + 256 + 512 + 16 * 16  # gprs, rflags, xmm, ymm upper, fxsave, scratch ptrs
@@ -58,6 +65,8 @@ RUNNER = r"""
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #define BASE 0x140000000ULL
 struct regs { uint64_t r[16]; };
@@ -80,7 +89,16 @@ __asm__(
 "  movq _g_r11(%rip), %r10\n  movq %r10, 88(%r9)\n"
 "  movq %r12, 96(%r9)\n  movq %r13, 104(%r9)\n  movq %r14, 112(%r9)\n  movq %r15, 120(%r9)\n"
 "  movq _g_frame(%rip), %rbp\n  leaq -40(%rbp), %rsp\n  popq %r15\n  popq %r14\n  popq %r13\n  popq %r12\n  popq %rbx\n  popq %rbp\n  ret\n");
+static void fault_handler(int sig, siginfo_t* info, void* context) {
+    ucontext_t* uc = (ucontext_t*)context;
+    fprintf(stderr, "[runner] fault sig=%d addr=%p rip=%llx\n", sig, info ? info->si_addr : 0,
+            uc ? (unsigned long long)uc->uc_mcontext->__ss.__rip : 0);
+    _exit(9);
+}
 int main(int argc, char** argv) {
+    struct sigaction action; memset(&action, 0, sizeof(action));
+    action.sa_sigaction = fault_handler; action.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &action, 0); sigaction(SIGBUS, &action, 0); sigaction(SIGILL, &action, 0);
     uint64_t address = strtoull(argv[2], 0, 16);
     FILE* segments = fopen(argv[1], "rb");
     uint32_t count = 0;
@@ -107,6 +125,10 @@ int main(int argc, char** argv) {
     }
     for (uint32_t index = 0; index < count; ++index)
         if (seg[index].filesz) memcpy((void*)(BASE + seg[index].vaddr), seg[index].data, seg[index].filesz);
+    /* The guest may call or jump anywhere in its own image, not just into the entry page: a page
+       that is mapped read/write but not executable faults on the first instruction fetched from
+       it, which reads as the guest and the reference "agreeing" on a fault. */
+    if (high > low) mprotect((void*)(BASE + low), high - low, 7);
     if (mprotect((void*)(BASE + (address & ~0xfffull)), 0x1000, 7) != 0) return 5;
     struct regs in, out;
     mmap((void*)(BASE+0x70000000), 0x100000, 3, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
@@ -431,6 +453,45 @@ def build_arm64_real(ir, directory):
     return directory / "native.dylib"
 
 
+def saturated_memory(rng, size=SCRATCH_SIZE):
+    """Scratch bytes in which every 8-byte slot names a valid object.
+
+    A real heap does not look like random bytes: a field that holds a pointer holds the address of
+    a mapped object, so a load-then-dereference chain stays inside mapped memory. With random bytes
+    the guest loads a garbage address and both runners die on the same wild access, which is
+    agreement on undefined behavior rather than a comparison (REPORT22: 73.85 % `both-fault`).
+    Seeding every slot with a pointer into this window keeps any such chain valid.
+    """
+    slots = size // 8
+    data = bytearray(size)
+    for index in range(slots):
+        struct.pack_into("<Q", data, index * 8, SCRATCH + 8 * rng.randrange(slots))
+    return bytes(data)
+
+
+def realistic_state(rng, segments=()):
+    """An entry state whose pointer registers and scratch slots all name mapped objects.
+
+    Registers point into the scratch window (mapped by both runners), with a share pointing at the
+    real image's writable data so a function can read a real object as well.
+    """
+    memory = saturated_memory(rng)
+    slots = SCRATCH_SIZE // 8
+    writable = [(vaddr, memsz) for vaddr, _filesz, memsz, _data, flags in segments
+                if flags & 2 and memsz >= 16]
+    registers = {}
+    for index, name in enumerate(replay.UNIFORM_GPRS):
+        if name == "rsp":
+            continue
+        if writable and index % 4 == 3:
+            vaddr, memsz = writable[rng.randrange(len(writable))]
+            registers[name] = BASE + vaddr + 8 * rng.randrange(memsz // 8)
+        else:
+            registers[name] = SCRATCH + 8 * rng.randrange(slots)
+    registers["rsp"] = RUNNER_ENTRY_RSP
+    return registers, memory
+
+
 def run_case_real(address, seed, directory, profile, plant=None):
     """Verify against the real module image: the compiler reads the real eboot and the real module
     profile (guest_data + dispatch), both runners map the real segments at BASE + vaddr with the
@@ -450,10 +511,7 @@ def run_case_real(address, seed, directory, profile, plant=None):
     library = ctypes.CDLL(str(dylib))
     data_ranges = [(vaddr, memsz) for vaddr, _filesz, memsz, _data, _flags in segments]
     rng = random.Random(seed)
-    memory = rng.randbytes(SCRATCH_SIZE)
-    registers = {item: SCRATCH + (rng.randrange(0, SCRATCH_SIZE // 4) & ~7)
-                 for item in replay.UNIFORM_GPRS if item != "rsp"}
-    registers["rsp"] = STACK - 8
+    registers, memory = realistic_state(rng, segments)
     arm = arm_state(dylib, f"sub_{address:x}", registers, memory, image=segments)
     runner = build_runner(directory)
     (directory / "segments.bin").write_bytes(real_image.blob(segments))
