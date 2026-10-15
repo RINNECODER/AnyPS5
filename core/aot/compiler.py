@@ -1585,9 +1585,12 @@ class Function:
             value = self.emit(f'load i128, ptr {gep}, align 16')
             self.lines.append(f'  store i128 {value}, ptr %ymm_hi{index}, align 16')
 
-    def uniform_store_registers(self, block):
+    def uniform_store_registers(self, block, rsp=None):
         for index, reg in enumerate(REGISTERS):
-            value = self.emit(f'load i64, ptr %{reg}, align 8')
+            # The rsp slot carries the guest stack pointer, which the frame pointer only stands in
+            # for locally: publishing the frame address would hand a callee a host address, and its
+            # own `add/sub rsp, imm` flags would then follow that address (see `outgoing_rsp`).
+            value = rsp if reg == 'rsp' and rsp is not None else self.emit(f'load i64, ptr %{reg}, align 8')
             gep = self.uniform_gep(block, 0, index)
             self.lines.append(f'  store i64 {value}, ptr {gep}, align 8')
         for index, reg in enumerate(VECTOR_REGISTERS):
@@ -1652,6 +1655,15 @@ class Function:
         gep = self.uniform_gep(block, 5, 0)
         self.lines.append(f'  store i64 {top}, ptr {gep}, align 8')
 
+    def outgoing_rsp(self, state, shift):
+        """The guest rsp the callee sees: the call site's rsp, less the return-address slot that a
+        `call` pushes and a tail `jmp` does not (`shift` is 8 for a jump). None when the guest rsp is
+        not tracked, which leaves the frame pointer in the slot as before."""
+        if self.rsp_guest is None or state['rsp'] is None:
+            return None
+        base = self.emit(f'load i64, ptr {self.rsp_guest}')
+        return self.emit(f'add i64 {base}, {state["rsp"] + shift - 8}')
+
     def uniform_stack_out(self, block, rsp, shift=0):
         if rsp is None:
             # A runtime-sized frame: the outgoing window is the guest stack at the runtime rsp,
@@ -1691,7 +1703,7 @@ class Function:
         self.lines.append('  call void @llvm.trap()')
         self.lines.append('  unreachable')
         self.lines.append(f'{label}_ok:')
-        self.uniform_store_registers('%rf_out')
+        self.uniform_store_registers('%rf_out', self.outgoing_rsp(state, 8 if jump else 0))
         self.uniform_stack_out('%rf_out', state['rsp'], 8 if jump else 0)
         self.lines.append(f'  call void {native}(ptr %rf_out)')
         self.uniform_load_registers('%rf_out', skip=('rsp',))
@@ -1733,7 +1745,7 @@ class Function:
         return repaired
 
     def uniform_call(self, ins, callee, slot, state, tail, result):
-        self.uniform_store_registers('%rf_out')
+        self.uniform_store_registers('%rf_out', self.outgoing_rsp(state, 8 if tail else 0))
         # A tail jmp leaves the guest return address at [rsp], so the callee's window starts one slot
         # above the caller's rsp; a `call` pushes that return address itself, so its window starts at
         # the rsp the args were pushed to.
