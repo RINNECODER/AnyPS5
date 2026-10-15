@@ -38,6 +38,7 @@ STARTS = Path(os.environ.get("ANYPS5_FDE_STARTS", W / "cfg/eboot.fde-starts.txt"
 sys.path.insert(0, str(REPO / "core" / "aot"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import difftest as harness  # noqa: E402
+import real_image  # noqa: E402
 import replay  # noqa: E402
 import call_record  # noqa: E402
 
@@ -47,6 +48,7 @@ SCRATCH_SIZE = 0x10000
 SCRATCH_MAP = 0x100000
 STACK = BASE + 0x700FFFF8
 REGFILE = 123 * 8
+CLOSURE_LIMIT = 600
 STATE = 16 * 8 + 8 + 256 + 256 + 512 + 16 * 16  # gprs, rflags, xmm, ymm upper, fxsave, scratch ptrs
 
 RUNNER = r"""
@@ -81,14 +83,28 @@ int main(int argc, char** argv) {
     FILE* segments = fopen(argv[1], "rb");
     uint32_t count = 0;
     if (fread(&count, 4, 1, segments) != 1) return 2;
+    struct { uint64_t vaddr, filesz, memsz; unsigned char* data; } seg[4096];
+    if (count > 4096) return 2;
     for (uint32_t index = 0; index < count; ++index) {
-        uint64_t vaddr, filesz, memsz;
-        if (fread(&vaddr,8,1,segments)!=1||fread(&filesz,8,1,segments)!=1||fread(&memsz,8,1,segments)!=1) return 2;
-        void* page = mmap((void*)(BASE + (vaddr & ~0xfffull)), memsz + (vaddr & 0xfff), 3,
-                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-        if (page == MAP_FAILED) return 3;
-        if (filesz && fread((char*)page + (vaddr & 0xfff), 1, filesz, segments) != (size_t)filesz) return 4;
+        if (fread(&seg[index].vaddr,8,1,segments)!=1||fread(&seg[index].filesz,8,1,segments)!=1||fread(&seg[index].memsz,8,1,segments)!=1) return 2;
+        seg[index].data = malloc(seg[index].filesz ? seg[index].filesz : 1);
+        if (seg[index].filesz && fread(seg[index].data, 1, seg[index].filesz, segments) != (size_t)seg[index].filesz) return 4;
     }
+    /* A 4 KiB page can host several segments; map every page once, otherwise MAP_FIXED
+       discards the bytes of a segment that was copied into a page an earlier segment mapped. */
+    uint64_t low = ~0ull, high = 0;
+    for (uint32_t index = 0; index < count; ++index) {
+        uint64_t page = seg[index].vaddr & ~0xfffull;
+        uint64_t end = page + (seg[index].vaddr & 0xfff) + seg[index].memsz;
+        if (page < low) low = page;
+        if (end > high) high = end;
+    }
+    if (high > low) {
+        void* region = mmap((void*)(BASE + low), high - low, 3, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (region == MAP_FAILED) return 3;
+    }
+    for (uint32_t index = 0; index < count; ++index)
+        if (seg[index].filesz) memcpy((void*)(BASE + seg[index].vaddr), seg[index].data, seg[index].filesz);
     if (mprotect((void*)(BASE + (address & ~0xfffull)), 0x1000, 7) != 0) return 5;
     struct regs in, out;
     mmap((void*)(BASE+0x70000000), 0x100000, 3, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
@@ -121,13 +137,28 @@ int main(int argc, char** argv) {
 
 TLS_STUB = 'extern "C" void* NativeAotTlsBase_nid_no_patch(void) { return 0; }\n'
 
+# The real-image path maps the segments itself (with the profile's relocations applied), so the
+# generated native_image_init's NativeAotMapImage call is a no-op here.
+REAL_STUB = ('extern "C" void* NativeAotTlsBase_nid_no_patch(void) { return 0; }\n'
+            'extern "C" void NativeAotMapImage_nid_no_patch(void*, unsigned long) {}\n'
+            'extern "C" void NativeAotApplyRelocations_nid_no_patch(void* const*, unsigned long) {}\n'
+            'extern "C" void Aps5GuestTlsRegister_nid_no_patch(void*) {}\n')
+
+
+_RUNNER = None
+
 
 def build_runner(directory):
+    """The x86 reference runner, built once per process and reused for every case."""
+    global _RUNNER
+    if _RUNNER is not None and Path(_RUNNER).exists():
+        return _RUNNER
     source = directory / "runner.c"
     source.write_text(RUNNER)
-    binary = directory / "runner"
+    binary = Path(tempfile.mkdtemp(prefix="runner-")) / "runner"
     subprocess.run(["xcrun", "clang", "-arch", "x86_64", "-O1", str(source), "-o", str(binary)],
                    check=True, capture_output=True)
+    _RUNNER = binary
     return binary
 
 
@@ -176,9 +207,12 @@ def build_arm64(ir, directory, stub_source=None):
         return directory / "native.dylib"
 
 
-def arm_state(dylib, name, registers, memory, timeout=30):
+def arm_state(dylib, name, registers, memory, timeout=30, image=None):
     """Run the ARM64 function in a forked child (so an infinite loop can be killed) and return
-    the register file bytes plus the scratch bytes, or None on a timeout/fault."""
+    the register file bytes plus the scratch bytes, or None on a timeout/fault.
+
+    `image` is the real module image's segment list: mapping it at BASE + vaddr is what makes a
+    guest_data reference (and the native dispatch table's keys) resolve."""
     out_path = Path(tempfile.mkdtemp(prefix="arm-")) / "state.bin"
     pid = os.fork()
     if pid == 0:
@@ -189,6 +223,8 @@ def arm_state(dylib, name, registers, memory, timeout=30):
             libc.mmap(ctypes.c_void_p(SCRATCH), SCRATCH_MAP, 3, 0x02 | 0x1000 | 0x10, -1, 0)
             ctypes.memmove(SCRATCH, memory, len(memory))
             libc.mmap(ctypes.c_void_p(BASE + 0x70000000), 0x100000, 3, 0x02 | 0x1000 | 0x10, -1, 0)
+            if image is not None:
+                real_image.map_segments(image)
             library = ctypes.CDLL(str(dylib))
             function = getattr(library, name)
             function.restype = None
@@ -196,7 +232,6 @@ def arm_state(dylib, name, registers, memory, timeout=30):
             regfile = (ctypes.c_uint64 * 123)()
             for index, register in enumerate(replay.UNIFORM_GPRS):
                 regfile[index] = registers.get(register, 0)
-            regfile[4] = STACK
             function(ctypes.byref(regfile))
             out_path.write_bytes(bytes(regfile) + ctypes.string_at(SCRATCH, SCRATCH_SIZE))
             os._exit(0)
@@ -274,8 +309,8 @@ def plant_ir(ir, plant, address):
     raise ValueError(f'unknown plant {plant}')
 
 
-def run_case(address, seed, directory, plant=None):
-    sizes = harness.fde_sizes(STARTS)
+def run_case(address, seed, directory, plant=None, profile=None, record=True):
+    sizes = profile.sizes if profile is not None else harness.fde_sizes(STARTS)
     title = harness.Title(ELF)
     # Contracts with the real image's segment map and guest_data (the way tools/native/title_image.py
     # builds them) were tried here: they do compile the low-address references, but in the synthetic
@@ -285,8 +320,8 @@ def run_case(address, seed, directory, plant=None):
     sites = [site for site in call_record.find_sites(title, sizes, address)
              if site['target'] in sizes and sizes[site['target']] and site['target'] != address]
     callees = sorted({site['target'] for site in sites})
-    result = harness.compile_one(title, sizes, address, 200, directory, uniform=True,
-                                 external=set(callees), functions=[address] + callees)
+    result = harness.compile_one(title, sizes, address, CLOSURE_LIMIT, directory, uniform=True,
+                                 external=set(callees) if record else (), profile=profile)
     if result["status"] != "compiled":
         return {"status": "rejected", "reason": result.get("reason", "")[:120], "call_sites": len(sites)}
     ir, image = result["ir"], (directory / f"{address:x}.elf").read_bytes()
@@ -296,13 +331,16 @@ def run_case(address, seed, directory, plant=None):
     memory = rng.randbytes(SCRATCH_SIZE)
     registers = {item: SCRATCH + (rng.randrange(0, SCRATCH_SIZE // 4) & ~7)
                  for item in replay.UNIFORM_GPRS if item != "rsp"}
-    registers["rsp"] = STACK
+    # The x86 runner reaches the guest through a `call`, so the guest's first instruction sees
+    # rsp = STACK - 8 (the pushed return address). The ARM entry must start there too, or a
+    # stack-adjustment flags result is computed from a different rsp.
+    registers["rsp"] = STACK - 8
     # A function that calls others is verified by recording those calls on the x86 side and
     # replaying them as native stubs, so its own code is tested without its callees having to
     # compile. The recorder must run before the ARM dylib is built: it produces the stubs.
     x86 = None
     stub_source = None
-    if sites:
+    if record and sites:
         try:
             records, x86 = call_record.record_calls(title, sizes, address, sites, registers, memory, directory)
         except (RuntimeError, subprocess.TimeoutExpired) as error:
@@ -335,6 +373,75 @@ def run_case(address, seed, directory, plant=None):
         return {"status": arm, "call_sites": len(sites)}
     return {"status": "ok", "arm": arm, "x86": x86, "library": library, "data_ranges": data_ranges,
             "call_sites": len(sites)}
+
+
+_REAL_OBJECTS = None
+
+
+def build_arm64_real(ir, directory):
+    """Link the real-image native object with the runtime dispatch table the compiler's
+    NativeAotDispatch lowering needs. The two runtime objects are built once per process."""
+    global _REAL_OBJECTS
+    from toolchain import build_native_object
+    build_native_object(ir, directory / "native.o")
+    if _REAL_OBJECTS is None or not all(Path(item).exists() for item in _REAL_OBJECTS):
+        folder = Path(tempfile.mkdtemp(prefix="realobj-"))
+        dispatch = REPO / "core" / "libs" / "native" / "NativeAotDispatch.cpp"
+        subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-O2", "-c", str(dispatch),
+                        "-o", str(folder / "dispatch.o")], check=True, capture_output=True)
+        (folder / "real_stub.cc").write_text(REAL_STUB)
+        subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-c", str(folder / "real_stub.cc"),
+                        "-o", str(folder / "real_stub.o")], check=True, capture_output=True)
+        _REAL_OBJECTS = (str(folder / "dispatch.o"), str(folder / "real_stub.o"))
+    subprocess.run(["xcrun", "clang++", "-arch", "arm64", "-dynamiclib", str(directory / "native.o"),
+                    *_REAL_OBJECTS, "-o", str(directory / "native.dylib")], check=True, capture_output=True)
+    return directory / "native.dylib"
+
+
+def run_case_real(address, seed, directory, profile, plant=None):
+    """Verify against the real module image: the compiler reads the real eboot and the real module
+    profile (guest_data + dispatch), both runners map the real segments at BASE + vaddr with the
+    profile's pointer relocations applied, and an indirect call or a tail call into a function
+    outside the closure no longer rejects the function."""
+    segments = real_image.segments(ELF)
+    segments = real_image.patch(segments, profile.relocations)
+    title = harness.Title(ELF)
+    _closure, contracts = harness.real_contracts(title, profile, address, CLOSURE_LIMIT,
+                                                 real_image.sha256(ELF), BASE, title.elf["e_entry"])
+    result = harness.compile_real(str(ELF), contracts)
+    if result["status"] != "compiled":
+        return {"status": "rejected", "reason": result.get("reason", "")[:160], "call_sites": 0}
+    ir = plant_ir(result["ir"], plant, address)
+    os.environ["ANYPS5_AOT_EBOOT"] = str(ELF)
+    dylib = build_arm64_real(ir, directory)
+    library = ctypes.CDLL(str(dylib))
+    data_ranges = [(vaddr, memsz) for vaddr, _filesz, memsz, _data, _flags in segments]
+    rng = random.Random(seed)
+    memory = rng.randbytes(SCRATCH_SIZE)
+    registers = {item: SCRATCH + (rng.randrange(0, SCRATCH_SIZE // 4) & ~7)
+                 for item in replay.UNIFORM_GPRS if item != "rsp"}
+    registers["rsp"] = STACK - 8
+    arm = arm_state(dylib, f"sub_{address:x}", registers, memory, image=segments)
+    runner = build_runner(directory)
+    (directory / "segments.bin").write_bytes(real_image.blob(segments))
+    (directory / "case.bin").write_bytes(
+        b"".join(int(registers.get(name, 0)).to_bytes(8, "little") for name in replay.REGISTERS))
+    (directory / "pages.bin").write_bytes(memory)
+    try:
+        completed = subprocess.run([str(runner), str(directory / "segments.bin"), hex(address),
+                                    str(directory / "case.bin"), str(directory / "out.bin"),
+                                    str(directory / "pages.bin")], capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return {"status": "x86-timeout", "call_sites": 0}
+    if arm == "fault" and completed.returncode != 0:
+        return {"status": "both-fault", "call_sites": 0}
+    if completed.returncode != 0:
+        return {"status": "x86-fault", "code": completed.returncode, "call_sites": 0}
+    if arm in ("timeout", "fault"):
+        return {"status": arm, "call_sites": 0}
+    x86 = (directory / "out.bin").read_bytes()
+    return {"status": "ok", "arm": arm, "x86": x86, "library": library, "data_ranges": data_ranges,
+            "call_sites": 0}
 
 
 def _segments(image):
