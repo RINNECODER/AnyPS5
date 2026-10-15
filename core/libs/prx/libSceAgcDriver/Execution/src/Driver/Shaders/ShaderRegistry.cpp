@@ -1081,6 +1081,7 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
     QueueState state{};
     std::shared_ptr<const ShaderRegistry> registry;
     std::shared_ptr<const ShaderSnapshot> owner;
+    std::vector<std::shared_ptr<const ShaderSnapshot>> selectedStages;
     {
         std::lock_guard lock(mutex);
         registry = shaders;
@@ -1091,6 +1092,7 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
             const auto selected = RegisteredHeader(*registry, shader);
             require(selected != nullptr, "graphics ABI refers to a replaced shader header");
             if (owner == nullptr) owner = selected;
+            selectedStages.push_back(selected);
             const auto& snapshot = *selected;
             require(snapshot.registeredState != nullptr, "registered shader state is missing");
             const auto registered = DecodeRegisteredState(snapshot, {});
@@ -1123,8 +1125,14 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
         return;
     }
     DrawDecode decoded{};
-    decoded.state.stages = Graphics::DecodeShaderStages(state);
-    DecodeGraphicsPrograms(decoded, state, *registry, true, false);
+    try {
+        decoded.state.stages = Graphics::DecodeShaderStages(state);
+        DecodeGraphicsPrograms(decoded, state, *registry, true, false);
+    } catch (const std::exception& error) {
+        for (const auto& selected : selectedStages) DeferPipelineStage(transaction.Edit(*selected), *selected, error.what());
+        transaction.Commit();
+        return;
+    }
     auto prepared = PrepareGraphicsStages(decoded, localDevice->Target(), true);
     for (auto& stage : prepared) {
         if (stage.entry.handle == nullptr) continue;
