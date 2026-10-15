@@ -80,44 +80,61 @@ def _import_effects(contract, reads, writes):
     return reads, writes
 
 
-def _targets(image, spec, records, address):
-    """The declared target addresses of an indirect call/jump at `address`, or None when the
-    contract has no annotation (the runtime dispatch fallback, which stays full)."""
-    pool = image.contracts.get('target_sets')
-    for record in records:
-        if record.get('address') != address:
-            continue
-        targets = record.get('targets')
-        if targets is None and 'target_set' in record:
-            index = record['target_set']
-            if not isinstance(pool, list) or not isinstance(index, int) or not 0 <= index < len(pool):
-                return None
-            targets = pool[index]
-        if not isinstance(targets, list) or not targets:
+def _record_targets(image, record):
+    """The declared target addresses of an indirect call/jump, or None when the contract has no
+    annotation (the runtime dispatch fallback, which stays full)."""
+    if record is None:
+        return None
+    targets = record.get('targets')
+    if targets is None and 'target_set' in record:
+        index = record['target_set']
+        pool = image.contracts.get('target_sets')
+        if not isinstance(pool, list) or not isinstance(index, int) or not 0 <= index < len(pool):
             return None
-        return targets
-    return None
+        targets = pool[index]
+    if not isinstance(targets, list) or not targets:
+        return None
+    return targets
+
+
+def _group_key(record):
+    """A key that shares one group between every site naming the same target set.
+
+    A pool target set is referenced by thousands of sites and can hold tens of thousands of
+    addresses; keying on the shared list object (or the pool index) means the union is computed
+    once instead of once per site.
+    """
+    if record.get('targets') is not None:
+        return ('i', id(record['targets']))
+    return ('p', record.get('target_set'))
 
 
 def structural(image, spec):
-    """(store, load, uniform callees) for one function, before the call-graph fixed point.
+    """(store, load, direct callees, indirect groups) for one function, before the fixed point.
 
     Decodes the function's whole FDE range linearly. Any instruction capstone cannot classify as
     a resolved uniform call is treated conservatively: a direct call outside the function table
     is an import (its argument and result registers), an indirect site without a declared target
-    set is full.
+    set is full. `indirect groups` is one (group key, target list) per annotated indirect site;
+    the key shares a group between sites naming the same target set.
     """
     start, size = spec['address'], spec.get('size') or 0
     if size <= 0:
-        return FULL, FULL, set()
+        return FULL, FULL, set(), []
     try:
         code = image.read(start, size)
     except Exception:
-        return FULL, FULL, set()
+        return FULL, FULL, set(), []
     reads = writes = 0
     callees = set()
-    calls = spec.get('indirect_calls') or ()
-    jumps = spec.get('indirect_jumps') or ()
+    groups = []
+    sites = {}
+    for record in spec.get('indirect_calls') or ():
+        if isinstance(record, dict):
+            sites.setdefault((record.get('address'), 'call'), record)
+    for record in spec.get('indirect_jumps') or ():
+        if isinstance(record, dict):
+            sites.setdefault((record.get('address'), 'jmp'), record)
     for ins in image.decoder.disasm(code, start):
         if ins.mnemonic == 'vzeroupper':
             # The lowering zeroes only the ymm upper halves; capstone reports all sixteen ymm as
@@ -139,15 +156,11 @@ def structural(image, spec):
         elif operand.type == X86_OP_MEM and ins.reg_name(operand.mem.base) == 'rip' and not operand.mem.index:
             direct = ins.address + ins.size + operand.mem.disp  # a GOT/PLT import slot
         if direct is None:
-            targets = _targets(image, spec, calls if ins.mnemonic == 'call' else jumps, ins.address)
+            record = sites.get((ins.address, 'call' if ins.mnemonic == 'call' else 'jmp'))
+            targets = _record_targets(image, record)
             if targets is None:
-                return FULL, FULL, set()
-            for target in targets:
-                if target in image.functions and abi.uniform(image.functions[target]):
-                    callees.add(target)
-                else:
-                    reads |= IMPORT_READ_MASK
-                    writes |= IMPORT_WRITE_MASK
+                return FULL, FULL, set(), []
+            groups.append((_group_key(record), targets))
             continue
         contract = image.functions.get(direct)
         if contract is not None and abi.uniform(contract):
@@ -157,7 +170,16 @@ def structural(image, spec):
         else:
             reads |= IMPORT_READ_MASK
             writes |= IMPORT_WRITE_MASK
-    return reads | writes, writes, callees
+    return reads | writes, writes, callees, groups
+
+
+def _absorb(address, grew_store, grew_load, store, load, pending, queued):
+    if store[address] | grew_store != store[address] or load[address] | grew_load != load[address]:
+        store[address] |= grew_store
+        load[address] |= grew_load
+        if address not in queued:
+            pending.append(address)
+            queued.add(address)
 
 
 def prepare(image):
@@ -166,32 +188,94 @@ def prepare(image):
     store(F) = own reads and writes unioned with every uniform callee's store; load(F) = own
     writes unioned with every callee's load. A worklist propagates a callee's growth to its
     callers, so recursion converges without a topological order.
+
+    Indirect sites depend on a whole target set at once. The sets are shared dispatch tables
+    with up to millions of entries, so the union over each set is a single graph node (a
+    "group") instead of one edge per target; a target's growth reaches a group's dependents
+    through two hops. Without the grouping the caller graph holds hundreds of millions of
+    edges and does not fit in memory.
     """
     if getattr(image, 'register_summaries_ready', False):
         return image.register_summaries
-    store, load, callers = {}, {}, {}
+    store, load = {}, {}
+    direct_callers = {}
+    dependents = {}
+    group_targets = []
+    group_keys = {}
+    group_pool = {}
     for address, spec in image.functions.items():
-        reads, writes, callees = structural(image, spec)
+        reads, writes, direct, groups = structural(image, spec)
         store[address], load[address] = reads, writes
-        for target in callees:
-            callers.setdefault(target, set()).add(address)
-    pending = deque(image.functions)
-    queued = set(image.functions)
+        for target in direct:
+            direct_callers.setdefault(target, set()).add(address)
+        for key, targets in groups:
+            gid = group_keys.get(key)
+            if gid is None:
+                gid = len(group_targets)
+                group_keys[key] = gid
+                group_targets.append(targets)
+                if key[0] == 'p':
+                    group_pool[key[1]] = gid
+            dependents.setdefault(gid, set()).add(address)
+    target_groups = {}
+    for gid, targets in enumerate(group_targets):
+        for target in targets:
+            target_groups.setdefault(target, set()).add(gid)
+    group_store = [0] * len(group_targets)
+    group_load = [0] * len(group_targets)
+    for gid, targets in enumerate(group_targets):
+        grew_store = grew_load = 0
+        for target in targets:
+            current = store.get(target)
+            if current is None:
+                # Not a uniform function in this image: the call reads the argument registers
+                # and writes the result registers, exactly as a direct import call does.
+                grew_store |= IMPORT_READ_MASK | IMPORT_WRITE_MASK
+                grew_load |= IMPORT_WRITE_MASK
+            else:
+                grew_store |= current
+                grew_load |= load[target]
+        group_store[gid], group_load[gid] = grew_store, grew_load
+    pending = deque()
+    queued = set()
+    for address in image.functions:
+        pending.append(address)
+        queued.add(address)
+    for gid in range(len(group_targets)):
+        pending.append(-(gid + 1))
+        queued.add(-(gid + 1))
     while pending:
-        address = pending.popleft()
-        queued.discard(address)
-        grew_store, grew_load = store[address], load[address]
-        for caller in callers.get(address, ()):
-            if store[caller] | grew_store != store[caller] or load[caller] | grew_load != load[caller]:
-                store[caller] |= grew_store
-                load[caller] |= grew_load
-                if caller not in queued:
-                    pending.append(caller)
-                    queued.add(caller)
+        item = pending.popleft()
+        queued.discard(item)
+        if item >= 0:
+            address = item
+            grew_store, grew_load = store[address], load[address]
+            for caller in direct_callers.get(address, ()):
+                _absorb(caller, grew_store, grew_load, store, load, pending, queued)
+            for gid in target_groups.get(address, ()):
+                if (group_store[gid] | grew_store != group_store[gid]
+                        or group_load[gid] | grew_load != group_load[gid]):
+                    group_store[gid] |= grew_store
+                    group_load[gid] |= grew_load
+                    if -(gid + 1) not in queued:
+                        pending.append(-(gid + 1))
+                        queued.add(-(gid + 1))
+        else:
+            gid = -item - 1
+            grew_store, grew_load = group_store[gid], group_load[gid]
+            for caller in dependents.get(gid, ()):
+                _absorb(caller, grew_store, grew_load, store, load, pending, queued)
     image.register_summaries = {address: (store[address], load[address]) for address in image.functions}
+    image.register_pool_masks = {index: (group_store[gid], group_load[gid])
+                                 for index, gid in group_pool.items()}
     image.register_summaries_ready = True
     return image.register_summaries
 
 
 def summary(image, address):
     return image.register_summaries.get(address, (FULL, FULL))
+
+
+def pool_mask(image, index):
+    """The (store, load) union of a shared pool target set, or None when it was never seen."""
+    return image.register_pool_masks.get(index)

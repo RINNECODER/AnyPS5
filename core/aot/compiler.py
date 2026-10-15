@@ -278,6 +278,7 @@ class Image:
         self.memory_effects = {}
         self.pointer_output_summaries = {}
         self.register_summaries = {}
+        self.register_pool_masks = {}
         self.provider_requirements = {}
         try:
             immutable_data.configure(self)
@@ -1738,6 +1739,13 @@ class Function:
             site = self.image.annotated_calls(self.contract).get(ins.address)
             if site is None:
                 return registers.FULL, registers.FULL
+            # A pool target set is shared by thousands of sites and can hold tens of thousands of
+            # addresses; the summary pass already unioned it once.
+            index = site.get('target_set')
+            if index is not None:
+                masks = registers.pool_mask(self.image, index)
+                if masks is not None:
+                    return masks
             store = load = 0
             for target in site['target_addresses']:
                 target_store, target_load = registers.summary(self.image, target)

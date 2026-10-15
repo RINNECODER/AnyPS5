@@ -844,6 +844,35 @@ class UniformABITests(unittest.TestCase):
             registers_file.gpr[GPR['rax']] = ctypes.cast(getattr(library, name), ctypes.c_void_p).value
             function(ctypes.byref(registers_file))
             self.assertEqual(registers_file.gpr[GPR[register]], expected)
+    def test_uniform_shared_target_set_is_one_group_and_grows(self):
+        # Two callers dispatch through the same pool target set. The union over the set is one
+        # group, and a target that calls a leaf writing rcx must still reach both callers through
+        # the group (the two-hop propagation the grouping adds).
+        code = bytearray(0x60)
+        code[0x00:0x03] = bytes.fromhex('ffd0c3')            # 0x1000: call rax ; ret
+        code[0x10:0x13] = bytes.fromhex('ffd0c3')            # 0x1010: call rax ; ret
+        code[0x20:0x26] = bytes.fromhex('e81b000000c3')      # 0x1020: call 0x1040 ; ret
+        code[0x30:0x34] = bytes.fromhex('4889f8c3')          # 0x1030: mov rax,rdi ; ret
+        code[0x40:0x45] = bytes.fromhex('4889d1c3')          # 0x1040: mov rcx,rdx ; ret
+        functions = [uniform_function('sub_1000', 0x1000, 3,
+                                      indirect_calls=[{'address': 0x1000, 'target_set': 0}]),
+                     uniform_function('sub_1010', 0x1010, 3,
+                                      indirect_calls=[{'address': 0x1010, 'target_set': 0}]),
+                     uniform_function('sub_1020', 0x1020, 6),
+                     uniform_function('sub_1030', 0x1030, 4),
+                     uniform_function('sub_1040', 0x1040, 4)]
+        raw, contracts = fixture(bytes(code), functions)
+        contracts['target_sets'] = [[0x1020, 0x1030]]
+        path = self.directory / 'input.elf'
+        path.write_bytes(raw)
+        image = Image(path, contracts)
+        registers.prepare(image)
+        self.assertEqual(len(image.register_pool_masks), 1)
+        group_store, _ = image.register_pool_masks[0]
+        self.assertTrue({'rax', 'rdi', 'rcx', 'rdx'} <= registers.names(group_store))
+        for caller in (0x1000, 0x1010):
+            self.assertTrue({'rax', 'rdi', 'rcx', 'rdx'} <= registers.names(image.register_summaries[caller][0]),
+                            hex(caller))
 
 
 if __name__ == '__main__':
