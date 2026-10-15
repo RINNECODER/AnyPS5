@@ -5,6 +5,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from abi import (ABIError, UNIFORM_STACK_SLOTS, uniform, uniform_locations, signature)
@@ -873,6 +874,60 @@ class UniformABITests(unittest.TestCase):
         for caller in (0x1000, 0x1010):
             self.assertTrue({'rax', 'rdi', 'rcx', 'rdx'} <= registers.names(image.register_summaries[caller][0]),
                             hex(caller))
+    def test_uniform_summary_matches_the_full_copy_build(self):
+        # The optimization must be invisible: a caller that copies only the callee's read set and
+        # reads back only its write set has to leave the whole register file in the same state as
+        # the full-copy build. This compiles the same function both ways and compares every byte.
+        code = bytearray(0x18)
+        code[0x00:0x06] = bytes.fromhex('e80b000000c3')      # 0x1000: call 0x1010 ; ret
+        code[0x10:0x18] = bytes.fromhex('4889f84801f0c3')    # 0x1010: mov rax,rdi ; add rax,rsi ; ret
+        functions = [uniform_function('sub_1000', 0x1000, 6),
+                     uniform_function('sub_1010', 0x1010, 8)]
+        raw, contracts = fixture(bytes(code), functions)
+        summary_function, summary_ir = self.build(raw, contracts, 'sub_1000', '-summary')
+        with mock.patch.object(registers, 'prepare', lambda image: image.register_summaries), \
+                mock.patch.object(registers, 'summary', lambda image, address: (registers.FULL, registers.FULL)), \
+                mock.patch.object(registers, 'pool_mask', lambda image, index: None):
+            full_function, full_ir = self.build(raw, contracts, 'sub_1000', '-full')
+        self.assertNotEqual(summary_ir, full_ir)
+
+        def initial():
+            state = RegisterFile()
+            state.gpr[GPR['rdi']] = 21
+            state.gpr[GPR['rsi']] = 21
+            state.gpr[GPR['rax']] = 0xdeadbeefcafef00d
+            for index, name in enumerate(('rbx', 'rbp', 'r12', 'r13', 'r14', 'r15')):
+                state.gpr[GPR[name]] = 0x1234000000000000 | index
+            for lane in range(16):
+                state.xmm[lane][0] = 0x0102030405060708 + lane
+                state.xmm[lane][1] = 0x1112131415161718 + lane
+                state.ymm_hi[lane][0] = 0x2122232425262728 + lane
+                state.ymm_hi[lane][1] = 0x3132333435363738 + lane
+            state.flags = 0x212
+            state.flags_mask = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11)
+            return state
+
+        def run(function):
+            state = initial()
+            function(ctypes.byref(state))
+            return bytes(state)
+
+        self.assertEqual(run(summary_function), run(full_function))
+
+    def build(self, raw, contracts, entry, suffix):
+        source = self.directory / f'input{suffix}.elf'
+        source.write_bytes(raw)
+        ir, _ = compile_image(Image(source, contracts))
+        ll = self.directory / f'output{suffix}.ll'
+        ll.write_text(ir)
+        binary = self.directory / f'output{suffix}.dylib'
+        subprocess.run(['xcrun', 'clang', '-arch', 'arm64', '-O3', '-dynamiclib', str(ll), '-o', str(binary)],
+                       check=True, capture_output=True)
+        library = ctypes.CDLL(str(binary))
+        function = getattr(library, entry)
+        function.restype = None
+        function.argtypes = [ctypes.POINTER(RegisterFile)]
+        return function, ir
 
 
 if __name__ == '__main__':
