@@ -145,7 +145,7 @@ int DriveNestedExit() {
     std::error_code ignored;
     std::filesystem::remove(marker, ignored);
     Require(code == 7);
-    Require(text == "remaining handler\n");
+    Require(text == "guest finalizer\nremaining handler\nshutdown\n");
     std::puts("Guest nested exit completed");
     return 0;
 }
@@ -219,7 +219,9 @@ int main(int argc, char** argv) {
         return DriveNestedExit();
     }
     if (argc > firstArgument && std::strcmp(argv[firstArgument], "--nested-exit") == 0) {
+        LibcRegisterShutdown_nid_postfix(GuestExitShutdown);
         Require(__cxa_atexit_nid_postfix(RemainingHandler, nullptr, nullptr) == 0);
+        Require(__cxa_atexit_nid_postfix(CheckShutdownStillRunning, nullptr, nullptr) == 0);
         Require(__cxa_atexit_nid_postfix(ExitingHandler, nullptr, nullptr) == 0);
         exit_nid_postfix(0);
         return 2;
