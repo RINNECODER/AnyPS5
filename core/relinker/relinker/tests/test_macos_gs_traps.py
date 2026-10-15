@@ -1,5 +1,6 @@
 """Check that `relinker --macos` traps guest GS accesses in place."""
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,10 @@ def main():
         for name, instruction in FORMS.items():
             image = make_image("register", "unwind", body=instruction + b"\xc3")
             check_trapped(name, convert(relinker, directory, name, image), instruction)
+        instruction = FORMS["gs-load-rcx"]
+        image = make_image("register", "unwind", body=instruction + b"\xc3")
+        struct.pack_into("<I", image, 176, 0)
+        check_trapped("gs-without-pt-tls", convert(relinker, directory, "gs-without-pt-tls", image), instruction)
     print("macOS GS trap checks passed")
 
 
