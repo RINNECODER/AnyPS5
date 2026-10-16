@@ -47,8 +47,12 @@ struct CachedRenderPipeline {
 // default follows the main executable's SDK: a relinked title (Rosetta direct path) declares SDK 11,
 // whose default MSL 2.3 lacks those identifiers. Exactly MSL 3.2 when `languageVersion32`.
 [[nodiscard]] MTLLanguageVersion ConvertedShaderLanguageVersion(MTLLanguageVersion processDefault, bool languageVersion32) API_AVAILABLE(macos(15.0));
+// Returns whether fast math optimizations are enabled for converted Metal shader compilation.
+// Defaults to true, can be overridden by the ANYPS5_METAL_FAST_MATH environment variable
+// (enabled unless set to 0, false, off, or no).
+[[nodiscard]] bool FastMathEnabled();
 // Returns `entryPoint` from the library compiled from `source` with the converted-shader compile options
-// (safe math; ConvertedShaderLanguageVersion). Throws std::runtime_error when compilation fails and
+// (fast math unless disabled; ConvertedShaderLanguageVersion). Throws std::runtime_error when compilation fails and
 // returns nil when the entry point is missing. `sourceHash` is ShaderSourceHash(source) when the caller
 // has it (a converted shader's Result::sourceHash), or 0 to compute it.
 [[nodiscard]] id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& source,

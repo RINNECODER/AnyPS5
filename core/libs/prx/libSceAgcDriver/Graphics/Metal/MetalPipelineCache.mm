@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -15,6 +16,16 @@
 #include <vector>
 
 namespace AgcDriver::Metal {
+
+bool FastMathEnabled() {
+    const char* value = std::getenv("ANYPS5_METAL_FAST_MATH");
+    if (value == nullptr) return true;
+    if (*value == '0' || *value == '\0') return false;
+    if (std::strcmp(value, "false") == 0 || std::strcmp(value, "FALSE") == 0 ||
+        std::strcmp(value, "off") == 0 || std::strcmp(value, "OFF") == 0 ||
+        std::strcmp(value, "no") == 0 || std::strcmp(value, "NO") == 0) return false;
+    return true;
+}
 
 namespace {
 
@@ -176,6 +187,7 @@ bool Linked(NSArray* functions) {
 CacheKey ComputeKey(id<MTLDevice> device, MTLComputePipelineDescriptor* descriptor) {
     CacheKeyWriter key;
     Device(key, device, 'C');
+    key.Bool(FastMathEnabled());
     Object(key, descriptor.computeFunction);
     StageInputs(key, descriptor.stageInputDescriptor);
     key.Bool(descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth);
@@ -191,6 +203,7 @@ CacheKey RenderKey(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor
                    id<MTLFunction> fragmentFunction) {
     CacheKeyWriter key;
     Device(key, device, 'R');
+    key.Bool(FastMathEnabled());
     Object(key, vertexFunction);
     Object(key, fragmentFunction);
     Colors(key, descriptor.colorAttachments);
@@ -223,6 +236,7 @@ CacheKey RenderKey(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor
 CacheKey MeshKey(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descriptor) {
     CacheKeyWriter key;
     Device(key, device, 'M');
+    key.Bool(FastMathEnabled());
     Object(key, descriptor.objectFunction);
     Object(key, descriptor.meshFunction);
     Object(key, descriptor.fragmentFunction);
@@ -265,7 +279,7 @@ struct Archive {
 };
 
 std::mutex archiveMutex;
-std::map<std::uintptr_t, Archive> archives;
+std::map<std::pair<std::uintptr_t, bool>, Archive> archives;
 // Metal does not document MTLBinaryArchive as safe to read (a pipeline created with it in
 // binaryArchives) while another thread adds to or serializes it. Creations share this lock; adding
 // and writing take it exclusively. Taken before archiveMutex, never while holding it.
@@ -430,7 +444,7 @@ bool WriteArchive(Archive& state) {
 
 bool FlushLocked() {
     bool ok = true;
-    for (auto& [device, state] : archives) ok = WriteArchive(state) && ok;
+    for (auto& [key, state] : archives) ok = WriteArchive(state) && ok;
     return ok;
 }
 
@@ -443,8 +457,10 @@ void FlushAtExit() {
 // Requires archiveMutex. Opens (or creates) the archive for `device` the first time it is used.
 Archive& ArchiveFor(id<MTLDevice> device) {
     const auto identity = reinterpret_cast<std::uintptr_t>((__bridge void*)device);
-    if (const auto found = archives.find(identity); found != archives.end()) return found->second;
-    auto& state = archives[identity];
+    const bool fastMath = FastMathEnabled();
+    const auto archiveKey = std::make_pair(identity, fastMath);
+    if (const auto found = archives.find(archiveKey); found != archives.end()) return found->second;
+    auto& state = archives[archiveKey];
     state.device = device;
     const auto directory = ShaderRecompiler::ShaderCacheDirectory();
     if (directory.empty()) return state;
@@ -454,7 +470,8 @@ Archive& ArchiveFor(id<MTLDevice> device) {
         ReportArchiveFailure("creating the shader cache directory", nil);
         return state;
     }
-    state.path = directory / ("metal-pipelines-v1-" + Sanitized(device.name) + "-" +
+    const std::string mathTag = fastMath ? "fastmath" : "safemath";
+    state.path = directory / ("metal-pipelines-v1-" + mathTag + "-" + Sanitized(device.name) + "-" +
                               Sanitized(NSProcessInfo.processInfo.operatingSystemVersionString) + ".metalarchive");
     @autoreleasepool {
         MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
@@ -522,9 +539,11 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
                                      bool languageVersion32, std::size_t sourceHash) {
     // The key is this short head followed by the whole source. A draw looks it up without copying
     // the source into a key, and with the source's hash from its conversion instead of hashing it again.
+    const bool fastMath = FastMathEnabled();
     CacheKeyWriter writer;
     Device(writer, device, 'F');
     writer.Bool(languageVersion32);
+    writer.Bool(fastMath);
     writer.Text(entryPoint);
     writer.Value<std::uint64_t>(source.size());
     const auto head = writer.Take();
@@ -544,8 +563,12 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
     NSString* name = [[NSString alloc] initWithBytes:entryPoint.data() length:entryPoint.size() encoding:NSUTF8StringEncoding];
     if (text == nil || name == nil) throw std::invalid_argument("Metal converted shader source and entry point must be valid UTF-8");
     MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    options.fastMathEnabled = fastMath;
+#pragma clang diagnostic pop
     if (@available(macOS 15.0, *)) {
-        options.mathMode = MTLMathModeSafe;
+        options.mathMode = fastMath ? MTLMathModeFast : MTLMathModeSafe;
         options.languageVersion = ConvertedShaderLanguageVersion(options.languageVersion, languageVersion32);
     }
     NSError* error = nil;
@@ -570,6 +593,7 @@ id<MTLFunction> CachedConvertedShaderFunction(id<MTLDevice> device, const Shader
     CacheKeyWriter writer;
     Device(writer, device, 'S');
     writer.Bool(languageVersion32);
+    writer.Bool(FastMathEnabled());
     writer.Text(entryPoint);
     writer.Value(reinterpret_cast<std::uintptr_t>(text.get()));
     auto key = writer.TakeKey();

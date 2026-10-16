@@ -155,7 +155,8 @@ function(anyps5_rosetta_graphics_tests)
     add_test_executable(rosetta_direct_graphics_tests
         ${ANYPS5_ROSETTA_LIBS_ROOT}/tests/rosetta_direct_graphics/DirectGraphicsTest.mm)
     target_compile_options(rosetta_direct_graphics_tests PRIVATE -fobjc-arc)
-    target_include_directories(rosetta_direct_graphics_tests PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
+    target_include_directories(rosetta_direct_graphics_tests PRIVATE ${ANYPS5_ROSETTA_LIBS_ROOT} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
+        $<TARGET_PROPERTY:anyps5_rosetta_shader_recompiler,INTERFACE_INCLUDE_DIRECTORIES>)
     target_link_libraries(rosetta_direct_graphics_tests PRIVATE
         libSceAgcDriver libSceVideoOut libkernel libc "${ANYPS5_ROSETTA_APPKIT}" "-framework ImageIO" "-framework CoreGraphics")
     set_target_properties(rosetta_direct_graphics_tests PROPERTIES
