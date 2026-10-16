@@ -13,6 +13,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <string_view>
 #include <string>
 #include <vector>
@@ -306,6 +309,70 @@ std::string barycentricVertexSource(const MetalBackend::InterfaceLayout& capture
     if (fixupClipSpace) source += "    position.z = (position.z + position.w) * 0.5f;\n";
     source += "    out.position = position;\n" + stores + "    return out;\n}\n";
     return source;
+}
+
+// barycentricVertexSource depends only on its arguments, and the fragment source is a shared text
+// (MetalBackend::ShaderSource) the conversion cache hands out again for the same shader: the
+// source is built once per combination instead of for every barycentric draw (it was about 2% of
+// the queue worker's time, plus hashing the new text to find its compiled function).
+struct BarycentricSource {
+    MetalBackend::ShaderSource source;
+    std::size_t hash = 0;
+};
+
+BarycentricSource cachedBarycentricVertexSource(const MetalBackend::InterfaceLayout& captured, const MetalBackend::ShaderSource& fragmentSource,
+    const RecompileResult& fragment, bool flipY, bool fixupClipSpace) {
+    const auto& text = fragmentSource.Shared();
+    if (text == nullptr) {
+        auto source = barycentricVertexSource(captured, fragmentSource, fragment, flipY, fixupClipSpace);
+        const auto hash = MetalBackend::ShaderSourceHash(source);
+        return {std::move(source), hash};
+    }
+    std::string key;
+    const auto put = [&key](auto value) { key.append(reinterpret_cast<const char*>(&value), sizeof(value)); };
+    put(reinterpret_cast<std::uintptr_t>(text.get()));
+    put(flipY);
+    put(fixupClipSpace);
+    put(captured.stride);
+    put(static_cast<std::uint32_t>(captured.members.size()));
+    for (const auto& member : captured.members) {
+        put(member.location.value_or(~0u));
+        put(member.builtin.value_or(~0u));
+        put(member.components);
+        put(member.width);
+        put(member.offset);
+    }
+    put(static_cast<std::uint32_t>(fragment.fragmentParameters.size()));
+    for (const auto& parameter : fragment.fragmentParameters) {
+        put(parameter.location);
+        put(parameter.sourceLocation);
+        put(parameter.flat);
+        put(parameter.perVertex);
+        put(parameter.custom);
+        put(parameter.flatP10);
+    }
+    put(fragment.barycentricEmulation.active);
+    put(fragment.barycentricEmulation.smooth);
+    put(fragment.barycentricEmulation.linear);
+    struct Entry {
+        // Held so that the address in the key names this text for as long as the entry lives.
+        std::shared_ptr<const std::string> fragmentText;
+        BarycentricSource result;
+    };
+    static std::mutex mutex;
+    static auto* entries = new std::unordered_map<std::string, Entry>();
+    {
+        std::lock_guard lock(mutex);
+        if (const auto found = entries->find(key); found != entries->end()) return found->second.result;
+    }
+    BarycentricSource result;
+    auto source = barycentricVertexSource(captured, fragmentSource, fragment, flipY, fixupClipSpace);
+    result.hash = MetalBackend::ShaderSourceHash(source);
+    result.source = std::move(source);
+    std::lock_guard lock(mutex);
+    if (entries->size() >= 4096) entries->clear();
+    entries->emplace(std::move(key), Entry{text, result});
+    return result;
 }
 
 std::span<const std::byte> pushBlock(const MetalBackend::Result& shader,
@@ -1121,8 +1188,10 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         corners.stage = ShaderStage::Vertex;
         corners.nativeExecutionKind = MetalBackend::NativeExecutionKind::Vertex;
         corners.entryPoint = BarycentricVertexEntry;
-        corners.source = barycentricVertexSource(capturePipeline->Reflection().rectList->outputLayout, nativeFragment.source,
+        auto built = cachedBarycentricVertexSource(capturePipeline->Reflection().rectList->outputLayout, nativeFragment.source,
             *fragment->program, state.viewport.height > 0, state.negativeOneToOne);
+        corners.source = std::move(built.source);
+        corners.sourceHash = built.hash;
         nativeVertex = std::move(corners);
     }
     std::unique_ptr<MetalRenderPipeline> vertexPipeline;

@@ -621,6 +621,27 @@ void MetalTexture::encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer>
     [blit endEncoding];
 }
 
+void MetalTexture::recordLinearUpload(id<MTLBuffer> linear, MetalEncoders::UploadBlitRecord& record) const {
+    const auto& descriptor = backing->descriptor;
+    const auto& geometry = backing->geometry;
+    id<MTLTexture> texture = backing->texture;
+    record.sourceBuffer = linear;
+    record.destinationTexture = texture;
+    const bool volume = texture.textureType == MTLTextureType3D;
+    for (std::uint32_t level = 0; level < geometry.mips.size(); ++level) {
+        const auto& mip = geometry.mips[level];
+        for (std::uint32_t layer = 0; layer < geometry.layers; ++layer) {
+            if (!geometry.HasLayer(level, layer)) continue;
+            const auto size = MTLSizeMake(std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1);
+            const auto origin = MTLOriginMake(0, 0, geometry.CopyDepth(layer));
+            const auto offset = geometry.LinearLayerOffset(layer) + mip.linearOffset;
+            const NSUInteger bytesPerImage = volume ? mip.linearSize : 0;
+            record.steps.push_back({offset, mip.pitchBytes, bytesPerImage, size,
+                geometry.CopyLayer(layer), level, origin});
+        }
+    }
+}
+
 bool MetalTexture::inPlace(id<MTLBuffer> buffer, std::size_t offset) const {
     // The detile addresses whole words, so the surface must be word-aligned and a whole number of words.
     const auto extent = bufferSize(backing->geometry.guestBytes);
@@ -671,7 +692,9 @@ void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recy
         // The blit reads only texels the detile wrote, so the (recycled) linear buffer needs no clearing.
         auto linear = backend.TransientBuffer(bufferSize(geometry.sliceLinearBytes * geometry.layers), commands);
         encodeTransfer(commands, guest, offset, linear, 0, false);
-        encodeLinearCopy(commands, linear, true);
+        MetalEncoders::UploadBlitRecord record;
+        recordLinearUpload(linear, record);
+        MetalEncoders::EnqueueUploadBlit(commands, std::move(record));
     }
     // The draw or dispatch that samples the texture is committed later on the same queue (or is
     // encoded after this into the same, batched, command buffer), so it runs after this; the

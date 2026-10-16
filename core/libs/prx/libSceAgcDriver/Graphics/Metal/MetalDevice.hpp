@@ -115,10 +115,36 @@ struct PassKey {
 // one pass.
 [[nodiscard]] bool IsAttachment(const PassKey& key, id<MTLResource> resource);
 
-// Ends the render encoder parked in `commands`, if any.
+// Upload batching: linear buffer -> texture blit copies (e.g. BC texture uploads after detiling)
+// can be grouped to share a single MTLBlitCommandEncoder per command buffer rather than creating
+// an encoder per texture.
+struct UploadBlitStep {
+    NSUInteger sourceOffset = 0;
+    NSUInteger sourceBytesPerRow = 0;
+    NSUInteger sourceBytesPerImage = 0;
+    MTLSize sourceSize{};
+    NSUInteger destinationSlice = 0;
+    NSUInteger destinationLevel = 0;
+    MTLOrigin destinationOrigin{};
+};
+
+struct UploadBlitRecord {
+    id<MTLBuffer> sourceBuffer = nil;
+    id<MTLTexture> destinationTexture = nil;
+    std::vector<UploadBlitStep> steps;
+};
+
+// Enqueues an upload blit record to be encoded into the shared blit encoder for `commands`.
+void EnqueueUploadBlit(id<MTLCommandBuffer> commands, UploadBlitRecord record);
+// Encodes all pending upload blits for `commands` into a single MTLBlitCommandEncoder.
+void FlushUploadBlits(id<MTLCommandBuffer> commands);
+// Whether there are pending upload blits for `commands`.
+[[nodiscard]] bool HasPendingUploadBlits(id<MTLCommandBuffer> commands);
+
+// Ends the render encoder parked in `commands`, if any, and flushes pending upload blits.
 void EndParked(id<MTLCommandBuffer> commands);
 // New encoders, after ending the one parked in `commands`.
-[[nodiscard]] id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands);
+[[nodiscard]] id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands, bool flushUploads = true);
 [[nodiscard]] id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands);
 [[nodiscard]] id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass);
 
@@ -134,6 +160,8 @@ void EndOrPark(const MetalDevice& batch, id<MTLCommandBuffer> commands, id<MTLRe
 struct Statistics {
     std::uint64_t passes = 0;
     std::uint64_t merged = 0;
+    std::uint64_t uploadBlits = 0;
+    std::uint64_t uploadBlitPasses = 0;
 };
 // Render passes RenderMerging opened and draws it merged into an open one so far.
 [[nodiscard]] Statistics TakeStatistics(bool reset = true);

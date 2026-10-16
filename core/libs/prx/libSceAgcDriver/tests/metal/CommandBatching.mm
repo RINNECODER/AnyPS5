@@ -430,6 +430,90 @@ void PassMergeParking(const MetalTests::Context& context, const Kernels& kernels
     Require(own.status == MTLCommandBufferStatusCompleted, "The unbatched passes did not complete");
 }
 
+void UploadBlitBatching(const MetalTests::Context& context) {
+    MetalDevice backend(context.device, context.library);
+    backend.SetBatching(true);
+    auto textureA = Target(context.device);
+    auto textureB = Target(context.device);
+    auto stagingA = Filled(backend, 0x11111111);
+    auto stagingB = Filled(backend, 0x22222222);
+
+    Encoders::UploadBlitRecord recordA;
+    recordA.sourceBuffer = stagingA;
+    recordA.destinationTexture = textureA;
+    recordA.steps.push_back({
+        .sourceOffset = 0,
+        .sourceBytesPerRow = Side * sizeof(std::uint32_t),
+        .sourceBytesPerImage = Side * Side * sizeof(std::uint32_t),
+        .sourceSize = MTLSizeMake(Side, Side, 1),
+        .destinationSlice = 0,
+        .destinationLevel = 0,
+        .destinationOrigin = MTLOriginMake(0, 0, 0),
+    });
+
+    Encoders::UploadBlitRecord recordB;
+    recordB.sourceBuffer = stagingB;
+    recordB.destinationTexture = textureB;
+    recordB.steps.push_back({
+        .sourceOffset = 0,
+        .sourceBytesPerRow = Side * sizeof(std::uint32_t),
+        .sourceBytesPerImage = Side * Side * sizeof(std::uint32_t),
+        .sourceSize = MTLSizeMake(Side, Side, 1),
+        .destinationSlice = 0,
+        .destinationLevel = 0,
+        .destinationOrigin = MTLOriginMake(0, 0, 0),
+    });
+
+    static_cast<void>(Encoders::TakeStatistics());
+
+    auto commands = backend.CommandBuffer();
+    Encoders::EnqueueUploadBlit(commands, recordA);
+    Require(Encoders::HasPendingUploadBlits(commands), "Pending upload blits not recognized");
+    Encoders::EnqueueUploadBlit(commands, recordB);
+
+    auto stats = Encoders::TakeStatistics(false);
+    Require(stats.uploadBlits == 2 && stats.uploadBlitPasses == 0, "Upload blits prematurely encoded");
+
+    // Compute encoder with 'upload detile' should not flush pending upload blits
+    auto computeUpload = backend.ComputeEncoder(commands, @"upload detile");
+    [computeUpload endEncoding];
+    Require(Encoders::HasPendingUploadBlits(commands), "Compute with upload detile flushed pending upload blits");
+
+    // Explicit flush batches all pending upload blits into a single blit encoder pass
+    Encoders::FlushUploadBlits(commands);
+    Require(!Encoders::HasPendingUploadBlits(commands), "Flush did not clear pending upload blits");
+    stats = Encoders::TakeStatistics(false);
+    Require(stats.uploadBlits == 2 && stats.uploadBlitPasses == 1, "Upload blits did not batch into a single pass");
+
+    // Subsequent enqueue followed by a render pass automatically flushes pending upload blits
+    Encoders::EnqueueUploadBlit(commands, recordA);
+    Require(Encoders::HasPendingUploadBlits(commands), "Pending upload blit not recognized");
+    auto render = Encoders::Render(commands, LoadingPass(textureA));
+    [render endEncoding];
+    Require(!Encoders::HasPendingUploadBlits(commands), "Render encoder did not flush pending upload blits");
+    stats = Encoders::TakeStatistics();
+    Require(stats.uploadBlits == 3 && stats.uploadBlitPasses == 2, "Automatic upload blit flush miscounted");
+
+    backend.Wait(commands);
+
+    // Verify GPU results in textureA and textureB
+    auto readA = backend.Buffer(Side * Side * sizeof(std::uint32_t));
+    auto readB = backend.Buffer(Side * Side * sizeof(std::uint32_t));
+    auto readCommands = backend.CommandBuffer();
+    auto blit = [readCommands blitCommandEncoder];
+    [blit copyFromTexture:textureA sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+        sourceSize:MTLSizeMake(Side, Side, 1) toBuffer:readA destinationOffset:0
+        destinationBytesPerRow:Side * sizeof(std::uint32_t) destinationBytesPerImage:readA.length];
+    [blit copyFromTexture:textureB sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+        sourceSize:MTLSizeMake(Side, Side, 1) toBuffer:readB destinationOffset:0
+        destinationBytesPerRow:Side * sizeof(std::uint32_t) destinationBytesPerImage:readB.length];
+    [blit endEncoding];
+    backend.Wait(readCommands);
+
+    Require(AllEqual(readA, 0x11111111), "Batched upload blit wrote incorrect data to texture A");
+    Require(AllEqual(readB, 0x22222222), "Batched upload blit wrote incorrect data to texture B");
+}
+
 void RunCommandBatchingTests(const MetalTests::Context& context) {
     const auto kernels = Build(context.device);
     OrderingInOneCommandBuffer(context, kernels);
@@ -439,4 +523,5 @@ void RunCommandBatchingTests(const MetalTests::Context& context) {
     AbandonedWorkReleasesAfterTheBatch(context, kernels);
     PassMergeKeys(context);
     PassMergeParking(context, kernels);
+    UploadBlitBatching(context);
 }
