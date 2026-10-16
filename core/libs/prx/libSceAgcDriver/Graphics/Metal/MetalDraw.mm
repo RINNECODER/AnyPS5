@@ -412,6 +412,9 @@ void MetalDraw::SetMaterializeHook(std::function<void(std::uint64_t, std::uint64
 void MetalDraw::InvalidateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> changed) {
     std::lock_guard<std::recursive_mutex> lock(drawMutex);
     imageCache.Clear();
+    translationCache.Clear();
+    lastEncoderState = {};
+    ++memoryVersion;
     depthCache->Invalidate(changed);
     for (const auto& range : changed) hostAliases->Invalidate(range.host.data(), range.host.size());
     std::erase_if(depthSurfaces, [&](const auto& surface) { return surface->OverlapsMappings(changed); });
@@ -846,6 +849,211 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
     resources.SetLazyCopyBacks(&lazyCopyBacks);
     if (materializeHook) resources.SetMaterializeHook(materializeHook);
     if (timeline != nullptr) resources.SetPendingStores(MetalShaderResources::PendingStoresOf(*timeline));
+    bool hasExpansions = false;
+    if (state.rasterSamples > 1) {
+        for (const auto& color : state.colors) {
+            if (color.samples == 1) {
+                hasExpansions = true;
+                break;
+            }
+        }
+    }
+    const bool cacheable = MetalDrawTranslationCache::Enabled() &&
+                           sampleCounter == nil &&
+                           !hasExpansions &&
+                           !baryPath && !rectPath && !meshPath &&
+                           gpuIndirect == nullptr && !fanPath &&
+                           (!nativeStrip || nativeRestart) &&
+                           draw.IndexReadCount() == draw.indexCount;
+    DrawTranslationKey key;
+    if (cacheable) {
+        key.vertexVariantId = vertex->program->PipelineVariantId();
+        key.fragmentVariantId = fragment->program->PipelineVariantId();
+        key.vertexPushOffset = vertex->pushConstantOffset;
+        key.fragmentPushOffset = fragment->pushConstantOffset;
+
+        key.stagesRegisterValue = state.stages.registerValue;
+        key.stagesPath = static_cast<std::uint32_t>(state.stages.path);
+        key.vertexWaveSize = state.stages.vertexWaveSize;
+        key.fragmentWaveSize = state.stages.fragmentWaveSize;
+        key.rasterSamples = state.rasterSamples;
+        key.topology = static_cast<std::uint32_t>(state.topology);
+        key.primitiveRestart = state.primitiveRestart;
+        key.negativeOneToOne = state.negativeOneToOne;
+        key.flipVertexY = state.viewport.height > 0;
+
+        key.depthTest = state.depthTest;
+        key.depthWrite = state.depthWrite;
+        key.depthCompare = static_cast<std::uint32_t>(state.depthCompare);
+        key.stencilTest = state.stencilTest;
+        key.stencilFront = state.stencilFront;
+        key.stencilBack = state.stencilBack;
+
+        key.renderExtentWidth = state.renderExtent.width;
+        key.renderExtentHeight = state.renderExtent.height;
+        key.customSampleLocations = state.customSampleLocations;
+        key.sampleLocations = state.sampleLocations;
+
+        key.colors.reserve(state.colors.size());
+        for (const auto& color : state.colors) {
+            key.colors.push_back({
+                .exportIndex = color.exportIndex,
+                .format = static_cast<std::uint32_t>(color.format),
+                .samples = color.samples,
+                .packing = static_cast<std::uint32_t>(color.packing),
+                .uintExport = color.uintExport,
+                .address = color.address,
+                .mip = color.mip,
+                .depthSlice = color.depthSlice,
+            });
+        }
+
+        if (state.depth) {
+            key.depth = DrawTranslationKey::DepthTargetInfo{
+                .address = state.depth->address,
+                .stencilAddress = state.depth->stencilAddress,
+                .format = static_cast<std::uint32_t>(state.depth->format),
+                .samples = state.depth->samples,
+                .slice = state.depth->slice,
+                .lastSlice = state.depth->lastSlice,
+                .layered = state.layered,
+            };
+        }
+
+        key.blends.reserve(state.blends.size());
+        for (const auto& b : state.blends) {
+            key.blends.push_back({
+                .blendEnable = b.blendEnable,
+                .srcColorBlendFactor = b.srcColorBlendFactor,
+                .dstColorBlendFactor = b.dstColorBlendFactor,
+                .colorBlendOp = b.colorBlendOp,
+                .srcAlphaBlendFactor = b.srcAlphaBlendFactor,
+                .dstAlphaBlendFactor = b.dstAlphaBlendFactor,
+                .alphaBlendOp = b.alphaBlendOp,
+                .colorWriteMask = b.colorWriteMask,
+            });
+        }
+
+        key.attributes.reserve(vertex->program->vertexAttributes.size());
+        for (const auto& attr : vertex->program->vertexAttributes) {
+            key.attributes.push_back({
+                .location = attr.location,
+                .fetchIndex = attr.fetchIndex,
+                .fields = attr.resource.fields,
+            });
+        }
+
+        for (const auto& binding : vertex->program->bindings) {
+            key.guestDescriptorWords.insert(key.guestDescriptorWords.end(),
+                binding.guestDescriptor.begin(), binding.guestDescriptor.end());
+        }
+        for (const auto& binding : fragment->program->bindings) {
+            key.guestDescriptorWords.insert(key.guestDescriptorWords.end(),
+                binding.guestDescriptor.begin(), binding.guestDescriptor.end());
+        }
+
+        key.indexed = draw.indexed;
+        key.nativeIndexSize = draw.indexSize;
+    }
+
+    const auto imageCacheClears = ImageCache() ? ImageCache()->TakeStatistics(false).clears : 0;
+    auto cached = cacheable ? translationCache.Find(key, memoryVersion, imageCacheClears) : nullptr;
+    if (cached != nullptr) {
+        MetalBufferBinding indexBuffer;
+        if (draw.indexed) {
+            const auto bytes = std::uint64_t{draw.indexCount} * draw.indexSize;
+            if (cpuReadHook && !cached->wholeVertexRanges) cpuReadHook(draw.indexAddress, bytes);
+            indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
+        }
+        id<MTLCommandBuffer> commands = backend.CommandBuffer();
+        MetalBatchedWork batched(backend, commands);
+        bool merged = false;
+        auto encoder = MetalEncoders::RenderMerging(backend, commands, cached->renderPass, cached->passKey, cached->mergeable, &merged);
+        if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
+
+        DynamicRenderState currentDynamicState{
+            .viewport = state.viewport,
+            .scissor = state.scissor,
+            .cullMode = state.cullMode,
+            .frontFace = state.frontFace,
+            .depthClamp = state.depthClamp,
+            .depthBias = state.depthBias,
+            .depthBiasConstant = state.depthBiasConstant,
+            .depthBiasSlope = state.depthBiasSlope,
+            .depthBiasClamp = state.depthBiasClamp,
+            .blendConstants = state.blendConstants,
+            .stencilFrontRef = state.stencilTest ? state.stencilFront.reference : 0,
+            .stencilBackRef = state.stencilTest ? state.stencilBack.reference : 0,
+        };
+
+        const bool sameEncoder = merged && (lastEncoderState.translationId == cached->recordId);
+        if (sameEncoder) {
+            const bool pushChanged = (lastEncoderState.pushConstants.size() != pushConstants.size() ||
+                                      std::memcmp(lastEncoderState.pushConstants.data(), pushConstants.data(), pushConstants.size()) != 0);
+            if (pushChanged) {
+                if (cached->vertexPushBuffer && cached->vertexPushBytes > 0) {
+                    auto span = std::span(pushConstants).first(std::min(cached->vertexPushBytes, pushConstants.size()));
+                    [encoder setVertexBytes:span.data() length:span.size() atIndex:*cached->vertexPushBuffer];
+                }
+                if (cached->fragmentPushBuffer && cached->fragmentPushBytes > 0) {
+                    auto span = std::span(pushConstants).first(std::min(cached->fragmentPushBytes, pushConstants.size()));
+                    [encoder setFragmentBytes:span.data() length:span.size() atIndex:*cached->fragmentPushBuffer];
+                }
+                lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
+            }
+            if (!(lastEncoderState.dynamicState == currentDynamicState)) {
+                BindRenderState(encoder, state, cached->depthStencilState);
+                lastEncoderState.dynamicState = currentDynamicState;
+            } else {
+                translationCache.RecordStateElision();
+            }
+        } else {
+            cached->vertexPipeline->Bind(encoder, cached->vertexBindings, cached->fragmentBindings,
+                pushBlock(cached->vertexPipeline->VertexReflection(), pushConstants),
+                pushBlock(cached->vertexPipeline->FragmentReflection(), pushConstants),
+                cached->residency);
+            BindRenderState(encoder, state, cached->depthStencilState);
+            for (std::size_t i = 0; i < cached->vertexBuffers.size(); ++i) {
+                [encoder setVertexBuffer:cached->vertexBuffers[i].buffer offset:cached->vertexBuffers[i].offset atIndex:i];
+            }
+            lastEncoderState.encoder = encoder;
+            lastEncoderState.translationId = cached->recordId;
+            lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
+            lastEncoderState.dynamicState = currentDynamicState;
+        }
+
+        try {
+            if (draw.indexed) {
+                [encoder drawIndexedPrimitives:cached->primitive indexCount:draw.indexCount
+                    indexType:cached->nativeIndexSize == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32
+                    indexBuffer:indexBuffer.buffer indexBufferOffset:indexBuffer.offset
+                    instanceCount:draw.instanceCount
+                    baseVertex:static_cast<NSInteger>(std::bit_cast<std::int32_t>(draw.firstVertex))
+                    baseInstance:draw.firstInstance];
+            } else {
+                [encoder drawPrimitives:cached->primitive vertexStart:draw.firstVertex vertexCount:draw.indexCount
+                    instanceCount:draw.instanceCount baseInstance:draw.firstInstance];
+            }
+        } catch (...) {
+            lastEncoderState.Reset();
+            [encoder endEncoding];
+            throw;
+        }
+        MetalEncoders::EndOrPark(backend, commands, encoder, cached->passKey, cached->mergeable);
+        resources.EncodeReadbacks(commands, timeline != nullptr);
+        if (timeline != nullptr && !resources.NeedsSynchronousCompletion()) {
+            resources.CommittedWithoutWaiting();
+            batched.Done();
+            timeline->Commit(commands, [resourcesOwner, commands, completed = std::move(completed)] {
+                const auto fault = CompleteCommittedWork([&] { return resourcesOwner->Complete(commands); });
+                if (completed) completed(fault);
+            }, cached->bdaStores, resources.WrittenGuestRanges(), resources.KnownStores());
+            return std::nullopt;
+        }
+        batched.Done();
+        backend.Wait(commands);
+        return CompleteCommittedWork([&] { return resources.Complete(commands); });
+    }
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -1194,7 +1402,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         corners.sourceHash = built.hash;
         nativeVertex = std::move(corners);
     }
-    std::unique_ptr<MetalRenderPipeline> vertexPipeline;
+    std::shared_ptr<MetalRenderPipeline> vertexPipeline;
     std::unique_ptr<MetalMeshPipeline> meshPipeline;
     if (meshPath) {
         auto descriptor = [[MTLMeshRenderPipelineDescriptor alloc] init];
@@ -1202,7 +1410,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         meshPipeline = std::make_unique<MetalMeshPipeline>(backend.Device(), std::move(nativeVertex), std::move(nativeFragment), descriptor);
         meshPipeline->ValidateThreadgroups(MTLSizeMake(meshGroups, draw.instanceCount, 1));
     } else {
-        vertexPipeline = std::make_unique<MetalRenderPipeline>(backend.Device(), std::move(nativeVertex), std::move(nativeFragment), pipelineDescriptor);
+        vertexPipeline = std::make_shared<MetalRenderPipeline>(backend.Device(), std::move(nativeVertex), std::move(nativeFragment), pipelineDescriptor);
     }
     const auto& mainReflection = meshPath ? meshPipeline->MeshReflection() : vertexPipeline->VertexReflection();
     const auto& fragmentReflection = meshPath ? meshPipeline->FragmentReflection() : vertexPipeline->FragmentReflection();
@@ -1319,7 +1527,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             for (id<MTLTexture> texture : binding.textures) mergeable = mergeable && !MetalEncoders::IsAttachment(passKey, texture);
         }
     }
-    auto encoder = MetalEncoders::RenderMerging(backend, commands, renderPass, passKey, mergeable);
+    bool merged = false;
+    auto encoder = MetalEncoders::RenderMerging(backend, commands, renderPass, passKey, mergeable, &merged);
     if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
     try {
         if (meshPath) {
@@ -1364,10 +1573,83 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             [encoder drawPrimitives:primitive vertexStart:draw.firstVertex vertexCount:draw.indexCount instanceCount:draw.instanceCount baseInstance:draw.firstInstance];
         }
     } catch (...) {
+        lastEncoderState.Reset();
         [encoder endEncoding];
         throw;
     }
     MetalEncoders::EndOrPark(backend, commands, encoder, passKey, mergeable);
+    if (cacheable) {
+        DynamicRenderState currentDynamicState{
+            .viewport = state.viewport,
+            .scissor = state.scissor,
+            .cullMode = state.cullMode,
+            .frontFace = state.frontFace,
+            .depthClamp = state.depthClamp,
+            .depthBias = state.depthBias,
+            .depthBiasConstant = state.depthBiasConstant,
+            .depthBiasSlope = state.depthBiasSlope,
+            .depthBiasClamp = state.depthBiasClamp,
+            .blendConstants = state.blendConstants,
+            .stencilFrontRef = state.stencilTest ? state.stencilFront.reference : 0,
+            .stencilBackRef = state.stencilTest ? state.stencilBack.reference : 0,
+        };
+
+        auto record = std::make_shared<DrawTranslationRecord>();
+        record->vertexPipeline = vertexPipeline;
+        record->depthStencilState = depthStencilState;
+        record->vertexBuffers = vertexBuffers;
+        record->vertexBindings = vertexBindings;
+        record->fragmentBindings = fragmentBindings;
+        record->residency.assign(residency.begin(), residency.end());
+        record->renderPass = renderPass;
+        record->passKey = passKey;
+        record->bdaStores = bdaStores;
+        record->mergeable = mergeable;
+        record->wholeVertexRanges = wholeVertexRanges;
+        record->primitive = primitive;
+        record->nativeIndexSize = nativeIndexSize;
+        record->vertexPushBuffer = vertexPipeline->VertexReflection().pushConstantBuffer;
+        record->vertexPushBytes = vertexPipeline->VertexReflection().pushConstantBytes;
+        record->fragmentPushBuffer = vertexPipeline->FragmentReflection().pushConstantBuffer;
+        record->fragmentPushBytes = vertexPipeline->FragmentReflection().pushConstantBytes;
+        record->memoryVersion = memoryVersion;
+        record->imageCacheClears = imageCacheClears;
+        record->key = std::move(key);
+
+        const auto& chunks = resources.UploadChunks();
+        if (!chunks.empty()) {
+            for (auto* list : {&record->vertexBindings, &record->fragmentBindings}) {
+                for (auto& binding : *list) {
+                    for (auto& buf : binding.buffers) {
+                        if (buf.buffer != nil && std::find(chunks.begin(), chunks.end(), buf.buffer) != chunks.end()) {
+                            const auto length = buf.length.value_or(buf.buffer.length - buf.offset);
+                            id<MTLBuffer> cloned = [backend.Device() newBufferWithBytes:static_cast<const std::byte*>(buf.buffer.contents) + buf.offset
+                                                                                 length:length
+                                                                                options:MTLResourceStorageModeShared];
+                            for (auto& res : record->residency) {
+                                if (res == buf.buffer) res = cloned;
+                            }
+                            buf.buffer = cloned;
+                            buf.offset = 0;
+                            buf.length = length;
+                        }
+                    }
+                }
+            }
+            for (id<MTLBuffer> chunk : chunks) {
+                std::erase(record->residency, chunk);
+            }
+        }
+
+        translationCache.Insert(record);
+
+        lastEncoderState.encoder = encoder;
+        lastEncoderState.translationId = record->recordId;
+        lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
+        lastEncoderState.dynamicState = currentDynamicState;
+    } else {
+        lastEncoderState.Reset();
+    }
     if (sampleCounter != nil) {
         const SampleCounterParameters parameters{1, 0};
         backend.Encode(commands, @"SampleCounter", @[sampleCounter, sampleTarget], &parameters, sizeof(parameters), MTLSizeMake(1, 1, 1));

@@ -6,6 +6,7 @@
 #include "MetalLazyCopyBacks.hpp"
 #include "MetalTexture.hpp"
 #include "MetalTimeline.hpp"
+#include "MetalDrawTranslationCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
@@ -84,6 +85,13 @@ public:
     // Materializes lazy copy-backs over guest bytes a binding reads through memory
     // (MetalShaderResources::SetMaterializeHook); the driver commits them to its timeline.
     void SetMaterializeHook(std::function<void(std::uint64_t, std::uint64_t)> hook);
+    // Statistics of the per-draw translation cache (DrawTranslationCache).
+    [[nodiscard]] DrawCacheStatistics TakeDrawCacheStatistics(bool reset = true) { return translationCache.TakeStatistics(reset); }
+    void ClearTranslationCache() {
+        std::lock_guard<std::recursive_mutex> lock(drawMutex);
+        translationCache.Clear();
+        lastEncoderState = {};
+    }
     [[nodiscard]] std::optional<ShaderRecompiler::BdaAbi::Fault> Draw(
         const Graphics::State& state, const Pm4::DrawParameters& draw,
         std::span<const Graphics::CompiledShader> shaders,
@@ -112,6 +120,21 @@ private:
     // Last, so their textures go before the device they were made on.
     MetalLazyCopyBacks lazyCopyBacks;
     GuestImageCache<MetalTexture> imageCache;
+    MetalDrawTranslationCache translationCache;
+    std::uint64_t memoryVersion = 0;
+    struct EncoderDrawState {
+        id<MTLRenderCommandEncoder> encoder = nil;
+        std::uint64_t translationId = 0;
+        std::vector<std::byte> pushConstants;
+        DynamicRenderState dynamicState;
+        void Reset() {
+            encoder = nil;
+            translationId = 0;
+            pushConstants.clear();
+            dynamicState = {};
+        }
+    };
+    EncoderDrawState lastEncoderState;
 };
 
 }
