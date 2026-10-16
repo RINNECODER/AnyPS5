@@ -190,10 +190,10 @@ int main(int argc, char** argv) {
     REQUIRE(Throws([] { _ZnwmSt11align_val_t_nid_postfix(8, 32); }) && handlerCalls == 0 && allocations == 1);
 
     Reset(0);
-    REQUIRE(_ZnwmSt11align_val_t_nid_postfix(0, 64) == storage.data() && lastSize == 1 && lastAlignment == 64);
+    REQUIRE(_ZnwmSt11align_val_t_nid_postfix(0, 16) == storage.data() && lastSize == 1 && lastAlignment == 16);
     Reset(2);
     _ZSt15set_new_handlerPFvvE_nid_postfix(&countingHandler);
-    REQUIRE(_ZnwmSt11align_val_t_nid_postfix(8, 32) == storage.data() && handlerCalls == 2 && allocations == 3);
+    REQUIRE(_ZnwmSt11align_val_t_nid_postfix(8, 16) == storage.data() && handlerCalls == 2 && allocations == 3);
     _ZSt15set_new_handlerPFvvE_nid_postfix(nullptr);
 
     std::puts("Guest new handler checks passed");
