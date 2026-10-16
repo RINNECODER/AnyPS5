@@ -98,8 +98,9 @@ def run(args, log=print):
     if previous_commit == args.commit:
         summary(["Alpha skipped: %s is already engine-alpha (%s)." % (args.commit, previous["release"]["version"])])
         return 0
-    missing = github.required_checks_passed(args.commit)
-    releaselib.require(not missing, "required checks have not passed on %s: %s" % (args.commit, ", ".join(missing)))
+    if not args.skip_checks:
+        missing = github.required_checks_passed(args.commit)
+        releaselib.require(not missing, "required checks have not passed on %s: %s" % (args.commit, ", ".join(missing)))
     if previous_commit is not None:
         status = github.compare(previous_commit, args.commit)["status"]
         if status != "ahead":
@@ -164,6 +165,7 @@ def main(argv=None):
     parser.add_argument("--work-root", type=Path, default=DEFAULT_WORK_ROOT)
     parser.add_argument("--min-macps", default=None)
     parser.add_argument("--keep-work", action="store_true")
+    parser.add_argument("--skip-checks", action="store_true", help="skip querying GitHub check-runs for required checks (for local releases when CI is disabled)")
     parser.add_argument("--dry-run", action="store_true", help="build and sign locally; write nothing to GitHub")
     args = parser.parse_args(argv)
     if not args.macps_repo:
