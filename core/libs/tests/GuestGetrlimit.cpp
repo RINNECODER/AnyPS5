@@ -11,6 +11,9 @@
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 
 struct ResourceLimit {
     std::int64_t rlim_cur;
