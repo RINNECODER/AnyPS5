@@ -864,6 +864,12 @@ void CountIndirectDraw(IndirectDrawPath path, double readMs, bool rewritten) {
     stats.indirectReadUs += readMs * 1000.0;
 }
 
+std::array<std::uint64_t, IndirectPathCount> IndirectDrawCounts() {
+    auto& stats = Profile();
+    std::lock_guard lock(stats.mutex);
+    return stats.indirect;
+}
+
 void CountDrawSkip(DrawSkip kind, double us) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     if (!profile) return;

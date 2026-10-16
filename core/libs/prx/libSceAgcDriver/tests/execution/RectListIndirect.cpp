@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "VulkanTestDevice.hpp"
 #include <algorithm>
 #include <array>
@@ -7,9 +9,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <initializer_list>
 #include <iostream>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,7 +42,9 @@ alignas(256) std::array<std::byte, 1024> DirectInstancedMemory{};
 alignas(256) std::array<std::byte, 1024> IndirectInstancedMemory{};
 alignas(256) std::array<std::byte, 1024> DirectIndexedMemory{};
 alignas(256) std::array<std::byte, 1024> IndirectIndexedMemory{};
-alignas(256) std::array<std::uint32_t, 20> Records{3, 1, 0, 0, 0, 1, 0, 0, 6, 2, 0, 0, 6, 1, 0, 0, 0, 0, 0, 0};
+constexpr std::array<std::uint32_t, 20> RecordWords{3, 1, 0, 0, 0, 1, 0, 0, 6, 2, 0, 0, 6, 1, 0, 0, 0, 0, 0, 0};
+constexpr std::size_t RecordBytes = 65536;
+std::uint32_t* Records = nullptr;
 alignas(256) std::array<std::uint16_t, 8> Indices{6, 7, 8, 3, 4, 5, 0, 0};
 
 struct Header {
@@ -71,7 +77,7 @@ std::vector<std::uint32_t> DrawRectangles() {
     const auto slotVertex = reinterpret_cast<std::uintptr_t>(SlotVertexCode.data());
     const auto indices = reinterpret_cast<std::uintptr_t>(Indices.data());
     const auto pixel = reinterpret_cast<std::uintptr_t>(PixelCode.data());
-    const auto records = reinterpret_cast<std::uintptr_t>(Records.data());
+    const auto records = reinterpret_cast<std::uintptr_t>(Records);
     const std::vector<std::pair<std::uint32_t, std::uint32_t>> context{
         {0x2d5, 0x2000},
         {0x1b6, 0}, {0x207, 0x01200000}, {0x200, 0}, {0x203, 0x800},
@@ -158,6 +164,18 @@ void Same(const std::array<std::byte, 1024>& indirect, const std::array<std::byt
     }
 }
 
+void DrawnOnTheGpu() {
+    const auto counts = AgcDriver::Graphics::IndirectDrawCounts();
+    std::string cpu;
+    for (std::size_t path = 1; path < counts.size(); ++path) {
+        if (counts[path] == 0) continue;
+        if (!cpu.empty()) cpu += ", ";
+        cpu += std::to_string(counts[path]) + " " + AgcDriver::Graphics::IndirectDrawPathName(static_cast<AgcDriver::Graphics::IndirectDrawPath>(path));
+    }
+    Require(cpu.empty(), "indirect rect-list draws read their records on the CPU: " + cpu);
+    Require(counts[0] == 4, "the GPU drew " + std::to_string(counts[0]) + " indirect rect-list draws from their records, expected 4");
+}
+
 void IndirectRectListsDrawAsDirectOnes() {
     DirectMemory.fill(Kept);
     IndirectMemory.fill(Kept);
@@ -169,6 +187,12 @@ void IndirectRectListsDrawAsDirectOnes() {
     Registered(VertexHeader, VertexCode.data(), sizeof(VertexCode), 2);
     Registered(SlotVertexHeader, SlotVertexCode.data(), sizeof(SlotVertexCode), 2);
     Registered(PixelHeader, PixelCode.data(), sizeof(PixelCode), 1);
+    Records = static_cast<std::uint32_t*>(::operator new(RecordBytes, std::align_val_t{RecordBytes}));
+    std::copy(RecordWords.begin(), RecordWords.end(), Records);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(Records, RecordBytes, true, true, true);
+    }
     auto commands = DrawRectangles();
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
     Require(sceAgcDriverSubmitDcb(&packet) == 0, "the draw submission failed");
@@ -182,19 +206,25 @@ void IndirectRectListsDrawAsDirectOnes() {
     Same(IndirectInstancedMemory, DirectInstancedMemory, "rect-list draw of 6 vertices and 2 instances");
     Require(Slots(DirectIndexedMemory) == "0 32 32 0", "the direct indexed rect-list draw covered pixels " + Slots(DirectIndexedMemory) + " of the four rectangles, expected only the second and third");
     Same(IndirectIndexedMemory, DirectIndexedMemory, "indexed rect-list draw");
+    DrawnOnTheGpu();
 }
 
 }
 
 int main() {
     try {
+#ifdef _WIN32
+        _putenv_s("APS5_PROFILE_DRAW", "1");
+#else
+        setenv("APS5_PROFILE_DRAW", "1", 1);
+#endif
         {
             const auto device = OpenVulkanTestDevice();
             if (!device) return VulkanTestSkipped;
         }
         IndirectRectListsDrawAsDirectOnes();
         AgcDriverShutdown_nid_postfix();
-        std::puts("indirect rect-list draws drew what the direct draw did");
+        std::puts("indirect rect-list draws were drawn on the GPU and drew what the direct draw did");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
