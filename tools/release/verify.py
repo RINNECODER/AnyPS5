@@ -25,10 +25,17 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import ssl
 import sys
 import tempfile
 import urllib.request
 import zipfile
+
+try:
+    import certifi
+    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    _SSL_CONTEXT = None
 
 PUBLIC_KEY_B64 = "8CH+bArwdc+38zujG9xU/pD1W7tRoi5UAeGSschuCpc="
 REPO = "RINNECODER/AnyPS5"
@@ -238,7 +245,10 @@ def verify_feed_bytes(name, data, signature_text, min_sequence=0, key=None):
 # ---- network and archive ---------------------------------------------------------------
 def fetch(url, limit=MAX_JSON_BYTES):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
-    with urllib.request.urlopen(request, timeout=60) as response:
+    kwargs = {"timeout": 60}
+    if _SSL_CONTEXT is not None:
+        kwargs["context"] = _SSL_CONTEXT
+    with urllib.request.urlopen(request, **kwargs) as response:
         data = response.read(limit + 1)
     require(len(data) <= limit, "download exceeds its size limit: " + url)
     return data
@@ -247,7 +257,10 @@ def fetch(url, limit=MAX_JSON_BYTES):
 def download(url, target, size, sha256):
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     digest, total = hashlib.sha256(), 0
-    with urllib.request.urlopen(request, timeout=120) as response, open(target, "wb") as out:
+    kwargs = {"timeout": 120}
+    if _SSL_CONTEXT is not None:
+        kwargs["context"] = _SSL_CONTEXT
+    with urllib.request.urlopen(request, **kwargs) as response, open(target, "wb") as out:
         while True:
             chunk = response.read(1 << 20)
             if not chunk:
