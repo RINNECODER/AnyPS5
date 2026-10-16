@@ -17,7 +17,18 @@ using DepthFastClearHarness::Surface;
 using DepthFastClearHarness::Width;
 
 alignas(4096) std::array<float, Width * Height * 2> Depth{};
-alignas(256) std::array<std::uint32_t, 1024> Htile{};
+alignas(256) std::array<std::uint32_t, HtileBytes / 4u> Htile{};
+alignas(16) std::array<std::uint32_t, 4> FillValue{};
+constexpr std::array<std::uint32_t, 9> MemoryValueFillKernel{0xd7460000u, 0x04010c08u, 0xf4201a82u, 0xfa000000u, 0xbf8cc07fu, 0x7e02026au, 0xe0102000u, 0x80000100u, 0xbf810000u};
+
+void FillFromMemory(std::uint64_t htile, std::uint32_t groups, std::uint32_t value) {
+    FillValue[0] = value;
+    const auto valueAddress = reinterpret_cast<std::uintptr_t>(FillValue.data());
+    const std::array<std::uint32_t, 8> userData{static_cast<std::uint32_t>(htile), static_cast<std::uint32_t>((htile >> 32u) & 0xffffu) | (4u << 16u), static_cast<std::uint32_t>(DepthFastClearHarness::HtileBytes / 4u), 0x00014204u, static_cast<std::uint32_t>(valueAddress), static_cast<std::uint32_t>(valueAddress >> 32u) | (16u << 16u), 1u, 0x0004dfacu};
+    const auto fill = AgcDriver::Graphics::MatchMemoryValueFill(MemoryValueFillKernel, userData, {64u, 1u, 1u}, {groups, 1u, 1u});
+    DepthFastClearHarness::Require(fill.has_value(), "the HTILE fill from a value in memory was not recognized");
+    AgcDriver::Graphics::NoteMemoryValueFill(*fill);
+}
 
 }
 

@@ -79,12 +79,12 @@ void AppendMarker(const char* line) {
     std::ofstream(marker, std::ios::app) << line << '\n';
 }
 void RelaunchedShutdown() { AppendMarker("shutdown"); }
-int RunRelaunchingChild(const char* self) {
+int RunChild(const char* self, const char* mode) {
 #ifdef _WIN32
     (void)self;
     std::wstring executable(32768, L'\0');
     executable.resize(GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())));
-    std::wstring commandLine = L"\"" + executable + L"\" --relaunch";
+    std::wstring commandLine = L"\"" + executable + L"\" " + std::wstring(mode, mode + std::strlen(mode));
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
@@ -99,7 +99,7 @@ int RunRelaunchingChild(const char* self) {
     const pid_t child = fork();
     Require(child >= 0);
     if (child == 0) {
-        execl(self, self, "--relaunch", static_cast<char*>(nullptr));
+        execl(self, self, mode, static_cast<char*>(nullptr));
         std::_Exit(127);
     }
     int status = 0;
@@ -110,7 +110,7 @@ int RunRelaunchingChild(const char* self) {
 int DriveRelaunch(const char* self) {
     const auto marker = std::filesystem::temp_directory_path() / ("anyps5-relaunch-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".txt");
     SetVariable(RelaunchMarker, marker.string().c_str());
-    Require(RunRelaunchingChild(self) == 0);
+    Require(RunChild(self, "--relaunch") == 0);
     std::string text;
     for (int attempt = 0; attempt < 200 && text.find("relaunched") == std::string::npos; ++attempt) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -125,7 +125,12 @@ int DriveRelaunch(const char* self) {
 }
 }
 int main(int argc, char** argv) {
-    if (argc > 1 && std::strcmp(argv[1], "--immediate") == 0) {
+    const int firstArgument = argc > 0 && std::strncmp(argv[0], "--", 2) == 0 ? 0 : 1;
+    if (argc > firstArgument && std::strcmp(argv[firstArgument], "--requested-exit-driver") == 0) {
+        Require(RunChild(argv[0], "--requested-exit") == 0);
+        return 0;
+    }
+    if (argc > firstArgument && std::strcmp(argv[firstArgument], "--immediate") == 0) {
         LibcRegisterShutdown_nid_postfix(UnexpectedCleanup);
         Require(std::atexit(UnexpectedCleanup) == 0);
 #ifdef _WIN32
@@ -162,6 +167,11 @@ int main(int argc, char** argv) {
         LibcRegisterShutdown_nid_postfix(Cleanup);
         Require(__cxa_atexit_nid_postfix(UnexpectedFinalizer, nullptr, nullptr) == 0);
         Require(std::atexit(ExitHandlerRan) == 0);
+        if (std::strcmp(argv[firstArgument], "--requested-exit") == 0) {
+            LibcRequestExit_nid_postfix(0);
+            LibcRequestExit_nid_postfix(7);
+            LibcAwaitExit_nid_postfix();
+        }
         sceSystemServiceLoadExec("exit", nullptr);
         return 2;
     }

@@ -162,6 +162,14 @@ extern "C" void AgcDriverSuspendPoint_nid_postfix() {
     InvokeEntry([&] { AgcDriver::SuspendPoint(); });
 }
 
+extern "C" std::uint64_t AgcDriverDispatchesAdoptedAhead_nid_postfix() {
+#if defined(ANYPS5_METAL_BACKEND)
+    return 0;
+#else
+    return AgcDriver::DriverDetail::Driver::Get().DispatchesAdoptedAhead();
+#endif
+}
+
 extern "C" void AgcDriverRegisterVideoOutput_nid_postfix(std::uint32_t handle, const std::shared_ptr<AgcDriver::IVideoOutput>& output) {
     AgcDriver::RegisterVideoOutput(handle, output);
 }

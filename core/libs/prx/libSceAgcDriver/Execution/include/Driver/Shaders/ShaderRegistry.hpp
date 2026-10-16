@@ -86,13 +86,15 @@ struct ShaderSnapshot {
     std::shared_ptr<PreparedShaders> prepared = std::make_shared<PreparedShaders>();
     std::shared_ptr<const RegisteredShaderState> registeredState;
     std::shared_ptr<std::atomic<std::uint8_t>> workgroupUse = std::make_shared<std::atomic<std::uint8_t>>(0u);
+    std::shared_ptr<std::atomic<bool>> rawGraphicsNoted = std::make_shared<std::atomic<bool>>(false);
 };
 
 
 std::shared_ptr<const ShaderSnapshot> ReadRawShader(std::uint64_t address);
 std::shared_ptr<const ShaderSnapshot> ProgramSnapshot(const ShaderRegistry& shaders, std::uint64_t address, std::initializer_list<std::uint8_t> types);
-void NoteRawGraphicsDraw();
+void NoteRawGraphicsDraw(const ShaderSnapshot& snapshot);
 bool RawGraphicsDrawn();
+bool RawGraphicsDrawnIn(std::uint64_t begin, std::uint64_t end);
 bool ProgramUsesWorkgroup(const ShaderSnapshot& snapshot, std::size_t codeOffset);
 
 std::shared_ptr<const ShaderRecompiler::SourceHandle> PrepareShaderWithDiagnostics(const ShaderRecompiler::RecompileRequest& request, ShaderRecompiler::ShaderPreparationContext* preparation = nullptr);

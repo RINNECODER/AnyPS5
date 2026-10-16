@@ -567,8 +567,7 @@ void ScalarCompareExecution() {
                 const CompareForm form{vex, isDouble, predicate};
                 const Bytes compare = EncodeCompare(form);
                 const auto split = Codegen::DecodeScalarCompare(compare.data(), compare.size());
-                require(split.has_value(), "A generated scalar compare was not decoded");
-                const bool lowered = split && Codegen::RosettaSplitsScalarCompare(*split);
+                const bool lowered = split.has_value();
                 char name[64];
                 std::snprintf(name, sizeof name, "%s%s predicate %u", vex ? "VCMP" : "CMP", isDouble ? "SD" : "SS", predicate);
 

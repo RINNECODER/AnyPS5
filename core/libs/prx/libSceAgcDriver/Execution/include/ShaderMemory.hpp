@@ -87,6 +87,7 @@ private:
         void SetAll() { bits.fill(~std::uint64_t{0}); }
         void SetBlock(std::size_t index) { bits[index / 64u] |= ((std::uint64_t{1} << BlockWords) - 1u) << (index % 64u / BlockWords * BlockWords); }
         void Reset() { bits.fill(0u); }
+        void SetRun(std::size_t first, std::size_t count);
         [[nodiscard]] bool None() const;
         [[nodiscard]] bool All() const { return std::all_of(bits.begin(), bits.end(), [](std::uint64_t word) { return word == ~std::uint64_t{0}; }); }
         template<typename TRun>

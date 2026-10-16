@@ -123,6 +123,11 @@ struct Context {
     // Nonzero when VK_EXT_external_memory_host is enabled: the required host pointer alignment.
     VkDeviceSize hostImportAlignment = 0;
     bool dmaBufImport = false;
+    std::uint32_t queueFamily = 0;
+    VkQueue settleQueue = VK_NULL_HANDLE;
+    VkCommandPool settlePool = VK_NULL_HANDLE;
+    std::uint32_t settleFamily = 0;
+    std::mutex* settleQueueMutex = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties2 memoryProperties2 = nullptr;
     RenderCache* renderCache = nullptr;
     DrawQueue* drawQueue = nullptr;

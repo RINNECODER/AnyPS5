@@ -43,4 +43,9 @@ std::uint64_t DepthPlaneBytes(VkExtent2D extent, std::uint32_t bytesPerTexel, st
     return width * height * bytesPerTexel * samples;
 }
 
+std::uint64_t HtileMetadataBytes(VkExtent2D extent) {
+    const auto blocks = static_cast<std::uint64_t>((extent.width + 1023u) / 1024u) * ((extent.height + 511u) / 512u);
+    return blocks * 32768u;
+}
+
 }

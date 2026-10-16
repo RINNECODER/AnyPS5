@@ -514,10 +514,76 @@ void verifySignedMinimum() {
         SrtRuntime runtime{data};
         Detail::Evaluator evaluator(plan, runtime);
         std::uint32_t result = 0;
-        require(evaluator.Evaluate(&minimum, result) && result == expected, "SRT signed minimum used unsigned ordering or failed evaluation");
+        require(evaluator.Evaluate(Detail::IrNode(&minimum), result) && result == expected, "SRT signed minimum used unsigned ordering or failed evaluation");
     }
 }
 
+void verifyMayEvaluate() {
+    using namespace ShaderRecompiler;
+    IrResourcePlan plan;
+    std::vector<std::unique_ptr<IrValue>> values;
+    const auto make = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments = {}) -> IrValue& {
+        values.push_back(std::make_unique<IrValue>(opcode, type, static_cast<std::uint32_t>(values.size())));
+        for (auto* argument : arguments) values.back()->AddArgument(argument);
+        return *values.back();
+    };
+    const auto constant = [&](std::uint32_t value) -> IrValue& {
+        auto& leaf = make(IrOpcode::Void, IrType::U32);
+        leaf.SetImmediateU32(value);
+        return leaf;
+    };
+    auto& scalar = make(IrOpcode::Void, IrType::ScalarReg);
+    scalar.SetRegister({RegisterBank::Scalar, 0});
+    auto& vector = make(IrOpcode::Void, IrType::VectorReg);
+    vector.SetRegister({RegisterBank::Vector, 0});
+    auto& input = make(IrOpcode::GetUserData, IrType::U32, {&scalar});
+    auto& lane = make(IrOpcode::GetRegister, IrType::U32, {&vector});
+    auto& uniform = make(IrOpcode::IEqual32, IrType::Bool, {&input, &constant(4)});
+    auto& varying = make(IrOpcode::IEqual32, IrType::Bool, {&input, &lane});
+    auto& select = make(IrOpcode::SelectU32, IrType::U32, {&uniform, &constant(1), &lane});
+    auto& unevaluated = make(IrOpcode::FPAdd32, IrType::F32, {&input, &input});
+    auto& invariant = make(IrOpcode::Phi, IrType::Bool);
+    invariant.AddArgument(&uniform);
+    invariant.AddArgument(&uniform);
+    auto& divergent = make(IrOpcode::Phi, IrType::Bool);
+    divergent.AddArgument(&uniform);
+    divergent.AddArgument(&varying);
+    auto& counter = make(IrOpcode::Phi, IrType::U32);
+    auto& next = make(IrOpcode::CompositeExtractU32x2, IrType::U32, {&make(IrOpcode::IAddCarry32, IrType::U32x2, {&counter, &constant(1)}), &constant(0)});
+    counter.AddArgument(&constant(0));
+    counter.AddArgument(&next);
+    auto& latch = make(IrOpcode::ULessThan32, IrType::Bool, {&next, &constant(4)});
+    auto& sum = make(IrOpcode::CompositeExtractU32x2, IrType::U32, {&make(IrOpcode::IAddCarry32, IrType::U32x2, {&input, &constant(1)}), &constant(0)});
+    std::array<std::uint32_t, 1> data{4};
+    SrtRuntime runtime{data};
+    for (const auto& [value, expected, name] : std::array<std::tuple<IrValue*, bool, const char*>, 11>{{
+             {&constant(3), true, "a constant"},
+             {&input, true, "user data"},
+             {&uniform, true, "a comparison of user data"},
+             {&lane, false, "a vector register read"},
+             {&varying, false, "a comparison with a vector register"},
+             {&select, false, "a select with a vector register arm"},
+             {&unevaluated, false, "an opcode the evaluator does not evaluate"},
+             {&invariant, true, "a phi whose operands agree"},
+             {&divergent, false, "a phi whose operands differ"},
+             {&latch, false, "a scalar loop counter's latch condition"},
+             {&sum, true, "the low word of a carry add of user data"},
+         }}) {
+        require(Detail::Evaluator::MayEvaluate(plan, value) == expected, (std::string("MayEvaluate misjudged ") + name).c_str());
+        Detail::Evaluator evaluator(plan, runtime);
+        std::uint32_t result = 0;
+        require(evaluator.Evaluate(Detail::IrNode(value), result) == expected, (std::string("MayEvaluate disagreed with the evaluator on ") + name).c_str());
+    }
+    const std::array<IrOpcode, 9> takenAsEvaluable{IrOpcode::Identity, IrOpcode::Phi, IrOpcode::Void, IrOpcode::GetUserData, IrOpcode::GetShaderBase, IrOpcode::ReadFirstLane, IrOpcode::ReadConst, IrOpcode::LoadAddressU32, IrOpcode::ReadConstBuffer};
+    for (std::uint16_t raw = 0; raw < static_cast<std::uint16_t>(IrOpcode::Count); ++raw) {
+        const auto opcode = static_cast<IrOpcode>(raw);
+        if (std::ranges::find(takenAsEvaluable, opcode) != takenAsEvaluable.end()) continue;
+        auto& value = make(opcode, IrType::U32, {&constant(0), &constant(0), &constant(0), &constant(0)});
+        Detail::Evaluator evaluator(plan, runtime);
+        std::uint32_t result = 0;
+        require(Detail::Evaluator::MayEvaluate(plan, &value) == evaluator.Evaluate(Detail::IrNode(&value), result), (std::string("MayEvaluate disagreed with the evaluator on ") + std::string(IrOpcodeName(opcode)) + " over constants").c_str());
+    }
+}
 void verifyEvaluatedValues() {
     using namespace ShaderRecompiler;
     std::vector<std::unique_ptr<IrValue>> values;
@@ -623,6 +689,7 @@ void verifyTypeZeroImageMaterialization() {
     image.source = 0u;
     image.resourceClass = ImageResourceClass::Sampled;
     image.dimension = RdnaImageDimension::Dim2D;
+    image.read = true;
     plan.info.images.push_back(image);
     plan.info.runtimeImageModes.push_back(ResourceMaterializer::RuntimeImageModes(image));
 
@@ -630,6 +697,17 @@ void verifyTypeZeroImageMaterialization() {
     ResourceMaterializer{}.Materialize(plan, SrtRuntime{}, snapshot);
     require(snapshot.images.size() == 1u && snapshot.images[0].dwordCount == 8u && snapshot.images[0].dwords == words,
             "TYPE=0 image descriptor with a nonzero base was rejected or altered during materialization");
+
+    for (const bool atomic : {false, true}) {
+        image.resourceClass = ImageResourceClass::Storage;
+        image.read = false;
+        image.written = !atomic;
+        image.atomic = atomic;
+        plan.info.images[0] = image;
+        plan.info.runtimeImageModes[0] = ResourceMaterializer::RuntimeImageModes(image);
+        expectFailure([&] { ResourceMaterializer{}.Materialize(plan, SrtRuntime{}, snapshot); }, "runtime image descriptor is invalid",
+                      atomic ? "TYPE=0 atomic image descriptor was accepted without hardware evidence" : "TYPE=0 writable image descriptor was accepted without hardware evidence");
+    }
 }
 
 void verifyOutOfRangeConstantReads() {
@@ -2115,7 +2193,8 @@ void verifyPixelRequestSerialization() {
                         value.posZ, value.posW, value.frontFace, value.frontFaceAllBits, value.ancillary, value.sampleShading,
                         value.noPerspective, value.linearCentroid, value.pixelKillEnable, value.depthExportEnable,
                         value.sampleMaskExportEnable, value.earlyZ, value.executeOnNoop, value.conservativeZExport, value.orderedPixelShader,
-                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage, value.layerBase);
+                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage, value.layerBase,
+                        value.stencilRefExportEnable, value.rasterPrimitive, value.layerExported, value.reversedBlend);
     };
     const std::array<std::uint32_t, 1> code{0xbf810000u};
     const std::array<std::uint32_t, 3> userData{0x12345678u, 0xabcdef01u, 0x87654321u};
@@ -2161,6 +2240,8 @@ void verifyPixelRequestSerialization() {
     for (std::uint32_t i = 0; i < pixel.interpolatorSettings.size(); ++i) pixel.interpolatorSettings[i] = 0x10101010u + i;
     pixel.alphaToCoverage = true;
     pixel.layerBase = 0x2a5u;
+    pixel.stencilRefExportEnable = true;
+    pixel.reversedBlend = 0x570001u;
     const std::array<std::array<std::uint8_t, 8>, 3> mappings{{
         {0x00u, 0xe4u, 0xc6u, 0x1bu, 0xffu, 0x80u, 0x55u, 0xaau},
         {0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u},
@@ -2185,6 +2266,10 @@ void verifyPixelRequestSerialization() {
             RecompileCacheKey::Build(changed, replayKey);
             require(key == replayKey && RecompileCacheKey::ContextHash(request) == RecompileCacheKey::ContextHash(changed), "runtime pixel export mapping changed the static shader identity");
         }
+        auto withoutReversedBlend = request;
+        withoutReversedBlend.context.pixel->reversedBlend = 0u;
+        RecompileCacheKey::Build(withoutReversedBlend, replayKey);
+        require(key == replayKey && RecompileCacheKey::ContextHash(request) == RecompileCacheKey::ContextHash(withoutReversedBlend), "the reversed-order blend code changed the static shader identity");
         auto withoutCoverage = request;
         withoutCoverage.context.pixel->alphaToCoverage = false;
         RecompileCacheKey::Build(withoutCoverage, replayKey);
@@ -2201,7 +2286,7 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel = ShaderPixelStageInfo{};
     minimal.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRoAAAA=", "new requests did not use serialization version 26");
+    require(requestPrefix(encoded, 8u) == "NVNQQRsAAAA=", "new requests did not use serialization version 27");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
     withFallbacks.context.linkedCallFallbacks = fallbacks;
@@ -2213,7 +2298,7 @@ void verifyPixelRequestSerialization() {
     for (std::size_t bytes = 0; bytes < 21u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag or primitive class was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRsAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQR8AAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{
@@ -2224,6 +2309,7 @@ void verifyPixelRequestSerialization() {
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAB0gQAAAE="};
     const auto version18 = serializer.Deserialize(version18Request);
     require(version18.request.context.pixel.has_value() && version18.request.context.pixel->rasterPrimitive == RasterPrimitive::Triangle, "a version 18 request read a primitive class");
+    require(version18.request.context.pixel->reversedBlend == 0u, "a version 18 request read a reversed-order blend code");
     require(version18.request.target.registrationModules && version18.request.target.registrationWordLimit == 1234u && version18.request.target.vertexSubgroups, "a version 18 request trailer was misread");
 }
 
@@ -2314,6 +2400,7 @@ void verifyLegacyPixelRequests() {
         require(!pixel.alphaToCoverage, "a legacy request enabled alpha-to-coverage");
         require(!pixel.stencilRefExportEnable, "a legacy request exported a stencil reference");
         require(pixel.rasterPrimitive == RasterPrimitive::Triangle, "a legacy request drew something other than triangles");
+        require(pixel.reversedBlend == 0u, "a legacy request blended into a reversed component order");
         require(pixel.inputAddr == 2u && pixel.hasPerspectiveCenterVgpr && pixel.targetOutputMode[0] == 9u, "legacy pixel layout was misread");
         require(pixel.conservativeZExport == (version >= 7u ? ConservativeZExport::GreaterThanZ : ConservativeZExport::AnyZ), "legacy conservative Z layout was misread");
         require(!pixel.orderedPixelShader, "a legacy request became a primitive-ordered pixel shader");
@@ -4105,6 +4192,7 @@ int main(int argc, char** argv) {
         verifyTypeZeroImageMaterialization();
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
+        verifyMayEvaluate();
         verifyPureFlatSlots();
         verifyGuardedDescriptorSources();
         verifyBindlessTable();

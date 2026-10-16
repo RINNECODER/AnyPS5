@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <queue>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace Relinker::UnusedNidFilter {
@@ -40,6 +41,8 @@ void buildGraph(
     bool followCodeAddresses,
     std::unordered_set<VirtualAddress>& reachable
 ) {
+    if (text.size() > std::numeric_limits<VirtualAddress>::max() - textVaddr)
+        throw RelinkerException("Text section range exceeds the address space");
     const Codegen::X64InstructionDecoder decoder;
     // One bit per text byte: a hash set of every visited address dominated large titles.
     std::vector<std::uint64_t> visited((text.size() + 63) / 64);
@@ -49,7 +52,7 @@ void buildGraph(
 
     auto enqueue = [&](VirtualAddress va) {
         if (reachable.count(va) > 0) return;
-        if (va < textVaddr || va >= textVaddr + static_cast<VirtualAddress>(text.size())) return;
+        if (va < textVaddr || va - textVaddr >= text.size()) return;
         const auto offset = static_cast<std::size_t>(va - textVaddr);
         auto& word = visited[offset / 64];
         const auto bit = std::uint64_t{1} << (offset % 64);
@@ -102,13 +105,13 @@ void buildGraph(
             if (followCodeAddresses && info.HasRipRelativeDisp && text[bufOff + info.OpcodeOffset] == 0x8d && (info.RexPrefix & 8)) {
                 std::int32_t displacement = 0;
                 std::memcpy(&displacement, text.data() + bufOff + info.RipRelativeDispOffset, 4);
-                enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + displacement));
+                enqueue(nextVaddr + static_cast<VirtualAddress>(static_cast<std::int64_t>(displacement)));
             }
 
             if (data != nullptr && info.HasRipRelativeDisp && !info.IsTwoByteOpcode && info.Opcode == 0x8D) {
                 std::int32_t displacement = 0;
                 std::memcpy(&displacement, text.data() + bufOff + info.RipRelativeDispOffset, 4);
-                const auto base = static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + displacement);
+                const auto base = nextVaddr + static_cast<VirtualAddress>(static_cast<std::int64_t>(displacement));
                 takeAddress(base);
                 for (VirtualAddress target : ReadRelativeTableTargets(*data, base, textVaddr, text.size())) takeAddress(target);
             }
@@ -120,35 +123,31 @@ void buildGraph(
                     break;
                 case ConditionalBranch:
                     if (info.HasBranchTarget)
-                        enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
+                        enqueue(nextVaddr + static_cast<VirtualAddress>(info.BranchDisp));
                     break;
                 case UnconditionalJump:
                     fallThrough = false;
                     if (info.HasRipRelativeDisp) {
                         std::int32_t disp = 0;
                         std::memcpy(&disp, text.data() + bufOff + info.RipRelativeDispOffset, 4);
-                        VirtualAddress slotVaddr = static_cast<VirtualAddress>(
-                            static_cast<std::int64_t>(nextVaddr) + disp
-                        );
+                        VirtualAddress slotVaddr = nextVaddr + static_cast<VirtualAddress>(static_cast<std::int64_t>(disp));
                         auto resolved = relativeRelocations.TargetOfSlot(slotVaddr);
                         if (resolved.has_value())
                             enqueue(*resolved);
                     } else if (info.HasBranchTarget) {
-                        enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
+                        enqueue(nextVaddr + static_cast<VirtualAddress>(info.BranchDisp));
                     }
                     break;
                 case Call:
                     if (info.HasRipRelativeDisp) {
                         std::int32_t disp = 0;
                         std::memcpy(&disp, text.data() + bufOff + info.RipRelativeDispOffset, 4);
-                        VirtualAddress slotVaddr = static_cast<VirtualAddress>(
-                            static_cast<std::int64_t>(nextVaddr) + disp
-                        );
+                        VirtualAddress slotVaddr = nextVaddr + static_cast<VirtualAddress>(static_cast<std::int64_t>(disp));
                         auto resolved = relativeRelocations.TargetOfSlot(slotVaddr);
                         if (resolved.has_value())
                             enqueue(*resolved);
                     } else if (info.HasBranchTarget) {
-                        enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
+                        enqueue(nextVaddr + static_cast<VirtualAddress>(info.BranchDisp));
                     }
                     break;
                 case IndirectCall:

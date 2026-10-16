@@ -16,7 +16,6 @@ constexpr char kVersion22WithoutF16Tail[] =
 void Require(bool condition) {
     if (!condition) std::abort();
 }
-
 }
 
 int main() {
@@ -44,6 +43,12 @@ int main() {
     request.target.float16DenormPreserve = true;
     const auto withPreserve = serializer.Deserialize(serializer.Serialize(request));
     Require(withPreserve.request.target.float16DenormPreserve);
+
+    request.context.pixel = ShaderPixelStageInfo{};
+    request.context.pixel->reversedBlend = 0x55417u;
+    const auto withReversedBlend = serializer.Deserialize(serializer.Serialize(request));
+    Require(withReversedBlend.request.context.pixel.has_value());
+    Require(withReversedBlend.request.context.pixel->reversedBlend == 0x55417u);
 
     return 0;
 }

@@ -168,7 +168,7 @@ int Run(const int argc, char* argv[]) {
             sourceBytes = std::move(converted.Bytes);
             trampolines = std::move(converted.Trampolines);
             std::map<std::string, std::size_t> stubsByName;
-            const auto counted = [](const std::string& name) { return name == "VRSQRTPS" || name == "VRCPPS" || name == "256-bit store" || name == "CMPSS" || name == "VCMPSS" || name == "CMPSD" || name == "VCMPSD"; };
+            const auto counted = [](const std::string& name) { return name == "VRSQRTPS" || name == "VRCPPS" || name == "256-bit store" || name == "CMPSS" || name == "VCMPSS" || name == "CMPSD" || name == "VCMPSD" || name == "scalar compare"; };
             for (const auto& report : converted.Reports) {
                 if (report.Lowering == Codegen::Amd64OnlyLowering::Kept)
                     std::cout << "Intel substitution: " << report.InstructionName << " at 0x" << std::hex << report.Offset << std::dec << " (" << report.OriginalLength << " bytes) kept: no room for a jump\n";
@@ -293,6 +293,11 @@ int Run(const int argc, char* argv[]) {
             std::cout << "Guest module: " << Io::Utf8Path(artifact.Path) << '\n';
         }
         fileWriter.Write(absPath, executableBytes);
+        if (!args.toWindows) {
+            std::error_code error;
+            std::filesystem::permissions(Io::NativePath(absPath), std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec | std::filesystem::perms::others_exec, std::filesystem::perm_options::add, error);
+            if (error) throw Domain::RelinkerException("Cannot make the output executable: " + absPath + " (" + error.message() + ")");
+        }
         if (args.writeRegistry) {
             const auto registryWriter = std::make_shared<Relinker::CallRegistryWriter>();
             fileWriter.Write(Io::Utf8Path(registryPaths.front()), registryWriter->WriteCallRegistry(result.RegistryEntries));

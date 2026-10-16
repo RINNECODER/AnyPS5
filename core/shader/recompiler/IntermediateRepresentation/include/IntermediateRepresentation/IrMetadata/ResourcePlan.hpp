@@ -90,6 +90,8 @@ public:
         return value;
     }
     [[nodiscard]] std::size_t Size() const { return count; }
+    [[nodiscard]] IrValue& operator[](std::size_t index) { return values[index]; }
+    [[nodiscard]] const IrValue& operator[](std::size_t index) const { return values[index]; }
     [[nodiscard]] IrValue* begin() { return values; }
     [[nodiscard]] IrValue* end() { return values + count; }
     [[nodiscard]] const IrValue* begin() const { return values; }
@@ -107,6 +109,26 @@ private:
     IrValue* values = nullptr;
     std::size_t count = 0;
     std::size_t capacity = 0;
+};
+
+struct CompactPlanValue {
+    std::uint64_t immediate = 0;
+    std::uint64_t flags = 0;
+    std::uint32_t firstArgument = 0;
+    std::uint32_t registerIndex = 0;
+    IrType type = IrType::Void;
+    IrOpcode opcode = IrOpcode::Void;
+    std::uint8_t argumentCount = 0;
+    bool hasImmediate = false;
+};
+
+struct CompactResourcePlan {
+    static constexpr std::uint32_t NoValue = 0xffffffffu;
+    std::vector<CompactPlanValue> values;
+    std::vector<std::uint32_t> arguments;
+    std::vector<std::uint32_t> sourceDwords;
+    std::vector<std::uint32_t> srtReads;
+    std::vector<std::uint32_t> conditions;
 };
 
 struct IrResourcePlan {
@@ -129,6 +151,8 @@ struct IrResourcePlan {
     // Detail::ComputePureFlatSlots): a driver may reuse a capture whose words differ only there.
     std::vector<std::uint8_t> pureFlatSlots;
     std::shared_ptr<const Detail::SrtExecutionPlan> executionPlan;
+    bool denseValueIds = false;
+    CompactResourcePlan compact;
     bool requiresSpecializationMemory = false;
     bool srtPlanComplete = false;
     bool resourceTrackingComplete = false;

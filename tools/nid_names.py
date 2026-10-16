@@ -120,7 +120,7 @@ def nid_arguments(arguments, options):
     return normalized
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Suggest real names for Unknown NID stubs")
     parser.add_argument("--db", default=os.environ.get("ANYPS5_NID_DB"),
@@ -132,10 +132,13 @@ def main():
     parser.add_argument("--json", action="store_true",
                         help="emit machine-readable JSON")
     options = [option for action in parser._actions for option in action.option_strings]
-    args = parser.parse_args(nid_arguments(sys.argv[1:], options))
+    arguments = sys.argv[1:] if argv is None else argv
+    args = parser.parse_args(nid_arguments(arguments, options))
+    requested_options = {option_name(argument, options) for argument in arguments}
+    requested_nids = "--nid" in requested_options
+    if requested_nids and requested_options & {"--name", "--symbol"}:
+        parser.error("--name/--symbol cannot be combined with --nid")
     if args.name:
-        if args.nid:
-            parser.error("--name/--symbol cannot be combined with --nid")
         rows = [{"name": name, "nid": compute_nid(name)} for name in args.name]
         if args.json:
             print(json.dumps({"symbols": rows}, indent=1))

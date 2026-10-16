@@ -15,12 +15,13 @@ class PipelineCache {
 public:
     static constexpr int SaveIntervalSeconds = 10;
 
-    PipelineCache(const Context& context, const VkPhysicalDeviceProperties& properties);
+    PipelineCache(const Context& context, const VkPhysicalDeviceProperties& properties, bool loadFromFile = true);
     ~PipelineCache();
 
     PipelineCache(const PipelineCache&) = delete;
     PipelineCache& operator=(const PipelineCache&) = delete;
     VkPipelineCache Handle() const { return cache; }
+    void SaveNow();
 
 private:
     void load(std::vector<std::byte>& initialData);

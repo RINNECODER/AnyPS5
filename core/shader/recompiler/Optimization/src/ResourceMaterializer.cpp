@@ -30,6 +30,8 @@ namespace ShaderRecompiler {
 namespace {
 
 std::atomic<std::uint64_t> specializationNanoseconds{0};
+std::atomic<std::uint64_t> evaluateNanoseconds{0};
+std::atomic<std::uint64_t> materializeNanoseconds{0};
 
 bool MaterializeProfiled() {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -62,11 +64,16 @@ ShaderBufferResource decodeBufferDescriptor(const DescriptorValue& value) {
 }
 
 bool nullImageDescriptor(const DescriptorValue& descriptor) {
-    return ((descriptor.dwords[3] >> 28u) & 0xfu) == 0u || (descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u);
+    return descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u;
 }
 
 ImageType rawImageType(const DescriptorValue& descriptor) {
     return static_cast<ImageType>((descriptor.dwords[3] >> 28u) & 0xfu);
+}
+
+bool nullImageDescriptor(const ImageResource& image, const DescriptorValue& descriptor) {
+    if (nullImageDescriptor(descriptor)) return true;
+    return rawImageType(descriptor) == static_cast<ImageType>(0u) && image.read && !image.written && !image.atomic;
 }
 
 IrBufferFormat rawImageFormat(const DescriptorValue& descriptor) {
@@ -124,7 +131,7 @@ bool validImageDescriptor(const DescriptorValue& descriptor, bool r128) {
 }
 
 std::uint32_t storageMipCount(const ImageResource& base, const DescriptorValue& descriptor) {
-    if (base.mipMode != ImageMipMode::DynamicStorage || nullImageDescriptor(descriptor)) {
+    if (base.mipMode != ImageMipMode::DynamicStorage || nullImageDescriptor(base, descriptor)) {
         return 1u;
     }
     const auto mipBase = (descriptor.dwords[3] >> 12u) & 0xfu;
@@ -138,7 +145,7 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
     if (decoded.mipCount == 0u) {
         throw std::runtime_error("storage image descriptor has an invalid mip range");
     }
-    if (nullImageDescriptor(descriptor)) {
+    if (nullImageDescriptor(base, descriptor)) {
         decoded.numericClass = base.atomic ? IrTextureNumericClass::Uint : IrTextureNumericClass::Float;
         decoded.dimension = RdnaImageDimension::Dim2D;
         decoded.cube = false;
@@ -446,7 +453,9 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
 
     std::vector<DescriptorValue> values;
     std::vector<std::uint8_t> activeSources;
+    const auto evaluateStarted = MaterializeProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     walker.EvaluateRuntimeSources(plan, plan.materializationSources, runtime, values, snapshot.flattenedSrt, plan.cleanFlatSlots, activeSources, &snapshot.srtPoison, &snapshot.nullRootReads);
+    if (MaterializeProfiled()) evaluateNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - evaluateStarted).count()), std::memory_order_relaxed);
 
     std::size_t cursor = 0;
     if (values.size() < plan.info.buffers.size()) {
@@ -494,7 +503,7 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
             descriptor = DescriptorValue{};
             descriptor.dwordCount = 8u;
         }
-        if (!validImageDescriptor(descriptor, image.r128) && !nullImageDescriptor(descriptor)) {
+        if (!validImageDescriptor(descriptor, image.r128) && !nullImageDescriptor(image, descriptor)) {
             throw std::runtime_error("runtime image descriptor is invalid");
         }
         snapshot.images[i] = descriptor;
@@ -510,7 +519,7 @@ void materializeForcedDegamma(const IrResourcePlan& plan, ResourceSnapshot& snap
     for (std::uint32_t index = 0; index < plan.info.images.size(); ++index) {
         auto& descriptor = snapshot.images.at(index);
         // A null image reads zero whatever its other words say; its format and extent are not checked.
-        if (nullImageDescriptor(descriptor)) continue;
+        if (nullImageDescriptor(plan.info.images.at(index), descriptor)) continue;
         if (((descriptor.dwords[1] >> 20u) & 0x1ffu) != static_cast<std::uint32_t>(IrBufferFormat::Format8_8_8_8UInt)) continue;
         bool forced = false;
         bool plain = false;
@@ -555,7 +564,7 @@ std::uint32_t colorCompareReference(IrBufferFormat format) {
 std::uint32_t emulatedCompareState(const ShaderInfo& info, const ResourceSnapshot& snapshot, std::uint32_t index) {
     const auto& image = info.images[index];
     const auto& descriptor = snapshot.images[index];
-    if (!image.depthCompare || descriptor.dwordCount != 8u || nullImageDescriptor(descriptor)) return 0u;
+    if (!image.depthCompare || descriptor.dwordCount != 8u || nullImageDescriptor(image, descriptor)) return 0u;
     const auto format = rawImageFormat(descriptor);
     if (format == IrBufferFormat::Format32Float || format == IrBufferFormat::Format16UNorm || IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3])) return 0u;
     if (image.indirectRoot != ImageResource::NoIndirectImage || (image.emulatedCompare & EmulatedCompare::Unsupported) != 0u) throw std::runtime_error("unsupported color comparison image instructions");
@@ -714,7 +723,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             face.cube = true;
             modes.push_back(face);
         }
-        if (image.dimension == RdnaImageDimension::Dim2D && image.flatLineCompatible && !storage && !depth && conversion == IrBufferFormat::Invalid && packed == IrBufferFormat::Invalid) {
+        if ((image.dimension == RdnaImageDimension::Dim2D || image.dimension == RdnaImageDimension::Dim2DArray) && image.flatLineCompatible && !storage && !depth && conversion == IrBufferFormat::Invalid && packed == IrBufferFormat::Invalid) {
             auto line = mode;
             line.dimension = RdnaImageDimension::Dim1D;
             modes.push_back(line);
@@ -840,7 +849,7 @@ const char* ResourceMaterializer::UnnormalizedSampleMismatch(const ImageResource
 std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image, const DescriptorValue& descriptor, std::span<const ImageResource> modes) {
     if (descriptor.dwordCount != 8u) throw std::runtime_error("runtime image descriptor must contain eight dwords");
     if (modes.empty()) throw std::runtime_error("prepared runtime image modes are missing");
-    if (nullImageDescriptor(descriptor)) return 0u;
+    if (nullImageDescriptor(image, descriptor)) return 0u;
     const auto decoded = decodeImageDescriptor(descriptor, image, image.srgbDecodeFormats);
     const auto format = rawImageFormat(descriptor);
     const bool emulated = image.depthCompare && format != IrBufferFormat::Format32Float && format != IrBufferFormat::Format16UNorm && !IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3]);
@@ -985,7 +994,7 @@ void ownPlanValues(IrResourcePlan& plan) {
     }
     plan.valueStorage.Reserve(order.size());
     for (const auto* value : order) {
-        auto* clone = plan.valueStorage.Create(value->Opcode(), value->Type(), value->Id());
+        auto* clone = plan.valueStorage.Create(value->Opcode(), value->Type(), static_cast<std::uint32_t>(plan.valueStorage.Size()));
         clone->SetFlags(value->Flags<std::uint64_t>());
         if (value->HasImmediate()) clone->SetImmediateU64(value->ImmediateU64());
         clone->SetRegister(value->Register());
@@ -1015,6 +1024,59 @@ void ownPlanValues(IrResourcePlan& plan) {
     for (auto* root : roots) {
         if (*root != nullptr) *root = clones.at(*root);
     }
+    plan.denseValueIds = true;
+}
+
+void buildCompactPlan(IrResourcePlan& plan) {
+    if (!plan.denseValueIds || plan.valueStorage.Size() >= CompactResourcePlan::NoValue) return;
+    CompactResourcePlan compact;
+    const auto idOf = [&](const IrValue* value, std::uint32_t& id) {
+        if (value == nullptr) return false;
+        const auto* resolved = value->Resolve();
+        id = resolved->Id();
+        return id < plan.valueStorage.Size() && &plan.valueStorage[id] == resolved;
+    };
+    try {
+        compact.values.reserve(plan.valueStorage.Size());
+        for (const auto& stored : plan.valueStorage) {
+            const auto* value = &stored;
+            if (value->ArgumentCount() > 0xffu) return;
+            CompactPlanValue entry;
+            entry.immediate = value->ImmediateU64();
+            entry.flags = value->Flags<std::uint64_t>();
+            entry.firstArgument = static_cast<std::uint32_t>(compact.arguments.size());
+            entry.registerIndex = value->Register().index;
+            entry.type = value->Type();
+            entry.opcode = value->Opcode();
+            entry.argumentCount = static_cast<std::uint8_t>(value->ArgumentCount());
+            entry.hasImmediate = value->HasImmediate();
+            for (std::size_t index = 0; index < value->ArgumentCount(); index++) {
+                std::uint32_t id = 0;
+                if (!idOf(value->Argument(index), id)) return;
+                compact.arguments.push_back(id);
+            }
+            compact.values.push_back(entry);
+        }
+        compact.sourceDwords.assign(plan.descriptorSources.size() * 8u, CompactResourcePlan::NoValue);
+        for (std::size_t source = 0; source < plan.descriptorSources.size(); source++) {
+            const auto& descriptor = plan.descriptorSources[source];
+            if (descriptor.dwordCount > 8u) return;
+            for (std::uint32_t dword = 0; dword < descriptor.dwordCount; dword++) {
+                if (!idOf(descriptor.dwords[dword], compact.sourceDwords[source * 8u + dword])) return;
+            }
+        }
+        compact.srtReads.resize(plan.srtReads.size());
+        for (std::size_t slot = 0; slot < plan.srtReads.size(); slot++) {
+            if (!idOf(plan.srtReads[slot].value, compact.srtReads[slot])) return;
+        }
+        compact.conditions.assign(plan.controlFlow.size(), CompactResourcePlan::NoValue);
+        for (std::size_t block = 0; block < plan.controlFlow.size(); block++) {
+            if (plan.controlFlow[block].condition != nullptr && !idOf(plan.controlFlow[block].condition, compact.conditions[block])) return;
+        }
+    } catch (const std::exception&) {
+        return;
+    }
+    plan.compact = std::move(compact);
 }
 
 }
@@ -1066,7 +1128,13 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
     plan.pureFlatSlots = Detail::ComputePureFlatSlots(plan);
     plan.guardedSrtSlots = Detail::ComputeGuardedFlatSlots(plan);
     plan.executionPlan = Detail::CompileSrtExecutionPlan(plan);
+    buildCompactPlan(plan);
     return plan;
+}
+
+void ResourceMaterializer::CompactPlan(IrResourcePlan& plan) {
+    plan.compact = {};
+    buildCompactPlan(plan);
 }
 
 void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot) const {
@@ -1077,6 +1145,7 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
     if (plan.requiresSpecializationMemory && runtime.readMemory == nullptr) {
         throw std::runtime_error("ResourceMaterializer::Materialize requires runtime memory access for indirect images");
     }
+    const auto materializeStarted = MaterializeProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     SrtWalker walker;
     ResourceSnapshot nextSnapshot;
     std::vector<TableResolution> tables;
@@ -1093,6 +1162,7 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
     if (MaterializeProfiled()) specializationNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
     snapshot = std::move(nextSnapshot);
     reportBindless();
+    if (MaterializeProfiled()) materializeNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - materializeStarted).count()), std::memory_order_relaxed);
 }
 
 std::uint64_t ResourceMaterializer::SpecializationNanoseconds() {
@@ -1105,6 +1175,14 @@ std::uint32_t ResourceMaterializer::BindlessSlots() {
 
 void ResourceMaterializer::CountBindlessRejection(BindlessRejection reason) {
     if (reason < BindlessRejection::Count) bindlessCounters().rejected[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
+}
+
+std::uint64_t ResourceMaterializer::EvaluateNanoseconds() {
+    return evaluateNanoseconds.load(std::memory_order_relaxed);
+}
+
+std::uint64_t ResourceMaterializer::MaterializeNanoseconds() {
+    return materializeNanoseconds.load(std::memory_order_relaxed);
 }
 
 }

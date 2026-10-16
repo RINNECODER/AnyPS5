@@ -292,9 +292,11 @@ int main() {
             auto device = MTLCreateSystemDefaultDevice();
             Require(device != nil, "Multisample depth tests require a Metal device");
             Require([device supportsTextureSampleCount:Samples], "Metal device lacks 4x multisampling");
-            alignas(256) static std::array<std::byte, Edge * Edge * Samples * 4> depthMemory{};
-            const auto depthAddress = reinterpret_cast<std::uintptr_t>(depthMemory.data());
-            const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{depthAddress, depthMemory, true}}};
+            static std::array<std::byte, 65536 + Edge * Edge * Samples * 4> depthStorage{};
+            const auto rawAddress = reinterpret_cast<std::uintptr_t>(depthStorage.data());
+            const auto depthAddress = (rawAddress + 65535ull) & ~65535ull;
+            const auto depthSpan = std::span<std::byte>(reinterpret_cast<std::byte*>(depthAddress), Edge * Edge * Samples * 4);
+            const std::array<NativeGuestMemory::BorrowedRange, 1> ranges{{{depthAddress, depthSpan, true}}};
             const NativeGuestMemory::BorrowedRangesScope borrowed(ranges);
             Graphics::State state;
             Decode(depthAddress, state);

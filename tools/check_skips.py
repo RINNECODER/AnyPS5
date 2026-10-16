@@ -12,13 +12,15 @@ WINDOWS_PREFIX = "agc"
 
 def skips(path):
     for case in ET.parse(path).getroot().iter("testcase"):
-        if case.find("skipped") is None:
+        skipped = case.find("skipped")
+        if skipped is None:
             continue
         name = case.get("name")
         if not name:
             continue
-        output = case.find("system-out")
-        yield name, (output.text or "") if output is not None else ""
+        output = ["skipped, " + reason.strip() for reason in (skipped.get("message", ""), skipped.text or "") if reason.strip()]
+        output += [case.findtext(channel) or "" for channel in ("system-out", "system-err")]
+        yield name, "\n".join(output)
 
 
 if __name__ == "__main__":

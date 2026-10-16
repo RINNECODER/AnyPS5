@@ -50,7 +50,7 @@ void DecodeDrawPrograms(const Graphics::State& state, const QueueState& queue, c
         require((address - snapshot.codeAddress) % sizeof(std::uint32_t) == 0, "graphics entry point is not dword aligned");
         require(snapshot.header.empty() || snapshot.type == type, "graphics program refers to an incompatible shader binary type");
 #if !defined(ANYPS5_METAL_BACKEND)
-        if (!nullPixel && snapshot.header.empty()) DriverDetail::NoteRawGraphicsDraw();
+        if (!nullPixel && snapshot.header.empty()) DriverDetail::NoteRawGraphicsDraw(snapshot);
 #endif
         if (!nullPixel) Graphics::NoteRegisterRead(Graphics::RegisterBank::Shader, rsrc2);
         const auto resources = nullPixel ? 0u : ReadGraphicsRegister(queue.shader, rsrc2);
