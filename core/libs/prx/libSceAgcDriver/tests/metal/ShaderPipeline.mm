@@ -662,9 +662,70 @@ void LanguageVersion(const MetalTests::Context& context) {
     }
 }
 
+void FastMath(const MetalTests::Context& context) {
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", nullptr);
+    MetalTests::Require(FastMathEnabled(), "FastMathEnabled() should default to true when ANYPS5_METAL_FAST_MATH is unset");
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "0");
+    MetalTests::Require(!FastMathEnabled(), "FastMathEnabled() should be false when ANYPS5_METAL_FAST_MATH=0");
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "false");
+    MetalTests::Require(!FastMathEnabled(), "FastMathEnabled() should be false when ANYPS5_METAL_FAST_MATH=false");
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "off");
+    MetalTests::Require(!FastMathEnabled(), "FastMathEnabled() should be false when ANYPS5_METAL_FAST_MATH=off");
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "no");
+    MetalTests::Require(!FastMathEnabled(), "FastMathEnabled() should be false when ANYPS5_METAL_FAST_MATH=no");
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "1");
+    MetalTests::Require(FastMathEnabled(), "FastMathEnabled() should be true when ANYPS5_METAL_FAST_MATH=1");
+
+    // Verify cache distinction between fast-math and safe-math
+    ClearMetalPipelineCaches();
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "1");
+    const std::string kernelSource =
+        "#include <metal_stdlib>\nusing namespace metal;\n"
+        "kernel void math_test(device float* out [[buffer(0)]], uint i [[thread_position_in_grid]]) {\n"
+        "  out[i] = sin(float(i)) * cos(float(i));\n"
+        "}\n";
+    id<MTLFunction> fastFunc = CachedShaderFunction(context.device, kernelSource, "math_test", false);
+    MetalTests::Require(fastFunc != nil, "Fast-math kernel compilation failed");
+
+    // Switching to safe math should produce a distinct cached function (cache miss, not reusing fastFunc)
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "0");
+    id<MTLFunction> safeFunc = CachedShaderFunction(context.device, kernelSource, "math_test", false);
+    MetalTests::Require(safeFunc != nil, "Safe-math kernel compilation failed");
+    MetalTests::Require(fastFunc != safeFunc, "Fast-math and safe-math functions should have distinct cache entries");
+
+    // Switching back to fast math should hit the cached fastFunc
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "1");
+    id<MTLFunction> fastFuncCached = CachedShaderFunction(context.device, kernelSource, "math_test", false);
+    MetalTests::Require(fastFunc == fastFuncCached, "Cached fast-math function was not reused from cache");
+
+    // Verify archive paths differ between fast-math and safe-math
+    const auto directory = std::filesystem::temp_directory_path() / ("aps5-metal-fastmath-archive-test-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(directory);
+    SetEnvironment("ANYPS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("APS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.c_str());
+    ClearMetalPipelineCaches();
+
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "1");
+    const auto fastArchive = MetalPipelineArchivePath(context.device);
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", "0");
+    const auto safeArchive = MetalPipelineArchivePath(context.device);
+    MetalTests::Require(!fastArchive.empty() && !safeArchive.empty(), "Archive paths should not be empty");
+    MetalTests::Require(fastArchive != safeArchive, "Archive path should differ between fast-math and safe-math");
+    MetalTests::Require(fastArchive.string().find("fastmath") != std::string::npos, "Fast-math archive path should contain 'fastmath'");
+    MetalTests::Require(safeArchive.string().find("safemath") != std::string::npos, "Safe-math archive path should contain 'safemath'");
+
+    ClearMetalPipelineCaches();
+    SetEnvironment("ANYPS5_SHADER_CACHE_DIR", nullptr);
+    SetEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
+    SetEnvironment("ANYPS5_METAL_FAST_MATH", nullptr);
+    std::filesystem::remove_all(directory);
+}
+
 }
 
 void RunShaderPipelineTests(const MetalTests::Context& context) {
+    FastMath(context);
     LanguageVersion(context);
     Compute(context);
     Render(context);
