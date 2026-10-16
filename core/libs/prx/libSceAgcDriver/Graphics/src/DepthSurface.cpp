@@ -882,11 +882,6 @@ VkImageAspectFlags HtileFillClears(std::uint32_t pattern, bool stencilInHtile) {
     return cleared;
 }
 
-std::uint64_t HtileMetadataBytes(VkExtent2D extent) {
-    const auto blocks = static_cast<std::uint64_t>((extent.width + 1023u) / 1024u) * ((extent.height + 511u) / 512u);
-    return blocks * 32768u;
-}
-
 bool HtileFillCovers(std::uint64_t htile, VkExtent2D extent, std::uint64_t address, std::size_t bytes) {
     if (htile == 0 || htile < address || htile >= address + bytes) return false;
     return address + bytes - htile >= HtileMetadataBytes(extent);

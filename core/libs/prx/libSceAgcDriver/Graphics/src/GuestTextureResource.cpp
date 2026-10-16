@@ -126,7 +126,6 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     Require(!cornerSample, "guest texture descriptor uses corner sampling which is not implemented");
     Require(!prtDefColor, "guest texture descriptor uses a partially resident default color which is not implemented");
     Require(arrayPitch == 0, "guest texture descriptor uses a nonzero array pitch which is not implemented");
-    Require(!msaaDepth || samples > 1, "guest texture descriptor uses MSAA depth on a single-sample image");
     Require(!iterate256 || (typeRaw == 14u && tileModeRaw == 24u && (format == 7u || format == 22u)), "guest texture descriptor ITERATE_256 is implemented only for multisampled Z depth");
     static_cast<void>(maxUncompBlkSize);
     static_cast<void>(maxCompBlkSize);

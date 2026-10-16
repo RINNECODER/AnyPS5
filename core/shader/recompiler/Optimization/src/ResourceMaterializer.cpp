@@ -519,7 +519,7 @@ void materializeForcedDegamma(const IrResourcePlan& plan, ResourceSnapshot& snap
     for (std::uint32_t index = 0; index < plan.info.images.size(); ++index) {
         auto& descriptor = snapshot.images.at(index);
         // A null image reads zero whatever its other words say; its format and extent are not checked.
-        if (nullImageDescriptor(descriptor)) continue;
+        if (nullImageDescriptor(plan.info.images.at(index), descriptor)) continue;
         if (((descriptor.dwords[1] >> 20u) & 0x1ffu) != static_cast<std::uint32_t>(IrBufferFormat::Format8_8_8_8UInt)) continue;
         bool forced = false;
         bool plain = false;

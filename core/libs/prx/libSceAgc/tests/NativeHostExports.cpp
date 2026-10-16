@@ -29,13 +29,12 @@ struct Library {
 
 void CheckInterpolantExports(const Library& library) {
     using Function = int (*)(ShaderRegister*, const Shader*, const Shader*);
-    // HV4j+E0MBHE is the NID of the name sceAgcCreateInterpolantMapping_0100 itself (upstream names the
-    // export after its NID), so it needs no alias; dbOlWdppb4o is still an explicit alias.
-    for (const auto& names : std::array<std::array<const char*, 2>, 2>{{
-             {"sceAgcCreateInterpolantMapping_0100", nullptr},
-             {"dbOlWdppb4o_nid_no_patch_cut", "sceAgcUnknownCreateInterpolantMapping"}}}) {
-        const auto alias = library.Resolve(names[0]);
-        Require(names[1] == nullptr || alias == library.Resolve(names[1]), "Native NID alias does not resolve to its public function");
+    // HV4j+E0MBHE and dbOlWdppb4o hash directly to sceAgcCreateInterpolantMapping_0100 and
+    // sceAgcCreateInterpolantMapping_10000; upstream names the exports after their NIDs.
+    for (const auto& name : std::array<const char*, 2>{
+             "sceAgcCreateInterpolantMapping_0100",
+             "sceAgcCreateInterpolantMapping_10000"}) {
+        const auto alias = library.Resolve(name);
         struct Guarded {
             std::uint64_t before;
             std::array<ShaderRegister, 32> registers;
@@ -43,24 +42,37 @@ void CheckInterpolantExports(const Library& library) {
         } output;
         std::memset(&output, 0xa5, sizeof(output));
         Require(reinterpret_cast<Function>(alias)(output.registers.data(), nullptr, nullptr) == 0,
-                "Native interpolant alias returned an error");
+                "Native interpolant export returned an error");
         for (std::uint32_t i = 0; i < output.registers.size(); ++i) {
             Require(output.registers[i].offset == 0x191u + i && output.registers[i].value == i,
-                    "Native interpolant alias changed the identity mapping");
+                    "Native interpolant export changed the identity mapping");
         }
         Require(output.before == 0xa5a5a5a5a5a5a5a5ull && output.after == 0xa5a5a5a5a5a5a5a5ull,
-                "Native interpolant alias wrote beyond its register output");
+                "Native interpolant export wrote beyond its register output");
     }
+
+    const auto update = library.Resolve("sceAgcUpdateInterpolantMapping_10000");
+    Shader ps{};
+    struct Guarded {
+        std::uint64_t before;
+        std::array<ShaderRegister, 32> registers;
+        std::uint64_t after;
+    } output;
+    std::memset(&output, 0xa5, sizeof(output));
+    Require(reinterpret_cast<Function>(update)(output.registers.data(), nullptr, &ps) == 0,
+            "Native update interpolant export returned an error");
+    Require(output.before == 0xa5a5a5a5a5a5a5a5ull && output.after == 0xa5a5a5a5a5a5a5a5ull,
+            "Native update interpolant export wrote beyond its register output");
 }
 
 void CheckUnimplementedExport(const Library& library) {
-    using Function = int (*)();
-    const auto alias = library.Resolve("vieBRwlh1Lw_nid_no_patch_cut");
-    Require(alias == library.Resolve("sceAgcUnknown_vieBRwlh1Lw"), "Native stub NID alias resolves incorrectly");
+    using Function = void* (*)();
+    const auto alias = library.Resolve("zARR5aCmkoY_nid_no_patch_cut");
+    Require(alias == library.Resolve("sceAgcDcbA_zARR5aCmkoY"), "Native stub NID alias resolves incorrectly");
     try {
         reinterpret_cast<Function>(alias)();
     } catch (const std::runtime_error& error) {
-        Require(std::string(error.what()) == "sceAgcUnknown_vieBRwlh1Lw not implemented",
+        Require(std::string(error.what()) == "sceAgcDcbA_zARR5aCmkoY not implemented",
                 "Native explicit stub changed its failure contract");
         return;
     }
