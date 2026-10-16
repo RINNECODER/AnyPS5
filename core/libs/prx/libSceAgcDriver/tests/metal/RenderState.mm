@@ -876,6 +876,27 @@ void DepthStencilCache(id<MTLDevice> device) {
     }
 }
 
+void DepthPromotionAndState(id<MTLDevice> device) {
+    Require(Metal::RenderPixelFormat(VK_FORMAT_D24_UNORM_S8_UINT) == MTLPixelFormatDepth32Float_Stencil8,
+            "RenderPixelFormat did not promote D24S8 to Depth32Float_Stencil8");
+    auto state = BasicState();
+    Graphics::DepthTarget depth{};
+    depth.format = VK_FORMAT_D24_UNORM_S8_UINT;
+    state.depth = depth;
+    state.depthTest = true;
+    state.depthWrite = true;
+    state.stencilTest = true;
+    auto descriptor = [MTLRenderPipelineDescriptor new];
+    Metal::ConfigureRenderPipelineDescriptor(descriptor, state);
+    Require(descriptor.depthAttachmentPixelFormat == MTLPixelFormatDepth32Float_Stencil8,
+            "Pipeline depth format did not promote D24S8 to Depth32Float_Stencil8");
+    Require(descriptor.stencilAttachmentPixelFormat == MTLPixelFormatDepth32Float_Stencil8,
+            "Pipeline stencil format did not set Depth32Float_Stencil8 for D24S8");
+    const auto d16Format = Metal::RenderPixelFormat(VK_FORMAT_D16_UNORM);
+    Require(d16Format == (Metal::PromoteD16() ? MTLPixelFormatDepth32Float : MTLPixelFormatDepth16Unorm),
+            "D16 promotion mismatch");
+}
+
 int main() {
     @autoreleasepool {
         try {
@@ -887,6 +908,7 @@ int main() {
             BlendScissor(device, queue, library);
             DepthStencil(device, queue, library);
             DepthStencilCache(device);
+            DepthPromotionAndState(device);
             ViewportWinding(device, queue, library);
             ClipDepth(device, queue, library);
             UnrestrictedViewportDepth(device, queue, library);

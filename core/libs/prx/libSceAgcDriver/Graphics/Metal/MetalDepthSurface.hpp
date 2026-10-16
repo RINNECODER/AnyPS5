@@ -34,8 +34,7 @@ struct MetalDepthPlaneView {
 
 class MetalDepthSurface {
 public:
-    // A surface with planes of its own (one layer), cleared to the target's clear values.
-    MetalDepthSurface(const MetalDevice& backend, const Graphics::DepthTarget& target);
+    MetalDepthSurface(const MetalDevice& backend, const Graphics::DepthTarget& target, MTLStorageMode storageMode = MTLStorageModePrivate);
     // A view of layer `layer` of shared planes; the layer keeps the texels it holds.
     MetalDepthSurface(const Graphics::DepthTarget& target, std::shared_ptr<MetalDepthPlanes> planes, std::uint32_t layer);
     MetalDepthSurface(const MetalDepthSurface&) = delete;
@@ -71,8 +70,7 @@ private:
     mutable id<MTLTexture> sampledStencil;
 };
 
-// Creates planes of `layers` layers in the target's shape, every layer cleared to its clear values.
-[[nodiscard]] std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, const Graphics::DepthTarget& target, std::uint32_t layers);
+[[nodiscard]] std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, const Graphics::DepthTarget& target, std::uint32_t layers, MTLStorageMode storageMode = MTLStorageModePrivate);
 
 class MetalDepthSurfaceCache;
 
@@ -117,7 +115,7 @@ void RetireDepthSurfaces(std::vector<std::shared_ptr<MetalDepthSurface>>& surfac
 // surface through a 2D MSAA image descriptor bind this texture. A new surface starts cleared to zero.
 class MetalColorSurface {
 public:
-    MetalColorSurface(const MetalDevice& backend, const Graphics::ColorTarget& target);
+    MetalColorSurface(const MetalDevice& backend, const Graphics::ColorTarget& target, MTLStorageMode storageMode = MTLStorageModePrivate);
     MetalColorSurface(const MetalColorSurface&) = delete;
     MetalColorSurface& operator=(const MetalColorSurface&) = delete;
     [[nodiscard]] id<MTLTexture> Texture() const;
@@ -140,8 +138,8 @@ public:
     // plane bound with several stencil planes (or a stencil plane with several depth planes) is a
     // surface per pairing, and binding one copies that plane over from the surface that bound it last
     // when both have its format and extent.
-    [[nodiscard]] std::shared_ptr<MetalDepthSurface> Acquire(const Graphics::DepthTarget& target);
-    [[nodiscard]] std::shared_ptr<MetalColorSurface> Acquire(const Graphics::ColorTarget& target);
+    [[nodiscard]] std::shared_ptr<MetalDepthSurface> Acquire(const Graphics::DepthTarget& target, MTLStorageMode storageMode = MTLStorageModePrivate);
+    [[nodiscard]] std::shared_ptr<MetalColorSurface> Acquire(const Graphics::ColorTarget& target, MTLStorageMode storageMode = MTLStorageModePrivate);
     void Clear();
     void Invalidate(std::span<const NativeGuestMemory::BorrowedRange> changed);
     // Drops one surface whose guest memory now holds another resource.

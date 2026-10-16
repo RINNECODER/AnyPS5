@@ -67,6 +67,7 @@ struct ColorTarget {
     // an ordinary guest-memory surface.
     std::uint32_t coverageSamples = 1;
     std::uint32_t samples = 1;
+    bool memoryless = false;
 };
 
 struct DepthTarget {
@@ -92,6 +93,7 @@ struct DepthTarget {
     bool htilePipeAligned = false;
     std::uint32_t htileVrsEncoding = 0;
     bool htileDepthOnly = false;
+    bool memoryless = false;
 };
 
 struct State {

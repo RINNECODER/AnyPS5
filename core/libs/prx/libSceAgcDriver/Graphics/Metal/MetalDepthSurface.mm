@@ -11,7 +11,7 @@
 namespace AgcDriver::Metal {
 namespace {
 
-id<MTLTexture> texture(id<MTLDevice> device, MTLPixelFormat format, VkExtent2D extent, std::uint32_t samples, std::uint32_t layers) {
+id<MTLTexture> texture(id<MTLDevice> device, MTLPixelFormat format, VkExtent2D extent, std::uint32_t samples, std::uint32_t layers, MTLStorageMode storageMode = MTLStorageModePrivate) {
     auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:extent.width height:extent.height mipmapped:NO];
     if (samples > 1) {
         if (![device supportsTextureSampleCount:samples]) throw std::invalid_argument("Metal device does not support the depth surface sample count");
@@ -21,8 +21,8 @@ id<MTLTexture> texture(id<MTLDevice> device, MTLPixelFormat format, VkExtent2D e
         descriptor.textureType = MTLTextureType2DArray;
         descriptor.arrayLength = layers;
     }
-    descriptor.storageMode = MTLStorageModePrivate;
-    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+    descriptor.storageMode = storageMode;
+    descriptor.usage = storageMode == MTLStorageModeMemoryless ? MTLTextureUsageRenderTarget : (MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView);
     auto result = [device newTextureWithDescriptor:descriptor];
     if (result == nil) throw std::runtime_error("Metal depth/stencil texture allocation failed");
     return result;
@@ -64,6 +64,7 @@ void validate(const Graphics::DepthTarget& target) {
         if (hasStencil) throw std::invalid_argument("Metal depth format has an unexpected stencil plane");
         break;
     case VK_FORMAT_D16_UNORM_S8_UINT:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
     case VK_FORMAT_D32_SFLOAT_S8_UINT:
         if (!hasStencil) throw std::invalid_argument("Metal depth/stencil format requires a stencil plane");
         break;
@@ -74,7 +75,7 @@ void validate(const Graphics::DepthTarget& target) {
 
 }
 
-std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, const Graphics::DepthTarget& target, std::uint32_t layers) {
+std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, const Graphics::DepthTarget& target, std::uint32_t layers, MTLStorageMode storageMode) {
     validate(target);
     if (layers == 0 || layers > 2048 || (target.samples > 1 && layers != 1)) throw std::invalid_argument("Metal depth array layer count is invalid");
     auto planes = std::make_shared<MetalDepthPlanes>();
@@ -82,20 +83,23 @@ std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, 
     const auto device = backend.Device();
     switch (target.format) {
     case VK_FORMAT_D16_UNORM:
-        planes->depth = texture(device, MTLPixelFormatDepth16Unorm, target.extent, target.samples, layers);
+        planes->depth = texture(device, PromoteD16() ? MTLPixelFormatDepth32Float : MTLPixelFormatDepth16Unorm, target.extent, target.samples, layers, storageMode);
         break;
     case VK_FORMAT_D32_SFLOAT:
-        planes->depth = texture(device, MTLPixelFormatDepth32Float, target.extent, target.samples, layers);
+        planes->depth = texture(device, MTLPixelFormatDepth32Float, target.extent, target.samples, layers, storageMode);
         break;
     case VK_FORMAT_D16_UNORM_S8_UINT:
-        planes->depth = texture(device, MTLPixelFormatDepth16Unorm, target.extent, target.samples, layers);
-        planes->stencil = texture(device, MTLPixelFormatStencil8, target.extent, target.samples, layers);
+        planes->depth = texture(device, MTLPixelFormatDepth16Unorm, target.extent, target.samples, layers, storageMode);
+        planes->stencil = texture(device, MTLPixelFormatStencil8, target.extent, target.samples, layers, storageMode);
         break;
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
     default:
-        planes->depth = texture(device, MTLPixelFormatDepth32Float_Stencil8, target.extent, target.samples, layers);
+        planes->depth = texture(device, MTLPixelFormatDepth32Float_Stencil8, target.extent, target.samples, layers, storageMode);
         planes->stencil = planes->depth;
         break;
     }
+    if (storageMode == MTLStorageModeMemoryless) return planes;
     // One layered pass clears every layer.
     auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.depthAttachment.texture = planes->depth;
@@ -117,8 +121,8 @@ std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, 
     return planes;
 }
 
-MetalDepthSurface::MetalDepthSurface(const MetalDevice& backend, const Graphics::DepthTarget& target)
-    : MetalDepthSurface(target, CreateDepthPlanes(backend, target, 1), 0) {}
+MetalDepthSurface::MetalDepthSurface(const MetalDevice& backend, const Graphics::DepthTarget& target, MTLStorageMode storageMode)
+    : MetalDepthSurface(target, CreateDepthPlanes(backend, target, 1, storageMode), 0) {}
 
 MetalDepthSurface::MetalDepthSurface(const Graphics::DepthTarget& target, std::shared_ptr<MetalDepthPlanes> planes, std::uint32_t layer)
     : target(target), planes(std::move(planes)), layer(layer) {
@@ -129,6 +133,13 @@ MetalDepthSurface::MetalDepthSurface(const Graphics::DepthTarget& target, std::s
 
 void MetalDepthSurface::refreshViews() const {
     if (viewGeneration == planes->generation) return;
+    if (planes->depth.storageMode == MTLStorageModeMemoryless) {
+        depth = planes->depth;
+        stencil = planes->stencil;
+        sampledStencil = nil;
+        viewGeneration = planes->generation;
+        return;
+    }
     const auto view = [&](id<MTLTexture> source, MTLPixelFormat format) -> id<MTLTexture> {
         if (source.textureType != MTLTextureType2DArray) {
             if (format == source.pixelFormat) return source;
@@ -145,15 +156,27 @@ void MetalDepthSurface::refreshViews() const {
 
 id<MTLTexture> MetalDepthSurface::DepthTexture() const { refreshViews(); return depth; }
 id<MTLTexture> MetalDepthSurface::StencilTexture() const { refreshViews(); return stencil; }
-id<MTLTexture> MetalDepthSurface::SampledDepthView() const { refreshViews(); return depth; }
-id<MTLTexture> MetalDepthSurface::SampledStencilView() const { refreshViews(); return sampledStencil; }
-MetalDepthPlaneView MetalDepthSurface::SampledDepthPlane() const { return {planes->depth, planes->depth.pixelFormat, layer}; }
+id<MTLTexture> MetalDepthSurface::SampledDepthView() const {
+    if (planes->depth.storageMode == MTLStorageModeMemoryless) return nil;
+    refreshViews();
+    return depth;
+}
+id<MTLTexture> MetalDepthSurface::SampledStencilView() const {
+    if (planes->depth.storageMode == MTLStorageModeMemoryless) return nil;
+    refreshViews();
+    return sampledStencil;
+}
+MetalDepthPlaneView MetalDepthSurface::SampledDepthPlane() const {
+    if (planes->depth.storageMode == MTLStorageModeMemoryless) return {};
+    return {planes->depth, planes->depth.pixelFormat, layer};
+}
 MetalDepthPlaneView MetalDepthSurface::SampledStencilPlane() const {
-    if (planes->stencil == nil) return {};
+    if (planes->stencil == nil || planes->depth.storageMode == MTLStorageModeMemoryless) return {};
     return {planes->stencil, planes->stencil == planes->depth ? MTLPixelFormatX32_Stencil8 : planes->stencil.pixelFormat, layer};
 }
 
 id<MTLTexture> MetalDepthSurface::LayeredDepthTexture(std::uint32_t count) const {
+    if (planes->depth.storageMode == MTLStorageModeMemoryless) throw std::invalid_argument("Metal layered views on memoryless depth are unsupported");
     if (planes->depth.textureType != MTLTextureType2DArray || count == 0 || count > planes->layers - layer) {
         throw std::invalid_argument("Metal layered depth view is outside the surface's depth array");
     }
@@ -164,6 +187,7 @@ id<MTLTexture> MetalDepthSurface::LayeredDepthTexture(std::uint32_t count) const
 }
 
 id<MTLTexture> MetalDepthSurface::LayeredStencilTexture(std::uint32_t count) const {
+    if (planes->depth.storageMode == MTLStorageModeMemoryless) throw std::invalid_argument("Metal layered views on memoryless stencil are unsupported");
     if (planes->stencil == nil) return nil;
     if (planes->stencil == planes->depth) return nil; // the caller attaches the depth view to both
     if (count == 0 || count > planes->layers - layer) throw std::invalid_argument("Metal layered stencil view is outside the surface's depth array");
@@ -187,6 +211,7 @@ void MetalDepthSurface::Rebind(std::shared_ptr<MetalDepthPlanes> other, std::uin
 
 id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std::shared_ptr<MetalDepthSurface>> surfaces,
     const MetalDepthSurface& base, std::uint32_t first, std::uint32_t last, id<MTLTexture> reuse) {
+    if (base.Planes()->depth.storageMode == MTLStorageModeMemoryless) throw std::invalid_argument("Metal depth array gathering on memoryless depth is unsupported");
     const auto& shape = base.Target();
     if (last < first || shape.samples != 1) throw std::invalid_argument("Metal depth array slices need a single-sample range");
     const auto sliceBytes = Graphics::DepthSliceBytes(shape.extent, hasD16(shape) ? 2u : 4u);
@@ -301,7 +326,7 @@ bool MetalDepthSurface::OverlapsMappings(std::span<const NativeGuestMemory::Borr
         overlaps(target.stencilAddress, Graphics::DepthPlaneBytes(target.extent, 1u, target.samples));
 }
 
-MetalColorSurface::MetalColorSurface(const MetalDevice& backend, const Graphics::ColorTarget& target) : target(target) {
+MetalColorSurface::MetalColorSurface(const MetalDevice& backend, const Graphics::ColorTarget& target, MTLStorageMode storageMode) : target(target) {
     if (target.extent.width == 0 || target.extent.height == 0 || target.extent.width > 16384 || target.extent.height > 16384 ||
         target.samples < 2 || target.samples > 8 || (target.samples & (target.samples - 1u)) != 0) {
         throw std::invalid_argument("Metal multisampled color surface dimensions or sample count are invalid");
@@ -311,10 +336,11 @@ MetalColorSurface::MetalColorSurface(const MetalDevice& backend, const Graphics:
         width:target.extent.width height:target.extent.height mipmapped:NO];
     descriptor.textureType = MTLTextureType2DMultisample;
     descriptor.sampleCount = target.samples;
-    descriptor.storageMode = MTLStorageModePrivate;
-    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+    descriptor.storageMode = storageMode;
+    descriptor.usage = storageMode == MTLStorageModeMemoryless ? MTLTextureUsageRenderTarget : (MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView);
     texture = [backend.Device() newTextureWithDescriptor:descriptor];
     if (texture == nil) throw std::runtime_error("Metal multisampled color texture allocation failed");
+    if (storageMode == MTLStorageModeMemoryless) return;
     auto pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = texture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -345,24 +371,30 @@ bool MetalColorSurface::OverlapsMappings(std::span<const NativeGuestMemory::Borr
 
 MetalDepthSurfaceCache::MetalDepthSurfaceCache(const MetalDevice& backend) : backend(backend) {}
 
-std::shared_ptr<MetalColorSurface> MetalDepthSurfaceCache::Acquire(const Graphics::ColorTarget& target) {
+std::shared_ptr<MetalColorSurface> MetalDepthSurfaceCache::Acquire(const Graphics::ColorTarget& target, MTLStorageMode storageMode) {
     std::lock_guard lock(mutex);
-    auto found = std::find_if(colorSurfaces.begin(), colorSurfaces.end(), [&](const auto& surface) { return surface->Matches(target); });
+    const auto mode = (target.memoryless || storageMode == MTLStorageModeMemoryless) ? MTLStorageModeMemoryless : MTLStorageModePrivate;
+    auto found = std::find_if(colorSurfaces.begin(), colorSurfaces.end(), [&](const auto& surface) {
+        return surface->Matches(target) && surface->Texture().storageMode == mode;
+    });
     if (found != colorSurfaces.end()) return *found;
     // A different layout at the same address replaces the old fragments.
     std::erase_if(colorSurfaces, [&](const auto& surface) { return surface->Target().address == target.address; });
-    auto result = std::make_shared<MetalColorSurface>(backend, target);
+    auto result = std::make_shared<MetalColorSurface>(backend, target, mode);
     colorSurfaces.push_back(result);
     return result;
 }
 
-std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphics::DepthTarget& target) {
+std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphics::DepthTarget& target, MTLStorageMode storageMode) {
     std::lock_guard lock(mutex);
-    auto found = std::find_if(surfaces.begin(), surfaces.end(), [&](const auto& surface) { return sameTarget(surface->Target(), target); });
+    const auto mode = (target.memoryless || storageMode == MTLStorageModeMemoryless) ? MTLStorageModeMemoryless : MTLStorageModePrivate;
+    auto found = std::find_if(surfaces.begin(), surfaces.end(), [&](const auto& surface) {
+        return sameTarget(surface->Target(), target) && surface->DepthTexture().storageMode == mode;
+    });
     if (target.samples > 1 || (target.slice == 0 && target.lastSlice == 0)) {
-        auto result = found != surfaces.end() ? *found : std::make_shared<MetalDepthSurface>(backend, target);
+        auto result = found != surfaces.end() ? *found : std::make_shared<MetalDepthSurface>(backend, target, mode);
         if (found == surfaces.end()) surfaces.push_back(result);
-        takePlanes(result);
+        if (mode != MTLStorageModeMemoryless) takePlanes(result);
         return result;
     }
     validate(target);
@@ -373,12 +405,12 @@ std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphic
     std::shared_ptr<MetalDepthPlanes> planes;
     for (const auto& surface : surfaces) {
         if (surface->Planes()->depth.textureType == MTLTextureType2DArray && sameShape(surface->Target(), target) &&
-            arrayBase(surface->Target(), surface->Layer()) == base) {
+            arrayBase(surface->Target(), surface->Layer()) == base && surface->DepthTexture().storageMode == mode) {
             planes = surface->Planes();
             break;
         }
     }
-    if (planes == nullptr) planes = CreateDepthPlanes(backend, target, layers);
+    if (planes == nullptr) planes = CreateDepthPlanes(backend, target, layers, mode);
     else if (planes->layers < layers) growPlanes(planes, target, layers);
     if (found != surfaces.end()) {
         const auto& surface = *found;

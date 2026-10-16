@@ -11,6 +11,15 @@
 #include <string>
 
 namespace AgcDriver::Metal {
+
+bool PromoteD16() {
+    static const bool enabled = [] {
+        const char* val = std::getenv("ANYPS5_PROMOTE_D16");
+        return val != nullptr && std::strcmp(val, "0") != 0;
+    }();
+    return enabled;
+}
+
 namespace {
 
 void Require(bool condition, const char* message) {
@@ -156,9 +165,9 @@ void Validate(const Graphics::State& state) {
             "depth/stencil state requires a decoded depth target");
     if (state.depth) {
         const auto format = state.depth->format;
-        Require(format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT,
+        Require(format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D32_SFLOAT_S8_UINT,
                 "depth target format has no implemented native mapping");
-        Require(!state.stencilTest || format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT, "stencil testing requires a native stencil attachment");
+        Require(!state.stencilTest || format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT || format == VK_FORMAT_D32_SFLOAT_S8_UINT, "stencil testing requires a native stencil attachment");
     }
     Require(state.colors.size() <= 8 && state.blends.size() <= 8, "too many color attachments");
     std::set<std::uint32_t> exports;
@@ -268,9 +277,10 @@ MTLPixelFormat RenderPixelFormat(VkFormat format) {
     case VK_FORMAT_R16G16B16A16_SFLOAT: return MTLPixelFormatRGBA16Float;
     case VK_FORMAT_R32G32B32A32_UINT: return MTLPixelFormatRGBA32Uint;
     case VK_FORMAT_R32G32B32A32_SFLOAT: return MTLPixelFormatRGBA32Float;
-    case VK_FORMAT_D16_UNORM:
+    case VK_FORMAT_D16_UNORM: return PromoteD16() ? MTLPixelFormatDepth32Float : MTLPixelFormatDepth16Unorm;
     case VK_FORMAT_D16_UNORM_S8_UINT: return MTLPixelFormatDepth16Unorm;
     case VK_FORMAT_D32_SFLOAT: return MTLPixelFormatDepth32Float;
+    case VK_FORMAT_D24_UNORM_S8_UINT:
     case VK_FORMAT_D32_SFLOAT_S8_UINT: return MTLPixelFormatDepth32Float_Stencil8;
     default: throw std::invalid_argument("Metal render state: unsupported attachment format " + std::to_string(format));
     }
@@ -311,7 +321,7 @@ void ConfigureRenderPipelineDescriptor(MTLRenderPipelineDescriptor* descriptor, 
     descriptor.depthAttachmentPixelFormat = state.depth ? RenderPixelFormat(state.depth->format) : MTLPixelFormatInvalid;
     descriptor.stencilAttachmentPixelFormat = !state.depth ? MTLPixelFormatInvalid :
         state.depth->format == VK_FORMAT_D16_UNORM_S8_UINT ? MTLPixelFormatStencil8 :
-        state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
+        (state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT || state.depth->format == VK_FORMAT_D24_UNORM_S8_UINT) ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
 }
 
 void ConfigureRenderPipelineDescriptor(MTLMeshRenderPipelineDescriptor* descriptor, const Graphics::State& state) {
@@ -323,7 +333,7 @@ void ConfigureRenderPipelineDescriptor(MTLMeshRenderPipelineDescriptor* descript
     descriptor.depthAttachmentPixelFormat = state.depth ? RenderPixelFormat(state.depth->format) : MTLPixelFormatInvalid;
     descriptor.stencilAttachmentPixelFormat = !state.depth ? MTLPixelFormatInvalid :
         state.depth->format == VK_FORMAT_D16_UNORM_S8_UINT ? MTLPixelFormatStencil8 :
-        state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
+        (state.depth->format == VK_FORMAT_D32_SFLOAT_S8_UINT || state.depth->format == VK_FORMAT_D24_UNORM_S8_UINT) ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
 }
 
 id<MTLDepthStencilState> CreateDepthStencilState(id<MTLDevice> device, const Graphics::State& state) {

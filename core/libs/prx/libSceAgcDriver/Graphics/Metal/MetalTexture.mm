@@ -79,6 +79,10 @@ MTLPixelFormat pixelFormat(std::uint32_t format) {
         case VK_FORMAT_BC6H_SFLOAT_BLOCK: return MTLPixelFormatBC6H_RGBFloat;
         case VK_FORMAT_BC7_UNORM_BLOCK: return MTLPixelFormatBC7_RGBAUnorm;
         case VK_FORMAT_BC7_SRGB_BLOCK: return MTLPixelFormatBC7_RGBAUnorm_sRGB;
+        case VK_FORMAT_D16_UNORM: return MTLPixelFormatDepth16Unorm;
+        case VK_FORMAT_D32_SFLOAT: return MTLPixelFormatDepth32Float;
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT: return MTLPixelFormatDepth32Float_Stencil8;
         default: throw std::runtime_error("Metal texture has no supported pixel format for guest format " + std::to_string(format));
     }
 }
