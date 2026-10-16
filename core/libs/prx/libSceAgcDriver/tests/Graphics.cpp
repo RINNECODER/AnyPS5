@@ -3162,6 +3162,18 @@ void oversizedDescriptorTests() {
     ::operator delete(block, std::align_val_t{blockBytes});
 }
 
+void guestBufferViewBytesTests() {
+    using AgcDriver::Graphics::GuestBufferMemory;
+    for (const std::uint64_t bytes : {4ull, 16ull, 4096ull}) {
+        for (const std::uint32_t adjustment : {0u, 4u, 16u, 256u}) {
+            Require(GuestBufferMemory::ViewBytes(bytes, adjustment) == bytes + adjustment, "a view whose adjustment is a whole number of DWORDs did not add the adjustment");
+        }
+        for (const std::uint32_t adjustment : {1u, 2u, 3u, 5u, 7u}) {
+            Require(GuestBufferMemory::ViewBytes(bytes, adjustment) == bytes + 4u * ((adjustment + 3u) / 4u), "a view that starts off a DWORD boundary did not cover the DWORDs around it");
+        }
+    }
+}
+
 void descriptorLayoutFlagTests() {
     constexpr VkDescriptorBindingFlags indexed = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
     mock = MockVulkan{};
@@ -6198,6 +6210,7 @@ int main(int argc, char** argv) {
         pushConstantTests();
         resourceTests();
         oversizedDescriptorTests();
+        guestBufferViewBytesTests();
         descriptorSnapshotTests();
         descriptorCacheTests();
         bufferBudgetPlacementTests();
