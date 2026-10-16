@@ -173,6 +173,7 @@ void testMemSemaphore() {
     expectFailure([&] { sceAgcCbMemSemaphore(&buffer, 0, 0, nullptr); });
     auto* unalignedLabel = reinterpret_cast<void*>(guestAddress + 1);
     expectFailure([&] { sceAgcCbMemSemaphore(&buffer, 0, 0, unalignedLabel); });
+    expectFailure([&] { sceAgcCbMemSemaphore(&buffer, 0, 4, label); });
 }
 
 }
