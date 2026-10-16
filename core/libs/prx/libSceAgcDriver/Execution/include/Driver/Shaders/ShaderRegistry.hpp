@@ -122,7 +122,11 @@ inline std::shared_ptr<const ShaderSnapshot> RegisteredProgram(const ShaderRegis
     return result;
 }
 void PublishRegisteredShader(std::shared_ptr<ShaderRegistry>& registry, const std::shared_ptr<const ShaderSnapshot>& snapshot);
-void SubmitRegistrationPreparation(std::function<void()> task);
+void SubmitRegistrationPreparation(std::function<void()> task, const PreparedShaders* prepared = nullptr);
+void PrioritizeRegistrationPreparation(PreparedShaders& prepared);
+void AwaitRegistrationPreparation();
+void SubmitLibraryPrebuild(std::function<void()> task);
+void AwaitLibraryPrebuilds();
 void CloseRegistrationPreparation();
 
 void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target);
