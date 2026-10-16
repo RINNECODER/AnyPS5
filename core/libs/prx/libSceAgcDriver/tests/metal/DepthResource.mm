@@ -469,6 +469,32 @@ void retiredDepth(const AgcDriver::Metal::MetalDevice& backend) {
     AgcDriver::Metal::RetireDepthSurfaces(surfaces, stencilSlice);
     MetalTests::Require(surfaces.size() == 1, "A stencil-only slice retired a depth surface at a fabricated depth address");
 }
+
+void memorylessAndPromotion(const AgcDriver::Metal::MetalDevice& backend) {
+    AgcDriver::Metal::MetalDepthSurfaceCache cache(backend);
+    AgcDriver::Graphics::DepthTarget target{0x400000, 0x800000ull, {width, height}, VK_FORMAT_D32_SFLOAT_S8_UINT, 4, 0};
+    target.memoryless = true;
+    auto memorylessDepth = cache.Acquire(target);
+    MetalTests::Require(memorylessDepth->DepthTexture().storageMode == MTLStorageModeMemoryless, "Memoryless depth target did not allocate memoryless storage");
+    MetalTests::Require(memorylessDepth->SampledDepthView() == nil, "Memoryless depth target returned non-nil sampled view");
+    MetalTests::Require(memorylessDepth->SampledStencilView() == nil, "Memoryless stencil target returned non-nil sampled view");
+    MetalTests::Require(memorylessDepth->SampledDepthPlane().texture == nil, "Memoryless depth plane returned non-nil texture");
+    MetalTests::Require(memorylessDepth->SampledStencilPlane().texture == nil, "Memoryless stencil plane returned non-nil texture");
+
+    AgcDriver::Graphics::ColorTarget colorTarget{};
+    colorTarget.address = 0x600000;
+    colorTarget.extent = {width, height};
+    colorTarget.format = VK_FORMAT_R8G8B8A8_UNORM;
+    colorTarget.samples = 4;
+    colorTarget.memoryless = true;
+    auto memorylessColor = cache.Acquire(colorTarget);
+    MetalTests::Require(memorylessColor->Texture().storageMode == MTLStorageModeMemoryless, "Memoryless color target did not allocate memoryless storage");
+
+    AgcDriver::Graphics::DepthTarget d24Target{0x400000, 0x800000ull, {width, height}, VK_FORMAT_D24_UNORM_S8_UINT, 1, 0};
+    auto d24Surface = cache.Acquire(d24Target);
+    MetalTests::Require(d24Surface->DepthTexture().pixelFormat == MTLPixelFormatDepth32Float_Stencil8, "D24S8 target was not promoted to Depth32Float_Stencil8");
+    MetalTests::Require(d24Surface->StencilTexture() == d24Surface->DepthTexture(), "D24S8 target did not share combined depth/stencil planes");
+}
 }
 
 void RunDepthResourceTests(const MetalTests::Context& context) {
@@ -503,4 +529,5 @@ void RunDepthResourceTests(const MetalTests::Context& context) {
     for (const auto format : {VK_FORMAT_D16_UNORM_S8_UINT, VK_FORMAT_D32_SFLOAT_S8_UINT}) sharedPlanes(context, backend, shaders, format);
     retiredDepth(backend);
     multisampledDepthPlane(backend);
+    memorylessAndPromotion(backend);
 }

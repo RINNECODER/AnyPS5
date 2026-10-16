@@ -655,7 +655,7 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
     renderPass.renderTargetHeight = source.extent.height;
     renderPass.colorAttachments[0].texture = surface->Texture();
     renderPass.colorAttachments[0].loadAction = MTLLoadActionLoad;
-    renderPass.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+    renderPass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
     renderPass.colorAttachments[0].resolveTexture = level;
     id<MTLCommandBuffer> commands = backend.CommandBuffer();
     auto encoder = MetalEncoders::Render(commands, renderPass);
@@ -1076,6 +1076,10 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             auto surface = depthCache->Acquire(color);
             if (std::find(colorSurfaces.begin(), colorSurfaces.end(), surface) == colorSurfaces.end()) colorSurfaces.push_back(surface);
             attachment.texture = surface->Texture();
+            if (surface->Texture().storageMode == MTLStorageModeMemoryless) {
+                attachment.loadAction = MTLLoadActionDontCare;
+                attachment.storeAction = MTLStoreActionDontCare;
+            }
             continue;
         }
         auto texture = resources.Texture(colorSurface(color), true, false, false, color.mip);
@@ -1106,26 +1110,49 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         attachment.resolveTexture = level;
         attachment.storeAction = MTLStoreActionMultisampleResolve;
     }
+    bool stencilWrites = false;
+    if (state.stencilTest) {
+        const auto writesFace = [](const VkStencilOpState& face) {
+            return face.writeMask != 0 && (face.failOp != VK_STENCIL_OP_KEEP ||
+                                           face.depthFailOp != VK_STENCIL_OP_KEEP ||
+                                           face.passOp != VK_STENCIL_OP_KEEP);
+        };
+        stencilWrites = writesFace(state.stencilFront) || writesFace(state.stencilBack);
+    }
+    const bool fullDepthOverwrite = state.depth && state.depthTest && state.depthWrite &&
+        state.depthCompare == VK_COMPARE_OP_ALWAYS && !state.depthBoundsTest &&
+        (state.rectList || (state.viewport.x <= 0 && state.viewport.y <= 0 &&
+         state.viewport.width >= state.renderExtent.width &&
+         std::abs(state.viewport.height) >= state.renderExtent.height)) &&
+        (state.scissor.offset.x <= 0 && state.scissor.offset.y <= 0 &&
+         state.scissor.extent.width >= state.renderExtent.width &&
+         state.scissor.extent.height >= state.renderExtent.height);
+    const bool depthMemoryless = depth && depth->DepthTexture().storageMode == MTLStorageModeMemoryless;
+    const auto depthLoad = (depthMemoryless || fullDepthOverwrite) ? MTLLoadActionDontCare : MTLLoadActionLoad;
+    const auto depthStore = (depthMemoryless || !state.depthWrite) ? MTLStoreActionDontCare : MTLStoreActionStore;
+    const bool stencilMemoryless = depth && depth->StencilTexture() != nil && depth->StencilTexture().storageMode == MTLStorageModeMemoryless;
+    const auto stencilLoad = stencilMemoryless ? MTLLoadActionDontCare : MTLLoadActionLoad;
+    const auto stencilStore = (stencilMemoryless || !stencilWrites) ? MTLStoreActionDontCare : MTLStoreActionStore;
     if (depth && depthLayers > 1) {
         id<MTLTexture> layeredDepth = depth->LayeredDepthTexture(depthLayers);
         renderPass.renderTargetArrayLength = depthLayers;
         renderPass.depthAttachment.texture = layeredDepth;
-        renderPass.depthAttachment.loadAction = MTLLoadActionLoad;
-        renderPass.depthAttachment.storeAction = MTLStoreActionStore;
+        renderPass.depthAttachment.loadAction = depthLoad;
+        renderPass.depthAttachment.storeAction = depthStore;
         if (depth->StencilTexture() != nil) {
             id<MTLTexture> layeredStencil = depth->LayeredStencilTexture(depthLayers);
             renderPass.stencilAttachment.texture = layeredStencil != nil ? layeredStencil : layeredDepth;
-            renderPass.stencilAttachment.loadAction = MTLLoadActionLoad;
-            renderPass.stencilAttachment.storeAction = MTLStoreActionStore;
+            renderPass.stencilAttachment.loadAction = stencilLoad;
+            renderPass.stencilAttachment.storeAction = stencilStore;
         }
     } else if (depth) {
         renderPass.depthAttachment.texture = depth->DepthTexture();
-        renderPass.depthAttachment.loadAction = MTLLoadActionLoad;
-        renderPass.depthAttachment.storeAction = MTLStoreActionStore;
+        renderPass.depthAttachment.loadAction = depthLoad;
+        renderPass.depthAttachment.storeAction = depthStore;
         if (depth->StencilTexture() != nil) {
             renderPass.stencilAttachment.texture = depth->StencilTexture();
-            renderPass.stencilAttachment.loadAction = MTLLoadActionLoad;
-            renderPass.stencilAttachment.storeAction = MTLStoreActionStore;
+            renderPass.stencilAttachment.loadAction = stencilLoad;
+            renderPass.stencilAttachment.storeAction = stencilStore;
         }
     }
     MetalBufferBinding indexBuffer;

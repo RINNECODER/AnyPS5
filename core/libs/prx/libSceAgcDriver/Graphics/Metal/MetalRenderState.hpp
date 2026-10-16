@@ -5,6 +5,7 @@
 
 namespace AgcDriver::Metal {
 
+[[nodiscard]] bool PromoteD16();
 [[nodiscard]] MTLPixelFormat RenderPixelFormat(VkFormat format);
 // The texture a color attachment of `format` renders through. Guest color surfaces are typed by their
 // memory layout (a COMP_SWAP_ALT 8_8_8_8 target is RGBA8 memory written as BGRA), so a same-size

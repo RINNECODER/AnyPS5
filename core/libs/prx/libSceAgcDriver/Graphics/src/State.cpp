@@ -307,7 +307,6 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     const auto surface = depthSurfaceInfo(read(cx, 0x010));
     const auto zFormat = surface.format;
     const bool stencil = (read(cx, 0x011) & 1u) != 0;
-    Require(zFormat != 2, "Z_24 depth is unsupported");
     if (zFormat == 0) depthControl &= ~6u;
     if (!stencil) depthControl &= ~1u;
     const auto base = [&](std::uint32_t low, std::uint32_t highOffset) {
@@ -349,7 +348,9 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     }
     if (surface.samples == 1 && surface.maxMip == 0) depth.lastSlice = std::max(lastSlice, depth.slice);
     else depth.lastSlice = depth.slice;
-    depth.format = zFormat == 1 ? (stencil ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D16_UNORM) : (stencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT);
+    depth.format = zFormat == 1 ? (stencil ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D16_UNORM) :
+        zFormat == 2 ? (stencil ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT) :
+        (stencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT);
     depth.clearDepth = readFloat(cx, 0x00b);
     depth.clearStencil = static_cast<std::uint8_t>(read(cx, 0x00a) & 0xffu);
     depth.htileDepthOnly = (read(cx, 0x011) & (1u << 29u)) != 0u;
