@@ -13,6 +13,7 @@ int APS5_VABI mergesort_nid_postfix(void*, std::size_t, std::size_t, int (APS5_V
 int* APS5_VABI __error_nid_postfix();
 void APS5_VABI qsort_nid_postfix(void*, std::size_t, std::size_t, int (APS5_VABI*)(const void*, const void*));
 int APS5_VABI qsort_s_nid_postfix(void*, std::size_t, std::size_t, int (APS5_VABI*)(const void*, const void*, void*), void*);
+void* APS5_VABI set_constraint_handler_s_nid_postfix(void*);
 }
 
 namespace {
@@ -90,6 +91,42 @@ bool ExpectOrderS(const char* name, const std::vector<int>& keys, const std::vec
         }
     }
     return true;
+}
+
+int constraintCalls = 0;
+int constraintError = 0;
+const char* constraintMessage = nullptr;
+
+void APS5_VABI CountConstraint(const char* message, void*, int error) {
+    ++constraintCalls;
+    constraintMessage = message;
+    constraintError = error;
+}
+
+bool ExpectConstraint(const char* name, void* base, std::size_t count, std::size_t size, bool comparator) {
+    int direction = 1;
+    const int calls = constraintCalls;
+    const int result = qsort_s_nid_postfix(base, count, size, comparator ? CompareKeysWithDirection : nullptr, &direction);
+    if (result != 22 || constraintCalls != calls + 1 || constraintError != 22 || !constraintMessage || std::strcmp(constraintMessage, name) != 0) {
+        std::fprintf(stderr, "qsort_s did not report \"%s\" through the installed handler (result %d, calls %d)\n", name, result, constraintCalls - calls);
+        return false;
+    }
+    return true;
+}
+
+bool ExpectQsortSConstraints() {
+    void* previous = set_constraint_handler_s_nid_postfix(reinterpret_cast<void*>(CountConstraint));
+    Element element{};
+    constexpr std::size_t huge = (static_cast<std::size_t>(-1) >> 1) + 1;
+    bool correct = ExpectConstraint("qsort_s : n > RSIZE_MAX", &element, huge, sizeof(Element), true);
+    correct &= ExpectConstraint("qsort_s : es > RSIZE_MAX", &element, 1, huge, true);
+    correct &= ExpectConstraint("qsort_s : a == NULL", nullptr, 2, sizeof(Element), true);
+    correct &= ExpectConstraint("qsort_s : cmp == NULL", &element, 2, sizeof(Element), false);
+    if (set_constraint_handler_s_nid_postfix(previous) != reinterpret_cast<void*>(CountConstraint)) {
+        std::fprintf(stderr, "set_constraint_handler_s did not return the installed handler\n");
+        correct = false;
+    }
+    return correct;
 }
 
 bool ExpectQsortS() {
@@ -188,6 +225,7 @@ int main() {
     correct &= ExpectOrderS("insertion sort", {1, 0, 1, 0}, {1, 3, 0, 2});
     correct &= ExpectOrderS("median of three", {2, 1, 2, 0, 1, 2, 0, 1, 0, 2, 1, 0}, {11, 3, 6, 8, 10, 1, 7, 4, 9, 5, 0, 2});
     correct &= ExpectQsortS();
+    correct &= ExpectQsortSConstraints();
     std::vector<int> keys;
     for (int index = 0; index < 48; ++index) keys.push_back((index * 7 + 3) % 5);
     correct &= ExpectOrder("pseudomedian of nine", keys,
