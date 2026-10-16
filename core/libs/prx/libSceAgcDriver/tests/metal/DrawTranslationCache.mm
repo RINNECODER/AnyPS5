@@ -1,5 +1,11 @@
 #include "MetalTestSupport.hpp"
 #include "MetalDrawTranslationCache.hpp"
+#include "MetalWorkerPool.hpp"
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -101,9 +107,90 @@ void TestLruEviction() {
     Require(found != nullptr, "Most recent record must be present");
 }
 
+void TestThreadSafety() {
+    MetalDrawTranslationCache cache;
+    constexpr int ThreadCount = 8;
+    constexpr int OperationsPerThread = 200;
+    std::vector<std::thread> threads;
+    std::atomic<int> foundCount{0};
+
+    for (int t = 0; t < ThreadCount; ++t) {
+        threads.emplace_back([&cache, &foundCount, t] {
+            for (int i = 0; i < OperationsPerThread; ++i) {
+                DrawTranslationKey key;
+                key.vertexVariantId = (t * OperationsPerThread + i) % 50 + 1;
+                key.fragmentVariantId = 100;
+                key.topology = 3;
+                key.rasterSamples = 1;
+
+                if (i % 2 == 0) {
+                    auto record = std::make_shared<DrawTranslationRecord>();
+                    record->key = key;
+                    record->memoryVersion = 0;
+                    record->imageCacheClears = 0;
+                    cache.Insert(record);
+                } else {
+                    auto found = cache.Find(key, 0, 0);
+                    if (found != nullptr) {
+                        foundCount.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+
+                if (i % 50 == 0) {
+                    cache.RecordStateElision();
+                    static_cast<void>(cache.Contains(key));
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    Require(cache.Size() <= MetalDrawTranslationCache::MaxEntries, "Cache size must not exceed MaxEntries under concurrent writes");
+    const auto stats = cache.TakeStatistics(true);
+    Require(stats.inserts > 0, "Inserts must be recorded");
+    Require(stats.lookups > 0, "Lookups must be recorded");
+}
+
+void TestWorkerPool() {
+    auto& pool = MetalWorkerPool::Shared();
+    Require(pool.WorkerCount() >= 1, "Worker pool must have at least 1 worker");
+
+    std::atomic<int> parallelSum{0};
+    constexpr std::size_t ParallelIterations = 64;
+    pool.ParallelFor(ParallelIterations, [&parallelSum](std::size_t index) {
+        parallelSum.fetch_add(static_cast<int>(index + 1), std::memory_order_relaxed);
+    });
+
+    constexpr int ExpectedSum = static_cast<int>(ParallelIterations * (ParallelIterations + 1) / 2);
+    Require(parallelSum.load() == ExpectedSum, "ParallelFor must execute all iterations correctly");
+
+    std::atomic<int> enqueueCounter{0};
+    std::mutex mtx;
+    std::condition_variable cv;
+    constexpr int EnqueueCount = 20;
+
+    for (int i = 0; i < EnqueueCount; ++i) {
+        pool.Enqueue([&enqueueCounter, &mtx, &cv, EnqueueCount] {
+            if (enqueueCounter.fetch_add(1, std::memory_order_relaxed) + 1 == EnqueueCount) {
+                std::lock_guard lock(mtx);
+                cv.notify_one();
+            }
+        });
+    }
+
+    std::unique_lock lock(mtx);
+    cv.wait_for(lock, std::chrono::seconds(5), [&] { return enqueueCounter.load() == EnqueueCount; });
+    Require(enqueueCounter.load() == EnqueueCount, "All enqueued jobs must complete");
+}
+
 }
 
 void RunDrawTranslationCacheTests(const MetalTests::Context& /*context*/) {
     TestBasicLookupAndInsert();
     TestLruEviction();
+    TestThreadSafety();
+    TestWorkerPool();
 }
