@@ -726,6 +726,7 @@ alignas(256) constexpr std::array<std::uint32_t, 64> BarrierFreeWaterfallVertexC
     0x07060504u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 11> FrontCode{0x7e0002ffu, 0, 0x7e0202ffu, 0, 0x7e0402ffu, 0, 0x7e0602ffu, 0x3f800000u, 0xf80008cfu, 0x03020100u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 64> UndecodablePixelCode{0xf1949f05u, 0x00060018u, 0xbf810000u};
+alignas(256) constexpr std::array<std::uint32_t, 64> PassthroughPixelCode{0xc8020002u, 0xf800180fu, 0x00000000u, 0xbf810000u};
 
 void DescribeWaterfallPixel(AbiHeader& pixel) {
     DescribeAbi(pixel, WaterfallPixelCode, 1, {{0x8, ProgramLow(WaterfallPixelCode.data())}, {0x9, ProgramHigh(WaterfallPixelCode.data())}, {0xa, 0}, {0xb, 2u << 1u}}, {{0x1b6, 1}, {0x1b3, 2}, {0x1b4, 2}, {0x191, 0}, {0x1c5, 4}});
@@ -971,12 +972,52 @@ void AbiDeferredVertexInputs() {
     ExpectFailure([] { AgcDriverShutdown_nid_postfix(); }, "statically bound vertex attributes are not implemented");
 }
 
+void AbiDeferredRectanglePairs() {
+    static AbiHeader front;
+    DescribeFront(front);
+    static AbiHeader pixel;
+    DescribeAbi(pixel, PassthroughPixelCode, 1, {{0x8, ProgramLow(PassthroughPixelCode.data())}, {0x9, ProgramHigh(PassthroughPixelCode.data())}, {0xa, 0}, {0xb, 0}}, {{0x1b6, 1}, {0x1b3, 2}, {0x1b4, 2}, {0x191, 0x420}, {0x1c5, 4}});
+    static AbiHeader unresolved;
+    DescribeWaterfallPixel(unresolved);
+    for (auto* header : {&front, &pixel, &unresolved}) AgcDriverRegisterShader_nid_postfix(&header->shader);
+    const std::array<ShaderRegister, 1> passthrough{pixel.context[3]};
+    const auto resolve = [&] {
+        AgcDriver::ShaderPreparationScope scope({&front.shader, &pixel.shader});
+        AgcDriverResolveGraphicsAbi_nid_postfix(&front.shader, nullptr, 17);
+        AgcDriverResolveGraphicsAbi_nid_postfix(&front.shader, &pixel.shader, 17);
+        AgcDriverResolveGraphicsAbi_nid_postfix(&front.shader, &unresolved.shader, 17);
+        AgcDriverResolveShaderAbi_nid_postfix(&pixel.shader, passthrough, {});
+        AgcDriverResolveGraphicsAbi_nid_postfix(&front.shader, &pixel.shader, 17);
+        scope.Commit();
+    };
+    auto log = Logged(resolve);
+    Require(Deferrals(log) == 1 && log.find("custom per-vertex interpolation is unsupported") != std::string::npos, "a rectangle pair its pipeline ABI cannot build was not deferred once with the builder's reason");
+    log = Logged(resolve);
+    Require(Deferrals(log) == 0, "a rectangle pair deferred at its pipeline ABI was logged again");
+    const auto draw = [&](bool withPixel) {
+        std::vector<std::uint32_t> commands;
+        for (const auto* header : {&front, &pixel}) {
+            if (header == &pixel && !withPixel) continue;
+            for (std::size_t index = 0; index < header->shader.num_sh_registers; ++index) commands.insert(commands.end(), {0xc0017600u, header->registers[index].offset, header->registers[index].value});
+            for (std::size_t index = 0; index < header->shader.num_cx_registers; ++index) commands.insert(commands.end(), {0xc0016900u, header->context[index].offset, header->context[index].value});
+        }
+        if (!withPixel) commands.insert(commands.end(), {0xc0017600u, 0x8, 0});
+        commands.insert(commands.end(), {0xc0016900u, 0x8e, 0xfu, 0xc0016900u, 0x8f, 0xfu, 0xc0016900u, 0xd, 0x00100010u, 0xc0016900u, 0x204, 0x80000u, 0xc0016900u, 0x1c3, 4, 0xc0017900u, 0x242, 17, 0xc0012d00u, 3, 2});
+        Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+        Require(sceAgcDriverSubmitDcb(&packet) == 0, "a rect-list draw was not submitted");
+        AgcDriverWaitIdle_nid_postfix();
+    };
+    draw(false);
+    ExpectFailure([&] { draw(true); }, "custom per-vertex interpolation is unsupported");
+    ExpectFailure([] { AgcDriverShutdown_nid_postfix(); }, "custom per-vertex interpolation is unsupported");
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         const std::string_view abiMode = argc == 2 ? argv[1] : "";
-        const bool abiDeferred = abiMode == "--abi-deferred-compute" || abiMode == "--abi-deferred-pixel" || abiMode == "--abi-deferred-stages" || abiMode == "--abi-deferred-rectangle" || abiMode == "--abi-deferred-undecodable-state" || abiMode == "--abi-deferred-registration-failure" || abiMode == "--abi-deferred-vertex-inputs";
+        const bool abiDeferred = abiMode == "--abi-deferred-compute" || abiMode == "--abi-deferred-pixel" || abiMode == "--abi-deferred-stages" || abiMode == "--abi-deferred-rectangle" || abiMode == "--abi-deferred-undecodable-state" || abiMode == "--abi-deferred-registration-failure" || abiMode == "--abi-deferred-vertex-inputs" || abiMode == "--abi-deferred-rectangle-pairs";
         Require(argc == 1 || abiDeferred || (argc == 2 && (std::string_view(argv[1]) == "--indirect" || std::string_view(argv[1]) == "--fail-before-registration" || std::string_view(argv[1]) == "--deferred" || std::string_view(argv[1]) == "--deferred-undecodable")), "invalid test arguments");
         if (abiDeferred) {
             if (!OpenVulkanTestDevice()) return VulkanTestSkipped;
@@ -986,6 +1027,7 @@ int main(int argc, char** argv) {
             else if (abiMode == "--abi-deferred-undecodable-state") AbiDeferredUndecodableState();
             else if (abiMode == "--abi-deferred-registration-failure") AbiDeferredRegistrationFailure();
             else if (abiMode == "--abi-deferred-vertex-inputs") AbiDeferredVertexInputs();
+            else if (abiMode == "--abi-deferred-rectangle-pairs") AbiDeferredRectanglePairs();
             else AbiDeferredRectangle();
             std::cout << "shader ABI deferral tests passed: " << abiMode << '\n';
             return 0;
