@@ -93,6 +93,7 @@ public:
     [[nodiscard]] std::vector<MetalTimeline::KnownStore> KnownStores() const;
     // Guest bytes the snapshot copied instead of aliasing (#291).
     [[nodiscard]] std::uint64_t CopiedBytes() const { return snapshot.CopiedBytes(); }
+    [[nodiscard]] const std::vector<id<MTLBuffer>>& UploadChunks() const { return uploadChunks; }
 
 private:
     [[nodiscard]] std::shared_ptr<MetalTexture> texture(const Graphics::GuestTextureResource& descriptor,

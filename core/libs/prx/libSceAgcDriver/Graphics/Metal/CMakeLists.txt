@@ -83,9 +83,11 @@ if(BUILD_TESTING)
         "${metalTestDirectory}/LabelEvents.mm"
         "${metalTestDirectory}/CaptureLogic.mm"
         "${metalTestDirectory}/KnownStores.mm"
+        "${metalTestDirectory}/DrawTranslationCache.mm"
     )
     target_compile_options(metal_utility_tests PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
     target_link_libraries(metal_utility_tests PRIVATE anyps5_metal_utilities)
+    target_include_directories(metal_utility_tests PRIVATE "${PROJECT_SOURCE_DIR}/3rdparty/Vulkan-Headers/include")
     if(ANYPS5_METAL_SHADER_BRIDGE)
         target_sources(metal_utility_tests PRIVATE "${metalTestDirectory}/ShaderPipeline.mm")
         target_sources(metal_utility_tests PRIVATE "${metalTestDirectory}/ShaderAlignment.mm")

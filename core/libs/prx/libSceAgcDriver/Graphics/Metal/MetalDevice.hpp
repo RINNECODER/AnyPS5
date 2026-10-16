@@ -151,7 +151,7 @@ void EndParked(id<MTLCommandBuffer> commands);
 // For draws. The encoder parked in `commands` when `mergeable`, `commands` is `batch`'s open batch
 // and `key` continues the parked pass; otherwise a new encoder for `pass` (the parked one ended).
 [[nodiscard]] id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLCommandBuffer> commands,
-    MTLRenderPassDescriptor* pass, const PassKey& key, bool mergeable);
+    MTLRenderPassDescriptor* pass, const PassKey& key, bool mergeable, bool* merged = nullptr);
 // Instead of endEncoding after a draw: parks `encoder` for the next draw when `mergeable` and
 // `commands` is `batch`'s open batch, and ends it otherwise.
 void EndOrPark(const MetalDevice& batch, id<MTLCommandBuffer> commands, id<MTLRenderCommandEncoder> encoder,

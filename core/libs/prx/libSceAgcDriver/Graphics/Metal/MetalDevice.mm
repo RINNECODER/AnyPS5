@@ -196,7 +196,8 @@ id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassD
 }
 
 id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass,
-                                          const PassKey& key, bool mergeable) {
+                                          const PassKey& key, bool mergeable, bool* merged) {
+    if (merged != nullptr) *merged = false;
     auto& slot = parked();
     {
         std::lock_guard lock(slot.mutex);
@@ -207,6 +208,7 @@ id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLComman
                 slot.encoder = nil;
                 slot.commands = nil;
                 ++slot.statistics.merged;
+                if (merged != nullptr) *merged = true;
                 return encoder;
             }
             endLocked(slot);
