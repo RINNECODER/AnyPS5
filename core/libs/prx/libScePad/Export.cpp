@@ -317,6 +317,7 @@ int APS5_VABI scePadSetAngularVelocityBiasCorrectionState(int handle, bool enabl
 
 APS5_EXPORT("n3kSX62fgNo", scePadUnknown_n3kSX62fgNo);
 int APS5_VABI scePadUnknown_n3kSX62fgNo() {
+    if (g_opened) NotImplemented_nid_no_patch(__func__);
     return g_initialized.load(std::memory_order_acquire) ? PAD_UNKNOWN_N3KSX62FGNO_AFTER_INIT : PAD_UNKNOWN_N3KSX62FGNO_BEFORE_INIT;
 }
 
