@@ -121,6 +121,8 @@ private:
     void encodeFused(id<MTLComputeCommandEncoder> encoder, id<MTLBuffer> guest, NSUInteger offset, bool retile, Subresources part = {}) const;
     // Encodes a GPU blit between the linear staging buffer and every present level and layer.
     void encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer> linear, bool toTexture, Subresources part = {}) const;
+    // Records the blit copy operations from `linear` into this texture for upload blit batching.
+    void recordLinearUpload(id<MTLBuffer> linear, MetalEncoders::UploadBlitRecord& record) const;
     const MetalDevice& backend;
     Graphics::GuestTextureResource descriptor;
     std::shared_ptr<Backing> backing;

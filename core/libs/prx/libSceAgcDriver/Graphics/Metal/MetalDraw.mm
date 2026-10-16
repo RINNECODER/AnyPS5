@@ -13,6 +13,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <string_view>
 #include <string>
 #include <vector>
@@ -308,6 +311,70 @@ std::string barycentricVertexSource(const MetalBackend::InterfaceLayout& capture
     return source;
 }
 
+// barycentricVertexSource depends only on its arguments, and the fragment source is a shared text
+// (MetalBackend::ShaderSource) the conversion cache hands out again for the same shader: the
+// source is built once per combination instead of for every barycentric draw (it was about 2% of
+// the queue worker's time, plus hashing the new text to find its compiled function).
+struct BarycentricSource {
+    MetalBackend::ShaderSource source;
+    std::size_t hash = 0;
+};
+
+BarycentricSource cachedBarycentricVertexSource(const MetalBackend::InterfaceLayout& captured, const MetalBackend::ShaderSource& fragmentSource,
+    const RecompileResult& fragment, bool flipY, bool fixupClipSpace) {
+    const auto& text = fragmentSource.Shared();
+    if (text == nullptr) {
+        auto source = barycentricVertexSource(captured, fragmentSource, fragment, flipY, fixupClipSpace);
+        const auto hash = MetalBackend::ShaderSourceHash(source);
+        return {std::move(source), hash};
+    }
+    std::string key;
+    const auto put = [&key](auto value) { key.append(reinterpret_cast<const char*>(&value), sizeof(value)); };
+    put(reinterpret_cast<std::uintptr_t>(text.get()));
+    put(flipY);
+    put(fixupClipSpace);
+    put(captured.stride);
+    put(static_cast<std::uint32_t>(captured.members.size()));
+    for (const auto& member : captured.members) {
+        put(member.location.value_or(~0u));
+        put(member.builtin.value_or(~0u));
+        put(member.components);
+        put(member.width);
+        put(member.offset);
+    }
+    put(static_cast<std::uint32_t>(fragment.fragmentParameters.size()));
+    for (const auto& parameter : fragment.fragmentParameters) {
+        put(parameter.location);
+        put(parameter.sourceLocation);
+        put(parameter.flat);
+        put(parameter.perVertex);
+        put(parameter.custom);
+        put(parameter.flatP10);
+    }
+    put(fragment.barycentricEmulation.active);
+    put(fragment.barycentricEmulation.smooth);
+    put(fragment.barycentricEmulation.linear);
+    struct Entry {
+        // Held so that the address in the key names this text for as long as the entry lives.
+        std::shared_ptr<const std::string> fragmentText;
+        BarycentricSource result;
+    };
+    static std::mutex mutex;
+    static auto* entries = new std::unordered_map<std::string, Entry>();
+    {
+        std::lock_guard lock(mutex);
+        if (const auto found = entries->find(key); found != entries->end()) return found->second.result;
+    }
+    BarycentricSource result;
+    auto source = barycentricVertexSource(captured, fragmentSource, fragment, flipY, fixupClipSpace);
+    result.hash = MetalBackend::ShaderSourceHash(source);
+    result.source = std::move(source);
+    std::lock_guard lock(mutex);
+    if (entries->size() >= 4096) entries->clear();
+    entries->emplace(std::move(key), Entry{text, result});
+    return result;
+}
+
 std::span<const std::byte> pushBlock(const MetalBackend::Result& shader,
     const std::array<std::byte, Graphics::PipelinePushConstantBytes>& bytes) {
     if (!shader.pushConstantBuffer) return {};
@@ -587,7 +654,7 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
     renderPass.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
     renderPass.colorAttachments[0].resolveTexture = level;
     id<MTLCommandBuffer> commands = backend.CommandBuffer();
-    auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
+    auto encoder = MetalEncoders::Render(commands, renderPass);
     if (encoder == nil) throw MetalGpuExecutionError("Metal CB resolve render encoder allocation failed");
     [encoder endEncoding];
     resources.EncodeReadbacks(commands);
@@ -1121,8 +1188,10 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         corners.stage = ShaderStage::Vertex;
         corners.nativeExecutionKind = MetalBackend::NativeExecutionKind::Vertex;
         corners.entryPoint = BarycentricVertexEntry;
-        corners.source = barycentricVertexSource(capturePipeline->Reflection().rectList->outputLayout, nativeFragment.source,
+        auto built = cachedBarycentricVertexSource(capturePipeline->Reflection().rectList->outputLayout, nativeFragment.source,
             *fragment->program, state.viewport.height > 0, state.negativeOneToOne);
+        corners.source = std::move(built.source);
+        corners.sourceHash = built.hash;
         nativeVertex = std::move(corners);
     }
     std::unique_ptr<MetalRenderPipeline> vertexPipeline;
@@ -1172,7 +1241,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
                 if (gpuIndirect->vertexRule == Rule::Constant) words[record * (recordBytes / 4u) + vertexWord] = gpuIndirect->vertexConstant;
                 if (gpuIndirect->instanceRule == Rule::Constant) words[record * (recordBytes / 4u) + instanceWord] = gpuIndirect->instanceConstant;
             }
-            auto blit = [commands blitCommandEncoder];
+            auto blit = MetalEncoders::Blit(commands);
             if (blit == nil) throw MetalGpuExecutionError("Metal indirect record blit encoder allocation failed");
             for (std::uint32_t record = 0; record < gpuIndirect->count; ++record) {
                 const auto source = indirectRecords.offset + NSUInteger{record} * gpuIndirect->stride;
@@ -1235,7 +1304,22 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             renderPass.colorAttachments[expansion.slot].texture = multisampleExpander->Expand(commands, expansion.source, state.rasterSamples, expansion.slot);
         }
     }
-    auto encoder = [commands renderCommandEncoderWithDescriptor:renderPass];
+    // Render-pass merging (MetalEncoders): the draw continues the pass the previous draw left open
+    // when it has the same attachments, and leaves its own open for the next. Not when the draw
+    // writes memory through its shaders (a later draw of the pass could read it unordered), counts
+    // samples, expands MSAA targets, uses custom sample locations (merging those changed pixels from
+    // run to run) or samples one of its own attachments.
+    const auto passKey = MetalEncoders::KeyOf(renderPass);
+    bool mergeable = sampleCounter == nil && expansions.empty() && !bdaStores && !(state.customSampleLocations && state.rasterSamples > 1) &&
+        !resources.WritesBesides(passKey);
+    // The bindings hold every texture the shaders read or write (the residency also holds the
+    // draw's own color targets).
+    for (const auto* list : {&vertexBindings, &fragmentBindings}) {
+        for (const auto& binding : *list) {
+            for (id<MTLTexture> texture : binding.textures) mergeable = mergeable && !MetalEncoders::IsAttachment(passKey, texture);
+        }
+    }
+    auto encoder = MetalEncoders::RenderMerging(backend, commands, renderPass, passKey, mergeable);
     if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
     try {
         if (meshPath) {
@@ -1283,7 +1367,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
         [encoder endEncoding];
         throw;
     }
-    [encoder endEncoding];
+    MetalEncoders::EndOrPark(backend, commands, encoder, passKey, mergeable);
     if (sampleCounter != nil) {
         const SampleCounterParameters parameters{1, 0};
         backend.Encode(commands, @"SampleCounter", @[sampleCounter, sampleTarget], &parameters, sizeof(parameters), MTLSizeMake(1, 1, 1));

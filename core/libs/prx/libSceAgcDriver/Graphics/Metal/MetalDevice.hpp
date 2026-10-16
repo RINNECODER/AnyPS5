@@ -65,6 +65,109 @@ private:
 
 class MetalDevice;
 
+// Render-pass merging and encoder bookkeeping.
+//
+// On Apple GPUs every render pass loads and stores its attachments through tile memory and costs
+// 10-16 us of fixed GPU time; the live map drew about 1,170 passes per frame, most of them one
+// draw each (375 shadow draws into one depth target). A draw may therefore leave its render
+// encoder open ("parked") instead of ending it, and the next draw into the same attachments of the
+// same batched command buffer encodes into it: one pass instead of one per draw.
+//
+// Only one encoder may be open in a command buffer, so everything that encodes into one ends the
+// encoder parked in it first: every encoder the driver creates comes from the functions below,
+// and MetalDevice ends it before a commit (Flush, Wait, Submit). Anything else that encodes into
+// a batched command buffer (an event signal) calls EndParked itself.
+namespace MetalEncoders {
+
+// The attachments and layout of a render pass, compared to decide whether a draw may continue
+// the parked pass.
+struct PassAttachment {
+    std::uintptr_t texture = 0;
+    std::uintptr_t resolve = 0;
+    // The textures `texture` and `resolve` are views of, or themselves.
+    std::uintptr_t textureRoot = 0;
+    std::uintptr_t resolveRoot = 0;
+    NSUInteger level = 0, slice = 0, plane = 0;
+    NSUInteger resolveLevel = 0, resolveSlice = 0, resolvePlane = 0;
+    MTLLoadAction load = MTLLoadActionDontCare;
+    MTLStoreAction store = MTLStoreActionDontCare;
+};
+
+struct PassKey {
+    NSUInteger width = 0, height = 0, layers = 0, samples = 0;
+    NSUInteger depthResolveFilter = 0, stencilResolveFilter = 0;
+    std::uintptr_t visibility = 0;
+    // Eight colors, then depth and stencil.
+    std::array<PassAttachment, 10> attachments{};
+    NSUInteger positions = 0;
+    std::array<MTLSamplePosition, 16> samplePositions{};
+};
+
+[[nodiscard]] PassKey KeyOf(MTLRenderPassDescriptor* pass);
+// Whether a pass described by `next` may continue the open pass `open`: the same attachments
+// (texture, level, slice, plane and resolve target), size, layers, samples, sample positions and
+// store actions, no visibility buffer, and every attachment of `next` loads (a clear or a
+// don't-care load needs a pass of its own).
+[[nodiscard]] bool Continues(const PassKey& open, const PassKey& next);
+// Whether `resource` is a texture that is, or is a view of the same texture as, an attachment or
+// resolve target of the pass `key` describes. A draw that samples an attachment reads what
+// earlier draws of the pass wrote, which Metal orders between passes but not between the draws of
+// one pass.
+[[nodiscard]] bool IsAttachment(const PassKey& key, id<MTLResource> resource);
+
+// Upload batching: linear buffer -> texture blit copies (e.g. BC texture uploads after detiling)
+// can be grouped to share a single MTLBlitCommandEncoder per command buffer rather than creating
+// an encoder per texture.
+struct UploadBlitStep {
+    NSUInteger sourceOffset = 0;
+    NSUInteger sourceBytesPerRow = 0;
+    NSUInteger sourceBytesPerImage = 0;
+    MTLSize sourceSize{};
+    NSUInteger destinationSlice = 0;
+    NSUInteger destinationLevel = 0;
+    MTLOrigin destinationOrigin{};
+};
+
+struct UploadBlitRecord {
+    id<MTLBuffer> sourceBuffer = nil;
+    id<MTLTexture> destinationTexture = nil;
+    std::vector<UploadBlitStep> steps;
+};
+
+// Enqueues an upload blit record to be encoded into the shared blit encoder for `commands`.
+void EnqueueUploadBlit(id<MTLCommandBuffer> commands, UploadBlitRecord record);
+// Encodes all pending upload blits for `commands` into a single MTLBlitCommandEncoder.
+void FlushUploadBlits(id<MTLCommandBuffer> commands);
+// Whether there are pending upload blits for `commands`.
+[[nodiscard]] bool HasPendingUploadBlits(id<MTLCommandBuffer> commands);
+
+// Ends the render encoder parked in `commands`, if any, and flushes pending upload blits.
+void EndParked(id<MTLCommandBuffer> commands);
+// New encoders, after ending the one parked in `commands`.
+[[nodiscard]] id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands, bool flushUploads = true);
+[[nodiscard]] id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands);
+[[nodiscard]] id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass);
+
+// For draws. The encoder parked in `commands` when `mergeable`, `commands` is `batch`'s open batch
+// and `key` continues the parked pass; otherwise a new encoder for `pass` (the parked one ended).
+[[nodiscard]] id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLCommandBuffer> commands,
+    MTLRenderPassDescriptor* pass, const PassKey& key, bool mergeable);
+// Instead of endEncoding after a draw: parks `encoder` for the next draw when `mergeable` and
+// `commands` is `batch`'s open batch, and ends it otherwise.
+void EndOrPark(const MetalDevice& batch, id<MTLCommandBuffer> commands, id<MTLRenderCommandEncoder> encoder,
+    const PassKey& key, bool mergeable);
+
+struct Statistics {
+    std::uint64_t passes = 0;
+    std::uint64_t merged = 0;
+    std::uint64_t uploadBlits = 0;
+    std::uint64_t uploadBlitPasses = 0;
+};
+// Render passes RenderMerging opened and draws it merged into an open one so far.
+[[nodiscard]] Statistics TakeStatistics(bool reset = true);
+
+}
+
 // Held by a work between taking a command buffer and handing it to a wait or the timeline. With
 // batching, a work that stops in between (a throw that skips it, an early return) leaves what it
 // already encoded in the shared command buffer, which still runs; before, its own command buffer

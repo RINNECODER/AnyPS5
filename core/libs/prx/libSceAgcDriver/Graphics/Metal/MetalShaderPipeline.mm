@@ -725,7 +725,7 @@ void MetalRectKernelPipeline::Encode(id<MTLCommandBuffer> commands, std::span<co
             throw std::invalid_argument("Metal rectangle native vertex buffer device, range or alignment is invalid");
         }
     }
-    auto encoder = [commands computeCommandEncoder];
+    auto encoder = MetalEncoders::Compute(commands);
     if (encoder == nil) throw MetalGpuExecutionError("Metal rectangle compute encoder allocation failed");
     [encoder setComputePipelineState:pipeline];
     if (capture) [encoder setStageInRegion:region];
@@ -782,7 +782,7 @@ void MetalComputePipeline::Encode(id<MTLCommandBuffer> commands,
     if (grid.width % threads[0] != 0 || grid.height % threads[1] != 0 || grid.depth % threads[2] != 0) {
         throw std::invalid_argument("Converted Metal compute grid must contain complete reflected workgroups");
     }
-    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = MetalEncoders::Compute(commands);
     if (encoder == nil) throw MetalGpuExecutionError("Converted Metal compute encoder creation failed");
     [encoder setComputePipelineState:pipeline];
     bindCompute(encoder, shader, prepared);
@@ -806,7 +806,7 @@ void MetalComputePipeline::EncodeIndirect(id<MTLCommandBuffer> commands,
     }
     auto prepared = prepare(device, shader, bufferAlignments, samplerFunction, bindings, pushConstants, indirectResources);
     const auto& threads = shader.threadsPerThreadgroup;
-    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder = MetalEncoders::Compute(commands);
     if (encoder == nil) throw MetalGpuExecutionError("Converted Metal compute encoder creation failed");
     [encoder setComputePipelineState:pipeline];
     bindCompute(encoder, shader, prepared);

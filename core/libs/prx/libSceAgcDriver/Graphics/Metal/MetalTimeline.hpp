@@ -153,6 +153,7 @@ public:
         }
         const auto value = ++labelValue;
         if (open) {
+            MetalEncoders::EndParked(last);
             [last encodeSignalEvent:labelEvent value:value];
             // The batch's completion (which Reap waits for, through the work before the label) comes
             // after the signal.

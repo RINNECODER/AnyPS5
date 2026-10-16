@@ -934,6 +934,7 @@ std::span<const id<MTLResource>> MetalShaderResources::Residency() const { retur
 void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands, bool lazy) {
     if (GpuTiming::SplitReadbacks() && std::any_of(images.begin(), images.end(), [](const Image& image) { return image.written; })) {
         // Profiling only: the copy-backs run right behind the work, in a command buffer of their own.
+        MetalEncoders::EndParked(commands);
         [commands enqueue];
         id<MTLCommandBuffer> readbacks = backend.CommandBuffer();
         [readbacks enqueue];
@@ -989,6 +990,13 @@ std::vector<MetalTimeline::KnownStore> MetalShaderResources::KnownStores() const
     known.reserve(deferredKeyStores.size());
     for (const auto& store : deferredKeyStores) known.push_back(store.known);
     return known;
+}
+
+bool MetalShaderResources::WritesBesides(const MetalEncoders::PassKey& pass) const {
+    if (!bufferWrites.empty()) return true;
+    return std::any_of(images.begin(), images.end(), [&](const Image& image) {
+        return image.written && !MetalEncoders::IsAttachment(pass, image.texture->Texture());
+    });
 }
 
 std::vector<std::pair<std::uint64_t, std::uint64_t>> MetalShaderResources::WrittenGuestRanges() const {
