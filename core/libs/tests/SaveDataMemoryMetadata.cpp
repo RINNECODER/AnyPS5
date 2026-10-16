@@ -52,6 +52,9 @@ int main() {
 
     Require(sceSaveDataCreateTransactionResource(1024) == kSaveDataNotInitialized);
     Require(sceSaveDataDeleteTransactionResource(1) == kSaveDataNotInitialized);
+    const std::uint32_t syncParamUninit[2] = {7531u, 0u};
+    Require(sceSaveDataSyncSaveDataMemory(nullptr) == static_cast<int>(0x809F0000u));
+    Require(sceSaveDataSyncSaveDataMemory(syncParamUninit) == static_cast<int>(0x809F0001u));
     const auto previous = std::filesystem::current_path();
     const auto root = std::filesystem::temp_directory_path() /
         ("anyps5-metadata-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
