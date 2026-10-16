@@ -743,6 +743,28 @@ void DescribeWaterfallVertex(AbiHeader& vertex, const std::array<std::uint32_t, 
     vertex.specials = {{0x25b, 0x8040}, {0x2d5, 0x00402000}, 0, {}, {}, {0x29b, 2}, {0x260, 0}};
 }
 
+struct FetchingHeader {
+    AbiHeader abi;
+    std::array<std::uint16_t, 11> directOffsets{};
+    ShaderSemantic semantic{};
+};
+
+void DescribeStaticFetch(FetchingHeader& vertex) {
+    vertex.abi.shader.header_size = sizeof(FetchingHeader);
+    for (auto& reg : vertex.abi.registers) {
+        if (reg.offset == 0x8b) reg.value = 4u << 1u;
+    }
+    vertex.directOffsets.fill(0xffffu);
+    vertex.directOffsets[8] = 0;
+    vertex.directOffsets[10] = 2;
+    vertex.abi.users.direct_resource_offset = vertex.directOffsets.data();
+    vertex.abi.users.direct_resource_count = static_cast<std::uint16_t>(vertex.directOffsets.size());
+    vertex.semantic.size_in_elements = 4;
+    vertex.semantic.static_vb_index = 1;
+    vertex.abi.shader.input_semantics = &vertex.semantic;
+    vertex.abi.shader.num_input_semantics = 1;
+}
+
 void AbiDeferredCompute() {
     static AbiHeader caller;
     DescribeAbi(caller, UserDataCaller, 0, {{0x20c, ProgramLow(UserDataCaller.data())}, {0x20d, ProgramHigh(UserDataCaller.data())}, {0x207, 64}, {0x208, 1}, {0x209, 1}, {0x212, 0}, {0x213, 8u << 1u}}, {});
@@ -917,12 +939,44 @@ void AbiDeferredUndecodableState() {
     AgcDriverShutdown_nid_postfix();
 }
 
+void AbiDeferredVertexInputs() {
+    static FetchingHeader fetching;
+    DescribeWaterfallVertex(fetching.abi, WaterfallVertexCode);
+    DescribeStaticFetch(fetching);
+    AgcDriverRegisterShader_nid_postfix(&fetching.abi.shader);
+    const std::array<const Shader*, 1> stages{&fetching.abi.shader};
+    const std::array<ShaderRegister, 1> primitive{{{0x242, 4}}};
+    const auto resolve = [&] {
+        AgcDriver::ShaderPreparationScope scope({&fetching.abi.shader});
+        AgcDriverResolveGraphicsStagesAbi_nid_postfix(stages, {}, primitive);
+        scope.Commit();
+    };
+    const auto before = ShaderRecompiler::FrontEndBuilds();
+    auto log = Logged(resolve);
+    Require(Deferrals(log) == 1 && log.find("statically bound vertex attributes are not implemented") != std::string::npos, "a graphics stage whose vertex inputs its pipeline ABI cannot decode was not deferred with the decode's reason");
+    log = Logged(resolve);
+    Require(ShaderRecompiler::FrontEndBuilds() == before && Deferrals(log) == 0, "a graphics stage deferred for vertex inputs that do not decode was prepared or logged again");
+    alignas(16) static std::array<std::uint32_t, 16> tables{};
+    const auto address = reinterpret_cast<std::uintptr_t>(tables.data());
+    std::vector<std::uint32_t> commands;
+    for (std::size_t index = 0; index < fetching.abi.shader.num_sh_registers; ++index) commands.insert(commands.end(), {0xc0017600u, fetching.abi.registers[index].offset, fetching.abi.registers[index].value});
+    for (std::uint32_t index = 0; index < 4; ++index) commands.insert(commands.end(), {0xc0017600u, 0x8cu + index, static_cast<std::uint32_t>(index % 2u == 0u ? address : address >> 32u)});
+    for (std::size_t index = 0; index < fetching.abi.shader.num_cx_registers; ++index) commands.insert(commands.end(), {0xc0016900u, fetching.abi.context[index].offset, fetching.abi.context[index].value});
+    for (const auto reg : {fetching.abi.specials.vgt_shader_stages_en, fetching.abi.specials.vgt_gs_out_prim_type}) commands.insert(commands.end(), {0xc0016900u, reg.offset, reg.value});
+    for (const auto reg : {fetching.abi.specials.ge_cntl, fetching.abi.specials.ge_user_vgpr_en}) commands.insert(commands.end(), {0xc0017900u, reg.offset, reg.value});
+    commands.insert(commands.end(), {0xc0017600u, 0x8, 0, 0xc0016900u, 0xd, 0x00100010u, 0xc0016900u, 0x204, 0x80000u, 0xc0016900u, 0x1c3, 4, 0xc0017900u, 0x242, 4, 0xc0012d00u, 3, 2});
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    Require(sceAgcDriverSubmitDcb(&packet) == 0, "the draw of a graphics stage deferred for its vertex inputs was not submitted");
+    ExpectFailure([] { AgcDriverWaitIdle_nid_postfix(); }, "statically bound vertex attributes are not implemented");
+    ExpectFailure([] { AgcDriverShutdown_nid_postfix(); }, "statically bound vertex attributes are not implemented");
+}
+
 }
 
 int main(int argc, char** argv) {
     try {
         const std::string_view abiMode = argc == 2 ? argv[1] : "";
-        const bool abiDeferred = abiMode == "--abi-deferred-compute" || abiMode == "--abi-deferred-pixel" || abiMode == "--abi-deferred-stages" || abiMode == "--abi-deferred-rectangle" || abiMode == "--abi-deferred-undecodable-state" || abiMode == "--abi-deferred-registration-failure";
+        const bool abiDeferred = abiMode == "--abi-deferred-compute" || abiMode == "--abi-deferred-pixel" || abiMode == "--abi-deferred-stages" || abiMode == "--abi-deferred-rectangle" || abiMode == "--abi-deferred-undecodable-state" || abiMode == "--abi-deferred-registration-failure" || abiMode == "--abi-deferred-vertex-inputs";
         Require(argc == 1 || abiDeferred || (argc == 2 && (std::string_view(argv[1]) == "--indirect" || std::string_view(argv[1]) == "--fail-before-registration" || std::string_view(argv[1]) == "--deferred" || std::string_view(argv[1]) == "--deferred-undecodable")), "invalid test arguments");
         if (abiDeferred) {
             if (!OpenVulkanTestDevice()) return VulkanTestSkipped;
@@ -931,6 +985,7 @@ int main(int argc, char** argv) {
             else if (abiMode == "--abi-deferred-stages") AbiDeferredStages();
             else if (abiMode == "--abi-deferred-undecodable-state") AbiDeferredUndecodableState();
             else if (abiMode == "--abi-deferred-registration-failure") AbiDeferredRegistrationFailure();
+            else if (abiMode == "--abi-deferred-vertex-inputs") AbiDeferredVertexInputs();
             else AbiDeferredRectangle();
             std::cout << "shader ABI deferral tests passed: " << abiMode << '\n';
             return 0;
