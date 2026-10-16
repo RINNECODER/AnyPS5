@@ -19,6 +19,8 @@
 #include "prx/libc/include/GuestTime.hpp"
 #include "prx/libc/include/SonyCrt.hpp"
 
+extern "C" char* tzname_nid_postfix[2];
+
 namespace {
 
 constexpr const char* WEEKDAY_NAMES[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
@@ -137,6 +139,8 @@ std::recursive_mutex& zoneMutex() {
     return mutex;
 }
 
+char** HostZoneNames();
+
 void applyGuestZone() {
     static bool initialized = false;
     static bool present = false;
@@ -158,6 +162,9 @@ void applyGuestZone() {
 #else
     ::tzset();
 #endif
+    char** names = HostZoneNames();
+    tzname_nid_postfix[0] = names[0];
+    tzname_nid_postfix[1] = names[1];
 }
 
 int& zoneDepth() {
