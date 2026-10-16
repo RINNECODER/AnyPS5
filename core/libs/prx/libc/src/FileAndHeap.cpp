@@ -342,7 +342,8 @@ FileStream* APS5_VABI _ZSt7_FiopenPKcNSt5_IosbIiE9_OpenmodeEi_nid_postfix(const 
         {Out | Noreplace, "wx"}, {Out | Trunc | Noreplace, "wx"}, {In | Out | Trunc | Noreplace, "w+x"},
         {Out | Binary | Noreplace, "wbx"}, {Out | Trunc | Binary | Noreplace, "wbx"},
         {In | Out | Trunc | Binary | Noreplace, "w+bx"}};
-    const int open = (mode & (In | Out | App | Trunc | Binary | Noreplace)) | ((mode & Nocreate) ? In : 0) | ((mode & App) ? Out : 0);
+    const int open = (mode & (In | Out | App | Trunc | Binary)) | ((mode & Nocreate) ? In : 0) | ((mode & App) ? Out : 0) |
+        (((mode & Noreplace) && (mode & (Out | App))) ? Noreplace : 0);
     const char* openMode = nullptr;
     for (const auto& [flags, text] : modes) if (flags == open) openMode = text;
     if (!openMode) return nullptr;
