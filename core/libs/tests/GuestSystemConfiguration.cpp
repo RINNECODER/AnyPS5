@@ -505,8 +505,11 @@ int main() {
     CheckVmmapSysctl();
     CheckNameToMib();
     *__error_nid_postfix() = 13;
+    Require(sysconf_nid_postfix(1) == 262144);
     Require(sysconf_nid_postfix(3) == 128);
+    Require(sysconf_nid_postfix(5) == 1024);
     Require(sysconf_nid_postfix(47) == 0x4000);
+    Require(sysconf_nid_postfix(56) == 1024);
     Require(getpagesize_nid_postfix() == sysconf_nid_postfix(47));
     Require(sysconf_nid_postfix(57) > 0);
     Require(sysconf_nid_postfix(58) > 0);

@@ -123,11 +123,20 @@ std::int64_t APS5_VABI sysconf_nid_postfix(int name) {
     const int saved = *__error_nid_postfix();
     std::int64_t result = -1;
     switch (name) {
+        case 1: // _SC_ARG_MAX
+            result = 262144;
+            break;
         case 3: // _SC_CLK_TCK
             result = 128;
             break;
+        case 5: // _SC_OPEN_MAX
+            result = 1024;
+            break;
         case 47: // _SC_PAGESIZE
             result = PS5_PAGE_SIZE;
+            break;
+        case 56: // _SC_IOV_MAX
+            result = 1024;
             break;
         case 57: // _SC_NPROCESSORS_CONF
         case 58: // _SC_NPROCESSORS_ONLN
