@@ -456,7 +456,6 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             size(opcode == 0x3c ? 7 : 9);
             require((packet[1] & 0x10u) != 0, "register-space WAIT_REG_MEM is not implemented");
             require((packet[1] & 7u) <= 6u, "invalid WAIT_REG_MEM compare function");
-            require((packet[2] & (opcode == 0x3c ? 3u : 7u)) == 0, "misaligned WAIT_REG_MEM address");
             break;
         }
         case 0x45: {
@@ -548,31 +547,33 @@ bool waitCompares(std::span<const std::uint32_t> packet, bool wide, std::uint64_
 
 }
 
+std::size_t WaitAwaitedBytes(std::span<const std::uint32_t> packet) {
+    const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
+    return wide && (packet.size() < 8 || packet[7] != 0) ? 8 : 4;
+}
+
 bool WaitSatisfied(std::span<const std::uint32_t> packet) {
     const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
-    const auto source = address(packet[2], packet[3]);
+    const auto awaitedBytes = WaitAwaitedBytes(packet);
+    const auto source = address(packet[2] & (awaitedBytes == 8 ? ~7u : ~3u), packet[3]);
     std::uint64_t value = 0;
     // Named for the [hooksync] attribution (the read goes through the flush hook).
     const GuestMemory::ReadSiteScope site(GuestMemory::ReadSite::Wait);
-    GuestMemory::Read(source, std::as_writable_bytes(std::span(&value, 1)).first(wide ? 8 : 4), wide ? 8 : 4);
+    GuestMemory::Read(source, std::as_writable_bytes(std::span(&value, 1)).first(awaitedBytes), awaitedBytes);
     return waitCompares(packet, wide, value);
 }
 
 bool WaitSatisfiedUnchecked(std::span<const std::uint32_t> packet) {
     const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
-    const auto source = address(packet[2], packet[3]);
-    const std::uint64_t value = wide ? *reinterpret_cast<const volatile std::uint64_t*>(source) : *reinterpret_cast<const volatile std::uint32_t*>(source);
+    const auto awaitedBytes = WaitAwaitedBytes(packet);
+    const auto source = address(packet[2] & (awaitedBytes == 8 ? ~7u : ~3u), packet[3]);
+    const std::uint64_t value = awaitedBytes == 8 ? *reinterpret_cast<const volatile std::uint64_t*>(source) : *reinterpret_cast<const volatile std::uint32_t*>(source);
     return waitCompares(packet, wide, value);
 }
 
 bool WaitComparesValue(std::span<const std::uint32_t> packet, std::uint64_t value) {
     const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
     return waitCompares(packet, wide, value);
-}
-
-std::size_t WaitAwaitedBytes(std::span<const std::uint32_t> packet) {
-    const bool wide = ((packet[0] >> 8u) & 0xffu) == 0x93u;
-    return wide && (packet.size() < 8 || packet[7] != 0) ? 8 : 4;
 }
 
 std::size_t ConditionalWords(std::span<const std::uint32_t> packet) {
@@ -968,7 +969,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
                 if (!warned && std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
                     warned = true;
                     std::fprintf(stderr, "[gpu] WAIT_REG_MEM at 0x%llx still waiting after 5s (function %u ref 0x%x mask 0x%x)\n",
-                                 static_cast<unsigned long long>(address(packet[2], packet[3])), packet[1] & 7u, packet[4], packet[5]);
+                                 static_cast<unsigned long long>(address(packet[2] & (WaitAwaitedBytes(packet) == 8 ? ~7u : ~3u), packet[3])), packet[1] & 7u, packet[4], packet[5]);
                 }
             }
             return;
