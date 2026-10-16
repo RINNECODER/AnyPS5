@@ -12,6 +12,7 @@ extern "C" {
 int APS5_VABI mergesort_nid_postfix(void*, std::size_t, std::size_t, int (APS5_VABI*)(const void*, const void*));
 int* APS5_VABI __error_nid_postfix();
 void APS5_VABI qsort_nid_postfix(void*, std::size_t, std::size_t, int (APS5_VABI*)(const void*, const void*));
+int APS5_VABI qsort_s_nid_postfix(void*, std::size_t, std::size_t, int (APS5_VABI*)(const void*, const void*, void*), void*);
 }
 
 namespace {
@@ -68,6 +69,50 @@ int APS5_VABI CompareFirstByte(const void* left, const void* right) {
     const int first = *static_cast<const unsigned char*>(left);
     const int second = *static_cast<const unsigned char*>(right);
     return (first > second) - (first < second);
+}
+
+int APS5_VABI CompareKeysWithDirection(const void* left, const void* right, void* context) {
+    return *static_cast<const int*>(context) * CompareKeys(left, right);
+}
+
+bool ExpectOrderS(const char* name, const std::vector<int>& keys, const std::vector<int>& tags) {
+    std::vector<Element> elements;
+    for (std::size_t index = 0; index < keys.size(); ++index) elements.push_back({keys[index], static_cast<int>(index)});
+    int direction = 1;
+    if (qsort_s_nid_postfix(elements.data(), elements.size(), sizeof(Element), CompareKeysWithDirection, &direction) != 0) {
+        std::fprintf(stderr, "%s: qsort_s failed\n", name);
+        return false;
+    }
+    for (std::size_t index = 0; index < tags.size(); ++index) {
+        if (elements[index].tag != tags[index]) {
+            std::fprintf(stderr, "%s: qsort_s element %zu has tag %d, expected %d\n", name, index, elements[index].tag, tags[index]);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ExpectQsortS() {
+    std::vector<Element> elements;
+    for (int index = 0; index < 50; ++index) elements.push_back({(index * 13) % 17, index});
+    int direction = -1;
+    if (qsort_s_nid_postfix(elements.data(), elements.size(), sizeof(Element), CompareKeysWithDirection, &direction) != 0) return false;
+    for (std::size_t index = 1; index < elements.size(); ++index) {
+        if (elements[index - 1].key < elements[index].key) {
+            std::fprintf(stderr, "qsort_s with a descending context is not sorted at %zu\n", index);
+            return false;
+        }
+    }
+    if (qsort_s_nid_postfix(nullptr, 0, sizeof(Element), nullptr, nullptr) != 0) {
+        std::fprintf(stderr, "qsort_s of no elements failed\n");
+        return false;
+    }
+    unsigned char bytes[] = {3, 1, 2};
+    if (qsort_s_nid_postfix(bytes, 3, 0, CompareKeysWithDirection, &direction) != 0 || bytes[0] != 3 || bytes[1] != 1 || bytes[2] != 2) {
+        std::fprintf(stderr, "qsort_s with zero-size elements changed them\n");
+        return false;
+    }
+    return true;
 }
 
 bool ExpectOrder(const char* name, const std::vector<int>& keys, const std::vector<int>& tags) {
@@ -140,6 +185,9 @@ int main() {
     bool correct = true;
     correct &= ExpectOrder("insertion sort", {1, 0, 1, 0}, {1, 3, 0, 2});
     correct &= ExpectOrder("median of three", {2, 1, 2, 0, 1, 2, 0, 1, 0, 2, 1, 0}, {11, 3, 6, 8, 10, 1, 7, 4, 9, 5, 0, 2});
+    correct &= ExpectOrderS("insertion sort", {1, 0, 1, 0}, {1, 3, 0, 2});
+    correct &= ExpectOrderS("median of three", {2, 1, 2, 0, 1, 2, 0, 1, 0, 2, 1, 0}, {11, 3, 6, 8, 10, 1, 7, 4, 9, 5, 0, 2});
+    correct &= ExpectQsortS();
     std::vector<int> keys;
     for (int index = 0; index < 48; ++index) keys.push_back((index * 7 + 3) % 5);
     correct &= ExpectOrder("pseudomedian of nine", keys,
