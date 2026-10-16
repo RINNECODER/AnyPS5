@@ -226,16 +226,16 @@ int main(int argc, char** argv) {
         exit_nid_postfix(0);
         return 2;
     }
-    if (argc > 1 && std::strcmp(argv[1], "--exit-order-driver") == 0) {
+    if (argc > firstArgument && std::strcmp(argv[firstArgument], "--exit-order-driver") == 0) {
         return DriveExitOrder();
     }
-    if (argc > 1 && std::strcmp(argv[1], "--exit-order") == 0) {
+    if (argc > firstArgument && std::strcmp(argv[firstArgument], "--exit-order") == 0) {
         LibcRegisterShutdown_nid_postfix(GuestExitShutdown);
         Require(__cxa_atexit_nid_postfix(CheckShutdownStillRunning, nullptr, nullptr) == 0);
         exit_nid_postfix(0);
         return 2;
     }
-    if (argc > 1 && std::strcmp(argv[1], "--relaunch-driver") == 0) {
+    if (argc > firstArgument && std::strcmp(argv[firstArgument], "--relaunch-driver") == 0) {
         return DriveRelaunch();
     }
     if (argc > firstArgument && std::strcmp(argv[firstArgument], "--relaunch") == 0) {
