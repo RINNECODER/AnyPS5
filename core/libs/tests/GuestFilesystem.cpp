@@ -949,6 +949,10 @@ int main() {
     Require(sceKernelOpen(invalidFlagsName.c_str(), 0x20a02, 0600) == static_cast<int>(0x80020016u));
     Require(open_nid_postfix(invalidFlagsName.c_str(), 0x20a00, 0600) == -1 && *__error_nid_postfix() == 22);
     Require(!std::filesystem::exists(invalidFlagsName));
+    Require(open_nid_postfix(nullptr, 3, 0) == -1 && *__error_nid_postfix() == 22);
+    Require(open_nid_postfix("", 0x20a00, 0600) == -1 && *__error_nid_postfix() == 22);
+    Require(_open_nid_postfix(nullptr, 0x403) == -1 && *__error_nid_postfix() == 22);
+    Require(_open_nid_postfix("", 3) == -1 && *__error_nid_postfix() == 22);
     Require(std::filesystem::file_size(present) == 5);
     Require(open_nid_postfix("", 0, 0) == -1 && *__error_nid_postfix() == 2);
     Require(_open_nid_postfix("", 0) == -1 && *__error_nid_postfix() == 2);
