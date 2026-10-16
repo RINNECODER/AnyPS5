@@ -147,6 +147,7 @@ void EndParked(id<MTLCommandBuffer> commands);
 [[nodiscard]] id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands, bool flushUploads = true);
 [[nodiscard]] id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands);
 [[nodiscard]] id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass);
+[[nodiscard]] id<MTLParallelRenderCommandEncoder> ParallelRender(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass);
 
 // For draws. The encoder parked in `commands` when `mergeable`, `commands` is `batch`'s open batch
 // and `key` continues the parked pass; otherwise a new encoder for `pass` (the parked one ended).
@@ -162,6 +163,8 @@ struct Statistics {
     std::uint64_t merged = 0;
     std::uint64_t uploadBlits = 0;
     std::uint64_t uploadBlitPasses = 0;
+    std::uint64_t parallelPasses = 0;
+    std::uint64_t parallelDraws = 0;
 };
 // Render passes RenderMerging opened and draws it merged into an open one so far.
 [[nodiscard]] Statistics TakeStatistics(bool reset = true);

@@ -14,6 +14,7 @@
 #include <cstring>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -260,6 +261,7 @@ public:
                                                               std::uint64_t currentMemoryVersion,
                                                               std::uint64_t currentImageCacheClears) {
         if (!Enabled()) return nullptr;
+        std::lock_guard lock(mutex);
         ++statistics.lookups;
         const auto it = entries.find(key);
         if (it == entries.end()) {
@@ -271,8 +273,7 @@ public:
             ++statistics.misses;
             return nullptr;
         }
-        // Move to front of LRU order
-        if (it->second->recordId != lruOrder.front()) {
+        if (!lruOrder.empty() && record->recordId != lruOrder.front()) {
             for (auto listIt = lruOrder.begin(); listIt != lruOrder.end(); ++listIt) {
                 if (*listIt == record->recordId) {
                     lruOrder.splice(lruOrder.begin(), lruOrder, listIt);
@@ -286,6 +287,7 @@ public:
 
     void Insert(std::shared_ptr<DrawTranslationRecord> record) {
         if (!Enabled() || record == nullptr) return;
+        std::lock_guard lock(mutex);
         record->recordId = ++nextId;
         while (entries.size() >= MaxEntries && !lruOrder.empty()) {
             const auto oldestId = lruOrder.back();
@@ -303,26 +305,37 @@ public:
     }
 
     void Clear() {
+        std::lock_guard lock(mutex);
         entries.clear();
         lruOrder.clear();
         ++statistics.clears;
     }
 
     void RecordStateElision() {
+        std::lock_guard lock(mutex);
         ++statistics.redundantStateElisions;
     }
 
     [[nodiscard]] DrawCacheStatistics TakeStatistics(bool reset = true) {
+        std::lock_guard lock(mutex);
         const auto res = statistics;
         if (reset) statistics = {};
         return res;
     }
 
     [[nodiscard]] std::size_t Size() const {
+        std::lock_guard lock(mutex);
         return entries.size();
     }
 
+    [[nodiscard]] bool Contains(const DrawTranslationKey& key) const {
+        if (!Enabled()) return false;
+        std::lock_guard lock(mutex);
+        return entries.find(key) != entries.end();
+    }
+
 private:
+    mutable std::mutex mutex;
     std::unordered_map<DrawTranslationKey, std::shared_ptr<DrawTranslationRecord>, DrawTranslationKeyHash> entries;
     std::list<std::uint64_t> lruOrder;
     std::uint64_t nextId = 0;

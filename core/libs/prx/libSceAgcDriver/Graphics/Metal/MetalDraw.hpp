@@ -98,6 +98,33 @@ public:
         std::span<const NativeGuestMemory::BorrowedRange> ranges,
         std::optional<std::array<std::uint32_t, 5>> meshArguments, MetalTimeline* timeline, Completed completed);
 
+    struct PreparedDraw {
+        Graphics::State state;
+        Pm4::DrawParameters draw;
+        std::shared_ptr<DrawTranslationRecord> cachedRecord;
+        MetalBufferBinding indexBuffer;
+        std::array<std::byte, Graphics::PipelinePushConstantBytes> pushConstants{};
+        DynamicRenderState dynamicState;
+    };
+
+    [[nodiscard]] MetalDrawTranslationCache& TranslationCache() { return translationCache; }
+    [[nodiscard]] const MetalDrawTranslationCache& TranslationCache() const { return translationCache; }
+
+    [[nodiscard]] static bool ParallelEncodingEnabled();
+    static constexpr std::size_t MinParallelDraws = 4;
+
+    [[nodiscard]] std::optional<PreparedDraw> PrepareCachedDraw(
+        const Graphics::State& state,
+        const Pm4::DrawParameters& draw,
+        std::span<const Graphics::CompiledShader> shaders,
+        std::span<const NativeGuestMemory::BorrowedRange> ranges);
+
+    [[nodiscard]] std::optional<ShaderRecompiler::BdaAbi::Fault> DrawBatchParallel(
+        std::span<const PreparedDraw> draws,
+        std::span<const NativeGuestMemory::BorrowedRange> ranges,
+        MetalTimeline* timeline = nullptr,
+        Completed completed = nullptr);
+
 private:
     MetalDraw(std::unique_ptr<MetalDevice> owned, MetalDevice* shared);
     [[nodiscard]] id<MTLTexture> residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare);

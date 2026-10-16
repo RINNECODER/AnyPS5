@@ -772,6 +772,126 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
     }
 }
 
+bool MetalDriver::Impl::TryExecuteDrawBatch(std::size_t& cursor, QueueState& queue, const Submission& submission) {
+    if (!MetalDraw::ParallelEncodingEnabled()) return false;
+    if (draw == nullptr || submission.shaders == nullptr) return false;
+
+    std::vector<MetalDraw::PreparedDraw> batch;
+    QueueState scanQueue = queue;
+    std::size_t scanCursor = cursor;
+    const auto totalWords = submission.commands.size();
+    std::optional<MetalEncoders::PassKey> targetPassKey;
+
+    while (scanCursor < totalWords) {
+        const auto header = submission.commands[scanCursor];
+        const auto count = Pm4::PacketWords(header);
+        if (count == 0 || count > totalWords - scanCursor) break;
+        const auto next = scanCursor + count;
+        const auto opcode = (header >> 8u) & 0xffu;
+
+        if (Pm4::FillerPacket(header) || Pm4::PureNopPacket(header)) {
+            scanCursor = next;
+            continue;
+        }
+
+        if (Pm4::DrawOpcode(opcode)) {
+            if (Pm4::IndirectDrawOpcode(opcode)) break;
+            const auto packet = std::span(submission.commands).subspan(scanCursor, count);
+            try {
+                auto direct = Pm4::ResolveDraw(packet, scanQueue);
+                if (direct.indirect || direct.indexCount == 0 || direct.instanceCount == 0) break;
+                auto decoded = DecodeDrawDispatch(scanQueue, *submission.shaders, DriverDetail::NullPixelProgramAddress());
+                if (decoded.state.stages.path != Graphics::ShaderPath::Vertex ||
+                    decoded.state.rectList || decoded.state.stages.mesh.has_value()) {
+                    break;
+                }
+
+                auto target = nativeTarget(nativeDevice, std::nullopt);
+                std::vector<MemoryRegion> memory;
+                std::vector<LinkedProgram> linked;
+                for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
+                    const auto& program = decoded.programs[i];
+                    memory.insert(memory.end(), program.memory.begin(), program.memory.end());
+                    linked.push_back({decoded.roles[i], program.binary, program.userDataBase, program.firstUserSgpr, program.userData});
+                }
+                ShaderMemory capture(memory);
+                std::vector<RecompileResult> programs;
+                programs.reserve(decoded.programs.size());
+                std::vector<Graphics::CompiledShader> stages;
+                stages.reserve(decoded.programs.size());
+                std::uint32_t pushOffset = 0;
+                for (std::size_t i = 0; i < decoded.programs.size(); ++i) {
+                    if (decoded.roles[i] == ProgramRole::GeometryBack) continue;
+                    const auto& program = decoded.programs[i];
+                    std::optional<ShaderVertexStageInfo> vertex;
+                    if (program.binary.stage != ShaderStage::Fragment) {
+                        vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData);
+                        if (vertex) {
+                            vertex->paClVsOutCntl = PositionExportLayout(program.binary.code, decoded.state.paClVsOutCntl);
+                            if ((vertex->paClVsOutCntl & 0xff00u) != 0) break;
+                        }
+                    }
+                    auto request = BuildDrawRecompileRequest(program.binary, program.firstUserSgpr, program.userData,
+                        decoded.state, decoded.pixel, vertex, target, pushOffset, direct, memory, linked);
+                    request.context.floatMode = DriverDetail::HeaderFloatMode(program.snapshot->type,
+                        program.snapshot->headerAddress, program.snapshot->header);
+                    const auto resources = capture.Capture(request);
+                    memory = capture.Regions();
+                    request.context.memory = memory;
+                    programs.push_back(*Recompile(request, *resources));
+                    const auto& result = programs.back();
+                    stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushOffset});
+                    pushOffset += static_cast<std::uint32_t>(result.pushConstants.size());
+                    if (i == 0) FoldDrawOffsets(result, program.firstUserSgpr, program.userData, direct);
+                }
+
+                if (stages.size() < 2) break;
+
+                auto prepared = draw->PrepareCachedDraw(decoded.state, direct, stages, ranges);
+                if (!prepared) break;
+
+                if (!targetPassKey) {
+                    targetPassKey = prepared->cachedRecord->passKey;
+                } else if (!MetalEncoders::Continues(*targetPassKey, prepared->cachedRecord->passKey)) {
+                    break;
+                }
+
+                batch.push_back(std::move(*prepared));
+                scanCursor = next;
+            } catch (...) {
+                break;
+            }
+        } else if (RegisterOnlyPacket(opcode) || opcode == 0x28 || opcode == 0x2f || opcode == 0x59 || opcode == 0x81) {
+            try {
+                Pm4::Execute(std::span(submission.commands).subspan(scanCursor, count), scanQueue);
+                scanCursor = next;
+            } catch (...) {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    if (batch.size() < MetalDraw::MinParallelDraws) {
+        return false;
+    }
+
+    if (timeline.UnknownWritesPending()) {
+        ++drainsBy[0x100];
+        timeline.Drain(0x100);
+    }
+
+    checkGpuFault(runInWorkingSet(draw->HostAliases(), ranges, [&] {
+        return draw->DrawBatchParallel(batch, ranges, DeferWork() ? &timeline : nullptr, nullptr)
+            .value_or(BdaAbi::Fault{});
+    }));
+
+    queue = std::move(scanQueue);
+    cursor = scanCursor;
+    return true;
+}
+
 bool MetalDriver::Impl::DeferLabelStore(std::span<const std::uint32_t> packet, std::uint32_t queueId) {
     const auto opcode = (packet[0] >> 8u) & 0xffu;
     const bool interrupt = opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0;
@@ -854,6 +974,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         borrowCurrentRanges();
         CheckFailureAndStopping();
         CompletePriorGpuWorkAndCopyBack();
+        drawAhead.Retire(submission.serial);
         return;
     }
     if (BindTrace::Active()) {
@@ -861,6 +982,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             static_cast<unsigned long long>(submission.serial), submission.commands.size(), submission.flips.size());
     }
     if (PacketCensus::Enabled()) PacketCensus::NoteSubmission(submission);
+    drawAhead.Post(submission, queue, draw.get(), nativeDevice);
     for (std::size_t cursor = 0; cursor < submission.commands.size();) {
         progress.fetch_add(1, std::memory_order_relaxed);
         CheckFailureAndStopping();
@@ -996,6 +1118,10 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             }
             Pm4::NoteDispatchRegisters(packet, queue);
         } else if (Pm4::DrawOpcode(opcode)) {
+            drawAhead.Progress(submission.serial, cursor);
+            if (TryExecuteDrawBatch(cursor, queue, submission)) {
+                continue;
+            }
             Tolerate(SkippedDraw, [&] { ExecuteDrawSynchronously(queue, packet, submission); });
         } else if (opcode == 0x3c || opcode == 0x93) {
             if (timeline.Empty()) pendingLabels.clear();
@@ -1110,6 +1236,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
         ForgetCachedImages(ForgetReason::Submission);
     }
     borrowed.reset();
+    drawAhead.Retire(submission.serial);
     if (submission.rewindTail != nullptr) ExecuteRewindTail(submission, queue);
 }
 

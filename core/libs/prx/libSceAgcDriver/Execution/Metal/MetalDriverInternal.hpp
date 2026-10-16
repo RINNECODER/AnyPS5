@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalDraw.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalTimeline.hpp"
+#include "MetalDrawAhead.hpp"
 #include "PacketStoreRange.hpp"
 #include <array>
 #include <atomic>
@@ -173,6 +174,8 @@ struct MetalDriver::Impl {
     void ExecuteDispatchSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission,
         std::optional<std::uint64_t> indirectArguments = std::nullopt);
     void ExecuteDrawSynchronously(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission);
+    bool TryExecuteDrawBatch(std::size_t& cursor, QueueState& queue, const Submission& submission);
+    MetalDrawAhead drawAhead;
     void ExecuteRewindTail(const Submission& submission, QueueState& queue);
     void WaitForQueueRoom(std::uint32_t queue);
     template <typename Work>

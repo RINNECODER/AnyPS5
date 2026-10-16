@@ -62,6 +62,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
     ${rosettaAgcDriver}/Execution/src/DisplayFormat.cpp
     ${rosettaAgcDriver}/Execution/Metal/MetalDriver.mm
     ${rosettaAgcDriver}/Execution/Metal/MetalPacketExecution.mm
+    ${rosettaAgcDriver}/Execution/Metal/MetalDrawAhead.mm
     ${rosettaAgcDriver}/Execution/Metal/DirectDriver.mm
     ${rosettaAgcDriver}/Execution/Metal/AgcFrameCapture.mm
     ${rosettaAgcDriver}/Graphics/src/ComputeStageInfo.cpp

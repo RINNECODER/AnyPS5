@@ -195,6 +195,15 @@ id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassD
     return [commands renderCommandEncoderWithDescriptor:pass];
 }
 
+id<MTLParallelRenderCommandEncoder> ParallelRender(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass) {
+    auto& slot = parked();
+    std::lock_guard lock(slot.mutex);
+    if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    FlushUploadBlitsLocked(slot, commands);
+    ++slot.statistics.parallelPasses;
+    return [commands parallelRenderCommandEncoderWithDescriptor:pass];
+}
+
 id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass,
                                           const PassKey& key, bool mergeable, bool* merged) {
     if (merged != nullptr) *merged = false;
