@@ -751,6 +751,24 @@ void DeferPipelineStage(PreparedShaderState& prepared, const ShaderSnapshot& sna
     prepared.deferred = true;
 }
 
+std::optional<std::string> FailedRegistration(const ShaderSnapshot& snapshot) {
+    std::unique_lock lock(snapshot.prepared->mutex);
+    try {
+        AwaitRegisteredPreparation(*snapshot.prepared, lock);
+    } catch (const std::exception& error) {
+        return error.what();
+    }
+    return std::nullopt;
+}
+
+bool DeferFailedRegistration(const ShaderSnapshot& snapshot) {
+    const auto failure = FailedRegistration(snapshot);
+    if (!failure) return false;
+    std::lock_guard lock(snapshot.prepared->mutex);
+    DeferPipelineStage(*snapshot.prepared, snapshot, failure->c_str());
+    return true;
+}
+
 #ifdef __GLIBC__
 void trimFreedMemory() {
     static std::atomic<std::int64_t> last{0};
@@ -1037,11 +1055,15 @@ std::vector<PreparedGraphicsStage> PrepareGraphicsStages(const DrawDecode& decod
         const auto& program = decoded.programs[index];
         const bool fragment = program.binary.stage == ShaderRecompiler::ShaderStage::Fragment;
         const auto wave = fragment ? decoded.state.stages.fragmentWaveSize : decoded.state.stages.vertexWaveSize;
-        std::optional<ShaderRecompiler::ShaderVertexStageInfo> vertex;
-        if (!fragment) vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, nullptr, true, 8u - program.firstUserSgpr);
         pushOffset = Graphics::StagePushOffset(pushOffset, program.binary.stage, fixedSlots);
         const auto offset = pushOffset;
         const auto room = (fixedSlots && fragment ? Graphics::PipelinePushSlotBytes : capacity) - pushOffset % Graphics::PipelinePushSlotBytes;
+        if (deferUnprepared && DeferFailedRegistration(*program.snapshot)) {
+            prepared.push_back({program.snapshot, {program.codeOffset, nullptr}, program.binary.stage, offset, nullptr});
+            continue;
+        }
+        std::optional<ShaderRecompiler::ShaderVertexStageInfo> vertex;
+        if (!fragment) vertex = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, nullptr, true, 8u - program.firstUserSgpr);
         ShaderRecompiler::RecompileRequest request{program.binary, {wave, program.firstUserSgpr, program.userData, {}, fragment ? std::optional(decoded.pixel) : std::nullopt, vertex, memory, RegisteredFloatMode(*program.snapshot)}, target, {0, 0, offset, room}, ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, decoded.state.stages.mesh, decoded.state.stages.tessellation, {}}};
         std::vector<std::uint64_t> key;
         ShaderRecompiler::BuildPreparedShaderKey(request, key);
@@ -1091,7 +1113,6 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
             require(registry != nullptr && registry->contains(address), "graphics ABI refers to an unregistered shader");
             const auto selected = RegisteredHeader(*registry, shader);
             require(selected != nullptr, "graphics ABI refers to a replaced shader header");
-            if (owner == nullptr) owner = selected;
             selectedStages.push_back(selected);
             const auto& snapshot = *selected;
             require(snapshot.registeredState != nullptr, "registered shader state is missing");
@@ -1110,6 +1131,13 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
     for (const auto reg : primitive) state.userConfig.insert_or_assign(reg.offset, reg.value);
     const auto localDevice = device.Load();
     require(localDevice != nullptr, "graphics ABI device is missing");
+    for (const auto& selected : selectedStages) {
+        if (!DeferFailedRegistration(*selected) && owner == nullptr) owner = selected;
+    }
+    if (owner == nullptr) {
+        transaction.Commit();
+        return;
+    }
     struct GraphicsAbiKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, GraphicsAbiKeyStorage>();
     BuildRegisteredAbiKey(state, *localDevice, key);
@@ -1119,7 +1147,7 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
         for (const auto& stage : abi.stages) {
             const auto snapshot = stage.lock();
             require(snapshot != nullptr, "prepared graphics ABI lost a registered stage");
-            if (snapshot->type != 1) ResolvePreparedGraphics(*snapshot, {}, primitiveType == state.userConfig.end() ? 0u : primitiveType->second, localDevice->Target());
+            if (snapshot->type != 1) ResolvePreparedGraphics(*snapshot, {}, primitiveType == state.userConfig.end() ? 0u : primitiveType->second, localDevice->Target(), true);
         }
         transaction.Commit();
         return;
@@ -1142,7 +1170,7 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
     }
     for (const auto& stage : prepared) {
         if (stage.snapshot->type == 1) continue;
-        ResolvePreparedGraphics(*stage.snapshot, {}, primitiveType == state.userConfig.end() ? 0u : primitiveType->second, localDevice->Target());
+        ResolvePreparedGraphics(*stage.snapshot, {}, primitiveType == state.userConfig.end() ? 0u : primitiveType->second, localDevice->Target(), true);
     }
     PreparedShaderState::GraphicsAbi abi{key, registry, {}};
     for (const auto& stage : prepared) abi.stages.push_back(stage.snapshot);
@@ -1181,6 +1209,10 @@ void Driver::ResolveShaderAbi(const Shader* shader, std::span<const ShaderRegist
     for (const auto reg : primitive) state.userConfig[reg.offset] = reg.value;
     const auto localDevice = device.Load();
     require(localDevice != nullptr, "shader registration device is missing");
+    if (DeferFailedRegistration(*snapshot)) {
+        transaction.Commit();
+        return;
+    }
     struct RegisteredAbiKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, RegisteredAbiKeyStorage>();
     BuildRegisteredAbiKey(state, *localDevice, key);
@@ -1232,7 +1264,7 @@ void Driver::ResolveGraphicsAbi(const Shader* vertex, const Shader* pixel, std::
     require(front != fragment, "rectangle stages refer to the same shader");
     const auto localDevice = device.Load();
     require(localDevice != nullptr, "shader registration device is missing");
-    ResolvePreparedGraphics(*front, fragment, primitiveType, localDevice->Target());
+    ResolvePreparedGraphics(*front, fragment, primitiveType, localDevice->Target(), true);
     transaction.Commit();
 }
 
@@ -1246,15 +1278,19 @@ void Driver::SettleShaderPreparations(std::span<const Shader* const> stages) {
             if (auto snapshot = RegisteredHeader(*shaders, shader)) snapshots.push_back(std::move(snapshot));
         }
     }
-    for (const auto& snapshot : snapshots) {
-        std::unique_lock lock(snapshot->prepared->mutex);
-        AwaitRegisteredPreparation(*snapshot->prepared, lock);
-    }
+    for (const auto& snapshot : snapshots) static_cast<void>(FailedRegistration(*snapshot));
 }
 
-void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target) {
+void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target, bool deferUnprepared) {
     ShaderPreparationTransaction transaction;
     require(fragment.get() != &front, "rectangle stages refer to the same shader");
+    if (deferUnprepared) {
+        const bool frontFailed = DeferFailedRegistration(front);
+        if ((fragment != nullptr && DeferFailedRegistration(*fragment)) || frontFailed) {
+            transaction.Commit();
+            return;
+        }
+    }
     std::vector<std::shared_ptr<const ShaderSnapshot>> fragments;
     {
         const auto& current = transaction.Read(front);

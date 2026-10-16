@@ -720,6 +720,10 @@ alignas(256) constexpr std::array<std::uint32_t, 64> WaterfallVertexCode{
     0xf0000f08u, 0x00040401u, 0x8a7e087eu, 0xbf89fff7u, 0xbefe0306u, 0xbf8a0000u, 0xbf8c3f70u, 0xf80008cfu,
     0x07060504u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 64> OtherWaterfallVertexCode = WaterfallVertexCode;
+alignas(256) constexpr std::array<std::uint32_t, 64> BarrierFreeWaterfallVertexCode{
+    0x7e020280u, 0x7e040280u, 0xbe86037eu, 0xf40c0404u, 0xfa000000u, 0xd4c10008u, 0x00020083u, 0xbf8cc07fu,
+    0xf0000f08u, 0x00040401u, 0x8a7e087eu, 0xbf89fff7u, 0xbefe0306u, 0xbf800000u, 0xbf8c3f70u, 0xf80008cfu,
+    0x07060504u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 11> FrontCode{0x7e0002ffu, 0, 0x7e0202ffu, 0, 0x7e0402ffu, 0, 0x7e0602ffu, 0x3f800000u, 0xf80008cfu, 0x03020100u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 64> UndecodablePixelCode{0xf1949f05u, 0x00060018u, 0xbf810000u};
 
@@ -765,12 +769,47 @@ void AbiDeferredCompute() {
     AgcDriverWaitIdle_nid_postfix();
     AgcDriver::GuestMemory::FlushGpuWrites(output, sizeof(CallerOutput));
     Require(std::ranges::all_of(CallerOutput, [](std::uint32_t lane) { return lane == 3u * (5u + 64u); }), "a compute shader its static ABI deferred did not run its user-data callees at its dispatch");
+    AgcDriverShutdown_nid_postfix();
+}
+
+void AbiDeferredRegistrationFailure() {
     static AbiHeader store;
     DescribeAbi(store, WaterfallStoreCode, 0, {{0x20c, ProgramLow(WaterfallStoreCode.data())}, {0x20d, ProgramHigh(WaterfallStoreCode.data())}, {0x207, 64}, {0x208, 1}, {0x209, 1}, {0x212, 0}, {0x213, 2u << 1u}}, {});
     store.shader.specials = &store.specials;
-    AgcDriverRegisterShader_nid_postfix(&store.shader);
-    ExpectFailure([&] { AgcDriverResolveShaderAbi_nid_postfix(&store.shader, {}, {}); }, "is not a valid runtime value");
-    AgcDriverShutdown_nid_postfix();
+    static AbiHeader front;
+    DescribeFront(front);
+    static AbiHeader pixel;
+    DescribeWaterfallPixel(pixel);
+    pixel.context[0] = {0x1b6, 0};
+    static AbiHeader vertex;
+    DescribeWaterfallVertex(vertex, BarrierFreeWaterfallVertexCode);
+    static AbiHeader interpolated;
+    DescribeWaterfallPixel(interpolated);
+    for (auto* header : {&store, &front, &pixel, &vertex, &interpolated}) AgcDriverRegisterShader_nid_postfix(&header->shader);
+    const std::array<ShaderRegister, 1> primitive{{{0x242, 4}}};
+    const std::array<const Shader*, 2> frontStages{&front.shader, &pixel.shader};
+    const std::array<const Shader*, 2> vertexStages{&vertex.shader, &interpolated.shader};
+    const auto resolve = [&] {
+        AgcDriver::ShaderPreparationScope scope({&front.shader, &pixel.shader, &vertex.shader});
+        AgcDriverResolveShaderAbi_nid_postfix(&store.shader, {}, {});
+        AgcDriverResolveShaderAbi_nid_postfix(&pixel.shader, {}, {});
+        AgcDriverResolveGraphicsAbi_nid_postfix(&front.shader, &pixel.shader, 17);
+        AgcDriverResolveGraphicsStagesAbi_nid_postfix(frontStages, {}, primitive);
+        AgcDriverResolveGraphicsStagesAbi_nid_postfix(vertexStages, {}, primitive);
+        AgcDriverResolveGraphicsAbi_nid_postfix(&vertex.shader, &interpolated.shader, 17);
+        scope.Commit();
+    };
+    auto log = Logged(resolve);
+    Require(Deferrals(log) == 3 && log.find("is not a valid runtime value") != std::string::npos, "stages whose registration preparation failed were not deferred once each, with the stored reason, when the title created their pipelines");
+    log = Logged(resolve);
+    Require(Deferrals(log) == 0, "stages whose registration preparation failed were logged again for the same pipelines");
+    std::vector<std::uint32_t> commands;
+    for (std::size_t index = 0; index < store.shader.num_sh_registers; ++index) commands.insert(commands.end(), {0xc0017600u, store.registers[index].offset, store.registers[index].value});
+    commands.insert(commands.end(), {0xc0031500u, 1, 1, 1, 0x8041u});
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    sceAgcDriverSubmitAcb(0x20, &packet);
+    ExpectFailure([] { AgcDriverWaitIdle_nid_postfix(); }, "is not a valid runtime value");
+    ExpectFailure([] { AgcDriverShutdown_nid_postfix(); }, "is not a valid runtime value");
 }
 
 void AbiDeferredPixel() {
@@ -883,7 +922,7 @@ void AbiDeferredUndecodableState() {
 int main(int argc, char** argv) {
     try {
         const std::string_view abiMode = argc == 2 ? argv[1] : "";
-        const bool abiDeferred = abiMode == "--abi-deferred-compute" || abiMode == "--abi-deferred-pixel" || abiMode == "--abi-deferred-stages" || abiMode == "--abi-deferred-rectangle" || abiMode == "--abi-deferred-undecodable-state";
+        const bool abiDeferred = abiMode == "--abi-deferred-compute" || abiMode == "--abi-deferred-pixel" || abiMode == "--abi-deferred-stages" || abiMode == "--abi-deferred-rectangle" || abiMode == "--abi-deferred-undecodable-state" || abiMode == "--abi-deferred-registration-failure";
         Require(argc == 1 || abiDeferred || (argc == 2 && (std::string_view(argv[1]) == "--indirect" || std::string_view(argv[1]) == "--fail-before-registration" || std::string_view(argv[1]) == "--deferred" || std::string_view(argv[1]) == "--deferred-undecodable")), "invalid test arguments");
         if (abiDeferred) {
             if (!OpenVulkanTestDevice()) return VulkanTestSkipped;
@@ -891,6 +930,7 @@ int main(int argc, char** argv) {
             else if (abiMode == "--abi-deferred-pixel") AbiDeferredPixel();
             else if (abiMode == "--abi-deferred-stages") AbiDeferredStages();
             else if (abiMode == "--abi-deferred-undecodable-state") AbiDeferredUndecodableState();
+            else if (abiMode == "--abi-deferred-registration-failure") AbiDeferredRegistrationFailure();
             else AbiDeferredRectangle();
             std::cout << "shader ABI deferral tests passed: " << abiMode << '\n';
             return 0;
