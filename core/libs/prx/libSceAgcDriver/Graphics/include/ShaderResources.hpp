@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace AgcDriver { class VulkanDevice; }
@@ -559,6 +560,7 @@ private:
     void noteMiss(const Key& key);
     void noteEvicted(const Key& key);
     void noteReturn(const Key& key);
+    void noteUse(const Key& key);
     struct KeyHash {
         std::size_t operator()(const Key& key) const noexcept {
             std::uint64_t hash = 14695981039346656037ull;
@@ -575,6 +577,12 @@ private:
     std::unordered_map<std::size_t, decltype(evictedOrder)::iterator> evictedKeys;
     std::size_t evictionsSinceCheck = 0;
     std::size_t returnsSinceCheck = 0;
+    std::unordered_set<std::size_t> usedKeys;
+    std::size_t usesSinceCheck = 0;
+    static constexpr std::size_t InitialShrinkWindow = 8;
+    static constexpr std::size_t MaximumShrinkWindow = 1024;
+    std::size_t shrinkWindow = InitialShrinkWindow;
+    bool shrankLast = false;
 };
 
 // The process-wide cache the device and the draw path share (keys name the device; a device clears

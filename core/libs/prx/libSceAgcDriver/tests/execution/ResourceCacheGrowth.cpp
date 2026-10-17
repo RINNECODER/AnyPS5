@@ -31,6 +31,8 @@ using AgcDriver::Graphics::Require;
 
 constexpr std::uint32_t Dispatches = 1536;
 constexpr std::uint32_t Passes = 4;
+constexpr std::uint32_t HotDispatches = 64;
+constexpr std::uint32_t HotRepeats = 640;
 constexpr std::size_t SrtBytes = 64;
 constexpr std::size_t OutputBytes = 256;
 constexpr std::size_t SrtOffset = 4096;
@@ -88,10 +90,11 @@ void Prepare(const GuestBlock& block) {
     std::memset(block.Bytes(OutputOffset), 0, static_cast<std::size_t>(Dispatches) * OutputBytes);
 }
 
-void RunPass(const GuestBlock& block) {
+void RunPass(const GuestBlock& block, std::uint32_t count = Dispatches, std::uint32_t repeats = 1) {
     const auto kernel = block.At(0);
     std::vector<std::uint32_t> words;
-    for (std::uint32_t dispatch = 0; dispatch < Dispatches; ++dispatch) {
+    for (std::uint32_t use = 0; use < count * repeats; ++use) {
+        const auto dispatch = use % count;
         const auto srt = block.At(SrtOffset + static_cast<std::size_t>(dispatch) * SrtBytes);
         for (const auto& packet : {Pm4(0x76, {0x20c, static_cast<std::uint32_t>(kernel >> 8u)}), Pm4(0x76, {0x20d, static_cast<std::uint32_t>(kernel >> 40u) & 0xffu}), Pm4(0x76, {0x207, 64}), Pm4(0x76, {0x208, 1}), Pm4(0x76, {0x209, 1}), Pm4(0x76, {0x213, 2u << 1u}), Pm4(0x76, {0x240, static_cast<std::uint32_t>(srt)}), Pm4(0x76, {0x241, static_cast<std::uint32_t>(srt >> 32u)}), Pm4(0x15, {1, 1, 1, 0x41})}) {
             words.insert(words.end(), packet.begin(), packet.end());
@@ -117,6 +120,32 @@ void WorkingSetLargerThanTheInitialBound(const GuestBlock& block) {
     Require(kept >= Dispatches, "resource cache growth: " + std::to_string(Dispatches) + " dispatches with distinct resources repeated " + std::to_string(Passes) + " times in turn, but the resource cache kept only " + std::to_string(kept) + " entries (initial bound " + std::to_string(InitialEntries) + "), so every pass rebuilt every set");
 }
 
+void BoundComesBackDown(const GuestBlock& block) {
+    auto& cache = AgcDriver::Graphics::SharedResourceCache();
+    const auto grown = cache.Capacity();
+    Require(grown > InitialEntries, "resource cache growth: the bound stayed at " + std::to_string(grown) + " entries after the large working set");
+    RunPass(block, HotDispatches, HotRepeats);
+    const auto shrunk = cache.Capacity();
+    Require(shrunk < grown, "resource cache growth: " + std::to_string(HotDispatches) + " sets served " + std::to_string(HotDispatches * HotRepeats) + " dispatches, but the bound stayed at " + std::to_string(shrunk) + " entries");
+
+    const std::uint32_t records = OutputBytes / 2;
+    std::memcpy(block.Bytes(SrtOffset + 8), &records, sizeof(records));
+    RunPass(block, 1);
+    Require(cache.Size() <= shrunk, "resource cache growth: the bound came down to " + std::to_string(shrunk) + " entries, but the next insert left " + std::to_string(cache.Size()));
+
+    for (std::uint32_t pass = 0; pass < Passes; ++pass) RunPass(block);
+    const auto regrown = cache.Capacity();
+    Require(regrown > shrunk, "resource cache growth: the bound did not grow again when the large working set came back");
+    RunPass(block, HotDispatches, HotRepeats);
+    Require(cache.Capacity() == regrown, "resource cache growth: the bound came down again after the same hot pass, although the last shrink had been undone");
+
+    cache.Clear();
+    Require(cache.Capacity() == InitialEntries, "resource cache growth: Clear() left the bound at " + std::to_string(cache.Capacity()) + " entries instead of " + std::to_string(InitialEntries));
+    Prepare(block);
+    for (std::uint32_t pass = 0; pass < Passes; ++pass) RunPass(block);
+    Require(cache.Capacity() > InitialEntries, "resource cache growth: after Clear() the large working set did not grow the bound again");
+}
+
 }
 
 int main() {
@@ -128,6 +157,7 @@ int main() {
         GuestBlock block;
         Prepare(block);
         WorkingSetLargerThanTheInitialBound(block);
+        BoundComesBackDown(block);
         AgcDriverShutdown_nid_postfix();
         std::puts("resource cache growth tests passed");
         return 0;
