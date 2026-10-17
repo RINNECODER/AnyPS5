@@ -459,6 +459,7 @@ id<MTLTexture> MetalDraw::residentDepthArray(const Graphics::GuestTextureResourc
         resource.lastLevel != 0 || resource.samples > 1 || resource.depthOrLastArray < resource.baseArray) {
         return nil;
     }
+    depthCache->MarkSampled(resource.baseAddress);
     const auto base = std::find_if(depthSurfaces.rbegin(), depthSurfaces.rend(), [&](const auto& surface) { return surface->Target().address == resource.baseAddress; });
     if (base == depthSurfaces.rend()) return nil;
     const auto baseSurface = *base;  // depthSurfaces may grow below
@@ -529,6 +530,7 @@ id<MTLTexture> MetalDraw::residentTexture(const Graphics::GuestTextureResource& 
 
 id<MTLTexture> MetalDraw::residentView(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const {
     const unsigned expectedSamples = Force1xMsaaEnabled() ? 1 : resource.samples;
+    depthCache->MarkSampled(resource.baseAddress);
     for (auto cursor = depthSurfaces.rbegin(); cursor != depthSurfaces.rend(); ++cursor) {
         const auto& surface = *cursor;
         const auto& target = surface->Target();
@@ -1829,7 +1831,6 @@ std::optional<MetalDraw::PreparedDraw> MetalDraw::PrepareCachedDraw(
     const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
     std::span<const NativeGuestMemory::BorrowedRange> ranges) {
-    std::lock_guard<std::recursive_mutex> lock(drawMutex);
     Graphics::State state = inputState;
     if (Force1xMsaaEnabled()) {
         if (state.rasterSamples > 1) {
@@ -1939,9 +1940,10 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
 
     const std::size_t totalDraws = draws.size();
     const std::size_t availableWorkers = MetalWorkerPool::Shared().WorkerCount();
+    constexpr std::size_t minChunk = 16;
     const std::size_t numWorkers = std::clamp<std::size_t>(
-        std::min<std::size_t>(totalDraws / 2, availableWorkers),
-        2, 8);
+        std::min<std::size_t>((totalDraws + minChunk - 1) / minChunk, availableWorkers),
+        1, 8);
 
     std::vector<id<MTLRenderCommandEncoder>> subEncoders;
     subEncoders.reserve(numWorkers);
