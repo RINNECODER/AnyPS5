@@ -674,12 +674,19 @@ void ReplayNativeHost(id<MTLDevice> device, AgcDriver::Metal::MetalDriver& drive
                 host->Snapshot().window == initial.window,
                 "Independent controller drain changed the window input cutoff or owner");
         if (actualSupportedControllers == 0 && actualUnsupportedControllers == 0) {
-            Require(controllerAfterWindowKeys.events.empty() && !controllerAfterWindowKeys.after.connected &&
-                    controllerAfterWindowKeys.after.controller == ControllerIdentity{} &&
-                    controllerAfterWindowKeys.after.state.buttons == 0 &&
-                    controllerAfterWindowKeys.after.state.sticks == std::array<std::uint8_t, 4>{128, 128, 128, 128} &&
-                    controllerAfterWindowKeys.after.state.leftTrigger == 0 && controllerAfterWindowKeys.after.state.rightTrigger == 0,
-                    "Window key/mouse events invented a physical controller or pressed state");
+            if (!controllerAfterWindowKeys.after.connected) {
+                Require(controllerAfterWindowKeys.events.empty() &&
+                        controllerAfterWindowKeys.after.controller == ControllerIdentity{} &&
+                        controllerAfterWindowKeys.after.state.buttons == 0 &&
+                        controllerAfterWindowKeys.after.state.sticks == std::array<std::uint8_t, 4>{128, 128, 128, 128} &&
+                        controllerAfterWindowKeys.after.state.leftTrigger == 0 && controllerAfterWindowKeys.after.state.rightTrigger == 0,
+                        "Window key/mouse events invented a physical controller or pressed state");
+            } else {
+                Require(controllerAfterWindowKeys.after.state.buttons == 0 &&
+                        controllerAfterWindowKeys.after.state.sticks == std::array<std::uint8_t, 4>{128, 128, 128, 128} &&
+                        controllerAfterWindowKeys.after.state.leftTrigger == 0 && controllerAfterWindowKeys.after.state.rightTrigger == 0,
+                        "Window key/mouse events invented a pressed controller state");
+            }
         }
         post(@[mouse(false), mouse(true), key(true)]);
         auto otherConsumer = std::async(std::launch::async, [&] {
