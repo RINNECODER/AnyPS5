@@ -869,6 +869,10 @@ void SubmitRegistrationPreparation(std::function<void()> task) {
     RegistrationPreparePool::Instance().Submit(std::move(task));
 }
 
+void AwaitLibraryPrebuilds() {
+    if (auto* pool = RegistrationPreparePool::ExistingPrebuild()) pool->AwaitSubmitted();
+}
+
 void CloseRegistrationPreparation() {
     RegistrationPreparePool::Instance().Close();
 }

@@ -51,6 +51,7 @@ struct LibraryStore {
     std::condition_variable work;
     std::deque<std::pair<VkDevice, std::function<void()>>> jobs;
     std::map<VkDevice, std::size_t> pending;
+    std::map<VkDevice, std::size_t> activeBuilds;
     bool started = false;
 };
 
@@ -104,7 +105,17 @@ std::span<const VkDynamicState> PipelineLibraryDynamicStates() {
 VkPipeline LinkPipelineFromLibraries(const Context& context, const VkGraphicsPipelineCreateInfo& info, const VkPipelineRenderingCreateInfoKHR& rendering, const VkPipelineLayoutCreateInfo& layout, const PipelineLibraryKeys& keys, std::shared_ptr<OptimizedPipeline>* optimized, std::span<VkShaderModule> modules) {
     Require(info.renderPass == VK_NULL_HANDLE && info.pDynamicState != nullptr, "pipeline library parts need dynamic rendering and the library dynamic states");
     auto& store = Libraries();
-    std::lock_guard lock(store.mutex);
+    std::unique_lock lock(store.mutex);
+    ++store.activeBuilds[context.device];
+    struct ActiveBuild {
+        LibraryStore& store;
+        VkDevice device;
+        std::unique_lock<std::mutex>& lock;
+        ~ActiveBuild() {
+            if (!lock.owns_lock()) lock.lock();
+            if (--store.activeBuilds[device] == 0) store.idle.notify_all();
+        }
+    } activeBuild{store, context.device, lock};
     auto& device = store.devices[context.device];
     if (device.destroyPipeline == nullptr) {
         device.destroyPipeline = context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline");
@@ -248,7 +259,7 @@ void WaitForOptimizedPipelines(VkDevice device) {
 void ClearPipelineLibraries(VkDevice device) {
     auto& store = Libraries();
     std::unique_lock lock(store.mutex);
-    store.idle.wait(lock, [&] { return store.pending[device] == 0; });
+    store.idle.wait(lock, [&] { return store.pending[device] == 0 && store.activeBuilds[device] == 0; });
     const auto found = store.devices.find(device);
     if (found == store.devices.end()) return;
     auto& libraries = found->second;

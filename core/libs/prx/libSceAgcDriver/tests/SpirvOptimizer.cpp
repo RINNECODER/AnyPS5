@@ -541,6 +541,7 @@ int main() {
     const char* mode = std::getenv("APS5_SPIRV_OPT");
     const bool optimizationEnabled = mode == nullptr || std::string(mode) != "none";
     testNarrowConversions(optimizationEnabled);
+    testLargeFunctionArray();
     testSpecializedSelectionExitSpirv16();
     testLargeFunctionArray();
     testInvalidInputIsRejected();
