@@ -711,6 +711,101 @@ bool WholeVertexRangesBindable(std::span<const ShaderRecompiler::VertexAttribute
 
 }
 
+void MetalDraw::PopulateTranslationKey(DrawTranslationKey& key,
+    const Graphics::State& state,
+    const Pm4::DrawParameters& draw,
+    const Graphics::CompiledShader* vertex,
+    const Graphics::CompiledShader* fragment) {
+    key.vertexVariantId = vertex->program->PipelineVariantId();
+    key.fragmentVariantId = fragment->program->PipelineVariantId();
+    key.vertexPushOffset = vertex->pushConstantOffset;
+    key.fragmentPushOffset = fragment->pushConstantOffset;
+
+    key.stagesRegisterValue = state.stages.registerValue;
+    key.stagesPath = static_cast<std::uint32_t>(state.stages.path);
+    key.vertexWaveSize = state.stages.vertexWaveSize;
+    key.fragmentWaveSize = state.stages.fragmentWaveSize;
+    key.rasterSamples = state.rasterSamples;
+    key.topology = static_cast<std::uint32_t>(state.topology);
+    key.primitiveRestart = state.primitiveRestart;
+    key.negativeOneToOne = state.negativeOneToOne;
+    key.flipVertexY = state.viewport.height > 0;
+
+    key.depthTest = state.depthTest;
+    key.depthWrite = state.depthWrite;
+    key.depthCompare = static_cast<std::uint32_t>(state.depthCompare);
+    key.stencilTest = state.stencilTest;
+    key.stencilFront = state.stencilFront;
+    key.stencilBack = state.stencilBack;
+
+    key.renderExtentWidth = state.renderExtent.width;
+    key.renderExtentHeight = state.renderExtent.height;
+    key.customSampleLocations = state.customSampleLocations;
+    key.sampleLocations = state.sampleLocations;
+
+    if (state.colors.size() > key.colors.capacity()) key.colors.reserve(state.colors.size());
+    for (const auto& color : state.colors) {
+        key.colors.push_back({
+            .exportIndex = color.exportIndex,
+            .format = static_cast<std::uint32_t>(color.format),
+            .samples = color.samples,
+            .packing = static_cast<std::uint32_t>(color.packing),
+            .uintExport = color.uintExport,
+            .address = color.address,
+            .mip = color.mip,
+            .depthSlice = color.depthSlice,
+        });
+    }
+
+    if (state.depth) {
+        key.depth = DrawTranslationKey::DepthTargetInfo{
+            .address = state.depth->address,
+            .stencilAddress = state.depth->stencilAddress,
+            .format = static_cast<std::uint32_t>(state.depth->format),
+            .samples = state.depth->samples,
+            .slice = state.depth->slice,
+            .lastSlice = state.depth->lastSlice,
+            .layered = state.layered,
+        };
+    }
+
+    if (state.blends.size() > key.blends.capacity()) key.blends.reserve(state.blends.size());
+    for (const auto& b : state.blends) {
+        key.blends.push_back({
+            .blendEnable = b.blendEnable,
+            .srcColorBlendFactor = b.srcColorBlendFactor,
+            .dstColorBlendFactor = b.dstColorBlendFactor,
+            .colorBlendOp = b.colorBlendOp,
+            .srcAlphaBlendFactor = b.srcAlphaBlendFactor,
+            .dstAlphaBlendFactor = b.dstAlphaBlendFactor,
+            .alphaBlendOp = b.alphaBlendOp,
+            .colorWriteMask = b.colorWriteMask,
+        });
+    }
+
+    const auto attributeCount = vertex->program->vertexAttributes.size();
+    if (attributeCount > key.attributes.capacity()) key.attributes.reserve(attributeCount);
+    for (const auto& attr : vertex->program->vertexAttributes) {
+        key.attributes.push_back({
+            .location = attr.location,
+            .fetchIndex = attr.fetchIndex,
+            .fields = attr.resource.fields,
+        });
+    }
+
+    for (const auto& binding : vertex->program->bindings) {
+        key.guestDescriptorWords.insert(key.guestDescriptorWords.end(),
+            binding.guestDescriptor.begin(), binding.guestDescriptor.end());
+    }
+    for (const auto& binding : fragment->program->bindings) {
+        key.guestDescriptorWords.insert(key.guestDescriptorWords.end(),
+            binding.guestDescriptor.begin(), binding.guestDescriptor.end());
+    }
+
+    key.indexed = draw.indexed;
+    key.nativeIndexSize = draw.indexSize;
+}
+
 std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
     std::span<const NativeGuestMemory::BorrowedRange> ranges,
@@ -895,99 +990,13 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                            gpuIndirect == nullptr && !fanPath &&
                            (!nativeStrip || nativeRestart) &&
                            draw.IndexReadCount() == draw.indexCount;
-    DrawTranslationKey key;
+    scratchKey.Clear();
     if (cacheable) {
-        key.vertexVariantId = vertex->program->PipelineVariantId();
-        key.fragmentVariantId = fragment->program->PipelineVariantId();
-        key.vertexPushOffset = vertex->pushConstantOffset;
-        key.fragmentPushOffset = fragment->pushConstantOffset;
-
-        key.stagesRegisterValue = state.stages.registerValue;
-        key.stagesPath = static_cast<std::uint32_t>(state.stages.path);
-        key.vertexWaveSize = state.stages.vertexWaveSize;
-        key.fragmentWaveSize = state.stages.fragmentWaveSize;
-        key.rasterSamples = state.rasterSamples;
-        key.topology = static_cast<std::uint32_t>(state.topology);
-        key.primitiveRestart = state.primitiveRestart;
-        key.negativeOneToOne = state.negativeOneToOne;
-        key.flipVertexY = state.viewport.height > 0;
-
-        key.depthTest = state.depthTest;
-        key.depthWrite = state.depthWrite;
-        key.depthCompare = static_cast<std::uint32_t>(state.depthCompare);
-        key.stencilTest = state.stencilTest;
-        key.stencilFront = state.stencilFront;
-        key.stencilBack = state.stencilBack;
-
-        key.renderExtentWidth = state.renderExtent.width;
-        key.renderExtentHeight = state.renderExtent.height;
-        key.customSampleLocations = state.customSampleLocations;
-        key.sampleLocations = state.sampleLocations;
-
-        key.colors.reserve(state.colors.size());
-        for (const auto& color : state.colors) {
-            key.colors.push_back({
-                .exportIndex = color.exportIndex,
-                .format = static_cast<std::uint32_t>(color.format),
-                .samples = color.samples,
-                .packing = static_cast<std::uint32_t>(color.packing),
-                .uintExport = color.uintExport,
-                .address = color.address,
-                .mip = color.mip,
-                .depthSlice = color.depthSlice,
-            });
-        }
-
-        if (state.depth) {
-            key.depth = DrawTranslationKey::DepthTargetInfo{
-                .address = state.depth->address,
-                .stencilAddress = state.depth->stencilAddress,
-                .format = static_cast<std::uint32_t>(state.depth->format),
-                .samples = state.depth->samples,
-                .slice = state.depth->slice,
-                .lastSlice = state.depth->lastSlice,
-                .layered = state.layered,
-            };
-        }
-
-        key.blends.reserve(state.blends.size());
-        for (const auto& b : state.blends) {
-            key.blends.push_back({
-                .blendEnable = b.blendEnable,
-                .srcColorBlendFactor = b.srcColorBlendFactor,
-                .dstColorBlendFactor = b.dstColorBlendFactor,
-                .colorBlendOp = b.colorBlendOp,
-                .srcAlphaBlendFactor = b.srcAlphaBlendFactor,
-                .dstAlphaBlendFactor = b.dstAlphaBlendFactor,
-                .alphaBlendOp = b.alphaBlendOp,
-                .colorWriteMask = b.colorWriteMask,
-            });
-        }
-
-        key.attributes.reserve(vertex->program->vertexAttributes.size());
-        for (const auto& attr : vertex->program->vertexAttributes) {
-            key.attributes.push_back({
-                .location = attr.location,
-                .fetchIndex = attr.fetchIndex,
-                .fields = attr.resource.fields,
-            });
-        }
-
-        for (const auto& binding : vertex->program->bindings) {
-            key.guestDescriptorWords.insert(key.guestDescriptorWords.end(),
-                binding.guestDescriptor.begin(), binding.guestDescriptor.end());
-        }
-        for (const auto& binding : fragment->program->bindings) {
-            key.guestDescriptorWords.insert(key.guestDescriptorWords.end(),
-                binding.guestDescriptor.begin(), binding.guestDescriptor.end());
-        }
-
-        key.indexed = draw.indexed;
-        key.nativeIndexSize = draw.indexSize;
+        PopulateTranslationKey(scratchKey, state, draw, vertex, fragment);
     }
 
     const auto imageCacheClears = ImageCache() ? ImageCache()->TakeStatistics(false).clears : 0;
-    auto cached = cacheable ? translationCache.Find(key, memoryVersion, imageCacheClears) : nullptr;
+    auto cached = cacheable ? translationCache.Find(scratchKey, memoryVersion, imageCacheClears) : nullptr;
     if (cached != nullptr) {
         MetalBufferBinding indexBuffer;
         if (draw.indexed) {
@@ -1725,7 +1734,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         record->fragmentPushBytes = vertexPipeline->FragmentReflection().pushConstantBytes;
         record->memoryVersion = memoryVersion;
         record->imageCacheClears = imageCacheClears;
-        record->key = std::move(key);
+        record->key = scratchKey;
 
         const auto& chunks = resources.UploadChunks();
         if (!chunks.empty()) {
@@ -1856,97 +1865,11 @@ std::optional<MetalDraw::PreparedDraw> MetalDraw::PrepareCachedDraw(
                            draw.IndexReadCount() == draw.indexCount;
     if (!cacheable) return std::nullopt;
 
-    DrawTranslationKey key;
-    key.vertexVariantId = vertex->program->PipelineVariantId();
-    key.fragmentVariantId = fragment->program->PipelineVariantId();
-    key.vertexPushOffset = vertex->pushConstantOffset;
-    key.fragmentPushOffset = fragment->pushConstantOffset;
-
-    key.stagesRegisterValue = state.stages.registerValue;
-    key.stagesPath = static_cast<std::uint32_t>(state.stages.path);
-    key.vertexWaveSize = state.stages.vertexWaveSize;
-    key.fragmentWaveSize = state.stages.fragmentWaveSize;
-    key.rasterSamples = state.rasterSamples;
-    key.topology = static_cast<std::uint32_t>(state.topology);
-    key.primitiveRestart = state.primitiveRestart;
-    key.negativeOneToOne = state.negativeOneToOne;
-    key.flipVertexY = state.viewport.height > 0;
-
-    key.depthTest = state.depthTest;
-    key.depthWrite = state.depthWrite;
-    key.depthCompare = static_cast<std::uint32_t>(state.depthCompare);
-    key.stencilTest = state.stencilTest;
-    key.stencilFront = state.stencilFront;
-    key.stencilBack = state.stencilBack;
-
-    key.renderExtentWidth = state.renderExtent.width;
-    key.renderExtentHeight = state.renderExtent.height;
-    key.customSampleLocations = state.customSampleLocations;
-    key.sampleLocations = state.sampleLocations;
-
-    key.colors.reserve(state.colors.size());
-    for (const auto& color : state.colors) {
-        key.colors.push_back({
-            .exportIndex = color.exportIndex,
-            .format = static_cast<std::uint32_t>(color.format),
-            .samples = color.samples,
-            .packing = static_cast<std::uint32_t>(color.packing),
-            .uintExport = color.uintExport,
-            .address = color.address,
-            .mip = color.mip,
-            .depthSlice = color.depthSlice,
-        });
-    }
-
-    if (state.depth) {
-        key.depth = DrawTranslationKey::DepthTargetInfo{
-            .address = state.depth->address,
-            .stencilAddress = state.depth->stencilAddress,
-            .format = static_cast<std::uint32_t>(state.depth->format),
-            .samples = state.depth->samples,
-            .slice = state.depth->slice,
-            .lastSlice = state.depth->lastSlice,
-            .layered = state.layered,
-        };
-    }
-
-    key.blends.reserve(state.blends.size());
-    for (const auto& b : state.blends) {
-        key.blends.push_back({
-            .blendEnable = b.blendEnable,
-            .srcColorBlendFactor = b.srcColorBlendFactor,
-            .dstColorBlendFactor = b.dstColorBlendFactor,
-            .colorBlendOp = b.colorBlendOp,
-            .srcAlphaBlendFactor = b.srcAlphaBlendFactor,
-            .dstAlphaBlendFactor = b.dstAlphaBlendFactor,
-            .alphaBlendOp = b.alphaBlendOp,
-            .colorWriteMask = b.colorWriteMask,
-        });
-    }
-
-    key.attributes.reserve(vertex->program->vertexAttributes.size());
-    for (const auto& attr : vertex->program->vertexAttributes) {
-        key.attributes.push_back({
-            .location = attr.location,
-            .fetchIndex = attr.fetchIndex,
-            .fields = attr.resource.fields,
-        });
-    }
-
-    for (const auto& binding : vertex->program->bindings) {
-        key.guestDescriptorWords.insert(key.guestDescriptorWords.end(),
-            binding.guestDescriptor.begin(), binding.guestDescriptor.end());
-    }
-    for (const auto& binding : fragment->program->bindings) {
-        key.guestDescriptorWords.insert(key.guestDescriptorWords.end(),
-            binding.guestDescriptor.begin(), binding.guestDescriptor.end());
-    }
-
-    key.indexed = draw.indexed;
-    key.nativeIndexSize = draw.indexSize;
+    scratchKey.Clear();
+    PopulateTranslationKey(scratchKey, state, draw, vertex, fragment);
 
     const auto imageCacheClears = ImageCache() ? ImageCache()->TakeStatistics(false).clears : 0;
-    auto cached = translationCache.Find(key, memoryVersion, imageCacheClears);
+    auto cached = translationCache.Find(scratchKey, memoryVersion, imageCacheClears);
     if (cached == nullptr || cached->renderPass == nil) return std::nullopt;
 
     MetalBufferBinding indexBuffer;

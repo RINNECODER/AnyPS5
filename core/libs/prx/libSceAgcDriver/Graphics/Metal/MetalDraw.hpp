@@ -131,6 +131,11 @@ private:
     [[nodiscard]] id<MTLTexture> residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare);
     [[nodiscard]] id<MTLTexture> residentDepthArray(const Graphics::GuestTextureResource& resource, bool storage);
     [[nodiscard]] id<MTLTexture> residentView(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const;
+    void PopulateTranslationKey(DrawTranslationKey& key,
+        const Graphics::State& state,
+        const Pm4::DrawParameters& draw,
+        const Graphics::CompiledShader* vertex,
+        const Graphics::CompiledShader* fragment);
     std::unique_ptr<MetalDevice> ownedBackend;
     MetalDevice& backend;
     std::unique_ptr<MetalDepthSurfaceCache> depthCache;
@@ -171,6 +176,7 @@ private:
         }
     };
     EncoderDrawState lastEncoderState;
+    DrawTranslationKey scratchKey;
 };
 
 }
