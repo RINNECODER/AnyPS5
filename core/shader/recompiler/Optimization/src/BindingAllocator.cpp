@@ -162,7 +162,7 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
     }
 
     if (!info.samplers.empty()) {
-        if (info.samplers.size() > RuntimeAbi::SamplerHeapCapacity / 2u) fail("shader sampler pairs exceed runtime heap capacity");
+        if (info.samplers.size() > RuntimeAbi::SamplerHeapCapacity / 2u) fail("shader sampler pairs exceed runtime heap capacity: " + std::to_string(info.samplers.size()) + " samplers");
         std::vector<std::uint32_t> resources(info.samplers.size() * 2u);
         for (std::uint32_t i = 0; i < resources.size(); i++) {
             resources[i] = i / 2u;

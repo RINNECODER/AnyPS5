@@ -129,7 +129,15 @@ uint2 blockExtent() {
 }
 
 void copyElement(uint src, uint dst, device const uint* inputBuffer, device uint* outputBuffer) {
-    if (ELEMENT_BYTES >= 4u) {
+    if (ELEMENT_BYTES == 16u) {
+        *reinterpret_cast<device packed_uint4*>(reinterpret_cast<device char*>(outputBuffer) + dst) =
+            *reinterpret_cast<device const packed_uint4*>(reinterpret_cast<device const char*>(inputBuffer) + src);
+    } else if (ELEMENT_BYTES == 8u) {
+        *reinterpret_cast<device packed_uint2*>(reinterpret_cast<device char*>(outputBuffer) + dst) =
+            *reinterpret_cast<device const packed_uint2*>(reinterpret_cast<device const char*>(inputBuffer) + src);
+    } else if (ELEMENT_BYTES == 4u) {
+        outputBuffer[dst >> 2] = inputBuffer[src >> 2];
+    } else if (ELEMENT_BYTES > 16u) {
         for (uint i = 0u; i < ELEMENT_BYTES; i += 4u) {
             outputBuffer[(dst + i) >> 2] = inputBuffer[(src + i) >> 2];
         }
@@ -202,10 +210,17 @@ struct TextureTransferParameters {
 };
 
 uint4 readElement(uint byteOffset, device const uint* buffer) {
-    if (ELEMENT_BYTES >= 4u) {
+    if (ELEMENT_BYTES == 16u) {
+        return uint4(*reinterpret_cast<device const packed_uint4*>(reinterpret_cast<device const char*>(buffer) + byteOffset));
+    } else if (ELEMENT_BYTES == 8u) {
+        auto val = *reinterpret_cast<device const packed_uint2*>(reinterpret_cast<device const char*>(buffer) + byteOffset);
+        return uint4(val.x, val.y, 0u, 0u);
+    } else if (ELEMENT_BYTES == 4u) {
+        return uint4(buffer[byteOffset >> 2], 0u, 0u, 0u);
+    } else if (ELEMENT_BYTES > 16u) {
         uint4 value = uint4(0u);
         uint words = ELEMENT_BYTES / 4u;
-        for (uint i = 0u; i < words; ++i) {
+        for (uint i = 0u; i < words && i < 4u; ++i) {
             value[i] = buffer[(byteOffset >> 2) + i];
         }
         return value;
@@ -215,9 +230,18 @@ uint4 readElement(uint byteOffset, device const uint* buffer) {
 }
 
 void writeElement(uint byteOffset, uint4 value, device uint* buffer) {
-    if (ELEMENT_BYTES >= 4u) {
+    if (ELEMENT_BYTES == 16u) {
+        *reinterpret_cast<device packed_uint4*>(reinterpret_cast<device char*>(buffer) + byteOffset) = (packed_uint4)value;
+        return;
+    } else if (ELEMENT_BYTES == 8u) {
+        *reinterpret_cast<device packed_uint2*>(reinterpret_cast<device char*>(buffer) + byteOffset) = (packed_uint2)value.xy;
+        return;
+    } else if (ELEMENT_BYTES == 4u) {
+        buffer[byteOffset >> 2] = value.x;
+        return;
+    } else if (ELEMENT_BYTES > 16u) {
         uint words = ELEMENT_BYTES / 4u;
-        for (uint i = 0u; i < words; ++i) {
+        for (uint i = 0u; i < words && i < 4u; ++i) {
             buffer[(byteOffset >> 2) + i] = value[i];
         }
         return;

@@ -93,6 +93,25 @@ int HostPoll(KernelSocketPoll::Entry* descriptors, int count, int timeoutMillise
     return result;
 }
 
+#else
+
+int HostPoll(KernelSocketPoll::Entry* descriptors, int count, int timeoutMilliseconds) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMilliseconds);
+    for (;;) {
+        int ready = 0;
+        for (int index = 0; index < count; ++index) {
+            auto& entry = descriptors[index];
+            if (!DescriptorIsOpen_nid_no_patch(entry.descriptor)) return -GuestEbadf;
+            if (!GuestSockets::PipeReady(entry.descriptor, entry.events, entry.revents)) {
+                NotImplemented_nid_no_patch(("select on descriptor " + std::to_string(entry.descriptor) + " (neither a socket nor a pipe)").c_str());
+            }
+            if (entry.revents != 0) ++ready;
+        }
+        if (ready > 0 || std::chrono::steady_clock::now() >= deadline) return ready;
+        PreciseSleepUntil(std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(1)));
+    }
+}
+
 #endif
 
 }
