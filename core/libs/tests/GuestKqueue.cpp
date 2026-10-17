@@ -60,6 +60,7 @@ static constexpr std::uint16_t EvForceoneshot = 0x0100;
 static constexpr std::uint16_t EvError = 0x4000;
 static constexpr std::uint16_t EvEof = 0x8000;
 static constexpr std::uint32_t NoteTrigger = 0x01000000;
+static constexpr std::uint32_t NoteLowat = 0x0001;
 static constexpr std::uint32_t NoteFfcopy = 0xc0000000;
 static constexpr std::uint32_t NoteFfor = 0x80000000;
 static constexpr std::uint32_t NoteUseconds = 0x0004;
@@ -270,6 +271,40 @@ static void SocketPair() {
     Require(close_nid_postfix(pair[0]) == 0);
     RequireFailure(Apply(kq, Change(static_cast<std::uintptr_t>(pair[0]), EvfiltRead, EvDelete)), GuestEbadf);
     Require(close_nid_postfix(pair[1]) == 0);
+    Require(close_nid_postfix(kq) == 0);
+}
+
+static void LowWaterMarks() {
+    const int kq = kqueue_nid_postfix();
+    int pair[2];
+    Require(socketpair_nid_postfix(Unix, Stream, 0, pair) == 0);
+    const auto reader = static_cast<std::uintptr_t>(pair[0]);
+    KernelEvent events[4]{};
+    Require(Apply(kq, Change(reader, EvfiltRead, EvAdd, NoteLowat, 4)) == 0);
+    Require(send_nid_postfix(pair[1], "ab", 2, 0) == 2);
+    Require(Poll(kq, events, 4) == 0);
+    Require(send_nid_postfix(pair[1], "cd", 2, 0) == 2);
+    Require(Wait(kq, events, 4) == 1 && events[0].ident == reader && events[0].filter == EvfiltRead && events[0].data == 4);
+    Require(Apply(kq, Change(reader, EvfiltRead, EvAdd, NoteLowat, 8)) == 0);
+    Require(Poll(kq, events, 4) == 0);
+    Require(Apply(kq, Change(reader, EvfiltRead, EvAdd)) == 0);
+    Require(Poll(kq, events, 4) == 1 && events[0].data == 4);
+    Require(Apply(kq, Change(reader, EvfiltRead, EvAdd, NoteLowat, 8)) == 0);
+    Require(Poll(kq, events, 4) == 0);
+    Require(Apply(kq, Change(static_cast<std::uintptr_t>(pair[1]), EvfiltWrite, EvAdd | EvOneshot, NoteLowat, 1)) == 0);
+    Require(Wait(kq, events, 4) == 1 && events[0].filter == EvfiltWrite);
+    Require(Throws([kq, &pair] { Apply(kq, Change(static_cast<std::uintptr_t>(pair[1]), EvfiltWrite, EvAdd, NoteLowat, 2)); }));
+    Require(Throws([kq, reader] { Apply(kq, Change(reader, EvfiltRead, EvAdd, NoteLowat, 0)); }));
+    Require(close_nid_postfix(pair[1]) == 0);
+    Require(Poll(kq, events, 4) == 1 && events[0].ident == reader && (events[0].flags & EvEof) != 0);
+    Require(close_nid_postfix(pair[0]) == 0);
+    int pipe[2];
+    Require(pipe_nid_postfix(pipe) == 0);
+    Require(Apply(kq, Change(static_cast<std::uintptr_t>(pipe[0]), EvfiltRead, EvAdd, NoteLowat, 64)) == 0);
+    Require(Poll(kq, events, 4) == 0);
+    Require(write_nid_postfix(pipe[1], "e", 1) == 1);
+    Require(Poll(kq, events, 4) == 1 && events[0].data == 1);
+    Require(close_nid_postfix(pipe[0]) == 0 && close_nid_postfix(pipe[1]) == 0);
     Require(close_nid_postfix(kq) == 0);
 }
 
@@ -604,6 +639,7 @@ int main() {
     SocketPair();
     DisableAndDispatch();
     Errors();
+    LowWaterMarks();
     FileWatch();
 #ifndef _WIN32
     RenameAndDeleteWatchedFile();

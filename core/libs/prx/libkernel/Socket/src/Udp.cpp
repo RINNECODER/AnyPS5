@@ -413,6 +413,18 @@ int GuestSockets::Family(int descriptor) {
     const auto found = sockets.find(descriptor);
     return found == sockets.end() ? -1 : found->second->family;
 }
+bool GuestSockets::Listening(int descriptor) {
+    std::shared_ptr<Socket> socket;
+    {
+        std::lock_guard lock(socketsMutex);
+        const auto found = sockets.find(descriptor);
+        if (found == sockets.end()) return false;
+        socket = found->second;
+    }
+    int accepting = 0;
+    socklen_t length = sizeof(accepting);
+    return getsockopt(socket->value, SOL_SOCKET, SO_ACCEPTCONN, reinterpret_cast<char*>(&accepting), &length) == 0 && accepting != 0;
+}
 
 extern "C" bool GuestSocketIsOpen_nid_no_patch(int descriptor) {
     return GuestSockets::IsOpen(descriptor);
