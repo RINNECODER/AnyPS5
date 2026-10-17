@@ -225,6 +225,33 @@ void OwnLabelTests() {
     Check(!labels.Holds(0x100, one), "a new submission forgets the driver's stores");
 }
 
+void FastVerifyTests() {
+    std::vector<std::byte> memory(0x40000);
+    auto* host = memory.data();
+    for (std::size_t i = 0; i < memory.size(); ++i) memory[i] = static_cast<std::byte>(i & 0xff);
+
+    Cache cache;
+    cache.SetFastVerify(true);
+    Check(cache.FastVerify(), "fast verify mode is enabled");
+
+    auto big = std::make_shared<FakeTexture>(FakeTexture{{0x0000, 8}, 0x20000});
+    cache.Insert(0x0000, host, big, false);
+    Check(cache.TakeStatistics().hashedBytes == 0, "fast verify insert for large upload does not hash full bytes");
+
+    cache.Expire(1);
+    auto hit = cache.Find(0x0000, host, Descriptor{0x0000, 8});
+    Check(hit && hit->texture == big, "fast verify upload survives expiry when unchanged");
+    Check(cache.TakeStatistics().hashedBytes == 0, "fast verify verification does not hash full bytes");
+
+    std::fill(memory.begin(), memory.begin() + 0x20000, std::byte{0});
+    cache.Expire(1);
+    Check(!cache.Find(0x0000, host, Descriptor{0x0000, 8}), "fast verify drops surface when cleared");
+
+    auto small = std::make_shared<FakeTexture>(FakeTexture{{0x30000, 8}, 0x1000});
+    cache.Insert(0x30000, host + 0x30000, small, false);
+    Check(cache.TakeStatistics().hashedBytes == 0x1000, "fast verify still hashes small surfaces <= 4096 bytes");
+}
+
 }
 
 int main() {
@@ -234,6 +261,7 @@ int main() {
     FingerprintTests();
     StoreRangeTests();
     OwnLabelTests();
+    FastVerifyTests();
     if (failures != 0) {
         std::printf("%d failure(s)\n", failures);
         return EXIT_FAILURE;

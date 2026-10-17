@@ -397,6 +397,9 @@ MetalDraw::MetalDraw(std::unique_ptr<MetalDevice> owned, MetalDevice* shared)
     if (![backend.Device() supportsFamily:MTLGPUFamilyApple7] || ![backend.Device() supportsFamily:MTLGPUFamilyMetal3]) {
         throw std::invalid_argument("Metal draw requires an Apple GPU with Metal 3 integer and GPU address support");
     }
+    const char* fastVerifyEnv = std::getenv("ANYPS5_METAL_FAST_IMAGE_VERIFY");
+    const bool fastVerify = (fastVerifyEnv == nullptr || std::string_view(fastVerifyEnv) != "0");
+    imageCache.SetFastVerify(fastVerify);
 }
 
 MetalDraw::~MetalDraw() = default;
