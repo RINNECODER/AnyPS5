@@ -321,16 +321,15 @@ std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
     return result;
 }
 
+constexpr int GuestEfault = 14;
+
 int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
-    if (path == nullptr) {
-        throw std::invalid_argument(std::string(__func__) + ": path is null");
-    }
+    if (path == nullptr) return SceErrorFromErrno(GuestEfault);
     if (*path == '\0') return SceErrorFromErrno(2);
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native, true)) return SceKernelError(error);
     std::error_code error;
     constexpr int GuestEnotdir = 20;
-    constexpr int GuestEfault = 14;
     const auto status = std::filesystem::status(native, error);
     if (error == std::errc::not_a_directory) return SceErrorFromErrno(GuestEnotdir);
     if (error == std::errc::filename_too_long || error == std::errc::too_many_symbolic_link_levels) return SceKernelError(FilesystemError(error));
@@ -345,9 +344,7 @@ int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
 }
 
 int APS5_VABI sceKernelUnlink(const char* path) {
-    if (path == nullptr) {
-        throw std::invalid_argument(std::string(__func__) + ": path is null");
-    }
+    if (path == nullptr) return SceErrorFromErrno(GuestEfault);
     if (*path == '\0') return SceErrorFromErrno(2);
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
