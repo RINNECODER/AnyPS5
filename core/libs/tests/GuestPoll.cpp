@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
+#include <string>
 #include <thread>
 struct PollDescriptor {
     int descriptor;
@@ -22,6 +23,9 @@ std::int64_t APS5_VABI send_nid_postfix(int, const void*, std::uint64_t, int);
 std::int64_t APS5_VABI recv_nid_postfix(int, void*, std::uint64_t, int);
 int APS5_VABI close_nid_postfix(int);
 int APS5_VABI open_nid_postfix(const char*, int, int);
+int APS5_VABI mkdir_nid_postfix(const char*, unsigned short);
+int APS5_VABI rmdir_nid_postfix(const char*);
+int APS5_VABI unlink_nid_postfix(const char*);
 int APS5_VABI poll_nid_postfix(PollDescriptor*, std::uint32_t, int);
 int APS5_VABI pipe_nid_postfix(int*);
 std::int64_t APS5_VABI read_nid_postfix(int, void*, std::uint64_t);
@@ -34,6 +38,33 @@ constexpr short Out = 0x4;
 constexpr short Hup = 0x10;
 constexpr short Invalid = 0x20;
 constexpr short ReadNormal = 0x40;
+constexpr short WriteBand = 0x100;
+static void PollsFilesAndDirectories(int socket) {
+    constexpr int ReadWrite = 0x0002, Create = 0x0200, DirectoryFlag = 0x00020000;
+    const auto stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const std::string filePath = "anyps5-poll-file-" + stamp;
+    const std::string directoryPath = "anyps5-poll-directory-" + stamp;
+    const int file = open_nid_postfix(filePath.c_str(), ReadWrite | Create, 0644);
+    Require(file >= 0);
+    Require(mkdir_nid_postfix(directoryPath.c_str(), 0755) == 0);
+    const int directory = open_nid_postfix(directoryPath.c_str(), DirectoryFlag, 0);
+    Require(directory >= 0);
+    PollDescriptor vnode{file, static_cast<short>(In | Out | ReadNormal | Priority | ReadBand | WriteBand), -1};
+    Require(poll_nid_postfix(&vnode, 1, 0) == 1 && vnode.revents == (In | Out | ReadNormal));
+    vnode.events = static_cast<short>(Priority | ReadBand | WriteBand);
+    Require(poll_nid_postfix(&vnode, 1, 0) == 0 && vnode.revents == 0);
+    const auto start = std::chrono::steady_clock::now();
+    Require(poll_nid_postfix(&vnode, 1, 30) == 0);
+    Require(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(25));
+    PollDescriptor folder{directory, static_cast<short>(In | Out), -1};
+    Require(poll_nid_postfix(&folder, 1, -1) == 1 && folder.revents == (In | Out));
+    PollDescriptor mixed[3]{{socket, In, -1}, {file, Out, -1}, {directory, ReadNormal, -1}};
+    Require(poll_nid_postfix(mixed, 3, -1) == 2);
+    Require(mixed[0].revents == 0 && mixed[1].revents == Out && mixed[2].revents == ReadNormal);
+    Require(close_nid_postfix(directory) == 0 && close_nid_postfix(file) == 0);
+    Require(rmdir_nid_postfix(directoryPath.c_str()) == 0 && unlink_nid_postfix(filePath.c_str()) == 0);
+}
+
 static void TestPipes(int socket) {
     int ends[2];
     Require(pipe_nid_postfix(ends) == 0);
@@ -153,6 +184,7 @@ int main() {
     Require(poll_nid_postfix(nullptr, 1, 0) == -1 && *__error_nid_postfix() == 14);
     Require(poll_nid_postfix(&single, 1, -2) == -1 && *__error_nid_postfix() == 22);
     TestPipes(listener);
+    PollsFilesAndDirectories(listener);
     Require(close_nid_postfix(server) == 0);
     const int file = open_nid_postfix("/dev/urandom", 0, 0);
     Require(file >= 0);
