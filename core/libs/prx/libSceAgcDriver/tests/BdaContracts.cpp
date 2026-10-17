@@ -1,4 +1,5 @@
 #include "BdaShader.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
 #include "SpirvBackend/SpirvBda.hpp"
 #include <array>
@@ -33,6 +34,20 @@ std::uint32_t CallSites(const std::vector<std::uint32_t>& spirv, const char* nam
 
 void RunBdaContractTests() {
     using namespace ShaderRecompiler;
+    using AgcDriver::Graphics::SpirvStoresThroughAddresses;
+    AgcDriver::Graphics::Require(!SpirvStoresThroughAddresses(MakeBdaTestShader(0x1000, 32)), "a BDA read was taken for a store through an address");
+    AgcDriver::Graphics::Require(!SpirvStoresThroughAddresses(MakeBdaDwordReadTestShader(0x1000, 4, false, false)), "BDA dword reads were taken for a store through an address");
+    AgcDriver::Graphics::Require(SpirvStoresThroughAddresses(MakeBdaStoreTestShader(0x1000, 7, 32, false)), "a BDA store was not seen");
+    AgcDriver::Graphics::Require(SpirvStoresThroughAddresses(MakeBdaWriteTestShader(0x1000, 7, 32, false)), "a BDA write was not seen");
+    const std::array<std::uint32_t, 2> stored{7u, 9u};
+    AgcDriver::Graphics::Require(SpirvStoresThroughAddresses(MakeBdaDwordWriteTestShader(0x1000, static_cast<std::uint32_t>(stored.size()), stored.data())), "BDA dword writes were not seen");
+    const std::array<std::uint32_t, 5> headerOnly{spv::MagicNumber, 0x00010300u, 0u, 1u, 0u};
+    AgcDriver::Graphics::Require(!SpirvStoresThroughAddresses(headerOnly), "a module without physical pointers was taken for one storing through addresses");
+    const std::array<std::uint32_t, 2> truncated{spv::MagicNumber, 0u};
+    AgcDriver::Graphics::Require(SpirvStoresThroughAddresses(truncated), "an unreadable module was taken for one without stores");
+    auto unparsed = MakeBdaStoreTestShader(0x1000, 7, 32, false);
+    unparsed[5] |= 0xffff0000u;
+    AgcDriver::Graphics::Require(SpirvStoresThroughAddresses(unparsed), "a module with an instruction past its end was taken for one without stores");
     const std::array<std::uint32_t, 3> capabilities{spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
     const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     SpirvTargetOptions target{0x00401000u, 0x00010300u, 32, BdaAbi::Version, capabilities, extensions};
