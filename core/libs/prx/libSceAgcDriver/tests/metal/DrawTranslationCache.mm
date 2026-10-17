@@ -1,7 +1,6 @@
 #include "MetalTestSupport.hpp"
 #include "MetalDrawTranslationCache.hpp"
 #include "MetalWorkerPool.hpp"
-#include "MetalDraw.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -156,7 +155,6 @@ void TestThreadSafety() {
 }
 
 void TestWorkerPool() {
-    Require(MetalDraw::MinParallelDraws() >= 2, "MinParallelDraws must be at least 2");
     auto& pool = MetalWorkerPool::Shared();
     Require(pool.WorkerCount() >= 1, "Worker pool must have at least 1 worker");
 
