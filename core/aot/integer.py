@@ -16,6 +16,16 @@ OPERATIONS = {'inc', 'dec', 'imul', 'sbb', 'adc', 'cdqe', 'cdq', 'cwd', 'cqo', '
               'prefetchnta', 'prefetcht0', 'prefetcht1', 'prefetcht2', 'prefetchw'} | SHIFTS | ROTATES
 
 
+# x86 CRC32 is the CRC32C (Castagnoli) accumulator; AArch64 has it as one instruction per width.
+CRC32_INTRINSICS = {8: 'crc32cb', 16: 'crc32ch', 32: 'crc32cw', 64: 'crc32cx'}
+INTRINSIC_DECLARATIONS = [
+    'declare i32 @llvm.aarch64.crc32cb(i32, i32)',
+    'declare i32 @llvm.aarch64.crc32ch(i32, i32)',
+    'declare i32 @llvm.aarch64.crc32cw(i32, i32)',
+    'declare i32 @llvm.aarch64.crc32cx(i32, i64)',
+]
+
+
 def condition(ins):
     suffix = ins.mnemonic[4:] if ins.mnemonic.startswith('cmov') else ins.mnemonic[3:]
     return ALIASES.get(suffix, suffix)
@@ -41,6 +51,12 @@ def analyze(function, ins, state):
             implicit_define(state, 'rcx', 64)
         return True
     conditional = op.startswith(('cmov', 'set'))
+    if op == 'crc32':
+        if len(args) != 2 or args[0].type != X86_OP_REG or args[0].size not in (4, 8) or args[1].type not in (X86_OP_REG, X86_OP_MEM):
+            function.fail(ins, 'crc32 requires a 32- or 64-bit register destination and a register or memory source')
+        function.read_operand(ins, state, args[1])
+        function.define(ins, state, args[0])
+        return True
     if op not in OPERATIONS and not conditional:
         return False
     if conditional:
@@ -409,6 +425,17 @@ def lower_stos(function, ins):
 def lower(function, ins):
     op, args = ins.mnemonic, ins.operands
     conditional = op.startswith(('cmov', 'set'))
+    if op == 'crc32':
+        width = args[1].size * 8
+        if width not in CRC32_INTRINSICS:
+            function.fail(ins, 'unsupported crc32 source width')
+        accumulator = function.read(ins, args[0], 32)
+        source = function.read(ins, args[1], width)
+        if width < 32:
+            source = function.emit(f'zext i{width} {source} to i32')
+        result = function.emit(f'call i32 @llvm.aarch64.{CRC32_INTRINSICS[width]}(i32 {accumulator}, i{max(width, 32)} {source})')
+        function.write(ins, args[0], result if args[0].size == 4 else function.emit(f'zext i32 {result} to i64'))
+        return True
     if op.startswith('stos') or op.startswith('rep stos'):
         return lower_stos(function, ins)
     if op not in OPERATIONS and not conditional:

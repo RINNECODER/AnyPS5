@@ -427,6 +427,94 @@ class UniformABITests(unittest.TestCase):
         function(ctypes.byref(registers))
         self.assertEqual(registers.gpr[GPR['rax']], 0x2A)
 
+    def native_cell(self, code, initial):
+        """Run the guest bytes natively (x86_64) with rdi -> a one-byte cell; return (rax, cell)."""
+        UniformABITests.serial += 1
+        stem = self.directory / f'cell{UniformABITests.serial}'
+        source = stem.with_suffix('.S')
+        source.write_text('.intel_syntax noprefix\n.text\n.globl _run\n_run:\n'
+                          '  .byte ' + ', '.join(f'0x{byte:02x}' for byte in code) + '\n')
+        runner = stem.with_suffix('.c')
+        runner.write_text('#include <stdint.h>\n#include <stdio.h>\n'
+                          'extern uint64_t run(uint8_t*);\n'
+                          'int main(void){uint8_t cell; uint64_t r;'
+                          'while(fread(&r,1,8,stdin)==8){cell=(uint8_t)r;'
+                          'uint64_t a=run(&cell);'
+                          'printf("%llu %u\\n",(unsigned long long)a,cell);}return 0;}\n')
+        binary = stem.with_suffix('.x86')
+        subprocess.run(['xcrun', 'clang', '-arch', 'x86_64', '-O2', str(source), str(runner), '-o', str(binary)],
+                       check=True, capture_output=True)
+        output = subprocess.run([str(binary)], input=struct.pack('<Q', initial), check=True, capture_output=True).stdout
+        first, second = output.split()
+        return int(first), int(second)
+
+    def test_uniform_cmpxchg_loop_keeps_the_accumulator_defined(self):
+        # 0x1000: mov al,[rdi] ; mov r8d,eax ; add r8d,1 ; lock cmpxchg [rdi],r8b ; jne 0x1000 ;
+        # movsx eax,al ; ret. The loop header merges the entry state with the back edge, where the
+        # byte `cmpxchg` defines only AL. The byte form leaves RAX's upper bits unchanged (the
+        # lowering reloads and recombines them), so the merged state must keep RAX defined; a
+        # narrower mask rejected the 32-bit use `add r8d, ecx` this shape stands in for.
+        code = bytes.fromhex('8a074189c04183c001f0440fb00775f00fbec0c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        reference = self.native_cell(code, 0x40)
+        registers = RegisterFile()
+        cell = ctypes.create_string_buffer(b'\x40', 1)
+        registers.gpr[GPR['rdi']] = ctypes.addressof(cell)
+        function(ctypes.byref(registers))
+        self.assertEqual((registers.gpr[GPR['rax']], cell.raw[0]), reference)
+
+    def test_uniform_unsaved_pop_stays_defined_for_a_wider_use(self):
+        # 0x1000: add rsp,8 ; pop r15 ; shl r15,1 ; mov rax,r15 ; sub rsp,16 ; ret. The popped slot
+        # is the caller's first stack slot, which the lowering loads from the frame; the analysis
+        # has to leave r15 defined, otherwise the 64-bit use `shl r15, 1` rejects the function even
+        # though the emitted code reads a real value.
+        code = bytes.fromhex('4883c408415f49d1e74c89f84883ec10c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        registers = RegisterFile()
+        registers.stack[0] = 0x21
+        function(ctypes.byref(registers))
+        self.assertEqual(registers.gpr[GPR['rax']], 0x42)
+
+    def test_uniform_gather_loads_selected_lanes_and_clears_the_mask(self):
+        # vmovdqu xmm1,[rdi] ; vmovdqu xmm2,[rdi+0x10] ; vmovdqu xmm0,[rdi+0x20] ;
+        # vgatherdps xmm0, [rsi + xmm1*4], xmm2 ; vmovdqu [rdx],xmm0 ;
+        # vmovdqu [rdx+0x10],xmm2 ; ret — a lane whose mask sign bit is set is loaded from the
+        # table, the other lanes keep the destination's previous value, and the mask register is
+        # cleared once the gather completes.
+        code = bytes.fromhex('c5fa6f0fc5fa6f5710c5fa6f4720c4e26992048ec5fa7f02c5fa7f5210c3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        table = (ctypes.c_float * 8)(10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0)
+        setup = ctypes.create_string_buffer(48)
+        ctypes.memmove(setup, (ctypes.c_int32 * 4)(3, 0, 5, 2), 16)
+        ctypes.memmove(ctypes.addressof(setup) + 16, (ctypes.c_int32 * 4)(-1, 0, -1, 0), 16)
+        ctypes.memmove(ctypes.addressof(setup) + 32, (ctypes.c_float * 4)(1.0, 2.0, 3.0, 4.0), 16)
+        output = ctypes.create_string_buffer(32)
+        registers = RegisterFile()
+        registers.gpr[GPR['rdi']] = ctypes.addressof(setup)
+        registers.gpr[GPR['rsi']] = ctypes.addressof(table)
+        registers.gpr[GPR['rdx']] = ctypes.addressof(output)
+        function(ctypes.byref(registers))
+        self.assertEqual(list((ctypes.c_float * 4).from_buffer_copy(output.raw[:16])),
+                         [40.0, 2.0, 60.0, 4.0])
+        self.assertEqual(list((ctypes.c_int32 * 4).from_buffer_copy(output.raw[16:32])),
+                         [0, 0, 0, 0])
+
+    def test_uniform_vstmxcsr_stores_the_default_control_word(self):
+        # vstmxcsr dword ptr [rdi] ; ret — no MXCSR is modelled, so the store publishes the
+        # architectural default (exceptions masked, round to nearest) a save/restore pair expects;
+        # x86 starts a process with exactly this value.
+        code = bytes.fromhex('c5f8ae1fc3')
+        raw, contracts = fixture(code, [uniform_function('sub_1000', 0x1000, len(code))])
+        function, ir, _ = self.compile(raw, contracts, 'sub_1000')
+        output = ctypes.create_string_buffer(4)
+        registers = RegisterFile()
+        registers.gpr[GPR['rdi']] = ctypes.addressof(output)
+        function(ctypes.byref(registers))
+        self.assertEqual(struct.unpack('<I', output.raw[:4])[0], 0x1F80)
+
     def test_uniform_unsaved_pop_of_the_return_address_slot(self):
         # 0x1000: pop r10 ; lea rsp,[rsp+rcx*8+8] ; push r10 ; ret — the popped slot is the guest
         # return-address slot, which the uniform ABI does not model. The function must lower, and

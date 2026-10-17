@@ -787,7 +787,7 @@ class Function:
             state['flags'] = set(FLAGS)
             return state
         if op in ('push', 'pop'):
-            if args[0].size != 8 or (op == 'pop' and args[0].type != X86_OP_REG):
+            if args[0].size != 8 or (op == 'pop' and args[0].type not in (X86_OP_REG, X86_OP_MEM)):
                 self.fail(ins, 'unsupported stack transfer')
             name = self.reg(ins, args[0])[0] if args[0].type == X86_OP_REG else None
             if op == 'push':
@@ -802,6 +802,14 @@ class Function:
                 state['rsp'] -= 8
                 state['saved'][state['rsp']] = (name, state['known'].get(name, 0) if name else MASK64, state['rbp'] if name == 'rbp' else None, state['pointers'].get(name))
                 self.depth = max(self.depth, -state['rsp'] + 128)
+            elif args[0].type == X86_OP_MEM:
+                # `pop m64`: the slot at the guest rsp is the source and an ordinary memory
+                # operand is the destination; only the rsp advance is shared with a register pop.
+                self.read_operand(ins, state, args[0])
+                self.define(ins, state, args[0])
+                if state['rsp'] is not None:
+                    state['saved'].pop(state['rsp'], None)
+                    state['rsp'] += 8
             else:
                 self.stack_pop(ins, state, name)
             return state
@@ -1019,16 +1027,30 @@ class Function:
             return state
         self.fail(ins, 'instruction semantics are not implemented')
 
+    def stack_slot_value(self, state):
+        """The value of the slot at the current guest rsp, for a pop to memory. A slot this
+        function pushed is a frame location; a declared caller window slot is one too; anything
+        else (the guest return-address slot) is not modelled, so it freezes."""
+        if state['rsp'] is None:
+            slot = self.emit(f'inttoptr i64 {self.load("rsp")} to ptr')
+            return self.emit(f'load i64, ptr {slot}, align 1')
+        if abi.UNIFORM_STACK_BASE <= state['rsp'] < abi.uniform_stack_end() or state['rsp'] in state['saved']:
+            return self.emit(f"load i64, ptr {self.frame_pointer(state['rsp'])}, align 1")
+        return self.emit('freeze i64 poison')
+
     def stack_pop(self, ins, state, name):
         """Model `pop name` (also the rbp restore of `leave`): read the slot at the guest rsp and
         advance it. A slot this function never pushed reads a caller-pushed frame slot or freezes."""
         if state['rsp'] is None:
             # Same as push: the transfer happens at the guest rsp, which is a real address in this
-            # ABI, so the destination becomes unknown instead of rejecting the function.
+            # ABI. The lowering loads the slot there, so the destination is a defined value; only
+            # its provenance and (for rbp) its frame offset are unknown.
             if not self.uniform:
                 self.fail(ins, 'unknown stack transfer')
-            for table in ('known', 'constants', 'pointers'):
+            for table in ('constants', 'pointers'):
                 state[table].pop(name, None)
+            state['native_pointers'].discard(name)
+            state['known'][name] = MASK64
             if name == 'rbp':
                 state['rbp'] = None
             return
@@ -1039,12 +1061,13 @@ class Function:
             # The uniform ABI keeps the guest stack in the local frame: the caller's window at
             # offsets [8, 264) and the guest return-address slot below it. A pop of a slot this
             # function never pushed therefore reads a caller-pushed slot (a defined frame location)
-            # or the return-address slot (not modelled). Either way the value is unknown here; the
-            # lowering reads the defined slot or freezes an arbitrary value rather than reading
-            # unwritten memory.
-            for table in ('known', 'constants', 'pointers'):
-                state[table].pop(name, None)
+            # or the return-address slot (not modelled). The lowering loads the defined slot or
+            # freezes an arbitrary but defined value, so the destination is defined either way;
+            # only its provenance and (for rbp) its frame offset are unknown.
+            state['constants'].pop(name, None)
+            state['pointers'].pop(name, None)
             state['native_pointers'].discard(name)
+            state['known'][name] = MASK64
             if name == 'rbp':
                 state['rbp'] = None
             state['rsp'] += 8
@@ -1230,7 +1253,7 @@ class Function:
         if op in ('push', 'pop') and original['rsp'] is None:
             # A dynamic frame: the transfer happens at the guest rsp value, not at a frame slot, so
             # there is no slot bookkeeping and the popped destination loses its provenance.
-            if op == 'pop':
+            if op == 'pop' and args[0].type == X86_OP_REG:
                 state['pointers'].pop(self.reg(ins, args[0])[0], None)
             native.add('rsp')
         elif op == 'push':
@@ -1244,13 +1267,15 @@ class Function:
                 stack.add(offset)
             native.add('rsp')
         elif op == 'pop':
-            if original['rsp'] in original['stack_pointers']:
-                native.add(self.reg(ins, args[0])[0])
-            name = self.reg(ins, args[0])[0]
-            pointer = original['stack_origins'].get(original['rsp'])
-            state['pointers'].pop(name, None)
-            if pointer is not None:
-                state['pointers'][name] = pointer
+            # A pop to memory has no destination register to track, but it still consumes the slot.
+            if args[0].type == X86_OP_REG:
+                name = self.reg(ins, args[0])[0]
+                pointer = original['stack_origins'].get(original['rsp'])
+                state['pointers'].pop(name, None)
+                if pointer is not None:
+                    state['pointers'][name] = pointer
+                if original['rsp'] in original['stack_pointers']:
+                    native.add(name)
             origins.pop(original['rsp'], None)
             stack.discard(original['rsp'])
             native.add('rsp')
@@ -2076,7 +2101,11 @@ class Function:
                             rsp = self.emit(f'sub i64 {rsp}, 8')
                     else:
                         slot = self.emit(f'inttoptr i64 {rsp} to ptr')
-                        self.store(reg, self.emit(f'load i64, ptr {slot}, align 1'))
+                        value = self.emit(f'load i64, ptr {slot}, align 1')
+                        if args[0].type == X86_OP_MEM:
+                            self.write(ins, args[0], value)
+                        else:
+                            self.store(reg, value)
                         rsp = self.emit(f'add i64 {rsp}, 8')
                     self.store('rsp', rsp)
                 elif op == 'push':
@@ -2084,6 +2113,11 @@ class Function:
                         value = self.read(ins, args[0], 64)
                         self.lines.append(f"  store i64 {value}, ptr {self.frame_pointer(state['rsp'] - 8)}, align 1")
                     offset = state['rsp'] - 8
+                elif args[0].type == X86_OP_MEM:
+                    # `pop m64`: the slot value goes to the memory operand (addressed with the rsp
+                    # this pop has not advanced yet), then the rsp advances.
+                    self.write(ins, args[0], self.stack_slot_value(state))
+                    offset = state['rsp'] + 8
                 else:
                     entry = state['saved'].get(state['rsp'])
                     if entry is None:
@@ -2392,7 +2426,7 @@ def compile_image(image, sink=None, emit_bodies=True, analyze=True):
     # The x87 fprem lowering uses fmod; a title may also import it, so declare it once.
     if 'fmod' not in {contract['name'] for contract in image.imports.values()}:
         lines.append('declare double @fmod(double, double)')
-    lines.extend(d for d in avx.INTRINSIC_DECLARATIONS if d not in lines)
+    lines.extend(d for d in avx.INTRINSIC_DECLARATIONS + integer.INTRINSIC_DECLARATIONS if d not in lines)
     if any(abi.uniform(spec) for spec in image.functions.values()):
         lines.append('%%regfile = type { [16 x i64], [16 x i128], [16 x i128], [2 x i64], [8 x double], [1 x i64], [%d x i64] }' % abi.UNIFORM_STACK_SLOTS)
     dispatch_enabled = bool(image.contracts.get('dispatch'))
