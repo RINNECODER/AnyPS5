@@ -2904,7 +2904,12 @@ VkDescriptorSetLayout DescriptorCache::Layout(std::span<const std::uint32_t> key
     ValidateDescriptorLayout(context, bindings, updateAfterBind);
     ++stats.layoutMisses;
     const auto layout = CreateSetLayout(context, bindings, updateAfterBind);
-    layouts.emplace(std::move(keyCopy), layout);
+    try {
+        layouts.emplace(std::move(keyCopy), layout);
+    } catch (...) {
+        destroyLayout(context.device, layout, nullptr);
+        throw;
+    }
     return layout;
 }
 
@@ -2973,6 +2978,7 @@ DescriptorCache::SetAllocation DescriptorCache::Allocate(VkDescriptorSetLayout l
     poolInfo.maxSets = ChainPoolSets;
     poolInfo.poolSizeCount = static_cast<std::uint32_t>(ChainPoolCreateSizes.size());
     poolInfo.pPoolSizes = ChainPoolCreateSizes.data();
+    chain.reserve(chain.size() + 1);
     VkDescriptorPool pool = VK_NULL_HANDLE;
     Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &poolInfo, nullptr, &pool), "vkCreateDescriptorPool");
     chain.push_back({pool});
