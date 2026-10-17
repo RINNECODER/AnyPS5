@@ -2759,6 +2759,10 @@ std::optional<ShaderRecompiler::GeometryStageLimits> VulkanDevice::GeometryLimit
     return ShaderRecompiler::GeometryStageLimits{limits.maxGeometryInputComponents, limits.maxGeometryOutputComponents, limits.maxGeometryOutputVertices, limits.maxGeometryTotalOutputComponents, limits.maxFragmentInputComponents};
 }
 
+std::uint32_t VulkanDevice::MaxFragmentInputComponents() const {
+    return state->properties.limits.maxFragmentInputComponents;
+}
+
 bool VulkanDevice::PrimitiveListRestart() const {
     return state->primitiveListRestart;
 }
