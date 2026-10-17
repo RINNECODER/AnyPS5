@@ -65,6 +65,9 @@ for name in VECTOR_REGISTERS:
     ALIASES[name] = (name, 128, 0)
 TYPES = abi.TYPES
 MASK64 = (1 << 64) - 1
+REGISTER_ALLOCAS = set(REGISTERS) | set(VECTOR_STORAGE)
+_ALLOCA_STORE = re.compile(r'^\s*store i\d+ [^,]+, ptr %([A-Za-z_][A-Za-z_0-9]*),')
+_ALLOCA_LOAD = re.compile(r'^\s*(?:%\w+ = )?load i\d+, ptr %([A-Za-z_][A-Za-z_0-9]*),')
 FLAG_BITS = {'cf': 0, 'pf': 2, 'zf': 6, 'sf': 7, 'of': 11}
 FLAGS = {'zf', 'sf', 'cf', 'of', 'pf'}
 CONDITIONS = {'e': {'zf'}, 'ne': {'zf'}, 'b': {'cf'}, 'ae': {'cf'}, 'a': {'cf', 'zf'},
@@ -408,6 +411,8 @@ class Function:
         self.states = {}
         self.memory_writes = {}
         self.lines = []
+        self.groups = []
+        self.body_start = None
         self.serial = 0
         self.depth = max([128] + [-obj['offset'] for obj in contract.get('stack_objects', [])])
         self.uniform = abi.uniform(contract)
@@ -1569,38 +1574,105 @@ class Function:
     def uniform_gep(self, block, bank, index):
         return self.emit(f'getelementptr inbounds %regfile, ptr {block}, i64 0, i32 {bank}, i64 {index}')
 
-    def uniform_load_registers(self, block, skip=()):
+    def uniform_load_registers(self, block, skip=(), kind='reload'):
+        entries = []
         for index, reg in enumerate(REGISTERS):
             if reg in skip:
                 continue
             gep = self.uniform_gep(block, 0, index)
             value = self.emit(f'load i64, ptr {gep}, align 8')
-            self.lines.append(f'  store i64 {value}, ptr %{reg}, align 8')
+            entries.append((reg, len(self.lines) - 1, f'  store i64 {value}, ptr %{reg}, align 8'))
         for index, reg in enumerate(VECTOR_REGISTERS):
             gep = self.uniform_gep(block, 1, index)
             value = self.emit(f'load i128, ptr {gep}, align 16')
-            self.lines.append(f'  store i128 {value}, ptr %{reg}, align 16')
+            entries.append((reg, len(self.lines) - 1, f'  store i128 {value}, ptr %{reg}, align 16'))
         for index in range(16):
+            name = f'ymm_hi{index}'
             gep = self.uniform_gep(block, 2, index)
             value = self.emit(f'load i128, ptr {gep}, align 16')
-            self.lines.append(f'  store i128 {value}, ptr %ymm_hi{index}, align 16')
+            entries.append((name, len(self.lines) - 1, f'  store i128 {value}, ptr %{name}, align 16'))
+        self.emit_group(kind, entries)
 
     def uniform_store_registers(self, block, rsp=None):
+        entries = []
         for index, reg in enumerate(REGISTERS):
             # The rsp slot carries the guest stack pointer, which the frame pointer only stands in
             # for locally: publishing the frame address would hand a callee a host address, and its
             # own `add/sub rsp, imm` flags would then follow that address (see `outgoing_rsp`).
-            value = rsp if reg == 'rsp' and rsp is not None else self.emit(f'load i64, ptr %{reg}, align 8')
+            if reg == 'rsp' and rsp is not None:
+                value, source = rsp, None
+            else:
+                value = self.emit(f'load i64, ptr %{reg}, align 8')
+                source = len(self.lines) - 1
             gep = self.uniform_gep(block, 0, index)
-            self.lines.append(f'  store i64 {value}, ptr {gep}, align 8')
+            entries.append((reg, source, f'  store i64 {value}, ptr {gep}, align 8'))
         for index, reg in enumerate(VECTOR_REGISTERS):
             value = self.emit(f'load i128, ptr %{reg}, align 16')
             gep = self.uniform_gep(block, 1, index)
-            self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
+            entries.append((reg, len(self.lines) - 2, f'  store i128 {value}, ptr {gep}, align 16'))
         for index in range(16):
-            value = self.emit(f'load i128, ptr %ymm_hi{index}, align 16')
+            name = f'ymm_hi{index}'
+            value = self.emit(f'load i128, ptr %{name}, align 16')
             gep = self.uniform_gep(block, 2, index)
-            self.lines.append(f'  store i128 {value}, ptr {gep}, align 16')
+            entries.append((name, len(self.lines) - 2, f'  store i128 {value}, ptr {gep}, align 16'))
+        self.emit_group('store', entries)
+
+    def emit_group(self, kind, entries):
+        """Append a register-file transfer and remember which register each line carries.
+
+        The load that feeds a store is part of the group: it reads the register alloca, and without
+        this the register would look used everywhere and nothing could be pruned.
+        """
+        group = []
+        for register, source, line in entries:
+            if source is not None:
+                group.append((source, None))
+            group.append((len(self.lines), register))
+            self.lines.append(line)
+        self.groups.append((kind, group))
+
+    def prune_regfile_traffic(self):
+        """Drop the register-file traffic for the registers this function does not use.
+
+        The uniform ABI imports, publishes and reloads the whole register file. A register the
+        function never reads does not need its incoming value, and a register it never writes still
+        holds the caller's value in the shared register file, so writing it back is redundant. The
+        groups recorded while lowering are pruned here, once the whole body is known: a store group
+        keeps only the registers written before it. A call is the one place the allocas go stale
+        without a write of their own, so a reload keeps every register the function goes on to use.
+        """
+        if not self.uniform or self.body_start is None or not self.groups:
+            return
+        grouped = set()
+        for _kind, entries in self.groups:
+            grouped.update(line for line, _register in entries)
+        reads, first_write = set(), {}
+        for index, line in enumerate(self.lines):
+            if index < self.body_start or index in grouped:
+                continue
+            store = _ALLOCA_STORE.match(line)
+            if store:
+                if store.group(1) in REGISTER_ALLOCAS:
+                    first_write.setdefault(store.group(1), index)
+                continue
+            load = _ALLOCA_LOAD.match(line)
+            if load and load.group(1) in REGISTER_ALLOCAS:
+                reads.add(load.group(1))
+        drop = set()
+        for kind, entries in self.groups:
+            for line_index, register in entries:
+                if register is None or register == 'rsp':
+                    continue
+                if kind == 'store':
+                    if first_write.get(register, len(self.lines)) > line_index:
+                        drop.add(line_index)
+                elif kind == 'entry':
+                    if register not in reads:
+                        drop.add(line_index)
+                elif register not in reads and register not in first_write:
+                    drop.add(line_index)
+        if drop:
+            self.lines = [line for index, line in enumerate(self.lines) if index not in drop]
 
     def uniform_load_state(self, block):
         """Load the integer flags and the x87 stack from the register file (entry only)."""
@@ -1703,10 +1775,10 @@ class Function:
         self.lines.append('  call void @llvm.trap()')
         self.lines.append('  unreachable')
         self.lines.append(f'{label}_ok:')
-        self.uniform_store_registers('%rf_out', self.outgoing_rsp(state, 8 if jump else 0))
-        self.uniform_stack_out('%rf_out', state['rsp'], 8 if jump else 0)
-        self.lines.append(f'  call void {native}(ptr %rf_out)')
-        self.uniform_load_registers('%rf_out', skip=('rsp',))
+        self.uniform_store_registers('%rf', self.outgoing_rsp(state, 8 if jump else 0))
+        self.uniform_stack_out('%rf', state['rsp'], 8 if jump else 0)
+        self.lines.append(f'  call void {native}(ptr %rf)')
+        self.uniform_load_registers('%rf', skip=('rsp',))
         if jump:
             self.uniform_store_state('%rf', state['flags'])
             self.uniform_store_registers('%rf')
@@ -1745,11 +1817,11 @@ class Function:
         return repaired
 
     def uniform_call(self, ins, callee, slot, state, tail, result):
-        self.uniform_store_registers('%rf_out', self.outgoing_rsp(state, 8 if tail else 0))
+        self.uniform_store_registers('%rf', self.outgoing_rsp(state, 8 if tail else 0))
         # A tail jmp leaves the guest return address at [rsp], so the callee's window starts one slot
         # above the caller's rsp; a `call` pushes that return address itself, so its window starts at
         # the rsp the args were pushed to.
-        self.uniform_stack_out('%rf_out', state['rsp'], 8 if tail else 0)
+        self.uniform_stack_out('%rf', state['rsp'], 8 if tail else 0)
         if slot == 'operand':
             if ins.address in self.image.finite_tables:
                 target = finite_tables.emit_target(self, ins, self.image.finite_tables[ins.address])
@@ -1759,8 +1831,8 @@ class Function:
                 finite_tables.emit_membership(self, ins, target, ['@' + name for name in self.image.annotated_calls(self.contract)[ins.address]['targets']])
         else:
             target = '@' + callee['name']
-        self.lines.append(f'  call void {target}(ptr %rf_out)')
-        self.uniform_load_registers('%rf_out', skip=('rsp',))
+        self.lines.append(f'  call void {target}(ptr %rf)')
+        self.uniform_load_registers('%rf', skip=('rsp',))
         if tail:
             self.uniform_store_state('%rf', state['flags'])
             self.uniform_store_registers('%rf')
@@ -1795,14 +1867,13 @@ class Function:
             # `add/sub rsp, imm` flag result is defined by the guest value, so the entry copies the
             # incoming rsp here before the frame pointer replaces it in %rsp.
             self.lines.append('  %rsp_guest = alloca i64, align 8')
-            self.lines.append('  %rf_out = alloca %regfile, align 16')
             self.lines.append('  %x87 = alloca [8 x double], align 16')
             self.lines.append('  %x87_top = alloca i32, align 4')
             self.lines.append('  store i32 0, ptr %x87_top, align 4')
             for flag in ('c0', 'c1', 'c2', 'c3'):
                 self.lines.append(f'  %{flag} = alloca i1, align 1')
                 self.lines.append(f'  store i1 false, ptr %{flag}, align 1')
-            self.uniform_load_registers('%rf')
+            self.uniform_load_registers('%rf', kind='entry')
             self.uniform_load_state('%rf')
             self.uniform_stack_in('%rf')
             incoming = self.emit('load i64, ptr %rsp')
@@ -1829,6 +1900,7 @@ class Function:
             self.lines.extend([f'  br i1 {valid}, label %native_fp_valid, label %native_fp_invalid',
                                'native_fp_invalid:', '  call void @llvm.trap()', '  unreachable', 'native_fp_valid:'])
         self.lines.append(f"  br label %b{self.contract['address']:x}")
+        self.body_start = len(self.lines)
         for address in sorted(self.instructions):
             ins = self.instructions[address]
             args, op = ins.operands, ins.mnemonic
@@ -2068,6 +2140,7 @@ class Function:
                 terminal = True
             if not terminal:
                 self.lines.append(f'  br label %b{address + ins.size:x}')
+        self.prune_regfile_traffic()
         self.lines.append('}')
         return '\n'.join(self.lines)
 

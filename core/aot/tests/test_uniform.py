@@ -254,7 +254,7 @@ class UniformABITests(unittest.TestCase):
                      uniform_function('sub_1010', 0x1010, 7)]
         raw, contracts = fixture(bytes(code), functions)
         function, ir, _ = self.compile(raw, contracts, 'sub_1000')
-        self.assertIn('call void @sub_1010(ptr %rf_out)', ir)
+        self.assertIn('call void @sub_1010(ptr %rf)', ir)
         registers = RegisterFile()
         registers.gpr[GPR['rdi']] = 21
         registers.gpr[GPR['rsi']] = 21
@@ -271,7 +271,7 @@ class UniformABITests(unittest.TestCase):
         raw, contracts = fixture(bytes(code), functions)
         function, ir, _ = self.compile(raw, contracts, 'sub_1000')
         self.assertIn('br i1', ir)
-        self.assertIn('call void @sub_1010(ptr %rf_out)', ir)
+        self.assertIn('call void @sub_1010(ptr %rf)', ir)
         registers = RegisterFile()
         registers.gpr[GPR['rdi']] = 0
         function(ctypes.byref(registers))
@@ -290,7 +290,7 @@ class UniformABITests(unittest.TestCase):
                      uniform_function('sub_1010', 0x1010, 4)]
         raw, contracts = fixture(bytes(code), functions)
         function, ir, _ = self.compile(raw, contracts, 'sub_1000')
-        self.assertIn('call void @sub_1010(ptr %rf_out)', ir)
+        self.assertIn('call void @sub_1010(ptr %rf)', ir)
         registers = RegisterFile()
         registers.gpr[GPR['rdi']] = 42
         function(ctypes.byref(registers))
@@ -336,7 +336,7 @@ class UniformABITests(unittest.TestCase):
                      uniform_function('sub_1010', 0x1010, 4)]
         raw, contracts = fixture(bytes(code), functions)
         function, ir, _ = self.compile(raw, contracts, 'sub_1000')
-        self.assertIn('call void @sub_1010(ptr %rf_out)', ir)
+        self.assertIn('call void @sub_1010(ptr %rf)', ir)
         for argument, expected in ((42, 42), (0, 0)):
             registers = RegisterFile()
             registers.gpr[GPR['rdi']] = argument
@@ -439,7 +439,7 @@ class UniformABITests(unittest.TestCase):
                      uniform_function('sub_1010', 0x1010, 1)]
         raw, contracts = fixture(bytes(code), functions)
         function, ir, _ = self.compile(raw, contracts, 'sub_1000')
-        self.assertIn('call void @sub_1010(ptr %rf_out)', ir)
+        self.assertIn('call void @sub_1010(ptr %rf)', ir)
         registers = RegisterFile()
         registers.gpr[GPR['rdi']] = 42
         function(ctypes.byref(registers))
