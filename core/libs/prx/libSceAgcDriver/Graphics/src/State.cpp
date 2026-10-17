@@ -680,7 +680,7 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
     };
     const bool alternate = swap == 1;
     const auto single = [&](VkFormat vkFormat, std::uint32_t bytes) { return DecodedColorFormat{vkFormat, bytes, static_cast<std::uint8_t>((0xe4u & ~3u) | swap)}; };
-    if (swap > 1 && format != 1 && format != 2 && format != 4 && format != 10 && format != 12) return fail();
+    if (swap > 1 && format != 1 && format != 2 && format != 4 && format != 10 && format != 12 && format != 16) return fail();
     switch (format) {
         case 1:
             if (number == unorm) return single(VK_FORMAT_R8_UNORM, 1);
@@ -748,6 +748,9 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
             if (number == floating) return {VK_FORMAT_R32G32B32A32_SFLOAT, 16};
             if (number == uint) return {VK_FORMAT_R32G32B32A32_UINT, 16};
             return fail();
+        case 16:
+            if ((swap != 0 && swap != 2) || number != unorm) return fail();
+            return {VK_FORMAT_R5G6B5_UNORM_PACK16, 2, static_cast<std::uint8_t>(swap == 2 ? 0xe4u : 0xc6u)};
         case 17:
             if (swap != 0 || number != unorm) return fail();
             return {VK_FORMAT_A1R5G5B5_UNORM_PACK16, 2, 0xc6u};

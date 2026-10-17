@@ -1593,6 +1593,35 @@ void ReversedBlendRoutingTests() {
     Require(native == 121u && routed == 932u, "the reversed-order blend routing accepts " + std::to_string(native) + " native and " + std::to_string(routed) + " routed factor combinations, not 121 and 932");
 }
 
+void Color565TargetTests() {
+    auto queue = makeState();
+    const auto info = [&](std::uint32_t number, std::uint32_t swap) {
+        queue.context[0x31c] = (queue.context[0x31c] & ~((0x1fu << 2u) | (7u << 8u) | (3u << 11u))) | (16u << 2u) | (number << 8u) | (swap << 11u);
+    };
+    info(0, 2);
+    const auto reversed = AgcDriver::Graphics::DecodeState(queue);
+    Require(reversed.colors.size() == 1 && reversed.colors[0].format == VK_FORMAT_R5G6B5_UNORM_PACK16 && reversed.colors[0].elementBytes == 2 && reversed.colors[0].componentMapping == 0xe4u, "a 5_6_5 target with the reversed component order did not render through R5G6B5 with X in its high bits");
+    Require(reversed.blends[0].colorWriteMask == 0xfu, "a 5_6_5 target with the reversed component order did not write all its channels");
+    queue.context[0x8e] = 0x1u;
+    Require(AgcDriver::Graphics::DecodeState(queue).blends[0].colorWriteMask == VK_COLOR_COMPONENT_R_BIT, "a 5_6_5 target with the reversed component order writing only X did not write the R5G6B5 channel in its high bits");
+    info(0, 0);
+    const auto standard = AgcDriver::Graphics::DecodeState(queue);
+    Require(standard.colors[0].format == VK_FORMAT_R5G6B5_UNORM_PACK16 && standard.colors[0].componentMapping == 0xc6u, "a 5_6_5 target with the standard component order did not render through R5G6B5 with X and Z exchanged");
+    Require(AgcDriver::Graphics::ExportMappings(standard)[0] == 0xc6u, "a 5_6_5 target with the standard component order did not export through the X and Z exchange");
+    Require(standard.blends[0].colorWriteMask == VK_COLOR_COMPONENT_B_BIT, "a 5_6_5 target with the standard component order writing only X did not write the R5G6B5 channel in its low bits");
+    queue.context[0x8e] = 0xfu;
+    info(0, 2);
+    for (std::uint32_t i = 0; i < 4; ++i) queue.context[0x105 + i] = 0;
+    queue.context[0x1e0] = 0x40000504u;
+    const auto blended = AgcDriver::Graphics::DecodeState(queue);
+    Require(blended.blends[0].blendEnable && blended.blends[0].srcColorBlendFactor == VK_BLEND_FACTOR_SRC_ALPHA && blended.blends[0].dstColorBlendFactor == VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, "alpha blending into a 5_6_5 target was not decoded");
+    queue.context[0x1e0] = 0;
+    for (const auto& [number, swap] : {std::pair{1u, 2u}, std::pair{4u, 0u}, std::pair{0u, 1u}, std::pair{0u, 3u}}) {
+        info(number, swap);
+        expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "unsupported color format 16 number type " + std::to_string(number) + " component swap " + std::to_string(swap));
+    }
+}
+
 void Color1555TargetTests() {
     auto queue = makeState();
     queue.context[0x31c] = (queue.context[0x31c] & ~((0x1fu << 2u) | (7u << 8u) | (3u << 11u))) | (17u << 2u);
@@ -6178,6 +6207,7 @@ int main(int argc, char** argv) {
         ConservativeRasterizationTests();
         DisabledColorTests();
         OpaqueDestinationAlphaTests();
+        Color565TargetTests();
         Color1555TargetTests();
         BlendBypassTests();
         CompactedExportTests();
