@@ -527,13 +527,16 @@ void Sync9SharedDecode() {
         const auto color = Graphics::DecodeState(guest).colors.at(0);
         Require(color.cmaskAddress == 0, "a view of mip 1 of a fast-clear target decoded a CMASK");
         cx[0x31b + stride] = 0;
+        const auto baseColor = Graphics::DecodeState(guest).colors.at(0);
+        Require(baseColor.cmaskFastClear, "base mip 0 of a mipmapped fast-clear target did not decode cmaskFastClear");
+        cx[0x3b8 + stride] |= 1u;
         bool refused = false;
         try {
             static_cast<void>(Graphics::DecodeState(guest));
         } catch (const std::exception& error) {
-            refused = std::string(error.what()).find("CMASK fast clears of a mipmapped") != std::string::npos;
+            refused = std::string(error.what()).find("3D or array") != std::string::npos;
         }
-        Require(refused, "a fast clear of mip 0 of a mipmapped target was not refused");
+        Require(refused, "a fast clear of an array target was not refused");
     }
     {
         auto* record = reinterpret_cast<std::uint32_t*>(memory.data() + 4096);
