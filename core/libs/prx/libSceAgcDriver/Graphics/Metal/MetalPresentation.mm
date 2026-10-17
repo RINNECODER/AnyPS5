@@ -44,7 +44,9 @@ MetalPresentation::MetalPresentation(const MetalDevice& backend, id<MTLLibrary> 
     : backend(backend), presenter(backend.Device(), library),
       fxUpscaler(std::make_unique<MetalFXUpscaler>(backend.Device())) {}
 
-MetalPresentation::~MetalPresentation() = default;
+MetalPresentation::~MetalPresentation() {
+    scanoutTexture = nil;
+}
 
 std::vector<std::byte> MetalPresentation::ReadPixels(const DisplayBuffer& buffer) { return displayPixels(buffer); }
 
@@ -71,6 +73,10 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
     if (const auto previous = layers.find(window.context); previous != layers.end() && previous->second != layer) {
         backend.Wait(backend.CommandBuffer());
         if (fxUpscaler) fxUpscaler->Reset();
+        scanoutTexture = nil;
+        scanoutWidth = 0;
+        scanoutHeight = 0;
+        scanoutFormat = MTLPixelFormatInvalid;
     }
     layers[window.context] = layer;
     std::uint32_t width = 0;
@@ -108,11 +114,17 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
     if (width != 0 && height != 0 && !unread) {
         if (buffer != nullptr) {
             const auto pixels = decoded != nullptr ? *decoded : displayPixels(*buffer);
-            auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:buffer->width height:buffer->height mipmapped:NO];
-            descriptor.storageMode = MTLStorageModeShared;
-            descriptor.usage = MTLTextureUsageShaderRead;
-            auto source = [backend.Device() newTextureWithDescriptor:descriptor];
-            if (source == nil) throw std::runtime_error("Metal cannot allocate the decoded scanout texture");
+            if (scanoutTexture == nil || scanoutWidth != buffer->width || scanoutHeight != buffer->height || scanoutFormat != layer.pixelFormat) {
+                auto descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:layer.pixelFormat width:buffer->width height:buffer->height mipmapped:NO];
+                descriptor.storageMode = MTLStorageModeShared;
+                descriptor.usage = MTLTextureUsageShaderRead;
+                scanoutTexture = [backend.Device() newTextureWithDescriptor:descriptor];
+                if (scanoutTexture == nil) throw std::runtime_error("Metal cannot allocate the decoded scanout texture");
+                scanoutWidth = buffer->width;
+                scanoutHeight = buffer->height;
+                scanoutFormat = layer.pixelFormat;
+            }
+            auto source = scanoutTexture;
             [source replaceRegion:MTLRegionMake2D(0, 0, buffer->width, buffer->height) mipmapLevel:0 withBytes:pixels.data() bytesPerRow:buffer->width * 4u];
             if (layer.device != backend.Device()) throw std::invalid_argument("Metal presentation requires a layer on its device");
             id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -155,6 +167,10 @@ void MetalPresentation::ReleaseWindow(void* context) {
         backend.Wait(backend.CommandBuffer());
         layers.erase(found);
         if (fxUpscaler) fxUpscaler->Reset();
+        scanoutTexture = nil;
+        scanoutWidth = 0;
+        scanoutHeight = 0;
+        scanoutFormat = MTLPixelFormatInvalid;
     }
 }
 
