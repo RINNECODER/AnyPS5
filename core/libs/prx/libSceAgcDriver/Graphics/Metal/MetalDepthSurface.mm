@@ -387,7 +387,8 @@ std::shared_ptr<MetalColorSurface> MetalDepthSurfaceCache::Acquire(const Graphic
 
 std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphics::DepthTarget& target, MTLStorageMode storageMode) {
     std::lock_guard lock(mutex);
-    const auto mode = (target.memoryless || storageMode == MTLStorageModeMemoryless) ? MTLStorageModeMemoryless : MTLStorageModePrivate;
+    const bool canBeMemoryless = !sampledAddresses.contains(target.address) && (target.memoryless || storageMode == MTLStorageModeMemoryless || transientAddresses.contains(target.address));
+    const auto mode = canBeMemoryless ? MTLStorageModeMemoryless : MTLStorageModePrivate;
     auto found = std::find_if(surfaces.begin(), surfaces.end(), [&](const auto& surface) {
         return sameTarget(surface->Target(), target) && surface->DepthTexture().storageMode == mode;
     });
@@ -511,6 +512,31 @@ void MetalDepthSurfaceCache::Invalidate(std::span<const NativeGuestMemory::Borro
     std::erase_if(colorSurfaces, [&](const auto& surface) { return surface->OverlapsMappings(changed); });
 }
 
+void MetalDepthSurfaceCache::MarkSampled(std::uint64_t address) {
+    std::lock_guard lock(mutex);
+    sampledAddresses.insert(address);
+    transientAddresses.erase(address);
+    std::erase_if(surfaces, [&](const auto& surface) {
+        return surface->Target().address == address && surface->DepthTexture().storageMode == MTLStorageModeMemoryless;
+    });
+}
+
+bool MetalDepthSurfaceCache::IsSampled(std::uint64_t address) const {
+    std::lock_guard lock(mutex);
+    return sampledAddresses.contains(address);
+}
+
+void MetalDepthSurfaceCache::SetTransientHint(std::uint64_t address, bool transient) {
+    std::lock_guard lock(mutex);
+    if (transient && !sampledAddresses.contains(address)) transientAddresses.insert(address);
+    else transientAddresses.erase(address);
+}
+
+bool MetalDepthSurfaceCache::IsTransient(std::uint64_t address) const {
+    std::lock_guard lock(mutex);
+    return transientAddresses.contains(address);
+}
+
 void MetalDepthSurfaceCache::Forget(const std::shared_ptr<MetalDepthSurface>& surface) {
     std::lock_guard lock(mutex);
     std::erase(surfaces, surface);
@@ -521,6 +547,8 @@ void MetalDepthSurfaceCache::Clear() {
     surfaces.clear();
     depthOwners.clear();
     stencilOwners.clear();
+    sampledAddresses.clear();
+    transientAddresses.clear();
     colorSurfaces.clear();
 }
 

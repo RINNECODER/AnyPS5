@@ -8,6 +8,7 @@
 #include <mutex>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -142,6 +143,10 @@ public:
     [[nodiscard]] std::shared_ptr<MetalColorSurface> Acquire(const Graphics::ColorTarget& target, MTLStorageMode storageMode = MTLStorageModePrivate);
     void Clear();
     void Invalidate(std::span<const NativeGuestMemory::BorrowedRange> changed);
+    void MarkSampled(std::uint64_t address);
+    [[nodiscard]] bool IsSampled(std::uint64_t address) const;
+    void SetTransientHint(std::uint64_t address, bool transient);
+    [[nodiscard]] bool IsTransient(std::uint64_t address) const;
     // Drops one surface whose guest memory now holds another resource.
     void Forget(const std::shared_ptr<MetalDepthSurface>& surface);
 
@@ -152,8 +157,10 @@ private:
     // The surface whose plane at each guest address holds that plane's current texels.
     std::unordered_map<std::uint64_t, std::weak_ptr<MetalDepthSurface>> depthOwners;
     std::unordered_map<std::uint64_t, std::weak_ptr<MetalDepthSurface>> stencilOwners;
-    std::mutex mutex;
+    mutable std::mutex mutex;
     std::vector<std::shared_ptr<MetalDepthSurface>> surfaces;
+    std::unordered_set<std::uint64_t> sampledAddresses;
+    std::unordered_set<std::uint64_t> transientAddresses;
     std::vector<std::shared_ptr<MetalColorSurface>> colorSurfaces;
 };
 

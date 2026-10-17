@@ -111,7 +111,7 @@ public:
     [[nodiscard]] const MetalDrawTranslationCache& TranslationCache() const { return translationCache; }
 
     [[nodiscard]] static bool ParallelEncodingEnabled();
-    static constexpr std::size_t DefaultMinParallelDraws = 4;
+    static constexpr std::size_t DefaultMinParallelDraws = 16;
     [[nodiscard]] static std::size_t MinParallelDraws();
 
     [[nodiscard]] std::optional<PreparedDraw> PrepareCachedDraw(
