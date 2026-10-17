@@ -539,6 +539,7 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_zero_initializer.py
             $<TARGET_FILE:relinker> $<TARGET_FILE:guest_module_args_host>)
         set_tests_properties(guest_zero_initializer PROPERTIES TIMEOUT 30)
+        add_asan_test_options(guest_zero_initializer verify_asan_link_order=0)
         set(windows_stdio_host_arguments)
         if(WIN32)
             if(MINGW)
