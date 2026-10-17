@@ -8,6 +8,8 @@ namespace AgcDriver::Metal {
 
 [[nodiscard]] bool MetalFxTemporalEnabled();
 [[nodiscard]] bool MetalFxTemporalSupported(id<MTLDevice> device);
+[[nodiscard]] bool MetalFxSpatialEnabled();
+[[nodiscard]] bool MetalFxSpatialSupported(id<MTLDevice> device);
 
 class MetalFXUpscaler {
 public:
@@ -32,6 +34,7 @@ private:
     std::uint32_t currentOutputWidth = 0;
     std::uint32_t currentOutputHeight = 0;
     MTLPixelFormat currentFormat = MTLPixelFormatInvalid;
+    bool isSpatial = false;
     bool needsReset = true;
 };
 

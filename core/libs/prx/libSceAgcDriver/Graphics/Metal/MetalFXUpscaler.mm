@@ -26,6 +26,27 @@ bool MetalFxTemporalSupported(id<MTLDevice> device) {
     return false;
 }
 
+bool MetalFxSpatialEnabled() {
+    const char* value = std::getenv("ANYPS5_METAL_FX_SPATIAL");
+    if (value == nullptr) return false;
+    if (*value == '1' && *(value + 1) == '\0') return true;
+    if (std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0 ||
+        std::strcmp(value, "on") == 0 || std::strcmp(value, "ON") == 0 ||
+        std::strcmp(value, "yes") == 0 || std::strcmp(value, "YES") == 0) return true;
+    return false;
+}
+
+bool MetalFxSpatialSupported(id<MTLDevice> device) {
+    if (device == nil) return false;
+    if (@available(macOS 13.0, *)) {
+        Class descClass = NSClassFromString(@"MTLFXSpatialScalerDescriptor");
+        if (descClass != nil && [descClass respondsToSelector:@selector(supportsDevice:)]) {
+            return [MTLFXSpatialScalerDescriptor supportsDevice:device];
+        }
+    }
+    return false;
+}
+
 MetalFXUpscaler::MetalFXUpscaler(id<MTLDevice> device) : device(device) {}
 
 MetalFXUpscaler::~MetalFXUpscaler() {
@@ -34,11 +55,11 @@ MetalFXUpscaler::~MetalFXUpscaler() {
 }
 
 bool MetalFXUpscaler::IsSupported() const {
-    return MetalFxTemporalSupported(device);
+    return MetalFxTemporalSupported(device) || MetalFxSpatialSupported(device);
 }
 
 bool MetalFXUpscaler::IsEnabled() const {
-    return MetalFxTemporalEnabled();
+    return MetalFxTemporalEnabled() || MetalFxSpatialEnabled();
 }
 
 void MetalFXUpscaler::Reset() {
@@ -52,22 +73,35 @@ id<MTLTexture> MetalFXUpscaler::Upscale(id<MTLCommandBuffer> commands, id<MTLTex
     }
     const auto inputWidth = static_cast<std::uint32_t>(source.width);
     const auto inputHeight = static_cast<std::uint32_t>(source.height);
+    const bool useSpatial = MetalFxSpatialEnabled() && MetalFxSpatialSupported(device) && !MetalFxTemporalEnabled();
     if (currentInputWidth != inputWidth || currentInputHeight != inputHeight ||
         currentOutputWidth != outputWidth || currentOutputHeight != outputHeight ||
-        currentFormat != source.pixelFormat || scaler == nil || upscaledTexture == nil) {
+        currentFormat != source.pixelFormat || isSpatial != useSpatial || scaler == nil || upscaledTexture == nil) {
         @try {
-            MTLFXTemporalScalerDescriptor* desc = [MTLFXTemporalScalerDescriptor new];
-            desc.colorTextureFormat = source.pixelFormat;
-            desc.depthTextureFormat = MTLPixelFormatInvalid;
-            desc.motionTextureFormat = MTLPixelFormatInvalid;
-            desc.outputTextureFormat = source.pixelFormat;
-            desc.inputWidth = inputWidth;
-            desc.inputHeight = inputHeight;
-            desc.outputWidth = outputWidth;
-            desc.outputHeight = outputHeight;
-            desc.autoExposureEnabled = YES;
-
-            id<MTLFXTemporalScaler> newScaler = [desc newTemporalScalerWithDevice:device];
+            id newScaler = nil;
+            if (useSpatial) {
+                MTLFXSpatialScalerDescriptor* desc = [MTLFXSpatialScalerDescriptor new];
+                desc.colorTextureFormat = source.pixelFormat;
+                desc.outputTextureFormat = source.pixelFormat;
+                desc.inputWidth = inputWidth;
+                desc.inputHeight = inputHeight;
+                desc.outputWidth = outputWidth;
+                desc.outputHeight = outputHeight;
+                desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+                newScaler = [desc newSpatialScalerWithDevice:device];
+            } else {
+                MTLFXTemporalScalerDescriptor* desc = [MTLFXTemporalScalerDescriptor new];
+                desc.colorTextureFormat = source.pixelFormat;
+                desc.depthTextureFormat = MTLPixelFormatInvalid;
+                desc.motionTextureFormat = MTLPixelFormatInvalid;
+                desc.outputTextureFormat = source.pixelFormat;
+                desc.inputWidth = inputWidth;
+                desc.inputHeight = inputHeight;
+                desc.outputWidth = outputWidth;
+                desc.outputHeight = outputHeight;
+                desc.autoExposureEnabled = YES;
+                newScaler = [desc newTemporalScalerWithDevice:device];
+            }
             if (newScaler == nil) return nil;
 
             MTLTextureDescriptor* outDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source.pixelFormat
@@ -86,6 +120,7 @@ id<MTLTexture> MetalFXUpscaler::Upscale(id<MTLCommandBuffer> commands, id<MTLTex
             currentOutputWidth = outputWidth;
             currentOutputHeight = outputHeight;
             currentFormat = source.pixelFormat;
+            isSpatial = useSpatial;
             needsReset = true;
         } @catch (NSException*) {
             scaler = nil;
@@ -94,14 +129,21 @@ id<MTLTexture> MetalFXUpscaler::Upscale(id<MTLCommandBuffer> commands, id<MTLTex
         }
     }
     @try {
-        id<MTLFXTemporalScaler> activeScaler = (id<MTLFXTemporalScaler>)scaler;
-        activeScaler.colorTexture = source;
-        activeScaler.outputTexture = upscaledTexture;
-        activeScaler.inputContentWidth = inputWidth;
-        activeScaler.inputContentHeight = inputHeight;
-        activeScaler.reset = needsReset;
-        needsReset = false;
-        [activeScaler encodeToCommandBuffer:commands];
+        if (isSpatial) {
+            id<MTLFXSpatialScaler> activeScaler = (id<MTLFXSpatialScaler>)scaler;
+            activeScaler.colorTexture = source;
+            activeScaler.outputTexture = upscaledTexture;
+            [activeScaler encodeToCommandBuffer:commands];
+        } else {
+            id<MTLFXTemporalScaler> activeScaler = (id<MTLFXTemporalScaler>)scaler;
+            activeScaler.colorTexture = source;
+            activeScaler.outputTexture = upscaledTexture;
+            activeScaler.inputContentWidth = inputWidth;
+            activeScaler.inputContentHeight = inputHeight;
+            activeScaler.reset = needsReset;
+            needsReset = false;
+            [activeScaler encodeToCommandBuffer:commands];
+        }
         return upscaledTexture;
     } @catch (NSException*) {
         return nil;
