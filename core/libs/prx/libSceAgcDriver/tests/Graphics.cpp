@@ -5565,7 +5565,7 @@ void float11_11_10TargetTests() {
     Require(AgcDriver::Graphics::ExportMappings(state)[0] == 0xc6u, "export 0 did not reverse its components into the 11_11_10 float target");
     auto changed = queue;
     changed.context[0x31c] &= ~0x40000u;
-    Require(AgcDriver::Graphics::DecodeState(changed).color.packing == ColorExportPacking::Float11_11_10, "an 11_11_10 float target without ROUND_MODE was refused");
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(changed); }, "rounding (ROUND_MODE 0) 11_11_10 float color targets");
     for (const auto swap : {0u, 1u, 3u}) {
         changed = queue;
         changed.context[0x31c] = (changed.context[0x31c] & ~0x1800u) | (swap << 11u);
