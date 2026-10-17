@@ -4215,6 +4215,35 @@ void pipelineLibrarySetTests() {
     }
 }
 
+void pipelineStoreLazyBufferPoolTests() {
+    using namespace AgcDriver::Graphics;
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.device = makeHandle<VkDevice>();
+    context.graphicsPipelineLibrary = true;
+    context.pipelineLinkTimeOptimization = false;
+    context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    ShaderRecompiler::RecompileResult vertex, fragment;
+    vertex.spirv = makeModule({});
+    fragment.spirv = makeModule({.fragment = true});
+    vertex.variantId = 201;
+    fragment.variantId = 202;
+    const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, PipelinePushSlotBytes}}};
+    std::array<std::uint32_t, 1> mainKey{31}, fragmentKey{32};
+    const PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), makeHandle<VkDescriptorSetLayout>(), true, mainKey, fragmentKey};
+    Require(context.bufferPool == nullptr, "the lazy buffer pool fixture already owns a buffer pool");
+    auto first = CachedPipeline(context, State{}, VertexInputLayout{}, resources, shaders);
+    const auto created = mock.pipelineCreateCount;
+    static_cast<void>(GetBufferPool(context));
+    auto again = CachedPipeline(context, State{}, VertexInputLayout{}, resources, shaders);
+    Require(again == first && mock.pipelineCreateCount == created, "creating the buffer pool dropped a cached pipeline of the live device");
+    ClearCachedPipelines(context.device);
+    again.reset();
+    first.reset();
+    context.bufferPool.reset();
+    Require(mock.live == 0, "lazy buffer pool pipeline tests leaked Vulkan objects");
+}
+
 void pipelineLibraryClearWaitsForBuildTests() {
     using namespace AgcDriver::Graphics;
     mock = MockVulkan{};
@@ -6524,6 +6553,11 @@ int main(int argc, char** argv) {
             std::cout << "pipeline library clear waits for active part builds\n";
             return 0;
         }
+        if (argc == 2 && std::string_view(argv[1]) == "--pipeline-store-lazy-buffer-pool") {
+            pipelineStoreLazyBufferPoolTests();
+            std::cout << "cached pipelines survive lazy buffer pool creation\n";
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--address-space-teardown") {
             addressSpaceTeardownTests();
             std::cout << "address-space device teardown releases cached guest allocations\n";
@@ -6575,6 +6609,8 @@ int main(int argc, char** argv) {
         RunGuestLeaseWaitTests();
         ResourceContentKeyTests(false);
         stateTests();
+        pipelineStoreLazyBufferPoolTests();
+        pipelineStoreLazyBufferPoolTests();
         retainedPixelStageTests();
         pipelineLibrarySetTests();
         pipelineLibraryClearWaitsForBuildTests();
