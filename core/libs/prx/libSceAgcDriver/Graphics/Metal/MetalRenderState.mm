@@ -386,8 +386,8 @@ void BindRenderState(id<MTLRenderCommandEncoder> encoder, const Graphics::State&
 }
 
 void ConfigureSamplePositions(MTLRenderPassDescriptor* pass, id<MTLDevice> device, const Graphics::State& state) {
-    Require(pass != nil, "render pass descriptor is missing");
     if (Force1xMsaaEnabled() || !state.customSampleLocations || state.rasterSamples == 1) return;
+    Require(pass != nil, "render pass descriptor is missing");
     Require(device != nil && device.programmableSamplePositionsSupported, "custom sample locations require programmable sample positions");
     const auto locations = Graphics::SampleLocations(state);
     std::array<MTLSamplePosition, 8> positions{};

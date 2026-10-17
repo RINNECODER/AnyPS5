@@ -124,7 +124,8 @@ std::size_t DisplayBufferSize(const DisplayBuffer& buffer) {
         throw std::runtime_error(message);
     }
     require(!halfFloat || buffer.dccAddress == 0, "VideoOut: DCC metadata on a 16-bit float display buffer is not implemented");
-    require(buffer.address != 0 && (buffer.address & 65535u) == 0, "VideoOut: display buffer requires 64 KiB alignment");
+    require(buffer.alignment == 65536u || (buffer.alignment == 4096u && buffer.tilingMode == 1), "VideoOut: 4 KiB display buffer alignment is only supported for linear buffers");
+    require(buffer.address != 0 && (buffer.address & (buffer.alignment - 1u)) == 0, buffer.alignment == 65536u ? "VideoOut: display buffer requires 64 KiB alignment" : "VideoOut: display buffer requires 4 KiB alignment");
     require(buffer.tilingMode <= 1, "VideoOut: unsupported display tiling mode");
     require(buffer.tilingMode != 0 || buffer.pitchInPixel == 0, "VideoOut: tiled display pitch is unsupported");
     require(buffer.dccAddress == 0 || buffer.tilingMode == 0, "VideoOut: a linear display buffer cannot carry DCC metadata");
@@ -273,6 +274,23 @@ std::vector<std::byte> ReadDisplayBuffer(const DisplayBuffer& buffer) {
     std::vector<std::byte> source(size);
     GuestMemory::Read(buffer.address, source, 65536);
     return DecodeDisplayBuffer(buffer, source);
+}
+
+std::vector<std::byte> DisplayBufferTexels(const DisplayBuffer& buffer, std::span<const std::byte> source) {
+    require(source.size() == DisplayBufferSize(buffer), "VideoOut: invalid display buffer size");
+    require(DisplayTexelBytes(buffer.pixelFormat) == 4u, "VideoOut: raw display texels are only read for 4-byte formats");
+    std::vector<std::byte> texels(static_cast<std::size_t>(buffer.width) * buffer.height * 4);
+    for (std::uint32_t y = 0; y < buffer.height; ++y) {
+        for (std::uint32_t x = 0; x < buffer.width; ++x) std::memcpy(texels.data() + (static_cast<std::size_t>(y) * buffer.width + x) * 4, source.data() + texelOffset(buffer, x, y, 4u), 4);
+    }
+    return texels;
+}
+
+std::vector<std::byte> ReadDisplayBufferTexels(const DisplayBuffer& buffer) {
+    const auto size = DisplayBufferSize(buffer);
+    std::vector<std::byte> source(size);
+    GuestMemory::Read(buffer.address, source, 65536);
+    return DisplayBufferTexels(buffer, source);
 }
 
 }

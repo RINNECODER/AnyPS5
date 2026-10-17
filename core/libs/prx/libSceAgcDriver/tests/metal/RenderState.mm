@@ -921,7 +921,7 @@ void Forced1xMsaa(id<MTLDevice> device) {
     Metal::ConfigureRenderPipelineDescriptor(descriptor, state);
     Require(descriptor.rasterSampleCount == 1, "ConfigureRenderPipelineDescriptor did not force rasterSampleCount to 1");
 
-    Metal::ConfigureSamplePositions(nil, state);
+    Metal::ConfigureSamplePositions(nil, nil, state);
 
     unsetenv("ANYPS5_METAL_FORCE_1X_MSAA");
     Require(!Metal::Force1xMsaaEnabled(), "Forced 1x MSAA still active after unsetenv");

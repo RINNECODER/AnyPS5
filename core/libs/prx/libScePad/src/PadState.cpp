@@ -207,7 +207,14 @@ Pad::InputScript LoadInputScript() {
 }
 
 Pad::InputCommandFile::Input InjectedInput(std::uint64_t now) {
-    static Pad::InputCommandFile commands(std::getenv("APS5_PAD_INPUT_FILE"));
+    static Pad::InputCommandFile commands([] {
+#ifdef _WIN32
+        const auto* path = _wgetenv(L"APS5_PAD_INPUT_FILE");
+#else
+        const auto* path = std::getenv("APS5_PAD_INPUT_FILE");
+#endif
+        return path ? std::filesystem::path(path) : std::filesystem::path{};
+    }());
     static Pad::InputScript script = LoadInputScript();
     static Pad::InputCommandFile::Input lastInjected;
     std::vector<const Pad::ScriptedPress*> started;

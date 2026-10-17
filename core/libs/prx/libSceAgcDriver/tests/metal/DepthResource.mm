@@ -472,7 +472,8 @@ void retiredDepth(const AgcDriver::Metal::MetalDevice& backend) {
 
 void memorylessAndPromotion(const AgcDriver::Metal::MetalDevice& backend) {
     AgcDriver::Metal::MetalDepthSurfaceCache cache(backend);
-    AgcDriver::Graphics::DepthTarget target{0x400000, 0x800000ull, {width, height}, VK_FORMAT_D32_SFLOAT_S8_UINT, 4, 0};
+    AgcDriver::Graphics::DepthTarget target{0x400000, 0x800000ull, {width, height}, VK_FORMAT_D32_SFLOAT_S8_UINT, 1.0f, 0};
+    target.samples = 4;
     target.memoryless = true;
     auto memorylessDepth = cache.Acquire(target);
     MetalTests::Require(memorylessDepth->DepthTexture().storageMode == MTLStorageModeMemoryless, "Memoryless depth target did not allocate memoryless storage");

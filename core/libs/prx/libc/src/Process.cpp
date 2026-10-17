@@ -111,7 +111,6 @@ void StartExit() {
         if (!runningExit) LibcAwaitExit_nid_postfix();
     } else {
         runningExit = true;
-        LibcRunShutdown_nid_postfix();
     }
 }
 
@@ -138,11 +137,13 @@ extern "C" {
 [[noreturn]] void LibcExit_nid_no_patch(int code) {
     StartExit();
     CxaFinalize_nid_no_patch(nullptr);
+    LibcRunShutdown_nid_postfix();
     std::exit(code);
 }
 
 [[noreturn]] void LibcExitWithoutHandlers_nid_no_patch(int code) {
     StartExit();
+    LibcRunShutdown_nid_postfix();
     std::fflush(nullptr);
     LibcTerminate_nid_no_patch(code);
 }
