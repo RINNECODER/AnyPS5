@@ -138,7 +138,12 @@ void copyElement(uint src, uint dst, device const uint* inputBuffer, device uint
     } else if (ELEMENT_BYTES == 4u) {
         outputBuffer[dst >> 2] = inputBuffer[src >> 2];
     } else if (ELEMENT_BYTES > 16u) {
-        for (uint i = 0u; i < ELEMENT_BYTES; i += 4u) {
+        uint i = 0u;
+        for (; i + 16u <= ELEMENT_BYTES; i += 16u) {
+            *reinterpret_cast<device packed_uint4*>(reinterpret_cast<device char*>(outputBuffer) + dst + i) =
+                *reinterpret_cast<device const packed_uint4*>(reinterpret_cast<device const char*>(inputBuffer) + src + i);
+        }
+        for (; i < ELEMENT_BYTES; i += 4u) {
             outputBuffer[(dst + i) >> 2] = inputBuffer[(src + i) >> 2];
         }
     } else {
@@ -218,12 +223,7 @@ uint4 readElement(uint byteOffset, device const uint* buffer) {
     } else if (ELEMENT_BYTES == 4u) {
         return uint4(buffer[byteOffset >> 2], 0u, 0u, 0u);
     } else if (ELEMENT_BYTES > 16u) {
-        uint4 value = uint4(0u);
-        uint words = ELEMENT_BYTES / 4u;
-        for (uint i = 0u; i < words && i < 4u; ++i) {
-            value[i] = buffer[(byteOffset >> 2) + i];
-        }
-        return value;
+        return uint4(*reinterpret_cast<device const packed_uint4*>(reinterpret_cast<device const char*>(buffer) + byteOffset));
     }
     uint mask = ELEMENT_BYTES == 1u ? 0xffu : 0xffffu;
     return uint4((buffer[byteOffset >> 2] >> ((byteOffset & 3u) * 8u)) & mask, 0u, 0u, 0u);
@@ -240,10 +240,7 @@ void writeElement(uint byteOffset, uint4 value, device uint* buffer) {
         buffer[byteOffset >> 2] = value.x;
         return;
     } else if (ELEMENT_BYTES > 16u) {
-        uint words = ELEMENT_BYTES / 4u;
-        for (uint i = 0u; i < words && i < 4u; ++i) {
-            buffer[(byteOffset >> 2) + i] = value[i];
-        }
+        *reinterpret_cast<device packed_uint4*>(reinterpret_cast<device char*>(buffer) + byteOffset) = (packed_uint4)value;
         return;
     }
     uint mask = ELEMENT_BYTES == 1u ? 0xffu : 0xffffu;
