@@ -1185,9 +1185,6 @@ target_link_libraries(agc_driver_graphics_tests PRIVATE
         libkernel
 )
 
-set_target_properties(agc_driver_graphics_tests PROPERTIES CXX_EXTENSIONS OFF)
-configure_windows_unwind(agc_driver_graphics_tests)
-
 if(BUILD_TESTING)
     add_test(NAME agc_command_batch_fence_failure COMMAND agc_driver_graphics_tests --command-batch-fence-failure)
     set_tests_properties(agc_command_batch_fence_failure PROPERTIES TIMEOUT 20)
