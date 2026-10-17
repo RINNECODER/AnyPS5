@@ -256,6 +256,7 @@ struct Parameters {
     std::uint32_t linearBase;
     std::uint32_t columnBegin;
     std::uint32_t rowBegin;
+    std::uint32_t pipeBankXor;
 };
 
 std::size_t bufferSize(std::uint64_t bytes) {
@@ -389,8 +390,8 @@ bool MetalTexture::CanShareBackingIgnoringDcc(const Graphics::GuestTextureResour
 
 bool MetalTexture::canShareBacking(const Graphics::GuestTextureResource& resource, bool ignoreDcc) const {
     const auto& original = backing->descriptor;
-    if (std::tie(original.baseAddress, original.width, original.height, original.mipCount, original.tileMode, original.dimension) !=
-        std::tie(resource.baseAddress, resource.width, resource.height, resource.mipCount, resource.tileMode, resource.dimension)) return false;
+    if (std::tie(original.baseAddress, original.width, original.height, original.mipCount, original.tileMode, original.dimension, original.pipeBankXor) !=
+        std::tie(resource.baseAddress, resource.width, resource.height, resource.mipCount, resource.tileMode, resource.dimension, resource.pipeBankXor)) return false;
     if (!ignoreDcc && std::tie(original.dccAddress, original.dccAlphaOnMsb, original.dccPipeAligned) !=
         std::tie(resource.dccAddress, resource.dccAlphaOnMsb, resource.dccPipeAligned)) return false;
     const auto originalAllocation = original.allocatedMipCount == 0 ? original.mipCount : original.allocatedMipCount;
@@ -418,6 +419,7 @@ std::string MetalTexture::ShareMismatch(const Graphics::GuestTextureResource& re
     field("tile", static_cast<std::uint64_t>(original.tileMode), static_cast<std::uint64_t>(resource.tileMode));
     field("dimension", static_cast<std::uint64_t>(original.dimension), static_cast<std::uint64_t>(resource.dimension));
     field("dcc", original.dccAddress, resource.dccAddress);
+    field("pipeBankXor", original.pipeBankXor, resource.pipeBankXor);
     field("format family", formatFamily(original.format), formatFamily(resource.format));
     if (why.empty()) why = CanShareBacking(resource) ? "shareable" : "surface geometry differs";
     return why;
@@ -491,6 +493,7 @@ void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> s
                 p.elementBytes = elementBytes;
                 p.slice = layer;
                 p.rangeEnd = UINT32_MAX;
+                p.pipeBankXor = backing->descriptor.pipeBankXor;
                 if (mip.width == 0 || mip.height == 0) continue;
                 if (encoder == nil) encoder = backend.ComputeEncoder(commands, retile ? @"readback retile" : @"upload detile");
                 backend.Dispatch(encoder, @"TextureDetile", @[source, destination], &p, sizeof(p), MTLSizeMake(mip.width, mip.height, 1), &constants, offsets);
@@ -586,6 +589,7 @@ void MetalTexture::encodeFused(id<MTLComputeCommandEncoder> encoder, id<MTLBuffe
             p.tile.elementBytes = backing->elementBytes;
             p.tile.slice = layer;
             p.tile.rangeEnd = UINT32_MAX;
+            p.tile.pipeBankXor = backing->descriptor.pipeBankXor;
             p.textureSlice = geometry.CopyLayer(layer);
             p.level = level;
             backend.Dispatch(encoder, retile ? @"TextureRetileFromTexture" : @"TextureDetileToTexture", @[guest], &p, sizeof(p),
