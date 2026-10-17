@@ -82,7 +82,8 @@ public:
               std::span<const std::byte> fragmentPushConstants = {},
               std::span<const id<MTLResource>> indirectResources = {},
               std::span<const MetalImplicitBufferBinding> implicitBuffers = {},
-              std::size_t rectPatchCount = 0) const;
+              std::size_t rectPatchCount = 0,
+              bool elideResidency = false) const;
 
 private:
     id<MTLDevice> device;
@@ -108,7 +109,8 @@ public:
               std::span<const MetalShaderResourceBinding> fragmentBindings,
               std::span<const std::byte> meshPushConstants = {},
               std::span<const std::byte> fragmentPushConstants = {},
-              std::span<const id<MTLResource>> indirectResources = {}) const;
+              std::span<const id<MTLResource>> indirectResources = {},
+              bool elideResidency = false) const;
 
 private:
     id<MTLDevice> device;

@@ -154,11 +154,15 @@ private:
         std::uint64_t translationId = 0;
         std::vector<std::byte> pushConstants;
         DynamicRenderState dynamicState;
+        id<MTLDepthStencilState> depthStencilState = nil;
+        std::vector<id<MTLResource>> residentResources;
         void Reset() {
             encoder = nil;
             translationId = 0;
             pushConstants.clear();
             dynamicState = {};
+            depthStencilState = nil;
+            residentResources.clear();
         }
     };
     EncoderDrawState lastEncoderState;

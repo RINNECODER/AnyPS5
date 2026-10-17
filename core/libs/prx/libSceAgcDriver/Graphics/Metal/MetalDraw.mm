@@ -1016,8 +1016,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
             .stencilBackRef = state.stencilTest ? state.stencilBack.reference : 0,
         };
 
-        const bool sameEncoder = merged && (lastEncoderState.translationId == cached->recordId);
-        if (sameEncoder) {
+        const bool encoderActive = merged && (lastEncoderState.encoder == encoder);
+        if (encoderActive && (lastEncoderState.translationId == cached->recordId)) {
             const bool pushChanged = (lastEncoderState.pushConstants.size() != pushConstants.size() ||
                                       std::memcmp(lastEncoderState.pushConstants.data(), pushConstants.data(), pushConstants.size()) != 0);
             if (pushChanged) {
@@ -1031,25 +1031,46 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                 }
                 lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
             }
-            if (!(lastEncoderState.dynamicState == currentDynamicState)) {
+            if (!(lastEncoderState.dynamicState == currentDynamicState) || lastEncoderState.depthStencilState != cached->depthStencilState) {
                 BindRenderState(encoder, state, cached->depthStencilState);
                 lastEncoderState.dynamicState = currentDynamicState;
+                lastEncoderState.depthStencilState = cached->depthStencilState;
             } else {
                 translationCache.RecordStateElision();
             }
         } else {
+            if (!encoderActive) {
+                lastEncoderState.Reset();
+                lastEncoderState.encoder = encoder;
+            }
+
+            for (id<MTLResource> res : cached->residency) {
+                if (std::find(lastEncoderState.residentResources.begin(), lastEncoderState.residentResources.end(), res) == lastEncoderState.residentResources.end()) {
+                    [encoder useResource:res usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
+                    lastEncoderState.residentResources.push_back(res);
+                }
+            }
+
             cached->vertexPipeline->Bind(encoder, cached->vertexBindings, cached->fragmentBindings,
                 pushBlock(cached->vertexPipeline->VertexReflection(), pushConstants),
                 pushBlock(cached->vertexPipeline->FragmentReflection(), pushConstants),
-                cached->residency);
-            BindRenderState(encoder, state, cached->depthStencilState);
+                cached->residency,
+                {}, 0,
+                /*elideResidency=*/true);
+
+            if (!encoderActive || !(lastEncoderState.dynamicState == currentDynamicState) || lastEncoderState.depthStencilState != cached->depthStencilState) {
+                BindRenderState(encoder, state, cached->depthStencilState);
+                lastEncoderState.dynamicState = currentDynamicState;
+                lastEncoderState.depthStencilState = cached->depthStencilState;
+            } else {
+                translationCache.RecordStateElision();
+            }
+
             for (std::size_t i = 0; i < cached->vertexBuffers.size(); ++i) {
                 [encoder setVertexBuffer:cached->vertexBuffers[i].buffer offset:cached->vertexBuffers[i].offset atIndex:i];
             }
-            lastEncoderState.encoder = encoder;
             lastEncoderState.translationId = cached->recordId;
             lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
-            lastEncoderState.dynamicState = currentDynamicState;
         }
 
         try {
@@ -1721,6 +1742,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         lastEncoderState.translationId = record->recordId;
         lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
         lastEncoderState.dynamicState = currentDynamicState;
+        lastEncoderState.depthStencilState = depthStencilState;
+        lastEncoderState.residentResources.assign(residency.begin(), residency.end());
     } else {
         lastEncoderState.Reset();
     }

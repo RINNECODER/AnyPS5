@@ -898,7 +898,8 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
                                std::span<const std::byte> fragmentPushConstants,
                                std::span<const id<MTLResource>> indirectResources,
                                std::span<const MetalImplicitBufferBinding> implicitBuffers,
-                               std::size_t rectPatchCount) const {
+                               std::size_t rectPatchCount,
+                               bool elideResidency) const {
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal render binding requires an encoder on this device");
     }
@@ -917,8 +918,10 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
     bindRender(encoder, vertex, preparedVertex, true);
     for (const auto& binding : implicit) [encoder setVertexBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
     bindRender(encoder, fragment, preparedFragment, false);
-    for (id<MTLResource> resource : indirectResources) {
-        [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
+    if (!elideResidency) {
+        for (id<MTLResource> resource : indirectResources) {
+            [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
+        }
     }
 }
 
@@ -988,7 +991,8 @@ void MetalMeshPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
                             std::span<const MetalShaderResourceBinding> fragmentBindings,
                             std::span<const std::byte> meshPushConstants,
                             std::span<const std::byte> fragmentPushConstants,
-                            std::span<const id<MTLResource>> indirectResources) const {
+                            std::span<const id<MTLResource>> indirectResources,
+                            bool elideResidency) const {
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal mesh binding requires an encoder on this device");
     }
@@ -997,8 +1001,10 @@ void MetalMeshPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
     [encoder setRenderPipelineState:pipeline];
     bindMesh(encoder, mesh, preparedMesh);
     bindRender(encoder, fragment, preparedFragment, false);
-    for (id<MTLResource> resource : indirectResources) {
-        [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageMesh | MTLRenderStageFragment];
+    if (!elideResidency) {
+        for (id<MTLResource> resource : indirectResources) {
+            [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageMesh | MTLRenderStageFragment];
+        }
     }
 }
 
