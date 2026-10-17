@@ -2,6 +2,7 @@
 #include "GraphicsTests.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -30,6 +31,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -2819,6 +2821,15 @@ struct LiveCounter {
 struct MockVulkan {
     std::uint64_t next = 1;
     LiveCounter live;
+    VkResult commandAllocationResult = VK_SUCCESS;
+    VkResult fenceCreationResult = VK_SUCCESS;
+    VkResult commandBeginResult = VK_SUCCESS;
+    VkFence failedFenceOutput = VK_NULL_HANDLE;
+    std::uint32_t freedCommandBuffers = 0;
+    std::uint32_t fenceCreateCalls = 0;
+    std::uint32_t fenceDestroyCalls = 0;
+    std::uint32_t invalidFenceDestroys = 0;
+    std::uint32_t commandBeginCalls = 0;
     std::map<VkBuffer, VkDeviceSize> bufferSizes;
     std::map<VkBuffer, VkBufferUsageFlags> bufferUsage;
     std::map<VkDeviceMemory, VkMemoryAllocateFlags> allocationFlags;
@@ -3108,18 +3119,44 @@ VKAPI_ATTR void VKAPI_CALL mockCmdUpdateBuffer(VkCommandBuffer, VkBuffer buffer,
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockAllocateCommandBuffers(VkDevice, const VkCommandBufferAllocateInfo* info, VkCommandBuffer* commands) {
+    if (mock.commandAllocationResult != VK_SUCCESS) {
+        std::fill_n(commands, info->commandBufferCount, VK_NULL_HANDLE);
+        return mock.commandAllocationResult;
+    }
     for (std::uint32_t index = 0; index < info->commandBufferCount; ++index) commands[index] = makeHandle<VkCommandBuffer>();
     mock.live += info->commandBufferCount;
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL mockFreeCommandBuffers(VkDevice, VkCommandPool, std::uint32_t count, const VkCommandBuffer*) { mock.live -= count; }
-VKAPI_ATTR VkResult VKAPI_CALL mockCreateFence(VkDevice, const VkFenceCreateInfo*, const VkAllocationCallbacks*, VkFence* fence) { *fence = makeHandle<VkFence>(); ++mock.live; return VK_SUCCESS; }
-VKAPI_ATTR void VKAPI_CALL mockDestroyFence(VkDevice, VkFence, const VkAllocationCallbacks*) { --mock.live; }
+VKAPI_ATTR void VKAPI_CALL mockFreeCommandBuffers(VkDevice, VkCommandPool, std::uint32_t count, const VkCommandBuffer*) {
+    mock.freedCommandBuffers += count;
+    mock.live -= count;
+}
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateFence(VkDevice, const VkFenceCreateInfo*, const VkAllocationCallbacks*, VkFence* fence) {
+    ++mock.fenceCreateCalls;
+    if (mock.fenceCreationResult != VK_SUCCESS) {
+        *fence = mock.failedFenceOutput;
+        return mock.fenceCreationResult;
+    }
+    *fence = makeHandle<VkFence>();
+    ++mock.live;
+    return VK_SUCCESS;
+}
+VKAPI_ATTR void VKAPI_CALL mockDestroyFence(VkDevice, VkFence fence, const VkAllocationCallbacks*) {
+    ++mock.fenceDestroyCalls;
+    if (fence != VK_NULL_HANDLE && fence == mock.failedFenceOutput) {
+        ++mock.invalidFenceDestroys;
+        return;
+    }
+    --mock.live;
+}
 VKAPI_ATTR VkResult VKAPI_CALL mockGetFenceStatus(VkDevice, VkFence) { return VK_SUCCESS; }
 VKAPI_ATTR VkResult VKAPI_CALL mockResetFences(VkDevice, std::uint32_t, const VkFence*) { return VK_SUCCESS; }
 VKAPI_ATTR VkResult VKAPI_CALL mockWaitForFences(VkDevice, std::uint32_t, const VkFence*, VkBool32, std::uint64_t) { return VK_SUCCESS; }
-VKAPI_ATTR VkResult VKAPI_CALL mockBeginCommandBuffer(VkCommandBuffer, const VkCommandBufferBeginInfo*) { return VK_SUCCESS; }
+VKAPI_ATTR VkResult VKAPI_CALL mockBeginCommandBuffer(VkCommandBuffer, const VkCommandBufferBeginInfo*) {
+    ++mock.commandBeginCalls;
+    return mock.commandBeginResult;
+}
 VKAPI_ATTR VkResult VKAPI_CALL mockEndCommandBuffer(VkCommandBuffer) { return VK_SUCCESS; }
 VKAPI_ATTR VkResult VKAPI_CALL mockQueueSubmit(VkQueue, std::uint32_t, const VkSubmitInfo*, VkFence) { return VK_SUCCESS; }
 VKAPI_ATTR void VKAPI_CALL mockCmdPipelineBarrier(VkCommandBuffer, VkPipelineStageFlags, VkPipelineStageFlags, VkDependencyFlags, std::uint32_t, const VkMemoryBarrier*, std::uint32_t, const VkBufferMemoryBarrier*, std::uint32_t, const VkImageMemoryBarrier*) {}
@@ -3193,6 +3230,51 @@ AgcDriver::Graphics::Context mockContext() {
     context.limits.maxPerStageResources = 128;
     context.limits.maxDescriptorSetStorageBuffers = 32;
     return context;
+}
+
+void commandBatchFenceFailureTests() {
+    using namespace AgcDriver::Graphics;
+    const std::lock_guard gpu(AgcDriver::GuestMemory::GpuMutex());
+    std::uint32_t invalidDestroys = 0;
+    for (const auto result : {VK_ERROR_OUT_OF_HOST_MEMORY, VK_ERROR_OUT_OF_DEVICE_MEMORY}) {
+        for (const bool nonnull : {false, true}) {
+            mock = MockVulkan{};
+            mock.fenceCreationResult = result;
+            mock.failedFenceOutput = nonnull ? reinterpret_cast<VkFence>(std::uintptr_t{0xdeadbeef}) : VK_NULL_HANDLE;
+            bool failed = false;
+            try {
+                CommandBatch batch(mockContext());
+            } catch (const std::runtime_error& error) {
+                const std::string message = error.what();
+                failed = message.find("vkCreateFence") != std::string::npos && message.find("Vulkan result " + std::to_string(result)) != std::string::npos;
+            }
+            Require(failed && mock.fenceCreateCalls == 1 && mock.commandBeginCalls == 0, "fence creation failure lost its error or continued construction");
+            Require(mock.live == 0 && mock.freedCommandBuffers == 1, "fence creation failure leaked the allocated command buffer");
+            invalidDestroys += mock.invalidFenceDestroys;
+            std::printf("command batch fence result=%d nonnull=%d invalid destroys=%u\n", result, nonnull, mock.invalidFenceDestroys);
+            const auto destroyed = mock.fenceDestroyCalls;
+            const auto invalid = mock.invalidFenceDestroys;
+            mock.fenceCreationResult = VK_SUCCESS;
+            {
+                CommandBatch recovered(mockContext());
+                Require(recovered.Handle() != VK_NULL_HANDLE, "command batch did not recover after fence creation failed");
+            }
+            Require(mock.live == 0 && mock.freedCommandBuffers == 2 && mock.fenceDestroyCalls == destroyed + 1 && mock.invalidFenceDestroys == invalid, "recovered command batch mishandled its owned objects");
+        }
+    }
+    for (const bool allocated : {false, true}) {
+        mock = MockVulkan{};
+        mock.commandAllocationResult = allocated ? VK_SUCCESS : VK_ERROR_OUT_OF_HOST_MEMORY;
+        mock.commandBeginResult = VK_ERROR_OUT_OF_HOST_MEMORY;
+        bool failed = false;
+        try {
+            CommandBatch batch(mockContext());
+        } catch (const std::runtime_error& error) {
+            failed = std::string(error.what()).find(allocated ? "vkBeginCommandBuffer" : "vkAllocateCommandBuffers") != std::string::npos;
+        }
+        Require(failed && mock.live == 0 && mock.freedCommandBuffers == (allocated ? 1u : 0u) && mock.fenceDestroyCalls == (allocated ? 1u : 0u) && mock.invalidFenceDestroys == 0, "command batch constructor failure mishandled its owned objects");
+    }
+    Require(invalidDestroys == 0, "command batch destroyed undefined failed fence outputs");
 }
 
 void addressSpaceTeardownTests() {
@@ -6603,6 +6685,10 @@ int main(int argc, char** argv) {
     setenv("APS5_HEAP_MIRROR_MIB", "4", 1);
 #endif
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--command-batch-fence-failure") {
+            commandBatchFenceFailureTests();
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--unused-stencil-reference") {
             stencilReferenceUnusedTests();
             return 0;
