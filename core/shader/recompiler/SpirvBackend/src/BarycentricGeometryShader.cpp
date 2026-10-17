@@ -24,6 +24,36 @@ struct PerVertexParameter {
     std::uint32_t location;
 };
 
+struct EmulatedInterface {
+    std::vector<std::uint32_t> passed;
+    std::vector<PerVertexParameter> perVertex;
+    BarycentricEmulationLayout layout;
+    std::uint32_t barycentrics = 0;
+    std::uint32_t sources = 0;
+};
+
+EmulatedInterface CollectEmulatedInterface(const RecompileResult& vertex, const RecompileResult& fragment) {
+    require(fragment.barycentricEmulation.active, "the fragment shader does not emulate barycentrics");
+    const auto exported = [&](std::uint32_t location) { return std::find(vertex.parameterExports.begin(), vertex.parameterExports.end(), location) != vertex.parameterExports.end(); };
+    EmulatedInterface emulated;
+    emulated.layout = LayoutBarycentricEmulation(fragment.fragmentParameters, fragment.barycentricEmulation);
+    for (const auto& parameter : fragment.fragmentParameters) {
+        require(exported(parameter.sourceLocation), "fragment parameter " + std::to_string(parameter.location) + " is not exported by the vertex shader");
+        if (!parameter.perVertex) {
+            emulated.passed.push_back(parameter.sourceLocation);
+            continue;
+        }
+        const auto relocated = std::find_if(emulated.layout.perVertexLocations.begin(), emulated.layout.perVertexLocations.end(), [&](const auto& entry) { return entry.first == parameter.location; });
+        require(relocated != emulated.layout.perVertexLocations.end(), "per-vertex parameter " + std::to_string(parameter.location) + " has no emulated location");
+        emulated.perVertex.push_back({parameter.sourceLocation, relocated->second});
+    }
+    emulated.barycentrics = (emulated.layout.smoothLocation != BarycentricEmulationLayout::NoLocation ? 1u : 0u) + (emulated.layout.linearLocation != BarycentricEmulationLayout::NoLocation ? 1u : 0u);
+    std::set<std::uint32_t> sources(emulated.passed.begin(), emulated.passed.end());
+    for (const auto& parameter : emulated.perVertex) sources.insert(parameter.sourceLocation);
+    emulated.sources = static_cast<std::uint32_t>(sources.size());
+    return emulated;
+}
+
 class BarycentricGeometryEmitter {
 public:
     explicit BarycentricGeometryEmitter(std::uint32_t version) : builder(version) {
@@ -171,30 +201,16 @@ RecompileResult BuildBarycentricGeometryShader(const RecompileResult& vertex, co
     require(limits.has_value(), "geometry shaders are unavailable");
     require(target.spirvVersion >= 0x00010300u && target.spirvVersion <= 0x00010500u, "unsupported SPIR-V target version");
     require(std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), spv::CapabilityGeometry) != target.supportedCapabilities.end(), "geometry capability is unavailable");
-    const auto exported = [&](std::uint32_t location) { return std::find(vertex.parameterExports.begin(), vertex.parameterExports.end(), location) != vertex.parameterExports.end(); };
-    const auto layout = LayoutBarycentricEmulation(fragment.fragmentParameters, fragment.barycentricEmulation);
-    std::vector<std::uint32_t> passed;
-    std::vector<PerVertexParameter> perVertex;
-    for (const auto& parameter : fragment.fragmentParameters) {
-        require(exported(parameter.sourceLocation), "fragment parameter " + std::to_string(parameter.location) + " is not exported by the vertex shader");
-        if (!parameter.perVertex) {
-            passed.push_back(parameter.sourceLocation);
-            continue;
-        }
-        const auto relocated = std::find_if(layout.perVertexLocations.begin(), layout.perVertexLocations.end(), [&](const auto& entry) { return entry.first == parameter.location; });
-        require(relocated != layout.perVertexLocations.end(), "per-vertex parameter " + std::to_string(parameter.location) + " has no emulated location");
-        perVertex.push_back({parameter.sourceLocation, relocated->second});
-    }
-    const auto barycentrics = (layout.smoothLocation != BarycentricEmulationLayout::NoLocation ? 1u : 0u) + (layout.linearLocation != BarycentricEmulationLayout::NoLocation ? 1u : 0u);
-    const auto outputComponents = 4u + 4u * static_cast<std::uint32_t>(passed.size()) + 3u * barycentrics + 12u * static_cast<std::uint32_t>(perVertex.size());
-    std::set<std::uint32_t> sources(passed.begin(), passed.end());
-    for (const auto& parameter : perVertex) sources.insert(parameter.sourceLocation);
-    const auto inputComponents = 4u + 4u * static_cast<std::uint32_t>(sources.size());
-    const auto fragmentComponents = 4u * (static_cast<std::uint32_t>(passed.size()) + barycentrics + 3u * static_cast<std::uint32_t>(perVertex.size()));
+    const auto emulated = CollectEmulatedInterface(vertex, fragment);
+    const auto passed = static_cast<std::uint32_t>(emulated.passed.size());
+    const auto perVertex = static_cast<std::uint32_t>(emulated.perVertex.size());
+    const auto outputComponents = 4u + 4u * passed + 3u * emulated.barycentrics + 12u * perVertex;
+    const auto inputComponents = 4u + 4u * emulated.sources;
+    const auto fragmentComponents = 4u * (passed + emulated.barycentrics + 3u * perVertex);
     require(limits->maxGeometryOutputVertices >= 3u && outputComponents <= limits->maxGeometryOutputComponents && 3u * outputComponents <= limits->maxGeometryTotalOutputComponents && inputComponents <= limits->maxGeometryInputComponents && fragmentComponents <= limits->maxFragmentInputComponents, "the emulated barycentric interface exceeds device limits");
     BarycentricGeometryEmitter emitter(target.spirvVersion);
     RecompileResult result;
-    result.spirv = emitter.Emit(passed, perVertex, layout);
+    result.spirv = emitter.Emit(emulated.passed, emulated.perVertex, emulated.layout);
 #if ANYPS5_ENABLE_SPIRV_TOOLS
     result.spirv = ValidateAndOptimizeSpirv(result.spirv, target.vulkanVersion, target.spirvVersion);
 #endif
