@@ -3164,12 +3164,13 @@ void oversizedDescriptorTests() {
 
 void guestBufferViewBytesTests() {
     using AgcDriver::Graphics::GuestBufferMemory;
-    for (const std::uint64_t bytes : {4ull, 16ull, 4096ull}) {
+    for (const std::uint64_t bytes : {2ull, 3ull, 4ull, 6ull, 7ull, 16ull, 4096ull, 4098ull}) {
         for (const std::uint32_t adjustment : {0u, 4u, 16u, 256u}) {
             Require(GuestBufferMemory::ViewBytes(bytes, adjustment) == bytes + adjustment, "a view whose adjustment is a whole number of DWORDs did not add the adjustment");
         }
         for (const std::uint32_t adjustment : {1u, 2u, 3u, 5u, 7u}) {
-            Require(GuestBufferMemory::ViewBytes(bytes, adjustment) == bytes + 4u * ((adjustment + 3u) / 4u), "a view that starts off a DWORD boundary did not cover the DWORDs around it");
+            const auto expected = 4 * ((adjustment + bytes + 3) / 4);
+            Require(GuestBufferMemory::ViewBytes(bytes, adjustment) == expected, "an off-DWORD view did not cover every byte in its range");
         }
     }
 }
