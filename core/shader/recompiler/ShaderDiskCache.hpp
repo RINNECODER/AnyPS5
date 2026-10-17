@@ -23,9 +23,8 @@ namespace ShaderRecompiler::ShaderDiskCache {
 //     BufferResource::formattedWritten of upstream PR 5172 (U8a: Metal image-mode views).
 // 37: fork format 36 plus upstream PR 5500 (layerBase in the pixel info and the request key; U7).
 // 38: fork format 37 plus upstream PR 1193 (denseValueIds in the resource plan).
-// 39: fork format 38 plus upstream PR 7381 (volumeArraySampleCompatible in ImageResource).
-// 40: fork format 39 plus upstream PR 7296 (samplerCoordinatesIgnored in DescriptorBinding).
-inline constexpr std::uint32_t FormatVersion = 40;
+// 39: fork format 38 plus upstream samplerCoordinatesIgnored in the descriptor binding.
+inline constexpr std::uint32_t FormatVersion = 39;
 
 enum class LoadStatus {
     Loaded,
