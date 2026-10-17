@@ -206,5 +206,6 @@ struct ConversionCacheStatistics {
 
 [[nodiscard]] ConversionCacheStatistics GetConversionCacheStatistics();
 void ClearConversionCache();
+void InlineBdaHelpers(std::string& source);
 
 }

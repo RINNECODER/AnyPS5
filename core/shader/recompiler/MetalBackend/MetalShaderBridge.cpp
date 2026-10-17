@@ -3,7 +3,9 @@
 #include "BoundedCache.hpp"
 #include "MetalConversionDiskCache.hpp"
 #include <spirv_msl.hpp>
+#include <array>
 #include <algorithm>
+#include <cctype>
 #include <bit>
 #include <atomic>
 #include <cstdio>
@@ -51,6 +53,16 @@ void InlineExactArithmetic(std::string& source) {
     const auto anchor = source.find(Anchor);
     if (anchor == std::string::npos) throw std::runtime_error("converted Metal source lacks its metal namespace declaration");
     source.insert(anchor + Anchor.size(), "#pragma METAL fp contract(off)\n");
+}
+bool IsBdaInlineHelper(std::string_view name) {
+    return name.starts_with("get_bda_") ||
+           name.starts_with("probe_bda_") ||
+           name.starts_with("read_bda_") ||
+           name.starts_with("load_bda_") ||
+           name.starts_with("write_bda_") ||
+           name.starts_with("bda_read") ||
+           name.starts_with("bda_write") ||
+           name == "note_bda_write";
 }
 [[noreturn]] void Fail(const std::string& reason) {
     throw std::runtime_error("Metal shader bridge: " + reason);
@@ -966,8 +978,11 @@ protected:
     void emit_function_prototype(spirv_cross::SPIRFunction& function,
                                  const spirv_cross::Bitset& flags) override {
         if (function.self != ir.default_entry_point && (function.function_control & spv::FunctionControlDontInlineMask)) {
-            EmitNonInlineFunctionPrototype(function);
-            return;
+            const auto& name = get_name(function.self);
+            if (!IsBdaInlineHelper(name)) {
+                EmitNonInlineFunctionPrototype(function);
+                return;
+            }
         }
         CompilerMSL::emit_function_prototype(function, flags);
         if (function.self != ir.default_entry_point || meshPosition == 0 || positionHookInstalled ||
@@ -1552,6 +1567,7 @@ static Result ConvertToMetalUncached(const RecompileResult& guest, ShaderStage s
     try { source = compiler.compile(); }
     catch (const std::exception& error) { Fail(error.what()); }
     InlineExactArithmetic(source);
+    InlineBdaHelpers(source);
     result.source = std::move(source);
     result.requiresTextureLodQueries = compiler.RequiresTextureLodQueries();
     result.minimumLodImages = compiler.MinimumLodImages();
@@ -1876,6 +1892,59 @@ Result Returned(const Result& shader, const RecompileResult& guest, const std::v
     return result;
 }
 
+}
+
+void InlineBdaHelpers(std::string& source) {
+    static constexpr std::array<std::string_view, 4> Attributes = {
+        "static __attribute__((noinline))",
+        "__attribute__((noinline))",
+        "[[clang::noinline]]",
+        "[[clang::optnone]]"
+    };
+    for (const auto& attr : Attributes) {
+        for (std::size_t at = source.find(attr); at != std::string::npos; ) {
+            const auto scanStart = at + attr.size();
+            const auto paren = source.find('(', scanStart);
+            const auto brace = source.find('{', scanStart);
+            const auto semicolon = source.find(';', scanStart);
+            if (paren == std::string::npos || (brace != std::string::npos && brace < paren) || (semicolon != std::string::npos && semicolon < paren) || paren - scanStart > 256u) {
+                at = source.find(attr, at + attr.size());
+                continue;
+            }
+            std::size_t nameEnd = paren;
+            while (nameEnd > scanStart && (source[nameEnd - 1] == ' ' || source[nameEnd - 1] == '\t' || source[nameEnd - 1] == '\n' || source[nameEnd - 1] == '\r')) {
+                --nameEnd;
+            }
+            std::size_t nameStart = nameEnd;
+            while (nameStart > scanStart && (std::isalnum(static_cast<unsigned char>(source[nameStart - 1])) || source[nameStart - 1] == '_')) {
+                --nameStart;
+            }
+            const auto funcName = std::string_view(source).substr(nameStart, nameEnd - nameStart);
+            if (!IsBdaInlineHelper(funcName)) {
+                at = source.find(attr, at + attr.size());
+                continue;
+            }
+            if (attr == "static __attribute__((noinline))") {
+                static constexpr std::string_view Replacement = "static inline __attribute__((always_inline))";
+                source.replace(at, attr.size(), Replacement);
+                at = source.find(attr, at + Replacement.size());
+            } else if (attr == "__attribute__((noinline))") {
+                static constexpr std::string_view Replacement = "__attribute__((always_inline))";
+                source.replace(at, attr.size(), Replacement);
+                at = source.find(attr, at + Replacement.size());
+            } else {
+                std::size_t eraseLen = attr.size();
+                while (at + eraseLen < source.size() && (source[at + eraseLen] == ' ' || source[at + eraseLen] == '\t')) {
+                    ++eraseLen;
+                }
+                if (at + eraseLen < source.size() && source[at + eraseLen] == '\n') {
+                    ++eraseLen;
+                }
+                source.erase(at, eraseLen);
+                at = source.find(attr, at);
+            }
+        }
+    }
 }
 
 Result ConvertToMetal(const RecompileResult& guest, ShaderStage stage, const TargetOptions& target) {
