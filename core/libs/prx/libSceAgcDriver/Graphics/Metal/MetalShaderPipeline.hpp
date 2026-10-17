@@ -75,6 +75,7 @@ public:
                                  MTLRenderPipelineDescriptor* descriptor);
     [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& VertexReflection() const;
     [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& FragmentReflection() const;
+    [[nodiscard]] id<MTLRenderPipelineState> Pipeline() const noexcept { return pipeline; }
     void Bind(id<MTLRenderCommandEncoder> encoder,
               std::span<const MetalShaderResourceBinding> vertexBindings,
               std::span<const MetalShaderResourceBinding> fragmentBindings,
@@ -83,7 +84,8 @@ public:
               std::span<const id<MTLResource>> indirectResources = {},
               std::span<const MetalImplicitBufferBinding> implicitBuffers = {},
               std::size_t rectPatchCount = 0,
-              bool elideResidency = false) const;
+              bool elideResidency = false,
+              bool elidePipeline = false) const;
 
 private:
     id<MTLDevice> device;
@@ -103,6 +105,7 @@ public:
                               MTLMeshRenderPipelineDescriptor* descriptor);
     [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& MeshReflection() const;
     [[nodiscard]] const ShaderRecompiler::MetalBackend::Result& FragmentReflection() const;
+    [[nodiscard]] id<MTLRenderPipelineState> Pipeline() const noexcept { return pipeline; }
     void ValidateThreadgroups(MTLSize groups) const;
     void Bind(id<MTLRenderCommandEncoder> encoder,
               std::span<const MetalShaderResourceBinding> meshBindings,
@@ -110,7 +113,8 @@ public:
               std::span<const std::byte> meshPushConstants = {},
               std::span<const std::byte> fragmentPushConstants = {},
               std::span<const id<MTLResource>> indirectResources = {},
-              bool elideResidency = false) const;
+              bool elideResidency = false,
+              bool elidePipeline = false) const;
 
 private:
     id<MTLDevice> device;

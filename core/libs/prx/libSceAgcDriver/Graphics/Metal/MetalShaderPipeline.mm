@@ -899,7 +899,8 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
                                std::span<const id<MTLResource>> indirectResources,
                                std::span<const MetalImplicitBufferBinding> implicitBuffers,
                                std::size_t rectPatchCount,
-                               bool elideResidency) const {
+                               bool elideResidency,
+                               bool elidePipeline) const {
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal render binding requires an encoder on this device");
     }
@@ -914,7 +915,9 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
     } else if (!implicitBuffers.empty() || rectPatchCount != 0) {
         throw std::invalid_argument("Ordinary Metal render pipelines do not accept rectangle intermediate buffers");
     }
-    [encoder setRenderPipelineState:pipeline];
+    if (!elidePipeline) {
+        [encoder setRenderPipelineState:pipeline];
+    }
     bindRender(encoder, vertex, preparedVertex, true);
     for (const auto& binding : implicit) [encoder setVertexBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
     bindRender(encoder, fragment, preparedFragment, false);
@@ -992,13 +995,16 @@ void MetalMeshPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
                             std::span<const std::byte> meshPushConstants,
                             std::span<const std::byte> fragmentPushConstants,
                             std::span<const id<MTLResource>> indirectResources,
-                            bool elideResidency) const {
+                            bool elideResidency,
+                            bool elidePipeline) const {
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal mesh binding requires an encoder on this device");
     }
     auto preparedMesh = prepare(device, mesh, meshBufferAlignments, meshSamplerFunction, meshBindings, meshPushConstants, indirectResources);
     auto preparedFragment = prepare(device, fragment, fragmentBufferAlignments, fragmentSamplerFunction, fragmentBindings, fragmentPushConstants, indirectResources);
-    [encoder setRenderPipelineState:pipeline];
+    if (!elidePipeline) {
+        [encoder setRenderPipelineState:pipeline];
+    }
     bindMesh(encoder, mesh, preparedMesh);
     bindRender(encoder, fragment, preparedFragment, false);
     if (!elideResidency) {

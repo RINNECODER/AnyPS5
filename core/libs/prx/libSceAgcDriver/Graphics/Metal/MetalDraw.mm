@@ -1051,12 +1051,15 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                 }
             }
 
+            const bool elidePipeline = encoderActive && (lastEncoderState.pipelineState == cached->vertexPipeline->Pipeline());
             cached->vertexPipeline->Bind(encoder, cached->vertexBindings, cached->fragmentBindings,
                 pushBlock(cached->vertexPipeline->VertexReflection(), pushConstants),
                 pushBlock(cached->vertexPipeline->FragmentReflection(), pushConstants),
                 cached->residency,
                 {}, 0,
-                /*elideResidency=*/true);
+                /*elideResidency=*/true,
+                /*elidePipeline=*/elidePipeline);
+            lastEncoderState.pipelineState = cached->vertexPipeline->Pipeline();
 
             if (!encoderActive || !(lastEncoderState.dynamicState == currentDynamicState) || lastEncoderState.depthStencilState != cached->depthStencilState) {
                 BindRenderState(encoder, state, cached->depthStencilState);
@@ -1066,8 +1069,21 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                 translationCache.RecordStateElision();
             }
 
-            for (std::size_t i = 0; i < cached->vertexBuffers.size(); ++i) {
-                [encoder setVertexBuffer:cached->vertexBuffers[i].buffer offset:cached->vertexBuffers[i].offset atIndex:i];
+            bool vertexBuffersMatch = encoderActive && (lastEncoderState.vertexBuffers.size() == cached->vertexBuffers.size());
+            if (vertexBuffersMatch) {
+                for (std::size_t i = 0; i < cached->vertexBuffers.size(); ++i) {
+                    if (lastEncoderState.vertexBuffers[i].buffer != cached->vertexBuffers[i].buffer ||
+                        lastEncoderState.vertexBuffers[i].offset != cached->vertexBuffers[i].offset) {
+                        vertexBuffersMatch = false;
+                        break;
+                    }
+                }
+            }
+            if (!vertexBuffersMatch) {
+                for (std::size_t i = 0; i < cached->vertexBuffers.size(); ++i) {
+                    [encoder setVertexBuffer:cached->vertexBuffers[i].buffer offset:cached->vertexBuffers[i].offset atIndex:i];
+                }
+                lastEncoderState.vertexBuffers.assign(cached->vertexBuffers.begin(), cached->vertexBuffers.end());
             }
             lastEncoderState.translationId = cached->recordId;
             lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
@@ -1740,10 +1756,13 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
 
         lastEncoderState.encoder = encoder;
         lastEncoderState.translationId = record->recordId;
+        lastEncoderState.pipelineState = record->vertexPipeline != nullptr ? record->vertexPipeline->Pipeline() :
+            (record->meshPipeline != nullptr ? record->meshPipeline->Pipeline() : nil);
         lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
         lastEncoderState.dynamicState = currentDynamicState;
         lastEncoderState.depthStencilState = depthStencilState;
         lastEncoderState.residentResources.assign(residency.begin(), residency.end());
+        lastEncoderState.vertexBuffers.assign(vertexBuffers.begin(), vertexBuffers.end());
     } else {
         lastEncoderState.Reset();
     }
@@ -1779,6 +1798,18 @@ bool MetalDraw::ParallelEncodingEnabled() {
         return true;
     }();
     return enabled;
+}
+
+std::size_t MetalDraw::MinParallelDraws() {
+    static const std::size_t minimum = [] {
+        const char* val = std::getenv("ANYPS5_METAL_PARALLEL_MIN_DRAWS");
+        if (val != nullptr && *val != '\0') {
+            const auto parsed = std::strtoul(val, nullptr, 10);
+            if (parsed >= 2) return static_cast<std::size_t>(parsed);
+        }
+        return DefaultMinParallelDraws;
+    }();
+    return minimum;
 }
 
 std::optional<MetalDraw::PreparedDraw> MetalDraw::PrepareCachedDraw(
@@ -2006,7 +2037,11 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
 
         id<MTLRenderCommandEncoder> encoder = subEncoders[workerIndex];
         std::uint64_t lastRecordId = 0;
+        id<MTLRenderPipelineState> lastPipeline = nil;
+        id<MTLDepthStencilState> lastDepthStencil = nil;
         DynamicRenderState lastDynamicState{};
+        std::vector<MetalBufferBinding> lastVertexBuffers;
+        std::vector<id<MTLResource>> residentResources;
 
         for (std::size_t d = start; d < end; ++d) {
             const auto& item = draws[d];
@@ -2015,16 +2050,47 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
 
             const bool sameRecord = (lastRecordId == record->recordId);
             if (!sameRecord) {
+                for (id<MTLResource> res : record->residency) {
+                    if (std::find(residentResources.begin(), residentResources.end(), res) == residentResources.end()) {
+                        [encoder useResource:res usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
+                        residentResources.push_back(res);
+                    }
+                }
+
+                const bool elidePipeline = (lastPipeline == record->vertexPipeline->Pipeline());
                 record->vertexPipeline->Bind(encoder, record->vertexBindings, record->fragmentBindings,
                     pushBlock(record->vertexPipeline->VertexReflection(), item.pushConstants),
                     pushBlock(record->vertexPipeline->FragmentReflection(), item.pushConstants),
-                    record->residency);
-                BindRenderState(encoder, item.state, record->depthStencilState);
-                for (std::size_t b = 0; b < record->vertexBuffers.size(); ++b) {
-                    [encoder setVertexBuffer:record->vertexBuffers[b].buffer offset:record->vertexBuffers[b].offset atIndex:b];
+                    record->residency,
+                    {}, 0,
+                    /*elideResidency=*/true,
+                    /*elidePipeline=*/elidePipeline);
+                lastPipeline = record->vertexPipeline->Pipeline();
+
+                if (!(lastDynamicState == item.dynamicState) || lastDepthStencil != record->depthStencilState) {
+                    BindRenderState(encoder, item.state, record->depthStencilState);
+                    lastDynamicState = item.dynamicState;
+                    lastDepthStencil = record->depthStencilState;
                 }
+
+                bool vertexBuffersMatch = (lastVertexBuffers.size() == record->vertexBuffers.size());
+                if (vertexBuffersMatch) {
+                    for (std::size_t b = 0; b < record->vertexBuffers.size(); ++b) {
+                        if (lastVertexBuffers[b].buffer != record->vertexBuffers[b].buffer ||
+                            lastVertexBuffers[b].offset != record->vertexBuffers[b].offset) {
+                            vertexBuffersMatch = false;
+                            break;
+                        }
+                    }
+                }
+                if (!vertexBuffersMatch) {
+                    for (std::size_t b = 0; b < record->vertexBuffers.size(); ++b) {
+                        [encoder setVertexBuffer:record->vertexBuffers[b].buffer offset:record->vertexBuffers[b].offset atIndex:b];
+                    }
+                    lastVertexBuffers.assign(record->vertexBuffers.begin(), record->vertexBuffers.end());
+                }
+
                 lastRecordId = record->recordId;
-                lastDynamicState = item.dynamicState;
             } else {
                 if (record->vertexPushBuffer && record->vertexPushBytes > 0) {
                     auto span = std::span(item.pushConstants).first(std::min(record->vertexPushBytes, item.pushConstants.size()));

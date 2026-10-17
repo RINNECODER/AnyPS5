@@ -111,7 +111,8 @@ public:
     [[nodiscard]] const MetalDrawTranslationCache& TranslationCache() const { return translationCache; }
 
     [[nodiscard]] static bool ParallelEncodingEnabled();
-    static constexpr std::size_t MinParallelDraws = 4;
+    static constexpr std::size_t DefaultMinParallelDraws = 4;
+    [[nodiscard]] static std::size_t MinParallelDraws();
 
     [[nodiscard]] std::optional<PreparedDraw> PrepareCachedDraw(
         const Graphics::State& state,
@@ -152,17 +153,21 @@ private:
     struct EncoderDrawState {
         id<MTLRenderCommandEncoder> encoder = nil;
         std::uint64_t translationId = 0;
+        id<MTLRenderPipelineState> pipelineState = nil;
         std::vector<std::byte> pushConstants;
         DynamicRenderState dynamicState;
         id<MTLDepthStencilState> depthStencilState = nil;
         std::vector<id<MTLResource>> residentResources;
+        std::vector<MetalBufferBinding> vertexBuffers;
         void Reset() {
             encoder = nil;
             translationId = 0;
+            pipelineState = nil;
             pushConstants.clear();
             dynamicState = {};
             depthStencilState = nil;
             residentResources.clear();
+            vertexBuffers.clear();
         }
     };
     EncoderDrawState lastEncoderState;
