@@ -11,6 +11,7 @@
 extern "C" {
 void* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode);
 int APS5_VABI fclose_nid_postfix(void* stream);
+void* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode, void* stream);
 int* APS5_VABI __error_nid_postfix();
 }
 
@@ -61,11 +62,33 @@ void Open() {
     Check(plain != nullptr && fclose_nid_postfix(plain) == 0);
 }
 
+bool ReopenFails(const char* name, const char* mode, int error) {
+    void* stream = fopen_nid_postfix("plain.txt", "r");
+    Check(stream != nullptr);
+    *__error_nid_postfix() = 0;
+    const bool failed = freopen_nid_postfix(name, mode, stream) == nullptr && *__error_nid_postfix() == error;
+    *__error_nid_postfix() = 0;
+    return failed;
+}
+
+void Reopen() {
+    Check(ReopenFails("loop", "r", GuestEloop));
+    Check(ReopenFails("loop/inside", "w", GuestEloop));
+    Check(ReopenFails(LongName.c_str(), "r", GuestEnametoolong));
+    Check(ReopenFails(LongName.c_str(), "w", GuestEnametoolong));
+    Check(ReopenFails("missing.txt", "r", GuestEnoent));
+    void* stream = fopen_nid_postfix("plain.txt", "r");
+    Check(stream != nullptr);
+    void* reopened = freopen_nid_postfix("plain.txt", "r", stream);
+    Check(reopened != nullptr && fclose_nid_postfix(reopened) == 0);
+}
+
 }
 
 int main() {
     const auto root = EnterFreshRoot();
     Open();
+    Reopen();
     std::error_code error;
     std::filesystem::current_path(std::filesystem::temp_directory_path(), error);
     std::filesystem::remove_all(root, error);

@@ -278,7 +278,7 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
             if (!path.empty() && parsed->writes) RecordWrittenPath_nid_no_patch(path);
             return stream;
         }
-        const int error = errno;
+        const int error = GuestErrnoFromHost_nid_no_patch(errno);
         if (stream->IsDynamic()) delete stream;
         errno = error;
         return nullptr;
