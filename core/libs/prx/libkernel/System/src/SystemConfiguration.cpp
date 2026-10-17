@@ -349,11 +349,11 @@ int APS5_VABI sysctlbyname_nid_postfix(const char* name, void* oldValue, std::si
             *__error_nid_postfix() = 1;
             return -1;
         }
-        if (oldValue == nullptr || oldLength == nullptr) throw std::runtime_error(std::string(__func__) + ": kern.rng_pseudo without an output buffer");
         static std::random_device device;
-        auto* bytes = static_cast<std::uint8_t*>(oldValue);
-        for (std::size_t i = 0; i < *oldLength; ++i) bytes[i] = static_cast<std::uint8_t>(device());
-        return 0;
+        std::uint8_t block[64]{};
+        if (oldValue != nullptr && oldLength != nullptr)
+            for (auto& byte : block) byte = static_cast<std::uint8_t>(device());
+        return CopyOut(block, sizeof(block), oldValue, oldLength);
     }
     if (std::strcmp(name, "kern.sdk_version") == 0) {
         if (newValue != nullptr) {
