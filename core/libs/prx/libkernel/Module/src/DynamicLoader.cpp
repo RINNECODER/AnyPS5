@@ -2,6 +2,8 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libkernel/Module/ModuleArgs.hpp"
 #include <nid/NidCompute.hpp>
+#include <algorithm>
+#include <cctype>
 #include <array>
 #include <condition_variable>
 #include <filesystem>
@@ -187,6 +189,22 @@ static void InitializeDeferredModule(HMODULE native) {
 }
 #endif
 
+#ifndef _WIN32
+std::string FoldCase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+std::string GuestModulePath(const std::string& path) {
+    const auto wanted = FoldCase(std::filesystem::path(path).filename().string() + ".guest.prx");
+    const auto directory = std::filesystem::read_symlink("/proc/self/exe").parent_path() / "app0" / "sce_module";
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+        if (FoldCase(entry.path().filename().string()) == wanted) return entry.path().string();
+    }
+    return {};
+}
+#endif
+
 void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
     if ((flags & ~0x103) || (flags & 3) == 0 || (flags & 3) == 3) {
         Error("dlopen: unsupported flags"); return nullptr;
@@ -210,7 +228,10 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             Error(message); return nullptr;
         }
 #else
-        const auto resolved = path ? RelinkedModulePath_nid_no_patch(ResolvePath_nid_no_patch(path)).string() : std::string{};
+        auto resolved = path ? RelinkedModulePath_nid_no_patch(ResolvePath_nid_no_patch(path)).string() : std::string{};
+        if (path && !resolved.ends_with(".guest.prx")) {
+            if (auto guest = GuestModulePath(path); !guest.empty()) resolved = std::move(guest);
+        }
         const int nativeFlags = ((flags & 3) == 1 ? RTLD_LAZY : RTLD_NOW) |
             ((flags & 0x100) ? RTLD_GLOBAL : RTLD_LOCAL);
         module->native = ::dlopen(path ? resolved.c_str() : nullptr, nativeFlags);
