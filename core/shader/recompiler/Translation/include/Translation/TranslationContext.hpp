@@ -74,6 +74,7 @@ private:
     IrU32 flushF16Input(IrU32 bits);
     IrU32 flushF16Result(IrU32 bits);
     IrF32 flushF16InputValue(IrF32 value);
+    IrF32 flushTinyF16Value(IrF32 value, std::uint32_t threshold);
     IrU32 convertF32ToF16Bits(IrF32 value, std::initializer_list<IrValue*> sources);
     void writeF16Conversion(const RdnaOperand& operand, IrF32 value, std::initializer_list<IrValue*> sources);
     IrU32 readU32(const RdnaOperand& operand);
