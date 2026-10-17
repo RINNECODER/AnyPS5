@@ -1896,14 +1896,12 @@ std::optional<MetalDraw::PreparedDraw> MetalDraw::PrepareCachedDraw(
     auto cached = translationCache.Find(key, memoryVersion, imageCacheClears);
     if (cached == nullptr || cached->renderPass == nil) return std::nullopt;
 
-    auto resourcesOwner = std::make_shared<MetalShaderResources>(backend, ranges,
-        [this](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
-            return residentTexture(resource, storage, compare);
-        }, hostAliases.get(), ImageCache());
-    auto& resources = *resourcesOwner;
-
     MetalBufferBinding indexBuffer;
     if (draw.indexed) {
+        MetalShaderResources resources(backend, ranges,
+            [this](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
+                return residentTexture(resource, storage, compare);
+            }, hostAliases.get(), ImageCache());
         const auto bytes = std::uint64_t{draw.indexCount} * draw.indexSize;
         if (cpuReadHook && !cached->wholeVertexRanges) cpuReadHook(draw.indexAddress, bytes);
         indexBuffer = resources.Buffer(draw.indexAddress, static_cast<std::size_t>(bytes));
