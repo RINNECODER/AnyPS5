@@ -135,6 +135,12 @@ int main() {
     Require(sceKernelRead(-1, direct, 1) == static_cast<std::int32_t>(0x80020009u));
     Require(sceKernelWrite(-1, direct, 1) == static_cast<std::int32_t>(0x80020009u));
     Require(sceKernelLseek(-1, 0, 0) == static_cast<std::int32_t>(0x80020009u));
+    Require(sceKernelRead(descriptor, nullptr, 1) == static_cast<std::int32_t>(0x8002000eu));
+    Require(sceKernelWrite(descriptor, nullptr, 1) == static_cast<std::int32_t>(0x8002000eu));
+    Require(sceKernelRead(descriptor, nullptr, 0) == 0);
+    Require(sceKernelWrite(descriptor, nullptr, 0) == 0);
+    Require(sceKernelRead(-1, nullptr, 0) == static_cast<std::int32_t>(0x80020009u));
+    Require(sceKernelWrite(-1, nullptr, 0) == static_cast<std::int32_t>(0x80020009u));
     Require(close_nid_postfix(descriptor) == 0);
     const int readOnly = open_nid_postfix(fileName.c_str(), SCE_KERNEL_O_RDONLY, 0);
     Require(readOnly >= 0);
