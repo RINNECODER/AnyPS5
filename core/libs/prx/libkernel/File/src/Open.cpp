@@ -162,6 +162,13 @@ static int SceErrorFromErrno(int error) {
     return static_cast<int>(0x80020000u | static_cast<unsigned>(guest));
 }
 
+static int SceStatErrorFromErrno(int error) {
+#ifdef ELOOP
+    if (error == ELOOP) return SceKernelError(62);
+#endif
+    return SceErrorFromErrno(error);
+}
+
 static int SceIoErrorFromErrno(int error) {
     int guest = SceErrorFromErrno(error) & 0xffff;
     if (error == EAGAIN) guest = 35;
@@ -346,7 +353,7 @@ static int StatNative(const std::filesystem::path& native, bool directory, FileS
     }
     if (directory && !std::filesystem::is_directory(status)) return SceErrorFromErrno(GuestEnotdir);
     if (sb == nullptr) return SceErrorFromErrno(GuestEfault);
-    File::FillFileStat(native, sb);
+    if (!File::TryFillFileStat(native, sb)) return SceStatErrorFromErrno(errno);
     return 0;
 }
 

@@ -3,6 +3,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libkernel/File/include/File.hpp"
+#include "prx/libkernel/File/include/NativeStat.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
@@ -786,6 +787,10 @@ int main() {
     Require(stat_nid_postfix(link.string().c_str(), &status) == 0 && (status.st_mode & 0170000) == 0100000);
     const auto dangling = root / "dangling";
     std::filesystem::create_symlink("missing.txt", dangling);
+    const auto statLoop = root / "stat-loop";
+    std::filesystem::create_symlink("stat-loop", statLoop);
+    errno = 0;
+    Require(!File::TryFillFileStat(statLoop, &status) && errno == ELOOP);
     Require(lstat_nid_postfix(dangling.string().c_str(), &linkStatus) == 0 && (linkStatus.st_mode & 0170000) == 0120000);
     constexpr int noFollow = 0x100;
     Require(sceKernelOpen(link.string().c_str(), noFollow, 0) == static_cast<int>(0x8002001Fu));
