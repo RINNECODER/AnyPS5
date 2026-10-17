@@ -29,6 +29,7 @@ struct Parameters {
     uint32_t linearBase = 0;
     uint32_t columnBegin = 0;
     uint32_t rowBegin = 0;
+    uint32_t pipeBankXor = 0;
 };
 
 struct Fixture {
@@ -77,11 +78,13 @@ uint32_t FixtureAddress(const Fixture& fixture, uint32_t x, uint32_t y) {
             if (bit == 7) yBit ^= (p.slice >> 7) & 1u;
             address += xBit * (1u << (2 * bit)) + yBit * (1u << (2 * bit + 1));
         }
+        address ^= p.pipeBankXor;
     } else if (fixture.constants[2] == 2) {
         address = (((swizzleX & 1u) ^ ((p.slice >> 1) & 1u)) * 4u) +
                   ((swizzleY & 1u) * 8u) + ((p.slice & 1u) * 16u) +
                   (((swizzleX >> 1) & 1u) * 32u) +
                   (((swizzleY >> 1) & 1u) * 64u) + (((p.slice >> 1) & 1u) * 128u);
+        address ^= p.pipeBankXor;
     } else {
         address = StandardAddress(swizzleX, swizzleY, p.elementBytes, fixture.constants[1]);
     }
@@ -266,6 +269,16 @@ void RunTextureDetileTests(const Context& context) {
     largeEquation.grid = MTLSizeMake(260, 260, 1);
     for (uint32_t slice : {0u, 128u, 129u}) {
         largeEquation.parameters.slice = slice;
+        Verify(context, largeEquation, 0);
+        Verify(context, largeEquation, 1);
+    }
+    for (uint32_t xorVal : {0x20u, 0x54u}) {
+        equation.parameters.pipeBankXor = xorVal;
+        Verify(context, equation, 0);
+        Verify(context, equation, 1);
+    }
+    for (uint32_t xorVal : {0x100u, 0x4600u}) {
+        largeEquation.parameters.pipeBankXor = xorVal;
         Verify(context, largeEquation, 0);
         Verify(context, largeEquation, 1);
     }

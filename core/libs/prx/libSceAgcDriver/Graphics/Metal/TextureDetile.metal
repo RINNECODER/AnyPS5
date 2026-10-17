@@ -42,6 +42,7 @@ struct TextureDetileParameters {
     uint linearBase;
     uint columnBegin;
     uint rowBegin;
+    uint pipeBankXor;
 };
 
 uint equationBit(uint mask, uint2 p, constant TextureDetileParameters& params) {
@@ -104,7 +105,7 @@ uint standard64Extra(uint x, uint y) {
 
 uint blockOffset(uint2 p, constant TextureDetileParameters& params) {
     if (TILE_FAMILY == 2u) {
-        return equationOffset(p, params);
+        return equationOffset(p, params) ^ params.pipeBankXor;
     }
     uint offset = standardOffset(p.x, p.y);
     if (BLOCK_BYTES > 4096u) {

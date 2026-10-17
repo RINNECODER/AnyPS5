@@ -179,7 +179,7 @@ template <std::size_t N>
 class SlotMask {
 public:
     void reserve(std::uint32_t first, std::uint32_t count, std::uint32_t limit) {
-        if (count == 0 || first >= limit || count > limit - first) {
+        if (count == 0 || first >= limit || count > limit - first || first + count > N) {
             throw std::invalid_argument("Converted Metal shader resource slots exceed the native argument limit");
         }
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -311,7 +311,7 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
     }
     SlotMask<32> bufferSlots;
     SlotMask<128> textureSlots;
-    SlotMask<32> samplerSlots;
+    SlotMask<1024> samplerSlots;
     id<MTLArgumentEncoder> samplerEncoder = nil;
     id<MTLBuffer> samplerBuffer = nil;
     auto samplerOwners = [NSMutableArray new];
