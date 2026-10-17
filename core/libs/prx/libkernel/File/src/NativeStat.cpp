@@ -23,6 +23,11 @@ struct NativeStat : __stat64 {
     bool isSymbolicLink = false;
 };
 static bool NativeStatPath(const std::filesystem::path& path, std::filesystem::path& prepared) {
+    const auto& input = path.native();
+    if (input.starts_with(L"\\\\?\\") || input.starts_with(L"\\\\.\\")) {
+        prepared = path;
+        return true;
+    }
     std::error_code error;
     prepared = std::filesystem::absolute(path, error);
     if (error) {

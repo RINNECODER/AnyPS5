@@ -285,6 +285,12 @@ static void TestLongHostPathLstat() {
         (status.st_mode & 0170000) == 0100000);
     Require(lstat_nid_postfix("/long-lstat-host/missing.bin", &status) == -1 && *__error_nid_postfix() == 2);
     RemovePathAlias_nid_no_patch("/long-lstat-host");
+    const auto extendedHost = ExtendedLongPath(deep).string();
+    AddPathAlias_nid_no_patch("/long-lstat-extended", extendedHost.c_str());
+    Require(lstat_nid_postfix("/long-lstat-extended/payload.bin", &status) == 0 && status.st_size == 8 &&
+        (status.st_mode & 0170000) == 0100000);
+    Require(lstat_nid_postfix("/long-lstat-extended/missing.bin", &status) == -1 && *__error_nid_postfix() == 2);
+    RemovePathAlias_nid_no_patch("/long-lstat-extended");
     Require(::DeleteFileW(ExtendedLongPath(file).c_str()) != 0);
     for (auto path = directories.rbegin(); path != directories.rend(); ++path)
         Require(::RemoveDirectoryW(ExtendedLongPath(*path).c_str()) != 0);
