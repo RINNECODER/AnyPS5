@@ -119,6 +119,39 @@ struct DrawTranslationKey {
     bool indexed = false;
     std::uint32_t nativeIndexSize = 4;
 
+    void Clear() noexcept {
+        vertexVariantId = 0;
+        fragmentVariantId = 0;
+        vertexPushOffset = 0;
+        fragmentPushOffset = 0;
+        stagesRegisterValue = 0;
+        stagesPath = 0;
+        vertexWaveSize = 0;
+        fragmentWaveSize = 0;
+        rasterSamples = 1;
+        topology = 0;
+        primitiveRestart = false;
+        negativeOneToOne = false;
+        flipVertexY = false;
+        depthTest = false;
+        depthWrite = false;
+        depthCompare = 0;
+        stencilTest = false;
+        stencilFront = {};
+        stencilBack = {};
+        renderExtentWidth = 0;
+        renderExtentHeight = 0;
+        customSampleLocations = false;
+        sampleLocations = {};
+        colors.clear();
+        depth = std::nullopt;
+        blends.clear();
+        attributes.clear();
+        guestDescriptorWords.clear();
+        indexed = false;
+        nativeIndexSize = 4;
+    }
+
     bool operator==(const DrawTranslationKey& o) const noexcept {
         return vertexVariantId == o.vertexVariantId && fragmentVariantId == o.fragmentVariantId &&
                vertexPushOffset == o.vertexPushOffset && fragmentPushOffset == o.fragmentPushOffset &&

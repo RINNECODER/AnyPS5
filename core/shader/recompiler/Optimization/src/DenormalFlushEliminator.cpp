@@ -28,18 +28,64 @@ bool setsExponentBit(const IrValue& value) {
     return false;
 }
 
+const IrValue* rightOperand(const IrValue* value, IrOpcode opcode, std::uint32_t bits) {
+    if (value->Opcode() != opcode || value->ArgumentCount() != 2u) return nullptr;
+    return isImmediate(value->Argument(1)->Resolve(), bits) ? value->Argument(0)->Resolve() : nullptr;
+}
+
+const IrValue* bitsOf(const IrValue* value) {
+    value = value->Resolve();
+    while ((value->Opcode() == IrOpcode::BitCastU32F32 || value->Opcode() == IrOpcode::BitCastF32U32) && value->ArgumentCount() == 1u) value = value->Argument(0)->Resolve();
+    return value;
+}
+
+bool testsForNan(const IrValue* condition, const IrValue* bits) {
+    condition = condition->Resolve();
+    if (condition->Opcode() == IrOpcode::FPIsNan32 && condition->ArgumentCount() == 1u) return bitsOf(condition->Argument(0)) == bits;
+    const IrValue* magnitude = rightOperand(condition, IrOpcode::UGreaterThan32, 0x7f800000u);
+    if (magnitude != nullptr) magnitude = maskedOperand(magnitude, IrOpcode::BitwiseAnd32, 0x7fffffffu);
+    return magnitude != nullptr && bitsOf(magnitude) == bits;
+}
+
+bool takenOnlyAsNan(const IrValue* condition, const IrValue* arm) {
+    const IrValue* bits = bitsOf(arm);
+    if (const IrValue* quieted = maskedOperand(bits, IrOpcode::BitwiseOr32, 0x00400000u)) bits = bitsOf(quieted);
+    return testsForNan(condition, bits);
+}
+
+const IrValue* tinyGuardedProduct(const IrValue* condition, const IrValue* arm) {
+    const IrValue* product = arm->Resolve();
+    if (product->Opcode() != IrOpcode::FPMul32 || product->ArgumentCount() != 2u) return nullptr;
+    const IrValue* offset = rightOperand(condition->Resolve(), IrOpcode::ULessThan32, 0x207fffffu);
+    const IrValue* magnitude = offset != nullptr ? rightOperand(offset, IrOpcode::ISub32, 1u) : nullptr;
+    const IrValue* scaled = magnitude != nullptr ? maskedOperand(magnitude, IrOpcode::BitwiseAnd32, 0x7fffffffu) : nullptr;
+    if (scaled == nullptr) return nullptr;
+    scaled = bitsOf(scaled);
+    if (scaled->Opcode() != IrOpcode::FPMul32 || scaled->ArgumentCount() != 2u) return nullptr;
+    const IrValue* lhs = product->Argument(0)->Resolve();
+    const IrValue* rhs = product->Argument(1)->Resolve();
+    for (std::size_t index = 0; index < 2u; ++index) {
+        const IrValue* factor = maskedOperand(scaled->Argument(index)->Resolve(), IrOpcode::FPMul32, 0x5f800000u);
+        const IrValue* other = scaled->Argument(1u - index)->Resolve();
+        if (factor != nullptr && ((factor == lhs && other == rhs) || (factor == rhs && other == lhs))) return product;
+    }
+    return nullptr;
+}
+
+bool clearsSignificand(const IrValue& value) {
+    for (std::size_t index = 0; index < value.ArgumentCount(); ++index) {
+        const IrValue* mask = value.Argument(index)->Resolve();
+        if (mask->HasImmediate() && (mask->ImmediateU32() & 0x007fffffu) == 0u) return true;
+    }
+    return false;
+}
+
 IrValue* flushedSource(const IrValue& value) {
     if (value.Opcode() != IrOpcode::SelectU32 || value.ArgumentCount() != 3u) return nullptr;
     IrValue* source = value.Argument(2)->Resolve();
     const IrValue* exponent = maskedOperand(value.Argument(0)->Resolve(), IrOpcode::IEqual32, 0u);
     if (exponent == nullptr || maskedOperand(exponent, IrOpcode::BitwiseAnd32, 0x7f800000u) != source) return nullptr;
     return maskedOperand(value.Argument(1)->Resolve(), IrOpcode::BitwiseAnd32, 0x80000000u) == source ? source : nullptr;
-}
-
-const IrValue* bitsOf(const IrValue* value) {
-    value = value->Resolve();
-    while (value->Opcode() == IrOpcode::BitCastF32U32 || value->Opcode() == IrOpcode::BitCastU32F32) value = value->Argument(0)->Resolve();
-    return value;
 }
 
 bool nanOnlyTrueArm(const IrValue& select) {
@@ -95,7 +141,7 @@ private:
             case IrOpcode::BitwiseAnd32:
                 if (maskedOperand(&value, IrOpcode::BitwiseAnd32, 0x80000000u) != nullptr) return true;
                 if (const IrValue* operand = maskedOperand(&value, IrOpcode::BitwiseAnd32, 0x7fffffffu)) return Contains(operand);
-                return false;
+                return value.ArgumentCount() == 2u && clearsSignificand(value);
             case IrOpcode::FPMul32: {
                 const auto keepsMagnitude = [&](const IrValue* factor, const IrValue* other) {
                     factor = factor->Resolve();
@@ -111,8 +157,10 @@ private:
             case IrOpcode::SelectF32: {
                 const auto flags = value.Opcode() == IrOpcode::SelectF32 ? value.Flags<SelectFlags>() : SelectFlags{};
                 if (flags.notDenormal) return true;
-                if (nanOnlyTrueArm(value)) return Contains(value.Argument(2));
-                return Contains(value.Argument(1)) && Contains(value.Argument(2));
+                const IrValue* condition = value.Argument(0);
+                const IrValue* product = tinyGuardedProduct(condition, value.Argument(2));
+                const bool taken = takenOnlyAsNan(condition, value.Argument(1)) || nanOnlyTrueArm(value) || Contains(value.Argument(1));
+                return taken && (product != nullptr ? Contains(product->Argument(0)) && Contains(product->Argument(1)) : Contains(value.Argument(2)));
             }
             case IrOpcode::FPMin32:
             case IrOpcode::FPMax32:

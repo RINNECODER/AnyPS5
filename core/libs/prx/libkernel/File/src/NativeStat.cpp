@@ -17,6 +17,25 @@ struct NativeStat : __stat64 {
     bool hasTimes = false;
     bool hasIdentity = false;
 };
+static bool NativeStatPath(const std::filesystem::path& path, std::filesystem::path& prepared) {
+    const auto& input = path.native();
+    if (input.starts_with(L"\\\\?\\") || input.starts_with(L"\\\\.\\")) {
+        prepared = path;
+        return true;
+    }
+    std::error_code error;
+    prepared = std::filesystem::absolute(path, error);
+    if (error) {
+        errno = FilesystemError(error);
+        return false;
+    }
+    prepared = prepared.lexically_normal().make_preferred();
+    const auto& native = prepared.native();
+    if (native.size() < MAX_PATH || native.starts_with(L"\\\\?\\") || native.starts_with(L"\\\\.\\")) return true;
+    prepared = native.starts_with(L"\\\\") ? std::filesystem::path(L"\\\\?\\UNC\\" + native.substr(2))
+                                               : std::filesystem::path(L"\\\\?\\" + native);
+    return true;
+}
 static int ReadHandleInfo(HANDLE handle, NativeStat* st) {
     if (GetFileType(handle) != FILE_TYPE_DISK) return 0;
     if (!GetFileInformationByHandleEx(handle, FileBasicInfo, &st->times, sizeof(st->times)))

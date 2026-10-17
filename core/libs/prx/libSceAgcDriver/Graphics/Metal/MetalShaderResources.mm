@@ -949,15 +949,12 @@ void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands, bool l
         return;
     }
     const bool defer = lazy && lazyCopyBacks != nullptr && MetalLazyCopyBacks::Enabled();
+    id<MTLComputeCommandEncoder> sharedEncoder = nil;
     for (auto& image : images) {
         if (!image.written) continue;
-        // Only what this work wrote, when the rest of the guest bytes already equal the texture: an
-        // uncompressed surface read and written in place (a DCC or staged one is copied whole).
         const bool partial = image.original.empty() && image.keys == Graphics::DccKeys::Uncompressed &&
             image.texture->Descriptor().dccAddress == 0 && image.writtenPart.levelBegin < image.writtenPart.levelEnd;
         const auto part = partial ? image.writtenPart : MetalTexture::Subresources{};
-        // Deferred only when the copy-back writes the guest bytes in place through their alias: a
-        // staged surface or one copied through another buffer needs its CPU copy in Complete.
         const bool aliased = image.original.empty() && !image.host.empty() &&
             static_cast<const std::byte*>(image.buffer.buffer.contents) + image.buffer.offset == image.host.data();
         if (defer && aliased &&
@@ -966,9 +963,25 @@ void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands, bool l
             image.deferred = true;
             continue;
         }
+        if (image.texture->FusesTransfer(false) && image.texture->UploadsInPlace(image.buffer.buffer, image.buffer.offset)) {
+            if (sharedEncoder == nil) {
+                sharedEncoder = backend.ComputeEncoder(commands, @"batched readback retiles");
+            }
+            if (image.texture->EncodeReadback(sharedEncoder, image.buffer.buffer, image.buffer.offset, part)) {
+                image.readbackIn = commands;
+                continue;
+            }
+        }
+        if (sharedEncoder != nil) {
+            [sharedEncoder endEncoding];
+            sharedEncoder = nil;
+        }
         if (image.texture->EncodeReadback(commands, image.buffer.buffer, image.buffer.offset, part)) {
             image.readbackIn = commands;
         }
+    }
+    if (sharedEncoder != nil) {
+        [sharedEncoder endEncoding];
     }
 }
 

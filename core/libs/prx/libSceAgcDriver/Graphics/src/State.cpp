@@ -680,7 +680,7 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
     };
     const bool alternate = swap == 1;
     const auto single = [&](VkFormat vkFormat, std::uint32_t bytes) { return DecodedColorFormat{vkFormat, bytes, static_cast<std::uint8_t>((0xe4u & ~3u) | swap)}; };
-    if (swap > 1 && format != 1 && format != 2 && format != 4 && format != 10 && format != 12) return fail();
+    if (swap > 1 && format != 1 && format != 2 && format != 4 && format != 10 && format != 12 && format != 16) return fail();
     switch (format) {
         case 1:
             if (number == unorm) return single(VK_FORMAT_R8_UNORM, 1);
@@ -748,6 +748,9 @@ DecodedColorFormat DecodeColorFormat(std::uint32_t format, std::uint32_t number,
             if (number == floating) return {VK_FORMAT_R32G32B32A32_SFLOAT, 16};
             if (number == uint) return {VK_FORMAT_R32G32B32A32_UINT, 16};
             return fail();
+        case 16:
+            if ((swap != 0 && swap != 2) || number != unorm) return fail();
+            return {VK_FORMAT_R5G6B5_UNORM_PACK16, 2, static_cast<std::uint8_t>(swap == 2 ? 0xe4u : 0xc6u)};
         case 17:
             if (swap != 0 || number != unorm) return fail();
             return {VK_FORMAT_A1R5G5B5_UNORM_PACK16, 2, 0xc6u};
@@ -1360,13 +1363,19 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     color.surfaceExtent = color.extent;
     color.mipCount = maxMip + 1u;
     color.mip = viewMip;
+    std::uint32_t firstTailLevel = maxMip + 1u;
     if (maxMip != 0) {
-        // A mipmapped surface is addressed like a texture; the view renders into one mip of it.
         const auto mips = ComputeElementMipLayout(ColorTextureTileMode(color.tileMode), color.elementBytes, color.extent.width, color.extent.height, maxMip + 1u);
         const auto& mip = mips.at(viewMip);
         mipOffset = mip.tiledOffset;
         color.mipTail = mip.tail;
         color.extent = {mip.width, mip.height};
+        for (std::uint32_t level = 0; level < mips.size(); ++level) {
+            if (mips[level].tail) {
+                firstTailLevel = level;
+                break;
+            }
+        }
     }
     const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes);
     const auto high = read(cx, 0x390 + slot);
@@ -1403,15 +1412,39 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
     }
     // Multisampled fragments live in a resident surface, so their CMASK/DCC keys are not consulted.
     // CMASK metadata covers mip 0 only, so a view of a higher mip decodes no fast clear.
-    if ((info & 0x2000u) != 0 && !multisampled && viewMip == 0) {
-        Require(maxMip == 0 && !volume && slice == 0, "CMASK fast clears of a mipmapped, 3D or array color target are unsupported");
+    if (!multisampled && ((info & 0x2000u) != 0 || (color.samples > 1 && (info & 0x4000u) != 0)) && (color.samples > 1 || viewMip == 0)) {
+        Require(color.samples > 1 || (!volume && slice == 0 && color.arrayLastSlice == 0), "CMASK fast clears of a 3D or array color target are unsupported");
         Require(((attrib3 >> 19u) & 0x1fu) == 0x18u && (attrib3 & 0x4000000u) != 0, "CMASK fast clears need pipe-aligned SW_64KB_Z_X metadata (CB_COLOR_ATTRIB3 FMASK_SW_MODE 24, CMASK_PIPE_ALIGNED)");
-        Require(color.elementBytes <= 8, "CMASK fast clears of texels over 64 bits are unsupported");
+        if (color.samples == 1) {
+            Require(color.elementBytes <= 8, "CMASK fast clears of texels over 64 bits are unsupported");
+            if (maxMip != 0) Require(color.elementBytes > 2, "CMASK fast clears of mipmapped color targets with 8 or 16 bpp are unsupported");
+        }
         const auto cmaskHigh = find(cx, 0x398 + slot);
-        color.cmaskAddress = ((cmaskHigh == cx.end() ? 0ull : static_cast<std::uint64_t>(cmaskHigh->second & 0xffu)) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x31f + stride)) << 8u);
-        Require(color.cmaskAddress != 0, "CMASK fast clears without a CMASK address are unsupported");
-        color.cmaskBytes = CmaskBytes(color.extent.width, color.extent.height);
-        GuestMemory::CheckRange(reinterpret_cast<const void*>(color.cmaskAddress), color.cmaskBytes, CmaskLayout::Alignment, true);
+        const auto cmask = ((cmaskHigh == cx.end() ? 0ull : static_cast<std::uint64_t>(cmaskHigh->second & 0xffu)) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x31f + stride)) << 8u);
+        Require((info & 0x2000u) == 0 || cmask != 0, "CMASK fast clears without a CMASK address are unsupported");
+        if (cmask != 0) {
+            std::size_t precedingBlocks = 0;
+            std::size_t totalBlocks = static_cast<std::size_t>((color.surfaceExtent.width + 1023u) / 1024u) * ((color.surfaceExtent.height + 511u) / 512u);
+            if (maxMip != 0) {
+                if (firstTailLevel > 0) {
+                    precedingBlocks = firstTailLevel < color.mipCount ? 1u : 0u;
+                    for (auto level = firstTailLevel; level-- > 1u;) {
+                        const auto w = std::max((color.surfaceExtent.width + (1u << level) - 1u) >> level, 1u);
+                        const auto h = std::max((color.surfaceExtent.height + (1u << level) - 1u) >> level, 1u);
+                        precedingBlocks += static_cast<std::size_t>((w + 1023u) / 1024u) * ((h + 511u) / 512u);
+                    }
+                    totalBlocks += precedingBlocks;
+                } else {
+                    totalBlocks = 1u;
+                }
+            }
+            const auto cmaskMip0Offset = precedingBlocks * CmaskLayout::Alignment;
+            const auto totalCmaskBytes = totalBlocks * CmaskLayout::Alignment;
+            color.cmaskAddress = cmask + cmaskMip0Offset;
+            color.cmaskBytes = CmaskBytes(color.extent.width, color.extent.height);
+            if (color.samples == 1) GuestMemory::CheckRange(reinterpret_cast<const void*>(cmask), totalCmaskBytes, CmaskLayout::Alignment, true);
+        }
+        color.cmaskFastClear = (info & 0x2000u) != 0;
     }
     if ((info & 0x10000000u) != 0 && !multisampled) {
         if (maxMip == 0) {

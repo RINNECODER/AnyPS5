@@ -531,9 +531,9 @@ void Sync9SharedDecode() {
         try {
             static_cast<void>(Graphics::DecodeState(guest));
         } catch (const std::exception& error) {
-            refused = std::string(error.what()).find("CMASK fast clears of a mipmapped") != std::string::npos;
+            refused = std::string(error.what()).find("CMASK fast clears") != std::string::npos;
         }
-        Require(refused, "a fast clear of mip 0 of a mipmapped target was not refused");
+        Require(refused, "a fast clear of an unconfigured mip 0 target was not refused");
     }
     {
         auto* record = reinterpret_cast<std::uint32_t*>(memory.data() + 4096);

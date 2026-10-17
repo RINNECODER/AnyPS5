@@ -63,6 +63,7 @@ static constexpr std::uint32_t NoteTrigger = 0x01000000;
 static constexpr std::uint32_t NoteFfcopy = 0xc0000000;
 static constexpr std::uint32_t NoteFfor = 0x80000000;
 static constexpr std::uint32_t NoteUseconds = 0x0004;
+static constexpr std::uint32_t NoteNseconds = 0x0008;
 static constexpr std::uint32_t NoteDelete = 0x0001;
 static constexpr std::uint32_t NoteWrite = 0x0002;
 static constexpr std::uint32_t NoteExtend = 0x0004;
@@ -162,6 +163,12 @@ static void Timers() {
     Require(Wait(kq, events, 4) == 1 && events[0].ident == 2 && events[0].data == 1);
     Require(Poll(kq, events, 4) == 0);
     RequireFailure(Apply(kq, Change(2, EvfiltTimer, EvDelete)), GuestEnoent);
+
+    Require(Apply(kq, Change(5, EvfiltTimer, EvAdd | EvOneshot, NoteNseconds, 1500000001)) == 0);
+    const KernelTimespec twoSeconds{2, 0};
+    Require(kevent_nid_postfix(kq, nullptr, 0, events, 4, &twoSeconds) == 1);
+    Require(events[0].ident == 5 && events[0].data == 1);
+    Require(Poll(kq, events, 4) == 0);
 
     RequireFailure(Apply(kq, Change(3, EvfiltTimer, EvAdd, 0, -1)), GuestEinval);
     RequireFailure(Apply(kq, Change(3, EvfiltTimer, EvAdd, 0x10, 5)), GuestEinval);
