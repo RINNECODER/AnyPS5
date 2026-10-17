@@ -1756,8 +1756,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
 
         lastEncoderState.encoder = encoder;
         lastEncoderState.translationId = record->recordId;
-        lastEncoderState.pipelineState = record->vertexPipeline != nullptr ? record->vertexPipeline->Pipeline() :
-            (record->meshPipeline != nullptr ? record->meshPipeline->Pipeline() : nil);
+        lastEncoderState.pipelineState = record->vertexPipeline != nullptr ? record->vertexPipeline->Pipeline() : nil;
         lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
         lastEncoderState.dynamicState = currentDynamicState;
         lastEncoderState.depthStencilState = depthStencilState;
