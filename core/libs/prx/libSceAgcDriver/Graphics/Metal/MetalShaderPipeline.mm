@@ -8,6 +8,7 @@
 #include <tuple>
 #import <objc/runtime.h>
 #include <array>
+#include <bitset>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -174,16 +175,31 @@ std::array<NSUInteger, 31> nativeBufferAlignments(NSArray<id<MTLBinding>>* bindi
     return result;
 }
 
-void reserveSlots(std::set<std::uint32_t>& slots, std::uint32_t first, std::uint32_t count,
-                  std::uint32_t limit) {
-    if (count == 0 || first >= limit || count > limit - first) {
-        throw std::invalid_argument("Converted Metal shader resource slots exceed the native argument limit");
-    }
-    for (std::uint32_t i = 0; i < count; ++i) {
-        if (!slots.insert(first + i).second) {
-            throw std::invalid_argument("Converted Metal shader resource slots overlap");
+template <std::size_t N>
+class SlotMask {
+public:
+    void reserve(std::uint32_t first, std::uint32_t count, std::uint32_t limit) {
+        if (count == 0 || first >= limit || count > limit - first) {
+            throw std::invalid_argument("Converted Metal shader resource slots exceed the native argument limit");
+        }
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const std::uint32_t slot = first + i;
+            if (bits.test(slot)) {
+                throw std::invalid_argument("Converted Metal shader resource slots overlap");
+            }
+            bits.set(slot);
         }
     }
+    [[nodiscard]] std::size_t size() const noexcept { return bits.count(); }
+
+private:
+    std::bitset<N> bits{};
+};
+
+template <std::size_t N>
+void reserveSlots(SlotMask<N>& slots, std::uint32_t first, std::uint32_t count,
+                  std::uint32_t limit) {
+    slots.reserve(first, count, limit);
 }
 
 void validateKind(const ResourceMapping& mapping) {
@@ -272,9 +288,9 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
             throw std::invalid_argument("Metal shader descriptor binding was supplied more than once");
         }
     }
-    std::set<std::uint32_t> bufferSlots;
-    std::set<std::uint32_t> textureSlots;
-    std::set<std::uint32_t> samplerSlots;
+    SlotMask<32> bufferSlots;
+    SlotMask<128> textureSlots;
+    SlotMask<32> samplerSlots;
     id<MTLArgumentEncoder> samplerEncoder = nil;
     id<MTLBuffer> samplerBuffer = nil;
     auto samplerOwners = [NSMutableArray new];
