@@ -70,11 +70,13 @@ public:
             std::vector<VkPhysicalDevice> devices(count);
             Check(enumerate(instance, &count, devices.data()), "vkEnumeratePhysicalDevices");
             const auto properties = function<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
+            const auto* requested = std::getenv("ANYPS5_GPU");
+            const bool named = requested != nullptr && *requested != '\0';
             context.physical = devices.front();
             for (const auto candidate : devices) {
                 VkPhysicalDeviceProperties described{};
                 properties(candidate, &described);
-                if (described.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                if (named ? std::strstr(described.deviceName, requested) != nullptr : described.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
                     context.physical = candidate;
                     break;
                 }
