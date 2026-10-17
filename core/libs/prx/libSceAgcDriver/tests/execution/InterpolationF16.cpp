@@ -269,6 +269,8 @@ ShaderRecompiler::SpirvTarget OfflineTarget(bool barycentric) {
 }
 
 void ExpectFailure(std::span<const std::uint32_t> code, std::uint32_t input0, bool barycentric, const char* expected, const char* message) {
+    static constexpr std::array<std::uint32_t, 1> capabilities{spv::CapabilityFloat64};
+    target.supportedCapabilities = capabilities;
     try {
         static_cast<void>(RecompilePixel(code, 64u, input0, OfflineTarget(barycentric), 0u));
     } catch (const std::exception& error) {
