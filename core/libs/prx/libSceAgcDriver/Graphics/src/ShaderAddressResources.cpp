@@ -19,6 +19,9 @@ std::uint32_t pointerOperandStored(std::uint32_t opcode, std::span<const std::ui
     case spv::OpCopyMemorySized:
     case spv::OpAtomicStore:
     case spv::OpAtomicFlagClear:
+    case spv::OpCooperativeMatrixStoreKHR:
+    case spv::OpCooperativeMatrixStoreNV:
+    case spv::OpCooperativeMatrixStoreTensorNV:
         return instruction.size() > 1 ? instruction[1] : 0u;
     case spv::OpAtomicExchange:
     case spv::OpAtomicCompareExchange:
@@ -44,8 +47,11 @@ std::uint32_t pointerOperandStored(std::uint32_t opcode, std::span<const std::ui
     }
 }
 
-bool namesOrDecorates(std::uint32_t opcode) {
+bool definesNoPointerValue(std::uint32_t opcode) {
     switch (static_cast<spv::Op>(opcode)) {
+    case spv::OpTypePointer:
+    case spv::OpTypeUntypedPointerKHR:
+    case spv::OpTypeForwardPointer:
     case spv::OpName:
     case spv::OpMemberName:
     case spv::OpDecorate:
@@ -91,18 +97,19 @@ bool SpirvStoresThroughAddresses(std::span<const std::uint32_t> words) {
     if (words.size() < 5 || words[0] != spv::MagicNumber) return true;
     std::unordered_set<std::uint32_t> pointerTypes;
     const bool readable = forEachInstruction(words, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
-        if (opcode == spv::OpTypePointer && instruction.size() > 2 && instruction[2] == spv::StorageClassPhysicalStorageBuffer) pointerTypes.insert(instruction[1]);
+        if ((opcode == spv::OpTypePointer || opcode == spv::OpTypeUntypedPointerKHR) && instruction.size() > 2 && instruction[2] == spv::StorageClassPhysicalStorageBuffer) pointerTypes.insert(instruction[1]);
     });
     if (!readable) return true;
     if (pointerTypes.empty()) return false;
     std::unordered_set<std::uint32_t> pointers;
     forEachInstruction(words, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
-        if (instruction.size() > 2 && !namesOrDecorates(opcode) && opcode != spv::OpTypePointer && pointerTypes.contains(instruction[1])) pointers.insert(instruction[2]);
+        if (instruction.size() > 2 && !definesNoPointerValue(opcode) && pointerTypes.contains(instruction[1])) pointers.insert(instruction[2]);
     });
     bool stores = false;
     forEachInstruction(words, [&](std::uint32_t opcode, std::span<const std::uint32_t> instruction) {
         const auto pointer = pointerOperandStored(opcode, instruction);
-        stores = stores || (pointer != 0 && pointers.contains(pointer));
+        const bool extendedWithPointer = opcode == spv::OpExtInst && std::any_of(instruction.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(5u, instruction.size())), instruction.end(), [&](std::uint32_t operand) { return pointers.contains(operand); });
+        stores = stores || extendedWithPointer || (pointer != 0 && pointers.contains(pointer));
     });
     return stores;
 }
