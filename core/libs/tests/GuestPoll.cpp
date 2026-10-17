@@ -200,6 +200,13 @@ int main() {
         Require(poll_nid_postfix(mixed, 2, -1) == 1 && mixed[0].revents == 0 && mixed[1].revents == Out);
         Require(close_nid_postfix(random) == 0);
     }
+    PollDescriptor console[3]{{0, static_cast<short>(In | ReadNormal | Out), -1}, {1, static_cast<short>(In | Out | WriteBand), -1}, {2, Out, -1}};
+    Require(poll_nid_postfix(console, 3, 0) == 2);
+    Require(console[0].revents == 0 && console[1].revents == Out && console[2].revents == Out);
+    PollDescriptor input{0, In, -1};
+    const auto inputStart = std::chrono::steady_clock::now();
+    Require(poll_nid_postfix(&input, 1, 30) == 0 && input.revents == 0);
+    Require(std::chrono::steady_clock::now() - inputStart >= std::chrono::milliseconds(25));
     const int queue = kqueue_nid_postfix();
     Require(queue >= 0);
     PollDescriptor unknown[2]{{listener, In, 0}, {queue, In, 0}};
