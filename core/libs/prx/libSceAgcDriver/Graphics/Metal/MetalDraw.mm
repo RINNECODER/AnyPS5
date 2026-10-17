@@ -2041,6 +2041,7 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
         DynamicRenderState lastDynamicState{};
         std::vector<MetalBufferBinding> lastVertexBuffers;
         std::vector<id<MTLResource>> residentResources;
+        std::vector<std::byte> lastPushConstants;
 
         for (std::size_t d = start; d < end; ++d) {
             const auto& item = draws[d];
@@ -2090,14 +2091,20 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
                 }
 
                 lastRecordId = record->recordId;
+                lastPushConstants.assign(item.pushConstants.begin(), item.pushConstants.end());
             } else {
-                if (record->vertexPushBuffer && record->vertexPushBytes > 0) {
-                    auto span = std::span(item.pushConstants).first(std::min(record->vertexPushBytes, item.pushConstants.size()));
-                    [encoder setVertexBytes:span.data() length:span.size() atIndex:*record->vertexPushBuffer];
-                }
-                if (record->fragmentPushBuffer && record->fragmentPushBytes > 0) {
-                    auto span = std::span(item.pushConstants).first(std::min(record->fragmentPushBytes, item.pushConstants.size()));
-                    [encoder setFragmentBytes:span.data() length:span.size() atIndex:*record->fragmentPushBuffer];
+                const bool pushChanged = (lastPushConstants.size() != item.pushConstants.size() ||
+                                          std::memcmp(lastPushConstants.data(), item.pushConstants.data(), item.pushConstants.size()) != 0);
+                if (pushChanged) {
+                    if (record->vertexPushBuffer && record->vertexPushBytes > 0) {
+                        auto span = std::span(item.pushConstants).first(std::min(record->vertexPushBytes, item.pushConstants.size()));
+                        [encoder setVertexBytes:span.data() length:span.size() atIndex:*record->vertexPushBuffer];
+                    }
+                    if (record->fragmentPushBuffer && record->fragmentPushBytes > 0) {
+                        auto span = std::span(item.pushConstants).first(std::min(record->fragmentPushBytes, item.pushConstants.size()));
+                        [encoder setFragmentBytes:span.data() length:span.size() atIndex:*record->fragmentPushBuffer];
+                    }
+                    lastPushConstants.assign(item.pushConstants.begin(), item.pushConstants.end());
                 }
                 if (!(lastDynamicState == item.dynamicState)) {
                     BindRenderState(encoder, item.state, record->depthStencilState);

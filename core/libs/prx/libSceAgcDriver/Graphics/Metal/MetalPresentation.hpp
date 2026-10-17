@@ -31,6 +31,10 @@ private:
     std::unique_ptr<MetalFXUpscaler> fxUpscaler;
     std::mutex mutex;
     std::map<void*, CAMetalLayer*> layers;
+    id<MTLTexture> scanoutTexture{nil};
+    std::uint32_t scanoutWidth{0};
+    std::uint32_t scanoutHeight{0};
+    MTLPixelFormat scanoutFormat{MTLPixelFormatInvalid};
 };
 
 }

@@ -282,11 +282,32 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
                          std::span<const id<MTLResource>> indirectResources) {
     ValidatePixelSamplerBindings(shader.guest.bindings);
     PreparedBindings result;
-    std::map<std::pair<std::uint32_t, std::uint32_t>, const MetalShaderResourceBinding*> bindings;
-    for (const auto& binding : supplied) {
-        if (!bindings.emplace(std::pair(binding.descriptorSet, binding.binding), &binding).second) {
-            throw std::invalid_argument("Metal shader descriptor binding was supplied more than once");
+    result.buffers.reserve(shader.resources.size() + (shader.samplerArgumentBuffer ? 1 : 0));
+    result.textures.reserve(shader.resources.size());
+    result.samplers.reserve(shader.resources.size());
+    struct BindingEntry {
+        std::uint32_t descriptorSet;
+        std::uint32_t binding;
+        const MetalShaderResourceBinding* resource;
+        bool consumed{false};
+    };
+    std::array<BindingEntry, 64> inlineEntries;
+    std::vector<BindingEntry> heapEntries;
+    std::span<BindingEntry> entries;
+    if (supplied.size() <= inlineEntries.size()) {
+        entries = std::span(inlineEntries.data(), supplied.size());
+    } else {
+        heapEntries.resize(supplied.size());
+        entries = std::span(heapEntries.data(), heapEntries.size());
+    }
+    for (std::size_t i = 0; i < supplied.size(); ++i) {
+        const auto& item = supplied[i];
+        for (std::size_t j = 0; j < i; ++j) {
+            if (entries[j].descriptorSet == item.descriptorSet && entries[j].binding == item.binding) {
+                throw std::invalid_argument("Metal shader descriptor binding was supplied more than once");
+            }
         }
+        entries[i] = {item.descriptorSet, item.binding, &item, false};
     }
     SlotMask<32> bufferSlots;
     SlotMask<128> textureSlots;
@@ -326,10 +347,11 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
         reserveSlots(bufferSlots, mapping.index, 1, 31);
     }
     for (const auto& mapping : shader.resources) {
-        const auto key = std::pair(mapping.descriptorSet, mapping.binding);
-        const auto found = bindings.find(key);
+        auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& entry) {
+            return !entry.consumed && entry.descriptorSet == mapping.descriptorSet && entry.binding == mapping.binding;
+        });
         if (!mapping.active) {
-            if (found != bindings.end()) bindings.erase(found);
+            if (found != entries.end()) found->consumed = true;
             continue;
         }
         validateKind(mapping);
@@ -340,10 +362,10 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
         if (descriptor == shader.guest.bindings.end() || descriptor->kind != mapping.kind || descriptor->count != mapping.count) {
             throw std::invalid_argument("Metal shader resource reflection disagrees with guest descriptor metadata");
         }
-        if (found == bindings.end()) {
+        if (found == entries.end()) {
             throw std::invalid_argument("Metal shader has an unresolved active descriptor binding");
         }
-        const auto& binding = *found->second;
+        const auto& binding = *found->resource;
         const std::size_t buffers = mapping.buffer ? mapping.count : 0;
         const std::size_t textures = mapping.texture ? mapping.count : 0;
         const std::size_t samplers = mapping.sampler ? mapping.count : 0;
@@ -422,10 +444,12 @@ PreparedBindings prepare(id<MTLDevice> device, const ShaderResult& shader,
                 result.samplers.push_back({*mapping.sampler + i, sampler});
             }
         }
-        bindings.erase(found);
+        found->consumed = true;
     }
-    if (!bindings.empty()) {
-        throw std::invalid_argument("Metal shader received a descriptor binding absent from reflection");
+    for (const auto& entry : entries) {
+        if (!entry.consumed) {
+            throw std::invalid_argument("Metal shader received a descriptor binding absent from reflection");
+        }
     }
     result.pushConstants = pushConstants.empty() ? std::span<const std::byte>(shader.pushConstantData) : pushConstants;
     if (result.pushConstants.size() > 4096 ||
