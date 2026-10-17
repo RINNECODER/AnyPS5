@@ -88,12 +88,6 @@ IrValue* flushedSource(const IrValue& value) {
     return maskedOperand(value.Argument(1)->Resolve(), IrOpcode::BitwiseAnd32, 0x80000000u) == source ? source : nullptr;
 }
 
-const IrValue* bitsOf(const IrValue* value) {
-    value = value->Resolve();
-    while (value->Opcode() == IrOpcode::BitCastF32U32 || value->Opcode() == IrOpcode::BitCastU32F32) value = value->Argument(0)->Resolve();
-    return value;
-}
-
 bool nanOnlyTrueArm(const IrValue& select) {
     const IrValue* condition = select.Argument(0)->Resolve();
     if (condition->Opcode() != IrOpcode::FPIsNan32) return false;
