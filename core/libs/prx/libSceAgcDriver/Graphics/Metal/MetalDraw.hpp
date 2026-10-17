@@ -176,7 +176,6 @@ private:
         }
     };
     EncoderDrawState lastEncoderState;
-    DrawTranslationKey scratchKey;
 };
 
 }

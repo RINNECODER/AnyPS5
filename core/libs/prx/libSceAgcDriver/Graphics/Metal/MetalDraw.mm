@@ -709,6 +709,8 @@ bool WholeVertexRangesBindable(std::span<const ShaderRecompiler::VertexAttribute
     return true;
 }
 
+thread_local DrawTranslationKey tl_scratchKey;
+
 }
 
 void MetalDraw::PopulateTranslationKey(DrawTranslationKey& key,
@@ -990,13 +992,13 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                            gpuIndirect == nullptr && !fanPath &&
                            (!nativeStrip || nativeRestart) &&
                            draw.IndexReadCount() == draw.indexCount;
-    scratchKey.Clear();
+    tl_scratchKey.Clear();
     if (cacheable) {
-        PopulateTranslationKey(scratchKey, state, draw, vertex, fragment);
+        PopulateTranslationKey(tl_scratchKey, state, draw, vertex, fragment);
     }
 
     const auto imageCacheClears = ImageCache() ? ImageCache()->TakeStatistics(false).clears : 0;
-    auto cached = cacheable ? translationCache.Find(scratchKey, memoryVersion, imageCacheClears) : nullptr;
+    auto cached = cacheable ? translationCache.Find(tl_scratchKey, memoryVersion, imageCacheClears) : nullptr;
     if (cached != nullptr) {
         MetalBufferBinding indexBuffer;
         if (draw.indexed) {
@@ -1202,12 +1204,14 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         (state.scissor.offset.x <= 0 && state.scissor.offset.y <= 0 &&
          state.scissor.extent.width >= state.renderExtent.width &&
          state.scissor.extent.height >= state.renderExtent.height);
+    const bool depthResolveEnabled = renderPass.depthAttachment.resolveTexture != nil;
     const bool depthMemoryless = depth && depth->DepthTexture().storageMode == MTLStorageModeMemoryless;
     const auto depthLoad = (depthMemoryless || fullDepthOverwrite) ? MTLLoadActionDontCare : MTLLoadActionLoad;
-    const auto depthStore = (depthMemoryless || !state.depthWrite) ? MTLStoreActionDontCare : MTLStoreActionStore;
+    const auto depthStore = depthResolveEnabled ? MTLStoreActionMultisampleResolve : ((depthMemoryless || !state.depthWrite) ? MTLStoreActionDontCare : MTLStoreActionStore);
+    const bool stencilResolveEnabled = renderPass.stencilAttachment.resolveTexture != nil;
     const bool stencilMemoryless = depth && depth->StencilTexture() != nil && depth->StencilTexture().storageMode == MTLStorageModeMemoryless;
     const auto stencilLoad = stencilMemoryless ? MTLLoadActionDontCare : MTLLoadActionLoad;
-    const auto stencilStore = (stencilMemoryless || !stencilWrites) ? MTLStoreActionDontCare : MTLStoreActionStore;
+    const auto stencilStore = stencilResolveEnabled ? MTLStoreActionMultisampleResolve : ((stencilMemoryless || !stencilWrites) ? MTLStoreActionDontCare : MTLStoreActionStore);
     if (depth && depthLayers > 1) {
         id<MTLTexture> layeredDepth = depth->LayeredDepthTexture(depthLayers);
         renderPass.renderTargetArrayLength = depthLayers;
@@ -1734,7 +1738,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         record->fragmentPushBytes = vertexPipeline->FragmentReflection().pushConstantBytes;
         record->memoryVersion = memoryVersion;
         record->imageCacheClears = imageCacheClears;
-        record->key = scratchKey;
+        record->key = tl_scratchKey;
 
         const auto& chunks = resources.UploadChunks();
         if (!chunks.empty()) {
@@ -1865,11 +1869,11 @@ std::optional<MetalDraw::PreparedDraw> MetalDraw::PrepareCachedDraw(
                            draw.IndexReadCount() == draw.indexCount;
     if (!cacheable) return std::nullopt;
 
-    scratchKey.Clear();
-    PopulateTranslationKey(scratchKey, state, draw, vertex, fragment);
+    tl_scratchKey.Clear();
+    PopulateTranslationKey(tl_scratchKey, state, draw, vertex, fragment);
 
     const auto imageCacheClears = ImageCache() ? ImageCache()->TakeStatistics(false).clears : 0;
-    auto cached = translationCache.Find(scratchKey, memoryVersion, imageCacheClears);
+    auto cached = translationCache.Find(tl_scratchKey, memoryVersion, imageCacheClears);
     if (cached == nullptr || cached->renderPass == nil) return std::nullopt;
 
     MetalBufferBinding indexBuffer;
