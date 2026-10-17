@@ -30,6 +30,7 @@ add_custom_target(anyps5_metal_shaders DEPENDS "${metalLibrary}")
 add_library(anyps5_metal_utilities STATIC
     MetalDevice.mm
     MetalPresenter.mm
+    MetalFXUpscaler.mm
     MetalGuestMemory.mm
     MetalPipelineCache.mm
     MetalWorkerPool.mm
@@ -45,6 +46,7 @@ target_link_libraries(anyps5_metal_utilities PUBLIC
     "${ANYPS5_FOUNDATION_FRAMEWORK}"
     "${ANYPS5_METAL_FRAMEWORK}"
     "${ANYPS5_QUARTZCORE_FRAMEWORK}"
+    "-weak_framework MetalFX"
 )
 add_dependencies(anyps5_metal_utilities anyps5_metal_shaders)
 set_target_properties(anyps5_metal_utilities PROPERTIES ANYPS5_METALLIB "${metalLibrary}")

@@ -1,8 +1,11 @@
 #include "MetalTestSupport.hpp"
 #include "MetalPresenter.hpp"
+#include "MetalFXUpscaler.hpp"
+#include "MetalPipelineCache.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 #include <vector>
@@ -62,9 +65,7 @@ void Match(std::span<const Pixel> actual, std::span<const Pixel> expected, int t
     }
 }
 
-}
-
-void RunPresentationTests(const MetalTests::Context& context) {
+void RunPresentationGeometryTests(const MetalTests::Context& context) {
     AgcDriver::Metal::MetalPresenter presenter(context.device, context.library);
     for (const auto sourceFormat : {MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm}) {
         for (const auto targetFormat : {MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm}) {
@@ -96,4 +97,98 @@ void RunPresentationTests(const MetalTests::Context& context) {
     Match(Render(context, presenter, 1, 1, encoded, 1, 1, true, MTLPixelFormatRGBA8Unorm_sRGB), decoded, 1);
     Match(Render(context, presenter, 1, 1, encoded, 1, 1, true, MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm_sRGB), linearEncoded, 1);
     Match(Render(context, presenter, 1, 1, encoded, 1, 1, true, MTLPixelFormatBGRA8Unorm_sRGB, MTLPixelFormatRGBA8Unorm_sRGB), encoded, 1);
+}
+
+void RunForced1xMsaaTests(const MetalTests::Context& context) {
+    unsetenv("ANYPS5_METAL_FORCE_1X_MSAA");
+    MetalTests::Require(!AgcDriver::Metal::Force1xMsaaEnabled(), "Forced 1x MSAA enabled by default");
+
+    for (const char* value : {"1", "true", "TRUE", "on", "ON", "yes", "YES"}) {
+        setenv("ANYPS5_METAL_FORCE_1X_MSAA", value, 1);
+        MetalTests::Require(AgcDriver::Metal::Force1xMsaaEnabled(), "Forced 1x MSAA was not enabled for truthy value");
+    }
+
+    for (const char* value : {"0", "false", "off", "no", "anything_else"}) {
+        setenv("ANYPS5_METAL_FORCE_1X_MSAA", value, 1);
+        MetalTests::Require(!AgcDriver::Metal::Force1xMsaaEnabled(), "Forced 1x MSAA was enabled for non-truthy value");
+    }
+
+    setenv("ANYPS5_METAL_FORCE_1X_MSAA", "1", 1);
+    MetalTests::Require(AgcDriver::Metal::Force1xMsaaEnabled(), "Forced 1x MSAA not enabled");
+
+    auto desc = [MTLRenderPipelineDescriptor new];
+    desc.rasterSampleCount = 4;
+    desc.vertexFunction = [context.library newFunctionWithName:@"presentationVertex"];
+    desc.fragmentFunction = [context.library newFunctionWithName:@"presentationFragment"];
+    desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+
+    NSError* error = nil;
+    auto pipeline = AgcDriver::Metal::CachedRenderPipelineState(context.device, desc, &error);
+    MetalTests::Require(pipeline.state != nil, "CachedRenderPipelineState failed with forced 1x MSAA");
+    MetalTests::Require(desc.rasterSampleCount == 1, "rasterSampleCount was not overridden to 1");
+
+    unsetenv("ANYPS5_METAL_FORCE_1X_MSAA");
+    MetalTests::Require(!AgcDriver::Metal::Force1xMsaaEnabled(), "Forced 1x MSAA still active after unsetenv");
+}
+
+void RunMetalFxUpscalerTests(const MetalTests::Context& context) {
+    unsetenv("ANYPS5_METAL_FX_TEMPORAL");
+    MetalTests::Require(!AgcDriver::Metal::MetalFxTemporalEnabled(), "MetalFX temporal enabled by default");
+
+    for (const char* value : {"1", "true", "TRUE", "on", "ON", "yes", "YES"}) {
+        setenv("ANYPS5_METAL_FX_TEMPORAL", value, 1);
+        MetalTests::Require(AgcDriver::Metal::MetalFxTemporalEnabled(), "MetalFX temporal was not enabled for truthy value");
+    }
+
+    for (const char* value : {"0", "false", "off", "no", "anything_else"}) {
+        setenv("ANYPS5_METAL_FX_TEMPORAL", value, 1);
+        MetalTests::Require(!AgcDriver::Metal::MetalFxTemporalEnabled(), "MetalFX temporal was enabled for non-truthy value");
+    }
+
+    AgcDriver::Metal::MetalFXUpscaler upscaler(context.device);
+    MetalTests::Require(upscaler.IsSupported() == AgcDriver::Metal::MetalFxTemporalSupported(context.device),
+                        "MetalFXUpscaler support query differs from MetalFxTemporalSupported");
+
+    unsetenv("ANYPS5_METAL_FX_TEMPORAL");
+    MetalTests::Require(!upscaler.IsEnabled(), "MetalFXUpscaler reported enabled when unset");
+    auto commands = [context.queue commandBuffer];
+    auto fallback = upscaler.Upscale(commands, nil, 1920, 1080);
+    MetalTests::Require(fallback == nil, "MetalFXUpscaler did not return nil when disabled");
+
+    if (upscaler.IsSupported()) {
+        setenv("ANYPS5_METAL_FX_TEMPORAL", "1", 1);
+        MetalTests::Require(upscaler.IsEnabled(), "MetalFXUpscaler reported disabled when ANYPS5_METAL_FX_TEMPORAL=1");
+
+        auto sourceDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:1280 height:720 mipmapped:NO];
+        sourceDesc.storageMode = MTLStorageModeShared;
+        sourceDesc.usage = MTLTextureUsageShaderRead;
+        auto source = [context.device newTextureWithDescriptor:sourceDesc];
+        MetalTests::Require(source != nil, "MetalFX test source texture creation failed");
+
+        auto upscaled = upscaler.Upscale(commands, source, 1920, 1080);
+        MetalTests::Require(upscaled != nil, "MetalFXUpscaler::Upscale failed on supported device");
+        MetalTests::Require(upscaled.width == 1920 && upscaled.height == 1080, "MetalFXUpscaler output dimensions mismatch");
+        MetalTests::Require(upscaled.pixelFormat == MTLPixelFormatBGRA8Unorm, "MetalFXUpscaler output format mismatch");
+        [commands commit];
+        [commands waitUntilCompleted];
+        MetalTests::Require(commands.status == MTLCommandBufferStatusCompleted, "MetalFX command buffer failed to complete");
+
+        upscaler.Reset();
+        auto commands2 = [context.queue commandBuffer];
+        auto upscaled2 = upscaler.Upscale(commands2, source, 1920, 1080);
+        MetalTests::Require(upscaled2 != nil, "MetalFXUpscaler::Upscale failed after reset");
+        [commands2 commit];
+        [commands2 waitUntilCompleted];
+        MetalTests::Require(commands2.status == MTLCommandBufferStatusCompleted, "MetalFX command buffer 2 failed to complete");
+
+        unsetenv("ANYPS5_METAL_FX_TEMPORAL");
+    }
+}
+
+}
+
+void RunPresentationTests(const MetalTests::Context& context) {
+    RunForced1xMsaaTests(context);
+    RunMetalFxUpscalerTests(context);
+    RunPresentationGeometryTests(context);
 }
