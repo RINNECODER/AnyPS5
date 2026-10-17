@@ -66,6 +66,11 @@ public:
         std::uint64_t hashedBytes = 0;
     };
 
+    // Fast verification mode: uses Proof::Sample (512 distributed words + endpoints, ~4 KiB)
+    // for textures > 4 KiB instead of re-hashing hundreds of megabytes on every expire generation.
+    void SetFastVerify(bool on) { fastVerify = on; }
+    [[nodiscard]] bool FastVerify() const { return fastVerify; }
+
     // The cached texture for a surface at `guest` (backed by `host`) whose backing `descriptor`
     // can share, if any.
     // `content` distinguishes what the texels stand for: 0 for the guest bytes themselves, another
@@ -106,10 +111,11 @@ public:
         if (texture == nullptr || host == nullptr) return;
         const auto bytes = texture->GuestBytes();
         std::lock_guard lock(mutex);
-        const auto proof = content != 0 ? Proof::Content : written ? Proof::Pending : Proof::Hash;
+        const bool useSample = written || (fastVerify && bytes > 4096);
+        const auto proof = content != 0 ? Proof::Content : written ? Proof::Pending : useSample ? Proof::Sample : Proof::Hash;
         if (auto found = entries.find(address(host)); found != entries.end()) {
             auto& entry = found->second;
-            if (proof == Proof::Hash && entry.texture == texture && entry.guest == guest && entry.content == content && entry.generation == generation) {
+            if ((proof == Proof::Hash || proof == Proof::Sample) && entry.texture == texture && entry.guest == guest && entry.content == content && entry.generation == generation) {
                 entry.stamp = ++clock;
                 return;
             }
@@ -123,6 +129,8 @@ public:
         if (proof == Proof::Hash) {
             fingerprint = GuestBytesFingerprint::Hash(host, bytes);
             statistics.hashedBytes += bytes;
+        } else if (proof == Proof::Sample) {
+            fingerprint = GuestBytesFingerprint::Sample(host, bytes);
         }
         entries.emplace(address(host), Entry{guest, address(host), bytes, std::move(texture), compare, ++clock, content, generation, generation, proof, fingerprint});
         totalBytes += bytes;
@@ -255,6 +263,7 @@ private:
     std::size_t totalBytes = 0;
     std::uint64_t clock = 0;
     std::uint64_t generation = 1;
+    bool fastVerify = false;
     Statistics statistics;
 };
 
