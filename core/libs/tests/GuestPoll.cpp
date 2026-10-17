@@ -28,6 +28,7 @@ int APS5_VABI rmdir_nid_postfix(const char*);
 int APS5_VABI unlink_nid_postfix(const char*);
 int APS5_VABI poll_nid_postfix(PollDescriptor*, std::uint32_t, int);
 int APS5_VABI pipe_nid_postfix(int*);
+int APS5_VABI kqueue_nid_postfix();
 std::int64_t APS5_VABI read_nid_postfix(int, void*, std::uint64_t);
 std::int64_t APS5_VABI write_nid_postfix(int, const char*, std::int64_t);
 int* APS5_VABI __error_nid_postfix();
@@ -186,16 +187,29 @@ int main() {
     TestPipes(listener);
     PollsFilesAndDirectories(listener);
     Require(close_nid_postfix(server) == 0);
-    const int file = open_nid_postfix("/dev/urandom", 0, 0);
-    Require(file >= 0);
-    PollDescriptor mixed[2]{{listener, In, 0}, {file, In, 0}};
+    for (const char* path : {"/dev/urandom", "/dev/random"}) {
+        const int random = open_nid_postfix(path, 0, 0);
+        Require(random >= 0);
+        PollDescriptor device{random, static_cast<short>(In | Out | Priority), -1};
+        Require(poll_nid_postfix(&device, 1, 0) == 1 && device.revents == In);
+        device.events = static_cast<short>(ReadNormal | Out);
+        Require(poll_nid_postfix(&device, 1, 0) == 1 && device.revents == ReadNormal);
+        device.events = static_cast<short>(Out | Priority | ReadBand | WriteBand);
+        Require(poll_nid_postfix(&device, 1, -1) == 1 && device.revents == (Out | Priority | ReadBand | WriteBand));
+        PollDescriptor mixed[2]{{listener, In, 0}, {random, Out, 0}};
+        Require(poll_nid_postfix(mixed, 2, -1) == 1 && mixed[0].revents == 0 && mixed[1].revents == Out);
+        Require(close_nid_postfix(random) == 0);
+    }
+    const int queue = kqueue_nid_postfix();
+    Require(queue >= 0);
+    PollDescriptor unknown[2]{{listener, In, 0}, {queue, In, 0}};
     bool unsupported = false;
     try {
-        poll_nid_postfix(mixed, 2, 0);
+        poll_nid_postfix(unknown, 2, 0);
     } catch (const std::runtime_error&) {
         unsupported = true;
     }
     Require(unsupported);
-    Require(close_nid_postfix(file) == 0);
+    Require(close_nid_postfix(queue) == 0);
     Require(close_nid_postfix(listener) == 0);
 }
