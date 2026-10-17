@@ -76,6 +76,7 @@ struct SurfaceGeometry {
 SurfaceGeometry DescribeSurface(const GuestTextureResource& descriptor);
 bool LevelsFitAllocation(const GuestTextureResource& surface, std::uint32_t levels);
 bool TracksBlockUnits(const GuestTextureResource& surface, const SurfaceGeometry& geometry);
+GuestTextureResource SampledArrayWindow(const GuestTextureResource& viewed);
 
 }
 
