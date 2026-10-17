@@ -873,7 +873,7 @@ bool MetalDriver::Impl::TryExecuteDrawBatch(std::size_t& cursor, QueueState& que
         }
     }
 
-    if (batch.size() < MetalDraw::MinParallelDraws) {
+    if (batch.size() < MetalDraw::MinParallelDraws()) {
         return false;
     }
 
