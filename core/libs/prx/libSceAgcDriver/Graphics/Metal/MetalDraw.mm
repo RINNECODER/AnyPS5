@@ -501,13 +501,13 @@ id<MTLTexture> MetalDraw::residentTexture(const Graphics::GuestTextureResource& 
     // into the address makes a new one).
     DropReplacedDepthSurfaces(depthSurfaces, *depthCache, resource);
     if (auto array = residentDepthArray(resource, storage); array != nil) return array;
-    if (auto view = residentView(resource, storage, compare); view != nil || resource.samples <= 1) return view;
+    if (auto view = residentView(resource, storage, compare); view != nil || (!Force1xMsaaEnabled() && resource.samples <= 1)) return view;
     // A multisampled image that no draw has rendered yet (a target cleared only through its DCC keys
     // and then read by a resolve or post pass). Guest memory never holds fragments, so the reader
     // gets the resident surface the first draw into the image would create: a new one starts
     // cleared to zero, as a draw-created surface does. Later draws into it render into this surface.
     if (storage || compare || resource.dimension != Graphics::TextureDimension::k2D || resource.baseLevel != 0 ||
-        resource.lastLevel != 0 || resource.baseArray != 0 || resource.depthOrLastArray != 0) {
+        resource.lastLevel != 0 || resource.baseArray != 0 || resource.depthOrLastArray != 0 || (!Force1xMsaaEnabled() && resource.samples <= 1)) {
         return nil;
     }
     Graphics::ColorTarget target{};
@@ -517,7 +517,7 @@ id<MTLTexture> MetalDraw::residentTexture(const Graphics::GuestTextureResource& 
     target.elementBytes = Graphics::BytesPerElement(resource.format);
     target.bytes = static_cast<std::size_t>(resource.width) * resource.height * target.elementBytes;
     target.dccAddress = resource.dccAddress;
-    target.samples = target.coverageSamples = resource.samples;
+    target.samples = target.coverageSamples = Force1xMsaaEnabled() ? 1 : resource.samples;
     static_cast<void>(RenderPixelFormat(target.format)); // A format with no render target stays unbound.
     auto surface = depthCache->Acquire(target);
     if (std::find(colorSurfaces.begin(), colorSurfaces.end(), surface) == colorSurfaces.end()) colorSurfaces.push_back(surface);
@@ -525,6 +525,7 @@ id<MTLTexture> MetalDraw::residentTexture(const Graphics::GuestTextureResource& 
 }
 
 id<MTLTexture> MetalDraw::residentView(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const {
+    const unsigned expectedSamples = Force1xMsaaEnabled() ? 1 : resource.samples;
     for (auto cursor = depthSurfaces.rbegin(); cursor != depthSurfaces.rend(); ++cursor) {
         const auto& surface = *cursor;
         const auto& target = surface->Target();
@@ -533,7 +534,7 @@ id<MTLTexture> MetalDraw::residentView(const Graphics::GuestTextureResource& res
         if (!stencil && !isDepth) continue;
         if (storage || resource.width != target.extent.width || resource.height != target.extent.height ||
             resource.dimension != Graphics::TextureDimension::k2D || resource.baseLevel != 0 || resource.lastLevel != 0 ||
-            resource.baseArray != 0 || resource.depthOrLastArray != 0 || (stencil && compare) || resource.samples != target.samples) {
+            resource.baseArray != 0 || resource.depthOrLastArray != 0 || (stencil && compare) || expectedSamples != target.samples) {
             char detail[224];
             std::snprintf(detail, sizeof detail, " (%ux%u dim %d levels %u-%u/%u layers %u-%u samples %u fmt %u tile %u%s%s; surface %ux%u samples %u fmt %d)",
                 resource.width, resource.height, static_cast<int>(resource.dimension), resource.baseLevel, resource.lastLevel,
@@ -556,14 +557,14 @@ id<MTLTexture> MetalDraw::residentView(const Graphics::GuestTextureResource& res
         if (view == nil) throw std::runtime_error("Metal draw resident depth component view creation failed");
         return view;
     }
-    if (resource.samples <= 1) return nil;
+    if (!Force1xMsaaEnabled() && resource.samples <= 1) return nil;
     for (auto cursor = colorSurfaces.rbegin(); cursor != colorSurfaces.rend(); ++cursor) {
         const auto& surface = *cursor;
         const auto& target = surface->Target();
         if (resource.baseAddress != target.address) continue;
         if (storage || compare || resource.width != target.extent.width || resource.height != target.extent.height ||
             resource.dimension != Graphics::TextureDimension::k2D || resource.baseArray != 0 || resource.depthOrLastArray != 0 ||
-            resource.samples != target.samples) {
+            expectedSamples != target.samples) {
             throw std::invalid_argument("Metal draw resident multisampled color view is incompatible with the guest descriptor");
         }
         id<MTLTexture> source = surface->Texture();
