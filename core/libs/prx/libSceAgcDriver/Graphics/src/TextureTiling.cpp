@@ -440,7 +440,7 @@ bool TracksBlockUnits(const GuestTextureResource& surface, const SurfaceGeometry
     return !geometry.thick && surface.tileMode != TextureTileMode::kLinear && surface.baseAddress % 65536 == 0 && (surface.dccAddress == 0 || surface.mipCount == 1);
 }
 
-GuestTextureResource SampledArrayWindow(const GuestTextureResource& viewed) {
+GuestTextureResource ViewedArrayWindow(const GuestTextureResource& viewed) {
     const bool layered = viewed.dimension == TextureDimension::k2DArray || viewed.dimension == TextureDimension::k1DArray || viewed.dimension == TextureDimension::kCube;
     if (!layered || viewed.baseArray == 0 || viewed.baseArray > viewed.depthOrLastArray || viewed.dccAddress != 0) return viewed;
     if (const auto xorMode = XorSwizzleMode(viewed.tileMode); xorMode != 0u) {
