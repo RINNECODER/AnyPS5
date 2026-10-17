@@ -310,12 +310,11 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
 
 int APS5_VABI fopen_s_nid_postfix(FileStream** result, const char* filename, const char* mode) {
     constexpr int GuestEinval = 22;
-    constexpr int GuestEnoent = 2;
     if (!result) return GuestEinval;
     *result = nullptr;
     if (!filename || !mode) return GuestEinval;
     *result = fopen_nid_postfix(filename, mode);
-    return *result ? 0 : GuestEnoent;
+    return *result ? 0 : errno;
 }
 
 int APS5_VABI fclose_nid_postfix(FileStream* stream) {

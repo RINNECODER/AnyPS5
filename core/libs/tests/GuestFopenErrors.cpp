@@ -12,6 +12,7 @@ extern "C" {
 void* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode);
 int APS5_VABI fclose_nid_postfix(void* stream);
 void* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode, void* stream);
+int APS5_VABI fopen_s_nid_postfix(void** result, const char* filename, const char* mode);
 int* APS5_VABI __error_nid_postfix();
 }
 
@@ -27,6 +28,7 @@ void Require(bool value, int line) {
 
 constexpr int GuestEnoent = 2;
 constexpr int GuestEisdir = 21;
+constexpr int GuestEinval = 22;
 constexpr int GuestEloop = 62;
 constexpr int GuestEnametoolong = 63;
 
@@ -83,12 +85,23 @@ void Reopen() {
     Check(reopened != nullptr && fclose_nid_postfix(reopened) == 0);
 }
 
+void CheckedOpen() {
+    void* stream = reinterpret_cast<void*>(1);
+    Check(fopen_s_nid_postfix(&stream, "loop", "r") == GuestEloop && stream == nullptr);
+    Check(fopen_s_nid_postfix(&stream, LongName.c_str(), "w") == GuestEnametoolong && stream == nullptr);
+    Check(fopen_s_nid_postfix(&stream, "folder", "w") == GuestEisdir && stream == nullptr);
+    Check(fopen_s_nid_postfix(&stream, "plain.txt", "z") == GuestEinval && stream == nullptr);
+    Check(fopen_s_nid_postfix(&stream, "missing.txt", "r") == GuestEnoent && stream == nullptr);
+    Check(fopen_s_nid_postfix(&stream, "plain.txt", "r") == 0 && stream != nullptr && fclose_nid_postfix(stream) == 0);
+}
+
 }
 
 int main() {
     const auto root = EnterFreshRoot();
     Open();
     Reopen();
+    CheckedOpen();
     std::error_code error;
     std::filesystem::current_path(std::filesystem::temp_directory_path(), error);
     std::filesystem::remove_all(root, error);
