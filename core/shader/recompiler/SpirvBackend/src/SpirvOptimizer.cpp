@@ -103,12 +103,18 @@ std::vector<std::uint32_t> ValidateAndOptimizeSpirv(std::span<const std::uint32_
     // APS5_SPIRV_OPT=full restores the SPIRV-Tools performance pipeline, =none skips optimization.
     const bool allowFolding = !HasLimitedUseTypes(spirv);
     const bool full = mode != nullptr && std::string(mode) == "full";
+    const bool inlineBda = full ||
+        (mode != nullptr && (std::string(mode) == "inline" || std::string(mode) == "inline-bda" ||
+                             std::string(mode) == "bda" || std::string(mode) == "leaf" ||
+                             std::string(mode) == "selective")) ||
+        (std::getenv("APS5_INLINE_BDA") != nullptr) ||
+        (std::getenv("APS5_SPIRV_INLINE") != nullptr);
     if (full && allowFolding) {
         optimizer.RegisterPerformancePasses(true);
     } else {
         optimizer.RegisterPass(spvtools::CreateWrapOpKillPass())
             .RegisterPass(spvtools::CreateDeadBranchElimPass());
-        if (full) {
+        if (inlineBda) {
             optimizer.RegisterPass(spvtools::CreateMergeReturnPass())
                 .RegisterPass(spvtools::CreateInlineExhaustivePass())
                 .RegisterPass(spvtools::CreateEliminateDeadFunctionsPass());
@@ -130,7 +136,7 @@ std::vector<std::uint32_t> ValidateAndOptimizeSpirv(std::span<const std::uint32_
         if (full) optimizer.RegisterPass(spvtools::CreateLoopUnrollPass(true));
         optimizer.RegisterPass(spvtools::CreateDeadBranchElimPass())
             .RegisterPass(spvtools::CreateRedundancyEliminationPass());
-        if (full) optimizer.RegisterPass(spvtools::CreateCombineAccessChainsPass());
+        if (full || inlineBda) optimizer.RegisterPass(spvtools::CreateCombineAccessChainsPass());
         if (allowFolding) optimizer.RegisterPass(spvtools::CreateSimplificationPass());
         if (full) {
             optimizer.RegisterPass(spvtools::CreateScalarReplacementPass(ScalarReplacementLimit))

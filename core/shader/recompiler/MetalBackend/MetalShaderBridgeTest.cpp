@@ -219,6 +219,62 @@ int main() {
             Reject([&] { static_cast<void>(ConvertToMetal(Fixtures::SubgroupLaneVertex(64), ShaderStage::Vertex, simd)); }, "32-wide host subgroup");
             Reject([&] { static_cast<void>(ConvertToMetal(Fixtures::SubgroupLaneVertex(), ShaderStage::Vertex)); }, "lacks SIMD-group");
         }
+        {
+            std::string snippet =
+                "static __attribute__((noinline))\n"
+                "ulong get_bda_pointer(constant ulong* bda_pagetable, ulong address, uint bytes, uint instruction);\n"
+                "[[clang::noinline]] ulong probe_bda_pointer(constant ulong* bda_pagetable, ulong address, uint bytes, uint instruction);\n"
+                "[[clang::optnone]] uint4 read_bda_span(ulong address, uint offset, uint used, uint instruction);\n"
+                "static __attribute__((noinline))\n"
+                "void write_bda_bytes(ulong address, uint value, uint bytes, uint instruction);\n"
+                "static __attribute__((noinline))\n"
+                "void record_bda_fault(constant ulong* bda_pagetable, ulong address, uint bytes, uint instruction, uint reason);\n";
+            InlineBdaHelpers(snippet);
+            Require(snippet.find("static inline __attribute__((always_inline))\nulong get_bda_pointer") != std::string::npos, "get_bda_pointer was not made inline");
+            Require(snippet.find("[[clang::noinline]]") == std::string::npos && snippet.find("ulong probe_bda_pointer") != std::string::npos, "probe_bda_pointer retained noinline");
+            Require(snippet.find("[[clang::optnone]]") == std::string::npos && snippet.find("uint4 read_bda_span") != std::string::npos, "read_bda_span retained optnone");
+            Require(snippet.find("static inline __attribute__((always_inline))\nvoid write_bda_bytes") != std::string::npos, "write_bda_bytes was not made inline");
+            Require(snippet.find("static __attribute__((noinline))\nvoid record_bda_fault") != std::string::npos, "record_bda_fault should retain noinline");
+        }
+        {
+            std::vector<std::uint32_t> bdaWords{spv::MagicNumber, 0x00010300u, 0u, 30u, 0u};
+            const auto emitBda = [&](spv::Op op, std::initializer_list<std::uint32_t> args) {
+                bdaWords.push_back((static_cast<std::uint32_t>(args.size() + 1) << 16u) | op);
+                bdaWords.insert(bdaWords.end(), args);
+            };
+            emitBda(spv::OpCapability, {spv::CapabilityShader});
+            emitBda(spv::OpMemoryModel, {spv::AddressingModelLogical, spv::MemoryModelGLSL450});
+            emitBda(spv::OpEntryPoint, {spv::ExecutionModelGLCompute, 10, 0x6e69616du, 0});
+            emitBda(spv::OpExecutionMode, {10, spv::ExecutionModeLocalSize, 1, 1, 1});
+            emitBda(spv::OpName, {20, 0x5f746567u, 0x5f616462u, 0x6e696f70u, 0x00726574u});
+            emitBda(spv::OpName, {21, 0x6f636572u, 0x625f6472u, 0x665f6164u, 0x746c7561u, 0});
+            emitBda(spv::OpTypeVoid, {1});
+            emitBda(spv::OpTypeFunction, {2, 1});
+            emitBda(spv::OpFunction, {1, 10, spv::FunctionControlMaskNone, 2});
+            emitBda(spv::OpLabel, {11});
+            emitBda(spv::OpFunctionCall, {1, 12, 20});
+            emitBda(spv::OpFunctionCall, {1, 13, 21});
+            emitBda(spv::OpReturn, {});
+            emitBda(spv::OpFunctionEnd, {});
+            emitBda(spv::OpFunction, {1, 20, spv::FunctionControlDontInlineMask, 2});
+            emitBda(spv::OpLabel, {22});
+            emitBda(spv::OpReturn, {});
+            emitBda(spv::OpFunctionEnd, {});
+            emitBda(spv::OpFunction, {1, 21, spv::FunctionControlDontInlineMask, 2});
+            emitBda(spv::OpLabel, {23});
+            emitBda(spv::OpReturn, {});
+            emitBda(spv::OpFunctionEnd, {});
+            RecompileResult bdaGuest;
+            bdaGuest.spirv = std::move(bdaWords);
+            bdaGuest.variantId = 192;
+            bdaGuest.hostSubgroupSize = 32;
+            TargetOptions target;
+            const auto bdaConverted = ConvertToMetal(bdaGuest, ShaderStage::Compute, target);
+            Require(bdaConverted.source.find("get_bda_pointer") != std::string::npos, "missing get_bda_pointer in converted MSL");
+            Require(bdaConverted.source.find("static inline __attribute__((always_inline))\nvoid get_bda_pointer") != std::string::npos, "expected always_inline on get_bda_pointer");
+            Require(bdaConverted.source.find("record_bda_fault") != std::string::npos, "missing record_bda_fault in converted MSL");
+            Require(bdaConverted.source.find("static __attribute__((noinline))\nvoid record_bda_fault") != std::string::npos, "record_bda_fault should stay noinline");
+        }
         std::cout << "PASS: descriptor reflection, implicit buffer lengths, preserved guest metadata, unsupported-contract rejection, conversion cache keys, and vertex subgroup lanes\n";
         return 0;
     } catch (const std::exception& error) {
