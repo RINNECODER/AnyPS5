@@ -386,6 +386,30 @@ static void EdgeTriggeredSocketRead() {
     Require(close_nid_postfix(marked[0]) == 0 && close_nid_postfix(marked[1]) == 0);
     Require(close_nid_postfix(kq) == 0);
 }
+
+static void EdgeTriggeredSocketWrite() {
+    const int kq = kqueue_nid_postfix();
+    int pair[2];
+    Require(socketpair_nid_postfix(Unix, Stream, 0, pair) == 0);
+    const auto ident = static_cast<std::uintptr_t>(pair[1]);
+    KernelEvent events[4]{};
+    Require(Apply(kq, Change(ident, EvfiltWrite, EvAdd | EvClear)) == 0);
+    Require(Poll(kq, events, 4) == 1 && events[0].ident == ident && events[0].filter == EvfiltWrite && events[0].data > 0);
+    Require(Poll(kq, events, 4) == 0);
+    const std::string payload(1000, 'w');
+    Require(send_nid_postfix(pair[1], payload.data(), payload.size(), 0) == static_cast<std::int64_t>(payload.size()));
+    Require(Poll(kq, events, 4) == 0);
+    std::string drained(payload.size(), '\0');
+    Require(recv_nid_postfix(pair[0], drained.data(), drained.size(), 0) == static_cast<std::int64_t>(drained.size()));
+    Require(Poll(kq, events, 4) == 1 && events[0].ident == ident && events[0].filter == EvfiltWrite && events[0].data > 0);
+    Require(Poll(kq, events, 4) == 0);
+    Require(Apply(kq, Change(ident, EvfiltWrite, EvAdd | EvClear)) == 0);
+    Require(Poll(kq, events, 4) == 1 && events[0].filter == EvfiltWrite);
+    Require(close_nid_postfix(pair[0]) == 0);
+    Require(Poll(kq, events, 4) == 1 && (events[0].flags & EvEof) != 0);
+    Require(close_nid_postfix(pair[1]) == 0);
+    Require(close_nid_postfix(kq) == 0);
+}
 #endif
 
 static void DisableAndDispatch() {
@@ -741,6 +765,7 @@ int main() {
     SocketPair();
 #ifdef __linux__
     EdgeTriggeredSocketRead();
+    EdgeTriggeredSocketWrite();
 #endif
     DisableAndDispatch();
     Errors();
