@@ -25,6 +25,8 @@
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/FilesystemError.hpp"
+#include "prx/libc/include/HostErrno.hpp"
+#include "prx/libc/include/AppArchive.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 
 #ifdef __linux__
@@ -295,8 +297,7 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
     if (const int error = ResolvePathError_nid_no_patch(filename, fpath)) { errno = error; return nullptr; }
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
     if (!handle) {
-        const int error = errno;
-        errno = error;
+        errno = GuestErrnoFromHost_nid_no_patch(errno);
         return nullptr;
     }
     // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());
