@@ -4,14 +4,18 @@
 #include "MetalPresenter.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include <map>
+#include <memory>
 #include <vector>
 #include <mutex>
 
 namespace AgcDriver::Metal {
 
+class MetalFXUpscaler;
+
 class MetalPresentation {
 public:
     MetalPresentation(const MetalDevice& backend, id<MTLLibrary> library);
+    ~MetalPresentation();
     // `pixels`, when given, are the display buffer's decoded pixels (ReadPixels), read by the
     // caller while it held the guest ranges (empty: the window was minimized, nothing was read);
     // otherwise Present reads them itself.
@@ -24,6 +28,7 @@ public:
 private:
     const MetalDevice& backend;
     MetalPresenter presenter;
+    std::unique_ptr<MetalFXUpscaler> fxUpscaler;
     std::mutex mutex;
     std::map<void*, CAMetalLayer*> layers;
 };

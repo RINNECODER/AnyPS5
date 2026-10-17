@@ -51,6 +51,7 @@ struct CachedRenderPipeline {
 // Defaults to true, can be overridden by the ANYPS5_METAL_FAST_MATH environment variable
 // (enabled unless set to 0, false, off, or no).
 [[nodiscard]] bool FastMathEnabled();
+[[nodiscard]] bool Force1xMsaaEnabled();
 // Returns `entryPoint` from the library compiled from `source` with the converted-shader compile options
 // (fast math unless disabled; ConvertedShaderLanguageVersion). Throws std::runtime_error when compilation fails and
 // returns nil when the entry point is missing. `sourceHash` is ShaderSourceHash(source) when the caller

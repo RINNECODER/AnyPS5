@@ -27,6 +27,16 @@ bool FastMathEnabled() {
     return true;
 }
 
+bool Force1xMsaaEnabled() {
+    const char* value = std::getenv("ANYPS5_METAL_FORCE_1X_MSAA");
+    if (value == nullptr) return false;
+    if (*value == '1' && *(value + 1) == '\0') return true;
+    if (std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0 ||
+        std::strcmp(value, "on") == 0 || std::strcmp(value, "ON") == 0 ||
+        std::strcmp(value, "yes") == 0 || std::strcmp(value, "YES") == 0) return true;
+    return false;
+}
+
 namespace {
 
 using ShaderRecompiler::MetalBackend::BoundedCache;
@@ -652,6 +662,9 @@ CachedRenderPipeline CreateRenderPipelineState(id<MTLDevice> device, MTLRenderPi
 }
 
 CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor, NSError** error) {
+    if (Force1xMsaaEnabled() && descriptor.rasterSampleCount > 1) {
+        descriptor.rasterSampleCount = 1;
+    }
     const bool cacheable = RenderCacheable(descriptor);
     auto key = cacheable ? RenderKey(device, descriptor, descriptor.vertexFunction, descriptor.fragmentFunction) : CacheKey();
     if (cacheable) {
@@ -662,6 +675,9 @@ CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPi
 
 CachedRenderPipeline CachedRenderPipelineState(id<MTLDevice> device, MTLRenderPipelineDescriptor* descriptor, id<MTLFunction> vertexFunction,
                                                id<MTLFunction> fragmentFunction, NSError** error) {
+    if (Force1xMsaaEnabled() && descriptor.rasterSampleCount > 1) {
+        descriptor.rasterSampleCount = 1;
+    }
     const bool cacheable = RenderCacheable(descriptor);
     auto key = cacheable ? RenderKey(device, descriptor, vertexFunction, fragmentFunction) : CacheKey();
     if (cacheable) {
@@ -708,6 +724,9 @@ CachedRenderPipeline CreateRenderPipelineState(id<MTLDevice> device, MTLRenderPi
 }
 
 CachedRenderPipeline CachedMeshPipelineState(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descriptor, NSError** error) {
+    if (Force1xMsaaEnabled() && descriptor.rasterSampleCount > 1) {
+        descriptor.rasterSampleCount = 1;
+    }
     const bool cacheable = !Linked(descriptor.objectLinkedFunctions.functions) && !Linked(descriptor.meshLinkedFunctions.functions) &&
                            !Linked(descriptor.fragmentLinkedFunctions.functions);
     auto key = cacheable ? MeshKey(device, descriptor) : CacheKey();

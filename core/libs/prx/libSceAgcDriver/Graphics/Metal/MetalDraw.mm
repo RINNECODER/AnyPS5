@@ -2,6 +2,7 @@
 #include "MetalWorkerPool.hpp"
 #include "MetalShaderResources.hpp"
 #include "MetalRenderState.hpp"
+#include "MetalPipelineCache.hpp"
 #include "MetalDepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -649,7 +650,18 @@ BdaAbi::Fault MetalDraw::ResolveSynchronously(const Graphics::ColorTarget& sourc
     id<MTLTexture> level = [handle newTextureViewWithPixelFormat:handle.pixelFormat textureType:MTLTextureType2D
         levels:NSMakeRange(destination.mip, 1) slices:NSMakeRange(0, 1)];
     if (level == nil) throw std::runtime_error("Metal CB resolve destination view creation failed");
-    // A pass with no draws that loads the samples and stores them resolved.
+    if (surface->Texture().sampleCount == 1) {
+        id<MTLCommandBuffer> commands = backend.CommandBuffer();
+        auto blit = MetalEncoders::Blit(commands);
+        if (blit == nil) throw MetalGpuExecutionError("Metal CB resolve blit encoder allocation failed");
+        [blit copyFromTexture:surface->Texture() sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(source.extent.width, source.extent.height, 1)
+                    toTexture:level destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        resources.EncodeReadbacks(commands);
+        backend.Wait(commands);
+        return CompleteCommittedWork([&] { return resources.Complete(commands); });
+    }
     auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
     renderPass.renderTargetWidth = source.extent.width;
     renderPass.renderTargetHeight = source.extent.height;
@@ -695,11 +707,24 @@ bool WholeVertexRangesBindable(std::span<const ShaderRecompiler::VertexAttribute
 
 }
 
-std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const Pm4::DrawParameters& draw,
+std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
     std::span<const NativeGuestMemory::BorrowedRange> ranges,
     std::optional<std::array<std::uint32_t, 5>> meshArguments, MetalTimeline* timeline, Completed completed) {
     std::lock_guard<std::recursive_mutex> lock(drawMutex);
+    Graphics::State state = inputState;
+    if (Force1xMsaaEnabled()) {
+        if (state.rasterSamples > 1) {
+            state.rasterSamples = 1;
+        }
+        for (auto& color : state.colors) {
+            if (color.samples > 1) color.samples = 1;
+            if (color.coverageSamples > 1) color.coverageSamples = 1;
+        }
+        if (state.depth && state.depth->samples > 1) {
+            state.depth->samples = 1;
+        }
+    }
     // An indirect draw here is one whose records the GPU reads (MetalDriver's GpuReadsIndirectRecords):
     // the CP's counts and first index or vertex come from the guest argument buffer when the draw runs,
     // and so do the base vertex and first instance where the rule is InPlace (Rule::Constant uses the
@@ -1153,6 +1178,23 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& state, const
             renderPass.stencilAttachment.texture = depth->StencilTexture();
             renderPass.stencilAttachment.loadAction = stencilLoad;
             renderPass.stencilAttachment.storeAction = stencilStore;
+        }
+    }
+    if (Force1xMsaaEnabled()) {
+        for (std::size_t i = 0; i < 8; ++i) {
+            auto attachment = renderPass.colorAttachments[i];
+            if (attachment.storeAction == MTLStoreActionMultisampleResolve) {
+                attachment.storeAction = MTLStoreActionStore;
+                attachment.resolveTexture = nil;
+            }
+        }
+        if (renderPass.depthAttachment.storeAction == MTLStoreActionMultisampleResolve) {
+            renderPass.depthAttachment.storeAction = MTLStoreActionStore;
+            renderPass.depthAttachment.resolveTexture = nil;
+        }
+        if (renderPass.stencilAttachment.storeAction == MTLStoreActionMultisampleResolve) {
+            renderPass.stencilAttachment.storeAction = MTLStoreActionStore;
+            renderPass.stencilAttachment.resolveTexture = nil;
         }
     }
     MetalBufferBinding indexBuffer;
@@ -1713,11 +1755,24 @@ bool MetalDraw::ParallelEncodingEnabled() {
 }
 
 std::optional<MetalDraw::PreparedDraw> MetalDraw::PrepareCachedDraw(
-    const Graphics::State& state,
+    const Graphics::State& inputState,
     const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
     std::span<const NativeGuestMemory::BorrowedRange> ranges) {
     std::lock_guard<std::recursive_mutex> lock(drawMutex);
+    Graphics::State state = inputState;
+    if (Force1xMsaaEnabled()) {
+        if (state.rasterSamples > 1) {
+            state.rasterSamples = 1;
+        }
+        for (auto& color : state.colors) {
+            if (color.samples > 1) color.samples = 1;
+            if (color.coverageSamples > 1) color.coverageSamples = 1;
+        }
+        if (state.depth && state.depth->samples > 1) {
+            state.depth->samples = 1;
+        }
+    }
     const Graphics::CompiledShader* vertex = nullptr;
     const Graphics::CompiledShader* fragment = nullptr;
     for (const auto& shader : shaders) {

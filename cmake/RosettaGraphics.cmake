@@ -96,7 +96,8 @@ target_link_libraries(libSceAgcDriver PRIVATE
     anyps5_rosetta_shader_recompiler
     anyps5_metal_utilities
     "-framework ImageIO"
-    "-framework CoreGraphics")
+    "-framework CoreGraphics"
+    "-weak_framework MetalFX")
 set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 
 set(rosettaVideoOut ${ANYPS5_ROSETTA_LIBS_ROOT}/prx/libSceVideoOut)

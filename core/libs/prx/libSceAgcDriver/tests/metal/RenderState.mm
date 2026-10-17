@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include "MetalRenderState.hpp"
+#include "MetalPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/NativeGuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
@@ -897,6 +898,38 @@ void DepthPromotionAndState(id<MTLDevice> device) {
             "D16 promotion mismatch");
 }
 
+void Forced1xMsaa(id<MTLDevice> device) {
+    unsetenv("ANYPS5_METAL_FORCE_1X_MSAA");
+    Require(!Metal::Force1xMsaaEnabled(), "Forced 1x MSAA enabled by default");
+
+    for (const char* value : {"1", "true", "TRUE", "on", "ON", "yes", "YES"}) {
+        setenv("ANYPS5_METAL_FORCE_1X_MSAA", value, 1);
+        Require(Metal::Force1xMsaaEnabled(), "Forced 1x MSAA was not enabled for valid truthy value");
+    }
+
+    for (const char* value : {"0", "false", "off", "no", "anything_else"}) {
+        setenv("ANYPS5_METAL_FORCE_1X_MSAA", value, 1);
+        Require(!Metal::Force1xMsaaEnabled(), "Forced 1x MSAA was enabled for non-truthy value");
+    }
+
+    setenv("ANYPS5_METAL_FORCE_1X_MSAA", "1", 1);
+    Require(Metal::Force1xMsaaEnabled(), "Forced 1x MSAA was not enabled");
+
+    auto state = BasicState();
+    state.rasterSamples = 4;
+    auto descriptor = [MTLRenderPipelineDescriptor new];
+    Metal::ConfigureRenderPipelineDescriptor(descriptor, state);
+    Require(descriptor.rasterSampleCount == 1, "ConfigureRenderPipelineDescriptor did not force rasterSampleCount to 1");
+
+    Metal::ConfigureSamplePositions(nil, state);
+
+    unsetenv("ANYPS5_METAL_FORCE_1X_MSAA");
+    Require(!Metal::Force1xMsaaEnabled(), "Forced 1x MSAA still active after unsetenv");
+    auto normalDescriptor = [MTLRenderPipelineDescriptor new];
+    Metal::ConfigureRenderPipelineDescriptor(normalDescriptor, state);
+    Require(normalDescriptor.rasterSampleCount == 4, "ConfigureRenderPipelineDescriptor did not retain 4 samples when override disabled");
+}
+
 int main() {
     @autoreleasepool {
         try {
@@ -922,6 +955,7 @@ int main() {
             CoveredCentroid();
             EarlyDepthDecode();
             PackedFloatDccClear();
+            Forced1xMsaa(device);
             std::cout << "PASS: original State sparse exports, blending/write masks/scissor, depth/stencil, disabled depth writes, positive/negative viewport and winding, clip depth and supported depth bounds pixels\n";
             return 0;
         } catch (const std::exception& error) {

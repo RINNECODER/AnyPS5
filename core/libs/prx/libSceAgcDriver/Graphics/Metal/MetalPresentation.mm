@@ -1,4 +1,5 @@
 #include "MetalPresentation.hpp"
+#include "MetalFXUpscaler.hpp"
 #include "FrameCapture.hpp"
 #include "BindTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -40,7 +41,10 @@ std::vector<std::byte> displayPixels(const DisplayBuffer& buffer) {
 }
 
 MetalPresentation::MetalPresentation(const MetalDevice& backend, id<MTLLibrary> library)
-    : backend(backend), presenter(backend.Device(), library) {}
+    : backend(backend), presenter(backend.Device(), library),
+      fxUpscaler(std::make_unique<MetalFXUpscaler>(backend.Device())) {}
+
+MetalPresentation::~MetalPresentation() = default;
 
 std::vector<std::byte> MetalPresentation::ReadPixels(const DisplayBuffer& buffer) { return displayPixels(buffer); }
 
@@ -66,6 +70,7 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
     if (layer == nil || ![layer isKindOfClass:CAMetalLayer.class]) throw std::invalid_argument("Metal presentation window callback did not return a CAMetalLayer");
     if (const auto previous = layers.find(window.context); previous != layers.end() && previous->second != layer) {
         backend.Wait(backend.CommandBuffer());
+        if (fxUpscaler) fxUpscaler->Reset();
     }
     layers[window.context] = layer;
     std::uint32_t width = 0;
@@ -112,7 +117,14 @@ void MetalPresentation::Present(const PresentationWindow& window, const DisplayB
             if (layer.device != backend.Device()) throw std::invalid_argument("Metal presentation requires a layer on its device");
             id<CAMetalDrawable> drawable = [layer nextDrawable];
             if (drawable != nil) {
-                presenter.Encode(commands, source, drawable.texture);
+                id<MTLTexture> presentationSource = source;
+                if (fxUpscaler && fxUpscaler->IsEnabled() && fxUpscaler->IsSupported()) {
+                    id<MTLTexture> upscaled = fxUpscaler->Upscale(commands, source, width, height);
+                    if (upscaled != nil) {
+                        presentationSource = upscaled;
+                    }
+                }
+                presenter.Encode(commands, presentationSource, drawable.texture);
                 [commands presentDrawable:drawable];
                 if (ticket) { frameCapture.Encode(commands, drawable.texture, *ticket); captureEncoded = true; }
             }
@@ -142,6 +154,7 @@ void MetalPresentation::ReleaseWindow(void* context) {
     if (const auto found = layers.find(context); found != layers.end()) {
         backend.Wait(backend.CommandBuffer());
         layers.erase(found);
+        if (fxUpscaler) fxUpscaler->Reset();
     }
 }
 

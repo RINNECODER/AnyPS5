@@ -303,7 +303,7 @@ void ConfigureRenderPipelineDescriptor(MTLRenderPipelineDescriptor* descriptor, 
     Require(state.stages.path == Graphics::ShaderPath::Vertex && !state.stages.mesh, "vertex pipeline requires a vertex shader path");
     Validate(state);
     ConfigureAttachments(descriptor.colorAttachments, state);
-    descriptor.rasterSampleCount = state.rasterSamples;
+    descriptor.rasterSampleCount = Force1xMsaaEnabled() ? 1 : state.rasterSamples;
     const auto primitive = state.rectList ? MTLPrimitiveTypeTriangle : PrimitiveType(state);
     if (state.rectList) {
         Require(state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST, "rectangle pipeline requires the original patch topology");
@@ -329,7 +329,7 @@ void ConfigureRenderPipelineDescriptor(MTLMeshRenderPipelineDescriptor* descript
     Require(state.stages.path == Graphics::ShaderPath::Geometry && state.stages.mesh.has_value(), "mesh pipeline requires a mesh shader path");
     Validate(state);
     ConfigureAttachments(descriptor.colorAttachments, state);
-    descriptor.rasterSampleCount = state.rasterSamples;
+    descriptor.rasterSampleCount = Force1xMsaaEnabled() ? 1 : state.rasterSamples;
     descriptor.depthAttachmentPixelFormat = state.depth ? RenderPixelFormat(state.depth->format) : MTLPixelFormatInvalid;
     descriptor.stencilAttachmentPixelFormat = !state.depth ? MTLPixelFormatInvalid :
         state.depth->format == VK_FORMAT_D16_UNORM_S8_UINT ? MTLPixelFormatStencil8 :
@@ -387,7 +387,7 @@ void BindRenderState(id<MTLRenderCommandEncoder> encoder, const Graphics::State&
 
 void ConfigureSamplePositions(MTLRenderPassDescriptor* pass, id<MTLDevice> device, const Graphics::State& state) {
     Require(pass != nil, "render pass descriptor is missing");
-    if (!state.customSampleLocations || state.rasterSamples == 1) return;
+    if (Force1xMsaaEnabled() || !state.customSampleLocations || state.rasterSamples == 1) return;
     Require(device != nil && device.programmableSamplePositionsSupported, "custom sample locations require programmable sample positions");
     const auto locations = Graphics::SampleLocations(state);
     std::array<MTLSamplePosition, 8> positions{};
