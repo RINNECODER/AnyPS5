@@ -1020,6 +1020,36 @@ std::uint32_t ImageSampleIndex(SpirvValueEmitContext& ctx, const ImageEmitAccess
     return AddressU32(ctx, access, addressInfo.coordinateComponents);
 }
 
+std::uint32_t QuantizeStoreTexel(SpirvEmitterState& state, std::uint32_t resource, std::uint32_t texel) {
+    const auto first = PipelineSpecialization::StoreQuantizeBase + resource * PipelineSpecialization::StoreQuantizeWords;
+    const auto f32 = TypeF32(state);
+    const auto vec4 = TypeF32Vector(state, 4u);
+    const auto bvec4 = state.module.Type(spv::OpTypeVector, TypeBool(state), 4u);
+    const auto splat = [&](std::uint32_t type, std::uint32_t scalar) {
+        const auto result = state.module.AllocateId();
+        state.module.AddFunction(spv::OpCompositeConstruct, type, result, scalar, scalar, scalar, scalar);
+        return result;
+    };
+    const auto word = [&](std::uint32_t index) { return state.module.SpecializationConstant(TypeU32(state), first + index, 0u); };
+    const auto enabled = Binary(state, spv::OpINotEqual, TypeBool(state), word(0u), ConstantU32(state, 0u));
+    const auto scale = splat(vec4, Unary(state, spv::OpBitcast, f32, word(1u)));
+    const auto reciprocal = splat(vec4, Unary(state, spv::OpBitcast, f32, word(2u)));
+    const auto snorm = Binary(state, spv::OpINotEqual, TypeBool(state), word(3u), ConstantU32(state, 0u));
+    const auto lower = splat(vec4, Select(state, f32, snorm, ConstantF32(state, std::bit_cast<std::uint32_t>(-1.0f)), ConstantF32(state, 0u)));
+    const auto zero = splat(vec4, ConstantF32(state, 0u));
+    const auto one = splat(vec4, ConstantF32(state, std::bit_cast<std::uint32_t>(1.0f)));
+    const auto finite = state.module.AllocateId();
+    state.module.AddFunction(spv::OpSelect, vec4, finite, Unary(state, spv::OpIsNan, bvec4, texel), zero, texel);
+    const auto clamped = state.module.AllocateId();
+    state.module.AddFunction(spv::OpExtInst, vec4, clamped, GlslStd450(state), GLSLstd450FClamp, finite, lower, one);
+    const auto level = state.module.AllocateId();
+    state.module.AddFunction(spv::OpExtInst, vec4, level, GlslStd450(state), GLSLstd450RoundEven, Binary(state, spv::OpFMul, vec4, clamped, scale));
+    const auto quantized = Binary(state, spv::OpFMul, vec4, level, reciprocal);
+    const auto result = state.module.AllocateId();
+    state.module.AddFunction(spv::OpSelect, vec4, result, splat(bvec4, enabled), quantized, texel);
+    return result;
+}
+
 void EmitWriteOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
     auto& state = ctx.state;
     if (access.slot != 0) {
@@ -1036,7 +1066,8 @@ void EmitWriteOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
     EmitIfCondition(state, condition, [&]() {
         const auto mipLod = access.image.mipMode == ImageMipMode::DynamicStorage ? LodU32(ctx, access) : 0u;
         const auto coord = CoordU32(ctx, access);
-        const auto texel = access.mem.imagePacked ? PackedStoreTexel(ctx, access, ctx.Arg(access.inst, 2)) : StoreTexel(ctx, access, ctx.Arg(access.inst, 2), uintImage);
+        auto texel = access.mem.imagePacked ? PackedStoreTexel(ctx, access, ctx.Arg(access.inst, 2)) : StoreTexel(ctx, access, ctx.Arg(access.inst, 2), uintImage);
+        if (!uintImage && !access.mem.imagePacked && !access.image.atomic && access.image.table == NoTable && !state.registrationModules && access.image.conversionFormat == IrBufferFormat::Invalid) texel = QuantizeStoreTexel(state, access.mem.resource, texel);
         EmitStorageImageWrite(state, access.mem.resource, mipLod, coord, texel, ImageSampleIndex(ctx, access));
     });
 }
