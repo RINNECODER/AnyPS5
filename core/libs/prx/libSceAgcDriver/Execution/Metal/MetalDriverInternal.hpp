@@ -64,6 +64,12 @@ struct MetalDriver::Impl {
     std::unique_ptr<MetalPresentation> presentation;
     std::unique_ptr<MetalDraw> draw;
     EopInterrupt eopInterrupt;
+    // A queue that raises its own RELEASE_MEM interrupts keeps its flip's end-of-pipe event, so the
+    // flip does not raise a second one (upstream 2aa6bfca6); the latch is cleared by a guest interrupt
+    // that reached the title, as Driver::deliverGuestEopInterrupt does.
+    std::mutex eopSelfSignalMutex;
+    std::unordered_map<std::uint32_t, std::uint32_t> eopSelfSignalFlips;
+    static constexpr std::uint32_t eopSelfSignalFlipLimit = 4;
     std::exception_ptr failure;
     std::atomic<bool> stopping{false};
     std::atomic<bool> skipInvalidCommandBuffers{false};
@@ -169,7 +175,8 @@ struct MetalDriver::Impl {
     };
     std::mutex computePipelinesMutex;
     std::unordered_map<const ShaderRecompiler::RecompileResult*, ComputePipelineEntry> computePipelines;
-    void DeliverEopInterrupt(std::uint32_t queue);
+    bool DeliverGuestEopInterrupt(std::uint32_t queue);
+    void DeliverFlipEopInterrupt(std::uint32_t queue);
     std::uint64_t barrierWaits = 0;
     void ExecuteSubmission(const Submission& submission, QueueState& queue);
     // `indirectArguments`: DISPATCH_INDIRECT whose {x, y, z} group counts the GPU reads at that guest

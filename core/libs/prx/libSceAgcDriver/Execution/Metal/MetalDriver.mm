@@ -785,9 +785,24 @@ void MetalDriver::Impl::ForgetCachedImages(const GuestStoreRange& store) {
     }
 }
 
-void MetalDriver::Impl::DeliverEopInterrupt(std::uint32_t queue) {
+bool MetalDriver::Impl::DeliverGuestEopInterrupt(std::uint32_t queue) {
     if (!eopInterrupt) throw std::runtime_error("Metal driver EOP interrupt requires a configured native host callback");
-    eopInterrupt(queue);
+    if (!eopInterrupt(queue)) return false;
+    std::lock_guard lock(eopSelfSignalMutex);
+    eopSelfSignalFlips[queue] = 0;
+    return true;
+}
+
+void MetalDriver::Impl::DeliverFlipEopInterrupt(std::uint32_t queue) {
+    {
+        std::lock_guard lock(eopSelfSignalMutex);
+        const auto latched = eopSelfSignalFlips.find(queue);
+        if (latched != eopSelfSignalFlips.end()) {
+            if (++latched->second <= eopSelfSignalFlipLimit) return;
+            eopSelfSignalFlips.erase(latched);
+        }
+    }
+    DeliverGuestEopInterrupt(queue);
 }
 
 void MetalDriver::Impl::RetireSubmission(Worker& worker, const Submission& submission,

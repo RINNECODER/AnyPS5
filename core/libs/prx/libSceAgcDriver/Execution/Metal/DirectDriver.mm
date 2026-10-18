@@ -262,7 +262,7 @@ void Configure(DirectState& state, MetalDriver& driver, const std::shared_ptr<co
             throw std::runtime_error("Rosetta direct path: cannot load " + path.string() + ": " + reason);
         }
         driver.Configure((__bridge void*)device, (__bridge void*)library, *ranges,
-            [](std::uint32_t queue) { AgcDriverDeliverEopInterrupt(queue); }, state.driverGeneration);
+            [](std::uint32_t queue) { return AgcDriverDeliverEopInterrupt(queue); }, state.driverGeneration);
         driver.SetSkipInvalidCommandBuffers(!StrictSubmissions());
         state.device = device;
         state.library = library;

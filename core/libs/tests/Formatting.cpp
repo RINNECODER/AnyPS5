@@ -201,7 +201,7 @@ __attribute__((noinline)) static void APS5_VABI RunChecks() {
     Require(snprintf_nid_postfix(pointers, sizeof(pointers), "%p", address(0xffffffffffffffffull)) == 16 &&
         std::strcmp(pointers, "ffffffffffffffff") == 0);
     Require(snprintf_nid_postfix(pointers, sizeof(pointers), "%p%ls", address(0), u"") == 1 && std::strcmp(pointers, "0") == 0);
-    Require(snprintf_nid_postfix(pointers, sizeof(pointers), "%%p|%%%p", address(0)) == 4 && std::strcmp(pointers, "%p|%0") == 0);
+    Require(snprintf_nid_postfix(pointers, sizeof(pointers), "%%p|%%%p", address(0)) == 5 && std::strcmp(pointers, "%p|%0") == 0);
     Require(sprintf_nid_postfix(pointers, "%p", address(0)) == 1 && std::strcmp(pointers, "0") == 0);
     Require(FormatList(pointers, sizeof(pointers), "[%1$*2$.*3$p]", address(0x1a), 10, 4) == 12 && std::strcmp(pointers, "[      001a]") == 0);
     Require(FormatList(pointers, sizeof(pointers), "%p:%d:%.1f:%d %d %d %d %d %d", address(0), 7, 2.5, 1, 2, 3, 4, 5, 6) == 19 &&
