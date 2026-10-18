@@ -692,6 +692,21 @@ int main(int argc, char** argv) {
             return VulkanTestSkipped;
         }
         auto context = device->GetContext();
+        if (disableStorageImageMultisample) {
+            PlaceholderImages placeholders(context);
+            for (std::uint32_t heap = ShaderRecompiler::RuntimeAbi::FirstStorageImageBinding;
+                 heap < ShaderRecompiler::RuntimeAbi::FirstImageBinding + ShaderRecompiler::RuntimeAbi::ImageBindingCount; ++heap) {
+                const auto shape = PlaceholderImageShapeOf(heap);
+                if (shape.samples == VK_SAMPLE_COUNT_1_BIT) continue;
+                bool refused = false;
+                try {
+                    placeholders.View(heap);
+                } catch (const std::runtime_error&) {
+                    refused = true;
+                }
+                Require(refused, "a device without storage-image MSAA returned a placeholder for typed multisample storage heap " + std::to_string(heap));
+            }
+        }
         TextureDetiler detiler(context);
         context.detiler = &detiler;
         if (resources) {
