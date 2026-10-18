@@ -1,5 +1,6 @@
 // Minimal title launcher: builds the FreeBSD argc/argv frame the PS5 entry expects in rdi, the
 // exit callback in rsi, the uniform register file's stack window, and calls the ELF entry.
+#include "../../core/libs/prx/libc/include/GuestLayout.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +32,7 @@ extern "C" void sub_80(void* rf);
 extern "C" void NativeAotReportEntryCounts_nid_no_patch();
 extern "C" const void* ApplicationProcessParameters_nid_no_patch();
 extern "C" void ApplicationHeapInitialize_nid_no_patch(const void* processParameters);
+extern "C" void GuestArenaSetOffset_nid_postfix(std::uint64_t offset);
 
 static void OnFatal(int signal, siginfo_t* info, void*) {
     std::fprintf(stderr, "[aot] fatal signal %d at %p (code %d)\n", signal,
@@ -45,6 +47,10 @@ extern "C" [[noreturn]] void aot_guest_exit(int code) {
 }
 
 int main(int argc, char** argv) {
+    // The compiler slid the whole guest address space above the macOS 64-512 GiB hole
+    // (tools/native/title_image.py defaults to GuestLayout::NativeSlide); the HLE arena and the
+    // DirectMemory placement must use the same slide, before the first guest allocation.
+    GuestArenaSetOffset_nid_postfix(GuestLayout::NativeSlide);
     int translated = 0;
     std::size_t bytes = sizeof(translated);
     if (sysctlbyname("sysctl.proc_translated", &translated, &bytes, nullptr, 0) != 0 && errno != ENOENT) return 90;
