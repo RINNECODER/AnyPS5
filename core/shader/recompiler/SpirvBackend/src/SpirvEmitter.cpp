@@ -258,6 +258,8 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
         state.requirements.ldsLock = false;
         state.requirements.ldsBufferInt64Atomics = true;
     }
+    const bool int64Atomics = std::ranges::find(state.supportedCapabilities, static_cast<std::uint32_t>(spv::CapabilityInt64Atomics)) != state.supportedCapabilities.end();
+    state.requirements.bufferU64View = state.requirements.bufferInt64Atomics || (state.requirements.coherentBufferPairs && int64Atomics);
     if (HostSubgroupSingleLane(state)) {
         state.requirements.subgroupBallot = false;
         state.requirements.subgroupShuffle = false;
