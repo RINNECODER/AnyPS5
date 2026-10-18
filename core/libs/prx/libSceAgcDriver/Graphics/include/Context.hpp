@@ -178,6 +178,7 @@ struct Context {
     bool provokingVertexLast = false;
     bool provokingVertexModePerPipeline = false;
     bool singlePassStorage = false;
+    bool storageImageMultisample = false;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {

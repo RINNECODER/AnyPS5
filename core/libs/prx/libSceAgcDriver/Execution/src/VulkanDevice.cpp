@@ -237,6 +237,7 @@ struct VulkanDevice::State {
     bool maintenance8 = false;
     std::uint32_t srgbDecodeFormats = 0;
     bool storageImageWithoutFormat = false;
+    bool storageImageMultisample = false;
     bool depthClamp = false;
     bool depthBounds = false;
     bool depthBiasClamp = false;
@@ -1206,6 +1207,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (enabled.shaderStorageImageWriteWithoutFormat) state->capabilities.push_back(spv::CapabilityStorageImageWriteWithoutFormat);
     if (enabled.shaderStorageImageReadWithoutFormat) state->capabilities.push_back(spv::CapabilityStorageImageReadWithoutFormat);
     state->storageImageWithoutFormat = enabled.shaderStorageImageWriteWithoutFormat == VK_TRUE && enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
+    state->storageImageMultisample = enabled.shaderStorageImageMultisample == VK_TRUE;
     // Bindless image tables index an image array with a wave-uniform runtime slot.
     enabled.shaderSampledImageArrayDynamicIndexing = available.shaderSampledImageArrayDynamicIndexing;
     enabled.shaderStorageImageArrayDynamicIndexing = available.shaderStorageImageArrayDynamicIndexing;
@@ -2868,6 +2870,7 @@ Graphics::Context VulkanDevice::buildContext() const {
     context.srgbDecodeFormats = state->srgbDecodeFormats;
     context.memoryProperties2 = state->memoryBudget ? state->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties2>("vkGetPhysicalDeviceMemoryProperties2") : nullptr;
     context.singlePassStorage = state->storageImageWithoutFormat;
+    context.storageImageMultisample = state->storageImageMultisample;
     return context;
 }
 

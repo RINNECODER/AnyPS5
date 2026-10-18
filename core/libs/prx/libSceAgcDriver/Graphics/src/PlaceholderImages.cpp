@@ -21,7 +21,8 @@ PlaceholderImages::PlaceholderImages(const Context& context) : context(context) 
     try {
         std::vector<VkImageMemoryBarrier> toClear;
         for (std::uint32_t index = 0; index < images.size(); ++index) {
-            const auto shape = PlaceholderImageShapeOf(ShaderRecompiler::RuntimeAbi::FirstImageBinding + index);
+            auto shape = PlaceholderImageShapeOf(ShaderRecompiler::RuntimeAbi::FirstImageBinding + index);
+            if ((shape.usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0 && shape.samples != VK_SAMPLE_COUNT_1_BIT && !context.storageImageMultisample) shape.samples = VK_SAMPLE_COUNT_1_BIT;
             if (!Supported(context, shape)) continue;
             auto& image = images[index];
             VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};

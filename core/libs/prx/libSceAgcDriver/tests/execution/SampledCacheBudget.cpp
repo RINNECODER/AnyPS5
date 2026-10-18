@@ -50,7 +50,7 @@ constexpr std::uint64_t Ceiling = Budget + Budget / 4u;
 
 class Device {
 public:
-    explicit Device(bool resourceImages = false) {
+    explicit Device(bool enableStorageImageMultisample = true) {
 #ifdef _WIN32
         library = SDL_LoadObject("vulkan-1.dll");
 #else
@@ -96,13 +96,12 @@ public:
             queue.queueFamilyIndex = family;
             queue.queueCount = 1;
             queue.pQueuePriorities = &priority;
+            VkPhysicalDeviceFeatures supported{};
+            function<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(context.physical, &supported);
             VkPhysicalDeviceFeatures enabled{};
             enabled.shaderInt64 = VK_TRUE;
-            if (resourceImages) {
-                VkPhysicalDeviceFeatures supported{};
-                function<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(context.physical, &supported);
-                enabled.shaderStorageImageMultisample = supported.shaderStorageImageMultisample;
-            }
+            enabled.shaderStorageImageMultisample = enableStorageImageMultisample && supported.shaderStorageImageMultisample;
+            context.storageImageMultisample = enabled.shaderStorageImageMultisample == VK_TRUE;
             address.pNext = &bytes;
             std::vector<const char*> extensionsEnabled{VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME, VK_KHR_8BIT_STORAGE_EXTENSION_NAME};
             if (hasExtension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
@@ -678,6 +677,7 @@ int main(int argc, char** argv) {
         const bool memory = argc > 1 && std::string(argv[1]) == "memory";
         const std::string mode = argc > 1 ? argv[1] : "";
         const bool resources = mode == "resource-admission" || mode == "resource-oversized" || mode == "resource-clear";
+        const bool disableStorageImageMultisample = mode == "without-storage-image-multisample";
 #ifdef _WIN32
         if (!memory) _putenv_s("APS5_TEXTURE_CACHE_MIB", "1");
 #else
@@ -685,7 +685,7 @@ int main(int argc, char** argv) {
 #endif
         std::unique_ptr<Device> device;
         try {
-            device = std::make_unique<Device>(resources);
+            device = std::make_unique<Device>(!disableStorageImageMultisample);
         } catch (const std::exception& error) {
             if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr) throw;
             std::printf("skipped, no usable Vulkan device: %s\n", error.what());
