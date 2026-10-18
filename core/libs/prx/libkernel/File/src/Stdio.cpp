@@ -402,6 +402,10 @@ static int PosixFailure(int error) {
     return -1;
 }
 
+static bool ExceedsTransferLimit(std::uint64_t bytes) {
+    return bytes > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+}
+
 static int PosixResult(int result) {
     return result < 0 ? PosixFailure(result & 0xffff) : result;
 }
@@ -836,6 +840,7 @@ int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
 }
 
 int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t offset) {
+    if (ExceedsTransferLimit(nbytes)) return PosixFailure(GUEST_EINVAL);
     if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
     if (offset < 0) return PosixFailure(GUEST_EINVAL);
     if (FailPosixPositionedGuestSocket(d)) return -1;
@@ -848,6 +853,7 @@ int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t off
 }
 
 int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_t nbytes, int64_t offset) {
+    if (ExceedsTransferLimit(nbytes)) return PosixFailure(GUEST_EINVAL);
     if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
     if (offset < 0) return PosixFailure(GUEST_EINVAL);
     if (FailPosixPositionedGuestSocket(d)) return -1;
@@ -857,6 +863,7 @@ int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_
 }
 
 int64_t APS5_VABI read_nid_postfix(int d, void* buf, uint64_t nbytes) {
+    if (ExceedsTransferLimit(nbytes)) return PosixFailure(GUEST_EINVAL);
     if (GuestSockets::IsOpen(d)) return GuestSockets::Read(d, buf, static_cast<size_t>(nbytes));
     if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
     char emptyBuffer = 0;
@@ -864,6 +871,7 @@ int64_t APS5_VABI read_nid_postfix(int d, void* buf, uint64_t nbytes) {
 }
 
 std::int64_t APS5_VABI _read_nid_postfix(int descriptor, void* buffer, std::size_t count) {
+    if (ExceedsTransferLimit(count)) return PosixFailure(GUEST_EINVAL);
     if (GuestSockets::IsOpen(descriptor)) return GuestSockets::Read(descriptor, buffer, count);
     if (buffer == nullptr && count != 0) return PosixFailure(GUEST_EFAULT);
     char emptyBuffer = 0;
@@ -871,9 +879,7 @@ std::int64_t APS5_VABI _read_nid_postfix(int descriptor, void* buffer, std::size
 }
 
 int64_t APS5_VABI write_nid_postfix(int d, const char* str, int64_t size) {
-    if (size < 0) {
-        APS5_INVALID_ARG_EX;
-    }
+    if (size < 0) return PosixFailure(GUEST_EINVAL);
     if (GuestSockets::IsOpen(d)) return GuestSockets::Write(d, str, static_cast<std::size_t>(size));
     if (str == nullptr && size != 0) return PosixFailure(GUEST_EFAULT);
     const char emptyBuffer = 0;
@@ -881,6 +887,7 @@ int64_t APS5_VABI write_nid_postfix(int d, const char* str, int64_t size) {
 }
 
 std::int64_t APS5_VABI _write_nid_postfix(int descriptor, const void* buffer, std::size_t count) {
+    if (ExceedsTransferLimit(count)) return PosixFailure(GUEST_EINVAL);
     if (GuestSockets::IsOpen(descriptor)) return GuestSockets::Write(descriptor, buffer, count);
     if (buffer == nullptr && count != 0) return PosixFailure(GUEST_EFAULT);
     const char emptyBuffer = 0;
@@ -947,7 +954,7 @@ int APS5_VABI sceKernelFdatasync(int fd) {
 }
 
 int APS5_VABI sceKernelWriteThrottlingStatus(std::uint64_t* status) {
-    if (status == nullptr) throw std::invalid_argument("sceKernelWriteThrottlingStatus: status is null");
+    if (status == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     status[0] = std::numeric_limits<std::uint32_t>::max();
     status[1] = 0;
     status[2] = 0;

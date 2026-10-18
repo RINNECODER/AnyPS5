@@ -206,6 +206,9 @@ private:
     IrValue* canonicalizeSampleAdjustDword3(IrValue* value) {
         for (;;) {
             value = value->Resolve();
+            if ((possibleU32Bits(value) & ~samplerDword3ReservedMask) == 0u) {
+                return &m_builder.Constant(0u);
+            }
             if (value->Opcode() != IrOpcode::BitwiseOr32) {
                 return value;
             }
@@ -213,9 +216,6 @@ private:
             IrValue* right = value->Argument(1)->Resolve();
             const bool leftReserved = (possibleU32Bits(left) & ~samplerDword3ReservedMask) == 0u;
             const bool rightReserved = (possibleU32Bits(right) & ~samplerDword3ReservedMask) == 0u;
-            if (leftReserved && rightReserved) {
-                return &m_builder.Constant(0u);
-            }
             if (leftReserved) {
                 value = right;
             } else if (rightReserved) {

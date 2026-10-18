@@ -350,8 +350,6 @@ public:
     VkImageAspectFlags pendingClear = 0;
     float clearDepth = 0.0f;
     std::uint8_t clearStencil = 0;
-<<<<<<< HEAD
-=======
 
     bool StorageViewMatches(std::span<const std::uint32_t> words, const GuestTextureResource& resource) const {
         if (resource.width != target.extent.width || resource.height != target.extent.height) return false;
@@ -447,7 +445,6 @@ public:
         else Recorder::CountBarriers(Recorder::CommandClass::Copy, 3);
     }
 
->>>>>>> 92f170c67 (fix(agc): treat a view past a depth surface's first level as memory)
     const Context context;
     const DepthTarget target;
     const VkFormat hostFormat;

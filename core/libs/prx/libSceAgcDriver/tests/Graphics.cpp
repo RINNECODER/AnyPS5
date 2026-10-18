@@ -2534,6 +2534,17 @@ void cmaskTests() {
     Require(texels(0x5a5a5a5au), "a refused pass changed the texels of a DCC target");
 }
 
+void uint8x2TargetTests() {
+    auto queue = makeState();
+    queue.context[0x1c5] = 7;
+    queue.context[0x31c] = (queue.context[0x31c] & ~0x1ffcu) | (3u << 2u) | (4u << 8u);
+    const auto state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.color.format == VK_FORMAT_R8G8_UINT && state.color.elementBytes == 2 && state.color.componentMapping == 0xe4u && state.color.uintExport, "an 8_8 UINT color target was rejected");
+    queue.context[0x31c] = (queue.context[0x31c] & ~0x1800u) | (1u << 11u);
+    const auto alt = AgcDriver::Graphics::DecodeState(queue);
+    Require(alt.color.format == VK_FORMAT_R8G8_UINT && alt.color.componentMapping == 0xecu, "an 8_8 UINT SWAP_ALT color target was rejected");
+}
+
 void uint8x4TargetTests() {
     auto queue = makeState();
     queue.context[0x1c5] = 7;
@@ -3815,21 +3826,33 @@ void storageTextureBudgetTests() {
     memory.memoryHeaps[1] = {32 * GiB, 0};
     memory.memoryHeaps[2] = {16 * GiB, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT};
     VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
-    Require(StorageTextureBudget(memory, nullptr) == 4 * GiB, "without VK_EXT_memory_budget the storage image cache does not keep a quarter of the 16 GiB heap");
+    Require(StorageTextureBudget(memory, nullptr, 0, 0) == 4 * GiB, "without VK_EXT_memory_budget the storage image cache does not keep a quarter of the 16 GiB heap");
     reported.heapBudget[0] = 100 * GiB;
     reported.heapBudget[1] = 100 * GiB;
-    Require(StorageTextureBudget(memory, &reported) == 4 * GiB, "a zero budget for the largest device-local heap did not fall back to a quarter of the heap");
+    Require(StorageTextureBudget(memory, &reported, 0, 0) == 4 * GiB, "a zero budget for the largest device-local heap did not fall back to a quarter of the heap");
     reported.heapBudget[2] = 10 * GiB;
-    Require(StorageTextureBudget(memory, &reported) == 2560 * MiB, "a 10 GiB budget on the 16 GiB heap does not limit the storage image cache to a quarter of the budget");
+    Require(StorageTextureBudget(memory, &reported, 0, 0) == 2560 * MiB, "a 10 GiB budget on the 16 GiB heap does not limit the storage image cache to a quarter of the budget");
+    reported.heapUsage[2] = 5 * GiB;
+    Require(StorageTextureBudget(memory, &reported, 1 * GiB, 2 * GiB) == 2560 * MiB, "2 GiB used outside the texture caches on a 10 GiB budget lowered the storage image cache below its quarter");
+    reported.heapUsage[2] = 8 * GiB;
+    Require(StorageTextureBudget(memory, &reported, 1 * GiB, 2 * GiB) == 1792 * MiB, "a 10 GiB budget with 5 GiB used outside the texture caches does not leave 1792 MiB after the sampled textures' 2 GiB floor and 1280 MiB of headroom");
+    reported.heapUsage[2] = 9 * GiB;
+    Require(StorageTextureBudget(memory, &reported, 3 * GiB, 2 * GiB) == 1792 * MiB, "3 GiB of sampled textures were not reserved past their 2 GiB floor");
+    reported.heapUsage[2] = 1 * GiB;
+    Require(StorageTextureBudget(memory, &reported, 1 * GiB, 2 * GiB) == 2560 * MiB, "usage below the cached bytes is not read as no other device memory in use");
+    Require(StorageTextureBudget(memory, &reported, 7 * GiB, 1 * GiB) == 1792 * MiB, "7 GiB of sampled textures with the usage below the cached bytes do not leave 1792 MiB after their reservation and 1280 MiB of headroom");
+    reported.heapUsage[2] = 9 * GiB + 512 * MiB;
+    Require(StorageTextureBudget(memory, &reported, 2 * GiB, 512 * MiB) == 512 * MiB, "a heap whose other users leave no room does not keep the 512 MiB floor");
+    reported.heapUsage[2] = 0;
     reported.heapBudget[2] = 6 * GiB;
-    Require(StorageTextureBudget(memory, &reported) == 1536 * MiB, "a 6 GiB budget on the 16 GiB heap does not limit the storage image cache to a quarter of the budget");
+    Require(StorageTextureBudget(memory, &reported, 0, 0) == 1536 * MiB, "a 6 GiB budget on the 16 GiB heap does not limit the storage image cache to a quarter of the budget");
     reported.heapBudget[2] = 1 * GiB;
-    Require(StorageTextureBudget(memory, &reported) == 512 * MiB, "a 1 GiB budget does not keep the 512 MiB floor");
+    Require(StorageTextureBudget(memory, &reported, 0, 0) == 512 * MiB, "a 1 GiB budget does not keep the 512 MiB floor");
     reported.heapBudget[2] = 40 * GiB;
-    Require(StorageTextureBudget(memory, &reported) == 4 * GiB, "a budget above the heap size raised the storage image cache past a quarter of the heap");
+    Require(StorageTextureBudget(memory, &reported, 0, 0) == 4 * GiB, "a budget above the heap size raised the storage image cache past a quarter of the heap");
     memory.memoryHeaps[0].flags = 0;
     memory.memoryHeaps[2].flags = 0;
-    Require(StorageTextureBudget(memory, &reported) == 2 * GiB, "a device without a device-local heap does not keep 2 GiB of storage images");
+    Require(StorageTextureBudget(memory, &reported, 0, 0) == 2 * GiB, "a device without a device-local heap does not keep 2 GiB of storage images");
 }
 
 void sampledBudgetReportTests() {
@@ -6391,6 +6414,7 @@ int main(int argc, char** argv) {
         metadataPassTests();
         cmaskTests();
         uint16ExportTests();
+        uint8x2TargetTests();
         uint8x4TargetTests();
         MsaaEnableSingleSampleTests();
         UnwrittenSampleLocationTests();

@@ -63,6 +63,8 @@ static void CheckStream(int family) {
     std::uint32_t length = address.size();
     Require(getsockname_nid_postfix(listener, address.data(), &length) == 0, "listener name");
     auto zero = Loopback(family, size);
+    Require(connect_nid_postfix(listener, zero.data(), size) == -1 && *__error_nid_postfix() == 45,
+        "connect on a listening stream socket must fail with EOPNOTSUPP (45)");
     const int client = socket_nid_postfix(family, 1, 0);
     Require(client >= 0, "client");
     Require(connect_nid_postfix(client, zero.data(), size) == -1 && *__error_nid_postfix() == 49,
