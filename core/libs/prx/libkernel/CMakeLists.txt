@@ -70,6 +70,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SystemConfiguration.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Login.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SoftwareVersion.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Error.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/ThermalSensors.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Signals.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SignalSets.cpp
@@ -94,6 +95,15 @@ endif()
 configure_windows_unwind(libkernel)
 
 if(BUILD_TESTING)
+    add_test_executable(kernel_error_tests ${LIBS_INCLUDE_DIR}/tests/KernelError.cpp)
+    target_include_directories(kernel_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(kernel_error_tests PRIVATE libkernel libc)
+    configure_windows_unwind(kernel_error_tests)
+    add_test(NAME kernel_error COMMAND kernel_error_tests)
+    if(WIN32)
+        set_tests_properties(kernel_error PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     if(NOT WIN32)
         add_library(guest_memory_lifetime_module MODULE ${LIBS_INCLUDE_DIR}/tests/GuestMemoryLifetimeModule.cpp)
         target_include_directories(guest_memory_lifetime_module PRIVATE ${LIBS_INCLUDE_DIR})
@@ -146,6 +156,20 @@ if(BUILD_TESTING)
     add_test(NAME guest_posix_sem_post COMMAND guest_posix_sem_tests post)
     if(WIN32)
         set_tests_properties(guest_posix_sem_init guest_posix_sem_post PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_wait_trace_tests ${LIBS_INCLUDE_DIR}/tests/GuestWaitTrace.cpp)
+    target_include_directories(guest_wait_trace_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_wait_trace_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_wait_trace_tests)
+    add_test(NAME guest_wait_trace COMMAND guest_wait_trace_tests)
+    set_tests_properties(guest_wait_trace PROPERTIES
+        ENVIRONMENT "APS5_TRACE_WAITS=1"
+        PASS_REGULAR_EXPRESSION "wait_trace_active_zero[^|]*x1"
+        FAIL_REGULAR_EXPRESSION "wait_trace_inactive[^|]*x0"
+        TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_wait_trace PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_process_time_tests ${LIBS_INCLUDE_DIR}/tests/GuestProcessTime.cpp)
@@ -261,6 +285,11 @@ if(BUILD_TESTING)
         target_link_libraries(guest_host_standard_error_tests PRIVATE libkernel libc)
         add_test(NAME guest_host_standard_error COMMAND guest_host_standard_error_tests)
         set_tests_properties(guest_host_standard_error PROPERTIES TIMEOUT 10)
+        add_test_executable(guest_closed_standard_descriptors_tests ${LIBS_INCLUDE_DIR}/tests/GuestClosedStandardDescriptors.cpp)
+        target_include_directories(guest_closed_standard_descriptors_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_closed_standard_descriptors_tests PRIVATE libkernel libc)
+        add_test(NAME guest_closed_standard_descriptors COMMAND guest_closed_standard_descriptors_tests)
+        set_tests_properties(guest_closed_standard_descriptors PROPERTIES TIMEOUT 10)
     endif()
     add_test_executable(guest_truncate_tests ${LIBS_INCLUDE_DIR}/tests/GuestTruncate.cpp)
     target_include_directories(guest_truncate_tests PRIVATE ${LIBS_INCLUDE_DIR})
