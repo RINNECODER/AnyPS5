@@ -26,6 +26,7 @@ const char16_t* APS5_VABI wcsrchr_nid_postfix(const char16_t* s, char16_t c);
 const char16_t* APS5_VABI wcsstr_nid_postfix(const char16_t* haystack, const char16_t* needle);
 const char16_t* APS5_VABI wcspbrk_nid_postfix(const char16_t* s, const char16_t* accept);
 std::size_t APS5_VABI wcsspn_nid_postfix(const char16_t* s, const char16_t* accept);
+std::size_t APS5_VABI wcscspn_nid_postfix(const char16_t* s, const char16_t* reject);
 char16_t* APS5_VABI wcstok_nid_postfix(char16_t* text, const char16_t* delimiters, char16_t** last);
 char16_t* APS5_VABI wmemset_nid_postfix(char16_t* s, char16_t c, std::size_t n);
 double APS5_VABI wcstod_nid_postfix(const char16_t* str, char16_t** endptr);
@@ -33,6 +34,11 @@ float APS5_VABI wcstof_nid_postfix(const char16_t* str, char16_t** endptr);
 long double APS5_VABI wcstold_nid_postfix(const char16_t* str, char16_t** endptr);
 long long APS5_VABI wcstol_nid_postfix(const char16_t* str, char16_t** endptr, int base);
 long long APS5_VABI wcstoll_nid_postfix(const char16_t* str, char16_t** endptr, int base);
+long long APS5_VABI wcstoimax_nid_postfix(const char16_t* str, char16_t** endptr, int base);
+unsigned long long APS5_VABI wcstoumax_nid_postfix(const char16_t* str, char16_t** endptr, int base);
+unsigned long long APS5_VABI strtouq_nid_postfix(const char* str, char** endptr, int base);
+char* APS5_VABI rindex_nid_postfix(const char* s, int c);
+int APS5_VABI flsl_nid_postfix(std::int64_t mask);
 unsigned long long APS5_VABI wcstoul_nid_postfix(const char16_t* str, char16_t** endptr, int base);
 unsigned long long APS5_VABI wcstoull_nid_postfix(const char16_t* str, char16_t** endptr, int base);
 int APS5_VABI wcscoll_nid_postfix(const char16_t* first, const char16_t* second);
@@ -118,6 +124,7 @@ int main() {
     require(wcspbrk_nid_postfix(haystack, u"xyz") == nullptr);
     require(wcsspn_nid_postfix(u"aabbc", u"ab") == 4);
     require(wcsspn_nid_postfix(u"abc", u"") == 0);
+    require(wcscspn_nid_postfix(u"abcde", u"dx") == 3 && wcscspn_nid_postfix(u"abc", u"") == 3 && wcscspn_nid_postfix(u"", u"a") == 0 && wcscspn_nid_postfix(u"abc", u"a") == 0);
 
     char16_t tokens[] = u",,one,,two;three,";
     char16_t* last = tokens;
@@ -237,6 +244,22 @@ int main() {
         require(wcsxfrm_nid_postfix(transformed, test.source, test.count) == test.length);
         require(same(transformed, test.expected, test.written));
         for (std::size_t index = test.written; index < 8; ++index) require(transformed[index] == 0xaaaa);
+    }
+    {
+        const char16_t number[] = u"  -0x7fffffffffffffff9";
+        char16_t* wideEnd = nullptr;
+        require(wcstoimax_nid_postfix(number, &wideEnd, 0) == INT64_MIN && wideEnd == number + 22);
+        const char16_t positive[] = u"+42z";
+        require(wcstoumax_nid_postfix(positive, &wideEnd, 10) == 42 && wideEnd == positive + 3);
+        require(wcstoumax_nid_postfix(u"-1", nullptr, 10) == UINT64_MAX);
+        char* narrowEnd = nullptr;
+        const char text[] = "0x1ffffffffffffffffg";
+        require(strtouq_nid_postfix(text, &narrowEnd, 16) == UINT64_MAX && narrowEnd == text + 19);
+        const char path[] = "a/b/c";
+        require(rindex_nid_postfix(path, '/') == path + 3 && rindex_nid_postfix(path, 'x') == nullptr);
+        require(rindex_nid_postfix(path, 0) == path + 5);
+        require(flsl_nid_postfix(0) == 0 && flsl_nid_postfix(1) == 1 && flsl_nid_postfix(0x80) == 8);
+        require(flsl_nid_postfix(0x100000000ll) == 33 && flsl_nid_postfix(INT64_MIN) == 64 && flsl_nid_postfix(-1) == 64);
     }
     return 0;
 }
