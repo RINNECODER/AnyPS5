@@ -29,16 +29,17 @@ namespace {
 
 using AgcDriver::Graphics::Require;
 
-constexpr std::uint32_t Dispatches = 1536;
+constexpr std::size_t BaseEntries = 32;
+constexpr std::size_t BaseShrinkWindow = 2;
+constexpr std::uint32_t Dispatches = 48;
 constexpr std::uint32_t Passes = 4;
-constexpr std::uint32_t HotDispatches = 64;
-constexpr std::uint32_t HotRepeats = 640;
+constexpr std::uint32_t HotDispatches = 2;
+constexpr std::uint32_t HotRepeats = 160;
 constexpr std::size_t SrtBytes = 64;
 constexpr std::size_t OutputBytes = 256;
 constexpr std::size_t SrtOffset = 4096;
 constexpr std::size_t OutputOffset = SrtOffset + static_cast<std::size_t>(Dispatches) * SrtBytes;
 constexpr std::size_t BlockBytes = (OutputOffset + static_cast<std::size_t>(Dispatches) * OutputBytes + 65535) & ~static_cast<std::size_t>(65535);
-constexpr std::size_t InitialEntries = 1024;
 
 constexpr std::array<std::uint32_t, 7> StoreCode{0xf4080100u, 0xfa000000u, 0xbf8c0000u, 0x7e020281u, 0xe0700000u, 0x80010100u, 0xbf810000u};
 
@@ -117,13 +118,13 @@ void WorkingSetLargerThanTheInitialBound(const GuestBlock& block) {
         }
     }
     const auto kept = cache.Size();
-    Require(kept >= Dispatches, "resource cache growth: " + std::to_string(Dispatches) + " dispatches with distinct resources repeated " + std::to_string(Passes) + " times in turn, but the resource cache kept only " + std::to_string(kept) + " entries (initial bound " + std::to_string(InitialEntries) + "), so every pass rebuilt every set");
+    Require(kept >= Dispatches, "resource cache growth: " + std::to_string(Dispatches) + " dispatches with distinct resources repeated " + std::to_string(Passes) + " times in turn, but the resource cache kept only " + std::to_string(kept) + " entries (initial bound " + std::to_string(BaseEntries) + "), so every pass rebuilt every set");
 }
 
 void BoundComesBackDown(const GuestBlock& block) {
     auto& cache = AgcDriver::Graphics::SharedResourceCache();
     const auto grown = cache.Capacity();
-    Require(grown > InitialEntries, "resource cache growth: the bound stayed at " + std::to_string(grown) + " entries after the large working set");
+    Require(grown > BaseEntries, "resource cache growth: the bound stayed at " + std::to_string(grown) + " entries after the large working set");
     RunPass(block, HotDispatches, HotRepeats);
     const auto shrunk = cache.Capacity();
     Require(shrunk < grown, "resource cache growth: " + std::to_string(HotDispatches) + " sets served " + std::to_string(HotDispatches * HotRepeats) + " dispatches, but the bound stayed at " + std::to_string(shrunk) + " entries");
@@ -140,20 +141,32 @@ void BoundComesBackDown(const GuestBlock& block) {
     Require(cache.Capacity() == regrown, "resource cache growth: the bound came down again after the same hot pass, although the last shrink had been undone");
 
     cache.Clear();
-    Require(cache.Capacity() == InitialEntries, "resource cache growth: Clear() left the bound at " + std::to_string(cache.Capacity()) + " entries instead of " + std::to_string(InitialEntries));
+    Require(cache.Capacity() == BaseEntries, "resource cache growth: Clear() left the bound at " + std::to_string(cache.Capacity()) + " entries instead of " + std::to_string(BaseEntries));
     Prepare(block);
     for (std::uint32_t pass = 0; pass < Passes; ++pass) RunPass(block);
-    Require(cache.Capacity() > InitialEntries, "resource cache growth: after Clear() the large working set did not grow the bound again");
+    Require(cache.Capacity() > BaseEntries, "resource cache growth: after Clear() the large working set did not grow the bound again");
+}
+
+void UseTheResourceCacheOnEveryDispatch() {
+#ifdef _WIN32
+    _putenv_s("APS5_NO_DISPATCH_RECIPE", "1");
+#else
+    setenv("APS5_NO_DISPATCH_RECIPE", "1", 1);
+#endif
 }
 
 }
 
 int main() {
+    UseTheResourceCacheOnEveryDispatch();
     try {
         {
             const auto device = OpenVulkanTestDevice();
             if (!device) return VulkanTestSkipped;
         }
+        auto& cache = AgcDriver::Graphics::SharedResourceCache();
+        cache.SetBase(BaseEntries, BaseShrinkWindow);
+        cache.Clear();
         GuestBlock block;
         Prepare(block);
         WorkingSetLargerThanTheInitialBound(block);

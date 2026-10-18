@@ -2772,10 +2772,10 @@ void ResourceCache::Insert(const Key& key, std::shared_ptr<ShaderResources> reso
         const char* value = std::getenv("APS5_RESOURCE_CACHE_ENTRIES");
         if (value != nullptr) {
             const auto parsed = std::strtoull(value, nullptr, 10);
-            capacity = static_cast<std::size_t>(parsed != 0 ? parsed : InitialEntries);
+            capacity = static_cast<std::size_t>(parsed != 0 ? parsed : baseEntries);
             fixedCapacity = true;
         } else {
-            capacity = InitialEntries;
+            capacity = baseEntries;
         }
     }
     noteUse(key);
@@ -2837,9 +2837,15 @@ void ResourceCache::Clear() {
     returnsSinceCheck = 0;
     usedKeys.clear();
     usesSinceCheck = 0;
-    shrinkWindow = InitialShrinkWindow;
+    shrinkWindow = baseShrinkWindow;
     shrankLast = false;
     if (!fixedCapacity) capacity = 0;
+}
+
+void ResourceCache::SetBase(std::size_t entries, std::size_t window) {
+    std::lock_guard lock(mutex);
+    baseEntries = entries;
+    baseShrinkWindow = window;
 }
 
 std::size_t ResourceCache::Size() const {
@@ -2849,7 +2855,7 @@ std::size_t ResourceCache::Size() const {
 
 std::size_t ResourceCache::Capacity() const {
     std::lock_guard lock(mutex);
-    return capacity == 0 ? InitialEntries : capacity;
+    return capacity == 0 ? baseEntries : capacity;
 }
 
 void ResourceCache::noteEvicted(const Key& key) {
@@ -2877,7 +2883,7 @@ void ResourceCache::noteEvicted(const Key& key) {
 }
 
 void ResourceCache::noteUse(const Key& key) {
-    if (fixedCapacity || capacity <= InitialEntries) return;
+    if (fixedCapacity || capacity <= baseEntries) return;
     usedKeys.insert(KeyHash{}(key));
     if (++usesSinceCheck < capacity * shrinkWindow) return;
     const auto used = usedKeys.size();
@@ -2886,7 +2892,7 @@ void ResourceCache::noteUse(const Key& key) {
     usesSinceCheck = 0;
     if (used * 4u > capacity) return;
     const auto previous = capacity;
-    capacity = std::max(capacity / 2u, InitialEntries);
+    capacity = std::max(capacity / 2u, baseEntries);
     shrankLast = true;
     evictionsSinceCheck = 0;
     returnsSinceCheck = 0;
