@@ -176,6 +176,7 @@ void FlipRaisesEop(id<MTLDevice> device, id<MTLLibrary> library) {
             Require(queue == 0, "the flip raised the end-of-pipe event of another queue");
             readyAtInterrupt = output->ready.load();
             ++interrupts;
+            return true;
         });
     driver.RegisterVideoOutput(7, output);
     driver.SubmitCommandBuffer(CommandsAddress, commands.size(), 0, 0);
@@ -219,7 +220,7 @@ void PublicationFailureReplay(id<MTLDevice> device, id<MTLLibrary> library) {
     std::atomic<unsigned> interrupts{0};
     AgcDriver::Metal::MetalDriver driver;
     driver.Configure((__bridge void*)device, (__bridge void*)library, ranges,
-        [&](std::uint32_t) { ++interrupts; });
+        [&](std::uint32_t) { ++interrupts; return true; });
     auto retained = std::make_shared<PublicationOutput>();
     auto registered = std::make_shared<PublicationOutput>();
     std::exception_ptr callbackAdmission;
@@ -380,6 +381,7 @@ void OriginalWave32Subgroup(id<MTLDevice> device, id<MTLLibrary> library) {
     driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t queue) {
         Require(queue == 0x20 && label[1] == 1, "Original wave32 EOP queue or completed label differs");
         callbacks.fetch_add(1);
+        return true;
     });
     try {
         driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
@@ -475,7 +477,7 @@ void NopSkipAndDispatchRegisters(id<MTLDevice> device, id<MTLLibrary> library) {
         {ArgumentsAddress, std::as_writable_bytes(std::span(arguments)), false}}};
     std::atomic<unsigned> callbacks{0};
     AgcDriver::Metal::MetalDriver driver;
-    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t) { callbacks.fetch_add(1); });
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t) { callbacks.fetch_add(1); return true; });
     try {
         driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
         driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
@@ -716,6 +718,7 @@ void RetainedSubgroupReplay(id<MTLDevice> device, id<MTLLibrary> library, const 
     driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t queue) {
         Require(queue == 0x20 && label[1] == 1, "Retained subgroup EOP queue or completed label differs");
         callbacks.fetch_add(1);
+        return true;
     });
     try {
         driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
@@ -767,6 +770,7 @@ void OriginalSubmitExports(id<MTLDevice> device, id<MTLLibrary> library) {
         Require(queue == expectedQueue && label[1] == expectedLabel, "EOP queue or completed label differs");
         Require(label[0] == 0xcafef00d && label[2] == 0xdeadbeef, "allocation guard changed");
         callbacks.fetch_add(1);
+        return true;
     });
     Require(sceAgcSuspendPoint() == 0, "Original AGC suspend did not use the configured native driver");
     auto* guestPacket = reinterpret_cast<const ::Packet*>(0x400000);
@@ -1032,7 +1036,7 @@ void RegisteredFloatModeReplay(id<MTLDevice> device, id<MTLLibrary> library) {
             {PacketAllocation, packetBytes, false},
             {LabelAddress, std::as_writable_bytes(std::span(label)), true}}};
         AgcDriver::Metal::MetalDriver driver;
-        driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [](std::uint32_t) {});
+        driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [](std::uint32_t) { return true; });
         try {
             driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
             if (test.scratch != 0) {
@@ -1144,7 +1148,7 @@ void IndirectRegistersAtSubmit(id<MTLDevice> device, id<MTLLibrary> library, boo
         {GateAddress, std::as_writable_bytes(std::span(gate)), true},
         {LabelAddress, std::as_writable_bytes(std::span(label)), true}}};
     AgcDriver::Metal::MetalDriver driver;
-    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [](std::uint32_t) {});
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [](std::uint32_t) { return true; });
     try {
         driver.RegisterShader(reinterpret_cast<const Shader*>(HeaderAddress));
         driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);
@@ -1254,6 +1258,7 @@ void FailSoftDispatchReplay(id<MTLDevice> device, id<MTLLibrary> library) {
     driver.Configure((__bridge void*)device, (__bridge void*)library, allRanges, [&](std::uint32_t queue) {
         Require(queue == 0x20, "Fail-soft dispatch EOP arrived from the wrong queue");
         interrupts.fetch_add(1);
+        return true;
     });
     try {
         driver.RegisterShader(reinterpret_cast<const Shader*>(GoodHeaderAddress));
@@ -1335,7 +1340,7 @@ void StickyGpuFaultReplay(id<MTLDevice> device, id<MTLLibrary> library) {
         {LabelAddress, std::as_writable_bytes(std::span(label)), true}}};
     std::atomic<std::uint32_t> interrupts{0};
     AgcDriver::Metal::MetalDriver driver;
-    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t) { interrupts.fetch_add(1); });
+    driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, [&](std::uint32_t) { interrupts.fetch_add(1); return true; });
     std::string reason;
     try {
         driver.Submit(reinterpret_cast<const ::Packet*>(PacketAddress), 0x20);

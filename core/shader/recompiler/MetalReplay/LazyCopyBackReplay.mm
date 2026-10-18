@@ -198,6 +198,7 @@ void Run(id<MTLDevice> device, id<MTLLibrary> library) {
         // The end-of-pipe interrupt is guest-visible: the target's bytes must be there.
         if (!guest.Rendered()) staleInterrupts.fetch_add(1);
         interrupts.fetch_add(1);
+        return true;
     });
     driver.RegisterShader(reinterpret_cast<const Shader*>(0x700000));
     driver.RegisterShader(reinterpret_cast<const Shader*>(0x710000));

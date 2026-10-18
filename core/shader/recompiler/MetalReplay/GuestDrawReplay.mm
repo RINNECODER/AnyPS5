@@ -1056,6 +1056,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
             }
             checkPixels(true);
             interrupts.fetch_add(1);
+            return true;
         });
     AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x700000));
     AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x710000));
@@ -1540,6 +1541,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
                     rangeCallbackChanged.notify_all();
                     rangeCallbackChanged.wait(lock, [&] { return rangeCallbackReleased; });
                 }
+                return true;
             }, 0);
         rangeDriver.RegisterShader(reinterpret_cast<const Shader*>(0x720000));
         output.fill(0xdeadbeef);
@@ -1692,6 +1694,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
                     transactionChanged.notify_all();
                     transactionChanged.wait(lock, [&] { return oldEopReleased; });
                 }
+                return true;
             }, 0);
         transactionDriver.RegisterShader(reinterpret_cast<const Shader*>(0x720000));
         const auto releaseTransaction = [&] {
@@ -1824,7 +1827,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
         const auto marker = std::make_exception_ptr(std::runtime_error("CPU mapping mutation partial failure"));
         AgcDriver::Metal::MetalDriver failedTransaction;
         failedTransaction.Configure((__bridge void*)device, (__bridge void*)library, mapped,
-            [&](std::uint32_t) { failedInterrupts.fetch_add(1); });
+            [&](std::uint32_t) { failedInterrupts.fetch_add(1); return true; });
         const auto releaseFailedMutation = [&] {
             {
                 std::lock_guard lock(failedMutex);
@@ -1991,6 +1994,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
             callbackEntered = true;
             callbackChanged.notify_all();
             callbackChanged.wait(lock, [&] { return callbackReleased; });
+            return true;
         });
     const auto releaseCallback = [&] {
         {
@@ -2068,6 +2072,7 @@ void DrawSubmittedGuest(id<MTLDevice> device, id<MTLLibrary> library) {
                 }
                 checkPixels(true);
                 numericInterrupts.fetch_add(1);
+                return true;
             });
         struct InvalidNumericSubmission {
             std::uint64_t address;
