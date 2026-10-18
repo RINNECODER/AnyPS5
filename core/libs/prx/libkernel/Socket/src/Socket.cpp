@@ -25,6 +25,7 @@
 
 namespace {
 
+constexpr int GuestEbadf = 9;
 constexpr int GuestEinval = 22;
 constexpr int SelectDescriptorLimit = 1024;
 constexpr int SelectPollSliceMilliseconds = 10;

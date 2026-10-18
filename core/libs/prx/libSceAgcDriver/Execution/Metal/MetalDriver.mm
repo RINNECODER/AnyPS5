@@ -174,14 +174,6 @@ void MetalDriver::Configure(void* device, void* library,
     impl->configured = true;
 }
 
-bool MetalDriver::WaitBeforeHostWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
-    return impl->WaitBeforeHostWrites(ranges);
-}
-
-MetalDriver::PendingWrites MetalDriver::PendingGuestWrites() {
-    return impl->PendingGuestWrites();
-}
-
 void MetalDriver::ReplaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation) {
     replaceBorrowedRanges(ranges, generation, {}, {}, {});
 }
@@ -246,28 +238,18 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
             if (impl->stopping) throw DriverStopped{};
             if (visible) {
                 changed.insert(changed.end(), removed.begin(), removed.end());
-                registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
-                std::vector<std::uint64_t> emptyAddresses;
-                std::vector<std::pair<std::uint64_t, DriverDetail::ShaderRegistry::mapped_type>> replaced;
-                for (const auto& [address, headers] : *registry) {
-                    auto remaining = headers;
-                    std::erase_if(remaining, [&](const auto& snapshotPointer) {
+                // ShaderRegistry shares chunks between versions and only hands out const entries, so the
+                // filtered registry is rebuilt rather than edited in place.
+                registry = std::make_shared<DriverDetail::ShaderRegistry>();
+                for (const auto& [address, snapshots] : *impl->shaders) {
+                    auto kept = snapshots;
+                    std::erase_if(kept, [&](const auto& snapshotPointer) {
                         const auto& snapshot = *snapshotPointer;
                         if (snapshot.codeAddress == DriverDetail::NullPixelProgramAddress()) return false;
                         return overlapsMappings(snapshot.codeAddress, snapshot.code.size() * sizeof(std::uint32_t), changed) ||
                             overlapsMappings(snapshot.headerAddress, snapshot.header.size(), changed);
                     });
-                    if (remaining.empty()) {
-                        emptyAddresses.push_back(address);
-                    } else if (remaining.size() != headers.size()) {
-                        replaced.emplace_back(address, std::move(remaining));
-                    }
-                }
-                for (auto& [address, headers] : replaced) {
-                    (*registry)[address] = std::move(headers);
-                }
-                for (const auto address : emptyAddresses) {
-                    registry->erase(address);
+                    if (!kept.empty()) registry->emplace(address, std::move(kept));
                 }
                 impl->draw->InvalidateBorrowedRanges(changed);
             }
@@ -750,56 +732,6 @@ void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes
         ++drainsBy[0x102];
         timeline.Drain(0x102);
     }
-}
-
-bool MetalDriver::Impl::WaitBeforeHostWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
-    std::lock_guard lock(gpuMutex);
-    if (ranges.empty()) return false;
-    // Bytes a recorded copy-back would write are materialized first: the host's write has to be the
-    // one that stays, and the copy-back is committed ahead of it on the timeline like any other.
-    bool materialized = false;
-    if (draw != nullptr && backend != nullptr && !draw->LazyCopyBacks().Empty() && CopyBacksOverlap(ranges)) {
-        MaterializeCopyBacks(MetalLazyCopyBacks::Cause::HostWrite);
-        materialized = true;
-    }
-    if (!materialized && !timeline.MayHaveWrittenAny(ranges)) return false;
-    ++drainsBy[0x10e];
-    timeline.Drain(0x10e);
-    return true;
-}
-
-bool MetalDriver::Impl::CopyBacksOverlap(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
-    // The copy-backs match at the host addresses of the borrowed ranges, so translate the guest
-    // ranges the caller passes through them, as MaterializeCopyBacks does.
-    if (draw == nullptr) return false;
-    std::vector<std::pair<std::uintptr_t, std::size_t>> hosts;
-    for (const auto& borrowed : this->ranges) {
-        const auto rangeBegin = borrowed.guestAddress;
-        const auto rangeEnd = rangeBegin + borrowed.host.size();
-        for (const auto& [address, bytes] : ranges) {
-            if (bytes > ~std::uint64_t{0} - address) continue;
-            const auto begin = std::max(address, rangeBegin);
-            const auto limit = std::min(address + bytes, rangeEnd);
-            if (begin >= limit) continue;
-            const auto host = reinterpret_cast<std::uintptr_t>(borrowed.host.data() + (begin - rangeBegin));
-            hosts.emplace_back(host, static_cast<std::size_t>(limit - begin));
-        }
-    }
-    std::sort(hosts.begin(), hosts.end());
-    return draw->LazyCopyBacks().OverlapsAny(hosts);
-}
-
-MetalDriver::PendingWrites MetalDriver::Impl::PendingGuestWrites() {
-    std::lock_guard lock(gpuMutex);
-    PendingWrites pending;
-    // Work whose stores cannot be named (BDA pointers) covers everything: the caller cannot tell
-    // which of its ranges the GPU may write and waits as before.
-    if (timeline.UnknownWritesPending()) {
-        pending.unknown = true;
-        return pending;
-    }
-    pending.ranges = timeline.WriteRanges();
-    return pending;
 }
 
 bool MetalDriver::Impl::BatchCommandBuffers() {

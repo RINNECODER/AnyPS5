@@ -32,6 +32,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceVideoOut/src/ControllerSource.mm"
     "${agcDriverRoot}/Execution/src/DisplayFormat.cpp"
     "${agcDriverRoot}/Execution/Metal/MetalDriver.mm"
+    "${agcDriverRoot}/Execution/src/Driver/Shaders/ShaderRegistryChunks.cpp"
     "${agcDriverRoot}/Execution/Metal/MetalPacketExecution.mm"
     "${agcDriverRoot}/Execution/Metal/MetalDrawAhead.mm"
     "${agcDriverRoot}/Execution/Metal/AgcFrameCapture.mm"
