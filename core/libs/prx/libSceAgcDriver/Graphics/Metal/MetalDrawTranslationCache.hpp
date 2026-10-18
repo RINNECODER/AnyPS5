@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -305,6 +306,7 @@ public:
         const auto& record = it->second;
         if (record->memoryVersion != currentMemoryVersion || record->imageCacheClears != currentImageCacheClears) {
             ++statistics.misses;
+            live.store(false, std::memory_order_relaxed);
             return nullptr;
         }
         if (!lruOrder.empty() && record->recordId != lruOrder.front()) {
@@ -316,8 +318,15 @@ public:
             }
         }
         ++statistics.hits;
+        live.store(true, std::memory_order_relaxed);
         return record;
     }
+
+    // Whether the cache served a record at the version it is at now: a batch scan recompiles every
+    // draw it looks at, so the scan only runs while this holds (the batch needs a record for its
+    // first draw, and none exists before the serial path made one). An image-cache expire moves the
+    // version and clears this until the serial path inserts a record the cache can serve again.
+    [[nodiscard]] bool Live() const { return live.load(std::memory_order_relaxed); }
 
     void Insert(std::shared_ptr<DrawTranslationRecord> record) {
         if (!Enabled() || record == nullptr) return;
@@ -342,6 +351,7 @@ public:
         std::lock_guard lock(mutex);
         entries.clear();
         lruOrder.clear();
+        live.store(false, std::memory_order_relaxed);
         ++statistics.clears;
     }
 
@@ -370,6 +380,7 @@ public:
 
 private:
     mutable std::mutex mutex;
+    std::atomic<bool> live{false};
     std::unordered_map<DrawTranslationKey, std::shared_ptr<DrawTranslationRecord>, DrawTranslationKeyHash> entries;
     std::list<std::uint64_t> lruOrder;
     std::uint64_t nextId = 0;
