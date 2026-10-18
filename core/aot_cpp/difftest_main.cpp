@@ -5,15 +5,22 @@
 #include <cstdint>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "aot_cpp/abi.hpp"
+#include "aot_cpp/atomics.hpp"
+#include "aot_cpp/calls.hpp"
+#include "aot_cpp/fma.hpp"
 #include "aot_cpp/guest_provider_calls.hpp"
 #include "aot_cpp/guest_regions.hpp"
+#include "aot_cpp/integer.hpp"
 #include "aot_cpp/json.hpp"
 #include "aot_cpp/optimize.hpp"
+#include "aot_cpp/register_aliases.hpp"
+#include "aot_cpp/register_values.hpp"
 #include "aot_cpp/targets.hpp"
 
 namespace {
@@ -55,6 +62,17 @@ std::vector<std::string> strings(const Json& value) {
         result.push_back(item.as_string());
     }
     return result;
+}
+
+std::optional<std::int64_t> optional_number(const Json& object, const std::string& key) {
+    const Json* value = object.find(key);
+    if (!value || value->is_null()) {
+        return std::nullopt;
+    }
+    if (value->type() != Json::Type::Int) {
+        throw std::runtime_error("field is not an integer: " + key);
+    }
+    return value->as_int();
 }
 
 Json run_targets(const Json& input) {
@@ -169,12 +187,105 @@ Json run_optimize(const Json& input) {
     return Json::object({{"ir", Json::string(result.ir)}, {"count", Json::integer(result.count)}});
 }
 
+Json run_atomics(const Json& input) {
+    std::string op = text(input, "op");
+    if (op == "ordered_load") {
+        return Json::string(aot_cpp::ordered_load(number(field(input, "bits")), text(input, "pointer"),
+                                                  optional_number(input, "align")));
+    }
+    if (op == "ordered_store") {
+        return Json::string(aot_cpp::ordered_store(number(field(input, "bits")), text(input, "value"),
+                                                   text(input, "pointer"), optional_number(input, "align")));
+    }
+    if (op == "accumulator") {
+        auto value = aot_cpp::accumulator(number(field(input, "size")));
+        return Json::array({Json::string(value.name), Json::integer(value.bits), Json::integer(value.shift)});
+    }
+    throw std::runtime_error("unknown atomics op");
+}
+
+Json run_calls(const Json& input) {
+    std::string op = text(input, "op");
+    if (op != "structural_signature") {
+        throw std::runtime_error("unknown calls op");
+    }
+    auto signature = aot_cpp::structural_signature(field(input, "contract"));
+    std::vector<Json> parameters;
+    for (const std::string& kind : signature.parameter_types) {
+        parameters.push_back(Json::string(kind));
+    }
+    std::vector<Json> locations;
+    for (const aot_cpp::Location& location : signature.locations) {
+        std::vector<Json> slot = {Json::string(location.kind)};
+        slot.push_back(location.kind == "register" ? Json::string(location.name) : Json::null());
+        slot.push_back(location.kind == "stack" ? Json::integer(location.offset) : Json::null());
+        slot.push_back(Json::integer(location.width));
+        locations.push_back(Json::array(std::move(slot)));
+    }
+    Json register_name = signature.has_return_register ? Json::string(signature.return_register) : Json::null();
+    return Json::array({Json::string(signature.result), Json::array(std::move(parameters)), register_name,
+                        Json::array(std::move(locations))});
+}
+
+Json run_fma(const Json& input) {
+    std::string op = text(input, "op");
+    if (op == "parts") {
+        auto parts = aot_cpp::fma_parts(text(input, "mnemonic"));
+        if (!parts) {
+            return Json::null();
+        }
+        std::vector<Json> items;
+        for (const std::string& group : *parts) {
+            items.push_back(Json::string(group));
+        }
+        return Json::array(std::move(items));
+    }
+    if (op == "vector_type") {
+        return Json::string(aot_cpp::fma_vector_type(number(field(input, "bits")), text(input, "element")));
+    }
+    throw std::runtime_error("unknown fma op");
+}
+
+Json run_integer(const Json& input) {
+    std::string op = text(input, "op");
+    if (op != "condition") {
+        throw std::runtime_error("unknown integer op");
+    }
+    return Json::string(aot_cpp::integer_condition(text(input, "mnemonic")));
+}
+
+Json run_register_values(const Json& input) {
+    std::string op = text(input, "op");
+    if (op != "low_prefix") {
+        throw std::runtime_error("unknown register_values op");
+    }
+    return Json::integer(aot_cpp::low_prefix(number(field(input, "mask"))));
+}
+
+Json run_register_aliases(const Json& input) {
+    std::string op = text(input, "op");
+    if (op != "equivalents") {
+        throw std::runtime_error("unknown register_aliases op");
+    }
+    std::vector<Json> items;
+    for (const std::string& name : aot_cpp::register_equivalents(field(input, "state"), text(input, "name"))) {
+        items.push_back(Json::string(name));
+    }
+    return Json::array(std::move(items));
+}
+
 Json run(const std::string& module, const Json& input) {
     if (module == "targets") return run_targets(input);
     if (module == "abi") return run_abi(input);
     if (module == "guest_regions") return run_guest_regions(input);
     if (module == "guest_provider_calls") return run_guest_provider_calls(input);
     if (module == "optimize") return run_optimize(input);
+    if (module == "atomics") return run_atomics(input);
+    if (module == "calls") return run_calls(input);
+    if (module == "fma") return run_fma(input);
+    if (module == "integer") return run_integer(input);
+    if (module == "register_values") return run_register_values(input);
+    if (module == "register_aliases") return run_register_aliases(input);
     throw std::runtime_error("unknown module: " + module);
 }
 
