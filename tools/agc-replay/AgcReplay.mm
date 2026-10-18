@@ -225,7 +225,39 @@ CaptureFile Load(const std::string& path) {
             const auto frame = in.Get<std::uint32_t>();
             in.Get<std::uint32_t>();
             Display display{};
-            display.buffer = in.Get<DisplayBuffer>();
+            // The DisplayBuffer gained its trailing alignment field without a capture version bump,
+            // so a version 1 display record holds either the 48-byte or the 56-byte struct. A
+            // candidate layout has to make the record's payload length add up and its fields pass
+            // DisplayBufferSize, which rejects a struct read at the wrong offset.
+            const auto* payload = base + offset;
+            const auto decode = [&](std::size_t structBytes, DisplayBuffer& buffer) {
+                if (8u + structBytes + 16u > bytes) return false;
+                std::uint32_t stored = 0;
+                std::memcpy(&stored, payload + 8u + structBytes + 12u, 4);
+                if (8u + structBytes + 16u + stored != bytes) return false;
+                const auto* fields = payload + 8u;
+                std::memcpy(&buffer.address, fields, 8);
+                std::memcpy(&buffer.pixelFormat, fields + 8, 8);
+                std::memcpy(&buffer.width, fields + 16, 4);
+                std::memcpy(&buffer.height, fields + 20, 4);
+                std::memcpy(&buffer.tilingMode, fields + 24, 4);
+                std::memcpy(&buffer.pitchInPixel, fields + 28, 4);
+                std::memcpy(&buffer.dccAddress, fields + 32, 8);
+                std::memcpy(&buffer.dccClearColor, fields + 40, 8);
+                if (structBytes != sizeof(DisplayBuffer)) buffer.alignment = 65536;
+                else std::memcpy(&buffer.alignment, fields + 48, 4);
+                try {
+                    static_cast<void>(DisplayBufferSize(buffer));
+                } catch (const std::exception&) {
+                    return false;
+                }
+                return true;
+            };
+            std::size_t layout = 0;
+            if (decode(sizeof(DisplayBuffer), display.buffer)) layout = sizeof(DisplayBuffer);
+            else if (decode(48u, display.buffer)) layout = 48u;
+            else Fail("capture display record has an inconsistent payload length");
+            static_cast<void>(in.Take(layout));
             display.hash = in.Get<std::uint64_t>();
             display.raw = in.Get<std::uint32_t>();
             display.stored = in.Get<std::uint32_t>();
