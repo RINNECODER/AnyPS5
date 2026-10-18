@@ -1791,19 +1791,6 @@ class Function:
         entries.append(('x87', None, f'  store i64 {top}, ptr {gep}, align 8'))
         self.emit_group('state-store', entries)
 
-    def uniform_copy_state(self, target, source):
-        """Publish the callee's flags and definedness mask into `target`.
-
-        A tail call is a `call`+`ret` on x86, and `ret` does not restore flags, so the flags the
-        root's own caller finally sees are the *callee's*. The tail-call epilogue used to publish
-        the caller's analysis flags instead, which disagreed with the reference whenever the
-        callee's last flag write differed from the caller's (REPORT24). The x87 stack is not part
-        of the uniform call ABI (a caller never reloads it from `%rf_out`), so it is left alone.
-        """
-        for index in range(2):
-            value = self.emit(f'load i64, ptr {self.uniform_gep(source, 3, index)}, align 8')
-            self.lines.append(f'  store i64 {value}, ptr {self.uniform_gep(target, 3, index)}, align 8')
-
     def outgoing_rsp(self, state, shift):
         """The guest rsp the callee sees: the call site's rsp, less the return-address slot that a
         `call` pushes and a tail `jmp` does not (`shift` is 8 for a jump). None when the guest rsp is
@@ -1857,7 +1844,6 @@ class Function:
         self.lines.append(f'  call void {native}(ptr %rf)')
         self.uniform_load_registers('%rf', skip=('rsp',))
         if jump:
-            self.uniform_copy_state('%rf', '%rf_out')
             self.uniform_store_registers('%rf')
             self.lines.append('  ret void')
 
@@ -1911,7 +1897,6 @@ class Function:
         self.lines.append(f'  call void {target}(ptr %rf)')
         self.uniform_load_registers('%rf', skip=('rsp',))
         if tail:
-            self.uniform_copy_state('%rf', '%rf_out')
             self.uniform_store_registers('%rf')
             self.lines.append('  ret void')
 

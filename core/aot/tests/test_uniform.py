@@ -306,6 +306,8 @@ class UniformABITests(unittest.TestCase):
         # flags instead made every tail-calling function disagree with the reference on the flags
         # its last flag-setting instruction before the `jmp` produced (REPORT24). The other
         # uniform tail-call tests assert a register result, so none of them observes the flags.
+        # The callee publishes its flags and mask into the register file it was handed, and a tail
+        # call hands it the caller's own `%rf`, so the root has nothing to copy back.
         # 0x1000: add edi,5 ; jmp 0x1010    0x1010: xor eax,eax ; ret
         code = bytearray(0x14)
         code[0x00:0x08] = bytes.fromhex('83c705e908000000')
@@ -314,7 +316,7 @@ class UniformABITests(unittest.TestCase):
                      uniform_function('sub_1010', 0x1010, 3)]
         raw, contracts = fixture(bytes(code), functions)
         function, ir, _ = self.compile(raw, contracts, 'sub_1000')
-        self.assertIn('call void @sub_1010(ptr %rf_out)', ir)
+        self.assertIn('call void @sub_1010(ptr %rf)', ir)
         registers = RegisterFile()
         function(ctypes.byref(registers))
         # `add edi,5` with edi=0 yields PF only; the callee's `xor eax,eax` yields ZF|PF.
