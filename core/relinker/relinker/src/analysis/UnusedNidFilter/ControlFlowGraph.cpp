@@ -44,6 +44,8 @@ void buildGraph(
 ) {
     if (text.size() > std::numeric_limits<VirtualAddress>::max() - textVaddr)
         throw RelinkerException("Text section range exceeds the address space");
+    std::size_t codeSize = text.size();
+    while (codeSize > 0 && text[codeSize - 1] == 0) --codeSize;
     const Codegen::X64InstructionDecoder decoder;
     // One bit per text byte: a hash set of every visited address dominated large titles.
     std::vector<std::uint64_t> visited((text.size() + 63) / 64);
@@ -85,7 +87,7 @@ void buildGraph(
         VirtualAddress va = worklist.front();
         worklist.pop();
 
-        while (va >= textVaddr && va - textVaddr < text.size() && !reachable.contains(va) && !(isData && isData(va))) {
+        while (va >= textVaddr && va - textVaddr < codeSize && !reachable.contains(va) && !(isData && isData(va))) {
             std::size_t bufOff = static_cast<std::size_t>(va - textVaddr);
             std::size_t available = text.size() - bufOff;
             if (available == 0) throw RelinkerException("CFG: zero available bytes at target", va);
