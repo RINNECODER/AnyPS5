@@ -486,6 +486,64 @@ public:
         }
     }
 
+    void MarkMinimumLodBankUsed() {
+        if (minimumLodBank == 0 || minimumLodPairs.empty()) return;
+        std::unordered_set<std::uint32_t> shadowed;
+        for (const auto& [combined, selection] : minimumLodPairs) {
+            static_cast<void>(selection);
+            shadowed.insert(combined);
+        }
+        const auto samplesThroughBank = [&](const spirv_cross::SPIRFunction& function) {
+            for (const auto blockId : function.blocks) {
+                for (const auto& instruction : get<spirv_cross::SPIRBlock>(blockId).ops) {
+                    switch (static_cast<spv::Op>(instruction.op)) {
+                    case spv::OpImageSampleImplicitLod:
+                    case spv::OpImageSampleExplicitLod:
+                    case spv::OpImageSampleDrefImplicitLod:
+                    case spv::OpImageSampleDrefExplicitLod:
+                    case spv::OpImageQueryLod:
+                        if (shadowed.contains(stream(instruction)[2])) return true;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+            return false;
+        };
+        std::vector<std::uint32_t> targets;
+        ir.for_each_typed_id<spirv_cross::SPIRFunction>([&](std::uint32_t id, const spirv_cross::SPIRFunction& function) {
+            if (id != ir.default_entry_point && samplesThroughBank(function)) targets.push_back(id);
+        });
+        if (targets.empty()) return;
+        const auto ids = ir.increase_bound_by(3);
+        auto& uintType = set<spirv_cross::SPIRType>(ids, spirv_cross::SPIRType{spv::OpTypeInt});
+        uintType.basetype = spirv_cross::SPIRType::UInt;
+        uintType.width = 32;
+        uintType.vecsize = 1;
+        uintType.columns = 1;
+        set<spirv_cross::SPIRConstant>(ids + 1, ids, std::uint32_t{0}, false);
+        auto& pointer = set<spirv_cross::SPIRType>(ids + 2, spirv_cross::SPIRType{spv::OpTypePointer});
+        pointer.pointer = true;
+        pointer.pointer_depth = 1;
+        pointer.parent_type = minimumLodSamplerType;
+        pointer.storage = spv::StorageClassUniformConstant;
+        for (const auto target : targets) {
+            auto& function = get<spirv_cross::SPIRFunction>(target);
+            const auto result = ir.increase_bound_by(1);
+            spirv_cross::Instruction instruction{};
+            instruction.op = spv::OpAccessChain;
+            instruction.offset = static_cast<std::uint32_t>(ir.spirv.size());
+            instruction.length = 4;
+            ir.spirv.push_back(ids + 2);
+            ir.spirv.push_back(result);
+            ir.spirv.push_back(minimumLodBank);
+            ir.spirv.push_back(ids + 1);
+            auto& block = get<spirv_cross::SPIRBlock>(function.entry_block);
+            block.ops.insert(block.ops.begin(), instruction);
+        }
+    }
+
     void InstallMinimumLodBank(std::uint32_t originalCount, spv::ExecutionModel execution) {
         if (shadowPairs.empty()) return;
         if (originalCount > 32u || shadowPairs.size() > 64u * 32u)
@@ -527,6 +585,7 @@ public:
             shadowPairs[i].magArgument = originalCount + i * 2u;
             shadowPairs[i].minArgument = originalCount + i * 2u + 1u;
         }
+        MarkMinimumLodBankUsed();
     }
 
     const std::vector<ShadowPair>& MinimumLodPairs() const { return shadowPairs; }
