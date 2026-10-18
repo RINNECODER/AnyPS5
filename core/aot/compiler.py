@@ -413,6 +413,7 @@ class Function:
         self.lines = []
         self.groups = []
         self.body_start = None
+        self.uses_x87 = False
         self.serial = 0
         self.depth = max([128] + [-obj['offset'] for obj in contract.get('stack_objects', [])])
         self.uniform = abi.uniform(contract)
@@ -1669,8 +1670,20 @@ class Function:
                 elif kind == 'entry':
                     if register not in reads:
                         drop.add(line_index)
-                elif register not in reads and register not in first_write:
-                    drop.add(line_index)
+                elif kind == 'reload':
+                    if register not in reads and register not in first_write:
+                        drop.add(line_index)
+        if not self.uses_x87:
+            # Nothing read the native x87 stack, so the register file still holds the caller's
+            # values in its x87 banks and re-publishing the copy the entry made would only write
+            # those same values back. This is worth the check: the entry rotation is eight loads
+            # and eight indexed stores, and every call and return repeats the eight stores.
+            for kind, entries in self.groups:
+                if kind not in ('state-load', 'state-store'):
+                    continue
+                for line_index, register in entries:
+                    if register == 'x87':
+                        drop.add(line_index)
         if drop:
             self.lines = [line for index, line in enumerate(self.lines) if index not in drop]
 
@@ -1682,15 +1695,17 @@ class Function:
             value = self.emit(f'lshr i64 {flags}, {bit}')
             value = self.emit(f'trunc i64 {value} to i1')
             self.lines.append(f'  store i1 {value}, ptr %{name}, align 1')
+        entries = []
         gep = self.uniform_gep(block, 5, 0)
         stored = self.emit(f'load i64, ptr {gep}, align 8')
         stored = self.emit(f'trunc i64 {stored} to i32')
-        self.lines.append(f'  store i32 {stored}, ptr %x87_top, align 4')
+        entries.append(('x87', None, f'  store i32 {stored}, ptr %x87_top, align 4'))
         top = self.emit('load i32, ptr %x87_top, align 4')
         for index in range(8):
             # The register file holds st(0)..st(7); the native stack is a ring indexed by the top.
             value = self.emit(f'load double, ptr {self.uniform_gep(block, 4, index)}, align 8')
-            self.lines.append(f'  store double {value}, ptr {self.x87_slot(top, index)}, align 8')
+            entries.append(('x87', None, f'  store double {value}, ptr {self.x87_slot(top, index)}, align 8'))
+        self.emit_group('state-load', entries)
 
     def x87_slot(self, top, index):
         offset = self.emit(f'add i32 {top}, {index}')
@@ -1718,14 +1733,16 @@ class Function:
         gep = self.uniform_gep(block, 3, 1)
         self.lines.append(f'  store i64 {mask}, ptr {gep}, align 8')
         top = self.emit('load i32, ptr %x87_top, align 4')
+        entries = []
         for index in range(8):
             value = self.emit(f'load double, ptr {self.x87_slot(top, index)}, align 8')
             gep = self.uniform_gep(block, 4, index)
-            self.lines.append(f'  store double {value}, ptr {gep}, align 8')
+            entries.append(('x87', len(self.lines) - 2, f'  store double {value}, ptr {gep}, align 8'))
         top = self.emit(f'load i32, ptr %x87_top, align 4')
         top = self.emit(f'zext i32 {top} to i64')
         gep = self.uniform_gep(block, 5, 0)
-        self.lines.append(f'  store i64 {top}, ptr {gep}, align 8')
+        entries.append(('x87', None, f'  store i64 {top}, ptr {gep}, align 8'))
+        self.emit_group('state-store', entries)
 
     def outgoing_rsp(self, state, shift):
         """The guest rsp the callee sees: the call site's rsp, less the return-address slot that a
