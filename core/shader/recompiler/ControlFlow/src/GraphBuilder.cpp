@@ -1320,13 +1320,18 @@ bool loadedDword(const RdnaProgram& program, std::uint32_t reg, std::uint32_t be
 
 bool reachingWriter(const RdnaProgram& program, std::uint32_t reader, std::initializer_list<std::uint32_t> indices, std::uint32_t& writer, std::uint32_t waveSize) {
     std::multimap<std::uint32_t, std::uint32_t> branches;
+    std::set<std::uint32_t> callTargets;
     for (std::uint32_t index = 0; index < program.instructions.size(); ++index) {
-        if (IsDirectBranchOpcode(program.instructions[index].op)) branches.emplace(program.instructions[index].branchTarget, index);
+        const auto& instruction = program.instructions[index];
+        std::uint32_t target = 0;
+        if (IsDirectBranchOpcode(instruction.op)) branches.emplace(instruction.branchTarget, index);
+        else if (instruction.op == RdnaOpcode::SSetpcB64 && resolveSetpcTarget(program, index, target)) branches.emplace(target, index);
+        else if (instruction.op == RdnaOpcode::SCallB64) callTargets.insert(instruction.branchTarget);
     }
     std::vector<bool> seen(program.instructions.size());
     std::vector<std::uint32_t> pending;
     const auto predecessors = [&](std::uint32_t index) {
-        if (index == 0u) return false;
+        if (index == 0u || callTargets.contains(program.instructions[index].programCounter)) return false;
         const auto before = pending.size();
         const auto op = program.instructions[index - 1u].op;
         if (op != RdnaOpcode::SBranch && op != RdnaOpcode::SEndpgm && op != RdnaOpcode::SCodeEnd && op != RdnaOpcode::SSetpcB64) pending.push_back(index - 1u);
