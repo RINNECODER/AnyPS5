@@ -11,6 +11,12 @@ bool LoadedFromMemory(const IrValue& handle);
 bool IsDescriptorHandle(IrOpcode opcode);
 bool IsRuntimeSelect(IrOpcode opcode);
 bool IsRuntimeUniformOp(IrOpcode opcode);
+bool ActiveMaskImplies(const IrValue* mask, const IrValue* condition);
+
+template<typename TNode>
+bool ActiveMaskImplies(const TNode& mask, const TNode& condition) {
+    return ActiveMaskImplies(mask.Value(), condition.Value());
+}
 
 }
 
