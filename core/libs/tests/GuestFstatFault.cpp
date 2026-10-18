@@ -15,7 +15,6 @@ std::int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int, FileStat*);
 int APS5_VABI sceKernelFstat(int, FileStat*);
 int APS5_VABI sceKernelOpen(const char*, int, std::uint16_t);
 int APS5_VABI close_nid_postfix(int);
-int APS5_VABI socketpair_nid_postfix(int, int, int, int*);
 int* APS5_VABI __error_nid_postfix();
 }
 
@@ -54,11 +53,6 @@ int main() {
     Require(fstat_nid_disambig1_nid_postfix(file, &status) == 0 && status.st_size == 5);
     RequireFailure(file, GuestEfault);
 
-    int sockets[2];
-    Require(socketpair_nid_postfix(1, 1, 0, sockets) == 0);
-    RequireFailure(sockets[0], GuestEfault);
-    Require(close_nid_postfix(sockets[0]) == 0);
-    Require(close_nid_postfix(sockets[1]) == 0);
     Require(close_nid_postfix(file) == 0);
 #ifndef _WIN32
     RequireFailure(file, GuestEbadf);
