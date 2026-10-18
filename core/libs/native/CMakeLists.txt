@@ -34,8 +34,16 @@ add_shader_recompiler(shader_recompiler_native native_runtime_platform GUARD_SOU
 # --- one static library with the HLE runtime and the Metal graphics driver ---------------------
 add_library(anyps5_native_graphics STATIC)
 
+# libc/libkernel plus every HLE component the guest start-up path imports. An import no component
+# defines is left undefined by the archives, so the bounded title image namespaces it to
+# `__aps5_guest_<name>` and the stub generator lowers it to a bare `ret` (or a trampoline to the
+# host C library): the guest call then silently returns zero. The components below are the ones the
+# recorded boot reaches before the title's main loop; each is host-portable (no x86_64 asm).
+# libSceSaveData.native is the variant that carries the transaction-resource entry points.
 set(nativeComponents libc libkernel libSceAgc libScePad libSceMouse libSceKeyboard libSceFiber
-    libSceFont libSceFontFt)
+    libSceFont libSceFontFt
+    libSceSysmodule libSceCommonDialog libSceSystemGesture libSceSaveData.native
+    libSceNpGameIntent libSceSystemService libSceAppContent libSceUserService libSceIme libSceJson2)
 set(nativeUnsupportedSources
     "${LIBS_INCLUDE_DIR}/prx/libc/src/ApplicationProcessParameters.cpp"
     "${LIBS_INCLUDE_DIR}/prx/libc/src/Strings.cpp"
@@ -255,6 +263,18 @@ if(BUILD_TESTING)
         set_target_properties(${reviewTest} PROPERTIES CXX_EXTENSIONS OFF)
         target_link_libraries(${reviewTest} PRIVATE Threads::Threads)
     endforeach()
+    # The guest arena reads its slide from the environment before it is first used, so this test
+    # compiles GuestArena and its dependencies directly instead of linking a shared runtime.
+    add_test_executable(native_aot_guest_arena_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/NativeGuestArenaTests.cpp"
+        "${LIBS_INCLUDE_DIR}/prx/libc/src/GuestArena.cpp"
+        "${LIBS_INCLUDE_DIR}/prx/libc/src/GuestWriteWatch.cpp"
+        "${LIBS_INCLUDE_DIR}/prx/libc/src/GuestAllocations.cpp")
+    target_include_directories(native_aot_guest_arena_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_compile_features(native_aot_guest_arena_tests PRIVATE cxx_std_20)
+    set_target_properties(native_aot_guest_arena_tests PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(native_aot_guest_arena_tests PRIVATE Threads::Threads)
+    add_test(NAME native_aot_guest_arena COMMAND native_aot_guest_arena_tests)
+    set_tests_properties(native_aot_guest_arena PROPERTIES TIMEOUT 30)
     # The Python suite in core/aot/tests already registers as native_aot_hle_log.<class>.<case>.
     add_test(NAME native_aot_hle_log_open COMMAND native_aot_hle_log_open_tests)
     # 100 forked trials, each racing 16 threads to open the log.
