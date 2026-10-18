@@ -6,6 +6,8 @@ from pathlib import Path
 
 MODULE = (Path(__file__).resolve().parents[3] / 'tools' / 'native' / 'contracts'
           / 'generate_contracts.py')
+if not MODULE.exists():
+    raise unittest.SkipTest(f'{MODULE} is not exported to this checkout')
 _spec = importlib.util.spec_from_file_location('generate_contracts', MODULE)
 generate_contracts = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(generate_contracts)
