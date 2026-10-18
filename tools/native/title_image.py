@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "core" / "aot"))
 from compiler import Image, compile_image, Rejected  # noqa: E402
 from toolchain import build_native_object  # noqa: E402
+import abi  # noqa: E402
 
 
 def title_process_parameters(image):
@@ -58,12 +59,12 @@ def title_process_parameters(image):
     return {'address': image.guest_base + address, 'bytes': size, 'bindings': bindings}
 
 
-def reachable(image, entry_addresses, limit):
+def reachable(image, entry_addresses, limit, exclude=()):
     starts = {spec['address']: spec for spec in image.functions.values()}
     decoder = Cs(CS_ARCH_X86, CS_MODE_64)
     decoder.detail = True
-    seen, order, frontier = set(), [], set()
-    pending = deque(address for address in entry_addresses if address in starts)
+    seen, order, frontier = set(exclude), [], set()
+    pending = deque(address for address in entry_addresses if address in starts and address not in seen)
     seen.update(pending)
     while pending and len(order) < limit:
         address = pending.popleft()
@@ -187,8 +188,12 @@ def main():
                         help='slide added to every guest vaddr (the Rosetta relinked base by default)')
     parser.add_argument('--hle-log', action='store_true',
                         help='log every import call and its return through HleLogCall/HleLogReturn')
+    parser.add_argument('--abi', help='ABI annotations the contracts were generated from; a stale '
+                                      'contracts/ABI pair is rejected instead of stubbing a verified import')
     args = parser.parse_args()
     contracts = json.loads(open(args.contracts).read())
+    if args.abi:
+        abi.validate_import_annotations(contracts, json.loads(open(args.abi).read()))
     # The slide must be set before the first Image so the process-parameter bindings carry it.
     contracts['guest_base'] = args.guest_base
     image = Image(args.elf, contracts)
@@ -236,7 +241,20 @@ def main():
     # trap instead of a dispatch miss (the bounded walk itself does not widen).
     order, frontier = reachable(image, entries, args.limit)
     native = set(order) | ({lifecycle.get('init'), lifecycle.get('fini')} - {None})
-    keep = native | frontier | recover_pointer_slot_calls(image, native)
+    # Follow the pointer-slot call targets with the remaining budget, after the direct closure, so
+    # a bounded limit keeps the entry/heap-init subtree native instead of letting the recovered run
+    # enqueue ahead of it. Targets past the budget stay reporting stubs.
+    while len(order) < args.limit:
+        recovered = recover_pointer_slot_calls(image, native) - native
+        if not recovered:
+            break
+        extra, extra_frontier = reachable(image, sorted(recovered), args.limit - len(order), exclude=native)
+        if not extra:
+            break
+        order += extra
+        frontier |= extra_frontier
+        native |= set(extra)
+    keep = native | frontier
     contracts['functions'] = [spec for spec in image.functions.values() if spec['address'] in keep]
     for spec in contracts['functions']:
         if spec['address'] in native:
