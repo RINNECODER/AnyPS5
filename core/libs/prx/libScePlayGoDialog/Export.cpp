@@ -67,6 +67,7 @@ int APS5_VABI scePlayGoDialogUpdateStatus(void) {
 int APS5_VABI scePlayGoDialogGetResult(void* result) {
     if (g_status.load() == STATUS_NONE) return ERROR_NOT_INITIALIZED;
     if (!result) return ERROR_PARAM_INVALID;
+    if (g_status.load() != STATUS_FINISHED) return ERROR_INVALID_STATE;
     auto* r = static_cast<PlayGoDialogResult*>(result);
     std::memset(r, 0, sizeof(*r));
     r->result = RESULT_OK;
