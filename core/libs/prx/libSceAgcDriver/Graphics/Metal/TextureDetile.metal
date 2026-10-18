@@ -279,3 +279,157 @@ kernel void TextureDetileToTexture(device const uint* inputBuffer [[buffer(0)]],
     }
     destination.write(readElement(params.tile.srcBase + tiledOffset, inputBuffer), p, params.textureSlice, params.level);
 }
+
+struct TiledSamplingParameters {
+    TextureDetileParameters tile;
+    uint filterMode;
+};
+
+inline float4 UnpackRgba8(uint value) {
+    return float4(
+        float(value & 0xffu) * (1.0f / 255.0f),
+        float((value >> 8u) & 0xffu) * (1.0f / 255.0f),
+        float((value >> 16u) & 0xffu) * (1.0f / 255.0f),
+        float((value >> 24u) & 0xffu) * (1.0f / 255.0f)
+    );
+}
+
+inline float4 SampleTiledRgba8Point(device const uint* data, uint2 p, constant TextureDetileParameters& params) {
+    if (p.x >= params.width || p.y >= params.height) {
+        return float4(0.0f);
+    }
+    uint tiledOffset = 0u;
+    uint linearOffset = 0u;
+    if (!elementOffsets(p, params, tiledOffset, linearOffset)) {
+        return float4(0.0f);
+    }
+    uint raw = data[(params.srcBase + tiledOffset) >> 2];
+    return UnpackRgba8(raw);
+}
+
+inline float4 SampleTiledRgba8Bilinear(device const uint* data, float2 uv, constant TextureDetileParameters& params) {
+    float u = uv.x * float(params.width) - 0.5f;
+    float v = uv.y * float(params.height) - 0.5f;
+    int x0 = clamp(int(floor(u)), 0, int(params.width - 1u));
+    int y0 = clamp(int(floor(v)), 0, int(params.height - 1u));
+    int x1 = clamp(x0 + 1, 0, int(params.width - 1u));
+    int y1 = clamp(y0 + 1, 0, int(params.height - 1u));
+    float fx = fract(u);
+    float fy = fract(v);
+    float4 c00 = SampleTiledRgba8Point(data, uint2(x0, y0), params);
+    float4 c10 = SampleTiledRgba8Point(data, uint2(x1, y0), params);
+    float4 c01 = SampleTiledRgba8Point(data, uint2(x0, y1), params);
+    float4 c11 = SampleTiledRgba8Point(data, uint2(x1, y1), params);
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
+inline float4 DecodeBc1Block(device const uint* blockPtr, uint2 intraCoord) {
+    uint word0 = blockPtr[0];
+    uint word1 = blockPtr[1];
+    ushort c0 = static_cast<ushort>(word0 & 0xffffu);
+    ushort c1 = static_cast<ushort>((word0 >> 16u) & 0xffffu);
+    float3 rgb0 = float3(float((c0 >> 11) & 0x1f), float((c0 >> 5) & 0x3f), float(c0 & 0x1f)) * float3(1.0f / 31.0f, 1.0f / 63.0f, 1.0f / 31.0f);
+    float3 rgb1 = float3(float((c1 >> 11) & 0x1f), float((c1 >> 5) & 0x3f), float(c1 & 0x1f)) * float3(1.0f / 31.0f, 1.0f / 63.0f, 1.0f / 31.0f);
+    uint bitIndex = (intraCoord.y * 4u + intraCoord.x) * 2u;
+    uint code = (word1 >> bitIndex) & 3u;
+    float3 finalRgb = (code == 0u) ? rgb0 :
+                      (code == 1u) ? rgb1 :
+                      (c0 > c1) ? ((code == 2u) ? mix(rgb0, rgb1, 1.0f / 3.0f) : mix(rgb0, rgb1, 2.0f / 3.0f)) :
+                                  ((code == 2u) ? mix(rgb0, rgb1, 0.5f) : float3(0.0f));
+    float finalAlpha = (c0 <= c1 && code == 3u) ? 0.0f : 1.0f;
+    return float4(finalRgb, finalAlpha);
+}
+
+inline float4 SampleTiledBc1Point(device const uint* data, uint2 p, constant TextureDetileParameters& params) {
+    if (p.x >= params.width || p.y >= params.height) {
+        return float4(0.0f);
+    }
+    uint2 blockCoord = p / 4u;
+    uint2 intraCoord = p % 4u;
+    uint tiledOffset = 0u;
+    uint linearOffset = 0u;
+    if (!elementOffsets(blockCoord, params, tiledOffset, linearOffset)) {
+        return float4(0.0f);
+    }
+    device const uint* blockPtr = data + ((params.srcBase + tiledOffset) >> 2);
+    return DecodeBc1Block(blockPtr, intraCoord);
+}
+
+inline float4 SampleTiledBc1Bilinear(device const uint* data, float2 uv, constant TextureDetileParameters& params) {
+    float u = uv.x * float(params.width) - 0.5f;
+    float v = uv.y * float(params.height) - 0.5f;
+    int x0 = clamp(int(floor(u)), 0, int(params.width - 1u));
+    int y0 = clamp(int(floor(v)), 0, int(params.height - 1u));
+    int x1 = clamp(x0 + 1, 0, int(params.width - 1u));
+    int y1 = clamp(y0 + 1, 0, int(params.height - 1u));
+    float fx = fract(u);
+    float fy = fract(v);
+    float4 c00 = SampleTiledBc1Point(data, uint2(x0, y0), params);
+    float4 c10 = SampleTiledBc1Point(data, uint2(x1, y0), params);
+    float4 c01 = SampleTiledBc1Point(data, uint2(x0, y1), params);
+    float4 c11 = SampleTiledBc1Point(data, uint2(x1, y1), params);
+    return mix(mix(c00, c10, fx), mix(c01, c11, fx), fy);
+}
+
+inline float DecodeBc4Block(device const uint* blockPtr, uint2 intraCoord) {
+    uint word0 = blockPtr[0];
+    uint word1 = blockPtr[1];
+    uint r0 = word0 & 0xffu;
+    uint r1 = (word0 >> 8u) & 0xffu;
+    ulong indices = (static_cast<ulong>(word1) << 16u) | (static_cast<ulong>(word0 >> 16u));
+    uint bitIndex = (intraCoord.y * 4u + intraCoord.x) * 3u;
+    uint code = static_cast<uint>((indices >> bitIndex) & 7u);
+    if (r0 > r1) {
+        if (code == 0u) return float(r0) * (1.0f / 255.0f);
+        if (code == 1u) return float(r1) * (1.0f / 255.0f);
+        return float(((8u - code) * r0 + (code - 1u) * r1) / 7u) * (1.0f / 255.0f);
+    } else {
+        if (code == 0u) return float(r0) * (1.0f / 255.0f);
+        if (code == 1u) return float(r1) * (1.0f / 255.0f);
+        if (code == 6u) return 0.0f;
+        if (code == 7u) return 1.0f;
+        return float(((6u - code) * r0 + (code - 1u) * r1) / 5u) * (1.0f / 255.0f);
+    }
+}
+
+inline float4 SampleTiledBc4Point(device const uint* data, uint2 p, constant TextureDetileParameters& params) {
+    if (p.x >= params.width || p.y >= params.height) {
+        return float4(0.0f);
+    }
+    uint2 blockCoord = p / 4u;
+    uint2 intraCoord = p % 4u;
+    uint tiledOffset = 0u;
+    uint linearOffset = 0u;
+    if (!elementOffsets(blockCoord, params, tiledOffset, linearOffset)) {
+        return float4(0.0f);
+    }
+    device const uint* blockPtr = data + ((params.srcBase + tiledOffset) >> 2);
+    float red = DecodeBc4Block(blockPtr, intraCoord);
+    return float4(red, 0.0f, 0.0f, 1.0f);
+}
+
+kernel void InShaderSampleTiledTexture(device const uint* inputBuffer [[buffer(0)]],
+                                     device float4* outputBuffer [[buffer(1)]],
+                                     constant TiledSamplingParameters& params [[buffer(2)]],
+                                     uint2 position [[thread_position_in_grid]]) {
+    if (position.x >= params.tile.width || position.y >= params.tile.height) {
+        return;
+    }
+    uint outputIndex = position.y * params.tile.width + position.x;
+    float4 result = float4(0.0f);
+    if (params.filterMode == 0u) {
+        result = SampleTiledRgba8Point(inputBuffer, position, params.tile);
+    } else if (params.filterMode == 1u) {
+        float2 uv = (float2(position) + 0.5f) / float2(params.tile.width, params.tile.height);
+        result = SampleTiledRgba8Bilinear(inputBuffer, uv, params.tile);
+    } else if (params.filterMode == 2u) {
+        result = SampleTiledBc1Point(inputBuffer, position, params.tile);
+    } else if (params.filterMode == 3u) {
+        float2 uv = (float2(position) + 0.5f) / float2(params.tile.width, params.tile.height);
+        result = SampleTiledBc1Bilinear(inputBuffer, uv, params.tile);
+    } else if (params.filterMode == 4u) {
+        result = SampleTiledBc4Point(inputBuffer, position, params.tile);
+    }
+    outputBuffer[outputIndex] = result;
+}
+

@@ -527,7 +527,8 @@ void MetalDevice::Dispatch(id<MTLComputeCommandEncoder> encoder, NSString* kerne
     }
     id<MTLComputePipelineState> state = pipeline(kernel, constants);
     const bool tileKernel = [kernel isEqualToString:@"TextureDetile"] || [kernel isEqualToString:@"ColorTransfer"] ||
-        [kernel isEqualToString:@"TextureRetileFromTexture"] || [kernel isEqualToString:@"TextureDetileToTexture"];
+        [kernel isEqualToString:@"TextureRetileFromTexture"] || [kernel isEqualToString:@"TextureDetileToTexture"] ||
+        [kernel isEqualToString:@"InShaderSampleTiledTexture"];
     const MTLSize threads = tileKernel ? MTLSizeMake(8, 8, 1) : MTLSizeMake(1, 1, 1);
     if (threads.width > device.maxThreadsPerThreadgroup.width ||
         threads.height > device.maxThreadsPerThreadgroup.height ||

@@ -1,6 +1,7 @@
 #include "MetalTestSupport.hpp"
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -164,6 +165,129 @@ Fixture StandardFixture(uint32_t elementBytes, uint32_t blockBytes) {
     return fixture;
 }
 
+struct Float4 {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float w = 0.0f;
+};
+
+struct TiledSamplingParameters {
+    Parameters tile;
+    uint32_t filterMode = 0;
+};
+
+void RunInShaderDetileTests(const Context& context) {
+    auto fixture = StandardFixture(4, 4096);
+    auto& p = fixture.parameters;
+    const uint32_t width = p.width;
+    const uint32_t height = p.height;
+    const size_t inputSize = static_cast<size_t>(p.blocksPerRow) * ((height + fixture.blockHeight - 1) / fixture.blockHeight) * 4096;
+    auto input = context.Buffer(inputSize + p.srcBase);
+    auto output = context.Buffer(width * height * sizeof(Float4));
+    auto* inputPtr = static_cast<uint8_t*>(input.contents) + p.srcBase;
+    std::memset(input.contents, 0, input.length);
+
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint32_t blockX = x / fixture.blockWidth;
+            const uint32_t blockY = y / fixture.blockHeight;
+            const uint32_t blockIndex = blockY * p.blocksPerRow + blockX;
+            const uint32_t offset = blockIndex * 4096 + StandardAddress(x % fixture.blockWidth, y % fixture.blockHeight, 4, 4096);
+            const uint32_t r = (x * 17) & 0xff;
+            const uint32_t g = (y * 23) & 0xff;
+            const uint32_t b = (x + y) & 0xff;
+            const uint32_t a = 255;
+            const uint32_t val = r | (g << 8) | (b << 16) | (a << 24);
+            std::memcpy(inputPtr + offset, &val, 4);
+        }
+    }
+
+    TiledSamplingParameters sampleParams;
+    sampleParams.tile = p;
+    sampleParams.filterMode = 0;
+    context.Dispatch(@"InShaderSampleTiledTexture", @[input, output], &sampleParams, sizeof(sampleParams), MTLSizeMake(width, height, 1), &fixture.constants);
+    const auto* outVecs = static_cast<const Float4*>(output.contents);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const auto sample = outVecs[y * width + x];
+            const float expectedR = float((x * 17) & 0xff) / 255.0f;
+            const float expectedG = float((y * 23) & 0xff) / 255.0f;
+            const float expectedB = float((x + y) & 0xff) / 255.0f;
+            Require(std::abs(sample.x - expectedR) < 1e-3f, "In-shader tiled RGBA8 point sample R mismatch");
+            Require(std::abs(sample.y - expectedG) < 1e-3f, "In-shader tiled RGBA8 point sample G mismatch");
+            Require(std::abs(sample.z - expectedB) < 1e-3f, "In-shader tiled RGBA8 point sample B mismatch");
+            Require(std::abs(sample.w - 1.0f) < 1e-3f, "In-shader tiled RGBA8 point sample A mismatch");
+        }
+    }
+
+    sampleParams.filterMode = 1;
+    context.Dispatch(@"InShaderSampleTiledTexture", @[input, output], &sampleParams, sizeof(sampleParams), MTLSizeMake(width, height, 1), &fixture.constants);
+    const auto* bilinearOut = static_cast<const Float4*>(output.contents);
+    Require(bilinearOut[0].w > 0.99f, "In-shader tiled RGBA8 bilinear sample alpha mismatch");
+
+    auto bcFixture = StandardFixture(8, 4096);
+    auto& bcParams = bcFixture.parameters;
+    const uint32_t bcWidth = bcParams.width * 4;
+    const uint32_t bcHeight = bcParams.height * 4;
+    const size_t bcInputSize = static_cast<size_t>(bcParams.blocksPerRow) * ((bcParams.height + bcFixture.blockHeight - 1) / bcFixture.blockHeight) * 4096;
+    auto bcInput = context.Buffer(bcInputSize + bcParams.srcBase);
+    auto bcOutput = context.Buffer(bcWidth * bcHeight * sizeof(Float4));
+    auto* bcInputPtr = static_cast<uint8_t*>(bcInput.contents) + bcParams.srcBase;
+    std::memset(bcInput.contents, 0, bcInput.length);
+
+    const uint16_t c0 = 0xf800;
+    const uint16_t c1 = 0x07e0;
+    const uint32_t colorEndpoints = uint32_t(c0) | (uint32_t(c1) << 16);
+    const uint32_t indices = 0x1b1b1b1b;
+    for (uint32_t by = 0; by < bcParams.height; ++by) {
+        for (uint32_t bx = 0; bx < bcParams.width; ++bx) {
+            const uint32_t blockX = bx / bcFixture.blockWidth;
+            const uint32_t blockY = by / bcFixture.blockHeight;
+            const uint32_t blockIndex = blockY * bcParams.blocksPerRow + blockX;
+            const uint32_t offset = blockIndex * 4096 + StandardAddress(bx % bcFixture.blockWidth, by % bcFixture.blockHeight, 8, 4096);
+            std::memcpy(bcInputPtr + offset, &colorEndpoints, 4);
+            std::memcpy(bcInputPtr + offset + 4, &indices, 4);
+        }
+    }
+
+    TiledSamplingParameters bcSampleParams;
+    bcSampleParams.tile = bcParams;
+    bcSampleParams.tile.width = bcWidth;
+    bcSampleParams.tile.height = bcHeight;
+    bcSampleParams.filterMode = 2;
+    context.Dispatch(@"InShaderSampleTiledTexture", @[bcInput, bcOutput], &bcSampleParams, sizeof(bcSampleParams), MTLSizeMake(bcWidth, bcHeight, 1), &bcFixture.constants);
+    const auto* bcOutVecs = static_cast<const Float4*>(bcOutput.contents);
+    for (uint32_t i = 0; i < 16; ++i) {
+        const auto sample = bcOutVecs[i];
+        Require(sample.w == 1.0f, "BC1 decoded sample must have alpha 1.0");
+    }
+
+    bcSampleParams.filterMode = 3;
+    context.Dispatch(@"InShaderSampleTiledTexture", @[bcInput, bcOutput], &bcSampleParams, sizeof(bcSampleParams), MTLSizeMake(bcWidth, bcHeight, 1), &bcFixture.constants);
+    const auto* bcBilinearOut = static_cast<const Float4*>(bcOutput.contents);
+    Require(bcBilinearOut[0].w == 1.0f, "BC1 bilinear sample must have alpha 1.0");
+
+    const uint8_t r0 = 255;
+    const uint8_t r1 = 0;
+    const uint32_t bc4Word0 = uint32_t(r0) | (uint32_t(r1) << 8);
+    const uint32_t bc4Word1 = 0;
+    for (uint32_t by = 0; by < bcParams.height; ++by) {
+        for (uint32_t bx = 0; bx < bcParams.width; ++bx) {
+            const uint32_t blockX = bx / bcFixture.blockWidth;
+            const uint32_t blockY = by / bcFixture.blockHeight;
+            const uint32_t blockIndex = blockY * bcParams.blocksPerRow + blockX;
+            const uint32_t offset = blockIndex * 4096 + StandardAddress(bx % bcFixture.blockWidth, by % bcFixture.blockHeight, 8, 4096);
+            std::memcpy(bcInputPtr + offset, &bc4Word0, 4);
+            std::memcpy(bcInputPtr + offset + 4, &bc4Word1, 4);
+        }
+    }
+    bcSampleParams.filterMode = 4;
+    context.Dispatch(@"InShaderSampleTiledTexture", @[bcInput, bcOutput], &bcSampleParams, sizeof(bcSampleParams), MTLSizeMake(bcWidth, bcHeight, 1), &bcFixture.constants);
+    const auto* bc4OutVecs = static_cast<const Float4*>(bcOutput.contents);
+    Require(std::abs(bc4OutVecs[0].x - 1.0f) < 1e-3f, "BC4 point sample red must match endpoint r0");
+}
+
 }
 
 void RunTextureDetileTests(const Context& context) {
@@ -282,4 +406,5 @@ void RunTextureDetileTests(const Context& context) {
         Verify(context, largeEquation, 0);
         Verify(context, largeEquation, 1);
     }
+    RunInShaderDetileTests(context);
 }
