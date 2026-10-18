@@ -1277,7 +1277,7 @@ void verifyWaterfallImageTable() {
     const auto& snapshot = compiled.capture->snapshot.tables.tables.at(0);
     require(snapshot.keys == Abi::MaxKeys && (snapshot.codes[2] & Abi::PoisonFlag) == 0u && (snapshot.codes[4] & Abi::PoisonFlag) == 0u, "waterfall image table: the snapshot failed");
     auto boundedCode = code;
-    boundedCode.insert(boundedCode.begin() + 4, {0x7e020284u, 0x02000282u});
+    boundedCode.insert(boundedCode.begin() + 4, {0x7d8a0080u, 0x7e020284u, 0x02000282u});
     auto boundedRequest = TableRequest(boundedCode, userData);
     boundedRequest.shader.codeAddress = 0x39000u;
     const auto boundedPlan = GetResourcePlan(boundedRequest);
