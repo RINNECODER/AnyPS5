@@ -45,6 +45,17 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/core/Decoder/Png ${CMAKE_BINARY_DIR}/Decode
 # AOT compiler, native image and native runtime (core/aot/CMakeLists.txt).
 add_subdirectory(${CMAKE_SOURCE_DIR}/core/aot)
 
+# FreeType backs libSceFont and libSceFontFt (RosettaGraphics.cmake builds it for the Rosetta libs).
+# The native arm64 path needs the same target so those libraries get its include directories.
+set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
+set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/3rdparty/freetype ${CMAKE_BINARY_DIR}/3rdparty/freetype EXCLUDE_FROM_ALL)
+set_target_properties(freetype PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Component targets (libc, libkernel, libSceAgc, ...). EXCLUDE_FROM_ALL keeps the .prx targets
 # from building; core/libs/native reads their SOURCES into anyps5_native_graphics.
 add_subdirectory(${CMAKE_SOURCE_DIR}/core/libs EXCLUDE_FROM_ALL)
