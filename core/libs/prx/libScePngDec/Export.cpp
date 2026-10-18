@@ -8,6 +8,7 @@
 #include <utility>
 #include "Decoder/Png.hpp"
 #include "SceTypes.hpp"
+#include "prx/libc/include/General.hpp"
 
 static_assert(sizeof(PngDecCreateParam) == 0xC);
 static_assert(sizeof(PngDecParseParam) == 0x10);
@@ -184,6 +185,14 @@ int32_t APS5_VABI scePngDecQueryMemorySize(const PngDecCreateParam* param) {
     const std::int32_t result = validateCreateParam(param);
     if (result != 0) return result;
     return static_cast<std::int32_t>(MEMORY_SIZE);
+}
+
+int32_t APS5_VABI scePngDecDecodeWithInputControl(void* handle, const void* param, void* image_info) {
+    (void)handle;
+    (void)param;
+    (void)image_info;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 }

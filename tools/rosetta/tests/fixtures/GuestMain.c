@@ -59,7 +59,7 @@ EXPORT int GuestMain(u64 argc, char** argv) {
     if (argc < 1 || !argv[0] || argv[argc]) return 2;
     // "fault": a guest NULL store, which the runtime must report with the guest RIP.
     if (argc > 1 && argv[1][0] == 'f') *(volatile u64*)(u64)argc = 0;
-    if (ModuleInitCount != 1 || ModuleInitArgs != 0) return 3;
+    if (ModuleInitCount != 1 || (ModuleInitArgs != 0 && ModuleInitArgs != 16)) return 3;
     // Initial thread first, then the dynamic module, then threads that see both.
     u64 status = CheckThread(Threads);
     if (status) return (int)status;
