@@ -78,8 +78,9 @@ void enqueue(LibraryStore& store, VkDevice device, std::function<void()> job) {
         std::thread(runJobs, std::ref(store)).detach();
         store.started = true;
     }
-    ++store.pending[device];
+    auto& pending = store.pending[device];
     store.jobs.emplace_back(device, std::move(job));
+    ++pending;
     store.work.notify_one();
 }
 

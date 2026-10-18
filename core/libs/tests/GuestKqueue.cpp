@@ -295,6 +295,14 @@ static void LowWaterMarks() {
     Require(Wait(kq, events, 4) == 1 && events[0].filter == EvfiltWrite);
     Require(Throws([kq, &pair] { Apply(kq, Change(static_cast<std::uintptr_t>(pair[1]), EvfiltWrite, EvAdd, NoteLowat, 2)); }));
     Require(Throws([kq, reader] { Apply(kq, Change(reader, EvfiltRead, EvAdd, NoteLowat, 0)); }));
+    int datagrams[2];
+    Require(socketpair_nid_postfix(Unix, 2, 0, datagrams) == 0);
+    const auto datagram = static_cast<std::uintptr_t>(datagrams[0]);
+    Require(Throws([kq, datagram] { Apply(kq, Change(datagram, EvfiltRead, EvAdd, NoteLowat, 2)); }));
+    Require(Apply(kq, Change(datagram, EvfiltRead, EvAdd, NoteLowat, 1)) == 0);
+    Require(send_nid_postfix(datagrams[1], "f", 1, 0) == 1);
+    Require(Poll(kq, events, 4) == 1 && events[0].ident == datagram && events[0].data == 1);
+    Require(close_nid_postfix(datagrams[0]) == 0 && close_nid_postfix(datagrams[1]) == 0);
     Require(close_nid_postfix(pair[1]) == 0);
     Require(Poll(kq, events, 4) == 1 && events[0].ident == reader && (events[0].flags & EvEof) != 0);
     Require(close_nid_postfix(pair[0]) == 0);

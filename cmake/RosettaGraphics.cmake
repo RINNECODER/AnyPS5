@@ -64,6 +64,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
     ${rosettaAgcDriver}/Execution/src/DisplayBuffer.cpp
     ${rosettaAgcDriver}/Execution/src/DisplayFormat.cpp
     ${rosettaAgcDriver}/Execution/Metal/MetalDriver.mm
+    ${rosettaAgcDriver}/Execution/src/Driver/Shaders/ShaderRegistryChunks.cpp
     ${rosettaAgcDriver}/Execution/Metal/MetalPacketExecution.mm
     ${rosettaAgcDriver}/Execution/Metal/MetalDrawAhead.mm
     ${rosettaAgcDriver}/Execution/Metal/DirectDriver.mm

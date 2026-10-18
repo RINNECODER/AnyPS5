@@ -145,6 +145,13 @@ std::vector<std::uint8_t> _rdpidReplacement(const DecodedInstruction& instr) {
     return bytes;
 }
 
+std::vector<std::uint8_t> _rdtscpReplacement(const DecodedInstruction& instr) {
+    std::vector<std::uint8_t> bytes(instr.Data, instr.Data + instr.Length);
+    bytes.push_back(0xB9);
+    bytes.insert(bytes.end(), 4, 0);
+    return bytes;
+}
+
 bool _validWait(const DecodedInstruction& instr) {
     const auto opcode = instr.Data + instr.OpcodeOffset();
     return instr.Length <= kMaxInstructionLength && std::find(instr.Data, opcode, X64OpcodeConstants::PrefixLock) == opcode;
@@ -244,6 +251,8 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::_matchRosetta(const D
         return _trampoline(kRdpid.Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { body.Raw(_rdpidReplacement(instr)); }), true);
     if (instr.IsCpuid())
         return _trampoline(kCpuid.Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { body.Raw(RosettaCpuid::StubBody()); }), true);
+    if (instr.IsRdtscp())
+        return _trampoline(kRdtscp.Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { body.Raw(_rdtscpReplacement(instr)); }), true);
     if (const auto wide = DecodeVexWideStore(instr.Data, instr.Length))
         return _trampoline(kWideStore.Name, instr.Length, _outOfLine(instr.Length, trailing, [&](StubBodyBuilder& body) { _wideStoreLowering.EmitOutOfLine(body, *wide); }), false, true);
     if (const auto compare = DecodeScalarCompare(instr.Data, instr.Length))
@@ -291,6 +300,10 @@ const char* Amd64OnlyInstructionMatcher::_emitOutOfLine(StubBodyBuilder& body, c
         EmitAdx(body, *adx);
         return adx->Overflow ? "ADOX" : "ADCX";
     }
+    if (_target == Amd64OnlyTarget::Rosetta && instr.IsRdtscp()) {
+        body.Raw(_rdtscpReplacement(instr));
+        return kRdtscp.Name;
+    }
     if (const auto wide = _target == Amd64OnlyTarget::Rosetta ? DecodeVexWideStore(instr.Data, instr.Length) : std::nullopt) {
         _wideStoreLowering.EmitOutOfLine(body, *wide);
         return kWideStore.Name;
@@ -329,7 +342,7 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
     const DecodedInstruction first{instructions.front().data(), instructions.front().size()};
     const auto compare = DecodeScalarCompare(first.Data, first.Length);
     const bool optional = DecodeReciprocal(first.Data, first.Length).has_value()
-        || (_target == Amd64OnlyTarget::Rosetta && (first.IsRdpid() || first.IsCpuid() || compare.has_value()));
+        || (_target == Amd64OnlyTarget::Rosetta && (first.IsRdpid() || first.IsRdtscp() || first.IsCpuid() || compare.has_value()));
     return _trampoline(name, instructions.front().size(), body.Finish(), optional);
 }
 

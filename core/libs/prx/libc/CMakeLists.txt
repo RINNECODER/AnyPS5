@@ -1,4 +1,15 @@
 if(BUILD_TESTING)
+    add_test_executable(guest_binary_word_tests ${LIBS_INCLUDE_DIR}/tests/GuestBinaryWord.cpp)
+    target_include_directories(guest_binary_word_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_binary_word_tests PRIVATE libc)
+    configure_windows_unwind(guest_binary_word_tests)
+    add_test(NAME guest_binary_word COMMAND guest_binary_word_tests guest_binary_word.tmp)
+    set_tests_properties(guest_binary_word PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(guest_binary_word PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
     add_test_executable(guest_safe_error_tests ${LIBS_INCLUDE_DIR}/tests/GuestSafeErrors.cpp)
     target_include_directories(guest_safe_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_safe_error_tests PRIVATE libc)
@@ -71,6 +82,8 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/exception/Exports.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/BinaryWordIo.cpp
 )
+
+target_sources(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/BinaryWordIo.cpp)
 
 target_include_directories(libc PRIVATE
         ${LIBS_INCLUDE_DIR}
@@ -485,8 +498,9 @@ if(BUILD_TESTING)
     configure_windows_unwind(guest_standard_stream_tests)
     add_test(NAME guest_standard_streams COMMAND guest_standard_stream_tests)
     add_test(NAME guest_standard_streams_closed_stdout COMMAND guest_standard_stream_tests --closed-stdout)
+    add_test(NAME guest_standard_streams_exclusive_stdout COMMAND guest_standard_stream_tests --exclusive-stdout)
     if(WIN32)
-        set_tests_properties(guest_standard_streams guest_standard_streams_closed_stdout PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_standard_streams guest_standard_streams_closed_stdout guest_standard_streams_exclusive_stdout PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(file_streams_tests ${LIBS_INCLUDE_DIR}/tests/FileStreams.cpp)

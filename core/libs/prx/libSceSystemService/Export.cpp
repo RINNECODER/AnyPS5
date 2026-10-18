@@ -122,6 +122,7 @@ int APS5_VABI sceSystemServiceLoadExec(const char* path, const char* const* argu
     if (arguments != nullptr && arguments[0] != nullptr) {
         NotImplemented_nid_no_patch("sceSystemServiceLoadExec: arguments for the relaunched executable");
     }
+    LibcStartExit_nid_postfix();
     LibcRunShutdown_nid_postfix();
     RelaunchHostExecutable();
     std::exit(0);

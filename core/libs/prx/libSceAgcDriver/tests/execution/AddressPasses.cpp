@@ -62,6 +62,8 @@ alignas(256) constexpr std::array<std::uint32_t, 40> VertexCodeUser8 = [] {
 }();
 
 alignas(256) constexpr std::array<std::uint32_t, 11> PixelRead{0x7e1a0280u, 0xdc308000u, 0x0c02000du, 0xbf8c3f70u, 0x7e10030cu, 0x7e120280u, 0x7e140280u, 0x7e160280u, 0xf800180fu, 0x0b0a0908u, 0xbf810000u};
+alignas(256) constexpr std::array<std::uint32_t, 9> PixelColorWord{0x7e100280u, 0x7e120280u, 0x7e1402ffu, 0x3f008081u, 0x7e1602ffu, 0x3e7cfcfdu, 0xf800180fu, 0x0b0a0908u, 0xbf810000u};
+alignas(256) constexpr std::array<std::uint32_t, 11> PixelDescriptorStore{0x7e0202f2u, 0x7e040280u, 0xe0701000u, 0x80010102u, 0x7e1002f2u, 0x7e1202f2u, 0x7e1402f2u, 0x7e1602f2u, 0xf800180fu, 0x0b0a0908u, 0xbf810000u};
 alignas(256) constexpr std::array<std::uint32_t, 11> PixelStore{0x7e1a0280u, 0x7e1802f2u, 0xdc708000u, 0x00020c0du, 0x7e1002f2u, 0x7e1202f2u, 0x7e1402f2u, 0x7e1602f2u, 0xf800180fu, 0x0b0a0908u, 0xbf810000u};
 
 struct Header {
@@ -72,6 +74,8 @@ struct Header {
 alignas(8) Header VertexHeader{};
 alignas(8) Header ReadHeader{};
 alignas(8) Header StoreHeader{};
+alignas(8) Header DescriptorStoreHeader{};
+alignas(8) Header ColorWordHeader{};
 
 void Register(Header& header, const std::uint32_t* code, std::size_t bytes, std::uint8_t type) {
     header.shader.file_header = 0x34333231u;
@@ -136,9 +140,10 @@ void Append(std::vector<std::uint32_t>& commands, std::uint32_t opcode, std::ini
 struct Step {
     const std::uint32_t* pixel;
     std::uint64_t pointer;
+    std::array<std::uint32_t, 4> descriptor{};
 };
 
-void Submit(const GuestBlock& vertices, const GuestBlock& target, std::initializer_list<Step> steps) {
+void Submit(const GuestBlock& vertices, const GuestBlock& target, std::initializer_list<Step> steps, bool linear = false) {
     const auto color = target.At(ColorOffset);
     const auto vertex = reinterpret_cast<std::uintptr_t>(VertexCodeUser8.data());
     const auto table = vertices.At(VertexTableOffset);
@@ -153,7 +158,7 @@ void Submit(const GuestBlock& vertices, const GuestBlock& target, std::initializ
         {0x8e, 0xf}, {0x8f, 0xf}, {0x202, 0xcc0010},
         {0x1c4, 0}, {0x1c5, 9}, {0x1c3, 4}, {0x31c, 0x28028},
         {0x31b, 0}, {0x31d, 0}, {0x3b0, (63u << 14u) | 3u},
-        {0x3b8, 0x9000000u | (RenderTargetTileMode << 14u)}, {0x1e0, 0},
+        {0x3b8, linear ? 0x9000000u : 0x9000000u | (RenderTargetTileMode << 14u)}, {0x1e0, 0},
         {0xc, 0}, {0xd, 0x40040},
         {0x81, 0x80000000}, {0x82, 0x40040},
         {0x90, 0x80000000}, {0x91, 0x40040},
@@ -173,6 +178,7 @@ void Submit(const GuestBlock& vertices, const GuestBlock& target, std::initializ
         const auto pixel = reinterpret_cast<std::uintptr_t>(step.pixel);
         Append(commands, 0x76, {0x008, static_cast<std::uint32_t>(pixel >> 8u), static_cast<std::uint32_t>(pixel >> 40u)});
         Append(commands, 0x76, {0x00e, static_cast<std::uint32_t>(step.pointer), static_cast<std::uint32_t>(step.pointer >> 32u)});
+        Append(commands, 0x76, {0x010, step.descriptor[0], step.descriptor[1], step.descriptor[2], step.descriptor[3]});
         Append(commands, 0x2d, {3, 2});
     }
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
@@ -184,12 +190,20 @@ AgcDriver::Graphics::DrawPassCounts AddressDraws() {
     return AgcDriver::Graphics::DrawPassTotals()[1];
 }
 
+AgcDriver::Graphics::DrawPassCounts OtherDraws() {
+    return AgcDriver::Graphics::DrawPassTotals()[0];
+}
+
+std::array<std::uint32_t, 4> StoredDword(const GuestBlock& data, std::size_t offset) {
+    return BufferDescriptor(data.At(offset), 0, 4, 0x31016facu);
+}
+
 void Expect(bool condition, const std::string& what) {
     if (!condition) throw std::runtime_error("address passes: " + what);
 }
 
-std::string Counts(const AgcDriver::Graphics::DrawPassCounts& before, const AgcDriver::Graphics::DrawPassCounts& after) {
-    return std::to_string(after.draws - before.draws) + " address-based draws, " + std::to_string(after.passesBegun - before.passesBegun) + " began a pass, " + std::to_string(after.passesContinued - before.passesContinued) + " continued one";
+std::string Counts(const AgcDriver::Graphics::DrawPassCounts& before, const AgcDriver::Graphics::DrawPassCounts& after, const char* draws = "address-based draws") {
+    return std::to_string(after.draws - before.draws) + " " + draws + ", " + std::to_string(after.passesBegun - before.passesBegun) + " began a pass, " + std::to_string(after.passesContinued - before.passesContinued) + " continued one";
 }
 
 void ReadersShareAPass(const GuestBlock& vertices, const GuestBlock& data, const GuestBlock& target) {
@@ -225,6 +239,52 @@ void ReadSeesStore(const GuestBlock& vertices, const GuestBlock& data, const Gue
     Expect(after.passesBegun - before.passesBegun == 2, "a draw reading through the table continued the pass of a draw that stored through it: " + Counts(before, after));
 }
 
+void ReadSeesDescriptorStore(const GuestBlock& vertices, const GuestBlock& data, const GuestBlock& target) {
+    std::memset(target.Bytes(ColorOffset), 0, ColorBytes);
+    std::memset(data.Bytes(64), 0, 4);
+    const auto before = AddressDraws();
+    const auto otherBefore = OtherDraws();
+    Submit(vertices, target, {{PixelDescriptorStore.data(), 0, StoredDword(data, 64)}, {PixelRead.data(), data.At(64)}});
+    const auto after = AddressDraws();
+    const auto otherAfter = OtherDraws();
+    AgcDriver::GuestMemory::FlushGpuWrites(static_cast<std::uintptr_t>(target.At(ColorOffset)), ColorBytes);
+    float stored = 0;
+    std::memcpy(&stored, data.Bytes(64), sizeof(stored));
+    unsigned brightest = 0;
+    for (std::size_t i = 0; i < ColorBytes; ++i) brightest = std::max(brightest, static_cast<unsigned>(target.Bytes(ColorOffset)[i]));
+    std::printf("a draw reading through the table what the previous draw stored through a buffer descriptor: stored %g, brightest color byte %u, %s; the storing draw: %s\n", static_cast<double>(stored), brightest, Counts(before, after).c_str(), Counts(otherBefore, otherAfter, "other draws").c_str());
+    Expect(otherAfter.draws - otherBefore.draws == 1, "the draw storing through a buffer descriptor was taken for an address-based one: " + Counts(otherBefore, otherAfter, "other draws"));
+    Expect(stored == 1.0f, "the store through the buffer descriptor did not reach guest memory");
+    Expect(after.draws - before.draws == 1 && after.passesBegun - before.passesBegun == 1, "a draw reading through the table continued the pass of a draw that stored through a buffer descriptor: " + Counts(before, after));
+    Expect(brightest == 255u, "the read through the table did not see the previous draw's store through a buffer descriptor");
+}
+
+void DescriptorStoreAfterTableReadBreaks(const GuestBlock& vertices, const GuestBlock& data, const GuestBlock& target) {
+    const auto before = AddressDraws();
+    const auto otherBefore = OtherDraws();
+    Submit(vertices, target, {{PixelRead.data(), data.At(80)}, {PixelDescriptorStore.data(), 0, StoredDword(data, 80)}});
+    const auto after = AddressDraws();
+    const auto otherAfter = OtherDraws();
+    std::printf("a draw storing through a buffer descriptor after a draw reading through the table: %s; the storing draw: %s\n", Counts(before, after).c_str(), Counts(otherBefore, otherAfter, "other draws").c_str());
+    Expect(after.draws - before.draws == 1 && otherAfter.draws - otherBefore.draws == 1, "the reading and the storing draw were not one address-based and one other draw");
+    Expect(otherAfter.passesBegun - otherBefore.passesBegun == 1, "a draw storing through a buffer descriptor continued the pass of a draw that read through the table: " + Counts(otherBefore, otherAfter, "other draws"));
+}
+
+void TargetReadAsWhenSplit(const GuestBlock& vertices, const GuestBlock& target, bool linear) {
+    const bool split = std::getenv("APS5_NO_ADDRESS_READ_PASSES") != nullptr;
+    Submit(vertices, target, {{PixelRead.data(), target.At(ColorOffset)}}, linear);
+    std::memset(target.Bytes(ColorOffset), 0, ColorBytes);
+    const auto before = AddressDraws();
+    Submit(vertices, target, {{PixelColorWord.data(), 0}, {PixelRead.data(), target.At(ColorOffset)}}, linear);
+    const auto after = AddressDraws();
+    AgcDriver::GuestMemory::FlushGpuWrites(static_cast<std::uintptr_t>(target.At(ColorOffset)), ColorBytes);
+    const unsigned red = target.Bytes(ColorOffset)[0];
+    const auto what = std::string(linear ? "linear" : "tiled") + " target" + (split ? " with APS5_NO_ADDRESS_READ_PASSES=1" : "");
+    std::printf("%s: a draw reading through the table the target the previous draw rendered read %s (red byte %u), %s\n", what.c_str(), red == 255u ? "that draw's color" : "the bytes before it", red, Counts(before, after).c_str());
+    Expect(red == (linear ? 255u : 0u), what + ": a draw reading through the table the target the previous draw rendered read " + (red == 255u ? "that draw's color" : "the bytes before it") + "; whether or not the pass breaks between them, it reads " + (linear ? "that draw's color (stored back after the draw)" : "the bytes before it (no write-back between them)"));
+    if (!linear && !split) Expect(after.passesContinued - before.passesContinued == 1, what + ": the reading draw did not continue the rendering draw's pass, so the case does not test it: " + Counts(before, after));
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -241,6 +301,8 @@ int main(int argc, char** argv) {
         Register(VertexHeader, VertexCodeUser8.data(), sizeof(VertexCodeUser8), 2);
         Register(ReadHeader, PixelRead.data(), sizeof(PixelRead), 1);
         Register(StoreHeader, PixelStore.data(), sizeof(PixelStore), 1);
+        Register(DescriptorStoreHeader, PixelDescriptorStore.data(), sizeof(PixelDescriptorStore), 1);
+        Register(ColorWordHeader, PixelColorWord.data(), sizeof(PixelColorWord), 1);
         GuestBlock readOnlyVertices;
         GuestBlock data;
         GuestBlock target;
@@ -252,6 +314,12 @@ int main(int argc, char** argv) {
         if (only.empty() || only == "--readers") ReadersShareAPass(readOnlyVertices, data, target);
         if (only.empty() || only == "--store-after-read") StoreAfterTableReadBreaks(readOnlyVertices, data, target);
         if (only.empty() || only == "--read-sees-store") ReadSeesStore(readOnlyVertices, data, target);
+        if (only.empty() || only == "--read-sees-descriptor-store") ReadSeesDescriptorStore(readOnlyVertices, data, target);
+        if (only.empty() || only == "--descriptor-store-after-read") DescriptorStoreAfterTableReadBreaks(readOnlyVertices, data, target);
+        if (only.empty() || only == "--targets") {
+            TargetReadAsWhenSplit(readOnlyVertices, target, false);
+            TargetReadAsWhenSplit(readOnlyVertices, target, true);
+        }
         AgcDriverShutdown_nid_postfix();
         std::puts("address passes: draws reading through the BDA table share a render pass, and a store through it still begins one");
         return 0;

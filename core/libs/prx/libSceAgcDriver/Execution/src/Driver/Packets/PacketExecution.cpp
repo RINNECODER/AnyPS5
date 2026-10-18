@@ -18,6 +18,8 @@ namespace AgcDriver::DriverDetail {
 
 namespace {
 
+constexpr std::uint32_t eopSelfSignalFlipLimit = 4;
+
 bool orderedFills() {
     static const bool ordered = std::getenv("APS5_PIPELINE_DRAIN_FILLS") == nullptr;
     return ordered;
@@ -48,6 +50,24 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
     }
 }
 
+}
+
+void Driver::deliverGuestEopInterrupt(std::uint32_t queue) {
+    if (!AgcDriverDeliverEopInterrupt(queue)) return;
+    std::lock_guard<std::mutex> lock(eopSelfSignalMutex);
+    eopSelfSignalFlips[queue] = 0;
+}
+
+void Driver::deliverFlipEopInterrupt(std::uint32_t queue) {
+    {
+        std::lock_guard<std::mutex> lock(eopSelfSignalMutex);
+        const auto latched = eopSelfSignalFlips.find(queue);
+        if (latched != eopSelfSignalFlips.end()) {
+            if (++latched->second <= eopSelfSignalFlipLimit) return;
+            eopSelfSignalFlips.erase(latched);
+        }
+    }
+    AgcDriverDeliverEopInterrupt(queue);
 }
 
 template <typename TWork>
@@ -290,10 +310,10 @@ void Driver::execute(const Submission& submission) {
                 if (localDevice != nullptr) {
                     localDevice->FlipBatches(batchesAtFlip, unsignaledAtFlip);
                     const auto queueId = submission.queue;
-                    flipInterruptDeferred = localDevice->AfterRecordedWork([queueId] { AgcDriverDeliverEopInterrupt(queueId); }, false);
+                    flipInterruptDeferred = localDevice->AfterRecordedWork([this, queueId] { deliverFlipEopInterrupt(queueId); }, false);
                 }
             }
-            if (!flipInterruptDeferred) AgcDriverDeliverEopInterrupt(submission.queue);
+            if (!flipInterruptDeferred) deliverFlipEopInterrupt(submission.queue);
             ++flipsCounted;
             if (batchesAtFlip != 0) flipSerial = batchesAtFlip;
             flipBatchesUnsignaled += unsignaledAtFlip;
@@ -392,7 +412,7 @@ void Driver::execute(const Submission& submission) {
                     if (const auto label = Pm4::DecodeLabelWrite(packet)) noteLabelStore(label->address, label->Bytes(), ++eventSerial, submission.queue);
                 }
             }
-            if (endOfPipeInterrupt && !interruptDeferred) AgcDriverDeliverEopInterrupt(submission.queue);
+            if (endOfPipeInterrupt && !interruptDeferred) deliverGuestEopInterrupt(submission.queue);
         }
         if (drawPacket || (sampleDump && wroteOnGpu)) Graphics::Recorder::CountRecordedWork();
         timing.Mark(header == RenderingWaitPacketHeader ? "rendering_wait" : opcode == 0x3c || opcode == 0x93 ? "memory_wait" : opcode == 0x15 || opcode == 0x16 ? "dispatch" : drawPacket ? "draw" : "execute");
@@ -410,7 +430,10 @@ void Driver::execute(const Submission& submission) {
             return;
         }
         if ((std::atomic_ref<std::uint32_t>(*const_cast<std::uint32_t*>(submission.rewindTail - 1)).load(std::memory_order_acquire) & 0x80000000u) != 0) {
-            DrawPipeline::Queue0().Enqueue([this] { submitOpenWork(); }, {});
+            DrawPipeline::Queue0().Enqueue([this] {
+                submitOpenWork();
+                wakeQueueZeroForCompletions();
+            }, {});
             executeRewindTail(submission);
             return;
         }

@@ -588,6 +588,7 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
                 physical.samplerCoordinatesIgnored.push_back(unnormalized.samplersIgnoreCoordinates.at(resource));
                 physical.resourceSources.push_back(info.samplers.at(resource).source);
                 physical.samplerPixelProof.push_back((originals[element] & 1u) == 0u ? pixelProofs.at(resource) : std::vector<PixelSamplerProof>{});
+                physical.samplerCoordinatesIgnored.push_back(unnormalized.samplersIgnoreCoordinates.at(resource));
                 const auto mode = 1u << (originals[element] & 1u);
                 physical.samplerIntegerBorder.push_back((samplerIntegerModes.at(resource) & mode) != 0u && (samplerFloatModes.at(resource) & mode) == 0u);
                 if ((originals[element] & 1u) != 0u && !inactive[element]) entry.samplerFilterElements.push_back(element);

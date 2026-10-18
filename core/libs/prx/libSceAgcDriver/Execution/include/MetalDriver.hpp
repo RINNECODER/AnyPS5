@@ -58,7 +58,7 @@ struct SkippedWorkDiagnostics {
 
 class MetalDriver {
 public:
-    using EopInterrupt = std::function<void(std::uint32_t)>;
+    using EopInterrupt = std::function<bool(std::uint32_t)>;
     MetalDriver();
     ~MetalDriver();
     MetalDriver(const MetalDriver&) = delete;

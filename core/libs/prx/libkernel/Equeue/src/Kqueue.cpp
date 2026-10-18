@@ -134,6 +134,9 @@ std::int64_t DescriptorLowWater(const KernelEvent& change) {
     if (change.filter == EVFILT_WRITE && change.data > 1) {
         NotImplemented_nid_no_patch("kevent: NOTE_LOWAT above 1 on EVFILT_WRITE");
     }
+    if (change.data > 1 && GuestSockets::Type(static_cast<int>(change.ident)) != 1) {
+        NotImplemented_nid_no_patch("kevent: NOTE_LOWAT above 1 on a socket that is not a stream");
+    }
     return change.data;
 }
 
@@ -312,6 +315,12 @@ std::optional<std::uint64_t> ScanDeadline(const KernelTimespec& timeout) {
 
 bool IsKqueueDescriptor(int descriptor) {
     return static_cast<bool>(FindKqueue(descriptor));
+}
+
+std::optional<bool> KqueueReadable(int descriptor) {
+    const auto queue = FindKqueue(descriptor);
+    if (!queue) return std::nullopt;
+    return queue->HasTriggeredEvents();
 }
 
 void KqueueDescriptorClosed(int descriptor) {

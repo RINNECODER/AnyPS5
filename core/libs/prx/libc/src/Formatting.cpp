@@ -38,7 +38,8 @@ bool RequiresGuestFormatting(const char* format) {
         ++format;
         if (*format == '%') { ++format; continue; }
         while (*format && std::strchr("-+ #0'0123456789.*$", *format)) ++format;
-        if (*format == 'S' || *format == 'C' || *format == 'm' || *format == 'p' || (*format == 'l' && (format[1] == 's' || format[1] == 'c'))) return true;
+        if (*format == 'S' || *format == 'C' || *format == 'm' || *format == 'p' ||
+            (*format == 'l' && (format[1] == 's' || format[1] == 'c' || format[1] == 'p'))) return true;
         if (*format) ++format;
     }
     return false;
