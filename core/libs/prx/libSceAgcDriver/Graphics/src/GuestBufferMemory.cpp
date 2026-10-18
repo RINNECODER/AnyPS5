@@ -1788,6 +1788,9 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
         } catch (const std::exception& error) {
             std::fprintf(stderr, "[gpu] lease wait failed: %s\n", error.what());
         }
+#ifdef _WIN32
+        if (releaseSettleRetired(imports, address, end)) retiredImport = true;
+#endif
     }
     auto& state = Leases();
     std::lock_guard lock(state.mutex);
