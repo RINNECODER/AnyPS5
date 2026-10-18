@@ -5360,6 +5360,27 @@ void ProvokingVertexTests() {
         if (generated == 1) state.stages.tessellation.emplace();
         expectFailure([&] { ValidateProvokingVertex(supported, state); }, "last provoking vertex is unsupported for generated primitive pipelines");
     }
+    auto meshDraw = last;
+    meshDraw.stages.path = ShaderPath::Geometry;
+    meshDraw.stages.mesh.emplace();
+    meshDraw.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    for (const auto topology : {VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST}) {
+        meshDraw.topology = topology;
+        for (const auto& drawn : {std::span<const CompiledShader>{}, std::span<const CompiledShader>(flatShaders), std::span<const CompiledShader>(flatP10Shaders), std::span<const CompiledShader>(smoothShaders), std::span<const CompiledShader>(slotShaders)}) ValidateProvokingVertex(supported, meshDraw, drawn);
+    }
+    for (const auto topology : {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN}) {
+        meshDraw.topology = topology;
+        expectFailure([&] { ValidateProvokingVertex(supported, meshDraw, flatShaders); }, "last provoking vertex is unsupported for triangle strips or fans assembled for a geometry program");
+        auto firstDraw = meshDraw;
+        firstDraw.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+        ValidateProvokingVertex(supported, firstDraw, flatShaders);
+    }
+    meshDraw.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    expectFailure([&] { ValidateProvokingVertex(unsupported, meshDraw, flatShaders); }, "last provoking vertex requires VK_EXT_provoking_vertex with provokingVertexLast enabled");
+    fragment.fragmentParameters = {{0, 0, true, true, false, false, false}};
+    expectFailure([&] { ValidateProvokingVertex(supported, meshDraw, shaders); }, "last provoking vertex with explicit per-vertex flat interpolation is unsupported");
+    meshDraw.stages.tessellation.emplace();
+    expectFailure([&] { ValidateProvokingVertex(supported, meshDraw, flatShaders); }, "last provoking vertex is unsupported for generated primitive pipelines");
     auto rectangle = last;
     rectangle.rectList = true;
     rectangle.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
