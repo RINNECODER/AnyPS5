@@ -5460,12 +5460,12 @@ void integerClearTests(const Device& device) {
     std::cout << "integer storage clears: " << tested << " formats ok\n";
 }
 
-void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) {
+bool clearHandOverTests(const Device& device, Recorder& recorder, bool watched) {
     const auto& base = device.GetContext();
     const std::string what = watched ? "clear-key hand-over (watched)" : "clear-key hand-over";
     if (base.hostImportAlignment == 0) {
         std::cout << "host imports unavailable: " << what << " not tested\n";
-        return;
+        return false;
     }
     constexpr std::size_t surfaceA = 256 * 256 * 4;
     constexpr std::size_t surfaceB = 128 * 128 * 8;
@@ -5476,7 +5476,7 @@ void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) 
 #ifndef _WIN32
     if (watched && decided == ImportWatch::Unwatch) {
         std::cout << "host imports are compared on this device: " << what << " not tested\n";
-        return;
+        return false;
     }
 #endif
     void* block = nullptr;
@@ -5484,7 +5484,7 @@ void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) 
         block = AllocateWatched(bytes, 65536);
         if (block == nullptr) {
             std::cout << "no write watching: " << what << " not tested\n";
-            return;
+            return false;
         }
     } else {
 #ifdef _WIN32
@@ -5523,11 +5523,11 @@ void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) 
     } unregister{base, block, address, watched};
     if (HostImportFor(base, address, bytes) == nullptr) {
         std::cout << "host import of the clear-key hand-over block refused: " << what << " not tested\n";
-        return;
+        return false;
     }
     if (watched && !AgcDriver::GuestMemory::Watched(address, bytes)) {
         std::cout << "the imported block left the write watch: " << what << " not tested\n";
-        return;
+        return false;
     }
     TextureDetiler detiler(base);
     auto context = base;
@@ -5667,6 +5667,7 @@ void clearHandOverTests(const Device& device, Recorder& recorder, bool watched) 
         if (order == Order::ReadFirst) Require(on.superseded <= 1, name + ": a unit stored by the read was dropped again");
     }
     std::cout << what << ": ok\n";
+    return true;
 }
 
 void denormalClearTests(const Device& device, Recorder& recorder) {
@@ -6067,8 +6068,7 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--clear-hand-over-only") {
             clearHandOverTests(device, recorder, false);
-            clearHandOverTests(device, recorder, true);
-            return 0;
+            return clearHandOverTests(device, recorder, true) ? 0 : 77;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--integer-clear-only") {
             integerClearTests(device);
