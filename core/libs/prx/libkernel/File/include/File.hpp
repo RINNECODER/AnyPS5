@@ -21,10 +21,9 @@ int APS5_VABI sceKernelFcntl(int d, int command, ...);
 #ifdef _WIN32
 std::int64_t NativePositioned_nid_no_patch(int descriptor, void* buf, std::size_t nbytes, std::int64_t offset, bool write);
 #endif
+bool DescriptorIsOpen_nid_no_patch(int descriptor);
 
 }
-
-bool DescriptorIsOpen_nid_no_patch(int descriptor);
 
 namespace File {
 int HostStandardError();
