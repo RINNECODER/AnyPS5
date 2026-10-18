@@ -212,6 +212,10 @@ static void ParseAndRoundTrip() {
         Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, invalid, std::strlen(invalid)) < 0);
         Require(_ZNK3sce4Json5Value7getTypeEv(&root) == TypeObject && _ZNK3sce4Json5Value5countEv(&root) == 8);
     }
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, nullptr, 0) < 0);
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, nullptr, 10) < 0);
+    Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, "", 0) < 0);
+    Require(_ZNK3sce4Json5Value7getTypeEv(&root) == TypeObject && _ZNK3sce4Json5Value5countEv(&root) == 8);
     for (const char* overflow : {"1e309", "[-1e309]", "{\"a\":[1,1e400]}"}) {
         bool unverified = false;
         try {
