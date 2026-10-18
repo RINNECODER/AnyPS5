@@ -167,6 +167,16 @@ int main() {
     piece = {whole, sizeof(whole)};
     message.flags = -1;
     Require(recvmsg_nid_postfix(pair[1], &message, 0) == 4 && message.flags == 0 && std::memcmp(whole, "next", 4) == 0);
+    Require(socketpair_nid_postfix(Unix, Datagram, 0, pair) == 0);
+    Require(send_nid_postfix(pair[0], "x", 1, 0) == 1);
+    Msghdr forgedIov{nullptr, 0, reinterpret_cast<Iovec*>(0x1), 1, nullptr, 0, -1};
+    Require(recvmsg_nid_postfix(pair[1], &forgedIov, 0) == -1 && *__error_nid_postfix() == 14);
+    Iovec forgedBase{reinterpret_cast<char*>(0x1), 16};
+    Msghdr forgedOutput{nullptr, 0, &forgedBase, 1, nullptr, 0, -1};
+    Require(recvmsg_nid_postfix(pair[1], &forgedOutput, 0) == -1 && *__error_nid_postfix() == 14);
+    Iovec good{part, sizeof(part)};
+    Msghdr forgedName{reinterpret_cast<char*>(0x1), 16, &good, 1, nullptr, 0, -1};
+    Require(recvmsg_nid_postfix(pair[1], &forgedName, 0) == -1 && *__error_nid_postfix() == 14);
     Require(close_nid_postfix(pair[0]) == 0 && close_nid_postfix(pair[1]) == 0);
 #endif
 

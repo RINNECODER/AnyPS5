@@ -15,6 +15,7 @@
 #include <poll.h>
 #include <unistd.h>
 #include <cerrno>
+#include <sys/mman.h>
 #endif
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
@@ -44,6 +45,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <deque>
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 namespace {
@@ -1240,15 +1242,59 @@ std::int64_t APS5_VABI sendmsg_nid_postfix(int descriptor, const GuestMsghdr* me
     }
     return sendto_nid_postfix(descriptor, buffer.data(), buffer.size(), flags, message->name, message->name ? message->nameLength : 0u);
 }
+static bool CommittedRange(const void* pointer, std::size_t bytes) {
+    if (bytes == 0) return true;
+    if (pointer == nullptr) return false;
+    const auto start = reinterpret_cast<std::uintptr_t>(pointer);
+    if (start + bytes < start) return false;
+#ifdef _WIN32
+    auto address = start & ~static_cast<std::uintptr_t>(0xFFF);
+    const auto end = start + bytes;
+    while (address < end) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(address), &info, sizeof(info)) == 0) return false;
+        if (info.State != MEM_COMMIT) return false;
+        address = reinterpret_cast<std::uintptr_t>(info.BaseAddress) + info.RegionSize;
+    }
+    return true;
+#else
+    const long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) return false;
+    const auto unit = static_cast<std::uintptr_t>(page);
+    const auto end = start + bytes;
+    const auto alignedEnd = (end + unit - 1) & ~(unit - 1);
+    if (alignedEnd < end) return false;
+    const auto aligned = start & ~(unit - 1);
+    const auto length = alignedEnd - aligned;
+    std::vector<unsigned char> resident((length + unit - 1) / unit);
+    return mincore(reinterpret_cast<void*>(aligned), length, resident.data()) == 0;
+#endif
+}
 std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message, int flags) {
     if (message == nullptr) return Fail(14);
+    if (!CommittedRange(message, sizeof(*message))) return Fail(14);
     const GuestArena::HostWrite messageDestination(message, sizeof(*message));
     if (!messageDestination.Open()) return Fail(14);
+    if (message->iovLength < 0 || message->iovLength > 1024) return Fail(40);
+    if (message->iovLength != 0 && !CommittedRange(message->iov, static_cast<std::size_t>(message->iovLength) * sizeof(GuestIovec))) return Fail(14);
     const auto total = MessageLength(message);
     if (total < 0) return -1;
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
     if ((flags & ~GuestReceiveFlags) != 0) return Fail(45);
+    std::deque<GuestArena::HostWrite> destinations;
+    for (int i = 0; i < message->iovLength; ++i) {
+        auto* base = message->iov[i].base;
+        const auto length = static_cast<std::size_t>(message->iov[i].length);
+        if (!CommittedRange(base, length)) return Fail(14);
+        destinations.emplace_back(base, length);
+        if (!destinations.back().Open()) return Fail(14);
+    }
+    if (message->name != nullptr) {
+        if (!CommittedRange(message->name, message->nameLength)) return Fail(14);
+        destinations.emplace_back(message->name, message->nameLength);
+        if (!destinations.back().Open()) return Fail(14);
+    }
     const bool records = socket->type == 2 || socket->type == 5;
     std::vector<char> buffer;
     try {
@@ -1276,15 +1322,11 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
     }
     std::size_t offset = 0;
     for (int i = 0; i < message->iovLength && offset < static_cast<std::size_t>(received); ++i) {
-        const GuestArena::HostWrite destination(message->iov[i].base, message->iov[i].length);
-        if (!destination.Open()) return Fail(14);
         const auto count = std::min<std::size_t>(message->iov[i].length, static_cast<std::size_t>(received) - offset);
         std::memcpy(message->iov[i].base, buffer.data() + offset, count);
         offset += count;
     }
     if (message->name != nullptr) {
-        const GuestArena::HostWrite nameDestination(message->name, message->nameLength);
-        if (!nameDestination.Open()) return Fail(14);
         if (socket->family == GuestUnix) {
             if (socket->type == 1) message->nameLength = 0; else UnnamedAddress(message->name, &message->nameLength);
         } else if (size > 0 && (native.ss_family == AF_INET || native.ss_family == AF_INET6)) {
