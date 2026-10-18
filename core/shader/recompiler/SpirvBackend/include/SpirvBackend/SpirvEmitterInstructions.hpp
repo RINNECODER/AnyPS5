@@ -350,6 +350,7 @@ void EmitSharedSrc2U64(SpirvValueEmitContext& ctx, const IrValue& inst);
 std::uint32_t EmitDataAppend(SpirvValueEmitContext& ctx, const IrValue& inst);
 std::uint32_t EmitDataConsume(SpirvValueEmitContext& ctx, const IrValue& inst);
 std::uint32_t EmitDataOrderedCount(SpirvValueEmitContext& ctx, const IrValue& inst);
+std::uint32_t EmitDataOrderedSwap(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageQueryDimensions(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageQueryLod(SpirvValueEmitContext& ctx, const IrValue& inst);
 void EmitImageRead(SpirvValueEmitContext& ctx, const IrValue& inst);

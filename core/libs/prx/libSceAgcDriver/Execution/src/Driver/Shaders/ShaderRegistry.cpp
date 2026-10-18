@@ -758,15 +758,80 @@ void trimFreedMemory() {
 class RegistrationPreparePool {
 public:
     static RegistrationPreparePool& Instance() {
-        static auto* pool = new RegistrationPreparePool();
+        static auto* pool = [] {
+            std::lock_guard lifecycle(Lifecycle());
+            auto* created = new RegistrationPreparePool(Closing() ? 0u : std::max(2u, std::thread::hardware_concurrency() / 2u));
+            PreparationSlot().store(created);
+            return created;
+        }();
         return *pool;
     }
 
-    void Submit(std::function<void()> task) {
+    static RegistrationPreparePool* Existing() {
+        return PreparationSlot().load();
+    }
+
+    static RegistrationPreparePool& Prebuild() {
+        static auto* pool = [] {
+            const char* text = std::getenv("APS5_PREBUILD_THREADS");
+            std::lock_guard lifecycle(Lifecycle());
+            auto* created = new RegistrationPreparePool(Closing() ? 0u : text != nullptr ? std::max(1u, static_cast<unsigned>(std::strtoul(text, nullptr, 10))) : 1u);
+            PrebuildSlot().store(created);
+            return created;
+        }();
+        return *pool;
+    }
+
+    static RegistrationPreparePool* ExistingPrebuild() {
+        return PrebuildSlot().load();
+    }
+
+    static unsigned LiveWorkers() {
+        return liveWorkers.load(std::memory_order_acquire);
+    }
+
+    static void CloseAll() {
+        std::array<RegistrationPreparePool*, 2> pools{};
+        {
+            std::lock_guard lifecycle(Lifecycle());
+            Closing() = true;
+            pools = {Existing(), ExistingPrebuild()};
+        }
+        for (auto* pool : pools) {
+            if (pool != nullptr) pool->Close();
+        }
+    }
+
+private:
+    static std::mutex& Lifecycle() {
+        static std::mutex lifecycle;
+        return lifecycle;
+    }
+
+    static bool& Closing() {
+        static bool closing = false;
+        return closing;
+    }
+
+    static std::atomic<RegistrationPreparePool*>& PreparationSlot() {
+        static std::atomic<RegistrationPreparePool*> slot{nullptr};
+        return slot;
+    }
+
+    static std::atomic<RegistrationPreparePool*>& PrebuildSlot() {
+        static std::atomic<RegistrationPreparePool*> slot{nullptr};
+        return slot;
+    }
+
+public:
+    void Submit(std::function<void()> task, const PreparedShaders* prepared = nullptr) {
         {
             std::unique_lock lock(mutex);
             if (threads != 0 && !closed) {
-                tasks.push_back(std::move(task));
+                const auto sequence = ++submitted;
+                if (prepared != nullptr && prepared->demanded.load()) tasks.push_front({std::move(task), prepared, sequence});
+                else tasks.push_back({std::move(task), prepared, sequence});
+                unfinished.insert(sequence);
                 lock.unlock();
                 ready.notify_one();
                 return;
@@ -775,23 +840,45 @@ public:
         task();
     }
 
-    void Close() {
+    void Prioritize(const PreparedShaders& prepared) {
+        std::lock_guard lock(mutex);
+        const auto found = std::ranges::find_if(tasks, [&](const auto& task) { return task.prepared == &prepared; });
+        if (found == tasks.end()) return;
+        if (std::getenv("APS5_TRACE_PREPARATION_WAIT") != nullptr) std::fprintf(stderr, "[shader-prepare] demanded queued task at position %zu of %zu\n", static_cast<std::size_t>(std::distance(tasks.begin(), found)), tasks.size());
+        std::rotate(tasks.begin(), found, std::next(found));
+    }
+
+    void AwaitSubmitted() {
         std::unique_lock lock(mutex);
-        closed = true;
-        idle.wait(lock, [&] { return tasks.empty() && running == 0; });
+        const auto ticket = submitted;
+        idle.wait(lock, [&] { return unfinished.empty() || *unfinished.begin() > ticket; });
+    }
+
+    void Close() {
+        std::vector<pthread_t> joined;
+        {
+            std::unique_lock lock(mutex);
+            closed = true;
+            idle.wait(lock, [&] { return tasks.empty() && running == 0; });
+            joined.swap(workers);
+        }
+        ready.notify_all();
+        for (const auto worker : joined) {
+            if (!pthread_equal(worker, pthread_self())) pthread_join(worker, nullptr);
+        }
     }
 
 private:
-    RegistrationPreparePool() {
-        const auto count = std::max(2u, std::thread::hardware_concurrency() / 2u);
+    explicit RegistrationPreparePool(unsigned count) {
         pthread_attr_t attributes;
         pthread_attr_init(&attributes);
         pthread_attr_setstacksize(&attributes, 64u << 20u);
         for (unsigned index = 0; index < count; ++index) {
             pthread_t thread;
             if (pthread_create(&thread, &attributes, &RegistrationPreparePool::Main, this) == 0) {
-                pthread_detach(thread);
+                workers.push_back(thread);
                 ++threads;
+                liveWorkers.fetch_add(1, std::memory_order_acq_rel);
             }
         }
         pthread_attr_destroy(&attributes);
@@ -800,22 +887,28 @@ private:
     static void* Main(void* argument) {
         auto& pool = *static_cast<RegistrationPreparePool*>(argument);
         for (;;) {
-            std::function<void()> task;
+            Task task;
             {
                 std::unique_lock lock(pool.mutex);
-                pool.ready.wait(lock, [&] { return !pool.tasks.empty(); });
+                pool.ready.wait(lock, [&] { return !pool.tasks.empty() || pool.closed; });
+                if (pool.tasks.empty()) {
+                    liveWorkers.fetch_sub(1, std::memory_order_acq_rel);
+                    return nullptr;
+                }
                 task = std::move(pool.tasks.front());
                 pool.tasks.pop_front();
                 ++pool.running;
             }
-            task();
-            task = nullptr;
+            const auto sequence = task.sequence;
+            task.function();
+            task = {};
             bool drained = false;
             {
                 std::lock_guard lock(pool.mutex);
                 --pool.running;
+                pool.unfinished.erase(sequence);
                 drained = pool.tasks.empty() && pool.running == 0;
-                if (drained) pool.idle.notify_all();
+                pool.idle.notify_all();
             }
 #ifdef __GLIBC__
             if (drained) trimFreedMemory();
@@ -824,12 +917,22 @@ private:
         return nullptr;
     }
 
+    struct Task {
+        std::function<void()> function;
+        const PreparedShaders* prepared = nullptr;
+        std::uint64_t sequence = 0;
+    };
+
     std::mutex mutex;
     std::condition_variable ready;
     std::condition_variable idle;
-    std::deque<std::function<void()>> tasks;
+    std::deque<Task> tasks;
+    std::vector<pthread_t> workers;
     unsigned threads = 0;
+    inline static std::atomic<unsigned> liveWorkers{0};
     unsigned running = 0;
+    std::uint64_t submitted = 0;
+    std::set<std::uint64_t> unfinished;
     bool closed = false;
 };
 
@@ -839,6 +942,7 @@ bool AsyncRegistrationPrepare() {
 }
 
 void PrepareRegisteredInBackground(std::shared_ptr<const ShaderSnapshot> snapshot, std::shared_ptr<RegisteredPreparation> plan) {
+    const auto* preparedKey = snapshot->prepared.get();
     SubmitRegistrationPreparation([snapshot = std::move(snapshot), plan = std::move(plan)] {
         PerformanceContext timingContext(FrameTiming::Preparation());
         std::vector<PreparedShaders::Entry> entries;
@@ -860,13 +964,26 @@ void PrepareRegisteredInBackground(std::shared_ptr<const ShaderSnapshot> snapsho
             prepared.pending = false;
         }
         prepared.settled.notify_all();
-    });
+    }, preparedKey);
 }
 
 }
 
-void SubmitRegistrationPreparation(std::function<void()> task) {
-    RegistrationPreparePool::Instance().Submit(std::move(task));
+void SubmitRegistrationPreparation(std::function<void()> task, const PreparedShaders* prepared) {
+    RegistrationPreparePool::Instance().Submit(std::move(task), prepared);
+}
+
+void PrioritizeRegistrationPreparation(PreparedShaders& prepared) {
+    prepared.demanded.store(true);
+    if (auto* pool = RegistrationPreparePool::Existing()) pool->Prioritize(prepared);
+}
+
+void AwaitRegistrationPreparation() {
+    if (auto* pool = RegistrationPreparePool::Existing()) pool->AwaitSubmitted();
+}
+
+void SubmitLibraryPrebuild(std::function<void()> task) {
+    RegistrationPreparePool::Prebuild().Submit(std::move(task));
 }
 
 void AwaitLibraryPrebuilds() {
@@ -874,7 +991,11 @@ void AwaitLibraryPrebuilds() {
 }
 
 void CloseRegistrationPreparation() {
-    RegistrationPreparePool::Instance().Close();
+    RegistrationPreparePool::CloseAll();
+}
+
+unsigned RegistrationPreparationThreads() {
+    return RegistrationPreparePool::LiveWorkers();
 }
 
 std::vector<PreparedGraphicsStage> PrepareGraphicsStages(const DrawDecode& decoded, const ShaderRecompiler::SpirvTarget& target) {

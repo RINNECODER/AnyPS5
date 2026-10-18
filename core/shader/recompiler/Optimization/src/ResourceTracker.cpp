@@ -1256,6 +1256,7 @@ private:
         }
         ImageResource image;
         image.singleMipPlaneBiasCompatible = m_program.Resources().stage == IrShaderStage::Pixel;
+        image.volumeArraySampleCompatible = true;
         image.source = source;
         image.firstUsePc = pc;
         image.resourceClass = resourceClass;
@@ -1293,6 +1294,7 @@ private:
         const bool cubeFaceSample = op == IrOpcode::ImageSampleRaw && (memory.imageSampleFlags == 0u || memory.imageSampleFlags == RdnaImageSampleFlagLevelZero || memory.imageSampleFlags == RdnaImageSampleFlagLod);
         const bool cubeFaceStore = op == IrOpcode::ImageWrite && !memory.imageHasMip;
         image.cubeFaceCompatible = image.cubeFaceCompatible && (cubeFaceLoad || cubeFaceSample || cubeFaceStore) && !memory.imagePacked && memory.imageByElements == 0u;
+        image.volumeArraySampleCompatible = image.volumeArraySampleCompatible && cubeFaceSample && !memory.imageR128 && !memory.imagePacked && memory.imageByElements == 0u;
         const bool flatVolumeLoad = op == IrOpcode::ImageRead && memory.imageSampleFlags == 0u;
         const bool flatVolumeSample = op == IrOpcode::ImageSampleRaw && memory.imageSampleFlags == RdnaImageSampleFlagLevelZero;
         const bool flatVolumeQuery = op == IrOpcode::ImageQueryDimensions;
