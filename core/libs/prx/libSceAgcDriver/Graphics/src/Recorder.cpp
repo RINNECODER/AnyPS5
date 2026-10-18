@@ -1826,6 +1826,13 @@ bool Recorder::MergeBarriers() {
     return merge;
 }
 
+bool Recorder::ElideCovered(CommandClass which, const BarrierMask& wanted, VkAccessFlags covered) {
+    static const bool batch = std::getenv("APS5_NO_BARRIER_BATCH") == nullptr;
+    if (!batch || !MergeBarriers() || !OrderedByTrailing(covered, wanted)) return false;
+    CountMerged(which);
+    return true;
+}
+
 void Recorder::CountMerged(CommandClass which) {
     if (!DrawOrGpuProfiled()) return;
     classMerged[static_cast<std::size_t>(which)].fetch_add(1, std::memory_order_relaxed);
