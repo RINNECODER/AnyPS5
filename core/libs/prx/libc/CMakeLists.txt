@@ -16,6 +16,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/StringExtensions.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Math.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Random.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/FloatBuiltins.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/HostEntropy.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Time.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FileAndHeap.cpp
@@ -197,6 +198,15 @@ if(BUILD_TESTING)
     add_test(NAME guest_wide_conversion COMMAND guest_wide_conversion_tests)
     if(WIN32)
         set_tests_properties(guest_wide_conversion PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_float_builtins_tests ${LIBS_INCLUDE_DIR}/tests/GuestFloatBuiltins.cpp)
+    target_include_directories(guest_float_builtins_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_float_builtins_tests PRIVATE libc)
+    configure_windows_unwind(guest_float_builtins_tests)
+    add_test(NAME guest_float_builtins COMMAND guest_float_builtins_tests)
+    if(WIN32)
+        set_tests_properties(guest_float_builtins PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_character_tests ${LIBS_INCLUDE_DIR}/tests/GuestCharacter.cpp)
@@ -528,6 +538,26 @@ if(BUILD_TESTING)
         set_tests_properties(guest_demangle PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test_executable(unwind_cursor_tests ${LIBS_INCLUDE_DIR}/tests/UnwindCursor.cpp)
+    target_include_directories(unwind_cursor_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(unwind_cursor_tests PRIVATE libc)
+    set_target_properties(unwind_cursor_tests PROPERTIES ENABLE_EXPORTS ON)
+    configure_windows_unwind(unwind_cursor_tests)
+    add_test(NAME unwind_cursor COMMAND unwind_cursor_tests)
+    set(unwindCursorTests unwind_cursor)
+    foreach(operation IN ITEMS get set)
+        add_test(NAME unwind_cursor_${operation}_register COMMAND unwind_cursor_tests ${operation}-register)
+        set_tests_properties(unwind_cursor_${operation}_register PROPERTIES TIMEOUT 20
+            PASS_REGULAR_EXPRESSION "libunwind: ${operation}Register - unsupported x86_64 register")
+        add_test(NAME unwind_cursor_${operation}_float_register COMMAND unwind_cursor_tests ${operation}-float-register)
+        set_tests_properties(unwind_cursor_${operation}_float_register PROPERTIES TIMEOUT 20
+            PASS_REGULAR_EXPRESSION "libunwind: ${operation}FloatRegister - no x86_64 float registers")
+        list(APPEND unwindCursorTests unwind_cursor_${operation}_register unwind_cursor_${operation}_float_register)
+    endforeach()
+    if(WIN32)
+        set_tests_properties(${unwindCursorTests} PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test_executable(guest_string_tests ${LIBS_INCLUDE_DIR}/tests/GuestStrings.cpp)
     target_include_directories(guest_string_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_string_tests PRIVATE libc libScePosixForWebKit)
@@ -569,6 +599,10 @@ if(BUILD_TESTING)
         target_include_directories(exception_runtime_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(exception_runtime_tests PRIVATE libc)
         add_test(NAME exception_runtime COMMAND exception_runtime_tests)
+        add_test_executable(guest_backtrace_tests ${LIBS_INCLUDE_DIR}/tests/GuestBacktrace.cpp)
+        target_include_directories(guest_backtrace_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_backtrace_tests PRIVATE libc)
+        add_test(NAME guest_backtrace COMMAND guest_backtrace_tests)
         add_test_executable(exception_personality_tests ${LIBS_INCLUDE_DIR}/tests/ExceptionPersonality.cpp)
         target_include_directories(exception_personality_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(exception_personality_tests PRIVATE libc)
