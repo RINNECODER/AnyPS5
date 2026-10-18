@@ -53,8 +53,15 @@ def translate(phdrs, addr, size=1):
     return None
 
 
+def load_data_segments(phdrs):
+    return [{"address": p["vaddr"], "size": p["memsz"]}
+            for p in phdrs if p["type"] == PT_LOAD and not p["flags"] & 1 and p["memsz"]]
+
+
 def dynamic_tags(raw, phdrs):
-    dyn = next(p for p in phdrs if p["type"] == PT_DYNAMIC)
+    dyn = next((p for p in phdrs if p["type"] == PT_DYNAMIC), None)
+    if dyn is None:
+        return {}
     tags = {}
     i = 0
     while True:
@@ -67,8 +74,12 @@ def dynamic_tags(raw, phdrs):
 
 
 def parse_dynamic(raw, phdrs):
-    """Return (pointer_relocations, imports, data_segments, entry)."""
+    """Return (pointer_relocations, imports, data_segments). A sample may have no PT_DYNAMIC
+    (freestanding) or no relocation tables at all; that is an empty set, not an error."""
     tags = dynamic_tags(raw, phdrs)
+    segments = load_data_segments(phdrs)
+    if 5 not in tags or 6 not in tags or 0xa not in tags:
+        return [], {}, segments
     strsz = tags[0xa]
     cands = {translate(phdrs, tags[5]), translate(phdrs, tags[6])}
 
@@ -81,7 +92,7 @@ def parse_dynamic(raw, phdrs):
 
     strtab_off = next(c for c in cands if is_strtab(c))
     symtab_off = next(c for c in cands if not is_strtab(c))
-    syment = tags[0xb]
+    syment = tags.get(0xb, 24)
     if tags.get(4) is not None:
         nchain = struct.unpack_from("<I", raw, translate(phdrs, tags[4]) + 4)[0]
     else:
@@ -99,8 +110,8 @@ def parse_dynamic(raw, phdrs):
     def read_relocs(off, size, ent):
         return [struct.unpack_from("<QQq", raw, off + k * ent) for k in range(size // ent)]
 
-    rela = read_relocs(translate(phdrs, tags[7]), tags[8], tags[9])
-    jmprel = read_relocs(translate(phdrs, tags[0x17]), tags[2], 24) if tags.get(0x17) else []
+    rela = read_relocs(translate(phdrs, tags[7]), tags[8], tags[9]) if 7 in tags and 8 in tags and 9 in tags else []
+    jmprel = read_relocs(translate(phdrs, tags[0x17]), tags[2], 24) if tags.get(0x17) and 2 in tags else []
     pointer_relocations, imports = [], {}
     for r_offset, r_info, r_addend in rela + jmprel:
         r_type, r_sym = r_info & 0xFFFFFFFF, r_info >> 32
@@ -111,9 +122,7 @@ def parse_dynamic(raw, phdrs):
             if sym and sym["shndx"] == 0 and sym["name"]:
                 entry = imports.setdefault(sym["name"], {"symbol_index": r_sym, "slots": []})
                 entry["slots"].append(r_offset)
-    data_segments = [{"address": p["vaddr"], "size": p["memsz"]}
-                     for p in phdrs if p["type"] == PT_LOAD and not p["flags"] & 1 and p["memsz"]]
-    return pointer_relocations, imports, data_segments
+    return pointer_relocations, imports, load_data_segments(phdrs)
 
 
 def load_starts(path):
