@@ -5,7 +5,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
+#if defined(__x86_64__) || defined(_M_X64)
 #include <xmmintrin.h>
+#endif
 
 using Entry = void (APS5_VABI*)(std::uint64_t, std::uint64_t);
 
@@ -26,6 +28,25 @@ std::int32_t APS5_VABI sceFiberStopContextSizeCheck(void);
 static void Require(bool value, const char* what) {
     if (!value) { std::fprintf(stderr, "Fiber check failed: %s\n", what); std::abort(); }
 }
+
+// The fiber implementation must carry the thread's floating-point control state across a switch.
+// x86 keeps it in MXCSR; AArch64 keeps it in FPCR. The test only needs a writable flush-to-zero bit.
+#if defined(__x86_64__) || defined(_M_X64)
+constexpr std::uint32_t FlushToZero = 0x8000u;
+static std::uint32_t GetControl() { return _mm_getcsr(); }
+static void SetControl(std::uint32_t value) { _mm_setcsr(value); }
+#else
+constexpr std::uint32_t FlushToZero = 1u << 24;
+static std::uint32_t GetControl() {
+    std::uint64_t value = 0;
+    asm volatile("mrs %0, fpcr" : "=r"(value));
+    return static_cast<std::uint32_t>(value);
+}
+static void SetControl(std::uint32_t value) {
+    const auto wide = static_cast<std::uint64_t>(value);
+    asm volatile("msr fpcr, %0" ::"r"(wide));
+}
+#endif
 
 namespace {
 
@@ -70,10 +91,10 @@ void APS5_VABI FirstEntry(std::uint64_t argOnInitialize, std::uint64_t argOnRun)
 void APS5_VABI SecondEntry(std::uint64_t argOnInitialize, std::uint64_t argOnRun) {
     Require(argOnInitialize == 22 && argOnRun == 200, "second fiber arguments");
     Require(sceFiberSwitch(g_second, 0, nullptr) == FiberErrorState, "switch to self");
-    _mm_setcsr(_mm_getcsr() | 0x8000u);
+    SetControl(GetControl() | FlushToZero);
     std::uint64_t received = 0;
     Require(sceFiberReturnToThread(250, &received) == 0 && received == 260, "second fiber resumed on another thread");
-    Require((_mm_getcsr() & 0x8000u) != 0, "second fiber keeps its MXCSR");
+    Require((GetControl() & FlushToZero) != 0, "second fiber keeps its floating-point control state");
     Require(sceFiberSwitch(g_first, 300, nullptr) == 0, "switch to first fiber");
     Require(false, "second fiber resumed after its last switch");
 }
@@ -124,13 +145,13 @@ int main() {
     Require(sceFiberGetSelf(&self) == FiberErrorPermission, "no fiber on the thread");
     Require(_sceFiberInitializeImpl_nid_postfix(g_first, "first", FirstEntry, 11, g_firstContext.data(), g_firstContext.size(), nullptr, 0) == 0, "initialize first");
     Require(_sceFiberInitializeImpl_nid_postfix(g_second, "second", SecondEntry, 22, g_secondContext.data(), g_secondContext.size(), nullptr, 0) == 0, "initialize second");
-    const auto threadCsr = _mm_getcsr();
+    const auto threadCsr = GetControl();
     std::uint64_t returned = 0;
     std::uint64_t framePointer = 0;
     Require(sceFiberGetThreadFramePointerAddress(&framePointer) == FiberErrorPermission, "frame pointer outside a fiber");
     Require(_sceFiberGetThreadFramePointerAddress(&framePointer) == FiberErrorPermission, "underscore frame pointer outside a fiber");
     Require(RunFirst(&returned) == 0 && returned == 250, "run first until second returns");
-    Require(_mm_getcsr() == threadCsr, "thread MXCSR restored after the fibers");
+    Require(GetControl() == threadCsr, "thread floating-point control state restored after the fibers");
     std::thread([&] {
         Require(sceFiberRun_nid_postfix(g_second, 260, &returned) == 0 && returned == 301, "resume second on another thread");
     }).join();
