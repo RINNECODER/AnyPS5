@@ -5,6 +5,7 @@
 #include "GpuTiming.hpp"
 #include "MetalDevice.hpp"
 #include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -176,6 +177,34 @@ public:
     // reached: every label point up to it has been passed by the GPU.
     [[nodiscard]] id<MTLSharedEvent> LabelEvent() const { return labelEvent; }
     [[nodiscard]] std::uint64_t LabelsSignalled() const { return labelEvent == nil ? 0 : labelEvent.signaledValue; }
+
+    [[nodiscard]] bool MayHaveWrittenAny(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) const {
+        if (pending.empty() || ranges.empty()) return false;
+        if (unknown) return true;
+        for (const auto& write : writes) {
+            const auto at = std::lower_bound(ranges.begin(), ranges.end(), write.begin,
+                [](const auto& range, std::uint64_t value) { return range.first < value; });
+            if (at != ranges.end() && at->first < write.end) return true;
+            if (at != ranges.begin()) {
+                const auto& before = *(at - 1);
+                if (write.begin - before.first < before.second) return true;
+            }
+        }
+        return false;
+    }
+
+    [[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint64_t>> WriteRanges() const {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted;
+        sorted.reserve(writes.size());
+        for (const auto& write : writes) sorted.emplace_back(write.begin, write.end);
+        std::sort(sorted.begin(), sorted.end());
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> merged;
+        for (const auto& [begin, end] : sorted) {
+            if (!merged.empty() && begin <= merged.back().second) merged.back().second = std::max(merged.back().second, end);
+            else merged.emplace_back(begin, end);
+        }
+        return merged;
+    }
 
     // Whether pending work may store to guest [begin, end) (or anywhere, with unknown writes).
     [[nodiscard]] bool MayHaveWritten(std::uint64_t begin, std::uint64_t end) const {

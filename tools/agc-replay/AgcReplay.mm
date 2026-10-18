@@ -330,6 +330,15 @@ WorkerCounters Workers() {
 
 std::uint64_t ThreadCpuNs() { return clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID); }
 
+// Whether pending GPU work may store to guest [guest, guest + bytes): `ranges` are sorted, merged
+// and disjoint.
+bool PendingWriteOver(const std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges, std::uint64_t guest, std::uint64_t bytes) {
+    const auto at = std::upper_bound(ranges.begin(), ranges.end(), guest,
+        [](std::uint64_t value, const auto& range) { return value < range.first; });
+    if (at != ranges.begin() && guest - (at - 1)->first < (at - 1)->second) return true;
+    return at != ranges.end() && at->first < guest + bytes;
+}
+
 std::uint64_t ThreadInstructions() {
     ThreadCounts counts{};
     std::uint64_t id = 0;
@@ -360,6 +369,10 @@ public:
 struct DeltaStats {
     std::atomic<std::uint64_t> written{0};
     std::atomic<std::uint64_t> kept{0};
+    // Writes ordered against pending GPU work (the wait the restore used to take for every
+    // submission) and how long those waits took.
+    std::atomic<std::uint64_t> ordered{0};
+    std::atomic<std::uint64_t> waitNs{0};
     std::atomic<std::uint64_t> cpuNs{0};
     std::atomic<std::uint64_t> instructions{0};
 };
@@ -583,17 +596,59 @@ int main(int argc, char** argv) {
         const auto started = ThreadCpuNs();
         const auto startedInstructions = ThreadInstructions();
         std::lock_guard gpu(context.gpuMutex);
-        context.drain();
-        for (const auto& page : submit->pages) {
-            auto* target = host(page.guest);
-            const auto current = Capture::Hash(target, page.raw);
+        // Restore the pages whose captured start state this submission needs: a page that already
+        // holds it (its captured hash) or newer bytes the replayed GPU wrote is left alone, and so
+        // is a page committed work may still store to (that store is the newer content, below).
+        // Waiting for the GPU at every submission is what used to stop the worker from encoding
+        // ahead of it, and most pages need no wait at all.
+        std::vector<std::size_t> restore;
+        for (std::size_t i = 0; i < submit->pages.size(); ++i) {
+            const auto& page = submit->pages[i];
+            const auto current = Capture::Hash(host(page.guest), page.raw);
             if (current == page.hash) continue;
             if (current != page.previous) {
                 ++deltas.kept;
                 continue;
             }
-            Capture::Decompress(page.data, page.stored, target, page.raw);
-            ++deltas.written;
+            restore.push_back(i);
+        }
+        if (!restore.empty()) {
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> overwritten;
+            overwritten.reserve(restore.size());
+            for (const auto index : restore) overwritten.emplace_back(submit->pages[index].guest, submit->pages[index].raw);
+            std::sort(overwritten.begin(), overwritten.end());
+            const auto pending = driver.PendingGuestWrites();
+            if (pending.unknown) {
+                // Work whose stores cannot be named (BDA pointers) is pending, so which page it may
+                // write is unknown: wait as before, then re-read what landed.
+                const auto waitStart = std::chrono::steady_clock::now();
+                if (driver.WaitBeforeHostWrites(overwritten)) {
+                    ++deltas.ordered;
+                    deltas.waitNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - waitStart).count());
+                    std::erase_if(restore, [&](std::size_t index) {
+                        const auto& page = submit->pages[index];
+                        if (Capture::Hash(host(page.guest), page.raw) == page.previous) return false;
+                        ++deltas.kept;
+                        return true;
+                    });
+                }
+            } else {
+                // A page committed work may still store to is left to the GPU: that store is the
+                // newer content the capture recorded (waiting for it here would stop the worker at
+                // every submission).
+                std::erase_if(restore, [&](std::size_t index) {
+                    const auto& page = submit->pages[index];
+                    if (!PendingWriteOver(pending.ranges, page.guest, page.raw)) return false;
+                    ++deltas.kept;
+                    return true;
+                });
+            }
+            for (const auto index : restore) {
+                const auto& page = submit->pages[index];
+                Capture::Decompress(page.data, page.stored, host(page.guest), page.raw);
+                ++deltas.written;
+            }
         }
         deltas.cpuNs += ThreadCpuNs() - started;
         deltas.instructions += ThreadInstructions() - startedInstructions;
@@ -695,10 +750,13 @@ int main(int argc, char** argv) {
             const auto gpuMs = Capture::TakeGpuBusyMs();
             const auto minstr = static_cast<double>(workersAfter.instructions - workersBefore.instructions - (deltas.instructions.load() - deltaInstrBefore)) / 1e6;
             std::uint64_t hash = 0;
-            if (const auto display = capture.displays.find(static_cast<std::uint32_t>(frame)); display != capture.displays.end()) {
-                NativeGuestMemory::BorrowedRangesScope scope(ranges);
-                lastPixels = Metal::MetalPresentation::ReadPixels(display->second.buffer);
-                hash = Capture::Hash(lastPixels.data(), lastPixels.size());
+            // Timing runs read no pixels: the readback is not part of the frame the replay measures.
+            if (std::getenv("ANYPS5_REPLAY_NO_PIXELS") == nullptr) {
+                if (const auto display = capture.displays.find(static_cast<std::uint32_t>(frame)); display != capture.displays.end()) {
+                    NativeGuestMemory::BorrowedRangesScope scope(ranges);
+                    lastPixels = Metal::MetalPresentation::ReadPixels(display->second.buffer);
+                    hash = Capture::Hash(lastPixels.data(), lastPixels.size());
+                }
             }
             const auto systemMs = static_cast<double>(workersAfter.systemNs - workersBefore.systemNs) / 1e6;
             samples[frame].push_back({wallMs, cpuMs, gpuMs, minstr, systemMs, hash});
@@ -725,8 +783,9 @@ int main(int argc, char** argv) {
     int status = 0;
     if (outOfOrder.load() != 0)
         std::printf("warning: %llu submissions ran out of the captured cross-queue order\n", static_cast<unsigned long long>(outOfOrder.load()));
-    std::printf("page deltas: %llu written, %llu kept (replayed GPU work wrote them), %.1f ms CPU (excluded)\n",
+    std::printf("page deltas: %llu written, %llu kept (replayed GPU work wrote them), %llu of the writes ordered against pending GPU work (%.1f ms), %.1f ms CPU (excluded)\n",
         static_cast<unsigned long long>(deltas.written.load()), static_cast<unsigned long long>(deltas.kept.load()),
+        static_cast<unsigned long long>(deltas.ordered.load()), static_cast<double>(deltas.waitNs.load()) / 1e6 / static_cast<double>(repeat),
         static_cast<double>(deltas.cpuNs.load()) / 1e6 / static_cast<double>(repeat));
     for (std::size_t frame = 0; frame < frames; ++frame) {
         const auto& all = samples[frame];

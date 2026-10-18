@@ -174,6 +174,14 @@ void MetalDriver::Configure(void* device, void* library,
     impl->configured = true;
 }
 
+bool MetalDriver::WaitBeforeHostWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
+    return impl->WaitBeforeHostWrites(ranges);
+}
+
+MetalDriver::PendingWrites MetalDriver::PendingGuestWrites() {
+    return impl->PendingGuestWrites();
+}
+
 void MetalDriver::ReplaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation) {
     replaceBorrowedRanges(ranges, generation, {}, {}, {});
 }
@@ -742,6 +750,56 @@ void MetalDriver::Impl::BeforeCpuRead(std::uint64_t address, std::uint64_t bytes
         ++drainsBy[0x102];
         timeline.Drain(0x102);
     }
+}
+
+bool MetalDriver::Impl::WaitBeforeHostWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
+    std::lock_guard lock(gpuMutex);
+    if (ranges.empty()) return false;
+    // Bytes a recorded copy-back would write are materialized first: the host's write has to be the
+    // one that stays, and the copy-back is committed ahead of it on the timeline like any other.
+    bool materialized = false;
+    if (draw != nullptr && backend != nullptr && !draw->LazyCopyBacks().Empty() && CopyBacksOverlap(ranges)) {
+        MaterializeCopyBacks(MetalLazyCopyBacks::Cause::HostWrite);
+        materialized = true;
+    }
+    if (!materialized && !timeline.MayHaveWrittenAny(ranges)) return false;
+    ++drainsBy[0x10e];
+    timeline.Drain(0x10e);
+    return true;
+}
+
+bool MetalDriver::Impl::CopyBacksOverlap(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
+    // The copy-backs match at the host addresses of the borrowed ranges, so translate the guest
+    // ranges the caller passes through them, as MaterializeCopyBacks does.
+    if (draw == nullptr) return false;
+    std::vector<std::pair<std::uintptr_t, std::size_t>> hosts;
+    for (const auto& borrowed : this->ranges) {
+        const auto rangeBegin = borrowed.guestAddress;
+        const auto rangeEnd = rangeBegin + borrowed.host.size();
+        for (const auto& [address, bytes] : ranges) {
+            if (bytes > ~std::uint64_t{0} - address) continue;
+            const auto begin = std::max(address, rangeBegin);
+            const auto limit = std::min(address + bytes, rangeEnd);
+            if (begin >= limit) continue;
+            const auto host = reinterpret_cast<std::uintptr_t>(borrowed.host.data() + (begin - rangeBegin));
+            hosts.emplace_back(host, static_cast<std::size_t>(limit - begin));
+        }
+    }
+    std::sort(hosts.begin(), hosts.end());
+    return draw->LazyCopyBacks().OverlapsAny(hosts);
+}
+
+MetalDriver::PendingWrites MetalDriver::Impl::PendingGuestWrites() {
+    std::lock_guard lock(gpuMutex);
+    PendingWrites pending;
+    // Work whose stores cannot be named (BDA pointers) covers everything: the caller cannot tell
+    // which of its ranges the GPU may write and waits as before.
+    if (timeline.UnknownWritesPending()) {
+        pending.unknown = true;
+        return pending;
+    }
+    pending.ranges = timeline.WriteRanges();
+    return pending;
 }
 
 bool MetalDriver::Impl::BatchCommandBuffers() {

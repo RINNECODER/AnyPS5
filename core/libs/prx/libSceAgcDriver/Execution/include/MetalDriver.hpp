@@ -71,6 +71,12 @@ public:
         std::span<const NativeGuestMemory::BorrowedRange> ranges, EopInterrupt eopInterrupt = {},
         std::uint64_t initialGeneration = 0);
     void ReplaceBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation);
+    bool WaitBeforeHostWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
+    struct PendingWrites {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+        bool unknown = false;
+    };
+    PendingWrites PendingGuestWrites();
     void MutateBorrowedRanges(std::span<const NativeGuestMemory::BorrowedRange> ranges, std::uint64_t generation,
         std::function<void()> mutateCpu, std::shared_ptr<const void> previousOwner, std::shared_ptr<const void> nextOwner);
     void WithValidatedReadableRanges(std::span<const ReadableGuestRange> ranges, const std::function<void()>& publish);

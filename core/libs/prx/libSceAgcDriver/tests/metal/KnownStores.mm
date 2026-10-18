@@ -7,7 +7,8 @@
 
 // MetalTimeline::PendingBytes: what pending GPU work leaves in guest memory when its stores are known
 // before it runs (a guest fill kernel clearing DCC keys, keys a draw leaves uncompressed), so the
-// driver need not wait for that work to read them; and when it must wait after all.
+// driver need not wait for that work to read them; and when it must wait after all. Also the batch
+// write query (MayHaveWrittenAny) the frame replay's page restore decides on.
 
 namespace {
 
@@ -99,6 +100,31 @@ void RunKnownStoresTests(const MetalTests::Context& context) {
                 "a reaped work's stores stayed pending behind later work");
         Require(timeline.MayHaveWritten(0x800000, 0x800001), "a pending work's range was retired early");
         event.signaledValue = 1;
+        timeline.Drain();
+    }
+    // MayHaveWrittenAny answers for many ranges at once (the replay's page restore asks which of the
+    // pages it is about to overwrite the GPU may still write): the same answer as MayHaveWritten for
+    // each range, in one pass, with no false hit in the gaps between them.
+    {
+        MetalTimeline timeline;
+        commit(timeline, {{Keys, Keys + Count}, {0x800000, 0x800000 + 0x1000}});
+        const std::vector<std::pair<std::uint64_t, std::uint64_t>> inside{{Keys + 16, Count}};
+        Require(timeline.MayHaveWrittenAny(inside), "a range inside a pending write was missed");
+        const std::vector<std::pair<std::uint64_t, std::uint64_t>> second{{0x800000 + 0x800, 0x800}};
+        Require(timeline.MayHaveWrittenAny(second), "a range inside the second pending write was missed");
+        const std::vector<std::pair<std::uint64_t, std::uint64_t>> gap{{Keys + Count, 0x1000}, {0x800000 - 0x1000, 0x1000}};
+        Require(!timeline.MayHaveWrittenAny(gap), "a range between two pending writes was reported written");
+        const std::vector<std::pair<std::uint64_t, std::uint64_t>> before{{Keys - 0x1000, 0x1000}};
+        Require(!timeline.MayHaveWrittenAny(before), "a range before the pending writes was reported written");
+        const std::vector<std::pair<std::uint64_t, std::uint64_t>> past{{0x800000 + 0x1000, 0x1000}};
+        Require(!timeline.MayHaveWrittenAny(past), "a range past a pending write was reported written");
+        Require(!timeline.MayHaveWrittenAny({}), "an empty range list was reported written");
+        const std::vector<std::pair<std::uint64_t, std::uint64_t>> straddling{{Keys + Count - 4, 8}};
+        Require(timeline.MayHaveWrittenAny(straddling), "a range straddling the end of a pending write was missed");
+        timeline.Drain();
+        Require(!timeline.MayHaveWrittenAny(inside), "a drained write still answered as pending");
+        commit(timeline, {{0x400000, 0x400000 + 0x1000}}, {}, true);
+        Require(timeline.MayHaveWrittenAny(inside), "unknown writes did not answer for every range");
         timeline.Drain();
     }
 }
