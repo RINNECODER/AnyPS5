@@ -276,7 +276,7 @@ CodeInstructionSet CodeInstructionCollector::Collect(const std::vector<std::uint
     for (const auto& [addressTag, sizeTag] : {std::pair{25u, 27u}, std::pair{26u, 28u}, std::pair{32u, 33u}}) {
         const auto address = value(addressTag, 0x60000000 + addressTag);
         const auto size = value(sizeTag, 0x60000000 + sizeTag);
-        if (address.has_value() != size.has_value()) throw Domain::RelinkerException("Code analysis: incomplete initializer array");
+        if (size && !address) throw Domain::RelinkerException("Code analysis: incomplete initializer array");
         if (!size || *size == 0) continue;
         if (*size % 8 != 0) throw Domain::RelinkerException("Code analysis: invalid initializer array size");
         const auto offset = fileOffset(*address, *size);
