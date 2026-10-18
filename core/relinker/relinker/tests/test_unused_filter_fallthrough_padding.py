@@ -8,9 +8,10 @@ CODE = 0x1000
 GOT_PUTS = 0x2090
 GOT_STRLEN = 0x2098
 MESSAGE = 0x2500
+EXIT_TAIL = b"\xbf\x2a\x00\x00\x00\xb8\xe7\x00\x00\x00\x0f\x05"
 
 
-def build(n_nops):
+def build(n_nops, tail=EXIT_TAIL):
     image = bytearray(0x3000)
     image[:16] = b"\x7fELF\x02\x01\x01" + bytes(9)
     nph = 6
@@ -28,8 +29,7 @@ def build(n_nops):
     image[MESSAGE:MESSAGE + len(message)] = message
     lea = b"\x48\x8d\x3d" + struct.pack("<i", MESSAGE - (CODE + 7))
     call = b"\xff\x15" + struct.pack("<i", GOT_PUTS - (CODE + 13))
-    exit_code = b"\xbf\x2a\x00\x00\x00\xb8\xe7\x00\x00\x00\x0f\x05"
-    code = lea + call + exit_code + b"\x90" * n_nops
+    code = lea + call + tail + b"\x90" * n_nops
     image[CODE:CODE + len(code)] = code
     phdr(2, 1, 5, 0, 0x0000, 0x2000, 0x2000, 0x1000)
     phdr(3, 1, 6, 0x2000, 0x2000, 0x1000, 0x1000, 0x1000)
@@ -51,6 +51,13 @@ def build(n_nops):
     return bytes(image)
 
 
+def run(relinker, source, output):
+    return subprocess.run(
+        [str(relinker), "--skip-sce-module", "--skip-syscall-check", "unused-filter=1",
+         str(source), str(output)],
+        capture_output=True, text=True, timeout=20)
+
+
 def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="anyps5-unused-filter-fallthrough-") as directory:
@@ -59,12 +66,34 @@ def main():
             source = work / f"tail-{n_nops}.elf"
             output = work / f"tail-{n_nops}.out"
             source.write_bytes(build(n_nops))
-            result = subprocess.run(
-                [str(relinker), "--skip-sce-module", "--skip-syscall-check", "unused-filter=1",
-                 str(source), str(output)],
-                capture_output=True, text=True, timeout=20)
+            result = run(relinker, source, output)
             assert result.returncode == 0 and output.exists(), (n_nops, result.returncode, result.stdout, result.stderr)
             assert "CFG/GOT filtering: 2 -> 1; filtered=1" in result.stdout, (n_nops, result.stdout)
+
+        entry_tail = bytearray(build(0))
+        struct.pack_into("<Q", entry_tail, 24, 0x1fff)
+        source = work / "entry-tail.elf"
+        output = work / "entry-tail.out"
+        source.write_bytes(entry_tail)
+        result = run(relinker, source, output)
+        assert result.returncode == 2 and not output.exists(), (result.returncode, result.stdout, result.stderr)
+        assert "Instruction truncated before ModRM byte" in result.stderr, result.stderr
+
+        jump_tail = bytearray(build(0))
+        jump_tail[CODE:CODE + 5] = b"\xe9" + struct.pack("<i", 0x1fff - (CODE + 5))
+        source = work / "jump-tail.elf"
+        output = work / "jump-tail.out"
+        source.write_bytes(jump_tail)
+        result = run(relinker, source, output)
+        assert result.returncode == 2 and not output.exists(), (result.returncode, result.stdout, result.stderr)
+        assert "Instruction truncated before ModRM byte" in result.stderr, result.stderr
+
+        source = work / "zero-immediate.elf"
+        output = work / "zero-immediate.out"
+        source.write_bytes(build(0, tail=b"\xb8\x00\x00\x00\x00"))
+        result = run(relinker, source, output)
+        assert result.returncode == 0 and output.exists(), (result.returncode, result.stdout, result.stderr)
+        assert "CFG/GOT filtering: 2 -> 1; filtered=1" in result.stdout, result.stdout
     print("Unused filter fallthrough padding tests passed")
 
 
