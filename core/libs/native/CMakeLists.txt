@@ -34,7 +34,8 @@ add_shader_recompiler(shader_recompiler_native native_runtime_platform GUARD_SOU
 # --- one static library with the HLE runtime and the Metal graphics driver ---------------------
 add_library(anyps5_native_graphics STATIC)
 
-set(nativeComponents libc libkernel libSceAgc libScePad libSceMouse libSceKeyboard)
+set(nativeComponents libc libkernel libSceAgc libScePad libSceMouse libSceKeyboard libSceFiber
+    libSceFont libSceFontFt)
 set(nativeUnsupportedSources
     "${LIBS_INCLUDE_DIR}/prx/libc/src/ApplicationProcessParameters.cpp"
     "${LIBS_INCLUDE_DIR}/prx/libc/src/Strings.cpp"
@@ -165,6 +166,7 @@ target_link_libraries(anyps5_native_graphics PUBLIC
     native_runtime_platform
     anyps5_native_image
     anyps5_metal_utilities
+    freetype
     "-framework ImageIO"
     "-framework CoreGraphics"
     "-framework Metal"
@@ -253,6 +255,18 @@ if(BUILD_TESTING)
         set_target_properties(${reviewTest} PROPERTIES CXX_EXTENSIONS OFF)
         target_link_libraries(${reviewTest} PRIVATE Threads::Threads)
     endforeach()
+    # The guest arena reads its slide from the environment before it is first used, so this test
+    # compiles GuestArena and its dependencies directly instead of linking a shared runtime.
+    add_test_executable(native_aot_guest_arena_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/NativeGuestArenaTests.cpp"
+        "${LIBS_INCLUDE_DIR}/prx/libc/src/GuestArena.cpp"
+        "${LIBS_INCLUDE_DIR}/prx/libc/src/GuestWriteWatch.cpp"
+        "${LIBS_INCLUDE_DIR}/prx/libc/src/GuestAllocations.cpp")
+    target_include_directories(native_aot_guest_arena_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_compile_features(native_aot_guest_arena_tests PRIVATE cxx_std_20)
+    set_target_properties(native_aot_guest_arena_tests PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(native_aot_guest_arena_tests PRIVATE Threads::Threads)
+    add_test(NAME native_aot_guest_arena COMMAND native_aot_guest_arena_tests)
+    set_tests_properties(native_aot_guest_arena PROPERTIES TIMEOUT 30)
     # The Python suite in core/aot/tests already registers as native_aot_hle_log.<class>.<case>.
     add_test(NAME native_aot_hle_log_open COMMAND native_aot_hle_log_open_tests)
     # 100 forked trials, each racing 16 threads to open the log.

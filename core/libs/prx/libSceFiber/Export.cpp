@@ -10,7 +10,9 @@
 #include <thread>
 #include <stdexcept>
 #include <string>
+#if defined(__x86_64__) || defined(_M_X64)
 #include <xmmintrin.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -195,6 +197,130 @@ static void UnpinStack(const void* context, std::uint64_t bytes) {
     GuestArena::GuestArenaUnpinWritable_nid_postfix(context, static_cast<std::size_t>(bytes));
 }
 
+#elif defined(__aarch64__)
+
+extern "C" void Aps5FiberSwitchStack_nid_no_patch(void** save, void* load);
+extern "C" void Aps5FiberTrampoline_nid_no_patch();
+
+#ifdef __APPLE__
+// AArch64: save the callee-saved integer and vector registers plus the FP control registers.
+// The frame layout must match InitialFrame below.
+asm(R"(
+    .text
+    .p2align 2
+    .globl _Aps5FiberSwitchStack_nid_no_patch
+_Aps5FiberSwitchStack_nid_no_patch:
+    stp d8, d9, [sp, #-176]!
+    stp d10, d11, [sp, #16]
+    stp d12, d13, [sp, #32]
+    stp d14, d15, [sp, #48]
+    stp x19, x20, [sp, #64]
+    stp x21, x22, [sp, #80]
+    stp x23, x24, [sp, #96]
+    stp x25, x26, [sp, #112]
+    stp x27, x28, [sp, #128]
+    stp x29, x30, [sp, #144]
+    mrs x2, fpcr
+    mrs x3, fpsr
+    stp x2, x3, [sp, #160]
+    mov x2, sp
+    str x2, [x0]
+    mov sp, x1
+    ldp d8, d9, [sp]
+    ldp d10, d11, [sp, #16]
+    ldp d12, d13, [sp, #32]
+    ldp d14, d15, [sp, #48]
+    ldp x19, x20, [sp, #64]
+    ldp x21, x22, [sp, #80]
+    ldp x23, x24, [sp, #96]
+    ldp x25, x26, [sp, #112]
+    ldp x27, x28, [sp, #128]
+    ldp x29, x30, [sp, #144]
+    ldp x2, x3, [sp, #160]
+    msr fpcr, x2
+    msr fpsr, x3
+    add sp, sp, #176
+    ret
+
+    .p2align 2
+    .globl _Aps5FiberTrampoline_nid_no_patch
+_Aps5FiberTrampoline_nid_no_patch:
+    mov x0, x19
+    mov x9, sp
+    and x9, x9, #-16
+    mov sp, x9
+    bl _Aps5FiberMain_nid_no_patch
+    brk #1
+)");
+#else
+asm(R"(
+    .text
+    .p2align 2
+    .globl Aps5FiberSwitchStack_nid_no_patch
+    .type Aps5FiberSwitchStack_nid_no_patch, @function
+Aps5FiberSwitchStack_nid_no_patch:
+    stp d8, d9, [sp, #-176]!
+    stp d10, d11, [sp, #16]
+    stp d12, d13, [sp, #32]
+    stp d14, d15, [sp, #48]
+    stp x19, x20, [sp, #64]
+    stp x21, x22, [sp, #80]
+    stp x23, x24, [sp, #96]
+    stp x25, x26, [sp, #112]
+    stp x27, x28, [sp, #128]
+    stp x29, x30, [sp, #144]
+    mrs x2, fpcr
+    mrs x3, fpsr
+    stp x2, x3, [sp, #160]
+    mov x2, sp
+    str x2, [x0]
+    mov sp, x1
+    ldp d8, d9, [sp]
+    ldp d10, d11, [sp, #16]
+    ldp d12, d13, [sp, #32]
+    ldp d14, d15, [sp, #48]
+    ldp x19, x20, [sp, #64]
+    ldp x21, x22, [sp, #80]
+    ldp x23, x24, [sp, #96]
+    ldp x25, x26, [sp, #112]
+    ldp x27, x28, [sp, #128]
+    ldp x29, x30, [sp, #144]
+    ldp x2, x3, [sp, #160]
+    msr fpcr, x2
+    msr fpsr, x3
+    add sp, sp, #176
+    ret
+    .size Aps5FiberSwitchStack_nid_no_patch, .-Aps5FiberSwitchStack_nid_no_patch
+
+    .p2align 2
+    .globl Aps5FiberTrampoline_nid_no_patch
+    .type Aps5FiberTrampoline_nid_no_patch, @function
+Aps5FiberTrampoline_nid_no_patch:
+    mov x0, x19
+    mov x9, sp
+    and x9, x9, #-16
+    mov sp, x9
+    bl Aps5FiberMain_nid_no_patch
+    brk #1
+    .size Aps5FiberTrampoline_nid_no_patch, .-Aps5FiberTrampoline_nid_no_patch
+)");
+#endif
+
+struct InitialFrame {
+    std::uint64_t d8, d9, d10, d11, d12, d13, d14, d15;
+    std::uint64_t x19, x20, x21, x22, x23, x24, x25, x26, x27, x28;
+    std::uint64_t framePointer;
+    std::uint64_t returnAddress;
+    std::uint64_t fpcr;
+    std::uint64_t fpsr;
+};
+static_assert(sizeof(InitialFrame) == 176, "initial fiber frame must match Aps5FiberSwitchStack_nid_no_patch");
+
+static StackBounds CurrentBounds() { return {}; }
+static void SetBounds(const StackBounds&) {}
+static void PinStack(const void*, std::uint64_t) {}
+static void UnpinStack(const void*, std::uint64_t) {}
+
 #else
 
 extern "C" void Aps5FiberSwitchStack_nid_no_patch(void** save, void* load);
@@ -315,11 +441,17 @@ static void PrepareInitialStack(Fiber* fiber) {
     const auto top = reinterpret_cast<std::uintptr_t>(fiber->context + fiber->contextSize) & ~static_cast<std::uintptr_t>(15);
     auto* frame = reinterpret_cast<InitialFrame*>(top - 256);
     std::memset(frame, 0, sizeof(*frame));
+#if defined(__x86_64__) || defined(_M_X64)
     frame->mxcsr = _mm_getcsr();
     std::uint16_t control = 0;
     asm volatile("fnstcw %0" : "=m"(control));
     frame->fpuControl = control;
     frame->r12 = reinterpret_cast<std::uint64_t>(fiber);
+#else
+    asm volatile("mrs %0, fpcr" : "=r"(frame->fpcr));
+    asm volatile("mrs %0, fpsr" : "=r"(frame->fpsr));
+    frame->x19 = reinterpret_cast<std::uint64_t>(fiber);
+#endif
     frame->returnAddress = reinterpret_cast<std::uint64_t>(&Aps5FiberTrampoline_nid_no_patch);
     fiber->savedStack = frame;
 }
