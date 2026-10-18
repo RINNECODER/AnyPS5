@@ -439,7 +439,7 @@ void Driver::execute(const Submission& submission) {
                             }
                             std::fprintf(stderr, "[gpu] queue 0x%x %s at DWORD %zu: register list entry with offset dword 0x%08x read again where the packet executes%s\n", submission.queue, Pm4::Name(packet[0]).c_str(), cursor, invalid, skipInvalid ? "; invalid entries are skipped (APS5_SKIP_INVALID_INDIRECT_REGISTERS)" : "");
                         }
-                        Pm4::ExecuteIndirectRegisters(packet, Pm4::IndirectRegistersValid(current) ? std::span<const std::uint32_t>(current) : std::span<const std::uint32_t>(listed), queue, skipInvalid);
+                        Pm4::ExecuteIndirectRegisters(packet, current, queue, skipInvalid);
                     }
                 } else {
                     Pm4::Execute(packet, queue);

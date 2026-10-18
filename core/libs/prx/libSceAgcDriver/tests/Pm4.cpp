@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -1087,6 +1088,26 @@ void testInvalidRegisterListEntries() {
     check(state.context.at(0x10) == 41 && state.context.at(0x11) == 42 && !state.context.contains(0x38f), "skipping an invalid entry lost the valid ones or wrote the invalid one");
 }
 
+void testPartlyUpdatedRegisterListSkipsOnlyItsInvalidEntries() {
+#ifdef _WIN32
+    check(_putenv_s("APS5_SKIP_INVALID_INDIRECT_REGISTERS", "1") == 0, "cannot enable skipping invalid register list entries");
+#else
+    check(setenv("APS5_SKIP_INVALID_INDIRECT_REGISTERS", "1", 1) == 0, "cannot enable skipping invalid register list entries");
+#endif
+    alignas(8) static std::uint32_t gate = 0;
+    alignas(8) static std::uint32_t copied = 0;
+    static std::array<std::uint32_t, 4> registers{0x038f038fu, 5, 0x11, 9};
+    auto words = joinPackets({
+        makePacket(0x3c, {0x13, low(&gate), high(&gate), 1, 0xffffffffu, 0x19}),
+        makePacket(0x9f, {low(registers.data()), high(registers.data()), 0x80000000, 2}),
+        makePacket(0x40, {0x100, 0xa010, 0, low(&copied), high(&copied)})});
+    submitWords(words);
+    registers = {0x10, 77, 0x03900390u, 6};
+    std::atomic_ref<std::uint32_t>(gate).store(1);
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::atomic_ref<std::uint32_t>(copied).load() == 77, "a register list partly updated before its packet ran lost the current valid entries");
+}
+
 void testRegisterListReadAgainAtExecution() {
     alignas(8) static std::uint32_t gate = 0;
     static std::uint32_t done = 0;
@@ -1450,6 +1471,7 @@ int main(int argc, char** argv) {
         testDriverSubmission();
         testRegisterListsReadAtSubmission();
         testInvalidRegisterListEntries();
+        testPartlyUpdatedRegisterListSkipsOnlyItsInvalidEntries();
         testRegisterListReadAgainAtExecution();
         testIndexAttributesReadAtExecution();
         testPredicatedSubmission();
