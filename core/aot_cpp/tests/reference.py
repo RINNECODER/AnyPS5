@@ -5,18 +5,65 @@ produced by calling the core/aot Python reference. `difftest.py` requires the C+
 produce exactly the same JSON. Inputs are synthetic only -- never title data.
 """
 import json
+import os
 import random
 import sys
 from pathlib import Path
 
 AOT = Path(__file__).resolve().parents[2] / "aot"
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(AOT))
+
+
+def _ensure_capstone():
+    """Make the capstone Python bindings importable.
+
+    The instruction-level modules (atomics/integer/fma/register_*) import capstone.x86 for the
+    X86_OP_* operand constants. A normal CMake build vendors the bindings under
+    3rdparty/capstone/bindings/python; a lane test environment exposes them through the
+    $ANYPS5_DIFFTEST_PYTHONPATH or $ANYPS5_NATIVE_WORK/tools-py variables. When none is present the
+    instruction-level modules are skipped and only the capstone-free modules run, so the harness
+    still works with nothing but the standard library.
+    """
+    try:
+        import capstone  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    candidates = []
+    configured = os.environ.get("ANYPS5_DIFFTEST_PYTHONPATH")
+    if configured:
+        candidates.extend(configured.split(os.pathsep))
+    candidates.append(str(REPO / "3rdparty" / "capstone" / "bindings" / "python"))
+    work = os.environ.get("ANYPS5_NATIVE_WORK")
+    if work:
+        candidates.append(str(Path(work) / "tools-py"))
+    for candidate in candidates:
+        if candidate and candidate not in sys.path and Path(candidate).is_dir():
+            sys.path.append(candidate)
+            try:
+                import capstone  # noqa: F401
+                return True
+            except ImportError:
+                sys.path.remove(candidate)
+    return False
+
+
+HAVE_CAPSTONE = _ensure_capstone()
 
 import abi  # noqa: E402
 import guest_regions  # noqa: E402
 import optimize  # noqa: E402
 import targets  # noqa: E402
 import guest_provider_calls as provider  # noqa: E402
+
+if HAVE_CAPSTONE:
+    import atomics  # noqa: E402
+    import calls  # noqa: E402
+    import fma  # noqa: E402
+    import integer  # noqa: E402
+    import register_aliases  # noqa: E402
+    import register_values  # noqa: E402
 
 
 def _norm(value):
@@ -293,6 +340,141 @@ def _random_ir(rng):
     return "\n".join(out) + "\n"
 
 
+# --- calls (structural signature; composes the ported abi module) ----------------------------
+
+def calls_inputs():
+    cases = [{"op": "structural_signature", "contract": contract} for contract in CONTRACTS]
+    rng = random.Random(5150)
+    for _ in range(40):
+        kinds = [rng.choice(["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "ptr", "f32", "f64"])
+                 for _ in range(rng.randrange(0, 20))]
+        cases.append({"op": "structural_signature",
+                      "contract": {"name": "c%d" % rng.randrange(1000),
+                                   "result": rng.choice(["void", "i8", "u32", "i64", "ptr", "f32", "f64"]),
+                                   "parameters": kinds}})
+    return cases
+
+
+def calls_expected(case):
+    return _safe(lambda: _norm(calls.structural_signature(case["contract"])))
+
+
+# --- atomics (TSO ordering policy) -----------------------------------------------------------
+
+def atomics_inputs():
+    cases = []
+    for bits in [8, 16, 32, 64, 1, 128, 0]:
+        for align in [None, 1, 2, 4, 8, 16, 32]:
+            cases.append({"op": "ordered_load", "bits": bits, "pointer": "%p", "align": align})
+            cases.append({"op": "ordered_store", "bits": bits, "value": "%v", "pointer": "%p", "align": align})
+    for size in [1, 2, 4, 8, 0, 3]:
+        cases.append({"op": "accumulator", "size": size})
+    rng = random.Random(717)
+    for _ in range(40):
+        bits = rng.choice([8, 16, 32, 64, 1, 128])
+        align = rng.choice([None, 1, 2, 4, 8, 16])
+        pointer = "%%p%d" % rng.randrange(10)
+        cases.append({"op": "ordered_load", "bits": bits, "pointer": pointer, "align": align})
+        cases.append({"op": "ordered_store", "bits": bits, "value": "%%v%d" % rng.randrange(10),
+                      "pointer": pointer, "align": align})
+    return cases
+
+
+def atomics_expected(case):
+    op = case["op"]
+    if op == "ordered_load":
+        return _safe(lambda: atomics.ordered_load(case["bits"], case["pointer"], case["align"]))
+    if op == "ordered_store":
+        return _safe(lambda: atomics.ordered_store(case["bits"], case["value"], case["pointer"], case["align"]))
+    return _safe(lambda: list(atomics._accumulator(case["size"])))
+
+
+# --- fma (VFMADD/VFMSUB mnemonic grammar) ----------------------------------------------------
+
+def fma_inputs():
+    valid = ["vf%s%s%s%s" % (negate, operation, order, suffix)
+             for negate in ["", "n"]
+             for operation in ["maddsub", "msubadd", "madd", "msub"]
+             for order in ["132", "213", "231"]
+             for suffix in ["ss", "sd", "ps", "pd"]]
+    invalid = ["vfmadd132ps", "vfmadd132px", "vmadd132ps", "vfnmaddbus132ps", "VFMADD132PS",
+               "vfmadd132", "vfmadd", "vfmsubadd213pd", "vfadd132ps", "vfmadd231s", "vf", "vfn"]
+    cases = [{"op": "parts", "mnemonic": mnemonic} for mnemonic in valid + invalid]
+    cases += [{"op": "vector_type", "bits": bits, "element": element}
+              for bits in [128, 256, 512, 64, 32] for element in ["float", "double"]]
+    rng = random.Random(321)
+    alphabet = "vfnmaddsub132231ssdp"
+    for _ in range(40):
+        cases.append({"op": "parts", "mnemonic": "".join(rng.choice(alphabet)
+                                                         for _ in range(rng.randrange(0, 14)))})
+    return cases
+
+
+def fma_expected(case):
+    if case["op"] == "vector_type":
+        return _safe(lambda: fma._vector_type(case["bits"], case["element"]))
+    return _safe(lambda: _norm(fma._parts(case["mnemonic"])))
+
+
+# --- integer (condition-code alias table) ----------------------------------------------------
+
+def integer_inputs():
+    names = ["e", "ne", "a", "ae", "b", "be", "g", "ge", "l", "le", "s", "ns", "o", "no", "p", "np",
+             "z", "nz", "c", "nc", "na", "nbe", "nb", "nae", "ng", "nge", "nl", "nle", "pe", "po",
+             "bogus", ""]
+    cases = [{"op": "condition", "mnemonic": prefix + name}
+             for name in names for prefix in ("cmov", "set")]
+    cases += [{"op": "condition", "mnemonic": mnemonic}
+              for mnemonic in ["", "ab", "cmov", "setcx", "cmovnz", "setna"]]
+    rng = random.Random(20261)
+    for _ in range(20):
+        cases.append({"op": "condition",
+                      "mnemonic": "".join(rng.choice("cmovsetnzabcglp") for _ in range(rng.randrange(0, 9)))})
+    return cases
+
+
+def integer_expected(case):
+    ins = type("Insn", (), {"mnemonic": case["mnemonic"]})()
+    return _safe(lambda: integer.condition(ins))
+
+
+# --- register_values -------------------------------------------------------------------------
+
+def register_values_inputs():
+    masks = [0, 1, 2, 3, 7, 8, 15, 0xffff, (1 << 40), (1 << 62) - 1, (1 << 62),
+             (1 << 32) - 1, (1 << 63) - 1, int("0x5555555555555555", 16), int("0xaaaaaaaaaaaaaaaa", 16) & ((1 << 63) - 1)]
+    cases = [{"op": "low_prefix", "mask": mask} for mask in masks]
+    rng = random.Random(882)
+    for _ in range(40):
+        cases.append({"op": "low_prefix", "mask": rng.randrange(0, 1 << 63)})
+    return cases
+
+
+def register_values_expected(case):
+    return _safe(lambda: register_values.low_prefix(case["mask"]))
+
+
+# --- register_aliases ------------------------------------------------------------------------
+
+def register_aliases_inputs():
+    fixed = [[["rax", "eax"], ["rdi", "edi"]], [], [["rax", "eax", "ax"], ["rbx", "ebx"]],
+             [["r8", "r8d"], ["rax", "eax"]]]
+    names = ["rax", "eax", "rdi", "edi", "r8", "r8d", "rbx", "rsp", "unknown"]
+    cases = [{"op": "equivalents", "state": {"register_aliases": aliases}, "name": name}
+             for aliases in fixed for name in names]
+    cases.append({"op": "equivalents", "state": {}, "name": "rax"})
+    rng = random.Random(4321)
+    pool = ["rax", "rbx", "rcx", "rdx", "eax", "ebx", "ecx", "edx", "rdi", "rsi", "r8", "r8d", "rsp", "r12"]
+    for _ in range(40):
+        aliases = [sorted(rng.sample(pool, rng.randrange(1, 4))) for _ in range(rng.randrange(0, 5))]
+        cases.append({"op": "equivalents", "state": {"register_aliases": aliases}, "name": rng.choice(pool)})
+    return cases
+
+
+def register_aliases_expected(case):
+    return _safe(lambda: sorted(register_aliases.equivalents(case["state"], case["name"])))
+
+
 MODULE_INPUTS = {
     "targets": targets_inputs,
     "abi": abi_inputs,
@@ -308,3 +490,23 @@ MODULE_EXPECTED = {
     "guest_provider_calls": guest_provider_calls_expected,
     "optimize": optimize_expected,
 }
+
+# The instruction-level modules import capstone.x86 (directly or through their module bodies);
+# they are skipped when the bindings are unavailable so the capstone-free modules still run.
+if HAVE_CAPSTONE:
+    MODULE_INPUTS.update({
+        "calls": calls_inputs,
+        "atomics": atomics_inputs,
+        "fma": fma_inputs,
+        "integer": integer_inputs,
+        "register_values": register_values_inputs,
+        "register_aliases": register_aliases_inputs,
+    })
+    MODULE_EXPECTED.update({
+        "calls": calls_expected,
+        "atomics": atomics_expected,
+        "fma": fma_expected,
+        "integer": integer_expected,
+        "register_values": register_values_expected,
+        "register_aliases": register_aliases_expected,
+    })

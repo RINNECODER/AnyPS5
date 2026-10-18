@@ -49,7 +49,10 @@ def check(binary, module):
 def bench(binary, iterations=30):
     print("speed (%d in-process iterations of the same synthetic batch):" % iterations)
     results = {}
-    for module in ("optimize", "abi", "guest_regions", "targets"):
+    for module in ("optimize", "abi", "guest_regions", "targets", "calls", "atomics", "fma",
+                   "integer", "register_values", "register_aliases"):
+        if module not in reference.MODULE_INPUTS:
+            continue
         inputs = reference.MODULE_INPUTS[module]()
         start = time.perf_counter()
         for _ in range(iterations):
