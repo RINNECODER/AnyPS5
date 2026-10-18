@@ -58,6 +58,7 @@ void PadInput::openController(int deviceIndex) {
         SDL_GameControllerGetNumTouchpads(controller), SDL_GameControllerHasLED(controller) == SDL_TRUE, SDL_GameControllerHasRumbleTriggers(controller) == SDL_TRUE);
     enableSensors();
     outputPending = true;
+    triggerEffectSent = false;
 }
 
 void PadInput::enableSensors() {
@@ -93,8 +94,10 @@ void PadInput::applyOutput() {
         if ((rumbling || (triggerRumble && !isPs5)) && now >= nextRumbleRefresh) outputPending = true;
         else return;
     }
+    if (now < nextOutputAllowed) return;
     outputPending = false;
     nextRumbleRefresh = now + std::chrono::milliseconds(700);
+    nextOutputAllowed = now + std::chrono::milliseconds(30);
     constexpr Uint32 rumbleMs = 2000;
     SDL_GameControllerRumble(controller, static_cast<Uint16>(large * 257), static_cast<Uint16>(small * 257), rumbling ? rumbleMs : 0);
     if (SDL_GameControllerHasLED(controller) == SDL_TRUE) {
@@ -103,11 +106,15 @@ void PadInput::applyOutput() {
     }
     if (outputState.triggerTouched) {
         if (isPs5) {
-            Uint8 effect[47] = {};
+            std::array<Uint8, 47> effect{};
             effect[0] = 0x04 | 0x08;
-            std::memcpy(effect + 10, outputState.trigger[1].effect, 11);
-            std::memcpy(effect + 21, outputState.trigger[0].effect, 11);
-            SDL_GameControllerSendEffect(controller, effect, sizeof(effect));
+            std::memcpy(effect.data() + 10, outputState.trigger[1].effect, 11);
+            std::memcpy(effect.data() + 21, outputState.trigger[0].effect, 11);
+            if (!triggerEffectSent || effect != sentTriggerEffect) {
+                SDL_GameControllerSendEffect(controller, effect.data(), static_cast<int>(effect.size()));
+                sentTriggerEffect = effect;
+                triggerEffectSent = true;
+            }
         } else if (SDL_GameControllerHasRumbleTriggers(controller) == SDL_TRUE) {
             SDL_GameControllerRumbleTriggers(controller, static_cast<Uint16>(outputState.trigger[0].fallback * 257), static_cast<Uint16>(outputState.trigger[1].fallback * 257), triggerRumble ? rumbleMs : 0);
         }
