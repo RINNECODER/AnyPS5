@@ -1,4 +1,5 @@
 #include "MetalTexture.hpp"
+#include "MetalHeapPool.hpp"
 #include "GpuTiming.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
@@ -297,7 +298,10 @@ MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestText
     native.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
     if (!compressed && !packed16(descriptor.format)) native.usage |= MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
     if (atomicFormat(descriptor.format)) native.usage |= MTLTextureUsageShaderAtomic;
-    backing->texture = [backend.Device() newTextureWithDescriptor:native];
+    backing->texture = MetalHeapPool::Shared().SuballocateTexture(backend.Device(), native);
+    if (backing->texture == nil) {
+        backing->texture = [backend.Device() newTextureWithDescriptor:native];
+    }
     require(backing->texture != nil, "Metal cannot allocate the guest texture format or dimensions");
     createViews(compare);
 }

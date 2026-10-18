@@ -1057,6 +1057,13 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                 lastEncoderState.encoder = encoder;
             }
 
+            for (id<MTLHeap> heap : cached->residentHeaps) {
+                if (std::find(lastEncoderState.residentHeaps.begin(), lastEncoderState.residentHeaps.end(), heap) == lastEncoderState.residentHeaps.end()) {
+                    [encoder useHeap:heap stages:MTLRenderStageVertex | MTLRenderStageFragment];
+                    lastEncoderState.residentHeaps.push_back(heap);
+                }
+            }
+
             for (id<MTLResource> res : cached->residency) {
                 if (std::find(lastEncoderState.residentResources.begin(), lastEncoderState.residentResources.end(), res) == lastEncoderState.residentResources.end()) {
                     [encoder useResource:res usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
@@ -1730,7 +1737,17 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         record->vertexBuffers = vertexBuffers;
         record->vertexBindings = vertexBindings;
         record->fragmentBindings = fragmentBindings;
-        record->residency.assign(residency.begin(), residency.end());
+        record->residentHeaps.clear();
+        record->residency.clear();
+        for (id<MTLResource> res : residency) {
+            if (id<MTLHeap> heap = [res heap]; heap != nil) {
+                if (std::find(record->residentHeaps.begin(), record->residentHeaps.end(), heap) == record->residentHeaps.end()) {
+                    record->residentHeaps.push_back(heap);
+                }
+            } else {
+                record->residency.push_back(res);
+            }
+        }
         record->renderPass = renderPass;
         record->passKey = passKey;
         record->bdaStores = bdaStores;
@@ -1779,7 +1796,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
         lastEncoderState.dynamicState = currentDynamicState;
         lastEncoderState.depthStencilState = depthStencilState;
-        lastEncoderState.residentResources.assign(residency.begin(), residency.end());
+        lastEncoderState.residentHeaps.assign(record->residentHeaps.begin(), record->residentHeaps.end());
+        lastEncoderState.residentResources.assign(record->residency.begin(), record->residency.end());
         lastEncoderState.vertexBuffers.assign(vertexBuffers.begin(), vertexBuffers.end());
     } else {
         lastEncoderState.Reset();
@@ -1974,6 +1992,7 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
         DynamicRenderState lastDynamicState{};
         std::vector<MetalBufferBinding> lastVertexBuffers;
         std::vector<id<MTLResource>> residentResources;
+        std::vector<id<MTLHeap>> residentHeaps;
         std::vector<std::byte> lastPushConstants;
 
         for (std::size_t d = start; d < end; ++d) {
@@ -1983,6 +2002,13 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
 
             const bool sameRecord = (lastRecordId == record->recordId);
             if (!sameRecord) {
+                for (id<MTLHeap> heap : record->residentHeaps) {
+                    if (std::find(residentHeaps.begin(), residentHeaps.end(), heap) == residentHeaps.end()) {
+                        [encoder useHeap:heap stages:MTLRenderStageVertex | MTLRenderStageFragment];
+                        residentHeaps.push_back(heap);
+                    }
+                }
+
                 for (id<MTLResource> res : record->residency) {
                     if (std::find(residentResources.begin(), residentResources.end(), res) == residentResources.end()) {
                         [encoder useResource:res usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
