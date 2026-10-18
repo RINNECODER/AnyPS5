@@ -212,6 +212,10 @@ unsigned long long APS5_VABI strtouq_nid_postfix(const char* str, char** endptr,
     return strtoull_nid_postfix(str, endptr, base);
 }
 
+unsigned long long APS5_VABI strtouq_nid_postfix(const char* str, char** endptr, int base) {
+    return strtoull_nid_postfix(str, endptr, base);
+}
+
 double APS5_VABI strtod_nid_postfix(const char* str, char** endptr) {
     return ParseFloat<double>(str, endptr, std::strtod);
 }
@@ -553,6 +557,14 @@ unsigned long long APS5_VABI wcstoul_nid_postfix(const char16_t* str, char16_t**
 
 unsigned long long APS5_VABI wcstoull_nid_postfix(const char16_t* str, char16_t** endptr, int base) {
     return ParseAsciiPrefix(str, endptr, [base](const char* text, char** end) { return StopAtPrefixLetter_nid_no_patch(text, end, base) ? 0ULL : ParseInteger<unsigned long long>(text, end, base, std::strtoull); });
+}
+
+long long APS5_VABI wcstoimax_nid_postfix(const char16_t* str, char16_t** endptr, int base) {
+    return wcstoll_nid_postfix(str, endptr, base);
+}
+
+unsigned long long APS5_VABI wcstoumax_nid_postfix(const char16_t* str, char16_t** endptr, int base) {
+    return wcstoull_nid_postfix(str, endptr, base);
 }
 
 long long APS5_VABI wcstoimax_nid_postfix(const char16_t* str, char16_t** endptr, int base) {
