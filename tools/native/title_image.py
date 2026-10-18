@@ -59,12 +59,12 @@ def title_process_parameters(image):
     return {'address': image.guest_base + address, 'bytes': size, 'bindings': bindings}
 
 
-def reachable(image, entry_addresses, limit):
+def reachable(image, entry_addresses, limit, exclude=()):
     starts = {spec['address']: spec for spec in image.functions.values()}
     decoder = Cs(CS_ARCH_X86, CS_MODE_64)
     decoder.detail = True
-    seen, order, frontier = set(), [], set()
-    pending = deque(address for address in entry_addresses if address in starts)
+    seen, order, frontier = set(exclude), [], set()
+    pending = deque(address for address in entry_addresses if address in starts and address not in seen)
     seen.update(pending)
     while pending and len(order) < limit:
         address = pending.popleft()
@@ -241,7 +241,20 @@ def main():
     # trap instead of a dispatch miss (the bounded walk itself does not widen).
     order, frontier = reachable(image, entries, args.limit)
     native = set(order) | ({lifecycle.get('init'), lifecycle.get('fini')} - {None})
-    keep = native | frontier | recover_pointer_slot_calls(image, native)
+    # Follow the pointer-slot call targets with the remaining budget, after the direct closure, so
+    # a bounded limit keeps the entry/heap-init subtree native instead of letting the recovered run
+    # enqueue ahead of it. Targets past the budget stay reporting stubs.
+    while len(order) < args.limit:
+        recovered = recover_pointer_slot_calls(image, native) - native
+        if not recovered:
+            break
+        extra, extra_frontier = reachable(image, sorted(recovered), args.limit - len(order), exclude=native)
+        if not extra:
+            break
+        order += extra
+        frontier |= extra_frontier
+        native |= set(extra)
+    keep = native | frontier
     contracts['functions'] = [spec for spec in image.functions.values() if spec['address'] in keep]
     for spec in contracts['functions']:
         if spec['address'] in native:
