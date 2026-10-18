@@ -131,6 +131,9 @@ static void write_out(const char* path, const uint64_t* gprs, uint64_t flags, ui
 
 #ifdef BENCH_X86
 struct regs { uint64_t r[16]; };
+/* `invoke` runs the guest and returns the flags the guest's `ret` left, captured before anything
+ * else can write them. Reading pushfq out in the caller would report this loop's flags instead,
+ * because the loop's own increment and compare write ZF and PF after the guest is done. */
 uint64_t g_frame, g_out, g_entry, g_r9, g_r10, g_r11, g_zero;
 extern uint64_t invoke(void* entry, struct regs* in, struct regs* out, uint64_t* stack, uint64_t stack_words);
 __asm__(
@@ -149,6 +152,7 @@ __asm__(
 "  movq _g_r9(%rip), %r10\n  movq %r10, 72(%r9)\n  movq _g_r10(%rip), %r10\n  movq %r10, 80(%r9)\n"
 "  movq _g_r11(%rip), %r10\n  movq %r10, 88(%r9)\n"
 "  movq %r12, 96(%r9)\n  movq %r13, 104(%r9)\n  movq %r14, 112(%r9)\n  movq %r15, 120(%r9)\n"
+"  pushfq\n  popq %rax\n"
 "  movq _g_frame(%rip), %rbp\n  leaq -40(%rbp), %rsp\n  popq %r15\n  popq %r14\n  popq %r13\n  popq %r12\n  popq %rbx\n  popq %rbp\n  ret\n");
 
 static void fault_handler(int signal_number, siginfo_t* info, void* context) {
@@ -217,8 +221,7 @@ int main(int argc, char** argv) {
         double per_call = (double)elapsed / (double)iterations;
         if (per_call < best) best = per_call;
     }
-    uint64_t flags = 0;
-    __asm__ volatile("pushfq\n popq %0" : "=r"(flags));
+    uint64_t flags = invoke((void*)(BASE + address), &registers, &registers, (uint64_t*)STACK, STACK_WORDS);
     printf("ns_per_call %.2f\niterations %llu\n", best, (unsigned long long)iterations);
     write_out(argv[7], registers.r, flags, DEFINED_FLAGS);
     return 0;

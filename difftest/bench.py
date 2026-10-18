@@ -42,6 +42,7 @@ PAGE = 0x1000
 ENTRY_RECORD = 136  # entry address + 16 GPRs, in replay.REGISTERS order
 ENTRY_PAGE_RECORD = 16 + 0x4000  # (entry, guest page) + 16 KiB of memory
 DRIVER = Path(__file__).resolve().parent / "bench_driver.c"
+DRIVER_TIMEOUT = 90
 
 STUB_SOURCE = '''#include <stdint.h>
 extern "C" void aps5_bench_noop(uint64_t* rf) { (void)rf; }
@@ -278,15 +279,20 @@ def bench_one(address, seed, profile, elf, directory, iterations, base_regions, 
     (directory / "stubs.txt").write_text("\n".join(f"{target:x}" for target in sorted(patched)))
     write_regfile(directory / "rf_arm.bin", registers, replay.UNIFORM_GPRS)
     write_regfile(directory / "rf_x86.bin", registers, replay.REGISTERS)
-    arm = subprocess.run([str(arm_driver), str(dylib), f"sub_{address:x}", str(iterations),
-                          str(directory / "rf_arm.bin"), str(directory / "scratch.bin"),
-                          str(directory / "out_arm.bin"), str(directory / "segments.bin")],
-                         capture_output=True, timeout=180)
-    x86 = subprocess.run([str(x86_driver), str(directory / "segments.bin"), hex(address),
-                          str(directory / "stubs.txt"), str(iterations),
-                          str(directory / "rf_x86.bin"), str(directory / "scratch.bin"),
-                          str(directory / "out_x86.bin"), hex(size)],
-                         capture_output=True, timeout=180)
+    try:
+        arm = subprocess.run([str(arm_driver), str(dylib), f"sub_{address:x}", str(iterations),
+                              str(directory / "rf_arm.bin"), str(directory / "scratch.bin"),
+                              str(directory / "out_arm.bin"), str(directory / "segments.bin")],
+                             capture_output=True, timeout=DRIVER_TIMEOUT)
+        x86 = subprocess.run([str(x86_driver), str(directory / "segments.bin"), hex(address),
+                              str(directory / "stubs.txt"), str(iterations),
+                              str(directory / "rf_x86.bin"), str(directory / "scratch.bin"),
+                              str(directory / "out_x86.bin"), hex(size)],
+                             capture_output=True, timeout=DRIVER_TIMEOUT)
+    except subprocess.TimeoutExpired as expired:
+        # A function whose entry state sends it into a loop never returns; report it instead of
+        # failing the whole selection.
+        return {"status": "timeout", "driver": Path(expired.cmd[0]).name}
     if arm.returncode != 0 and x86.returncode != 0:
         return {"status": "both-fault", "arm_code": arm.returncode, "x86_code": x86.returncode}
     if arm.returncode != 0:
