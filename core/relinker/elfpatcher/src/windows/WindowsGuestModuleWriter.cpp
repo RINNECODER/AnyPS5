@@ -171,7 +171,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
             code.Emit({0x4c, 0x89, 0xe7, 0x4c, 0x89, 0xee, 0x4c, 0x89, 0xf2});
             code.Rip({0x48, 0x8b, 0x05}, slotsRva + static_cast<std::uint32_t>(guest.PreInitArray.size()) * 8);
             code.Emit({0xff, 0xd0});
-            code.Emit({0x41, 0x5c, 0x41, 0x5d, 0x41, 0x5e, 0xc3});
+            code.Emit({0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0xc3});
             auto thunk = code.TakeBytes();
             while (thunk.size() % 8 != 0) thunk.push_back(0x90);
             for (const auto slot : guest.PreInitArray) {

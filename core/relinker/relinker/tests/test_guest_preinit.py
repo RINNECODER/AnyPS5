@@ -173,7 +173,7 @@ def check_windows_deferred(data, slots):
     restore = 15 + 23 * len(slots)
     assert code[restore:restore + 12] == b'\x4c\x89\xe7\x4c\x89\xee\x4c\x89\xf2\x48\x8b\x05', code[restore:restore + 16]
     assert code[restore + 16:restore + 18] == b'\xff\xd0', code[restore:restore + 25]
-    assert code[restore + 18:restore + 25] == b'\x41\x5c\x41\x5d\x41\x5e\xc3', code[restore:restore + 25]
+    assert code[restore + 18:restore + 25] == b'\x41\x5e\x41\x5d\x41\x5c\xc3', code[restore:restore + 25]
     slots_offset = code_size + (8 - code_size % 8) % 8
     slots_rva = ginitc_rva + slots_offset
     for index, slot in enumerate(slots):
