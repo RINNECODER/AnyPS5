@@ -240,6 +240,7 @@ def main():
             libraries = work / 'libs'
             libraries.mkdir()
             shutil.copyfile(host, libraries / 'libc.prx')
+            shutil.copyfile(host, libraries / 'libkernel.prx')
             load_and_record(work, libraries / 'libc.prx', converted)
         mach = work / 'macos'
         mach_modules = mach / 'sce_module'
