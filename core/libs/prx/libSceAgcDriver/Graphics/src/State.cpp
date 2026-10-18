@@ -348,6 +348,7 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     }
     if (surface.samples == 1 && surface.maxMip == 0) depth.lastSlice = std::max(lastSlice, depth.slice);
     else depth.lastSlice = depth.slice;
+    depth.layers = depth.lastSlice >= depth.slice ? (depth.lastSlice - depth.slice + 1u) : 1u;
     depth.format = zFormat == 1 ? (stencil ? VK_FORMAT_D16_UNORM_S8_UINT : VK_FORMAT_D16_UNORM) :
         zFormat == 2 ? (stencil ? VK_FORMAT_D24_UNORM_S8_UINT : VK_FORMAT_D32_SFLOAT) :
         (stencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT);
@@ -964,6 +965,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     APS5_LOG_OUT_DEBUG("Topology=%u", static_cast<unsigned>(result.topology));
     result.primitiveRestart = read(queue.userConfig, 0x24b, RegisterBank::UserConfig) != 0 && !result.rectList && result.topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
     result.layered = (read(cx, 0x207) & (1u << 18u)) != 0;
+    result.layerExports = (read(cx, 0x207) & LayerExports) != 0;
     if ((read(cx, 0x207) & LayerExports) != 0) {
         static bool reported = false;
         if (!reported) {
@@ -1241,6 +1243,15 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
         Require(format == 3u || format == 4u || format == 5u || format == 6u || format == 9u, "alpha-to-coverage needs an MRT0 export format with a floating-point alpha");
         Require(mrt0 == result.colors.end() || (mrt0->componentMapping == 0xe4u && mrt0->packing == ShaderRecompiler::ColorExportPacking::None), "alpha-to-coverage into a component-swapped or packed MRT0 target is unsupported");
     }
+    result.renderLayers = 1;
+    if (result.layered) {
+        for (const auto& color : result.colors) {
+            result.renderLayers = std::max(result.renderLayers, color.layers);
+        }
+        if (result.depth) {
+            result.renderLayers = std::max(result.renderLayers, result.depth->layers);
+        }
+    }
     APS5_LOG_OUT_DEBUG("DecodeState done colorTarget=%u render=%ux%u topology=%u", result.hasColorTarget ? 1u : 0u, result.renderExtent.width, result.renderExtent.height, static_cast<unsigned>(result.topology));
     return result;
 }
@@ -1366,9 +1377,15 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
         color.arrayLastSlice = attrib3 & 0x1fffu;
         color.arraySlice = slice;
     }
-    if (lastSlice != slice) {
+    if (!volume && lastSlice != slice) {
         const auto exports = find(cx, 0x207);
-        Require(exports == cx.end() || (exports->second & (1u << 18u)) == 0, "layered draws into a color view of several array slices are unsupported");
+        if (exports != cx.end() && (exports->second & (1u << 18u)) != 0) {
+            if (color.arrayLastSlice == 0) {
+                color.arrayLastSlice = lastSlice;
+                color.arraySlice = slice;
+            }
+            color.layers = lastSlice + 1u - slice;
+        }
     }
     color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
     Require(!multisampled || (maxMip == 0 && !volume && slice == 0), "mipmapped, 3D or array-sliced multisampled color targets are unsupported");

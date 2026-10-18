@@ -168,14 +168,14 @@ Graphics::GuestTextureResource colorSurface(const Graphics::ColorTarget& color) 
     if (!format) throw std::invalid_argument("Metal draw color format has no guest texture mapping");
     const bool chain = color.mipCount > 1;
     Graphics::GuestTextureResource surface{};
-    surface.baseAddress = chain ? color.surfaceAddress : color.address;
+    surface.baseAddress = color.arrayAddress != 0 ? color.arrayAddress : (chain ? color.surfaceAddress : color.address);
     surface.width = chain ? color.surfaceExtent.width : color.extent.width;
     surface.height = chain ? color.surfaceExtent.height : color.extent.height;
-    surface.depthOrLastArray = color.depth - 1;
+    surface.depthOrLastArray = color.arrayLastSlice != 0 ? color.arrayLastSlice : (color.depth - 1);
     surface.mipCount = color.mipCount;
     surface.lastLevel = color.mipCount - 1;
     surface.tileMode = Graphics::ColorTextureTileMode(color.tileMode);
-    surface.dimension = color.depth > 1 ? Graphics::TextureDimension::k3D : Graphics::TextureDimension::k2D;
+    surface.dimension = color.arrayLastSlice > 0 ? Graphics::TextureDimension::k2DArray : (color.depth > 1 ? Graphics::TextureDimension::k3D : Graphics::TextureDimension::k2D);
     surface.format = *format;
     surface.dstSelX = 4;
     surface.dstSelY = 5;
@@ -959,7 +959,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
     for (const auto& color : state.colors) RetireDepthSurfaces(depthSurfaces, color, depth.get());
     // A depth-only draw that exports a render target index renders into slices slice..lastSlice of its
     // depth array at once; each slice also gets its surface, so later single-slice and array readers find it.
-    const std::uint32_t depthLayers = depth && state.layered && state.colors.empty() && state.depth->samples == 1 ?
+    const std::uint32_t depthLayers = depth && state.layered && state.depth->samples == 1 ?
         state.depth->lastSlice - state.depth->slice + 1u : 0u;
     if (depthLayers > 1) {
         for (std::uint32_t layer = 1; layer < depthLayers; ++layer) {
@@ -1167,6 +1167,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         if (state.rasterSamples == 1) {
             attachment.texture = handle;
             attachment.level = color.mip;
+            attachment.slice = color.arraySlice;
             attachment.depthPlane = color.depthSlice;
             continue;
         }
@@ -1214,9 +1215,12 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
     const bool stencilMemoryless = depth && depth->StencilTexture() != nil && depth->StencilTexture().storageMode == MTLStorageModeMemoryless;
     const auto stencilLoad = stencilMemoryless ? MTLLoadActionDontCare : MTLLoadActionLoad;
     const auto stencilStore = stencilResolveEnabled ? MTLStoreActionMultisampleResolve : ((stencilMemoryless || !stencilWrites) ? MTLStoreActionDontCare : MTLStoreActionStore);
+    const std::uint32_t maxRenderLayers = std::max(depthLayers, state.renderLayers);
+    if (maxRenderLayers > 1) {
+        renderPass.renderTargetArrayLength = maxRenderLayers;
+    }
     if (depth && depthLayers > 1) {
         id<MTLTexture> layeredDepth = depth->LayeredDepthTexture(depthLayers);
-        renderPass.renderTargetArrayLength = depthLayers;
         renderPass.depthAttachment.texture = layeredDepth;
         renderPass.depthAttachment.loadAction = depthLoad;
         renderPass.depthAttachment.storeAction = depthStore;

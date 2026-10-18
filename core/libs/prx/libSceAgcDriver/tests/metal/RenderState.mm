@@ -593,12 +593,13 @@ void ColorViewSlices() {
     Require(refused("beyond the array surface"), "a view past the last array slice was not refused");
     cx[0x31b + stride] = 1u << 13u;
     cx[0x207] = 1u << 18u;
-    Require(refused("layered draws into a color view of several array slices"), "a layered draw into a view of several slices was not refused");
+    const auto layeredColor = Graphics::DecodeState(guest).colors.at(0);
+    Require(layeredColor.address == address && layeredColor.arraySlice == 0 && layeredColor.layers == 2, "a layered draw into slices 0..1 did not decode two layers");
     cx[0x207] = 0;
     cx[0x3b8 + 3] = 0x0a000003; // A 3D target of depth 4.
     cx[0x31b + stride] = 2u | (3u << 13u);
     Require(refused("several 3D slices"), "a view of several 3D slices was not refused");
-    std::cout << "PASS: color views of several array slices render into their first slice; layered and 3D ranges refused\n";
+    std::cout << "PASS: color views of several array slices render into their first slice or multiple layers; 3D ranges refused\n";
 }
 
 // Upstream 04138f50a: clip and cull distance enables reach State::paClVsOutCntl (the Metal draw passes

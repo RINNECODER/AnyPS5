@@ -60,6 +60,7 @@ struct ColorTarget {
     std::uint64_t arrayAddress = 0;
     std::uint32_t arrayLastSlice = 0;
     std::uint32_t arraySlice = 0;
+    std::uint32_t layers = 1;
     std::uint32_t exportIndex = 0;
     bool uintExport = false;
     std::uint32_t pipeBankXor = 0;
@@ -88,6 +89,7 @@ struct DepthTarget {
     std::uint32_t slice = 0;
     std::uint32_t firstSlice = 0;
     std::uint32_t lastSlice = 0;
+    std::uint32_t layers = 1;
     std::uint32_t depthSwizzle = 0;
     std::uint32_t pipeBankXor = 0;
     bool iterate256 = false;
@@ -124,6 +126,8 @@ struct State {
     // PA_CL_VS_OUT_CNTL USE_VTX_RENDER_TARGET_INDX: the vertex (or mesh) stage exports a render target
     // index, the slice of a layered depth target (DepthTarget::slice..lastSlice) each primitive renders to.
     bool layered = false;
+    bool layerExports = false;
+    std::uint32_t renderLayers = 1;
     bool dualSourceBlend = false;
     std::uint32_t reversedBlend = 0;
     VkExtent2D renderExtent;
