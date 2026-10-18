@@ -87,8 +87,8 @@ void PadInput::applyOutput() {
     if (controller == nullptr) return;
     const auto now = std::chrono::steady_clock::now();
     const bool isPs5 = SDL_GameControllerGetType(controller) == SDL_CONTROLLER_TYPE_PS5;
-    const auto large = isPs5 ? outputState.vibrationLarge : std::max(outputState.vibrationLarge, outputState.audioVibrationLarge);
-    const auto small = isPs5 ? outputState.vibrationSmall : std::max(outputState.vibrationSmall, outputState.audioVibrationSmall);
+    const auto large = std::max(outputState.vibrationLarge, outputState.audioVibrationLarge);
+    const auto small = std::max(outputState.vibrationSmall, outputState.audioVibrationSmall);
     const bool rumbling = large != 0 || small != 0;
     const bool triggerRumble = outputState.trigger[0].fallback != 0 || outputState.trigger[1].fallback != 0;
     if (SDL_GameControllerHasLED(controller) == SDL_TRUE) {
