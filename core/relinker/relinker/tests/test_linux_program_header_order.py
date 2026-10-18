@@ -15,6 +15,7 @@ PT_DYNAMIC = 2
 PT_INTERP = 3
 PT_PHDR = 6
 PT_OS_PROCPARAM = 0x61000001
+PT_GNU_STACK = 0x6474E551
 PT_SCE_VERSION = 0x6FFFFF01
 PAGE = 0x1000
 
@@ -105,7 +106,7 @@ def main():
         unordered = convert("unordered-loads", multi_load_fixture([DATA, PROCPARAM, TEXT, RODATA]))
         headers = check_order("unordered-loads", unordered.read_bytes())
         assert [h[3] for h in headers if h[0] == PT_LOAD][:3] == [TEXT[3], RODATA[3], DATA[3]], headers
-        assert kinds_between_loads(headers) == [PT_OS_PROCPARAM], headers
+        assert kinds_between_loads(headers) == [PT_OS_PROCPARAM, PT_GNU_STACK], headers
         run_expecting_trap("unordered-loads", unordered)
 
         tailed = convert("unaligned-tail", multi_load_fixture([TEXT, RODATA, PROCPARAM, TAIL], 0x9400))

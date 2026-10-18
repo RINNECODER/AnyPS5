@@ -187,6 +187,10 @@ int APS5_VABI _Cnd_init_nid_postfix(void** handle) {
     return threadSuccess;
 }
 
+int APS5_VABI _Cnd_init_with_default_name_override_nid_postfix(void** handle, const char*) {
+    return _Cnd_init_nid_postfix(handle);
+}
+
 void APS5_VABI _Cnd_destroy_nid_postfix(void** handle) {
     if (!handle)
         throw std::invalid_argument("_Cnd_destroy: null condition handle pointer");
@@ -269,6 +273,10 @@ int APS5_VABI _Cnd_broadcast_nid_postfix(void** handle) {
 int SignalCondition_nid_no_patch(void** handle) {
     ResolveCondition(handle, "_Cnd_signal")->native.notify_one();
     return threadSuccess;
+}
+
+unsigned APS5_VABI _ZNSt6thread20hardware_concurrencyEv_nid_postfix() {
+    return std::thread::hardware_concurrency();
 }
 
 int APS5_VABI _Thrd_sleep_nid_postfix(const Xtime* target, Xtime*) {

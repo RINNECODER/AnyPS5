@@ -109,7 +109,9 @@ std::vector<Domain::ProgramHeader> ProgramHeaderLayoutBuilder::_keptHeaders(cons
 }
 
 std::size_t ProgramHeaderLayoutBuilder::RequiredProgramHeaderCount(const std::vector<Domain::ProgramHeader>& originalHeaders) const {
-    return _keptHeaders(originalHeaders).size() + kSyntheticProgramHeaderCount;
+    auto kept = _keptHeaders(originalHeaders);
+    const bool hasStack = std::any_of(kept.begin(), kept.end(), [](const Domain::ProgramHeader& ph) { return ph.Type == PT_GNU_STACK; });
+    return kept.size() + kSyntheticProgramHeaderCount + (hasStack ? std::size_t{0} : std::size_t{1});
 }
 
 std::uint64_t ProgramHeaderLayoutBuilder::GuestLoadPageEnd(
@@ -141,6 +143,9 @@ std::uint16_t ProgramHeaderLayoutBuilder::WriteLayout(
     const ProgramHeaderLayoutRequest& request
 ) const {
     auto kept = _keptHeaders(request.OriginalHeaders);
+    if (std::none_of(kept.begin(), kept.end(), [](const Domain::ProgramHeader& ph) { return ph.Type == PT_GNU_STACK; })
+        && RequiredProgramHeaderCount(request.OriginalHeaders) <= request.PhNum)
+        kept.push_back({PT_GNU_STACK, PF_R | PF_W, 0, 0, 0, 0, 0, 16});
     const auto frameCount = std::count_if(kept.begin(), kept.end(), [](const Domain::ProgramHeader& ph) { return ph.Type == PT_GNU_EH_FRAME; });
 
     const bool keepFrames = kept.size() + kSyntheticProgramHeaderCount <= request.PhNum;
