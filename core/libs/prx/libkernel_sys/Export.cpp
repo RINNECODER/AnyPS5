@@ -335,6 +335,7 @@ std::int64_t APS5_VABI readlink_nid_postfix(const char* path, char* buffer, std:
     if (path == nullptr) return Fail(GuestEfault);
     if (*path == '\0') return Fail(GuestEnoent);
     if (size > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) return Fail(GuestEinval);
+    if (std::strlen(path) >= GuestPathMax) return Fail(GuestEnametoolong);
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return Fail(error);
     return ReadNativeLink(native, buffer, size);
@@ -344,6 +345,7 @@ std::int64_t APS5_VABI readlinkat_nid_postfix(int fd, const char* path, char* bu
     if (path == nullptr) return Fail(GuestEfault);
     if (*path == '\0') return Fail(GuestEnoent);
     if (size > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) return Fail(GuestEinval);
+    if (std::strlen(path) >= GuestPathMax) return Fail(GuestEnametoolong);
     if (fd == GuestAtFdcwd || *path == '/') return readlink_nid_postfix(path, buffer, size);
     int error = 0;
     const char* base = GetDirectoryDescriptorPath_nid_no_patch(fd, &error);
@@ -429,6 +431,12 @@ int APS5_VABI symlink_nid_postfix(const char* target, const char* created) {
     if (*target == '/') {
         NotImplemented_nid_no_patch("symlink: absolute targets");
         return -1;
+    }
+    for (const auto& part : std::filesystem::path(target)) {
+        if (part == "..") {
+            NotImplemented_nid_no_patch("symlink: parent-directory targets");
+            return -1;
+        }
     }
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(created, native)) return static_cast<int>(Fail(error));
