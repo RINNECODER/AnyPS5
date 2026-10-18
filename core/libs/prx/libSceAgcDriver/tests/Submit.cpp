@@ -230,6 +230,35 @@ void testEndOfPipeInterrupts() {
     AgcDriverWaitIdle_nid_postfix();
     check(output->ready.load() == 2, "flip after a release interrupt was not handed to its output");
     check(owner->GetTriggeredEvents(events.data(), 2) == 0, "flip on a queue that already raised its own release interrupt raised a second event");
+    words[2] = 1u << 24u;
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "release before sustained flips submit failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(owner->GetTriggeredEvents(events.data(), 2) == 1, "a release interrupt did not deliver on a queue whose flip event is suppressed");
+    std::uint32_t sustainedFlips = 0;
+    std::uint32_t flipsUntilEvent = 0;
+    while (sustainedFlips < 8 && flipsUntilEvent == 0) {
+        check(sceAgcDriverSubmitDcb(&flipPacket) == 0, "sustained flip submit failed");
+        AgcDriverWaitIdle_nid_postfix();
+        ++sustainedFlips;
+        check(output->ready.load() == static_cast<int>(2 + sustainedFlips), "sustained flip was not handed to its output");
+        if (owner->GetTriggeredEvents(events.data(), 2) != 0) flipsUntilEvent = sustainedFlips;
+    }
+    check(flipsUntilEvent != 0, "a flip never raised an event again on a queue whose own release interrupts stopped");
+    check(flipsUntilEvent > 2, "a flip raised an event within two flips of the queue's own release interrupt");
+    check(sceAgcDriverSubmitDcb(&flipPacket) == 0, "flip after the latch cleared submit failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(output->ready.load() == static_cast<int>(3 + sustainedFlips), "flip after the latch cleared was not handed to its output");
+    check(owner->GetTriggeredEvents(events.data(), 2) == 1, "a flip did not raise an event after the latch cleared");
+    words[2] = 1u << 24u;
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "release after a cleared latch submit failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(owner->GetTriggeredEvents(events.data(), 2) == 1, "a release interrupt did not deliver after the latch cleared");
+    for (int index = 0; index < 2; ++index) {
+        check(sceAgcDriverSubmitDcb(&flipPacket) == 0, "flip paired with a release interrupt submit failed");
+        AgcDriverWaitIdle_nid_postfix();
+        check(output->ready.load() == static_cast<int>(4 + sustainedFlips + index), "flip paired with a release interrupt was not handed to its output");
+        check(owner->GetTriggeredEvents(events.data(), 2) == 0, "a flip raised an event within two flips of the queue's own release interrupt");
+    }
     AgcDriverUnregisterVideoOutput_nid_postfix(7, output);
     alignas(8) static volatile std::uint64_t label = 0;
     const auto labelAddress = reinterpret_cast<std::uintptr_t>(&label);

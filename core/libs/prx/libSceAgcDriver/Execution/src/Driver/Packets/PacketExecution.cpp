@@ -18,6 +18,8 @@ namespace AgcDriver::DriverDetail {
 
 namespace {
 
+constexpr std::uint32_t eopSelfSignalFlipLimit = 4;
+
 bool orderedFills() {
     static const bool ordered = std::getenv("APS5_PIPELINE_DRAIN_FILLS") == nullptr;
     return ordered;
@@ -53,13 +55,17 @@ bool keepsDrawPipeline(std::span<const std::uint32_t> packet, std::uint32_t head
 void Driver::deliverGuestEopInterrupt(std::uint32_t queue) {
     if (!AgcDriverDeliverEopInterrupt(queue)) return;
     std::lock_guard<std::mutex> lock(eopSelfSignalMutex);
-    eopSelfSignalQueues.insert(queue);
+    eopSelfSignalFlips[queue] = 0;
 }
 
 void Driver::deliverFlipEopInterrupt(std::uint32_t queue) {
     {
         std::lock_guard<std::mutex> lock(eopSelfSignalMutex);
-        if (eopSelfSignalQueues.count(queue) != 0) return;
+        const auto latched = eopSelfSignalFlips.find(queue);
+        if (latched != eopSelfSignalFlips.end()) {
+            if (++latched->second <= eopSelfSignalFlipLimit) return;
+            eopSelfSignalFlips.erase(latched);
+        }
     }
     AgcDriverDeliverEopInterrupt(queue);
 }

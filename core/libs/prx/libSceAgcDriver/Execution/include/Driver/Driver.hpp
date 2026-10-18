@@ -304,7 +304,7 @@ private:
     std::atomic<std::uint64_t> flipBatchesUnsignaled{0};
 
     std::mutex eopSelfSignalMutex;
-    std::unordered_set<std::uint32_t> eopSelfSignalQueues;
+    std::unordered_map<std::uint32_t, std::uint32_t> eopSelfSignalFlips;
 
     alignas(64) std::atomic<int> packetsInFlight{0};
     std::atomic<std::uint64_t> packetsDone{0};
