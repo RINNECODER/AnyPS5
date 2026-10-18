@@ -37,8 +37,8 @@ int main() {
     Require(scePlayGoDialogOpen(nullptr) == paramInvalid);
     Require(scePlayGoDialogUpdateStatus() == 1);
 
-    PlayGoDialogResult uninitResult{};
-    Require(scePlayGoDialogGetResult(&uninitResult) == invalidState);
+    PlayGoDialogResult unfinishedResult{};
+    Require(scePlayGoDialogGetResult(&unfinishedResult) == invalidState);
 
     Require(scePlayGoDialogOpen(&openParam) == 0);
     Require(scePlayGoDialogGetStatus() == 3);
