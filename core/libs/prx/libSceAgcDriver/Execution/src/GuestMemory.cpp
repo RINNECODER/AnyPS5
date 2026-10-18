@@ -636,9 +636,18 @@ bool onOwnLiveStack(std::uintptr_t address, std::size_t bytes) {
 }
 
 #ifdef __linux__
+bool pageStateRecorded(std::uintptr_t address, std::size_t bytes) {
+    auto& pages = Pages();
+    pages.initialize();
+    for (auto at = address & ~static_cast<std::uintptr_t>(PageBytes - 1); at < address + bytes; at += PageBytes) {
+        if (const auto* span = pages.spanOf(at); span != nullptr && span->load(at) != 0) return true;
+    }
+    return false;
+}
+
 bool readableWithoutQuery(std::uintptr_t address, std::size_t bytes) {
     constexpr std::size_t limit = 4096;
-    if (bytes > limit || HostMapping::QueryFd() >= 0) return false;
+    if (bytes > limit || HostMapping::QueryFd() >= 0 || pageStateRecorded(address, bytes)) return false;
     thread_local std::array<std::byte, limit> scratch;
     iovec local{scratch.data(), bytes};
     iovec remote{reinterpret_cast<void*>(address), bytes};
