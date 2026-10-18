@@ -2858,6 +2858,17 @@ void StorageTexture::MarkDirty() {
     markLayersPending(0, trackedLayers);
 }
 
+void StorageTexture::MarkSliceDirty(std::uint32_t slice, std::uint32_t count) {
+    if (descriptor.dccAddress != 0 && IsDccClear(uploadedKeys) && !IsDccClear(filledKeys)) {
+        traceKeyStore("first write", descriptor, guestBytes);
+        MarkDccUncompressed(context, descriptor.dccAddress, guestBytes, DccKeyCount(descriptor, guestBytes));
+        uploadedKeys = DccKeys::Uncompressed;
+    }
+    const auto clampedFirst = std::min(slice, trackedLayers);
+    const auto clampedCount = std::min(count, trackedLayers - clampedFirst);
+    if (clampedCount > 0) markLayersPending(clampedFirst, clampedCount);
+}
+
 bool StorageTexture::anyLayerPending() const {
     return std::any_of(layerPending.begin(), layerPending.end(), [](bool pending) { return pending; });
 }
