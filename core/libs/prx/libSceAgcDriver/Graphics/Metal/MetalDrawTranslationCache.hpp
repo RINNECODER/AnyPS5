@@ -243,6 +243,7 @@ struct DrawTranslationRecord {
     std::vector<MetalShaderResourceBinding> vertexBindings;
     std::vector<MetalShaderResourceBinding> fragmentBindings;
     std::vector<id<MTLResource>> residency;
+    std::vector<id<MTLHeap>> residentHeaps;
     MTLRenderPassDescriptor* renderPass = nil;
     MetalEncoders::PassKey passKey{};
     bool bdaStores = false;

@@ -34,6 +34,7 @@ add_library(anyps5_metal_utilities STATIC
     MetalGuestMemory.mm
     MetalPipelineCache.mm
     MetalWorkerPool.mm
+    MetalHeapPool.mm
     "${CMAKE_CURRENT_SOURCE_DIR}/../../Execution/src/AspectFit.cpp"
 )
 target_compile_options(anyps5_metal_utilities PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")

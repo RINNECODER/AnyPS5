@@ -163,6 +163,7 @@ private:
         DynamicRenderState dynamicState;
         id<MTLDepthStencilState> depthStencilState = nil;
         std::vector<id<MTLResource>> residentResources;
+        std::vector<id<MTLHeap>> residentHeaps;
         std::vector<MetalBufferBinding> vertexBuffers;
         void Reset() {
             encoder = nil;
@@ -172,6 +173,7 @@ private:
             dynamicState = {};
             depthStencilState = nil;
             residentResources.clear();
+            residentHeaps.clear();
             vertexBuffers.clear();
         }
     };

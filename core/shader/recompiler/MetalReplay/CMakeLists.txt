@@ -52,6 +52,7 @@ add_library(anyps5_metal_native_execution STATIC
     "${agcDriverRoot}/Graphics/Metal/FrameCapture.mm"
     "${agcDriverRoot}/Graphics/Metal/MetalDccExtent.cpp"
     "${agcDriverRoot}/Graphics/Metal/MetalHostExports.cpp"
+    "${agcDriverRoot}/Graphics/Metal/MetalHeapPool.mm"
 )
 target_compile_options(anyps5_metal_native_execution PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
 target_compile_definitions(anyps5_metal_native_execution PUBLIC
