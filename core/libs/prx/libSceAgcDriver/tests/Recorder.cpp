@@ -6068,7 +6068,11 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && std::string_view(argv[1]) == "--clear-hand-over-only") {
             clearHandOverTests(device, recorder, false);
-            return clearHandOverTests(device, recorder, true) ? 0 : 77;
+            if (!clearHandOverTests(device, recorder, true)) {
+                std::cout << "skipped, the device imports no watched host memory for the clear-key hand-over\n";
+                return 77;
+            }
+            return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--integer-clear-only") {
             integerClearTests(device);
