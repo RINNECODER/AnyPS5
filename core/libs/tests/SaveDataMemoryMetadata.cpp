@@ -23,6 +23,7 @@ int APS5_VABI sceSaveDataTerminate();
 int APS5_VABI sceSaveDataCreateTransactionResource(std::uint32_t);
 int APS5_VABI sceSaveDataDeleteTransactionResource(std::int32_t);
 int APS5_VABI sceSaveDataSetSaveDataMemory2(const SaveDataMemorySet2*);
+int APS5_VABI sceSaveDataSyncSaveDataMemory(const void*);
 int APS5_VABI sceSaveDataSetupSaveDataMemory2(const SaveDataMemorySetup2*, SaveDataMemorySetupResult*);
 }
 
@@ -45,6 +46,10 @@ static std::vector<char> Read(const std::filesystem::path& path) {
 }
 
 int main() {
+    const std::uint32_t syncParamUninit[2] = {7531u, 0u};
+    Require(sceSaveDataSyncSaveDataMemory(nullptr) == static_cast<int>(0x809F0000u));
+    Require(sceSaveDataSyncSaveDataMemory(syncParamUninit) == static_cast<int>(0x809F0001u));
+
     Require(sceSaveDataCreateTransactionResource(1024) == kSaveDataNotInitialized);
     Require(sceSaveDataDeleteTransactionResource(1) == kSaveDataNotInitialized);
     const auto previous = std::filesystem::current_path();

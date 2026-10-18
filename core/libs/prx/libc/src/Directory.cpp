@@ -30,6 +30,8 @@ using NativeDirectory = _WDIR;
 NativeDirectory* OpenNative(const std::filesystem::path& path) { return ::_wopendir(path.c_str()); }
 int CloseNative(NativeDirectory* native) { return ::_wclosedir(native); }
 void RewindNative(NativeDirectory* native) { ::_wrewinddir(native); }
+long TellNative(NativeDirectory* native) { return ::_wtelldir(native); }
+void SeekNative(NativeDirectory* native, long location) { ::_wseekdir(native, location); }
 bool ReadNative(NativeDirectory* native, std::filesystem::path& component, std::string& name, std::uint64_t& inode) {
     auto* entry = ::_wreaddir(native);
     if (!entry) return false;
@@ -44,6 +46,8 @@ using NativeDirectory = DIR;
 NativeDirectory* OpenNative(const std::filesystem::path& path) { return ::opendir(path.c_str()); }
 int CloseNative(NativeDirectory* native) { return ::closedir(native); }
 void RewindNative(NativeDirectory* native) { ::rewinddir(native); }
+long TellNative(NativeDirectory* native) { return ::telldir(native); }
+void SeekNative(NativeDirectory* native, long location) { ::seekdir(native, location); }
 bool ReadNative(NativeDirectory* native, std::filesystem::path& component, std::string& name, std::uint64_t& inode) {
     auto* entry = ::readdir(native);
     if (!entry) return false;
@@ -156,6 +160,20 @@ void APS5_VABI rewinddir_nid_postfix(void* handle) {
     auto& directory = *static_cast<Directory*>(handle);
     std::lock_guard lock(directory.mutex);
     RewindNative(directory.native);
+}
+
+std::int64_t APS5_VABI telldir_nid_postfix(void* handle) {
+    if (!handle) { errno = 9; return -1; }
+    auto& directory = *static_cast<Directory*>(handle);
+    std::lock_guard lock(directory.mutex);
+    return TellNative(directory.native);
+}
+
+void APS5_VABI seekdir_nid_postfix(void* handle, std::int64_t location) {
+    if (!handle) { errno = 9; return; }
+    auto& directory = *static_cast<Directory*>(handle);
+    std::lock_guard lock(directory.mutex);
+    SeekNative(directory.native, static_cast<long>(location));
 }
 
 void* APS5_VABI OpenDescriptorDirectory_nid_no_patch(const char* hostPath, int descriptor, int (APS5_VABI* closeDescriptor)(int)) {
