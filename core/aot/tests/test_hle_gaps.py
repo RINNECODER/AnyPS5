@@ -20,29 +20,33 @@ from hle_gaps import GUEST_PREFIX, classify, main, read_symbols, resolve_import_
 
 ROOT = Path(__file__).resolve().parents[3]
 
-# The HLE entry points the guest's start-up path reaches before the title's main loop, in the order
-# the recorded Rosetta boot calls them. Every one of these has a verified ABI in the contracts, so a
-# component that stops providing it turns the guest's call into a silent zero return.
-STARTUP_ENTRY_POINTS = (
-    'sceSysmoduleLoadModule',
-    'sceCommonDialogInitialize',
-    'sceSystemGestureInitializePrimitiveTouchRecognizer',
-    'sceSaveDataInitialize3',
-    'sceSaveDataCreateTransactionResource',
-    'sceNpGameIntentInitialize',
-    'sceSystemServiceParamGetString',
-    'sceAppContentInitialize',
-    'sceAppContentTemporaryDataMount2',
-    'sceUserServiceInitialize',
-    'sceUserServiceGetInitialUser',
-    'sceUserServiceGetUserName',
-    'sceImeKeyboardOpen',
-    '_ZN3sce4Json11InitializerC1Ev',
-    '_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E',
-    '_ZN3sce4Json14InitParameter2C2Ev',
-    '_ZN3sce4Json14InitParameter217setFileBufferSizeEm',
-    '_ZN3sce4Json18InitParameterRtti216setAllocatorRttiEPNS0_14AllocParamRttiEPv',
-)
+# The HLE entry points the guest's start-up path reaches before the title's main loop, and the
+# component that must serve each one. Every one of these has a verified ABI in the contracts, so a
+# component that stops providing it turns the guest's call into a silent zero return. The map is
+# kept here rather than derived from the component sources so the check reads only the runtime's
+# component list: the compiler-repo mirror carries `core/libs/native` but not the component sources,
+# and the list is what the boot depends on. `StartupComponentSourceTests` cross-checks the map
+# against the sources where they exist.
+STARTUP_PROVIDERS = {
+    'sceSysmoduleLoadModule': 'libSceSysmodule',
+    'sceCommonDialogInitialize': 'libSceCommonDialog',
+    'sceSystemGestureInitializePrimitiveTouchRecognizer': 'libSceSystemGesture',
+    'sceSaveDataInitialize3': 'libSceSaveData.native',
+    'sceSaveDataCreateTransactionResource': 'libSceSaveData.native',
+    'sceNpGameIntentInitialize': 'libSceNpGameIntent',
+    'sceSystemServiceParamGetString': 'libSceSystemService',
+    'sceAppContentInitialize': 'libSceAppContent',
+    'sceAppContentTemporaryDataMount2': 'libSceAppContent',
+    'sceUserServiceInitialize': 'libSceUserService',
+    'sceUserServiceGetInitialUser': 'libSceUserService',
+    'sceUserServiceGetUserName': 'libSceUserService',
+    'sceImeKeyboardOpen': 'libSceIme',
+    '_ZN3sce4Json11InitializerC1Ev': 'libSceJson2',
+    '_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E': 'libSceJson2',
+    '_ZN3sce4Json14InitParameter2C2Ev': 'libSceJson2',
+    '_ZN3sce4Json14InitParameter217setFileBufferSizeEm': 'libSceJson2',
+    '_ZN3sce4Json18InitParameterRtti216setAllocatorRttiEPNS0_14AllocParamRttiEPv': 'libSceJson2',
+}
 
 
 def native_components():
@@ -132,16 +136,18 @@ class ImportBindingTests(unittest.TestCase):
 
 
 class StartupComponentCoverageTests(unittest.TestCase):
-    """The routing itself: the components that serve the start-up imports are in the runtime."""
+    """The routing itself: the components that serve the start-up imports are in the runtime.
+
+    Reads only `core/libs/native/CMakeLists.txt`, so it holds in the compiler-repo mirror too.
+    """
 
     def test_every_startup_entry_point_is_provided_by_a_native_component(self):
-        # The regression: a component is dropped from nativeComponents (or its entry point is
-        # renamed), so the import has no provider, the image namespaces it, and the stub generator
-        # lowers the guest's library call to a bare `ret` with no build-time diagnostic.
+        # The regression: a component is dropped from nativeComponents, so the import has no
+        # provider, the image namespaces it, and the stub generator lowers the guest's library call
+        # to a bare `ret` with no build-time diagnostic.
         components = native_components()
-        provided = {name: component for component in components
-                    for name in component_exported_entry_points(component)}
-        missing = [name for name in STARTUP_ENTRY_POINTS if name not in provided]
+        missing = sorted({component for component in STARTUP_PROVIDERS.values()
+                          if component not in components})
         self.assertEqual(missing, [])
 
     def test_the_save_data_component_is_the_transaction_resource_variant(self):
@@ -149,8 +155,43 @@ class StartupComponentCoverageTests(unittest.TestCase):
         # variant that also carries the transaction-resource entry points may be compiled in.
         self.assertIn('libSceSaveData.native', native_components())
         self.assertNotIn('libSceSaveData', native_components())
+
+
+class StartupComponentSourceTests(unittest.TestCase):
+    """The map above against the component sources, where this checkout carries them.
+
+    The compiler-repo mirror exports `core/libs/native` and only the `core/libs/prx` files its
+    compiler tests include, so it has nothing to scan here. Skipping there is honest: the guard
+    that matters in that repo is the component list, which `StartupComponentCoverageTests` checks
+    without the sources. A component renamed at home is also a missing source directory for CMake,
+    so the build reports it before this test would.
+    """
+
+    def carried_sources(self):
+        root = ROOT / 'core/libs/prx'
+        providers = sorted(set(STARTUP_PROVIDERS.values()))
+        return [component for component in providers if (root / component).is_dir()], providers
+
+    def setUp(self):
+        carried, providers = self.carried_sources()
+        if len(carried) != len(providers):
+            self.skipTest('this checkout carries %d of %d component sources' %
+                          (len(carried), len(providers)))
+
+    def test_each_startup_entry_point_comes_from_the_component_that_exports_it(self):
+        for name, component in sorted(STARTUP_PROVIDERS.items()):
+            self.assertIn(name, component_exported_entry_points(component),
+                          '%s is mapped to %s, which does not export it' % (name, component))
+
+    def test_the_transaction_resource_entry_point_is_in_the_variant_compiled_in(self):
         self.assertIn('sceSaveDataCreateTransactionResource',
                       component_exported_entry_points('libSceSaveData.native'))
+
+    def test_the_initialiser_alone_does_not_distinguish_the_two_save_data_variants(self):
+        # Both variants export sceSaveDataInitialize3, so the list check above cannot be dropped in
+        # favour of a source scan: it is the transaction-resource entry point that decides.
+        self.assertIn('sceSaveDataInitialize3',
+                      component_exported_entry_points('libSceSaveData'))
 
 
 class TitleImageBindingTests(unittest.TestCase):
