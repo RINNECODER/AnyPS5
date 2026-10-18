@@ -58,7 +58,8 @@ void PadInput::openController(int deviceIndex) {
         SDL_GameControllerGetNumTouchpads(controller), SDL_GameControllerHasLED(controller) == SDL_TRUE, SDL_GameControllerHasRumbleTriggers(controller) == SDL_TRUE);
     enableSensors();
     outputPending = true;
-    triggerEffectSent = false;
+    lightBar.Reset();
+    triggerEffect.Reset();
 }
 
 void PadInput::enableSensors() {
@@ -90,30 +91,28 @@ void PadInput::applyOutput() {
     const auto small = isPs5 ? outputState.vibrationSmall : std::max(outputState.vibrationSmall, outputState.audioVibrationSmall);
     const bool rumbling = large != 0 || small != 0;
     const bool triggerRumble = outputState.trigger[0].fallback != 0 || outputState.trigger[1].fallback != 0;
+    if (SDL_GameControllerHasLED(controller) == SDL_TRUE) {
+        const LightBarPacer::Color color = outputState.lightBarValid
+            ? LightBarPacer::Color{outputState.lightBar[0], outputState.lightBar[1], outputState.lightBar[2]}
+            : LightBarPacer::Color{0, 64, 255};
+        if (lightBar.Due(color, now)) lightBar.Result(color, now, SDL_GameControllerSetLED(controller, color[0], color[1], color[2]) == 0);
+    }
     if (!outputPending) {
         if ((rumbling || (triggerRumble && !isPs5)) && now >= nextRumbleRefresh) outputPending = true;
         else return;
     }
-    if (now < nextOutputAllowed) return;
     outputPending = false;
     nextRumbleRefresh = now + std::chrono::milliseconds(700);
-    nextOutputAllowed = now + std::chrono::milliseconds(30);
     constexpr Uint32 rumbleMs = 2000;
     SDL_GameControllerRumble(controller, static_cast<Uint16>(large * 257), static_cast<Uint16>(small * 257), rumbling ? rumbleMs : 0);
-    if (SDL_GameControllerHasLED(controller) == SDL_TRUE) {
-        if (outputState.lightBarValid) SDL_GameControllerSetLED(controller, outputState.lightBar[0], outputState.lightBar[1], outputState.lightBar[2]);
-        else SDL_GameControllerSetLED(controller, 0, 64, 255);
-    }
     if (outputState.triggerTouched) {
         if (isPs5) {
-            std::array<Uint8, 47> effect{};
+            TriggerEffectCache::Effect effect{};
             effect[0] = 0x04 | 0x08;
             std::memcpy(effect.data() + 10, outputState.trigger[1].effect, 11);
             std::memcpy(effect.data() + 21, outputState.trigger[0].effect, 11);
-            if (!triggerEffectSent || effect != sentTriggerEffect) {
-                SDL_GameControllerSendEffect(controller, effect.data(), static_cast<int>(effect.size()));
-                sentTriggerEffect = effect;
-                triggerEffectSent = true;
+            if (triggerEffect.NeedsSend(effect)) {
+                triggerEffect.Result(effect, SDL_GameControllerSendEffect(controller, effect.data(), static_cast<int>(effect.size())) == 0);
             }
         } else if (SDL_GameControllerHasRumbleTriggers(controller) == SDL_TRUE) {
             SDL_GameControllerRumbleTriggers(controller, static_cast<Uint16>(outputState.trigger[0].fallback * 257), static_cast<Uint16>(outputState.trigger[1].fallback * 257), triggerRumble ? rumbleMs : 0);
