@@ -78,6 +78,17 @@ def require(condition, message):
         raise Rejected(message)
 
 
+def alignment_of(address, limit=1 << 32):
+    """The largest power of two dividing a known address, capped at `limit`.
+
+    Used to prove the alignment of a scalar access before the IR claims one; see
+    `Function.memory_alignment`.
+    """
+    if address == 0:
+        return limit
+    return min(limit, address & -address)
+
+
 def signature(contract):
     try:
         return abi.signature(contract)
@@ -1468,6 +1479,34 @@ class Function:
         address = self.emit(f'getelementptr i8, ptr {pointer}, i64 {offset}') if offset != '0' else pointer
         return checked_stack.guard(self, ins, operand, address)
 
+    def memory_alignment(self, ins, operand):
+        """The alignment proven for a scalar memory operand, or None when it cannot be proven.
+
+        `atomics.ordered_load`/`ordered_store` claim this alignment in the IR, and a release or
+        acquire atomic whose address is not naturally aligned lowers to `stlr`/`ldar`, which fault
+        on a misaligned address (a packed guest field is stored at one). A constant address
+        (RIP-relative or an image pointer) and a frame-relative address are inspected; an address
+        the compiler cannot place keeps the natural form, the pre-existing policy.
+        """
+        if operand.type != X86_OP_MEM:
+            return None
+        mem = operand.mem
+        state = self.states[ins.address]
+        if mem.segment or mem.index:
+            return None
+        base = ins.reg_name(mem.base)
+        if base == 'rip':
+            return alignment_of(ins.address + ins.size + mem.disp)
+        if base in ('rsp', 'rbp') and state[base] is not None:
+            return alignment_of(self.depth + state[base] + mem.disp, 16)
+        if base in state['pointers']:
+            kind, argument, displacement = state['pointers'][base]
+            if kind == 'image':
+                return alignment_of(displacement + mem.disp)
+            if kind == 'frame':
+                return alignment_of(self.depth + displacement + mem.disp, 16)
+        return None
+
     def read(self, ins, operand, bits=None):
         bits = operand.size * 8 if bits is None else bits
         if operand.type == X86_OP_REG:
@@ -1475,7 +1514,7 @@ class Function:
             return self.load(name, min(width, bits), shift)
         if operand.type == X86_OP_IMM:
             return str(operand.imm & ((1 << bits) - 1))
-        value = self.emit(atomics.ordered_load(bits, self.address(ins, operand)))
+        value = self.emit(atomics.ordered_load(bits, self.address(ins, operand), self.memory_alignment(ins, operand)))
         return checked_pointers.emit(self, ins, operand, value)
 
     def write(self, ins, operand, value):
@@ -1484,7 +1523,7 @@ class Function:
             self.store(name, value, bits, shift)
         else:
             pointer = frame_exclusion.guard(self, ins, operand, self.address(ins, operand))
-            self.lines.append(atomics.ordered_store(operand.size * 8, value, pointer))
+            self.lines.append(atomics.ordered_store(operand.size * 8, value, pointer, self.memory_alignment(ins, operand)))
 
     def guest_stack_flags(self, ins, args, state, right):
         """(left, right, value) from the guest rsp for a flag-setting stack adjustment, else None.
