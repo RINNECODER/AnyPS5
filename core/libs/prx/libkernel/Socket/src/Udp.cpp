@@ -1241,6 +1241,9 @@ std::int64_t APS5_VABI sendmsg_nid_postfix(int descriptor, const GuestMsghdr* me
     return sendto_nid_postfix(descriptor, buffer.data(), buffer.size(), flags, message->name, message->name ? message->nameLength : 0u);
 }
 std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message, int flags) {
+    if (message == nullptr) return Fail(14);
+    const GuestArena::HostWrite messageDestination(message, sizeof(*message));
+    if (!messageDestination.Open()) return Fail(14);
     const auto total = MessageLength(message);
     if (total < 0) return -1;
     const auto socket = Lookup(descriptor);
@@ -1273,14 +1276,18 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
     }
     std::size_t offset = 0;
     for (int i = 0; i < message->iovLength && offset < static_cast<std::size_t>(received); ++i) {
+        const GuestArena::HostWrite destination(message->iov[i].base, message->iov[i].length);
+        if (!destination.Open()) return Fail(14);
         const auto count = std::min<std::size_t>(message->iov[i].length, static_cast<std::size_t>(received) - offset);
         std::memcpy(message->iov[i].base, buffer.data() + offset, count);
         offset += count;
     }
-    if (message->name && socket->family == GuestUnix) {
-        if (socket->type == 1) message->nameLength = 0; else UnnamedAddress(message->name, &message->nameLength);
-    } else if (message->name) {
-        if (size > 0 && (native.ss_family == AF_INET || native.ss_family == AF_INET6)) {
+    if (message->name != nullptr) {
+        const GuestArena::HostWrite nameDestination(message->name, message->nameLength);
+        if (!nameDestination.Open()) return Fail(14);
+        if (socket->family == GuestUnix) {
+            if (socket->type == 1) message->nameLength = 0; else UnnamedAddress(message->name, &message->nameLength);
+        } else if (size > 0 && (native.ss_family == AF_INET || native.ss_family == AF_INET6)) {
             GuestAddress(native, message->name, &message->nameLength);
         } else {
             message->nameLength = 0;
