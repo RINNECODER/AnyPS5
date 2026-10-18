@@ -119,6 +119,9 @@ struct MetalDriver::Impl {
     // Drains the timeline before the worker reads guest [address, address + bytes) on the CPU when
     // committed work may have written it. Called with gpuMutex held.
     void BeforeCpuRead(std::uint64_t address, std::uint64_t bytes);
+    bool WaitBeforeHostWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
+    MetalDriver::PendingWrites PendingGuestWrites();
+    bool CopyBacksOverlap(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
     // Work whose deferred completion found a working-set fault and ran again synchronously.
     std::uint64_t deferredReruns = 0;
     std::array<std::uint64_t, 0x110> drainsBy{};

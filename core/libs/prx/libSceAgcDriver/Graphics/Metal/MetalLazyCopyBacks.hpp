@@ -57,7 +57,7 @@ namespace AgcDriver::Metal {
 class MetalLazyCopyBacks {
 public:
     // Why bytes were materialized, for ANYPS5_METAL_GPU_TIMING statistics.
-    enum class Cause : unsigned { Drain, Signal, Retire, CpuRead, GpuRead, Overlap, Mapping, Count };
+    enum class Cause : unsigned { Drain, Signal, Retire, CpuRead, GpuRead, Overlap, Mapping, HostWrite, Count };
 
     static bool Enabled() {
         static const bool enabled = [] {
@@ -118,6 +118,27 @@ public:
         std::lock_guard lock(mutex);
         const auto from = reinterpret_cast<std::uintptr_t>(begin);
         return std::any_of(entries.begin(), entries.end(), [&](const Entry& entry) { return entry.overlaps(from, from + bytes); });
+    }
+
+    [[nodiscard]] bool OverlapsAny(std::span<const std::pair<std::uintptr_t, std::size_t>> hosts) const {
+        if (hosts.empty()) return false;
+        std::lock_guard lock(mutex);
+        const auto overlaps = [&](std::uintptr_t begin, std::uintptr_t end) {
+            const auto at = std::lower_bound(hosts.begin(), hosts.end(), begin,
+                [](const auto& range, std::uintptr_t value) { return range.first < value; });
+            if (at != hosts.end() && at->first < end) return true;
+            if (at != hosts.begin()) {
+                const auto& before = *(at - 1);
+                if (begin - before.first < before.second) return true;
+            }
+            return false;
+        };
+        for (const auto& entry : entries) {
+            const auto hostBegin = reinterpret_cast<std::uintptr_t>(entry.host);
+            if (overlaps(hostBegin, hostBegin + entry.bytes)) return true;
+            if (overlaps(entry.alias, entry.alias + entry.bytes)) return true;
+        }
+        return false;
     }
 
     // Encodes into `commands` the recorded copy-backs whose bytes overlap [begin, begin + bytes),
