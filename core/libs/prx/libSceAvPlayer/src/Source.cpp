@@ -577,8 +577,10 @@ private:
             picture.luma_bit_depth = 8;
             picture.chroma_bit_depth = 8;
             picture.video_full_range_flag = parameters->color_range == AVCOL_RANGE_JPEG;
-            const auto rate = av_guess_frame_rate(format, const_cast<AVStream*>(&stream), nullptr);
+            const AVRational rate = stream.avg_frame_rate.num > 0 && stream.avg_frame_rate.den > 0 ? stream.avg_frame_rate : stream.r_frame_rate;
             picture.frame_rate = rate.num > 0 && rate.den > 0 ? av_q2d(rate) : 0.0;
+            picture.colour_primaries = static_cast<std::uint32_t>(parameters->color_primaries);
+            picture.transfer_characteristics = static_cast<std::uint32_t>(parameters->color_trc);
         } else {
             auto& sound = info.details.audio;
             sound.channel_count = basic.details.audio.channel_count;

@@ -7,6 +7,8 @@
 
 ### Unknown function info
 
+- [sceAvPlayerGetStreamInfoEx](../../../core/libs/prx/libSceAvPlayer/src/Source.cpp) (libSceAvPlayer) - the video stream reports its frame rate as a double at byte 48 of the video details (byte 64 of the structure), the offset BloodRayne 2: ReVamped's Unity video player reads it from; the field is named after that use and the offset is not confirmed on a console. The two `uint32` colour fields that follow it (`colour_primaries` at byte 56 and `transfer_characteristics` at byte 60 of the video details, filled from the codec's colour primaries and transfer characteristic) follow [KytyPS5](https://github.com/KytyPS5/KytyPS5/blob/main/src/libs/avPlayer.cpp#L231-L250) and are likewise unconfirmed on a console; BloodRayne 2: ReVamped never reads them. They are not filled in frame info, and the padding bytes 43-47 and 64-79 are left zero. With the field left zero the player concludes that the video has already reached its end after the first frame, pauses it and never resumes
+
 - [AvPlayer loop warnings](../../../core/libs/prx/libSceAvPlayer/src/Source.cpp) are queued when the first audio or video frame of a loop is delivered, following [KytyPS5's playback boundary tracking](https://github.com/KytyPS5/KytyPS5/blob/a6f4e8e7f456b8697d3102823d3f16400c3e121e/src/libs/avPlayer.cpp#L1038-L1043). The console's exact callback timing is unverified. Decode-ahead does not announce a loop while the caller is consuming the previous pass.
 
 - [sceAvPlayerAddSource](../../../core/libs/prx/libSceAvPlayer/src/Source.cpp) (libSceAvPlayer) - requests up to 4 additional decode-ahead video framebuffers from the memory replacement beyond `num_output_video_framebuffers` when memory is available; the console's internal buffering behaviour is unknown
