@@ -1,8 +1,5 @@
 # libSceFont technical debt
 
-### Silent stubs
-
-- [sceFontGlyphDefineAttribute](../../../core/libs/prx/libSceFont/src/Render.cpp) (libSceFont) checks the glyph and ignores the attribute and its value, whose meaning is unknown. PPSA01325 sets attribute 0x11 to 0 on a glyph from `sceFontGenerateCharGlyph` that it deletes unused, and draws the character with `sceFontRenderCharGlyphImageHorizontal`
 
 ### Unknown function info
 
