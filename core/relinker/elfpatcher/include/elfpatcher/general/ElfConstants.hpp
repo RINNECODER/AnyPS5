@@ -152,6 +152,8 @@ inline constexpr std::uint8_t STT_FUNC = 2;
 inline constexpr std::uint8_t STT_TLS = 6;
 inline constexpr std::uint8_t STV_DEFAULT = 0;
 inline constexpr std::uint16_t SHN_UNDEF = 0;
+inline constexpr std::uint16_t SHN_LORESERVE = 0xff00;
+inline constexpr std::uint16_t SHN_ABS = 0xfff1;
 
 inline constexpr std::uint32_t SHT_NULL = 0;
 inline constexpr std::uint32_t SHT_PROGBITS = 1;

@@ -1642,7 +1642,7 @@ namespace {
 // returned for inputs that differ only in that field.
 static_assert(sizeof(TargetOptions) == 120, "TargetOptions changed: update ConversionKey");
 static_assert(sizeof(InterfaceMember) == 32, "InterfaceMember changed: update ConversionKey");
-static_assert(sizeof(DescriptorBinding) == 448, "DescriptorBinding changed: update ConversionKey");
+static_assert(sizeof(DescriptorBinding) == 472, "DescriptorBinding changed: update ConversionKey");
 static_assert(sizeof(PixelSamplerProof) == 68, "PixelSamplerProof changed: update ConversionKey");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update ConversionKey");
 #endif
@@ -1796,6 +1796,7 @@ CacheKey ConversionKey(const RecompileResult& guest, ShaderStage stage, const Ta
         WriteBits(key, binding.bufferWritten);
         WriteBits(key, binding.samplerUnnormalized);
         WriteBits(key, binding.samplerIntegerBorder);
+        WriteBits(key, binding.samplerCoordinatesIgnored);
         WriteBits(key, binding.imageUnnormalized);
         WriteBits(key, binding.imageUnnormalizedBaseLevel);
         WriteWords(key, binding.imageSamplers);

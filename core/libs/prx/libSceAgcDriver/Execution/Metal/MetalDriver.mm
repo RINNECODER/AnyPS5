@@ -239,15 +239,28 @@ void MetalDriver::replaceBorrowedRanges(std::span<const NativeGuestMemory::Borro
             if (visible) {
                 changed.insert(changed.end(), removed.begin(), removed.end());
                 registry = std::make_shared<DriverDetail::ShaderRegistry>(*impl->shaders);
-                for (auto& entry : *registry) {
-                    std::erase_if(entry.second, [&](const auto& snapshotPointer) {
+                std::vector<std::uint64_t> emptyAddresses;
+                std::vector<std::pair<std::uint64_t, DriverDetail::ShaderRegistry::mapped_type>> replaced;
+                for (const auto& [address, headers] : *registry) {
+                    auto remaining = headers;
+                    std::erase_if(remaining, [&](const auto& snapshotPointer) {
                         const auto& snapshot = *snapshotPointer;
                         if (snapshot.codeAddress == DriverDetail::NullPixelProgramAddress()) return false;
                         return overlapsMappings(snapshot.codeAddress, snapshot.code.size() * sizeof(std::uint32_t), changed) ||
                             overlapsMappings(snapshot.headerAddress, snapshot.header.size(), changed);
                     });
+                    if (remaining.empty()) {
+                        emptyAddresses.push_back(address);
+                    } else if (remaining.size() != headers.size()) {
+                        replaced.emplace_back(address, std::move(remaining));
+                    }
                 }
-                std::erase_if(*registry, [](const auto& entry) { return entry.second.empty(); });
+                for (auto& [address, headers] : replaced) {
+                    (*registry)[address] = std::move(headers);
+                }
+                for (const auto address : emptyAddresses) {
+                    registry->erase(address);
+                }
                 impl->draw->InvalidateBorrowedRanges(changed);
             }
             if (impl->rangeOwner) releasedOwners.push_back(impl->rangeOwner);

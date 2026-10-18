@@ -87,6 +87,44 @@ struct PhysicalMemoryPool {
 
     bool CheckedFree(uint64_t start, size_t len) { return _release(start, len, true); }
 
+    bool Allocated(uint64_t start, size_t len) {
+        uint64_t lo, hi;
+        if (!PageSpan(start, len, lo, hi)) return false;
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _allUsed(static_cast<size_t>(lo / kPage), static_cast<size_t>((hi - lo) / kPage));
+    }
+
+    // Claims a fully allocated span so no other release can free or reuse its pages while the
+    // caller unmaps the guest views that still map them. CheckedFree's check and free cannot be
+    // atomic with the unmap in between, so the span is held instead.
+    bool Claim(uint64_t start, size_t len) {
+        uint64_t lo, hi;
+        if (!PageSpan(start, len, lo, hi)) return false;
+        const size_t first = static_cast<size_t>(lo / kPage);
+        const size_t count = static_cast<size_t>((hi - lo) / kPage);
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (!_allUsed(first, count)) return false;
+        for (size_t i = 0; i < count; ++i) {
+            if (_claimed[first + i]) return false;
+        }
+        for (size_t i = 0; i < count; ++i) _claimed[first + i] = true;
+        return true;
+    }
+
+    // Releases a claim, freeing the span when it still holds the allocation the claim took. An
+    // abandon (free false) leaves the allocation in place for a caller that could not unmap.
+    bool ReleaseClaim(uint64_t start, size_t len, bool free) {
+        uint64_t lo, hi;
+        if (!PageSpan(start, len, lo, hi)) return false;
+        const size_t first = static_cast<size_t>(lo / kPage);
+        const size_t count = static_cast<size_t>((hi - lo) / kPage);
+        std::lock_guard<std::mutex> lock(_mutex);
+        const bool allocated = _allUsed(first, count);
+        for (size_t i = 0; i < count; ++i) _claimed[first + i] = false;
+        if (!free || !allocated) return false;
+        return _releaseLocked(lo, hi, false);
+    }
+
     bool Find(uint64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {
         if (!start || !end || !memoryType || offset >= kPoolBytes) return false;
         std::lock_guard<std::mutex> lock(_mutex);
@@ -214,10 +252,16 @@ private:
     bool _release(uint64_t start, size_t len, bool requireAllocated) {
         uint64_t lo, hi;
         if (!PageSpan(start, len, lo, hi)) return false;
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _releaseLocked(lo, hi, requireAllocated);
+    }
+
+    bool _releaseLocked(uint64_t lo, uint64_t hi, bool requireAllocated) {
         const size_t first = static_cast<size_t>(lo / kPage);
         const size_t count = static_cast<size_t>((hi - lo) / kPage);
-
-        std::lock_guard<std::mutex> lock(_mutex);
+        for (size_t i = 0; i < count; ++i) {
+            if (_claimed[first + i]) return false;
+        }
         if (requireAllocated && !_allUsed(first, count)) return false;
 
         const bool splitLo = _splitAt(lo);
@@ -257,6 +301,7 @@ private:
 
     std::mutex _mutex;
     bool _used[kNumPages] = {};
+    bool _claimed[kNumPages] = {};
     BlockMap _blocks;
 };
 
@@ -276,6 +321,18 @@ void DirectMemoryFree(int64_t start, size_t len) {
 
 bool DirectMemoryCheckedFree(int64_t start, size_t len) {
     return PhysicalMemoryPool::Instance().CheckedFree(static_cast<uint64_t>(start), len);
+}
+
+bool DirectMemoryAllocated(int64_t start, size_t len) {
+    return PhysicalMemoryPool::Instance().Allocated(static_cast<uint64_t>(start), static_cast<size_t>(len));
+}
+
+bool DirectMemoryClaim(int64_t start, size_t len) {
+    return PhysicalMemoryPool::Instance().Claim(static_cast<uint64_t>(start), static_cast<size_t>(len));
+}
+
+bool DirectMemoryReleaseClaim(int64_t start, size_t len, bool free) {
+    return PhysicalMemoryPool::Instance().ReleaseClaim(static_cast<uint64_t>(start), static_cast<size_t>(len), free);
 }
 
 bool DirectMemoryFind(int64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {

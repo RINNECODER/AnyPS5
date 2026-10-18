@@ -108,7 +108,7 @@ void inactiveVertexPointSizeTests() {
         queue.context[0x207] = 0x01210000;
         return queue;
     };
-    for (const auto primitive : {2u, 4u, 5u, 6u, 7u, 17u}) {
+    for (const auto primitive : {2u, 4u, 5u, 6u, 7u, 17u, 21u}) {
         auto queue = pointSizeState();
         queue.userConfig[0x242] = primitive;
         for (const auto raster : {0u, 0x240u, 0x248u}) {
@@ -183,6 +183,23 @@ void inactiveVertexPointSizeTests() {
     auto queue = pointSizeState();
     queue.userConfig.erase(0x242);
     rejected(queue);
+}
+
+void PolygonPrimitiveTests() {
+    auto queue = makeState();
+    queue.userConfig[0x242] = 21;
+    queue.context[0x1b3] = 2;
+    queue.context[0x1b4] = 2;
+    const auto state = AgcDriver::Graphics::DecodeState(queue);
+    Require(state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN, "a polygon did not decode to a triangle fan");
+    Require(!state.primitiveRestart, "polygon decoding enabled primitive restart by default");
+    Require(AgcDriver::Graphics::RasterPrimitiveOf(state) == ShaderRecompiler::RasterPrimitive::Triangle, "a polygon was not classified as a triangle primitive");
+    Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck rejected a direct polygon draw");
+    queue.userConfig[0x24b] = 1;
+    queue.context[0x103] = 0xffffffffu;
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "the precheck rejected an indexed polygon draw with restart");
+    const auto indexedState = AgcDriver::Graphics::DecodeState(queue);
+    Require(indexedState.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN && indexedState.primitiveRestart, "indexed polygon decoding did not keep primitive restart");
 }
 
 void retainedPixelStageTests() {
@@ -306,6 +323,9 @@ void stateTests() {
     queue.context[0x103] = 0xffffffffu;
     Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "primitive restart was rejected for an indexed strip");
     Require(AgcDriver::Graphics::DecodeState(queue).primitiveRestart, "primitive restart was not decoded for a strip");
+    queue.userConfig[0x242] = 21;
+    Require(AgcDriver::Graphics::DrawRejection(queue, true).empty(), "primitive restart was rejected for an indexed polygon");
+    Require(AgcDriver::Graphics::DecodeState(queue).primitiveRestart, "primitive restart was not decoded for a polygon");
     queue.context[0x103] = 5;
     Require(AgcDriver::Graphics::DrawRejection(queue, true).find("all ones") != std::string::npos, "a restart index other than all ones was accepted");
     queue = makeState();
@@ -707,10 +727,10 @@ void MsaaEnableSingleSampleTests() {
     queue = enabled();
     queue.userConfig[0x242] = 1;
     Require(DrawRejection(queue, false).find("primitives other than triangles") != std::string::npos, "the precheck accepted MSAA_ENABLE on a single-sample target for points");
-    for (const auto primitive : {5u, 6u}) {
+    for (const auto primitive : {5u, 6u, 21u}) {
         queue = enabled();
         queue.userConfig[0x242] = primitive;
-        Require(DecodeState(queue).samples == 1 && DrawRejection(queue, false).empty(), "MSAA_ENABLE on a single-sample target was refused for a triangle fan or strip");
+        Require(DecodeState(queue).samples == 1 && DrawRejection(queue, false).empty(), "MSAA_ENABLE on a single-sample target was refused for a triangle fan, strip or polygon");
     }
     queue = enabled();
     queue.context[0x292] = 7;
@@ -4554,7 +4574,7 @@ std::string interlockShape(std::span<const std::uint32_t> words) {
     return shape;
 }
 
-std::string interlockExits(std::span<const std::uint32_t> words, std::size_t& kills) {
+std::string interlockExits(std::span<const std::uint32_t> words, std::size_t& kills, std::size_t& terminates) {
     struct Block {
         std::vector<spv::Op> ops;
         std::vector<std::uint32_t> next;
@@ -4596,6 +4616,7 @@ std::string interlockExits(std::span<const std::uint32_t> words, std::size_t& ki
             if (op == spv::OpEndInvocationInterlockEXT && stage++ != 1) return "block " + std::to_string(current) + " ends the interlock outside it";
             if ((op == spv::OpKill || op == spv::OpReturn || op == spv::OpReturnValue || op == spv::OpUnreachable || op == spv::OpTerminateInvocation) && stage != 2) return "an exit in block " + std::to_string(current) + " skips OpEndInvocationInterlockEXT";
             if (op == spv::OpKill) ++kills;
+            if (op == spv::OpTerminateInvocation) ++terminates;
         }
         for (const auto next : blocks[current].next) {
             const auto [known, added] = state.emplace(next, stage);
@@ -4644,9 +4665,57 @@ void orderedPixelShaderTests() {
     auto faulting = orderedPixelRequest(0x30600u, bdaInterlock, OrderedBdaPixelCode);
     faulting.target.supportedExtensions = bdaExtensions;
     faulting.target.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
-    std::size_t kills = 0;
-    const auto exits = interlockExits(ShaderRecompiler::Recompile(faulting).spirv.Words(), kills);
-    Require(exits.empty() && kills == 6u, "a primitive-ordered pixel shader with BDA reads: " + (exits.empty() ? std::to_string(kills) + " OpKill, not the valid-mask kill and 5 BDA fault kills" : exits));
+    std::size_t kills = 0, terminates = 0;
+    const auto exits = interlockExits(ShaderRecompiler::Recompile(faulting).spirv.Words(), kills, terminates);
+    Require(exits.empty() && kills == 6u && terminates == 0u, "a primitive-ordered pixel shader with BDA reads: " + (exits.empty() ? std::to_string(kills) + " OpKill and " + std::to_string(terminates) + " OpTerminateInvocation, not the valid-mask kill and 5 BDA fault kills" : exits));
+    const std::array<std::string_view, 3> terminateExtensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage", "SPV_KHR_terminate_invocation"};
+    auto terminating = faulting;
+    terminating.target.supportedExtensions = terminateExtensions;
+    const auto terminated = ShaderRecompiler::Recompile(terminating).spirv.Copy();
+    std::size_t terminatedKills = 0, terminatedStops = 0;
+    const auto terminatedExits = interlockExits(terminated, terminatedKills, terminatedStops);
+    Require(terminatedExits.empty() && terminatedKills == 1u && terminatedStops == 5u, "a primitive-ordered pixel shader with BDA reads and SPV_KHR_terminate_invocation: " + (terminatedExits.empty() ? std::to_string(terminatedKills) + " OpKill and " + std::to_string(terminatedStops) + " OpTerminateInvocation, not the valid-mask kill and 5 BDA fault terminations" : terminatedExits));
+    std::size_t terminateDeclarations = 0;
+    for (std::size_t at = 5; at < terminated.size() && (terminated[at] >> 16u) != 0; at += terminated[at] >> 16u) {
+        if ((terminated[at] & 0xffffu) == spv::OpExtension && std::string_view(reinterpret_cast<const char*>(&terminated[at + 1])) == "SPV_KHR_terminate_invocation") ++terminateDeclarations;
+    }
+    Require(terminateDeclarations == 1u, "the module declared SPV_KHR_terminate_invocation " + std::to_string(terminateDeclarations) + " times");
+    const auto countOps = [](std::span<const std::uint32_t> words) {
+        std::map<spv::Op, std::size_t> counts;
+        for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) ++counts[static_cast<spv::Op>(words[at] & 0xffffu)];
+        return counts;
+    };
+    const std::array<std::uint32_t, 4> bdaCapabilities{spv::CapabilityShader, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    auto unordered = orderedPixelRequest(0x20600u, bdaCapabilities, OrderedBdaPixelCode);
+    unordered.target.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
+    unordered.target.supportedExtensions = terminateExtensions;
+    const auto unorderedOps = countOps(ShaderRecompiler::Recompile(unordered).spirv.Words());
+    Require(!unorderedOps.contains(spv::OpBeginInvocationInterlockEXT), "a pixel shader without PRIMITIVE_ORDERED_PIXEL_SHADER began the interlock");
+    Require(unorderedOps.at(spv::OpTerminateInvocation) == 5u && unorderedOps.at(spv::OpKill) == 1u, "a pixel shader with BDA reads and SPV_KHR_terminate_invocation did not terminate on a fault");
+    unordered.target.supportedExtensions = bdaExtensions;
+    const auto unorderedKills = countOps(ShaderRecompiler::Recompile(unordered).spirv.Words());
+    Require(!unorderedKills.contains(spv::OpTerminateInvocation) && unorderedKills.at(spv::OpKill) == 6u, "a pixel shader with BDA reads and no SPV_KHR_terminate_invocation did not kill on a fault");
+    static constexpr std::array<std::uint32_t, 12> vertexBdaCode{0x7e040f00u, 0x7e060280u, 0xdc208001u, 0x047d0002u, 0xdc308008u, 0x057d0002u, 0xbf8c3f70u, 0x4a080b04u, 0x7e0e0d04u, 0xf80008cfu, 0x07070707u, 0xbf810000u};
+    const std::array<std::uint32_t, 5> vertexCapabilities{spv::CapabilityShader, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess, spv::CapabilityClipDistance};
+    const auto vertexWords = [&](std::span<const std::string_view> extensions) {
+        ShaderRecompiler::RecompileRequest request{};
+        request.shader = {ShaderRecompiler::ShaderStage::Vertex, 0x10000u, vertexBdaCode, 0, {}};
+        request.context.waveSize = 64;
+        request.context.vertex = ShaderRecompiler::ShaderVertexStageInfo{};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = 64;
+        request.target.supportedCapabilities = vertexCapabilities;
+        request.target.supportedExtensions = extensions;
+        request.target.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
+        request.layout.pushConstantSizeBytes = 128;
+        request.useCache = false;
+        return ShaderRecompiler::Recompile(request).spirv.Copy();
+    };
+    const auto vertexStops = vertexWords(bdaExtensions);
+    const auto vertexTerminate = vertexWords(terminateExtensions);
+    const auto vertexOps = countOps(vertexTerminate);
+    Require(std::ranges::equal(vertexStops, vertexTerminate) && !vertexOps.contains(spv::OpTerminateInvocation) && !vertexOps.contains(spv::OpKill) && vertexOps.at(spv::OpReturn) > 1u, "a vertex shader with BDA reads changed its fault exit when SPV_KHR_terminate_invocation was advertised");
     expectFailure([&] { static_cast<void>(ShaderRecompiler::Recompile(orderedPixelRequest(0x30600u, plain))); }, "fragmentShaderPixelInterlock");
 }
 
@@ -5204,7 +5273,7 @@ void ConservativeRasterizationTests() {
     queue.context[0x1b4] = 2;
     Require(AgcDriver::Graphics::DecodeState(queue).conservativeRasterization == VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT, "PA_SC_CONSERVATIVE_RASTERIZATION_CNTL 0x6000 enabled conservative rasterization");
     queue.context[0x313] = 0x6001;
-    for (const auto primitive : {4u, 5u, 6u}) {
+    for (const auto primitive : {4u, 5u, 6u, 21u}) {
         queue.userConfig[0x242] = primitive;
         Require(AgcDriver::Graphics::DecodeState(queue).conservativeRasterization == VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT, "OVER_RAST_ENABLE did not decode to overestimation for primitive type " + std::to_string(primitive));
         Require(AgcDriver::Graphics::DrawRejection(queue, false).empty(), "the precheck rejected OVER_RAST_ENABLE");
@@ -6329,6 +6398,7 @@ int main(int argc, char** argv) {
         ShaderStageTests();
         NggVertexWorkgroupTests();
         inactiveVertexPointSizeTests();
+        PolygonPrimitiveTests();
         TuningFieldTests();
         PixelInputLayoutTests();
         UnexportedPixelInputTests();
