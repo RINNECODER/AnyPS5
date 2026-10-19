@@ -228,10 +228,15 @@ namespace {
 std::uint32_t PositionExportLayout(std::span<const std::uint32_t> code, std::uint32_t paClVsOutCntl) {
     const auto bits = paClVsOutCntl & Graphics::PositionExportLayoutBits;
     if (bits == 0) return 0;
-    const auto decoded = RdnaInstructionDecoder{}.Decode(code);
-    const bool used = std::any_of(decoded.instructions.begin(), decoded.instructions.end(), [](const auto& instruction) {
-        return instruction.family == RdnaInstructionFamily::EXP && instruction.exportTarget >= 0x0du && instruction.exportTarget <= 0x0fu && instruction.exportEnableMask != 0;
-    });
+    bool used = true;
+    try {
+        const auto decoded = RdnaInstructionDecoder{}.Decode(code);
+        used = std::any_of(decoded.instructions.begin(), decoded.instructions.end(), [](const auto& instruction) {
+            return instruction.family == RdnaInstructionFamily::EXP && instruction.exportTarget >= 0x0du && instruction.exportTarget <= 0x0fu && instruction.exportEnableMask != 0;
+        });
+    } catch (const std::invalid_argument& error) {
+        if (std::strstr(error.what(), "opcode is not implemented") == nullptr) throw;
+    }
     return used ? bits : 0;
 }
 
