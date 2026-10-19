@@ -66,6 +66,14 @@ int APS5_VABI sceNpAuthGetAuthorizedAppCode() {
  return SCE_NP_ERROR_SIGNED_OUT;
 }
 
+int APS5_VABI sceNpAuthGetAuthorizationCode(int req_id, const void* param, void* auth_code) {
+ return sceNpAuthGetAuthorizationCodeV3(req_id, param, auth_code, nullptr);
+}
+
+int APS5_VABI sceNpAuthGetIdToken(int req_id, const void* param, void* id_token) {
+ return sceNpAuthGetIdTokenV3(req_id, param, id_token);
+}
+
 int APS5_VABI sceNpAuthGetAuthorizationCodeV3(int req_id, const void* param, void* auth_code, int* issuer_id) {
  (void)issuer_id;
  if (!param || !auth_code) return ORBIS_NP_AUTH_ERROR_INVALID_ARGUMENT;
