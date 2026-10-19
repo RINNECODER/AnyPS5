@@ -2,6 +2,7 @@
 
 ### Unknown function info
 
+- [sceVideodec2InitLibrary](../../../core/libs/prx/libSceVideodec2/Unimplemented.cpp) (libSceVideodec2) throws: the FFmpeg decoders this module creates need no library-level initialisation, and neither SharpProspero nor EVO-PLAYER-PS5 declares this call, so its arguments and result are unknown. A title imports it from this module
 - [sceVideodec2GetAvcPictureInfo](../../../core/libs/prx/libSceVideodec2/Export.cpp) (libSceVideodec2) - runs the `sceVideodec2GetPictureInfo` body (KytyPS5 binds both NIDs to one function; SharpProspero gives both the same `outputInfo, first, second` signature); the second (bottom field) picture info is never written, since only progressive H.264 output is modelled. prosper calls the AVC layout unestablished (no title observed calling it)
 
 ### Functional
