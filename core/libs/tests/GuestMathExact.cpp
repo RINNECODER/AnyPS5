@@ -14,11 +14,14 @@ int APS5_VABI ilogbl_nid_postfix(long double);
 long double APS5_VABI roundl_nid_postfix(long double);
 long double APS5_VABI modfl_nid_postfix(long double, long double*);
 long double APS5_VABI nanl_nid_postfix(const char*);
-long double APS5_VABI scalblnl_nid_postfix(long double, long);
+long double APS5_VABI scalblnl_nid_postfix(long double, std::int64_t);
 long double APS5_VABI fmal_nid_postfix(long double, long double, long double);
 double APS5_VABI scalb_nid_postfix(double, double);
+double APS5_VABI scalbln_nid_postfix(double, std::int64_t);
+long double APS5_VABI remainderl_nid_postfix(long double, long double);
 double APS5_VABI drem_nid_postfix(double, double);
-long APS5_VABI lrint_nid_postfix(double);
+float APS5_VABI dremf_nid_postfix(float, float);
+std::int64_t APS5_VABI lrint_nid_postfix(double);
 int APS5_VABI finite_nid_postfix(double);
 int APS5_VABI __fpclassifyl_nid_postfix(long double);
 int APS5_VABI __isnanl_nid_postfix(long double);
@@ -69,12 +72,25 @@ static void CheckErrno() {
     Require(scalb_nid_postfix(1.0, 3.0) == 8.0 && scalb_nid_postfix(4.0, -INFINITY) == 0.0);
     errno = 0;
     Require(std::isnan(drem_nid_postfix(1.0, 0.0)) && errno == EDOM);
+    errno = 0;
+    Require(std::isnan(drem_nid_postfix(INFINITY, 1.0)) && errno == EDOM);
+    errno = 0;
+    Require(std::isnan(dremf_nid_postfix(1.0f, 0.0f)) && errno == EDOM);
+    errno = 0;
+    Require(std::isnan(remainderl_nid_postfix(1.0L, 0.0L)) && errno == EDOM);
+    errno = 0;
+    Require(std::isnan(remainderl_nid_postfix(INFINITY, 1.0L)) && errno == EDOM);
+    errno = 0;
+    Require(std::isnan(remainderl_nid_postfix(NAN, 0.0L)) && errno == 0);
+    Require(remainderl_nid_postfix(7.0L, 2.0L) == -1.0L && errno == 0);
     Require(drem_nid_postfix(7.0, 2.0) == -1.0 && lrint_nid_postfix(2.5) == 2);
 }
 
 static void CheckConsoleQuirks() {
     Require(ilogbl_nid_postfix(NAN) == INT_MAX && ilogbl_nid_postfix(0.0L) == INT_MIN && ilogbl_nid_postfix(8.0L) == 3);
-    Require(scalblnl_nid_postfix(1.0L, 0x100000001L) == 2.0L && scalblnl_nid_postfix(1.0L, LONG_MAX) == 0.5L);
+    Require(scalblnl_nid_postfix(1.0L, INT64_C(0x100000001)) == 2.0L && scalblnl_nid_postfix(1.0L, INT64_MAX) == 0.5L);
+    Require(scalbln_nid_postfix(1.0, INT64_C(0x100000001)) == INFINITY && scalbln_nid_postfix(1.0, INT64_MIN) == 0.0);
+    Require(lrint_nid_postfix(0x1p40) == INT64_C(0x10000000000));
     const long double product = Extended(0x4000, 0xe000000000000000ull) * Extended(0x4001, 0xda76b022816f6a94ull);
     Require(SameBits(fmal_nid_postfix(Extended(0x4000, 0xe000000000000000ull), Extended(0x4001, 0xda76b022816f6a94ull), Extended(0x9b45, 0xd3b49eac84283c95ull)), product));
     Require(finite_nid_postfix(1.0) == 1 && finite_nid_postfix(INFINITY) == 0);
