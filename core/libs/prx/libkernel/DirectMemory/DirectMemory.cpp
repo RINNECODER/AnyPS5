@@ -2,6 +2,7 @@
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GpuSharedMemory.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #include <algorithm>
 #include <cerrno>
@@ -246,12 +247,26 @@ void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment)
 // titles that read it back keep working and relative layouts are preserved.
 constexpr std::uintptr_t DarwinHoleShift = DarwinRefusedEnd - DarwinRefusedStart;
 
+// Under ANYPS5_GPU_SHARED_MEMORY the guest arena is slid above the hole (GuestArena reads the
+// slide), so a fixed request that names a raw guest address moves by the same amount and a native
+// arm64 process maps it at the address the guest already uses. Requests outside the raw
+// application area keep the host placement they had before the arena was available.
+bool SlideFixedGuestAddress(void** addr, size_t len) {
+    if (*addr == nullptr) return false;
+    auto address = reinterpret_cast<std::uintptr_t>(*addr);
+    if (!GuestArena::GuestArenaSlideAddress_nid_postfix(&address, len)) return false;
+    *addr = reinterpret_cast<void*>(address);
+    return true;
+}
+
 // Returns false for a fixed request that starts below the hole and runs into it,
 // which cannot be moved out of it and fails with ENOMEM.
 bool DarwinRelocateFixed(void** addr, size_t len, int flags) {
     constexpr int GuestMapFixed = 0x10;
     const auto start = reinterpret_cast<std::uintptr_t>(*addr);
-    if ((flags & GuestMapFixed) == 0 || !DarwinRefusedRange(start, len)) return true;
+    if ((flags & GuestMapFixed) == 0) return true;
+    if (SlideFixedGuestAddress(addr, len)) return true;
+    if (!DarwinRefusedRange(start, len)) return true;
     if (start < DarwinRefusedStart) {
         std::fprintf(stderr, "[memory] fixed mapping %p+0x%zx runs into the 64-512 GiB range macOS refuses\n", *addr, len);
         return false;
@@ -332,13 +347,23 @@ int PhysicalFile() {
     return file;
 }
 #elif defined(__APPLE__)
+std::string& PhysicalObjectName() {
+    static std::string name = [] {
+        char text[32];
+        std::snprintf(text, sizeof(text), "/aps5-dmem-%d", static_cast<int>(getpid()));
+        return std::string(text);
+    }();
+    return name;
+}
+
 int PhysicalFile() {
     static const int file = [] {
-        char name[32];
-        std::snprintf(name, sizeof(name), "/aps5-dmem-%d", static_cast<int>(getpid()));
-        const int created = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        const bool shared = GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix();
+        const std::string& name = PhysicalObjectName();
+        if (shared) GpuSharedMemory::GpuSharedMemoryAdoptObject_nid_postfix(name.c_str());
+        const int created = shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
         if (created < 0) throw std::system_error(errno, std::generic_category(), "create direct memory backing");
-        shm_unlink(name);
+        if (!shared) shm_unlink(name.c_str());
         if (ftruncate(created, static_cast<off_t>(DIRECT_MEMORY_SIZE)) != 0 || fcntl(created, F_SETFD, FD_CLOEXEC) != 0) {
             const int error = errno;
             ::close(created);
@@ -426,6 +451,9 @@ public:
         GuestArena::GuestArenaMap_nid_postfix(reinterpret_cast<void*>(address), bytes, section, offset, WinProtFromPosix(protection));
 #else
         if (::mmap(reinterpret_cast<void*>(address), bytes, protection, MAP_SHARED | MAP_FIXED, file, static_cast<off_t>(fileOffset + offset)) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map direct memory backing");
+#if defined(__APPLE__)
+        GpuSharedMemory::GpuSharedMemoryRegister_nid_postfix(address, bytes, PhysicalObjectName().c_str(), fileOffset + offset);
+#endif
 #endif
     }
 
@@ -699,6 +727,34 @@ void AddMapping(std::uintptr_t address, std::size_t len, std::uint64_t phys, int
 #endif
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+bool ArenaAvailable() { return GuestArena::GuestArenaAvailable_nid_postfix(); }
+
+#if defined(__APPLE__)
+std::uint32_t ArenaProtection(int nativeProtection) {
+    const bool readable = (nativeProtection & PROT_READ) != 0;
+    const bool writable = (nativeProtection & PROT_WRITE) != 0;
+    if ((nativeProtection & PROT_EXEC) != 0) return readable && writable ? 0x40 : (readable ? 0x20 : 0x10);
+    if (writable) return 0x04;
+    return readable ? 0x02 : 0x01;
+}
+#endif
+
+void* ArenaCommit(void* addr, size_t len, int prot) {
+#if defined(__APPLE__)
+    if (GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix()) {
+        GuestArena::GuestArenaCommit_nid_postfix(addr, len, ArenaProtection(prot), 0);
+        return addr;
+    }
+#endif
+    return mmap(addr, len, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+}
+
+void ArenaForget(void* addr, size_t len) {
+    if (GuestArena::GuestArenaContains_nid_postfix(addr, len)) GuestArena::GuestArenaRelease_nid_postfix(addr, len);
+}
+#endif
+
 bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, size_t len, int prot, int flags, int64_t physStart = -1) {
     constexpr int GuestMapFixed = 0x10;
     constexpr int GuestMapNoOverwrite = 0x80;
@@ -717,7 +773,11 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
             GuestArena::GuestArenaReset_nid_postfix(addr, len);
             if (nativeProtection != PROT_NONE) CommitArenaRange(addr, len, WinProtFromPosix(nativeProtection));
 #else
-            if (::mmap(addr, len, nativeProtection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "remap anonymous memory");
+            if (ArenaAvailable() && GuestArena::GuestArenaContains_nid_postfix(addr, len)) {
+                if (ArenaCommit(addr, len, nativeProtection) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "remap anonymous memory");
+            } else if (::mmap(addr, len, nativeProtection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
+                throw std::system_error(errno, std::generic_category(), "remap anonymous memory");
+            }
             GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(addr, len);
 #endif
         }
@@ -725,18 +785,6 @@ bool RemapFixedIntoRegistered(GuestAllocations::Mutation& mutation, void* addr, 
     if ((prot & GuestProtGpuReadWrite) != 0) mutation.NoteGpuMapping(addr, len);
     return true;
 }
-
-#if defined(__linux__) || defined(__APPLE__)
-bool ArenaAvailable() { return GuestArena::GuestArenaAvailable_nid_postfix(); }
-
-void* ArenaCommit(void* addr, size_t len, int prot) {
-    return mmap(addr, len, prot, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-}
-
-void ArenaForget(void* addr, size_t len) {
-    if (GuestArena::GuestArenaContains_nid_postfix(addr, len)) GuestArena::GuestArenaRelease_nid_postfix(addr, len);
-}
-#endif
 
 void Unmap(void* addr, size_t len) {
 #if defined(__linux__)
@@ -746,8 +794,13 @@ void Unmap(void* addr, size_t len) {
     ArenaForget(addr, len);
     GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(addr, len);
 #elif defined(__APPLE__)
-    // The guest arena is Linux-only, so every mapping here is a plain host one.
-    if (munmap(addr, len) != 0) throw std::system_error(errno, std::generic_category(), "munmap failed");
+    // The guest arena is only available here once the GPU-process flag has slid it above the hole;
+    // a range inside it is reset in place, as on Linux, so its pages leave the shared object.
+    if (ArenaAvailable() && GuestArena::GuestArenaContains_nid_postfix(addr, len))
+        GuestArena::GuestArenaReset_nid_postfix(addr, len);
+    else if (munmap(addr, len) != 0) throw std::system_error(errno, std::generic_category(), "munmap failed");
+    ArenaForget(addr, len);
+    GpuSharedMemory::GpuSharedMemoryUnregister_nid_postfix(reinterpret_cast<std::uintptr_t>(addr), len);
     GuestWriteWatch::GuestWriteWatchUnregister_nid_postfix(addr, len);
 #else
     if (KernelArena::Get().Contains(addr, len)) munmap(addr, len);
@@ -796,8 +849,17 @@ void* MapPlaced(void* addr, size_t len, int prot, int flags, size_t alignment) {
         }
 #endif
 #if defined(__linux__) || defined(__APPLE__)
-        if (ArenaAvailable() && !GuestArena::GuestArenaContains_nid_postfix(addr, len))
+        if (ArenaAvailable() && !GuestArena::GuestArenaContains_nid_postfix(addr, len)) {
+#if defined(__APPLE__)
+            // A fixed mapping outside the slid arena (the relinked image's own range, for example)
+            // keeps its host placement.
+            void* placed = DarwinMapExactly(reinterpret_cast<std::uintptr_t>(addr), len, prot);
+            if (placed == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "Fixed mmap failed");
+            return placed;
+#else
             throw std::invalid_argument("fixed mapping is outside the guest address space arena");
+#endif
+        }
         if (ArenaAvailable()) {
             GuestArena::GuestArenaMarkUsed_nid_postfix(addr, len);
             if (void* placed = ArenaCommit(addr, len, prot); placed != MAP_FAILED) return placed;

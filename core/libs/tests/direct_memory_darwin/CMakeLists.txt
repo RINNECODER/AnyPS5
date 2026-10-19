@@ -14,6 +14,7 @@ add_executable(direct_memory_darwin_tests
     ../../prx/libkernel/DirectMemory/MemoryPool.cpp
     ../../prx/libc/src/GuestAllocations.cpp
     ../../prx/libc/src/GuestArena.cpp
+    ../../prx/libc/src/GpuSharedMemory.cpp
     ../../prx/libc/src/GuestWriteWatch.cpp
     ../../prx/libkernel/AppMetadata/src/ParamJsonParser.cpp
     ResolvePathStub.cpp)

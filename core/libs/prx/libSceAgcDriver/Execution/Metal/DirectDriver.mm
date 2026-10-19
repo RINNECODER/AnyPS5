@@ -5,6 +5,8 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalGuestMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestArena.hpp"
+#include "prx/libc/include/GpuSharedMemory.hpp"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <dlfcn.h>
@@ -56,11 +58,19 @@ using Ranges = std::vector<NativeGuestMemory::BorrowedRange>;
 // Command words outside the GPU-visible guest allocations (VideoOut's flip packet, a DCB in CPU-only
 // or host memory) are copied here before submission. The driver captures submitted words during
 // the call, so one buffer under a lock is enough. It starts at StagingBytes and grows to the
-// largest such buffer, up to MaxStagingBytes (the capture's own limit is larger).
+// largest such buffer, up to MaxStagingBytes (the capture's own limit is larger). Under
+// ANYPS5_GPU_SHARED_MEMORY the buffer comes from the slid, shm-backed guest arena instead, so a
+// native arm64 server can read the staged words at the address this process registered.
 constexpr std::size_t StagingBytes = 64 * 1024;
 constexpr std::size_t MaxStagingBytes = 64 * 1024 * 1024;
+constexpr std::size_t StagingPageBytes = 0x4000;
 
 std::byte* MapStaging(std::size_t bytes) {
+    if (GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix() && GuestArena::GuestArenaAvailable_nid_postfix()) {
+        void* address = GuestArena::GuestArenaAllocate_nid_postfix(bytes, StagingPageBytes);
+        GuestArena::GuestArenaCommit_nid_postfix(address, bytes, 0x04, StagingPageBytes);
+        return static_cast<std::byte*>(address);
+    }
     void* mapping = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mapping == MAP_FAILED) throw std::runtime_error("Rosetta direct path: cannot map the command staging buffer");
     return static_cast<std::byte*>(mapping);
@@ -269,6 +279,7 @@ void Configure(DirectState& state, MetalDriver& driver, const std::shared_ptr<co
     }
     state.applied = ranges;
     state.configured = true;
+    GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix();
 }
 
 }

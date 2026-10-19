@@ -15,6 +15,16 @@ using SharedBackingWriter = bool (*)(std::uintptr_t address, const void* source,
 
 extern "C" {
 
+// The slide is read from ANYPS5_GUEST_BASE before the arena is first used; this overrides it for
+// a caller that already knows the value. Both must be page aligned.
+void GuestArenaSetOffset_nid_postfix(std::uint64_t offset);
+// Moves a raw guest address by the arena slide when the whole range lies in the raw PS5
+// application area, so a fixed mapping request and the slid arena agree on the address. Returns
+// false when no slide applies.
+bool GuestArenaSlideAddress_nid_postfix(std::uintptr_t* address, std::size_t bytes);
+// The slide the arena was placed with, so a memory mapping layer can move a raw guest address by
+// the same amount.
+std::uint64_t GuestArenaSlide_nid_postfix();
 bool GuestArenaAvailable_nid_postfix();
 bool GuestArenaContains_nid_postfix(const void* pointer, std::size_t bytes);
 void* GuestArenaAllocate_nid_postfix(std::size_t bytes, std::size_t alignment);

@@ -108,10 +108,14 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
                                 && (mappingFlags & GuestMapFixed) != 0;
     if (mappingFlags == (GuestPrivate | GuestAnonymous) || fixedAnonymous) {
         if (descriptor != -1 || offset != 0) return failed(GuestInvalid);
-        const auto start = reinterpret_cast<std::uintptr_t>(address);
-        if (fixedAnonymous && ((start & (PS5_PAGE_SIZE - 1)) != 0 ||
-            rounded > std::numeric_limits<std::uintptr_t>::max() - start ||
-            !GuestArena::GuestArenaContains_nid_postfix(address, rounded))) return failed(GuestInvalid);
+        auto start = reinterpret_cast<std::uintptr_t>(address);
+        if (fixedAnonymous && ((start & (PS5_PAGE_SIZE - 1)) != 0 || rounded > std::numeric_limits<std::uintptr_t>::max() - start)) return failed(GuestInvalid);
+        if (fixedAnonymous && !GuestArena::GuestArenaContains_nid_postfix(address, rounded)) {
+            auto slid = start;
+            if (!GuestArena::GuestArenaSlideAddress_nid_postfix(&slid, rounded)) return failed(GuestInvalid);
+            start = slid;
+            address = reinterpret_cast<void*>(slid);
+        }
         const bool exclusive = fixedAnonymous && (mappingFlags & GuestMapExclusive) != 0;
         const int placement = fixedAnonymous ? GuestMapFixed | (exclusive ? GuestMapNoOverwrite : 0) : 0;
         void* mapped = fixedAnonymous ? address : nullptr;
