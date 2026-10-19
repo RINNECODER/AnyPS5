@@ -49,6 +49,8 @@
 
 ### Functional
 
+- [_FSinh and _FCosh](../../../core/libs/prx/libc/src/Math.cpp) (libc) finite results are not verified bit for bit against the console: the scaled product uses the host's binary64 hyperbolic function before rounding to binary32, rather than the float rational and `_FExp` sequence in PRAGMATA's bundled `libc.prx`. NaN preference and payloads, signed zeros, infinite operands and the range-error thresholds follow that binary's instructions; the system `libSceLibcInternal` implementation and nondefault flush-to-zero modes are unverified.
+
 - [sscanf_s and vsscanf_s](../../../core/libs/prx/libc/src/Formatting.cpp) (libc) return `EOF` when a reached conversion has a null destination, stopping before further assignments, following C11 K.3.5.3.7 and K.3.5.3.14. Earlier assignments are retained. The constraint handler is not invoked, and console behaviour is unverified.
 
 - [__isfinitel](../../../core/libs/prx/libc/src/Math.cpp) - classifies the x87 80-bit exponent without narrowing to double or performing floating-point comparisons, following [FreeBSD msun](https://github.com/freebsd/freebsd-src/blob/main/lib/msun/src/s_isfinite.c). The signature and classification follow FreeBSD; console behaviour is unmeasured. Requires little-endian x87 long double stored in 16 bytes, as the existing guest long-double ABI does.
