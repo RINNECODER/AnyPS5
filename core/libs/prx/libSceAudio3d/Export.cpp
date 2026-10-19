@@ -25,7 +25,7 @@ namespace {
 constexpr int AUDIO3D_ERROR_INVALID_PORT = static_cast<int>(0x80EA0002);
 constexpr int AUDIO3D_ERROR_INVALID_OBJECT = static_cast<int>(0x80EA0003);
 constexpr int AUDIO3D_ERROR_INVALID_PARAMETER = static_cast<int>(0x80EA0004);
-constexpr int AUDIO3D_ERROR_NOT_SUPPORTED = static_cast<int>(0x80EA0005);
+constexpr int AUDIO3D_ERROR_NOT_SUPPORTED = static_cast<int>(0x80EA0008);
 constexpr int AUDIO3D_ERROR_OUT_OF_RESOURCES = static_cast<int>(0x80EA0006);
 constexpr int AUDIO3D_ERROR_NOT_READY = static_cast<int>(0x80EA0007);
 
@@ -126,6 +126,7 @@ void APS5_VABI sceAudio3dGetDefaultOpenParameters(Audio3dOpenParameters* p) {
     if (p == nullptr) APS5_INVALID_ARG_EX;
     constexpr Audio3dOpenParameters defaults{0x20, 256, 0, 512, 2, 2, 0, 0};
     static_assert(offsetof(Audio3dOpenParameters, num_beds) == 0x20);
+    static_assert(sizeof(Audio3dOpenParameters) == 0x28);
     std::memcpy(p, &defaults, defaults.size_this);
 }
 
