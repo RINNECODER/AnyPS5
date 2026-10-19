@@ -298,7 +298,7 @@ MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestText
     native.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
     if (!compressed && !packed16(descriptor.format)) native.usage |= MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
     if (atomicFormat(descriptor.format)) native.usage |= MTLTextureUsageShaderAtomic;
-    backing->texture = MetalHeapPool::Shared().SuballocateTexture(backend.Device(), native);
+    backing->texture = MetalHeapPool::Enabled() ? MetalHeapPool::Shared().SuballocateTexture(backend.Device(), native) : nil;
     if (backing->texture == nil) {
         backing->texture = [backend.Device() newTextureWithDescriptor:native];
     }

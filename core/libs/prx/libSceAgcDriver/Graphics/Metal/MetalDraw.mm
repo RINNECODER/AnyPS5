@@ -1,5 +1,6 @@
 #include "MetalDraw.hpp"
 #include "MetalWorkerPool.hpp"
+#include "MetalHeapPool.hpp"
 #include "MetalShaderResources.hpp"
 #include "MetalRenderState.hpp"
 #include "MetalPipelineCache.hpp"
@@ -1739,14 +1740,18 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         record->fragmentBindings = fragmentBindings;
         record->residentHeaps.clear();
         record->residency.clear();
-        for (id<MTLResource> res : residency) {
-            if (id<MTLHeap> heap = [res heap]; heap != nil) {
-                if (std::find(record->residentHeaps.begin(), record->residentHeaps.end(), heap) == record->residentHeaps.end()) {
-                    record->residentHeaps.push_back(heap);
+        if (MetalHeapPool::Enabled()) {
+            for (id<MTLResource> res : residency) {
+                if (id<MTLHeap> heap = [res heap]; heap != nil) {
+                    if (std::find(record->residentHeaps.begin(), record->residentHeaps.end(), heap) == record->residentHeaps.end()) {
+                        record->residentHeaps.push_back(heap);
+                    }
+                } else {
+                    record->residency.push_back(res);
                 }
-            } else {
-                record->residency.push_back(res);
             }
+        } else {
+            record->residency.assign(residency.begin(), residency.end());
         }
         record->renderPass = renderPass;
         record->passKey = passKey;
