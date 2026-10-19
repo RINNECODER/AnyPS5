@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -189,14 +190,18 @@ std::vector<std::size_t> SyscallScanner::ScanCodeSectionForSyscalls(
     const std::vector<std::uint8_t>& codeSection,
     const FileByteOffset codeSectionOffset,
     const FileByteOffset codeSectionSize) {
-    const std::size_t limit = std::min(codeSection.size(), static_cast<std::size_t>(codeSectionSize));
+    if (codeSectionSize > codeSection.size()) throw RelinkerException("Code section exceeds the input buffer", codeSectionOffset);
+    if (codeSectionSize > std::numeric_limits<FileByteOffset>::max() - codeSectionOffset) throw RelinkerException("Code section offset overflow", codeSectionOffset);
+    const auto limit = static_cast<std::size_t>(codeSectionSize);
 
     RecentInstructions recent;
     std::vector<std::size_t> trapped;
     const auto scanner = Codegen::MakeInstructionScanner();
     scanner->VisitCodeSection(codeSection, codeSectionOffset, codeSectionSize, [&](const Codegen::InstructionMatch& match) {
         recent.Push(match);
+        if (match.Offset < codeSectionOffset) throw RelinkerException("Instruction match precedes code section offset", match.Offset);
         const std::size_t start = static_cast<std::size_t>(match.Offset - codeSectionOffset);
+        if (start > codeSection.size() || match.Length > codeSection.size() - start) throw RelinkerException("Instruction match exceeds code section", match.Offset);
         const auto opcodeOffset = Codegen::DecodedInstruction{codeSection.data() + start, match.Length}.OpcodeOffset();
         const std::size_t opcode = start + opcodeOffset;
         const std::size_t spanLimit = std::min(limit, start + static_cast<std::size_t>(match.Length));

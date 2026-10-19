@@ -4,6 +4,7 @@
 #include <relinker/domain/Types.hpp>
 #include <relinker/analysis/UnusedNidFilter/IRelativeRelocationIndex.hpp>
 #include <relinker/analysis/UnusedNidFilter/StrictReachability.hpp>
+#include <functional>
 #include <unordered_set>
 #include <memory>
 #include <span>
@@ -34,7 +35,8 @@ std::unique_ptr<IControlFlowGraph> BuildControlFlowGraph(
     const std::vector<VirtualAddress>& extraEntries,
     const IRelativeRelocationIndex& relativeRelocations,
     bool followCodeAddresses,
-    std::unordered_set<VirtualAddress>& reachable
+    std::unordered_set<VirtualAddress>& reachable,
+    const std::function<bool(VirtualAddress)>& isData = {}
 );
 
 std::unique_ptr<IControlFlowGraph> BuildControlFlowGraph(

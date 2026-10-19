@@ -39,7 +39,8 @@ void buildGraph(
     const IRelativeRelocationIndex& relativeRelocations,
     const std::vector<StrictDataRegion>* data,
     bool followCodeAddresses,
-    std::unordered_set<VirtualAddress>& reachable
+    std::unordered_set<VirtualAddress>& reachable,
+    const std::function<bool(VirtualAddress)>& isData
 ) {
     if (text.size() > std::numeric_limits<VirtualAddress>::max() - textVaddr)
         throw RelinkerException("Text section range exceeds the address space");
@@ -52,6 +53,7 @@ void buildGraph(
 
     auto enqueue = [&](VirtualAddress va) {
         if (reachable.count(va) > 0) return;
+        if (isData && isData(va)) return;
         if (va < textVaddr || va - textVaddr >= text.size()) return;
         const auto offset = static_cast<std::size_t>(va - textVaddr);
         auto& word = visited[offset / 64];
@@ -83,7 +85,7 @@ void buildGraph(
         VirtualAddress va = worklist.front();
         worklist.pop();
 
-        while (va >= textVaddr && va - textVaddr < text.size() && !reachable.contains(va)) {
+        while (va >= textVaddr && va - textVaddr < text.size() && !reachable.contains(va) && !(isData && isData(va))) {
             std::size_t bufOff = static_cast<std::size_t>(va - textVaddr);
             std::size_t available = text.size() - bufOff;
             if (available == 0) throw RelinkerException("CFG: zero available bytes at target", va);
@@ -173,9 +175,10 @@ std::unique_ptr<IControlFlowGraph> BuildControlFlowGraph(
     const std::vector<VirtualAddress>& extraEntries,
     const IRelativeRelocationIndex& relativeRelocations,
     bool followCodeAddresses,
-    std::unordered_set<VirtualAddress>& reachable
+    std::unordered_set<VirtualAddress>& reachable,
+    const std::function<bool(VirtualAddress)>& isData
 ) {
-    buildGraph(text, textVaddr, entryVaddr, extraEntries, relativeRelocations, nullptr, followCodeAddresses, reachable);
+    buildGraph(text, textVaddr, entryVaddr, extraEntries, relativeRelocations, nullptr, followCodeAddresses, reachable, isData);
     return std::make_unique<ControlFlowGraph>(&reachable);
 }
 
@@ -212,7 +215,7 @@ std::unique_ptr<IControlFlowGraph> BuildAddressTakenControlFlowGraph(
     const std::vector<StrictDataRegion>& data
 ) {
     std::unordered_set<VirtualAddress> reachable;
-    buildGraph(std::span<const std::uint8_t>(text.data(), text.size()), textVaddr, entryVaddr, extraEntries, relativeRelocations, &data, false, reachable);
+    buildGraph(std::span<const std::uint8_t>(text.data(), text.size()), textVaddr, entryVaddr, extraEntries, relativeRelocations, &data, false, reachable, {});
     return std::make_unique<ControlFlowGraph>(std::move(reachable));
 }
 
