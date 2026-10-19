@@ -5,16 +5,22 @@
 #   --build DIR        x86_64 build dir configured with -DANYPS5_ROSETTA_LIBS=ON (required)
 #   --title-dir DIR    title dump: eboot.bin and the .prx modules MacPS passes (or ANYPS5_E2E_TITLE_DIR)
 #   --from-save DIR    a title-data tree holding one autosave, loaded through Load Game > Autosaves
+#                      (best effort; the default drives a new game to the map)
 #   --out DIR          output directory (default: ./gameplay-smoke-<timestamp>)
 #   --seconds N        wall limit for the run (default 320)
 #   --min-gameplay N   seconds the guest must keep presenting frames after the map appears (default 60)
+#   --max-black N      frames after the map allowed below --black-ratio (default 3)
+#   --black-ratio F    a frame below this nonblack_ratio is a black-region frame (default 0.65)
 #
-# The gate passes only when the guest exits cleanly (or reaches the wall limit), no fault or uncaught
-# exception is reported, a detailed 3D frame appears after map generation, frames keep presenting for
-# --min-gameplay seconds after it, and that frame is saved as map.png. Refuses to run while Steam or
-# the title is running, and takes the game-run lock (with-lock eboot) when that helper is installed.
+# The controller watches the engine's log and its captured frames and presses only when it sees the
+# screen that needs it (the main menu, then the leader select), so it does not depend on when a
+# screen appears. It stops pressing once map generation starts, waits for a detailed 3D frame, then
+# keeps playing for --min-gameplay seconds. The gate passes only when the guest exits cleanly (or
+# reaches the wall limit) with no fault, the 3D map appears, frames keep presenting after it, no
+# black-region frames appear, and the map screenshot is saved as map.png. Refuses to run while Steam
+# or the title is running, and takes the game-run lock (with-lock eboot) when that helper is installed.
 set -u
-BUILD=""; TITLE=""; FROMSAVE=""; OUT=""; SECONDS_LIMIT=320; MIN_GAMEPLAY=60
+BUILD=""; TITLE=""; FROMSAVE=""; OUT=""; SECONDS_LIMIT=320; MIN_GAMEPLAY=60; MAX_BLACK=3; BLACK_RATIO=0.65
 while [ $# -gt 0 ]; do case $1 in
   --build) BUILD=$2; shift;;
   --title-dir) TITLE=$2; shift;;
@@ -22,9 +28,11 @@ while [ $# -gt 0 ]; do case $1 in
   --out) OUT=$2; shift;;
   --seconds) SECONDS_LIMIT=$2; shift;;
   --min-gameplay) MIN_GAMEPLAY=$2; shift;;
+  --max-black) MAX_BLACK=$2; shift;;
+  --black-ratio) BLACK_RATIO=$2; shift;;
   *) echo "unknown argument: $1" >&2; exit 2;;
 esac; shift; done
-[ -n "$BUILD" ] || { sed -n '2,14p' "$0"; exit 2; }
+[ -n "$BUILD" ] || { sed -n '2,19p' "$0"; exit 2; }
 BUILD=$(cd "$BUILD" && pwd)
 TITLE=${TITLE:-${ANYPS5_E2E_TITLE_DIR:-}}
 [ -n "$TITLE" ] || { echo "--title-dir or ANYPS5_E2E_TITLE_DIR is required" >&2; exit 2; }
@@ -32,81 +40,177 @@ TITLE=$(cd "$TITLE" && pwd)
 SRC=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$BUILD/CMakeCache.txt")
 [ -x "$BUILD/rosetta/bin/anyps5_rosetta_run" ] && [ -f "$SRC/tools/rosetta/run_title.py" ] || { echo "bad build dir: $BUILD" >&2; exit 2; }
 OUT=${OUT:-$PWD/gameplay-smoke-$(date +%Y%m%d-%H%M%S)}
-mkdir -p "$OUT/frames"
+mkdir -p "$OUT"
 
 if pgrep -f steam_osx >/dev/null; then echo "Steam is running; the gate needs the GPU to itself" >&2; exit 2; fi
 if pgrep -f anyps5_rosetta_run >/dev/null; then echo "a title is already running" >&2; exit 2; fi
 
-SCRIPT=""
-if [ -n "$FROMSAVE" ]; then
-  [ -d "$FROMSAVE" ] || { echo "bad --from-save: $FROMSAVE" >&2; exit 2; }
-  CYC=(down cross r1 down cross); i=0
-  for ((t = 8; t <= 150; t += 3)); do SCRIPT="$SCRIPT${SCRIPT:+;}t=$t:${CYC[i % 5]}"; i=$((i + 1)); done
-  for ((t = 154; t <= SECONDS_LIMIT; t += 6)); do SCRIPT="$SCRIPT;t=$t:cross"; done
-else
-  B=cross
-  for ((t = 8; t <= SECONDS_LIMIT; t += 3)); do SCRIPT="$SCRIPT${SCRIPT:+;}t=$t:$B"; [ $B = cross ] && B=square || B=cross; done
-fi
+CONTROLLER=$(mktemp /private/tmp/anyps5-gameplay-controller.XXXXXX.py)
+trap 'rm -f "$CONTROLLER"' EXIT
+cat > "$CONTROLLER" <<'PY'
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
 
-S=$(mktemp -d /private/tmp/anyps5-gameplay-smoke.XXXXXX)
-cleanup() { rm -rf "$S"; }
-trap cleanup EXIT
-TITLE_DATA="$S/titledata"; mkdir -p "$TITLE_DATA"
-[ -n "$FROMSAVE" ] && cp -R "$FROMSAVE/." "$TITLE_DATA/"
+BUTTONS = {"cross": 0x4000, "square": 0x8000, "circle": 0x2000, "down": 0x40, "up": 0x10, "r1": 0x800}
 
-export ANYPS5_INPUT_SCRIPT="$SCRIPT"
-export ANYPS5_TITLE_DATA="$TITLE_DATA"
-export ANYPS5_FRAME_CAPTURE_DIR="$OUT/frames"
-export ANYPS5_FRAME_CAPTURE_INTERVAL_MS=3000
-export ANYPS5_UNOBTRUSIVE_WINDOWS=1
+build, title, source, out = (Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]))
+seconds, minimum, max_black, black_ratio = (float(sys.argv[5]), float(sys.argv[6]), int(sys.argv[7]), float(sys.argv[8]))
+from_save = sys.argv[9]
 
-RUN=(python3 "$SRC/tools/rosetta/run_title.py" "$TITLE" --build "$BUILD" --wall "$SECONDS_LIMIT" --log "$OUT/run.log")
-if command -v with-lock >/dev/null 2>&1; then with-lock eboot "${RUN[@]}" > "$OUT/summary.txt" 2>&1; else "${RUN[@]}" > "$OUT/summary.txt" 2>&1; fi
+frames = out / 'frames'
+frames.mkdir(parents=True, exist_ok=True)
+scratch = Path(tempfile.mkdtemp(prefix='anyps5-gameplay-smoke-'))
+pad = scratch / 'pad'
+title_data = scratch / 'titledata'
+title_data.mkdir()
+if from_save:
+    shutil.copytree(from_save, title_data, dirs_exist_ok=True)
+run_log = out / 'run.log'
 
-python3 - "$OUT" "$SECONDS_LIMIT" "$MIN_GAMEPLAY" <<'PY'
-import json, os, re, shutil, sys
-out, limit, minimum = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
-lines = open(os.path.join(out, 'run.log'), errors='replace').read().splitlines()
-t0 = None
-for l in lines:
-    m = re.search(r'input script t=([\d.]+):\w+: down at [\d.]+ s \(epoch ms (\d+)\)', l)
-    if m:
-        t0 = int(m.group(2)) - float(m.group(1)) * 1000
+env = dict(os.environ)
+env['APS5_PAD_INPUT_FILE'] = str(pad)
+env['ANYPS5_TITLE_DATA'] = str(title_data)
+env['ANYPS5_FRAME_CAPTURE_DIR'] = str(frames)
+env['ANYPS5_FRAME_CAPTURE_INTERVAL_MS'] = '1000'
+env['ANYPS5_UNOBTRUSIVE_WINDOWS'] = '1'
+env.pop('ANYPS5_INPUT_SCRIPT', None)
+
+command = ['python3', str(source / 'tools' / 'rosetta' / 'run_title.py'), str(title),
+           '--build', str(build), '--wall', str(int(seconds)), '--log', str(run_log)]
+summary = open(out / 'summary.txt', 'w')
+engine = subprocess.Popen(command, env=env, stdout=summary, stderr=subprocess.STDOUT, start_new_session=True)
+
+sequence = 0
+def press(button, hold=250):
+    global sequence
+    sequence += 1
+    pad.write_text(f'{sequence} {BUTTONS[button]} {hold}\n')
+
+start = time.monotonic()
+log_position = 0
+menu_seen = leader_seen = map_generation_seen = False
+menu_pressed = False
+last_press = -10.0
+press_count = 0
+map_time = None
+map_frame = None
+after = []
+presented_after = 0
+save_queue = []
+while True:
+    now = time.monotonic() - start
+    try:
+        with open(run_log, 'r', errors='replace') as stream:
+            stream.seek(log_position)
+            fresh = stream.read()
+            log_position = stream.tell()
+    except FileNotFoundError:
+        fresh = ''
+    for line in fresh.splitlines():
+        if 'TEXTURE_my2k_notloggedin' in line:
+            menu_seen = True
+        if 'TEXTURE_age_sel_bg_ramp' in line:
+            leader_seen = True
+        if 'scripts/voronoi' in line:
+            map_generation_seen = True
+        if '"event":"frames_presented"' in line and map_time is not None:
+            presented_after += 1
+        if 'frame_captured' in line:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            ratio = event.get('nonblack_ratio', 1.0)
+            colors = event.get('distinct_colors', 0)
+            if map_time is None and map_generation_seen and ratio >= 0.6 and colors >= 800:
+                map_time = now
+                map_frame = event.get('path')
+            if map_time is not None:
+                after.append((now, ratio, colors, event.get('path')))
+    if map_time is None and not map_generation_seen:
+        if from_save:
+            if menu_seen and not menu_pressed:
+                menu_pressed = True
+                save_queue = [(now, 'down'), (now + 0.8, 'cross'), (now + 1.7, 'r1'), (now + 2.5, 'down'), (now + 3.2, 'cross')]
+            while save_queue and save_queue[0][0] <= now:
+                press(save_queue.pop(0)[1])
+                last_press = now
+            if not save_queue and now - last_press >= 2.5:
+                press('cross')
+                last_press = now
+        else:
+            if menu_seen and not menu_pressed:
+                menu_pressed = True
+                press('cross')
+                last_press = now
+            elif now - last_press >= 2.5:
+                press('square' if press_count % 2 else 'cross')
+                press_count += 1
+                last_press = now
+    if engine.poll() is not None:
         break
-map_index = None; map_time = None; map_frame = None
-generated = False
-for i, l in enumerate(lines):
-    if 'scripts/voronoi' in l:
-        generated = True
-    if map_index is None and 'frame_captured' in l:
-        try: event = json.loads(l)
-        except ValueError: continue
-        if event.get('nonblack_ratio', 0) >= 0.5 and event.get('distinct_colors', 0) >= 512:
-            m = re.search(r'frame-\d+-(\d+)\.png', event.get('path', ''))
-            if m and t0:
-                map_index = i
-                map_time = (int(m.group(1)) - t0) / 1000.0
-                map_frame = event['path']
+    if map_time is not None and now - map_time >= minimum + 5:
+        break
+    if now >= seconds + 30:
+        break
+    time.sleep(0.25)
+
+if engine.poll() is None:
+    try:
+        os.killpg(engine.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        engine.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(engine.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        engine.wait()
+summary.close()
+
+lines = run_log.read_text(errors='replace').splitlines() if run_log.exists() else []
 exits = [json.loads(l) for l in lines if l.startswith('{') and '"event":"guest_exit"' in l]
 exit_code = exits[-1].get('exit_code') if exits else None
 faulted = any(re.search(r'guest fault|uncaught_exception|assertion failed', l) for l in lines)
-play = (limit - map_time) if map_time is not None else 0.0
-after = sum(1 for l in lines[map_index:] if '"event":"frames_presented"' in l) if map_index is not None else 0
-screenshot = os.path.join(out, 'map.png')
-if map_frame and os.path.exists(map_frame):
+black = [entry for entry in after if entry[1] < black_ratio]
+play = (after[-1][0] - map_time) if (map_time is not None and after) else 0.0
+screenshot = out / 'map.png'
+if map_frame and Path(map_frame).exists():
     shutil.copyfile(map_frame, screenshot)
+    best = max(after, key=lambda entry: entry[1]) if after else None
+    if best and Path(best[3]).exists():
+        shutil.copyfile(best[3], out / 'map-best.png')
 checks = [
-    ('map generation reached', generated),
     ('3D map frame captured', map_time is not None),
-    ('frames keep presenting after the map', after >= max(1, int(minimum / 3))),
     (f'gameplay >= {minimum:.0f} s after the map', play >= minimum),
+    ('frames keep presenting after the map', presented_after >= max(1, int(minimum / 3))),
+    (f'no black-region frames (< {black_ratio})', len(black) <= max_black),
     ('clean guest exit', exit_code == 0 and not faulted),
-    ('map screenshot saved', os.path.exists(screenshot)),
+    ('map screenshot saved', screenshot.exists()),
 ]
 for name, ok in checks:
     print(('PASS ' if ok else 'FAIL ') + name)
-print(f'map at {map_time if map_time is None else round(map_time, 1)} s, wall {limit:.0f} s, gameplay {play:.1f} s, '
-      f'frames_presented events after map {after}, exit {exit_code}')
-print('out: ' + out)
+ratios = [entry[1] for entry in after]
+print(f'map at {round(map_time, 1) if map_time else None} s, gameplay {play:.1f} s, captured after map {len(after)}, '
+      f'presented events {presented_after}, nonblack min {round(min(ratios), 3) if ratios else None} '
+      f'mean {round(sum(ratios) / len(ratios), 3) if ratios else None}, black frames {len(black)}, exit {exit_code}')
+print('out: ' + str(out))
+shutil.rmtree(scratch, ignore_errors=True)
 sys.exit(0 if all(ok for _, ok in checks) else 1)
 PY
+
+if command -v with-lock >/dev/null 2>&1; then
+  with-lock eboot python3 "$CONTROLLER" "$BUILD" "$TITLE" "$SRC" "$OUT" "$SECONDS_LIMIT" "$MIN_GAMEPLAY" "$MAX_BLACK" "$BLACK_RATIO" "$FROMSAVE"
+else
+  python3 "$CONTROLLER" "$BUILD" "$TITLE" "$SRC" "$OUT" "$SECONDS_LIMIT" "$MIN_GAMEPLAY" "$MAX_BLACK" "$BLACK_RATIO" "$FROMSAVE"
+fi
