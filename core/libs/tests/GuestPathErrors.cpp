@@ -120,6 +120,15 @@ void Rename() {
     Check(sceKernelRename("plain.txt", "moved.txt") == 0 && sceKernelRename("moved.txt", "plain.txt") == 0);
 }
 
+void Truncate() {
+    Check(sceKernelTruncate_nid_postfix("loop", 0) == SceEloop);
+    Check(sceKernelTruncate_nid_postfix(LongName.c_str(), 0) == SceEnametoolong);
+    Check(PosixFails(truncate_nid_postfix("loop", 0), GuestEloop));
+    Check(PosixFails(truncate_nid_postfix(LongName.c_str(), 0), GuestEnametoolong));
+    Check(sceKernelTruncate_nid_postfix("missing.txt", 0) == SceKernelError(2));
+    Check(sceKernelTruncate_nid_postfix("plain.txt", 2) == 0 && std::filesystem::file_size("plain.txt") == 2);
+}
+
 }
 
 int main() {
@@ -128,6 +137,7 @@ int main() {
     Status();
     Directories();
     Rename();
+    Truncate();
     std::error_code error;
     std::filesystem::current_path(std::filesystem::temp_directory_path(), error);
     std::filesystem::remove_all(root, error);
