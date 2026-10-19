@@ -457,7 +457,11 @@ public:
 #else
         if (::mmap(reinterpret_cast<void*>(address), bytes, protection, MAP_SHARED | MAP_FIXED, file, static_cast<off_t>(fileOffset + offset)) == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map direct memory backing");
 #if defined(__APPLE__)
-        GpuSharedMemory::GpuSharedMemoryRegister_nid_postfix(address, bytes, PhysicalObjectName().c_str(), fileOffset + offset);
+        // Only memory in the slid guest address space is published: a fixed mapping outside it (a
+        // low fixed request that stayed at its host address) is not one a native process may map
+        // with MAP_FIXED, because it would replace the process's own mappings.
+        if (GuestArena::GuestArenaContains_nid_postfix(reinterpret_cast<void*>(address), bytes))
+            GpuSharedMemory::GpuSharedMemoryRegister_nid_postfix(address, bytes, PhysicalObjectName().c_str(), fileOffset + offset);
 #endif
 #endif
     }

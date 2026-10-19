@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -38,6 +40,7 @@ constexpr int ProtGpuReadWrite = 0x30;
 constexpr int MapFixed = 0x10;
 constexpr std::size_t Length = 0x10000;
 constexpr std::uintptr_t RawDirectAddress = 0x1000000000ull;
+constexpr std::uintptr_t RawLowAddress = 0x180000000ull;
 constexpr std::uintptr_t ExpectedSlide = 0x8000000000ull;
 
 int g_failures = 0;
@@ -73,6 +76,21 @@ bool Checked(void* address, std::size_t bytes, unsigned char (*pattern)(std::uin
 }
 
 std::vector<std::uintptr_t> MappedRanges;
+
+bool ManifestMentions(const std::filesystem::path& path, std::uintptr_t begin, std::uintptr_t end) {
+    std::ifstream manifest(path);
+    std::string line;
+    while (std::getline(manifest, line)) {
+        if (line.rfind("region ", 0) != 0) continue;
+        std::istringstream fields(line);
+        std::string kind;
+        std::uint64_t address = 0;
+        std::uint64_t bytes = 0;
+        if (!(fields >> kind >> std::hex >> address >> bytes)) continue;
+        if (address < end && begin < address + bytes) return true;
+    }
+    return false;
+}
 
 bool WaitForFile(const std::filesystem::path& path, std::chrono::milliseconds limit) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
@@ -119,8 +137,16 @@ int main(int argc, char** argv) {
         Fill(heap, Length, WriterPattern);
         MappedRanges.push_back(reinterpret_cast<std::uintptr_t>(heap));
 
+        std::int64_t lowPhysical = -1;
+        Check(DirectMemoryAlloc(0, DIRECT_MEMORY_SIZE, Length, Length, 0, &lowPhysical) == 0, "allocate direct memory for the low mapping");
+        void* low = reinterpret_cast<void*>(RawLowAddress);
+        Check(DoMapDirect(&low, Length, ProtCpuReadWrite, MapFixed, lowPhysical, 0) == 0, "map direct memory below the guest application area");
+        Check(reinterpret_cast<std::uintptr_t>(low) == RawLowAddress, "a mapping outside the application area keeps its host address");
+        Fill(low, Length, WriterPattern);
+
         Check(GpuSharedMemory::GpuSharedMemoryRegionCount_nid_postfix() >= 3, "every GPU-visible range is registered");
         Check(GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix(), "the manifest is published");
+        Check(!ManifestMentions(manifest, RawLowAddress, RawLowAddress + Length), "a mapping outside the shared address space is not published");
         std::printf("writer: %zu regions at", GpuSharedMemory::GpuSharedMemoryRegionCount_nid_postfix());
         for (const auto address : MappedRanges) std::printf(" 0x%llx", static_cast<unsigned long long>(address));
         std::printf("\n");
