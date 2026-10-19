@@ -95,6 +95,7 @@ void EmitReturnTerminator(SpirvValueEmitContext& ctx) {
         state.module.AddFunction(spv::OpEndInvocationInterlockEXT);
     }
     EmitKillIfPixelValidMaskInactive(state);
+    if (state.quadPixelUncovered != 0u) EmitKillIfBoolFalse(state, Unary(state, spv::OpLogicalNot, TypeBool(state), state.quadPixelUncovered));
     state.module.AddFunction(spv::OpReturn);
 }
 

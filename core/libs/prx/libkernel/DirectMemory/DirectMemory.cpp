@@ -1188,6 +1188,7 @@ int DoMprotect(const void* addr, size_t len, int prot) {
         GuestWriteWatch::GuestWriteWatchProtectionChanged_nid_postfix(insidePointer, insideBytes, nativeProtection);
 #endif
         NoteGuestStackProtection(inside, insideBytes, (prot & 3) == 3);
+        GuestAllocations::GuestAllocationsInvalidate_nid_postfix(inside, insideBytes);
         RecordProtection(insidePointer, insideBytes, prot);
         return 0;
     }

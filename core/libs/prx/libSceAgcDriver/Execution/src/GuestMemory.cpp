@@ -36,6 +36,7 @@
 #include <pthread.h>
 #include <sstream>
 #include <sys/ioctl.h>
+#include <sys/uio.h>
 #include <unistd.h>
 #include "prx/libc/include/specifics/linux/HostMapping.hpp"
 #endif
@@ -350,6 +351,7 @@ namespace {
 constexpr std::size_t PageBytes = 4096;
 constexpr std::uint8_t PageReadable = 1;
 constexpr std::uint8_t PageWritable = 2;
+constexpr std::uint8_t PageInaccessible = 4;
 
 struct PageSpan {
     std::uintptr_t base = 0;
@@ -422,6 +424,17 @@ struct PageStates {
     void forget(std::uintptr_t address, std::size_t bytes) {
         arena.forget(address, bytes);
         image.forget(address, bytes);
+    }
+
+    void record(std::uintptr_t base, std::uintptr_t regionEnd, bool readable, bool writable, std::uint64_t generation) {
+        for (PageSpan* span : {&arena, &image}) {
+            if (span->size == 0 || regionEnd <= span->base || base >= span->base + span->size) continue;
+            const std::uint8_t value = readable ? static_cast<std::uint8_t>(PageReadable | (writable ? PageWritable : 0u)) : PageInaccessible;
+            const auto first = std::max(base, span->base);
+            const auto last = std::min(regionEnd, span->base + span->size);
+            for (auto at = first; at < last; at += PageBytes) span->store(at, value);
+            if (GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) span->forget(first, static_cast<std::size_t>(last - first));
+        }
     }
 };
 
@@ -499,9 +512,9 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
     while (cursor < end) {
         if (const auto* span = pages.spanOf(cursor)) {
             const auto value = span->load(cursor);
-            if ((value & 3u) != 0) {
+            if (value != 0) {
                 const auto next = span->runEnd(cursor, value, end);
-                if (!emit(PageRun{cursor, next, true, (value & PageWritable) != 0})) return true;
+                if (!emit(PageRun{cursor, next, (value & PageReadable) != 0, (value & PageWritable) != 0})) return true;
                 cursor = next;
                 continue;
             }
@@ -533,14 +546,7 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
         const bool committed = memory.State == MEM_COMMIT && (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0;
         const bool readable = committed && readableProtection(protection);
         const bool writable = readable && writableProtection(protection);
-        for (PageSpan* span : {&pages.arena, &pages.image}) {
-            if (!readable || span->size == 0 || regionEnd <= span->base || base >= span->base + span->size) continue;
-            const std::uint8_t value = PageReadable | (writable ? PageWritable : 0u);
-            const auto first = std::max(base, span->base);
-            const auto last = std::min(regionEnd, span->base + span->size);
-            for (auto at = first; at < last; at += PageBytes) span->store(at, value);
-            if (GuestAllocations::GuestAllocationsGeneration_nid_postfix() != generation) span->forget(first, static_cast<std::size_t>(last - first));
-        }
+        if ((memory.Protect & PAGE_GUARD) == 0) pages.record(base, regionEnd, readable, writable, generation);
         const auto next = std::min(end, regionEnd);
         if (!emit(PageRun{cursor, next, readable, writable})) return true;
         cursor = next;
@@ -554,6 +560,7 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
                 if (query.vma_end <= cursor || query.vma_start >= query.vma_end) return false;
                 if (query.vma_start > cursor) {
                     const auto gapEnd = std::min<std::uintptr_t>(end, query.vma_start);
+                    recordRun(gapEnd, false, false);
                     if (!emit(PageRun{cursor, gapEnd, false, false})) return true;
                     cursor = gapEnd;
                     continue;
@@ -584,6 +591,7 @@ bool describePages(std::uintptr_t address, std::size_t bytes, Emit&& emit) {
             if (last <= cursor) continue;
             if (first > cursor) {
                 const auto gapEnd = std::min(end, first);
+                recordRun(gapEnd, false, false);
                 if (!emit(PageRun{cursor, gapEnd, false, false})) return true;
                 cursor = gapEnd;
                 found = true;
@@ -634,11 +642,35 @@ bool onOwnLiveStack(std::uintptr_t address, std::size_t bytes) {
     return bounds.high != 0 && frame >= bounds.low && frame < bounds.high && address >= frame && address < bounds.high && bytes <= bounds.high - address;
 }
 
+#ifdef __linux__
+bool pageStateRecorded(std::uintptr_t address, std::size_t bytes) {
+    auto& pages = Pages();
+    pages.initialize();
+    for (auto at = address & ~static_cast<std::uintptr_t>(PageBytes - 1); at < address + bytes; at += PageBytes) {
+        if (const auto* span = pages.spanOf(at); span != nullptr && span->load(at) != 0) return true;
+    }
+    return false;
+}
+
+bool readableWithoutQuery(std::uintptr_t address, std::size_t bytes) {
+    constexpr std::size_t limit = 4096;
+    if (bytes > limit || HostMapping::QueryFd() >= 0 || pageStateRecorded(address, bytes)) return false;
+    thread_local std::array<std::byte, limit> scratch;
+    iovec local{scratch.data(), bytes};
+    iovec remote{reinterpret_cast<void*>(address), bytes};
+    static const pid_t self = getpid();
+    return ::process_vm_readv(self, &local, 1, &remote, 1, 0) == static_cast<ssize_t>(bytes);
+}
+#endif
+
 // Checks that [address, address + bytes) is mapped with read (and, if asked, write) access. Returns
 // an empty string when it is, otherwise why it is not.
 std::string verify(std::uintptr_t address, std::size_t bytes, bool writable) {
     const TimedAccess timed(CounterVerify, bytes);
     if (onOwnLiveStack(address, bytes)) return {};
+#ifdef __linux__
+    if (!writable && readableWithoutQuery(address, bytes)) return {};
+#endif
     std::string reason;
     const bool queried = describePages(address, bytes, [&](const PageRun& run) {
         if (!run.readable) {
@@ -1016,6 +1048,7 @@ void watchPrivateMapping(std::uintptr_t address, std::size_t bytes, std::uint64_
 // presenter, game threads inside the flush hook), as nothing orders the CPU's writes for it.
 std::atomic<std::uint64_t> nextCollectEpoch{1};
 thread_local std::uint64_t threadCollectEpoch = 0;
+std::atomic<std::uint64_t> lastBumpedEpoch{0};
 
 std::uint64_t currentCollectEpoch() {
     if (threadCollectEpoch != 0) return threadCollectEpoch;
@@ -1220,7 +1253,22 @@ std::uint64_t CollectWritesUncached(std::uint64_t address, std::size_t bytes) {
 
 void BumpCollectEpoch() {
     threadCollectEpoch = nextCollectEpoch.fetch_add(1, std::memory_order_relaxed) + 1;
+    auto last = lastBumpedEpoch.load(std::memory_order_relaxed);
+    while (last < threadCollectEpoch && !lastBumpedEpoch.compare_exchange_weak(last, threadCollectEpoch, std::memory_order_release, std::memory_order_relaxed)) {}
     collectEpochBumps.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::uint64_t ThreadCollectEpoch() {
+    return collectMemoEnabled() ? threadCollectEpoch : 0;
+}
+
+std::uint64_t UnwatchSerial() {
+    return unwatchSerial.load(std::memory_order_acquire);
+}
+
+void AdoptLatestCollectEpoch() {
+    const auto latest = lastBumpedEpoch.load(std::memory_order_acquire);
+    if (latest > threadCollectEpoch) threadCollectEpoch = latest;
 }
 
 std::uint64_t CollectEpochBumps() {

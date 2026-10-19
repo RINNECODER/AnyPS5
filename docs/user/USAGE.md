@@ -225,6 +225,8 @@ python3 tools/import_audit.py app.registry.json app.libc.prx.guest.prx.registry.
 
 `--registry` writes `app.registry.json` for the executable and one `app.<module>.registry.json` for each converted bundled module; pass all of them. `--libs` is the directory the `libs` target fills ([build instructions](../dev/BUILD.md)); the exports are read from the built `.prx` files, so the result matches what the loader finds. Imports are counted once per NID and library, and every reference lands in exactly one class:
 
+Module registries mark ELF weak imports with `"weak": true`, allowing the audit's current-stop selection to skip them. Strong imports omit the field. Older module registries do not preserve weak bindings; regenerate them to distinguish optional imports.
+
 | Class | Meaning |
 |-------|---------|
 | `implemented` | A built library exports the NID and its function is not a throwing stub. |

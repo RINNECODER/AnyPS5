@@ -331,16 +331,10 @@ void DefineOutputs(SpirvEmitterState& state) {
     }
     const auto stage = state.program.Resources().stage;
     const bool exportsPosition = std::ranges::any_of(state.outputs, [](const SpirvOutputBinding& output) { return output.kind == StageOutputKind::Position; });
-    // The all-zero clip position distance needs the ClipDistance capability. Targets that
-    // lack it (the Metal bridge) keep the previous behavior of not clipping that primitive
-    // instead of rejecting the shader.
     const bool hasClipDistanceCapability = std::ranges::find(state.supportedCapabilities, spv::CapabilityClipDistance) != state.supportedCapabilities.end();
-    if (exportsPosition && hasClipDistanceCapability && (stage == IrShaderStage::Vertex || stage == IrShaderStage::TessellationEvaluation)) {
+    if (exportsPosition && hasClipDistanceCapability && (stage == IrShaderStage::Vertex || stage == IrShaderStage::TessellationEvaluation) && clipDistanceCount + cullDistanceCount < MaxClipDistances) {
         state.zeroPositionClipIndex = clipDistanceCount;
         clipDistanceCount += 1u;
-        if (clipDistanceCount > MaxClipDistances) {
-            FailEmit("guest clip distances plus the all-zero clip position distance exceed " + std::to_string(MaxClipDistances) + " clip distances");
-        }
     }
     const auto BuiltIn = [&](std::uint32_t& variable, std::uint32_t type, const char* name, std::uint32_t builtin) {
         if (variable == 0u) {

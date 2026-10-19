@@ -81,7 +81,6 @@ DescriptorRole RoleFor(DescriptorBindingKind kind) {
 DescriptorImageShape ImageShapeForResource(const ImageResource& image) {
     const RdnaImageDimensionInfo& info = RdnaImageDimensionInfoFor(image.dimension);
     if (info.multisampled != 0u) {
-        // Bound as texture2d_ms / texture2d_ms_array; the sample index is an explicit fetch operand.
         return info.arrayed != 0u ? DescriptorImageShape::Image2DMultisampleArray : DescriptorImageShape::Image2DMultisample;
     }
     if (info.spirvDimension == spv::Dim1D) {
