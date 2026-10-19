@@ -88,10 +88,12 @@ int main() {
     const PngDecCreateParam badAttribute{sizeof(PngDecCreateParam), 2, 1920};
     Require(scePngDecQueryMemorySize(&badAttribute) == invalidParam);
     const PngDecCreateParam zeroWidth{sizeof(PngDecCreateParam), 0, 0};
-    Require(scePngDecQueryMemorySize(&zeroWidth) == invalidSize);
+    Require(scePngDecQueryMemorySize(&zeroWidth) == invalidParam);
     const PngDecCreateParam hugeWidth{sizeof(PngDecCreateParam), 0, 1000002};
-    Require(scePngDecQueryMemorySize(&hugeWidth) == invalidSize);
-    const PngDecCreateParam maxWidth{sizeof(PngDecCreateParam), 1, 1000001};
+    Require(scePngDecQueryMemorySize(&hugeWidth) == invalidParam);
+    const PngDecCreateParam overWidth{sizeof(PngDecCreateParam), 1, 1000001};
+    Require(scePngDecQueryMemorySize(&overWidth) == invalidParam);
+    const PngDecCreateParam maxWidth{sizeof(PngDecCreateParam), 1, 1000000};
     Require(scePngDecQueryMemorySize(&maxWidth) == memorySize);
 
     std::vector<unsigned char> memory(static_cast<std::size_t>(memorySize) + 1);
@@ -99,6 +101,7 @@ int main() {
     void* handle = nullptr;
     Require(scePngDecCreate(nullptr, unaligned, static_cast<std::uint32_t>(memorySize), &handle) == invalidParam);
     Require(scePngDecCreate(&badSize, unaligned, static_cast<std::uint32_t>(memorySize), &handle) == invalidSize);
+    Require(scePngDecCreate(&overWidth, unaligned, static_cast<std::uint32_t>(memorySize), &handle) == invalidParam);
     Require(scePngDecCreate(&param, nullptr, static_cast<std::uint32_t>(memorySize), &handle) == invalidAddr);
     Require(scePngDecCreate(&param, unaligned, static_cast<std::uint32_t>(memorySize), nullptr) == invalidAddr);
     Require(scePngDecCreate(&param, unaligned, static_cast<std::uint32_t>(memorySize) - 1, &handle) == invalidWorkMemory);
