@@ -496,9 +496,11 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     if (atomic && (format != VK_FORMAT_R32_UINT && format != VK_FORMAT_R32_SINT && format != VK_FORMAT_R32_SFLOAT)) {
         throw std::invalid_argument("Metal texture atomics require one 32-bit component");
     }
+    const auto usage = MetalTexture::UsageFor(descriptor, written, storage, atomic);
     for (auto& image : images) {
         const bool dccDiffers = !image.texture->CanShareBacking(descriptor) && sharesPlainTexels(image, descriptor);
         if (!dccDiffers && !image.texture->CanShareBacking(descriptor)) continue;
+        image.texture->EnsureUsage(usage);
         if (Graphics::IsDccClear(image.keys)) {
             const auto& original = image.texture->Descriptor();
             const auto elementBytes = Graphics::BytesPerElement(original.format);
@@ -638,6 +640,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
     std::shared_ptr<MetalTexture> texture;
     bool textureCompare = compare;
     if (cached) {
+        cached->texture->EnsureUsage(usage);
         texture = cached->texture;
         textureCompare = cached->compare;
     } else {
@@ -646,7 +649,7 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
                 static_cast<unsigned long long>(descriptor.baseAddress), describeImage(descriptor).c_str(), bytes, written ? 1 : 0,
                 cacheable ? 1 : 0, staged ? 1 : 0, static_cast<unsigned>(keys), static_cast<unsigned long long>(content));
         }
-        texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered));
+        texture = std::shared_ptr<MetalTexture>(new MetalTexture(backend, descriptor, compare, minimumLodLowered, usage));
         if (keys == Graphics::DccKeys::Uncompressed) {
             if (cpuRead && !texture->UploadsInPlace(buffer.buffer, buffer.offset)) cpuRead(descriptor.baseAddress, bytes);
             // Another texture of these bytes may be newer than them (another format or view of a

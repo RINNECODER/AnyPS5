@@ -64,6 +64,9 @@ public:
     [[nodiscard]] id<MTLTexture> StorageView(bool atomic = false) const;
     [[nodiscard]] bool SupportsStorage() const;
     [[nodiscard]] bool SupportsAtomic() const;
+    [[nodiscard]] static MTLTextureUsage UsageFor(const Graphics::GuestTextureResource& descriptor,
+        bool written, bool storage, bool atomic);
+    [[nodiscard]] static std::uint64_t UsageWideningCount();
     [[nodiscard]] const Graphics::GuestTextureResource& Descriptor() const;
     [[nodiscard]] const Graphics::SurfaceGeometry& Geometry() const;
     [[nodiscard]] std::size_t GuestBytes() const;
@@ -74,7 +77,9 @@ public:
 private:
     friend class MetalShaderResources;
     MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor,
-                 bool compare, bool minimumLodLowered);
+                 bool compare, bool minimumLodLowered, MTLTextureUsage usage);
+    void EnsureUsage(MTLTextureUsage usage);
+    [[nodiscard]] id<MTLTexture> createNative(MTLTextureUsage usage) const;
     [[nodiscard]] std::shared_ptr<MetalTexture> CreateView(const Graphics::GuestTextureResource& descriptor,
                                                         bool compare, bool minimumLodLowered, bool ignoreDcc = false) const;
     [[nodiscard]] bool canShareBacking(const Graphics::GuestTextureResource& descriptor, bool ignoreDcc) const;
@@ -91,6 +96,8 @@ private:
         Graphics::SurfaceGeometry geometry;
         std::uint32_t elementBytes;
         id<MTLTexture> texture;
+        MTLTextureUsage usage = MTLTextureUsageUnknown;
+        std::mutex usageMutex;
         // Views already made of this backing, by every descriptor field and the compare flag: a cached
         // surface bound through another descriptor got new native views for every draw.
         std::mutex viewsMutex;
@@ -125,6 +132,7 @@ private:
     void recordLinearUpload(id<MTLBuffer> linear, MetalEncoders::UploadBlitRecord& record) const;
     const MetalDevice& backend;
     Graphics::GuestTextureResource descriptor;
+    bool compareTexture = false;
     std::shared_ptr<Backing> backing;
     id<MTLTexture> typedTexture;
     id<MTLTexture> sampledView;

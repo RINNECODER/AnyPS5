@@ -4,7 +4,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureSwizzleEquations.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bit>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -136,6 +138,15 @@ MTLPixelFormat storageFormat(std::uint32_t format) {
     }
 }
 
+MTLTextureUsage legacyUsage(const Graphics::GuestTextureResource& descriptor) {
+    MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+    if (!Graphics::IsBlockCompressed(descriptor.format) && !packed16(descriptor.format)) {
+        usage |= MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
+    }
+    if (atomicFormat(descriptor.format)) usage |= MTLTextureUsageShaderAtomic;
+    return usage;
+}
+
 std::uint32_t formatFamily(std::uint32_t format) {
     switch (Graphics::ResolveTextureFormat(format)) {
         case VK_FORMAT_R8_UNORM:
@@ -265,17 +276,22 @@ std::size_t bufferSize(std::uint64_t bytes) {
     return (static_cast<std::size_t>(bytes) + 3u) & ~std::size_t(3u);
 }
 
+std::atomic<std::uint64_t>& wideningCount() {
+    static std::atomic<std::uint64_t> count{0};
+    return count;
+}
+
 }
 
 MetalTexture::MetalTexture(const MetalDevice& backend, std::span<const std::uint32_t> words, bool compare)
     : MetalTexture(backend, Graphics::DecodeTextureResource(words), compare) {}
 
 MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor, bool compare)
-    : MetalTexture(backend, descriptor, compare, false) {}
+    : MetalTexture(backend, descriptor, compare, false, legacyUsage(descriptor)) {}
 
 MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestTextureResource& descriptor,
-    bool compare, bool minimumLodLowered)
-    : backend(backend), descriptor(descriptor), backing(std::make_shared<Backing>()) {
+    bool compare, bool minimumLodLowered, MTLTextureUsage usage)
+    : backend(backend), descriptor(descriptor), compareTexture(compare), backing(std::make_shared<Backing>()) {
     validateDescriptor(descriptor, compare, minimumLodLowered);
     const bool compressed = Graphics::IsBlockCompressed(descriptor.format);
     require(!compressed || backend.Device().supportsBCTextureCompression, "Metal device does not support BC compressed textures");
@@ -286,6 +302,31 @@ MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestText
     bufferSize(backing->geometry.guestBytes);
     bufferSize(backing->geometry.sliceLinearBytes * backing->geometry.layers);
     require(descriptor.baseArray < backing->geometry.imageLayers, "Metal texture view base array lies outside the surface");
+    backing->usage = usage;
+    backing->texture = createNative(usage);
+    createViews(compare);
+}
+
+MTLTextureUsage MetalTexture::UsageFor(const Graphics::GuestTextureResource& descriptor, bool written, bool storage, bool atomic) {
+    const bool fused = !Graphics::IsBlockCompressed(descriptor.format) && !packed16(descriptor.format);
+    MTLTextureUsage usage = MTLTextureUsageShaderRead;
+    // The detile and retile kernels write every uncompressed surface through the fused transfer path,
+    // which needs ShaderWrite and the raw element view PixelFormatView provides.
+    if (fused) usage |= MTLTextureUsageShaderWrite;
+    if (atomic) usage |= MTLTextureUsageShaderAtomic;
+    // A written non-storage image is a render target (a color attachment); a storage image is
+    // written through StorageView instead.
+    if (written && !storage) usage |= MTLTextureUsageRenderTarget;
+    const auto base = atomicFormat(descriptor.format) ? MTLPixelFormatR32Uint : storageFormat(descriptor.format);
+    if (fused || pixelFormat(descriptor.format) != base) usage |= MTLTextureUsagePixelFormatView;
+    return usage;
+}
+
+std::uint64_t MetalTexture::UsageWideningCount() {
+    return wideningCount().load(std::memory_order_relaxed);
+}
+
+id<MTLTexture> MetalTexture::createNative(MTLTextureUsage usage) const {
     auto native = [MTLTextureDescriptor new];
     native.textureType = textureType(descriptor.dimension);
     native.pixelFormat = atomicFormat(descriptor.format) ? MTLPixelFormatR32Uint : storageFormat(descriptor.format);
@@ -294,21 +335,45 @@ MetalTexture::MetalTexture(const MetalDevice& backend, const Graphics::GuestText
     native.depth = backing->geometry.imageDepth;
     native.arrayLength = backing->geometry.imageLayers;
     native.mipmapLevelCount = descriptor.mipCount;
-    native.storageMode = MTLStorageModeShared;
-    native.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
-    if (!compressed && !packed16(descriptor.format)) native.usage |= MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
-    if (atomicFormat(descriptor.format)) native.usage |= MTLTextureUsageShaderAtomic;
-    backing->texture = MetalHeapPool::Enabled() ? MetalHeapPool::Shared().SuballocateTexture(backend.Device(), native) : nil;
-    if (backing->texture == nil) {
-        backing->texture = [backend.Device() newTextureWithDescriptor:native];
+    native.storageMode = MTLStorageModePrivate;
+    native.usage = usage;
+    id<MTLTexture> texture = MetalHeapPool::Enabled() ? MetalHeapPool::Shared().SuballocateTexture(backend.Device(), native) : nil;
+    if (texture == nil) texture = [backend.Device() newTextureWithDescriptor:native];
+    require(texture != nil, "Metal cannot allocate the guest texture format or dimensions");
+    return texture;
+}
+
+void MetalTexture::EnsureUsage(MTLTextureUsage required) {
+    if ((backing->usage & required) == required) return;
+    std::lock_guard lock(backing->usageMutex);
+    if ((backing->usage & required) == required) return;
+    const auto usage = backing->usage | required;
+    id<MTLTexture> widened = createNative(usage);
+    id<MTLCommandBuffer> commands = backend.CommandBuffer();
+    id<MTLBlitCommandEncoder> blit = MetalEncoders::Blit(commands);
+    require(blit != nil, "Metal texture widening blit encoder creation failed");
+    [blit copyFromTexture:backing->texture toTexture:widened];
+    [blit endEncoding];
+    backend.Submit(commands);
+    backing->texture = widened;
+    backing->usage = usage;
+    {
+        std::lock_guard viewsLock(backing->viewsMutex);
+        backing->views.clear();
+        backing->rawView = nil;
+        backing->rawViewMade = false;
     }
-    require(backing->texture != nil, "Metal cannot allocate the guest texture format or dimensions");
-    createViews(compare);
+    createViews(compareTexture);
+    const auto total = wideningCount().fetch_add(1, std::memory_order_relaxed) + 1;
+    if (std::getenv("ANYPS5_METAL_TEXTURE_USAGE_STATS") != nullptr) {
+        std::fprintf(stderr, "[metal-texture] usage widening %llu req 0x%lx %ux%u fmt %u\n", static_cast<unsigned long long>(total),
+            static_cast<unsigned long>(required), descriptor.width, descriptor.height, descriptor.format);
+    }
 }
 
 MetalTexture::MetalTexture(const MetalDevice& backend, std::shared_ptr<Backing> backing,
     const Graphics::GuestTextureResource& descriptor, bool compare, bool minimumLodLowered)
-    : backend(backend), descriptor(descriptor), backing(std::move(backing)) {
+    : backend(backend), descriptor(descriptor), compareTexture(compare), backing(std::move(backing)) {
     validateDescriptor(descriptor, compare, minimumLodLowered);
     createViews(compare);
 }
