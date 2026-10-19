@@ -216,6 +216,12 @@ int main() {
     decode = DecodeParam(rgbPng, image);
     decode.image_mem_addr = nullptr;
     Require(scePngDecDecode(handle, &decode, &info) == invalidAddr);
+    std::vector<std::uint8_t> misalignedImage(3 * 2 * 4 + 1, 0xCC);
+    decode = DecodeParam(rgbPng, misalignedImage);
+    decode.image_mem_addr = misalignedImage.data() + 1;
+    decode.image_mem_size = static_cast<std::uint32_t>(misalignedImage.size() - 1);
+    Require(scePngDecDecode(handle, &decode, &info) == invalidAddr);
+    Require(std::all_of(misalignedImage.begin(), misalignedImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
     decode = DecodeParam(rgbPng, image);
     decode.png_mem_size = 0;
     Require(scePngDecDecode(handle, &decode, &info) == invalidSize);
