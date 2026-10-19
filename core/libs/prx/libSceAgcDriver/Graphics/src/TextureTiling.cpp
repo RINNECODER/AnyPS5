@@ -435,6 +435,10 @@ bool LevelsFitAllocation(const GuestTextureResource& surface, std::uint32_t leve
     return true;
 }
 
+bool TracksBlockUnits(const GuestTextureResource& surface, const SurfaceGeometry& geometry) {
+    return !geometry.thick && surface.tileMode != TextureTileMode::kLinear && surface.baseAddress % 65536 == 0 && (surface.dccAddress == 0 || surface.mipCount == 1);
+}
+
 std::vector<TileMipLayout> ComputeElementMipLayout(TextureTileMode tileMode, std::uint32_t bytesPerElement, std::uint32_t width, std::uint32_t height, std::uint32_t mipCount) {
     Require(width != 0 && height != 0 && mipCount != 0 && mipCount <= 16u, "invalid surface mip chain");
     if (tileMode == TextureTileMode::kLinear) return ComputeLinearMipLayout(bytesPerElement, 1u, 1u, width, height, mipCount);
