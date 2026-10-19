@@ -2194,6 +2194,7 @@ std::optional<ShaderRecompiler::BdaAbi::Fault> MetalDraw::DrawBatchParallel(
             // A worker that failed still ends its sub-encoder: the parallel encoder's commit
             // must not see it open.
             [encoder endEncoding];
+            throw;
         }
     });
 
