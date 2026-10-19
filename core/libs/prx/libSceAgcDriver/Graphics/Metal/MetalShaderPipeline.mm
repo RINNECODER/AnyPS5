@@ -774,7 +774,7 @@ void MetalRectKernelPipeline::Encode(id<MTLCommandBuffer> commands, std::span<co
     for (std::size_t i = 0; i < vertexBuffers.size(); ++i) [encoder setBuffer:vertexBuffers[i].buffer offset:vertexBuffers[i].offset atIndex:i];
     for (id<MTLResource> resource : indirectResources) [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite];
     [encoder dispatchThreads:region.size threadsPerThreadgroup:MTLSizeMake(pipeline.threadExecutionWidth, 1, 1)];
-    [encoder endEncoding];
+    MetalEncoders::EndCompute(commands, encoder);
 }
 
 MetalComputePipeline::MetalComputePipeline(id<MTLDevice> device, ShaderResult shader)
@@ -831,7 +831,7 @@ void MetalComputePipeline::Encode(id<MTLCommandBuffer> commands,
     }
     [encoder dispatchThreadgroups:MTLSizeMake(grid.width / threads[0], grid.height / threads[1], grid.depth / threads[2])
              threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
-    [encoder endEncoding];
+    MetalEncoders::EndCompute(commands, encoder);
 }
 
 void MetalComputePipeline::EncodeIndirect(id<MTLCommandBuffer> commands,
@@ -857,7 +857,7 @@ void MetalComputePipeline::EncodeIndirect(id<MTLCommandBuffer> commands,
     // Zero groups in any dimension dispatch nothing, as the CP does.
     [encoder dispatchThreadgroupsWithIndirectBuffer:arguments indirectBufferOffset:offset
                               threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
-    [encoder endEncoding];
+    MetalEncoders::EndCompute(commands, encoder);
 }
 
 MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vertex,

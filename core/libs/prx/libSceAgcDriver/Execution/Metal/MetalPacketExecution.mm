@@ -510,6 +510,7 @@ void MetalDriver::Impl::ExecuteDispatchSynchronously(QueueState& queue, std::spa
             }, stores, bindings->WrittenGuestRanges(), std::move(known));
             return std::nullopt;
         }
+        MetalEncoders::EndParked(commands);
         [commands commit];
         backend->Wait(commands);
         return CompleteCommittedWork([&] { return bindings->Complete(commands); });

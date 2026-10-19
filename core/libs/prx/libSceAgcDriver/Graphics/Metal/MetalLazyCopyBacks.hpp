@@ -237,10 +237,10 @@ private:
                 ++statistics.fused;
             }
         } catch (...) {
-            if (encoder != nil) [encoder endEncoding];
+            if (encoder != nil) MetalEncoders::EndCompute(commands, encoder);
             throw;
         }
-        if (encoder != nil) [encoder endEncoding];
+        if (encoder != nil) MetalEncoders::EndCompute(commands, encoder);
         for (auto* entry : blit) {
             if (!entry->texture->EncodeReadback(commands, entry->guest, entry->offset, entry->part)) {
                 throw MetalGpuExecutionError("Metal lazy copy-back is no longer in place");

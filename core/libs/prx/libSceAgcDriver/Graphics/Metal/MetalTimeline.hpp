@@ -90,7 +90,10 @@ public:
             if (auto signal = completionSignal; signal && commands != LastCommitted()) {
                 [commands addCompletedHandler:^(id<MTLCommandBuffer>) { (*signal)(); }];
             }
-            if (batch == nullptr || !batch->OpenBatch(commands)) [commands commit];
+            if (batch == nullptr || !batch->OpenBatch(commands)) {
+                MetalEncoders::EndParked(commands);
+                [commands commit];
+            }
         }
         ++committed;
         pending.push_back({commands, std::move(complete), GpuTiming::Current(), committed});
