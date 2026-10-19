@@ -544,6 +544,28 @@ public:
         }
     }
 
+    void RegisterCalleeStorePointerTypes(const spirv_cross::SPIRFunction& callee) {
+        std::unordered_map<std::uint32_t, std::uint32_t> resultTypes;
+        std::vector<std::uint32_t> pointers;
+        for (const auto blockId : callee.blocks) {
+            for (const auto& instruction : get<spirv_cross::SPIRBlock>(blockId).ops) {
+                const auto* words = stream(instruction);
+                const auto op = static_cast<spv::Op>(instruction.op);
+                if (op == spv::OpStore || op == spv::OpCopyMemory || op == spv::OpCooperativeMatrixStoreKHR)
+                    pointers.push_back(words[0]);
+                std::uint32_t resultType = 0, resultId = 0;
+                if (instruction_to_result_type(resultType, resultId, op, words, instruction.length))
+                    resultTypes.emplace(resultId, resultType);
+            }
+        }
+        for (const auto pointer : pointers) {
+            if (ir.ids[pointer].get_type() != spirv_cross::TypeNone) continue;
+            const auto found = resultTypes.find(pointer);
+            if (found != resultTypes.end())
+                set<spirv_cross::SPIRExpression>(pointer, "0", found->second, false);
+        }
+    }
+
     void InstallMinimumLodBank(std::uint32_t originalCount, spv::ExecutionModel execution) {
         if (shadowPairs.empty()) return;
         if (originalCount > 32u || shadowPairs.size() > 64u * 32u)
@@ -766,6 +788,8 @@ protected:
     }
 
     void emit_instruction(const spirv_cross::Instruction& instruction) override {
+        if (instruction.op == spv::OpFunctionCall)
+            RegisterCalleeStorePointerTypes(get<spirv_cross::SPIRFunction>(stream(instruction)[2]));
         if (instruction.op == spv::OpGroupNonUniformShuffle) {
             forced_temporaries.insert(stream(instruction)[1]);
         }
