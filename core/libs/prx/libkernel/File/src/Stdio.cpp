@@ -492,6 +492,11 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     fs->f_namemax = nameMax;
     return 0;
 }
+
+static bool NativeIsPipe(int descriptor) {
+    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    return handle != INVALID_HANDLE_VALUE && ::GetFileType(handle) == FILE_TYPE_PIPE;
+}
 #else
 #include <sys/statvfs.h>
 #if defined(__APPLE__)
@@ -504,15 +509,24 @@ constexpr int HostPathOpenFlag = O_PATH;
 #else
 constexpr int HostPathOpenFlag = 0; // macOS has no O_PATH; a socket descriptor then always reports EINVAL
 #endif
-static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
+static bool NativeIsPipe(int descriptor) {
+    struct stat file{};
+    if (::fstat(descriptor, &file) != 0 || !S_ISFIFO(file.st_mode)) return false;
+#if defined(__APPLE__)
+    // shortcut: Darwin has no pipefs magic, so a named FIFO also counts as a pipe; distinguish them if a title opens one.
+    return true;
+#else
     constexpr long PipeFilesystem = 0x50495045;
+    struct statfs kind{};
+    return ::fstatfs(descriptor, &kind) == 0 && static_cast<long>(kind.f_type) == PipeFilesystem;
+#endif
+}
+
+static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     struct stat file{};
     if (::fstat(descriptor, &file) != 0) return SceErrorFromErrno(errno) & 0xffff;
     if (S_ISSOCK(file.st_mode) && (::fcntl(descriptor, F_GETFL) & HostPathOpenFlag) == 0) return GUEST_EINVAL;
-    if (S_ISFIFO(file.st_mode)) {
-        struct statfs kind{};
-        if (::fstatfs(descriptor, &kind) == 0 && static_cast<long>(kind.f_type) == PipeFilesystem) return GUEST_EINVAL;
-    }
+    if (NativeIsPipe(descriptor)) return GUEST_EINVAL;
     if (S_ISCHR(file.st_mode)) return DeviceFilesystem(fs);
     struct statvfs host{};
     if (::fstatvfs(descriptor, &host) != 0) return SceErrorFromErrno(errno) & 0xffff;
@@ -625,6 +639,16 @@ static std::string FileFlagNames(std::uint64_t flags) {
     return names;
 }
 
+static int SetFileFlags(const char* function, const std::string& target, std::uint64_t flags) {
+    std::uint64_t known = 0;
+    for (const auto& entry : GUEST_FILE_FLAGS) known |= entry.first;
+    if ((flags & ~known) != 0) return GUEST_EOPNOTSUPP;
+    if ((flags & GUEST_SF_SNAPSHOT) != 0) return GUEST_EPERM;
+    if (flags != 0)
+        throw std::runtime_error(std::string(function) + ": setting " + FileFlagNames(flags) + " on " + target + " is not supported, the host keeps no BSD file flags");
+    return 0;
+}
+
 extern "C" {
 
 int APS5_VABI chmod_nid_postfix(const char* path, int mode) {
@@ -640,12 +664,18 @@ int APS5_VABI chflags_nid_postfix(const char* path, std::uint64_t flags) {
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return PosixFailure(error);
     if (const int error = LookupError(native)) return PosixFailure(error);
-    std::uint64_t known = 0;
-    for (const auto& entry : GUEST_FILE_FLAGS) known |= entry.first;
-    if ((flags & ~known) != 0) return PosixFailure(GUEST_EOPNOTSUPP);
-    if ((flags & GUEST_SF_SNAPSHOT) != 0) return PosixFailure(GUEST_EPERM);
-    if (flags != 0)
-        throw std::runtime_error("chflags: setting " + FileFlagNames(flags) + " on " + path + " is not supported, the host keeps no BSD file flags");
+    if (const int error = SetFileFlags("chflags", path, flags)) return PosixFailure(error);
+    return 0;
+}
+
+int APS5_VABI fchflags_nid_postfix(int d, std::uint64_t flags) {
+    if (GuestSockets::IsOpen(d) || File::IsSharedMemoryDescriptor_nid_no_patch(d)) return PosixFailure(GUEST_EINVAL);
+    if (!File::IsVnode(d)) {
+        if (!DescriptorIsOpen_nid_no_patch(d)) return PosixFailure(GUEST_EBADF);
+        if (NativeIsPipe(d)) return PosixFailure(GUEST_EINVAL);
+        throw std::runtime_error("fchflags: descriptor " + std::to_string(d) + " is neither a file, a directory, a pipe, a socket nor shared memory");
+    }
+    if (const int error = SetFileFlags("fchflags", "descriptor " + std::to_string(d), flags)) return PosixFailure(error);
     return 0;
 }
 
