@@ -279,7 +279,8 @@ void Configure(DirectState& state, MetalDriver& driver, const std::shared_ptr<co
     }
     state.applied = ranges;
     state.configured = true;
-    GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix();
+    if (GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix() && !GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix())
+        std::fprintf(stderr, "[gpu] the shared-memory manifest could not be published\n");
 }
 
 }
@@ -388,7 +389,8 @@ MetalDriver& DirectDriver() {
     } else if (ranges != state.applied) {
         driver.ReplaceBorrowedRanges(*ranges, ++state.driverGeneration);
         state.applied = ranges;
-        GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix();
+        if (GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix() && !GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix())
+            std::fprintf(stderr, "[gpu] the shared-memory manifest could not be published\n");
     }
     return driver;
 }

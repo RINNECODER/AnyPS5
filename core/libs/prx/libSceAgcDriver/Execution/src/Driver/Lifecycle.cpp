@@ -53,19 +53,21 @@ constexpr std::uint32_t ScalarEndProgram = 0xbf810000u;
 constexpr std::uint64_t FsTableDword3 = 0x5204u;
 
 void MapDriverMemory() {
-    // The FS table and its routine block are GPU-visible, so under the GPU-process flag they move
-    // with the guest arena and are committed from its shared object; every address written into the
-    // block follows the mapped base.
+    // The FS table and its routine block are GPU-visible, so under the GPU-process flag they come
+    // from the slid, shm-backed guest arena; the raw address is inside the PS5 system reservation,
+    // whose slid image is reserved too, so the block is allocated rather than slid. Every address
+    // written into it follows the mapped base.
     std::uint64_t base = DriverMemoryAddress;
-    GuestArena::GuestArenaSlideAddress_nid_postfix(&base, DriverMemoryBytes);
     void* mapped = nullptr;
 #if defined(__APPLE__)
     if (GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix() && GuestArena::GuestArenaAvailable_nid_postfix()) {
+        base = reinterpret_cast<std::uint64_t>(GuestArena::GuestArenaAllocate_nid_postfix(DriverMemoryBytes, 0x1000));
         GuestArena::GuestArenaCommit_nid_postfix(reinterpret_cast<void*>(base), DriverMemoryBytes, 0x04, DriverMemoryBytes);
         mapped = reinterpret_cast<void*>(base);
     }
 #endif
     if (mapped == nullptr) {
+        GuestArena::GuestArenaSlideAddress_nid_postfix(&base, DriverMemoryBytes);
 #ifdef _WIN32
         mapped = reinterpret_cast<void*>(base);
         GuestArena::GuestArenaCommit_nid_postfix(mapped, DriverMemoryBytes, PAGE_READWRITE, DriverMemoryBytes);
