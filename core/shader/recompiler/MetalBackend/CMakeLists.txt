@@ -36,7 +36,7 @@ foreach(source IN LISTS ANYPS5_MSL_CACHE_SOURCES)
 endforeach()
 string(SHA256 ANYPS5_MSL_CACHE_VERSION "${ANYPS5_MSL_CACHE_HASHES}")
 string(SUBSTRING "${ANYPS5_MSL_CACHE_VERSION}" 0 16 ANYPS5_MSL_CACHE_VERSION)
-target_compile_definitions(anyps5_metal_shader_bridge PRIVATE ANYPS5_MSL_CACHE_VERSION="${ANYPS5_MSL_CACHE_VERSION}")
+target_compile_definitions(anyps5_metal_shader_bridge PUBLIC ANYPS5_MSL_CACHE_VERSION="${ANYPS5_MSL_CACHE_VERSION}")
 target_include_directories(anyps5_metal_shader_bridge PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(anyps5_metal_shader_bridge PRIVATE spirv-cross-msl compression)
 

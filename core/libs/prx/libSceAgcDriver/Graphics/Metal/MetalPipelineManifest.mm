@@ -24,6 +24,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef ANYPS5_MSL_CACHE_VERSION
+#define ANYPS5_MSL_CACHE_VERSION "unversioned"
+#endif
+
 namespace AgcDriver::Metal {
 
 namespace {
@@ -337,8 +341,8 @@ ManifestIdentity IdentityFor(id<MTLDevice> device) {
     identity.deviceName = Sanitized(device.name);
     identity.osVersion = Sanitized(NSProcessInfo.processInfo.operatingSystemVersionString);
     const std::string math = FastMathEnabled() ? "fastmath" : "safemath";
-    identity.path = (directory / ("metal-pso-manifest-v1-" + math + "-" + TitleKey() + "-" + identity.deviceName + "-" +
-                                  identity.osVersion + ".bin")).string();
+    identity.path = (directory / ("metal-pso-manifest-v1-" + math + "-" + ANYPS5_MSL_CACHE_VERSION + "-" + TitleKey() + "-" +
+                                  identity.deviceName + "-" + identity.osVersion + ".bin")).string();
     return identity;
 }
 

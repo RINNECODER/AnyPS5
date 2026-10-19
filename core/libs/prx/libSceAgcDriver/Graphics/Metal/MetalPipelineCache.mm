@@ -1031,6 +1031,7 @@ bool FlushMetalPipelineArchives() {
 }
 
 void ClearMetalPipelineCaches() {
+    WaitForMetalPipelineManifestReplay(120000);
     DrainArchiveQueue();
     {
         std::unique_lock use(archiveUse);
