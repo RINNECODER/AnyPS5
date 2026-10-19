@@ -47,6 +47,8 @@ extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetMarkerSpan(CommandBuffer* buf, c
 extern "C" std::uint32_t* APS5_VABI sceAgcAcbPushMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
 extern "C" std::uint32_t* APS5_VABI sceAgcAcbSetMarkerSpan(CommandBuffer* buf, const char* str, std::uint32_t length, std::uint32_t color);
 extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetIndexBuffer(CommandBuffer* buf, std::uint64_t indexAddress);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetIndexIndirectArgs(CommandBuffer* buf, std::uint64_t attributeAddress, std::uint32_t attributeIndex);
+extern "C" std::uint32_t APS5_VABI sceAgcDcbSetIndexIndirectArgsGetSize();
 extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetBaseIndirectArgs(CommandBuffer* buf, std::uint32_t shaderType, const volatile void* indirectBaseAddr);
 extern "C" std::uint32_t* APS5_VABI sceAgcSetNop(CommandBuffer* buf, std::uint32_t sizeDw);
 extern "C" std::uint32_t APS5_VABI sceAgcDcbBeginOcclusionQueryGetSize(std::uint8_t type);
@@ -310,6 +312,20 @@ void testIndexBuffer() {
         return;
     }
     throw std::runtime_error("misaligned index buffer was accepted");
+}
+
+void testIndexIndirectArgs() {
+    Storage storage;
+    const auto* packet = sceAgcDcbSetIndexIndirectArgs(&storage.buffer, 0x1111111122222220u, 0x4444u);
+    const std::array<std::uint32_t, 4> expected{0xc0029100u, 0x22222220u, 0x11111111u, 0x4444u};
+    check(packet == storage.words.data() && std::equal(expected.begin(), expected.end(), packet), "index indirect args packet differs from the console's");
+    check(sceAgcDcbSetIndexIndirectArgsGetSize() == expected.size() * sizeof(std::uint32_t), "index indirect args size differs from its packet");
+    const auto* cleared = sceAgcDcbSetIndexIndirectArgs(&storage.buffer, 0, 0);
+    check(cleared == packet + expected.size() && cleared[0] == expected[0] && cleared[1] == 0 && cleared[2] == 0 && cleared[3] == 0, "null index attribute base was not written as 0");
+    const auto before = storage.words;
+    expectFailure([&] { sceAgcDcbSetIndexIndirectArgs(&storage.buffer, 0x1111111122222228u, 0); });
+    expectFailure([&] { sceAgcDcbSetIndexIndirectArgs(&storage.buffer, 0x1111111122222220u, 0x10000u); });
+    check(storage.words == before && storage.buffer.cursor_up == cleared + expected.size(), "rejected index indirect args modified the buffer");
 }
 
 void testIndirectBase() {
@@ -651,6 +667,7 @@ int main(int argc, char** argv) {
         testOcclusionQuerySizes();
         testWorkloads();
         testIndexBuffer();
+        testIndexIndirectArgs();
         testIndirectBase();
         testContextState();
         testFlip();
