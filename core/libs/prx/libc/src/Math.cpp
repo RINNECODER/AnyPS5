@@ -625,10 +625,6 @@ int APS5_VABI isnanf_nid_postfix(float x) { return __isnanf_nid_postfix(x); }
 int APS5_VABI isnan_nid_postfix(double x) { return __isnan_nid_postfix(x); }
 int APS5_VABI isinf_nid_postfix(double x) { return __isinf_nid_postfix(x); }
 int APS5_VABI __fpclassifyf_nid_postfix(float x) { return SonyFpclassify(x); }
-int APS5_VABI __fpclassifyl_nid_postfix(long double x) {
-    static_assert(sizeof(long double) == 16, "guest long double requires x87 extended precision storage");
-    return SonyFpclassify(x);
-}
 int APS5_VABI __signbitf_nid_postfix(float x) { return std::signbit(x) ? 1 : 0; }
 int APS5_VABI __signbitl_nid_postfix(long double x) {
     static_assert(sizeof(long double) == 16, "guest long double requires x87 extended precision storage");
