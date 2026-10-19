@@ -149,9 +149,6 @@ void FlushUploadBlits(id<MTLCommandBuffer> commands);
 // Whether there are pending upload blits for `commands`.
 [[nodiscard]] bool HasPendingUploadBlits(id<MTLCommandBuffer> commands);
 
-// Ends the render, blit or parallel encoder a caller still holds open for `commands`, if any, and
-// the render encoder parked in it: a commit must never see an open encoder, including when a
-// caller threw before it ended or parked its own. Safe on an encoder another call already ended.
 void EndEncoder(id<MTLCommandBuffer> commands, id<MTLCommandEncoder> encoder);
 // Ends the render encoder parked in `commands`, if any, and flushes pending upload blits.
 void EndParked(id<MTLCommandBuffer> commands);
