@@ -210,6 +210,8 @@ When a register points at readable memory that starts with at least four printab
 
 Set `APS5_CRASH_INDIRECT_MEMORY=1` before launching the executable to include up to 64 bytes from each pointer found in the register memory dump. The report labels each block with its register, pointer offset and target address. Inaccessible, incomplete and executable targets are skipped. This additional dump is disabled when the variable is unset or empty.
 
+
+The report lists every other thread of the process with its `rip`, `rsp`, `rbp` and the return addresses of its `rbp` frame chain. A thread whose chain yields fewer than two frames, such as one waiting inside `ntdll.dll` or in code built without frame pointers, also gets up to 24 stack return address candidates: the words in the 32 KiB above its `rsp` that point at executable memory, read while the thread is suspended. Like the candidates of the faulting thread they are a scan, not an unwind, so stale return addresses of finished calls can appear among them.
 ## Exit codes
 
 `0`: conversion succeeded or help was displayed. `1`: invalid arguments. `2`: conversion failed; the error is printed to stderr. With `--autorun`, successful conversion returns the launched application's exit code.
