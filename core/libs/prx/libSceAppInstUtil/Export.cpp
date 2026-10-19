@@ -25,7 +25,7 @@ int APS5_VABI sceAppInstUtilAppIsInInstalling(int32_t* installing) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppIsInUpdating(const char* titleId, int32_t* updating) {
+int APS5_VABI sceAppInstUtilAppIsInUpdating() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -33,19 +33,19 @@ int APS5_VABI sceAppInstUtilAppExists(const char* titleId, int32_t* exists) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppGetSize(const char* titleId, uint64_t* size) {
+int APS5_VABI sceAppInstUtilAppGetSize() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppInstallPkg(const char* pkgPath, void* reserved) {
+int APS5_VABI sceAppInstUtilAppInstallPkg() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppPrepareOverwritePkg(const char* pkgPath) {
+int APS5_VABI sceAppInstUtilAppPrepareOverwritePkg() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppRecoverApp(const char* titleId) {
+int APS5_VABI sceAppInstUtilAppRecoverApp() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -53,31 +53,31 @@ int APS5_VABI sceAppInstUtilAppUnInstall(const char* titleId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppUnInstallAddcont(const char* titleId, const char* addcontName) {
+int APS5_VABI sceAppInstUtilAppUnInstallAddcont() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppUnInstallPat(const char* titleId) {
+int APS5_VABI sceAppInstUtilAppUnInstallPat() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppUnInstallTheme(const char* contentId) {
+int APS5_VABI sceAppInstUtilAppUnInstallTheme() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilAppUnInstallTypes(const char* titleId, uint32_t deleteTypes) {
+int APS5_VABI sceAppInstUtilAppUnInstallTypes() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilGetInstallProgressInfo(const char* contentId, uint32_t* state, uint32_t* progress, uint64_t* progressSize, uint64_t* totalSize, uint32_t* restSec) {
+int APS5_VABI sceAppInstUtilGetInstallProgressInfo() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilGetInstallProgress(const char* contentId, uint32_t* progress) {
+int APS5_VABI sceAppInstUtilGetInstallProgress() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceAppInstUtilGetPrimaryAppSlot(const char* titleId, int32_t* slot) {
+int APS5_VABI sceAppInstUtilGetPrimaryAppSlot() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

@@ -5,7 +5,7 @@
 
 extern "C" {
 
-int APS5_VABI sceRegMgrGetBin(int32_t optionId, void* outData, std::size_t dataLength) {
+int APS5_VABI sceRegMgrGetBin() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -17,7 +17,7 @@ int APS5_VABI sceRegMgrGetStr(int32_t optionId, char* outString, std::size_t str
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceRegMgrSetBin(int32_t optionId, const void* inData, std::size_t dataLength) {
+int APS5_VABI sceRegMgrSetBin() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

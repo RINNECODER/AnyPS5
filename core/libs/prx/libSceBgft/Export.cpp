@@ -13,27 +13,27 @@ int APS5_VABI sceBgftServiceTerm(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceDownloadPauseTaskAll(void) {
+int APS5_VABI sceBgftServiceDownloadPauseTaskAll() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceDownloadResumeTaskAll(void) {
+int APS5_VABI sceBgftServiceDownloadResumeTaskAll() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceDownloadStartTaskAll(void) {
+int APS5_VABI sceBgftServiceDownloadStartTaskAll() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceDownloadStopTaskAll(void) {
+int APS5_VABI sceBgftServiceDownloadStopTaskAll() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceDownloadFindActivePatchTask(const char* unk, int32_t* taskId) {
+int APS5_VABI sceBgftServiceDownloadFindActivePatchTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceDownloadFindActivePupTask(int32_t* taskId) {
+int APS5_VABI sceBgftServiceDownloadFindActivePupTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -61,59 +61,59 @@ int APS5_VABI sceBgftServiceDownloadStopTask(int32_t taskId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadFindActiveGameAndGameAcTask(const char* contentId, int32_t* taskId) {
+int APS5_VABI sceBgftServiceIntDownloadFindActiveGameAndGameAcTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadFindActiveTask(const char* contentId, int32_t subType, int32_t* taskId) {
+int APS5_VABI sceBgftServiceIntDownloadFindActiveTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadGetGameAndGameAcProgress(const char* contentId, void* progress) {
+int APS5_VABI sceBgftServiceIntDownloadGetGameAndGameAcProgress() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadGetPatchProgress(const char* contentId, void* progress) {
+int APS5_VABI sceBgftServiceIntDownloadGetPatchProgress() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadGetPlayGoProgress(const char* contentId, void* progress) {
+int APS5_VABI sceBgftServiceIntDownloadGetPlayGoProgress() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadGetProgress(int32_t taskId, void* progress) {
+int APS5_VABI sceBgftServiceIntDownloadGetProgress() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadGetTaskInfo(int32_t taskId, void* taskInfo) {
+int APS5_VABI sceBgftServiceIntDownloadGetTaskInfo() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadPauseTask(int32_t taskId) {
+int APS5_VABI sceBgftServiceIntDownloadPauseTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadRegisterTaskByStorageEx(void* params, int32_t* taskId) {
+int APS5_VABI sceBgftServiceIntDownloadRegisterTaskByStorageEx() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadResumeTask(int32_t taskId) {
+int APS5_VABI sceBgftServiceIntDownloadResumeTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadStopTask(int32_t taskId) {
+int APS5_VABI sceBgftServiceIntDownloadStopTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadStartTask(int32_t taskId) {
+int APS5_VABI sceBgftServiceIntDownloadStartTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntDownloadUnregisterTask(int32_t taskId) {
+int APS5_VABI sceBgftServiceIntDownloadUnregisterTask() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceBgftServiceIntInit(void* params) {
+int APS5_VABI sceBgftServiceIntInit() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

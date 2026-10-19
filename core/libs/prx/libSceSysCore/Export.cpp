@@ -5,7 +5,7 @@
 
 extern "C" {
 
-int APS5_VABI sceApplicationGetAppInfoByAppId(int32_t appId, void* info) {
+int APS5_VABI sceApplicationGetAppInfoByAppId() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
