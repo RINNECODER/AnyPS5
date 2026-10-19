@@ -981,6 +981,52 @@ void LazyCopyBacks(Metal::MetalDevice& backend,id<MTLLibrary> library) {
     // The mapping stays: the aliases and cached textures above still name it until they go.
 }
 
+// A draw translation record is valid only while its own guest images still prove the bytes it was
+// built from (DrawTranslationRecord::images, GuestImageCache::Revalidate): an Expire alone keeps it,
+// a CPU write to one of its images after an Expire drops it, and the next bind re-uploads and
+// renders the new bytes instead of the cached texture.
+void RecordImageRevalidation(const Metal::MetalDevice& backend,id<MTLLibrary> library) {
+    auto d=Descriptor();
+    const auto geometry=Graphics::DescribeSurface(d);
+    std::vector<std::byte> guest(geometry.guestBytes);
+    const auto fill=[&](std::array<std::uint8_t,4> color) {
+        for(std::uint32_t y=0;y<8;++y) for(std::uint32_t x=0;x<8;++x) std::memcpy(guest.data()+y*geometry.mips[0].pitchBytes+x*4,color.data(),4);
+    };
+    fill({17,31,73,127});
+    const NativeGuestMemory::BorrowedRange range{d.baseAddress,guest,true};
+    Metal::GuestImageCache<Metal::MetalTexture> cache;
+    std::vector<Metal::DrawImageDependency> images;
+    std::shared_ptr<Metal::MetalTexture> cached;
+    {
+        Metal::MetalShaderResources resources(backend,std::span(&range,1),{},nullptr,&cache);
+        cached=resources.Texture(d);
+        auto commands=backend.CommandBuffer();
+        backend.Wait(commands);
+        Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"record image upload faulted");
+        const auto set=resources.DrawImages();
+        Require(set.uncached==0 && set.cached.size()==1,"a cacheable surface did not report one image dependency");
+        images=set.cached;
+    }
+    const auto proves=[&] {
+        for(const auto& image:images) if(!cache.Revalidate(image.host,image.guest,image.content,image.texture.get())) return false;
+        return true;
+    };
+    cache.Expire();
+    Require(proves(),"an Expire alone invalidated a record whose image did not change");
+    fill({200,100,50,255});
+    cache.Expire();
+    Require(!proves(),"a CPU write after Expire left a record's image proving the old bytes");
+    Metal::MetalShaderResources pass(backend,std::span(&range,1),{},nullptr,&cache);
+    auto texture=pass.Texture(d);
+    Require(texture->Texture()!=cached->Texture(),"the changed surface was still served from the cache");
+    auto output=backend.Buffer(64*4);
+    auto commands=backend.CommandBuffer();
+    Encode(backend,library,commands,@"read2D",texture->SampledView(),output,MTLSizeMake(8,8,1));
+    backend.Wait(commands);
+    Pixels(output.contents,{200,100,50,255},64,"the re-uploaded texture does not render the guest's new bytes");
+    static_cast<void>(pass.Complete(commands));
+}
+
 void RunTextureViewsTests(const MetalTests::Context& context) {
     Metal::MetalDevice backend(context.device,context.library);
     NSError* error=nil;
@@ -1000,4 +1046,5 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     ArrayPrefixViews(backend,library);
     AccessGuards(backend);
     LazyCopyBacks(backend,library);
+    RecordImageRevalidation(backend,library);
 }

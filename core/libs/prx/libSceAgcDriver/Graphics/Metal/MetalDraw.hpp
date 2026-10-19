@@ -26,6 +26,7 @@ class MetalDepthSurface;
 class MetalColorSurface;
 class MetalMultisampleExpander;
 class MetalGuestHostAliases;
+class MetalShaderResources;
 
 // Draw throws this for an indirect draw whose records the GPU cannot consume as they are (they need
 // rewriting, counting or reading on the CPU) before it has encoded anything; the caller reads them.
@@ -128,6 +129,25 @@ public:
 
 private:
     MetalDraw(std::unique_ptr<MetalDevice> owned, MetalDevice* shared);
+    // The render pass a draw renders into: the guest surfaces it acquires as attachments and the
+    // single-fragment color targets of a multisampled pass it expands. The fresh path and a reused
+    // draw translation record both build it from the draw's state, so a record's attachments stand
+    // only while the same surfaces come back.
+    struct PassAttachments {
+        MTLRenderPassDescriptor* renderPass = nil;
+        struct Expansion {
+            id<MTLTexture> source = nil;
+            std::uint32_t slot = 0;
+        };
+        std::vector<Expansion> expansions;
+    };
+    [[nodiscard]] PassAttachments ConfigureAttachments(const Graphics::State& state, MetalShaderResources& resources);
+    // Whether every guest image `record` was built from still proves the bytes it was built from
+    // (GuestImageCache::Revalidate): false drops the record and the draw re-prepares it.
+    [[nodiscard]] bool ValidateCachedRecord(const DrawTranslationRecord& record);
+    // Whether the attachments `pass` now binds are the objects `record`'s bindings stand on and its
+    // write set is its own attachments: false drops the record.
+    [[nodiscard]] bool RevalidateCachedWrites(const DrawTranslationRecord& record, const PassAttachments& pass);
     [[nodiscard]] id<MTLTexture> residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare);
     [[nodiscard]] id<MTLTexture> residentDepthArray(const Graphics::GuestTextureResource& resource, bool storage);
     [[nodiscard]] id<MTLTexture> residentView(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const;

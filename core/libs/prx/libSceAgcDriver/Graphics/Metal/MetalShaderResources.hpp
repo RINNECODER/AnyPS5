@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MetalDevice.hpp"
+#include "MetalDrawTranslationCache.hpp"
 #include "MetalGuestMemory.hpp"
 #include "MetalShaderPipeline.hpp"
 #include "MetalTexture.hpp"
@@ -91,6 +92,21 @@ public:
     // MetalTimeline::Commit after CommittedWithoutWaiting: the DCC keys of written images it leaves
     // uncompressed while earlier pending work may still store to them.
     [[nodiscard]] std::vector<MetalTimeline::KnownStore> KnownStores() const;
+    // The guest images this work read, for a draw translation record to re-prove before it reuses
+    // its bindings (DrawImageDependency): `cached` are the ones the image cache holds an entry for,
+    // `uncached` the rest (staged or partially borrowed surfaces), which have no proof to re-run and
+    // so tie a record to the image cache generation it was built at.
+    struct DrawImageSet {
+        std::vector<DrawImageDependency> cached;
+        std::uint32_t uncached = 0;
+    };
+    [[nodiscard]] DrawImageSet DrawImages() const;
+    // The guest ranges this work had to encode lazy copy-backs for ahead of its own bindings
+    // (materializeBefore): a reused draw translation record encodes them again.
+    [[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint64_t>> MaterializedRanges() const;
+    // Encodes the lazy copy-backs over guest [address, address + bytes) ahead of this work, as a
+    // binding about to read them through memory would.
+    void MaterializeBefore(std::uint64_t address, std::uint64_t bytes) { materializeBefore(address, bytes); }
     // Guest bytes the snapshot copied instead of aliasing (#291).
     [[nodiscard]] std::uint64_t CopiedBytes() const { return snapshot.CopiedBytes(); }
     [[nodiscard]] const std::vector<id<MTLBuffer>>& UploadChunks() const { return uploadChunks; }

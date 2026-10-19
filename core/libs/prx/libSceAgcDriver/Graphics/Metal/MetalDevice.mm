@@ -152,6 +152,26 @@ bool IsAttachment(const PassKey& key, id<MTLResource> resource) {
     return false;
 }
 
+bool SamePass(const PassKey& a, const PassKey& b) {
+    if (a.width != b.width || a.height != b.height || a.layers != b.layers || a.samples != b.samples ||
+        a.depthResolveFilter != b.depthResolveFilter || a.stencilResolveFilter != b.stencilResolveFilter ||
+        a.visibility != b.visibility || a.positions != b.positions) return false;
+    for (std::size_t i = 0; i < a.samplePositions.size(); ++i) {
+        if (a.samplePositions[i].x != b.samplePositions[i].x || a.samplePositions[i].y != b.samplePositions[i].y) return false;
+    }
+    for (std::size_t i = 0; i < a.attachments.size(); ++i) {
+        const auto& left = a.attachments[i];
+        const auto& right = b.attachments[i];
+        if (left.textureRoot != right.textureRoot || left.resolveRoot != right.resolveRoot ||
+            left.level != right.level || left.slice != right.slice || left.plane != right.plane ||
+            left.resolveLevel != right.resolveLevel || left.resolveSlice != right.resolveSlice ||
+            left.resolvePlane != right.resolvePlane || left.load != right.load || left.store != right.store) return false;
+    }
+    return true;
+}
+
+id<MTLTexture> RootTexture(id<MTLTexture> texture) { return rootOf(texture); }
+
 void EnqueueUploadBlit(id<MTLCommandBuffer> commands, UploadBlitRecord record) {
     if (record.steps.empty() || commands == nil) return;
     auto& slot = parked();

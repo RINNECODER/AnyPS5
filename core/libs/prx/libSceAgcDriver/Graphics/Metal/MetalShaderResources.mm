@@ -1066,6 +1066,25 @@ void MetalShaderResources::markDccUncompressed(bool committing) {
     }
 }
 
+std::vector<std::pair<std::uint64_t, std::uint64_t>> MetalShaderResources::MaterializedRanges() const {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    ranges.reserve(materialized.size());
+    for (const auto& done : materialized) ranges.emplace_back(done.guestAddress, done.guestAddress + done.bytes);
+    return ranges;
+}
+
+MetalShaderResources::DrawImageSet MetalShaderResources::DrawImages() const {
+    DrawImageSet result;
+    for (const auto& image : images) {
+        if (!image.cacheable) {
+            ++result.uncached;
+            continue;
+        }
+        result.cached.push_back({image.host.data(), image.texture->Descriptor().baseAddress, image.written ? 0 : image.content, image.texture});
+    }
+    return result;
+}
+
 void MetalShaderResources::CommittedWithoutWaiting() {
     if (imageCache != nullptr) {
         for (const auto& image : images) {

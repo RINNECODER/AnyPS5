@@ -114,6 +114,14 @@ struct PassKey {
 // earlier draws of the pass wrote, which Metal orders between passes but not between the draws of
 // one pass.
 [[nodiscard]] bool IsAttachment(const PassKey& key, id<MTLResource> resource);
+// Whether `a` and `b` describe the same attachments at the same level, slice and plane, with the
+// same resolve targets and store actions, at the same size, layers, samples and sample positions:
+// what a reused draw translation record's pass must still be for its attachments to stand. Views
+// of one texture differ between builds, so textures compare by their root (IsAttachment).
+[[nodiscard]] bool SamePass(const PassKey& a, const PassKey& b);
+// The texture a view stands on: the end of its chain of parent textures. Two views built at
+// different times of the same surface compare by this.
+[[nodiscard]] id<MTLTexture> RootTexture(id<MTLTexture> texture);
 
 // Upload batching: linear buffer -> texture blit copies (e.g. BC texture uploads after detiling)
 // can be grouped to share a single MTLBlitCommandEncoder per command buffer rather than creating
