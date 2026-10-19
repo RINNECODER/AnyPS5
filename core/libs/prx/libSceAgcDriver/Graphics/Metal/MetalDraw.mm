@@ -1650,13 +1650,17 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         }
     }
     // Render-pass merging (MetalEncoders): the draw continues the pass the previous draw left open
-    // when it has the same attachments, and leaves its own open for the next. Not when the draw
-    // writes memory through its shaders (a later draw of the pass could read it unordered), counts
-    // samples, expands MSAA targets, uses custom sample locations (merging those changed pixels from
-    // run to run) or samples one of its own attachments.
+    // when it has the same attachments, and leaves its own open for the next.
     const auto passKey = MetalEncoders::KeyOf(renderPass);
-    bool mergeable = sampleCounter == nil && expansions.empty() && !bdaStores && !(state.customSampleLocations && state.rasterSamples > 1) &&
-        !resources.WritesBesides(passKey);
+    bool hasColorAttachment = false;
+    for (std::size_t slot = 0; slot < 8; ++slot) {
+        if (passKey.attachments[slot].texture != 0) {
+            hasColorAttachment = true;
+            break;
+        }
+    }
+    bool mergeable = sampleCounter == nil && expansions.empty() && !bdaStores &&
+        !(state.customSampleLocations && state.rasterSamples > 1 && !hasColorAttachment) && !resources.WritesBesides(passKey);
     // The bindings hold every texture the shaders read or write (the residency also holds the
     // draw's own color targets).
     for (const auto* list : {&vertexBindings, &fragmentBindings}) {
