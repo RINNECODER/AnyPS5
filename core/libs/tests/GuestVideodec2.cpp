@@ -596,6 +596,48 @@ void testDecode(bool lengthPrefixed, bool separateParameters = false) {
     checkThrows([&] { sceVideodec2DeleteDecoder_nid_postfix(handle); });
 }
 
+void testLengthPrefixLooksLikeStartCode() {
+    auto units = accessUnits(true);
+    std::vector<std::uint8_t> filler;
+    constexpr std::size_t fillerLength = 0x101;
+    for (int shift = 24; shift >= 0; shift -= 8) filler.push_back(static_cast<std::uint8_t>(fillerLength >> shift));
+    filler.push_back(0x0c);
+    filler.insert(filler.end(), fillerLength - 1, 0xff);
+    units.front().insert(units.front().begin(), filler.begin(), filler.end());
+    check(units.front()[0] == 0 && units.front()[1] == 0 && units.front()[2] == 1, "the crafted unit does not begin with start-code bytes");
+
+    const DecoderConfigInfo config{sizeof(DecoderConfigInfo), 0, 1, 100, 0, static_cast<std::int32_t>(Width), static_cast<std::int32_t>(Height), 4, 1};
+    DecoderMemoryInfo memory{sizeof(DecoderMemoryInfo)};
+    check(sceVideodec2QueryDecoderMemoryInfo_nid_postfix(&config, &memory) == 0, "memory query failed");
+    std::uint64_t handle = 0;
+    check(sceVideodec2CreateDecoder_nid_postfix(&config, &memory, &handle) == 0, "decoder creation failed");
+    std::vector<std::uint8_t> buffer(memory.maxFrameBufferSize);
+    std::size_t pictures = 0;
+    const auto take = [&](const OutputInfo& output) {
+        if (!output.isValid) return false;
+        check(pictures < PictureHashes.size(), "more pictures than access units");
+        check(!output.isErrorFrame && output.frameWidth == Width && output.frameHeight == CodedHeight, "unexpected picture geometry");
+        check(hashNv12(buffer.data(), output.framePitch, output.frameHeight) == PictureHashes[pictures], "picture " + std::to_string(pictures) + " differs from the reference");
+        ++pictures;
+        return true;
+    };
+    for (std::size_t unit = 0; unit < units.size(); ++unit) {
+        const InputData input{sizeof(InputData), units[unit].data(), units[unit].size(), 1000 + unit, unit, 0xa0 + unit};
+        FrameBuffer frame{sizeof(FrameBuffer), buffer.data(), buffer.size(), false};
+        OutputInfo output{sizeof(OutputInfo)};
+        check(sceVideodec2Decode_nid_postfix(handle, &input, &frame, &output) == 0, "decode failed");
+        take(output);
+    }
+    for (;;) {
+        FrameBuffer frame{sizeof(FrameBuffer), buffer.data(), buffer.size(), false};
+        OutputInfo output{sizeof(OutputInfo)};
+        check(sceVideodec2Flush_nid_postfix(handle, &frame, &output) == 0, "flush failed");
+        if (!take(output)) break;
+    }
+    check(pictures == PictureHashes.size(), "missing pictures after flush");
+    check(sceVideodec2DeleteDecoder_nid_postfix(handle) == 0, "delete failed");
+}
+
 std::uint64_t createDecoder(std::uint32_t codec, std::uint32_t profile) {
     const DecoderConfigInfo config{sizeof(DecoderConfigInfo), 1, codec, profile, 0, static_cast<std::int32_t>(Width), static_cast<std::int32_t>(Height), 4, 1};
     DecoderMemoryInfo memory{sizeof(DecoderMemoryInfo)};
@@ -804,6 +846,7 @@ int main() {
         testFailures();
         testDecode(false);
         testDecode(true);
+        testLengthPrefixLooksLikeStartCode();
         testDecode(false, true);
         const auto hevc = hevcUnits(HevcStream.data(), HevcStream.size());
         testClip(CodecHevc, 1, hevc, HevcHashes);
