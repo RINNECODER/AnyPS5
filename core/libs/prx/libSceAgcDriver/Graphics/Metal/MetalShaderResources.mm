@@ -753,6 +753,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
         return false;
     };
     std::vector<MetalShaderResourceBinding> result;
+    result.reserve(shader.resources.size());
     for (const auto& mapping : shader.resources) {
         if (!mapping.active) continue;
         const auto found = std::find_if(shader.guest.bindings.begin(), shader.guest.bindings.end(), [&mapping](const auto& binding) {
@@ -767,6 +768,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
             if (found->guestDescriptor.size() != static_cast<std::size_t>(found->count) * 4 || !mapping.buffer) {
                 throw std::invalid_argument("Metal draw guest buffer descriptor metadata is invalid");
             }
+            native.buffers.reserve(found->count);
             for (std::uint32_t i = 0; i < found->count; ++i) {
                 ShaderBufferResource descriptor;
                 std::copy_n(found->guestDescriptor.begin() + i * 4u, 4, descriptor.fields.begin());
@@ -828,6 +830,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
                 throw std::invalid_argument("Metal 64-bit image atomics are not implemented");
             }
             std::uint32_t storageMipOffset = 0;
+            native.textures.reserve(found->count);
             for (std::uint32_t i = 0; i < found->count; ++i) {
                 if (NullImageDescriptor(std::span(found->guestDescriptor).subspan(i * 8u, 8))) {
                     // An empty element of a runtime ABI image heap stays unbound, as in the Vulkan driver.
@@ -911,6 +914,7 @@ std::vector<MetalShaderResourceBinding> MetalShaderResources::Bindings(const Met
             if (!found->samplerDepthCompare.empty() && found->samplerDepthCompare.size() != found->count) {
                 throw std::invalid_argument("Metal draw sampler comparison metadata has the wrong descriptor count");
             }
+            native.samplers.reserve(found->count);
             for (std::uint32_t i = 0; i < found->count; ++i) {
                 const bool compare = i < found->samplerDepthCompare.size() && found->samplerDepthCompare[i];
                 const bool pixel = !found->samplerUnnormalized.empty() && found->samplerUnnormalized[i];

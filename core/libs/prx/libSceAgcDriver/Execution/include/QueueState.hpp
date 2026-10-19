@@ -97,6 +97,15 @@ public:
         mark(offset) = value;
         return {const_iterator{this, offset}, true};
     }
+    bool assignIfChanged(std::uint32_t offset, std::uint32_t value) {
+        if (contains(offset)) {
+            if (values[offset] == value) return false;
+            values[offset] = value;
+            return true;
+        }
+        mark(offset) = value;
+        return true;
+    }
     std::uint32_t& operator[](std::uint32_t offset) {
         if (contains(offset)) return values[offset];
         return mark(offset) = 0;
