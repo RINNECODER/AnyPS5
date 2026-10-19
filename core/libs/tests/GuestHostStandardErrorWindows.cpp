@@ -24,21 +24,21 @@ static DWORD Available(int descriptor, void* buffer, DWORD capacity, DWORD& read
     return available;
 }
 
-int main() {
+static void Split(int standard, std::FILE* stream) {
     int capture[2]{-1, -1};
     Require(::_pipe(capture, 65536, _O_BINARY) == 0);
-    const int original = ::_dup(2);
-    Require(original >= 0 && ::_dup2(capture[1], 2) == 0);
+    const int original = ::_dup(standard);
+    Require(original >= 0 && ::_dup2(capture[1], standard) == 0);
 
     int guest[2]{-1, -1};
     Require(pipe_nid_postfix(guest) == 0);
-    Require(dup2_nid_postfix(guest[1], 2) == 2);
+    Require(dup2_nid_postfix(guest[1], standard) == standard);
 
     std::string host(8192, 'h');
     host.back() = '\n';
-    Require(std::fputs(host.c_str(), stderr) >= 0);
-    Require(std::fflush(stderr) == 0);
-    Require(write_nid_postfix(2, "guest", 5) == 5);
+    Require(std::fputs(host.c_str(), stream) >= 0);
+    Require(std::fflush(stream) == 0);
+    Require(write_nid_postfix(standard, "guest", 5) == 5);
 
     char guestBytes[8]{};
     DWORD guestRead = 0;
@@ -49,11 +49,16 @@ int main() {
     Require(Available(capture[0], hostBytes, sizeof(hostBytes), hostRead) == host.size());
     Require(hostRead == sizeof(hostBytes) && std::string(hostBytes, hostRead) == host.substr(0, hostRead));
 
-    Require(::_dup2(original, 2) == 0);
+    Require(::_dup2(original, standard) == 0);
     ::_close(original);
     ::_close(capture[0]);
     ::_close(capture[1]);
     ::_close(guest[0]);
     ::_close(guest[1]);
+}
+
+int main() {
+    Split(2, stderr);
+    Split(1, stdout);
     return 0;
 }

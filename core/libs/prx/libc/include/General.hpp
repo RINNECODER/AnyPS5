@@ -16,6 +16,7 @@ extern "C" bool StopAtPrefixLetter_nid_no_patch(const char* str, char** endptr, 
 #ifndef _WIN32
 extern "C" int KeepHostStandardError_nid_no_patch();
 extern "C" int HostStandardError_nid_no_patch();
+extern "C" int KeepHostStandardOutput_nid_no_patch();
 #endif
 
 extern "C" bool CopyGuestEnvironment_nid_no_patch(const char* name, std::string& value);

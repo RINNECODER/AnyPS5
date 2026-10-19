@@ -101,5 +101,29 @@ int main() {
         if (redirect == Redirect::Reopen) Require(Contents(probe).find("report kept") == std::string::npos);
     }
     std::filesystem::remove(probe);
+
+    int host[2] = {-1, -1};
+    Require(::pipe(host) == 0);
+    const pid_t child = ::fork();
+    Require(child >= 0);
+    if (child == 0) {
+        ::close(host[0]);
+        if (::dup2(host[1], 1) != 1) ::_exit(70);
+        ::close(host[1]);
+        int guest[2] = {-1, -1};
+        if (pipe_nid_postfix(guest) != 0 || dup2_nid_postfix(guest[1], 1) != 1) ::_exit(72);
+        std::fputs("host\n", stdout);
+        std::fflush(stdout);
+        ::_exit(0);
+    }
+    ::close(host[1]);
+    std::string output;
+    char buffer[64];
+    for (ssize_t count; (count = ::read(host[0], buffer, sizeof(buffer))) > 0;) output.append(buffer, static_cast<std::size_t>(count));
+    ::close(host[0]);
+    int status = 0;
+    Require(::waitpid(child, &status, 0) == child);
+    Require(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    Require(output == "host\n");
     return 0;
 }

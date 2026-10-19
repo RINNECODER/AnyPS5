@@ -385,6 +385,32 @@ extern "C" int HostStandardError_nid_no_patch() {
     return g_hostStandardError.load();
 }
 
+namespace {
+std::mutex g_hostStandardOutputMutex;
+std::atomic<int> g_hostStandardOutput{-1};
+}
+
+extern "C" int KeepHostStandardOutput_nid_no_patch() {
+    const std::lock_guard lock(g_hostStandardOutputMutex);
+    if (const int kept = g_hostStandardOutput.load(); kept >= 0) return kept;
+    const int kept = ::fcntl(1, F_DUPFD_CLOEXEC, 3);
+    if (kept < 0) {
+        if (errno == EBADF) return -1;
+        throw std::system_error(errno, std::generic_category(), "Keeping the host standard output");
+    }
+    std::FILE* const stream = ::fdopen(kept, "w");
+    if (stream == nullptr) {
+        const int error = errno;
+        ::close(kept);
+        throw std::system_error(error, std::generic_category(), "Keeping the host standard output");
+    }
+    std::setvbuf(stream, nullptr, _IONBF, 0);
+    std::fflush(stdout);
+    stdout = stream;
+    g_hostStandardOutput.store(kept);
+    return kept;
+}
+
 extern "C" int DuplicateHostDescriptor_nid_no_patch(int descriptor) {
     return ::fcntl(descriptor, F_DUPFD_CLOEXEC, 3);
 }
