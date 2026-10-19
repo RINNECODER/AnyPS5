@@ -113,7 +113,9 @@ bool writeManifest() {
         std::fprintf(file, "region 0x%llx 0x%llx %s 0x%llx\n", static_cast<unsigned long long>(region.address),
             static_cast<unsigned long long>(region.bytes), region.object.c_str(), static_cast<unsigned long long>(region.offset));
     }
-    if (std::fflush(file) != 0 || std::fclose(file) != 0) {
+    const int flushed = std::fflush(file);
+    const int closed = std::fclose(file);
+    if (flushed != 0 || closed != 0) {
         std::remove(temporary.c_str());
         return false;
     }

@@ -587,16 +587,15 @@ std::string ArenaSharedName() {
 void* CommitAt(void* pointer, std::size_t bytes, std::uint32_t protection) {
 #if defined(__APPLE__)
     if (GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix()) {
+        // A private fallback would leave a GPU-visible range the native process cannot map, so the
+        // failure is reported instead of committing memory the server would read as stale.
         const int file = ArenaSharedFile();
-        if (file >= 0) {
-            const auto offset = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer) - Arena::Get().Base());
-            void* mapped = mmap(pointer, bytes, PosixProtection(protection), MAP_SHARED | MAP_FIXED, file, static_cast<off_t>(offset));
-            if (mapped != MAP_FAILED) {
-                GpuSharedMemory::GpuSharedMemoryRegister_nid_postfix(reinterpret_cast<std::uintptr_t>(pointer), bytes, ArenaSharedName().c_str(), offset);
-                return mapped;
-            }
-            std::fprintf(stderr, "[arena] shared mapping %p+0x%zx failed: %s\n", pointer, bytes, std::strerror(errno));
-        }
+        if (file < 0) throw std::system_error(ENODEV, std::generic_category(), "guest arena shared backing is unavailable");
+        const auto offset = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(pointer) - Arena::Get().Base());
+        void* mapped = mmap(pointer, bytes, PosixProtection(protection), MAP_SHARED | MAP_FIXED, file, static_cast<off_t>(offset));
+        if (mapped == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "guest arena shared mapping failed");
+        GpuSharedMemory::GpuSharedMemoryRegister_nid_postfix(reinterpret_cast<std::uintptr_t>(pointer), bytes, ArenaSharedName().c_str(), offset);
+        return mapped;
     }
 #endif
     return PlaceAt(pointer, bytes, protection);
