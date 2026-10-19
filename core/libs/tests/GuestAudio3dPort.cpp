@@ -248,6 +248,25 @@ void CheckMixAndPush() {
     Require(sceAudio3dPortClose(0) == 0, "close");
 }
 
+void CheckPushKeepsRealTime() {
+    Audio3dOpenParameters parameters = Defaults();
+    std::uint32_t id = 7;
+    Require(Open(parameters, &id) == 0 && id == 0, "open");
+    const std::int16_t samples[8] = {1000, -1000, 2000, -2000, 3000, -3000, 4000, -4000};
+    Require(sceAudio3dBedWrite(0, 2, 0, samples, 4) == 0, "bed write");
+    constexpr std::uint32_t frames = 200;
+    const std::uint64_t blockUs = 1000000ull * parameters.granularity / 48000ull;
+    const auto start = std::chrono::steady_clock::now();
+    for (std::uint32_t i = 0; i < frames; i++) {
+        Require(sceAudio3dPortAdvance(0) == 0, "advance");
+        Require(sceAudio3dPortPush(0, 1) == 0, "sync push");
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+    const std::uint64_t expected = frames * blockUs;
+    Require(elapsed + 150000 >= static_cast<std::uint64_t>(expected) && elapsed < expected + 300000, "a blocking push must run at real time");
+    Require(sceAudio3dPortClose(0) == 0, "close");
+}
+
 void CheckFlush() {
     Require(sceAudio3dPortFlush(0) == INVALID_PORT, "flush needs an open port");
     Audio3dOpenParameters parameters = Defaults();
@@ -366,6 +385,7 @@ int main() {
     CheckObjects();
     CheckQueue();
     CheckMixAndPush();
+    CheckPushKeepsRealTime();
     CheckFlush();
     CheckAudioOutPorts();
     CheckObjectAttributes();
