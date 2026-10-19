@@ -9,7 +9,7 @@
 namespace {
 
 std::uint64_t mspaceAtomicIdMask = 0;
-std::array<std::uint64_t, 64> mstateTable{};
+std::array<std::uint64_t, 65> mstateTable{};
 
 static_assert(sizeof(LibcHeapInfo) == 32);
 static_assert(offsetof(LibcHeapInfo, mspace_atomic_id_mask) == 16);
