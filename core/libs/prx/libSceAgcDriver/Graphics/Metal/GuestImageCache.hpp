@@ -53,6 +53,8 @@ public:
         bool compare;
     };
 
+    enum class Cause : unsigned { Other, WrittenImage, WritableBuffer, DccMetadata, BdaWrittenPage, KnownStore, DriverStore, Count };
+
     struct Statistics {
         std::uint64_t hits = 0;
         std::uint64_t misses = 0;
@@ -64,6 +66,10 @@ public:
         std::uint64_t verified = 0;
         std::uint64_t rejected = 0;
         std::uint64_t hashedBytes = 0;
+        std::uint64_t invalidated = 0;
+        std::uint64_t invalidatedBy[8]{};
+        std::uint64_t evicted = 0;
+        std::uint64_t replaced = 0;
     };
 
     // Fast verification mode: uses Proof::Sample (512 distributed words + endpoints, ~4 KiB)
@@ -120,10 +126,15 @@ public:
                 return;
             }
         }
-        eraseOverlapping(address(host), bytes);
-        if (auto same = entries.find(address(host)); same != entries.end()) erase(same);
+        statistics.replaced += eraseOverlapping(address(host), bytes);
+        if (auto same = entries.find(address(host)); same != entries.end()) {
+            erase(same);
+            ++statistics.replaced;
+        }
         while (!entries.empty() && (entries.size() >= MaxEntries || totalBytes + bytes > MaxBytes)) {
-            erase(std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.second.stamp < b.second.stamp; }));
+            const auto victim = std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.second.stamp < b.second.stamp; });
+            erase(victim);
+            ++statistics.evicted;
         }
         std::uint64_t fingerprint = 0;
         if (proof == Proof::Hash) {
@@ -152,11 +163,13 @@ public:
         entry.fingerprint = GuestBytesFingerprint::Sample(host, entry.bytes);
     }
 
-    // Forgets every entry whose host bytes overlap [host, host + bytes).
-    void Invalidate(const std::byte* host, std::size_t bytes) {
+    void Invalidate(const std::byte* host, std::size_t bytes, Cause cause = Cause::Other) {
         if (host == nullptr || bytes == 0) return;
         std::lock_guard lock(mutex);
-        eraseOverlapping(address(host), bytes);
+        const auto dropped = eraseOverlapping(address(host), bytes);
+        if (dropped == 0) return;
+        statistics.invalidated += dropped;
+        statistics.invalidatedBy[static_cast<unsigned>(cause) % 8] += dropped;
     }
 
     // Drops every entry (a mapping change, a failure).
@@ -243,8 +256,9 @@ private:
         entries.erase(entry);
     }
 
-    void eraseOverlapping(std::uintptr_t begin, std::size_t bytes) {
+    std::size_t eraseOverlapping(std::uintptr_t begin, std::size_t bytes) {
         const auto end = begin + bytes;
+        std::size_t dropped = 0;
         // Entries are disjoint: only the last one starting before `begin` can reach into the range.
         auto entry = entries.lower_bound(begin);
         if (entry != entries.begin()) {
@@ -253,9 +267,13 @@ private:
         }
         while (entry != entries.end() && entry->second.host < end) {
             const auto next = std::next(entry);
-            if (begin < entry->second.host + entry->second.bytes) erase(entry);
+            if (begin < entry->second.host + entry->second.bytes) {
+                erase(entry);
+                ++dropped;
+            }
             entry = next;
         }
+        return dropped;
     }
 
     mutable std::mutex mutex;
