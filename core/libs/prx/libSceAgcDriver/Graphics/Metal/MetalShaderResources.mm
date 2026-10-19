@@ -945,6 +945,7 @@ void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands, bool l
             GpuTiming::Scope timing(GpuTiming::Kind::Readback);
             GpuTiming::Record(0, done.GPUEndTime - done.GPUStartTime, done.GPUStartTime, done.GPUEndTime);
         }];
+        MetalEncoders::EndParked(readbacks);
         [readbacks commit];
         return;
     }
@@ -973,7 +974,7 @@ void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands, bool l
             }
         }
         if (sharedEncoder != nil) {
-            [sharedEncoder endEncoding];
+            MetalEncoders::EndCompute(commands, sharedEncoder);
             sharedEncoder = nil;
         }
         if (image.texture->EncodeReadback(commands, image.buffer.buffer, image.buffer.offset, part)) {
@@ -981,7 +982,7 @@ void MetalShaderResources::EncodeReadbacks(id<MTLCommandBuffer> commands, bool l
         }
     }
     if (sharedEncoder != nil) {
-        [sharedEncoder endEncoding];
+        MetalEncoders::EndCompute(commands, sharedEncoder);
     }
 }
 

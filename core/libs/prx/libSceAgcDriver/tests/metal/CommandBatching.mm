@@ -403,7 +403,7 @@ void PassMergeParking(const MetalTests::Context& context, const Kernels& kernels
     [compute setBuffer:x offset:0 atIndex:0];
     [compute setBytes:parameters.data() length:sizeof(parameters) atIndex:1];
     [compute dispatchThreads:MTLSizeMake(Elements, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
-    [compute endEncoding];
+    Encoders::EndCompute(commands, compute);
     auto fifth = Encoders::RenderMerging(backend, commands, LoadingPass(target), key, true);
     Require(fifth != fourth, "A draw continued a pass that an encoder in between ended");
     DrawFirst(fifth, kernels, x);
@@ -428,6 +428,53 @@ void PassMergeParking(const MetalTests::Context& context, const Kernels& kernels
     [next endEncoding];
     single.Wait(own);
     Require(own.status == MTLCommandBufferStatusCompleted, "The unbatched passes did not complete");
+}
+
+// Compute encoders: a run of dispatches or detiles in one command buffer shares one encoder, and
+// anything that needs the encoder slot (a render pass, a blit, EndParked, a commit) ends it.
+void ComputeEncoderParking(const MetalTests::Context& context, const Kernels& kernels) {
+    MetalDevice backend(context.device, context.library);
+    backend.SetBatching(true);
+    static_cast<void>(Encoders::TakeStatistics());
+    auto commands = backend.CommandBuffer();
+    const std::array<std::uint32_t, 2> parameters{1, 4};
+    const auto dispatch = [&](id<MTLComputeCommandEncoder> encoder) {
+        [encoder setComputePipelineState:kernels.scaleAdd];
+        [encoder setBuffer:backend.Buffer(4 * sizeof(std::uint32_t)) offset:0 atIndex:0];
+        [encoder setBytes:parameters.data() length:sizeof(parameters) atIndex:1];
+        [encoder dispatchThreads:MTLSizeMake(Elements, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    };
+    auto first = backend.ComputeEncoder(commands);
+    dispatch(first);
+    Encoders::EndCompute(commands, first);
+    auto second = backend.ComputeEncoder(commands);
+    Require(second == first, "A second dispatch in the same command buffer opened another encoder");
+    dispatch(second);
+    Encoders::EndCompute(commands, second);
+    Require(Encoders::TakeStatistics(false).computeReused == 1, "The reused compute encoder was not counted");
+    // A render pass takes the slot: the parked compute encoder ends, and the next dispatch opens a new one.
+    auto target = Target(context.device);
+    const auto key = Encoders::KeyOf(LoadingPass(target));
+    auto pass = Encoders::RenderMerging(backend, commands, LoadingPass(target), key, true);
+    DrawFirst(pass, kernels, Filled(backend, 0));
+    Encoders::EndOrPark(backend, commands, pass, key, true);
+    auto third = backend.ComputeEncoder(commands);
+    Require(third != first && third != second, "A dispatch after a render pass reused an encoder the pass ended");
+    dispatch(third);
+    Encoders::EndCompute(commands, third);
+    // A commit ends the parked compute encoder, and the work still runs.
+    auto copy = backend.CommandBuffer();
+    auto parked = backend.ComputeEncoder(copy);
+    dispatch(parked);
+    Encoders::EndCompute(copy, parked);
+    backend.Flush();
+    Require(copy.status >= MTLCommandBufferStatusCommitted, "Flush did not commit a batch with a parked compute encoder");
+    // Another command buffer does not reuse it.
+    auto other = backend.CommandBuffer();
+    auto fresh = backend.ComputeEncoder(other);
+    Require(fresh != parked, "A compute encoder was reused across command buffers");
+    Encoders::EndCompute(other, fresh);
+    backend.Wait(other);
 }
 
 void UploadBlitBatching(const MetalTests::Context& context) {
@@ -476,7 +523,7 @@ void UploadBlitBatching(const MetalTests::Context& context) {
 
     // Compute encoder with 'upload detile' should not flush pending upload blits
     auto computeUpload = backend.ComputeEncoder(commands, @"upload detile");
-    [computeUpload endEncoding];
+    Encoders::EndCompute(commands, computeUpload);
     Require(Encoders::HasPendingUploadBlits(commands), "Compute with upload detile flushed pending upload blits");
 
     // Explicit flush batches all pending upload blits into a single blit encoder pass
@@ -523,5 +570,6 @@ void RunCommandBatchingTests(const MetalTests::Context& context) {
     AbandonedWorkReleasesAfterTheBatch(context, kernels);
     PassMergeKeys(context);
     PassMergeParking(context, kernels);
+    ComputeEncoderParking(context, kernels);
     UploadBlitBatching(context);
 }

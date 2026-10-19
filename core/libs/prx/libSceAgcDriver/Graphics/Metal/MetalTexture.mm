@@ -504,10 +504,10 @@ void MetalTexture::encodeTransfer(id<MTLCommandBuffer> commands, id<MTLBuffer> s
             }
         }
     } catch (...) {
-        if (encoder != nil) [encoder endEncoding];
+        if (encoder != nil) MetalEncoders::EndCompute(commands, encoder);
         throw;
     }
-    if (encoder != nil) [encoder endEncoding];
+    if (encoder != nil) MetalEncoders::EndCompute(commands, encoder);
 }
 
 namespace {
@@ -696,10 +696,10 @@ void MetalTexture::uploadFrom(id<MTLBuffer> guest, std::size_t offset, bool recy
         try {
             encodeFused(encoder, guest, offset, false);
         } catch (...) {
-            [encoder endEncoding];
+            MetalEncoders::EndCompute(commands, encoder);
             throw;
         }
-        [encoder endEncoding];
+        MetalEncoders::EndCompute(commands, encoder);
     } else {
         // The blit reads only texels the detile wrote, so the (recycled) linear buffer needs no clearing.
         auto linear = backend.TransientBuffer(bufferSize(geometry.sliceLinearBytes * geometry.layers), commands);
@@ -777,10 +777,10 @@ bool MetalTexture::EncodeReadback(id<MTLCommandBuffer> commands, id<MTLBuffer> g
         try {
             encodeFused(encoder, guest, offset, true, part);
         } catch (...) {
-            [encoder endEncoding];
+            MetalEncoders::EndCompute(commands, encoder);
             throw;
         }
-        [encoder endEncoding];
+        MetalEncoders::EndCompute(commands, encoder);
         return true;
     }
     // The retile reads only the elements the blit wrote, so the recycled linear buffer needs no clearing.

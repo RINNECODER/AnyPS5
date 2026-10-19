@@ -31,6 +31,9 @@ struct Parked {
     Statistics statistics;
     id<MTLCommandBuffer> uploadCommands = nil;
     std::vector<UploadBlitRecord> pendingUploadBlits;
+    id<MTLCommandBuffer> computeCommands = nil;
+    id<MTLComputeCommandEncoder> compute = nil;
+    id<MTLCommandBuffer> openBatch = nil;
 };
 
 Parked& parked() {
@@ -45,9 +48,18 @@ void endLocked(Parked& slot) {
     slot.commands = nil;
 }
 
+// With the slot's mutex held.
+void endComputeLocked(Parked& slot) {
+    if (slot.compute == nil) return;
+    [slot.compute endEncoding];
+    slot.compute = nil;
+    slot.computeCommands = nil;
+}
+
 void FlushUploadBlitsLocked(Parked& slot, id<MTLCommandBuffer> commands) {
     if (slot.pendingUploadBlits.empty() || slot.uploadCommands != commands) return;
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endComputeLocked(slot);
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
     if (GpuTiming::Enabled() && blit != nil) blit.label = @"upload linear copy";
     for (const auto& record : slot.pendingUploadBlits) {
@@ -168,21 +180,56 @@ void EndParked(id<MTLCommandBuffer> commands) {
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    if (slot.compute != nil && slot.computeCommands == commands) endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
 }
 
 id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands, bool flushUploads) {
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
+    if (flushUploads && slot.uploadCommands == commands && !slot.pendingUploadBlits.empty()) {
+        endComputeLocked(slot);
+        FlushUploadBlitsLocked(slot, commands);
+    }
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
-    if (flushUploads) FlushUploadBlitsLocked(slot, commands);
-    return [commands computeCommandEncoder];
+    if (slot.compute != nil && slot.computeCommands == commands && commands == slot.openBatch &&
+        commands.status < MTLCommandBufferStatusCommitted) {
+        ++slot.statistics.computeReused;
+        return slot.compute;
+    }
+    endComputeLocked(slot);
+    id<MTLComputeCommandEncoder> encoder = [commands computeCommandEncoder];
+    ++slot.statistics.computeEncoders;
+    if (encoder != nil && commands == slot.openBatch) {
+        slot.compute = encoder;
+        slot.computeCommands = commands;
+    }
+    return encoder;
+}
+
+void EndCompute(id<MTLCommandBuffer> commands, id<MTLComputeCommandEncoder> encoder) {
+    if (encoder == nil) return;
+    auto& slot = parked();
+    std::lock_guard lock(slot.mutex);
+    if (slot.compute == encoder && slot.computeCommands == commands && commands == slot.openBatch) return;
+    if (slot.compute == encoder) {
+        slot.compute = nil;
+        slot.computeCommands = nil;
+    }
+    [encoder endEncoding];
+}
+
+void SetOpenBatch(id<MTLCommandBuffer> commands) {
+    auto& slot = parked();
+    std::lock_guard lock(slot.mutex);
+    slot.openBatch = commands;
 }
 
 id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands) {
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
     return [commands blitCommandEncoder];
 }
@@ -191,6 +238,7 @@ id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassD
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
     return [commands renderCommandEncoderWithDescriptor:pass];
 }
@@ -199,6 +247,7 @@ id<MTLParallelRenderCommandEncoder> ParallelRender(id<MTLCommandBuffer> commands
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
     ++slot.statistics.parallelPasses;
     return [commands parallelRenderCommandEncoderWithDescriptor:pass];
@@ -222,6 +271,7 @@ id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLComman
             }
             endLocked(slot);
         }
+        endComputeLocked(slot);
         ++slot.statistics.passes;
     }
     return [commands renderCommandEncoderWithDescriptor:pass];
@@ -237,6 +287,7 @@ void EndOrPark(const MetalDevice& batch, id<MTLCommandBuffer> commands, id<MTLRe
     std::lock_guard lock(slot.mutex);
     // Another command buffer's parked encoder must still end before that one commits.
     if (slot.encoder != nil && slot.encoder != encoder) endLocked(slot);
+    endComputeLocked(slot);
     slot.commands = commands;
     slot.encoder = encoder;
     slot.key = key;
@@ -336,6 +387,7 @@ id<MTLBuffer> MetalDevice::TransientBuffer(std::size_t bytes, id<MTLCommandBuffe
 id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
     if (batching && open != nil && open.status == MTLCommandBufferStatusNotEnqueued) {
         ++openUses;
+        MetalEncoders::SetOpenBatch(open);
         return open;
     }
     id<MTLCommandBuffer> commands = [queue commandBuffer];
@@ -364,6 +416,7 @@ id<MTLCommandBuffer> MetalDevice::CommandBuffer() const {
         open = commands;
         openUses = 1;
     }
+    MetalEncoders::SetOpenBatch(batching ? open : nil);
     return commands;
 }
 
@@ -392,6 +445,7 @@ void MetalDevice::Flush() const {
     flushed = open;
     open = nil;
     openUses = 0;
+    MetalEncoders::SetOpenBatch(nil);
 }
 
 void MetalDevice::Submit(id<MTLCommandBuffer> commands) const {
@@ -470,10 +524,10 @@ void MetalDevice::Encode(id<MTLCommandBuffer> commands, NSString* kernel, NSArra
     try {
         Dispatch(encoder, kernel, buffers, parameters, parameterBytes, grid, constants, offsets);
     } catch (...) {
-        [encoder endEncoding];
+        MetalEncoders::EndCompute(commands, encoder);
         throw;
     }
-    [encoder endEncoding];
+    MetalEncoders::EndCompute(commands, encoder);
 }
 
 void MetalDevice::validateDispatch(NSString* kernel, NSArray<id<MTLBuffer>>* buffers, const void* parameters,

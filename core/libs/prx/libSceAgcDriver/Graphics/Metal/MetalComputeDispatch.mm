@@ -269,6 +269,7 @@ Abi::Fault MetalComputeDispatch::DispatchSynchronously(const ComputeDispatchStat
     id<MTLCommandBuffer> commands = [queue commandBuffer];
     if (commands == nil) throw MetalGpuExecutionError("Native Metal compute dispatch command creation failed");
     pipeline.Encode(commands, bindings, MTLSizeMake(grid[0], grid[1], grid[2]), {}, resident);
+    MetalEncoders::EndParked(commands);
     [commands commit];
     [commands waitUntilCompleted];
     if (commands.status != MTLCommandBufferStatusCompleted) {
