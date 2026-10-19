@@ -393,6 +393,8 @@ DecodedInstructionInfo X64InstructionDecoder::DecodeInstruction(
         info.ModRmRegField = (modrm >> ModRmRegShift) & ModRmRegMask;
         const std::uint8_t mod = registerOnly ? ModRmModRegister : (modrm >> ModRmModShift) & ModRmModMask;
         const std::uint8_t rm = modrm & ModRmRmMask;
+        if (mod != ModRmModRegister)
+            info.HasMemoryOperand = true;
         if (mod == ModRmModIndirect && rm == ModRmRmRipRelative) {
             info.HasRipRelativeDisp = true;
             info.RipRelativeDispOffset = modrmPos + 1;
@@ -480,6 +482,8 @@ DecodedInstructionInfo X64InstructionDecoder::DecodeInstruction(
             info.ModRmRegField = reg;
             std::uint8_t mod = (modrm >> ModRmModShift) & ModRmModMask;
             std::uint8_t rm = modrm & ModRmRmMask;
+            if (mod != ModRmModRegister)
+                info.HasMemoryOperand = true;
             if (reg == 2) {
                 if (mod == ModRmModIndirect && rm == ModRmRmRipRelative) {
                     info.FlowKind = ControlFlowKind::Call;
@@ -591,6 +595,10 @@ DecodedInstructionInfo X64InstructionDecoder::DecodeInstruction(
 
     if (hasModRm && pos < info.Length)
         readModRm(pos, twoByteOpcode && op >= TwoByteMovCrDrMin && op <= TwoByteMovCrDrMax);
+
+    if (!twoByteOpcode && ((op >= 0x6c && op <= 0x6f) || (op >= 0xa0 && op <= 0xa7) ||
+                           (op >= 0xaa && op <= 0xaf) || op == 0xd7))
+        info.HasMemoryOperand = true;
 
     info.FlowKind = ControlFlowKind::Sequential;
     return info;

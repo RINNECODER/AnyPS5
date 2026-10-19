@@ -17,6 +17,12 @@ FORMS = {
     "gs-short-register-address": bytes.fromhex("65 48 8b 00"),
 }
 
+NON_MEMORY_FORMS = {
+    "gs-nop": bytes.fromhex("65 90"),
+    "gs-register-move": bytes.fromhex("65 48 89 c8"),
+    "gs-cpuid": bytes.fromhex("65 0f a2"),
+}
+
 
 def convert(relinker, directory, name, image):
     source = Path(directory) / f"{name}.elf"
@@ -38,12 +44,20 @@ def check_trapped(name, code, instruction):
         raise SystemExit(f"{name}: the GS access was left in the code")
 
 
+def check_untouched(name, code, instruction):
+    if instruction + b"\xc3" not in code:
+        raise SystemExit(f"{name}: a non-memory GS instruction was replaced")
+
+
 def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="anyps5-macos-gs-") as directory:
         for name, instruction in FORMS.items():
             image = make_image("register", "unwind", body=instruction + b"\xc3")
             check_trapped(name, convert(relinker, directory, name, image), instruction)
+        for name, instruction in NON_MEMORY_FORMS.items():
+            image = make_image("register", "unwind", body=instruction + b"\xc3")
+            check_untouched(name, convert(relinker, directory, name, image), instruction)
         instruction = FORMS["gs-load-rcx"]
         image = make_image("register", "unwind", body=instruction + b"\xc3")
         struct.pack_into("<I", image, 176, 0)
