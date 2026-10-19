@@ -28,9 +28,11 @@
 #include <list>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <atomic>
 #include <pthread.h>
 #include <set>
+#include <string>
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
