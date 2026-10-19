@@ -162,7 +162,7 @@ int main() {
     Require(scePngDecDelete(narrowHandle) == 0);
 
     constexpr std::uint32_t pitch = 3 * 4 + 8;
-    std::vector<std::uint8_t> padded(pitch + 3 * 4, 0xEE);
+    std::vector<std::uint8_t> padded(pitch * 2, 0xEE);
     decode = DecodeParam(rgbPng, padded);
     decode.pixel_format = 1;
     decode.image_pitch = pitch;
