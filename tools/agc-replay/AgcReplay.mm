@@ -718,6 +718,7 @@ int main(int argc, char** argv) {
             const auto deltaInstrBefore = deltas.instructions.load();
             const auto workersBefore = Workers();
             const auto wallBefore = std::chrono::steady_clock::now();
+            std::uint64_t submitNs = 0;
             for (; next < submits.size() && submits[next]->frame == frame; ++next) {
                 const auto* submit = submits[next];
                 if (submit->index >= timeline.NextChange(liveAt)) {
@@ -741,8 +742,11 @@ int main(int argc, char** argv) {
                     registry = submit->registry;
                 }
                 if (submit->count != 0) std::memcpy(host(submit->address), submit->words, std::size_t{submit->count} * 4);
+                { const auto submitStart = std::chrono::steady_clock::now();
                 driver.SubmitCommandBuffer(submit->address, submit->count, 0, submit->queue);
+                submitNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - submitStart).count()); }
             }
+            const auto submitMs = static_cast<double>(submitNs) / 1e6;
             driver.WaitIdle();
             const auto wallMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wallBefore).count();
             const auto workersAfter = Workers();
@@ -759,6 +763,7 @@ int main(int argc, char** argv) {
                 }
             }
             const auto systemMs = static_cast<double>(workersAfter.systemNs - workersBefore.systemNs) / 1e6;
+            if (!quiet) std::printf("  submit calls: %.1f ms of the frame\n", submitMs);
             samples[frame].push_back({wallMs, cpuMs, gpuMs, minstr, systemMs, hash});
             if (rep != 0 && hash != samples[frame][rep - 1].hash) {
                 const auto display = capture.displays.at(static_cast<std::uint32_t>(frame));
