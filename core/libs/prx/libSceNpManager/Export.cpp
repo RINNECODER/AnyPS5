@@ -88,6 +88,44 @@ int APS5_VABI sceNpGetAccountAge(int req_id, int user_id, uint8_t* age) {
  return SCE_NP_ERROR_SIGNED_OUT;
 }
 
+int APS5_VABI sceNpGetAccountCountry(const NpOnlineId* online_id, void* country_code) {
+    if (!online_id || !country_code) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    return SCE_NP_ERROR_USER_NOT_FOUND;
+}
+
+int APS5_VABI sceNpGetAccountDateOfBirth(const NpOnlineId* online_id, void* date_of_birth) {
+    if (!online_id || !date_of_birth) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    return SCE_NP_ERROR_USER_NOT_FOUND;
+}
+
+int APS5_VABI sceNpGetAccountLanguage(int req_id, const NpOnlineId* online_id, void* language) {
+    (void)req_id;
+    if (!online_id || !language) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    return SCE_NP_ERROR_USER_NOT_FOUND;
+}
+
+int APS5_VABI sceNpGetParentalControlInfo(int req_id, const NpOnlineId* online_id, int8_t* age, void* info) {
+    (void)req_id;
+    if (!online_id || !age || !info) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    return SCE_NP_ERROR_USER_NOT_FOUND;
+}
+
+int APS5_VABI sceNpGetUserIdByOnlineId(const NpOnlineId* online_id, int* user_id) {
+    if (!online_id || !user_id) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    return SCE_NP_ERROR_SIGNED_OUT;
+}
+
+int APS5_VABI sceNpCheckPlus(int req_id, const void* param, void* result) {
+    if (req_id == 0 || !param || !result) return SCE_NP_ERROR_INVALID_ARGUMENT;
+    return SCE_NP_ERROR_SIGNED_OUT;
+}
+
+int APS5_VABI sceNpNotifyPlusFeature(const void* param) {
+    (void)param;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI sceNpGetAccountCountryA(int user_id, void* country_code) {
     (void)user_id;
     if (!country_code) return SCE_NP_ERROR_INVALID_ARGUMENT;
