@@ -1078,7 +1078,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                 cached->residency,
                 {}, 0,
                 /*elideResidency=*/true,
-                /*elidePipeline=*/elidePipeline);
+                /*elidePipeline=*/elidePipeline,
+                &lastEncoderState.vertexStage, &lastEncoderState.fragmentStage);
             lastEncoderState.pipelineState = cached->vertexPipeline->Pipeline();
 
             if (!encoderActive || !(lastEncoderState.dynamicState == currentDynamicState) || lastEncoderState.depthStencilState != cached->depthStencilState) {
@@ -1089,22 +1090,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
                 translationCache.RecordStateElision();
             }
 
-            bool vertexBuffersMatch = encoderActive && (lastEncoderState.vertexBuffers.size() == cached->vertexBuffers.size());
-            if (vertexBuffersMatch) {
-                for (std::size_t i = 0; i < cached->vertexBuffers.size(); ++i) {
-                    if (lastEncoderState.vertexBuffers[i].buffer != cached->vertexBuffers[i].buffer ||
-                        lastEncoderState.vertexBuffers[i].offset != cached->vertexBuffers[i].offset) {
-                        vertexBuffersMatch = false;
-                        break;
-                    }
-                }
-            }
-            if (!vertexBuffersMatch) {
-                for (std::size_t i = 0; i < cached->vertexBuffers.size(); ++i) {
-                    [encoder setVertexBuffer:cached->vertexBuffers[i].buffer offset:cached->vertexBuffers[i].offset atIndex:i];
-                }
-                lastEncoderState.vertexBuffers.assign(cached->vertexBuffers.begin(), cached->vertexBuffers.end());
-            }
+            BindVertexBuffers(encoder, cached->vertexBuffers, lastEncoderState.vertexStage);
             lastEncoderState.translationId = cached->recordId;
             lastEncoderState.pushConstants.assign(pushConstants.begin(), pushConstants.end());
         }
@@ -1714,6 +1700,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         [encoder endEncoding];
         throw;
     }
+    lastEncoderState.Reset();
     MetalEncoders::EndOrPark(backend, commands, encoder, passKey, mergeable);
     if (cacheable) {
         DynamicRenderState currentDynamicState{

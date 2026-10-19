@@ -647,18 +647,89 @@ void bindCompute(id<MTLComputeCommandEncoder> encoder, const ShaderResult& shade
 }
 
 void bindRender(id<MTLRenderCommandEncoder> encoder, const ShaderResult& shader,
-                const PreparedBindings& bindings, bool vertex) {
-    for (const auto& binding : bindings.buffers) {
-        if (vertex) [encoder setVertexBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
-        else [encoder setFragmentBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
-    }
-    for (const auto& binding : bindings.textures) {
-        if (vertex) [encoder setVertexTexture:binding.texture atIndex:binding.index];
-        else [encoder setFragmentTexture:binding.texture atIndex:binding.index];
-    }
-    for (const auto& binding : bindings.samplers) {
-        if (vertex) [encoder setVertexSamplerState:binding.sampler atIndex:binding.index];
-        else [encoder setFragmentSamplerState:binding.sampler atIndex:binding.index];
+                const PreparedBindings& bindings, bool vertex, StageBindings* shadow) {
+    if (shadow != nullptr) {
+        if (shadow->buffers.size() < 31) {
+            shadow->buffers.resize(31, nil);
+            shadow->offsets.resize(31, 0);
+        }
+        if (shadow->textures.size() < 128) shadow->textures.resize(128, nil);
+        if (shadow->samplers.size() < 1024) shadow->samplers.resize(1024, nil);
+        const BufferArgument* buffers[31] = {};
+        for (const auto& binding : bindings.buffers) buffers[binding.index] = &binding;
+        id<MTLBuffer> runBuffers[31];
+        NSUInteger runOffsets[31];
+        std::size_t runStart = 0, runCount = 0;
+        const auto flushBuffers = [&] {
+            if (runCount == 0) return;
+            if (vertex) [encoder setVertexBuffers:runBuffers offsets:runOffsets withRange:NSMakeRange(runStart, runCount)];
+            else [encoder setFragmentBuffers:runBuffers offsets:runOffsets withRange:NSMakeRange(runStart, runCount)];
+            runCount = 0;
+        };
+        for (std::size_t index = 0; index < 31; ++index) {
+            const auto* binding = buffers[index];
+            if (binding == nullptr) continue;
+            const auto& resource = binding->resource;
+            if (shadow->buffers[index] == resource.buffer && shadow->offsets[index] == resource.offset) continue;
+            if (resource.buffer != nil && shadow->buffers[index] == resource.buffer && resource.offset <= shadow->offsets[index]) {
+                flushBuffers();
+                if (vertex) [encoder setVertexBufferOffset:resource.offset atIndex:index];
+                else [encoder setFragmentBufferOffset:resource.offset atIndex:index];
+                shadow->offsets[index] = resource.offset;
+                continue;
+            }
+            if (resource.buffer == nil) {
+                flushBuffers();
+                if (vertex) [encoder setVertexBuffer:nil offset:resource.offset atIndex:index];
+                else [encoder setFragmentBuffer:nil offset:resource.offset atIndex:index];
+                shadow->buffers[index] = nil;
+                shadow->offsets[index] = resource.offset;
+                continue;
+            }
+            if (runCount != 0 && runStart + runCount != index) flushBuffers();
+            if (runCount == 0) runStart = index;
+            runBuffers[runCount] = resource.buffer;
+            runOffsets[runCount] = resource.offset;
+            ++runCount;
+            shadow->buffers[index] = resource.buffer;
+            shadow->offsets[index] = resource.offset;
+        }
+        flushBuffers();
+        id<MTLTexture> runTextures[128];
+        std::size_t textureStart = 0, textureCount = 0;
+        const auto flushTextures = [&] {
+            if (textureCount == 0) return;
+            if (vertex) [encoder setVertexTextures:runTextures withRange:NSMakeRange(textureStart, textureCount)];
+            else [encoder setFragmentTextures:runTextures withRange:NSMakeRange(textureStart, textureCount)];
+            textureCount = 0;
+        };
+        for (const auto& binding : bindings.textures) {
+            if (shadow->textures[binding.index] == binding.texture) continue;
+            if (textureCount != 0 && textureStart + textureCount != binding.index) flushTextures();
+            if (textureCount == 0) textureStart = binding.index;
+            runTextures[textureCount++] = binding.texture;
+            shadow->textures[binding.index] = binding.texture;
+        }
+        flushTextures();
+        for (const auto& binding : bindings.samplers) {
+            if (shadow->samplers[binding.index] == binding.sampler) continue;
+            if (vertex) [encoder setVertexSamplerState:binding.sampler atIndex:binding.index];
+            else [encoder setFragmentSamplerState:binding.sampler atIndex:binding.index];
+            shadow->samplers[binding.index] = binding.sampler;
+        }
+    } else {
+        for (const auto& binding : bindings.buffers) {
+            if (vertex) [encoder setVertexBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
+            else [encoder setFragmentBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
+        }
+        for (const auto& binding : bindings.textures) {
+            if (vertex) [encoder setVertexTexture:binding.texture atIndex:binding.index];
+            else [encoder setFragmentTexture:binding.texture atIndex:binding.index];
+        }
+        for (const auto& binding : bindings.samplers) {
+            if (vertex) [encoder setVertexSamplerState:binding.sampler atIndex:binding.index];
+            else [encoder setFragmentSamplerState:binding.sampler atIndex:binding.index];
+        }
     }
     if (shader.pushConstantBuffer) {
         if (vertex) [encoder setVertexBytes:bindings.pushConstants.data() length:bindings.pushConstants.size() atIndex:*shader.pushConstantBuffer];
@@ -685,6 +756,46 @@ void bindMesh(id<MTLRenderCommandEncoder> encoder, const ShaderResult& shader,
     }
 }
 
+}
+
+void BindVertexBuffers(id<MTLRenderCommandEncoder> encoder, std::span<const MetalBufferBinding> buffers, StageBindings& shadow) {
+    if (shadow.buffers.size() < 31) {
+        shadow.buffers.resize(31, nil);
+        shadow.offsets.resize(31, 0);
+    }
+    id<MTLBuffer> runBuffers[31];
+    NSUInteger runOffsets[31];
+    std::size_t runStart = 0, runCount = 0;
+    const auto flush = [&] {
+        if (runCount == 0) return;
+        [encoder setVertexBuffers:runBuffers offsets:runOffsets withRange:NSMakeRange(runStart, runCount)];
+        runCount = 0;
+    };
+    for (std::size_t index = 0; index < buffers.size(); ++index) {
+        const auto& resource = buffers[index];
+        if (shadow.buffers[index] == resource.buffer && shadow.offsets[index] == resource.offset) continue;
+        if (resource.buffer != nil && shadow.buffers[index] == resource.buffer && resource.offset <= shadow.offsets[index]) {
+            flush();
+            [encoder setVertexBufferOffset:resource.offset atIndex:index];
+            shadow.offsets[index] = resource.offset;
+            continue;
+        }
+        if (resource.buffer == nil) {
+            flush();
+            [encoder setVertexBuffer:nil offset:resource.offset atIndex:index];
+            shadow.buffers[index] = nil;
+            shadow.offsets[index] = resource.offset;
+            continue;
+        }
+        if (runCount != 0 && runStart + runCount != index) flush();
+        if (runCount == 0) runStart = index;
+        runBuffers[runCount] = resource.buffer;
+        runOffsets[runCount] = resource.offset;
+        ++runCount;
+        shadow.buffers[index] = resource.buffer;
+        shadow.offsets[index] = resource.offset;
+    }
+    flush();
 }
 
 MetalRectKernelPipeline::MetalRectKernelPipeline(id<MTLDevice> device, ShaderResult shader,
@@ -940,7 +1051,9 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
                                std::span<const MetalImplicitBufferBinding> implicitBuffers,
                                std::size_t rectPatchCount,
                                bool elideResidency,
-                               bool elidePipeline) const {
+                               bool elidePipeline,
+                               StageBindings* vertexStage,
+                               StageBindings* fragmentStage) const {
     if (encoder == nil || encoder.device != device) {
         throw std::invalid_argument("Converted Metal render binding requires an encoder on this device");
     }
@@ -958,9 +1071,9 @@ void MetalRenderPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
     if (!elidePipeline) {
         [encoder setRenderPipelineState:pipeline];
     }
-    bindRender(encoder, vertex, preparedVertex, true);
+    bindRender(encoder, vertex, preparedVertex, true, vertexStage);
     for (const auto& binding : implicit) [encoder setVertexBuffer:binding.resource.buffer offset:binding.resource.offset atIndex:binding.index];
-    bindRender(encoder, fragment, preparedFragment, false);
+    bindRender(encoder, fragment, preparedFragment, false, fragmentStage);
     if (!elideResidency) {
         for (id<MTLResource> resource : indirectResources) {
             [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageVertex | MTLRenderStageFragment];
@@ -1046,7 +1159,7 @@ void MetalMeshPipeline::Bind(id<MTLRenderCommandEncoder> encoder,
         [encoder setRenderPipelineState:pipeline];
     }
     bindMesh(encoder, mesh, preparedMesh);
-    bindRender(encoder, fragment, preparedFragment, false);
+    bindRender(encoder, fragment, preparedFragment, false, nullptr);
     if (!elideResidency) {
         for (id<MTLResource> resource : indirectResources) {
             [encoder useResource:resource usage:MTLResourceUsageRead | MTLResourceUsageWrite stages:MTLRenderStageMesh | MTLRenderStageFragment];

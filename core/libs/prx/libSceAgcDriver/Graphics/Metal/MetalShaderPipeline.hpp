@@ -27,6 +27,21 @@ struct MetalImplicitBufferBinding {
     MetalBufferBinding buffer;
 };
 
+struct StageBindings {
+    std::vector<id<MTLBuffer>> buffers;
+    std::vector<NSUInteger> offsets;
+    std::vector<id<MTLTexture>> textures;
+    std::vector<id<MTLSamplerState>> samplers;
+    void Reset() {
+        buffers.clear();
+        offsets.clear();
+        textures.clear();
+        samplers.clear();
+    }
+};
+
+void BindVertexBuffers(id<MTLRenderCommandEncoder> encoder, std::span<const MetalBufferBinding> buffers, StageBindings& shadow);
+
 class MetalRectKernelPipeline {
 public:
     explicit MetalRectKernelPipeline(id<MTLDevice> device, ShaderRecompiler::MetalBackend::Result shader,
@@ -85,7 +100,9 @@ public:
               std::span<const MetalImplicitBufferBinding> implicitBuffers = {},
               std::size_t rectPatchCount = 0,
               bool elideResidency = false,
-              bool elidePipeline = false) const;
+              bool elidePipeline = false,
+              StageBindings* vertexStage = nullptr,
+              StageBindings* fragmentStage = nullptr) const;
 
 private:
     id<MTLDevice> device;

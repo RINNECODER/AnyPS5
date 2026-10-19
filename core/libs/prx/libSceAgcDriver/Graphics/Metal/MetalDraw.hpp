@@ -165,6 +165,8 @@ private:
         std::vector<id<MTLResource>> residentResources;
         std::vector<id<MTLHeap>> residentHeaps;
         std::vector<MetalBufferBinding> vertexBuffers;
+        StageBindings vertexStage;
+        StageBindings fragmentStage;
         void Reset() {
             encoder = nil;
             translationId = 0;
@@ -175,6 +177,8 @@ private:
             residentResources.clear();
             residentHeaps.clear();
             vertexBuffers.clear();
+            vertexStage.Reset();
+            fragmentStage.Reset();
         }
     };
     EncoderDrawState lastEncoderState;
