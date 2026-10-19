@@ -132,6 +132,8 @@ static void CheckReceiveMessageFaults() {
     Iovec vector{reinterpret_cast<void*>(0x1000), sizeof(data)};
     message = {nullptr, 0, &vector, 1, nullptr, 0, -1};
     Require(ReceiveFaults(pair[1], &message));
+    vector.base = inaccessible;
+    Require(Queue(pair[0], pair[1], "x") && ReceiveFaults(pair[1], &message));
     vector.base = readOnly + 128;
     Require(Queue(pair[0], pair[1], "x") && ReceiveFaults(pair[1], &message));
     message = {reinterpret_cast<void*>(0x1000), 16, &good, 1, nullptr, 0, -1};
@@ -161,7 +163,12 @@ static void CheckReceiveMessageFaults() {
     Require(sceKernelMprotect(memory, page * 3, 3) == 0 && sceKernelMunmap(memory, page * 3) == 0);
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "recvmsg-memory") == 0) {
+        CheckReceiveMessageFaults();
+        return 0;
+    }
+    Require(argc == 1);
     int pair[2] = {-1, -1};
     Require(socketpair_nid_postfix(Unix, Stream, 0, pair) == 0);
     Require(pair[0] >= 0 && pair[0] < DescriptorSetSize && pair[1] >= 0 && pair[1] < DescriptorSetSize && pair[0] != pair[1]);
