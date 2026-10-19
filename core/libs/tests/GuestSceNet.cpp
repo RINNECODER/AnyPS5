@@ -711,25 +711,6 @@ static void CheckAddressText(int family, const char* text) {
     Require(sceNetInetNtop(family, address.data(), nullptr, output.size()) == nullptr && *sceNetErrnoLoc() == 22);
 }
 
-static void CheckInetPtonEx() {
-    std::array<std::uint8_t, 16> address{};
-    Require(sceNetInetPtonEx(2, "192.168.1.20", address.data(), 0) == 1);
-    Require(address[0] == 192 && address[1] == 168 && address[2] == 1 && address[3] == 20);
-    std::array<std::uint8_t, 16> expected{};
-    Require(sceNetInetPton(28, "fe80::1:2", expected.data()) == 1);
-    address.fill(0);
-    Require(sceNetInetPtonEx(28, "fe80::1:2", address.data(), 0) == 1 && address == expected);
-    Require(sceNetInetPtonEx(2, "not an address", address.data(), 0) == 0);
-    Require(Failed(sceNetInetPtonEx(99, "127.0.0.1", address.data(), 0), 47));
-    Require(Failed(sceNetInetPtonEx(2, nullptr, address.data(), 0), 22));
-    Require(Failed(sceNetInetPtonEx(2, "127.0.0.1", nullptr, 0), 22));
-    for (const int flags : {1, -1}) {
-        bool threw = false;
-        try { sceNetInetPtonEx(2, "127.0.0.1", address.data(), flags); } catch (const std::runtime_error&) { threw = true; }
-        Require(threw);
-    }
-}
-
 static void CheckInetPtonRejects(int family, const char* text) {
     std::array<std::uint8_t, 16> address{};
     address.fill(0xaa);
@@ -751,6 +732,25 @@ static void CheckInetPtonWhitespace() {
     }
     for (const char* text : {"::1 ", "::1\t", " ::1", "::1x"}) {
         CheckInetPtonRejects(28, text);
+    }
+}
+
+static void CheckInetPtonEx() {
+    std::array<std::uint8_t, 16> address{};
+    Require(sceNetInetPtonEx(2, "192.168.1.20", address.data(), 0) == 1);
+    Require(address[0] == 192 && address[1] == 168 && address[2] == 1 && address[3] == 20);
+    std::array<std::uint8_t, 16> expected{};
+    Require(sceNetInetPton(28, "fe80::1:2", expected.data()) == 1);
+    address.fill(0);
+    Require(sceNetInetPtonEx(28, "fe80::1:2", address.data(), 0) == 1 && address == expected);
+    Require(sceNetInetPtonEx(2, "not an address", address.data(), 0) == 0);
+    Require(Failed(sceNetInetPtonEx(99, "127.0.0.1", address.data(), 0), 47));
+    Require(Failed(sceNetInetPtonEx(2, nullptr, address.data(), 0), 22));
+    Require(Failed(sceNetInetPtonEx(2, "127.0.0.1", nullptr, 0), 22));
+    for (const int flags : {1, -1}) {
+        bool threw = false;
+        try { sceNetInetPtonEx(2, "127.0.0.1", address.data(), flags); } catch (const std::runtime_error&) { threw = true; }
+        Require(threw);
     }
 }
 
@@ -1202,8 +1202,8 @@ int main(int argc, char** argv) {
     CheckAddressText(2, "255.255.255.255");
     CheckAddressText(28, "::1");
     CheckAddressText(28, "1234:5678:9abc:def0:1234:5678:9abc:def0");
-    CheckInetPtonEx();
     CheckInetPtonWhitespace();
+    CheckInetPtonEx();
     CheckUsleep();
     CheckEpollIdent();
     CheckLinkLocalAllNodesIpv6();
