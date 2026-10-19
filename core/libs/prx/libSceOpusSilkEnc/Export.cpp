@@ -35,11 +35,6 @@ int APS5_VABI sceOpusSilkEncEncode() {
     return 0;
 }
 
-int APS5_VABI sceOpusSilkEncEncodeCancelForTimeout() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceOpusSilkEncEncodeFloat() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -61,11 +56,6 @@ int APS5_VABI sceOpusSilkEncEncodeWithPriority() {
 }
 
 int APS5_VABI sceOpusSilkEncEncodeWithPriorityAndTimeout() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceOpusSilkEncGetAjmContext() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

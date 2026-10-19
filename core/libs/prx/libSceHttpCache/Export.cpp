@@ -15,16 +15,6 @@ int APS5_VABI sceHttpCacheClearAll() {
     return 0;
 }
 
-int APS5_VABI sceHttpCacheClearAllUserTags() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpCacheClearCacheInfo() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHttpCacheCompleteRequest() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -40,11 +30,6 @@ int APS5_VABI sceHttpCacheCreateRequestWithTag() {
     return 0;
 }
 
-int APS5_VABI sceHttpCacheDebugSetUrl() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHttpCacheDeleteRequest() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -56,21 +41,6 @@ int APS5_VABI sceHttpCacheInit() {
 }
 
 int APS5_VABI sceHttpCacheReadData() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpCacheRedirectedConnectionEnabled() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpCacheRegisterCacheInfoUrl() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpCacheRemoveTag() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -121,11 +91,6 @@ int APS5_VABI sceHttpCacheSystemClearAll() {
 }
 
 int APS5_VABI sceHttpCacheSystemInit() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpCacheSystemOnUserServiceEvent() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
