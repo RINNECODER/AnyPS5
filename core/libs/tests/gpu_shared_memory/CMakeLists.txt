@@ -31,11 +31,23 @@ target_link_libraries(gpu_shared_memory_writer PRIVATE Threads::Threads)
 add_executable(gpu_shared_memory_verifier SharedMemoryVerifier.cpp)
 target_compile_features(gpu_shared_memory_verifier PRIVATE cxx_std_20)
 
-set_target_properties(gpu_shared_memory_writer gpu_shared_memory_verifier PROPERTIES
+# The registry contract: a partial remap or unmap keeps the fragments of the registered range
+# around it, with their object offsets advanced by the bytes kept.
+add_executable(gpu_shared_memory_registry
+    RegistryFragments.cpp
+    ../../prx/libc/src/GpuSharedMemory.cpp)
+target_include_directories(gpu_shared_memory_registry PRIVATE ../..)
+target_compile_features(gpu_shared_memory_registry PRIVATE cxx_std_20)
+
+set_target_properties(gpu_shared_memory_writer gpu_shared_memory_verifier gpu_shared_memory_registry PROPERTIES
     CXX_EXTENSIONS OFF
     RUNTIME_OUTPUT_DIRECTORY "$<1:${ANYPS5_TEST_OUTPUT_DIRECTORY}>")
 set_target_properties(gpu_shared_memory_writer PROPERTIES OSX_ARCHITECTURES x86_64)
 set_target_properties(gpu_shared_memory_verifier PROPERTIES OSX_ARCHITECTURES arm64)
+
+add_test(NAME gpu_shared_memory_registry
+    COMMAND gpu_shared_memory_registry ${CMAKE_CURRENT_BINARY_DIR}/fragments-manifest.txt)
+set_tests_properties(gpu_shared_memory_registry PROPERTIES TIMEOUT 30)
 
 add_test(NAME gpu_shared_memory_proof
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_proof.sh

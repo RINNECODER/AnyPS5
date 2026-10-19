@@ -360,7 +360,12 @@ int PhysicalFile() {
     static const int file = [] {
         const bool shared = GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix();
         const std::string& name = PhysicalObjectName();
-        if (shared) GpuSharedMemory::GpuSharedMemoryAdoptObject_nid_postfix(name.c_str());
+        if (shared) {
+            // An earlier run that died before its exit handler leaves the name behind, and macOS
+            // reuses the pid, so the exclusive create has to start from a clean name.
+            GpuSharedMemory::GpuSharedMemoryAdoptObject_nid_postfix(name.c_str());
+            shm_unlink(name.c_str());
+        }
         const int created = shm_open(name.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
         if (created < 0) throw std::system_error(errno, std::generic_category(), "create direct memory backing");
         if (!shared) shm_unlink(name.c_str());

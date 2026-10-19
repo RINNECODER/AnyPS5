@@ -33,6 +33,24 @@ struct State {
     bool exitInstalled = false;
 };
 
+// Removes the part of every registered range that [address, end) covers, keeping the fragments
+// before and after it with their object offsets advanced by the bytes kept, so a partial remap or
+// unmap does not lose the ranges around it.
+void SplittingErase(std::vector<Region>& regions, std::uint64_t address, std::uint64_t end) {
+    std::vector<Region> kept;
+    kept.reserve(regions.size() + 2);
+    for (const auto& region : regions) {
+        const auto regionEnd = region.address + region.bytes;
+        if (regionEnd <= address || end <= region.address) {
+            kept.push_back(region);
+            continue;
+        }
+        if (region.address < address) kept.push_back({region.address, address - region.address, region.object, region.offset});
+        if (regionEnd > end) kept.push_back({end, regionEnd - end, region.object, region.offset + (end - region.address)});
+    }
+    regions = std::move(kept);
+}
+
 State& state() {
     static auto* value = new State;
     return *value;
@@ -56,9 +74,9 @@ const char* manifestPath() {
     return text != nullptr && *text != '\0' ? text : nullptr;
 }
 
-void writeManifest() {
+bool writeManifest() {
     const char* path = manifestPath();
-    if (path == nullptr) return;
+    if (path == nullptr) return false;
     auto& shared = state();
     std::vector<Region> regions;
     std::vector<std::string> objects;
@@ -75,7 +93,7 @@ void writeManifest() {
     objects.erase(std::unique(objects.begin(), objects.end()), objects.end());
     const std::string temporary = std::string(path) + ".tmp";
     std::FILE* file = std::fopen(temporary.c_str(), "w");
-    if (file == nullptr) return;
+    if (file == nullptr) return false;
     std::fprintf(file, "anyps5-gpu-shared-memory 1\n");
     for (const auto& object : objects) {
         std::uint64_t bytes = 0;
@@ -93,9 +111,13 @@ void writeManifest() {
     }
     if (std::fflush(file) != 0 || std::fclose(file) != 0) {
         std::remove(temporary.c_str());
-        return;
+        return false;
     }
-    std::rename(temporary.c_str(), path);
+    if (std::rename(temporary.c_str(), path) != 0) {
+        std::remove(temporary.c_str());
+        return false;
+    }
+    return true;
 }
 
 void atExit() {
@@ -181,12 +203,9 @@ void GpuSharedMemoryAdoptObject_nid_postfix(const char* name) {
 bool GpuSharedMemoryRegister_nid_postfix(std::uint64_t address, std::uint64_t bytes, const char* object, std::uint64_t offset) {
 #if defined(__APPLE__)
     if (!enabled() || bytes == 0 || object == nullptr) return false;
-    const auto end = address + bytes;
     auto& shared = state();
     std::lock_guard lock(shared.lock);
-    std::erase_if(shared.regions, [address, end](const Region& region) {
-        return region.address < end && address < region.address + region.bytes;
-    });
+    SplittingErase(shared.regions, address, address + bytes);
     shared.regions.push_back({address, bytes, object, offset});
     return true;
 #else
@@ -201,12 +220,9 @@ bool GpuSharedMemoryRegister_nid_postfix(std::uint64_t address, std::uint64_t by
 void GpuSharedMemoryUnregister_nid_postfix(std::uint64_t address, std::uint64_t bytes) {
 #if defined(__APPLE__)
     if (!enabled() || bytes == 0) return;
-    const auto end = address + bytes;
     auto& shared = state();
     std::lock_guard lock(shared.lock);
-    std::erase_if(shared.regions, [address, end](const Region& region) {
-        return region.address < end && address < region.address + region.bytes;
-    });
+    SplittingErase(shared.regions, address, address + bytes);
 #else
     static_cast<void>(address);
     static_cast<void>(bytes);
@@ -221,9 +237,8 @@ std::size_t GpuSharedMemoryRegionCount_nid_postfix() {
 
 bool GpuSharedMemoryPublish_nid_postfix() {
 #if defined(__APPLE__)
-    if (!enabled() || manifestPath() == nullptr) return false;
-    writeManifest();
-    return true;
+    if (!enabled()) return false;
+    return writeManifest();
 #else
     return false;
 #endif
