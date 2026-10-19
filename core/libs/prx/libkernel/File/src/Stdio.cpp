@@ -400,6 +400,11 @@ static int SceErrorFromErrno(int error) {
     return static_cast<int>(0x80020000u | static_cast<unsigned>(guest));
 }
 
+static int PathLookupFailure(const std::error_code& error) {
+    const bool lookup = error == std::errc::filename_too_long || error == std::errc::too_many_symbolic_link_levels;
+    return lookup ? SceErrorFromErrno(error.default_error_condition().value()) : 0;
+}
+
 extern "C" int* APS5_VABI __error_nid_postfix();
 
 static int PosixFailure(int error) {
@@ -1126,6 +1131,7 @@ int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
     while (!native.has_filename() && native.has_relative_path()) native = native.parent_path();
     std::error_code error;
     if (std::filesystem::exists(native, error)) return SceErrorFromErrno(GUEST_EEXIST);
+    if (const int failure = PathLookupFailure(error)) return failure;
     if (!std::filesystem::is_directory(WithoutTrailingSeparator(native).parent_path(), error)) {
         return SceErrorFromErrno(HasNonDirectoryPrefix(native) ? GUEST_ENOTDIR : GUEST_ENOENT);
     }
@@ -1336,6 +1342,7 @@ int APS5_VABI sceKernelRmdir(const char* path) {
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
     std::error_code error;
     if (std::filesystem::is_symlink(native, error)) return SceErrorFromErrno(GUEST_ENOTDIR);
+    if (const int failure = PathLookupFailure(error)) return failure;
     if (!std::filesystem::is_directory(native, error)) {
         const bool blockedByFile = HasNonDirectoryPrefix(native) || std::filesystem::exists(WithoutTrailingSeparator(native), error);
         return SceErrorFromErrno(blockedByFile ? GUEST_ENOTDIR : GUEST_ENOENT);
