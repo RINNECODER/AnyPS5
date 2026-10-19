@@ -222,6 +222,14 @@ int main() {
     decode = DecodeParam(rgbPng, image);
     decode.pixel_format = 2;
     Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
+    std::vector<std::uint8_t> invalidAlphaImage(3 * 2 * 4, 0xCC);
+    decode = DecodeParam(rgbPng, invalidAlphaImage);
+    decode.alpha_value = 0x100;
+    Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
+    Require(std::all_of(invalidAlphaImage.begin(), invalidAlphaImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
+    decode.alpha_value = 0xFFFF;
+    Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
+    Require(std::all_of(invalidAlphaImage.begin(), invalidAlphaImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
     decode = DecodeParam(rgbPng, image);
     decode.image_pitch = 3 * 4 - 1;
     Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
