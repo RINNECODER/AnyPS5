@@ -105,15 +105,22 @@ bool FindFrameFast(Lookup& query) {
     if (header[0] != 1) return false;
     static std::mutex mutex;
     static std::map<std::tuple<const Byte*, const void*, const void*>, std::pair<Word, Word>> bases;
+    const std::tuple key {header, static_cast<const void*>(object.dlfo_map_start), static_cast<const void*>(object.dlfo_map_end)};
     {
         std::lock_guard lock(mutex);
-        const std::tuple key {header, static_cast<const void*>(object.dlfo_map_start), static_cast<const void*>(object.dlfo_map_end)};
         auto found = bases.find(key);
-        if (found == bases.end()) {
-            Lookup probe {query.pc};
-            dl_iterate_phdr(FindFrame, &probe);
-            found = bases.emplace(key, std::pair {probe.text, probe.data}).first;
+        if (found != bases.end()) {
+            query.text = found->second.first;
+            query.data = found->second.second;
+            SearchHeader(header, query);
+            return true;
         }
+    }
+    Lookup probe {query.pc};
+    dl_iterate_phdr(FindFrame, &probe);
+    {
+        std::lock_guard lock(mutex);
+        const auto found = bases.emplace(key, std::pair {probe.text, probe.data}).first;
         query.text = found->second.first;
         query.data = found->second.second;
     }
