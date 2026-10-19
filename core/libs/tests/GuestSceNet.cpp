@@ -730,6 +730,30 @@ static void CheckInetPtonEx() {
     }
 }
 
+static void CheckInetPtonRejects(int family, const char* text) {
+    std::array<std::uint8_t, 16> address{};
+    address.fill(0xaa);
+    *sceNetErrnoLoc() = 123;
+    Require(sceNetInetPton(family, text, address.data()) == 0 && *sceNetErrnoLoc() == 123);
+    Require(std::all_of(address.begin(), address.end(), [](std::uint8_t byte) { return byte == 0xaa; }));
+}
+
+static void CheckInetPtonWhitespace() {
+    for (const char* text : {"1.2.3.4 ", "1.2.3.4\t", "1.2.3.4\n", "1.2.3.4\v", "1.2.3.4\f", "1.2.3.4\r", "1.2.3.4 5", "1.2.3.4 x"}) {
+        std::array<std::uint8_t, 16> address{};
+        address.fill(0xaa);
+        *sceNetErrnoLoc() = 123;
+        Require(sceNetInetPton(2, text, address.data()) == 1 && *sceNetErrnoLoc() == 123);
+        Require(address[0] == 1 && address[1] == 2 && address[2] == 3 && address[3] == 4 && address[4] == 0xaa);
+    }
+    for (const char* text : {" 1.2.3.4", "1.2.3.4x", "1.2.3.4.", "1.2.3.4\x01", "1.2.3.4\xa0", "1.2. 3.4", "1.2.3", "1.2.3 ", "01.2.3.4", "256.0.0.1"}) {
+        CheckInetPtonRejects(2, text);
+    }
+    for (const char* text : {"::1 ", "::1\t", " ::1", "::1x"}) {
+        CheckInetPtonRejects(28, text);
+    }
+}
+
 static void CheckUsleep() {
     Require(sceNetUsleep(0) == 0);
     const auto start = std::chrono::steady_clock::now();
@@ -1179,6 +1203,7 @@ int main(int argc, char** argv) {
     CheckAddressText(28, "::1");
     CheckAddressText(28, "1234:5678:9abc:def0:1234:5678:9abc:def0");
     CheckInetPtonEx();
+    CheckInetPtonWhitespace();
     CheckUsleep();
     CheckEpollIdent();
     CheckLinkLocalAllNodesIpv6();
