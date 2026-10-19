@@ -615,7 +615,10 @@ void StartMetalPipelineManifestReplay(id<MTLDevice> device) {
         replayDone = false;
     }
     MetalWorkerPool::Shared().Enqueue([device] {
-        ReplayMetalPipelineManifest(device);
+        try {
+            ReplayMetalPipelineManifest(device);
+        } catch (...) {
+        }
         {
             std::lock_guard lock(replayMutex);
             replayDone = true;

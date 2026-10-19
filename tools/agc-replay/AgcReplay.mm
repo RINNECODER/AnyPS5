@@ -876,7 +876,7 @@ int main(int argc, char** argv) {
         else std::printf("wrote %s\n", dumpPng.c_str());
     }
     std::fflush(stdout);
-    if (psoStats) AgcDriver::Metal::FlushMetalPipelineArchives();
+    AgcDriver::Metal::FlushMetalPipelineArchives();
     AgcDriver::Metal::FlushMetalPipelineManifest();
     if (psoStats) {
         const auto cache = AgcDriver::Metal::GetMetalPipelineCacheStatistics();

@@ -564,9 +564,11 @@ void ArchiveWorkerMain() {
             queuedRecords.clear();
         }
         if (!batch.empty()) {
-            try {
-                AddQueuedBatch(batch);
-            } catch (...) {
+            @autoreleasepool {
+                try {
+                    AddQueuedBatch(batch);
+                } catch (...) {
+                }
             }
         }
         {
