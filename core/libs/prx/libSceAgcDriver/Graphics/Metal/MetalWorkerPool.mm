@@ -4,6 +4,12 @@
 
 namespace AgcDriver::Metal {
 
+namespace {
+thread_local bool poolThread = false;
+}
+
+bool MetalWorkerPool::OnPoolThread() { return poolThread; }
+
 std::size_t MetalWorkerPool::DefaultWorkerCount() {
     const char* env = std::getenv("ANYPS5_METAL_WORKER_THREADS");
     if (env != nullptr) {
@@ -23,6 +29,7 @@ MetalWorkerPool::MetalWorkerPool(std::size_t count) {
     workers.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         workers.emplace_back([this, i] {
+            poolThread = true;
             char name[32];
             std::snprintf(name, sizeof(name), "agc-metal-w%zu", i);
             pthread_setname_np(name);

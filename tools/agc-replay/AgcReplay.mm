@@ -24,6 +24,8 @@
 #include "prx/libSceAgcDriver/Execution/Metal/AgcFrameCapture.hpp"
 #include "prx/libSceAgcDriver/Execution/Metal/DirectDriver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MetalDriver.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/MetalPipelineCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/MetalPipelineManifest.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
 #include <mach/mach.h>
 #include <libproc.h>
@@ -437,7 +439,7 @@ double Median(std::vector<double> values) {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: %s <capture-dir> [--frames N] [--repeat K] [--dump-png out.png] [--expect-hash HEX]\n"
-                             "       [--expect-png ref.png [--max-diff-pixels N]] [--metallib PATH] [--quiet]\n", argv[0]);
+                             "       [--expect-png ref.png [--max-diff-pixels N]] [--metallib PATH] [--quiet] [--pso-stats]\n", argv[0]);
         return 2;
     }
     std::string dir = argv[1];
@@ -450,6 +452,7 @@ int main(int argc, char** argv) {
     std::string metallib = ANYPS5_AGC_REPLAY_METALLIB;
     if (const char* value = std::getenv("ANYPS5_METAL_UTILITY_LIBRARY"); value != nullptr && *value != '\0') metallib = value;
     bool quiet = false;
+    bool psoStats = false;
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         const auto next = [&]() -> std::string {
@@ -464,6 +467,7 @@ int main(int argc, char** argv) {
         else if (arg == "--max-diff-pixels") maxDiffPixels = std::stoul(next());
         else if (arg == "--metallib") metallib = next();
         else if (arg == "--quiet") quiet = true;
+        else if (arg == "--pso-stats") psoStats = true;
         else Fail("unknown argument " + arg);
     }
     // The queue workers are created from this thread and inherit its QoS: user-interactive keeps
@@ -542,6 +546,7 @@ int main(int argc, char** argv) {
     Metal::ApplyDirectWorkingSet();
     auto& driver = Metal::MetalDriver::Get();
     driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, {}, 1);
+    AgcDriver::Metal::WaitForMetalPipelineManifestReplay(120000);
     driver.SetSkipInvalidCommandBuffers(true);
     std::set<std::uint32_t> handles;
     for (const auto* submit : submits)
@@ -876,6 +881,26 @@ int main(int argc, char** argv) {
         else std::printf("wrote %s\n", dumpPng.c_str());
     }
     std::fflush(stdout);
+    AgcDriver::Metal::FlushMetalPipelineArchives();
+    AgcDriver::Metal::FlushMetalPipelineManifest();
+    if (psoStats) {
+        const auto cache = AgcDriver::Metal::GetMetalPipelineCacheStatistics();
+        const auto manifest = AgcDriver::Metal::GetMetalPipelineManifestStatistics();
+        const auto ms = [](std::uint64_t micros) { return static_cast<double>(micros) / 1000.0; };
+        std::printf("pso: library compiles %llu (%.1f ms), pipeline creations %llu (%.1f ms)\n",
+            static_cast<unsigned long long>(cache.libraryCompiles), ms(cache.libraryCompileMicros),
+            static_cast<unsigned long long>(cache.pipelineCreations), ms(cache.pipelineCreationMicros));
+        std::printf("pso: draw-thread library compiles %llu (%.1f ms), draw-thread pipeline creations %llu (%.1f ms)\n",
+            static_cast<unsigned long long>(cache.drawThreadLibraryCompiles), ms(cache.drawThreadLibraryCompileMicros),
+            static_cast<unsigned long long>(cache.drawThreadCreations), ms(cache.drawThreadCreationMicros));
+        std::printf("pso: render misses %llu hits %llu, compute misses %llu hits %llu\n",
+            static_cast<unsigned long long>(cache.renderPipelines.misses), static_cast<unsigned long long>(cache.renderPipelines.hits),
+            static_cast<unsigned long long>(cache.computePipelines.misses), static_cast<unsigned long long>(cache.computePipelines.hits));
+        std::printf("pso: manifest entries %llu loaded %llu replayed %llu failed %llu (%.1f ms)\n",
+            static_cast<unsigned long long>(manifest.entries), static_cast<unsigned long long>(manifest.loaded),
+            static_cast<unsigned long long>(manifest.replayed), static_cast<unsigned long long>(manifest.failed), ms(manifest.micros));
+        std::fflush(stdout);
+    }
     // The driver's workers and Metal objects are not torn down: exit directly.
     _exit(status);
 }

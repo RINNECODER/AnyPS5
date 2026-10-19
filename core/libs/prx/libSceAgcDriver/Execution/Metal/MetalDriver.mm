@@ -2,6 +2,7 @@
 #include "AgcFrameCapture.hpp"
 #include <pthread.h>
 #include "prx/libSceAgcDriver/Graphics/Metal/BindTrace.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/MetalPipelineManifest.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalPresentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -172,6 +173,7 @@ void MetalDriver::Configure(void* device, void* library,
     impl->eopInterrupt = std::move(interrupt);
     impl->shaders = std::move(registry);
     impl->configured = true;
+    StartMetalPipelineManifestReplay(nativeDevice);
 }
 
 bool MetalDriver::WaitBeforeHostWrites(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
