@@ -101,6 +101,30 @@ public:
         return std::nullopt;
     }
 
+    // Re-proves, for a draw translation record that bound `texture` and read `guest` at `host`, the
+    // same lazy proof an Expire defers: the record's own images only, not every entry. False when a
+    // write dropped the entry, it now describes another guest range or texture, or its bytes
+    // changed; the caller drops its record and re-prepares it.
+    [[nodiscard]] bool Revalidate(const std::byte* host, std::uint64_t guest, std::uint64_t content, const Texture* texture) {
+        if (host == nullptr || texture == nullptr) return false;
+        std::lock_guard lock(mutex);
+        const auto found = entries.find(address(host));
+        if (found == entries.end()) return false;
+        auto& entry = found->second;
+        if (entry.guest != guest || entry.content != content || entry.texture.get() != texture) return false;
+        if (entry.generation != generation) {
+            if (!proves(entry)) {
+                ++statistics.rejected;
+                erase(found);
+                return false;
+            }
+            ++statistics.verified;
+            entry.generation = generation;
+        }
+        entry.stamp = ++clock;
+        return true;
+    }
+
     // Records that `texture`'s texels now equal the guest bytes at `guest`/`host` (or, with a
     // nonzero `content`, the clear value it stands for); replaces every entry whose host bytes
     // overlap them. `written`: the work that made it writes the surface, so its bytes match only
@@ -182,6 +206,13 @@ public:
     [[nodiscard]] std::size_t Size() const {
         std::lock_guard lock(mutex);
         return entries.size();
+    }
+
+    // The Expire generation: a record that read a surface with no entry here is valid only while
+    // this is unchanged (it has no proof of its own to re-run).
+    [[nodiscard]] std::uint64_t Generation() const {
+        std::lock_guard lock(mutex);
+        return generation;
     }
 
     // Guest bytes the entries cover.

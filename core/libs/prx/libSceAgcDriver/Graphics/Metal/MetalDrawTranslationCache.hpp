@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 #include "MetalDevice.hpp"
 #include "MetalShaderPipeline.hpp"
+#include "MetalTexture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
@@ -236,6 +237,28 @@ struct DynamicRenderState {
     }
 };
 
+// One guest image a draw read through the image cache: what its record's bindings stand on. The
+// record is valid only while every one of these still proves the bytes it was built from, so a
+// record survives GuestImageCache::Expire (the entries re-prove lazily) but not a write to its own
+// images.
+struct DrawImageDependency {
+    const std::byte* host = nullptr;
+    std::uint64_t guest = 0;
+    std::uint64_t content = 0;
+    std::shared_ptr<MetalTexture> texture;
+};
+
+// One resident surface a draw's bindings sampled through the depth cache
+// (MetalDraw::residentTexture) instead of a guest-memory texture. A view built now of a surface the
+// record was built on has the same root texture (MetalEncoders::RootTexture), so a record whose draw
+// sampled a surface since re-created at its address is dropped.
+struct DrawResidentDependency {
+    Graphics::GuestTextureResource descriptor{};
+    bool storage = false;
+    bool compare = false;
+    id<MTLTexture> root = nil;
+};
+
 struct DrawTranslationRecord {
     std::uint64_t recordId = 0;
     std::shared_ptr<MetalRenderPipeline> vertexPipeline;
@@ -261,7 +284,18 @@ struct DrawTranslationRecord {
     std::size_t fragmentPushOffset = 0;
 
     std::uint64_t memoryVersion = 0;
-    std::uint64_t imageCacheClears = 0;
+    std::vector<DrawImageDependency> images;
+    // Images the record read that have no image-cache entry (staged or partially borrowed): with no
+    // proof to re-run, the record is valid only while `imageCacheGeneration` is unchanged.
+    std::uint32_t uncachedImages = 0;
+    std::uint64_t imageCacheGeneration = 0;
+    std::vector<DrawResidentDependency> residentDependencies;
+    // Whether this work writes guest memory only through its render-pass attachments. A record whose
+    // draw wrote a storage buffer or image has no write plan to replay, so it is not reused.
+    bool attachmentsOnly = false;
+    // Guest ranges whose lazy copy-backs the draw encoded ahead of its own bindings, encoded again
+    // when the record is reused.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> materializedRanges;
 
     DrawTranslationKey key;
 };
@@ -272,6 +306,12 @@ struct DrawCacheStatistics {
     std::uint64_t misses = 0;
     std::uint64_t inserts = 0;
     std::uint64_t clears = 0;
+    // Records the cache served and the draw then dropped: one of their own images no longer proved
+    // the bytes they were built from, the draw wrote something a reused record cannot replay, or it
+    // no longer binds the record's attachment objects.
+    std::uint64_t rejectedImages = 0;
+    std::uint64_t rejectedWrites = 0;
+    std::uint64_t rejectedAttachments = 0;
     std::uint64_t redundantStateElisions = 0;
 };
 
@@ -293,8 +333,7 @@ public:
     }
 
     [[nodiscard]] std::shared_ptr<DrawTranslationRecord> Find(const DrawTranslationKey& key,
-                                                              std::uint64_t currentMemoryVersion,
-                                                              std::uint64_t currentImageCacheClears) {
+                                                              std::uint64_t currentMemoryVersion) {
         if (!Enabled()) return nullptr;
         std::lock_guard lock(mutex);
         ++statistics.lookups;
@@ -304,7 +343,7 @@ public:
             return nullptr;
         }
         const auto& record = it->second;
-        if (record->memoryVersion != currentMemoryVersion || record->imageCacheClears != currentImageCacheClears) {
+        if (record->memoryVersion != currentMemoryVersion) {
             ++statistics.misses;
             live.store(false, std::memory_order_relaxed);
             return nullptr;
@@ -322,11 +361,22 @@ public:
         return record;
     }
 
-    // Whether the cache served a record at the version it is at now: a batch scan recompiles every
+    // Whether the cache served a record that its images still prove: a batch scan recompiles every
     // draw it looks at, so the scan only runs while this holds (the batch needs a record for its
-    // first draw, and none exists before the serial path made one). An image-cache expire moves the
-    // version and clears this until the serial path inserts a record the cache can serve again.
+    // first draw, and none exists before the serial path made one). A record whose own images
+    // changed is removed, which clears this until the cache serves another.
     [[nodiscard]] bool Live() const { return live.load(std::memory_order_relaxed); }
+
+    // Drops the record for `key` (its images no longer prove the bytes it was built from).
+    void Remove(const DrawTranslationKey& key) {
+        std::lock_guard lock(mutex);
+        const auto it = entries.find(key);
+        if (it == entries.end()) return;
+        const auto id = it->second->recordId;
+        entries.erase(it);
+        lruOrder.remove(id);
+        live.store(false, std::memory_order_relaxed);
+    }
 
     void Insert(std::shared_ptr<DrawTranslationRecord> record) {
         if (!Enabled() || record == nullptr) return;
@@ -358,6 +408,12 @@ public:
     void RecordStateElision() {
         std::lock_guard lock(mutex);
         ++statistics.redundantStateElisions;
+    }
+
+    // Counts a record the cache served that the draw then dropped (DrawCacheStatistics).
+    void RecordRejection(std::uint64_t DrawCacheStatistics::* reason) {
+        std::lock_guard lock(mutex);
+        ++(statistics.*reason);
     }
 
     [[nodiscard]] DrawCacheStatistics TakeStatistics(bool reset = true) {

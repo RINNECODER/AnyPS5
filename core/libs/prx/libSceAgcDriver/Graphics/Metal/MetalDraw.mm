@@ -811,6 +811,156 @@ void MetalDraw::PopulateTranslationKey(DrawTranslationKey& key,
     key.nativeIndexSize = draw.indexSize;
 }
 
+// The attachments a draw renders into, built from its state: depth and multisampled color surfaces
+// the depth cache holds resident, single-sample color targets the image cache serves or this work
+// uploads, and (for a multisampled pass over a single-sample target) the transient textures it is
+// expanded into. Both the fresh path and a reused translation record call this, so a record's
+// render pass is the one its draw would build now.
+MetalDraw::PassAttachments MetalDraw::ConfigureAttachments(const Graphics::State& state, MetalShaderResources& resources) {
+    auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
+    if (depth) {
+        // The surface bound last at an address is the one a view of it reads: it goes last, and the
+        // depth surfaces its planes overlap (another stencil pairing of its depth plane, another extent
+        // at its address) are retired until they are bound again.
+        std::erase(depthSurfaces, depth);
+        RetireDepthSurfaces(depthSurfaces, depth->Target());
+        depthSurfaces.push_back(depth);
+    }
+    // A color target over a depth surface's memory writes where its planes were (all its fragments).
+    for (const auto& color : state.colors) RetireDepthSurfaces(depthSurfaces, color, depth.get());
+    // A depth-only draw that exports a render target index renders into slices slice..lastSlice of its
+    // depth array at once; each slice also gets its surface, so later single-slice and array readers find it.
+    const std::uint32_t depthLayers = depth && state.layered && state.depth->samples == 1 ?
+        state.depth->lastSlice - state.depth->slice + 1u : 0u;
+    if (depthLayers > 1) {
+        for (std::uint32_t layer = 1; layer < depthLayers; ++layer) {
+            const auto slice = DepthArraySlice(*state.depth, layer);
+            auto surface = depthCache->Acquire(slice);
+            RetireDepthSurfaces(depthSurfaces, slice, surface.get());
+            if (std::find(depthSurfaces.begin(), depthSurfaces.end(), surface) == depthSurfaces.end()) depthSurfaces.push_back(surface);
+        }
+    }
+    PassAttachments pass;
+    pass.renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
+    auto renderPass = pass.renderPass;
+    renderPass.renderTargetWidth = state.renderExtent.width;
+    renderPass.renderTargetHeight = state.renderExtent.height;
+    ConfigureSamplePositions(renderPass, backend.Device(), state);
+    for (const auto& color : state.colors) {
+        if (color.exportIndex >= 8) throw std::invalid_argument("Metal draw color export slot is invalid");
+        auto attachment = renderPass.colorAttachments[color.exportIndex];
+        attachment.loadAction = MTLLoadActionLoad;
+        attachment.storeAction = MTLStoreActionStore;
+        if (color.samples > 1) {
+            if (color.samples != state.rasterSamples) throw std::invalid_argument("Metal draw multisampled color target disagrees with the pass sample count");
+            auto surface = depthCache->Acquire(color);
+            if (std::find(colorSurfaces.begin(), colorSurfaces.end(), surface) == colorSurfaces.end()) colorSurfaces.push_back(surface);
+            attachment.texture = surface->Texture();
+            if (surface->Texture().storageMode == MTLStorageModeMemoryless) {
+                attachment.loadAction = MTLLoadActionDontCare;
+                attachment.storeAction = MTLStoreActionDontCare;
+            }
+            continue;
+        }
+        auto texture = resources.Texture(colorSurface(color), true, false, false, color.mip);
+        // The surface is typed by its memory layout; the attachment renders through the guest state's format.
+        id<MTLTexture> handle = ColorAttachmentView(texture->Texture(), RenderPixelFormat(color.format));
+        if (state.rasterSamples == 1) {
+            attachment.texture = handle;
+            attachment.level = color.mip;
+            attachment.slice = color.arraySlice;
+            attachment.depthPlane = color.depthSlice;
+            continue;
+        }
+        // A single-fragment target in a multisampled pass: expand it into a transient multisample
+        // texture before the draw and resolve the samples back into the target after it.
+        if (color.depth != 1 || color.uintExport || color.packing != ShaderRecompiler::ColorExportPacking::None) {
+            throw std::invalid_argument("Metal draw cannot resolve a 3D, integer or packed single-fragment color target from a multisampled pass");
+        }
+        switch (handle.pixelFormat) {
+        case MTLPixelFormatR8Uint: case MTLPixelFormatR16Uint: case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint:
+        case MTLPixelFormatRG16Uint: case MTLPixelFormatRG32Uint: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA32Uint:
+            throw std::invalid_argument("Metal draw cannot resolve an integer single-fragment color target from a multisampled pass");
+        default:
+            break;
+        }
+        id<MTLTexture> level = [handle newTextureViewWithPixelFormat:handle.pixelFormat textureType:MTLTextureType2D
+            levels:NSMakeRange(color.mip, 1) slices:NSMakeRange(0, 1)];
+        if (level == nil) throw std::runtime_error("Metal draw color level view creation failed");
+        pass.expansions.push_back({level, color.exportIndex});
+        attachment.resolveTexture = level;
+        attachment.storeAction = MTLStoreActionMultisampleResolve;
+    }
+    bool stencilWrites = false;
+    if (state.stencilTest) {
+        const auto writesFace = [](const VkStencilOpState& face) {
+            return face.writeMask != 0 && (face.failOp != VK_STENCIL_OP_KEEP ||
+                                           face.depthFailOp != VK_STENCIL_OP_KEEP ||
+                                           face.passOp != VK_STENCIL_OP_KEEP);
+        };
+        stencilWrites = writesFace(state.stencilFront) || writesFace(state.stencilBack);
+    }
+    const bool fullDepthOverwrite = state.depth && state.depthTest && state.depthWrite &&
+        state.depthCompare == VK_COMPARE_OP_ALWAYS && !state.depthBoundsTest &&
+        (state.rectList || (state.viewport.x <= 0 && state.viewport.y <= 0 &&
+         state.viewport.width >= state.renderExtent.width &&
+         std::abs(state.viewport.height) >= state.renderExtent.height)) &&
+        (state.scissor.offset.x <= 0 && state.scissor.offset.y <= 0 &&
+         state.scissor.extent.width >= state.renderExtent.width &&
+         state.scissor.extent.height >= state.renderExtent.height);
+    const bool depthResolveEnabled = renderPass.depthAttachment.resolveTexture != nil;
+    const bool depthMemoryless = depth && depth->DepthTexture().storageMode == MTLStorageModeMemoryless;
+    const auto depthLoad = (depthMemoryless || fullDepthOverwrite) ? MTLLoadActionDontCare : MTLLoadActionLoad;
+    const auto depthStore = depthResolveEnabled ? MTLStoreActionMultisampleResolve : ((depthMemoryless || !state.depthWrite) ? MTLStoreActionDontCare : MTLStoreActionStore);
+    const bool stencilResolveEnabled = renderPass.stencilAttachment.resolveTexture != nil;
+    const bool stencilMemoryless = depth && depth->StencilTexture() != nil && depth->StencilTexture().storageMode == MTLStorageModeMemoryless;
+    const auto stencilLoad = stencilMemoryless ? MTLLoadActionDontCare : MTLLoadActionLoad;
+    const auto stencilStore = stencilResolveEnabled ? MTLStoreActionMultisampleResolve : ((stencilMemoryless || !stencilWrites) ? MTLStoreActionDontCare : MTLStoreActionStore);
+    const std::uint32_t maxRenderLayers = std::max(depthLayers, state.renderLayers);
+    if (maxRenderLayers > 1) {
+        renderPass.renderTargetArrayLength = maxRenderLayers;
+    }
+    if (depth && depthLayers > 1) {
+        id<MTLTexture> layeredDepth = depth->LayeredDepthTexture(depthLayers);
+        renderPass.depthAttachment.texture = layeredDepth;
+        renderPass.depthAttachment.loadAction = depthLoad;
+        renderPass.depthAttachment.storeAction = depthStore;
+        if (depth->StencilTexture() != nil) {
+            id<MTLTexture> layeredStencil = depth->LayeredStencilTexture(depthLayers);
+            renderPass.stencilAttachment.texture = layeredStencil != nil ? layeredStencil : layeredDepth;
+            renderPass.stencilAttachment.loadAction = stencilLoad;
+            renderPass.stencilAttachment.storeAction = stencilStore;
+        }
+    } else if (depth) {
+        renderPass.depthAttachment.texture = depth->DepthTexture();
+        renderPass.depthAttachment.loadAction = depthLoad;
+        renderPass.depthAttachment.storeAction = depthStore;
+        if (depth->StencilTexture() != nil) {
+            renderPass.stencilAttachment.texture = depth->StencilTexture();
+            renderPass.stencilAttachment.loadAction = stencilLoad;
+            renderPass.stencilAttachment.storeAction = stencilStore;
+        }
+    }
+    if (Force1xMsaaEnabled()) {
+        for (std::size_t i = 0; i < 8; ++i) {
+            auto attachment = renderPass.colorAttachments[i];
+            if (attachment.storeAction == MTLStoreActionMultisampleResolve) {
+                attachment.storeAction = MTLStoreActionStore;
+                attachment.resolveTexture = nil;
+            }
+        }
+        if (renderPass.depthAttachment.storeAction == MTLStoreActionMultisampleResolve) {
+            renderPass.depthAttachment.storeAction = MTLStoreActionStore;
+            renderPass.depthAttachment.resolveTexture = nil;
+        }
+        if (renderPass.stencilAttachment.storeAction == MTLStoreActionMultisampleResolve) {
+            renderPass.stencilAttachment.storeAction = MTLStoreActionStore;
+            renderPass.stencilAttachment.resolveTexture = nil;
+        }
+    }
+    return pass;
+}
+
 std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, const Pm4::DrawParameters& draw,
     std::span<const Graphics::CompiledShader> shaders,
     std::span<const NativeGuestMemory::BorrowedRange> ranges,
@@ -947,32 +1097,14 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         static_assert(MeshDrawPushOffsetBytes + MeshDrawPushBytes == Graphics::PipelinePushSlotBytes);
         std::memcpy(pushConstants.data() + MeshDrawPushOffsetBytes, words.data(), sizeof(words));
     }
-    auto depth = state.depth ? depthCache->Acquire(*state.depth) : nullptr;
-    if (depth) {
-        // The surface bound last at an address is the one a view of it reads: it goes last, and the
-        // depth surfaces its planes overlap (another stencil pairing of its depth plane, another extent
-        // at its address) are retired until they are bound again.
-        std::erase(depthSurfaces, depth);
-        RetireDepthSurfaces(depthSurfaces, depth->Target());
-        depthSurfaces.push_back(depth);
-    }
-    // A color target over a depth surface's memory writes where its planes were (all its fragments).
-    for (const auto& color : state.colors) RetireDepthSurfaces(depthSurfaces, color, depth.get());
-    // A depth-only draw that exports a render target index renders into slices slice..lastSlice of its
-    // depth array at once; each slice also gets its surface, so later single-slice and array readers find it.
-    const std::uint32_t depthLayers = depth && state.layered && state.depth->samples == 1 ?
-        state.depth->lastSlice - state.depth->slice + 1u : 0u;
-    if (depthLayers > 1) {
-        for (std::uint32_t layer = 1; layer < depthLayers; ++layer) {
-            const auto slice = DepthArraySlice(*state.depth, layer);
-            auto surface = depthCache->Acquire(slice);
-            RetireDepthSurfaces(depthSurfaces, slice, surface.get());
-            if (std::find(depthSurfaces.begin(), depthSurfaces.end(), surface) == depthSurfaces.end()) depthSurfaces.push_back(surface);
-        }
-    }
+    // The resident surfaces this draw's bindings sample through the depth cache: a reused record
+    // re-proves them, so a surface re-created at an address it sampled drops the record.
+    std::vector<DrawResidentDependency> residentDependencies;
     auto resourcesOwner = std::make_shared<MetalShaderResources>(backend, ranges,
-        [this](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
-            return residentTexture(resource, storage, compare);
+        [this, &residentDependencies](const Graphics::GuestTextureResource& resource, bool storage, bool compare) {
+            id<MTLTexture> view = residentTexture(resource, storage, compare);
+            if (view != nil) residentDependencies.push_back({resource, storage, compare, MetalEncoders::RootTexture(view)});
+            return view;
         }, hostAliases.get(), ImageCache());
     auto& resources = *resourcesOwner;
     if (cpuReadHook) resources.SetCpuReadHook(cpuReadHook);
@@ -1000,9 +1132,25 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         PopulateTranslationKey(tl_scratchKey, state, draw, vertex, fragment);
     }
 
-    const auto imageCacheClears = ImageCache() ? ImageCache()->TakeStatistics(false).clears : 0;
-    auto cached = cacheable ? translationCache.Find(tl_scratchKey, memoryVersion, imageCacheClears) : nullptr;
+    auto cached = cacheable ? translationCache.Find(tl_scratchKey, memoryVersion) : nullptr;
+    if (cached != nullptr && !ValidateCachedRecord(*cached)) {
+        translationCache.RecordRejection(&DrawCacheStatistics::rejectedImages);
+        translationCache.Remove(tl_scratchKey);
+        cached = nullptr;
+    }
+    // The pass this draw renders into, built the way the fresh path builds it. A record's bindings
+    // and its write plan stand on the attachments it was built from, so it is dropped when the draw
+    // no longer binds those objects (or when its writes are not its own attachments, which a reused
+    // record has no plan to replay).
+    const auto pass = ConfigureAttachments(state, resources);
+    if (cached != nullptr && !RevalidateCachedWrites(*cached, pass)) {
+        translationCache.Remove(tl_scratchKey);
+        cached = nullptr;
+    }
     if (cached != nullptr) {
+        // The lazy copy-backs this draw's bindings read through memory: the fresh path encodes them
+        // as it resolves each binding, before it takes a command buffer, so a reused record does too.
+        for (const auto& range : cached->materializedRanges) resources.MaterializeBefore(range.first, range.second);
         MetalBufferBinding indexBuffer;
         if (draw.indexed) {
             const auto bytes = std::uint64_t{draw.indexCount} * draw.indexSize;
@@ -1012,7 +1160,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         id<MTLCommandBuffer> commands = backend.CommandBuffer();
         MetalBatchedWork batched(backend, commands);
         bool merged = false;
-        auto encoder = MetalEncoders::RenderMerging(backend, commands, cached->renderPass, cached->passKey, cached->mergeable, &merged);
+        const auto cachedPassKey = MetalEncoders::KeyOf(pass.renderPass);
+        auto encoder = MetalEncoders::RenderMerging(backend, commands, pass.renderPass, cachedPassKey, cached->mergeable, &merged);
         if (encoder == nil) throw MetalGpuExecutionError("Metal draw render encoder allocation failed");
 
         DynamicRenderState currentDynamicState{
@@ -1127,7 +1276,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
             [encoder endEncoding];
             throw;
         }
-        MetalEncoders::EndOrPark(backend, commands, encoder, cached->passKey, cached->mergeable);
+        MetalEncoders::EndOrPark(backend, commands, encoder, cachedPassKey, cached->mergeable);
         resources.EncodeReadbacks(commands, timeline != nullptr);
         if (timeline != nullptr && !resources.NeedsSynchronousCompletion()) {
             resources.CommittedWithoutWaiting();
@@ -1144,127 +1293,8 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
     }
     auto pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
     if (!meshPath) ConfigureRenderPipelineDescriptor(pipelineDescriptor, state);
-    auto renderPass = [MTLRenderPassDescriptor renderPassDescriptor];
-    renderPass.renderTargetWidth = state.renderExtent.width;
-    renderPass.renderTargetHeight = state.renderExtent.height;
-    ConfigureSamplePositions(renderPass, backend.Device(), state);
-    struct Expansion {
-        id<MTLTexture> source;
-        std::uint32_t slot;
-    };
-    std::vector<Expansion> expansions;
-    for (const auto& color : state.colors) {
-        if (color.exportIndex >= 8) throw std::invalid_argument("Metal draw color export slot is invalid");
-        auto attachment = renderPass.colorAttachments[color.exportIndex];
-        attachment.loadAction = MTLLoadActionLoad;
-        attachment.storeAction = MTLStoreActionStore;
-        if (color.samples > 1) {
-            if (color.samples != state.rasterSamples) throw std::invalid_argument("Metal draw multisampled color target disagrees with the pass sample count");
-            auto surface = depthCache->Acquire(color);
-            if (std::find(colorSurfaces.begin(), colorSurfaces.end(), surface) == colorSurfaces.end()) colorSurfaces.push_back(surface);
-            attachment.texture = surface->Texture();
-            if (surface->Texture().storageMode == MTLStorageModeMemoryless) {
-                attachment.loadAction = MTLLoadActionDontCare;
-                attachment.storeAction = MTLStoreActionDontCare;
-            }
-            continue;
-        }
-        auto texture = resources.Texture(colorSurface(color), true, false, false, color.mip);
-        // The surface is typed by its memory layout; the attachment renders through the guest state's format.
-        id<MTLTexture> handle = ColorAttachmentView(texture->Texture(), RenderPixelFormat(color.format));
-        if (state.rasterSamples == 1) {
-            attachment.texture = handle;
-            attachment.level = color.mip;
-            attachment.slice = color.arraySlice;
-            attachment.depthPlane = color.depthSlice;
-            continue;
-        }
-        // A single-fragment target in a multisampled pass: expand it into a transient multisample
-        // texture before the draw and resolve the samples back into the target after it.
-        if (color.depth != 1 || color.uintExport || color.packing != ShaderRecompiler::ColorExportPacking::None) {
-            throw std::invalid_argument("Metal draw cannot resolve a 3D, integer or packed single-fragment color target from a multisampled pass");
-        }
-        switch (handle.pixelFormat) {
-        case MTLPixelFormatR8Uint: case MTLPixelFormatR16Uint: case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint:
-        case MTLPixelFormatRG16Uint: case MTLPixelFormatRG32Uint: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA32Uint:
-            throw std::invalid_argument("Metal draw cannot resolve an integer single-fragment color target from a multisampled pass");
-        default:
-            break;
-        }
-        id<MTLTexture> level = [handle newTextureViewWithPixelFormat:handle.pixelFormat textureType:MTLTextureType2D
-            levels:NSMakeRange(color.mip, 1) slices:NSMakeRange(0, 1)];
-        if (level == nil) throw std::runtime_error("Metal draw color level view creation failed");
-        expansions.push_back({level, color.exportIndex});
-        attachment.resolveTexture = level;
-        attachment.storeAction = MTLStoreActionMultisampleResolve;
-    }
-    bool stencilWrites = false;
-    if (state.stencilTest) {
-        const auto writesFace = [](const VkStencilOpState& face) {
-            return face.writeMask != 0 && (face.failOp != VK_STENCIL_OP_KEEP ||
-                                           face.depthFailOp != VK_STENCIL_OP_KEEP ||
-                                           face.passOp != VK_STENCIL_OP_KEEP);
-        };
-        stencilWrites = writesFace(state.stencilFront) || writesFace(state.stencilBack);
-    }
-    const bool fullDepthOverwrite = state.depth && state.depthTest && state.depthWrite &&
-        state.depthCompare == VK_COMPARE_OP_ALWAYS && !state.depthBoundsTest &&
-        (state.rectList || (state.viewport.x <= 0 && state.viewport.y <= 0 &&
-         state.viewport.width >= state.renderExtent.width &&
-         std::abs(state.viewport.height) >= state.renderExtent.height)) &&
-        (state.scissor.offset.x <= 0 && state.scissor.offset.y <= 0 &&
-         state.scissor.extent.width >= state.renderExtent.width &&
-         state.scissor.extent.height >= state.renderExtent.height);
-    const bool depthResolveEnabled = renderPass.depthAttachment.resolveTexture != nil;
-    const bool depthMemoryless = depth && depth->DepthTexture().storageMode == MTLStorageModeMemoryless;
-    const auto depthLoad = (depthMemoryless || fullDepthOverwrite) ? MTLLoadActionDontCare : MTLLoadActionLoad;
-    const auto depthStore = depthResolveEnabled ? MTLStoreActionMultisampleResolve : ((depthMemoryless || !state.depthWrite) ? MTLStoreActionDontCare : MTLStoreActionStore);
-    const bool stencilResolveEnabled = renderPass.stencilAttachment.resolveTexture != nil;
-    const bool stencilMemoryless = depth && depth->StencilTexture() != nil && depth->StencilTexture().storageMode == MTLStorageModeMemoryless;
-    const auto stencilLoad = stencilMemoryless ? MTLLoadActionDontCare : MTLLoadActionLoad;
-    const auto stencilStore = stencilResolveEnabled ? MTLStoreActionMultisampleResolve : ((stencilMemoryless || !stencilWrites) ? MTLStoreActionDontCare : MTLStoreActionStore);
-    const std::uint32_t maxRenderLayers = std::max(depthLayers, state.renderLayers);
-    if (maxRenderLayers > 1) {
-        renderPass.renderTargetArrayLength = maxRenderLayers;
-    }
-    if (depth && depthLayers > 1) {
-        id<MTLTexture> layeredDepth = depth->LayeredDepthTexture(depthLayers);
-        renderPass.depthAttachment.texture = layeredDepth;
-        renderPass.depthAttachment.loadAction = depthLoad;
-        renderPass.depthAttachment.storeAction = depthStore;
-        if (depth->StencilTexture() != nil) {
-            id<MTLTexture> layeredStencil = depth->LayeredStencilTexture(depthLayers);
-            renderPass.stencilAttachment.texture = layeredStencil != nil ? layeredStencil : layeredDepth;
-            renderPass.stencilAttachment.loadAction = stencilLoad;
-            renderPass.stencilAttachment.storeAction = stencilStore;
-        }
-    } else if (depth) {
-        renderPass.depthAttachment.texture = depth->DepthTexture();
-        renderPass.depthAttachment.loadAction = depthLoad;
-        renderPass.depthAttachment.storeAction = depthStore;
-        if (depth->StencilTexture() != nil) {
-            renderPass.stencilAttachment.texture = depth->StencilTexture();
-            renderPass.stencilAttachment.loadAction = stencilLoad;
-            renderPass.stencilAttachment.storeAction = stencilStore;
-        }
-    }
-    if (Force1xMsaaEnabled()) {
-        for (std::size_t i = 0; i < 8; ++i) {
-            auto attachment = renderPass.colorAttachments[i];
-            if (attachment.storeAction == MTLStoreActionMultisampleResolve) {
-                attachment.storeAction = MTLStoreActionStore;
-                attachment.resolveTexture = nil;
-            }
-        }
-        if (renderPass.depthAttachment.storeAction == MTLStoreActionMultisampleResolve) {
-            renderPass.depthAttachment.storeAction = MTLStoreActionStore;
-            renderPass.depthAttachment.resolveTexture = nil;
-        }
-        if (renderPass.stencilAttachment.storeAction == MTLStoreActionMultisampleResolve) {
-            renderPass.stencilAttachment.storeAction = MTLStoreActionStore;
-            renderPass.stencilAttachment.resolveTexture = nil;
-        }
-    }
+    auto renderPass = pass.renderPass;
+    const auto& expansions = pass.expansions;
     MetalBufferBinding indexBuffer;
     std::uint32_t nativeIndexSize = draw.indexSize;
     std::uint32_t maxIndex = 0;
@@ -1776,7 +1806,13 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         record->fragmentPushBuffer = vertexPipeline->FragmentReflection().pushConstantBuffer;
         record->fragmentPushBytes = vertexPipeline->FragmentReflection().pushConstantBytes;
         record->memoryVersion = memoryVersion;
-        record->imageCacheClears = imageCacheClears;
+        const auto drawImages = resources.DrawImages();
+        record->images = drawImages.cached;
+        record->uncachedImages = drawImages.uncached;
+        record->imageCacheGeneration = ImageCache() != nullptr ? ImageCache()->Generation() : 0;
+        record->residentDependencies = residentDependencies;
+        record->attachmentsOnly = !resources.WritesBesides(passKey);
+        record->materializedRanges = resources.MaterializedRanges();
         record->key = tl_scratchKey;
 
         const auto& chunks = resources.UploadChunks();
@@ -1864,6 +1900,40 @@ std::size_t MetalDraw::MinParallelDraws() {
     return minimum;
 }
 
+bool MetalDraw::ValidateCachedRecord(const DrawTranslationRecord& record) {
+    auto* cache = ImageCache();
+    if (cache == nullptr) return record.images.empty() && record.uncachedImages == 0;
+    if (record.uncachedImages != 0 && record.imageCacheGeneration != cache->Generation()) return false;
+    for (const auto& image : record.images) {
+        if (!cache->Revalidate(image.host, image.guest, image.content, image.texture.get())) return false;
+    }
+    return true;
+}
+
+bool MetalDraw::RevalidateCachedWrites(const DrawTranslationRecord& record, const PassAttachments& pass) {
+    // A record whose draw wrote anything but its own attachments (a storage buffer or image, a
+    // staged surface) has no write plan to replay: only the attachments are rebuilt on a hit.
+    if (!record.attachmentsOnly) {
+        translationCache.RecordRejection(&DrawCacheStatistics::rejectedWrites);
+        return false;
+    }
+    if (!MetalEncoders::SamePass(record.passKey, MetalEncoders::KeyOf(pass.renderPass))) {
+        translationCache.RecordRejection(&DrawCacheStatistics::rejectedAttachments);
+        return false;
+    }
+    // The record's bindings also stand on the resident surfaces its shaders sampled (a depth or
+    // multisampled color surface). A view of such a surface is a new object each time, so they
+    // compare by the texture the view stands on.
+    for (const auto& dependency : record.residentDependencies) {
+        id<MTLTexture> view = residentTexture(dependency.descriptor, dependency.storage, dependency.compare);
+        if (view == nil || MetalEncoders::RootTexture(view) != dependency.root) {
+            translationCache.RecordRejection(&DrawCacheStatistics::rejectedAttachments);
+            return false;
+        }
+    }
+    return true;
+}
+
 std::optional<MetalDraw::PreparedDraw> MetalDraw::PrepareCachedDraw(
     const Graphics::State& inputState,
     const Pm4::DrawParameters& draw,
@@ -1911,9 +1981,12 @@ std::optional<MetalDraw::PreparedDraw> MetalDraw::PrepareCachedDraw(
     tl_scratchKey.Clear();
     PopulateTranslationKey(tl_scratchKey, state, draw, vertex, fragment);
 
-    const auto imageCacheClears = ImageCache() ? ImageCache()->TakeStatistics(false).clears : 0;
-    auto cached = translationCache.Find(tl_scratchKey, memoryVersion, imageCacheClears);
+    auto cached = translationCache.Find(tl_scratchKey, memoryVersion);
     if (cached == nullptr || cached->renderPass == nil) return std::nullopt;
+    if (!ValidateCachedRecord(*cached)) {
+        translationCache.Remove(tl_scratchKey);
+        return std::nullopt;
+    }
 
     MetalBufferBinding indexBuffer;
     if (draw.indexed) {

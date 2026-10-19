@@ -1048,6 +1048,19 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
             ForgetCachedImages(ForgetReason::Flip);
             if (FrameProfile::Enabled()) FrameProfile::Shared().Flip();
             if (PacketCensus::Enabled()) { censusTimer.Finish(); PacketCensus::Flip(); }
+            if (draw != nullptr && GpuTiming::Enabled()) {
+                const auto drawCache = draw->TakeDrawCacheStatistics();
+                const auto encoders = MetalEncoders::TakeStatistics();
+                if (drawCache.lookups != 0) {
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"draw_cache\",\"lookups\":%llu,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"elisions\":%llu,\"rejected_images\":%llu,\"rejected_writes\":%llu,\"rejected_attachments\":%llu,\"parallel_passes\":%llu,\"parallel_draws\":%llu}\n",
+                        static_cast<unsigned long long>(drawCache.lookups), static_cast<unsigned long long>(drawCache.hits),
+                        static_cast<unsigned long long>(drawCache.misses), static_cast<unsigned long long>(drawCache.inserts),
+                        static_cast<unsigned long long>(drawCache.clears), static_cast<unsigned long long>(drawCache.redundantStateElisions),
+                        static_cast<unsigned long long>(drawCache.rejectedImages), static_cast<unsigned long long>(drawCache.rejectedWrites),
+                        static_cast<unsigned long long>(drawCache.rejectedAttachments),
+                        static_cast<unsigned long long>(encoders.parallelPasses), static_cast<unsigned long long>(encoders.parallelDraws));
+                }
+            }
             if (draw != nullptr && draw->ImageCache() != nullptr && GpuTiming::Enabled()) {
                 static std::uint64_t flips = 0;
                 if (++flips % 16 == 0) {
