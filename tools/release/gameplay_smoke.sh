@@ -7,22 +7,28 @@
 #   --from-save DIR    a title-data tree holding one autosave, loaded through Load Game > Autosaves
 #                      (best effort; the default drives a new game to the map)
 #   --out DIR          output directory (default: ./gameplay-smoke-<timestamp>)
-#   --seconds N        wall limit for the run (default 320)
+#   --seconds N        wall limit for the run (default 360)
 #   --min-gameplay N   seconds the guest must keep presenting frames after the map appears (default 60)
 #   --max-black N      frames after the map allowed below --black-ratio (default 4)
 #   --black-ratio F    a frame below this nonblack_ratio is a black-region frame (default 0.65)
 #
 # The controller watches the engine's log and its captured frames and presses only when it sees the
 # screen that needs it (the main menu, then the leader select), so it does not depend on when a
-# screen appears. It stops pressing once map generation starts, waits for a detailed 3D frame, then
-# keeps playing for --min-gameplay seconds. The gate passes only when the guest exits cleanly (or
-# reaches the wall limit) with no fault, the 3D map appears, frames keep presenting after it, no
-# black-region frames appear, and the map screenshot is saved as map.png. Refuses to run while the
+# screen appears. It keeps pressing through map generation, the loading panel and the BEGIN GAME
+# screen, and stops only when a frame shows the real 3D map: a detailed scene the loading panel never
+# reaches (the engine's distinct_colors, a 64x36 sample of the frame, is 1080-1290 on the loading
+# panel and 1600-2200 on the map). The map only animates once the tutorial screens over it are
+# dismissed, so the gate keeps pressing and detects the map as five frames whose colour count is
+# high and changing (the loading and tutorial panels hold one value). It then keeps playing for
+# --min-gameplay seconds. The gate passes
+# only when the guest exits cleanly (or reaches the wall limit) with no fault, the 3D map appears,
+# frames keep presenting after it, no black-region frames appear, and the map screenshot is saved as
+# map.png. Refuses to run while the
 # game or another title run is up (an anyps5_rosetta_run this gate did not start, or the game's own
 # process), and takes the game-run lock (with-lock eboot) when that helper is installed. The Steam
 # client may be open as long as no game is running.
 set -u
-BUILD=""; TITLE=""; FROMSAVE=""; OUT=""; SECONDS_LIMIT=320; MIN_GAMEPLAY=60; MAX_BLACK=4; BLACK_RATIO=0.65
+BUILD=""; TITLE=""; FROMSAVE=""; OUT=""; SECONDS_LIMIT=360; MIN_GAMEPLAY=60; MAX_BLACK=4; BLACK_RATIO=0.65
 while [ $# -gt 0 ]; do case $1 in
   --build) BUILD=$2; shift;;
   --title-dir) TITLE=$2; shift;;
@@ -102,9 +108,12 @@ menu_seen = leader_seen = map_generation_seen = False
 menu_pressed = False
 last_press = -10.0
 press_count = 0
+map_seen = False
 map_time = None
 map_frame = None
+recent = []
 after = []
+frame_metrics = []
 presented_after = 0
 save_queue = []
 while True:
@@ -132,12 +141,20 @@ while True:
                 continue
             ratio = event.get('nonblack_ratio', 1.0)
             colors = event.get('distinct_colors', 0)
-            if map_time is None and map_generation_seen and ratio >= 0.6:
-                map_time = now
-                map_frame = event.get('path')
+            frame_metrics.append((round(now, 1), ratio, colors))
+            recent.append((now, colors, event.get('path')))
+            if map_generation_seen and ratio >= 0.8 and colors >= 1500:
+                map_seen = True
+            if map_time is None and map_generation_seen and len(recent) >= 5:
+                window = recent[-5:]
+                values = [entry[1] for entry in window]
+                animating = all(abs(values[i] - values[i - 1]) >= 10 for i in range(1, len(values)))
+                if min(values) >= 1800 and animating:
+                    map_time = window[0][0]
+                    map_frame = window[0][2]
             if map_time is not None:
                 after.append((now, ratio, colors, event.get('path')))
-    if map_time is None and not map_generation_seen:
+    if True:
         if from_save:
             if menu_seen and not menu_pressed:
                 menu_pressed = True
@@ -145,18 +162,13 @@ while True:
             while save_queue and save_queue[0][0] <= now:
                 press(save_queue.pop(0)[1])
                 last_press = now
-            if not save_queue and now - last_press >= 2.5:
+            if not save_queue and now >= 8.0 and now - last_press >= 3.0:
                 press('cross')
                 last_press = now
-        else:
-            if menu_seen and not menu_pressed:
-                menu_pressed = True
-                press('cross')
-                last_press = now
-            elif now - last_press >= 2.5:
-                press('square' if press_count % 2 else 'cross')
-                press_count += 1
-                last_press = now
+        elif now >= 8.0 and now - last_press >= 3.0:
+            press('square' if press_count % 2 else 'cross')
+            press_count += 1
+            last_press = now
     if engine.poll() is not None:
         break
     if now >= seconds + 90:
@@ -204,6 +216,10 @@ checks = [
 ]
 for name, ok in checks:
     print(('PASS ' if ok else 'FAIL ') + name)
+with open(out / 'frames.csv', 'w') as stream:
+    stream.write('s,nonblack,colors\n')
+    for entry in frame_metrics:
+        stream.write(f'{entry[0]},{entry[1]},{entry[2]}\n')
 ratios = [entry[1] for entry in after]
 print(f'map at {round(map_time, 1) if map_time else None} s, gameplay {play:.1f} s, captured after map {len(after)}, '
       f'presented events {presented_after}, nonblack min {round(min(ratios), 3) if ratios else None} '
