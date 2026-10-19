@@ -1,0 +1,5 @@
+# libSceMove technical debt
+
+### Unknown function info
+
+- [libSceMove](../../../core/libs/prx/libSceMove/Export.cpp) (libSceMove) - no PS Move controller is modelled, and the behaviour and error codes follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/f68923fe807f657348e6719ce658bcbd0a2b1c72/src/core/libraries/move/move.cpp) (PS4), not measured on a PS5; signatures follow [Orbital](https://github.com/AlexAltea/orbital/blob/master/tools/ida/db_types.json). `sceMoveOpen` returns a new handle (`0x30B0100`, then every `0x100`) for any user, type and index, and no call checks a handle, so `sceMoveClose` and `sceMoveResetLightSphere` succeed for any handle. The device info, state, extension port, vibration and light sphere calls return 1 (no controller connected) and write nothing. Before `sceMoveInit` and after `sceMoveTerm` every other call returns `NOT_INIT` (`0x80EE0001`), and a null output or a negative timestamp returns `INVALID_ARG` (`0x80EE0003`). Closes when: measured on a PS5
