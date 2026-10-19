@@ -53,6 +53,7 @@ static constexpr std::uint64_t KERNEL_MNT_NOSUID = 0x8;
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
+#include <cstdio>
 #include <fcntl.h>
 #include <direct.h>
 #include <sys/stat.h>
@@ -646,6 +647,16 @@ int APS5_VABI _close_nid_postfix(int descriptor) {
 namespace {
 std::atomic<int> g_hostStandardError{-1};
 
+#ifdef _WIN32
+void RetargetHostStandardError(int saved) {
+    std::fflush(stderr);
+    auto* const stream = __acrt_iob_func(2);
+    auto* const descriptor = reinterpret_cast<long*>(reinterpret_cast<unsigned char*>(stream) + 24);
+    if (*descriptor != 2) throw std::runtime_error("dup2: host stderr descriptor field is not 2");
+    *descriptor = saved;
+}
+#endif
+
 void PreserveHostStandardError() {
     if (g_hostStandardError.load() >= 0) return;
 #ifdef _WIN32
@@ -659,7 +670,17 @@ void PreserveHostStandardError() {
 #ifdef _WIN32
         _close(saved);
 #endif
+        return;
     }
+#ifdef _WIN32
+    try {
+        RetargetHostStandardError(saved);
+    } catch (...) {
+        g_hostStandardError.store(-1);
+        _close(saved);
+        throw;
+    }
+#endif
 }
 }
 
