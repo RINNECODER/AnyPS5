@@ -387,11 +387,7 @@ int main() {
         "tzset did not pick up the new TZ");
     Require(tzname_nid_postfix[0] != nullptr && std::strcmp(tzname_nid_postfix[0], "UTC") == 0 && tzname_nid_postfix[1] != nullptr,
         "tzname does not name the zone tzset set");
-#ifdef _WIN32
-    _putenv_s("TZ", "EST5EDT");
-#else
-    setenv("TZ", "EST5EDT", 1);
-#endif
+    Require(setenv_nid_postfix("TZ", "EST5EDT", 1) == 0, "Could not set the guest time zone");
     tzset_nid_postfix();
     Require(std::strcmp(tzname_nid_postfix[0], "EST") == 0 && std::strcmp(tzname_nid_postfix[1], "EDT") == 0,
         "tzname does not name the standard and daylight zones");
