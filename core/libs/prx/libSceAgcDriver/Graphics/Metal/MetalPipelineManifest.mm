@@ -2,6 +2,7 @@
 #include "MetalPipelineCache.hpp"
 #include "MetalWorkerPool.hpp"
 #include "ShaderCacheDirectory.hpp"
+#include "ShaderCacheEviction.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -356,7 +357,10 @@ std::string RecipeKey(const Recipe& recipe) {
 
 void RegisterFlushAtExit() {
     static std::once_flag registered;
-    std::call_once(registered, [] { std::atexit(FlushMetalPipelineManifest); });
+    std::call_once(registered, [] {
+        static_cast<void>(ShaderRecompiler::CacheEviction::SharedBudget());
+        std::atexit(FlushMetalPipelineManifest);
+    });
 }
 
 void AddRecipe(id<MTLDevice> device, Recipe recipe) {
@@ -606,7 +610,9 @@ void FlushMetalPipelineManifest() {
     if (path.empty() || snapshot.empty()) return;
     std::string bytes;
     EncodeManifest(deviceName, osVersion, snapshot, bytes);
-    WriteFileAtomically(path, {reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()});
+    if (WriteFileAtomically(path, {reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()})) {
+        ShaderRecompiler::CacheEviction::SharedBudget().NoteWrite(ShaderRecompiler::ShaderCacheDirectory(), bytes.size());
+    }
 }
 
 std::shared_ptr<DecodedManifest> LoadAndMergeManifest(id<MTLDevice> device) {
