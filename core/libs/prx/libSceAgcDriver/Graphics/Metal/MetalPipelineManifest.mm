@@ -315,14 +315,18 @@ struct ManifestIdentity {
 };
 
 std::string TitleKey() {
-    std::ifstream stream(std::filesystem::current_path() / "app0" / "sce_sys" / "param.json");
-    if (!stream) return "default";
-    const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
-    if (text.empty()) return "default";
-    char name[24];
-    std::snprintf(name, sizeof(name), "%016llx",
-                  static_cast<unsigned long long>(HashBytes({reinterpret_cast<const std::byte*>(text.data()), text.size()})));
-    return name;
+    const auto metadata = std::filesystem::current_path() / "app0" / "sce_sys";
+    for (const char* name : {"param.json", "param.sfo"}) {
+        std::ifstream stream(metadata / name, std::ios::binary);
+        if (!stream) continue;
+        const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+        if (text.empty()) continue;
+        char key[24];
+        std::snprintf(key, sizeof(key), "%016llx",
+                      static_cast<unsigned long long>(HashBytes({reinterpret_cast<const std::byte*>(text.data()), text.size()})));
+        return key;
+    }
+    return "default";
 }
 
 ManifestIdentity IdentityFor(id<MTLDevice> device) {
@@ -488,11 +492,19 @@ std::condition_variable replayCv;
 bool replayDone = true;
 
 void MergeDecodedRecipes(id<MTLDevice> device, const DecodedManifest& manifest) {
+    std::unordered_map<const std::string*, std::shared_ptr<const std::string>> interned;
+    const auto intern = [&](const std::string* text) -> std::shared_ptr<const std::string> {
+        if (text == nullptr) return nullptr;
+        if (const auto found = interned.find(text); found != interned.end()) return found->second;
+        auto shared = std::make_shared<const std::string>(*text);
+        interned.emplace(text, shared);
+        return shared;
+    };
     for (const auto& decoded : manifest.recipes) {
         Recipe recipe;
         recipe.kind = decoded.kind;
-        recipe.source0 = std::make_shared<const std::string>(*decoded.source0);
-        if (decoded.source1 != nullptr && !decoded.source1->empty()) recipe.source1 = std::make_shared<const std::string>(*decoded.source1);
+        recipe.source0 = intern(decoded.source0);
+        if (decoded.source1 != nullptr && !decoded.source1->empty()) recipe.source1 = intern(decoded.source1);
         recipe.entry0 = *decoded.entry0;
         recipe.entry1 = *decoded.entry1;
         recipe.language32_0 = decoded.language32_0;
@@ -593,16 +605,27 @@ void FlushMetalPipelineManifest() {
     WriteFileAtomically(path, {reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()});
 }
 
+std::shared_ptr<DecodedManifest> LoadAndMergeManifest(id<MTLDevice> device) {
+    const auto path = IdentityFor(device).path;
+    if (path.empty()) return nullptr;
+    std::vector<std::byte> file;
+    if (!ReadWholeFile(path, file)) return nullptr;
+    auto manifest = std::make_shared<DecodedManifest>();
+    if (!DecodeManifest(file, device, *manifest)) return nullptr;
+    MergeDecodedRecipes(device, *manifest);
+    return manifest;
+}
+
 bool ReplayMetalPipelineManifest(id<MTLDevice> device) {
     if (device == nil || !ManifestEnabled()) return false;
-    const auto path = IdentityFor(device).path;
-    if (path.empty()) return false;
-    std::vector<std::byte> file;
-    if (!ReadWholeFile(path, file)) return false;
-    DecodedManifest manifest;
-    if (!DecodeManifest(file, device, manifest)) return false;
-    MergeDecodedRecipes(device, manifest);
-    ReplayDecoded(device, manifest);
+    std::shared_ptr<DecodedManifest> manifest;
+    try {
+        manifest = LoadAndMergeManifest(device);
+    } catch (...) {
+        return false;
+    }
+    if (manifest == nullptr) return false;
+    ReplayDecoded(device, *manifest);
     return true;
 }
 
@@ -610,13 +633,18 @@ void StartMetalPipelineManifestReplay(id<MTLDevice> device) {
     if (device == nil || !ManifestEnabled()) return;
     static std::atomic<bool> started{false};
     if (started.exchange(true)) return;
+    std::shared_ptr<DecodedManifest> manifest;
+    try {
+        manifest = LoadAndMergeManifest(device);
+    } catch (...) {
+    }
     {
         std::lock_guard lock(replayMutex);
         replayDone = false;
     }
-    MetalWorkerPool::Shared().Enqueue([device] {
+    MetalWorkerPool::Shared().Enqueue([device, manifest] {
         try {
-            ReplayMetalPipelineManifest(device);
+            if (manifest != nullptr) ReplayDecoded(device, *manifest);
         } catch (...) {
         }
         {
