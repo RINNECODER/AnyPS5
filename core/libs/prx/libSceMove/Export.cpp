@@ -1,10 +1,10 @@
-#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <mutex>
-#include <unordered_set>
+#include <unordered_map>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libSceUserService/UserService.hpp"
 
 namespace {
 
@@ -19,7 +19,12 @@ constexpr int32_t MOVE_HANDLE_STEP = 0x100;
 std::mutex stateMutex;
 bool initialized = false;
 int32_t nextHandle = MOVE_FIRST_HANDLE;
-std::unordered_set<int32_t> openHandles;
+struct Slot {
+    int32_t type;
+    int32_t index;
+};
+
+std::unordered_map<int32_t, Slot> openHandles;
 
 int checkHandle(const char* function, int32_t handle) {
     std::lock_guard lock(stateMutex);
@@ -48,14 +53,15 @@ int APS5_VABI sceMoveTerm(void) {
 }
 
 int APS5_VABI sceMoveOpen(int32_t userId, int32_t type, int32_t index) {
-    (void)userId;
-    (void)type;
-    (void)index;
     std::lock_guard lock(stateMutex);
     if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (userId != USER_SERVICE_INITIAL_USER_ID) NotImplemented_nid_no_patch(__func__);
+    for (const auto& [openHandle, slot] : openHandles) {
+        if (slot.type == type && slot.index == index) NotImplemented_nid_no_patch(__func__);
+    }
     const int32_t handle = nextHandle;
     nextHandle += MOVE_HANDLE_STEP;
-    openHandles.insert(handle);
+    openHandles.emplace(handle, Slot{type, index});
     return handle;
 }
 

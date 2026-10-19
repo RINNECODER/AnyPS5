@@ -101,6 +101,8 @@ int main() {
     const std::int32_t second = sceMoveOpen(kUserId, 0, 1);
     Require(first == kFirstHandle);
     Require(second == kFirstHandle + kHandleStep);
+    Require(Throws([] { sceMoveOpen(kUserId, 0, 0); }));
+    Require(Throws([] { sceMoveOpen(kUserId + 1, 0, 2); }));
 
     Require(sceMoveGetDeviceInfo(first, nullptr) == kInvalidArg);
     Require(sceMoveGetExtensionPortInfo(first, nullptr) == kInvalidArg);
@@ -125,6 +127,9 @@ int main() {
 
     Require(sceMoveClose(first) == kOk);
     RequireUnknownHandleThrows(first);
+    const std::int32_t reopened = sceMoveOpen(kUserId, 0, 0);
+    Require(reopened == kFirstHandle + 2 * kHandleStep);
+    Require(sceMoveClose(reopened) == kOk);
     Require(sceMoveSetVibration(second, 0) == kNoControllerConnected);
     Require(sceMoveTerm() == kOk);
 
@@ -133,7 +138,7 @@ int main() {
     Require(sceMoveInit() == kOk);
     RequireUnknownHandleThrows(second);
     const std::int32_t third = sceMoveOpen(kUserId, 0, 0);
-    Require(third == kFirstHandle + 2 * kHandleStep);
+    Require(third == kFirstHandle + 3 * kHandleStep);
     Require(sceMoveClose(third) == kOk);
     Require(sceMoveTerm() == kOk);
 }
