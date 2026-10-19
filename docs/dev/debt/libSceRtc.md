@@ -1,5 +1,9 @@
 # libSceRtc technical debt
 
+### Silent stubs
+
+- [sceRtcInit, sceRtcEnd](../../../core/libs/prx/libSceRtc/Export.cpp) (libSceRtc) - return 0 and do nothing, as the console functions do: both are a bare `xor eax, eax; ret` in libSceRtc.sprx on firmware 13.60
+
 ### Unknown function info
 
 - [sceRtcParseDateTime](../../../core/libs/prx/libSceRtc/Export.cpp) (libSceRtc) - the console's zone name table is only known from the names measured on PS5 firmware 13.60 and 13.42; any other name is assumed to take the military letter offset of its first character, as every measured name outside the table does (`HST`, `MSK`, `XYZ`), so a name the console's table holds but nobody measured gets the wrong offset
