@@ -1663,6 +1663,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
     bool synced = false;
     bool drained = false;
     bool retiredImport = false;
+    bool droppedAddressSpace = false;
     // A range pinned only by the cached address space is released by dropping the cache's
     // reference: no GPU wait, no device lock (the mutating thread may be a driver thread holding
     // it). The registry rescans; a range still pinned by a build or a batch holding the space comes
@@ -1671,12 +1672,24 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
         Spaces().droppedByWaiter.store(true, std::memory_order_relaxed);
         Spaces().waiterDrops.fetch_add(1, std::memory_order_relaxed);
         dropped.reset();
-        auto& state = Leases();
-        std::lock_guard lock(state.mutex);
-        ++state.stats.contentionWaits;
-        ++state.stats.cacheDrops;
-        state.stats.contentionMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        return true;
+        droppedAddressSpace = true;
+        auto& imports = Imports();
+        const auto end = static_cast<std::uint64_t>(address) + bytes;
+        bool overlapsImport = false;
+        {
+            std::lock_guard importsLock(imports.mutex);
+            const auto next = imports.imports.lower_bound(address);
+            const auto previous = next == imports.imports.begin() ? imports.imports.end() : std::prev(next);
+            overlapsImport = (next != imports.imports.end() && next->first < end) || (previous != imports.imports.end() && previous->first + previous->second.bytes > address);
+        }
+        if (!overlapsImport) {
+            auto& state = Leases();
+            std::lock_guard lock(state.mutex);
+            ++state.stats.contentionWaits;
+            ++state.stats.cacheDrops;
+            state.stats.contentionMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            return true;
+        }
     }
     if (GuestMemory::GpuMutex().HeldByThisThread()) {
         try {
@@ -1792,6 +1805,7 @@ bool WaitForLeasesAndImports(std::uintptr_t address, std::size_t bytes) noexcept
     auto& state = Leases();
     std::lock_guard lock(state.mutex);
     ++state.stats.contentionWaits;
+    if (droppedAddressSpace) ++state.stats.cacheDrops;
     if (synced) ++state.stats.contentionSyncs;
     if (drained) ++state.stats.contentionDrains;
     state.stats.contentionMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
