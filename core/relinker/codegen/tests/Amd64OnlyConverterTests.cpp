@@ -936,6 +936,32 @@ void converterWideStoreWindows() {
     requireFailure([&] { (void)convert(withStore(far, tail)); }, "A 256-bit store whose movable neighbours are all beyond a short jump was kept");
 }
 
+void converterClaimedFollower() {
+    const auto converter = Codegen::MakeAmd64OnlyConverter(Codegen::Amd64OnlyTarget::Rosetta);
+    for (const auto& [shortInstruction, name] : {std::pair{Bytes{0x0F, 0x53, 0xCA}, "RCPPS"}, std::pair{Bytes{0xF3, 0x0F, 0xC7, 0xF8}, "RDPID"}}) {
+        Bytes file(0x300, 0xCC);
+        Bytes text = {0x74, 0x06, 0xEB, 0x00, 0xC5, 0xFC, 0x11, 0x07};
+        text.insert(text.end(), shortInstruction.begin(), shortInstruction.end());
+        for (int index = 0; index < 4; ++index)
+            text.insert(text.end(), {0x48, 0x01, 0xC8});
+        text.insert(text.end(), 8, 0x90);
+        text.push_back(0xC3);
+        std::copy(text.begin(), text.end(), file.begin() + 0x200);
+        const auto result = converter->Convert(file, {segmentHeader(text.size())});
+        for (std::size_t left = 0; left < result.Trampolines.size(); ++left) {
+            for (std::size_t right = left + 1; right < result.Trampolines.size(); ++right) {
+                const auto& a = result.Trampolines[left];
+                const auto& b = result.Trampolines[right];
+                require(a.Offset + a.Length <= b.Offset || b.Offset + b.Length <= a.Offset, "A short instruction's site overlaps instructions another stub already moved");
+            }
+        }
+        bool kept = false;
+        for (const auto& report : result.Reports)
+            kept = kept || (report.InstructionName == name && report.Lowering == Codegen::Amd64OnlyLowering::Kept);
+        require(result.KeptCount == 1 && kept, "An optional short instruction followed by moved instructions was not kept");
+    }
+}
+
 void converterJumpTableTargets() {
     const auto converter = Codegen::MakeAmd64OnlyConverter(Codegen::Amd64OnlyTarget::Rosetta);
     const Bytes leaTable = {0x48, 0x8D, 0x0D, 0xF9, 0x1F, 0x00, 0x00};
@@ -1970,6 +1996,7 @@ int main() {
         rdtscpExecution();
         wideStoreSplit();
         converterWideStoreWindows();
+        converterClaimedFollower();
         converterJumpTableTargets();
         converterReciprocal();
         converterScalarCompare();
