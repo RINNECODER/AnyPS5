@@ -336,8 +336,9 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     const bool depthClear = (read(cx, 0x000) & 1u) != 0;
     const bool stencilClear = (read(cx, 0x000) & 2u) != 0;
     const auto view = read(cx, 0x002);
-    zero(cx, 0x002, 0x3c000000u, "depth mips (DB_DEPTH_VIEW MIP_LEVEL)");
     const auto surface = depthSurfaceInfo(read(cx, 0x010));
+    const auto viewMip = (view >> 26u) & 0xfu;
+    const auto maxMip = surface.maxMip;
     const auto zFormat = surface.format;
     const bool stencil = (read(cx, 0x011) & 1u) != 0;
     if (zFormat == 0) depthControl &= ~6u;
@@ -374,8 +375,28 @@ void decodeDepth(const Registers& cx, std::uint32_t depthControl, State& result)
     depth.extent = {(size & 0x3fffu) + 1u, ((size >> 16u) & 0x3fffu) + 1u};
     // DB_DEPTH_VIEW SLICE_START [12:0] (with SLICE_START_HI), SLICE_MAX [23:13] and SLICE_MAX_HI [31:30].
     const auto lastSlice = ((view >> 13u) & 0x7ffu) | (((view >> 30u) & 3u) << 11u);
-    if (const auto slice = view & 0x1fffu; slice != 0) {
-        Require(surface.samples == 1 && surface.maxMip == 0, "array slices of a multisampled or mipmapped depth surface are unsupported");
+    if (maxMip != 0) {
+        // Upstream cd1efc9fc: the view's level of a 64 KiB Z_X mip chain is rendered as a one-slice surface of its own.
+        char message[320];
+        std::snprintf(message, sizeof(message), "depth view mip %u of %u at %ux%u (DB_Z_INFO 0x%08x, DB_DEPTH_VIEW 0x%08x)", viewMip, maxMip + 1u, depth.extent.width, depth.extent.height, read(cx, 0x010), view);
+        const std::string where(message);
+        Require(viewMip <= maxMip, "the " + where + " is beyond the surface's mips");
+        Require(depth.samples == 1u, "multisampled " + where + " is unsupported");
+        Require(depth.depthSwizzle == XorSwizzleMode(TextureTileMode::kZ64KBX), "the " + where + " uses a swizzle other than 64 KiB Z_X");
+        const auto depthMips = ComputeElementMipLayout(TextureTileMode::kZ64KBX, zFormat == 1 ? 2u : 4u, depth.extent.width, depth.extent.height, maxMip + 1u);
+        const auto stencilMips = ComputeElementMipLayout(TextureTileMode::kZ64KBX, 1u, depth.extent.width, depth.extent.height, maxMip + 1u);
+        Require(zFormat == 0 || !depthMips.at(viewMip).tail, "rendering the " + where + " into the packed mip tail is unsupported");
+        Require(!stencil || !stencilMips.at(viewMip).tail, "rendering the stencil of the " + where + " into the packed mip tail is unsupported");
+        Require((read(cx, 0x010) & (1u << 29u)) == 0, "HTILE for the " + where + " is unsupported");
+        if (const auto slice = view & 0x1fffu; slice != 0) {
+            if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * ComputeSurfaceSize(depthMips, 1u);
+            if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * ComputeSurfaceSize(stencilMips, 1u);
+        }
+        if (depth.address != 0) depth.address += depthMips.at(viewMip).tiledOffset;
+        if (depth.stencilAddress != 0) depth.stencilAddress += stencilMips.at(viewMip).tiledOffset;
+        depth.extent = {depthMips.at(viewMip).width, depthMips.at(viewMip).height};
+    } else if (const auto slice = view & 0x1fffu; slice != 0) {
+        Require(surface.samples == 1, "array slices of a multisampled depth surface are unsupported");
         depth.slice = slice;
         if (depth.address != 0) depth.address += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, zFormat == 1 ? 2u : 4u);
         if (depth.stencilAddress != 0) depth.stencilAddress += static_cast<std::uint64_t>(slice) * DepthSliceBytes(depth.extent, 1u);
