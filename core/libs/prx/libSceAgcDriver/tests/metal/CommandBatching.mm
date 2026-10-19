@@ -425,7 +425,7 @@ void PassMergeParking(const MetalTests::Context& context, const Kernels& kernels
     Encoders::EndOrPark(single, own, alone, key, true);
     auto next = Encoders::RenderMerging(single, own, LoadingPass(target), key, true);
     Require(next != alone, "A pass outside a batch was parked");
-    [next endEncoding];
+    Encoders::EndEncoder(own, next);
     single.Wait(own);
     Require(own.status == MTLCommandBufferStatusCompleted, "The unbatched passes did not complete");
 }
@@ -475,6 +475,35 @@ void ComputeEncoderParking(const MetalTests::Context& context, const Kernels& ke
     Require(fresh != parked, "A compute encoder was reused across command buffers");
     Encoders::EndCompute(other, fresh);
     backend.Wait(other);
+}
+
+// A draw that throws while its render encoder is open (before it parks or ends it) must not leave
+// the encoder open: the commit an abandoned batched work runs ends it, and its pass still runs.
+void AbandonedRenderEncoderEndsOnCommit(const MetalTests::Context& context, const Kernels& kernels) {
+    MetalDevice backend(context.device, context.library);
+    backend.SetBatching(true);
+    auto target = Target(context.device);
+    auto drawn = backend.Buffer(sizeof(std::uint32_t));
+    auto four = Filled(backend, 4);
+    const auto key = Encoders::KeyOf(LoadingPass(target));
+    for (const bool mergeable : {true, false}) {
+        backend.Wait(Clear(backend, target, 1));
+        auto commands = backend.CommandBuffer();
+        try {
+            AgcDriver::Metal::MetalBatchedWork batched(backend, commands);
+            auto encoder = Encoders::RenderMerging(backend, commands, LoadingPass(target), key, mergeable);
+            Require(encoder != nil, "Abandoned render encoder was not created");
+            DrawFirst(encoder, kernels, four);
+            throw std::runtime_error("abandoned");
+        } catch (const std::runtime_error&) {
+        }
+        Require(commands.status >= MTLCommandBufferStatusCommitted, "An abandoned render encoder did not commit its batch");
+        auto readback = backend.CommandBuffer();
+        CopyTexel(readback, target, drawn);
+        backend.Wait(readback);
+        Require(First(drawn) == 4, "The abandoned render encoder's pass did not run");
+    }
+    backend.Flush();
 }
 
 void UploadBlitBatching(const MetalTests::Context& context) {
@@ -536,7 +565,7 @@ void UploadBlitBatching(const MetalTests::Context& context) {
     Encoders::EnqueueUploadBlit(commands, recordA);
     Require(Encoders::HasPendingUploadBlits(commands), "Pending upload blit not recognized");
     auto render = Encoders::Render(commands, LoadingPass(textureA));
-    [render endEncoding];
+    Encoders::EndEncoder(commands, render);
     Require(!Encoders::HasPendingUploadBlits(commands), "Render encoder did not flush pending upload blits");
     stats = Encoders::TakeStatistics();
     Require(stats.uploadBlits == 3 && stats.uploadBlitPasses == 2, "Automatic upload blit flush miscounted");
@@ -571,5 +600,6 @@ void RunCommandBatchingTests(const MetalTests::Context& context) {
     PassMergeKeys(context);
     PassMergeParking(context, kernels);
     ComputeEncoderParking(context, kernels);
+    AbandonedRenderEncoderEndsOnCommit(context, kernels);
     UploadBlitBatching(context);
 }

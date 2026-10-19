@@ -149,6 +149,7 @@ void FlushUploadBlits(id<MTLCommandBuffer> commands);
 // Whether there are pending upload blits for `commands`.
 [[nodiscard]] bool HasPendingUploadBlits(id<MTLCommandBuffer> commands);
 
+void EndEncoder(id<MTLCommandBuffer> commands, id<MTLCommandEncoder> encoder);
 // Ends the render encoder parked in `commands`, if any, and flushes pending upload blits.
 void EndParked(id<MTLCommandBuffer> commands);
 // New encoders, after ending the one parked in `commands`.

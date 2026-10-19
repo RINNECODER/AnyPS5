@@ -28,7 +28,9 @@ struct FakeTexture {
     Descriptor descriptor;
     std::size_t bytes;
     bool CanShareBacking(const Descriptor& other) const { return other.base == descriptor.base && other.width == descriptor.width; }
+    bool CanShareBackingIgnoringDcc(const Descriptor& other) const { return CanShareBacking(other); }
     std::size_t GuestBytes() const { return bytes; }
+    const struct Descriptor& Descriptor() const { return descriptor; }
 };
 
 using Cache = AgcDriver::Metal::GuestImageCache<FakeTexture>;
@@ -97,7 +99,9 @@ void ByteBoundTests() {
         Descriptor descriptor;
         std::size_t bytes;
         bool CanShareBacking(const Descriptor& other) const { return other.base == descriptor.base; }
+        bool CanShareBackingIgnoringDcc(const Descriptor& other) const { return CanShareBacking(other); }
         std::size_t GuestBytes() const { return bytes; }
+        const struct Descriptor& Descriptor() const { return descriptor; }
     };
     using BigCache = AgcDriver::Metal::GuestImageCache<Big>;
     // Content entries take no hash, so the host bytes behind these addresses are never read.
