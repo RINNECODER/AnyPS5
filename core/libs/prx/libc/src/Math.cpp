@@ -344,6 +344,7 @@ long double APS5_VABI log1pl_nid_postfix(long double x) { return std::log1p(x); 
 long double APS5_VABI log2l_nid_postfix(long double x) { return std::log2(x); }
 long double APS5_VABI lgammal_nid_postfix(long double x) { return std::lgamma(x); }
 long double APS5_VABI tgammal_nid_postfix(long double x) { return std::tgamma(x); }
+float APS5_VABI tgammaf_nid_postfix(float x) { return std::tgamma(x); }
 long double APS5_VABI hypotl_nid_postfix(long double x, long double y) {
     if (std::isinf(x) || std::isinf(y)) return std::numeric_limits<long double>::infinity();
     return std::hypot(x, y);
