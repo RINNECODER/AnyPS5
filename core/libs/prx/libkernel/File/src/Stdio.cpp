@@ -648,16 +648,6 @@ namespace {
 std::atomic<int> g_hostStandardError{-1};
 std::atomic<int> g_hostStandardOutput{-1};
 
-#ifdef _WIN32
-void RetargetHostStream(int standard, int saved) {
-    auto* const stream = __acrt_iob_func(standard);
-    std::fflush(stream);
-    auto* const descriptor = reinterpret_cast<long*>(reinterpret_cast<unsigned char*>(stream) + 24);
-    if (*descriptor != standard) throw std::runtime_error("dup2: host standard stream descriptor field is not " + std::to_string(standard));
-    *descriptor = saved;
-}
-#endif
-
 void PreserveHostStream(int standard, std::atomic<int>& slot) {
     if (slot.load() >= 0) return;
 #ifdef _WIN32
@@ -674,12 +664,10 @@ void PreserveHostStream(int standard, std::atomic<int>& slot) {
         return;
     }
 #ifdef _WIN32
-    try {
-        RetargetHostStream(standard, saved);
-    } catch (...) {
+    if (!AdoptHostStandardStream_nid_no_patch(standard, saved)) {
         slot.store(-1);
         _close(saved);
-        throw;
+        throw std::runtime_error(standard == 1 ? "dup2: cannot keep the host standard output" : "dup2: cannot keep the host standard error");
     }
 #endif
 }

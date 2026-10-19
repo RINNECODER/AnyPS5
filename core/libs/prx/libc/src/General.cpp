@@ -416,6 +416,32 @@ extern "C" int DuplicateHostDescriptor_nid_no_patch(int descriptor) {
 }
 #endif
 
+#ifdef _WIN32
+namespace {
+std::atomic<std::FILE*> g_hostStandardOutputFile{nullptr};
+std::atomic<std::FILE*> g_hostStandardErrorFile{nullptr};
+}
+
+extern "C" bool AdoptHostStandardStream_nid_no_patch(int standard, int saved) {
+    std::fflush(__acrt_iob_func(standard));
+    std::FILE* stream = ::_fdopen(saved, "w");
+    if (stream == nullptr) return false;
+    std::setvbuf(stream, nullptr, _IONBF, 0);
+    (standard == 1 ? g_hostStandardOutputFile : g_hostStandardErrorFile).store(stream, std::memory_order_release);
+    return true;
+}
+
+extern "C" std::FILE* HostStandardOutputFile_nid_no_patch() {
+    if (std::FILE* kept = g_hostStandardOutputFile.load(std::memory_order_acquire)) return kept;
+    return __acrt_iob_func(1);
+}
+
+extern "C" std::FILE* HostStandardErrorFile_nid_no_patch() {
+    if (std::FILE* kept = g_hostStandardErrorFile.load(std::memory_order_acquire)) return kept;
+    return __acrt_iob_func(2);
+}
+#endif
+
 extern "C" void AddPathAlias_nid_no_patch(const char* guestPrefix, const char* hostPath) {
     if (guestPrefix == nullptr || hostPath == nullptr) {
         APS5_INVALID_ARG_EX;

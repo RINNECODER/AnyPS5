@@ -1,3 +1,5 @@
+#include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/HostStandardStreams.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -13,6 +15,12 @@ extern "C" {
 int APS5_VABI pipe_nid_postfix(int*);
 int APS5_VABI dup2_nid_postfix(int, int);
 std::int64_t APS5_VABI write_nid_postfix(int, const void*, std::size_t);
+int APS5_VABI printf_nid_postfix(const char*, ...);
+int APS5_VABI puts_nid_postfix(const char*);
+int APS5_VABI fprintf_nid_postfix(FileStream*, const char*, ...);
+int APS5_VABI fflush_nid_postfix(FileStream*);
+extern FileStream _Stdout_nid_postfix;
+extern FileStream _Stderr_nid_postfix;
 }
 
 static void Require(bool value) { if (!value) std::abort(); }
@@ -24,7 +32,7 @@ static DWORD Available(int descriptor, void* buffer, DWORD capacity, DWORD& read
     return available;
 }
 
-static void Split(int standard, std::FILE* stream) {
+static void Split(int standard) {
     int capture[2]{-1, -1};
     Require(::_pipe(capture, 65536, _O_BINARY) == 0);
     const int original = ::_dup(standard);
@@ -33,6 +41,7 @@ static void Split(int standard, std::FILE* stream) {
     int guest[2]{-1, -1};
     Require(pipe_nid_postfix(guest) == 0);
     Require(dup2_nid_postfix(guest[1], standard) == standard);
+    std::FILE* const stream = standard == 1 ? stdout : stderr;
 
     std::string host(8192, 'h');
     host.back() = '\n';
@@ -57,8 +66,34 @@ static void Split(int standard, std::FILE* stream) {
     ::_close(guest[1]);
 }
 
+static void GuestText(int standard, const std::string& text) {
+    int guest[2]{-1, -1};
+    Require(pipe_nid_postfix(guest) == 0);
+    const int original = ::_dup(standard);
+    Require(original >= 0);
+    Require(dup2_nid_postfix(guest[1], standard) == standard);
+    if (standard == 1) {
+        Require(printf_nid_postfix("guest-printf\n") >= 0);
+        Require(puts_nid_postfix("guest-puts") >= 0);
+        Require(fflush_nid_postfix(&_Stdout_nid_postfix) == 0);
+    } else {
+        Require(fprintf_nid_postfix(&_Stderr_nid_postfix, "guest-fprintf\n") >= 0);
+        Require(fflush_nid_postfix(&_Stderr_nid_postfix) == 0);
+    }
+    std::string got(text.size(), '\0');
+    DWORD read = 0;
+    Require(Available(guest[0], got.data(), static_cast<DWORD>(got.size()), read) == text.size());
+    Require(read == text.size() && got == text);
+    Require(::_dup2(original, standard) == 0);
+    ::_close(original);
+    ::_close(guest[0]);
+    ::_close(guest[1]);
+}
+
 int main() {
-    Split(2, stderr);
-    Split(1, stdout);
+    Split(2);
+    Split(1);
+    GuestText(1, "guest-printf\nguest-puts\n");
+    GuestText(2, "guest-fprintf\n");
     return 0;
 }
