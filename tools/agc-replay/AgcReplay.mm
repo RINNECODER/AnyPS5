@@ -546,7 +546,7 @@ int main(int argc, char** argv) {
     Metal::ApplyDirectWorkingSet();
     auto& driver = Metal::MetalDriver::Get();
     driver.Configure((__bridge void*)device, (__bridge void*)library, ranges, {}, 1);
-    if (psoStats) AgcDriver::Metal::WaitForMetalPipelineManifestReplay(120000);
+    AgcDriver::Metal::WaitForMetalPipelineManifestReplay(120000);
     driver.SetSkipInvalidCommandBuffers(true);
     std::set<std::uint32_t> handles;
     for (const auto* submit : submits)

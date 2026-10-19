@@ -543,10 +543,12 @@ void AddQueuedBatch(std::vector<QueuedRecord>& batch) {
     }
 }
 
-void WriteQueuedArchives() {
+void WriteQueuedArchives(bool force) {
     std::unique_lock use(archiveUse);
     std::lock_guard lock(archiveMutex);
-    static_cast<void>(FlushLocked());
+    for (auto& [key, state] : archives) {
+        if (force || state.pending >= ArchiveWriteBatch) static_cast<void>(WriteArchive(state));
+    }
 }
 
 void ArchiveWorkerMain() {
@@ -578,7 +580,7 @@ void ArchiveWorkerMain() {
         drainedCv.notify_all();
         if (stopping) {
             try {
-                WriteQueuedArchives();
+                WriteQueuedArchives(true);
             } catch (...) {
             }
             return;
@@ -590,7 +592,7 @@ void ArchiveWorkerMain() {
         }
         if (idle) {
             try {
-                WriteQueuedArchives();
+                WriteQueuedArchives(false);
             } catch (...) {
             }
         }

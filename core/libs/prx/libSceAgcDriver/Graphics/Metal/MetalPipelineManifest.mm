@@ -501,6 +501,10 @@ void MergeDecodedRecipes(id<MTLDevice> device, const DecodedManifest& manifest) 
         return shared;
     };
     for (const auto& decoded : manifest.recipes) {
+        {
+            std::lock_guard lock(recipeMutex);
+            if (recipes.size() >= ManifestRecipeLimit) break;
+        }
         Recipe recipe;
         recipe.kind = decoded.kind;
         recipe.source0 = intern(decoded.source0);
