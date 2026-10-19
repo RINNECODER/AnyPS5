@@ -377,6 +377,7 @@ int main() {
                 }
             }
         }
+        RunSrgbZero(*device, Format1616UNorm, {ClampEdge, FilterPoint}, "16_16 unorm comparison returns zero", false, 0u);
         Run(*device, {ClampEdge, FilterPoint}, "point, clamp to edge");
         Run(*device, {ClampWrap, FilterPoint}, "point, wrap");
         if (lodClamp) Run(*device, {ClampWrap, FilterPoint}, "point, wrap with negative offsets", true);
