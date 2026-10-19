@@ -10,6 +10,7 @@ namespace AgcDriver::Metal {
 class MetalHeapPool {
 public:
     static MetalHeapPool& Shared();
+    [[nodiscard]] static bool Enabled();
 
     explicit MetalHeapPool(std::size_t slabSize = 128 * 1024 * 1024);
     ~MetalHeapPool();

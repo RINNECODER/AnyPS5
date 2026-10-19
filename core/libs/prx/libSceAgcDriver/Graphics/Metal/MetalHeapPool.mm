@@ -1,6 +1,18 @@
 #include "MetalHeapPool.hpp"
+#include <cstdlib>
+#include <cstring>
 
 namespace AgcDriver::Metal {
+
+bool MetalHeapPool::Enabled() {
+    const char* value = std::getenv("ANYPS5_METAL_TEXTURE_HEAP");
+    if (value == nullptr) return false;
+    if (*value == '1' && *(value + 1) == '\0') return true;
+    if (std::strcmp(value, "true") == 0 || std::strcmp(value, "TRUE") == 0 ||
+        std::strcmp(value, "on") == 0 || std::strcmp(value, "ON") == 0 ||
+        std::strcmp(value, "yes") == 0 || std::strcmp(value, "YES") == 0) return true;
+    return false;
+}
 
 MetalHeapPool& MetalHeapPool::Shared() {
     static MetalHeapPool pool;
