@@ -1065,7 +1065,7 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                 static std::uint64_t flips = 0;
                 if (++flips % 16 == 0) {
                     const auto cache = draw->ImageCache()->TakeStatistics();
-                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"verified\":%llu,\"rejected\":%llu,\"hashed_mib\":%.1f,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu]}\n",
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"verified\":%llu,\"rejected\":%llu,\"hashed_mib\":%.1f,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu],\"invalidated\":%llu,\"invalidated_by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu],\"evicted\":%llu,\"replaced\":%llu}\n",
                         static_cast<unsigned long long>(cache.hits), static_cast<unsigned long long>(cache.misses),
                         static_cast<unsigned long long>(cache.inserts), static_cast<unsigned long long>(cache.clears),
                         static_cast<unsigned long long>(cache.verified), static_cast<unsigned long long>(cache.rejected),
@@ -1073,7 +1073,13 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                         static_cast<unsigned long long>(cache.clearsBy[0]), static_cast<unsigned long long>(cache.clearsBy[1]),
                         static_cast<unsigned long long>(cache.clearsBy[2]), static_cast<unsigned long long>(cache.clearsBy[3]),
                         static_cast<unsigned long long>(cache.clearsBy[4]), static_cast<unsigned long long>(cache.clearsBy[5]),
-                        static_cast<unsigned long long>(cache.clearsBy[6]), static_cast<unsigned long long>(cache.clearsBy[7]));
+                        static_cast<unsigned long long>(cache.clearsBy[6]), static_cast<unsigned long long>(cache.clearsBy[7]),
+                        static_cast<unsigned long long>(cache.invalidated),
+                        static_cast<unsigned long long>(cache.invalidatedBy[0]), static_cast<unsigned long long>(cache.invalidatedBy[1]),
+                        static_cast<unsigned long long>(cache.invalidatedBy[2]), static_cast<unsigned long long>(cache.invalidatedBy[3]),
+                        static_cast<unsigned long long>(cache.invalidatedBy[4]), static_cast<unsigned long long>(cache.invalidatedBy[5]),
+                        static_cast<unsigned long long>(cache.invalidatedBy[6]),
+                        static_cast<unsigned long long>(cache.evicted), static_cast<unsigned long long>(cache.replaced));
                     std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"gpu_timeline\",\"committed\":%llu,\"drains\":%llu,\"reruns\":%llu,\"command_buffers\":%llu}\n",
                         static_cast<unsigned long long>(timeline.Committed()), static_cast<unsigned long long>(timeline.Drains()),
                         static_cast<unsigned long long>(deferredReruns), static_cast<unsigned long long>(backend->CommandBuffersCreated()));

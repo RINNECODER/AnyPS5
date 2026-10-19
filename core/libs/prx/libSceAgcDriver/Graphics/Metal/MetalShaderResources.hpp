@@ -196,7 +196,7 @@ private:
     MetalGuestHostAliases* aliases = nullptr;
     ImageCache* imageCache = nullptr;
     // Drops cached images whose guest bytes overlap [begin, end) through any borrowed range.
-    void forgetCachedImages(std::uint64_t begin, std::uint64_t end);
+    void forgetCachedImages(std::uint64_t begin, std::uint64_t end, ImageCache::Cause cause = ImageCache::Cause::Other);
     [[nodiscard]] Graphics::DccKeys textureKeys(const Graphics::GuestTextureResource& descriptor, std::size_t bytes);
     void validateDccWrite(const Graphics::GuestTextureResource& descriptor, std::size_t bytes, Graphics::DccKeys keys);
     [[nodiscard]] bool physicallyOverlaps(std::uint64_t begin, std::uint64_t end,

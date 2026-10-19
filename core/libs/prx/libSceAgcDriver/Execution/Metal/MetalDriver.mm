@@ -851,7 +851,8 @@ void MetalDriver::Impl::ForgetCachedImages(const GuestStoreRange& store) {
         if (!store.Overlaps(range.guestAddress, range.host.size())) continue;
         const auto begin = std::max(store.begin, range.guestAddress);
         const auto end = std::min(store.begin + std::min(store.bytes, ~std::uint64_t{0} - store.begin), range.guestAddress + range.host.size());
-        draw->ImageCache()->Invalidate(range.host.data() + (begin - range.guestAddress), static_cast<std::size_t>(end - begin));
+        draw->ImageCache()->Invalidate(range.host.data() + (begin - range.guestAddress), static_cast<std::size_t>(end - begin),
+            Metal::GuestImageCache<Metal::MetalTexture>::Cause::DriverStore);
     }
 }
 
