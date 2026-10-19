@@ -664,6 +664,15 @@ void Manifest(const MetalTests::Context& context) {
     RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm));
     MetalTests::Require(GetMetalPipelineCacheStatistics().renderPipelines.misses == misses,
                         "a render pipeline rebuilt from the manifest was compiled again on its next use");
+    MetalTests::Require(GetMetalPipelineManifestStatistics().entries >= 2,
+                        "the replay dropped the recipes it had loaded");
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA16Float));
+    FlushMetalPipelineManifest();
+    ClearMetalPipelineCaches();
+    const auto replayedBefore = GetMetalPipelineManifestStatistics().replayed;
+    MetalTests::Require(ReplayMetalPipelineManifest(context.device), "the rewritten manifest was not read back");
+    MetalTests::Require(GetMetalPipelineManifestStatistics().replayed - replayedBefore >= 3,
+                        "the rewritten manifest lost a pipeline from the earlier session");
     ClearMetalPipelineCaches();
     SetEnvironment("ANYPS5_SHADER_CACHE_DIR", nullptr);
     SetEnvironment("ANYPS5_NO_SHADER_CACHE", "1");

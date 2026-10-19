@@ -319,6 +319,7 @@ std::deque<QueuedRecord> queuedRecords;
 std::uint64_t queuedSequence = 0;
 std::uint64_t processedSequence = 0;
 bool queueStopping = false;
+bool queueShutdown = false;
 std::thread queueThread;
 std::condition_variable drainedCv;
 
@@ -596,6 +597,7 @@ void ArchiveWorkerMain() {
 
 void EnsureArchiveWorker() {
     std::lock_guard lock(queueMutex);
+    if (queueShutdown) return;
     if (queueThread.joinable()) return;
     queueStopping = false;
     queueThread = std::thread(ArchiveWorkerMain);
@@ -623,7 +625,7 @@ void EnqueueRecord(id<MTLDevice> device, Recorded recorded) {
     EnsureArchiveWorker();
     {
         std::lock_guard lock(queueMutex);
-        if (queueStopping) return;
+        if (queueStopping || queueShutdown) return;
         queuedRecords.push_back(QueuedRecord{device, std::move(recorded)});
         ++queuedSequence;
     }
@@ -631,6 +633,11 @@ void EnqueueRecord(id<MTLDevice> device, Recorded recorded) {
 }
 
 void FlushAtExit() {
+    WaitForMetalPipelineManifestReplay(120000);
+    {
+        std::lock_guard lock(queueMutex);
+        queueShutdown = true;
+    }
     StopArchiveWorker();
     std::unique_lock use(archiveUse);
     std::lock_guard lock(archiveMutex);

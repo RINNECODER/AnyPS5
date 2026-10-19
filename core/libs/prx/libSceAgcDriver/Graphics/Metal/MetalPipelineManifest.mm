@@ -487,6 +487,21 @@ std::mutex replayMutex;
 std::condition_variable replayCv;
 bool replayDone = true;
 
+void MergeDecodedRecipes(id<MTLDevice> device, const DecodedManifest& manifest) {
+    for (const auto& decoded : manifest.recipes) {
+        Recipe recipe;
+        recipe.kind = decoded.kind;
+        recipe.source0 = std::make_shared<const std::string>(*decoded.source0);
+        if (decoded.source1 != nullptr && !decoded.source1->empty()) recipe.source1 = std::make_shared<const std::string>(*decoded.source1);
+        recipe.entry0 = *decoded.entry0;
+        recipe.entry1 = *decoded.entry1;
+        recipe.language32_0 = decoded.language32_0;
+        recipe.language32_1 = decoded.language32_1;
+        recipe.descriptor = decoded.descriptor;
+        AddRecipe(device, std::move(recipe));
+    }
+}
+
 void ReplayDecoded(id<MTLDevice> device, const DecodedManifest& manifest) {
     const auto started = std::chrono::steady_clock::now();
     std::uint64_t replayed = 0;
@@ -559,6 +574,7 @@ void RecordComputePipelineRecipe(id<MTLDevice> device, const ShaderRecompiler::M
 }
 
 void FlushMetalPipelineManifest() {
+    WaitForMetalPipelineManifestReplay(120000);
     if (!ManifestEnabled()) return;
     std::vector<std::pair<std::string, Recipe>> snapshot;
     std::string path;
@@ -585,6 +601,7 @@ bool ReplayMetalPipelineManifest(id<MTLDevice> device) {
     if (!ReadWholeFile(path, file)) return false;
     DecodedManifest manifest;
     if (!DecodeManifest(file, device, manifest)) return false;
+    MergeDecodedRecipes(device, manifest);
     ReplayDecoded(device, manifest);
     return true;
 }
