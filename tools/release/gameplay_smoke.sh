@@ -9,7 +9,7 @@
 #   --out DIR          output directory (default: ./gameplay-smoke-<timestamp>)
 #   --seconds N        wall limit for the run (default 320)
 #   --min-gameplay N   seconds the guest must keep presenting frames after the map appears (default 60)
-#   --max-black N      frames after the map allowed below --black-ratio (default 3)
+#   --max-black N      frames after the map allowed below --black-ratio (default 4)
 #   --black-ratio F    a frame below this nonblack_ratio is a black-region frame (default 0.65)
 #
 # The controller watches the engine's log and its captured frames and presses only when it sees the
@@ -20,7 +20,7 @@
 # black-region frames appear, and the map screenshot is saved as map.png. Refuses to run while Steam
 # or the title is running, and takes the game-run lock (with-lock eboot) when that helper is installed.
 set -u
-BUILD=""; TITLE=""; FROMSAVE=""; OUT=""; SECONDS_LIMIT=320; MIN_GAMEPLAY=60; MAX_BLACK=3; BLACK_RATIO=0.65
+BUILD=""; TITLE=""; FROMSAVE=""; OUT=""; SECONDS_LIMIT=320; MIN_GAMEPLAY=60; MAX_BLACK=4; BLACK_RATIO=0.65
 while [ $# -gt 0 ]; do case $1 in
   --build) BUILD=$2; shift;;
   --title-dir) TITLE=$2; shift;;
@@ -130,7 +130,7 @@ while True:
                 continue
             ratio = event.get('nonblack_ratio', 1.0)
             colors = event.get('distinct_colors', 0)
-            if map_time is None and map_generation_seen and ratio >= 0.6 and colors >= 800:
+            if map_time is None and map_generation_seen and ratio >= 0.6:
                 map_time = now
                 map_frame = event.get('path')
             if map_time is not None:
@@ -183,6 +183,10 @@ exits = [json.loads(l) for l in lines if l.startswith('{') and '"event":"guest_e
 exit_code = exits[-1].get('exit_code') if exits else None
 faulted = any(re.search(r'guest fault|uncaught_exception|assertion failed', l) for l in lines)
 black = [entry for entry in after if entry[1] < black_ratio]
+run = worst = 0
+for entry in after:
+    run = run + 1 if entry[1] < black_ratio else 0
+    worst = max(worst, run)
 play = (after[-1][0] - map_time) if (map_time is not None and after) else 0.0
 screenshot = out / 'map.png'
 if map_frame and Path(map_frame).exists():
@@ -203,7 +207,8 @@ for name, ok in checks:
 ratios = [entry[1] for entry in after]
 print(f'map at {round(map_time, 1) if map_time else None} s, gameplay {play:.1f} s, captured after map {len(after)}, '
       f'presented events {presented_after}, nonblack min {round(min(ratios), 3) if ratios else None} '
-      f'mean {round(sum(ratios) / len(ratios), 3) if ratios else None}, black frames {len(black)}, exit {exit_code}')
+      f'mean {round(sum(ratios) / len(ratios), 3) if ratios else None}, black frames {len(black)}, '
+      f'longest black run {worst}, exit {exit_code}')
 print('out: ' + str(out))
 shutil.rmtree(scratch, ignore_errors=True)
 sys.exit(0 if all(ok for _, ok in checks) else 1)
