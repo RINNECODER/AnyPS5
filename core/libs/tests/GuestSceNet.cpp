@@ -11,6 +11,7 @@
 #endif
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/Socket/include/SocketSelectDeadline.hpp"
+#include "prx/libkernel/Time/include/Time.hpp"
 #include "SceTypes.hpp"
 #include <algorithm>
 #include <array>
@@ -90,6 +91,7 @@ int* APS5_VABI __error_nid_postfix();
 int APS5_VABI sceNetInetPton(int, const char*, void*);
 int APS5_VABI sceNetInetPtonEx(int, const char*, void*, int);
 int APS5_VABI sceNetUsleep(int);
+void APS5_VABI sceNetGetSystemTime(std::uint64_t*);
 const char* APS5_VABI sceNetInetNtop(int, const void*, char*, std::uint32_t);
 int* APS5_VABI sceNetErrnoLoc(void);
 }
@@ -845,6 +847,27 @@ static void CheckInetPtonEx() {
     }
 }
 
+static void CheckSystemTime() {
+    *sceNetErrnoLoc() = 22;
+    sceNetGetSystemTime(nullptr);
+    Require(*sceNetErrnoLoc() == 22);
+    std::array<std::uint64_t, 3> output{0x123456789abcdef0ULL, UINT64_MAX, 0xfedcba9876543210ULL};
+    std::uint64_t previous = 0;
+    for (int i = 0; i < 64; ++i) {
+        output[1] = UINT64_MAX;
+        const auto before = sceKernelGetProcessTime();
+        sceNetGetSystemTime(&output[1]);
+        const auto after = sceKernelGetProcessTime();
+        Require(before <= output[1] && output[1] <= after && previous <= output[1]);
+        Require(output[0] == 0x123456789abcdef0ULL && output[2] == 0xfedcba9876543210ULL);
+        Require(*sceNetErrnoLoc() == 22);
+        previous = output[1];
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    sceNetGetSystemTime(&output[1]);
+    Require(output[1] > previous);
+}
+
 static void CheckUsleep() {
     Require(sceNetUsleep(0) == 0);
     const auto start = std::chrono::steady_clock::now();
@@ -1321,6 +1344,7 @@ int main(int argc, char** argv) {
     CheckInetPtonExParts();
     CheckInetPtonEx();
     CheckUsleep();
+    CheckSystemTime();
     CheckEpollIdent();
     CheckTcpNoDelay();
     CheckLinkLocalAllNodesIpv6();
