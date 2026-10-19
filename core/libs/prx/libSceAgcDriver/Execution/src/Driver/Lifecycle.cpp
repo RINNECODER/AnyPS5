@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GpuSharedMemory.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include <cstdint>
 #include <cstdio>
@@ -52,25 +53,43 @@ constexpr std::uint32_t ScalarEndProgram = 0xbf810000u;
 constexpr std::uint64_t FsTableDword3 = 0x5204u;
 
 void MapDriverMemory() {
-    void* mapped;
-#ifdef _WIN32
-    mapped = reinterpret_cast<void*>(DriverMemoryAddress);
-    GuestArena::GuestArenaCommit_nid_postfix(mapped, DriverMemoryBytes, PAGE_READWRITE, DriverMemoryBytes);
-#else
-    mapped = mmap(reinterpret_cast<void*>(DriverMemoryAddress), DriverMemoryBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-    if (mapped == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map the AGC driver memory");
+    // The FS table and its routine block are GPU-visible, so under the GPU-process flag they come
+    // from the slid, shm-backed guest arena; the raw address is inside the PS5 system reservation,
+    // whose slid image is reserved too, so the block is allocated rather than slid. Every address
+    // written into it follows the mapped base.
+    std::uint64_t base = DriverMemoryAddress;
+    void* mapped = nullptr;
+#if defined(__APPLE__)
+    if (GpuSharedMemory::GpuSharedMemoryEnabled_nid_postfix() && GuestArena::GuestArenaAvailable_nid_postfix()) {
+        base = reinterpret_cast<std::uint64_t>(GuestArena::GuestArenaAllocate_nid_postfix(DriverMemoryBytes, 0x1000));
+        GuestArena::GuestArenaCommit_nid_postfix(reinterpret_cast<void*>(base), DriverMemoryBytes, 0x04, DriverMemoryBytes);
+        mapped = reinterpret_cast<void*>(base);
+    }
 #endif
-    if (reinterpret_cast<std::uint64_t>(mapped) != DriverMemoryAddress) throw std::runtime_error("the AGC driver memory was not mapped at its fixed address");
-    auto* routineTable = reinterpret_cast<std::uint64_t*>(FsRoutineTableAddress);
+    if (mapped == nullptr) {
+        GuestArena::GuestArenaSlideAddress_nid_postfix(&base, DriverMemoryBytes);
+#ifdef _WIN32
+        mapped = reinterpret_cast<void*>(base);
+        GuestArena::GuestArenaCommit_nid_postfix(mapped, DriverMemoryBytes, PAGE_READWRITE, DriverMemoryBytes);
+#else
+        mapped = mmap(reinterpret_cast<void*>(base), DriverMemoryBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (mapped == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map the AGC driver memory");
+#endif
+    }
+    if (reinterpret_cast<std::uint64_t>(mapped) != base) throw std::runtime_error("the AGC driver memory was not mapped at its fixed address");
+    const auto tableAddress = base + (FsTableAddress - DriverMemoryAddress);
+    const auto routineTableAddress = base + (FsRoutineTableAddress - DriverMemoryAddress);
+    const auto routineAddress = base + (FsRoutineAddress - DriverMemoryAddress);
+    auto* routineTable = reinterpret_cast<std::uint64_t*>(routineTableAddress);
     for (std::uint64_t record = 0; record < FsRoutineRecords; ++record) {
-        routineTable[record * 2u] = FsRoutineAddress;
+        routineTable[record * 2u] = routineAddress;
         routineTable[record * 2u + 1u] = 0u;
     }
-    auto* routine = reinterpret_cast<std::uint32_t*>(FsRoutineAddress);
+    auto* routine = reinterpret_cast<std::uint32_t*>(routineAddress);
     routine[0] = ScalarSetpcB64LinkS14;
     routine[1] = ScalarEndProgram;
-    auto* slot = reinterpret_cast<std::uint64_t*>(FsTableAddress);
-    slot[0] = (FsRoutineTableAddress & 0xffffffffffffull) | 16ull << 48u;
+    auto* slot = reinterpret_cast<std::uint64_t*>(tableAddress);
+    slot[0] = (routineTableAddress & 0xffffffffffffull) | 16ull << 48u;
     slot[1] = FsTableDword3 << 32u | FsRoutineRecords;
     GuestAllocations::Mutation mutation;
     mutation.Add(mapped, DriverMemoryBytes, true, true, true);
