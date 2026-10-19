@@ -1004,6 +1004,7 @@ static void CheckLongDoubleFunctions() {
     Require(std::fabs(j0f_nid_postfix(2.5f) - static_cast<float>(std::cyl_bessel_j(0.0, 2.5))) < 1e-6f);
     Require(std::fabs(jnf_nid_postfix(3, 4.0f) - static_cast<float>(std::cyl_bessel_j(3.0, 4.0))) < 1e-6f);
     Require(y0f_nid_postfix(0.0f) == -std::numeric_limits<float>::infinity() && y1f_nid_postfix(0.0f) == -std::numeric_limits<float>::infinity());
+    Require(ynf_nid_postfix(2, 0.0f) == -std::numeric_limits<float>::infinity());
     Require(std::fabs(ynf_nid_postfix(2, 3.0f) - static_cast<float>(std::cyl_neumann(2.0, 3.0))) < 1e-6f);
     Require(std::isnan(y0f_nid_postfix(-1.0f)));
 }
