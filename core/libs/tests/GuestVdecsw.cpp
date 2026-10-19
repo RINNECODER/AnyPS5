@@ -218,6 +218,76 @@ void testDecode() {
     check(sceVdecswTrySyncDecodeInput(session.decoder, &result) == InputQueueEmpty, "a finalized decoder did not report an empty input queue");
 }
 
+void testHevc() {
+    Session session(CodecHevc, 1, 30);
+    const auto units = hevcUnits(HevcStream.data(), HevcStream.size());
+    check(units.size() == HevcHashes.size(), "unexpected HEVC access unit count");
+    std::vector<std::uint8_t> buffer(session.memory.maxFrameBufferSize);
+    std::size_t pictures = 0;
+    bool ended = false;
+    const auto drain = [&] {
+        for (;;) {
+            const FrameBuffer frame{sizeof(FrameBuffer), buffer.data(), buffer.size()};
+            check(sceVdecswSetDecodeOutput(session.decoder, &frame) == 0, "HEVC output buffer was rejected");
+            OutputInfo output{sizeof(OutputInfo)};
+            const auto status = sceVdecswTrySyncDecodeOutput(session.decoder, &output);
+            if (status == OutputPending) return;
+            check(status == 0, "HEVC output sync failed");
+            if (!output.isValid) {
+                ended = true;
+                return;
+            }
+            check(pictures < HevcHashes.size() && output.codecType == CodecHevc && output.pictureCount == 1 && output.frameWidth == Width && output.frameHeight == Height, "unexpected HEVC picture geometry");
+            HevcPictureInfo info{sizeof(HevcPictureInfo)};
+            check(sceVdecswGetHevcPictureInfo(&output, &info) == 0 && info.isValid, "HEVC picture info missing");
+            const auto unit = HevcDisplayOrderUnits[pictures];
+            check(info.ptsData == 1000 + unit && info.dtsData == unit && info.attachedData == 0xa0 + unit, "HEVC pictures out of display order");
+            check(info.idrPictureFlag == (pictures == 0 ? 1 : 0) && info.irapPictureFlag == (pictures == 0 ? 1 : 0), "HEVC random access flags differ");
+            check(info.generalProfileIdc == 1 && info.generalLevelIdc == 30 && info.bitDepthLumaMinus8 == 0 && info.bitDepthChromaMinus8 == 0, "HEVC profile, level or bit depth differs");
+            check(info.picWidthInLumaSamples == Width && info.picHeightInLumaSamples == Height && info.conformanceWindowFlag == 0 && info.frameCroppingFlag == 0, "HEVC picture geometry in the picture info is wrong");
+            AvcPictureInfo avc{sizeof(AvcPictureInfo)};
+            bool avcThrows = false;
+            try {
+                sceVdecswGetAvcPictureInfo(&output, &avc, nullptr);
+            } catch (const std::exception&) {
+                avcThrows = true;
+            }
+            check(avcThrows, "AVC picture info was returned for an HEVC picture");
+            check(hashNv12(buffer.data(), output.framePitch, output.frameHeight) == HevcHashes[pictures], "HEVC picture " + std::to_string(pictures) + " differs from the reference");
+            ++pictures;
+        }
+    };
+    for (std::size_t unit = 0; unit < units.size(); ++unit) {
+        const InputData input{sizeof(InputData), units[unit].data(), units[unit].size(), 1000 + unit, unit, 0xa0 + unit};
+        check(sceVdecswSetDecodeInput(session.decoder, &input) == 0, "HEVC decode input was rejected");
+        InputResult consumed{sizeof(InputResult)};
+        check(sceVdecswTrySyncDecodeInput(session.decoder, &consumed) == 0 && consumed.decodedAu == units[unit].data(), "an HEVC access unit was not consumed");
+        drain();
+    }
+    check(sceVdecswFinalizeDecodeSequence(session.decoder) == 0, "HEVC finalize failed");
+    while (!ended) drain();
+    check(pictures == HevcHashes.size(), "missing HEVC pictures after finalizing the sequence");
+}
+
+void testHevcCrop() {
+    Session session(CodecHevc, 1, 30);
+    std::vector<std::uint8_t> buffer(session.memory.maxFrameBufferSize);
+    const FrameBuffer frame{sizeof(FrameBuffer), buffer.data(), buffer.size()};
+    check(sceVdecswSetDecodeOutput(session.decoder, &frame) == 0, "cropped HEVC output buffer was rejected");
+    const InputData input{sizeof(InputData), HevcCroppedStream.data(), HevcCroppedStream.size(), 1000, 0, 0xa0};
+    check(sceVdecswSetDecodeInput(session.decoder, &input) == 0, "cropped HEVC decode input was rejected");
+    InputResult consumed{sizeof(InputResult)};
+    check(sceVdecswSyncDecodeInput(session.decoder, &consumed) == 0, "the cropped HEVC access unit was not consumed");
+    check(sceVdecswFinalizeDecodeSequence(session.decoder) == 0, "cropped HEVC finalize failed");
+    OutputInfo output{sizeof(OutputInfo)};
+    check(sceVdecswSyncDecodeOutput(session.decoder, &output) == 0 && output.isValid && output.frameWidth == 64 && output.frameHeight == 40, "unexpected cropped HEVC picture geometry");
+    HevcPictureInfo info{sizeof(HevcPictureInfo)};
+    check(sceVdecswGetHevcPictureInfo(&output, &info) == 0 && info.isValid, "cropped HEVC picture info missing");
+    check(info.picWidthInLumaSamples == 64 && info.picHeightInLumaSamples == 40, "cropped HEVC coded size differs");
+    check(info.conformanceWindowFlag == 1 && info.confWinLeftOffset == 0 && info.confWinRightOffset == 0 && info.confWinTopOffset == 0 && info.confWinBottomOffset == 2, "HEVC conformance window differs");
+    check(info.frameCroppingFlag == 1 && info.frameCropLeftOffset == 0 && info.frameCropRightOffset == 0 && info.frameCropTopOffset == 0 && info.frameCropBottomOffset == 2, "HEVC frame cropping differs");
+}
+
 void testWithoutOutput() {
     Session session;
     const auto units = accessUnits(false);
@@ -265,6 +335,8 @@ void testSyncWrappers() {
 int main() {
     try {
         testDecode();
+        testHevc();
+        testHevcCrop();
         testWithoutOutput();
         testSyncWrappers();
         std::puts("Vdecsw tests passed");
