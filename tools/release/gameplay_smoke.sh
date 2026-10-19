@@ -17,8 +17,10 @@
 # screen appears. It stops pressing once map generation starts, waits for a detailed 3D frame, then
 # keeps playing for --min-gameplay seconds. The gate passes only when the guest exits cleanly (or
 # reaches the wall limit) with no fault, the 3D map appears, frames keep presenting after it, no
-# black-region frames appear, and the map screenshot is saved as map.png. Refuses to run while Steam
-# or the title is running, and takes the game-run lock (with-lock eboot) when that helper is installed.
+# black-region frames appear, and the map screenshot is saved as map.png. Refuses to run while the
+# game or another title run is up (an anyps5_rosetta_run this gate did not start, or the game's own
+# process), and takes the game-run lock (with-lock eboot) when that helper is installed. The Steam
+# client may be open as long as no game is running.
 set -u
 BUILD=""; TITLE=""; FROMSAVE=""; OUT=""; SECONDS_LIMIT=320; MIN_GAMEPLAY=60; MAX_BLACK=4; BLACK_RATIO=0.65
 while [ $# -gt 0 ]; do case $1 in
@@ -42,8 +44,8 @@ SRC=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$BUILD/CMakeCache.txt")
 OUT=${OUT:-$PWD/gameplay-smoke-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$OUT"
 
-if pgrep -f steam_osx >/dev/null; then echo "Steam is running; the gate needs the GPU to itself" >&2; exit 2; fi
-if pgrep -f anyps5_rosetta_run >/dev/null; then echo "a title is already running" >&2; exit 2; fi
+if pgrep -f anyps5_rosetta_run >/dev/null; then echo "a title is already running (anyps5_rosetta_run); the gate needs the GPU to itself" >&2; exit 2; fi
+if pgrep -f "CivilizationVII" >/dev/null; then echo "the game is running; the gate needs the GPU to itself" >&2; exit 2; fi
 
 CONTROLLER=$(mktemp /private/tmp/anyps5-gameplay-controller.XXXXXX.py)
 trap 'rm -f "$CONTROLLER"' EXIT
@@ -157,9 +159,7 @@ while True:
                 last_press = now
     if engine.poll() is not None:
         break
-    if map_time is not None and now - map_time >= minimum + 5:
-        break
-    if now >= seconds + 30:
+    if now >= seconds + 90:
         break
     time.sleep(0.25)
 
