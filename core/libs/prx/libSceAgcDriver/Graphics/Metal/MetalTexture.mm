@@ -630,7 +630,7 @@ void MetalTexture::encodeLinearCopy(id<MTLCommandBuffer> commands, id<MTLBuffer>
             }
         }
     }
-    [blit endEncoding];
+    MetalEncoders::EndEncoder(commands, blit);
 }
 
 void MetalTexture::recordLinearUpload(id<MTLBuffer> linear, MetalEncoders::UploadBlitRecord& record) const {

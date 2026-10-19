@@ -116,7 +116,7 @@ std::shared_ptr<MetalDepthPlanes> CreateDepthPlanes(const MetalDevice& backend, 
     auto commands = backend.CommandBuffer();
     auto encoder = MetalEncoders::Render(commands, pass);
     if (encoder == nil) throw MetalGpuExecutionError("Metal depth initial clear encoder creation failed");
-    [encoder endEncoding];
+    MetalEncoders::EndEncoder(commands, encoder);
     backend.Wait(commands);
     return planes;
 }
@@ -275,7 +275,7 @@ id<MTLTexture> GatherDepthSlices(const MetalDevice& backend, std::span<const std
     for (NSUInteger i = 0; i < layers; ++i) {
         [blit copyFromTexture:sources[i]->Planes()->depth sourceSlice:sources[i]->Layer() sourceLevel:0 toTexture:array destinationSlice:i destinationLevel:0 sliceCount:1 levelCount:1];
     }
-    [blit endEncoding];
+    MetalEncoders::EndEncoder(commands, blit);
     backend.Submit(commands);
     return array;
 }
@@ -349,7 +349,7 @@ MetalColorSurface::MetalColorSurface(const MetalDevice& backend, const Graphics:
     auto commands = backend.CommandBuffer();
     auto encoder = MetalEncoders::Render(commands, pass);
     if (encoder == nil) throw MetalGpuExecutionError("Metal color surface initial clear encoder creation failed");
-    [encoder endEncoding];
+    MetalEncoders::EndEncoder(commands, encoder);
     backend.Wait(commands);
 }
 
@@ -428,7 +428,7 @@ std::shared_ptr<MetalDepthSurface> MetalDepthSurfaceCache::Acquire(const Graphic
                 [blit copyFromTexture:surface->Planes()->stencil sourceSlice:surface->Layer() sourceLevel:0 toTexture:planes->stencil
                     destinationSlice:target.slice destinationLevel:0 sliceCount:1 levelCount:1];
             }
-            [blit endEncoding];
+            MetalEncoders::EndEncoder(commands, blit);
             backend.Wait(commands);
             surface->Rebind(planes, target.slice);
             return surface;
@@ -481,7 +481,7 @@ void MetalDepthSurfaceCache::takePlanes(const std::shared_ptr<MetalDepthSurface>
         [blit copyFromBuffer:staging sourceOffset:0 sourceBytesPerRow:rowBytes sourceBytesPerImage:rowBytes * target.extent.height sourceSize:size
             toTexture:destination destinationSlice:surface->Layer() destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:option];
     }
-    [blit endEncoding];
+    MetalEncoders::EndEncoder(commands, blit);
     backend.Wait(commands);
 }
 
@@ -498,7 +498,7 @@ void MetalDepthSurfaceCache::growPlanes(const std::shared_ptr<MetalDepthPlanes>&
         [blit copyFromTexture:planes->stencil sourceSlice:0 sourceLevel:0 toTexture:grown->stencil destinationSlice:0 destinationLevel:0
             sliceCount:planes->layers levelCount:1];
     }
-    [blit endEncoding];
+    MetalEncoders::EndEncoder(commands, blit);
     backend.Wait(commands);
     planes->depth = grown->depth;
     planes->stencil = grown->stencil;
@@ -626,7 +626,7 @@ id<MTLTexture> MetalMultisampleExpander::Expand(id<MTLCommandBuffer> commands, i
     [encoder setRenderPipelineState:pipeline->second];
     [encoder setFragmentTexture:source atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [encoder endEncoding];
+    MetalEncoders::EndEncoder(commands, encoder);
     return transient->second;
 }
 

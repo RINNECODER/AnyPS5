@@ -34,6 +34,8 @@ struct Parked {
     id<MTLCommandBuffer> computeCommands = nil;
     id<MTLComputeCommandEncoder> compute = nil;
     id<MTLCommandBuffer> openBatch = nil;
+    id<MTLCommandEncoder> open = nil;
+    id<MTLCommandBuffer> openCommands = nil;
 };
 
 Parked& parked() {
@@ -48,6 +50,16 @@ void endLocked(Parked& slot) {
     slot.commands = nil;
 }
 
+// With the slot's mutex held. The encoder a caller still holds (a render, blit or parallel encoder
+// it has not ended or parked): only one encoder may be open in a command buffer, so anything that
+// needs the slot, and any commit, ends it first.
+void endOpenLocked(Parked& slot) {
+    if (slot.open == nil) return;
+    [slot.open endEncoding];
+    slot.open = nil;
+    slot.openCommands = nil;
+}
+
 // With the slot's mutex held.
 void endComputeLocked(Parked& slot) {
     if (slot.compute == nil) return;
@@ -59,6 +71,7 @@ void endComputeLocked(Parked& slot) {
 void FlushUploadBlitsLocked(Parked& slot, id<MTLCommandBuffer> commands) {
     if (slot.pendingUploadBlits.empty() || slot.uploadCommands != commands) return;
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endOpenLocked(slot);
     endComputeLocked(slot);
     id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
     if (GpuTiming::Enabled() && blit != nil) blit.label = @"upload linear copy";
@@ -200,8 +213,24 @@ void EndParked(id<MTLCommandBuffer> commands) {
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    if (slot.open != nil && slot.openCommands == commands) endOpenLocked(slot);
     if (slot.compute != nil && slot.computeCommands == commands) endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
+}
+
+void EndEncoder(id<MTLCommandBuffer> commands, id<MTLCommandEncoder> encoder) {
+    if (encoder == nil) return;
+    auto& slot = parked();
+    std::lock_guard lock(slot.mutex);
+    if (slot.encoder == encoder) {
+        endLocked(slot);
+        return;
+    }
+    if (slot.open == encoder) {
+        endOpenLocked(slot);
+        return;
+    }
+    [encoder endEncoding];
 }
 
 id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands, bool flushUploads) {
@@ -212,6 +241,7 @@ id<MTLComputeCommandEncoder> Compute(id<MTLCommandBuffer> commands, bool flushUp
         FlushUploadBlitsLocked(slot, commands);
     }
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endOpenLocked(slot);
     if (slot.compute != nil && slot.computeCommands == commands && commands == slot.openBatch &&
         commands.status < MTLCommandBufferStatusCommitted) {
         ++slot.statistics.computeReused;
@@ -249,64 +279,97 @@ id<MTLBlitCommandEncoder> Blit(id<MTLCommandBuffer> commands) {
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endOpenLocked(slot);
     endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
-    return [commands blitCommandEncoder];
+    id<MTLBlitCommandEncoder> encoder = [commands blitCommandEncoder];
+    if (encoder != nil) {
+        slot.open = encoder;
+        slot.openCommands = commands;
+    }
+    return encoder;
 }
 
 id<MTLRenderCommandEncoder> Render(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass) {
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endOpenLocked(slot);
     endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
-    return [commands renderCommandEncoderWithDescriptor:pass];
+    id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    if (encoder != nil) {
+        slot.open = encoder;
+        slot.openCommands = commands;
+    }
+    return encoder;
 }
 
 id<MTLParallelRenderCommandEncoder> ParallelRender(id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass) {
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     if (slot.encoder != nil && slot.commands == commands) endLocked(slot);
+    endOpenLocked(slot);
     endComputeLocked(slot);
     FlushUploadBlitsLocked(slot, commands);
     ++slot.statistics.parallelPasses;
-    return [commands parallelRenderCommandEncoderWithDescriptor:pass];
+    id<MTLParallelRenderCommandEncoder> encoder = [commands parallelRenderCommandEncoderWithDescriptor:pass];
+    if (encoder != nil) {
+        slot.open = encoder;
+        slot.openCommands = commands;
+    }
+    return encoder;
 }
 
 id<MTLRenderCommandEncoder> RenderMerging(const MetalDevice& batch, id<MTLCommandBuffer> commands, MTLRenderPassDescriptor* pass,
                                           const PassKey& key, bool mergeable, bool* merged) {
     if (merged != nullptr) *merged = false;
     auto& slot = parked();
-    {
-        std::lock_guard lock(slot.mutex);
-        FlushUploadBlitsLocked(slot, commands);
-        if (slot.encoder != nil && slot.commands == commands) {
-            if (mergeable && batch.OpenBatch(commands) && Continues(slot.key, key)) {
-                id<MTLRenderCommandEncoder> encoder = slot.encoder;
-                slot.encoder = nil;
-                slot.commands = nil;
-                ++slot.statistics.merged;
-                if (merged != nullptr) *merged = true;
-                return encoder;
-            }
-            endLocked(slot);
+    std::lock_guard lock(slot.mutex);
+    FlushUploadBlitsLocked(slot, commands);
+    if (slot.encoder != nil && slot.commands == commands) {
+        if (mergeable && batch.OpenBatch(commands) && Continues(slot.key, key)) {
+            slot.key = key;
+            ++slot.statistics.merged;
+            if (merged != nullptr) *merged = true;
+            return slot.encoder;
         }
-        endComputeLocked(slot);
-        ++slot.statistics.passes;
+        endLocked(slot);
     }
-    return [commands renderCommandEncoderWithDescriptor:pass];
+    endOpenLocked(slot);
+    endComputeLocked(slot);
+    ++slot.statistics.passes;
+    id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    if (encoder == nil) return nil;
+    // A mergeable pass in the open batch is left in the slot for the next draw to continue it; any
+    // other encoder stays tracked as open, so a commit ends it even if the caller never does.
+    if (mergeable && batch.OpenBatch(commands)) {
+        slot.encoder = encoder;
+        slot.commands = commands;
+        slot.key = key;
+    } else {
+        slot.open = encoder;
+        slot.openCommands = commands;
+    }
+    return encoder;
 }
 
 void EndOrPark(const MetalDevice& batch, id<MTLCommandBuffer> commands, id<MTLRenderCommandEncoder> encoder, const PassKey& key,
                bool mergeable) {
     if (!mergeable || key.visibility != 0 || !batch.OpenBatch(commands)) {
-        [encoder endEncoding];
+        EndEncoder(commands, encoder);
         return;
     }
     auto& slot = parked();
     std::lock_guard lock(slot.mutex);
     // Another command buffer's parked encoder must still end before that one commits.
     if (slot.encoder != nil && slot.encoder != encoder) endLocked(slot);
+    if (slot.open == encoder) {
+        slot.open = nil;
+        slot.openCommands = nil;
+    } else {
+        endOpenLocked(slot);
+    }
     endComputeLocked(slot);
     slot.commands = commands;
     slot.encoder = encoder;
