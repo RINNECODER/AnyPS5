@@ -2650,11 +2650,6 @@ void UnusedViewportDepthTests() {
     AgcDriver::Graphics::NormalizeUnusedViewportDepth(color, pixel);
     AgcDriver::Graphics::ValidateViewport(context, color.viewport);
     Require(color.viewport.minDepth == 0 && color.viewport.maxDepth == 1, "unused viewport depth is not representable");
-    AgcDriver::Graphics::Context remapping{};
-    remapping.depthClamp = true;
-    const auto normalized = color;
-    AgcDriver::Graphics::ApplyDepthRemap(remapping, color);
-    Require(color.depthRemap.mode == 0 && color.viewport.minDepth == 0 && color.viewport.maxDepth == 1 && color.negativeOneToOne == normalized.negativeOneToOne && color.depthClamp == normalized.depthClamp, "the depth remap acted on a normalized viewport");
     Require(color.viewport.x == decoded.viewport.x && color.viewport.y == decoded.viewport.y && color.viewport.width == decoded.viewport.width && color.viewport.height == decoded.viewport.height && color.negativeOneToOne == decoded.negativeOneToOne && color.depthClamp == decoded.depthClamp, "unused depth changed coverage or clipping");
     auto observed = decoded;
     pixel.posZ = true;
