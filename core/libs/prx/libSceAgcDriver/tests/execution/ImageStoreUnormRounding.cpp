@@ -127,7 +127,7 @@ float Value(const Format& format, std::uint32_t tid, std::uint32_t index) {
 std::uint32_t Level(const Format& format, float value) {
     const auto lower = format.snorm ? -1.0f : 0.0f;
     const auto clamped = std::isnan(value) ? 0.0f : std::clamp(value, lower, 1.0f);
-    const auto product = clamped * Scale(format);
+    const auto product = static_cast<double>(clamped) * static_cast<double>(Scale(format));
     const auto level = static_cast<std::int32_t>(std::nearbyint(product));
     return static_cast<std::uint32_t>(level) & ((1u << format.bits) - 1u);
 }
@@ -237,7 +237,7 @@ void CheckTexels(const std::uint8_t* texels, const Format& format) {
                 std::uint32_t wanted = 0;
                 std::memcpy(&actual, texels + offset + component * format.bits / 8u, format.bits / 8u);
                 std::memcpy(&wanted, expected.data() + offset + component * format.bits / 8u, format.bits / 8u);
-                Require(actual == wanted, std::string("image_store of ") + format.name + ": texel (" + std::to_string(x) + ", " + std::to_string(y) + ") component " + std::to_string(component) + " is " + Hex(actual) + ", expected " + Hex(wanted) + " (round to nearest even)");
+                Require(actual == wanted, std::string("image_store of ") + format.name + ": texel (" + std::to_string(x) + ", " + std::to_string(y) + ") component " + std::to_string(component) + " is " + Hex(actual) + ", expected " + Hex(wanted) + " (level nearest to the exact product)");
             }
         }
     }

@@ -1042,8 +1042,23 @@ std::uint32_t QuantizeStoreTexel(SpirvEmitterState& state, std::uint32_t resourc
     state.module.AddFunction(spv::OpSelect, vec4, finite, Unary(state, spv::OpIsNan, bvec4, texel), zero, texel);
     const auto clamped = state.module.AllocateId();
     state.module.AddFunction(spv::OpExtInst, vec4, clamped, GlslStd450(state), GLSLstd450FClamp, finite, lower, one);
-    const auto level = state.module.AllocateId();
-    state.module.AddFunction(spv::OpExtInst, vec4, level, GlslStd450(state), GLSLstd450RoundEven, Binary(state, spv::OpFMul, vec4, clamped, scale));
+    const auto product = Binary(state, spv::OpFMul, vec4, clamped, scale);
+    state.module.AddAnnotation(spv::OpDecorate, product, spv::DecorationNoContraction);
+    const auto ext = [&](GLSLstd450 op, const auto&... operands) {
+        const auto result = state.module.AllocateId();
+        state.module.AddFunction(spv::OpExtInst, vec4, result, GlslStd450(state), static_cast<std::uint32_t>(op), operands...);
+        return result;
+    };
+    const auto error = ext(GLSLstd450Fma, clamped, scale, Unary(state, spv::OpFNegate, vec4, product));
+    state.module.AddAnnotation(spv::OpDecorate, error, spv::DecorationNoContraction);
+    const auto below = ext(GLSLstd450Floor, product);
+    const auto fraction = Binary(state, spv::OpFSub, vec4, product, below);
+    state.module.AddAnnotation(spv::OpDecorate, fraction, spv::DecorationNoContraction);
+    const auto tie = Binary(state, spv::OpFOrdEqual, bvec4, fraction, splat(vec4, ConstantF32(state, std::bit_cast<std::uint32_t>(0.5f))));
+    const auto above = Binary(state, spv::OpFAdd, vec4, below, one);
+    const auto even = ext(GLSLstd450RoundEven, product);
+    const auto broken = Select(state, vec4, Binary(state, spv::OpFOrdGreaterThan, bvec4, error, zero), above, Select(state, vec4, Binary(state, spv::OpFOrdLessThan, bvec4, error, zero), below, even));
+    const auto level = Select(state, vec4, tie, broken, even);
     const auto quantized = Binary(state, spv::OpFMul, vec4, level, reciprocal);
     const auto result = state.module.AllocateId();
     state.module.AddFunction(spv::OpSelect, vec4, result, splat(bvec4, enabled), quantized, texel);
