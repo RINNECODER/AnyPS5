@@ -60,11 +60,6 @@ int APS5_VABI sceAudioOutSetSystemDebugState(void) {
     return 0;
 }
 
-int APS5_VABI sceAudioOutGetSystemState(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceAudioOut2LoPortGetState(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
