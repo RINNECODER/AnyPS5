@@ -132,6 +132,7 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
     const std::span<const std::uint8_t> png = toBytes(param->png_mem_addr, param->png_mem_size);
     const std::optional<Decoder::Png::Header> header = Decoder::Png::ParseHeader(png);
     if (!header) return SCE_PNG_DEC_ERROR_INVALID_DATA;
+    if (image_info) fillImageInfo(*header, image_info);
     if (header->bitDepth == 16 && context->attribute == ATTRIBUTE_BIT_DEPTH_16) {
         throw std::runtime_error("scePngDecDecode: 16-bit output is not implemented");
     }
@@ -140,6 +141,9 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
     const std::uint64_t pitch = param->image_pitch == 0 ? rowSize : param->image_pitch;
     if (pitch < rowSize) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
     if ((header->height - 1) * pitch + rowSize > param->image_mem_size) return SCE_PNG_DEC_ERROR_INVALID_SIZE;
+    const std::uint64_t alignedWidth = (static_cast<std::uint64_t>(header->width) + 7u) & ~std::uint64_t{7u};
+    const std::uint64_t alignedMaxWidth = (static_cast<std::uint64_t>(context->maxImageWidth) + 7u) & ~std::uint64_t{7u};
+    if (alignedWidth > alignedMaxWidth) return SCE_PNG_DEC_ERROR_INVALID_WORK_MEMORY;
 
     const std::optional<Decoder::Png::Image> image = Decoder::Png::Decode(png);
     if (!image || image->width != header->width || image->height != header->height) return SCE_PNG_DEC_ERROR_DECODE_ERROR;
@@ -159,7 +163,6 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
         }
     }
 
-    if (image_info) fillImageInfo(*header, image_info);
     if (header->width > MAX_PACKED_DIMENSION || header->height > MAX_PACKED_DIMENSION) return 0;
     return static_cast<std::int32_t>(header->width << 16 | header->height);
 }

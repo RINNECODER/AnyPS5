@@ -1,6 +1,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "Decoder/Png.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -49,6 +50,12 @@ static std::vector<std::uint8_t> RgbPng() {
     std::vector<std::uint8_t> rgb(3 * 2 * 3);
     for (std::size_t i = 0; i < rgb.size(); ++i) rgb[i] = static_cast<std::uint8_t>(10 + i * 13);
     return Decoder::Png::Encode(rgb, 3, 2, 3);
+}
+
+static std::vector<std::uint8_t> RgbPngWidth(std::uint32_t width) {
+    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(width) * 3);
+    for (std::size_t i = 0; i < rgb.size(); ++i) rgb[i] = static_cast<std::uint8_t>(i * 17 + 3);
+    return Decoder::Png::Encode(rgb, width, 1, 3);
 }
 
 static PngDecDecodeParam DecodeParam(const std::vector<std::uint8_t>& png, std::vector<std::uint8_t>& image) {
@@ -134,6 +141,25 @@ int main() {
         for (std::size_t c = 0; c < 3; ++c) Require(image[pixel * 4 + c] == static_cast<std::uint8_t>(10 + (pixel * 3 + c) * 13));
         Require(image[pixel * 4 + 3] == 0x77);
     }
+
+    const PngDecCreateParam narrowParam{sizeof(PngDecCreateParam), 0, 9};
+    std::vector<unsigned char> narrowMemory(static_cast<std::size_t>(memorySize));
+    void* narrowHandle = nullptr;
+    Require(scePngDecCreate(&narrowParam, narrowMemory.data(), static_cast<std::uint32_t>(memorySize), &narrowHandle) == 0);
+    const std::vector<std::uint8_t> alignedWidthPng = RgbPngWidth(16);
+    std::vector<std::uint8_t> alignedWidthImage(16 * 4, 0xCC);
+    PngDecDecodeParam narrowDecode = DecodeParam(alignedWidthPng, alignedWidthImage);
+    Require(scePngDecDecode(narrowHandle, &narrowDecode, &info) == (16 << 16 | 1));
+    Require(info.image_width == 16 && info.image_height == 1);
+
+    const std::vector<std::uint8_t> oversizedWidthPng = RgbPngWidth(17);
+    std::vector<std::uint8_t> oversizedWidthImage(17 * 4, 0xCC);
+    narrowDecode = DecodeParam(oversizedWidthPng, oversizedWidthImage);
+    info = {};
+    Require(scePngDecDecode(narrowHandle, &narrowDecode, &info) == invalidWorkMemory);
+    Require(info.image_width == 17 && info.image_height == 1);
+    Require(std::all_of(oversizedWidthImage.begin(), oversizedWidthImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
+    Require(scePngDecDelete(narrowHandle) == 0);
 
     constexpr std::uint32_t pitch = 3 * 4 + 8;
     std::vector<std::uint8_t> padded(pitch + 3 * 4, 0xEE);
