@@ -1659,8 +1659,15 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
             break;
         }
     }
+    bool keepsDepthOrStencil = false;
+    for (std::size_t slot = 8; slot < passKey.attachments.size(); ++slot) {
+        if (passKey.attachments[slot].texture != 0 && passKey.attachments[slot].store != MTLStoreActionDontCare) {
+            keepsDepthOrStencil = true;
+            break;
+        }
+    }
     bool mergeable = sampleCounter == nil && expansions.empty() && !bdaStores &&
-        !(state.customSampleLocations && state.rasterSamples > 1 && !hasColorAttachment) && !resources.WritesBesides(passKey);
+        !(state.customSampleLocations && state.rasterSamples > 1 && (!hasColorAttachment || keepsDepthOrStencil)) && !resources.WritesBesides(passKey);
     // The bindings hold every texture the shaders read or write (the residency also holds the
     // draw's own color targets).
     for (const auto* list : {&vertexBindings, &fragmentBindings}) {
