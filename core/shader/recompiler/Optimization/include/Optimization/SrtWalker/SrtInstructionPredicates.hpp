@@ -3,6 +3,9 @@
 
 #include "IntermediateRepresentation/IrProgram.hpp"
 
+#include <concepts>
+#include <type_traits>
+
 namespace ShaderRecompiler::Detail {
 
 bool IsRawRead(const IrResourcePlan& program, const IrValue& inst);
@@ -11,8 +14,6 @@ bool LoadedFromMemory(const IrValue& handle);
 bool IsDescriptorHandle(IrOpcode opcode);
 bool IsRuntimeSelect(IrOpcode opcode);
 bool IsRuntimeUniformOp(IrOpcode opcode);
-#include <concepts>
-#include <type_traits>
 
 bool ActiveMaskImplies(const IrValue* mask, const IrValue* condition);
 
