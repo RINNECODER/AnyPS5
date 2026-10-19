@@ -1955,9 +1955,8 @@ int APS5_VABI sceNetGetsockoptEx(void) {
     return 0;
 }
 
-int APS5_VABI sceNetGetSystemTime(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI sceNetGetSystemTime(std::uint64_t* output) {
+    if (output != nullptr) *output = sceKernelGetProcessTime();
 }
 
 int APS5_VABI sceNetGetSystemMemInfo(void) {
