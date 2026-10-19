@@ -32,11 +32,7 @@ std::atomic<std::uint64_t> commitGeneration{1};
 std::atomic<void (*)(std::uintptr_t, std::size_t, std::uint64_t)> privateMappingObserver{nullptr};
 #endif
 
-#ifdef ANYPS5_ENABLE_ASAN
-constexpr std::uintptr_t GuestArenaOffset = 0x0000100000000000ull;
-#else
-constexpr std::uintptr_t GuestArenaOffset = 0;
-#endif
+constexpr std::uintptr_t GuestArenaOffset = GuestArena::GuestAddressOffset;
 constexpr std::uintptr_t ArenaStart = 0x0000000200000000ull + GuestArenaOffset;
 constexpr std::uintptr_t SystemReservedStart = 0x00000007FFFFC000ull + GuestArenaOffset;
 constexpr std::uintptr_t SystemReservedEnd = 0x0000001000000000ull + GuestArenaOffset;
