@@ -120,6 +120,14 @@ struct DrawTranslationKey {
 
     bool indexed = false;
     std::uint32_t nativeIndexSize = 4;
+    // The draw's index parameters: the cached path reuses the vertex-buffer extents its index scan
+    // produced, so a record stands only for the same index range (the scan's maxIndex depends on the
+    // index values, which this key cannot see; the address, count and base vertex pin the range).
+    std::uint64_t indexAddress = 0;
+    std::uint32_t indexCount = 0;
+    std::uint32_t firstVertex = 0;
+    std::uint32_t instanceCount = 0;
+    std::uint32_t firstInstance = 0;
 
     void Clear() noexcept {
         vertexVariantId = 0;
@@ -152,6 +160,11 @@ struct DrawTranslationKey {
         guestDescriptorWords.clear();
         indexed = false;
         nativeIndexSize = 4;
+        indexAddress = 0;
+        indexCount = 0;
+        firstVertex = 0;
+        instanceCount = 0;
+        firstInstance = 0;
     }
 
     bool operator==(const DrawTranslationKey& o) const noexcept {
@@ -169,7 +182,9 @@ struct DrawTranslationKey {
                customSampleLocations == o.customSampleLocations && sampleLocations == o.sampleLocations &&
                colors == o.colors && depth == o.depth && blends == o.blends &&
                attributes == o.attributes && guestDescriptorWords == o.guestDescriptorWords &&
-               indexed == o.indexed && nativeIndexSize == o.nativeIndexSize;
+               indexed == o.indexed && nativeIndexSize == o.nativeIndexSize &&
+               indexAddress == o.indexAddress && indexCount == o.indexCount && firstVertex == o.firstVertex &&
+               instanceCount == o.instanceCount && firstInstance == o.firstInstance;
     }
 };
 
@@ -205,6 +220,9 @@ struct DrawTranslationKeyHash {
         for (const auto w : k.guestDescriptorWords) {
             mix(w);
         }
+        mix(k.indexAddress);
+        mix((std::uint64_t{k.indexCount} << 32u) | k.firstVertex);
+        mix((std::uint64_t{k.instanceCount} << 32u) | k.firstInstance);
         return static_cast<std::size_t>(h);
     }
 };
@@ -246,6 +264,16 @@ struct DrawImageDependency {
     std::uint64_t guest = 0;
     std::uint64_t content = 0;
     std::shared_ptr<MetalTexture> texture;
+};
+
+// The guest snapshot a draw's bindings carry (MetalShaderResources::GuestSnapshot): the BDA page
+// table a shader's guest-address lookup reads and the fault buffer it reports a miss into. A draw
+// translation record captures the buffers its bindings were built with, so it stands only while the
+// same snapshot comes back.
+struct GuestSnapshotIdentity {
+    id<MTLBuffer> table = nil;
+    id<MTLBuffer> fault = nil;
+    [[nodiscard]] bool operator==(const GuestSnapshotIdentity& other) const { return table == other.table && fault == other.fault; }
 };
 
 // One resident surface a draw's bindings sampled through the depth cache
@@ -290,6 +318,11 @@ struct DrawTranslationRecord {
     std::uint32_t uncachedImages = 0;
     std::uint64_t imageCacheGeneration = 0;
     std::vector<DrawResidentDependency> residentDependencies;
+    // The guest snapshot (the BDA page table and fault buffer) the record's bindings were built
+    // with. The table changes whenever the working set's admissions change, and a stale one maps
+    // guest addresses through buffers that are no longer current while a fault lands in a fault
+    // buffer this work's completion never reads, so a record stands only while it matches.
+    GuestSnapshotIdentity guestSnapshot{};
     // Whether this work writes guest memory only through its render-pass attachments. A record whose
     // draw wrote a storage buffer or image has no write plan to replay, so it is not reused.
     bool attachmentsOnly = false;
@@ -321,10 +354,16 @@ public:
 
     MetalDrawTranslationCache() = default;
 
+    // Off unless ANYPS5_METAL_DRAW_CACHE is set to a nonzero value. Reusing a record reuses
+    // everything its bindings stand on: the guest-image entries it re-proves, the attachment objects
+    // and resident surfaces it was built from, the snapshot buffers (the BDA page table, the fault
+    // buffer, the mirror aliases) it captured, and the vertex-buffer extents its index scan produced.
+    // The frame replay gate repeats one frame, so it cannot exercise a reuse *across* frames and
+    // cannot protect any of that; the cache is opt-in until a multi-frame gate exists.
     [[nodiscard]] static bool Enabled() {
         static const bool enabled = [] {
             const char* v1 = std::getenv("ANYPS5_METAL_DRAW_CACHE");
-            if (v1 != nullptr && std::string_view(v1) == "0") return false;
+            if (v1 == nullptr || *v1 == '\0' || std::string_view(v1) == "0") return false;
             const char* v2 = std::getenv("APS5_NO_DRAW_CACHE");
             if (v2 != nullptr && std::string_view(v2) != "0") return false;
             return true;

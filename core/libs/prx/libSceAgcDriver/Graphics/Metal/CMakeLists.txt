@@ -101,6 +101,8 @@ if(BUILD_TESTING)
     add_dependencies(metal_utility_tests anyps5_metal_shaders)
     add_test(NAME metal_utility_tests COMMAND metal_utility_tests "${metalLibrary}")
     # The binary-archive test points the disk cache at a temporary directory itself; nothing else may
-    # write pipelines into the per-user cache.
-    set_tests_properties(metal_utility_tests PROPERTIES TIMEOUT 120 ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+    # write pipelines into the per-user cache. The draw translation cache is opt-in
+    # (ANYPS5_METAL_DRAW_CACHE) and the DrawTranslationCache cases drive it directly.
+    set_tests_properties(metal_utility_tests PROPERTIES TIMEOUT 120
+        ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;ANYPS5_METAL_DRAW_CACHE=1")
 endif()

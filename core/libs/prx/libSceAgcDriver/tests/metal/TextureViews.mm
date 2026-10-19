@@ -1027,6 +1027,50 @@ void RecordImageRevalidation(const Metal::MetalDevice& backend,id<MTLLibrary> li
     static_cast<void>(pass.Complete(commands));
 }
 
+// The cache keeps entries whose host ranges overlap, so a surface bound whole and a sub-range inside
+// it do not evict each other and re-upload every frame (a live-map frame bound a 128 MiB surface and
+// two 32 MiB sub-ranges inside it that way: 192 MiB and ~138 ms of GPU time per frame). An insert
+// supersedes only the entry that describes the same surface; a write drops every entry whose bytes
+// it overlaps.
+void OverlappingEntries(const Metal::MetalDevice& backend) {
+    auto whole=Descriptor();
+    const auto wholeBytes=Graphics::DescribeSurface(whole).guestBytes;
+    auto inner=whole; inner.height=whole.height/2; inner.baseAddress=whole.baseAddress+wholeBytes/2;
+    const auto innerBytes=Graphics::DescribeSurface(inner).guestBytes;
+    Require(innerBytes==wholeBytes/2&&inner.baseAddress>whole.baseAddress,
+        "the nested test descriptor does not lie inside the whole surface");
+    std::vector<std::byte> guest(wholeBytes,std::byte{0x11});
+    const NativeGuestMemory::BorrowedRange range{whole.baseAddress,guest,true};
+    Metal::GuestImageCache<Metal::MetalTexture> cache;
+    const auto upload=[&](const Graphics::GuestTextureResource& descriptor) {
+        Metal::MetalShaderResources resources(backend,std::span(&range,1),{},nullptr,&cache);
+        auto texture=resources.Texture(descriptor);
+        auto commands=backend.CommandBuffer();
+        backend.Wait(commands);
+        Require(resources.Complete(commands).state==BdaAbi::FaultState::Empty,"overlapping entry upload faulted");
+        return texture;
+    };
+    const auto wholeTexture=upload(whole);
+    const auto innerTexture=upload(inner);
+    Require(wholeTexture->Texture()!=innerTexture->Texture(),"the nested surface was served from the whole surface's texture");
+    Require(cache.Size()==2,"the nested insert dropped the whole surface's entry");
+    {
+        Metal::MetalShaderResources resources(backend,std::span(&range,1),{},nullptr,&cache);
+        Require(resources.Texture(whole)->Texture()==wholeTexture->Texture(),"the whole surface re-uploaded after its sub-range was cached");
+    }
+    {
+        Metal::MetalShaderResources resources(backend,std::span(&range,1),{},nullptr,&cache);
+        Require(resources.Texture(inner)->Texture()==innerTexture->Texture(),"the sub-range re-uploaded after the whole surface was cached");
+    }
+    // A write inside the whole surface drops both entries: the whole surface's bytes changed there.
+    cache.Invalidate(range.host.data()+wholeBytes/2,innerBytes,Metal::GuestImageCache<Metal::MetalTexture>::Cause::WrittenImage);
+    Require(cache.Size()==0,"a write inside the whole surface left an overlapping entry");
+    {
+        Metal::MetalShaderResources resources(backend,std::span(&range,1),{},nullptr,&cache);
+        Require(resources.Texture(whole)->Texture()!=wholeTexture->Texture(),"the whole surface was still served from the cache after a write inside it");
+    }
+}
+
 void RunTextureViewsTests(const MetalTests::Context& context) {
     Metal::MetalDevice backend(context.device,context.library);
     NSError* error=nil;
@@ -1047,4 +1091,5 @@ void RunTextureViewsTests(const MetalTests::Context& context) {
     AccessGuards(backend);
     LazyCopyBacks(backend,library);
     RecordImageRevalidation(backend,library);
+    OverlappingEntries(backend);
 }

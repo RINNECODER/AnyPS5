@@ -147,7 +147,7 @@ private:
     [[nodiscard]] bool ValidateCachedRecord(const DrawTranslationRecord& record);
     // Whether the attachments `pass` now binds are the objects `record`'s bindings stand on and its
     // write set is its own attachments: false drops the record.
-    [[nodiscard]] bool RevalidateCachedWrites(const DrawTranslationRecord& record, const PassAttachments& pass);
+    [[nodiscard]] bool RevalidateCachedWrites(const DrawTranslationRecord& record, const PassAttachments& pass, const MetalShaderResources& resources);
     [[nodiscard]] id<MTLTexture> residentTexture(const Graphics::GuestTextureResource& resource, bool storage, bool compare);
     [[nodiscard]] id<MTLTexture> residentDepthArray(const Graphics::GuestTextureResource& resource, bool storage);
     [[nodiscard]] id<MTLTexture> residentView(const Graphics::GuestTextureResource& resource, bool storage, bool compare) const;
