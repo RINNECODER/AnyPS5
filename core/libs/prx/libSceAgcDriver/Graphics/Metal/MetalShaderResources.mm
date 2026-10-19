@@ -20,6 +20,9 @@ namespace {
 using namespace ShaderRecompiler;
 namespace Abi = ShaderRecompiler::BdaAbi;
 
+std::mutex uploadMutex;
+ImageUploadStatistics uploadStatistics;
+
 MetalGuestMemory::DispatchSnapshot capture(MetalGuestMemory& memory,
     std::span<const NativeGuestMemory::BorrowedRange> ranges, MetalGuestHostAliases* aliases) {
     for (const auto& range : ranges) {
@@ -651,6 +654,11 @@ std::shared_ptr<MetalTexture> MetalShaderResources::texture(const Graphics::Gues
             // surface written since): the upload converts through the copied-back bytes, GPU-side.
             materializeBefore(descriptor.baseAddress, bytes);
             texture->Upload(buffer.buffer, buffer.offset);
+            {
+                std::lock_guard lock(uploadMutex);
+                ++uploadStatistics.uploads;
+                uploadStatistics.bytes += bytes;
+            }
         } else {
             std::vector<std::byte> clear(bytes);
             if (!Graphics::FillDccClear(Graphics::ResolveTextureFormat(descriptor.format), keys, descriptor.dccAlphaOnMsb, clear)) {
@@ -1213,6 +1221,13 @@ Abi::Fault MetalShaderResources::Complete(id<MTLCommandBuffer> commands) {
         }
     }
     return fault;
+}
+
+ImageUploadStatistics TakeImageUploadStatistics(bool reset) {
+    std::lock_guard lock(uploadMutex);
+    const auto result = uploadStatistics;
+    if (reset) uploadStatistics = {};
+    return result;
 }
 
 }

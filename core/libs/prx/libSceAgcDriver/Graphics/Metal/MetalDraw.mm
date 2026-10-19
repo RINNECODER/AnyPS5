@@ -809,6 +809,14 @@ void MetalDraw::PopulateTranslationKey(DrawTranslationKey& key,
 
     key.indexed = draw.indexed;
     key.nativeIndexSize = draw.indexSize;
+    // The cached path reuses the vertex-buffer extents the index scan produced (the scan's maxIndex
+    // depends on the index *values*, which this key cannot see), so a record stands only for the same
+    // index range: its address, count and base vertex, and the instance range the extents cover.
+    key.indexAddress = draw.indexAddress;
+    key.indexCount = draw.indexCount;
+    key.firstVertex = draw.firstVertex;
+    key.instanceCount = draw.instanceCount;
+    key.firstInstance = draw.firstInstance;
 }
 
 // The attachments a draw renders into, built from its state: depth and multisampled color surfaces
@@ -1143,7 +1151,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
     // no longer binds those objects (or when its writes are not its own attachments, which a reused
     // record has no plan to replay).
     const auto pass = ConfigureAttachments(state, resources);
-    if (cached != nullptr && !RevalidateCachedWrites(*cached, pass)) {
+    if (cached != nullptr && !RevalidateCachedWrites(*cached, pass, resources)) {
         translationCache.Remove(tl_scratchKey);
         cached = nullptr;
     }
@@ -1811,6 +1819,7 @@ std::optional<BdaAbi::Fault> MetalDraw::Draw(const Graphics::State& inputState, 
         record->uncachedImages = drawImages.uncached;
         record->imageCacheGeneration = ImageCache() != nullptr ? ImageCache()->Generation() : 0;
         record->residentDependencies = residentDependencies;
+        record->guestSnapshot = resources.GuestSnapshot();
         record->attachmentsOnly = !resources.WritesBesides(passKey);
         record->materializedRanges = resources.MaterializedRanges();
         record->key = tl_scratchKey;
@@ -1910,7 +1919,7 @@ bool MetalDraw::ValidateCachedRecord(const DrawTranslationRecord& record) {
     return true;
 }
 
-bool MetalDraw::RevalidateCachedWrites(const DrawTranslationRecord& record, const PassAttachments& pass) {
+bool MetalDraw::RevalidateCachedWrites(const DrawTranslationRecord& record, const PassAttachments& pass, const MetalShaderResources& resources) {
     // A record whose draw wrote anything but its own attachments (a storage buffer or image, a
     // staged surface) has no write plan to replay: only the attachments are rebuilt on a hit.
     if (!record.attachmentsOnly) {
@@ -1918,6 +1927,13 @@ bool MetalDraw::RevalidateCachedWrites(const DrawTranslationRecord& record, cons
         return false;
     }
     if (!MetalEncoders::SamePass(record.passKey, MetalEncoders::KeyOf(pass.renderPass))) {
+        translationCache.RecordRejection(&DrawCacheStatistics::rejectedAttachments);
+        return false;
+    }
+    // The record's bindings carry the BDA page table and fault buffer of the snapshot they were
+    // built with: a working-set change rebuilds the table (its entries no longer name the current
+    // mirror buffers) and a recycled fault buffer swallows a miss this work's completion would read.
+    if (!(record.guestSnapshot == resources.GuestSnapshot())) {
         translationCache.RecordRejection(&DrawCacheStatistics::rejectedAttachments);
         return false;
     }
