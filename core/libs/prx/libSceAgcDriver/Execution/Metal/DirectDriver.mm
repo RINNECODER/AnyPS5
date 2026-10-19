@@ -388,6 +388,7 @@ MetalDriver& DirectDriver() {
     } else if (ranges != state.applied) {
         driver.ReplaceBorrowedRanges(*ranges, ++state.driverGeneration);
         state.applied = ranges;
+        GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix();
     }
     return driver;
 }

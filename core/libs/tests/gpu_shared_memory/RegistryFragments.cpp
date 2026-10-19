@@ -75,9 +75,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    Check(GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix(), "a publish with nothing changed is a success");
+
+    Check(GpuSharedMemory::GpuSharedMemoryRegister_nid_postfix(0x9000020000ull, 0x4000, object, 0x100), "register a third range");
     setenv(GpuSharedMemory::ManifestEnvironment, unwritable.c_str(), 1);
     Check(!GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix(), "an unwritable manifest path is reported as a failure");
     setenv(GpuSharedMemory::ManifestEnvironment, manifest.c_str(), 1);
+    Check(GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix(), "the failed publish is retried after the path is usable again");
+    {
+        const auto lines = RegionLines(manifest);
+        Check(lines.size() == 6, "the retry publishes the changed set");
+    }
 
     if (g_failures != 0) {
         std::fprintf(stderr, "%d registry check(s) failed\n", g_failures);

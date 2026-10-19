@@ -40,6 +40,7 @@ constexpr int ProtGpuReadWrite = 0x30;
 constexpr int MapFixed = 0x10;
 constexpr std::size_t Length = 0x10000;
 constexpr std::uintptr_t RawDirectAddress = 0x1000000000ull;
+constexpr std::uintptr_t RawFlexibleAddress = 0x2000000000ull;
 constexpr std::uintptr_t RawLowAddress = 0x180000000ull;
 constexpr std::uintptr_t ExpectedSlide = 0x8000000000ull;
 
@@ -132,6 +133,12 @@ int main(int argc, char** argv) {
         Fill(flexible, Length, WriterPattern);
         MappedRanges.push_back(reinterpret_cast<std::uintptr_t>(flexible));
 
+        void* fixed = reinterpret_cast<void*>(RawFlexibleAddress);
+        Check(DoMapAnon(&fixed, Length, ProtGpuReadWrite, MapFixed) == 0, "map a fixed anonymous range in the raw application area");
+        Check(reinterpret_cast<std::uintptr_t>(fixed) == RawFlexibleAddress + ExpectedSlide, "a fixed mapping is slid exactly once");
+        Fill(fixed, Length, WriterPattern);
+        MappedRanges.push_back(reinterpret_cast<std::uintptr_t>(fixed));
+
         void* heap = GuestArena::GuestArenaAllocate_nid_postfix(Length, 0x4000);
         GuestArena::GuestArenaCommit_nid_postfix(heap, Length, 0x04, Length);
         Fill(heap, Length, WriterPattern);
@@ -144,7 +151,7 @@ int main(int argc, char** argv) {
         Check(reinterpret_cast<std::uintptr_t>(low) == RawLowAddress, "a mapping outside the application area keeps its host address");
         Fill(low, Length, WriterPattern);
 
-        Check(GpuSharedMemory::GpuSharedMemoryRegionCount_nid_postfix() >= 3, "every GPU-visible range is registered");
+        Check(GpuSharedMemory::GpuSharedMemoryRegionCount_nid_postfix() >= 4, "every GPU-visible range is registered");
         Check(GpuSharedMemory::GpuSharedMemoryPublish_nid_postfix(), "the manifest is published");
         Check(!ManifestMentions(manifest, RawLowAddress, RawLowAddress + Length), "a mapping outside the shared address space is not published");
         std::printf("writer: %zu regions at", GpuSharedMemory::GpuSharedMemoryRegionCount_nid_postfix());

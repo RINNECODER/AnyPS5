@@ -31,6 +31,8 @@ struct State {
     std::vector<Region> regions;
     std::vector<std::string> objects;
     bool exitInstalled = false;
+    std::uint64_t version = 0;
+    std::uint64_t publishedVersion = ~std::uint64_t{0};
 };
 
 // Removes the part of every registered range that [address, end) covers, keeping the fragments
@@ -80,10 +82,12 @@ bool writeManifest() {
     auto& shared = state();
     std::vector<Region> regions;
     std::vector<std::string> objects;
+    std::uint64_t version = 0;
     {
         std::lock_guard lock(shared.lock);
         regions = shared.regions;
         objects = shared.objects;
+        version = shared.version;
     }
     std::sort(regions.begin(), regions.end(), [](const Region& left, const Region& right) {
         if (left.address != right.address) return left.address < right.address;
@@ -116,6 +120,10 @@ bool writeManifest() {
     if (std::rename(temporary.c_str(), path) != 0) {
         std::remove(temporary.c_str());
         return false;
+    }
+    {
+        std::lock_guard lock(shared.lock);
+        shared.publishedVersion = version;
     }
     return true;
 }
@@ -207,6 +215,7 @@ bool GpuSharedMemoryRegister_nid_postfix(std::uint64_t address, std::uint64_t by
     std::lock_guard lock(shared.lock);
     SplittingErase(shared.regions, address, address + bytes);
     shared.regions.push_back({address, bytes, object, offset});
+    ++shared.version;
     return true;
 #else
     static_cast<void>(address);
@@ -223,6 +232,7 @@ void GpuSharedMemoryUnregister_nid_postfix(std::uint64_t address, std::uint64_t 
     auto& shared = state();
     std::lock_guard lock(shared.lock);
     SplittingErase(shared.regions, address, address + bytes);
+    ++shared.version;
 #else
     static_cast<void>(address);
     static_cast<void>(bytes);
@@ -238,6 +248,10 @@ std::size_t GpuSharedMemoryRegionCount_nid_postfix() {
 bool GpuSharedMemoryPublish_nid_postfix() {
 #if defined(__APPLE__)
     if (!enabled()) return false;
+    {
+        std::lock_guard lock(state().lock);
+        if (state().publishedVersion == state().version) return true;
+    }
     return writeManifest();
 #else
     return false;
