@@ -305,6 +305,8 @@ struct Decoder {
     std::deque<FramePointer> ready;
     std::vector<std::uint8_t> annexB;
     std::vector<std::uint8_t> parameterSets;
+    bool lengthPrefixed = false;
+    bool shortStartCodes = false;
     bool flushing = false;
     std::array<Vp9PictureInfo, 8> vp9References{};
     Vp9PictureInfo vp9Colors{};
@@ -397,7 +399,18 @@ bool StartsWithStartCode(const std::uint8_t* data, std::size_t size) {
 }
 
 const std::vector<std::uint8_t>* ToAnnexB(Decoder& decoder, const std::uint8_t* data, std::size_t size) {
-    if (TilesAsAvcc(data, size)) {
+    const bool tiles = TilesAsAvcc(data, size);
+    const bool opensWithStartCode = StartsWithStartCode(data, size);
+    if (!tiles && !opensWithStartCode) throw std::runtime_error("Videodec2: access unit is neither Annex-B nor length-prefixed");
+    const bool shortStartCode = opensWithStartCode && data[2] == 1;
+    bool lengthPrefixed = tiles;
+    if (tiles && opensWithStartCode) {
+        lengthPrefixed = shortStartCode ? !decoder.shortStartCodes : decoder.lengthPrefixed;
+    } else {
+        decoder.lengthPrefixed = tiles;
+        if (shortStartCode) decoder.shortStartCodes = true;
+    }
+    if (lengthPrefixed) {
         decoder.annexB.clear();
         for (std::size_t index = 0; index < size;) {
             const std::size_t length = (static_cast<std::size_t>(data[index]) << 24u) | (static_cast<std::size_t>(data[index + 1]) << 16u) | (static_cast<std::size_t>(data[index + 2]) << 8u) | data[index + 3];
@@ -408,7 +421,6 @@ const std::vector<std::uint8_t>* ToAnnexB(Decoder& decoder, const std::uint8_t* 
         }
         return &decoder.annexB;
     }
-    if (!StartsWithStartCode(data, size)) throw std::runtime_error("Videodec2: access unit is neither Annex-B nor length-prefixed");
     decoder.annexB.assign(data, data + size);
     return &decoder.annexB;
 }
