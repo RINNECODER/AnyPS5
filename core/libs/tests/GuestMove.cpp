@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 
 extern "C" {
 int APS5_VABI sceMoveInit(void);
@@ -27,6 +28,8 @@ constexpr int kNotInit = static_cast<int>(0x80EE0001);
 constexpr int kAlreadyInit = static_cast<int>(0x80EE0002);
 constexpr int kInvalidArg = static_cast<int>(0x80EE0003);
 constexpr std::int32_t kUserId = 0x10000000;
+constexpr std::int32_t kFirstHandle = 0x30B0100;
+constexpr std::int32_t kHandleStep = 0x100;
 constexpr std::uint8_t kFill = 0x5A;
 
 struct Buffer {
@@ -41,6 +44,16 @@ struct Buffer {
         return true;
     }
 };
+
+template <typename TCall>
+bool Throws(TCall call) {
+    try {
+        call();
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
 
 void RequireNotInit(std::int32_t handle) {
     Buffer buffer;
@@ -59,19 +72,35 @@ void RequireNotInit(std::int32_t handle) {
     Require(count == -7);
 }
 
+void RequireUnknownHandleThrows(std::int32_t handle) {
+    Buffer buffer;
+    std::int32_t count = -7;
+    Require(Throws([&] { sceMoveClose(handle); }));
+    Require(Throws([&] { sceMoveGetDeviceInfo(handle, buffer.bytes); }));
+    Require(Throws([&] { sceMoveGetExtensionPortInfo(handle, buffer.bytes); }));
+    Require(Throws([&] { sceMoveReadStateLatest(handle, buffer.bytes); }));
+    Require(Throws([&] { sceMoveReadStateRecent(handle, 0, buffer.bytes, &count); }));
+    Require(Throws([&] { sceMoveSetVibration(handle, 0xFF); }));
+    Require(Throws([&] { sceMoveSetLightSphere(handle, 0xFF, 0, 0); }));
+    Require(Throws([&] { sceMoveResetLightSphere(handle); }));
+    Require(buffer.Untouched());
+    Require(count == -7);
+}
+
 }
 
 int main() {
-    RequireNotInit(0);
+    RequireNotInit(kFirstHandle);
 
     Require(sceMoveInit() == kOk);
     Require(sceMoveInit() == kAlreadyInit);
 
+    RequireUnknownHandleThrows(kFirstHandle);
+
     const std::int32_t first = sceMoveOpen(kUserId, 0, 0);
     const std::int32_t second = sceMoveOpen(kUserId, 0, 1);
-    Require(first > 0);
-    Require(second > 0);
-    Require(first != second);
+    Require(first == kFirstHandle);
+    Require(second == kFirstHandle + kHandleStep);
 
     Require(sceMoveGetDeviceInfo(first, nullptr) == kInvalidArg);
     Require(sceMoveGetExtensionPortInfo(first, nullptr) == kInvalidArg);
@@ -95,16 +124,16 @@ int main() {
     Require(sceMoveResetLightSphere(first) == kOk);
 
     Require(sceMoveClose(first) == kOk);
-    Require(sceMoveClose(second) == kOk);
+    RequireUnknownHandleThrows(first);
+    Require(sceMoveSetVibration(second, 0) == kNoControllerConnected);
     Require(sceMoveTerm() == kOk);
 
-    RequireNotInit(first);
+    RequireNotInit(second);
 
     Require(sceMoveInit() == kOk);
+    RequireUnknownHandleThrows(second);
     const std::int32_t third = sceMoveOpen(kUserId, 0, 0);
-    Require(third > 0);
-    Require(third != first);
-    Require(third != second);
+    Require(third == kFirstHandle + 2 * kHandleStep);
     Require(sceMoveClose(third) == kOk);
     Require(sceMoveTerm() == kOk);
 }

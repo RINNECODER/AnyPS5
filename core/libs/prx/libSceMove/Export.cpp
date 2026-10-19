@@ -1,6 +1,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include <mutex>
+#include <unordered_set>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
@@ -14,84 +16,96 @@ constexpr int MOVE_ERROR_INVALID_ARG = static_cast<int>(0x80EE0003);
 constexpr int32_t MOVE_FIRST_HANDLE = 0x30B0100;
 constexpr int32_t MOVE_HANDLE_STEP = 0x100;
 
-std::atomic<bool> initialized{false};
-std::atomic<int32_t> nextHandle{MOVE_FIRST_HANDLE};
+std::mutex stateMutex;
+bool initialized = false;
+int32_t nextHandle = MOVE_FIRST_HANDLE;
+std::unordered_set<int32_t> openHandles;
+
+int checkHandle(const char* function, int32_t handle) {
+    std::lock_guard lock(stateMutex);
+    if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (!openHandles.contains(handle)) NotImplemented_nid_no_patch(function);
+    return MOVE_OK;
+}
 
 }
 
 extern "C" {
 
 int APS5_VABI sceMoveInit(void) {
-    bool expected = false;
-    return initialized.compare_exchange_strong(expected, true) ? MOVE_OK : MOVE_ERROR_ALREADY_INIT;
+    std::lock_guard lock(stateMutex);
+    if (initialized) return MOVE_ERROR_ALREADY_INIT;
+    initialized = true;
+    return MOVE_OK;
 }
 
 int APS5_VABI sceMoveTerm(void) {
-    return initialized.exchange(false) ? MOVE_OK : MOVE_ERROR_NOT_INIT;
+    std::lock_guard lock(stateMutex);
+    if (!initialized) return MOVE_ERROR_NOT_INIT;
+    initialized = false;
+    openHandles.clear();
+    return MOVE_OK;
 }
 
 int APS5_VABI sceMoveOpen(int32_t userId, int32_t type, int32_t index) {
     (void)userId;
     (void)type;
     (void)index;
+    std::lock_guard lock(stateMutex);
     if (!initialized) return MOVE_ERROR_NOT_INIT;
-    return nextHandle.fetch_add(MOVE_HANDLE_STEP);
+    const int32_t handle = nextHandle;
+    nextHandle += MOVE_HANDLE_STEP;
+    openHandles.insert(handle);
+    return handle;
 }
 
 int APS5_VABI sceMoveClose(int32_t handle) {
-    (void)handle;
+    std::lock_guard lock(stateMutex);
     if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (openHandles.erase(handle) == 0) NotImplemented_nid_no_patch(__func__);
     return MOVE_OK;
 }
 
 int APS5_VABI sceMoveGetDeviceInfo(int32_t handle, void* info) {
-    (void)handle;
-    if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (const int result = checkHandle(__func__, handle); result != MOVE_OK) return result;
     if (!info) return MOVE_ERROR_INVALID_ARG;
     return MOVE_NO_CONTROLLER_CONNECTED;
 }
 
 int APS5_VABI sceMoveGetExtensionPortInfo(int32_t handle, void* data) {
-    (void)handle;
-    if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (const int result = checkHandle(__func__, handle); result != MOVE_OK) return result;
     if (!data) return MOVE_ERROR_INVALID_ARG;
     return MOVE_NO_CONTROLLER_CONNECTED;
 }
 
 int APS5_VABI sceMoveReadStateLatest(int32_t handle, void* data) {
-    (void)handle;
-    if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (const int result = checkHandle(__func__, handle); result != MOVE_OK) return result;
     if (!data) return MOVE_ERROR_INVALID_ARG;
     return MOVE_NO_CONTROLLER_CONNECTED;
 }
 
 int APS5_VABI sceMoveReadStateRecent(int32_t handle, int64_t timestamp, void* data, int32_t* outCount) {
-    (void)handle;
-    if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (const int result = checkHandle(__func__, handle); result != MOVE_OK) return result;
     if (timestamp < 0 || !data || !outCount) return MOVE_ERROR_INVALID_ARG;
     return MOVE_NO_CONTROLLER_CONNECTED;
 }
 
 int APS5_VABI sceMoveSetVibration(int32_t handle, uint8_t motor) {
-    (void)handle;
     (void)motor;
-    if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (const int result = checkHandle(__func__, handle); result != MOVE_OK) return result;
     return MOVE_NO_CONTROLLER_CONNECTED;
 }
 
 int APS5_VABI sceMoveSetLightSphere(int32_t handle, uint8_t red, uint8_t green, uint8_t blue) {
-    (void)handle;
     (void)red;
     (void)green;
     (void)blue;
-    if (!initialized) return MOVE_ERROR_NOT_INIT;
+    if (const int result = checkHandle(__func__, handle); result != MOVE_OK) return result;
     return MOVE_NO_CONTROLLER_CONNECTED;
 }
 
 int APS5_VABI sceMoveResetLightSphere(int32_t handle) {
-    (void)handle;
-    if (!initialized) return MOVE_ERROR_NOT_INIT;
-    return MOVE_OK;
+    return checkHandle(__func__, handle);
 }
 
 }
