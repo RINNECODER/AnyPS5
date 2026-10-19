@@ -1065,11 +1065,13 @@ void MetalDriver::Impl::ExecuteSubmission(const Submission& submission, QueueSta
                 static std::uint64_t flips = 0;
                 if (++flips % 16 == 0) {
                     const auto cache = draw->ImageCache()->TakeStatistics();
-                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"verified\":%llu,\"rejected\":%llu,\"hashed_mib\":%.1f,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu],\"invalidated\":%llu,\"invalidated_by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu],\"evicted\":%llu,\"replaced\":%llu}\n",
+                    const auto uploads = TakeImageUploadStatistics();
+                    std::fprintf(stderr, "{\"schema_version\":1,\"event\":\"image_cache\",\"flips\":16,\"hits\":%llu,\"misses\":%llu,\"inserts\":%llu,\"clears\":%llu,\"verified\":%llu,\"rejected\":%llu,\"hashed_mib\":%.1f,\"uploads\":%llu,\"upload_mib\":%.1f,\"by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu],\"invalidated\":%llu,\"invalidated_by\":[%llu,%llu,%llu,%llu,%llu,%llu,%llu],\"evicted\":%llu,\"replaced\":%llu}\n",
                         static_cast<unsigned long long>(cache.hits), static_cast<unsigned long long>(cache.misses),
                         static_cast<unsigned long long>(cache.inserts), static_cast<unsigned long long>(cache.clears),
                         static_cast<unsigned long long>(cache.verified), static_cast<unsigned long long>(cache.rejected),
                         static_cast<double>(cache.hashedBytes) / (1024.0 * 1024.0),
+                        static_cast<unsigned long long>(uploads.uploads), static_cast<double>(uploads.bytes) / (1024.0 * 1024.0),
                         static_cast<unsigned long long>(cache.clearsBy[0]), static_cast<unsigned long long>(cache.clearsBy[1]),
                         static_cast<unsigned long long>(cache.clearsBy[2]), static_cast<unsigned long long>(cache.clearsBy[3]),
                         static_cast<unsigned long long>(cache.clearsBy[4]), static_cast<unsigned long long>(cache.clearsBy[5]),

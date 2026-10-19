@@ -107,6 +107,10 @@ public:
     // Encodes the lazy copy-backs over guest [address, address + bytes) ahead of this work, as a
     // binding about to read them through memory would.
     void MaterializeBefore(std::uint64_t address, std::uint64_t bytes) { materializeBefore(address, bytes); }
+    // The guest snapshot this work's bindings carry: the BDA page table and the fault buffer a
+    // shader's guest-address lookup reads and reports a miss into. A draw translation record captures
+    // the buffers its bindings were built with, so it stands only while the same snapshot comes back.
+    [[nodiscard]] GuestSnapshotIdentity GuestSnapshot() const { return {snapshot.Table(), snapshot.FaultBuffer()}; }
     // Guest bytes the snapshot copied instead of aliasing (#291).
     [[nodiscard]] std::uint64_t CopiedBytes() const { return snapshot.CopiedBytes(); }
     [[nodiscard]] const std::vector<id<MTLBuffer>>& UploadChunks() const { return uploadChunks; }
@@ -205,5 +209,14 @@ private:
         std::vector<ImageRange>& writableRanges);
     [[nodiscard]] MetalBufferBinding mirror(std::uint64_t address, std::size_t bytes, bool writable);
 };
+
+// Guest-surface uploads (a detile and a blit into a new native texture) and the guest bytes they
+// copied: what the image cache's hits save, and what a frame still pays for. The driver's
+// `image_cache` profiling event takes and resets them.
+struct ImageUploadStatistics {
+    std::uint64_t uploads = 0;
+    std::uint64_t bytes = 0;
+};
+[[nodiscard]] ImageUploadStatistics TakeImageUploadStatistics(bool reset = true);
 
 }

@@ -36,11 +36,17 @@ namespace AgcDriver::Metal {
 // - a mapping change or a failure calls Clear, which drops everything.
 // Entries are keyed by guest address and host address (so a remapped range never hits) and
 // invalidated by host range (so a write through another guest alias of the same memory counts).
-// Entries never overlap in host bytes (an insert replaces the ones it overlaps), so they are kept
-// ordered by host address: a lookup or an invalidation touches only the entries at its range.
-// The bound is MaxEntries and MaxBytes of guest bytes, least recently used out first. A live-map
-// frame binds about 350 surfaces; at the old bound of 128 entries every frame re-uploaded about
-// 300 of them (one compute or blit encoder each) although none had changed.
+// They may **overlap**: the title binds one 128 MiB surface whole and its two 32 MiB sub-ranges
+// inside it, and the same bytes as two format families, so an insert that dropped every entry it
+// overlapped made those alternatives evict each other and re-upload every frame (REPORT6). An
+// insert keeps them; it supersedes only the entries that describe the same surface (same guest
+// address, content, byte count and geometry), and a write drops every entry whose bytes it
+// overlaps (Invalidate), which is what keeps an overlapping entry from being served stale: an
+// entry is re-proved (or is in the generation it was inserted in) before every use.
+// The bound is MaxEntries and MaxBytes of guest bytes (an overlap counts once per entry), least
+// recently used out first. A live-map frame binds about 350 surfaces; at the old bound of 128
+// entries every frame re-uploaded about 300 of them (one compute or blit encoder each) although
+// none had changed.
 // `Texture` provides `bool CanShareBacking(const Descriptor&) const` and `std::size_t GuestBytes() const`.
 template <typename Texture>
 class GuestImageCache {
@@ -77,6 +83,7 @@ public:
     void SetFastVerify(bool on) { fastVerify = on; }
     [[nodiscard]] bool FastVerify() const { return fastVerify; }
 
+
     // The cached texture for a surface at `guest` (backed by `host`) whose backing `descriptor`
     // can share, if any.
     // `content` distinguishes what the texels stand for: 0 for the guest bytes themselves, another
@@ -85,23 +92,27 @@ public:
     template <typename Descriptor>
     std::optional<Hit> Find(std::uint64_t guest, const std::byte* host, const Descriptor& descriptor, std::uint64_t content = 0) {
         std::lock_guard lock(mutex);
-        if (auto found = entries.find(address(host)); found != entries.end()) {
+        auto found = entries.lower_bound(address(host));
+        while (found != entries.end() && found->first == address(host)) {
             auto& entry = found->second;
-            if (entry.guest == guest && entry.content == content && entry.texture->CanShareBacking(descriptor)) {
-                if (entry.generation != generation) {
-                    if (!proves(entry)) {
-                        ++statistics.rejected;
-                        erase(found);
-                        ++statistics.misses;
-                        return std::nullopt;
-                    }
-                    ++statistics.verified;
-                    entry.generation = generation;
-                }
-                entry.stamp = ++clock;
-                ++statistics.hits;
-                return Hit{entry.texture, entry.compare};
+            // Several entries may share a host base (a surface and its sub-ranges, two format
+            // families of the same bytes): the one whose backing serves this descriptor answers.
+            if (entry.guest != guest || entry.content != content || !entry.texture->CanShareBacking(descriptor)) {
+                ++found;
+                continue;
             }
+            if (entry.generation != generation && !proves(entry)) {
+                ++statistics.rejected;
+                found = erase(found);
+                continue;
+            }
+            if (entry.generation != generation) {
+                ++statistics.verified;
+                entry.generation = generation;
+            }
+            entry.stamp = ++clock;
+            ++statistics.hits;
+            return Hit{entry.texture, entry.compare};
         }
         ++statistics.misses;
         return std::nullopt;
@@ -114,28 +125,35 @@ public:
     [[nodiscard]] bool Revalidate(const std::byte* host, std::uint64_t guest, std::uint64_t content, const Texture* texture) {
         if (host == nullptr || texture == nullptr) return false;
         std::lock_guard lock(mutex);
-        const auto found = entries.find(address(host));
-        if (found == entries.end()) return false;
-        auto& entry = found->second;
-        if (entry.guest != guest || entry.content != content || entry.texture.get() != texture) return false;
-        if (entry.generation != generation) {
-            if (!proves(entry)) {
-                ++statistics.rejected;
-                erase(found);
-                return false;
+        auto found = entries.lower_bound(address(host));
+        while (found != entries.end() && found->first == address(host)) {
+            auto& entry = found->second;
+            if (entry.guest != guest || entry.content != content || entry.texture.get() != texture) {
+                ++found;
+                continue;
             }
-            ++statistics.verified;
-            entry.generation = generation;
+            if (entry.generation != generation) {
+                if (!proves(entry)) {
+                    ++statistics.rejected;
+                    erase(found);
+                    return false;
+                }
+                ++statistics.verified;
+                entry.generation = generation;
+            }
+            entry.stamp = ++clock;
+            return true;
         }
-        entry.stamp = ++clock;
-        return true;
+        return false;
     }
 
     // Records that `texture`'s texels now equal the guest bytes at `guest`/`host` (or, with a
-    // nonzero `content`, the clear value it stands for); replaces every entry whose host bytes
-    // overlap them. `written`: the work that made it writes the surface, so its bytes match only
-    // once its copy-back completed (Seal). An uploaded surface already cached as this texture
-    // keeps its proof.
+    // nonzero `content`, the clear value it stands for). An entry that describes the same surface
+    // (same guest address, content, byte count and geometry) is superseded; every other entry whose
+    // host bytes overlap these is kept, because it describes a different surface of the same bytes
+    // and the write that changed them dropped it already (Invalidate). `written`: the work that
+    // made it writes the surface, so its bytes match only once its copy-back completed (Seal). An
+    // uploaded surface already cached as this texture keeps its proof.
     void Insert(std::uint64_t guest, const std::byte* host, std::shared_ptr<Texture> texture, bool compare, std::uint64_t content = 0,
         bool written = false) {
         if (texture == nullptr || host == nullptr) return;
@@ -143,17 +161,24 @@ public:
         std::lock_guard lock(mutex);
         const bool useSample = written || (fastVerify && bytes > 4096);
         const auto proof = content != 0 ? Proof::Content : written ? Proof::Pending : useSample ? Proof::Sample : Proof::Hash;
-        if (auto found = entries.find(address(host)); found != entries.end()) {
+        auto found = entries.lower_bound(address(host));
+        while (found != entries.end() && found->first == address(host)) {
             auto& entry = found->second;
-            if ((proof == Proof::Hash || proof == Proof::Sample) && entry.texture == texture && entry.guest == guest && entry.content == content && entry.generation == generation) {
+            if ((proof == Proof::Hash || proof == Proof::Sample) && entry.texture == texture && entry.guest == guest &&
+                entry.content == content && entry.generation == generation) {
                 entry.stamp = ++clock;
                 return;
             }
-        }
-        statistics.replaced += eraseOverlapping(address(host), bytes);
-        if (auto same = entries.find(address(host)); same != entries.end()) {
-            erase(same);
-            ++statistics.replaced;
+            // The same surface re-uploaded (its bytes changed, or its entry was dropped): the new
+            // entry supersedes it. Two format families of one surface cannot share a backing, so
+            // both are kept.
+            if (entry.guest == guest && entry.content == content && entry.bytes == bytes &&
+                entry.texture->CanShareBackingIgnoringDcc(texture->Descriptor())) {
+                found = erase(found);
+                ++statistics.replaced;
+                continue;
+            }
+            ++found;
         }
         while (!entries.empty() && (entries.size() >= MaxEntries || totalBytes + bytes > MaxBytes)) {
             const auto victim = std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.second.stamp < b.second.stamp; });
@@ -179,12 +204,18 @@ public:
         std::lock_guard lock(mutex);
         // A later write of the same texture may still be in flight; completions run in order, so
         // the last one's sample stands.
-        auto found = entries.find(address(host));
-        if (found == entries.end()) return;
-        auto& entry = found->second;
-        if (entry.texture.get() != texture || (entry.proof != Proof::Pending && entry.proof != Proof::Sample)) return;
-        entry.proof = Proof::Sample;
-        entry.fingerprint = GuestBytesFingerprint::Sample(host, entry.bytes);
+        auto found = entries.lower_bound(address(host));
+        while (found != entries.end() && found->first == address(host)) {
+            auto& entry = found->second;
+            if (entry.texture.get() != texture) {
+                ++found;
+                continue;
+            }
+            if (entry.proof != Proof::Pending && entry.proof != Proof::Sample) return;
+            entry.proof = Proof::Sample;
+            entry.fingerprint = GuestBytesFingerprint::Sample(host, entry.bytes);
+            return;
+        }
     }
 
     void Invalidate(const std::byte* host, std::size_t bytes, Cause cause = Cause::Other) {
@@ -280,23 +311,19 @@ private:
 
     static std::uintptr_t address(const std::byte* host) { return reinterpret_cast<std::uintptr_t>(host); }
 
-    using Entries = std::map<std::uintptr_t, Entry>;
+    using Entries = std::multimap<std::uintptr_t, Entry>;
 
-    void erase(typename Entries::iterator entry) {
+    typename Entries::iterator erase(typename Entries::iterator entry) {
         totalBytes -= entry->second.bytes;
-        entries.erase(entry);
+        return entries.erase(entry);
     }
 
+    // Entries may overlap, so an entry starting before `begin` can still reach into the range and
+    // a walk back from `lower_bound` is not enough: every entry starting before `end` is examined.
     std::size_t eraseOverlapping(std::uintptr_t begin, std::size_t bytes) {
         const auto end = begin + bytes;
         std::size_t dropped = 0;
-        // Entries are disjoint: only the last one starting before `begin` can reach into the range.
-        auto entry = entries.lower_bound(begin);
-        if (entry != entries.begin()) {
-            const auto before = std::prev(entry);
-            if (begin < before->second.host + before->second.bytes) entry = before;
-        }
-        while (entry != entries.end() && entry->second.host < end) {
+        for (auto entry = entries.begin(); entry != entries.end() && entry->first < end;) {
             const auto next = std::next(entry);
             if (begin < entry->second.host + entry->second.bytes) {
                 erase(entry);

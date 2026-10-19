@@ -3,6 +3,8 @@
 #include "MetalWorkerPool.hpp"
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <string_view>
 #include <condition_variable>
 #include <thread>
 #include <vector>
@@ -15,7 +17,13 @@ using MetalTests::Require;
 void TestBasicLookupAndInsert() {
     MetalDrawTranslationCache cache;
     Require(cache.Size() == 0, "Initial cache size must be 0");
-    Require(MetalDrawTranslationCache::Enabled(), "Cache must be enabled by default");
+    // The cache is opt-in (ANYPS5_METAL_DRAW_CACHE, unset means off): a record reuses everything its
+    // bindings stand on, and the single-frame replay gate cannot exercise a reuse across frames. The
+    // ctest registration sets the variable, so this asserts the mapping rather than the default.
+    const char* drawCache = std::getenv("ANYPS5_METAL_DRAW_CACHE");
+    const bool requested = drawCache != nullptr && *drawCache != '\0' && std::string_view(drawCache) != "0";
+    Require(MetalDrawTranslationCache::Enabled() == requested,
+        "the draw translation cache must be enabled exactly when ANYPS5_METAL_DRAW_CACHE is set to a nonzero value");
 
     DrawTranslationKey key;
     key.vertexVariantId = 101;
