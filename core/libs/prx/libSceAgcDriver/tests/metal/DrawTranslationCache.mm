@@ -80,6 +80,35 @@ void TestBasicLookupAndInsert() {
     Require(stats.clears == 1, "Clears count must be 1");
 }
 
+// Live() gates the parallel batch scan: it is true only while the cache serves records at the
+// version it is at now. Inserting is not enough (an image-cache expire can move the version before
+// the next lookup), so only a hit makes it live, a version mismatch and Clear make it dead.
+void TestLiveGate() {
+    MetalDrawTranslationCache cache;
+    Require(!cache.Live(), "An empty cache must not be live");
+
+    DrawTranslationKey key;
+    key.vertexVariantId = 7;
+    key.fragmentVariantId = 9;
+    auto record = std::make_shared<DrawTranslationRecord>();
+    record->key = key;
+    record->memoryVersion = 0;
+    record->imageCacheClears = 0;
+    cache.Insert(record);
+    Require(!cache.Live(), "An insert alone must not make the cache live");
+
+    Require(cache.Find(key, 0, 0) != nullptr, "A record at the current version must be served");
+    Require(cache.Live(), "Serving a record must make the cache live");
+
+    Require(cache.Find(key, 1, 0) == nullptr, "A record at another version must not be served");
+    Require(!cache.Live(), "A version mismatch must make the cache dead");
+
+    Require(cache.Find(key, 0, 0) != nullptr, "The record is served again at its own version");
+    Require(cache.Live(), "Serving it again must make the cache live");
+    cache.Clear();
+    Require(!cache.Live(), "Clear must make the cache dead");
+}
+
 void TestLruEviction() {
     MetalDrawTranslationCache cache;
     // Insert MaxEntries + 1 items
@@ -190,6 +219,7 @@ void TestWorkerPool() {
 
 void RunDrawTranslationCacheTests(const MetalTests::Context& /*context*/) {
     TestBasicLookupAndInsert();
+    TestLiveGate();
     TestLruEviction();
     TestThreadSafety();
     TestWorkerPool();

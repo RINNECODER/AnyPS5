@@ -775,6 +775,11 @@ void MetalDriver::Impl::ExecuteDrawSynchronously(QueueState& queue, std::span<co
 bool MetalDriver::Impl::TryExecuteDrawBatch(std::size_t& cursor, QueueState& queue, const Submission& submission) {
     if (!MetalDraw::ParallelEncodingEnabled()) return false;
     if (draw == nullptr || submission.shaders == nullptr) return false;
+    // The batch is built from translation records, and it recompiles every draw it looks at to key
+    // the lookup. Until the cache has served a record at its current version, that work is wasted:
+    // records only appear as the serial path encodes, and an image-cache expire moves the version
+    // under every record (MetalDrawTranslationCache::Live).
+    if (!draw->TranslationCache().Live()) return false;
 
     std::vector<MetalDraw::PreparedDraw> batch;
     QueueState scanQueue = queue;
