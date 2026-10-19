@@ -177,6 +177,23 @@ int main() {
     }
     for (std::size_t x = 3 * 4; x < pitch; ++x) Require(padded[x] == 0xEE);
 
+    std::vector<std::uint8_t> invalidPitchImage(3 * 2 * 4 + 8, 0xCC);
+    decode = DecodeParam(rgbPng, invalidPitchImage);
+    decode.image_pitch = 3 * 4 + 2;
+    Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
+    Require(std::all_of(invalidPitchImage.begin(), invalidPitchImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
+
+    decode = DecodeParam(rgbPng, invalidPitchImage);
+    decode.image_pitch = pitch;
+    decode.image_mem_size = pitch + 3 * 4;
+    Require(scePngDecDecode(handle, &decode, &info) == invalidParam);
+    Require(std::all_of(invalidPitchImage.begin(), invalidPitchImage.end(), [](std::uint8_t byte) { return byte == 0xCC; }));
+
+    std::vector<std::uint8_t> fullPitchImage(pitch * 2, 0xCC);
+    decode = DecodeParam(rgbPng, fullPitchImage);
+    decode.image_pitch = pitch;
+    Require(scePngDecDecode(handle, &decode, &info) == (3 << 16 | 2));
+
     const std::vector<std::uint8_t> palettePng(PALETTE_TRNS, PALETTE_TRNS + sizeof(PALETTE_TRNS));
     std::vector<std::uint8_t> paletteImage(2 * 2 * 4);
     decode = DecodeParam(palettePng, paletteImage);

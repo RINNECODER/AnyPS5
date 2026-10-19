@@ -139,8 +139,12 @@ int32_t APS5_VABI scePngDecDecode(void* handle, const PngDecDecodeParam* param, 
 
     const std::uint64_t rowSize = static_cast<std::uint64_t>(header->width) * BYTES_PER_PIXEL;
     const std::uint64_t pitch = param->image_pitch == 0 ? rowSize : param->image_pitch;
-    if (pitch < rowSize) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
-    if ((header->height - 1) * pitch + rowSize > param->image_mem_size) return SCE_PNG_DEC_ERROR_INVALID_SIZE;
+    if (param->image_pitch != 0 && (pitch < rowSize || (pitch & 3u) != 0)) return SCE_PNG_DEC_ERROR_INVALID_PARAM;
+    if (param->image_pitch == 0) {
+        if (header->height * rowSize > param->image_mem_size) return SCE_PNG_DEC_ERROR_INVALID_SIZE;
+    } else if (header->height * pitch >= 0x80000000ull || header->height * pitch > param->image_mem_size) {
+        return SCE_PNG_DEC_ERROR_INVALID_PARAM;
+    }
     const std::uint64_t alignedWidth = (static_cast<std::uint64_t>(header->width) + 7u) & ~std::uint64_t{7u};
     const std::uint64_t alignedMaxWidth = (static_cast<std::uint64_t>(context->maxImageWidth) + 7u) & ~std::uint64_t{7u};
     if (alignedWidth > alignedMaxWidth) return SCE_PNG_DEC_ERROR_INVALID_WORK_MEMORY;
