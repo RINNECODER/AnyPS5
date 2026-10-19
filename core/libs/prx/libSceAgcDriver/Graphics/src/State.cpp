@@ -196,7 +196,9 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
     const auto opValue = refMask >> 24u;
     auto reference = test;
     auto fixed = compare == 0 || compare == 7 ? 0u : face.compareMask;
-    const auto convert = [&](std::uint32_t op) {
+    std::uint32_t invertMask = 0;
+    std::uint32_t inverted = 0;
+    const auto convert = [&](std::uint32_t op, bool testFailed) {
         if (face.writeMask == 0) return VK_STENCIL_OP_KEEP;
         char detail[96];
         switch (op) {
@@ -207,6 +209,16 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
             case 4: {
                 const auto value = op == 2 ? 0xffu : op == 3 ? test : opValue;
                 if (((reference ^ value) & fixed & face.writeMask) != 0) {
+                    const auto compared = test & face.compareMask;
+                    const bool passKnown = compare == 2 || (compare == 3 && compared == face.compareMask) || (compare == 6 && compared == 0u);
+                    const bool failKnown = compare == 5 || (compare == 1 && compared == 0u) || (compare == 4 && compared == face.compareMask);
+                    const bool testValueKnown = testFailed ? failKnown : passKnown;
+                    const auto flipped = (test ^ value) & face.writeMask;
+                    if (testValueKnown && (face.writeMask & ~face.compareMask) == 0 && (invertMask == 0 || invertMask == flipped)) {
+                        invertMask = flipped;
+                        ++inverted;
+                        return VK_STENCIL_OP_INVERT;
+                    }
                     std::snprintf(detail, sizeof(detail), "AGC graphics: stencil replacement 0x%02x against test value 0x%02x (masks 0x%02x/0x%02x) is unsupported", value, test, face.compareMask, face.writeMask);
                     throw std::runtime_error(detail);
                 }
@@ -229,9 +241,14 @@ VkStencilOpState stencilFace(std::uint32_t compare, std::uint32_t ops, std::uint
                 throw std::runtime_error(detail);
         }
     };
-    face.failOp = convert(ops & 0xfu);
-    face.passOp = convert((ops >> 4u) & 0xfu);
-    face.depthFailOp = convert((ops >> 8u) & 0xfu);
+    face.failOp = convert(ops & 0xfu, true);
+    face.passOp = convert((ops >> 4u) & 0xfu, false);
+    face.depthFailOp = convert((ops >> 8u) & 0xfu, false);
+    if (invertMask != 0) {
+        const auto active = ((ops & 0xfu) != 0u) + (((ops >> 4u) & 0xfu) != 0u) + (((ops >> 8u) & 0xfu) != 0u);
+        if (inverted != active) throw std::runtime_error("AGC graphics: a stencil replacement drawn as an inversion beside another stencil operation is unsupported");
+        face.writeMask = invertMask;
+    }
     face.reference = reference;
     return face;
 }
