@@ -83,6 +83,8 @@ float APS5_VABI copysignf_nid_postfix(float, float);
 double APS5_VABI remquo_nid_postfix(double, double, int*);
 float APS5_VABI remquof_nid_postfix(float, float, int*);
 float APS5_VABI fmaf_nid_postfix(float, float, float);
+long double APS5_VABI ceill_nid_postfix(long double);
+long double APS5_VABI floorl_nid_postfix(long double);
 float APS5_VABI tanf_nid_postfix(float);
 int APS5_VABI rand_nid_postfix();
 void APS5_VABI srand_nid_postfix(unsigned int);

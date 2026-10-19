@@ -66,209 +66,100 @@ VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequestJoinVoiceChatGroup)
 VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequestLeaveVoiceChatGroup)
 VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequestDeleteVoiceChatGroup)
 
-int APS5_VABI sceVoiceChatAbortRequest(void) {
-    NotImplemented_nid_no_patch(__func__);
+VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequest0)
+VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequest1)
+VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequestAcsTts)
+VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequestAction)
+VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequestSetMemberVolume)
+VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequestUpdateGameSessionVoiceChatChannelName)
+VOICECHAT_OFFLINE_REQUEST(sceVoiceChatRequestUpdatePlayerSessionVoiceChatChannelName)
+
+int APS5_VABI sceVoiceChatAbortRequest(int requestId) {
+    (void)requestId;
     return 0;
 }
 
-int APS5_VABI sceVoiceChatGetActiveChannel(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVoiceChatGetActiveChannel(void* channel) {
+    (void)channel;
+    logSoft(__func__, "SIGNED_OUT (offline)");
+    return VOICECHAT_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceVoiceChatGetChannelMemberActiveChannelMatchingState(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVoiceChatGetChannelMemberActiveChannelMatchingState(void* a, void* b) {
+    (void)a;
+    (void)b;
+    logSoft(__func__, "SIGNED_OUT (offline)");
+    return VOICECHAT_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceVoiceChatGetChannelMemberVoiceConnectionState(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVoiceChatGetChannelMemberVoiceConnectionState(void* a, void* b) {
+    (void)a;
+    (void)b;
+    logSoft(__func__, "SIGNED_OUT (offline)");
+    return VOICECHAT_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceVoiceChatGetChatChannelMemberInfoList(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVoiceChatGetChatChannelMemberInfoList(void* a, void* b) {
+    (void)a;
+    (void)b;
+    logSoft(__func__, "SIGNED_OUT (offline)");
+    return VOICECHAT_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceVoiceChatGetChatGroupMemberInfoList(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVoiceChatGetChatGroupMemberInfoList(void* a, void* b) {
+    (void)a;
+    (void)b;
+    logSoft(__func__, "SIGNED_OUT (offline)");
+    return VOICECHAT_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceVoiceChatGetMicState(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVoiceChatGetMicState(void* state) {
+    (void)state;
+    logSoft(__func__, "SIGNED_OUT (offline)");
+    return VOICECHAT_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceVoiceChatGetUserVoiceVolumeGain(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVoiceChatGetUserVoiceVolumeGain(void* a, void* gain) {
+    (void)a;
+    (void)gain;
+    logSoft(__func__, "SIGNED_OUT (offline)");
+    return VOICECHAT_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceVoiceChatRegisterChannelEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVoiceChatSetUserVoiceVolumeGain(void* a, int32_t gain) {
+    (void)a;
+    (void)gain;
+    logSoft(__func__, "SIGNED_OUT (offline)");
+    return VOICECHAT_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceVoiceChatRegisterDaemonEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
+int APS5_VABI sceVoiceChatRegisterChannelEventHandler(void* a, void* b) { (void)a; (void)b; return 0; }
+int APS5_VABI sceVoiceChatRegisterDaemonEventHandler(void* a, void* b) { (void)a; (void)b; return 0; }
+int APS5_VABI sceVoiceChatRegisterMemberEventHandler(void* a, void* b) { (void)a; (void)b; return 0; }
+int APS5_VABI sceVoiceChatRegisterPartyUserStateChangedHandler(void* a, void* b) { (void)a; (void)b; return 0; }
+int APS5_VABI sceVoiceChatRegisterVoiceEventHandler(void* a, void* b) { (void)a; (void)b; return 0; }
 
-int APS5_VABI sceVoiceChatRegisterMemberEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
+int APS5_VABI sceVoiceChatStartAccessibilityEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStartChannelEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStartDaemonEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStartMemberEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStartRangedMemberEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStartVoiceEvent(void* a) { (void)a; return 0; }
 
-int APS5_VABI sceVoiceChatRegisterPartyUserStateChangedHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
+int APS5_VABI sceVoiceChatStopAccessibilityEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStopChannelEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStopDaemonEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStopMemberEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStopRangedMemberEvent(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatStopVoiceEvent(void* a) { (void)a; return 0; }
 
-int APS5_VABI sceVoiceChatRegisterVoiceEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatRequest0(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatRequest1(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatRequestAcsTts(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatRequestAction(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatRequestSetMemberVolume(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatRequestUpdateGameSessionVoiceChatChannelName(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatRequestUpdatePlayerSessionVoiceChatChannelName(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatSetUserVoiceVolumeGain(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStartAccessibilityEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStartChannelEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStartDaemonEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStartMemberEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStartRangedMemberEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStartVoiceEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStopAccessibilityEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStopChannelEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStopDaemonEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStopMemberEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStopRangedMemberEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatStopVoiceEvent(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatUnregisterAccessibilityEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatUnregisterChannelEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatUnregisterDaemonEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatUnregisterMemberEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatUnregisterMicEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatUnregisterPartyUserStateChangedHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatUnregisterRangedMemberEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceVoiceChatUnregisterVoiceEventHandler(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
+int APS5_VABI sceVoiceChatUnregisterAccessibilityEventHandler(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatUnregisterChannelEventHandler(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatUnregisterDaemonEventHandler(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatUnregisterMemberEventHandler(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatUnregisterMicEventHandler(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatUnregisterPartyUserStateChangedHandler(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatUnregisterRangedMemberEventHandler(void* a) { (void)a; return 0; }
+int APS5_VABI sceVoiceChatUnregisterVoiceEventHandler(void* a) { (void)a; return 0; }
 
 }

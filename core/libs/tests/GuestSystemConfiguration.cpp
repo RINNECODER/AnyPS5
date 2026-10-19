@@ -28,6 +28,11 @@ int APS5_VABI getpid_nid_postfix();
 void* APS5_VABI mmap_nid_postfix(void*, std::size_t, int, int, int, std::int64_t);
 int APS5_VABI munmap_nid_postfix(void*, std::size_t);
 std::uint64_t APS5_VABI sceKernelGetTscFrequency(void);
+struct GuestRlimitTest {
+    std::int64_t rlim_cur;
+    std::int64_t rlim_max;
+};
+int APS5_VABI getrlimit_nid_postfix(int resource, GuestRlimitTest* limit);
 extern char** environ_nid_postfix;
 }
 static void Require(bool value) { if (!value) std::abort(); }
@@ -505,8 +510,13 @@ int main() {
     CheckVmmapSysctl();
     CheckNameToMib();
     *__error_nid_postfix() = 13;
+    Require(sysconf_nid_postfix(1) == 262144);
     Require(sysconf_nid_postfix(3) == 128);
+    GuestRlimitTest nofileLimit{};
+    Require(getrlimit_nid_postfix(8, &nofileLimit) == 0);
+    Require(sysconf_nid_postfix(5) == nofileLimit.rlim_cur);
     Require(sysconf_nid_postfix(47) == 0x4000);
+    Require(sysconf_nid_postfix(56) == 1024);
     Require(getpagesize_nid_postfix() == sysconf_nid_postfix(47));
     Require(sysconf_nid_postfix(57) > 0);
     Require(sysconf_nid_postfix(58) > 0);

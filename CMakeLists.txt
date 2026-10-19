@@ -101,6 +101,10 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/tests/test_shader_cache_native_paths.py
             ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ShaderCacheVersion.cmake ${CMAKE_COMMAND})
         set_tests_properties(shader_cache_native_paths PROPERTIES TIMEOUT 20)
+        add_test(NAME shader_cache_runtime_sources COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_shader_cache_runtime_sources.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler ${CMAKE_COMMAND})
+        set_tests_properties(shader_cache_runtime_sources PROPERTIES TIMEOUT 180)
         add_test(NAME pr_overlap_encoding COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_pr_overlap_encoding.py)
         add_test(NAME pr_overlap_dependencies COMMAND ${Python3_EXECUTABLE}
@@ -117,6 +121,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_unwrap_self.py)
         add_test(NAME conventions_function_bodies COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_conventions_comments.py)
+        add_test(NAME conventions_debt_length COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_check_conventions_debt_length.py)
         add_test(NAME test_registration COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/tests/test_test_registration.py)
         add_test(NAME check_skips COMMAND ${Python3_EXECUTABLE}

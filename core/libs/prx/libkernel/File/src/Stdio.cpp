@@ -494,7 +494,7 @@ extern "C" int APS5_VABI pipe_nid_postfix(int* descriptors) {
     if (!destination.Open()) return PosixFailure(GUEST_EFAULT);
     int native[2];
 #ifdef _WIN32
-    const int result = ::_pipe(native, 4096, _O_BINARY);
+    const int result = ::_pipe(native, 65536, _O_BINARY);
 #else
     const int result = ::pipe(native);
 #endif
@@ -979,6 +979,9 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
         if (WithoutParameterHandler([fd] { return ::_get_osfhandle(fd); }) == -1) return SceErrorFromErrno(GUEST_EBADF);
         return SceErrorFromErrno(GUEST_EINVAL);
     }
+    const GuestArena::HostWrite destination(buf, static_cast<std::size_t>(nbytes));
+    const GuestArena::HostWrite baseDestination(basep, basep == nullptr ? 0 : sizeof(*basep));
+    if (!destination.Open() || !baseDestination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     if (basep != nullptr) *basep = 0;
     return File::ReadDirectoryDescriptor(fd, buf, nbytes);
 }
@@ -1017,6 +1020,12 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     constexpr std::size_t GuestMaxName = 255;
     if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    struct stat status{};
+    if (::fstat(fd, &status) != 0) return SceErrorFromErrno(errno);
+    if (!S_ISDIR(status.st_mode)) return SceErrorFromErrno(GUEST_EINVAL);
+    const GuestArena::HostWrite destination(buf, static_cast<std::size_t>(nbytes));
+    const GuestArena::HostWrite baseDestination(basep, basep == nullptr ? 0 : sizeof(*basep));
+    if (!destination.Open() || !baseDestination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
     const off_t base = ::lseek(fd, 0, SEEK_CUR);
     if (base < 0) return SceErrorFromErrno(errno);
     if (basep != nullptr) *basep = static_cast<int64_t>(base);
@@ -1293,24 +1302,8 @@ int64_t APS5_VABI pwritev_nid_postfix(int d, const KernelIovec* iov, int iovcnt,
 
 int APS5_VABI sceKernelRename(const char* from, const char* to) {
     if (!from || !to) return SceErrorFromErrno(GUEST_EFAULT);
-    if (*from == '\0' || *to == '\0') return SceErrorFromErrno(GUEST_ENOENT);
-    std::filesystem::path source;
-    if (const int error = ResolvePathError_nid_no_patch(from, source)) return SceKernelError(error);
-    std::error_code error;
-    const auto sourceStatus = std::filesystem::status(source, error);
-    if (!std::filesystem::exists(sourceStatus)) return SceErrorFromErrno(GUEST_ENOENT);
-    std::filesystem::path destination;
-    if (const int result = ResolvePathError_nid_no_patch(to, destination)) return SceKernelError(result);
-    bool replacesFile = false;
-#ifdef _WIN32
-    const auto destinationStatus = std::filesystem::symlink_status(destination, error);
-    replacesFile = !std::filesystem::is_directory(sourceStatus) && std::filesystem::exists(destinationStatus) && !std::filesystem::is_directory(destinationStatus);
-#endif
-    error = RenameNative_nid_no_patch(source, destination, replacesFile);
-    if (error) return SceErrorFromErrno(GUEST_EIO);
-    RecordWrittenPath_nid_no_patch(source);
-    RecordWrittenPath_nid_no_patch(destination);
-    return 0;
+    const int result = RenameGuestPath_nid_no_patch(from, to);
+    return result == 0 ? 0 : SceKernelError(errno);
 }
 
 int APS5_VABI sceKernelRmdir(const char* path) {
