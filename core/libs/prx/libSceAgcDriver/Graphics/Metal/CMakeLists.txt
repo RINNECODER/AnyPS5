@@ -33,6 +33,7 @@ add_library(anyps5_metal_utilities STATIC
     MetalFXUpscaler.mm
     MetalGuestMemory.mm
     MetalPipelineCache.mm
+    MetalPipelineManifest.mm
     MetalWorkerPool.mm
     MetalHeapPool.mm
     "${CMAKE_CURRENT_SOURCE_DIR}/../../Execution/src/AspectFit.cpp"

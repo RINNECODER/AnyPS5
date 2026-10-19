@@ -1,6 +1,7 @@
 #include "MetalTestSupport.hpp"
 #include "MetalShaderPipeline.hpp"
 #include "MetalPipelineCache.hpp"
+#include "MetalPipelineManifest.hpp"
 #include <spirv.hpp>
 #include <array>
 #include <cmath>
@@ -519,9 +520,10 @@ void Archive(const MetalTests::Context& context) {
     MetalTests::Require(!path.empty() && path.parent_path() == directory, "the pipeline archive is not under the shader cache directory");
     Compute(context);
     RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm));
+    MetalTests::Require(FlushMetalPipelineArchives(), "writing the binary archive failed");
     auto stats = GetMetalPipelineCacheStatistics();
     MetalTests::Require(stats.archiveAdditions >= 2 && stats.archiveFailures == 0, "new pipelines were not added to the binary archive");
-    MetalTests::Require(FlushMetalPipelineArchives() && std::filesystem::file_size(path) > 0, "the binary archive was not written");
+    MetalTests::Require(std::filesystem::file_size(path) > 0, "the binary archive was not written");
     ClearMetalPipelineCaches();
     Compute(context);
     MetalTests::Require(GetMetalPipelineCacheStatistics().archiveLoads == 1, "the written binary archive was not loaded");
@@ -636,6 +638,38 @@ void ConcurrentArchive(const MetalTests::Context& context) {
     std::filesystem::remove_all(directory);
 }
 
+void Manifest(const MetalTests::Context& context) {
+    const auto directory = std::filesystem::temp_directory_path() / ("aps5-metal-manifest-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(directory);
+    SetEnvironment("ANYPS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("APS5_NO_SHADER_CACHE", nullptr);
+    SetEnvironment("ANYPS5_NO_PSO_MANIFEST", nullptr);
+    SetEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.c_str());
+    ClearMetalPipelineCaches();
+    Compute(context);
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm));
+    const auto recorded = GetMetalPipelineManifestStatistics();
+    MetalTests::Require(recorded.entries >= 2, "the pipeline manifest recorded no recipe for a new pipeline");
+    FlushMetalPipelineManifest();
+    ClearMetalPipelineCaches();
+    const auto beforeReplay = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(ReplayMetalPipelineManifest(context.device), "the pipeline manifest was not read back");
+    const auto manifest = GetMetalPipelineManifestStatistics();
+    MetalTests::Require(manifest.loaded == 1 && manifest.replayed >= 2 && manifest.failed == 0,
+                        "the pipeline manifest did not rebuild every recorded pipeline");
+    const auto afterReplay = GetMetalPipelineCacheStatistics();
+    MetalTests::Require(afterReplay.renderPipelines.misses > beforeReplay.renderPipelines.misses,
+                        "the manifest replay created no render pipeline state");
+    const auto misses = afterReplay.renderPipelines.misses;
+    RenderVariant(context, ColorDescriptor(MTLPixelFormatRGBA8Unorm));
+    MetalTests::Require(GetMetalPipelineCacheStatistics().renderPipelines.misses == misses,
+                        "a render pipeline rebuilt from the manifest was compiled again on its next use");
+    ClearMetalPipelineCaches();
+    SetEnvironment("ANYPS5_SHADER_CACHE_DIR", nullptr);
+    SetEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
+    std::filesystem::remove_all(directory);
+}
+
 // A relinked title declares an old SDK, so the process default is MSL 2.3; converted shaders still
 // compile as MSL 3.2, which the bridge's workgroup acquire/release fences need.
 void LanguageVersion(const MetalTests::Context& context) {
@@ -733,4 +767,5 @@ void RunShaderPipelineTests(const MetalTests::Context& context) {
     Caches(context);
     Archive(context);
     ConcurrentArchive(context);
+    Manifest(context);
 }

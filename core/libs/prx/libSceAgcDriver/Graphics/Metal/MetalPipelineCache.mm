@@ -1,18 +1,27 @@
 #include "MetalPipelineCache.hpp"
+#include "MetalPipelineManifest.hpp"
+#include "MetalWorkerPool.hpp"
 #include "MetalBackend/BoundedCache.hpp"
 #include "MetalBackend/MetalShaderBridge.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include <unordered_map>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
+#include <pthread.h>
 #include <shared_mutex>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace AgcDriver::Metal {
@@ -299,6 +308,55 @@ std::atomic<std::uint64_t> archiveAdditions{0};
 std::atomic<std::uint64_t> archiveWrites{0};
 std::atomic<std::uint64_t> archiveFailures{0};
 
+struct QueuedRecord {
+    id<MTLDevice> device;
+    Recorded recorded;
+};
+
+std::mutex queueMutex;
+std::condition_variable queueCv;
+std::deque<QueuedRecord> queuedRecords;
+std::uint64_t queuedSequence = 0;
+std::uint64_t processedSequence = 0;
+bool queueStopping = false;
+std::thread queueThread;
+std::condition_variable drainedCv;
+
+std::atomic<std::uint64_t> pipelineCreations{0};
+std::atomic<std::uint64_t> pipelineCreationMicros{0};
+std::atomic<std::uint64_t> drawThreadCreations{0};
+std::atomic<std::uint64_t> drawThreadCreationMicros{0};
+std::atomic<std::uint64_t> libraryCompiles{0};
+std::atomic<std::uint64_t> libraryCompileMicros{0};
+std::atomic<std::uint64_t> drawThreadLibraryCompiles{0};
+std::atomic<std::uint64_t> drawThreadLibraryCompileMicros{0};
+
+Archive& ArchiveFor(id<MTLDevice> device);
+
+std::uint64_t ElapsedMicros(const std::chrono::steady_clock::time_point& start) {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+}
+
+void AccountPipelineCreation(const std::chrono::steady_clock::time_point& start) {
+    const auto micros = ElapsedMicros(start);
+    pipelineCreations.fetch_add(1, std::memory_order_relaxed);
+    pipelineCreationMicros.fetch_add(micros, std::memory_order_relaxed);
+    if (!MetalWorkerPool::OnPoolThread()) {
+        drawThreadCreations.fetch_add(1, std::memory_order_relaxed);
+        drawThreadCreationMicros.fetch_add(micros, std::memory_order_relaxed);
+    }
+}
+
+void AccountLibraryCompile(const std::chrono::steady_clock::time_point& start) {
+    const auto micros = ElapsedMicros(start);
+    libraryCompiles.fetch_add(1, std::memory_order_relaxed);
+    libraryCompileMicros.fetch_add(micros, std::memory_order_relaxed);
+    if (!MetalWorkerPool::OnPoolThread()) {
+        drawThreadLibraryCompiles.fetch_add(1, std::memory_order_relaxed);
+        drawThreadLibraryCompileMicros.fetch_add(micros, std::memory_order_relaxed);
+    }
+}
+
 std::string Sanitized(NSString* text) {
     std::string result;
     for (const char character : std::string(text == nil ? "" : text.UTF8String)) {
@@ -458,7 +516,122 @@ bool FlushLocked() {
     return ok;
 }
 
+void AddQueuedBatch(std::vector<QueuedRecord>& batch) {
+    for (std::size_t offset = 0; offset < batch.size(); offset += ArchiveWriteBatch) {
+        const auto end = std::min(batch.size(), offset + ArchiveWriteBatch);
+        std::unique_lock use(archiveUse);
+        std::lock_guard lock(archiveMutex);
+        for (std::size_t i = offset; i < end; ++i) {
+            auto& state = ArchiveFor(batch[i].device);
+            if (state.archive == nil) continue;
+            NSError* error = nil;
+            bool added = false;
+            @try {
+                added = batch[i].recorded.add(state.archive, &error);
+            } @catch (NSException*) {
+                added = false;
+            }
+            if (!added) {
+                ReportArchiveFailure("adding a pipeline to the Metal pipeline archive", error);
+                continue;
+            }
+            state.unverified.push_back(std::move(batch[i].recorded));
+            archiveAdditions.fetch_add(1, std::memory_order_relaxed);
+            ++state.pending;
+        }
+    }
+}
+
+void WriteQueuedArchives() {
+    std::unique_lock use(archiveUse);
+    std::lock_guard lock(archiveMutex);
+    static_cast<void>(FlushLocked());
+}
+
+void ArchiveWorkerMain() {
+    pthread_setname_np("agc-pso-archive");
+    for (;;) {
+        std::vector<QueuedRecord> batch;
+        std::uint64_t sequence = 0;
+        bool stopping = false;
+        {
+            std::unique_lock lock(queueMutex);
+            queueCv.wait(lock, [] { return queueStopping || !queuedRecords.empty(); });
+            stopping = queueStopping;
+            sequence = queuedSequence;
+            batch.assign(std::make_move_iterator(queuedRecords.begin()), std::make_move_iterator(queuedRecords.end()));
+            queuedRecords.clear();
+        }
+        if (!batch.empty()) {
+            try {
+                AddQueuedBatch(batch);
+            } catch (...) {
+            }
+        }
+        {
+            std::lock_guard lock(queueMutex);
+            processedSequence = std::max(processedSequence, sequence);
+        }
+        drainedCv.notify_all();
+        if (stopping) {
+            try {
+                WriteQueuedArchives();
+            } catch (...) {
+            }
+            return;
+        }
+        bool idle = false;
+        {
+            std::lock_guard lock(queueMutex);
+            idle = queuedRecords.empty() && !queueStopping;
+        }
+        if (idle) {
+            try {
+                WriteQueuedArchives();
+            } catch (...) {
+            }
+        }
+    }
+}
+
+void EnsureArchiveWorker() {
+    std::lock_guard lock(queueMutex);
+    if (queueThread.joinable()) return;
+    queueStopping = false;
+    queueThread = std::thread(ArchiveWorkerMain);
+}
+
+void StopArchiveWorker() {
+    std::thread thread;
+    {
+        std::lock_guard lock(queueMutex);
+        if (!queueThread.joinable()) return;
+        queueStopping = true;
+        thread = std::move(queueThread);
+    }
+    queueCv.notify_all();
+    if (thread.joinable()) thread.join();
+}
+
+void DrainArchiveQueue() {
+    EnsureArchiveWorker();
+    std::unique_lock lock(queueMutex);
+    drainedCv.wait(lock, [] { return processedSequence >= queuedSequence; });
+}
+
+void EnqueueRecord(id<MTLDevice> device, Recorded recorded) {
+    EnsureArchiveWorker();
+    {
+        std::lock_guard lock(queueMutex);
+        if (queueStopping) return;
+        queuedRecords.push_back(QueuedRecord{device, std::move(recorded)});
+        ++queuedSequence;
+    }
+    queueCv.notify_one();
+}
+
 void FlushAtExit() {
+    StopArchiveWorker();
     std::unique_lock use(archiveUse);
     std::lock_guard lock(archiveMutex);
     static_cast<void>(FlushLocked());
@@ -483,6 +656,12 @@ Archive& ArchiveFor(id<MTLDevice> device) {
     const std::string mathTag = fastMath ? "fastmath" : "safemath";
     state.path = directory / ("metal-pipelines-v1-" + mathTag + "-" + Sanitized(device.name) + "-" +
                               Sanitized(NSProcessInfo.processInfo.operatingSystemVersionString) + ".metalarchive");
+    const auto legacyPath = directory / ("metal-pipelines-v1-" + Sanitized(device.name) + "-" +
+                                         Sanitized(NSProcessInfo.processInfo.operatingSystemVersionString) + ".metalarchive");
+    if (legacyPath != state.path) {
+        std::error_code ignored;
+        std::filesystem::remove(legacyPath, ignored);
+    }
     @autoreleasepool {
         MTLBinaryArchiveDescriptor* descriptor = [MTLBinaryArchiveDescriptor new];
         NSError* failure = nil;
@@ -516,29 +695,18 @@ id<MTLBinaryArchive> ArchiveHandle(id<MTLDevice> device) {
 // `archive` is the handle the pipeline was created against (nil when the disk cache is off).
 void Record(id<MTLDevice> device, id<MTLBinaryArchive> archive, Recorded recorded) {
     if (archive == nil) return;
-    std::unique_lock use(archiveUse);
-    std::lock_guard lock(archiveMutex);
-    auto& state = ArchiveFor(device);
-    // A cache clear may have replaced the archive while the pipeline was being created. The pipeline is
-    // cached afterwards all the same, so it goes into the archive that replaced it: skipping it would
-    // leave a cached pipeline missing from the file for good.
-    if (state.archive == nil) return;
-    NSError* error = nil;
-    bool added = false;
-    @try {
-        added = recorded.add(state.archive, &error);
-    } @catch (NSException*) {
-        added = false;
-    }
-    if (!added) {
-        ReportArchiveFailure("adding a pipeline to the Metal pipeline archive", error);
-        return;
-    }
-    state.unverified.push_back(std::move(recorded));
-    archiveAdditions.fetch_add(1, std::memory_order_relaxed);
-    if (++state.pending >= ArchiveWriteBatch) static_cast<void>(WriteArchive(state));
+    EnqueueRecord(device, std::move(recorded));
 }
 
+}
+
+bool RenderPipelineCacheable(MTLRenderPipelineDescriptor* descriptor) {
+    return !Linked(descriptor.vertexLinkedFunctions.functions) && !Linked(descriptor.fragmentLinkedFunctions.functions) &&
+           !Linked(descriptor.vertexPreloadedLibraries) && !Linked(descriptor.fragmentPreloadedLibraries);
+}
+
+bool ComputePipelineCacheable(MTLComputePipelineDescriptor* descriptor) {
+    return !Linked(descriptor.linkedFunctions.functions) && !Linked(descriptor.preloadedLibraries);
 }
 
 MTLLanguageVersion ConvertedShaderLanguageVersion(MTLLanguageVersion processDefault, bool languageVersion32) {
@@ -582,7 +750,9 @@ id<MTLFunction> CachedShaderFunction(id<MTLDevice> device, const std::string& so
         options.languageVersion = ConvertedShaderLanguageVersion(options.languageVersion, languageVersion32);
     }
     NSError* error = nil;
+    const auto compileStart = std::chrono::steady_clock::now();
     id<MTLLibrary> library = [device newLibraryWithSource:text options:options error:&error];
+    AccountLibraryCompile(compileStart);
     if (library == nil) {
         const char* message = error.localizedDescription.UTF8String;
         auto what = std::string("Converted Metal shader compilation failed: ") + (message == nullptr ? "no Metal error description" : message);
@@ -627,8 +797,10 @@ CachedComputePipeline CachedComputePipelineState(id<MTLDevice> device, MTLComput
     {
         std::shared_lock use(archiveUse, std::defer_lock);
         if (archive != nil) use.lock();
+        const auto creationStart = std::chrono::steady_clock::now();
         state = [device newComputePipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
                                                        reflection:&reflection error:error];
+        AccountPipelineCreation(creationStart);
     }
     if (state == nil || !cacheable) return {state, reflection};
     {
@@ -700,8 +872,10 @@ CachedRenderPipeline CreateRenderPipelineState(id<MTLDevice> device, MTLRenderPi
     {
         std::shared_lock use(archiveUse, std::defer_lock);
         if (archive != nil) use.lock();
+        const auto creationStart = std::chrono::steady_clock::now();
         state = [device newRenderPipelineStateWithDescriptor:native options:MTLPipelineOptionBindingInfo
                                                      reflection:&reflection error:error];
+        AccountPipelineCreation(creationStart);
     }
     if (state == nil || !cacheable) return {state, reflection};
     {
@@ -741,8 +915,10 @@ CachedRenderPipeline CachedMeshPipelineState(id<MTLDevice> device, MTLMeshRender
     {
         std::shared_lock use(archiveUse, std::defer_lock);
         if (archive != nil) use.lock();
+        const auto creationStart = std::chrono::steady_clock::now();
         state = [device newRenderPipelineStateWithMeshDescriptor:native options:MTLPipelineOptionBindingInfo
                                                          reflection:&reflection error:error];
+        AccountPipelineCreation(creationStart);
     }
     if (state == nil || !cacheable) return {state, reflection};
     {
@@ -819,6 +995,14 @@ MetalPipelineCacheStatistics GetMetalPipelineCacheStatistics() {
     result.archiveAdditions = archiveAdditions.load(std::memory_order_relaxed);
     result.archiveWrites = archiveWrites.load(std::memory_order_relaxed);
     result.archiveFailures = archiveFailures.load(std::memory_order_relaxed);
+    result.pipelineCreations = pipelineCreations.load(std::memory_order_relaxed);
+    result.pipelineCreationMicros = pipelineCreationMicros.load(std::memory_order_relaxed);
+    result.drawThreadCreations = drawThreadCreations.load(std::memory_order_relaxed);
+    result.drawThreadCreationMicros = drawThreadCreationMicros.load(std::memory_order_relaxed);
+    result.libraryCompiles = libraryCompiles.load(std::memory_order_relaxed);
+    result.libraryCompileMicros = libraryCompileMicros.load(std::memory_order_relaxed);
+    result.drawThreadLibraryCompiles = drawThreadLibraryCompiles.load(std::memory_order_relaxed);
+    result.drawThreadLibraryCompileMicros = drawThreadLibraryCompileMicros.load(std::memory_order_relaxed);
     return result;
 }
 
@@ -829,12 +1013,14 @@ std::filesystem::path MetalPipelineArchivePath(id<MTLDevice> device) {
 }
 
 bool FlushMetalPipelineArchives() {
+    DrainArchiveQueue();
     std::unique_lock use(archiveUse);
     std::lock_guard lock(archiveMutex);
     return FlushLocked();
 }
 
 void ClearMetalPipelineCaches() {
+    DrainArchiveQueue();
     {
         std::unique_lock use(archiveUse);
         std::lock_guard lock(archiveMutex);
@@ -847,10 +1033,19 @@ void ClearMetalPipelineCaches() {
     RenderPipelines().Clear();
     DepthStencilStates().Clear();
     SamplerStates().Clear();
+    ClearMetalPipelineManifest();
     archiveLoads = 0;
     archiveAdditions = 0;
     archiveWrites = 0;
     archiveFailures = 0;
+    pipelineCreations = 0;
+    pipelineCreationMicros = 0;
+    drawThreadCreations = 0;
+    drawThreadCreationMicros = 0;
+    libraryCompiles = 0;
+    libraryCompileMicros = 0;
+    drawThreadLibraryCompiles = 0;
+    drawThreadLibraryCompileMicros = 0;
 }
 
 }

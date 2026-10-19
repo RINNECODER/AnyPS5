@@ -30,6 +30,14 @@ struct MetalPipelineCacheStatistics {
     std::uint64_t archiveAdditions = 0;
     std::uint64_t archiveWrites = 0;
     std::uint64_t archiveFailures = 0;
+    std::uint64_t pipelineCreations = 0;
+    std::uint64_t pipelineCreationMicros = 0;
+    std::uint64_t drawThreadCreations = 0;
+    std::uint64_t drawThreadCreationMicros = 0;
+    std::uint64_t libraryCompiles = 0;
+    std::uint64_t libraryCompileMicros = 0;
+    std::uint64_t drawThreadLibraryCompiles = 0;
+    std::uint64_t drawThreadLibraryCompileMicros = 0;
 };
 
 struct CachedComputePipeline {
@@ -79,6 +87,8 @@ struct CachedRenderPipeline {
 [[nodiscard]] CachedRenderPipeline CachedMeshPipelineState(id<MTLDevice> device, MTLMeshRenderPipelineDescriptor* descriptor,
                                                            NSError** error);
 [[nodiscard]] id<MTLDepthStencilState> CachedDepthStencilState(id<MTLDevice> device, MTLDepthStencilDescriptor* descriptor);
+[[nodiscard]] bool RenderPipelineCacheable(MTLRenderPipelineDescriptor* descriptor);
+[[nodiscard]] bool ComputePipelineCacheable(MTLComputePipelineDescriptor* descriptor);
 // Metal returns one shared object for identical sampler descriptors anyway; the cache only saves the
 // creation call. Callers must not treat a sampler object as unique to one guest descriptor.
 [[nodiscard]] id<MTLSamplerState> CachedSamplerState(id<MTLDevice> device, MTLSamplerDescriptor* descriptor);

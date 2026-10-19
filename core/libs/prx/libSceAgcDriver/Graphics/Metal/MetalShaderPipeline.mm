@@ -1,6 +1,7 @@
 #include "MetalShaderPipeline.hpp"
 #include "MetalDevice.hpp"
 #include "MetalPipelineCache.hpp"
+#include "MetalPipelineManifest.hpp"
 #include <algorithm>
 #include "MetalSampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
@@ -726,6 +727,7 @@ MetalRectKernelPipeline::MetalRectKernelPipeline(id<MTLDevice> device, ShaderRes
     pipeline = created.state;
     if (pipeline == nil) throw std::runtime_error(errorMessage("Converted Metal rectangle kernel creation failed", error));
     if (created.reflection == nil) throw std::runtime_error("Metal rectangle kernel did not return native binding reflection");
+    RecordComputePipelineRecipe(device, this->shader, descriptor);
     bufferAlignments = nativeBufferAlignments(created.reflection.bindings);
     if (pipeline.threadExecutionWidth == 0 || pipeline.threadExecutionWidth > pipeline.maxTotalThreadsPerThreadgroup ||
         pipeline.threadExecutionWidth > device.maxThreadsPerThreadgroup.width) {
@@ -791,6 +793,7 @@ MetalComputePipeline::MetalComputePipeline(id<MTLDevice> device, ShaderResult sh
         throw std::runtime_error(errorMessage("Converted Metal compute pipeline creation failed", error));
     }
     if (created.reflection == nil) throw std::runtime_error("Metal compute pipeline did not return native binding reflection");
+    RecordComputePipelineRecipe(device, this->shader, descriptor);
     bufferAlignments = nativeBufferAlignments(created.reflection.bindings);
     if (this->shader.requiresSimdGroups && this->shader.guest.hostSubgroupSize != 0 &&
         this->shader.guest.hostSubgroupSize != pipeline.threadExecutionWidth) {
@@ -899,6 +902,7 @@ MetalRenderPipeline::MetalRenderPipeline(id<MTLDevice> device, ShaderResult vert
         throw std::runtime_error(errorMessage("Converted Metal render pipeline creation failed", error));
     }
     if (created.reflection == nil) throw std::runtime_error("Metal render pipeline did not return native binding reflection");
+    RecordRenderPipelineRecipe(device, this->vertex, this->fragment, descriptor);
     // Read from the reflection once per pipeline state rather than walking its bindings for every draw.
     // The map holds each state, so its address is not reused while it is listed.
     struct Alignments {
