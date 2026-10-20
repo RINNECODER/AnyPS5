@@ -458,6 +458,22 @@ static void CheckNanConversions() {
     }
 }
 
+static void CheckFloatUnderflowErrno() {
+    char* end = nullptr;
+    errno = 7;
+    Require(strtod_nid_postfix("1e-310", &end) == 1e-310 && errno == 7);
+    Require(strtod_nid_postfix("-4.9406564584124654e-324", &end) == -0x1p-1074 && errno == 7);
+    Require(strtof_nid_postfix("1e-40", &end) == 1e-40f && errno == 7);
+    Require(strtold_nid_postfix("1e-4940", &end) == 1e-4940L && errno == 7);
+    Require(strtod_nid_postfix("1e-330", &end) == 0.0 && errno == ERANGE);
+    errno = 0;
+    Require(strtof_nid_postfix("1e-46", &end) == 0.0f && errno == ERANGE);
+    errno = 0;
+    Require(strtod_nid_postfix("1e400", &end) == HUGE_VAL && errno == ERANGE);
+    errno = 0;
+    Require(strtod_nid_postfix("2.2250738585072014e-308", &end) == 0x1p-1022 && errno == 0);
+}
+
 static void CheckHypotSpecialValue() {
     Require(std::bit_cast<std::uint64_t>(hypot_nid_postfix(INFINITY, std::bit_cast<double>(0x7ff0000000000001ull))) == 0x7ff0000000000000ull);
     Require(std::bit_cast<std::uint64_t>(hypot_nid_postfix(std::bit_cast<double>(0x7ff0000000000001ull), INFINITY)) == 0x7ff0000000000000ull);
@@ -1464,6 +1480,7 @@ int main() {
     CheckSinhf();
     CheckAtanhf();
     CheckHypotSpecialValue();
+    CheckFloatUnderflowErrno();
     CheckFmodErrno();
     CheckDoubleClassification();
     CheckIntegerAbsAndDivision();
