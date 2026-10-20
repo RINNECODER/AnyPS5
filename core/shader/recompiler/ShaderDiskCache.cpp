@@ -88,7 +88,7 @@ static_assert(sizeof(GuestRegister) == 8, "GuestRegister changed: update the pla
 static_assert(sizeof(MemoryInfo) == 80, "MemoryInfo changed: update the plan encoder");
 static_assert(sizeof(DescriptorSource) == 104, "DescriptorSource changed: update the plan encoder");
 static_assert(sizeof(DescriptorSource::IndirectImage) == 28, "IndirectImage changed: update the plan encoder");
-static_assert(sizeof(ResourceBlock) == 80, "ResourceBlock changed: update the plan encoder");
+static_assert(sizeof(ResourceBlock) == 104, "ResourceBlock changed: update the plan encoder");
 static_assert(sizeof(SrtRead) == 16, "SrtRead changed: update the plan encoder");
 static_assert(sizeof(UniformFill) == 28, "UniformFill changed: update the plan encoder");
 static_assert(sizeof(UniformFillPlan) == 64, "UniformFillPlan changed: update the plan encoder");
@@ -127,7 +127,7 @@ static_assert(fieldCount<GuestRegister>() == 2, "GuestRegister changed: update t
 static_assert(fieldCount<MemoryInfo>() == 31, "MemoryInfo changed: update the plan encoder");
 static_assert(fieldCount<DescriptorSource>() == 3, "DescriptorSource changed: update the plan encoder");
 static_assert(fieldCount<DescriptorSource::IndirectImage>() == 7, "IndirectImage changed: update the plan encoder");
-static_assert(fieldCount<ResourceBlock>() == 4, "ResourceBlock changed: update the plan encoder");
+static_assert(fieldCount<ResourceBlock>() == 5, "ResourceBlock changed: update the plan encoder");
 static_assert(fieldCount<SrtRead>() == 2, "SrtRead changed: update the plan encoder");
 static_assert(fieldCount<UniformFill>() == 5, "UniformFill changed: update the plan encoder");
 static_assert(fieldCount<UniformFillPlan>() == 2, "UniformFillPlan changed: update the plan encoder");
@@ -1036,6 +1036,7 @@ bool encodePlan(Writer& writer, const IrResourcePlan& plan) {
         out.Values(std::span<const std::uint32_t>(block.successors));
         out.Values(std::span<const std::uint32_t>(block.sources));
         out.Values(std::span<const std::uint32_t>(block.images));
+        out.Values(std::span<const std::uint32_t>(block.flatSlots));
     });
     writer.Values(std::span<const std::uint32_t>(plan.materializationSources));
     writer.List(plan.srtReads, [&](Writer& out, const SrtRead& read) {
@@ -1174,11 +1175,12 @@ bool decodePlan(Reader& reader, IrResourcePlan& plan) {
         in.Value(table.hasMaterial);
         source.indirectImage = indirect ? std::optional(table) : std::nullopt;
     });
-    reader.List(plan.controlFlow, 28, [&](Reader& in, ResourceBlock& block) {
+    reader.List(plan.controlFlow, 36, [&](Reader& in, ResourceBlock& block) {
         block.condition = valueAt(in.Get<std::uint32_t>());
         in.Values(block.successors);
         in.Values(block.sources);
         in.Values(block.images);
+        in.Values(block.flatSlots);
     });
     reader.Values(plan.materializationSources);
     reader.List(plan.srtReads, 8, [&](Reader& in, SrtRead& read) {
@@ -1212,7 +1214,8 @@ bool decodePlan(Reader& reader, IrResourcePlan& plan) {
         return (block.condition == nullptr || block.successors.size() == 2u) &&
                std::ranges::all_of(block.successors, [&](std::uint32_t successor) { return successor < plan.controlFlow.size(); }) &&
                std::ranges::all_of(block.sources, knownSource) &&
-               std::ranges::all_of(block.images, [&](std::uint32_t image) { return image < plan.info.images.size(); });
+               std::ranges::all_of(block.images, [&](std::uint32_t image) { return image < plan.info.images.size(); }) &&
+               std::ranges::all_of(block.flatSlots, [&](std::uint32_t slot) { return slot < plan.srtReads.size(); });
     });
     if (!blocksValid) return false;
     // The SRT execution plan is derived from the value graph, so it is rebuilt rather than stored.
