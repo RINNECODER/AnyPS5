@@ -542,7 +542,12 @@ int APS5_VABI sceRtcSetMicrosecond(RtcDateTime* time, int microsecond) {
 }
 
 int APS5_VABI sceRtcFormatRFC3339(char* date_time, const RtcTick* utc, int time_zone_minutes) {
-    if (!date_time || !utc) return SCE_RTC_ERROR_INVALID_POINTER;
+    if (!date_time) return SCE_RTC_ERROR_INVALID_POINTER;
+    RtcTick now{};
+    if (!utc) {
+        now.tick = currentTick();
+        utc = &now;
+    }
     if (time_zone_minutes < -1439 || time_zone_minutes > 1439) return SCE_RTC_ERROR_INVALID_VALUE;
     RtcTick local{};
     if (const int result = addTicks(&local, utc, time_zone_minutes, TICKS_PER_MINUTE); result != 0) return result;
@@ -558,13 +563,23 @@ int APS5_VABI sceRtcFormatRFC3339(char* date_time, const RtcTick* utc, int time_
 }
 
 int APS5_VABI sceRtcFormatRFC3339LocalTime(char* date_time, const RtcTick* utc) {
-    if (!date_time || !utc) return SCE_RTC_ERROR_INVALID_POINTER;
+    if (!date_time) return SCE_RTC_ERROR_INVALID_POINTER;
+    RtcTick now{};
+    if (!utc) {
+        now.tick = currentTick();
+        utc = &now;
+    }
     if (utc->tick > MAX_TICK) return SCE_RTC_ERROR_INVALID_VALUE;
     return sceRtcFormatRFC3339(date_time, utc, localOffsetMinutes(*utc));
 }
 
 int APS5_VABI sceRtcFormatRFC2822(char* date_time, const RtcTick* utc, int time_zone_minutes) {
-    if (!date_time || !utc) return SCE_RTC_ERROR_INVALID_POINTER;
+    if (!date_time) return SCE_RTC_ERROR_INVALID_POINTER;
+    RtcTick now{};
+    if (!utc) {
+        now.tick = currentTick();
+        utc = &now;
+    }
     if (time_zone_minutes < -1439 || time_zone_minutes > 1439) return SCE_RTC_ERROR_INVALID_VALUE;
     RtcTick local{};
     if (const int result = addTicks(&local, utc, time_zone_minutes, TICKS_PER_MINUTE); result != 0) return result;
@@ -576,7 +591,12 @@ int APS5_VABI sceRtcFormatRFC2822(char* date_time, const RtcTick* utc, int time_
 }
 
 int APS5_VABI sceRtcFormatRFC2822LocalTime(char* date_time, const RtcTick* utc) {
-    if (!date_time || !utc) return SCE_RTC_ERROR_INVALID_POINTER;
+    if (!date_time) return SCE_RTC_ERROR_INVALID_POINTER;
+    RtcTick now{};
+    if (!utc) {
+        now.tick = currentTick();
+        utc = &now;
+    }
     if (utc->tick > MAX_TICK) return SCE_RTC_ERROR_INVALID_VALUE;
     return sceRtcFormatRFC2822(date_time, utc, localOffsetMinutes(*utc));
 }
