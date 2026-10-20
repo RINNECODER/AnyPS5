@@ -2,6 +2,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libSceFont/include/FontTypes.hpp"
+
+struct FontGraphicsDevice;
+struct FontGraphicsDeviceParam;
+struct FontGraphicsService;
+struct FontGraphicsServiceParam;
+struct FontWords;
+struct FontOutlineProfile;
+struct FontMetrics;
+struct FontStyleInformation;
+struct FontGlyphExpandBufferState;
 
 #pragma GCC visibility push(default)
 
@@ -12,12 +23,12 @@ int APS5_VABI sceFontControl() {
     return 0;
 }
 
-int APS5_VABI sceFontCreateGraphicsDevice() {
+int APS5_VABI sceFontCreateGraphicsDevice(const FontMemory* memory, const FontGraphicsDeviceParam* param, FontGraphicsDevice** device) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontCreateGraphicsService() {
+int APS5_VABI sceFontCreateGraphicsService(const FontMemory* memory, const FontGraphicsServiceParam* param, FontGraphicsService** service) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -32,38 +43,38 @@ int APS5_VABI sceFontCreateWords() {
     return 0;
 }
 
-int APS5_VABI sceFontDestroyGraphicsDevice() {
+int APS5_VABI sceFontDestroyGraphicsDevice(FontGraphicsDevice** device) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontDestroyGraphicsService() {
+int APS5_VABI sceFontDestroyGraphicsService(FontGraphicsService** service) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontDestroyWords() {
+int APS5_VABI sceFontDestroyWords(FontWords** words) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 
-int APS5_VABI sceFontGetFontGlyphsOutlineProfile() {
+int APS5_VABI sceFontGetFontGlyphsOutlineProfile(FontHandle font, FontOutlineProfile* profile) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGetFontMetrics() {
+int APS5_VABI sceFontGetFontMetrics(FontHandle font, std::uint32_t mode, FontMetrics* metrics) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGetFontStyleInformation() {
+int APS5_VABI sceFontGetFontStyleInformation(FontHandle font, FontStyleInformation* information) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGetGlyphExpandBufferState() {
+int APS5_VABI sceFontGetGlyphExpandBufferState(FontHandle font, FontGlyphExpandBufferState* state) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
