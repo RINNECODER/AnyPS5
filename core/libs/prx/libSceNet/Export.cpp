@@ -2203,7 +2203,6 @@ int APS5_VABI sceNetSetDns6Info(void) {
 }
 
 int APS5_VABI sceNetShowRoute6(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
