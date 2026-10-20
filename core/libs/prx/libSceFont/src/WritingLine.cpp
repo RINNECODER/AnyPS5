@@ -246,19 +246,24 @@ int APS5_VABI sceFontDestroyWritingLine(void** pWritingLine) {
 }
 
 int APS5_VABI sceFontWritingLineClear(void* writingLine) {
-    auto* line = GetLine(__func__, writingLine);
+    if (!writingLine) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* line = static_cast<WritingLine*>(writingLine);
+    {
+        std::lock_guard lock(linesMutex);
+        if (!lines.contains(line)) return SCE_FONT_ERROR_INVALID_WRITING;
+    }
     ResetOrders(*line);
     return SCE_FONT_OK;
 }
 
 int APS5_VABI sceFontWritingLineWritesOrder(void* writingLine, std::uint64_t writingAttribute, const FontWritingMetrics* writingMetrics, void* writingOrderer) {
-    auto* line = GetLine(__func__, writingLine);
-    if (writingAttribute == 0) writingAttribute = WRITING_ATTRIBUTE_ID;
-    if ((writingAttribute & WRITING_ATTRIBUTE_ID_MASK) != WRITING_ATTRIBUTE_ID)
-        Unsupported(__func__, "writing attribute " + std::to_string(writingAttribute) + " is not modelled");
     const std::size_t level = (writingAttribute >> 8) & 0xFF;
-    if (level >= WRITING_LEVEL_COUNT) Unsupported(__func__, "embedding level " + std::to_string(level) + " (error code not verified)");
-    if (!writingOrderer) Unsupported(__func__, "null writing orderer (error code not verified)");
+    if (!writingLine || !writingOrderer || (writingAttribute & WRITING_ATTRIBUTE_ID_MASK) != WRITING_ATTRIBUTE_ID || level >= WRITING_LEVEL_COUNT) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* line = static_cast<WritingLine*>(writingLine);
+    {
+        std::lock_guard lock(linesMutex);
+        if (!lines.contains(line)) return SCE_FONT_ERROR_INVALID_WRITING;
+    }
     if (line->cursor) ResetOrders(*line);
     WritingOrder* order = &line->orders.emplace_back();
     order->orderer = writingOrderer;
@@ -319,8 +324,12 @@ const FontWritingLineStep* APS5_VABI sceFontWritingLineRefersRenderStep(void* wr
 }
 
 int APS5_VABI sceFontWritingLineGetRenderMetrics(void* writingLine, FontWritingMetrics* writingMetrics) {
-    auto* line = GetLine(__func__, writingLine);
-    if (!writingMetrics) Unsupported(__func__, "null metrics pointer (error code not verified)");
+    if (!writingMetrics) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    *writingMetrics = {};
+    if (!writingLine) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    auto* line = static_cast<WritingLine*>(writingLine);
+    std::lock_guard lock(linesMutex);
+    if (!lines.contains(line)) return SCE_FONT_ERROR_INVALID_WRITING;
     *writingMetrics = line->renderMetrics;
     return SCE_FONT_OK;
 }
