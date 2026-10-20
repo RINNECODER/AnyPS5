@@ -29,6 +29,14 @@ bool ValidPort(int userId, int type, int index) {
 
 }
 
+struct PadUpdateData {
+    std::size_t size;
+    std::uint8_t data[32768];
+};
+
+static_assert(sizeof(PadUpdateData) == 32776);
+static_assert(offsetof(PadUpdateData, data) == 8);
+
 struct PadMotionSensorPosition {
     float x;
     float y;
@@ -999,7 +1007,7 @@ int APS5_VABI scePadBondUpdateInit(void) {
     return 0;
 }
 
-int APS5_VABI scePadBondUpdateIsReady(void) {
+int APS5_VABI scePadBondUpdateIsReady(std::int32_t deviceId, std::int32_t* ready) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1009,22 +1017,22 @@ int APS5_VABI scePadBondUpdateStart(void) {
     return 0;
 }
 
-int APS5_VABI scePadBondUpdateGetStatus(void) {
+int APS5_VABI scePadBondUpdateGetStatus(std::int32_t deviceId, std::int32_t* status) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadBondUpdateSendData(void) {
+int APS5_VABI scePadBondUpdateSendData(std::int32_t deviceId, const PadUpdateData* data) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadBondUpdateResetBond(void) {
+int APS5_VABI scePadBondUpdateResetBond(std::int32_t deviceId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadBondUpdateGetReconnectStatus(void) {
+int APS5_VABI scePadBondUpdateGetReconnectStatus(std::int32_t* status) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1044,7 +1052,7 @@ int APS5_VABI scePadControllerUpdateIsUpdateNeeded2(void) {
     return 0;
 }
 
-int APS5_VABI scePadControllerUpdateIsReady(void) {
+int APS5_VABI scePadControllerUpdateIsReady(std::int32_t deviceId, std::int32_t* ready) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1054,22 +1062,22 @@ int APS5_VABI scePadControllerUpdateStart(void) {
     return 0;
 }
 
-int APS5_VABI scePadControllerUpdateGetStatus(void) {
+int APS5_VABI scePadControllerUpdateGetStatus(std::int32_t deviceId, std::int32_t* status) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadControllerUpdateSendData(void) {
+int APS5_VABI scePadControllerUpdateSendData(std::int32_t deviceId, const PadUpdateData* data) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadControllerUpdateResetController(void) {
+int APS5_VABI scePadControllerUpdateResetController(std::int32_t deviceId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadControllerUpdateGetReconnectStatus(void) {
+int APS5_VABI scePadControllerUpdateGetReconnectStatus(std::int32_t* status) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

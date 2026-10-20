@@ -79,17 +79,8 @@
 - [scePadReadHistory](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadRemoteControlInsertData](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadRemoteControlInsertDataForAston](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadBondUpdateInit](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadBondUpdateIsReady](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadBondUpdateStart](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadBondUpdateGetStatus](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadBondUpdateSendData](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadBondUpdateResetBond](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadBondUpdateGetReconnectStatus](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadBondUpdateTerm](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadControllerUpdateInit](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadControllerUpdateIsUpdateNeeded2](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadControllerUpdateIsReady](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadControllerUpdateStart](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadControllerUpdateGetStatus](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadControllerUpdateSendData](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
@@ -97,3 +88,7 @@
 - [scePadControllerUpdateGetReconnectStatus](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadControllerUpdateTerm](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadUnknown_n3kSX62fgNo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad, NID `n3kSX62fgNo`) - PPSA01530 and PPSA13356 import it and fail to load without it. The real name is unknown; it is declared without parameters and throws
+
+### Functional
+
+- [Touchpad resolution](../../../core/libs/prx/libScePad/include/PadState.hpp) (libScePad) - the library reports a DualSense to every title, so the controller information reports its touchpad, 1920 by 1080 at 44.86 pixels per cm, and the host controller's fingers and the keyboard touch contacts are placed in that range. [duaLib](https://github.com/WujekFoliarz/duaLib/blob/0b39f92261e2ff0e77eb0dac00943be6970e0dbf/src/source/duaLib.cpp#L847-L849) reports these values for a DualSense and 1920 by 943 at 44 for a DualShock 4, and the Linux kernel's [hid-playstation](https://github.com/torvalds/linux/blob/cd4f494ba535e848e2d299707d363de84e61a518/drivers/hid/hid-playstation.c#L177-L178) holds 1920 by 1080 against 1920 by 942 for the DualShock 4. A DualShock 4 on the host reports through the DualSense range too, so its last touchpad rows are never reached. The console's values are not measured
