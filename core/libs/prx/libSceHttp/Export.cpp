@@ -634,12 +634,12 @@ int APS5_VABI sceHttpsFreeCaList(int http_ctx_id, HttpsCaList* ca_list) {
     return 0;
 }
 
-int APS5_VABI sceHttpAuthCacheImport(void) {
+int APS5_VABI sceHttpAuthCacheImport(int contextId, const void* buffer, std::size_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpAuthCacheExport(void) {
+int APS5_VABI sceHttpAuthCacheExport(int contextId, void* buffer, std::size_t size, std::size_t* requiredSize) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -689,17 +689,17 @@ int APS5_VABI sceHttpDbgGetRequestStat(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpAddRequestHeaderRaw(void) {
+int APS5_VABI sceHttpAddRequestHeaderRaw(int id, const char* header, int mode) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpRemoveRequestHeader(void) {
+int APS5_VABI sceHttpRemoveRequestHeader(int id, const char* name) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpGetAuthEnabled(void) {
+int APS5_VABI sceHttpGetAuthEnabled(int id, int* enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -719,7 +719,7 @@ int APS5_VABI sceHttpGetCookie(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpGetCookieEnabled(void) {
+int APS5_VABI sceHttpGetCookieEnabled(int id, int* enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -769,12 +769,12 @@ int APS5_VABI sceHttpGetCookieStats(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpSetPriorityOption(void) {
+int APS5_VABI sceHttpSetPriorityOption(int id, int priority) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpSetPolicyOption(void) {
+int APS5_VABI sceHttpSetPolicyOption(int id, int policy) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -790,7 +790,7 @@ int APS5_VABI sceHttpSetDefaultAcceptEncodingGZIPEnabled(int http_ctx_id, int en
     return SetHttpContextAcceptEncodingGzip(http_ctx_id, enable != 0) ? 0 : ERROR_INVALID_ID;
 }
 
-int APS5_VABI sceHttpSetProxy(void) {
+int APS5_VABI sceHttpSetProxy(int id, int mode, int authentication, const char* hostname, std::uint16_t port) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -800,7 +800,7 @@ int APS5_VABI sceHttpSetSocketCreationCallback(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpSetHttp09Enabled(void) {
+int APS5_VABI sceHttpSetHttp09Enabled(int id, int enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -815,12 +815,12 @@ int APS5_VABI sceHttpGetConnectionStat(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpAddQuery(void) {
+int APS5_VABI sceHttpAddQuery(int id, const char* query) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpSetDelayBuildRequestEnabled(void) {
+int APS5_VABI sceHttpSetDelayBuildRequestEnabled(int id, int enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
