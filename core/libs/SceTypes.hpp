@@ -1674,6 +1674,34 @@ struct AppContentBootParam {
 
 struct AppContentMountPoint { char data[16]; };
 
+using ContentExportMallocCallback = void* (APS5_VABI *)(std::size_t size, void* userData);
+using ContentExportFreeCallback = void (APS5_VABI *)(void* memory, void* userData);
+using ContentExportDataCallback = std::int32_t (APS5_VABI *)(const void** data, std::size_t* size, void* userData);
+
+struct ContentExportInitParam {
+    ContentExportMallocCallback mallocFunc;
+    ContentExportFreeCallback freeFunc;
+    void* userData;
+};
+
+static_assert(sizeof(ContentExportInitParam) == 24);
+static_assert(offsetof(ContentExportInitParam, freeFunc) == 8);
+static_assert(offsetof(ContentExportInitParam, userData) == 16);
+
+struct ContentExportSfParam {
+    std::size_t size;
+    const char* metadata;
+    const std::int64_t* contentIds;
+    std::uint32_t contentCount;
+    std::uint32_t option;
+};
+
+static_assert(sizeof(ContentExportSfParam) == 32);
+static_assert(offsetof(ContentExportSfParam, metadata) == 8);
+static_assert(offsetof(ContentExportSfParam, contentIds) == 16);
+static_assert(offsetof(ContentExportSfParam, contentCount) == 24);
+static_assert(offsetof(ContentExportSfParam, option) == 28);
+
 struct ContentExportInitParam2 {
     void* malloc_func;
     void* free_func;

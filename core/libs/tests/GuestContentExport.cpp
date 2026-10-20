@@ -4,18 +4,18 @@
 #include <set>
 #include <stdexcept>
 
-extern "C" int APS5_VABI sceContentExportAddToFavorites(void);
+extern "C" int APS5_VABI sceContentExportAddToFavorites(std::int64_t contentId);
 extern "C" int APS5_VABI sceContentExportDataProvideFunction(void);
 extern "C" int APS5_VABI sceContentExportFree(void);
 extern "C" int APS5_VABI sceContentExportFrom(void);
-extern "C" int APS5_VABI sceContentExportFromFileForSf(void);
-extern "C" int APS5_VABI sceContentExportFromFileWithContentIdList(void);
-extern "C" int APS5_VABI sceContentExportFromFileWithTitleIdList(void);
-extern "C" int APS5_VABI sceContentExportInit(void);
+extern "C" int APS5_VABI sceContentExportFromFileForSf(std::int32_t expId, const ContentExportParam* param, const ContentExportSfParam* sfParam, const char* sourcePath, const char* thumbnailPath, char* path, std::size_t pathBufferLength);
+extern "C" int APS5_VABI sceContentExportFromFileWithContentIdList(std::int32_t expId, const ContentExportParam* param, const char* sourcePath, const char* thumbnailPath, const std::int64_t* contentIds, std::uint32_t contentCount, char* path, std::size_t pathBufferLength);
+extern "C" int APS5_VABI sceContentExportFromFileWithTitleIdList(std::int32_t expId, const ContentExportParam* param, const char* sourcePath, const char* thumbnailPath, const char* titleIdList, char* path, std::size_t pathBufferLength);
+extern "C" int APS5_VABI sceContentExportInit(const ContentExportInitParam* param);
 extern "C" int APS5_VABI sceContentExportMalloc(void);
-extern "C" int APS5_VABI sceContentExportRemoveFromFavorites(void);
-extern "C" int APS5_VABI sceContentExportRenameContent(void);
-extern "C" int APS5_VABI sceContentExportValidateContents(void);
+extern "C" int APS5_VABI sceContentExportRemoveFromFavorites(std::int64_t contentId);
+extern "C" int APS5_VABI sceContentExportRenameContent(std::int64_t contentId, const char* name);
+extern "C" int APS5_VABI sceContentExportValidateContents(const std::int64_t* contentIds, std::uint32_t count);
 
 extern "C" int APS5_VABI sceContentExportInit2(const ContentExportInitParam2* init_param);
 extern "C" int APS5_VABI sceContentExportTerm(void);
@@ -23,8 +23,7 @@ extern "C" int APS5_VABI sceContentExportStart(void);
 extern "C" int APS5_VABI sceContentExportFinish(std::int32_t expId);
 extern "C" int APS5_VABI sceContentExportGetProgress(std::int32_t expId);
 extern "C" int APS5_VABI sceContentExportCancel(std::int32_t expId);
-extern "C" int APS5_VABI sceContentExportFromDataWithThumbnail(std::int32_t expId, const ContentExportParam* param, const ContentExportCallbackParam* contentCallbackParam,
-    const char* thumbnailType, const ContentExportCallbackParam* thumbnailCallbackParam, char* path, std::size_t pathBufferLength);
+extern "C" int APS5_VABI sceContentExportFromDataWithThumbnail(std::int32_t expId, const ContentExportParam* param, const ContentExportCallbackParam* contentCallbackParam, const char* thumbnailType, const ContentExportCallbackParam* thumbnailCallbackParam, char* path, std::size_t pathBufferLength);
 
 namespace {
 
@@ -103,17 +102,17 @@ int main() {
     Require(sceContentExportTerm() == 0);
     Require(sceContentExportStart() == static_cast<int>(0x809D3004u));
     Require(Throws([&] { sceContentExportFinish(reopened); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportAddToFavorites(); }));
+    Require(Throws<std::runtime_error>([] { sceContentExportAddToFavorites(0); }));
     Require(Throws<std::runtime_error>([] { sceContentExportDataProvideFunction(); }));
     Require(Throws<std::runtime_error>([] { sceContentExportFree(); }));
     Require(Throws<std::runtime_error>([] { sceContentExportFrom(); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportFromFileForSf(); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportFromFileWithContentIdList(); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportFromFileWithTitleIdList(); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportInit(); }));
+    Require(Throws<std::runtime_error>([] { sceContentExportFromFileForSf(0, nullptr, nullptr, nullptr, nullptr, nullptr, 0); }));
+    Require(Throws<std::runtime_error>([] { sceContentExportFromFileWithContentIdList(0, nullptr, nullptr, nullptr, nullptr, 0, nullptr, 0); }));
+    Require(Throws<std::runtime_error>([] { sceContentExportFromFileWithTitleIdList(0, nullptr, nullptr, nullptr, nullptr, nullptr, 0); }));
+    Require(Throws<std::runtime_error>([] { sceContentExportInit(nullptr); }));
     Require(Throws<std::runtime_error>([] { sceContentExportMalloc(); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportRemoveFromFavorites(); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportRenameContent(); }));
-    Require(Throws<std::runtime_error>([] { sceContentExportValidateContents(); }));
+    Require(Throws<std::runtime_error>([] { sceContentExportRemoveFromFavorites(0); }));
+    Require(Throws<std::runtime_error>([] { sceContentExportRenameContent(0, nullptr); }));
+    Require(Throws<std::runtime_error>([] { sceContentExportValidateContents(nullptr, 0); }));
 }
 

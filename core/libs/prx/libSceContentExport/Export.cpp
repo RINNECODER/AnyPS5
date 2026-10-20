@@ -42,22 +42,22 @@ int APS5_VABI sceContentExportFinish(std::int32_t expId) {
     return 0;
 }
 
-int APS5_VABI sceContentExportFromData(void) {
+int APS5_VABI sceContentExportFromData(std::int32_t expId, const ContentExportParam* param, std::size_t contentLength, ContentExportDataCallback callback, void* userData, char* path, std::size_t pathBufferLength) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceContentExportFromFile(void) {
+int APS5_VABI sceContentExportFromFile(std::int32_t expId, const ContentExportParam* param, const char* sourcePath, char* path, std::size_t pathBufferLength) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceContentExportFromFileWithThumbnail(void) {
+int APS5_VABI sceContentExportFromFileWithThumbnail(std::int32_t expId, const ContentExportParam* param, const char* sourcePath, const char* thumbnailPath, char* path, std::size_t pathBufferLength) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceContentExportAddToFavorites(void) {
+int APS5_VABI sceContentExportAddToFavorites(std::int64_t contentId) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -77,22 +77,22 @@ int APS5_VABI sceContentExportFrom(void) {
  return 0;
 }
 
-int APS5_VABI sceContentExportFromFileForSf(void) {
+int APS5_VABI sceContentExportFromFileForSf(std::int32_t expId, const ContentExportParam* param, const ContentExportSfParam* sfParam, const char* sourcePath, const char* thumbnailPath, char* path, std::size_t pathBufferLength) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceContentExportFromFileWithContentIdList(void) {
+int APS5_VABI sceContentExportFromFileWithContentIdList(std::int32_t expId, const ContentExportParam* param, const char* sourcePath, const char* thumbnailPath, const std::int64_t* contentIds, std::uint32_t contentCount, char* path, std::size_t pathBufferLength) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceContentExportFromFileWithTitleIdList(void) {
+int APS5_VABI sceContentExportFromFileWithTitleIdList(std::int32_t expId, const ContentExportParam* param, const char* sourcePath, const char* thumbnailPath, const char* titleIdList, char* path, std::size_t pathBufferLength) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceContentExportInit(void) {
+int APS5_VABI sceContentExportInit(const ContentExportInitParam* param) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -102,17 +102,17 @@ int APS5_VABI sceContentExportMalloc(void) {
  return 0;
 }
 
-int APS5_VABI sceContentExportRemoveFromFavorites(void) {
+int APS5_VABI sceContentExportRemoveFromFavorites(std::int64_t contentId) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceContentExportRenameContent(void) {
+int APS5_VABI sceContentExportRenameContent(std::int64_t contentId, const char* name) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceContentExportValidateContents(void) {
+int APS5_VABI sceContentExportValidateContents(const std::int64_t* contentIds, std::uint32_t count) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -138,8 +138,7 @@ int APS5_VABI sceContentExportCancel(std::int32_t expId) {
     return ErrorInvalidState;
 }
 
-int APS5_VABI sceContentExportFromDataWithThumbnail(std::int32_t expId, const ContentExportParam* param, const ContentExportCallbackParam* contentCallbackParam,
-    const char* thumbnailType, const ContentExportCallbackParam* thumbnailCallbackParam, char* path, std::size_t pathBufferLength) {
+int APS5_VABI sceContentExportFromDataWithThumbnail(std::int32_t expId, const ContentExportParam* param, const ContentExportCallbackParam* contentCallbackParam, const char* thumbnailType, const ContentExportCallbackParam* thumbnailCallbackParam, char* path, std::size_t pathBufferLength) {
     std::lock_guard lock(g_sessionMutex);
     RequireSession(__func__, expId);
     throw std::runtime_error(std::string(__func__) + ": the host has no media library to export into");
