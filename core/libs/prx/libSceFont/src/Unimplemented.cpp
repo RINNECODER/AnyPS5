@@ -13,6 +13,33 @@ struct FontOutlineProfile;
 struct FontMetrics;
 struct FontStyleInformation;
 struct FontGlyphExpandBufferState;
+struct FontGraphicsResource;
+struct FontGraphicsFillMethod;
+struct FontGraphicsFillPlot;
+struct FontGraphicsFillRates;
+struct FontGraphicsFill;
+
+struct FontGraphicsRegion {
+    float x;
+    float y;
+    float width;
+    float height;
+    std::uint32_t flags;
+    std::uint32_t tag;
+    float outerRadius;
+    float innerRadius;
+};
+
+static_assert(sizeof(FontGraphicsRegion) == 32);
+static_assert(offsetof(FontGraphicsRegion, x) == 0);
+static_assert(offsetof(FontGraphicsRegion, y) == 4);
+static_assert(offsetof(FontGraphicsRegion, width) == 8);
+static_assert(offsetof(FontGraphicsRegion, height) == 12);
+static_assert(offsetof(FontGraphicsRegion, flags) == 16);
+static_assert(offsetof(FontGraphicsRegion, tag) == 20);
+static_assert(offsetof(FontGraphicsRegion, outerRadius) == 24);
+static_assert(offsetof(FontGraphicsRegion, innerRadius) == 28);
+
 
 #pragma GCC visibility push(default)
 
@@ -119,42 +146,42 @@ int APS5_VABI sceFontGraphicsExchangeResource() {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsFillMethodInit() {
+int APS5_VABI sceFontGraphicsFillMethodInit(FontGraphicsFillMethod* method, std::int32_t mode, std::int32_t type) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsFillPlotInit() {
+int APS5_VABI sceFontGraphicsFillPlotInit(FontGraphicsFillPlot* plot, const FontGraphicsRegion* region) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsFillPlotSetLayout() {
+int APS5_VABI sceFontGraphicsFillPlotSetLayout(FontGraphicsFillPlot* plot, std::int32_t first, std::int32_t second) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsFillPlotSetMapping() {
+int APS5_VABI sceFontGraphicsFillPlotSetMapping(FontGraphicsFillPlot* plot, float first, float second, float third, float fourth) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsFillRatesInit() {
+int APS5_VABI sceFontGraphicsFillRatesInit(FontGraphicsFillRates* rates, const FontGraphicsFill* fill, std::uint32_t effect) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsFillRatesSetFillEffect() {
+int APS5_VABI sceFontGraphicsFillRatesSetFillEffect(FontGraphicsFillRates* rates, const FontGraphicsFill* fill, std::uint32_t effect) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsFillRatesSetLayout() {
+int APS5_VABI sceFontGraphicsFillRatesSetLayout(FontGraphicsFillRates* rates, std::int32_t first, std::int32_t second) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsFillRatesSetMapping() {
+int APS5_VABI sceFontGraphicsFillRatesSetMapping(FontGraphicsFillRates* rates, float first, float second, float third, float fourth) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -164,17 +191,17 @@ int APS5_VABI sceFontGraphicsGetDeviceUsage() {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsRegionInit() {
+int APS5_VABI sceFontGraphicsRegionInit(FontGraphicsRegion* region, float x, float y, float width, float height) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsRegionInitCircular() {
+int APS5_VABI sceFontGraphicsRegionInitCircular(FontGraphicsRegion* region, float centerX, float centerY, float outerRadius, float innerRadius) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsRegionInitRoundish() {
+int APS5_VABI sceFontGraphicsRegionInitRoundish(FontGraphicsRegion* region, float x, float y, float width, float height, float outerRadius, float innerRadius, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -199,7 +226,7 @@ int APS5_VABI sceFontGraphicsSetupClipping() {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsSetupColorRates() {
+int APS5_VABI sceFontGraphicsSetupColorRates(FontGraphicsResource* resource, float red, float green, float blue, float alpha) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -229,7 +256,7 @@ int APS5_VABI sceFontGraphicsSetupHandleDefault() {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsSetupLocation() {
+int APS5_VABI sceFontGraphicsSetupLocation(FontGraphicsResource* resource, float x, float y) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -239,12 +266,12 @@ int APS5_VABI sceFontGraphicsSetupPositioning() {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsSetupRotation() {
+int APS5_VABI sceFontGraphicsSetupRotation(FontGraphicsResource* resource, float angle, float pivotX, float pivotY) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsSetupScaling() {
+int APS5_VABI sceFontGraphicsSetupScaling(FontGraphicsResource* resource, float scaleX, float scaleY, float pivotX, float pivotY) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -289,7 +316,7 @@ int APS5_VABI sceFontGraphicsUpdateClipping() {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsUpdateColorRates() {
+int APS5_VABI sceFontGraphicsUpdateColorRates(FontGraphicsResource* resource, float red, float green, float blue, float alpha) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -314,7 +341,7 @@ int APS5_VABI sceFontGraphicsUpdateGlyphFillPlot() {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsUpdateLocation() {
+int APS5_VABI sceFontGraphicsUpdateLocation(FontGraphicsResource* resource, float x, float y) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -324,12 +351,12 @@ int APS5_VABI sceFontGraphicsUpdatePositioning() {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsUpdateRotation() {
+int APS5_VABI sceFontGraphicsUpdateRotation(FontGraphicsResource* resource, float angle, float pivotX, float pivotY) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsUpdateScaling() {
+int APS5_VABI sceFontGraphicsUpdateScaling(FontGraphicsResource* resource, float scaleX, float scaleY, float pivotX, float pivotY) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
