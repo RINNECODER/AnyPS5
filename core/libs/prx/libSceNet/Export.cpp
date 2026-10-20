@@ -1949,7 +1949,7 @@ int APS5_VABI sceNetGetIfName(void) {
     return 0;
 }
 
-int APS5_VABI sceNetGetIfnameNumList(void) {
+int APS5_VABI sceNetGetIfnameNumList(std::uint32_t* interfaceIds, std::int32_t capacity, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2064,7 +2064,7 @@ int APS5_VABI sceNetThreadExit(void) {
     return 0;
 }
 
-int APS5_VABI sceNetThreadJoin(void) {
+int APS5_VABI sceNetThreadJoin(void* thread) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
