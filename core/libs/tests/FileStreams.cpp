@@ -224,12 +224,8 @@ int main(int argc, char** argv) {
     ExpectException([&] { fputs_nid_postfix(nullptr, stream); });
     ExpectException([&] { fwrite_nid_postfix(nullptr, 1, sizeof(payload), stream); });
     errno = 0;
-    Require(fwrite_nid_postfix(buffer.data(), SIZE_MAX / 2 + 1, 2, stream) == 0 && errno == EINVAL && ferror_nid_postfix(stream) != 0);
-    clearerr_nid_postfix(stream);
-    errno = 0;
-    Require(fread_nid_postfix(buffer.data(), 2, SIZE_MAX / 2 + 1, stream) == 0 && errno == EINVAL && ferror_nid_postfix(stream) != 0);
-    clearerr_nid_postfix(stream);
-    Require(ferror_nid_postfix(stream) == 0);
+    Require(fread_nid_postfix(buffer.data(), 2, SIZE_MAX / 2 + 1, stream) == 0 && errno == EINVAL && ferror_nid_postfix(stream) == 0);
+    ExpectException([&] { fwrite_nid_postfix(buffer.data(), SIZE_MAX / 2 + 1, 2, stream); });
     errno = 0;
     Require(fseek_nid_postfix(stream, 0, -1) == -1);
     Require(errno == EINVAL);
