@@ -89,6 +89,9 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/BinaryWordIo.cpp
 )
 
+set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/MathExact.cpp
+        TARGET_DIRECTORY libc PROPERTIES COMPILE_OPTIONS "-frounding-math")
+
 target_sources(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/BinaryWordIo.cpp)
 
 target_include_directories(libc PRIVATE
