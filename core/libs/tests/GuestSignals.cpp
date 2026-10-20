@@ -146,6 +146,15 @@ int main() {
     Require(signal_nid_postfix(15, Callback) == nullptr);
     Require(sigaction_nid_postfix(15, nullptr, &current) == 0 && current.handler == callback && current.flags == 0x2);
     Require(signal_nid_postfix(15, nullptr) == Callback);
+    for (const int flags : {0x80, 0x100, 0x8000, 0x40 | 0x80}) {
+        const GuestSigaction undefinedFlags{callback, flags, {}};
+        *__error_nid_postfix() = 0;
+        Require(sigaction_nid_postfix(15, &undefinedFlags, nullptr) == -1 && *__error_nid_postfix() == 22);
+        Require(sigaction_nid_postfix(15, nullptr, &current) == 0 && current.handler == 0 && current.flags == 0x2);
+    }
+    const GuestSigaction ignoredWithFlags{1, 0x8000, {}};
+    Require(sigaction_nid_postfix(15, &ignoredWithFlags, nullptr) == 0);
+    Require(sigaction_nid_postfix(15, &defaults, nullptr) == 0);
 
     const GuestSigaction crash{infoCallback, 0x40 | 0x10, {}};
     for (int recorded : {10, 1, 64, 128}) {

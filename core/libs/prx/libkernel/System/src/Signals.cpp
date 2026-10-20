@@ -41,6 +41,7 @@ constexpr std::uint32_t UnblockableSignals = (1u << (GuestSigkill - 1)) | (1u <<
 constexpr int GuestSigalrm = 14;
 constexpr int SaRestart = 0x2;
 constexpr int SaSiginfo = 0x40;
+constexpr int SaDefinedFlags = 0x7f;
 std::atomic<GuestHandler> handlers[MaxSignal + 1]{};
 static_assert(std::atomic<GuestHandler>::is_always_lock_free);
 std::atomic<std::uint32_t> blockedMask{0};
@@ -486,6 +487,7 @@ GuestHandler APS5_VABI signal_nid_postfix(int guest, GuestHandler handler) {
 }
 int APS5_VABI sigaction_nid_postfix(int guest, const GuestSigaction* action, GuestSigaction* previous) {
     if (guest < 1 || guest > MaxSignal) { *__error_nid_postfix() = 22; return -1; }
+    if (action && action->handler > 1 && (action->flags & ~SaDefinedFlags) != 0) { *__error_nid_postfix() = 22; return -1; }
     if (action && (guest == GuestSigkill || guest == GuestSigstop) && action->handler != 0) { *__error_nid_postfix() = 22; return -1; }
     std::lock_guard lock(registration);
     const GuestSigaction old = dispositions[guest];
