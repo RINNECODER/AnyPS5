@@ -104,6 +104,30 @@ void CheckCallsBeforeZeroPadding() {
     RequireOffsets(*BuildControlFlowGraph(indirect, TextAddress, TextAddress, {}, pointers), {0});
 }
 
+void CheckCallsThatStillFallThrough() {
+    const Pointers pointers;
+    Bytes boundary(0x13, 0x90);
+    boundary[11] = 0xe8;
+    SetDisplacement(boundary, 12, 16, TextAddress + 0x12);
+    boundary[16] = 0;
+    boundary[17] = 0;
+    boundary[18] = 0xc3;
+    RequireOffsets(*BuildControlFlowGraph(boundary, TextAddress, TextAddress, {}, pointers), {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 16, 18});
+
+    Bytes partial(0x11, 0x90);
+    partial[0] = 0xe8;
+    SetDisplacement(partial, 1, 5, TextAddress + 0x10);
+    partial[5] = 0;
+    partial[6] = 0;
+    partial[7] = 0xc3;
+    partial[0x10] = 0xc3;
+    RequireOffsets(*BuildControlFlowGraph(partial, TextAddress, TextAddress, {}, pointers), {0, 5, 7, 0x10});
+
+    Bytes truncated{0xe8, 0, 0, 0, 0, 0, 0xc3};
+    SetDisplacement(truncated, 1, 5, TextAddress + 6);
+    RequireOffsets(*BuildControlFlowGraph(truncated, TextAddress, TextAddress, {}, pointers), {0, 5, 6});
+}
+
 void CheckRelocatedTransfers() {
     constexpr auto slot = TextAddress + 0x1000;
     Bytes text{0xff, 0x15, 0, 0, 0, 0, 0x90, 0xc3, 0xff, 0x25, 0, 0, 0, 0, 0x90, 0x90, 0xc3};
@@ -328,6 +352,7 @@ int main() {
         CheckBranches();
         CheckCalls();
         CheckCallsBeforeZeroPadding();
+        CheckCallsThatStillFallThrough();
         CheckRelocatedTransfers();
         CheckCodeAddresses();
         CheckSpeculativeRoots();
