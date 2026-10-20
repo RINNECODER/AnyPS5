@@ -58,6 +58,7 @@ constexpr auto Invalid = -1;
 #endif
 int Fail(int error) { *__error_nid_postfix() = error; return -1; }
 constexpr int GuestPeek = 0x2;
+constexpr int GuestWaitAll = 0x40;
 constexpr int GuestDontWait = 0x80;
 constexpr int GuestNoSignal = 0x20000;
 #ifdef _WIN32
@@ -65,7 +66,7 @@ constexpr int GuestSendFlags = GuestNoSignal;
 constexpr int GuestReceiveFlags = GuestPeek;
 #else
 constexpr int GuestSendFlags = GuestNoSignal | GuestDontWait;
-constexpr int GuestReceiveFlags = GuestPeek | GuestDontWait;
+constexpr int GuestReceiveFlags = GuestPeek | GuestWaitAll | GuestDontWait;
 #endif
 int NativeSendFlags(int flags) {
 #ifdef _WIN32
@@ -75,11 +76,12 @@ int NativeSendFlags(int flags) {
     return (flags & GuestNoSignal ? MSG_NOSIGNAL : 0) | (flags & GuestDontWait ? MSG_DONTWAIT : 0);
 #endif
 }
-int NativeReceiveFlags(int flags) {
+int NativeReceiveFlags(int flags, int type) {
+    const int waitAll = type == 1 && (flags & GuestWaitAll) != 0 ? MSG_WAITALL : 0;
 #ifdef _WIN32
-    return flags & GuestPeek ? MSG_PEEK : 0;
+    return (flags & GuestPeek ? MSG_PEEK : 0) | waitAll;
 #else
-    return (flags & GuestPeek ? MSG_PEEK : 0) | (flags & GuestDontWait ? MSG_DONTWAIT : 0);
+    return (flags & GuestPeek ? MSG_PEEK : 0) | (flags & GuestDontWait ? MSG_DONTWAIT : 0) | waitAll;
 #endif
 }
 int NativeError() {
@@ -1088,7 +1090,7 @@ std::int64_t APS5_VABI recv_nid_postfix(int descriptor, void* buffer, std::uint6
     if (!destination.Open()) return Fail(14);
     if (const int waited = WaitForTransfer(*socket, false, flags)) return Fail(waited);
     const auto result = ::recv(socket->value, static_cast<char*>(buffer), static_cast<int>(length),
-        NativeReceiveFlags(flags));
+        NativeReceiveFlags(flags, socket->type));
 #ifdef _WIN32
     if (result < 0 && socket->type == 2 && WSAGetLastError() == WSAEMSGSIZE) return static_cast<std::int64_t>(length);
 #endif
@@ -1202,7 +1204,7 @@ std::int64_t APS5_VABI recvfrom_nid_postfix(int descriptor, void* buffer, std::u
     socklen_t size = sizeof(native);
     if (const int waited = WaitForTransfer(*socket, false, flags)) return Fail(waited);
     auto result = ::recvfrom(socket->value, static_cast<char*>(buffer), static_cast<int>(length),
-        NativeReceiveFlags(flags), reinterpret_cast<sockaddr*>(&native), &size);
+        NativeReceiveFlags(flags, socket->type), reinterpret_cast<sockaddr*>(&native), &size);
 #ifdef _WIN32
     if (result < 0 && socket->type == 2 && WSAGetLastError() == WSAEMSGSIZE) result = static_cast<int>(length);
 #endif
@@ -1325,7 +1327,7 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
     socklen_t size = sizeof(native);
     if (const int waited = WaitForTransfer(*socket, false, flags)) return Fail(waited);
     std::int64_t received = ::recvfrom(socket->value, buffer.data(), static_cast<int>(buffer.size()),
-        NativeReceiveFlags(flags), reinterpret_cast<sockaddr*>(&native), &size);
+        NativeReceiveFlags(flags, socket->type), reinterpret_cast<sockaddr*>(&native), &size);
     if (received < 0) {
 #ifdef _WIN32
         if (!records || WSAGetLastError() != WSAEMSGSIZE) return Fail(NativeError());
