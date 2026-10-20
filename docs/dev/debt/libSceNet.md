@@ -53,15 +53,18 @@
 - [sceNetIoctl](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetMemoryAllocate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetMemoryFree](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
+- [sceNetGetSystemTime](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unverified on PS5 hardware: the `void(uint64_t*)` signature, process-relative microseconds and ignored null output follow [shadPS4 net.cpp](https://github.com/shadps4-emu/shadPS4/blob/d615b3887ba29025a59242e1a26f5b68bb176158/src/core/libraries/net/net.cpp#L1654-L1659). The clock is the same as `sceKernelGetProcessTime`, including `APS5_TIME_SCALE`
+- [sceNetGetSystemMemInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
+- [sceNetInitParam](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
+- [sceNetInetPtonEx](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the `(int af, const char* src, void* dst, int flags)` signature follows [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/net/net.cpp); IPv4 conversion and the ignored flags follow PS4 firmware 10.71, not yet confirmed on PS5. There IPv4 text is read as `inet_aton` reads it (`a`, `a.b`, `a.b.c`, hex and octal parts, values wrapping at 32 bits, the text ending at the first space, tab or VT), except that a part starting with `09` is decimal (`"0989"` is 989) and an octal part with `8` or `9` fails. Flags 0, each single bit up to 0x100, 0x10000, 0x80000000 and -1 gave the same results; other values were not measured. LF, FF and CR as terminators, and `NET_EINVAL` for a null `src` or `dst`, follow `sceNetInetPton` and were not measured for this function. IPv6 converts as `sceNetInetPton` does.
+- [sceNetMemoryAllocate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the `(int64_t size, int flags)` signature, flag 2 as zero fill and the null result for a size of 0 or less follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/d5ba5fd06c49af29b8ec9200cad70bca676a9cd4/src/core/libraries/net/net.cpp). The block comes from the guest heap, and an allocation failure returns null without setting an errno. Any other flag bit throws, since its meaning is not known. Unverified on hardware
+- [sceNetMemoryFree](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the `(void* memory)` signature follows [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/d5ba5fd06c49af29b8ec9200cad70bca676a9cd4/src/core/libraries/net/net.cpp); the block returns to the guest heap and a null pointer is ignored. Unverified on hardware
 - [sceNetSetDnsInfoToKernel](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSetsockoptEx](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSocketInternal](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetSyncCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetSyncDestroy](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetSyncGet](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetSyncSignal](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetSyncWait](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSysctl](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetThreadCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetThreadExit](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetThreadJoin](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -76,23 +79,15 @@
 - [sceNetGetDns6Info](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetSetDns6InfoToKernel](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowRoute6ForBuffer](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigGetIfFlags](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigSetIfFlags](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigUnsetIfFlags](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigDelIfaddr](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigDownInterface](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigSetDefaultRoute](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigSetDefaultRouteDev](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigSetIfaddr](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigSetIfLinkLocalAddr6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigUpInterface](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigUpInterfaceWithFlags](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigCleanUpAllInterfaces](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigFlushRoute](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigFlushRoute6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddIfaddr](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigGetIfaddr](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigSetIfmtu](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddArp](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddArpWithInterface](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddMRoute](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -109,7 +104,6 @@
 - [sceNetDhcpGetInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetDhcpGetInfoEx](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetDhcpStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetDhcpStop](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddIfaddr6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigDelIfaddr6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigDelDefaultRoute6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -121,19 +115,15 @@
 - [sceNetConfigDelRoute6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddRoute6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetAddrConfig6Start](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetAddrConfig6Stop](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetAddrConfig6GetInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetInfoDumpStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetInfoDumpStop](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetDhcpdStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetDhcpdStop](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetDuplicateIpStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetDuplicateIpStop](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocClearWakeOnWlan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocGetWakeOnWlanInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocJoin](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigWlanAdhocLeave](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocPspEmuClearWakeOnWlan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocPspEmuGetWakeOnWlanInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocPspEmuSetWakeOnWlan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -141,22 +131,17 @@
 - [sceNetConfigWlanAdhocSetExtInfoElement](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocSetWakeOnWlan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanApStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigWlanApStop](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanBackgroundScanQuery](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanBackgroundScanStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigWlanBackgroundScanStop](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanDiagGetDeviceInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanDiagSetAntenna](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanDiagSetTxFixedRate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanGetDeviceConfig](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanInfraGetRssiInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigWlanInfraLeave](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanInfraScanJoin](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanScan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanSetDeviceConfig](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigEtherGetLinkMode](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigEtherPostPlugInOutEvent](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigEtherSetLinkMode](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetPppoeStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetPppoeStop](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetBandwidthControlSetDefaultParam](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
