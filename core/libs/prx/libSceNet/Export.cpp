@@ -252,6 +252,7 @@ constexpr int NET_EMSGSIZE = 40;
 constexpr int NET_ETIMEDOUT = 60;
 constexpr int NET_ECONNREFUSED = 61;
 constexpr int NET_EHOSTUNREACH = 65;
+constexpr int NET_ENOTINIT = 200;
 constexpr int NET_ERROR_BASE = static_cast<int>(0x80410100u);
 constexpr int NET_ERROR_RESOLVER_ENODNS = static_cast<int>(0x804101E1u);
 constexpr int NET_RESOLVER_ABORT_FLAG_NTOA_PRESERVATION = 0x1;
@@ -2129,7 +2130,9 @@ extern const std::uint8_t in6addr_any_nid_postfix[16] = {};
 extern const std::uint8_t in6addr_loopback_nid_postfix[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 
 int APS5_VABI sceNetClearDnsCache(int flags) {
-    if (flags != 0) throw std::runtime_error("sceNetClearDnsCache: flags " + std::to_string(flags) + " are not supported");
+    std::lock_guard lock(g_mutex);
+    if (!g_net_inited) return fail(NET_ENOTINIT);
+    if (flags != 0) return fail(NET_EINVAL);
     return 0;
 }
 

@@ -1538,6 +1538,10 @@ int main() {
         Require(in6addr_any_nid_postfix[i] == 0);
         Require(in6addr_loopback_nid_postfix[i] == (i == 15 ? 1 : 0));
     }
+    for (const int flags : {0, 1, -1}) {
+        Require(sceNetClearDnsCache(flags) == static_cast<int>(0x804101C8));
+        Require(*sceNetErrnoLoc() == 200);
+    }
     Require(sceNetInit_nid_postfix() == 0);
     CheckPeerSocketTypes();
     if (argc == 2 && std::strcmp(argv[1], "--peer-only") == 0) return 0;
@@ -1943,10 +1947,9 @@ int main() {
     ipv4.fill(0xA5);
     Require(sceNetResolverStartNtoa(resolver, "localhost", ipv4.data(), 5000000, 1, 0) == 0 && ipv4[0] == 127);
     Require(sceNetResolverGetError(resolver, &resolver_error) == 0 && resolver_error == 0);
-    for (const int flags : {0x1, -1}) {
-        bool threw = false;
-        try { sceNetClearDnsCache(flags); } catch (const std::runtime_error&) { threw = true; }
-        Require(threw);
+    for (const int flags : {1, 2, 0x10000, -1}) {
+        Require(sceNetClearDnsCache(flags) == static_cast<int>(0x80410116));
+        Require(*sceNetErrnoLoc() == 22);
     }
     Require(sceNetResolverDestroy(resolver) == 0);
     resolver_error = -1;
