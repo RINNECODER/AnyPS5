@@ -91,6 +91,8 @@ struct NetEmulationParameter;
 
 struct NetResolverConnection;
 struct NetThreadParameter;
+struct NetIpv4InterfaceAddress;
+struct NetStatisticsInfoInternal;
 struct NetInitializeParameter;
 struct NetInterfaceInfo;
 struct NetInterfaceStatistics;
@@ -2045,7 +2047,7 @@ int APS5_VABI sceNetGetRandom(void) {
     return 0;
 }
 
-int APS5_VABI sceNetGetRouteInfo(void) {
+int APS5_VABI sceNetGetRouteInfo(std::int32_t family, NetRouteInfo* routes, std::int32_t capacity, std::uint8_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2275,12 +2277,12 @@ int APS5_VABI sceNetConfigFlushRoute6(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddIfaddr(void) {
+int APS5_VABI sceNetConfigAddIfaddr(int interfaceId, const std::uint32_t* address, const std::uint32_t* broadcastAddress, const std::uint32_t* netmask) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigGetIfaddr(void) {
+int APS5_VABI sceNetConfigGetIfaddr(std::int32_t interfaceId, NetIpv4InterfaceAddress* addresses, std::int32_t capacity) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2660,7 +2662,7 @@ int APS5_VABI sceNetConfigRoutingShowtCtlVar(void) {
     return 0;
 }
 
-int APS5_VABI sceNetGetStatisticsInfoInternal(void) {
+int APS5_VABI sceNetGetStatisticsInfoInternal(NetStatisticsInfoInternal* info) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
