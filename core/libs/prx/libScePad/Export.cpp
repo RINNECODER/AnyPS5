@@ -55,12 +55,12 @@ int APS5_VABI scePadClose_nid_postfix(int handle) {
  return PAD_OK;
 }
 
-int APS5_VABI scePadVrControllerSetVibration() {
+int APS5_VABI scePadVrControllerSetVibration(std::int32_t handle, std::uint8_t intensity) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadVrControllerSetVibrationMode() {
+int APS5_VABI scePadVrControllerSetVibrationMode(std::int32_t handle, std::uint32_t mode) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -872,7 +872,7 @@ int APS5_VABI scePadMbusTerm(void) {
     return 0;
 }
 
-int APS5_VABI scePadConnectPort(void) {
+int APS5_VABI scePadConnectPort(std::int32_t userId, std::int32_t portType) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1047,7 +1047,7 @@ int APS5_VABI scePadControllerUpdateInit(void) {
     return 0;
 }
 
-int APS5_VABI scePadControllerUpdateIsUpdateNeeded2(void) {
+int APS5_VABI scePadControllerUpdateIsUpdateNeeded2(std::int32_t deviceId, const std::uint32_t* version, std::uint16_t* status) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
