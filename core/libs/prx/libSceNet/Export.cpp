@@ -1564,6 +1564,35 @@ int APS5_VABI sceNetEtherNtostr(const NetEtherAddr* n, char* str, size_t len) {
     return 0;
 }
 
+int APS5_VABI sceNetEtherStrton(const char* text, NetEtherAddr* address) {
+    if (text == nullptr || address == nullptr) return fail(NET_EFAULT);
+    const auto hexDigit = [](char character) {
+        if (character >= '0' && character <= '9') return character - '0';
+        if (character >= 'a' && character <= 'f') return character - 'a' + 10;
+        if (character >= 'A' && character <= 'F') return character - 'A' + 10;
+        return -1;
+    };
+    NetEtherAddr parsed{};
+    for (std::size_t index = 0; index < sizeof(parsed.data); ++index) {
+        int value = hexDigit(*text);
+        if (value < 0) return fail(NET_EINVAL);
+        ++text;
+        if (const int digit = hexDigit(*text); digit >= 0) {
+            value = value * 16 + digit;
+            ++text;
+        }
+        if (index + 1 == sizeof(parsed.data)) {
+            if (*text != '\0') return fail(NET_EINVAL);
+        } else {
+            if (*text != ':' && *text != '-') return fail(NET_EINVAL);
+            ++text;
+        }
+        parsed.data[index] = static_cast<std::uint8_t>(value);
+    }
+    *address = parsed;
+    return 0;
+}
+
 int APS5_VABI sceNetGetMacAddress(NetEtherAddr* addr, int flags) {
     (void)flags;
     if (addr == nullptr) {
