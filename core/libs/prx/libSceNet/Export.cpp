@@ -47,6 +47,14 @@ struct NetIpv6Address {
 
 static_assert(sizeof(NetIpv6Address) == 16);
 
+struct NetIpv6InterfaceAddress {
+    NetIpv6Address address;
+    std::uint8_t prefixLength;
+    std::uint8_t reserved[3];
+};
+
+static_assert(sizeof(NetIpv6InterfaceAddress) == 20);
+
 namespace {
 // FreeBSD errno numbers as reported through sceNetErrnoLoc (SCE_NET_ERROR_* is 0x80410100 + errno).
 constexpr int NET_ENOENT = 2;
@@ -2275,7 +2283,7 @@ int APS5_VABI sceNetDhcpStop(int interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddIfaddr6(void) {
+int APS5_VABI sceNetConfigAddIfaddr6(int interfaceId, const NetIpv6Address* address, std::uint8_t prefixLength) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2295,7 +2303,7 @@ int APS5_VABI sceNetConfigSetIfaddr6(int interfaceId, const NetIpv6Address* addr
     return 0;
 }
 
-int APS5_VABI sceNetConfigSetIfaddr6WithFlags(void) {
+int APS5_VABI sceNetConfigSetIfaddr6WithFlags(int interfaceId, const NetIpv6Address* address, std::uint8_t prefixLength, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2305,7 +2313,7 @@ int APS5_VABI sceNetConfigSetDefaultRoute6(int interfaceId, const NetIpv6Address
     return 0;
 }
 
-int APS5_VABI sceNetConfigGetIfaddr6(void) {
+int APS5_VABI sceNetConfigGetIfaddr6(int interfaceId, NetIpv6InterfaceAddress* addresses, std::uint32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
