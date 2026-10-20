@@ -11,6 +11,21 @@
 #include "prx/libScePad/include/Pad.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 
+struct PadDataExtended;
+struct PadVrControllerData;
+struct PadVrControllerDeviceInformation;
+struct PadVrTriggerEffect;
+struct PadVrTriggerEffects;
+struct PadTriggerEffectExtended;
+struct PadExtensionReport;
+struct PadExtensionUnitInfo;
+struct PadTriggerInternalState;
+struct PadTrackerData;
+struct PadBlasterTrackerData;
+struct PadAstonTrackerData;
+struct PadUiData;
+struct PadUiTuningData;
+
 namespace {
 
 constexpr int PAD_ERROR_DEVICE_NOT_CONNECTED = static_cast<int>(0x80920007);
@@ -169,11 +184,11 @@ int APS5_VABI scePadOpenExt(int userId, int type, int index, const void* param) 
  return PAD_ERROR_DEVICE_NOT_CONNECTED;
 }
 
-int APS5_VABI scePadReadExt() { NotImplemented_nid_no_patch(__func__); return 0; }
+int APS5_VABI scePadReadExt(std::int32_t handle, PadDataExtended* data, std::int32_t count) { NotImplemented_nid_no_patch(__func__); return 0; }
 
-int APS5_VABI scePadGetFeatureReport() { NotImplemented_nid_no_patch(__func__); return 0; }
+int APS5_VABI scePadGetFeatureReport(std::int32_t handle, std::uint8_t reportId, void* data, std::size_t size) { NotImplemented_nid_no_patch(__func__); return 0; }
 
-int APS5_VABI scePadSetFeatureReport() { NotImplemented_nid_no_patch(__func__); return 0; }
+int APS5_VABI scePadSetFeatureReport(std::int32_t handle, std::uint8_t reportId, const void* data, std::size_t size) { NotImplemented_nid_no_patch(__func__); return 0; }
 
 int APS5_VABI scePadOutputReport() { NotImplemented_nid_no_patch(__func__); return 0; }
 
@@ -269,12 +284,12 @@ int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool enab
  return PAD_OK;
 }
 
-int APS5_VABI scePadVrControllerGetDeviceInformation() {
+int APS5_VABI scePadVrControllerGetDeviceInformation(std::int32_t handle, PadVrControllerDeviceInformation* info) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI scePadVrControllerRead() {
+int APS5_VABI scePadVrControllerRead(std::int32_t handle, PadVrControllerData* data, std::int32_t count) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -291,12 +306,12 @@ int APS5_VABI scePadVrControllerReadState(int handle, void* state) {
  return 0;
 }
 
-int APS5_VABI scePadVrControllerSetTriggerEffect() {
+int APS5_VABI scePadVrControllerSetTriggerEffect(std::int32_t handle, const PadVrTriggerEffect* effect) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI scePadVrControllerSetTriggerEffects() {
+int APS5_VABI scePadVrControllerSetTriggerEffects(std::int32_t leftHandle, std::int32_t rightHandle, const PadVrTriggerEffects* effects) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -326,7 +341,15 @@ int APS5_VABI scePadVrControllerGetTriggerEffectStates(void) {
     return 0;
 }
 
-int APS5_VABI scePadSetTriggerEffectExt(void) {
+int APS5_VABI scePadGetAccessibilityControllerState(int handle, std::uint32_t* state) {
+    if (!Pad::IsInitialized()) return PAD_ERROR_NOT_INITIALIZED;
+    if (state == nullptr) return PAD_ERROR_INVALID_ARG;
+    if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+    *state = 0;
+    return PAD_OK;
+}
+
+int APS5_VABI scePadSetTriggerEffectExt(std::int32_t handle, const PadTriggerEffectExtended* effect) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -336,17 +359,17 @@ int APS5_VABI scePadLastLotusButtonData(void) {
     return 0;
 }
 
-int APS5_VABI scePadReadStateExt(void) {
+int APS5_VABI scePadReadStateExt(std::int32_t handle, PadDataExtended* data) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetExtensionReport(void) {
+int APS5_VABI scePadSetExtensionReport(std::int32_t handle, const PadExtensionReport* report) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetExtensionUnitInfo(void) {
+int APS5_VABI scePadGetExtensionUnitInfo(std::int32_t handle, PadExtensionUnitInfo* info) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -516,7 +539,7 @@ int APS5_VABI scePadSetTriggerEffectStrength(void) {
     return 0;
 }
 
-int APS5_VABI scePadGetTriggerEffectInternalState(void) {
+int APS5_VABI scePadGetTriggerEffectInternalState(std::int32_t handle, PadTriggerInternalState* state) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -566,12 +589,12 @@ int APS5_VABI scePadGetUsbDetectionState(void) {
     return 0;
 }
 
-int APS5_VABI scePadUiReadState(void) {
+int APS5_VABI scePadUiReadState(std::int32_t handle, PadUiData* data) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadUiReadStateForTuning(void) {
+int APS5_VABI scePadUiReadStateForTuning(std::int32_t handle, PadUiTuningData* data) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -771,12 +794,12 @@ int APS5_VABI scePadSetLightBarForTracker(void) {
     return 0;
 }
 
-int APS5_VABI scePadReadForTracker(void) {
+int APS5_VABI scePadReadForTracker(std::int32_t handle, PadTrackerData* data, std::int32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadReadBlasterForTracker(void) {
+int APS5_VABI scePadReadBlasterForTracker(std::int32_t handle, PadBlasterTrackerData* data, std::int32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -836,7 +859,7 @@ int APS5_VABI scePadIsMoveReproductionModel(void) {
     return 0;
 }
 
-int APS5_VABI scePadReadAstonForTracker(void) {
+int APS5_VABI scePadReadAstonForTracker(std::int32_t handle, PadAstonTrackerData* data, std::int32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
