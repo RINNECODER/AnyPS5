@@ -199,6 +199,9 @@
 - [sceNetEmulationDebugSettingsGet](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetEmulationSet](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetEmulationGet](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
+- [sceNetDhcpdStart](../../../core/libs/prx/libSceNet/Export.cpp): six arguments and the three-argument address callback are confirmed. The 24-byte parameter contains five network-order addresses and a client limit. Individual address roles and the two unused thread-option meanings remain unresolved.
+- [sceNetPppoeStart](../../../core/libs/prx/libSceNet/Export.cpp): seven arguments are confirmed, including the parameter pointer on the stack. The 272-byte parameter contains two DNS addresses, two 128-byte credential arrays, MTU and flags. Callback arguments are user data, event and error; the two unused thread-option meanings remain unresolved.
+- [sceNetConfigRoutingStart](../../../core/libs/prx/libSceNet/Export.cpp): five pointer/scalar arguments are confirmed. Input address data is eight bytes; the mutable server parameter is 20 bytes and duplicates its first address when its count is one. Optional rules contain a count and pointer to 20-byte records with protocol, two address/port pairs and flags. Layouts are defined; rule flag meanings and protocol-specific port interpretation remain unresolved.
 - [sceNetConfigRoutingShowRoutingConfig](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the native routine consumes no arguments; the throwing implementation remains unchanged.
 
 ### Functional

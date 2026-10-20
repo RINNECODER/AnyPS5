@@ -99,6 +99,63 @@ struct NetAddress6StartParameter;
 
 using NetAddressCallback = void (APS5_VABI *)(void* userArg, std::int32_t event, std::int32_t error);
 
+struct NetDhcpdStartParameter {
+    std::uint32_t addresses[5];
+    std::uint32_t maxClients;
+};
+
+struct NetPppoeStartParameter {
+    std::uint32_t dnsAddresses[2];
+    char userName[128];
+    char password[128];
+    std::int32_t mtu;
+    std::uint32_t flags;
+};
+
+struct NetRoutingAddressParameter {
+    std::uint32_t address;
+    std::uint32_t mask;
+};
+
+struct NetRoutingServerParameter {
+    std::int32_t count;
+    std::uint32_t localAddresses[2];
+    std::uint32_t remoteAddresses[2];
+};
+
+struct NetRoutingRule {
+    std::int32_t protocol;
+    std::uint32_t firstAddress;
+    std::uint16_t firstPort;
+    std::uint16_t reserved;
+    std::uint32_t secondAddress;
+    std::uint16_t secondPort;
+    std::uint16_t flags;
+};
+
+struct NetRoutingRuleParameter {
+    std::int32_t count;
+    const NetRoutingRule* rules;
+};
+
+static_assert(sizeof(NetRoutingAddressParameter) == 8);
+static_assert(sizeof(NetRoutingServerParameter) == 20);
+static_assert(offsetof(NetRoutingServerParameter, remoteAddresses) == 12);
+static_assert(sizeof(NetRoutingRule) == 20);
+static_assert(offsetof(NetRoutingRule, firstPort) == 8);
+static_assert(offsetof(NetRoutingRule, secondAddress) == 12);
+static_assert(offsetof(NetRoutingRule, flags) == 18);
+static_assert(sizeof(NetRoutingRuleParameter) == 16);
+static_assert(offsetof(NetRoutingRuleParameter, rules) == 8);
+
+static_assert(sizeof(NetDhcpdStartParameter) == 24);
+static_assert(offsetof(NetDhcpdStartParameter, maxClients) == 20);
+static_assert(sizeof(NetPppoeStartParameter) == 272);
+static_assert(offsetof(NetPppoeStartParameter, userName) == 8);
+static_assert(offsetof(NetPppoeStartParameter, password) == 136);
+static_assert(offsetof(NetPppoeStartParameter, mtu) == 264);
+static_assert(offsetof(NetPppoeStartParameter, flags) == 268);
+
 struct NetInfoDumpParameter {
     std::uint32_t flags;
     std::uint32_t intervalSeconds;
@@ -2466,7 +2523,7 @@ int APS5_VABI sceNetInfoDumpStop(void) {
     return 0;
 }
 
-int APS5_VABI sceNetDhcpdStart(void) {
+int APS5_VABI sceNetDhcpdStart(std::uint32_t interfaceId, NetAddressCallback callback, void* userArg, std::int32_t threadParameter1, std::int32_t threadParameter2, const NetDhcpdStartParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2626,7 +2683,7 @@ int APS5_VABI sceNetConfigEtherSetLinkMode(void) {
     return 0;
 }
 
-int APS5_VABI sceNetPppoeStart(void) {
+int APS5_VABI sceNetPppoeStart(std::uint32_t interfaceId, std::int32_t pppoeInterfaceId, NetAddressCallback callback, void* userArg, std::int32_t threadParameter1, std::int32_t threadParameter2, const NetPppoeStartParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2656,7 +2713,7 @@ int APS5_VABI sceNetConfigSetDefaultScope(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigRoutingStart(void) {
+int APS5_VABI sceNetConfigRoutingStart(std::uint32_t firstInterfaceId, std::uint32_t secondInterfaceId, const NetRoutingAddressParameter* addressParameter, NetRoutingServerParameter* serverParameter, const NetRoutingRuleParameter* ruleParameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
