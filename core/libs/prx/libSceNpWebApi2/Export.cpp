@@ -10,6 +10,8 @@
 // The PSN web API has no service behind it: handles can be created, but requests fail.
 static constexpr int SCE_NP_WEBAPI2_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80553402);
 static constexpr int SCE_NP_WEBAPI2_ERROR_UNAVAILABLE = static_cast<int>(0x80553406);
+static constexpr int SCE_NP_WEBAPI2_ERROR_INVALID_CONTEXT = static_cast<int>(0x80553404);
+static constexpr int SCE_NP_WEBAPI2_ERROR_INVALID_HANDLE = static_cast<int>(0x8055340D);
 static std::atomic<int> g_nextHandle{1};
 
 struct NpWebApi2PushContextId {
@@ -27,6 +29,21 @@ struct NpWebApi2MemoryPoolStats {
 
 static std::mutex g_poolsMutex;
 static std::unordered_map<int, size_t> g_pools;
+
+static int CreateLibraryContext(size_t poolSize) {
+    const int libCtxId = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard lock(g_poolsMutex);
+    g_pools[libCtxId] = poolSize;
+    return libCtxId;
+}
+
+struct PushHandle {
+    std::int32_t libraryContextId;
+    std::uint32_t timeout = 0;
+    bool aborted = false;
+};
+
+static std::unordered_map<int, PushHandle> pushHandles;
 
 extern "C" {
 
@@ -101,11 +118,11 @@ int APS5_VABI sceNpWebApi2Initialize(int lib_http_ctx_id, size_t pool_size) {
     return lib_ctx_id;
 }
 
-int APS5_VABI sceNpWebApi2GetMemoryPoolStats(int lib_ctx_id, NpWebApi2MemoryPoolStats* stats) {
-    if (stats == nullptr) APS5_INVALID_ARG_EX;
+int APS5_VABI sceNpWebApi2GetMemoryPoolStats(int libraryContextId, NpWebApi2MemoryPoolStats* stats) {
     std::lock_guard lock(g_poolsMutex);
-    const auto pool = g_pools.find(lib_ctx_id);
-    if (pool == g_pools.end()) throw std::invalid_argument("sceNpWebApi2GetMemoryPoolStats: unknown context");
+    const auto pool = g_pools.find(libraryContextId);
+    if (pool == g_pools.end()) return SCE_NP_WEBAPI2_ERROR_INVALID_CONTEXT;
+    if (!stats) return 0;
     *stats = {pool->second, 0, 0, 0};
     return 0;
 }
@@ -120,21 +137,29 @@ int APS5_VABI sceNpWebApi2PushEventCreateFilter(int lib_ctx_id, int handle_id, c
     return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
 }
 
-int APS5_VABI sceNpWebApi2PushEventCreateHandle(int lib_ctx_id) {
-    (void)lib_ctx_id;
-    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+int APS5_VABI sceNpWebApi2PushEventCreateHandle(int libraryContextId) {
+    std::lock_guard lock(g_poolsMutex);
+    if (!g_pools.contains(libraryContextId)) return SCE_NP_WEBAPI2_ERROR_INVALID_CONTEXT;
+    const int handleId = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
+    pushHandles.emplace(handleId, PushHandle{libraryContextId});
+    return handleId;
 }
 
-int APS5_VABI sceNpWebApi2PushEventAbortHandle(int libCtxId, int handleId) {
-    (void)libCtxId;
-    (void)handleId;
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNpWebApi2PushEventAbortHandle(int libraryContextId, int handleId) {
+    std::lock_guard lock(g_poolsMutex);
+    if (!g_pools.contains(libraryContextId)) return SCE_NP_WEBAPI2_ERROR_INVALID_CONTEXT;
+    const auto handle = pushHandles.find(handleId);
+    if (handle == pushHandles.end() || handle->second.libraryContextId != libraryContextId) return SCE_NP_WEBAPI2_ERROR_INVALID_HANDLE;
+    handle->second.aborted = true;
     return 0;
 }
 
-int APS5_VABI sceNpWebApi2PushEventDeleteHandle(int lib_ctx_id, int handle_id) {
-    (void)lib_ctx_id;
-    (void)handle_id;
+int APS5_VABI sceNpWebApi2PushEventDeleteHandle(int libraryContextId, int handleId) {
+    std::lock_guard lock(g_poolsMutex);
+    if (!g_pools.contains(libraryContextId)) return SCE_NP_WEBAPI2_ERROR_INVALID_CONTEXT;
+    const auto handle = pushHandles.find(handleId);
+    if (handle == pushHandles.end() || handle->second.libraryContextId != libraryContextId) return SCE_NP_WEBAPI2_ERROR_INVALID_HANDLE;
+    pushHandles.erase(handle);
     return 0;
 }
 
@@ -169,6 +194,7 @@ int APS5_VABI sceNpWebApi2SendRequest(int64_t request_id, const void* data, size
 
 int APS5_VABI sceNpWebApi2Terminate(int lib_ctx_id) {
     std::lock_guard lock(g_poolsMutex);
+    std::erase_if(pushHandles, [lib_ctx_id](const auto& item) { return item.second.libraryContextId == lib_ctx_id; });
     g_pools.erase(lib_ctx_id);
     return 0;
 }
@@ -181,11 +207,12 @@ int APS5_VABI sceNpWebApi2PushEventDeleteFilter(std::int32_t libraryContextId, s
     return 0;
 }
 
-int APS5_VABI sceNpWebApi2PushEventSetHandleTimeout(int lib_ctx_id, int handle_id, uint32_t timeout) {
-    (void)handle_id;
-    (void)timeout;
+int APS5_VABI sceNpWebApi2PushEventSetHandleTimeout(int libraryContextId, int handleId, std::uint32_t timeout) {
     std::lock_guard lock(g_poolsMutex);
-    if (!g_pools.contains(lib_ctx_id)) throw std::invalid_argument("sceNpWebApi2PushEventSetHandleTimeout: unknown context");
+    if (!g_pools.contains(libraryContextId)) return SCE_NP_WEBAPI2_ERROR_INVALID_CONTEXT;
+    const auto handle = pushHandles.find(handleId);
+    if (handle == pushHandles.end() || handle->second.libraryContextId != libraryContextId) return SCE_NP_WEBAPI2_ERROR_INVALID_HANDLE;
+    handle->second.timeout = timeout;
     return 0;
 }
 
