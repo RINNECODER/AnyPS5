@@ -3,6 +3,8 @@
 #include "prx/libc/include/GuestHeap.hpp"
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -101,6 +103,16 @@ static bool CheckWidePrecision() {
     }
     if (!correct) return false;
     char output[32];
+    for (const std::size_t oversized : {static_cast<std::size_t>(INT_MAX) + 2, static_cast<std::size_t>(SIZE_MAX)}) {
+        std::memset(output, 'Z', sizeof(output));
+        errno = 0;
+        Require(snprintf_nid_postfix(output, oversized, "x") == -1 && errno == 84 && output[0] == 0);
+        std::memset(output, 'Z', sizeof(output));
+        errno = 0;
+        Require(FormatList(output, oversized, "x") == -1 && errno == 84 && output[0] == 0);
+    }
+    Require(snprintf_nid_postfix(output, static_cast<std::size_t>(INT_MAX) + 1, "x") == 1 && std::strcmp(output, "x") == 0);
+    Require(FormatList(output, static_cast<std::size_t>(INT_MAX) + 1, "y") == 1 && std::strcmp(output, "y") == 0);
     Require(snprintf_nid_postfix(output, sizeof(output), "[%5.1ls]", u"\u00e9") == 7 && std::strcmp(output, "[     ]") == 0);
     Require(snprintf_nid_postfix(output, sizeof(output), "[%-5.2ls]", u"\u00e9") == 7 && std::strcmp(output, "[\xc3\xa9   ]") == 0);
     Require(FormatList(output, sizeof(output), "%.3ls", u"\U0001f600") == 0 && output[0] == 0);
