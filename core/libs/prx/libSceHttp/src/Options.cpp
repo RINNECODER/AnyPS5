@@ -63,6 +63,15 @@ bool SetHttpContextAcceptEncodingGzip(int contextId, bool enable) {
     return true;
 }
 
+bool SetHttpEpollBinding(int id, HttpEpollHandle epoll, void* argument) {
+    std::lock_guard lock(g_optionsMutex);
+    const auto found = g_objectOptions.find(id);
+    if (found == g_objectOptions.end()) return false;
+    found->second.epoll = epoll;
+    found->second.epollArgument = argument;
+    return true;
+}
+
 extern "C" {
 
 int APS5_VABI sceHttpGetAutoRedirect(int id, int* enable) {
@@ -95,6 +104,15 @@ int APS5_VABI sceHttpGetAcceptEncodingGZIPEnabled(int id, int* enable) {
 
 int APS5_VABI sceHttpSetAcceptEncodingGZIPEnabled(int id, int enable) {
     return SetHttpOption(id, &HttpOptions::acceptEncodingGzip, enable != 0) ? 0 : ERROR_INVALID_ID;
+}
+
+int APS5_VABI sceHttpGetEpoll(int id, HttpEpollHandle* epoll, void** argument) {
+    if (!epoll) return ERROR_INVALID_VALUE;
+    const auto options = FindHttpOptions(id);
+    if (!options) return ERROR_INVALID_ID;
+    *epoll = options->epoll;
+    if (argument) *argument = options->epollArgument;
+    return 0;
 }
 
 }

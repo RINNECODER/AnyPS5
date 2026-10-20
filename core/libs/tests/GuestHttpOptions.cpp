@@ -22,6 +22,11 @@ int APS5_VABI sceHttpTryGetNonblock(int, int*);
 int APS5_VABI sceHttpSetAcceptEncodingGZIPEnabled(int, int);
 int APS5_VABI sceHttpGetAcceptEncodingGZIPEnabled(int, int*);
 int APS5_VABI sceHttpSetDefaultAcceptEncodingGZIPEnabled(int, int);
+int APS5_VABI sceHttpCreateEpoll(int, HttpEpollHandle*);
+int APS5_VABI sceHttpDestroyEpoll(int, HttpEpollHandle);
+int APS5_VABI sceHttpSetEpoll(int, HttpEpollHandle, void*);
+int APS5_VABI sceHttpUnsetEpoll(int);
+int APS5_VABI sceHttpGetEpoll(int, HttpEpollHandle*, void**);
 }
 
 namespace {
@@ -99,6 +104,28 @@ void CheckAcceptEncodingGzip(int context) {
     Require(sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(compressed) == 0 && sceHttpDeleteTemplate(plain) == 0, "delete failed");
 }
 
+void CheckEpoll(int context) {
+    HttpEpollHandle epoll = nullptr;
+    Require(sceHttpCreateEpoll(context, &epoll) == 0 && epoll != nullptr, "sceHttpCreateEpoll failed");
+    const int pattern = sceHttpCreateTemplate(context, "anyps5-test", 2, 0);
+    const int connection = sceHttpCreateConnectionWithURL(pattern, "http://example.com/", 1);
+    const int request = sceHttpCreateRequestWithURL(connection, 0, "http://example.com/a", 0);
+    int marker = 0;
+    HttpEpollHandle bound = epoll;
+    void* argument = &marker;
+    Require(sceHttpGetEpoll(request, &bound, &argument) == 0 && bound == nullptr && argument == nullptr, "a new request is bound to an epoll");
+    Require(sceHttpSetEpoll(request, epoll, &marker) == 0, "sceHttpSetEpoll failed");
+    Require(sceHttpGetEpoll(request, &bound, &argument) == 0 && bound == epoll && argument == &marker, "sceHttpGetEpoll does not return the binding that was set");
+    bound = nullptr;
+    Require(sceHttpGetEpoll(request, &bound, nullptr) == 0 && bound == epoll, "sceHttpGetEpoll needs the argument output");
+    Require(sceHttpGetEpoll(connection, &bound, &argument) == 0 && bound == nullptr, "binding a request bound its connection");
+    Require(sceHttpUnsetEpoll(request) == 0 && sceHttpGetEpoll(request, &bound, &argument) == 0 && bound == nullptr && argument == nullptr, "sceHttpUnsetEpoll left the binding");
+    Require(sceHttpGetEpoll(request, nullptr, &argument) == InvalidValue, "a null epoll output was not refused");
+    Require(sceHttpGetEpoll(UnknownId, &bound, &argument) == InvalidId && sceHttpSetEpoll(UnknownId, epoll, nullptr) == InvalidId && sceHttpUnsetEpoll(UnknownId) == InvalidId, "an unknown id was not refused");
+    Require(sceHttpDeleteRequest(request) == 0 && sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(pattern) == 0, "delete failed");
+    Require(sceHttpDestroyEpoll(context, epoll) == 0, "sceHttpDestroyEpoll failed");
+}
+
 }
 
 int main() {
@@ -107,6 +134,7 @@ int main() {
     CheckAutoRedirect(context);
     CheckNonblock(context);
     CheckAcceptEncodingGzip(context);
+    CheckEpoll(context);
     Require(sceHttpTerm_nid_postfix(context) == 0, "sceHttpTerm failed");
     Require(sceHttpSetDefaultAcceptEncodingGZIPEnabled(context, 1) == static_cast<int>(0x80431001u), "a gzip default was taken before sceHttpInit");
     std::puts("HTTP option tests passed");
