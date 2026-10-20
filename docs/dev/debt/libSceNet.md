@@ -10,7 +10,6 @@
 - [sceNetClearDnsCache](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the library has no DNS cache to clear because lookups use the host resolver. The host resolver cache is left unchanged.
 - [sceNetGetStatisticsInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetInterfaceStats](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSetDnsInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowIfconfigWithMemory](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowPolicy](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowPolicyWithMemory](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -21,7 +20,6 @@
 - [sceNetResolverConnect](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetResolverConnectDestroy](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetSockInfo6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSetDns6Info](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetShowRoute6WithMemory](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetAllocateAllRouteInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetAllocateAllRouteInfo6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -45,7 +43,6 @@
 - [sceNetGetSystemMemInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetInitParam](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetInetPtonEx](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the `(int af, const char* src, void* dst, int flags)` signature follows [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/net/net.cpp); IPv4 conversion and the ignored flags follow PS4 firmware 10.71, not yet confirmed on PS5. There IPv4 text is read as `inet_aton` reads it (`a`, `a.b`, `a.b.c`, hex and octal parts, values wrapping at 32 bits, the text ending at the first space, tab or VT), except that a part starting with `09` is decimal (`"0989"` is 989) and an octal part with `8` or `9` fails. Flags 0, each single bit up to 0x100, 0x10000, 0x80000000 and -1 gave the same results; other values were not measured. LF, FF and CR as terminators, and `NET_EINVAL` for a null `src` or `dst`, follow `sceNetInetPton` and were not measured for this function. IPv6 converts as `sceNetInetPton` does.
-- [sceNetSetDnsInfoToKernel](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetThreadCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddIfaddr](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - disassembly confirms the same interface/address/broadcast/netmask arguments as SetIfaddr, entering its shared handler with add mode selected. GetIfaddr copies up to two 16-byte interface-address records. GetRouteInfo uses a family, record buffer, signed capacity and byte flags; internal statistics output is 16 bytes. The address-record and internal-statistics fields remain incomplete.
 
@@ -60,8 +57,6 @@
 - [sceNetThreadExit](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetInetNtopWithScopeId](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetInetPtonWithScopeId](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetGetDns6Info](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSetDns6InfoToKernel](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigSetIfLinkLocalAddr6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigCleanUpAllInterfaces](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddIfaddr](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature

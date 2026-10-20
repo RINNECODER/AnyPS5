@@ -2146,7 +2146,7 @@ int APS5_VABI sceNetGetInterfaceStats(NetInterfaceStats* stats, std::uint32_t fl
     return 0;
 }
 
-int APS5_VABI sceNetSetDnsInfo(void) {
+int APS5_VABI sceNetSetDnsInfo(const NetDnsInfo* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2200,7 +2200,7 @@ int APS5_VABI sceNetGetSockInfo6(std::int32_t socket, NetSockInfo6* info, std::u
     return 0;
 }
 
-int APS5_VABI sceNetSetDns6Info(void) {
+int APS5_VABI sceNetSetDns6Info(const NetDns6Info* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2269,7 +2269,7 @@ int APS5_VABI sceNetGetAppMemInfo(NetAppMemoryInfo* info, std::uint32_t flags) {
     return 0;
 }
 
-int APS5_VABI sceNetGetDnsInfo(std::uint32_t* info, int flags) {
+int APS5_VABI sceNetGetDnsInfo(NetDnsInfo* info, std::uint32_t flags) {
     if (flags != 0) throw std::runtime_error("sceNetGetDnsInfo: flags " + std::to_string(flags) + " are not supported");
     if (!info) throw std::runtime_error("sceNetGetDnsInfo: a null info is not supported");
     std::array<std::uint32_t, 2> servers{};
@@ -2388,7 +2388,7 @@ void APS5_VABI sceNetMemoryFree(void* memory) {
     GuestHeap::GuestHeapFree_nid_postfix(memory);
 }
 
-int APS5_VABI sceNetSetDnsInfoToKernel(void) {
+int APS5_VABI sceNetSetDnsInfoToKernel(const NetDnsInfo* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2488,12 +2488,12 @@ int APS5_VABI sceNetInetPtonWithScopeId(std::int32_t family, const char* text, v
     return 0;
 }
 
-int APS5_VABI sceNetGetDns6Info(void) {
+int APS5_VABI sceNetGetDns6Info(NetDns6Info* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetSetDns6InfoToKernel(void) {
+int APS5_VABI sceNetSetDns6InfoToKernel(const NetDns6Info* info, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
