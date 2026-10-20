@@ -10,12 +10,7 @@
 - [sceNetCtlGetInfo](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - answers from the host interface that holds an IPv4 address, preferring the one that carries the default route: its address, netmask, gateway, MTU and first two IPv4 DNS servers. The device is reported as wired, the link as connected, the IP configuration as DHCP and the HTTP proxy as off, whatever the host uses, and the Ethernet address is the one `sceNetGetMacAddress` reports. A gateway or DNS server the interface does not have is reported as `0.0.0.0`; what a console reports then is unknown. The DHCP host name (12), the PPPoE user name (13), the HTTP proxy server (20) and the Wi-Fi BSSID and SSID (5, 6) are empty strings, as that configuration sets none of them; the remaining Wi-Fi codes (7-10) and the HTTP proxy port (21) report 0; this follows [KytyPS5](https://github.com/KytyPS5/KytyPS5/blob/main/src/libs/network.cpp) and is not measured on hardware
 - [sceNetCtlCheckCallbackForNpToolkit](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlCheckCallbackForLibIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlGetResultIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlGetStateIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlGetState2IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetInfoIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlGetEtherLinkMode](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlGetWifiType](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlConnectIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlConnectWithRetryIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlConnectConfIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
@@ -26,11 +21,8 @@
 - [sceNetCtlGetScanInfoForSsidScanIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetScanInfoBssidForSsidListScanIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetScanInfoForSsidListScanIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlSetErrorNotificationEnabledIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetResultV6](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetResultV6](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl, NID `H5yARg37U5g`) - `(int eventType, int* errorCode)` comes only from [SharpProspero](https://github.com/SvenGDK/SharpProspero/blob/5dfdb4b0b166e83dc9ae275001afb695f12c7174/src/SharpProspero/Interop/Net/NetCtl.cs#L246-L251), whose source is unknown; shadPS4 only stubs it. Callbacks registered with `sceNetCtlRegisterCallbackV6` receive no event, so event types 1-3 write 0 to `errorCode`; what a console writes before the first event is unmeasured. A null `errorCode` answers `INVALID_ADDR`, as `sceNetCtlGetResult` does, and other event types throw, as their error code on a console is unknown
-- [sceNetCtlGetResultV6IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlGetStateV6IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetInfoV6IpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetNatInfoIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlSetStunWithPaddingFlagIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
@@ -40,7 +32,6 @@
 - [sceNetCtlEnableBandwidthManagementIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetBandwidthInfoIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetNetEvConfigInfoIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlGetConnectionElapsedTimeIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlScanIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - argument registers and IPC transfer directions are recovered for the info, connection, scan, NAT, bandwidth and Wi-Fi queries. The connection configuration is 1464 bytes, scan options 88, BSSID output 96, scan info 112, IPv6 info 256, internal NAT info 196, bandwidth info 32, bandwidth-estimation info 28 and Wi-Fi info 48. Their field semantics still require the receiving service; incomplete declarations preserve this gap. Scan queries transfer a six-byte BSSID and use a 64-bit in/out buffer size.
 
 - [sceNetCtlGetInfo](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - answers from the host interface that holds an IPv4 address, preferring the one that carries the default route: its address, netmask, gateway, MTU and first two IPv4 DNS servers. The device is reported as wired, the link as connected, the IP configuration as DHCP and the HTTP proxy as off, whatever the host uses, and the Ethernet address is the one `sceNetGetMacAddress` reports. A gateway or DNS server the interface does not have is reported as `0.0.0.0`; what a console reports then is unknown. The DHCP host name (12), the PPPoE user name (13), the HTTP proxy server (20) and the Wi-Fi BSSID and SSID (5, 6) are empty strings, as that configuration sets none of them; the remaining Wi-Fi codes (7-10) and the HTTP proxy port (21) report 0; this follows [KytyPS5](https://github.com/KytyPS5/KytyPS5/blob/main/src/libs/network.cpp) and is not measured on hardware
