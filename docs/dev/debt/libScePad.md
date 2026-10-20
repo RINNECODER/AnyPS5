@@ -19,7 +19,6 @@
 - [scePadDeviceOpen](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetDataInternal](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadSetLightBarBlinking](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadGetCapability](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadShareOutputData](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadShareOutputDataWithFunctionType](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetVersionInfo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
@@ -44,10 +43,8 @@
 - [scePadResetLeonardo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetTelemetryInfo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetInfoByPortType](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadSetLightBarForTracker](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadReadForTracker](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadReadBlasterForTracker](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
-- [scePadGetBluetoothAddress](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadReadAstonForTracker](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetAstonModel](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadMbusInit](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature

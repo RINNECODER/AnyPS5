@@ -462,7 +462,7 @@ int APS5_VABI scePadSetLoginUserNumber(std::int32_t number) {
     return 0;
 }
 
-int APS5_VABI scePadGetCapability(void) {
+int APS5_VABI scePadGetCapability(std::int32_t deviceId, std::uint32_t* capability) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -782,7 +782,7 @@ int APS5_VABI scePadResetLightBarAllByPortType(std::uint32_t portType) {
     return 0;
 }
 
-int APS5_VABI scePadSetLightBarForTracker(void) {
+int APS5_VABI scePadSetLightBarForTracker(std::int32_t handle, const PadLightBarParam* color) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -842,7 +842,7 @@ bool APS5_VABI scePadIsMoveConnected(std::int32_t handle) {
     return 0;
 }
 
-int APS5_VABI scePadGetBluetoothAddress(void) {
+int APS5_VABI scePadGetBluetoothAddress(std::int32_t handle, std::uint64_t* address) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
