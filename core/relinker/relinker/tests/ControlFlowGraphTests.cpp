@@ -249,6 +249,16 @@ void CheckRelativeJumpTables() {
     nonPadding.back() = 0x55;
     Require(Relinker::FindTrailingRelativeJumpTable(nonPadding) == nonPadding.size(), "Table followed by non-padding bytes was accepted");
 
+    Bytes codeAfter = text;
+    codeAfter.resize(48, 0xcc);
+    codeAfter[32] = 0x55;
+    codeAfter[33] = 0x5d;
+    codeAfter[34] = 0xc3;
+    std::size_t tableEnd = 0;
+    Require(Relinker::FindTrailingRelativeJumpTable(codeAfter, TextAddress, &tableEnd) == tableOffset && tableEnd == 32, "Table padded to 16 bytes before more code was not found");
+    const std::vector<std::pair<VirtualAddress, VirtualAddress>> codeAfterFunctions{{TextAddress, TextAddress + 9}, {TextAddress + codeAfter.size(), TextAddress + codeAfter.size() + 8}};
+    const auto codeAfterTables = Relinker::FindRelativeJumpTables(codeAfter, TextAddress, codeAfterFunctions);
+    Require(codeAfterTables.size() == 1 && codeAfterTables[0].Begin == TextAddress + tableOffset && codeAfterTables[0].End == TextAddress + 32, "Table before more code did not end at its padding");
 }
 
 }
