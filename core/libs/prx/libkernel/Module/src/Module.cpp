@@ -251,9 +251,6 @@ int APS5_VABI __elf_phdr_match_addr_nid_postfix(dl_phdr_info* phdrInfo, void* ad
     if (phdrInfo == nullptr) throw std::invalid_argument("__elf_phdr_match_addr: phdr_info is null");
     const auto address = reinterpret_cast<std::uintptr_t>(addr);
 
-    // Some guest libc callers pass the ModuleInfoEx returned by
-    // sceKernelGetModuleInfoFromAddr instead of a host dl_phdr_info. Its
-    // segment records contain the already-relocated addresses and permissions.
     const auto* module = reinterpret_cast<const ModuleInfoEx*>(phdrInfo);
     if (module->st_size == sizeof(ModuleInfoEx)) {
         for (std::uint32_t i = 0; i < module->segment_count && i < std::size(module->segments); ++i) {

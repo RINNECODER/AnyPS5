@@ -43,8 +43,6 @@ int main() {
     info.dlpi_phnum = 0;
     Require(__elf_phdr_match_addr_nid_postfix(&info, Address(0x403800)) == 0);
 
-    // Some guest libc builds pass the ModuleInfoEx returned by
-    // sceKernelGetModuleInfoFromAddr, not a host dl_phdr_info.
     ModuleInfoEx module{};
     module.st_size = sizeof(module);
     module.segment_count = 3;
