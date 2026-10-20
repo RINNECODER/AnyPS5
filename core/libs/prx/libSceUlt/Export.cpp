@@ -261,6 +261,33 @@ int APS5_VABI sceUltMutexLock(void* mutex) {
     return ULT_OK;
 }
 
+int APS5_VABI sceUltMutexTryLock(void* mutex) {
+    std::shared_ptr<UltMutexState> state;
+    {
+        std::lock_guard<std::mutex> lock(gMutex);
+        auto it = gMutexes.find(mutex);
+        if (it == gMutexes.end()) {
+            return mutex == nullptr ? ULT_ERROR_NULL : ULT_ERROR_STATE;
+        }
+        state = it->second;
+    }
+    const auto self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(state->_mutex);
+    if (!state->_alive) {
+        return ULT_ERROR_STATE;
+    }
+    if (state->_owner == self) {
+        ++state->_lockCount;
+        return ULT_OK;
+    }
+    if (state->_lockCount != 0) {
+        return ULT_ERROR_BUSY;
+    }
+    state->_owner = self;
+    state->_lockCount = 1;
+    return ULT_OK;
+}
+
 int APS5_VABI sceUltMutexUnlock(void* mutex) {
     std::shared_ptr<UltMutexState> state;
     {
@@ -862,11 +889,6 @@ int APS5_VABI sceUltGetUlthreadRuntimeInfo() {
 }
 
 int APS5_VABI sceUltGetWaitingQueueResourcePoolInfo() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltMutexTryLock() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
