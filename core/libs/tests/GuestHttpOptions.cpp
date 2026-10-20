@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 
 extern "C" {
 int APS5_VABI sceHttpInit_nid_postfix(int, int, std::uint64_t);
@@ -27,6 +28,10 @@ int APS5_VABI sceHttpDestroyEpoll(int, HttpEpollHandle);
 int APS5_VABI sceHttpSetEpoll(int, HttpEpollHandle, void*);
 int APS5_VABI sceHttpUnsetEpoll(int);
 int APS5_VABI sceHttpGetEpoll(int, HttpEpollHandle*, void**);
+int APS5_VABI sceHttpCacheRedirectedConnectionEnabled(int, int);
+int APS5_VABI sceHttpsEnableOptionPrivate(int, std::uint32_t);
+int APS5_VABI sceHttpsDisableOptionPrivate(int, std::uint32_t);
+int APS5_VABI sceHttpAbortRequestForce(int);
 }
 
 namespace {
@@ -126,6 +131,23 @@ void CheckEpoll(int context) {
     Require(sceHttpDestroyEpoll(context, epoll) == 0, "sceHttpDestroyEpoll failed");
 }
 
+void CheckUnobservedOptions(int context) {
+    const int pattern = sceHttpCreateTemplate(context, "anyps5-test", 2, 0);
+    const int connection = sceHttpCreateConnectionWithURL(pattern, "http://example.com/", 1);
+    const int request = sceHttpCreateRequestWithURL(connection, 0, "http://example.com/a", 0);
+    Require(sceHttpCacheRedirectedConnectionEnabled(pattern, 0) == 0 && sceHttpCacheRedirectedConnectionEnabled(request, 1) == 0, "sceHttpCacheRedirectedConnectionEnabled refused a live object");
+    Require(sceHttpCacheRedirectedConnectionEnabled(UnknownId, 1) == InvalidId, "sceHttpCacheRedirectedConnectionEnabled took an unknown id");
+    for (const auto option : {sceHttpsEnableOptionPrivate, sceHttpsDisableOptionPrivate}) {
+        Require(option(connection, 0x2dffu) == 0 && option(connection, 0) == 0, "a private SSL option within the mask was refused");
+        Require(option(connection, 0x0100u) == 0 && option(connection, 0x2000u) == 0, "a private-only SSL flag was refused");
+        Require(option(connection, 0x0200u) == InvalidValue && option(connection, 0x4000u) == InvalidValue, "an SSL flag outside the private mask was taken");
+        Require(option(UnknownId, 0x0200u) == InvalidValue, "the SSL flags are not checked before the id");
+        Require(option(UnknownId, 0x01u) == InvalidId, "a private SSL option took an unknown id");
+    }
+    Require(sceHttpAbortRequestForce(request) == 0, "sceHttpAbortRequestForce failed on a live request");
+    Require(sceHttpDeleteRequest(request) == 0 && sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(pattern) == 0, "delete failed");
+}
+
 }
 
 int main() {
@@ -135,6 +157,7 @@ int main() {
     CheckNonblock(context);
     CheckAcceptEncodingGzip(context);
     CheckEpoll(context);
+    CheckUnobservedOptions(context);
     Require(sceHttpTerm_nid_postfix(context) == 0, "sceHttpTerm failed");
     Require(sceHttpSetDefaultAcceptEncodingGZIPEnabled(context, 1) == static_cast<int>(0x80431001u), "a gzip default was taken before sceHttpInit");
     std::puts("HTTP option tests passed");

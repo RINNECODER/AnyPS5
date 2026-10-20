@@ -1,10 +1,13 @@
 #include "prx/libSceHttp/src/Options.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceHttp/src/HttpErrors.hpp"
+#include <cstdint>
 #include <mutex>
 #include <unordered_map>
 
 namespace {
+
+constexpr std::uint32_t PrivateSslFlags = 0x2dffu;
 
 std::mutex g_optionsMutex;
 std::unordered_map<int, bool> g_contextAcceptEncodingGzip;
@@ -113,6 +116,20 @@ int APS5_VABI sceHttpGetEpoll(int id, HttpEpollHandle* epoll, void** argument) {
     *epoll = options->epoll;
     if (argument) *argument = options->epollArgument;
     return 0;
+}
+
+int APS5_VABI sceHttpCacheRedirectedConnectionEnabled(int id, int enable) {
+    (void)enable;
+    return FindHttpOptions(id) ? 0 : ERROR_INVALID_ID;
+}
+
+int APS5_VABI sceHttpsEnableOptionPrivate(int id, std::uint32_t sslFlags) {
+    if ((sslFlags & ~PrivateSslFlags) != 0) return ERROR_INVALID_VALUE;
+    return FindHttpOptions(id) ? 0 : ERROR_INVALID_ID;
+}
+
+int APS5_VABI sceHttpsDisableOptionPrivate(int id, std::uint32_t sslFlags) {
+    return sceHttpsEnableOptionPrivate(id, sslFlags);
 }
 
 }
