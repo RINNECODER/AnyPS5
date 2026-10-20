@@ -274,15 +274,14 @@ std::int32_t APS5_VABI sceAudioPropagationSourceGetRays(AudioPropagationHandle s
     return 0;
 }
 
-std::int32_t APS5_VABI sceAudioPropagationSourceCalculateAudioPaths(AudioPropagationHandle source, const void* rays, std::uint32_t rayCount, std::uint32_t flags, void* paths, std::uint32_t pathCount) {
+std::int32_t APS5_VABI sceAudioPropagationSourceCalculateAudioPaths(AudioPropagationHandle source, const void* rays, std::uint32_t rayCount, std::uint32_t reflectionOrder, void* paths, std::uint32_t pathCount) {
     auto& state = registry();
     std::lock_guard lock(state.mutex);
-    requireObject(state, source, Kind::Source, __func__);
-    static_cast<void>(rays);
-    static_cast<void>(flags);
-    static_cast<void>(paths);
-    requireNoPropagation(rayCount == 0 && pathCount == 0, __func__);
-    return 0;
+    const auto found = state.objects.find(source);
+    if (found == state.objects.end() || found->second.kind != Kind::Source || !liveSystem(state, found->second.system)) return ErrorInvalidHandle;
+    if (!rays || !paths) return ErrorNullPointer;
+    if (rayCount != 6 || reflectionOrder == 0 || pathCount == 0) return ErrorInvalidArgument;
+    throw std::runtime_error(__func__);
 }
 
 std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPaths(AudioPropagationHandle source, const void* entries, std::uint32_t count) {
