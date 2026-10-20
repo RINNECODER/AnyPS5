@@ -20,6 +20,10 @@ constexpr int ULT_ERROR_STATE = -2139029498;
 constexpr int ULT_ERROR_BUSY = -2139029497;
 constexpr int ULT_ERROR_AGAIN = -2139029496;
 
+struct UltOptParam {
+    std::uint8_t bytes[128];
+};
+
 struct UltMutexState {
     std::mutex _mutex;
     std::condition_variable _available;

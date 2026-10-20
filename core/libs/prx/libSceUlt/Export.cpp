@@ -108,6 +108,14 @@ void ReleaseQueue(UltQueueState& state) {
     --pool._queues;
 }
 
+int InitializeOptParam(UltOptParam* optParam) {
+    if (optParam == nullptr) {
+        return ULT_ERROR_NULL;
+    }
+    std::memset(optParam, 0, sizeof(*optParam));
+    return ULT_OK;
+}
+
 void* APS5_VABI ulthreadRunner(void* arg) {
     auto* state = static_cast<UltUlthreadState*>(arg);
     const auto result = state->_entry(state->_arg);
@@ -182,6 +190,31 @@ int APS5_VABI sceUltMutexOptParamInitialize(UltMutexOptParam* optParam, std::uin
     }
     std::memset(optParam, 0, sizeof(*optParam));
     return ULT_OK;
+}
+
+int APS5_VABI sceUltSemaphoreOptParamInitialize(UltOptParam* optParam, std::uint32_t buildVersion) {
+    (void)buildVersion;
+    return InitializeOptParam(optParam);
+}
+
+int APS5_VABI sceUltQueueOptParamInitialize(UltOptParam* optParam, std::uint32_t buildVersion) {
+    (void)buildVersion;
+    return InitializeOptParam(optParam);
+}
+
+int APS5_VABI sceUltQueueDataResourcePoolOptParamInitialize(UltOptParam* optParam, std::uint32_t buildVersion) {
+    (void)buildVersion;
+    return InitializeOptParam(optParam);
+}
+
+int APS5_VABI sceUltWaitingQueueResourcePoolOptParamInitialize(UltOptParam* optParam, std::uint32_t buildVersion) {
+    (void)buildVersion;
+    return InitializeOptParam(optParam);
+}
+
+int APS5_VABI sceUltUlthreadOptParamInitialize(UltOptParam* optParam, std::uint32_t buildVersion) {
+    (void)buildVersion;
+    return InitializeOptParam(optParam);
 }
 
 int APS5_VABI sceUltMutexCreate(void* mutex, const char* name, void* waitingQueueResourcePool, const UltMutexOptParam* optParam, std::uint32_t buildVersion) {
@@ -1013,37 +1046,12 @@ int APS5_VABI sceUltConditionVariableOptParamInitialize() {
     return 0;
 }
 
-int APS5_VABI sceUltQueueDataResourcePoolOptParamInitialize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltQueueOptParamInitialize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceUltReaderWriterLockCreate() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
 int APS5_VABI sceUltReaderWriterLockOptParamInitialize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltSemaphoreOptParamInitialize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltUlthreadOptParamInitialize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltWaitingQueueResourcePoolOptParamInitialize() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

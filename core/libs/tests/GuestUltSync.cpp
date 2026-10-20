@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <thread>
 
 extern "C" {
@@ -14,6 +15,11 @@ int APS5_VABI sceUltMutexLock(void*);
 int APS5_VABI sceUltMutexTryLock(void*);
 int APS5_VABI sceUltMutexUnlock(void*);
 int APS5_VABI sceUltMutexDestroy(void*);
+int APS5_VABI sceUltSemaphoreOptParamInitialize(void*, std::uint32_t);
+int APS5_VABI sceUltQueueOptParamInitialize(void*, std::uint32_t);
+int APS5_VABI sceUltQueueDataResourcePoolOptParamInitialize(void*, std::uint32_t);
+int APS5_VABI sceUltWaitingQueueResourcePoolOptParamInitialize(void*, std::uint32_t);
+int APS5_VABI sceUltUlthreadOptParamInitialize(void*, std::uint32_t);
 }
 
 namespace {
@@ -62,12 +68,26 @@ void MutexTryLock() {
     CHECK(sceUltMutexTryLock(&mutex) == State);
 }
 
+void OptParams() {
+    using Initializer = int (APS5_VABI *)(void*, std::uint32_t);
+    for (const Initializer initialize : {sceUltSemaphoreOptParamInitialize, sceUltQueueOptParamInitialize, sceUltQueueDataResourcePoolOptParamInitialize,
+                                         sceUltWaitingQueueResourcePoolOptParamInitialize, sceUltUlthreadOptParamInitialize}) {
+        std::uint8_t bytes[136];
+        std::memset(bytes, 0xa5, sizeof(bytes));
+        CHECK(initialize(nullptr, 0) == Null);
+        CHECK(initialize(bytes, 0) == Ok);
+        for (std::size_t index = 0; index < 128; ++index) CHECK(bytes[index] == 0);
+        for (std::size_t index = 128; index < sizeof(bytes); ++index) CHECK(bytes[index] == 0xa5);
+    }
+}
+
 }
 
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
     CHECK(sceUltInitialize() == Ok);
     if (std::strcmp(argv[1], "mutex-trylock") == 0) MutexTryLock();
+    else if (std::strcmp(argv[1], "opt-params") == 0) OptParams();
     else return 2;
     CHECK(sceUltFinalize() == Ok);
     std::puts("ULT sync tests passed");
