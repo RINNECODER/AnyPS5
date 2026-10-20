@@ -26,3 +26,5 @@
 - [Font graphics fill and transform signatures](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp): region layout and scalar float arguments are confirmed from assembly, including the extra 32-bit corner flags omitted by the roundish-region decompilation. Fill-method, plot and rates layouts, layout selector meanings and mapping parameter meanings remain unresolved. Protected bodies are unchanged.
 
 Frame lifecycle, drawing completion, device usage, frame policy, clipping and fill setup/update argument signatures in [Unimplemented.cpp](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp) are recovered. Device usage, frame and resource layouts remain opaque; their runtime implementation is still unavailable.
+
+Glyph image rendering uses six pointer arguments and two scalar coordinates, with existing style, surface, metrics and output layouts. Positioning takes a mask and two floats. Control, word-character search and resource release/exchange/render signatures in [Unimplemented.cpp](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp) are recovered; control payload types depend on the command and remain unmodeled.
