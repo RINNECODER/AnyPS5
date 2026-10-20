@@ -9,6 +9,7 @@ struct FontGraphicsDeviceParam;
 struct FontGraphicsService;
 struct FontGraphicsServiceParam;
 struct FontWords;
+struct FontGlyphSupport;
 struct FontOutlineProfile;
 struct FontMetrics;
 struct FontStyleInformation;
@@ -463,7 +464,7 @@ int APS5_VABI sceFontGraphicsUpdateShapeFillPlot(FontGraphicsResource* resource,
     return 0;
 }
 
-int APS5_VABI sceFontSupportGlyphs() {
+int APS5_VABI sceFontSupportGlyphs(const FontGlyphSupport* support) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -473,7 +474,7 @@ int APS5_VABI sceFontWordsFindWordCharacters(FontWords* words, FontTextCharacter
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsDrawupFillTextureImageObject(void) {
+int APS5_VABI sceFontGraphicsDrawupFillTextureImageObject(FontGraphicsFrame* frame, const void* data, std::uint32_t dataSize, float x, float y, float width, float height, FontGraphicsFill** fill) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
