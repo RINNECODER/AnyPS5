@@ -2,8 +2,10 @@
 #include <bit>
 #include <cerrno>
 #include <cfenv>
+#include <cfloat>
 #include <climits>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -206,6 +208,20 @@ long double APS5_VABI truncl_nid_postfix(long double);
 long double APS5_VABI nearbyintl_nid_postfix(long double);
 double APS5_VABI logb_nid_postfix(double);
 double APS5_VABI remainder_nid_postfix(double, double);
+struct DinkumwareFloatCharacteristics {
+    int digits;
+    int mantissaDigits;
+    int maxExponent10;
+    int maxExponent;
+    int minExponent10;
+    int minExponent;
+    alignas(16) unsigned char epsilon[16];
+    alignas(16) unsigned char max[16];
+    alignas(16) unsigned char min[16];
+};
+extern DinkumwareFloatCharacteristics _Flt_nid_postfix;
+extern DinkumwareFloatCharacteristics _Dbl_nid_postfix;
+extern DinkumwareFloatCharacteristics _Ldbl_nid_postfix;
 }
 static void Require(bool value) { if (!value) std::abort(); }
 
@@ -1243,6 +1259,32 @@ void CheckNoConversionIsPositiveZero() {
     Require(parsedWideLong == 0.L && !std::signbit(parsedWideLong) && wideEnd == wide);
 }
 
+template<typename TValue, std::size_t TBytes>
+static void RequireCharacteristic(const unsigned char (&constant)[16], TValue expected) {
+    TValue value;
+    std::memcpy(&value, constant, sizeof(value));
+    Require(value == expected);
+    for (std::size_t index = TBytes; index < 16; ++index) Require(constant[index] == 0);
+}
+
+template<typename TValue, std::size_t TBytes>
+static void RequireCharacteristics(const DinkumwareFloatCharacteristics& table, const int (&integers)[6]) {
+    const int fields[] = {table.digits, table.mantissaDigits, table.maxExponent10, table.maxExponent, table.minExponent10, table.minExponent};
+    for (int index = 0; index < 6; ++index) Require(fields[index] == integers[index]);
+    RequireCharacteristic<TValue, TBytes>(table.epsilon, std::numeric_limits<TValue>::epsilon());
+    RequireCharacteristic<TValue, TBytes>(table.max, std::numeric_limits<TValue>::max());
+    RequireCharacteristic<TValue, TBytes>(table.min, std::numeric_limits<TValue>::min());
+}
+
+static void CheckDinkumwareFloatCharacteristics() {
+    static_assert(sizeof(DinkumwareFloatCharacteristics) == 80 && offsetof(DinkumwareFloatCharacteristics, epsilon) == 32);
+    RequireCharacteristics<float, 4>(_Flt_nid_postfix, {FLT_DIG, FLT_MANT_DIG, FLT_MAX_10_EXP, FLT_MAX_EXP, FLT_MIN_10_EXP, FLT_MIN_EXP});
+    RequireCharacteristics<double, 8>(_Dbl_nid_postfix, {DBL_DIG, DBL_MANT_DIG, DBL_MAX_10_EXP, DBL_MAX_EXP, DBL_MIN_10_EXP, DBL_MIN_EXP});
+    RequireCharacteristics<long double, 10>(_Ldbl_nid_postfix, {18, 64, 4932, 16384, -4931, -16381});
+    for (const auto* table : {&_Flt_nid_postfix, &_Dbl_nid_postfix, &_Ldbl_nid_postfix})
+        for (std::size_t index = 24; index < 32; ++index) Require(reinterpret_cast<const unsigned char*>(table)[index] == 0);
+}
+
 int main() {
     CheckFloatClassification();
     CheckDinkumwareConstants();
@@ -1536,4 +1578,5 @@ int main() {
     CheckIntegerAbsAndDivision();
     CheckScaling();
     CheckLongDoubleFunctions();
+    CheckDinkumwareFloatCharacteristics();
 }
