@@ -23,7 +23,6 @@ constexpr int VideodecErrorDecodeAu = static_cast<int>(0x80C10011);
 
 constexpr std::uint32_t CodecAvc = 1;
 constexpr std::uint32_t PitchAlignment = 64;
-constexpr std::uint32_t SizeAlignment = 16;
 
 struct ConfigInfo {
     std::uint64_t thisSize;
@@ -191,13 +190,6 @@ std::uint32_t AlignUp(std::uint32_t value, std::uint32_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
 
-std::uint32_t CodedSize(std::uint32_t size, std::uint32_t before, std::uint32_t after) {
-    const auto total = size + before + after;
-    if (total % SizeAlignment == 0) return total;
-    if (size % SizeAlignment == 0) return size;
-    return AlignUp(total, SizeAlignment);
-}
-
 }
 
 extern "C" {
@@ -214,22 +206,18 @@ void Videodec2PictureCrop_nid_no_patch(std::uint64_t, const void*, Decoder2Crop*
 namespace {
 
 struct Geometry {
-    std::uint32_t visibleWidth = 0;
-    std::uint32_t visibleHeight = 0;
-    std::uint32_t codedWidth = 0;
-    std::uint32_t codedHeight = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
     std::uint32_t pitch = 0;
     Decoder2Crop crop{};
 };
 
 Geometry Measure(const Decoder2OutputInfo& output, const Decoder2Crop& crop) {
     Geometry geometry;
-    geometry.visibleWidth = output.frameWidth;
-    geometry.visibleHeight = output.frameHeight;
+    geometry.width = output.frameWidth;
+    geometry.height = output.frameHeight;
     geometry.crop = crop;
-    geometry.codedWidth = CodedSize(output.frameWidth, crop.left, crop.right);
-    geometry.codedHeight = CodedSize(output.frameHeight, crop.top, crop.bottom);
-    geometry.pitch = AlignUp(geometry.codedWidth, PitchAlignment);
+    geometry.pitch = AlignUp(geometry.width, PitchAlignment);
     return geometry;
 }
 
@@ -245,9 +233,9 @@ void FillPictureInfo(const Geometry& geometry, const Decoder2OutputInfo& output,
     std::memset(picture->codec.reserved, 0, sizeof(picture->codec.reserved));
     if (!output.isValid) return;
     picture->isValid = 1;
-    picture->frameWidth = geometry.codedWidth;
+    picture->frameWidth = geometry.width;
     picture->framePitch = geometry.pitch;
-    picture->frameHeight = geometry.codedHeight;
+    picture->frameHeight = geometry.height;
     picture->isErrorPic = output.isErrorFrame ? 1 : 0;
     picture->codec.avc.frameCropLeftOffset = geometry.crop.left / 2;
     picture->codec.avc.frameCropRightOffset = geometry.crop.right / 2;
@@ -256,22 +244,18 @@ void FillPictureInfo(const Geometry& geometry, const Decoder2OutputInfo& output,
 }
 
 int CopyPicture(const Decoder2OutputInfo& output, const Geometry& geometry, const FrameBuffer* frameBuffer) {
-    const auto bytes = static_cast<std::uint64_t>(geometry.pitch) * geometry.codedHeight * 3 / 2;
+    const auto bytes = static_cast<std::uint64_t>(geometry.pitch) * geometry.height * 3 / 2;
     if (frameBuffer->frameBuffer == nullptr) return VideodecErrorFrameBufferPointer;
     if (frameBuffer->frameBufferSize < bytes) return VideodecErrorFrameBufferSize;
     const auto sourcePitch = static_cast<std::uint64_t>(output.framePitchInBytes);
     const auto* source = static_cast<const std::uint8_t*>(output.frameBuffer);
     auto* destination = static_cast<std::uint8_t*>(frameBuffer->frameBuffer);
-    for (std::uint32_t row = 0; row < geometry.visibleHeight; ++row)
-        std::memcpy(destination + static_cast<std::uint64_t>(row) * geometry.pitch, source + static_cast<std::uint64_t>(row) * sourcePitch, geometry.visibleWidth);
-    const auto* sourceChroma = source + sourcePitch * geometry.visibleHeight;
-    auto* destinationChroma = destination + static_cast<std::uint64_t>(geometry.pitch) * geometry.codedHeight;
-    for (std::uint32_t row = 0; row < geometry.visibleHeight / 2; ++row)
-        std::memcpy(destinationChroma + static_cast<std::uint64_t>(row) * geometry.pitch, sourceChroma + static_cast<std::uint64_t>(row) * sourcePitch, geometry.visibleWidth);
-    for (std::uint32_t row = geometry.visibleHeight; row < geometry.codedHeight; ++row)
-        std::memcpy(destination + static_cast<std::uint64_t>(row) * geometry.pitch, destination + static_cast<std::uint64_t>(geometry.visibleHeight - 1) * geometry.pitch, geometry.visibleWidth);
-    for (std::uint32_t row = geometry.visibleHeight / 2; row < geometry.codedHeight / 2; ++row)
-        std::memcpy(destinationChroma + static_cast<std::uint64_t>(row) * geometry.pitch, destinationChroma + static_cast<std::uint64_t>(geometry.visibleHeight / 2 - 1) * geometry.pitch, geometry.visibleWidth);
+    for (std::uint32_t row = 0; row < geometry.height; ++row)
+        std::memcpy(destination + static_cast<std::uint64_t>(row) * geometry.pitch, source + static_cast<std::uint64_t>(row) * sourcePitch, geometry.width);
+    const auto* sourceChroma = source + sourcePitch * geometry.height;
+    auto* destinationChroma = destination + static_cast<std::uint64_t>(geometry.pitch) * geometry.height;
+    for (std::uint32_t row = 0; row < geometry.height / 2; ++row)
+        std::memcpy(destinationChroma + static_cast<std::uint64_t>(row) * geometry.pitch, sourceChroma + static_cast<std::uint64_t>(row) * sourcePitch, geometry.width);
     return 0;
 }
 

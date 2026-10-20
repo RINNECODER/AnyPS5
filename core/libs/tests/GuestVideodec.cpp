@@ -133,9 +133,8 @@ struct Session {
     FrameBuffer MakeTarget() { return FrameBuffer{sizeof(FrameBuffer), buffer.data(), buffer.size()}; }
 };
 
-void testDecode() {
+void testDecode(const std::vector<std::vector<std::uint8_t>>& units, std::uint32_t cropTop, std::uint32_t cropBottom) {
     Session session;
-    const auto units = accessUnits(false);
     check(units.size() == PictureHashes.size(), "unexpected access unit count");
     std::vector<std::uint64_t> hashes;
     std::vector<std::uint64_t> timestamps;
@@ -144,7 +143,7 @@ void testDecode() {
         check(picture.framePitch == Pitch && picture.frameHeight == PictureHeight, "unexpected picture geometry");
         check(picture.frameWidth == Width, "unexpected picture width");
         check(picture.codecType == 0 && !picture.isErrorPic, "unexpected picture flags");
-        check(picture.codec.avc.frameCropBottomOffset == (CodedHeight - Height) / 2, "unexpected crop");
+        check(picture.codec.avc.frameCropTopOffset == cropTop && picture.codec.avc.frameCropBottomOffset == cropBottom, "unexpected crop");
         hashes.push_back(hashNv12(session.buffer.data(), Pitch, PictureHeight));
         timestamps.push_back(picture.ptsData);
     };
@@ -169,6 +168,15 @@ void testDecode() {
         const auto unit = DisplayOrderUnits[index];
         check(timestamps[index] == 1000 + unit, "pictures out of display order");
     }
+}
+
+void testDecode() {
+    testDecode(accessUnits(false), 0, (CodedHeight - Height) / 2);
+}
+
+void testDecodeCropped() {
+    const auto stream = croppedStream();
+    testDecode(accessUnits(stream.data(), stream.size(), false), 4, 4);
 }
 
 void testErrors() {
@@ -227,6 +235,7 @@ void testReset() {
 int main() {
     try {
         testDecode();
+        testDecodeCropped();
         testErrors();
         testReset();
         std::puts("Videodec tests passed");
