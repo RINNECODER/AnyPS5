@@ -10,6 +10,14 @@ static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_CONN_NOT_FOUND = static_cast
 static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE = static_cast<int>(0x80552D06);
 static std::atomic<uint32_t> g_nextContext{1};
 
+struct SessionSignalingInitParam {
+    std::int32_t userId;
+    std::uint64_t poolSize;
+    std::uint64_t affinityMask;
+    std::int32_t threadPriority;
+    std::uint64_t stackSize;
+};
+
 struct SessionSignalingMemoryInfo {
     std::uint64_t poolSize;
     std::uint64_t usedSize;
@@ -34,6 +42,11 @@ struct SessionSignalingGroupInfo {
 };
 
 static_assert(sizeof(SessionSignalingMemoryInfo) == 24);
+static_assert(sizeof(SessionSignalingInitParam) == 40);
+static_assert(offsetof(SessionSignalingInitParam, poolSize) == 8);
+static_assert(offsetof(SessionSignalingInitParam, affinityMask) == 16);
+static_assert(offsetof(SessionSignalingInitParam, threadPriority) == 24);
+static_assert(offsetof(SessionSignalingInitParam, stackSize) == 32);
 static_assert(offsetof(SessionSignalingMemoryInfo, usedSize) == 8);
 static_assert(offsetof(SessionSignalingMemoryInfo, peakUsedSize) == 16);
 static_assert(sizeof(SessionSignalingPeerAddress) == 16);
@@ -47,7 +60,7 @@ static_assert(offsetof(SessionSignalingGroupInfo, connectionCount) == 256);
 
 extern "C" {
 
-int APS5_VABI sceNpSessionSignalingInitialize(void* param) {
+int APS5_VABI sceNpSessionSignalingInitialize(const SessionSignalingInitParam* param) {
     (void)param;
     return 0;
 }
@@ -81,11 +94,11 @@ int APS5_VABI sceNpSessionSignalingGetConnectionInfo(void) {
     return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
-int APS5_VABI sceNpSessionSignalingActivateUser(void) {
+int APS5_VABI sceNpSessionSignalingActivateUser(std::uint32_t contextId, const SessionSignalingPeerAddress* peerAddress, std::uint32_t* connectionId) {
     return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
-int APS5_VABI sceNpSessionSignalingGetConnectionFromPeerAddress2(void) {
+int APS5_VABI sceNpSessionSignalingGetConnectionFromPeerAddress2(std::uint32_t contextId, std::uint32_t groupId, const SessionSignalingPeerAddress* peerAddress, std::uint32_t* connectionId) {
     return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
