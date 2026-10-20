@@ -66,8 +66,6 @@
 - [sceNetSetDns6InfoToKernel](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigSetIfLinkLocalAddr6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigCleanUpAllInterfaces](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigFlushRoute](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigFlushRoute6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigAddIfaddr](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigGetIfaddr](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetDhcpGetAutoipInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -79,11 +77,9 @@
 - [sceNetInfoDumpStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetDhcpdStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetDuplicateIpStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigWlanAdhocClearWakeOnWlan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocGetWakeOnWlanInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocJoin](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigWlanAdhocPspEmuClearWakeOnWlan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocPspEmuGetWakeOnWlanInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocPspEmuSetWakeOnWlan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanAdhocScanJoin](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -100,7 +96,6 @@
 - [sceNetConfigWlanInfraScanJoin](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanScan](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetConfigWlanSetDeviceConfig](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetConfigEtherPostPlugInOutEvent](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetPppoeStart](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetBandwidthControlSetDefaultParam](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetBandwidthControlGetDefaultParam](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
