@@ -7,6 +7,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <thread>
+#include <vector>
 
 extern "C" {
 int APS5_VABI sceUltInitialize();
@@ -32,6 +33,15 @@ int APS5_VABI sceUltReaderWriterLockUnlockRead(void*);
 int APS5_VABI sceUltReaderWriterLockLockWrite(void*);
 int APS5_VABI sceUltReaderWriterLockTryLockWrite(void*);
 int APS5_VABI sceUltReaderWriterLockUnlockWrite(void*);
+std::uint64_t APS5_VABI sceUltUlthreadRuntimeGetWorkAreaSize(std::uint32_t, std::uint32_t);
+int APS5_VABI sceUltUlthreadRuntimeCreate(void*, const char*, std::uint32_t, std::uint32_t, void*, const void*, std::uint32_t);
+int APS5_VABI sceUltUlthreadRuntimeDestroy(void*);
+int APS5_VABI sceUltUlthreadCreate(void*, const char*, UltUlthreadEntry, std::uint64_t, void*, std::uint64_t, void*, const void*, std::uint32_t);
+int APS5_VABI sceUltUlthreadJoin(void*, std::int32_t*);
+int APS5_VABI sceUltUlthreadTryJoin(void*, std::int32_t*);
+int APS5_VABI sceUltUlthreadGetSelf(void**);
+int APS5_VABI sceUltUlthreadYield();
+int APS5_VABI sceUltUlthreadExit(std::int32_t);
 }
 
 namespace {
@@ -239,6 +249,51 @@ void ReaderWriterFinalize() {
     CHECK(sceUltInitialize() == Ok);
 }
 
+struct alignas(8) UlthreadObject {
+    std::uint8_t bytes[512];
+};
+
+std::atomic<void*> gSelf{nullptr};
+std::atomic<int> gYield{-1};
+std::atomic<bool> gPastExit{false};
+
+std::int32_t APS5_VABI ExitingEntry(std::uint64_t status) {
+    void* self = nullptr;
+    if (sceUltUlthreadGetSelf(&self) == Ok) gSelf = self;
+    gYield = sceUltUlthreadYield();
+    sceUltUlthreadExit(static_cast<std::int32_t>(status));
+    gPastExit = true;
+    return -1;
+}
+
+void Ulthreads() {
+    void* self = &gSelf;
+    CHECK(sceUltUlthreadGetSelf(nullptr) == Null);
+    CHECK(sceUltUlthreadGetSelf(&self) == State && self == &gSelf);
+    CHECK(sceUltUlthreadYield() == State);
+    CHECK(sceUltUlthreadExit(1) == State);
+    std::vector<std::uint8_t> workArea(sceUltUlthreadRuntimeGetWorkAreaSize(2, 1));
+    Object runtime{};
+    CHECK(sceUltUlthreadRuntimeCreate(&runtime, "runtime", 2, 1, workArea.data(), nullptr, 0) == Ok);
+    UlthreadObject first{};
+    std::uint8_t context[4096];
+    CHECK(sceUltUlthreadCreate(&first, "exits", ExitingEntry, 42, context, sizeof(context), &runtime, nullptr, 0) == Ok);
+    std::int32_t status = 0;
+    CHECK(sceUltUlthreadJoin(&first, &status) == Ok);
+    CHECK(status == 42 && gSelf.load() == &first && gYield.load() == Ok && !gPastExit.load());
+    UlthreadObject second{};
+    gSelf = nullptr;
+    CHECK(sceUltUlthreadCreate(&second, "tryjoin", ExitingEntry, 7, context, sizeof(context), &runtime, nullptr, 0) == Ok);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    int joined = Busy;
+    while (joined == Busy && std::chrono::steady_clock::now() < deadline) {
+        joined = sceUltUlthreadTryJoin(&second, &status);
+        if (joined == Busy) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(joined == Ok && status == 7 && gSelf.load() == &second);
+    CHECK(sceUltUlthreadRuntimeDestroy(&runtime) == Ok);
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -251,6 +306,7 @@ int main(int argc, char** argv) {
     else if (std::strcmp(argv[1], "rwlock-writer") == 0) ReaderWriterWriter();
     else if (std::strcmp(argv[1], "rwlock-pool") == 0) ReaderWriterPool();
     else if (std::strcmp(argv[1], "rwlock-finalize") == 0) ReaderWriterFinalize();
+    else if (std::strcmp(argv[1], "ulthreads") == 0) Ulthreads();
     else return 2;
     CHECK(sceUltFinalize() == Ok);
     std::puts("ULT sync tests passed");

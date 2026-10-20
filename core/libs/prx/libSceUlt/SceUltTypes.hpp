@@ -106,6 +106,7 @@ struct UltRuntimeState {
 struct UltUlthreadState {
     UltUlthreadEntry _entry = nullptr;
     std::uint64_t _arg = 0;
+    void* _object = nullptr;
     Pthread _thread = nullptr;
     void* _runtime = nullptr;
     std::atomic<bool> _exited{false};

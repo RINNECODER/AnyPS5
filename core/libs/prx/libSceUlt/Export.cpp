@@ -18,6 +18,8 @@
 
 extern "C" int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name);
 extern "C" int APS5_VABI scePthreadJoin(Pthread thread, void** retval);
+extern "C" void APS5_VABI scePthreadExit(void* retval);
+extern "C" void APS5_VABI scePthreadYield();
 
 namespace {
 
@@ -109,8 +111,11 @@ void ReleaseQueue(UltQueueState& state) {
     --pool._queues;
 }
 
+thread_local UltUlthreadState* gCurrentUlthread = nullptr;
+
 void* APS5_VABI ulthreadRunner(void* arg) {
     auto* state = static_cast<UltUlthreadState*>(arg);
+    gCurrentUlthread = state;
     const auto result = state->_entry(state->_arg);
     state->_exited.store(true, std::memory_order_release);
     return reinterpret_cast<void*>(static_cast<std::intptr_t>(result));
@@ -761,6 +766,7 @@ int APS5_VABI sceUltUlthreadCreate(void* ulthread, const char* name, UltUlthread
     auto state = std::make_shared<UltUlthreadState>();
     state->_entry = entry;
     state->_arg = arg;
+    state->_object = ulthread;
     state->_runtime = runtime;
     {
         std::lock_guard<std::mutex> lock(gMutex);
@@ -822,6 +828,34 @@ int APS5_VABI sceUltUlthreadTryJoin(void* ulthread, std::int32_t* status) {
         }
     }
     return sceUltUlthreadJoin(ulthread, status);
+}
+
+int APS5_VABI sceUltUlthreadGetSelf(void** ulthread) {
+    if (ulthread == nullptr) {
+        return ULT_ERROR_NULL;
+    }
+    if (gCurrentUlthread == nullptr) {
+        return ULT_ERROR_STATE;
+    }
+    *ulthread = gCurrentUlthread->_object;
+    return ULT_OK;
+}
+
+int APS5_VABI sceUltUlthreadYield() {
+    if (gCurrentUlthread == nullptr) {
+        return ULT_ERROR_STATE;
+    }
+    scePthreadYield();
+    return ULT_OK;
+}
+
+int APS5_VABI sceUltUlthreadExit(std::int32_t status) {
+    if (gCurrentUlthread == nullptr) {
+        return ULT_ERROR_STATE;
+    }
+    gCurrentUlthread->_exited.store(true, std::memory_order_release);
+    scePthreadExit(reinterpret_cast<void*>(static_cast<std::intptr_t>(status)));
+    return ULT_OK;
 }
 
 int APS5_VABI sceUltUlthreadRuntimeDestroy(void* runtime) {
@@ -924,21 +958,6 @@ int APS5_VABI sceUltGetUlthreadRuntimeInfo() {
 }
 
 int APS5_VABI sceUltGetWaitingQueueResourcePoolInfo() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltUlthreadExit() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltUlthreadGetSelf() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltUlthreadYield() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
