@@ -295,7 +295,7 @@ int APS5_VABI scePadVrControllerRead() {
  return 0;
 }
 
-int APS5_VABI scePadVrControllerGetTriggerEffectState() {
+int APS5_VABI scePadVrControllerGetTriggerEffectState(std::int32_t leftHandle, std::int32_t rightHandle, PadTriggerEffectStateInformation* states) {
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
@@ -337,7 +337,7 @@ int APS5_VABI scePadUnknown_n3kSX62fgNo() {
     return g_initialized.load(std::memory_order_acquire) ? PAD_UNKNOWN_N3KSX62FGNO_AFTER_INIT : PAD_UNKNOWN_N3KSX62FGNO_BEFORE_INIT;
 }
 
-int APS5_VABI scePadVrControllerGetTriggerEffectStates(void) {
+int APS5_VABI scePadVrControllerGetTriggerEffectStates(std::int32_t leftHandle, std::int32_t rightHandle, PadTriggerEffectStateInformation* states) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
