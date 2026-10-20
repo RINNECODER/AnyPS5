@@ -63,6 +63,10 @@ std::uint32_t APS5_VABI sceAgcDriverNopDataGetPacketSize(std::uint32_t bytes) {
     return PayloadDwords(bytes) + 2;
 }
 
+std::uint32_t APS5_VABI sceAgcDriverUserDataGetPacketSize(std::uint32_t bytes) {
+    return WorkloadDataPacketDwords(bytes);
+}
+
 std::uint32_t APS5_VABI sceAgcDriverWaitUntilSafeForRendering(std::uint32_t** command,
     std::uint32_t capacity, std::uint32_t mode, std::uint32_t handle, int index) {
     if (!command || capacity < AgcDriver::RenderingWaitPacketWords || mode != 0 || index < 0)
