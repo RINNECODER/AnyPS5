@@ -3,6 +3,8 @@
 ### Unknown function info
 
 - [scePadUnknown_n3kSX62fgNo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad, NID `n3kSX62fgNo`) - firmware 13.60 returned `0x80920005` before `scePadInit` and `0x809200ff` after it in the #3177 probe; the tested call read or wrote no argument pointers. PPSA15645 calls the import after `scePadOpen`, but its return and side effects in that state are unknown. The NID name and signature are unknown, so the statuses are not named by presumed error meanings
+- [libScePad profile and device-setting exports](../../../core/libs/prx/libScePad/Export.cpp) - profile getters, tuning, saved settings, USB state, shared output and virtual-device setting arguments are recovered. Hunt and Leonardo reset each consume only a handle; physical VR USB status consumes only an output pointer. Remote settings output is 64 bytes and license-controller information is 1224 bytes. Kernel ioctl payload fields remain incomplete.
+
 - [libScePad report and tracking exports](../../../core/libs/prx/libScePad/Export.cpp) - read, extended-read, tracker, UI, VR-controller and report argument registers are recovered. Feature reports use a byte report ID and 64-bit byte count, capped at 64. VR trigger effects consume a 56-byte record; the dual-controller call uses two handles and a mask with records at offsets 8 and 64. Remaining payload field layouts use incomplete declarations, including extended samples and kernel-owned extension reports.
 
 - [scePadUnknown_n3kSX62fgNo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad, NID `n3kSX62fgNo`) - the name is unknown, and the 0 returned after `scePadInit` is inferred, not measured. In the OS 10.01 system module the function takes no arguments, returns `0x80920005` before `scePadInit`, and otherwise sends a per-process value of 1 to ShellCore over Mbus, returning `0x809200ff` if that call fails and 0 if it succeeds, with or without an open handle. The #3177 probe measured `0x809200ff` in a process that is not a game; a game process is assumed to get 0. The ShellCore setting it changes is unknown and not modelled
@@ -98,6 +100,9 @@
 - [scePadIsCoPilot](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadSetIsCoPilot](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadRegisterCollaboInputMgrProcess](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
+- [scePadSetProfileHunt](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
+- [scePadParseUniqueDataLeonardo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
+- [scePadSetProfileLeonardo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetTelemetryInfo](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetActiveTime](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetDeviceId](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
@@ -140,6 +145,7 @@
 - [scePadSetVirtualDeviceComponentInformation](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadEnablePs4CompatibleMode](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadGetLicenseControllerInformation](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
+- [scePadSetVirtualDeviceComponentInformation](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadReadHistory](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadStartRecording](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
 - [scePadStopRecording](../../../core/libs/prx/libScePad/Export.cpp) (libScePad) - unknown signature
