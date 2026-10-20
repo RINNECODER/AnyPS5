@@ -615,12 +615,12 @@ int APS5_VABI sceImeVshInformConfirmdString(ImeVshContext* context, const char16
     return 0;
 }
 
-int APS5_VABI sceImeVshNotifyCurrentTextInfo(void) {
+int APS5_VABI sceImeVshNotifyCurrentTextInfo(ImeVshContext* context, const char16_t* text, std::int32_t caretIndex, std::int32_t preeditFirst, std::int32_t preeditSecond, std::int32_t selectionFirst, std::int32_t selectionSecond) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceImeVshNotifyCurrentTextInfoForReconvertText(void) {
+int APS5_VABI sceImeVshNotifyCurrentTextInfoForReconvertText(ImeVshContext* context, const char16_t* text, std::int32_t caretIndex, std::int32_t preeditFirst, std::int32_t preeditSecond, std::int32_t selectionFirst, std::int32_t selectionSecond, std::int32_t option) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
