@@ -49,13 +49,11 @@
 - [sceNetCtlApRpStartConf](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlApRpStop](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlApCpStop](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetCtlApRestart](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetBweCheckCallbackIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetBweGetInfoIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetBweStartInternetConnectionTestIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetBweFinishInternetConnectionTestIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetBweStartInternetConnectionTestBandwidthTestIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
-- [sceNetBweSetInternetConnectionTestResultIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 - [sceNetCtlGetWifiInfoIpcInt](../../../core/libs/prx/libSceNetCtl/Export.cpp) (libSceNetCtl) - unknown signature
 
 ### Functional
