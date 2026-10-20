@@ -123,6 +123,13 @@ int main() {
             {"65488b0c2578030000", true},
             {"65a4", true},
             {"650fa2", false},
+            {"650ff7c1", true},
+            {"65660ff7c1", true},
+            {"65c5f9f7c1", true},
+            {"65c4e179f7c1", true},
+            {"650f01c8", true},
+            {"650f01fa", true},
+            {"650f01c9", false},
             {"ff10", true},
             {"ffe0", false},
         }) {

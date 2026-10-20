@@ -15,12 +15,18 @@ FORMS = {
     "gs-store": bytes.fromhex("65 48 89 04 25 30 00 00 00"),
     "gs-alu": bytes.fromhex("65 48 33 04 25 28 00 00 00"),
     "gs-short-register-address": bytes.fromhex("65 48 8b 00"),
+    "gs-maskmovdqu": bytes.fromhex("65 66 0f f7 c1"),
+    "gs-maskmovq": bytes.fromhex("65 0f f7 c1"),
+    "gs-vmaskmovdqu": bytes.fromhex("65 c5 f9 f7 c1"),
+    "gs-monitor": bytes.fromhex("65 0f 01 c8"),
+    "gs-monitorx": bytes.fromhex("65 0f 01 fa"),
 }
 
 NON_MEMORY_FORMS = {
     "gs-nop": bytes.fromhex("65 90"),
     "gs-register-move": bytes.fromhex("65 48 89 c8"),
     "gs-cpuid": bytes.fromhex("65 0f a2"),
+    "gs-mwait": bytes.fromhex("65 0f 01 c9"),
 }
 
 
