@@ -708,8 +708,13 @@ bool readsScalarDword(const RdnaInstruction& instruction, std::uint32_t reg, std
     return overlaps(instruction.source0, source0Count) || overlaps(instruction.source1, source1Count) || overlaps(instruction.source2, source2Count) || overlaps(instruction.source3, source3Count);
 }
 
+struct LinkEscape {
+    std::uint32_t waveSize = 0;
+    std::string reason;
+};
+
 template <typename TError>
-void requireReturnAddressesStayInCalls(const RdnaProgram& program, const std::vector<SwappcCall>& calls, const std::vector<std::uint32_t>& unlinked, std::uint32_t knownWaveSize, const TError& escapeError) {
+LinkEscape requireReturnAddressesStayInCalls(const RdnaProgram& program, const std::vector<SwappcCall>& calls, const std::vector<std::uint32_t>& unlinked, std::uint32_t knownWaveSize, const TError& escapeError) {
     std::set<std::uint32_t> links;
     for (const auto& call : calls) {
         if (!call.fetch) links.insert(call.linkRegister);
@@ -738,9 +743,7 @@ void requireReturnAddressesStayInCalls(const RdnaProgram& program, const std::ve
         std::erase_if(next, [&](std::uint32_t successor) { return successor >= size; });
         return next;
     };
-    const std::array<std::uint32_t, 2> eitherWaveSize{32u, 64u};
-    const auto waveSizes = knownWaveSize != 0u ? std::span<const std::uint32_t>(&knownWaveSize, 1u) : std::span<const std::uint32_t>(eitherWaveSize);
-    for (const auto waveSize : waveSizes) {
+    const auto escapeAt = [&](std::uint32_t waveSize) -> std::optional<std::invalid_argument> {
         for (const auto link : links) {
             const auto writesLink = [&](std::uint32_t index) {
                 const SwappcCall* call = findCallAt(calls, index);
@@ -774,13 +777,24 @@ void requireReturnAddressesStayInCalls(const RdnaProgram& program, const std::ve
                 const bool inside = std::ranges::any_of(calls, [&](const SwappcCall& call) { return !call.fetch && call.linkRegister == link && index >= call.targetIndex && index <= call.returnIndex; });
                 if (inside || !(((holds[index] & 1u) != 0u && readsScalarDword(instruction, link, waveSize)) || ((holds[index] & 2u) != 0u && readsScalarDword(instruction, link + 1u, waveSize)))) continue;
                 const auto owner = std::ranges::find_if(calls, [&](const SwappcCall& call) { return !call.fetch && call.linkRegister == link; });
-                throw escapeError(*owner, instruction);
+                return escapeError(*owner, instruction);
             }
         }
+        return std::nullopt;
+    };
+    if (knownWaveSize != 0u) {
+        if (const auto escape = escapeAt(knownWaveSize)) throw *escape;
+        return {};
     }
+    const auto narrow = escapeAt(32u);
+    const auto wide = escapeAt(64u);
+    if (narrow && wide) throw *narrow;
+    if (narrow) return {32u, narrow->what()};
+    if (wide) return {64u, wide->what()};
+    return {};
 }
 
-std::vector<SwappcCall> analyzeSwappcCalls(const RdnaProgram& program, const SwappcInfo* swappc, std::vector<std::uint32_t>& unlinked) {
+std::vector<SwappcCall> analyzeSwappcCalls(const RdnaProgram& program, const SwappcInfo* swappc, std::vector<std::uint32_t>& unlinked, LinkEscape& linkEscape) {
     std::vector<SwappcCall> calls;
     for (std::uint32_t index = 0; index < program.instructions.size(); ++index) {
         const auto& instruction = program.instructions[index];
@@ -923,7 +937,7 @@ std::vector<SwappcCall> analyzeSwappcCalls(const RdnaProgram& program, const Swa
         }
     }
 
-    requireReturnAddressesStayInCalls(program, calls, unlinked, swappc != nullptr ? swappc->waveSize : 0u, escapeError);
+    linkEscape = requireReturnAddressesStayInCalls(program, calls, unlinked, swappc != nullptr ? swappc->waveSize : 0u, escapeError);
 
     for (std::size_t first = 0; first < calls.size(); ++first) {
         if (!calls[first].fetch && calls[first].callIndex >= calls[first].targetIndex && calls[first].callIndex <= calls[first].returnIndex) {
@@ -1578,9 +1592,12 @@ LinkedCalls LinkCalls(const RdnaProgram& program, std::span<const UserDataCall> 
 
 ControlFlowGraph GraphBuilder::Build(const RdnaProgram& program, const SwappcInfo* swappc) const {
     std::vector<std::uint32_t> unlinked;
-    const std::vector<SwappcCall> calls = analyzeSwappcCalls(program, swappc, unlinked);
+    LinkEscape linkEscape;
+    const std::vector<SwappcCall> calls = analyzeSwappcCalls(program, swappc, unlinked, linkEscape);
     ControlFlowGraph graph;
     for (const auto index : unlinked) graph.unlinkedCallProgramCounters.push_back(program.instructions[index].programCounter);
+    graph.linkEscapeWaveSize = linkEscape.waveSize;
+    graph.linkEscapeReason = std::move(linkEscape.reason);
     graph.blocks = splitIntoBlocks(program, calls);
     linkBlocks(graph.blocks, program, calls);
     for (const auto& call : calls) {
