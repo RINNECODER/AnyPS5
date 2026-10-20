@@ -1799,7 +1799,7 @@ int APS5_VABI sceNetSetDnsInfo(void) {
     return 0;
 }
 
-int APS5_VABI sceNetShowIfconfigWithMemory(void) {
+int APS5_VABI sceNetShowIfconfigWithMemory(std::int32_t poolId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1809,7 +1809,7 @@ int APS5_VABI sceNetShowPolicy(void) {
     return 0;
 }
 
-int APS5_VABI sceNetShowPolicyWithMemory(void) {
+int APS5_VABI sceNetShowPolicyWithMemory(std::int32_t poolId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1819,7 +1819,7 @@ int APS5_VABI sceNetShowRoute(void) {
     return 0;
 }
 
-int APS5_VABI sceNetShowRouteWithMemory(void) {
+int APS5_VABI sceNetShowRouteWithMemory(std::int32_t poolId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1864,7 +1864,7 @@ int APS5_VABI sceNetShowRoute6(void) {
     return 0;
 }
 
-int APS5_VABI sceNetShowRoute6WithMemory(void) {
+int APS5_VABI sceNetShowRoute6WithMemory(std::int32_t poolId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2074,27 +2074,27 @@ int APS5_VABI sceNetUsleep(int microseconds) {
     return sceKernelUsleep_nid_postfix(static_cast<KernelUseconds>(microseconds));
 }
 
-int APS5_VABI sceNetShowIfconfigForBuffer(void) {
+int APS5_VABI sceNetShowIfconfigForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetShowRouteForBuffer(void) {
+int APS5_VABI sceNetShowRouteForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetShowNetstatForBuffer(void) {
+int APS5_VABI sceNetShowNetstatForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetShowNetstatEx(void) {
+int APS5_VABI sceNetShowNetstatEx(std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetShowNetstatExForBuffer(void) {
+int APS5_VABI sceNetShowNetstatExForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2119,7 +2119,7 @@ int APS5_VABI sceNetSetDns6InfoToKernel(void) {
     return 0;
 }
 
-int APS5_VABI sceNetShowRoute6ForBuffer(void) {
+int APS5_VABI sceNetShowRoute6ForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
