@@ -612,7 +612,7 @@ DecodedInstructionInfo X64InstructionDecoder::DecodeInstruction(
         const std::uint8_t reg = (info.ModRmByte >> ModRmRegShift) & ModRmRegMask;
         if (op == TwoByteMaskmov && mod == ModRmModRegister)
             info.HasMemoryOperand = true;
-        else if (op == TwoByteGrp7 && (info.ModRmByte == 0xC8 || info.ModRmByte == 0xFA))
+        else if (op == TwoByteGrp7 && (info.ModRmByte == 0xC8 || info.ModRmByte == 0xFA || info.ModRmByte == 0xFC))
             info.HasMemoryOperand = true;
         else if (op == TwoByteGrp15 && repPrefix && reg == 6 && mod == ModRmModRegister)
             info.HasMemoryOperand = true;

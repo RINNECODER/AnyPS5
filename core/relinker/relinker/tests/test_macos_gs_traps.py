@@ -20,6 +20,7 @@ FORMS = {
     "gs-vmaskmovdqu": bytes.fromhex("65 c5 f9 f7 c1"),
     "gs-monitor": bytes.fromhex("65 0f 01 c8"),
     "gs-monitorx": bytes.fromhex("65 0f 01 fa"),
+    "gs-clzero": bytes.fromhex("65 0f 01 fc"),
     "gs-umonitor": bytes.fromhex("65 f3 0f ae f0"),
 }
 
@@ -28,6 +29,7 @@ NON_MEMORY_FORMS = {
     "gs-register-move": bytes.fromhex("65 48 89 c8"),
     "gs-cpuid": bytes.fromhex("65 0f a2"),
     "gs-mwait": bytes.fromhex("65 0f 01 c9"),
+    "gs-rdpru": bytes.fromhex("65 0f 01 fd"),
     "gs-umwait": bytes.fromhex("65 f2 0f ae f0"),
 }
 
