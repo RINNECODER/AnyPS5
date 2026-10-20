@@ -69,7 +69,7 @@ std::size_t TablesEnd(std::span<const std::uint8_t> code, std::size_t firstTable
 
 }
 
-std::size_t FindTrailingRelativeJumpTable(std::span<const std::uint8_t> code, VirtualAddress codeAddress, std::size_t* tableEnd) {
+std::size_t FindTrailingRelativeJumpTable(std::span<const std::uint8_t> code, VirtualAddress codeAddress, std::size_t* tableEnd, std::size_t unwindEnd) {
     const Codegen::X64InstructionDecoder decoder;
     std::vector<TableLoad> loads;
     std::vector<bool> instructionStarts(code.size() + 1, false);
@@ -84,8 +84,10 @@ std::size_t FindTrailingRelativeJumpTable(std::span<const std::uint8_t> code, Vi
                 const auto end = TablesEnd(code, position, loads, instructionStarts);
                 if (end == 0) continue;
                 const auto aligned = std::min<std::size_t>(code.size(), static_cast<std::size_t>(((codeAddress + end + 15) & ~VirtualAddress{15}) - codeAddress));
-                if (!OnlyPadding(code, end, aligned, decoder)) continue;
-                if (tableEnd) *tableEnd = OnlyPadding(code, aligned, code.size(), decoder) ? code.size() : aligned;
+                const auto checkedTo = std::max(aligned, std::min(code.size(), unwindEnd));
+                const bool toRangeEnd = OnlyPadding(code, end, code.size(), decoder);
+                if (!toRangeEnd && !OnlyPadding(code, end, checkedTo, decoder)) continue;
+                if (tableEnd) *tableEnd = toRangeEnd ? code.size() : checkedTo;
                 return position;
             }
         }
@@ -127,7 +129,7 @@ std::vector<RelativeJumpTable> FindRelativeJumpTables(std::span<const std::uint8
             inspectEnd = std::min(functions[index + 1].first, segmentEnd);
         const auto code = segment.subspan(begin - segmentVAddr, inspectEnd - begin);
         std::size_t tableEnd = code.size();
-        if (const auto tail = FindTrailingRelativeJumpTable(code, begin, &tableEnd); tail != 0 && tail < code.size())
+        if (const auto tail = FindTrailingRelativeJumpTable(code, begin, &tableEnd, std::min(end, segmentEnd) - begin); tail != 0 && tail < code.size())
             tables.push_back({begin, begin + tail, begin + tableEnd});
     }
     return tables;
