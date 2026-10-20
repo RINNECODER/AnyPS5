@@ -220,10 +220,13 @@ std::shared_ptr<Socket> Lookup(int descriptor) {
     Fail(9);
     return {};
 }
+int AddressLengthError(const void* input, std::uint32_t length) {
+    if (length > 255) return 63;
+    if (length < 2) return 22;
+    return input ? 0 : 14;
+}
 bool Address(const void* input, std::uint32_t length, sockaddr_storage& native, socklen_t& size) {
-    if (length > 255) { Fail(63); return false; }
-    if (length < 2) { Fail(22); return false; }
-    if (!input) { Fail(14); return false; }
+    if (const int error = AddressLengthError(input, length)) { Fail(error); return false; }
     const auto* bytes = static_cast<const unsigned char*>(input);
     if ((bytes[1] == 2 && length < 16) || (bytes[1] == 28 && length < 28)) { Fail(22); return false; }
     if (bytes[1] == 2 && length >= 16) {
@@ -1006,6 +1009,7 @@ int APS5_VABI socketpair_nid_postfix(int family, int type, int protocol, int* de
     }
 }
 int APS5_VABI connect_nid_postfix(int descriptor, const void* address, std::uint32_t length) {
+    if (const int error = AddressLengthError(address, length)) return Fail(error);
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
     if (socket->family != GuestUnix && socket->type == 2 && address && length >= 2 && static_cast<const unsigned char*>(address)[1] == 0
@@ -1091,6 +1095,7 @@ std::int64_t APS5_VABI recv_nid_postfix(int descriptor, void* buffer, std::uint6
     return result < 0 ? Fail(NativeError()) : result;
 }
 int APS5_VABI bind_nid_postfix(int descriptor, const void* address, std::uint32_t length) {
+    if (const int error = AddressLengthError(address, length)) return Fail(error);
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
     sockaddr_storage native{};
@@ -1161,6 +1166,9 @@ int APS5_VABI _ioctl_nid_postfix(int descriptor, std::uint64_t request, void* ar
 }
 std::int64_t APS5_VABI sendto_nid_postfix(int descriptor, const void* buffer, std::uint64_t length,
     int flags, const void* address, std::uint32_t addressLength) {
+    if (address) {
+        if (const int error = AddressLengthError(address, addressLength)) return Fail(error);
+    }
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
     if ((flags & ~GuestSendFlags) != 0) return Fail(45);
