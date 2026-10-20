@@ -249,36 +249,6 @@ int APS5_VABI sceAudio3dPortFlush(uint32_t port_id) {
     return 0;
 }
 
-int APS5_VABI sceAudio3dAudioOutOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceAudio3dAudioOutClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceAudio3dAudioOutOutput(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceAudio3dAudioOutOutputs(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceAudio3dBedWrite(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceAudio3dBedWrite2(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceAudio3dStrError(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
