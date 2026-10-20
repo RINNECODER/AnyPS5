@@ -653,7 +653,7 @@ int APS5_VABI sceUltUlthreadTryJoin(void* ulthread, std::int32_t* status) {
             return ULT_ERROR_STATE;
         }
         if (!it->second->_exited.load(std::memory_order_acquire)) {
-            return ULT_ERROR_BUSY;
+            return ULT_ERROR_AGAIN;
         }
     }
     return sceUltUlthreadJoin(ulthread, status);
@@ -670,7 +670,7 @@ int APS5_VABI sceUltUlthreadRuntimeDestroy(void* runtime) {
     }
     for (const auto& entry : gUlthreads) {
         if (entry.second->_runtime == runtime) {
-            return ULT_ERROR_BUSY;
+            return ULT_ERROR_STATE;
         }
     }
     gRuntimes.erase(it);

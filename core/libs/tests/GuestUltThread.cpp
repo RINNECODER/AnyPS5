@@ -46,6 +46,7 @@ static constexpr int Ok = 0;
 static constexpr int Null = -2139029503;
 static constexpr int State = -2139029498;
 static constexpr int Busy = -2139029497;
+static constexpr int Again = -2139029496;
 
 static void Require(bool value, int line) {
     if (!value) {
@@ -148,9 +149,9 @@ static void TryJoin() {
     const int running = sceUltUlthreadTryJoin(&thread, &status);
     gRelease.store(true, std::memory_order_release);
     int joined;
-    while ((joined = sceUltUlthreadTryJoin(&thread, &status)) == Busy) std::this_thread::yield();
+    while ((joined = sceUltUlthreadTryJoin(&thread, &status)) == Again) std::this_thread::yield();
 
-    CHECK(running == Busy);
+    CHECK(running == Again);
     CHECK(joined == Ok && status == 0x3C);
     CHECK(sceUltUlthreadTryJoin(&thread, &status) == State);
     CHECK(sceUltUlthreadTryJoin(nullptr, &status) == Null);
@@ -167,7 +168,7 @@ static void Destroy() {
     CHECK(_sceUltUlthreadRuntimeCreate(&other, "other", 1, 1, nullptr, nullptr, 0) == Ok);
     CHECK(_sceUltUlthreadCreate(&thread, "thread", Immediate, 0x11, nullptr, 0, &runtime, nullptr, 0) == Ok);
     CHECK(sceUltUlthreadRuntimeDestroy(&other) == Ok);
-    CHECK(sceUltUlthreadRuntimeDestroy(&runtime) == Busy);
+    CHECK(sceUltUlthreadRuntimeDestroy(&runtime) == State);
     std::int32_t status = 0;
     CHECK(sceUltUlthreadJoin(&thread, &status) == Ok && status == 0x11);
     CHECK(sceUltUlthreadRuntimeDestroy(&runtime) == Ok);
