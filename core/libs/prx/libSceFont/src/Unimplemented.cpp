@@ -16,6 +16,11 @@ struct FontGlyphExpandBufferState;
 struct FontGraphicsResource;
 struct FontGraphicsFrame;
 struct FontGraphicsDesignResource;
+struct FontGraphicsDesign;
+struct FontGraphicsCanvas;
+struct FontGraphicsCanvasSequence;
+struct FontGraphicsSurface;
+struct FontGraphicsSurfaceTexture;
 struct FontGraphicsDeviceUsage;
 struct FontGraphicsFillMethod;
 struct FontGraphicsFillPlot;
@@ -289,27 +294,27 @@ int APS5_VABI sceFontGraphicsSetupShapeFillPlot(FontGraphicsResource* resource, 
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsStructureCanvas() {
+int APS5_VABI sceFontGraphicsStructureCanvas(FontGraphicsDevice* device, std::uint32_t width, std::uint32_t height, std::int32_t format, FontGraphicsCanvas** canvas) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsStructureCanvasSequence() {
+int APS5_VABI sceFontGraphicsStructureCanvasSequence(FontGraphicsDevice* device, FontGraphicsCanvas* canvas, const FontGraphicsSurface* surface, std::uint64_t flags, FontGraphicsCanvasSequence** sequence) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsStructureDesign() {
+int APS5_VABI sceFontGraphicsStructureDesign(FontGraphicsDevice* device, std::int32_t format, FontGraphicsDesign** design) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsStructureDesignResource() {
+int APS5_VABI sceFontGraphicsStructureDesignResource(FontGraphicsDevice* device, FontGraphicsDesign* design, FontGraphicsDesignResource** resource) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsStructureSurfaceTexture() {
+int APS5_VABI sceFontGraphicsStructureSurfaceTexture(FontGraphicsDevice* device, const FontGraphicsSurface* surface, FontGraphicsSurfaceTexture** texture) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -389,7 +394,7 @@ int APS5_VABI sceFontGraphicsDrawupFillTextureImageObject(void) {
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsDrawupFillTexturePatternObject(void) {
+int APS5_VABI sceFontGraphicsDrawupFillTexturePatternObject(FontGraphicsFrame* frame, const void* data, std::uint32_t dataSize, std::uint32_t firstMode, std::uint32_t secondMode, std::int32_t firstCount, std::int32_t firstLayout, std::int32_t secondLayout, std::int32_t secondCount, FontGraphicsFill** fill) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

@@ -28,3 +28,5 @@
 Frame lifecycle, drawing completion, device usage, frame policy, clipping and fill setup/update argument signatures in [Unimplemented.cpp](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp) are recovered. Device usage, frame and resource layouts remain opaque; their runtime implementation is still unavailable.
 
 Glyph image rendering uses six pointer arguments and two scalar coordinates, with existing style, surface, metrics and output layouts. Positioning takes a mask and two floats. Control, word-character search and resource release/exchange/render signatures in [Unimplemented.cpp](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp) are recovered; control payload types depend on the command and remain unmodeled.
+
+Canvas, design, surface texture and fill-pattern construction signatures in [Unimplemented.cpp](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp) are recovered. Pattern mode/count semantics and the graphics surface descriptor fields still require reconstruction; distinct opaque types preserve the confirmed object categories.
