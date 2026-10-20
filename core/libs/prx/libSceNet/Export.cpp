@@ -41,6 +41,33 @@
 
 // Guest socket descriptors retain PS5 semantics while their transport is backed by host sockets.
 
+struct NetWlanAdhocParameter;
+struct NetWlanWakeInfo;
+struct NetWlanPspWakeInfo;
+struct NetWlanPspWakeParameter;
+struct NetWlanApParameter;
+struct NetWlanDeviceInfo;
+struct NetWlanAntennaParameter;
+struct NetWlanRateParameter;
+struct NetWlanDeviceConfiguration;
+struct NetWlanRssiInfo;
+struct NetDhcpInfo;
+struct NetAutoIpInfo;
+struct NetAddress6Info;
+
+struct NetDhcpOptionInfo {
+    std::uint32_t option;
+    std::uint32_t capacity;
+    void* data;
+    std::uint32_t size;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(NetDhcpOptionInfo) == 24);
+static_assert(offsetof(NetDhcpOptionInfo, capacity) == 4);
+static_assert(offsetof(NetDhcpOptionInfo, data) == 8);
+static_assert(offsetof(NetDhcpOptionInfo, size) == 16);
+
 struct NetSockInfo6;
 struct NetStatisticsInfo;
 struct NetInterfaceStats;
@@ -2312,17 +2339,17 @@ int APS5_VABI sceNetConfigGetDefaultRoute(void) {
     return 0;
 }
 
-int APS5_VABI sceNetDhcpGetAutoipInfo(void) {
+int APS5_VABI sceNetDhcpGetAutoipInfo(std::int32_t interfaceId, NetAutoIpInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetDhcpGetInfo(void) {
+int APS5_VABI sceNetDhcpGetInfo(std::int32_t interfaceId, NetDhcpInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetDhcpGetInfoEx(void) {
+int APS5_VABI sceNetDhcpGetInfoEx(std::int32_t interfaceId, std::int32_t type, NetDhcpOptionInfo* info, std::uint32_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2397,7 +2424,7 @@ int APS5_VABI sceNetAddrConfig6Stop(void) {
     return 0;
 }
 
-int APS5_VABI sceNetAddrConfig6GetInfo(void) {
+int APS5_VABI sceNetAddrConfig6GetInfo(std::int32_t interfaceId, NetAddress6Info* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2437,17 +2464,17 @@ int APS5_VABI sceNetConfigWlanAdhocClearWakeOnWlan(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocCreate(void) {
+int APS5_VABI sceNetConfigWlanAdhocCreate(std::int32_t interfaceId, NetWlanAdhocParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocGetWakeOnWlanInfo(void) {
+int APS5_VABI sceNetConfigWlanAdhocGetWakeOnWlanInfo(std::int32_t interfaceId, NetWlanWakeInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocJoin(void) {
+int APS5_VABI sceNetConfigWlanAdhocJoin(std::int32_t interfaceId, NetWlanAdhocParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2462,12 +2489,12 @@ int APS5_VABI sceNetConfigWlanAdhocPspEmuClearWakeOnWlan(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocPspEmuGetWakeOnWlanInfo(void) {
+int APS5_VABI sceNetConfigWlanAdhocPspEmuGetWakeOnWlanInfo(std::int32_t interfaceId, NetWlanPspWakeInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanAdhocPspEmuSetWakeOnWlan(void) {
+int APS5_VABI sceNetConfigWlanAdhocPspEmuSetWakeOnWlan(std::int32_t interfaceId, NetWlanPspWakeParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2487,7 +2514,7 @@ int APS5_VABI sceNetConfigWlanAdhocSetWakeOnWlan(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanApStart(void) {
+int APS5_VABI sceNetConfigWlanApStart(std::int32_t interfaceId, NetWlanApParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2512,27 +2539,27 @@ int APS5_VABI sceNetConfigWlanBackgroundScanStop(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanDiagGetDeviceInfo(void) {
+int APS5_VABI sceNetConfigWlanDiagGetDeviceInfo(std::int32_t interfaceId, NetWlanDeviceInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanDiagSetAntenna(void) {
+int APS5_VABI sceNetConfigWlanDiagSetAntenna(std::int32_t interfaceId, NetWlanAntennaParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanDiagSetTxFixedRate(void) {
+int APS5_VABI sceNetConfigWlanDiagSetTxFixedRate(std::int32_t interfaceId, NetWlanRateParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanGetDeviceConfig(void) {
+int APS5_VABI sceNetConfigWlanGetDeviceConfig(std::int32_t interfaceId, NetWlanDeviceConfiguration* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanInfraGetRssiInfo(void) {
+int APS5_VABI sceNetConfigWlanInfraGetRssiInfo(std::int32_t interfaceId, NetWlanRssiInfo* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2552,7 +2579,7 @@ int APS5_VABI sceNetConfigWlanScan(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigWlanSetDeviceConfig(void) {
+int APS5_VABI sceNetConfigWlanSetDeviceConfig(std::int32_t interfaceId, NetWlanDeviceConfiguration* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
