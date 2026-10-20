@@ -23,6 +23,46 @@ inline constexpr std::size_t PortalParamsSize = 0x60;
 inline constexpr std::uint32_t PathEntryId = 0x010107d9;
 inline constexpr std::size_t PathEntrySize = 0x28;
 
+struct SourceInfo;
+struct SystemInfo;
+struct ReportRegistration;
+
+struct ReportArguments {
+    std::uint32_t generalOffset;
+    std::uint32_t floatingOffset;
+    void* overflowArguments;
+    void* savedRegisters;
+};
+
+struct ReportInfo {
+    std::uint64_t size;
+    AudioPropagationHandle handle;
+    std::uint32_t category;
+    std::int32_t result;
+    std::int32_t operation;
+    std::uint32_t reserved;
+    const char* function;
+    const char* format;
+    ReportArguments arguments;
+};
+
+using ReportHandler = void (APS5_VABI*)(const ReportInfo* report, void* userData);
+
+static_assert(sizeof(ReportArguments) == 24);
+static_assert(offsetof(ReportArguments, generalOffset) == 0);
+static_assert(offsetof(ReportArguments, floatingOffset) == 4);
+static_assert(offsetof(ReportArguments, overflowArguments) == 8);
+static_assert(offsetof(ReportArguments, savedRegisters) == 16);
+static_assert(sizeof(ReportInfo) == 72);
+static_assert(offsetof(ReportInfo, size) == 0);
+static_assert(offsetof(ReportInfo, handle) == 8);
+static_assert(offsetof(ReportInfo, category) == 16);
+static_assert(offsetof(ReportInfo, result) == 20);
+static_assert(offsetof(ReportInfo, operation) == 24);
+static_assert(offsetof(ReportInfo, function) == 32);
+static_assert(offsetof(ReportInfo, format) == 40);
+static_assert(offsetof(ReportInfo, arguments) == 48);
+
 struct Attribute {
     std::uint32_t id;
     std::uint32_t reserved0;

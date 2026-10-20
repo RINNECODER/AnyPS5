@@ -315,32 +315,32 @@ std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle sy
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationPathGetNumPoints() {
+int APS5_VABI sceAudioPropagationPathGetNumPoints(AudioPropagationHandle path, std::uint32_t* count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationReportApi() {
+int APS5_VABI sceAudioPropagationReportApi(std::uint32_t category, AudioPropagationHandle handle, std::int32_t result, std::int32_t operation, const char* function, const char* format, ...) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationResetAttributes() {
+int APS5_VABI sceAudioPropagationResetAttributes(Attribute* attributes, std::uint32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationSourceQueryInfo() {
+int APS5_VABI sceAudioPropagationSourceQueryInfo(AudioPropagationHandle source, SourceInfo* info) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationSystemLock() {
+int APS5_VABI sceAudioPropagationSystemLock(AudioPropagationHandle system) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationSystemQueryInfo() {
+int APS5_VABI sceAudioPropagationSystemQueryInfo(AudioPropagationHandle system, SystemInfo* info, std::size_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -395,22 +395,22 @@ int APS5_VABI sceAudioPropagationSystemOptionInit() {
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationReportRegisterHandler() {
+int APS5_VABI sceAudioPropagationReportRegisterHandler(std::uint32_t category, ReportHandler handler, void* userData, ReportRegistration** registration) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationReportUnregisterHandler() {
+int APS5_VABI sceAudioPropagationReportUnregisterHandler(ReportRegistration* registration) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationSystemEnumHandles() {
+int APS5_VABI sceAudioPropagationSystemEnumHandles(AudioPropagationHandle* handles, std::uint32_t capacity) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceAudioPropagationSystemUnlock() {
+int APS5_VABI sceAudioPropagationSystemUnlock(AudioPropagationHandle system) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
