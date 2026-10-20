@@ -1819,7 +1819,6 @@ int APS5_VABI sceNetShowPolicyWithMemory(void) {
 }
 
 int APS5_VABI sceNetShowRoute(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
