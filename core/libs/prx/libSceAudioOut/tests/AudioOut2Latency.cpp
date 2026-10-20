@@ -7,6 +7,8 @@
 
 extern "C" {
 int APS5_VABI sceAudioOut2Initialize();
+int APS5_VABI sceAudioOut2LoInit();
+int APS5_VABI sceAudioOut2LoTerminate();
 int APS5_VABI sceAudioOut2Set3DLatency(int, std::uint32_t);
 int APS5_VABI sceAudioOut2MasteringInit(std::uint32_t);
 int APS5_VABI sceAudioOut2MasteringTerm();
@@ -70,6 +72,12 @@ void TestEnableChat() {
     Require(sceAudioOut2EnableChat() == 0, "enabling chat after disabling it must be accepted");
 }
 
+void TestLowLatencyService() {
+    Require(sceAudioOut2LoInit() == 0, "starting the low-latency service must be accepted");
+    Require(sceAudioOut2LoInit() == 0, "starting the low-latency service again must be accepted");
+    Require(ThrowsRuntimeError([] { sceAudioOut2LoTerminate(); }), "stopping the low-latency service must throw");
+}
+
 }
 
 int main() {
@@ -79,5 +87,6 @@ int main() {
     TestMasteringTerm();
     TestMasteringSetParam();
     TestEnableChat();
+    TestLowLatencyService();
     return 0;
 }
