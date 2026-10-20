@@ -1,12 +1,12 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
 #include "prx/libc/include/HostEntropy.hpp"
+#include "prx/libc/include/General.hpp"
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
-#include "prx/libc/include/General.hpp"
 
 namespace {
 

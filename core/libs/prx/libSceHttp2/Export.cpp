@@ -59,6 +59,7 @@ static bool HandleIsLive(int id) {
     return FindAnyHandle(id) != nullptr;
 }
 
+struct SceHttp2CookieStats;
 struct Http2MemoryPoolStats {
     size_t pool_size;
     size_t max_inuse_size;
@@ -68,7 +69,6 @@ struct Http2MemoryPoolStats {
 
 static std::mutex g_completionsMutex;
 static std::unordered_map<int, std::deque<Http2AsyncResult>> g_completions;
-struct SceHttp2CookieStats;
 
 static void EraseCompletions(const std::vector<int>& ids) {
     std::lock_guard lock(g_completionsMutex);
