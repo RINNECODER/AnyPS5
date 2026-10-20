@@ -1022,9 +1022,19 @@ int APS5_VABI _ZN3sce4Json5Value22setTypeMismatchHandlerEPFRKS1_NS0_9ValueTypeEP
     return 0;
 }
 
-int APS5_VABI _ZNK3sce4Json5ValuecvbEv(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+bool APS5_VABI _ZNK3sce4Json5ValuecvbEv(const Value* self) {
+    const Node& n = NodeOf(*self);
+    switch (n.type) {
+        case TypeNull: return false;
+        case TypeBoolean: return n.boolean;
+        case TypeInteger: return n.integer != 0;
+        case TypeUInteger: return n.uinteger != 0;
+        case TypeReal: return n.real != 0.0;
+        case TypeString: return n.string.text && !n.string.text->empty();
+        case TypeArray:
+        case TypeObject: return true;
+        default: throw std::runtime_error("sce::Json::Value: invalid value type");
+    }
 }
 
 void APS5_VABI _ZN3sce4Json6Object4PairC1ERKNS0_6StringERKNS0_5ValueE(Pair* self, const String* key, const Value* value) {
