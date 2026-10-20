@@ -547,12 +547,12 @@ int APS5_VABI scePadDisableTransportButtons(bool disabled) {
     return 0;
 }
 
-int APS5_VABI scePadSetLotusIrCodeSetStart(void) {
+int APS5_VABI scePadSetLotusIrCodeSetStart(std::int32_t handle, std::uint8_t codeSet, std::uint16_t code, std::size_t dataSize) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetLotusIrCodeSetData(void) {
+int APS5_VABI scePadSetLotusIrCodeSetData(std::int32_t handle, std::uint8_t packetIndex, const void* data, std::size_t dataSize) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -567,12 +567,12 @@ int APS5_VABI scePadGetLotusIrCodeSetResult(std::int32_t handle, std::int32_t* r
     return 0;
 }
 
-int APS5_VABI scePadSetLotusEnableIrKey(void) {
+int APS5_VABI scePadSetLotusEnableIrKey(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetLotusDisableIrKey(void) {
+int APS5_VABI scePadSetLotusDisableIrKey(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
