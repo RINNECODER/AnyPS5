@@ -1542,6 +1542,12 @@ int main() {
         Require(sceNetClearDnsCache(flags) == static_cast<int>(0x804101C8));
         Require(*sceNetErrnoLoc() == 200);
     }
+    std::uint32_t randomOutput = 0x12345678;
+    Require(Failed(sceNetGetRandom(&randomOutput), 200));
+    Require(randomOutput == 0x12345678);
+    Require(Failed(sceNetGetRandom(nullptr), 200));
+    Require(Failed(sceNetUsleep(0), 200));
+    Require(Failed(sceNetUsleep(-1), 200));
     Require(sceNetInit_nid_postfix() == 0);
     CheckPeerSocketTypes();
     if (argc == 2 && std::strcmp(argv[1], "--peer-only") == 0) return 0;

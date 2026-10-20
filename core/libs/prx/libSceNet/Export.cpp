@@ -2314,6 +2314,7 @@ int APS5_VABI sceNetGetNameToIndex(std::uint32_t interfaceId) {
 }
 
 int APS5_VABI sceNetGetRandom(std::uint32_t* output) {
+    if (!g_net_inited) return fail(NET_ENOTINIT);
     if (output == nullptr) return fail(NET_EINVAL);
     static std::mutex mutex;
     static std::random_device device;
@@ -2449,8 +2450,11 @@ int APS5_VABI sceNetThreadJoin(void* thread) {
 }
 
 int APS5_VABI sceNetUsleep(int microseconds) {
+    if (!g_net_inited) return fail(NET_ENOTINIT);
     if (microseconds < 0) return fail(NET_EINVAL);
-    return sceKernelUsleep_nid_postfix(static_cast<KernelUseconds>(microseconds));
+    const int result = sceKernelUsleep_nid_postfix(static_cast<KernelUseconds>(microseconds));
+    if (result < 0) set_errno((result & 0xFF00) == 0x100 ? result & 0xFF : 205);
+    return result;
 }
 
 int APS5_VABI sceNetShowIfconfigForBuffer(char* buffer, std::int32_t bufferSize, std::int32_t poolId) {
