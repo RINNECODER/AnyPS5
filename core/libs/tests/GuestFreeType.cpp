@@ -5,6 +5,7 @@
 #include FT_FREETYPE_H
 #include FT_OUTLINE_H
 
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -29,6 +30,7 @@ int APS5_VABI FT_Done_Face_nid_postfix(GuestFaceRec*);
 int APS5_VABI FT_Set_Pixel_Sizes_nid_postfix(GuestFaceRec*, std::uint32_t, std::uint32_t);
 std::uint32_t APS5_VABI FT_Get_Char_Index_nid_postfix(GuestFaceRec*, std::uint64_t);
 int APS5_VABI FT_Load_Glyph_nid_postfix(GuestFaceRec*, std::uint32_t, std::int32_t);
+int APS5_VABI FT_Load_Char_nid_postfix(GuestFaceRec*, std::uint64_t, std::int32_t);
 int APS5_VABI FT_Render_Glyph_nid_postfix(GuestGlyphSlotRec*, std::int32_t);
 }
 
@@ -293,6 +295,47 @@ int main() {
     Require(FT_Get_Char_Index_nid_postfix(face, 'A') == 1 && FT_Get_Char_Index_nid_postfix(face, 'B') == 0);
     Require(FT_Get_Char_Index_nid_postfix(face, 0x100000041ull) == 1);
     Require(FT_Get_Char_Index_nid_postfix(nullptr, 'A') == 0);
+
+    Require(FT_Load_Char_nid_postfix(nullptr, 'A', FT_LOAD_DEFAULT) == FT_Err_Invalid_Face_Handle);
+    for (const std::uint64_t code : std::array<std::uint64_t, 4>{'A', 'B', 0x100000041ull, 0xFFFFFFFFFFFFFFFFull}) {
+        for (const std::int32_t flags : std::array<std::int32_t, 4>{FT_LOAD_DEFAULT, FT_LOAD_NO_SCALE, FT_LOAD_NO_HINTING, FT_LOAD_RENDER}) {
+            Require(FT_Load_Char_nid_postfix(face, code, flags) == FT_Load_Char(host, static_cast<FT_ULong>(code), flags));
+            SlotMatches(face->glyph, host->glyph);
+            Require(face->glyph->glyph_index == (static_cast<std::uint32_t>(code) == 'A' ? 1u : 0u));
+        }
+    }
+    {
+        auto noMap = font;
+        const std::size_t tableCount = (static_cast<std::size_t>(noMap[4]) << 8) | noMap[5];
+        bool renamed = false;
+        for (std::size_t offset = 12; offset < 12 + tableCount * 16; offset += 16) {
+            if (std::memcmp(noMap.data() + offset, "cmap", 4) != 0) continue;
+            std::memcpy(noMap.data() + offset, "none", 4);
+            renamed = true;
+            break;
+        }
+        Require(renamed);
+        {
+            std::ofstream file(root / "app0" / "no-map.ttf", std::ios::binary);
+            file.write(reinterpret_cast<const char*>(noMap.data()), static_cast<std::streamsize>(noMap.size()));
+            Require(file.good());
+        }
+        GuestFaceRec* guestNoMap = nullptr;
+        FT_Face nativeNoMap = nullptr;
+        Require(FT_New_Face_nid_postfix(library, "/app0/no-map.ttf", 0, &guestNoMap) == 0);
+        Require(FT_New_Memory_Face(hostLibrary, noMap.data(), static_cast<FT_Long>(noMap.size()), 0, &nativeNoMap) == 0);
+        Require(guestNoMap->charmap == nullptr && nativeNoMap->charmap == nullptr);
+        Require(FT_Set_Pixel_Sizes_nid_postfix(guestNoMap, 0, 100) == 0 && FT_Set_Pixel_Sizes(nativeNoMap, 0, 100) == 0);
+        for (const std::uint64_t code : {1ull, 2ull}) {
+            for (const std::int32_t flags : std::array<std::int32_t, 2>{FT_LOAD_DEFAULT, FT_LOAD_RENDER}) {
+                const FT_Error expected = FT_Load_Char(nativeNoMap, static_cast<FT_ULong>(code), flags);
+                Require((code == 1) == (expected == 0));
+                Require(FT_Load_Char_nid_postfix(guestNoMap, code, flags) == expected);
+                SlotMatches(guestNoMap->glyph, nativeNoMap->glyph);
+            }
+        }
+        Require(FT_Done_Face(nativeNoMap) == 0);
+    }
 
     Require(FT_Load_Glyph_nid_postfix(nullptr, 1, FT_LOAD_DEFAULT) == FT_Err_Invalid_Face_Handle);
     Require(FT_Load_Glyph_nid_postfix(face, 1, FT_LOAD_DEFAULT) == 0 && FT_Load_Glyph(host, 1, FT_LOAD_DEFAULT) == 0);

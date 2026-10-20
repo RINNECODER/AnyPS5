@@ -161,6 +161,13 @@ int APS5_VABI FT_Load_Glyph_nid_postfix(GuestFaceRec* face, std::uint32_t glyph_
     return error;
 }
 
+int APS5_VABI FT_Load_Char_nid_postfix(GuestFaceRec* face, std::uint64_t char_code, std::int32_t load_flags) {
+    GuestFace* owner = FaceOf(face);
+    const FT_Error error = FT_Load_Char(owner ? owner->host : nullptr, static_cast<FT_ULong>(static_cast<std::uint32_t>(char_code)), load_flags);
+    if (owner) SyncSlot(*owner);
+    return error;
+}
+
 int APS5_VABI FT_Render_Glyph_nid_postfix(GuestGlyphSlotRec* slot, std::int32_t render_mode) {
     GuestFace* owner = FaceOf(slot);
     if (owner) WriteBackOutline(*owner);
