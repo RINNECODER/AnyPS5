@@ -387,7 +387,7 @@ size_t APS5_VABI fread_nid_postfix(void* buffer, size_t size, size_t count, File
     auto* handle = GetStreamHandle(stream);
     if (size == 0 || count == 0) return 0;
     if (!buffer) throw std::runtime_error("fread: null buffer");
-    if (count > std::numeric_limits<std::size_t>::max() / size) throw std::overflow_error("fread: buffer size overflow");
+    if (count > std::numeric_limits<std::size_t>::max() / size) { errno = 22; stream->SetError(); return 0; }
     const auto bytes = size * count;
     if (bytes > std::numeric_limits<std::uintptr_t>::max() - reinterpret_cast<std::uintptr_t>(buffer)) throw std::overflow_error("fread: buffer address overflow");
     const GuestArena::HostWrite destination(buffer, bytes);
@@ -407,6 +407,13 @@ size_t APS5_VABI fwrite_nid_postfix(const void* buffer, size_t size, size_t coun
     auto* handle = GetNativeStream(stream);
     if (size == 0 || count == 0) return 0;
     if (!buffer) throw std::runtime_error("fwrite: null buffer");
+<<<<<<< HEAD
+=======
+    if (count > std::numeric_limits<std::size_t>::max() / size) { errno = 22; stream->SetError(); return 0; }
+    const auto bytes = size * count;
+    if (bytes > std::numeric_limits<std::uintptr_t>::max() - reinterpret_cast<std::uintptr_t>(buffer)) throw std::overflow_error("fwrite: buffer address overflow");
+    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(buffer, bytes);
+>>>>>>> b191f4371 (fix(libc): fail fread and fwrite with EINVAL when size times count overflows)
     const auto result = std::fwrite(buffer, size, count, handle);
     stream->SyncStatus();
     return result;
