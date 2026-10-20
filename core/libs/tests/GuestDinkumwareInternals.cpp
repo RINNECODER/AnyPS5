@@ -1,12 +1,13 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 extern "C" {
 int* APS5_VABI __error_nid_postfix();
-double APS5_VABI _Stod_nid_postfix(const char* text, char** end, long pten);
+double APS5_VABI _Stod_nid_postfix(const char* text, char** end, std::int64_t pten);
 long long APS5_VABI _Stoll_nid_postfix(const char* text, char** end, int base);
 double APS5_VABI _Sin_nid_postfix(double x, unsigned int quadrant);
 float APS5_VABI _FSin_nid_postfix(float x, unsigned int quadrant);
@@ -26,7 +27,7 @@ void Require(bool condition, const char* message) {
     }
 }
 
-void CheckStod(const char* text, long pten, double expected, long consumed, int error, const char* message) {
+void CheckStod(const char* text, std::int64_t pten, double expected, long consumed, int error, const char* message) {
     *__error_nid_postfix() = 0;
     char* end = nullptr;
     const double value = _Stod_nid_postfix(text, &end, pten);
@@ -45,6 +46,9 @@ void TestStod() {
     CheckStod("1e300", 8, 1e308, 5, 0, "a scale up to the largest decades");
     CheckStod("5e-324", -1, 0.0, 6, RangeError, "a scale that underflows to zero");
     CheckStod("1", 2147483647, HUGE_VAL, 1, RangeError, "the largest scale");
+    CheckStod("5", std::int64_t{1} << 40, HUGE_VAL, 1, RangeError, "a scale above 32 bits");
+    CheckStod("1e400", -100, 1e300, 5, 0, "an overflowing text scaled back into range");
+    CheckStod("0.01e41", -2, 1e37, 7, 0, "a negative scale from leading fraction zeros");
     CheckStod("1e-2147483648", -1, 0.0, 13, RangeError, "the smallest exponent and scale");
     CheckStod("-0", 5, -0.0, 2, 0, "negative zero keeps its sign");
     CheckStod("infinity", 3, HUGE_VAL, 8, 0, "infinity is not scaled");

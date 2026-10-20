@@ -28,6 +28,7 @@ float APS5_VABI log2f_nid_postfix(float x);
 namespace {
 
 constexpr long long ExponentLimit = 1000000000;
+constexpr int RangeError = 34;
 
 bool Hexadecimal(const char* text) {
     while (std::isspace(static_cast<unsigned char>(*text))) ++text;
@@ -39,12 +40,18 @@ bool Hexadecimal(const char* text) {
 
 extern "C" {
 
-double APS5_VABI _Stod_nid_postfix(const char* text, char** end, long pten) {
-    const int saved = *__error_nid_postfix();
+double APS5_VABI _Stod_nid_postfix(const char* text, char** end, std::int64_t pten) {
+    int& guestErrno = *__error_nid_postfix();
+    const int saved = guestErrno;
+    guestErrno = 0;
     char* stop = nullptr;
     const double value = strtod_nid_postfix(text, &stop);
     if (end != nullptr) *end = stop;
-    if (pten == 0 || stop == text || !std::isfinite(value)) return value;
+    const bool overflowed = std::isinf(value) && guestErrno == RangeError;
+    if (pten == 0 || stop == text || !(std::isfinite(value) || overflowed)) {
+        if (guestErrno == 0) guestErrno = saved;
+        return value;
+    }
     if (Hexadecimal(text)) NotImplemented_nid_no_patch("_Stod (hexadecimal text with a power-of-ten scale)");
     std::string number(text, static_cast<const char*>(stop));
     long long exponent = 0;
@@ -53,10 +60,10 @@ double APS5_VABI _Stod_nid_postfix(const char* text, char** end, long pten) {
         exponent = std::strtoll(number.c_str() + marker + 1, nullptr, 10);
         number.resize(marker);
     }
-    exponent = std::clamp(exponent, -ExponentLimit, ExponentLimit) + std::clamp<long long>(pten, -ExponentLimit, ExponentLimit);
+    exponent = std::clamp(exponent, -ExponentLimit, ExponentLimit) + std::clamp<std::int64_t>(pten, -ExponentLimit, ExponentLimit);
     number += 'e';
     number += std::to_string(exponent);
-    *__error_nid_postfix() = saved;
+    guestErrno = saved;
     return strtod_nid_postfix(number.c_str(), nullptr);
 }
 
