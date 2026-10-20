@@ -31,6 +31,18 @@ struct RequestStatusRegistration {
 };
 static std::mutex g_statusMutex;
 static std::map<int, RequestStatusRegistration> g_statusCallbacks;
+struct HttpCookieStats {
+    std::size_t usedBytes;
+    std::uint32_t cookieCount;
+    std::uint32_t reserved;
+    std::size_t peakUsedBytes;
+    std::uint32_t peakCookieCount;
+    std::uint32_t evictedCookieCount;
+};
+
+static_assert(sizeof(HttpCookieStats) == 32);
+static_assert(offsetof(HttpCookieStats, peakUsedBytes) == 16);
+
 struct HttpMemoryPoolStats {
     std::size_t poolSize;
     std::size_t peakUsedSize;
@@ -781,7 +793,7 @@ int APS5_VABI sceHttpSetCookieMaxNumPerDomain(int contextId, std::uint32_t count
     return 0;
 }
 
-int APS5_VABI sceHttpGetCookieStats(void) {
+int APS5_VABI sceHttpGetCookieStats(int id, HttpCookieStats* stats) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

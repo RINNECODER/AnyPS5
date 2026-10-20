@@ -41,7 +41,6 @@
 - [sceHttpGetEpollId](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
 - [sceHttpGetEpoll](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
 - [sceHttpSetCookieSendCallback](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
-- [sceHttpGetCookieStats](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
 - [sceHttpsEnableOptionPrivate](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
 - [sceHttpsDisableOptionPrivate](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
 - [sceHttpSetAcceptEncodingGZIPEnabled](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
