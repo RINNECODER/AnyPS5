@@ -5,10 +5,16 @@
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include <SDL_loadso.h>
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string_view>
 #include <vector>
 
 namespace AgcDriver::Graphics {
@@ -20,6 +26,55 @@ bool Recorder::Reap() { Require(false, "the device tests have no recorder"); ret
 namespace {
 
 using namespace AgcDriver::Graphics;
+
+std::optional<std::size_t> selectDevice(std::span<const VkPhysicalDeviceProperties> devices, std::string_view request) {
+    const auto rankDeviceType = [](VkPhysicalDeviceType type) {
+        switch (type) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 3;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 2;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 1;
+            default: return 0;
+        }
+    };
+    std::optional<std::size_t> selected;
+    int selectedRank = -1;
+    for (std::size_t index = 0; index < devices.size(); ++index) {
+        const auto& candidate = devices[index];
+        if (candidate.apiVersion < VK_API_VERSION_1_1) continue;
+        const std::string_view name(candidate.deviceName);
+        if (!request.empty() && std::search(name.begin(), name.end(), request.begin(), request.end(), [](char left, char right) {
+            return std::tolower(static_cast<unsigned char>(left)) == std::tolower(static_cast<unsigned char>(right));
+        }) == name.end()) continue;
+        const int rank = request.empty() ? rankDeviceType(candidate.deviceType) : 4;
+        if (rank <= selectedRank) continue;
+        selected = index;
+        selectedRank = rank;
+    }
+    return selected;
+}
+
+void deviceSelectionTests() {
+    const auto properties = [](const char* name, VkPhysicalDeviceType type) {
+        VkPhysicalDeviceProperties result{};
+        result.apiVersion = VK_API_VERSION_1_1;
+        result.deviceType = type;
+        std::memcpy(result.deviceName, name, std::strlen(name) + 1u);
+        return result;
+    };
+    std::array devices{
+        properties("AMD Radeon(TM) Graphics", VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU),
+        properties("NVIDIA GeForce RTX 5080", VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU),
+    };
+    Require(!selectDevice({}, {}).has_value(), "an empty Vulkan device list selected a device");
+    Require(selectDevice(devices, {}) == 1u, "default selection did not prefer the discrete GPU");
+    Require(selectDevice(devices, "AMD") == 0u, "an AMD request lost to an unrelated discrete GPU");
+    Require(selectDevice(devices, "aMd rAdEoN") == 0u, "GPU name matching was not case-insensitive");
+    Require(selectDevice(devices, "RTX 5080") == 1u, "partial GPU name matching failed");
+    Require(!selectDevice(devices, "missing device").has_value(), "an unmatched GPU request selected another device");
+    devices[0].apiVersion = VK_API_VERSION_1_0;
+    Require(!selectDevice(devices, "AMD").has_value(), "a GPU without Vulkan 1.1 matched the request");
+    std::cout << "BDA device selection CPU tests passed\n";
+}
 
 class Device {
 public:
@@ -142,6 +197,7 @@ private:
 
 int main(int argc, char** argv) {
     try {
+        deviceSelectionTests();
         RunBdaContractTests();
         if (argc == 2) {
             const auto shader = MakeBdaTestShader(0x7fff12340000ULL, 32);
