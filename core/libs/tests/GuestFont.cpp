@@ -47,7 +47,7 @@ int APS5_VABI sceFontGetCharGlyphCode(FontHandle, std::uint32_t, std::uint32_t*)
 int APS5_VABI sceFontGetFontResolution(FontHandle, std::uint32_t*, float*);
 int APS5_VABI sceFontGetRenderScaledKerning(FontHandle, std::uint32_t, std::uint32_t, FontKerning*);
 int APS5_VABI sceFontGenerateCharGlyph(FontHandle, std::uint32_t, const FontGenerateGlyphDetail*, FontGlyph*);
-int APS5_VABI sceFontGlyphDefineAttribute(FontGlyph, int, int*);
+int APS5_VABI sceFontGlyphDefineAttribute(FontGlyph, std::int32_t, std::int32_t*);
 int APS5_VABI sceFontGlyphGetAttribute(FontGlyph, int, int*);
 int APS5_VABI sceFontDeleteGlyph(const FontMemory*, FontGlyph*);
 int APS5_VABI sceFontTextSourceInit(FontTextSource*, const void*, std::uint32_t, FontTextParseFunction, void*);
@@ -413,21 +413,32 @@ int main() {
     Require(sceFontSetScalePixel(font, 100.0f, 100.0f) == SCE_FONT_OK);
     FontGlyph glyph = nullptr;
     Require(sceFontGenerateCharGlyph(font, 'A', nullptr, &glyph) == SCE_FONT_OK && glyph != nullptr);
-    int glyphAttribute = -1;
-    Require(sceFontGlyphDefineAttribute(glyph, 0x11, &glyphAttribute) == SCE_FONT_OK && glyphAttribute == 0);
-    Require(sceFontGlyphGetAttribute(glyph, 0x11, &glyphAttribute) == SCE_FONT_OK && glyphAttribute == 0x11);
-    glyphAttribute = -1;
-    Require(sceFontGlyphDefineAttribute(glyph, 0, &glyphAttribute) == SCE_FONT_OK && glyphAttribute == 0x11);
-    Require(sceFontGlyphDefineAttribute(glyph, 5, nullptr) == SCE_FONT_OK);
-    glyphAttribute = -1;
-    Require(sceFontGlyphGetAttribute(glyph, 0, &glyphAttribute) == SCE_FONT_OK && glyphAttribute == 5);
-    Require(sceFontGlyphGetAttribute(glyph, 0x11, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
-    glyphAttribute = -1;
-    Require(sceFontGlyphDefineAttribute(nullptr, 0x11, &glyphAttribute) == SCE_FONT_ERROR_INVALID_GLYPH && glyphAttribute == -1);
-    Require(sceFontGlyphGetAttribute(nullptr, 0x11, &glyphAttribute) == SCE_FONT_ERROR_INVALID_GLYPH && glyphAttribute == -1);
+    const auto originalFlags = glyph->flags;
+    std::int32_t previousAttribute = -1;
+    Require(sceFontGlyphDefineAttribute(glyph, 0x11, &previousAttribute) == SCE_FONT_OK);
+    Require(previousAttribute == ((originalFlags & 2) ? 0x11 : 0x10));
+    Require(glyph->flags == (originalFlags | 2));
+    Require(sceFontGlyphDefineAttribute(glyph, 0x10, &previousAttribute) == SCE_FONT_OK && previousAttribute == 0x11);
+    Require(glyph->flags == (originalFlags & ~2u));
+    Require(sceFontGlyphDefineAttribute(glyph, 0x10, &previousAttribute) == SCE_FONT_OK && previousAttribute == 0x10);
+    Require(sceFontGlyphDefineAttribute(glyph, 0x11, nullptr) == SCE_FONT_OK);
+    for (std::int32_t attribute = -1; attribute <= 256; ++attribute) {
+        if (attribute == 0x10 || attribute == 0x11) continue;
+        previousAttribute = -1;
+        Require(sceFontGlyphDefineAttribute(glyph, attribute, &previousAttribute) == SCE_FONT_ERROR_INVALID_PARAMETER);
+        Require(previousAttribute == 0 && glyph->flags == (originalFlags | 2));
+    }
+    previousAttribute = -1;
+    Require(sceFontGlyphDefineAttribute(nullptr, 0x11, &previousAttribute) == SCE_FONT_ERROR_INVALID_GLYPH && previousAttribute == 0);
+    Require(sceFontGlyphDefineAttribute(nullptr, 0x11, nullptr) == SCE_FONT_ERROR_INVALID_GLYPH);
     FontGlyphOpaque notAGlyph{};
-    Require(sceFontGlyphDefineAttribute(&notAGlyph, 0x11, &glyphAttribute) == SCE_FONT_ERROR_INVALID_GLYPH);
-    Require(sceFontGlyphGetAttribute(&notAGlyph, 0x11, &glyphAttribute) == SCE_FONT_ERROR_INVALID_GLYPH);
+    previousAttribute = -1;
+    Require(sceFontGlyphDefineAttribute(&notAGlyph, 0x11, &previousAttribute) == SCE_FONT_ERROR_INVALID_GLYPH && previousAttribute == 0);
+    int glyphAttribute = -1;
+    Require(sceFontGlyphGetAttribute(glyph, 0x11, &glyphAttribute) == SCE_FONT_OK && glyphAttribute == 0x11);
+    Require(sceFontGlyphGetAttribute(glyph, 0x11, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontGlyphGetAttribute(nullptr, 0x11, &glyphAttribute) == SCE_FONT_ERROR_INVALID_GLYPH);
+>>>>>>> cfbff67da (fix(font): implement glyph attribute transitions and output)
     Require(sceFontDeleteGlyph(&memory, &glyph) == SCE_FONT_OK && glyph == nullptr);
     FontKerning kerning{1.0f, 1.0f, 1.0f, 1.0f};
     Require(sceFontGetKerning(font, 'A', 'V', &kerning) == SCE_FONT_OK && KerningIs(kerning, -20.0f));
