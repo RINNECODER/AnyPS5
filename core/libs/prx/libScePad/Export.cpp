@@ -381,17 +381,17 @@ int APS5_VABI scePadSetUserColor(void) {
     return 0;
 }
 
-int APS5_VABI scePadDisableVibration(void) {
+int APS5_VABI scePadDisableVibration(std::int32_t handle, bool disabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetVibrationStrength(void) {
+int APS5_VABI scePadSetVibrationStrength(std::int32_t handle, std::uint32_t strength) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetLightBarBaseBrightness(void) {
+int APS5_VABI scePadSetLightBarBaseBrightness(std::int32_t handle, std::uint32_t brightness) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -411,37 +411,37 @@ int APS5_VABI scePadGetControllerIdleCount(void) {
     return 0;
 }
 
-int APS5_VABI scePadSetPowerSavingState(void) {
+int APS5_VABI scePadSetPowerSavingState(std::int32_t handle, std::uint8_t state) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetAutoPowerOffCount(void) {
+int APS5_VABI scePadSetAutoPowerOffCount(std::int32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadEnableUsbConnection(void) {
+int APS5_VABI scePadEnableUsbConnection(bool enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadEnableAutoDetect(void) {
+int APS5_VABI scePadEnableAutoDetect(bool enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadEnablePlayPauseEmulation(void) {
+int APS5_VABI scePadEnablePlayPauseEmulation(bool enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadDisableTrackingLedBatterySaver(void) {
+int APS5_VABI scePadDisableTrackingLedBatterySaver(bool disabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetLoginUserNumber(void) {
+int APS5_VABI scePadSetLoginUserNumber(std::int32_t number) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -506,12 +506,12 @@ int APS5_VABI scePadSwitchConnection(void) {
     return 0;
 }
 
-int APS5_VABI scePadDisableTriggerEffect(void) {
+int APS5_VABI scePadDisableTriggerEffect(std::int32_t handle, bool disabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetTriggerEffectStrength(void) {
+int APS5_VABI scePadSetTriggerEffectStrength(std::int32_t handle, std::uint32_t strength) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -521,12 +521,12 @@ int APS5_VABI scePadGetTriggerEffectInternalState(void) {
     return 0;
 }
 
-int APS5_VABI scePadSetUserNumber(void) {
+int APS5_VABI scePadSetUserNumber(std::int32_t handle, std::int32_t number) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadDisableTransportButtons(void) {
+int APS5_VABI scePadDisableTransportButtons(bool disabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
