@@ -119,11 +119,11 @@ int APS5_VABI sceNpEntitlementAccessInitialize(const NpEntitlementAccessInitPara
 }
 
 int APS5_VABI sceNpEntitlementAccessAbortRequest(std::int64_t requestId) {
- return 0;
+    throw std::logic_error("sceNpEntitlementAccessAbortRequest: asynchronous request tracking is unimplemented");
 }
 
 int APS5_VABI sceNpEntitlementAccessDeleteRequest(std::int64_t requestId) {
- return 0;
+    throw std::logic_error("sceNpEntitlementAccessDeleteRequest: asynchronous request tracking is unimplemented");
 }
 
 int APS5_VABI sceNpEntitlementAccessGenerateTransactionId(NpEntitlementAccessTransactionId* transactionId) {
@@ -131,7 +131,7 @@ int APS5_VABI sceNpEntitlementAccessGenerateTransactionId(NpEntitlementAccessTra
  return SCE_NP_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceNpEntitlementAccessPollConsumeEntitlement(std::int64_t requestId, std::int32_t* result, std::int32_t* remainingCount) {
+int APS5_VABI sceNpEntitlementAccessPollConsumeEntitlement(std::int64_t requestId, std::int32_t* result, std::int32_t* countResult) {
  return SCE_NP_ERROR_SIGNED_OUT;
 }
 

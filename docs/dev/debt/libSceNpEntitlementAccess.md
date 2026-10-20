@@ -3,7 +3,7 @@
 ### Unknown function info
 
 - [sceNpEntitlementAccessGetEntitlementKey](../../../core/libs/prx/libSceNpEntitlementAccess/Export.cpp) - the three-argument signature, 16-byte key and errors `0x817D0002`/`0x817D0007` follow [KytyPS5](https://github.com/KytyPS5/KytyPS5/blob/main/src/libs/libNet.cpp); PPSA01521 passes a service label, entitlement label and output pointer. Only the no-key path is implemented: local entitlement labels carry no keys, and the output is untouched on failure. Console error precedence and key provisioning are unverified
-- [Entitlement requests and polls](../../../core/libs/prx/libSceNpEntitlementAccess/Export.cpp): native argument lists are restored for single-item, list and consume operations, plus abort/delete. Request IDs are 64-bit, labels occupy 20 bytes and transaction IDs occupy 72 bytes. List options occupy 32 bytes and results have a 64-byte stride; their field semantics and three list-result scalars remain unresolved. The existing signed-out responses do not reproduce native initialization, validation or asynchronous request handling; abort/delete still report success without tracking requests.
+- [Entitlement requests and polls](../../../core/libs/prx/libSceNpEntitlementAccess/Export.cpp): native argument lists are restored for single-item, list and consume operations, plus abort/delete. Request IDs are 64-bit, labels occupy 20 bytes and transaction IDs occupy 72 bytes. List options occupy 32 bytes and results have a 64-byte stride; their field semantics and three list-result scalars remain unresolved. The existing signed-out responses do not reproduce native initialization, validation or asynchronous request handling; abort/delete throw until request tracking is implemented.
 
 ### Functional
 

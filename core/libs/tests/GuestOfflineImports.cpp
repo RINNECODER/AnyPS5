@@ -9,6 +9,8 @@
 #include <string_view>
 
 extern "C" {
+int APS5_VABI sceNpEntitlementAccessAbortRequest(std::int64_t);
+int APS5_VABI sceNpEntitlementAccessDeleteRequest(std::int64_t);
 int APS5_VABI sceHttpSetCookieEnabled(int, int);
 int APS5_VABI sceHttpSendRequest(int, const void*, std::size_t);
 int APS5_VABI sceNpEntitlementAccessGetEntitlementKey(
@@ -32,6 +34,22 @@ int APS5_VABI sceRudpEnd();
 static void Require(bool value) { if (!value) std::abort(); }
 
 int main() {
+    for (std::int64_t requestId : {std::int64_t{0}, std::int64_t{1}, INT64_MAX}) {
+        bool abortFailed = false;
+        bool deleteFailed = false;
+        try {
+            sceNpEntitlementAccessAbortRequest(requestId);
+        } catch (const std::logic_error&) {
+            abortFailed = true;
+        }
+        try {
+            sceNpEntitlementAccessDeleteRequest(requestId);
+        } catch (const std::logic_error&) {
+            deleteFailed = true;
+        }
+        Require(abortFailed && deleteFailed);
+    }
+
     constexpr int invalidValue = static_cast<int>(0x804311FE);
     constexpr int network = static_cast<int>(0x80431063);
     Require(sceHttpSetCookieEnabled(1, 0) == 0);
