@@ -34,6 +34,24 @@ struct SessionSignalingSessionParam {
     std::uint32_t option;
 };
 
+struct SessionSignalingNetAddress {
+    std::uint32_t address;
+    std::uint16_t port;
+};
+
+union SessionSignalingConnectionInfo {
+    std::uint32_t value;
+    SessionSignalingNetAddress netAddress;
+    SessionSignalingPeerAddress peerAddress;
+};
+
+struct SessionSignalingLocalNetInfo {
+    std::uint32_t localAddress;
+    std::uint32_t mappedAddress;
+    std::uint32_t mappedPort;
+    std::uint32_t mappingStatus;
+};
+
 using SessionSignalingEventCallback = void (APS5_VABI *)(std::uint32_t, std::uint32_t, std::int32_t, const SessionSignalingPeerAddress*, std::int32_t, void*);
 using SessionSignalingConnectionCallback = void (APS5_VABI *)(std::uint32_t, std::uint32_t, std::int32_t, std::int32_t, void*);
 using SessionSignalingConnectionCallback2 = void (APS5_VABI *)(std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::int32_t, void*);
@@ -76,6 +94,13 @@ static_assert(offsetof(SessionSignalingMemoryInfo, peakUsedSize) == 16);
 static_assert(sizeof(SessionSignalingPeerAddress) == 16);
 static_assert(sizeof(SessionSignalingSessionParam) == 8);
 static_assert(offsetof(SessionSignalingSessionParam, option) == 4);
+static_assert(sizeof(SessionSignalingNetAddress) == 8);
+static_assert(offsetof(SessionSignalingNetAddress, port) == 4);
+static_assert(sizeof(SessionSignalingConnectionInfo) == 16);
+static_assert(sizeof(SessionSignalingLocalNetInfo) == 16);
+static_assert(offsetof(SessionSignalingLocalNetInfo, mappedAddress) == 4);
+static_assert(offsetof(SessionSignalingLocalNetInfo, mappedPort) == 8);
+static_assert(offsetof(SessionSignalingLocalNetInfo, mappingStatus) == 12);
 static_assert(sizeof(SessionSignalingContextParam1) == 56);
 static_assert(sizeof(SessionSignalingContextParam2) == 56);
 static_assert(offsetof(SessionSignalingContextParam1, prepareCallback) == 8);
@@ -124,7 +149,7 @@ int APS5_VABI sceNpSessionSignalingDestroyContext(uint32_t context_id) {
     return 0;
 }
 
-int APS5_VABI sceNpSessionSignalingGetConnectionInfo(void) {
+int APS5_VABI sceNpSessionSignalingGetConnectionInfo(std::uint32_t contextId, std::uint32_t connectionId, std::uint32_t code, SessionSignalingConnectionInfo* info) {
     return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
@@ -140,17 +165,17 @@ int APS5_VABI sceNpSessionSignalingTerminate(void) {
     return 0;
 }
 
-int32_t APS5_VABI sceNpSessionSignalingGetConnectionStatus(int32_t context_id, int32_t connection_id, int32_t* status, void* peer_address, uint16_t* peer_port) {
- (void)context_id;
- (void)connection_id;
- (void)peer_address;
- (void)peer_port;
+int32_t APS5_VABI sceNpSessionSignalingGetConnectionStatus(std::uint32_t contextId, std::uint32_t connectionId, std::int32_t* status, std::uint32_t* peerAddress, std::uint16_t* peerPort) {
+ (void)contextId;
+ (void)connectionId;
+ (void)peerAddress;
+ (void)peerPort;
  if (!status) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
  return SCE_NP_SESSION_SIGNALING_ERROR_CONN_NOT_FOUND;
 }
 
-int32_t APS5_VABI sceNpSessionSignalingGetLocalNetInfo(int32_t context_id, void* info) {
- (void)context_id;
+int32_t APS5_VABI sceNpSessionSignalingGetLocalNetInfo(std::uint32_t contextId, SessionSignalingLocalNetInfo* info) {
+ (void)contextId;
  if (!info) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
  return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
