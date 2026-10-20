@@ -121,6 +121,25 @@ static void CheckReuse() {
     Require(sceNetSocketClose(replacement) == 0 && sceNetSocketClose(sender) == 0);
 }
 
+static void CheckControl() {
+    const int descriptor = Socket();
+    const int epoll = sceNetEpollCreate("control", 0);
+    Require(epoll >= 0);
+    Require(sceNetEpollControl(epoll, 3, descriptor, nullptr) == static_cast<int>(0x80410102));
+    Require(*sceNetErrnoLoc() == 2);
+    Register(epoll, descriptor, 1, OldData);
+    Require(sceNetSocketClose(descriptor) == 0);
+    NetEpollEvent event{};
+    event.events = 1;
+    for (const int closed : {descriptor, -1}) {
+        for (const int operation : {3, 1, 2}) {
+            Require(sceNetEpollControl(epoll, operation, closed, operation == 3 ? nullptr : &event) == static_cast<int>(0x80410109));
+            Require(*sceNetErrnoLoc() == 9);
+        }
+    }
+    Require(sceNetEpollDestroy(epoll) == 0);
+}
+
 struct WaitResult {
     int count = -1;
     int error = 0;
@@ -186,6 +205,7 @@ int main(int argc, char** argv) {
     Require(sceNetInit_nid_postfix() == 0);
     for (int iteration = 0; iteration != 3; ++iteration) {
         if (std::string(argv[1]) == "reuse") CheckReuse();
+        else if (std::string(argv[1]) == "control") CheckControl();
         else CheckWait(argv[1]);
     }
     std::printf("epoll lifetime %s: 3 rounds passed\n", argv[1]);

@@ -1455,7 +1455,7 @@ int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* e
     }
     if (op != NET_EPOLL_CTL_ADD && op != NET_EPOLL_CTL_MOD && op != NET_EPOLL_CTL_DEL) return fail(NET_EINVAL);
     if (op != NET_EPOLL_CTL_DEL && !event) return fail(NET_EINVAL);
-    if (op != NET_EPOLL_CTL_DEL && g_socks.count(id) == 0) return fail(NET_EBADF);
+    if (g_socks.count(id) == 0) return fail(NET_EBADF);
     auto& registrations = g_epoll_socks[eid];
     if (op == NET_EPOLL_CTL_ADD) {
         if (registrations.count(id) != 0) return fail(NET_EADDRINUSE);
