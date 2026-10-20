@@ -1,10 +1,13 @@
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <atomic>
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 extern "C" {
 extern FileStream* __stdinp_nid_postfix;
@@ -17,6 +20,8 @@ int APS5_VABI fwscanf_s_nid_postfix(FileStream*, const char16_t*, ...);
 int APS5_VABI wscanf_nid_postfix(const char16_t*, ...);
 int APS5_VABI wscanf_s_nid_postfix(const char16_t*, ...);
 std::int32_t APS5_VABI fgetwc_nid_postfix(FileStream*);
+void APS5_VABI flockfile_nid_postfix(FileStream*);
+void APS5_VABI funlockfile_nid_postfix(FileStream*);
 }
 
 #ifdef _WIN32
@@ -156,8 +161,27 @@ static void CheckStandardInput() {
     Close(stream);
 }
 
+static void CheckLocking() {
+    FileStream* stream = Open("12 34");
+    std::atomic<bool> done = false;
+    std::int32_t value = 0;
+    int result = 0;
+    flockfile_nid_postfix(stream);
+    std::thread scanner([&] {
+        result = fwscanf_nid_postfix(stream, u"%d", &value);
+        done = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    Require(!done, "the scan waits for the stream lock");
+    funlockfile_nid_postfix(stream);
+    scanner.join();
+    Require(result == 1 && value == 12, "the scan runs once the lock is released");
+    Close(stream);
+}
+
 int main() {
     CheckConsumption();
+    CheckLocking();
     CheckWideText();
     CheckStandardInput();
     return 0;

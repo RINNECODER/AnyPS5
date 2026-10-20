@@ -26,6 +26,8 @@ extern "C" int APS5_VABI iswspace_nid_postfix(std::uint32_t c);
 extern "C" std::size_t APS5_VABI wcrtomb_nid_postfix(char* destination, std::uint16_t value, void* state);
 extern "C" std::int32_t APS5_VABI fgetwc_nid_postfix(FileStream* stream);
 extern "C" int APS5_VABI ungetc_nid_postfix(int value, FileStream* stream);
+extern "C" void APS5_VABI flockfile_nid_postfix(FileStream* stream);
+extern "C" void APS5_VABI funlockfile_nid_postfix(FileStream* stream);
 
 namespace {
 
@@ -183,6 +185,18 @@ public:
             bytes[count++] = static_cast<unsigned char>(0x80 | (code & 0x3f));
         }
         while (count != 0) ungetc_nid_postfix(bytes[--count], stream);
+    }
+};
+
+class LockedStream {
+    FileStream* const stream;
+
+public:
+    explicit LockedStream(FileStream* value) : stream(value->IsOpen() ? value : nullptr) {
+        if (stream != nullptr) flockfile_nid_postfix(stream);
+    }
+    ~LockedStream() {
+        if (stream != nullptr) funlockfile_nid_postfix(stream);
     }
 };
 
@@ -504,11 +518,13 @@ extern FileStream* __stdinp_nid_postfix;
 
 int APS5_VABI vfwscanf_nid_postfix(FileStream* stream, const char16_t* format, VaList* args) {
     if (stream == nullptr || format == nullptr) return EOF;
+    const LockedStream lock(stream);
     return WideScanner("vfwscanf", false, WideInput(stream), format, args).Run();
 }
 
 int APS5_VABI vfwscanf_s_nid_postfix(FileStream* stream, const char16_t* format, VaList* args) {
     if (stream == nullptr || format == nullptr) return EOF;
+    const LockedStream lock(stream);
     return WideScanner("vfwscanf_s", true, WideInput(stream), format, args).Run();
 }
 
