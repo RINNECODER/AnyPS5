@@ -118,6 +118,7 @@ static void CheckSendToPortZero() {
     std::array<unsigned char, 16> bindAddress{16, 2, 0, 0, 127, 0, 0, 1};
     Require(bind_nid_postfix(bound, bindAddress.data(), bindAddress.size()) == 0);
     Require(sendto_nid_postfix(bound, "x", 1, 0, portZero.data(), portZero.size()) == 1);
+    Require(recv_nid_postfix(receiver, buffer, sizeof(buffer), 0x80) == -1 && *__error_nid_postfix() == 35);
     std::array<unsigned char, 16> anyDestination{16, 2, 0, 0, 0, 0, 0, 0};
     Require(sendto_nid_postfix(bound, "x", 1, 0, anyDestination.data(), anyDestination.size()) == -1 && *__error_nid_postfix() == 49);
     Require(close_nid_postfix(bound) == 0 && close_nid_postfix(receiver) == 0 && close_nid_postfix(sender) == 0);

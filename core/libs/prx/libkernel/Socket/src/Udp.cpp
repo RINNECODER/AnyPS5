@@ -269,20 +269,20 @@ bool ZeroPortConnect(const Socket& socket, const void* address, std::uint32_t le
     Fail(49);
     return true;
 }
-bool ZeroPortSend(const Socket& socket, const sockaddr_storage& destination) {
-    if (socket.type != 2 || socket.family != 2 || destination.ss_family != AF_INET) return false;
+constexpr std::int64_t NotAnswered = -2;
+std::int64_t ZeroPortSend(const Socket& socket, const sockaddr_storage& destination, std::uint64_t length) {
+    if (socket.type != 2 || socket.family != 2 || destination.ss_family != AF_INET) return NotAnswered;
     const auto& remote = reinterpret_cast<const sockaddr_in&>(destination);
-    if (remote.sin_port != 0) return false;
+    if (remote.sin_port != 0) return NotAnswered;
     sockaddr_storage peer{};
     socklen_t peerSize = sizeof(peer);
-    if (::getpeername(socket.value, reinterpret_cast<sockaddr*>(&peer), &peerSize) == 0) return false;
+    if (::getpeername(socket.value, reinterpret_cast<sockaddr*>(&peer), &peerSize) == 0) return NotAnswered;
     sockaddr_in local{};
     socklen_t localSize = sizeof(local);
     const bool bound = ::getsockname(socket.value, reinterpret_cast<sockaddr*>(&local), &localSize) == 0
         && local.sin_port != 0 && local.sin_addr.s_addr != htonl(INADDR_ANY);
-    if (bound && remote.sin_addr.s_addr != htonl(INADDR_ANY) && remote.sin_addr.s_addr != htonl(INADDR_BROADCAST)) return false;
-    Fail(49);
-    return true;
+    if (bound && remote.sin_addr.s_addr != htonl(INADDR_ANY) && remote.sin_addr.s_addr != htonl(INADDR_BROADCAST)) return static_cast<std::int64_t>(length);
+    return Fail(49);
 }
 int Disconnect(const Socket& socket) {
     sockaddr_storage peer{};
@@ -1201,7 +1201,7 @@ std::int64_t APS5_VABI sendto_nid_postfix(int descriptor, const void* buffer, st
         socklen_t size;
         if (!Address(address, addressLength, native, size)) return -1;
         if (native.ss_family != (socket->family == 2 ? AF_INET : AF_INET6)) return Fail(47);
-        if (ZeroPortSend(*socket, native)) return -1;
+        if (const auto answered = ZeroPortSend(*socket, native, length); answered != NotAnswered) return answered;
         result = static_cast<int>(::sendto(socket->value, static_cast<const char*>(buffer), static_cast<int>(length), SocketSendFlags(*socket, flags),
             reinterpret_cast<sockaddr*>(&native), size));
     }
