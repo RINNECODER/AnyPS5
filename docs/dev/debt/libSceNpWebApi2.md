@@ -2,6 +2,7 @@
 
 ### Silent stubs
 
+- [sceNpWebApi2AddWebTraceTag](../../../core/libs/prx/libSceNpWebApi2/Export.cpp) (libSceNpWebApi2) - the `(request id, value)` signature follows [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/np/np_web_api2/np_web_api2.cpp). PPSA33016 imports it. It validates that the value pointer is not null (returning `INVALID_ARGUMENT` 0x80553402), accepts any request id, and stores nothing: no request reaches a service, as `sceNpWebApi2SendRequest` fails with `UNAVAILABLE` at once, so trace tags are not transmitted offline
 - [sceNpWebApi2SetRequestTimeout](../../../core/libs/prx/libSceNpWebApi2/Export.cpp) (libSceNpWebApi2) - the `(request id, timeout)` signature follows [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/main/src/core/libraries/np/np_web_api2/np_web_api2.cpp). Pinball FX (PPSA08755) calls it while its main menu loads. It succeeds for any request id and stores nothing: no request reaches a service, as `sceNpWebApi2SendRequest` fails with `UNAVAILABLE` at once, so no timeout can expire. shadPS4 returns `LIB_CONTEXT_NOT_FOUND`, `USER_CONTEXT_NOT_FOUND` or `REQUEST_NOT_FOUND` for an id it does not know; this library keeps no context or request table (`sceNpWebApi2CreateRequest` hands out counter values, and `sceNpWebApi2AbortRequest`, `sceNpWebApi2AddHttpRequestHeader` and `sceNpWebApi2DeleteRequest` also accept any id), so those errors are not reported until the request functions track their ids together
 
 ### Unknown function info
