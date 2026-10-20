@@ -59,17 +59,17 @@ const FontWritingStep* APS5_VABI sceFontWritingRefersRenderStep(FontWriting*);
 FontTextCharacter* APS5_VABI sceFontWritingRefersRenderStepCharacter(FontWriting*, const FontWritingLetterStep**);
 const void* APS5_VABI sceFontSelectLibraryFt(int);
 const void* APS5_VABI sceFontSelectRendererFt(int);
-int APS5_VABI sceFontFtSupportBdf();
-int APS5_VABI sceFontFtSupportCid();
-int APS5_VABI sceFontFtSupportOpenType();
-int APS5_VABI sceFontFtSupportOpenTypeOtf();
-int APS5_VABI sceFontFtSupportOpenTypeTtf();
-int APS5_VABI sceFontFtSupportPcf();
-int APS5_VABI sceFontFtSupportPfr();
-int APS5_VABI sceFontFtSupportTrueType();
-int APS5_VABI sceFontFtSupportType1();
-int APS5_VABI sceFontFtSupportType42();
-int APS5_VABI sceFontFtSupportWinFonts();
+int APS5_VABI sceFontFtSupportBdf(FontLibrary library);
+int APS5_VABI sceFontFtSupportCid(FontLibrary library);
+int APS5_VABI sceFontFtSupportOpenType(FontLibrary library);
+int APS5_VABI sceFontFtSupportOpenTypeOtf(FontLibrary library);
+int APS5_VABI sceFontFtSupportOpenTypeTtf(FontLibrary library);
+int APS5_VABI sceFontFtSupportPcf(FontLibrary library);
+int APS5_VABI sceFontFtSupportPfr(FontLibrary library);
+int APS5_VABI sceFontFtSupportTrueType(FontLibrary library);
+int APS5_VABI sceFontFtSupportType1(FontLibrary library);
+int APS5_VABI sceFontFtSupportType42(FontLibrary library);
+int APS5_VABI sceFontFtSupportWinFonts(FontLibrary library);
 int APS5_VABI sceFontCharacterGetSyllableStringState(const FontTextCharacter*, int*);
 FontTextCodes* APS5_VABI sceFontCharactersRefersTextCodes(const FontTextCharacter*, const FontTextCharacter*, FontTextCodes*);
 FontTextCodes* APS5_VABI sceFontTextCodesStepNext(FontTextCodes*);
@@ -240,11 +240,31 @@ int main() {
     Require(sceFontMemoryInit(&memory, nullptr, 0, &iface, nullptr, nullptr, nullptr) == SCE_FONT_OK);
     Require(sceFontSelectLibraryFt(0) != nullptr && sceFontSelectLibraryFt(1) == nullptr);
     Require(sceFontSelectRendererFt(0) != nullptr && sceFontSelectRendererFt(1) == nullptr);
-    Require(sceFontFtSupportBdf() == 0 && sceFontFtSupportCid() == 0 && sceFontFtSupportOpenType() == 0 && sceFontFtSupportOpenTypeOtf() == 0 && sceFontFtSupportOpenTypeTtf() == 0 && sceFontFtSupportPcf() == 0 && sceFontFtSupportPfr() == 0 && sceFontFtSupportTrueType() == 0 && sceFontFtSupportType1() == 0 && sceFontFtSupportType42() == 0 && sceFontFtSupportWinFonts() == 0);
 
     FontLibrary library = nullptr;
     Require(sceFontCreateLibrary(&memory, nullptr, &library) == SCE_FONT_ERROR_INVALID_PARAMETER && library == nullptr);
     Require(sceFontCreateLibrary(&memory, sceFontSelectLibraryFt(0), &library) == SCE_FONT_OK && library != nullptr);
+    Require(sceFontFtSupportBdf(library) == 0 && sceFontFtSupportCid(library) == 0 && sceFontFtSupportOpenType(library) == 0 && sceFontFtSupportOpenTypeOtf(library) == 0 && sceFontFtSupportOpenTypeTtf(library) == 0 && sceFontFtSupportPcf(library) == 0 && sceFontFtSupportPfr(library) == 0 && sceFontFtSupportTrueType(library) == 0 && sceFontFtSupportType1(library) == 0 && sceFontFtSupportType42(library) == 0 && sceFontFtSupportWinFonts(library) == 0);
+    const auto* nativeLibrary = static_cast<const Font::FontLibNative*>(library);
+    const auto savedLock = nativeLibrary->lock_word;
+    for (auto support : {sceFontFtSupportBdf, sceFontFtSupportCid, sceFontFtSupportOpenType, sceFontFtSupportOpenTypeOtf, sceFontFtSupportOpenTypeTtf, sceFontFtSupportPcf, sceFontFtSupportPfr, sceFontFtSupportTrueType, sceFontFtSupportType1, sceFontFtSupportType42, sceFontFtSupportWinFonts}) {
+        Font::FontLibNative invalidLibrary{};
+        Require(support(nullptr) == SCE_FONT_ERROR_INVALID_LIBRARY);
+        Require(support(&invalidLibrary) == SCE_FONT_ERROR_INVALID_LIBRARY);
+        Require(support(library) == SCE_FONT_OK);
+        Require(nativeLibrary->lock_word == savedLock);
+    }
+
+    Font::FontLibNative foreignLibrary{};
+    foreignLibrary.magic = Font::LIBRARY_MAGIC;
+    foreignLibrary.lock_word = 5;
+    bool foreignDriverRejected = false;
+    try {
+        static_cast<void>(sceFontFtSupportTrueType(&foreignLibrary));
+    } catch (const std::runtime_error&) {
+        foreignDriverRejected = true;
+    }
+    Require(foreignDriverRejected && foreignLibrary.lock_word == 5);
 
     std::uint32_t subPixelCount = 1;
     Require(sceFontGetPixelResolution(library, &subPixelCount) == SCE_FONT_OK && subPixelCount == 64);
