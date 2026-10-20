@@ -41,6 +41,17 @@
 
 // Guest socket descriptors retain PS5 semantics while their transport is backed by host sockets.
 
+struct NetSyncObject {
+    void* mutex;
+    void* condition;
+    std::uint32_t signals;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(NetSyncObject) == 24);
+
+using NetEventCallback = std::uint64_t (APS5_VABI*)(std::uint32_t interfaceId, std::uint64_t events, void* userData, void* waitData);
+
 struct NetIpv6Address {
     std::uint8_t bytes[16];
 };
@@ -1878,22 +1889,22 @@ int APS5_VABI sceNetDbgInit(void) {
     return 0;
 }
 
-int APS5_VABI sceNetEventCallbackCreate(void) {
+int APS5_VABI sceNetEventCallbackCreate(std::uint32_t interfaceId, NetEventCallback callback, void* userData, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetEventCallbackDestroy(void) {
+int APS5_VABI sceNetEventCallbackDestroy(std::uint32_t interfaceId, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetEventCallbackGetError(void) {
+int APS5_VABI sceNetEventCallbackGetError(std::uint32_t interfaceId, std::int32_t* error, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetEventCallbackWaitCB(void) {
+int APS5_VABI sceNetEventCallbackWaitCB(std::int32_t timeout, void* waitData, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1943,7 +1954,7 @@ int APS5_VABI sceNetGetIfnameNumList(void) {
     return 0;
 }
 
-int APS5_VABI sceNetGetNameToIndex(void) {
+int APS5_VABI sceNetGetNameToIndex(std::uint32_t interfaceId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2013,27 +2024,27 @@ int APS5_VABI sceNetSocketInternal(const char* name, int domain, int type, int p
     return 0;
 }
 
-int APS5_VABI sceNetSyncCreate(void) {
+int APS5_VABI sceNetSyncCreate(NetSyncObject* sync, std::uint32_t signals, const char* name) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetSyncDestroy(void) {
+int APS5_VABI sceNetSyncDestroy(NetSyncObject* sync) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetSyncGet(void) {
+NetSyncObject* APS5_VABI sceNetSyncGet(std::uint32_t index) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetSyncSignal(void) {
+int APS5_VABI sceNetSyncSignal(NetSyncObject* sync, std::uint32_t signals) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetSyncWait(void) {
+int APS5_VABI sceNetSyncWait(NetSyncObject* sync, std::uint32_t* timeout) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

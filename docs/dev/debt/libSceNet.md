@@ -29,10 +29,6 @@
 - [sceNetAllocateAllRouteInfo6](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetControl](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetDbgInit](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetEventCallbackCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetEventCallbackDestroy](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetEventCallbackGetError](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetEventCallbackWaitCB](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetFreeAllRouteInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetArpInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetAppMemInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -44,6 +40,7 @@
 - [sceNetGetIfnameNumList](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetNameToIndex](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetRandom](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
+- [sceNetGetRandom](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the `(uint32_t* output)` signature and the `EINVAL` failure for a null output follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/d5ba5fd06c49af29b8ec9200cad70bca676a9cd4/src/core/libraries/net/net.cpp); the value comes from the host's `std::random_device`, as `kern.rng_pseudo` in libkernel does. Unverified on hardware
 - [sceNetGetRouteInfo](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetsockoptEx](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetGetSystemTime](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
@@ -60,11 +57,6 @@
 - [sceNetMemoryAllocate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the `(int64_t size, int flags)` signature, flag 2 as zero fill and the null result for a size of 0 or less follow [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/d5ba5fd06c49af29b8ec9200cad70bca676a9cd4/src/core/libraries/net/net.cpp). The block comes from the guest heap, and an allocation failure returns null without setting an errno. Any other flag bit throws, since its meaning is not known. Unverified on hardware
 - [sceNetMemoryFree](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - the `(void* memory)` signature follows [shadPS4](https://github.com/shadps4-emu/shadPS4/blob/d5ba5fd06c49af29b8ec9200cad70bca676a9cd4/src/core/libraries/net/net.cpp); the block returns to the guest heap and a null pointer is ignored. Unverified on hardware
 - [sceNetSetDnsInfoToKernel](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSyncCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSyncDestroy](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSyncGet](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSyncSignal](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
-- [sceNetSyncWait](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetThreadCreate](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetThreadExit](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
 - [sceNetThreadJoin](../../../core/libs/prx/libSceNet/Export.cpp) (libSceNet) - unknown signature
