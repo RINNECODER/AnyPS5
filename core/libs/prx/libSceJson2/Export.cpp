@@ -948,6 +948,7 @@ static_assert(sizeof(InitParameter2) == 0x28 && offsetof(InitParameter2, special
 
 void APS5_VABI _ZN3sce4Json14InitParameter2C1Ev(InitParameter2* self) {
     *self = {};
+    self->specialFloatFormatType = 2;
 }
 
 void APS5_VABI _ZN3sce4Json14InitParameter2C2Ev(InitParameter2* self) {
