@@ -1852,6 +1852,16 @@ struct PlayGoDialogResult {
     std::int32_t reserved[9];
 };
 
+struct RudpPollEvent {
+    std::int32_t contextId;
+    std::uint16_t events;
+    std::uint16_t returnedEvents;
+};
+
+static_assert(sizeof(RudpPollEvent) == 8);
+static_assert(offsetof(RudpPollEvent, events) == 4);
+static_assert(offsetof(RudpPollEvent, returnedEvents) == 6);
+
 using RudpEventHandler = void (*)(int ctx_id, int event_id, int error_code, void* arg);
 
 struct SystemServiceStatus {

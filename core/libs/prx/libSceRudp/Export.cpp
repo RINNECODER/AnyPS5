@@ -36,6 +36,16 @@ std::map<int, bool> g_ctx;  // id -> bound
 GuestRudpEventHandler g_handler = nullptr;
 void* g_handler_arg = nullptr;
 
+struct RudpPoll {
+    std::size_t capacity;
+    std::map<int, uint16_t> entries;
+};
+
+
+int g_next_poll = 1;
+std::map<int, RudpPoll> g_polls;
+std::condition_variable g_polls_changed;
+
 bool valid_ctx(int ctx) {
     return g_ctx.count(ctx) != 0;
 }
@@ -290,6 +300,125 @@ int APS5_VABI sceRudpGetMaxSegmentSize(uint16_t* size) {
         return RUDP_ERROR_INVALID_ARGUMENT;
     }
     *size = RUDP_MAX_SEGMENT_SIZE;
+    return 0;
+}
+
+int APS5_VABI sceRudpPollCreate(std::size_t size) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_inited) {
+        return RUDP_ERROR_NOT_INITIALIZED;
+    }
+    if (size == 0) {
+        return RUDP_ERROR_INVALID_ARGUMENT;
+    }
+    if (g_next_poll == std::numeric_limits<int>::max()) {
+        throw std::runtime_error("sceRudpPollCreate: poll ids exhausted");
+    }
+    const int id = g_next_poll++;
+    g_polls[id] = RudpPoll{size, {}};
+    return id;
+}
+
+int APS5_VABI sceRudpPollControl(int pollId, int op, int ctxId, uint16_t events) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_inited) {
+        return RUDP_ERROR_NOT_INITIALIZED;
+    }
+    if (pollId < 0 || ctxId < 0 || (op != RUDP_POLL_OP_ADD && op != RUDP_POLL_OP_MODIFY && op != RUDP_POLL_OP_REMOVE)) {
+        return RUDP_ERROR_INVALID_ARGUMENT;
+    }
+    const auto poll = g_polls.find(pollId);
+    if (poll == g_polls.end()) {
+        return RUDP_ERROR_INVALID_POLL_ID;
+    }
+    if (!valid_ctx(ctxId)) {
+        return RUDP_ERROR_INVALID_CONTEXT_ID;
+    }
+    auto& entries = poll->second.entries;
+    const auto entry = entries.find(ctxId);
+    if (op == RUDP_POLL_OP_ADD) {
+        if (entries.size() >= poll->second.capacity) {
+            return RUDP_ERROR_TOO_MANY_CONTEXTS;
+        }
+        if (entry != entries.end()) {
+            return RUDP_ERROR_INVALID_CONTEXT_ID;
+        }
+        entries.emplace(ctxId, events);
+        return 0;
+    }
+    if (entry == entries.end()) {
+        return RUDP_ERROR_INVALID_CONTEXT_ID;
+    }
+    if (op == RUDP_POLL_OP_MODIFY) {
+        entry->second = events;
+    } else {
+        entries.erase(entry);
+    }
+    return 0;
+}
+
+int APS5_VABI sceRudpPollWait(int pollId, RudpPollEvent* events, std::size_t eventLen, uint64_t timeout) {
+    std::unique_lock<std::mutex> lk(g_mutex);
+    if (!g_inited) {
+        return RUDP_ERROR_NOT_INITIALIZED;
+    }
+    if (pollId < 0 || events == nullptr || eventLen == 0) {
+        return RUDP_ERROR_INVALID_ARGUMENT;
+    }
+    if (g_polls.count(pollId) == 0) {
+        return RUDP_ERROR_INVALID_POLL_ID;
+    }
+    const auto closed = [pollId] { return !g_inited || g_polls.count(pollId) == 0; };
+    if (timeout > RUDP_POLL_WAIT_MAX_USEC) {
+        g_polls_changed.wait(lk, closed);
+    } else if (!g_polls_changed.wait_for(lk, std::chrono::microseconds(timeout), closed)) {
+        return 0;
+    }
+    return g_inited ? RUDP_ERROR_INVALID_POLL_ID : RUDP_ERROR_NOT_INITIALIZED;
+}
+
+int APS5_VABI sceRudpPollDestroy(int pollId) {
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (!g_inited) {
+        return RUDP_ERROR_NOT_INITIALIZED;
+    }
+    if (pollId < 0) {
+        return RUDP_ERROR_INVALID_ARGUMENT;
+    }
+    if (g_polls.erase(pollId) == 0) {
+        return RUDP_ERROR_INVALID_POLL_ID;
+    }
+    g_polls_changed.notify_all();
+    return 0;
+}
+
+int APS5_VABI sceRudpAccept() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpFlush() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpGetLocalInfo() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpListen() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpPollCancel() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceRudpSetMaxSegmentSize() {
+    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
