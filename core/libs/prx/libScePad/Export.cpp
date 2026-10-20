@@ -676,57 +676,57 @@ int APS5_VABI scePadResetLeonardo(void) {
     return 0;
 }
 
-int APS5_VABI scePadSetProfileEditMode(void) {
+int APS5_VABI scePadSetProfileEditMode(std::int32_t handle, bool enabled, std::uint32_t profile) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetProfileEditMode(void) {
+int APS5_VABI scePadGetProfileEditMode(std::int32_t handle, std::int32_t* mode) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetProfileEditModeLeonardo(void) {
+int APS5_VABI scePadGetProfileEditModeLeonardo(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetSelectButtonCustomizeMode(void) {
+int APS5_VABI scePadSetSelectButtonCustomizeMode(std::int32_t handle, bool enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetSelectButtonCustomizeMode(void) {
+int APS5_VABI scePadGetSelectButtonCustomizeMode(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetToggleAllReleaseLeonardo(void) {
+int APS5_VABI scePadSetToggleAllReleaseLeonardo(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadEnableControllerIndicator(void) {
+int APS5_VABI scePadEnableControllerIndicator(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadEnableProfileIndicator(void) {
+int APS5_VABI scePadEnableProfileIndicator(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetProfileIndicatorAnimation(void) {
+int APS5_VABI scePadSetProfileIndicatorAnimation(std::int32_t handle, std::uint8_t animation) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadIsCoPilot(void) {
+int APS5_VABI scePadIsCoPilot(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetIsCoPilot(void) {
+int APS5_VABI scePadSetIsCoPilot(std::int32_t handle, bool enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -741,12 +741,12 @@ int APS5_VABI scePadGetTelemetryInfo(void) {
     return 0;
 }
 
-int APS5_VABI scePadGetActiveTime(void) {
+int APS5_VABI scePadGetActiveTime(std::int32_t handle, std::int32_t type, std::uint64_t* activeTime) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetDeviceId(void) {
+int APS5_VABI scePadGetDeviceId(std::int32_t handle, std::int32_t* deviceId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
