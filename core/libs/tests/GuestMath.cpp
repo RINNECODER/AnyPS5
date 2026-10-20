@@ -57,6 +57,18 @@ long double APS5_VABI frexpl_nid_postfix(long double, int*);
 struct LibcFloatConstant { std::uint32_t bits[4]; };
 extern LibcFloatConstant _FInf_nid_postfix;
 extern LibcFloatConstant _FNan_nid_postfix;
+extern LibcFloatConstant _FDenorm_nid_postfix;
+extern LibcFloatConstant _FSnan_nid_postfix;
+union SonyDconst { unsigned short _Word[8]; float _Float; double _Double; long double _Long_double; };
+extern SonyDconst _Inf_nid_postfix;
+extern SonyDconst _Denorm_nid_postfix;
+extern SonyDconst _Hugeval_nid_postfix;
+extern SonyDconst _Nan_nid_postfix;
+extern SonyDconst _Snan_nid_postfix;
+extern SonyDconst _LDenorm_nid_postfix;
+extern SonyDconst _LInf_nid_postfix;
+extern SonyDconst _LNan_nid_postfix;
+extern SonyDconst _LSnan_nid_postfix;
 short APS5_VABI _FDtest_nid_postfix(const float*);
 short APS5_VABI _Dtest_nid_postfix(const double*);
 int APS5_VABI __fpclassifyf_nid_postfix(float);
@@ -1020,6 +1032,36 @@ static void CheckFloatClassification() {
     Require(__fpclassifyl_nid_postfix(-std::numeric_limits<long double>::infinity()) == 1);
 }
 
+static void RequireBytes(const void* constant, std::initializer_list<unsigned char> expected) {
+    unsigned char bytes[16];
+    std::memcpy(bytes, constant, sizeof(bytes));
+    int index = 0;
+    for (const unsigned char byte : expected) Require(bytes[index++] == byte);
+    while (index < 16) Require(bytes[index++] == 0);
+}
+
+static void CheckDinkumwareConstants() {
+    RequireBytes(&_Inf_nid_postfix, {0, 0, 0, 0, 0, 0, 0xf0, 0x7f});
+    RequireBytes(&_Denorm_nid_postfix, {1});
+    RequireBytes(&_Hugeval_nid_postfix, {0, 0, 0, 0, 0, 0, 0xf0, 0x7f});
+    RequireBytes(&_Nan_nid_postfix, {0, 0, 0, 0, 0, 0, 0xf8, 0x7f});
+    RequireBytes(&_Snan_nid_postfix, {1, 0, 0, 0, 0, 0, 0xf0, 0x7f});
+    RequireBytes(&_FDenorm_nid_postfix, {1});
+    RequireBytes(&_FSnan_nid_postfix, {1, 0, 0x80, 0x7f});
+    RequireBytes(&_LDenorm_nid_postfix, {1});
+    RequireBytes(&_LInf_nid_postfix, {0, 0, 0, 0, 0, 0, 0, 0x80, 0xff, 0x7f});
+    RequireBytes(&_LNan_nid_postfix, {0, 0, 0, 0, 0, 0, 0, 0xc0, 0xff, 0x7f});
+    RequireBytes(&_LSnan_nid_postfix, {1, 0, 0, 0, 0, 0, 0, 0x80, 0xff, 0x7f});
+    Require(_Dtest_nid_postfix(&_Denorm_nid_postfix._Double) == -2 && _Denorm_nid_postfix._Double == std::numeric_limits<double>::denorm_min());
+    Require(_Dtest_nid_postfix(&_Hugeval_nid_postfix._Double) == 1 && _Hugeval_nid_postfix._Double == HUGE_VAL);
+    Require(_Dtest_nid_postfix(&_Nan_nid_postfix._Double) == 2 && _Dtest_nid_postfix(&_Snan_nid_postfix._Double) == 2);
+    Require(_FDtest_nid_postfix(reinterpret_cast<const float*>(&_FDenorm_nid_postfix)) == -2);
+    Require(_FDtest_nid_postfix(reinterpret_cast<const float*>(&_FSnan_nid_postfix)) == 2);
+    Require(_LDenorm_nid_postfix._Long_double == std::numeric_limits<long double>::denorm_min());
+    Require(_LInf_nid_postfix._Long_double == std::numeric_limits<long double>::infinity());
+    Require(std::isnan(_LNan_nid_postfix._Long_double) && std::isnan(_LSnan_nid_postfix._Long_double));
+}
+
 static void CheckMissingClassificationExports() {
     const float infinity = std::numeric_limits<float>::infinity();
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -1203,6 +1245,8 @@ void CheckNoConversionIsPositiveZero() {
 
 int main() {
     CheckFloatClassification();
+    CheckDinkumwareConstants();
+    CheckNoConversionIsPositiveZero();
     CheckMissingClassificationExports();
     CheckNoConversionIsPositiveZero();
     CheckFloatMathExports();
