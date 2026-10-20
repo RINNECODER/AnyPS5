@@ -130,9 +130,11 @@ int main() {
     }
     Require(towlower_nid_postfix(0xffffffff) == 0xffffffff && towupper_nid_postfix(0xffffffff) == 0xffffffff);
     Require(btowc_nid_postfix(-1) == 0xffffffff && btowc_nid_postfix(0) == 0);
-    Require(btowc_nid_postfix('A') == 'A' && btowc_nid_postfix(0xe9) == 0xe9 && btowc_nid_postfix(-23) == 0xe9);
-    Require(wctob_nid_postfix('A') == 'A' && wctob_nid_postfix(0xe9) == 0xe9 && wctob_nid_postfix(0) == 0);
-    Require(wctob_nid_postfix(0x100) == -1 && wctob_nid_postfix(0x20ac) == -1 && wctob_nid_postfix(0xffffffff) == -1);
+    Require(btowc_nid_postfix('A') == 'A' && btowc_nid_postfix(0x7f) == 0x7f && btowc_nid_postfix(0x80) == 0xffffffff);
+    Require(btowc_nid_postfix(0xe9) == 0xffffffff && btowc_nid_postfix(-23) == 0xffffffff && btowc_nid_postfix(0x141) == 'A');
+    Require(wctob_nid_postfix('A') == 'A' && wctob_nid_postfix(0x7f) == 0x7f && wctob_nid_postfix(0x80) == -1 && wctob_nid_postfix(0) == 0);
+    Require(wctob_nid_postfix(0xe9) == -1 && wctob_nid_postfix(0x20ac) == -1 && wctob_nid_postfix(0xffffffff) == -1);
+    Require(wctob_nid_postfix(0x10041) == 'A' && wctob_nid_postfix(0x80000000) == 0);
     Require(wctrans_nid_postfix("tolower") == 1 && wctrans_nid_postfix("toupper") == 2);
     Require(wctrans_nid_postfix("") == 0 && wctrans_nid_postfix("TOLOWER") == 0 && wctrans_nid_postfix("tolowe") == 0);
     for (std::int64_t c = -300; c < 70000; ++c) {

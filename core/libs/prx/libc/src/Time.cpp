@@ -486,7 +486,7 @@ int64_t APS5_VABI libc_time_nid_postfix(int64_t* timer);
 double APS5_VABI libc_difftime_nid_postfix(int64_t time1, int64_t time0);
 std::size_t APS5_VABI wcsrtombs_nid_postfix(char* destination, const std::uint16_t** source, std::size_t capacity, void* state);
 std::size_t APS5_VABI mbsrtowcs_nid_postfix(std::uint16_t* destination, const char** source, std::size_t capacity, void* state);
-int APS5_VABI ___mb_cur_max_nid_postfix();
+int APS5_VABI _Getmbcurmax_nid_postfix();
 
 void APS5_VABI tzset_nid_postfix(void) {
     const ZoneScope zone;
@@ -669,7 +669,7 @@ size_t APS5_VABI wcsftime_nid_postfix(std::uint16_t* str, size_t count, const st
         return 0;
     }
     wcsrtombs_nid_postfix(narrowFormat.get(), &formatCursor, formatLength + 1, nullptr);
-    const auto maxCharacterBytes = static_cast<std::size_t>(___mb_cur_max_nid_postfix());
+    const auto maxCharacterBytes = static_cast<std::size_t>(_Getmbcurmax_nid_postfix());
     if (std::numeric_limits<std::size_t>::max() / maxCharacterBytes <= count) {
         errno = GuestEinval;
         return 0;
@@ -680,13 +680,14 @@ size_t APS5_VABI wcsftime_nid_postfix(std::uint16_t* str, size_t count, const st
         return 0;
     }
     const int callerError = errno;
-    if (strftime_nid_postfix(narrow.get(), count, narrowFormat.get(), timeptr) == 0) {
+    if (strftime_nid_postfix(narrow.get(), count * maxCharacterBytes, narrowFormat.get(), timeptr) == 0) {
         errno = callerError;
         return 0;
     }
     const char* narrowCursor = narrow.get();
-    const std::size_t length = mbsrtowcs_nid_postfix(str, &narrowCursor, count, nullptr);
-    if (length == static_cast<std::size_t>(-2) || length == Failed || narrowCursor != nullptr) return 0;
+    const std::size_t length = mbsrtowcs_nid_postfix(nullptr, &narrowCursor, 0, nullptr);
+    if (length == Failed || length >= count) return 0;
+    mbsrtowcs_nid_postfix(str, &narrowCursor, count, nullptr);
     return length;
 }
 
