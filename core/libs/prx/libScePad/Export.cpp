@@ -557,12 +557,12 @@ int APS5_VABI scePadSetLotusIrCodeSetData(void) {
     return 0;
 }
 
-int APS5_VABI scePadSetLotusIrCodeSetEnd(void) {
+int APS5_VABI scePadSetLotusIrCodeSetEnd(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetLotusIrCodeSetResult(void) {
+int APS5_VABI scePadGetLotusIrCodeSetResult(std::int32_t handle, std::int32_t* result, std::uint8_t* deviceResult) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -592,7 +592,7 @@ int APS5_VABI scePadUiReadStateForTuning(void) {
     return 0;
 }
 
-int APS5_VABI scePadSetStickTriggerTuningMode(void) {
+int APS5_VABI scePadSetStickTriggerTuningMode(std::int32_t handle, std::uint32_t mode) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -632,17 +632,17 @@ int APS5_VABI scePadGetActiveProfileInfo(void) {
     return 0;
 }
 
-int APS5_VABI scePadDisableActiveProfileChange(void) {
+int APS5_VABI scePadDisableActiveProfileChange(std::int32_t handle, bool disabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadDisableActiveProfileChangeByDeviceId(void) {
+int APS5_VABI scePadDisableActiveProfileChangeByDeviceId(std::int32_t deviceId, bool disabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetActiveProfileSlot(void) {
+int APS5_VABI scePadSetActiveProfileSlot(std::int32_t deviceId, std::uint32_t slot) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -667,12 +667,12 @@ int APS5_VABI scePadParseUniqueDataLeonardo(void) {
     return 0;
 }
 
-int APS5_VABI scePadGetControllerTypeLeonardo(void) {
+int APS5_VABI scePadGetControllerTypeLeonardo(std::int32_t deviceId, std::int32_t* controllerType) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetControllerTypeLeonardo(void) {
+int APS5_VABI scePadSetControllerTypeLeonardo(std::int32_t deviceId, std::int32_t controllerType) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
