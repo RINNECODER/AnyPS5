@@ -31,6 +31,23 @@ struct RequestStatusRegistration {
 };
 static std::mutex g_statusMutex;
 static std::map<int, RequestStatusRegistration> g_statusCallbacks;
+struct HttpMemoryPoolStats {
+    std::size_t poolSize;
+    std::size_t peakUsedSize;
+    std::size_t usedSize;
+};
+
+struct HttpRequestHeader {
+    const char* name;
+    const char* value;
+};
+
+static_assert(sizeof(HttpMemoryPoolStats) == 24);
+static_assert(offsetof(HttpMemoryPoolStats, peakUsedSize) == 8);
+static_assert(offsetof(HttpMemoryPoolStats, usedSize) == 16);
+static_assert(sizeof(HttpRequestHeader) == 16);
+static_assert(offsetof(HttpRequestHeader, value) == 8);
+
 struct HttpsCaList {
     void* certs;
     int certsNum;
@@ -659,7 +676,7 @@ int APS5_VABI sceHttpDbgShowStat(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpGetMemoryPoolStats(void) {
+int APS5_VABI sceHttpGetMemoryPoolStats(int contextId, HttpMemoryPoolStats* stats) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -779,7 +796,7 @@ int APS5_VABI sceHttpSetPolicyOption(int id, int policy) {
     return 0;
 }
 
-int APS5_VABI sceHttpRequestGetAllHeaders(void) {
+int APS5_VABI sceHttpRequestGetAllHeaders(int requestId, HttpRequestHeader* headers, std::uint32_t* headerCount, char* contentLength, std::size_t* contentLengthSize) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -805,7 +822,7 @@ int APS5_VABI sceHttpSetHttp09Enabled(int id, int enabled) {
     return 0;
 }
 
-int APS5_VABI sceHttpGetRegisteredCtxIds(void) {
+int APS5_VABI sceHttpGetRegisteredCtxIds(int contextId, int* netPoolId, int* sslContextId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
