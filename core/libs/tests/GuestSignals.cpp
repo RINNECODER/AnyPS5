@@ -98,6 +98,11 @@ int main() {
     Require(raise_nid_postfix(15) == 0 && received == 0);
     Require(signal_nid_postfix(15, nullptr) == ignore);
     Require(raise_nid_postfix(100) == -1 && *__error_nid_postfix() == 22);
+    *__error_nid_postfix() = 0;
+    received = 0;
+    Require(raise_nid_postfix(0) == 0 && received == 0 && *__error_nid_postfix() == 0);
+    Require(raise_nid_postfix(129) == -1 && *__error_nid_postfix() == 22);
+    Require(raise_nid_postfix(-1) == -1 && *__error_nid_postfix() == 22);
     GuestSignalSet blocked{{0x20, 0, 0, 0}};
     GuestSignalSet previous{{}};
     Require(sigprocmask_nid_postfix(3, &blocked, &previous) == 0);
