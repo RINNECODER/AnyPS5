@@ -28,8 +28,6 @@
 - [sceHttpDbgShowConnectionStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - the native diagnostic consumes no arguments; it prints library state. The throwing implementation remains unchanged.
 - [sceHttpDbgShowRequestStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - the native diagnostic consumes no arguments; it prints library state. The throwing implementation remains unchanged.
 - [sceHttpDbgShowMemoryPoolStat](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - the native diagnostic consumes no arguments; it prints library state. The throwing implementation remains unchanged.
-- [sceHttpSetCookieSendCallback](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
-- [sceHttpSetSocketCreationCallback](../../../core/libs/prx/libSceHttp/Export.cpp) (libSceHttp) - unknown signature
 
 ### Functional
 
