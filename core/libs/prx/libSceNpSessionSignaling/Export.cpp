@@ -21,6 +21,13 @@ struct SessionSignalingPeerAddress {
     std::uint32_t platform;
 };
 
+struct SessionSignalingConnectionStatistics {
+    std::uint32_t peakConnectionCount;
+    std::uint32_t connectionCount;
+    std::uint32_t connectingCount;
+    std::uint32_t connectedCount;
+};
+
 struct SessionSignalingGroupInfo {
     std::uint32_t connectionIds[64];
     std::uint64_t connectionCount;
@@ -31,6 +38,10 @@ static_assert(offsetof(SessionSignalingMemoryInfo, usedSize) == 8);
 static_assert(offsetof(SessionSignalingMemoryInfo, peakUsedSize) == 16);
 static_assert(sizeof(SessionSignalingPeerAddress) == 16);
 static_assert(offsetof(SessionSignalingPeerAddress, platform) == 8);
+static_assert(sizeof(SessionSignalingConnectionStatistics) == 16);
+static_assert(offsetof(SessionSignalingConnectionStatistics, connectionCount) == 4);
+static_assert(offsetof(SessionSignalingConnectionStatistics, connectingCount) == 8);
+static_assert(offsetof(SessionSignalingConnectionStatistics, connectedCount) == 12);
 static_assert(sizeof(SessionSignalingGroupInfo) == 264);
 static_assert(offsetof(SessionSignalingGroupInfo, connectionCount) == 256);
 
@@ -108,7 +119,7 @@ int APS5_VABI sceNpSessionSignalingGetMemoryInfo(SessionSignalingMemoryInfo* mem
     return 0;
 }
 
-int APS5_VABI sceNpSessionSignalingGetConnectionStatistics(void) {
+int APS5_VABI sceNpSessionSignalingGetConnectionStatistics(SessionSignalingConnectionStatistics* statistics) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
