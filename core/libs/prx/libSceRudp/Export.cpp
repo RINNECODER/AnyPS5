@@ -196,7 +196,7 @@ int APS5_VABI sceRudpGetContextStatus(int ctx_id, void* status, uint32_t size) {
     return 0;
 }
 
-int APS5_VABI sceRudpGetRemoteInfo() {
+int APS5_VABI sceRudpGetRemoteInfo(int contextId, void* address, std::uint32_t* addressSize, std::uint16_t* virtualPort) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -271,12 +271,12 @@ int APS5_VABI sceRudpNetFlush(void) {
     return g_inited ? 0 : RUDP_ERROR_NOT_INITIALIZED;
 }
 
-int APS5_VABI sceRudpProcessEvents(void) {
+int APS5_VABI sceRudpProcessEvents(std::uint64_t timeout) {
     std::lock_guard<std::mutex> lk(g_mutex);
     return g_inited ? 0 : RUDP_ERROR_NOT_INITIALIZED;
 }
 
-int APS5_VABI sceRudpNetReceived(void) {
+int APS5_VABI sceRudpNetReceived(int socketId, const void* data, std::size_t dataSize, const void* sourceAddress, std::uint32_t sourceAddressSize) {
     std::lock_guard<std::mutex> lk(g_mutex);
     return g_inited ? 0 : RUDP_ERROR_NOT_INITIALIZED;
 }
