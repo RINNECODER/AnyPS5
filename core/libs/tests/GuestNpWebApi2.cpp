@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 struct NpWebApi2MemoryPoolStats {
@@ -33,8 +34,11 @@ int main() {
     const int context = sceNpWebApi2Initialize(1, 0x20000);
     const int other = sceNpWebApi2Initialize(1, 0x8000);
     Require(context > 0 && other > 0 && context != other);
-    NpWebApi2MemoryPoolStats stats{1, 1, 1, 1};
+    NpWebApi2MemoryPoolStats stats;
+    std::memset(&stats, 0xa5, sizeof(stats));
     Require(sceNpWebApi2GetMemoryPoolStats(context, &stats) == 0);
+    const auto* statsBytes = reinterpret_cast<const unsigned char*>(&stats);
+    for (std::size_t index = sizeof(std::size_t); index < sizeof(stats); ++index) Require(statsBytes[index] == 0);
     Require(stats.pool_size == 0x20000 && stats.max_inuse_size == 0 && stats.current_inuse_size == 0 && stats.reserved == 0);
     Require(sceNpWebApi2GetMemoryPoolStats(other, &stats) == 0 && stats.pool_size == 0x8000);
     Require(sceNpWebApi2GetMemoryPoolStats(context, nullptr) == 0);

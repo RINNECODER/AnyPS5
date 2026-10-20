@@ -3,6 +3,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include <atomic>
+#include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -26,6 +27,8 @@ struct NpWebApi2MemoryPoolStats {
     size_t current_inuse_size;
     int32_t reserved;
 };
+
+static_assert(sizeof(NpWebApi2MemoryPoolStats) == 32);
 
 static std::mutex g_poolsMutex;
 static std::unordered_map<int, size_t> g_pools;
@@ -123,7 +126,8 @@ int APS5_VABI sceNpWebApi2GetMemoryPoolStats(int libraryContextId, NpWebApi2Memo
     const auto pool = g_pools.find(libraryContextId);
     if (pool == g_pools.end()) return SCE_NP_WEBAPI2_ERROR_INVALID_CONTEXT;
     if (!stats) return 0;
-    *stats = {pool->second, 0, 0, 0};
+    std::memset(stats, 0, sizeof(*stats));
+    stats->pool_size = pool->second;
     return 0;
 }
 
