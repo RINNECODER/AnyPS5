@@ -7,3 +7,5 @@
 ### Functional
 
 - [sceConvertKeycodeGetCharacter](../../../core/libs/prx/libSceConvertKeycode/Export.cpp) (libSceConvertKeycode) takes the keycode as a USB HID keyboard usage and returns the unshifted character of the US layout for letters, digits, punctuation, space and the keypad. A keycode without a character returns 0 with the character 0; whether the console returns an error instead is not measured.
+
+- `sceConvertKeycodeGetVirtualKeycode`: HID-to-virtual-key mappings and the three-argument signature are confirmed. Layouts 31–39 and version-dependent Y/Z mappings for layouts 2, 3 and 12 throw until the guest platform and compiled SDK version are exposed; no version is guessed.
