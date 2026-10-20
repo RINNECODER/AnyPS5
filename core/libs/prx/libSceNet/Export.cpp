@@ -41,6 +41,62 @@
 
 // Guest socket descriptors retain PS5 semantics while their transport is backed by host sockets.
 
+struct NetResolverConnection;
+struct NetThreadParameter;
+struct NetInitializeParameter;
+struct NetInterfaceInfo;
+struct NetInterfaceStatistics;
+
+struct NetResolverConnectOption {
+    std::int32_t connectionTimeout;
+    std::int32_t resolverTimeout;
+    std::int32_t resolverRetryCount;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(NetResolverConnectOption) == 16);
+static_assert(offsetof(NetResolverConnectOption, resolverTimeout) == 4);
+static_assert(offsetof(NetResolverConnectOption, resolverRetryCount) == 8);
+static_assert(offsetof(NetResolverConnectOption, reserved) == 12);
+
+struct NetSyncObject {
+    void* mutex;
+    void* condition;
+    std::uint32_t signals;
+    std::uint32_t reserved;
+};
+
+static_assert(sizeof(NetSyncObject) == 24);
+
+using NetEventCallback = std::uint64_t (APS5_VABI*)(std::uint32_t interfaceId, std::uint64_t events, void* userData, void* waitData);
+
+struct NetIpv6Address {
+    std::uint8_t bytes[16];
+};
+
+static_assert(sizeof(NetIpv6Address) == 16);
+
+struct NetDnsInfo {
+    std::uint32_t primaryAddress;
+    std::uint32_t secondaryAddress;
+};
+
+struct NetDns6Info {
+    NetIpv6Address primaryAddress;
+    NetIpv6Address secondaryAddress;
+};
+
+static_assert(sizeof(NetDnsInfo) == 8);
+static_assert(sizeof(NetDns6Info) == 32);
+
+struct NetIpv6InterfaceAddress {
+    NetIpv6Address address;
+    std::uint8_t prefixLength;
+    std::uint8_t reserved[3];
+};
+
+static_assert(sizeof(NetIpv6InterfaceAddress) == 20);
+
 namespace {
 // FreeBSD errno numbers as reported through sceNetErrnoLoc (SCE_NET_ERROR_* is 0x80410100 + errno).
 constexpr int NET_ENOENT = 2;
@@ -1804,22 +1860,22 @@ int APS5_VABI sceNetResolverStartAton6(void) {
     return 0;
 }
 
-int APS5_VABI sceNetResolverConnectAbort(void) {
+int APS5_VABI sceNetResolverConnectAbort(NetResolverConnection* connection, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetResolverConnectCreate(void) {
+int APS5_VABI sceNetResolverConnectCreate(const char* name, std::int32_t socketType, NetResolverConnection* connection, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetResolverConnect(void) {
+int APS5_VABI sceNetResolverConnect(NetResolverConnection* connection, const char* hostname, std::uint16_t port, const NetResolverConnectOption* option) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetResolverConnectDestroy(void) {
+int APS5_VABI sceNetResolverConnectDestroy(NetResolverConnection* connection) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1904,17 +1960,17 @@ int APS5_VABI sceNetGetDnsInfo(void) {
     return 0;
 }
 
-int APS5_VABI sceNetGetIfList(void) {
+int APS5_VABI sceNetGetIfList(std::int32_t interfaceId, NetInterfaceInfo* interfaces, std::uint32_t capacity) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetGetIfListEx(void) {
+int APS5_VABI sceNetGetIfListEx(std::int32_t interfaceId, NetInterfaceInfo* interfaces, std::uint32_t capacity, std::uint32_t flags) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetGetIfListOnce(void) {
+int APS5_VABI sceNetGetIfListOnce(std::int32_t interfaceId, NetInterfaceStatistics* statistics, std::uint32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -1959,7 +2015,7 @@ int APS5_VABI sceNetGetSystemMemInfo(void) {
     return 0;
 }
 
-int APS5_VABI sceNetInitParam(void) {
+int APS5_VABI sceNetInitParam(const NetInitializeParameter* parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2029,7 +2085,7 @@ int APS5_VABI sceNetSysctl(void) {
     return 0;
 }
 
-int APS5_VABI sceNetThreadCreate(void) {
+int APS5_VABI sceNetThreadCreate(Pthread* thread, const NetThreadParameter* parameter, const char* name) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
