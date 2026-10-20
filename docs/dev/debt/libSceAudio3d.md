@@ -7,7 +7,7 @@
 
 ### Functional
 
-- [libSceAudio3d bed path](../../../core/libs/prx/libSceAudio3d/Export.cpp) (libSceAudio3d) - bed PCM is mixed and played: `sceAudio3dBedWrite` and `sceAudio3dBedWrite2` store the bed, `sceAudio3dPortAdvance` mixes it into a stereo frame with a linear-balance pan and a 5.1/7.1 downmix ([Mixer.hpp](../../../core/libs/prx/libSceAudio3d/Mixer.hpp)) and queues the frame, and `sceAudio3dPortPush` opens a type-126 AudioOut port on first use and submits the queued frames to it. The explicit `sceAudio3dAudioOutOpen`, `sceAudio3dAudioOutOutput` and `sceAudio3dAudioOutOutputs` exports queue their blocks and the port drains them. The attribute enum values and the panning model are unverified
+- [libSceAudio3d bed path](../../../core/libs/prx/libSceAudio3d/Export.cpp) (libSceAudio3d) - bed PCM is mixed and played: `sceAudio3dBedWrite` and `sceAudio3dBedWrite2` queue a bed, bounded by `queue_depth` and `NOT_READY` when full, `sceAudio3dPortAdvance` consumes one and mixes it into a stereo frame with a linear-balance pan and a 5.1/7.1 downmix, and an advance with no bed queued mixes silence ([Mixer.hpp](../../../core/libs/prx/libSceAudio3d/Mixer.hpp)) and queues the frame, and `sceAudio3dPortPush` opens a type-126 AudioOut port on first use and submits the queued frames to it. The explicit `sceAudio3dAudioOutOpen`, `sceAudio3dAudioOutOutput` and `sceAudio3dAudioOutOutputs` exports queue their blocks and the port drains them. The attribute enum values and the panning model are unverified
 
 ### Unknown function info
 

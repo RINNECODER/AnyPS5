@@ -54,6 +54,13 @@ struct Audio3dAudioOut {
     std::deque<std::vector<std::uint8_t>> pending;
 };
 
+struct Audio3dBed {
+    std::vector<std::uint8_t> pcm;
+    std::uint32_t channels = 0;
+    std::uint32_t format = 0;
+    std::uint32_t samples = 0;
+};
+
 struct Audio3dPort {
     bool open = false;
     std::uint32_t queue_depth = 0;
@@ -62,10 +69,7 @@ struct Audio3dPort {
     std::uint32_t max_objects = 0;
     std::uint32_t next_object_id = 0;
     std::set<std::uint32_t> objects;
-    std::vector<std::uint8_t> bed;
-    std::uint32_t bed_channels = 0;
-    std::uint32_t bed_format = 0;
-    std::uint32_t bed_samples = 0;
+    std::deque<Audio3dBed> beds;
     std::deque<std::vector<std::int16_t>> mixed;
     int audio_out_handle = 0;
     std::map<int, Audio3dAudioOut> audio_out_ports;
@@ -150,16 +154,22 @@ int APS5_VABI sceAudio3dPortAdvance(uint32_t port_id) {
     if (!PortIsOpen(port_id)) return AUDIO3D_ERROR_INVALID_PORT;
     if (g_port.buffer_mode != AUDIO3D_BUFFER_ADVANCE_AND_PUSH) return AUDIO3D_ERROR_NOT_SUPPORTED;
     if (QueueLevel() >= g_port.queue_depth) return AUDIO3D_ERROR_NOT_READY;
-    const Audio3dInternal::Source source{
-        g_port.bed.data(),
-        g_port.bed_samples,
-        g_port.bed_channels,
-        g_port.bed_format == AUDIO3D_FORMAT_FLOAT,
-        1.0f,
-        0.0f,
-    };
     std::vector<std::int16_t> frame;
-    Audio3dInternal::MixFrame(&source, g_port.bed.empty() ? 0 : 1, g_port.granularity, frame);
+    if (g_port.beds.empty()) {
+        Audio3dInternal::MixFrame(nullptr, 0, g_port.granularity, frame);
+    } else {
+        const Audio3dBed& bed = g_port.beds.front();
+        const Audio3dInternal::Source source{
+            bed.pcm.data(),
+            bed.samples,
+            bed.channels,
+            bed.format == AUDIO3D_FORMAT_FLOAT,
+            1.0f,
+            0.0f,
+        };
+        Audio3dInternal::MixFrame(&source, 1, g_port.granularity, frame);
+        g_port.beds.pop_front();
+    }
     g_port.mixed.push_back(std::move(frame));
     return 0;
 }
@@ -364,11 +374,14 @@ int APS5_VABI sceAudio3dBedWrite2(uint32_t port_id, uint32_t num_channels, uint3
     if (reinterpret_cast<std::uintptr_t>(buffer) % sample_size != 0) return AUDIO3D_ERROR_INVALID_PARAMETER;
     const std::uint32_t samples = std::min(num_samples, g_port.granularity);
     const std::size_t bytes = static_cast<std::size_t>(samples) * num_channels * sample_size;
+    if (g_port.beds.size() >= g_port.queue_depth) return AUDIO3D_ERROR_NOT_READY;
     const auto* first = static_cast<const std::uint8_t*>(buffer);
-    g_port.bed.assign(first, first + bytes);
-    g_port.bed_channels = num_channels;
-    g_port.bed_format = format;
-    g_port.bed_samples = samples;
+    Audio3dBed bed;
+    bed.pcm.assign(first, first + bytes);
+    bed.channels = num_channels;
+    bed.format = format;
+    bed.samples = samples;
+    g_port.beds.push_back(std::move(bed));
     return 0;
 }
 
