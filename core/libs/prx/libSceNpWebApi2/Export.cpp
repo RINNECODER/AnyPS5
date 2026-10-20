@@ -12,6 +12,12 @@ static constexpr int SCE_NP_WEBAPI2_ERROR_INVALID_ARGUMENT = static_cast<int>(0x
 static constexpr int SCE_NP_WEBAPI2_ERROR_UNAVAILABLE = static_cast<int>(0x80553406);
 static std::atomic<int> g_nextHandle{1};
 
+struct NpWebApi2PushContextId {
+    char value[37];
+};
+
+static_assert(sizeof(NpWebApi2PushContextId) == 37);
+
 struct NpWebApi2MemoryPoolStats {
     size_t pool_size;
     size_t max_inuse_size;
@@ -36,8 +42,9 @@ int APS5_VABI sceNpWebApi2AddHttpRequestHeader(int64_t request_id, const char* f
     return 0;
 }
 
-int APS5_VABI sceNpWebApi2AddWebTraceTag() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceNpWebApi2AddWebTraceTag(std::int64_t requestId, const char* value) {
+    (void)requestId;
+    if (!value) return SCE_NP_WEBAPI2_ERROR_INVALID_ARGUMENT;
     return 0;
 }
 
@@ -166,11 +173,11 @@ int APS5_VABI sceNpWebApi2Terminate(int lib_ctx_id) {
     return 0;
 }
 
-int APS5_VABI sceNpWebApi2PushEventCreatePushContext() {
+int APS5_VABI sceNpWebApi2PushEventCreatePushContext(std::int32_t userContextId, NpWebApi2PushContextId* pushContextId) {
     return SCE_NP_WEBAPI2_ERROR_UNAVAILABLE;
 }
 
-int APS5_VABI sceNpWebApi2PushEventDeleteFilter() {
+int APS5_VABI sceNpWebApi2PushEventDeleteFilter(std::int32_t libraryContextId, std::int32_t filterId) {
     return 0;
 }
 
@@ -186,15 +193,15 @@ int APS5_VABI sceNpWebApi2PushEventRegisterPushContextCallback() {
     return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
 }
 
-int APS5_VABI sceNpWebApi2PushEventStartPushContextCallback() {
+int APS5_VABI sceNpWebApi2PushEventStartPushContextCallback(std::int32_t userContextId, const NpWebApi2PushContextId* pushContextId) {
     return 0;
 }
 
-int APS5_VABI sceNpWebApi2PushEventUnregisterCallback() {
+int APS5_VABI sceNpWebApi2PushEventUnregisterCallback(std::int32_t userContextId, std::int32_t callbackId) {
     return 0;
 }
 
-int APS5_VABI sceNpWebApi2PushEventUnregisterPushContextCallback() {
+int APS5_VABI sceNpWebApi2PushEventUnregisterPushContextCallback(std::int32_t userContextId, std::int32_t callbackId) {
     return 0;
 }
 
