@@ -14,6 +14,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -99,27 +101,29 @@ public:
             Require(count != 0, "no Vulkan device");
             std::vector<VkPhysicalDevice> devices(count);
             Check(enumerate(instance, &count, devices.data()), "vkEnumeratePhysicalDevices");
-            const auto rankDeviceType = [](VkPhysicalDeviceType type) {
-                switch (type) {
-                    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 3;
-                    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 2;
-                    case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 1;
-                    default: return 0;
-                }
-            };
+            devices.resize(count);
             const auto physicalProperties = function<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
-            int selectedRank = -1;
-            for (const auto physical : devices) {
-                VkPhysicalDeviceProperties candidate{};
-                physicalProperties(physical, &candidate);
-                if (candidate.apiVersion < VK_API_VERSION_1_1) continue;
-                const int rank = rankDeviceType(candidate.deviceType);
-                if (rank <= selectedRank) continue;
-                context.physical = physical;
-                selectedRank = rank;
-                cpu = candidate.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+            std::vector<VkPhysicalDeviceProperties> deviceProperties(count);
+            for (std::size_t index = 0; index < devices.size(); ++index) {
+                physicalProperties(devices[index], &deviceProperties[index]);
             }
-            Require(context.physical != VK_NULL_HANDLE, "no Vulkan 1.1 device");
+            const char* requestedName = std::getenv("ANYPS5_GPU");
+            const std::string_view request = requestedName != nullptr ? requestedName : "";
+            const auto selected = selectDevice(deviceProperties, request);
+            if (!selected.has_value()) {
+                if (!request.empty()) {
+                    std::string candidateNames;
+                    for (const auto& candidate : deviceProperties) {
+                        if (!candidateNames.empty()) candidateNames += ", ";
+                        candidateNames += candidate.deviceName;
+                    }
+                    throw std::runtime_error(std::string("no Vulkan 1.1 device whose name contains ANYPS5_GPU=\"") + std::string(request) + "\"; devices: " + candidateNames);
+                }
+                throw std::runtime_error("no Vulkan 1.1 device");
+            }
+            context.physical = devices[*selected];
+            cpu = deviceProperties[*selected].deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+            std::cout << "Using \"" << deviceProperties[*selected].deviceName << "\"\n";
             const auto extensions = function<PFN_vkEnumerateDeviceExtensionProperties>("vkEnumerateDeviceExtensionProperties");
             Check(extensions(context.physical, nullptr, &count, nullptr), "vkEnumerateDeviceExtensionProperties");
             std::vector<VkExtensionProperties> available(count);
