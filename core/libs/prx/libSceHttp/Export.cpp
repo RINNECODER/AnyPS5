@@ -316,9 +316,11 @@ int APS5_VABI sceHttpSetEpoll(int id, HttpEpollHandle eh, void* user_arg) {
 }
 
 int APS5_VABI sceHttpSetNonblock(int id, int enable) {
-    (void)id;
-    (void)enable;
-    return 0;
+    return SetHttpOption(id, &HttpOptions::nonblock, enable != 0) ? 0 : ERROR_INVALID_ID;
+}
+
+int APS5_VABI sceHttpTrySetNonblock(int id, int enable) {
+    return sceHttpSetNonblock(id, enable);
 }
 
 int APS5_VABI sceHttpSetRecvTimeOut(int id, uint32_t usec) {
@@ -696,21 +698,6 @@ int APS5_VABI sceHttpRemoveRequestHeader(void) {
 }
 
 int APS5_VABI sceHttpGetAuthEnabled(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpTrySetNonblock(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpGetNonblock(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpTryGetNonblock(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

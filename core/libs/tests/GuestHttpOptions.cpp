@@ -15,6 +15,10 @@ int APS5_VABI sceHttpCreateRequestWithURL(int, int, const char*, std::uint64_t);
 int APS5_VABI sceHttpDeleteRequest(int);
 int APS5_VABI sceHttpSetAutoRedirect(int, int);
 int APS5_VABI sceHttpGetAutoRedirect(int, int*);
+int APS5_VABI sceHttpSetNonblock(int, int);
+int APS5_VABI sceHttpGetNonblock(int, int*);
+int APS5_VABI sceHttpTrySetNonblock(int, int);
+int APS5_VABI sceHttpTryGetNonblock(int, int*);
 }
 
 namespace {
@@ -54,12 +58,28 @@ void CheckAutoRedirect(int context) {
     Require(sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(pattern) == 0, "delete failed");
 }
 
+void CheckNonblock(int context) {
+    const int pattern = sceHttpCreateTemplate(context, "anyps5-test", 2, 0);
+    Require(Get(sceHttpGetNonblock, pattern) == 0 && Get(sceHttpTryGetNonblock, pattern) == 0, "a template is nonblocking by default");
+    Require(sceHttpSetNonblock(pattern, 1) == 0, "sceHttpSetNonblock failed on a template");
+    const int connection = sceHttpCreateConnectionWithURL(pattern, "http://example.com/", 1);
+    Require(Get(sceHttpGetNonblock, connection) == 1, "a connection did not take its template's nonblocking option");
+    Require(sceHttpTrySetNonblock(connection, 0) == 0 && Get(sceHttpTryGetNonblock, connection) == 0 && Get(sceHttpGetNonblock, connection) == 0, "sceHttpTrySetNonblock did not change the option sceHttpGetNonblock reads");
+    Require(Get(sceHttpGetNonblock, pattern) == 1, "setting a connection changed its template");
+    int value = 0;
+    Require(sceHttpGetNonblock(connection, nullptr) == InvalidValue && sceHttpTryGetNonblock(connection, nullptr) == InvalidValue, "a null output was not refused");
+    Require(sceHttpGetNonblock(UnknownId, &value) == InvalidId && sceHttpTryGetNonblock(UnknownId, &value) == InvalidId, "an unknown id was not refused by the getters");
+    Require(sceHttpSetNonblock(UnknownId, 1) == InvalidId && sceHttpTrySetNonblock(UnknownId, 1) == InvalidId, "an unknown id was not refused by the setters");
+    Require(sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(pattern) == 0, "delete failed");
+}
+
 }
 
 int main() {
     const int context = sceHttpInit_nid_postfix(1, 1, 0x10000);
     Require(context > 0, "sceHttpInit failed");
     CheckAutoRedirect(context);
+    CheckNonblock(context);
     Require(sceHttpTerm_nid_postfix(context) == 0, "sceHttpTerm failed");
     std::puts("HTTP option tests passed");
     return 0;

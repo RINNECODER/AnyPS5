@@ -5,6 +5,7 @@
 
 struct HttpOptions {
     bool autoRedirect = true;
+    bool nonblock = false;
 };
 
 void AddHttpTemplate(int templateId);

@@ -52,4 +52,16 @@ int APS5_VABI sceHttpGetAutoRedirect(int id, int* enable) {
     return 0;
 }
 
+int APS5_VABI sceHttpGetNonblock(int id, int* enable) {
+    if (!enable) return ERROR_INVALID_VALUE;
+    const auto options = FindHttpOptions(id);
+    if (!options) return ERROR_INVALID_ID;
+    *enable = options->nonblock ? 1 : 0;
+    return 0;
+}
+
+int APS5_VABI sceHttpTryGetNonblock(int id, int* enable) {
+    return sceHttpGetNonblock(id, enable);
+}
+
 }
