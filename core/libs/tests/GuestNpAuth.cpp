@@ -45,7 +45,17 @@ int main() {
     int issuerId = 0;
 
     Require(sceNpAuthSetTimeout(syncReq, 2, 5000000, 10000000, 10000000, 10000000) == 0);
-    Require(sceNpAuthSetTimeout(asyncReq, 0, 0, 0, 0, 0) == 0);
+    Require(sceNpAuthSetTimeout(asyncReq, 0, 0, 0, 0, 0) == invalidArgument);
+
+    Require(sceNpAuthSetTimeout(syncReq, -1, 1000000, 10000000, 10000000, 10000000) == invalidArgument);
+    Require(sceNpAuthSetTimeout(syncReq, 1, 999999, 10000000, 10000000, 10000000) == invalidArgument);
+    Require(sceNpAuthSetTimeout(syncReq, 1, 1000000, 9999999, 10000000, 10000000) == invalidArgument);
+    Require(sceNpAuthSetTimeout(syncReq, 1, 1000000, 10000000, 9999999, 10000000) == invalidArgument);
+    Require(sceNpAuthSetTimeout(syncReq, 1, 1000000, 10000000, 10000000, 9999999) == invalidArgument);
+    Require(sceNpAuthSetTimeout(syncReq, 1, 1000000, 10000000, 10000000, 10000000) == 0);
+    Require(sceNpAuthSetTimeout(syncReq, 1, 0, 0, 0, 0) == 0);
+    Require(sceNpAuthSetTimeout(syncReq, 0, 0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu) == 0);
+    Require(sceNpAuthSetTimeout(-1, 0, 0, 0, 0, 0) == invalidArgument);
 
     int pollUnprocessed = 0;
     Require(sceNpAuthPollAsync(asyncReq, &pollUnprocessed) == invalidId);
