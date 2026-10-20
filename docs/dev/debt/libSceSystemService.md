@@ -17,6 +17,86 @@
 - [sceSystemServiceParamGetInt](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - the time zone (parameter 4) and summer time (parameter 5) follow the host's local time zone at the moment of the call. Titles compute the local time as UTC plus the time zone in minutes plus 60 minutes when summer time is 1 ([Apollo](https://github.com/bucanero/apollo-ps4/blob/252a9d5a187c463994263009851a179f4f910c49/source/exec_cmd.c#L70-L92), [GoldHEN's frame logger](https://github.com/GoldHEN/GoldHEN_Plugins_Repository/blob/6c3a06f53d9caebadfb0aeed9bb94119012010a7/plugin_src/frame_logger/source/main.c#L60-L82), and [SharpProspero](https://github.com/SvenGDK/SharpProspero/blob/413d2e3518fb435f40971d238fe0ecae7ee551da/src/SharpProspero/Platform/SystemParameters.cs#L75-L79) calls them the offset from UTC in minutes and whether summer time is in effect), so the time zone is the host's current offset east of UTC less the summer time shift while summer time is in effect: 60 minutes on Linux, and on Windows the C runtime's own summer time bias (`_get_dstbias`), which is also what shifted its local time. For a host zone whose summer time is not one hour, Linux keeps the sum right and the standard offset wrong, and Windows the opposite; how the console reports such a zone is unknown. libkernel's `sceKernelConvertUtcToLocaltime`, `sceKernelConvertLocaltimeToUtc` and `sceKernelGettimezone` still use UTC
 - [sceSystemServiceInitializePlayerDialogParam](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - a null param throws: what the console does with it is not measured. The console run in [prosper](https://github.com/mattias800/prosper/blob/40d95db32efe1ad00106a5b9a84e018fffa9ecff/prosper/tests/data/console_oracle/nethttp.golden.tsv#L46) shows only the 0x40 bytes written (size 0x40, user ID -1 at 0xC, zeros), so the field names and the mode and target account fields follow [SharpProspero's struct](https://github.com/SvenGDK/SharpProspero/blob/5dfdb4b0b166e83dc9ae275001afb695f12c7174/src/SharpProspero/Interop/SystemService/SystemService.cs#L637-L655), and the `void` return [its declaration](https://github.com/SvenGDK/SharpProspero/blob/5dfdb4b0b166e83dc9ae275001afb695f12c7174/src/SharpProspero/Interop/SystemService/SystemService.cs#L419-L426); the console left 0x800693020 in `rax`, not an SCE error code. Closes when: the null case is measured on a PS5
 
+- [libSceSystemService firmware 3.20 pending exports](../../../core/libs/prx/libSceSystemService/PendingExports.cpp) - 477 symbol names are present in [the PS5 3.20 libSceSystemService export list](https://github.com/DNNDHH/PS5-3.20_Libs/blob/b2a77c09cd71c01f34c790cfbe98c751a13262ad/libSceSystemService.c). Their signatures and console behaviour are unverified. The declarations use the existing no-parameter unknown-signature convention solely to resolve imports, and every call throws through `NotImplemented_nid_no_patch`.
+- [sceSystemServiceLaunchSystemDeeplink](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilLaunchByUriParamInit](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceSystemStateMgrTickVideoPlayback](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceSystemServiceTelemetrySetData2WithUserId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilStartUmmDictation](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceSystemServiceGetSpotifyTitleId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceSystemServiceGetAppStatusListContainsDaemon](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceSystemServiceSwitchToVRApp](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceSystemServiceSwitchToNonVRApp](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceLncUtilGetSpmemAllocatorConfigValue](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrInitialize](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrTerminate](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrCreateLocalSandbox](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrDestroyLocalSandbox](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrSwitchLocalSandbox](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrGetCurrentLocalSandboxId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrGetLocalSandboxIdList](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrGetLocalSandboxInfo](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrSetLocalSandboxInfo](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCsbMgrIssueStreamingSandboxInfo](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceReportSequenceHandlerRequestReport](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceReportSequenceHandlerCancelReport](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceReportSequenceHandlerExistsEvent](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceReportSequenceHandlerUpdateEventCache](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceReportSequenceHandlerGetEventCache](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceLncUtilRegisterCallEntries](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceLncUtilGetSpmemConfigJson](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceLncUtilExportSpmemConfigJson](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceLncUtilImportSpmemConfigJson](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilExitAppWithValue](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilNpDebugSpecialNotification](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilIsDddTemperatureDanger](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilIsM2StorageTemperatureDanger](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetAvailableSizeM2](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilNotifyConnectAccountStatusChanged](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilIsInternalCronosUser](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilChangePbtcMode](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilTelemetryCacheData](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilMicMuteKeyPressed](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilSwitchMicMute](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilNotifyStartEventToUniversalMicMute](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilIsLotusMicActivated](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilResetAllNoticeScreenSkipFlag](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilResetNoticeScreenSkipFlag](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetNoticeScreenSkipFlagByAppId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetPasscodeInputType](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetPasscodeDisplayInfo](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilNotifySystemResumeTelemetryInfo](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilUpdateTelemetryToken](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetVRBaseMatRectangles](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilSetVRBaseMatRectangles](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilIsLaunchBlockDialog](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetConsoleToken](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetDeviceIdByDeviceUniqueId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetDeviceUniqueIdByDeviceId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetStreamingClientInfo](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilRequestCffUpdate](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetCffConfig](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilRemoveCffConfigFile](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilDebugGetNumberOfCffItems](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilDebugGetCffInfo](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilDebugSetCffStatus](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetPeripheralConnectionSessionId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetCdlgEnabledFreezeRendering](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilGetNpTitleId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilIsCronosInGameCommerceEnabled](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilLemSettingGet](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilLemSettingSet](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilLemSettingGetList](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilLemSettingReset](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceShellCoreUtilIsEChassisVariant](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceSystemStateMgrGetRebootCause](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCoredumpSequenceHandlerUpdateEventCache](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCoredumpSequenceHandlerGetEventCache](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCoredumpSequenceHandlerGetWorkingEventSummary](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCoredumpSequenceHandlerGetCoredumpStatus](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCoredumpSequenceHandlerGetCoredumpStatusByAppId](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+- [sceCoredumpSequenceHandlerCancelCoredump](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - unknown signature
+
 ### Functional
 
 - [sceSystemServiceLoadExec](../../../core/libs/prx/libSceSystemService/Export.cpp) (libSceSystemService) - besides `"exit"`, it starts the title's own `/app0/eboot.bin` or another executable under `/app0` that the relinker converted with `--executable`, which is looked up beside the running one (`/app0/picker/picker.bin` as `picker.picker.bin` with the running executable's extension). The main executable is the one `APS5_EBOOT` names, which the first call sets to its own path. After the guest shutdown the old process ends without running guest exit handlers or host destructors; as during `exit`, a guest thread that calls a library the shutdown has stopped waits for the end instead of unwinding. `"exit"` ends the process after the host shutdown without running the title's `atexit` and `__cxa_atexit` handlers, since the console's shell closes the title instead; a line the title writes just before through its own thread, such as a forwarded standard error line, may not be printed. [VLC for PS5](https://github.com/ZiZc3/VLC/blob/86bb7d474a303f62bb3c2fc12f728db4846085b8/src/platform_ps5.c#L565-L571) (PPSA85300) relaunches itself with no arguments; RetroArch (PPSA99169) starts its frontend picker with `{"", NULL}`, and the picker starts `eboot.bin` with `{"--ps5-mode=retroarch", NULL}` or `/app0/es-de/es-de.bin` ([picker.cpp](https://github.com/mihawk-99/PS5_RetroArch/blob/bead80725cc11e3c5c65bd9424b0a4494ae36d45/frontends/picker/picker.cpp#L444-L446)), so the list holds only arguments. A list with a first entry becomes the whole guest `argv`, with no program name in front ([LoadExec.cpp](../../../core/libs/prx/libSceSystemService/LoadExec.cpp)): a [PS5 RetroArch console transcript](https://github.com/mihawk-99/PS5_RetroArch/blob/bead80725cc11e3c5c65bd9424b0a4494ae36d45/evidence/loadexec-second-image/relaunch-test.jsonl) records a restart with one argument entering with `argc=1`, `argv[0]="--ps5-relaunch=1"`, and a launch from the home screen with `argc=1`, `argv[0]=""` ([relaunch_ps5.cpp](https://github.com/mihawk-99/PS5_RetroArch/blob/bead80725cc11e3c5c65bd9424b0a4494ae36d45/src/relaunch_ps5.cpp#L161-L164)). For such a list Linux replaces the process with `fexecve`: the PID and the standard streams stay, the other descriptors are closed and the working directory becomes the executable's. Windows starts a suspended process that inherits only the standard streams and a handle of the old process, and its entry stub waits for the old process to end before it loads the title's libraries, so a shell or script that started the title sees it end. A null list or one without a first entry keeps the earlier launch: the new executable gets only its own path as its command line (`CreateProcessW` on Windows, `execv` on Linux), so its `argv[0]` is the host path, and the old process ends without waiting for it. What the console passes for such a list is not known, nor are its argument limits and error codes. Paths outside `/app0`, unconverted executables and macOS hosts throw
