@@ -331,12 +331,29 @@ int main() {
     const std::vector<unsigned char> fontData = EmptyGlyphFont();
     Require(sceFontOpenFontMemory(library, fontData.data(), static_cast<std::uint32_t>(fontData.size()), nullptr, &font) == SCE_FONT_OK && font != nullptr);
     int setting = -1;
-    Require(sceFontGetScriptLanguage(font, 3, &setting) == SCE_FONT_OK && setting == 0);
-    Require(sceFontSetScriptLanguage(font, 3, 7) == SCE_FONT_OK && sceFontSetScriptLanguage(font, 4, 9) == SCE_FONT_OK);
-    Require(sceFontGetScriptLanguage(font, 3, &setting) == SCE_FONT_OK && setting == 7);
-    Require(sceFontGetScriptLanguage(font, 4, &setting) == SCE_FONT_OK && setting == 9);
-    Require(sceFontGetScriptLanguage(font, 3, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontGetScriptLanguage(font, 3, &setting) == SCE_FONT_ERROR_INVALID_PARAMETER && setting == 0);
+    Require(sceFontSetScriptLanguage(font, 3, 7) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontSetScriptLanguage(font, 0x100, 0x106) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontSetScriptLanguage(font, 0x600, 0x603) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontSetScriptLanguage(font, 0x3000, 0x3015) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontGetScriptLanguage(font, 0x100, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
     Require(sceFontSetScriptLanguage(nullptr, 3, 7) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    Require(sceFontGetScriptLanguage(nullptr, 3, nullptr) == SCE_FONT_ERROR_INVALID_FONT_HANDLE);
+    for (const auto script : {0x100, 0x600, 0x3000}) {
+        bool setThrew = false;
+        bool getThrew = false;
+        try {
+            sceFontSetScriptLanguage(font, script, script);
+        } catch (const std::logic_error&) {
+            setThrew = true;
+        }
+        try {
+            sceFontGetScriptLanguage(font, script, &setting);
+        } catch (const std::logic_error&) {
+            getThrew = true;
+        }
+        Require(setThrew && getThrew && setting == 0);
+    }
     Require(sceFontSetTypographicDesign(font, 1, 2) == SCE_FONT_OK);
     Require(sceFontGetTypographicDesign(font, 1, &setting) == SCE_FONT_OK && setting == 2);
     Require(sceFontGetTypographicDesign(font, 5, &setting) == SCE_FONT_OK && setting == 0);
