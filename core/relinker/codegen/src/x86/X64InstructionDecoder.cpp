@@ -356,6 +356,7 @@ DecodedInstructionInfo X64InstructionDecoder::DecodeInstruction(
 
     std::size_t pos = 0;
     bool operandSizeOverride = false;
+    bool repPrefix = false;
 
     while (pos < info.Length) {
         std::uint8_t b = data[pos];
@@ -374,6 +375,8 @@ DecodedInstructionInfo X64InstructionDecoder::DecodeInstruction(
                 info.AddressSize32 = true;
             if (b == PrefixOperandSize)
                 operandSizeOverride = true;
+            if (b == PrefixRep)
+                repPrefix = true;
             info.RexPrefix = 0;
             ++pos;
             continue;
@@ -605,9 +608,13 @@ DecodedInstructionInfo X64InstructionDecoder::DecodeInstruction(
         readModRm(pos, twoByteOpcode && op >= TwoByteMovCrDrMin && op <= TwoByteMovCrDrMax);
 
     if (info.HasModRm && twoByteOpcode) {
-        if (op == TwoByteMaskmov && ((info.ModRmByte >> ModRmModShift) & ModRmModMask) == ModRmModRegister)
+        const std::uint8_t mod = (info.ModRmByte >> ModRmModShift) & ModRmModMask;
+        const std::uint8_t reg = (info.ModRmByte >> ModRmRegShift) & ModRmRegMask;
+        if (op == TwoByteMaskmov && mod == ModRmModRegister)
             info.HasMemoryOperand = true;
         else if (op == TwoByteGrp7 && (info.ModRmByte == 0xC8 || info.ModRmByte == 0xFA))
+            info.HasMemoryOperand = true;
+        else if (op == TwoByteGrp15 && repPrefix && reg == 6 && mod == ModRmModRegister)
             info.HasMemoryOperand = true;
     }
 

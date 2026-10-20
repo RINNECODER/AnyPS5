@@ -130,6 +130,10 @@ int main() {
             {"650f01c8", true},
             {"650f01fa", true},
             {"650f01c9", false},
+            {"65f30faef0", true},
+            {"f20faef0", false},
+            {"660faef0", false},
+            {"f30faee8", false},
             {"ff10", true},
             {"ffe0", false},
         }) {
