@@ -269,7 +269,7 @@ int main() {
     std::uint32_t subPixelCount = 1;
     Require(sceFontGetPixelResolution(library, &subPixelCount) == SCE_FONT_OK && subPixelCount == 64);
     Require(sceFontGetPixelResolution(library, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
-    Require(sceFontGetPixelResolution(nullptr, nullptr) == SCE_FONT_ERROR_INVALID_PARAMETER);
+    Require(sceFontGetPixelResolution(nullptr, nullptr) == SCE_FONT_ERROR_INVALID_LIBRARY);
     subPixelCount = 1;
     Require(sceFontGetPixelResolution(nullptr, &subPixelCount) == SCE_FONT_ERROR_INVALID_LIBRARY && subPixelCount == 0);
     FontHandleOpaque notALibrary{};
@@ -281,8 +281,11 @@ int main() {
     Require(sceFontCreateLibrary(&memory, &coarseDriver, &coarseLibrary) == SCE_FONT_OK && coarseLibrary != nullptr);
     Require(sceFontGetPixelResolution(coarseLibrary, &subPixelCount) == SCE_FONT_OK && subPixelCount == 16);
     Require(sceFontGetPixelResolution(library, &subPixelCount) == SCE_FONT_OK && subPixelCount == 64);
+    Require(static_cast<Font::FontLibNative*>(coarseLibrary)->lock_word == 0);
     coarseDriver.pixel_resolution = nullptr;
     Require(sceFontGetPixelResolution(coarseLibrary, &subPixelCount) == SCE_FONT_ERROR_INVALID_LIBRARY && subPixelCount == 0);
+    Require(sceFontGetPixelResolution(coarseLibrary, nullptr) == SCE_FONT_ERROR_INVALID_LIBRARY);
+    Require(static_cast<Font::FontLibNative*>(coarseLibrary)->lock_word == 0);
     Require(sceFontDestroyLibrary(&coarseLibrary) == SCE_FONT_OK && coarseLibrary == nullptr);
 
     void* cacheBuffer = nullptr;
