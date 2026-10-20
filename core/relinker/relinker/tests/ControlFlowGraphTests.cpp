@@ -86,6 +86,24 @@ void CheckCalls() {
     RequireOffsets(*indirect, {0, 2, 3});
 }
 
+void CheckCallsBeforeZeroPadding() {
+    const Pointers pointers;
+    Bytes padded(0x21, 0);
+    padded[0] = 0xe8;
+    SetDisplacement(padded, 1, 5, TextAddress + 0x20);
+    const Bytes next{0x75, 0x64, 0x55, 0x48, 0x89, 0xe5, 0xc3};
+    std::copy(next.begin(), next.end(), padded.begin() + 16);
+    padded[0x20] = 0xc3;
+    RequireOffsets(*BuildControlFlowGraph(padded, TextAddress, TextAddress, {}, pointers), {0, 0x20});
+    RequireOffsets(*BuildControlFlowGraph(padded, TextAddress, TextAddress, {TextAddress + 16}, pointers), {0, 16, 18, 19, 22, 0x20});
+
+    Bytes indirect(0x11, 0);
+    indirect[0] = 0xff;
+    indirect[1] = 0xd0;
+    indirect[16] = 0xc3;
+    RequireOffsets(*BuildControlFlowGraph(indirect, TextAddress, TextAddress, {}, pointers), {0});
+}
+
 void CheckRelocatedTransfers() {
     constexpr auto slot = TextAddress + 0x1000;
     Bytes text{0xff, 0x15, 0, 0, 0, 0, 0x90, 0xc3, 0xff, 0x25, 0, 0, 0, 0, 0x90, 0x90, 0xc3};
@@ -309,6 +327,7 @@ int main() {
         CheckFallthrough();
         CheckBranches();
         CheckCalls();
+        CheckCallsBeforeZeroPadding();
         CheckRelocatedTransfers();
         CheckCodeAddresses();
         CheckSpeculativeRoots();
