@@ -2,13 +2,28 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
-#include <atomic>
+#include <array>
+#include <mutex>
 
 // Peer-to-peer signaling needs the network: contexts exist, but sessions never activate.
 static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80553303);
 static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_CONN_NOT_FOUND = static_cast<int>(0x8055330C);
 static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE = static_cast<int>(0x80552D06);
-static std::atomic<uint32_t> g_nextContext{1};
+static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED = static_cast<int>(0x80553301);
+static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_ALREADY_INITIALIZED = static_cast<int>(0x80553302);
+static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_LIMIT = static_cast<int>(0x80553307);
+static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND = static_cast<int>(0x80553308);
+static constexpr int SCE_NP_SESSION_SIGNALING_ERROR_GROUP_NOT_FOUND = static_cast<int>(0x8055330A);
+
+struct SessionSignalingContext {
+    std::uint32_t id;
+    std::int32_t userId;
+    bool active;
+};
+
+static std::mutex g_mutex;
+static bool g_initialized = false;
+static std::array<SessionSignalingContext, 10> g_contexts{};
 
 struct SessionSignalingInitParam {
     std::int32_t userId;
@@ -116,73 +131,134 @@ static_assert(offsetof(SessionSignalingConnectionStatistics, connectedCount) == 
 static_assert(sizeof(SessionSignalingGroupInfo) == 264);
 static_assert(offsetof(SessionSignalingGroupInfo, connectionCount) == 256);
 
+static SessionSignalingContext* FindContext(std::uint32_t contextId) {
+    auto& context = g_contexts[contextId % g_contexts.size()];
+    return context.active && context.id == contextId ? &context : nullptr;
+}
+
+template<typename TConnectionCallback>
+static int CreateContext(const SessionSignalingContextParam<TConnectionCallback>* param, std::uint32_t* contextId) {
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
+    if (!param || !contextId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+    for (const auto& context : g_contexts) {
+        if (context.active && context.userId == param->userId) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_LIMIT;
+    }
+    for (auto& context : g_contexts) {
+        if (!context.active) {
+            context.userId = param->userId;
+            context.active = true;
+            *contextId = context.id;
+            return 0;
+        }
+    }
+    return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_LIMIT;
+}
+
 extern "C" {
 
 int APS5_VABI sceNpSessionSignalingInitialize(const SessionSignalingInitParam* param) {
-    (void)param;
+    std::lock_guard lock(g_mutex);
+    if (g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_ALREADY_INITIALIZED;
+    if (!param || !param->poolSize) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+    for (std::uint32_t index = 0; index < g_contexts.size(); ++index) {
+        g_contexts[index] = {1000 + index, 0, false};
+    }
+    g_initialized = true;
     return 0;
 }
 
 int APS5_VABI sceNpSessionSignalingActivateSession(std::uint32_t contextId, const char* sessionId, std::uint32_t sessionType, const SessionSignalingSessionParam* param, std::uint32_t* groupId) {
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
+    if (!sessionId || !param || !groupId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+    if (!FindContext(contextId)) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
+    if ((param->mode == 1 && param->option != 0) || (param->mode == 2 && param->option == 0)) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
     return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
 int APS5_VABI sceNpSessionSignalingCreateContext2(const SessionSignalingContextParam2* param, std::uint32_t* contextId) {
-    if (!param || !contextId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
-    *contextId = g_nextContext.fetch_add(1, std::memory_order_relaxed);
-    return 0;
+    return CreateContext(param, contextId);
 }
 
 int APS5_VABI sceNpSessionSignalingCreateContext(const SessionSignalingContextParam1* param, std::uint32_t* contextId) {
-    if (!param || !contextId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
-    *contextId = g_nextContext.fetch_add(1, std::memory_order_relaxed);
-    return 0;
+    return CreateContext(param, contextId);
 }
 
-int APS5_VABI sceNpSessionSignalingDeactivate(uint32_t context_id) {
-    (void)context_id;
-    return 0;
+int APS5_VABI sceNpSessionSignalingDeactivate(std::uint32_t contextId, std::uint32_t connectionId) {
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
+    if (!FindContext(contextId)) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
+    return SCE_NP_SESSION_SIGNALING_ERROR_GROUP_NOT_FOUND;
 }
 
-int APS5_VABI sceNpSessionSignalingDestroyContext(uint32_t context_id) {
-    (void)context_id;
+int APS5_VABI sceNpSessionSignalingDestroyContext(std::uint32_t contextId) {
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
+    auto* context = FindContext(contextId);
+    if (!context) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
+    context->active = false;
+    const auto nextId = context->id + static_cast<std::uint32_t>(g_contexts.size());
+    context->id = nextId < 100001 ? nextId : 1000 + contextId % static_cast<std::uint32_t>(g_contexts.size());
     return 0;
 }
 
 int APS5_VABI sceNpSessionSignalingGetConnectionInfo(std::uint32_t contextId, std::uint32_t connectionId, std::uint32_t code, SessionSignalingConnectionInfo* info) {
-    return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
+    if (!info) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+    if (!FindContext(contextId)) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
+    return SCE_NP_SESSION_SIGNALING_ERROR_CONN_NOT_FOUND;
 }
 
 int APS5_VABI sceNpSessionSignalingActivateUser(std::uint32_t contextId, const SessionSignalingPeerAddress* peerAddress, std::uint32_t* connectionId) {
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
+    if (!peerAddress || !connectionId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+    if (!FindContext(contextId)) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
     return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
 int APS5_VABI sceNpSessionSignalingGetConnectionFromPeerAddress2(std::uint32_t contextId, std::uint32_t groupId, const SessionSignalingPeerAddress* peerAddress, std::uint32_t* connectionId) {
-    return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
+    if (!peerAddress || !connectionId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+    if (!FindContext(contextId)) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
+    return SCE_NP_SESSION_SIGNALING_ERROR_GROUP_NOT_FOUND;
 }
 
 int APS5_VABI sceNpSessionSignalingTerminate(void) {
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
+    g_initialized = false;
+    for (auto& context : g_contexts) context.active = false;
     return 0;
 }
 
 int32_t APS5_VABI sceNpSessionSignalingGetConnectionStatus(std::uint32_t contextId, std::uint32_t connectionId, std::int32_t* status, std::uint32_t* peerAddress, std::uint16_t* peerPort) {
- (void)contextId;
  (void)connectionId;
  (void)peerAddress;
  (void)peerPort;
+ std::lock_guard lock(g_mutex);
+ if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
  if (!status) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+ if (!FindContext(contextId)) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
  return SCE_NP_SESSION_SIGNALING_ERROR_CONN_NOT_FOUND;
 }
 
 int32_t APS5_VABI sceNpSessionSignalingGetLocalNetInfo(std::uint32_t contextId, SessionSignalingLocalNetInfo* info) {
  (void)contextId;
+ std::lock_guard lock(g_mutex);
+ if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
  if (!info) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
  return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
 int APS5_VABI sceNpSessionSignalingRequestPrepare(uint32_t contextId, uint32_t* requestId) {
- (void)contextId;
+ std::lock_guard lock(g_mutex);
+ if (!g_initialized) return SCE_NP_SESSION_SIGNALING_ERROR_NOT_INITIALIZED;
  if (!requestId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+ if (!FindContext(contextId)) return SCE_NP_SESSION_SIGNALING_ERROR_CONTEXT_NOT_FOUND;
  return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
