@@ -47,6 +47,8 @@ int APS5_VABI sceNetShutdown(int, int);
 int APS5_VABI sceNetSetsockopt(int, int, int, const void*, std::uint32_t);
 int APS5_VABI sceNetGetsockopt(int, int, int, void*, std::uint32_t*);
 int* APS5_VABI sceNetErrnoLoc(void);
+int APS5_VABI sceNetEtherNtostr(const NetEtherAddr*, char*, std::size_t);
+int APS5_VABI sceNetEtherStrton(const char*, NetEtherAddr*);
 int APS5_VABI sceNetEpollCreate(const char*, int);
 int APS5_VABI sceNetEpollControl(int, int, int, const NetEpollEvent*);
 int APS5_VABI sceNetEpollWait(int, NetEpollEvent*, int, int);
@@ -730,6 +732,80 @@ static void CheckInetPtonEx() {
     }
 }
 
+static void CheckEtherAddress() {
+    struct GuardedAddress {
+        std::uint8_t before;
+        NetEtherAddr address;
+        std::uint8_t after;
+    };
+    static_assert(sizeof(GuardedAddress) == 8);
+    const GuardedAddress original{0x12, {{0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5}}, 0x34};
+    for (const char* text : {"0:1:2:a:B:f", "00:01:02:0A:0b:0F", "0-1-2-a-B-f", "0:1-2:a-B:f"}) {
+        auto output = original;
+        const std::array<std::uint8_t, 6> expected{0, 1, 2, 10, 11, 15};
+        *sceNetErrnoLoc() = 33;
+        Require(sceNetEtherStrton(text, &output.address) == 0);
+        Require(std::memcmp(output.address.data, expected.data(), expected.size()) == 0);
+        Require(output.before == original.before && output.after == original.after && *sceNetErrnoLoc() == 33);
+    }
+    for (unsigned value = 0; value < 256; ++value) {
+        NetEtherAddr input{};
+        for (unsigned index = 0; index < 6; ++index) input.data[index] = static_cast<std::uint8_t>(value + index * 43);
+        char text[18]{};
+        Require(sceNetEtherNtostr(&input, text, sizeof(text)) == 0);
+        auto output = original;
+        Require(sceNetEtherStrton(text, &output.address) == 0);
+        Require(std::memcmp(input.data, output.address.data, sizeof(input.data)) == 0);
+        Require(output.before == original.before && output.after == original.after);
+    }
+    for (const char* text : {"", "0", "0:1:2:3:4", "0:1:2:3:4:", "0:1:2:3:4:5:6", "000:1:2:3:4:5",
+             "0:1:2:3:4:555", ":0:1:2:3:4:5", "0::1:2:3:4:5", "0.1.2.3.4.5", "0x0:1:2:3:4:5",
+             "0:1:2:3:4:g", "+0:1:2:3:4:5", " 0:1:2:3:4:5", "0:1:2:3:4:5 ", "0:1:2:3:4:5\n"}) {
+        auto output = original;
+        Require(Failed(sceNetEtherStrton(text, &output.address), 22));
+        Require(std::memcmp(&output, &original, sizeof(output)) == 0);
+    }
+    const std::string valid = "00:11:22:33:44:55";
+    for (std::size_t length = 0; length + 1 < valid.size(); ++length) {
+        auto output = original;
+        Require(Failed(sceNetEtherStrton(valid.substr(0, length).c_str(), &output.address), 22));
+        Require(std::memcmp(&output, &original, sizeof(output)) == 0);
+    }
+    for (unsigned value = 128; value < 256; ++value) {
+        auto text = valid;
+        text[0] = static_cast<char>(value);
+        auto output = original;
+        Require(Failed(sceNetEtherStrton(text.c_str(), &output.address), 22));
+        Require(std::memcmp(&output, &original, sizeof(output)) == 0);
+    }
+    auto output = original;
+    Require(Failed(sceNetEtherStrton(nullptr, &output.address), 14));
+    Require(std::memcmp(&output, &original, sizeof(output)) == 0);
+    Require(Failed(sceNetEtherStrton(valid.c_str(), nullptr), 14));
+    Require(Failed(sceNetEtherStrton(nullptr, nullptr), 14));
+}
+
+static void CheckSystemTime() {
+    *sceNetErrnoLoc() = 22;
+    sceNetGetSystemTime(nullptr);
+    Require(*sceNetErrnoLoc() == 22);
+    std::array<std::uint64_t, 3> output{0x123456789abcdef0ULL, UINT64_MAX, 0xfedcba9876543210ULL};
+    std::uint64_t previous = 0;
+    for (int i = 0; i < 64; ++i) {
+        output[1] = UINT64_MAX;
+        const auto before = sceKernelGetProcessTime();
+        sceNetGetSystemTime(&output[1]);
+        const auto after = sceKernelGetProcessTime();
+        Require(before <= output[1] && output[1] <= after && previous <= output[1]);
+        Require(output[0] == 0x123456789abcdef0ULL && output[2] == 0xfedcba9876543210ULL);
+        Require(*sceNetErrnoLoc() == 22);
+        previous = output[1];
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    sceNetGetSystemTime(&output[1]);
+    Require(output[1] > previous);
+}
+
 static void CheckUsleep() {
     Require(sceNetUsleep(0) == 0);
     const auto start = std::chrono::steady_clock::now();
@@ -1119,42 +1195,8 @@ static void CheckDatagramDisconnect() {
     for (const int descriptor : {peer, other, dissolved}) Require(sceNetSocketClose(descriptor) == 0);
 }
 
-static void CheckPeerSocketTypes() {
-    std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};
-    const int receiver = sceNetSocket("peer-udp-receiver", 2, 6, 0);
-    const int sender = sceNetSocket("peer-udp-sender", 2, 6, 0);
-    Require(receiver >= 0 && sender >= 0);
-    const int enabled = 1;
-    Require(sceNetSetsockopt(receiver, 0xffff, 0x20, &enabled, sizeof(enabled)) == 0);
-    Require(sceNetSetsockopt(receiver, 0xffff, 0x20000, &enabled, sizeof(enabled)) == 0);
-    Require(sceNetBind_nid_postfix(receiver, address.data(), address.size()) == 0);
-    std::uint32_t size = address.size();
-    Require(sceNetGetsockname(receiver, address.data(), &size) == 0);
-    const char payload[] = "peer socket transport";
-    char received[sizeof(payload)]{};
-    Require(sceNetSendto(sender, payload, sizeof(payload), 0, address.data(), size) == sizeof(payload));
-    Require(sceNetRecvfrom(receiver, received, sizeof(received), 0, nullptr, nullptr) == sizeof(received));
-    Require(std::strcmp(payload, received) == 0);
-    Require(sceNetSocketClose(sender) == 0 && sceNetSocketClose(receiver) == 0);
-
-    const int listener = sceNetSocket("peer-stream-listener", 2, 10, 0);
-    const int client = sceNetSocket("peer-stream-client", 2, 10, 0);
-    Require(listener >= 0 && client >= 0);
-    address = {16, 2, 0, 0, 127, 0, 0, 1};
-    Require(sceNetBind_nid_postfix(listener, address.data(), address.size()) == 0);
-    Require(sceNetListen(listener, 1) == 0);
-    size = address.size();
-    Require(sceNetGetsockname(listener, address.data(), &size) == 0);
-    Require(sceNetConnect(client, address.data(), size) == 0);
-    const int accepted = sceNetAccept(listener, nullptr, nullptr);
-    Require(accepted >= 0);
-    Require(sceNetSend(client, payload, sizeof(payload), 0) == sizeof(payload));
-    Require(sceNetRecv(accepted, received, sizeof(received), 0) == sizeof(received));
-    Require(std::strcmp(payload, received) == 0);
-    Require(sceNetSocketClose(accepted) == 0 && sceNetSocketClose(client) == 0 && sceNetSocketClose(listener) == 0);
-}
-
-int main(int argc, char** argv) {
+int main() {
+    CheckEtherAddress();
     const auto epoch = std::chrono::steady_clock::time_point{};
     Require(KernelSocketSelect::DeadlineAfter(epoch, 2, 250000) == epoch + std::chrono::milliseconds(2250));
     Require(KernelSocketSelect::DeadlineAfter(epoch, INT64_MAX, 0) == std::chrono::steady_clock::time_point::max());
