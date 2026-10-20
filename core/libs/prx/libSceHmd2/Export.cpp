@@ -321,67 +321,12 @@ int APS5_VABI sceHmd2SetIpdOffset() {
     return 0;
 }
 
-int APS5_VABI sceHmd2ReprojectionClearEventGpuEnd(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSlamTraceStop(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2ReprojectionClearEventGpuStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalRelocalizerSetResultData(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSetSlamCommand(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSetBudgetMode(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalRelocalizerOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalSetPortStatus(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHmd2InternalPowerEventInitialize(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalRelocalizerClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalTrackingStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalLedDetectorStartBySlot(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGetDeviceInformation(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -406,27 +351,7 @@ int APS5_VABI sceHmd2InternalSetFakeLensSeparationDistance(void) {
     return 0;
 }
 
-int APS5_VABI sceHmd2InternalResetViewPosition(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2GazeGetEnabledEye(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalDfuSend(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalTrackingReadData2(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGetVrMode(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -441,86 +366,6 @@ int APS5_VABI sceHmd2InternalImageOpenBySlot(void) {
     return 0;
 }
 
-int APS5_VABI sceHmd2InternalGetFwVersion(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageReadData(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGetTrackerFtsData(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalTrackingOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGazeReadStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalRelocalizerStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGetStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSetPowerOff(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalCrashReportOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalTrackingClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGazeStop(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalCrashReportClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalDfuOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageSetConfigBySlot(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSetCameraSeeThroughParam(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalLedDetectorStopBySlot(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -531,82 +376,7 @@ int APS5_VABI sceHmd2InternalSetDeviceConnection(void) {
     return 0;
 }
 
-int APS5_VABI sceHmd2InternalGazeOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalRelocalizerGetVersion(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGenDataStop(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGetFakeLensSeparationDistance(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalDecryptData(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalUnregisterVibrationCallback(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalRelocalizerStop(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalClearTrackerFts(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSetHomeCalibration(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalLedDetectorCloseBySlot(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalTrackingStop(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalLedDetectorOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalDfuClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGenDataStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalIsGameVr2d(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -616,92 +386,7 @@ int APS5_VABI sceHmd2InternalSetSidetone(void) {
     return 0;
 }
 
-int APS5_VABI sceHmd2InternalImageGetFrameData(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSlamTraceClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalLedDetectorClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSetPositionResetIcon(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalIsCommonDlgVr2d(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalIsMiniAppVr2d(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGazeClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalLedDetectorSetPriorityConfigBySlot(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalDfuStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageSetConfig(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGenDataClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalGetDeviceId(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSetForceIcon(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalLedDetectorStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSetVolume(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGetSlamCommand(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageGetAverageLuminance(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalTrackingReadData(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -711,17 +396,7 @@ int APS5_VABI sceHmd2InternalSetBrightness(void) {
     return 0;
 }
 
-int APS5_VABI sceHmd2InternalDfuGetStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalImageStopBySlot(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageGetMemoryLayout(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -731,87 +406,12 @@ int APS5_VABI sceHmd2InternalSetVibrationMode(void) {
     return 0;
 }
 
-int APS5_VABI sceHmd2InternalGenDataOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalGetVr2dData(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHmd2InternalGazeStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalRelocalizerReadDataAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalMapSharedMemory(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSlamTraceStart(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalLedDetectorSetIrCameraConfigBySlot(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalImageStop(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalIsCommonDlgMiniAppVr2d(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGetMirroringMode(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalRegisterVibrationCallback(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceHmd2InternalImageCloseBySlot(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalGetOpticalParam(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalPushVr2dData(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHmd2InternalSlamTraceOpen(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
