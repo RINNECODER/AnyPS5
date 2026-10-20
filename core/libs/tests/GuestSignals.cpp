@@ -64,6 +64,11 @@ void APS5_VABI Callback(int value) {
     received = value;
     handlerReturn = reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
 }
+GuestSignalSet maskInHandler{};
+void APS5_VABI MaskCallback(int value) {
+    received = value;
+    sigprocmask_nid_postfix(1, nullptr, &maskInHandler);
+}
 static void Require(bool value) { if (!value) std::abort(); }
 int main() {
     const auto invalid = reinterpret_cast<Handler>(static_cast<std::uintptr_t>(-1));
@@ -112,6 +117,17 @@ int main() {
     Require(sigprocmask_nid_postfix(1, nullptr, &previous) == 0 && previous.bits[0] == 0x20);
     Require(pthread_sigmask_nid_postfix(2, &blocked, &previous) == 0 && previous.bits[0] == 0x20);
     Require(pthread_sigmask_nid_postfix(1, nullptr, &previous) == 0 && previous.bits[0] == 0);
+    const GuestSignalSet withKillAndStop{{(1u << 8) | (1u << 16) | 0x20, 0, 0, 0}};
+    const GuestSignalSet noSignals{{0, 0, 0, 0}};
+    Require(sigprocmask_nid_postfix(1, &withKillAndStop, nullptr) == 0);
+    Require(sigprocmask_nid_postfix(1, nullptr, &previous) == 0 && previous.bits[0] == 0x20);
+    Require(sigprocmask_nid_postfix(3, &noSignals, nullptr) == 0);
+    Require(sigprocmask_nid_postfix(3, &withKillAndStop, nullptr) == 0);
+    Require(sigprocmask_nid_postfix(1, nullptr, &previous) == 0 && previous.bits[0] == 0x20);
+    Require(sigprocmask_nid_postfix(3, &noSignals, nullptr) == 0);
+    Require(pthread_sigmask_nid_postfix(1, &withKillAndStop, nullptr) == 0);
+    Require(pthread_sigmask_nid_postfix(1, nullptr, &previous) == 0 && previous.bits[0] == 0x20);
+    Require(pthread_sigmask_nid_postfix(3, &noSignals, nullptr) == 0);
 
     const auto callback = reinterpret_cast<std::uintptr_t>(Callback);
     const auto infoCallback = reinterpret_cast<std::uintptr_t>(InfoCallback);
@@ -184,6 +200,14 @@ int main() {
     *__error_nid_postfix() = 0;
     Require(sigsuspend_nid_postfix(&empty) == -1 && *__error_nid_postfix() == 4 && received == 30);
     Require(sigprocmask_nid_postfix(1, nullptr, &previous) == 0 && previous.bits[0] == user.bits[0]);
+    Require(signal_nid_postfix(30, MaskCallback) != invalid);
+    const GuestSignalSet suspendWithKillAndStop{{(1u << 8) | (1u << 16) | (1u << 28), 0, 0, 0}};
+    received = 0;
+    Require(raise_nid_postfix(30) == 0 && received == 0);
+    Require(sigsuspend_nid_postfix(&suspendWithKillAndStop) == -1 && received == 30);
+    Require(maskInHandler.bits[0] == (1u << 28));
+    Require(sigprocmask_nid_postfix(1, nullptr, &previous) == 0 && previous.bits[0] == user.bits[0]);
+    Require(signal_nid_postfix(30, Callback) != invalid);
     received = 0;
     SuspendWait wait{&empty, 0, 0};
     void* suspender = nullptr;
