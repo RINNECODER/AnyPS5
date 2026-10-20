@@ -869,12 +869,12 @@ int APS5_VABI scePadConnectPort(void) {
     return 0;
 }
 
-int APS5_VABI scePadDisconnectPort(void) {
+int APS5_VABI scePadDisconnectPort(std::int32_t userId, std::int32_t portType) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadDisconnectDevice(void) {
+int APS5_VABI scePadDisconnectDevice(std::int32_t deviceId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -899,7 +899,7 @@ int APS5_VABI scePadVirtualDeviceAddDevice(void) {
     return 0;
 }
 
-int APS5_VABI scePadVirtualDeviceDeleteDevice(void) {
+int APS5_VABI scePadVirtualDeviceDeleteDevice(std::int32_t deviceId) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -924,17 +924,17 @@ int APS5_VABI scePadVirtualDeviceSetTriggerEffectSetting(void) {
     return 0;
 }
 
-int APS5_VABI scePadVirtualDeviceDisableButtonRemapping(void) {
+int APS5_VABI scePadVirtualDeviceDisableButtonRemapping(bool disabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetShareButtonMaskForRemotePlay(void) {
+int APS5_VABI scePadSetShareButtonMaskForRemotePlay(std::uint8_t mask) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetPS4BcVibrationMode(void) {
+int APS5_VABI scePadSetPS4BcVibrationMode(std::uint8_t mode) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -944,7 +944,7 @@ int APS5_VABI scePadSetVirtualDeviceComponentInformation(void) {
     return 0;
 }
 
-int APS5_VABI scePadEnablePs4CompatibleMode(void) {
+int APS5_VABI scePadEnablePs4CompatibleMode(std::int32_t handle, bool enabled) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -979,17 +979,17 @@ int APS5_VABI scePadRemoteControlInsertDataForAston(void) {
     return 0;
 }
 
-int APS5_VABI scePadGetFeatureReport2(void) {
+int APS5_VABI scePadGetFeatureReport2(std::int32_t handle, std::uint8_t reportId, void* data, std::size_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetFeatureReport2(void) {
+int APS5_VABI scePadSetFeatureReport2(std::int32_t handle, std::uint8_t reportId, const void* data, std::size_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetMuteLed(void) {
+int APS5_VABI scePadSetMuteLed(std::int32_t handle, std::uint32_t mode) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
