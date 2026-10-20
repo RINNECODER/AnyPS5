@@ -180,8 +180,9 @@ int main() {
         const std::size_t size = std::strlen(row[1]) + 1;
         Require(sceHttpUriUnescape(nullptr, &required, 0, row[0]) == 0 && required == size);
         std::memset(escaped, 'Z', sizeof(escaped));
-        Require(sceHttpUriUnescape(escaped, &required, size - 1, row[0]) == outOfMemory && required == size);
-        for (char c : escaped) Require(c == 'Z');
+        required = 123;
+        Require(sceHttpUriUnescape(escaped, &required, size - 1, row[0]) == outOfMemory && required == 123);
+        Require(std::memcmp(escaped, row[1], size - 1) == 0 && escaped[size - 1] == 'Z');
         Require(sceHttpUriUnescape(escaped, nullptr, size, row[0]) == 0);
         Require(Equal(escaped, row[1]) && escaped[size] == 'Z');
     }
@@ -194,6 +195,17 @@ int main() {
     required = 123;
     Require(sceHttpUriUnescape(escaped, &required, sizeof(escaped), nullptr) == invalidValue);
     Require(required == 123 && Equal(escaped, "A/%20"));
+
+    for (const char* malformed : {"%", "%1", "%1g", "%gg", "%+1", "%-1", "prefix%4", "prefix%xy"}) {
+        std::memset(escaped, 'Z', sizeof(escaped));
+        required = 123;
+        Require(sceHttpUriUnescape(escaped, &required, sizeof(escaped), malformed) == static_cast<int>(0x80433060));
+        Require(required == 123);
+        for (char value : escaped) Require(value == 'Z');
+    }
+    std::memset(escaped, 'Z', sizeof(escaped));
+    Require(sceHttpUriUnescape(escaped, &required, 2, "a%20b") == outOfMemory);
+    Require(required == 123 && escaped[0] == 'a' && escaped[1] == ' ' && escaped[2] == 'Z');
 
     char bytes[256], encodedBytes[766], decodedBytes[256];
     for (std::size_t i = 1; i < 256; ++i) bytes[i - 1] = static_cast<char>(i);
