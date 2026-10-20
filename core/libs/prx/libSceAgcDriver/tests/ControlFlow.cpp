@@ -296,6 +296,11 @@ std::size_t recompile(const std::string& name, std::span<const std::uint32_t> co
     return result.spirv.size();
 }
 
+void verifyCallLinkOverwrittenByWave64Compare() {
+    const std::vector<std::uint32_t> code{0xbb080007u, 0xd4060008u, 0x0001e500u, 0xd5010001u, 0x0021e880u, 0xe0700000u, 0x80010100u, 0xbf810000u, 0xbe802008u, 0xbf9f0000u};
+    static_cast<void>(recompile("a wave64 compare that overwrites a call's link pair before a v_cndmask reads it", code, 64u));
+}
+
 void verifyLargeLoopExitFallback() {
     const std::vector<std::uint32_t> code{
         0x060202ffu, 0x3f800000u, 0x060202ffu, 0x3f000000u, 0x060202ffu, 0x3f001000u, 0x060202ffu, 0x3f002000u,
@@ -1221,6 +1226,7 @@ done:
     try {
         verifyNullSwappc();
         verifyScheduledJumpTable();
+        verifyCallLinkOverwrittenByWave64Compare();
         verifyLargeLoopExitFallback();
         verifyNestedExitForwarders();
         verifyIrreducibleLoopEntry();
