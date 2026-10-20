@@ -29,6 +29,30 @@ struct SessionSignalingPeerAddress {
     std::uint32_t platform;
 };
 
+struct SessionSignalingSessionParam {
+    std::uint32_t mode;
+    std::uint32_t option;
+};
+
+using SessionSignalingEventCallback = void (APS5_VABI *)(std::uint32_t, std::uint32_t, std::int32_t, const SessionSignalingPeerAddress*, std::int32_t, void*);
+using SessionSignalingConnectionCallback = void (APS5_VABI *)(std::uint32_t, std::uint32_t, std::int32_t, std::int32_t, void*);
+using SessionSignalingConnectionCallback2 = void (APS5_VABI *)(std::uint32_t, std::uint32_t, std::uint32_t, std::int32_t, std::int32_t, void*);
+
+template<typename TConnectionCallback>
+struct SessionSignalingContextParam {
+    std::int32_t userId;
+    std::uint32_t serviceLabel;
+    SessionSignalingEventCallback prepareCallback;
+    void* prepareUserData;
+    SessionSignalingEventCallback sessionCallback;
+    void* sessionUserData;
+    TConnectionCallback connectionCallback;
+    void* connectionUserData;
+};
+
+using SessionSignalingContextParam1 = SessionSignalingContextParam<SessionSignalingConnectionCallback>;
+using SessionSignalingContextParam2 = SessionSignalingContextParam<SessionSignalingConnectionCallback2>;
+
 struct SessionSignalingConnectionStatistics {
     std::uint32_t peakConnectionCount;
     std::uint32_t connectionCount;
@@ -50,6 +74,15 @@ static_assert(offsetof(SessionSignalingInitParam, stackSize) == 32);
 static_assert(offsetof(SessionSignalingMemoryInfo, usedSize) == 8);
 static_assert(offsetof(SessionSignalingMemoryInfo, peakUsedSize) == 16);
 static_assert(sizeof(SessionSignalingPeerAddress) == 16);
+static_assert(sizeof(SessionSignalingSessionParam) == 8);
+static_assert(offsetof(SessionSignalingSessionParam, option) == 4);
+static_assert(sizeof(SessionSignalingContextParam1) == 56);
+static_assert(sizeof(SessionSignalingContextParam2) == 56);
+static_assert(offsetof(SessionSignalingContextParam1, prepareCallback) == 8);
+static_assert(offsetof(SessionSignalingContextParam1, sessionCallback) == 24);
+static_assert(offsetof(SessionSignalingContextParam1, connectionCallback) == 40);
+static_assert(offsetof(SessionSignalingContextParam2, connectionCallback) == 40);
+static_assert(offsetof(SessionSignalingContextParam2, connectionUserData) == 48);
 static_assert(offsetof(SessionSignalingPeerAddress, platform) == 8);
 static_assert(sizeof(SessionSignalingConnectionStatistics) == 16);
 static_assert(offsetof(SessionSignalingConnectionStatistics, connectionCount) == 4);
@@ -65,19 +98,20 @@ int APS5_VABI sceNpSessionSignalingInitialize(const SessionSignalingInitParam* p
     return 0;
 }
 
-int APS5_VABI sceNpSessionSignalingActivateSession(void) {
+int APS5_VABI sceNpSessionSignalingActivateSession(std::uint32_t contextId, const char* sessionId, std::uint32_t sessionType, const SessionSignalingSessionParam* param, std::uint32_t* groupId) {
     return SCE_NP_SESSION_SIGNALING_ERROR_UNAVAILABLE;
 }
 
-int APS5_VABI sceNpSessionSignalingCreateContext2(const void* param, uint32_t* context_id) {
-    (void)param;
-    if (!context_id) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
-    *context_id = g_nextContext.fetch_add(1, std::memory_order_relaxed);
+int APS5_VABI sceNpSessionSignalingCreateContext2(const SessionSignalingContextParam2* param, std::uint32_t* contextId) {
+    if (!param || !contextId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+    *contextId = g_nextContext.fetch_add(1, std::memory_order_relaxed);
     return 0;
 }
 
-int APS5_VABI sceNpSessionSignalingCreateContext(const void* param, uint32_t* context_id) {
-    return sceNpSessionSignalingCreateContext2(param, context_id);
+int APS5_VABI sceNpSessionSignalingCreateContext(const SessionSignalingContextParam1* param, std::uint32_t* contextId) {
+    if (!param || !contextId) return SCE_NP_SESSION_SIGNALING_ERROR_INVALID_ARGUMENT;
+    *contextId = g_nextContext.fetch_add(1, std::memory_order_relaxed);
+    return 0;
 }
 
 int APS5_VABI sceNpSessionSignalingDeactivate(uint32_t context_id) {

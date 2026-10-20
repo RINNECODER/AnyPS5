@@ -6,6 +6,7 @@
 
 extern "C" {
 int APS5_VABI sceNpSessionSignalingInitialize(void* param);
+int APS5_VABI sceNpSessionSignalingCreateContext(const void* param, std::uint32_t* contextId);
 int APS5_VABI sceNpSessionSignalingCreateContext2(const void* param, std::uint32_t* contextId);
 std::int32_t APS5_VABI sceNpSessionSignalingGetLocalNetInfo(std::int32_t contextId, void* info);
 int APS5_VABI sceNpSessionSignalingRequestPrepare(std::uint32_t contextId, std::uint32_t* requestId);
@@ -29,10 +30,16 @@ void Require(bool condition, const char* message) {
 }
 
 int main() {
-    unsigned char initializeParam[32] = {};
+    alignas(8) unsigned char initializeParam[40] = {};
     Require(sceNpSessionSignalingInitialize(initializeParam) == 0, "initialize failed");
-    unsigned char contextParam[64] = {};
+    alignas(8) unsigned char contextParam[56] = {};
     std::uint32_t contextId = 0;
+    Require(sceNpSessionSignalingCreateContext(nullptr, &contextId) == InvalidArgument, "null context parameter");
+    Require(contextId == 0, "invalid context parameter wrote an id");
+    Require(sceNpSessionSignalingCreateContext2(nullptr, &contextId) == InvalidArgument, "null context2 parameter");
+    Require(contextId == 0, "invalid context2 parameter wrote an id");
+    Require(sceNpSessionSignalingCreateContext(contextParam, nullptr) == InvalidArgument, "null context id");
+    Require(sceNpSessionSignalingCreateContext2(contextParam, nullptr) == InvalidArgument, "null context2 id");
     Require(sceNpSessionSignalingCreateContext2(contextParam, &contextId) == 0, "context creation failed");
 
     std::uint32_t requestId = 0xa5a5a5a5u;
