@@ -269,6 +269,21 @@ bool ZeroPortConnect(const Socket& socket, const void* address, std::uint32_t le
     Fail(49);
     return true;
 }
+bool ZeroPortSend(const Socket& socket, const sockaddr_storage& destination) {
+    if (socket.type != 2 || socket.family != 2 || destination.ss_family != AF_INET) return false;
+    const auto& remote = reinterpret_cast<const sockaddr_in&>(destination);
+    if (remote.sin_port != 0) return false;
+    sockaddr_storage peer{};
+    socklen_t peerSize = sizeof(peer);
+    if (::getpeername(socket.value, reinterpret_cast<sockaddr*>(&peer), &peerSize) == 0) return false;
+    sockaddr_in local{};
+    socklen_t localSize = sizeof(local);
+    const bool bound = ::getsockname(socket.value, reinterpret_cast<sockaddr*>(&local), &localSize) == 0
+        && local.sin_port != 0 && local.sin_addr.s_addr != htonl(INADDR_ANY);
+    if (bound && remote.sin_addr.s_addr != htonl(INADDR_ANY) && remote.sin_addr.s_addr != htonl(INADDR_BROADCAST)) return false;
+    Fail(49);
+    return true;
+}
 int Disconnect(const Socket& socket) {
     sockaddr_storage peer{};
     socklen_t peerSize = sizeof(peer);
@@ -1186,6 +1201,7 @@ std::int64_t APS5_VABI sendto_nid_postfix(int descriptor, const void* buffer, st
         socklen_t size;
         if (!Address(address, addressLength, native, size)) return -1;
         if (native.ss_family != (socket->family == 2 ? AF_INET : AF_INET6)) return Fail(47);
+        if (ZeroPortSend(*socket, native)) return -1;
         result = static_cast<int>(::sendto(socket->value, static_cast<const char*>(buffer), static_cast<int>(length), SocketSendFlags(*socket, flags),
             reinterpret_cast<sockaddr*>(&native), size));
     }
