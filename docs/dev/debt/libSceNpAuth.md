@@ -10,3 +10,5 @@
 ### Functional
 
 - [sceNpAuthSetTimeout](../../../core/libs/prx/libSceNpAuth/Export.cpp): native validation and storage are implemented: retry must be nonnegative, the all-zero tuple is invalid, resolve timeout is zero or at least 1000000, and other timeouts are zero or at least 10000000. Invalid arguments precede request lookup. Stored settings currently have no transport to configure because authentication remains offline.
+
+- [sceNpAuthGetAuthorizedAppCode](../../../core/libs/prx/libSceNpAuth/Export.cpp): the five-argument ABI and 40-byte request parameter are recovered. Pointer, size, user, option and request-ID validation replaces the unconditional signed-out result. Valid calls throw because authorization and asynchronous result delivery are not implemented. Client-ID storage is copied as 136 bytes by the firmware; its internal fields and the complete output-code format remain unresolved.

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -65,8 +66,14 @@ int APS5_VABI sceNpAuthDeleteRequest(int req_id) {
  return 0;
 }
 
-int APS5_VABI sceNpAuthGetAuthorizedAppCode() {
- return SCE_NP_ERROR_SIGNED_OUT;
+int APS5_VABI sceNpAuthGetAuthorizedAppCode(std::int32_t requestId, const NpAuthAuthorizedAppCodeParameter* parameter, char* code, std::int32_t* issuerId, bool* authorizationRequired) {
+ (void)issuerId;
+ if (parameter == nullptr || code == nullptr || authorizationRequired == nullptr) return ORBIS_NP_AUTH_ERROR_INVALID_ARGUMENT;
+ if (parameter->size != sizeof(NpAuthAuthorizedAppCodeParameter)) return static_cast<int>(0x80550302u);
+ if (parameter->userId == -1 || parameter->clientId == nullptr || parameter->scope == nullptr || parameter->option > 1) return ORBIS_NP_AUTH_ERROR_INVALID_ARGUMENT;
+ std::lock_guard lock(g_requestMutex);
+ if (!g_requests.contains(requestId)) return ORBIS_NP_AUTH_ERROR_REQUEST_NOT_FOUND;
+ throw std::logic_error("sceNpAuthGetAuthorizedAppCode: authorization backend is not implemented");
 }
 
 int APS5_VABI sceNpAuthGetAuthorizationCodeV3(int req_id, const void* param, void* auth_code, int* issuer_id) {

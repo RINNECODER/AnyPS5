@@ -929,6 +929,21 @@ struct VoicePortInfo {
     std::uint16_t reserved;
 };
 
+struct NpAuthClientId;
+
+struct NpAuthAuthorizedAppCodeParameter {
+    std::uint64_t size;
+    std::int32_t userId;
+    const NpAuthClientId* clientId;
+    const char* scope;
+    std::uint32_t option;
+};
+
+static_assert(sizeof(NpAuthAuthorizedAppCodeParameter) == 40);
+static_assert(offsetof(NpAuthAuthorizedAppCodeParameter, clientId) == 16);
+static_assert(offsetof(NpAuthAuthorizedAppCodeParameter, scope) == 24);
+static_assert(offsetof(NpAuthAuthorizedAppCodeParameter, option) == 32);
+
 struct VoiceResourceInfo {
     std::uint16_t max_voice_input_ports;
     std::uint16_t max_voice_output_ports;
