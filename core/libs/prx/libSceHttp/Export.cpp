@@ -714,7 +714,7 @@ int APS5_VABI sceHttpGetEpollId(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpGetCookie(void) {
+int APS5_VABI sceHttpGetCookie(int contextId, const char* url, char* cookie, std::size_t* requiredSize, std::size_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -724,7 +724,7 @@ int APS5_VABI sceHttpGetCookieEnabled(int id, int* enabled) {
     return 0;
 }
 
-int APS5_VABI sceHttpAddCookie(void) {
+int APS5_VABI sceHttpAddCookie(int contextId, const char* url, const char* cookie, std::size_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -734,32 +734,32 @@ int APS5_VABI sceHttpSetCookieSendCallback(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpCookieExport(void) {
+int APS5_VABI sceHttpCookieExport(int contextId, void* buffer, std::size_t size, std::size_t* requiredSize) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpCookieImport(void) {
+int APS5_VABI sceHttpCookieImport(int contextId, const void* buffer, std::size_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpSetCookieTotalMaxSize(void) {
+int APS5_VABI sceHttpSetCookieTotalMaxSize(int contextId, std::uint32_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpSetCookieMaxSize(void) {
+int APS5_VABI sceHttpSetCookieMaxSize(int contextId, std::uint32_t size) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpSetCookieMaxNum(void) {
+int APS5_VABI sceHttpSetCookieMaxNum(int contextId, std::uint32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceHttpSetCookieMaxNumPerDomain(void) {
+int APS5_VABI sceHttpSetCookieMaxNumPerDomain(int contextId, std::uint32_t count) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
