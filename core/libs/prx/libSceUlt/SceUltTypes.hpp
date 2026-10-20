@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <list>
 #include <mutex>
@@ -23,6 +24,14 @@ constexpr int ULT_ERROR_AGAIN = -2139029496;
 struct UltOptParam {
     std::uint8_t bytes[128];
 };
+
+inline int InitializeOptParam(UltOptParam* optParam) {
+    if (optParam == nullptr) {
+        return ULT_ERROR_NULL;
+    }
+    std::memset(optParam, 0, sizeof(*optParam));
+    return ULT_OK;
+}
 
 struct UltMutexState {
     std::mutex _mutex;

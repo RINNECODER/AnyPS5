@@ -14,6 +14,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "SceUltTypes.hpp"
+#include "prx/libSceUlt/src/ReaderWriterLock.hpp"
 
 extern "C" int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name);
 extern "C" int APS5_VABI scePthreadJoin(Pthread thread, void** retval);
@@ -108,14 +109,6 @@ void ReleaseQueue(UltQueueState& state) {
     --pool._queues;
 }
 
-int InitializeOptParam(UltOptParam* optParam) {
-    if (optParam == nullptr) {
-        return ULT_ERROR_NULL;
-    }
-    std::memset(optParam, 0, sizeof(*optParam));
-    return ULT_OK;
-}
-
 void* APS5_VABI ulthreadRunner(void* arg) {
     auto* state = static_cast<UltUlthreadState*>(arg);
     const auto result = state->_entry(state->_arg);
@@ -123,6 +116,11 @@ void* APS5_VABI ulthreadRunner(void* arg) {
     return reinterpret_cast<void*>(static_cast<std::intptr_t>(result));
 }
 
+}
+
+bool UltWaitingPoolExists(void* pool) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    return gResourcePools.contains(pool);
 }
 
 extern "C" {
@@ -162,6 +160,7 @@ int APS5_VABI sceUltFinalize() {
         }
         gConditions.clear();
         gMutexes.clear();
+        UltFinalizeReaderWriterLocks();
         gResourcePools.clear();
         for (auto& entry : gQueues) {
             auto& state = *entry.second;
@@ -488,6 +487,9 @@ int APS5_VABI sceUltWaitingQueueResourcePoolDestroy(void* pool) {
                 return ULT_ERROR_BUSY;
             }
         }
+    }
+    if (UltReaderWriterLocksWaitOn(pool)) {
+        return ULT_ERROR_BUSY;
     }
     gResourcePools.erase(it);
     return ULT_OK;
@@ -926,41 +928,6 @@ int APS5_VABI sceUltGetWaitingQueueResourcePoolInfo() {
     return 0;
 }
 
-int APS5_VABI sceUltReaderWriterLockDestroy() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltReaderWriterLockLockRead() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltReaderWriterLockLockWrite() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltReaderWriterLockTryLockRead() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltReaderWriterLockTryLockWrite() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltReaderWriterLockUnlockRead() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltReaderWriterLockUnlockWrite() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceUltUlthreadExit() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -1042,16 +1009,6 @@ int APS5_VABI sceUltConditionVariableCreate() {
 }
 
 int APS5_VABI sceUltConditionVariableOptParamInitialize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltReaderWriterLockCreate() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceUltReaderWriterLockOptParamInitialize() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
