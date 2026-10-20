@@ -140,6 +140,10 @@ static bool Failed(std::int64_t result, int error) {
     return result == static_cast<int>(0x80410100u | static_cast<unsigned>(error)) && *sceNetErrnoLoc() == error;
 }
 
+static void CheckSocketHostErrors() {
+    Require(Failed(sceNetSocket(nullptr, 2, 1, 17), 43));
+}
+
 static void CheckStreamSender(int family) {
     const auto addressSize = family == 2 ? 16u : 28u;
     const int listener = sceNetSocket(nullptr, family, 1, 6);
@@ -1329,6 +1333,7 @@ int main() {
     CheckPeerSocketTypes();
     if (argc == 2 && std::strcmp(argv[1], "--peer-only") == 0) return 0;
     CheckEpollWritable();
+    CheckSocketHostErrors();
     CheckPoolStats();
     CheckNetstat();
     CheckEmptyEpoll();
