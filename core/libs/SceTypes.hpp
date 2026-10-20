@@ -1377,6 +1377,24 @@ struct NpUnifiedEntitlementLabel {
     char padding[3];
 };
 
+struct NpServiceEntitlementLabel {
+    char data[7];
+    std::uint8_t reserved[13];
+};
+
+struct NpEntitlementAccessTransactionId {
+    char data[65];
+    std::uint8_t reserved[7];
+};
+
+struct NpEntitlementAccessListParameter;
+struct NpEntitlementAccessUnifiedInfo;
+struct NpEntitlementAccessServiceInfo;
+
+static_assert(sizeof(NpUnifiedEntitlementLabel) == 20);
+static_assert(sizeof(NpServiceEntitlementLabel) == 20);
+static_assert(sizeof(NpEntitlementAccessTransactionId) == 72);
+
 struct NpEntitlementAccessInitParam { char reserved[32]; };
 struct NpEntitlementAccessBootParam { char reserved[32]; };
 
