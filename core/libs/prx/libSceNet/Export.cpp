@@ -41,6 +41,12 @@
 
 // Guest socket descriptors retain PS5 semantics while their transport is backed by host sockets.
 
+struct NetIpv6Address {
+    std::uint8_t bytes[16];
+};
+
+static_assert(sizeof(NetIpv6Address) == 16);
+
 namespace {
 // FreeBSD errno numbers as reported through sceNetErrnoLoc (SCE_NET_ERROR_* is 0x80410100 + errno).
 constexpr int NET_ENOENT = 2;
@@ -2124,17 +2130,17 @@ int APS5_VABI sceNetConfigDownInterface(int interfaceId) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigSetDefaultRoute(void) {
+int APS5_VABI sceNetConfigSetDefaultRoute(const std::uint32_t* gateway) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigSetDefaultRouteDev(void) {
+int APS5_VABI sceNetConfigSetDefaultRouteDev(const std::uint32_t* gateway) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigSetIfaddr(void) {
+int APS5_VABI sceNetConfigSetIfaddr(int interfaceId, const std::uint32_t* address, const std::uint32_t* broadcastAddress, const std::uint32_t* netmask) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2184,37 +2190,37 @@ int APS5_VABI sceNetConfigSetIfmtu(std::uint32_t interfaceId, int mtu) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddArp(void) {
+int APS5_VABI sceNetConfigAddArp(const NetEtherAddr* etherAddress, const std::uint32_t* address) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddArpWithInterface(void) {
+int APS5_VABI sceNetConfigAddArpWithInterface(int interfaceId, const NetEtherAddr* etherAddress, const std::uint32_t* address) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddMRoute(void) {
+int APS5_VABI sceNetConfigAddMRoute(const std::uint32_t* address) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddRoute(void) {
+int APS5_VABI sceNetConfigAddRoute(const std::uint32_t* destination, const std::uint32_t* gateway, const std::uint32_t* netmask, int hostRoute) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddRouteWithInterface(void) {
+int APS5_VABI sceNetConfigAddRouteWithInterface(int interfaceId, const std::uint32_t* destination, const std::uint32_t* gateway, const std::uint32_t* netmask, int hostRoute) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigDelArp(void) {
+int APS5_VABI sceNetConfigDelArp(const NetEtherAddr* etherAddress, const std::uint32_t* address) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigDelArpWithInterface(void) {
+int APS5_VABI sceNetConfigDelArpWithInterface(int interfaceId, const NetEtherAddr* etherAddress, const std::uint32_t* address) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2229,17 +2235,17 @@ int APS5_VABI sceNetConfigDelDefaultRouteDev(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigDelMRoute(void) {
+int APS5_VABI sceNetConfigDelMRoute(const std::uint32_t* address) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigDelRoute(void) {
+int APS5_VABI sceNetConfigDelRoute(const std::uint32_t* destination, const std::uint32_t* gateway, const std::uint32_t* netmask) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigGetDefaultRoute(void) {
+int APS5_VABI sceNetConfigGetDefaultRoute(std::uint32_t* gateway) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2274,7 +2280,7 @@ int APS5_VABI sceNetConfigAddIfaddr6(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigDelIfaddr6(void) {
+int APS5_VABI sceNetConfigDelIfaddr6(int interfaceId, const NetIpv6Address* address) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2284,7 +2290,7 @@ int APS5_VABI sceNetConfigDelDefaultRoute6(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigSetIfaddr6(void) {
+int APS5_VABI sceNetConfigSetIfaddr6(int interfaceId, const NetIpv6Address* address, std::uint8_t prefixLength) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2294,7 +2300,7 @@ int APS5_VABI sceNetConfigSetIfaddr6WithFlags(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigSetDefaultRoute6(void) {
+int APS5_VABI sceNetConfigSetDefaultRoute6(int interfaceId, const NetIpv6Address* gateway) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -2304,17 +2310,17 @@ int APS5_VABI sceNetConfigGetIfaddr6(void) {
     return 0;
 }
 
-int APS5_VABI sceNetConfigGetDefaultRoute6(void) {
+int APS5_VABI sceNetConfigGetDefaultRoute6(NetIpv6Address* gateway) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigDelRoute6(void) {
+int APS5_VABI sceNetConfigDelRoute6(const NetIpv6Address* destination, std::uint8_t prefixLength) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceNetConfigAddRoute6(void) {
+int APS5_VABI sceNetConfigAddRoute6(const NetIpv6Address* destination, const NetIpv6Address* gateway, std::uint8_t prefixLength) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
