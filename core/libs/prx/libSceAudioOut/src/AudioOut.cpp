@@ -612,7 +612,7 @@ int APS5_VABI sceAudioOutGetPortState(int handle, AudioOutPortState* state) {
     return 0;
 }
 
-int APS5_VABI sceAudioOutDeviceIdOpen() {
+int APS5_VABI sceAudioOutDeviceIdOpen(std::uint64_t deviceId, std::int32_t type, std::int32_t index, std::uint32_t length, std::int32_t frequency, std::uint32_t parameter) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
