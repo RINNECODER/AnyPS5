@@ -24,3 +24,5 @@
 - [Font graphics and metric signatures](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp): graphics-device/service creation takes font memory, parameters and a handle output; destruction takes a handle pointer. Attribute selectors and outputs are 32-bit values. Metric, outline-profile, style-information and expansion-buffer outputs remain opaque pending field recovery. Protected implementations are unchanged.
 
 - [Font graphics fill and transform signatures](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp): region layout and scalar float arguments are confirmed from assembly, including the extra 32-bit corner flags omitted by the roundish-region decompilation. Fill-method, plot and rates layouts, layout selector meanings and mapping parameter meanings remain unresolved. Protected bodies are unchanged.
+
+Frame lifecycle, drawing completion, device usage, frame policy, clipping and fill setup/update argument signatures in [Unimplemented.cpp](../../../core/libs/prx/libSceFont/src/Unimplemented.cpp) are recovered. Device usage, frame and resource layouts remain opaque; their runtime implementation is still unavailable.
