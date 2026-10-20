@@ -6,12 +6,16 @@
 struct HttpOptions {
     bool autoRedirect = true;
     bool nonblock = false;
+    bool acceptEncodingGzip = false;
 };
 
-void AddHttpTemplate(int templateId);
+void AddHttpContext(int contextId);
+void RemoveHttpContext(int contextId);
+void AddHttpTemplate(int templateId, int contextId);
 void AddHttpChild(int id, int parentId);
 void RemoveHttpObject(int id);
 std::optional<HttpOptions> FindHttpOptions(int id);
 bool SetHttpOption(int id, bool HttpOptions::*option, bool enable);
+bool SetHttpContextAcceptEncodingGzip(int contextId, bool enable);
 
 #endif

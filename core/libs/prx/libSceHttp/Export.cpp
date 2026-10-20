@@ -194,12 +194,11 @@ int APS5_VABI sceHttpCreateRequestWithURL2(int conn_id, const char* method, cons
 }
 
 int APS5_VABI sceHttpCreateTemplate(int http_ctx_id, const char* user_agent, int http_ver, int is_auto_proxy_conf) {
-    (void)http_ctx_id;
     (void)user_agent;
     (void)http_ver;
     (void)is_auto_proxy_conf;
     const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
-    AddHttpTemplate(id);
+    AddHttpTemplate(id, http_ctx_id);
     return id;
 }
 
@@ -262,6 +261,7 @@ int APS5_VABI sceHttpInit_nid_postfix(int memid, int ssl_ctx_id, uint64_t pool_s
     const int id = g_nextHandle.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(g_stateMutex);
     g_contexts.insert(id);
+    AddHttpContext(id);
     return id;
 }
 
@@ -384,6 +384,7 @@ int APS5_VABI sceHttpTerm_nid_postfix(int http_ctx_id) {
         std::lock_guard lock(g_stateMutex);
         if (g_contexts.empty()) return ERROR_BEFORE_INIT;
         if (g_contexts.erase(http_ctx_id) == 0) return ERROR_INVALID_ID;
+        RemoveHttpContext(http_ctx_id);
         if (!g_contexts.empty()) return 0;
         for (auto& [handle, epoll] : g_epolls) epolls.push_back(std::move(epoll));
         g_epolls.clear();
@@ -797,19 +798,10 @@ int APS5_VABI sceHttpRequestGetAllHeaders(void) {
     return 0;
 }
 
-int APS5_VABI sceHttpSetAcceptEncodingGZIPEnabled(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpGetAcceptEncodingGZIPEnabled(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceHttpSetDefaultAcceptEncodingGZIPEnabled(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceHttpSetDefaultAcceptEncodingGZIPEnabled(int http_ctx_id, int enable) {
+    std::lock_guard lock(g_stateMutex);
+    if (g_contexts.empty()) return ERROR_BEFORE_INIT;
+    return SetHttpContextAcceptEncodingGzip(http_ctx_id, enable != 0) ? 0 : ERROR_INVALID_ID;
 }
 
 int APS5_VABI sceHttpSetProxy(void) {

@@ -7,13 +7,26 @@
 namespace {
 
 std::mutex g_optionsMutex;
+std::unordered_map<int, bool> g_contextAcceptEncodingGzip;
 std::unordered_map<int, HttpOptions> g_objectOptions;
 
 }
 
-void AddHttpTemplate(int templateId) {
+void AddHttpContext(int contextId) {
     std::lock_guard lock(g_optionsMutex);
-    g_objectOptions[templateId] = HttpOptions{};
+    g_contextAcceptEncodingGzip[contextId] = false;
+}
+
+void RemoveHttpContext(int contextId) {
+    std::lock_guard lock(g_optionsMutex);
+    g_contextAcceptEncodingGzip.erase(contextId);
+}
+
+void AddHttpTemplate(int templateId, int contextId) {
+    std::lock_guard lock(g_optionsMutex);
+    HttpOptions options;
+    if (const auto context = g_contextAcceptEncodingGzip.find(contextId); context != g_contextAcceptEncodingGzip.end()) options.acceptEncodingGzip = context->second;
+    g_objectOptions[templateId] = options;
 }
 
 void AddHttpChild(int id, int parentId) {
@@ -42,6 +55,14 @@ bool SetHttpOption(int id, bool HttpOptions::*option, bool enable) {
     return true;
 }
 
+bool SetHttpContextAcceptEncodingGzip(int contextId, bool enable) {
+    std::lock_guard lock(g_optionsMutex);
+    const auto found = g_contextAcceptEncodingGzip.find(contextId);
+    if (found == g_contextAcceptEncodingGzip.end()) return false;
+    found->second = enable;
+    return true;
+}
+
 extern "C" {
 
 int APS5_VABI sceHttpGetAutoRedirect(int id, int* enable) {
@@ -62,6 +83,18 @@ int APS5_VABI sceHttpGetNonblock(int id, int* enable) {
 
 int APS5_VABI sceHttpTryGetNonblock(int id, int* enable) {
     return sceHttpGetNonblock(id, enable);
+}
+
+int APS5_VABI sceHttpGetAcceptEncodingGZIPEnabled(int id, int* enable) {
+    if (!enable) return ERROR_INVALID_VALUE;
+    const auto options = FindHttpOptions(id);
+    if (!options) return ERROR_INVALID_ID;
+    *enable = options->acceptEncodingGzip ? 1 : 0;
+    return 0;
+}
+
+int APS5_VABI sceHttpSetAcceptEncodingGZIPEnabled(int id, int enable) {
+    return SetHttpOption(id, &HttpOptions::acceptEncodingGzip, enable != 0) ? 0 : ERROR_INVALID_ID;
 }
 
 }
