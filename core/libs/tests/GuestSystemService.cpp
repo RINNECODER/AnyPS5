@@ -17,15 +17,6 @@ constexpr int browserUnavailable = static_cast<int>(0x8002002Du);
 
 void Require(bool value) { if (!value) std::abort(); }
 
-bool ParamGetStringThrows(int paramId, char* buf, std::size_t bufSize) {
-    try {
-        static_cast<void>(sceSystemServiceParamGetString(paramId, buf, bufSize));
-    } catch (const std::runtime_error&) {
-        return true;
-    }
-    return false;
-}
-
 template<typename TCall>
 bool Throws(TCall call) {
     try {
@@ -133,15 +124,27 @@ int main() {
     Require(luminance.max_tone_map_luminance == 100.0f);
     Require(luminance.min_tone_map_luminance == 0.0f);
 
-    char name[SYSTEM_SERVICE_MAX_SYSTEM_NAME_LENGTH];
+    char name[SYSTEM_SERVICE_MAX_SYSTEM_NAME_LENGTH * 2];
+    const auto untouched = [&name] {
+        for (const char byte : name) {
+            if (byte != 'x') return false;
+        }
+        return true;
+    };
     std::memset(name, 'x', sizeof(name));
-    Require(sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, nullptr, sizeof(name)) == SYSTEM_SERVICE_ERROR_PARAMETER);
-    Require(sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, name, 0) == SYSTEM_SERVICE_ERROR_PARAMETER);
-    Require(ParamGetStringThrows(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, name, sizeof(name) - 1));
-    Require(ParamGetStringThrows(SYSTEM_SERVICE_PARAM_ID_LANG, name, sizeof(name)));
-    Require(name[0] == 'x');
-    Require(sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, name, sizeof(name)) == SYSTEM_SERVICE_OK);
+    Require(sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, nullptr, SYSTEM_SERVICE_MAX_SYSTEM_NAME_LENGTH) == SYSTEM_SERVICE_ERROR_PARAMETER);
+    for (std::size_t size = 0; size < SYSTEM_SERVICE_MAX_SYSTEM_NAME_LENGTH; ++size) {
+        Require(sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, name, size) == SYSTEM_SERVICE_ERROR_PARAMETER);
+    }
+    for (const int paramId : {-1, 0, 1, 5, 7, 40, 100, 1000, 0x7fffffff}) {
+        Require(sceSystemServiceParamGetString(paramId, name, sizeof(name)) == SYSTEM_SERVICE_ERROR_PARAMETER);
+    }
+    Require(sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_LANG, name, sizeof(name)) == SYSTEM_SERVICE_ERROR_PARAMETER);
+    Require(untouched());
+    Require(sceSystemServiceParamGetString(SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME, name, SYSTEM_SERVICE_MAX_SYSTEM_NAME_LENGTH + 3) == SYSTEM_SERVICE_OK);
     Require(std::strcmp(name, "PS5") == 0);
+    for (std::size_t index = 4; index < SYSTEM_SERVICE_MAX_SYSTEM_NAME_LENGTH + 3; ++index) Require(name[index] == '\0');
+    for (std::size_t index = SYSTEM_SERVICE_MAX_SYSTEM_NAME_LENGTH + 3; index < sizeof(name); ++index) Require(name[index] == 'x');
 
     Require(sceSystemServiceGetStatus(nullptr) == SYSTEM_SERVICE_ERROR_PARAMETER);
     SystemServiceStatus status;
