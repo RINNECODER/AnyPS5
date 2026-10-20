@@ -1049,8 +1049,24 @@ std::uint32_t QuantizeStoreTexel(SpirvEmitterState& state, std::uint32_t resourc
         state.module.AddFunction(spv::OpExtInst, vec4, result, GlslStd450(state), static_cast<std::uint32_t>(op), operands...);
         return result;
     };
-    const auto error = ext(GLSLstd450Fma, clamped, scale, Unary(state, spv::OpFNegate, vec4, product));
-    state.module.AddAnnotation(spv::OpDecorate, error, spv::DecorationNoContraction);
+    const auto exact = [&](spv::Op opcode, std::uint32_t lhs, std::uint32_t rhs) {
+        const auto value = Binary(state, opcode, vec4, lhs, rhs);
+        state.module.AddAnnotation(spv::OpDecorate, value, spv::DecorationNoContraction);
+        return value;
+    };
+    const auto spreadFactor = splat(vec4, ConstantF32(state, std::bit_cast<std::uint32_t>(4097.0f)));
+    const auto high = [&](std::uint32_t value) {
+        const auto spread = exact(spv::OpFMul, value, spreadFactor);
+        return exact(spv::OpFSub, spread, exact(spv::OpFSub, spread, value));
+    };
+    const auto clampedHigh = high(clamped);
+    const auto scaleHigh = high(scale);
+    const auto clampedLow = exact(spv::OpFSub, clamped, clampedHigh);
+    const auto scaleLow = exact(spv::OpFSub, scale, scaleHigh);
+    auto error = exact(spv::OpFSub, exact(spv::OpFMul, clampedHigh, scaleHigh), product);
+    error = exact(spv::OpFAdd, error, exact(spv::OpFMul, clampedHigh, scaleLow));
+    error = exact(spv::OpFAdd, error, exact(spv::OpFMul, clampedLow, scaleHigh));
+    error = exact(spv::OpFAdd, error, exact(spv::OpFMul, clampedLow, scaleLow));
     const auto below = ext(GLSLstd450Floor, product);
     const auto fraction = Binary(state, spv::OpFSub, vec4, product, below);
     state.module.AddAnnotation(spv::OpDecorate, fraction, spv::DecorationNoContraction);
