@@ -29,6 +29,14 @@ bool ValidPort(int userId, int type, int index) {
 
 }
 
+struct PadMotionSensorPosition {
+    float x;
+    float y;
+    float z;
+};
+
+static_assert(sizeof(PadMotionSensorPosition) == 12);
+
 extern "C" {
 
 int APS5_VABI scePadClose_nid_postfix(int handle) {
@@ -761,7 +769,7 @@ int APS5_VABI scePadResetLightBarAll(void) {
     return 0;
 }
 
-int APS5_VABI scePadResetLightBarAllByPortType(void) {
+int APS5_VABI scePadResetLightBarAllByPortType(std::uint32_t portType) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -781,47 +789,47 @@ int APS5_VABI scePadReadBlasterForTracker(void) {
     return 0;
 }
 
-int APS5_VABI scePadResetOrientationForTracker(void) {
+int APS5_VABI scePadResetOrientationForTracker(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetMotionTimerUnit(void) {
+int APS5_VABI scePadGetMotionTimerUnit(std::int32_t handle, float* unit) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadSetVrTrackingMode(void) {
+int APS5_VABI scePadSetVrTrackingMode(std::uint8_t mode) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetMotionSensorPosition(void) {
+int APS5_VABI scePadGetMotionSensorPosition(std::int32_t handle, PadMotionSensorPosition* position) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadGetSphereRadius(void) {
+int APS5_VABI scePadGetSphereRadius(std::int32_t handle, float* radius) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadIsValidHandle(void) {
+bool APS5_VABI scePadIsValidHandle(std::int32_t handle, std::int32_t portType) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadIsDS4Connected(void) {
+bool APS5_VABI scePadIsDS4Connected(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadIsBlasterConnected(void) {
+bool APS5_VABI scePadIsBlasterConnected(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI scePadIsMoveConnected(void) {
+bool APS5_VABI scePadIsMoveConnected(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -831,7 +839,7 @@ int APS5_VABI scePadGetBluetoothAddress(void) {
     return 0;
 }
 
-int APS5_VABI scePadIsMoveReproductionModel(void) {
+int APS5_VABI scePadIsMoveReproductionModel(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -841,7 +849,7 @@ int APS5_VABI scePadReadAstonForTracker(void) {
     return 0;
 }
 
-int APS5_VABI scePadGetAstonModel(void) {
+int APS5_VABI scePadGetAstonModel(std::int32_t handle) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
