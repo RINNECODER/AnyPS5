@@ -9,6 +9,10 @@
 
 namespace AudioPropagation {
 
+inline constexpr std::int32_t ErrorInvalidArgument = static_cast<std::int32_t>(0x8A700001);
+inline constexpr std::int32_t ErrorInvalidHandle = static_cast<std::int32_t>(0x8A700002);
+inline constexpr std::int32_t ErrorNullPointer = static_cast<std::int32_t>(0x8A700003);
+
 inline constexpr std::uint32_t MaterialId = 0x010107d1;
 inline constexpr std::size_t MaterialSize = 0x40;
 inline constexpr std::uint32_t SystemMemoryId = 0x010107d4;

@@ -122,7 +122,11 @@ int main() {
     std::uint32_t count = 7;
     Require(sceAudioPropagationSourceGetAudioPathCount(source, &count) == 0 && count == 0, "source reports audio paths");
     AudioPropagationHandle path = 0;
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceGetAudioPath(source, 0, &path); }, "audio path without paths");
+    path = 0x1234;
+    Require(sceAudioPropagationSourceGetAudioPath(source, 0, &path) == AudioPropagation::ErrorInvalidArgument && path == 0x1234, "audio path without paths");
+    Require(sceAudioPropagationSourceGetAudioPath(source, UINT32_MAX, &path) == AudioPropagation::ErrorInvalidArgument && path == 0x1234, "audio path index range");
+    Require(sceAudioPropagationSourceGetAudioPath(source, 0, nullptr) == AudioPropagation::ErrorNullPointer, "audio path null output");
+    Require(sceAudioPropagationSourceGetAudioPath(0, 0, nullptr) == AudioPropagation::ErrorInvalidHandle, "audio path handle precedence");
 
     std::uint8_t rays[AudioPropagation::RaySize * 2]{};
     count = 7;

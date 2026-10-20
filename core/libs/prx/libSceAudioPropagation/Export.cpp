@@ -258,9 +258,11 @@ std::int32_t APS5_VABI sceAudioPropagationSourceGetAudioPathCount(AudioPropagati
 std::int32_t APS5_VABI sceAudioPropagationSourceGetAudioPath(AudioPropagationHandle source, std::uint32_t index, AudioPropagationHandle* outPath) {
     auto& state = registry();
     std::lock_guard lock(state.mutex);
-    requireObject(state, source, Kind::Source, __func__);
-    static_cast<void>(outPath);
-    throw std::invalid_argument(std::string(__func__) + ": index " + std::to_string(index) + " out of range (0 audio paths)");
+    const auto found = state.objects.find(source);
+    if (found == state.objects.end() || found->second.kind != Kind::Source || !liveSystem(state, found->second.system)) return ErrorInvalidHandle;
+    if (!outPath) return ErrorNullPointer;
+    static_cast<void>(index);
+    return ErrorInvalidArgument;
 }
 
 std::int32_t APS5_VABI sceAudioPropagationSourceGetRays(AudioPropagationHandle source, void* rays, std::uint32_t* count) {
