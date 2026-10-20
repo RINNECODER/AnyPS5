@@ -42,6 +42,7 @@ int APS5_VABI close_nid_postfix(int);
 int APS5_VABI sceKernelClose(int);
 std::int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int, FileStat*);
 int APS5_VABI dup_nid_postfix(int);
+int APS5_VABI dup2_nid_postfix(int, int);
 int APS5_VABI open_nid_postfix(const char*, int, int);
 std::int64_t APS5_VABI read_nid_postfix(int, void*, std::uint64_t);
 int APS5_VABI select_nid_postfix(int, void*, void*, void*, const void*);
@@ -181,6 +182,25 @@ static void DuplicateKeepsSocket() {
     Require(close_nid_postfix(sender) == 0);
 }
 
+static void SocketNumbersStayInDescriptorSet() {
+    const int socket = Socket();
+    std::vector<int> files;
+    for (;;) {
+        const int file = open_nid_postfix("/dev/urandom", 0, 0);
+        Require(file >= 0);
+        if (file >= DescriptorSetSize) {
+            Require(close_nid_postfix(file) == 0);
+            break;
+        }
+        files.push_back(file);
+    }
+    Require(dup_nid_postfix(socket) == -1 && *__error_nid_postfix() == 24);
+    Require(socket_nid_postfix(Inet, Datagram, 0) == -1 && *__error_nid_postfix() == 24);
+    Require(dup2_nid_postfix(socket, DescriptorSetSize) == -1 && *__error_nid_postfix() == 24);
+    for (const int file : files) Require(close_nid_postfix(file) == 0);
+    Require(close_nid_postfix(socket) == 0);
+}
+
 static void SocketTypeErrors() {
     constexpr int PrototypeError = 41;
     constexpr int ProtocolError = 43;
@@ -202,5 +222,6 @@ int main() {
     SelectSocketAndFile();
     CloseReleasesNumber();
     DuplicateKeepsSocket();
+    SocketNumbersStayInDescriptorSet();
     return 0;
 }
