@@ -164,6 +164,13 @@ constexpr std::uint32_t DeviceGun = 3;
 std::mutex g_devicesMutex;
 std::int32_t g_deviceHandles[DeviceGun + 1] = {-1, -1, -1, -1};
 
+struct RecalibrateParam {
+    std::uint32_t size;
+    std::uint32_t device_type;
+    std::uint32_t calibration_type;
+    std::uint32_t reserved[5];
+};
+
 } // namespace
 
 extern "C" {
@@ -246,8 +253,12 @@ int APS5_VABI sceVrTrackerQueryMemory(const void* param, void* result) {
     return 0;
 }
 int APS5_VABI sceVrTrackerRecalibrate(const void* param) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (!g_initialized.load()) return NotInit;
+    const auto* recalibrate = static_cast<const RecalibrateParam*>(param);
+    if (!recalibrate || recalibrate->size != sizeof(RecalibrateParam) || recalibrate->device_type > DeviceGun) return ArgumentInvalid;
+    if (recalibrate->device_type == DeviceHmd) return DeviceNotRegistered;
+    std::lock_guard lock(g_devicesMutex);
+    return g_deviceHandles[recalibrate->device_type] == -1 ? DeviceNotRegistered : 0;
 }
 int APS5_VABI sceVrTrackerRegisterDevice(int device_type, int handle) {
     return sceVrTrackerRegisterDeviceInternal(device_type, handle, -1, 0);
@@ -280,9 +291,9 @@ int APS5_VABI sceVrTrackerSetDeviceRejection() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
-int APS5_VABI sceVrTrackerSetDurationUntilStatusNotTracking(int device_type, std::uint32_t duration_camera_frames) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceVrTrackerSetDurationUntilStatusNotTracking(int device_type, std::uint32_t) {
+    if (!g_initialized.load()) return NotInit;
+    return static_cast<std::uint32_t>(device_type) > DeviceGun ? ArgumentInvalid : 0;
 }
 int APS5_VABI sceVrTrackerSetExtendedMode() {
     NotImplemented_nid_no_patch(__func__);
