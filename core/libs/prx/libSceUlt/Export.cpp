@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -168,11 +169,17 @@ int APS5_VABI sceUltFinalize() {
 }
 
 int APS5_VABI sceUltMutexOptParamInitialize(UltMutexOptParam* optParam, std::uint32_t buildVersion) {
-    (void)buildVersion;
     if (optParam == nullptr) {
         return ULT_ERROR_NULL;
     }
+    if ((reinterpret_cast<std::uintptr_t>(optParam) & 7u) != 0) {
+        return ULT_ERROR_ALIGNMENT;
+    }
     std::memset(optParam, 0, sizeof(*optParam));
+    optParam->header[0] = 0x6C696275;
+    optParam->header[1] = 0x6C746D61;
+    optParam->header[2] = 0x67696300;
+    optParam->buildVersion = buildVersion;
     return ULT_OK;
 }
 
@@ -690,6 +697,15 @@ int APS5_VABI _sceUltMutexOptParamInitialize(UltMutexOptParam* optParam, std::ui
 }
 
 int APS5_VABI _sceUltMutexCreate(void* mutex, const char* name, void* waitingQueueResourcePool, const UltMutexOptParam* optParam) {
+    if (mutex == nullptr || name == nullptr || waitingQueueResourcePool == nullptr) {
+        return ULT_ERROR_NULL;
+    }
+    if (((reinterpret_cast<std::uintptr_t>(mutex) | reinterpret_cast<std::uintptr_t>(optParam) | reinterpret_cast<std::uintptr_t>(waitingQueueResourcePool)) & 7u) != 0) {
+        return ULT_ERROR_ALIGNMENT;
+    }
+    if (optParam != nullptr && (optParam->header[0] != 0x6C696275 || optParam->header[1] != 0x6C746D61 || optParam->header[2] != 0x67696300 || optParam->attribute > 1 || std::any_of(std::begin(optParam->reserved), std::end(optParam->reserved), [](std::uint32_t value) { return value != 0; }))) {
+        return ULT_ERROR_INVALID;
+    }
     return sceUltMutexCreate(mutex, name, waitingQueueResourcePool, optParam, 0);
 }
 

@@ -1976,11 +1976,15 @@ struct UserServiceGamePresets {
     std::uint32_t audio_language;
 };
 
-struct UltMutexOptParam {
-    std::uint32_t reserved_header[2];
+struct alignas(8) UltMutexOptParam {
+    std::uint32_t header[3];
+    std::uint32_t buildVersion;
     std::uint32_t attribute;
-    std::uint32_t reserved0;
+    std::uint32_t reserved[27];
 };
+
+static_assert(sizeof(UltMutexOptParam) == 128);
+static_assert(offsetof(UltMutexOptParam, attribute) == 16);
 
 struct UltUlthreadRuntimeOptParam { std::uint8_t bytes[128]; };
 
