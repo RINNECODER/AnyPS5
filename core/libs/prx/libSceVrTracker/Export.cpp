@@ -1,3 +1,4 @@
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -126,6 +127,36 @@ std::uint32_t OnionSize(const CalibrationSettings& settings) {
     return settings.move_position == CalibrationAuto ? BaseOnionSize * 2 : BaseOnionSize;
 }
 
+constexpr std::int32_t ComputePipes = 7;
+constexpr std::int32_t QueuesPerPipe = 8;
+
+struct InitParam {
+    std::uint32_t size;
+    std::uint32_t profile;
+    std::uint32_t execution_mode;
+    std::int32_t hmd_thread_priority;
+    std::int32_t pad_thread_priority;
+    std::int32_t move_thread_priority;
+    std::int32_t gun_thread_priority;
+    std::int32_t reserved;
+    std::uint64_t cpu_mask;
+    CalibrationSettings calibration_settings;
+    void* direct_memory_onion;
+    std::uint32_t direct_memory_onion_size;
+    std::uint32_t direct_memory_onion_alignment;
+    void* direct_memory_garlic;
+    std::uint32_t direct_memory_garlic_size;
+    std::uint32_t direct_memory_garlic_alignment;
+    void* work_memory;
+    std::uint32_t work_memory_size;
+    std::uint32_t work_memory_alignment;
+    std::int32_t gpu_pipe_id;
+    std::int32_t gpu_queue_id;
+};
+static_assert(sizeof(InitParam) == 0x80);
+
+std::atomic<bool> g_initialized{false};
+
 } // namespace
 
 extern "C" {
@@ -151,8 +182,20 @@ int APS5_VABI sceVrTrackerGpuWait(const VrTrackerGpuWaitParam* param) {
     return 0;
 }
 int APS5_VABI sceVrTrackerInit(const VrTrackerInitParam* param) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (g_initialized.load()) return AlreadyInitialized;
+    if (param && param->size == sizeof(VrTrackerInitParam)) NotImplemented_nid_no_patch(__func__);
+    const auto* init = reinterpret_cast<const InitParam*>(param);
+    if (!init || init->size != sizeof(InitParam) || !init->direct_memory_garlic ||
+        init->direct_memory_garlic_alignment != MemoryAlignment || init->direct_memory_garlic_size != GarlicSize ||
+        !init->direct_memory_onion || init->direct_memory_onion_alignment != MemoryAlignment ||
+        init->direct_memory_onion_size != OnionSize(init->calibration_settings) || !init->work_memory ||
+        init->work_memory_alignment != MemoryAlignment || init->work_memory_size != WorkSize ||
+        init->gpu_pipe_id >= ComputePipes || init->gpu_queue_id >= QueuesPerPipe ||
+        !ValidCalibration(init->calibration_settings)) {
+        return ArgumentInvalid;
+    }
+    bool expected = false;
+    return g_initialized.compare_exchange_strong(expected, true) ? 0 : AlreadyInitialized;
 }
 int APS5_VABI sceVrTrackerCpuPopMarker() {
     NotImplemented_nid_no_patch(__func__);
@@ -250,8 +293,8 @@ int APS5_VABI sceVrTrackerStopLiveCapture() {
     return 0;
 }
 int APS5_VABI sceVrTrackerTerm() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    bool expected = true;
+    return g_initialized.compare_exchange_strong(expected, false) ? 0 : NotInit;
 }
 int APS5_VABI sceVrTrackerUnregisterDevice(int handle) {
     NotImplemented_nid_no_patch(__func__);
