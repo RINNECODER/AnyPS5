@@ -176,6 +176,10 @@ int main() {
     reset();
     Require(sceAudioPropagationSourceRender(system, infos, 1) == 0, "render failed");
     Require(untouched(), "empty source erased an existing mix");
+    infos[0].channelCount = 99;
+    Require(sceAudioPropagationSourceRender(system, infos, 1) == 0 && infos[0].channelCount == 0, "fixed render format clears the channel count");
+    const auto* tail = reinterpret_cast<const std::uint8_t*>(outputs[1]);
+    Require(tail[0] == 0xab, "render wrote past the output size");
     reset();
     infos[0].outputSize = sizeof(float) * 16;
     Require(sceAudioPropagationSourceRender(system, infos, 2) == 0, "render of two sources failed");

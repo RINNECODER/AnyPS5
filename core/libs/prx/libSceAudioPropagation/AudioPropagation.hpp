@@ -104,10 +104,10 @@ static_assert(offsetof(AudioPath, flags) == 212);
 struct RenderInfo {
     AudioPropagationStructDescriptor desc;
     AudioPropagationHandle source;
-    void* output;
+    float* output;
     std::size_t outputSize;
     std::uint32_t format;
-    std::uint32_t reserved;
+    std::uint32_t channelCount;
 };
 
 struct PortalParams {
@@ -122,6 +122,7 @@ static_assert(sizeof(Attribute) == 0x20);
 static_assert(sizeof(RenderInfo) == RenderInfoSize);
 static_assert(offsetof(RenderInfo, source) == 0x10);
 static_assert(offsetof(RenderInfo, format) == 0x28);
+static_assert(offsetof(RenderInfo, channelCount) == 0x2c);
 static_assert(sizeof(PortalParams) == PortalParamsSize);
 static_assert(offsetof(PortalParams, rooms) == 0x50);
 
@@ -151,7 +152,7 @@ std::int32_t APS5_VABI sceAudioPropagationSourceGetRays(AudioPropagationHandle s
 std::int32_t APS5_VABI sceAudioPropagationSourceCalculateAudioPaths(AudioPropagationHandle source, const void* rays, std::uint32_t rayCount, std::uint32_t reflectionOrder, void* paths, std::uint32_t pathCount);
 std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPaths(AudioPropagationHandle source, const void* entries, std::uint32_t count);
 std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPath(AudioPropagationHandle path, const AudioPropagation::AudioPath* data, float gain);
-std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle system, const AudioPropagation::RenderInfo* infos, std::uint32_t count);
+std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle system, AudioPropagation::RenderInfo* infos, std::uint32_t count);
 
 }
 

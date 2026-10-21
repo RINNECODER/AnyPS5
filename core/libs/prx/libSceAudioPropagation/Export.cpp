@@ -301,7 +301,7 @@ std::int32_t APS5_VABI sceAudioPropagationSourceSetAudioPath(AudioPropagationHan
     return 0;
 }
 
-std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle system, const RenderInfo* infos, std::uint32_t count) {
+std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle system, RenderInfo* infos, std::uint32_t count) {
     require(infos != nullptr && count != 0, __func__);
     auto& state = registry();
     std::lock_guard lock(state.mutex);
@@ -312,6 +312,9 @@ std::int32_t APS5_VABI sceAudioPropagationSourceRender(AudioPropagationHandle sy
         require(requireObject(state, info.source, Kind::Source, __func__).system == system, __func__);
         require(info.output != nullptr && info.outputSize != 0, __func__);
         if (info.format != RenderFormat) throw std::runtime_error(std::string(__func__) + ": render format " + std::to_string(info.format) + " is unknown");
+    }
+    for (std::uint32_t index = 0; index < count; ++index) {
+        infos[index].channelCount = 0;
     }
     return 0;
 }
