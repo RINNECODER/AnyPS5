@@ -22,7 +22,7 @@ int APS5_VABI sceNpGetUserIdByOnlineId(const NpOnlineId* online_id, int* user_id
 int APS5_VABI sceNpCheckPlus(int req_id, const void* param, void* result);
 int APS5_VABI sceNpNotifyPlusFeature(const void* param);
 int APS5_VABI sceNpGetAccountId(const NpOnlineId* online_id, std::uint64_t* account_id);
-int APS5_VABI sceNpSetGamePresenceOnline(int user_id, std::uint32_t timeout);
+int APS5_VABI sceNpSetGamePresenceOnline(int req_id, const NpOnlineId* online_id, std::uint32_t presence);
 int APS5_VABI sceNpRegisterPlusEventCallback(void* callback, void* userdata);
 int APS5_VABI sceNpUnregisterPlusEventCallback(void);
 }
@@ -107,7 +107,9 @@ void CheckOnlineIdQueries() {
     Require(sceNpGetAccountId(&onlineId, &accountId) == SignedOut, "sceNpGetAccountId must report NP as signed out");
     Require(sceNpGetAccountId(nullptr, &accountId) == InvalidArgument, "sceNpGetAccountId must reject a null online id");
     Require(sceNpGetAccountId(&onlineId, nullptr) == InvalidArgument, "sceNpGetAccountId must reject a null output");
-    Require(sceNpSetGamePresenceOnline(0x10000000, 0) == SignedOut, "sceNpSetGamePresenceOnline must report NP as signed out");
+    Require(sceNpSetGamePresenceOnline(1, &onlineId, 0) == SignedOut, "sceNpSetGamePresenceOnline must report NP as signed out");
+    Require(sceNpSetGamePresenceOnline(0, &onlineId, 0) == InvalidArgument, "sceNpSetGamePresenceOnline must reject request id 0");
+    Require(sceNpSetGamePresenceOnline(1, nullptr, 0) == InvalidArgument, "sceNpSetGamePresenceOnline must reject a null online id");
     Require(sceNpRegisterPlusEventCallback(output, nullptr) == 0 && sceNpUnregisterPlusEventCallback() == 0, "the plus event callback must register and unregister");
     Require(sceNpUnregisterPlusEventCallback() == 0, "unregistering the plus event callback again must succeed like the premium one");
     Require(std::memcmp(output, untouched, sizeof(output)) == 0 && age == 0x5a && userId == 0x5a5a && accountId == 0x5a5a, "a failed query wrote its output");

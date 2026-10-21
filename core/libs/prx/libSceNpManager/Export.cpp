@@ -733,9 +733,9 @@ int APS5_VABI sceNpGetAccountId(const NpOnlineId* online_id, uint64_t* account_i
     return SCE_NP_ERROR_SIGNED_OUT;
 }
 
-int APS5_VABI sceNpSetGamePresenceOnline(int user_id, uint32_t timeout) {
-    (void)user_id;
-    (void)timeout;
+int APS5_VABI sceNpSetGamePresenceOnline(int req_id, const NpOnlineId* online_id, uint32_t presence) {
+    (void)presence;
+    if (req_id == 0 || !online_id) return SCE_NP_ERROR_INVALID_ARGUMENT;
     return SCE_NP_ERROR_SIGNED_OUT;
 }
 
