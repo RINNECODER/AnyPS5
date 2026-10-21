@@ -1,6 +1,7 @@
 add_library(libSceFreeType SHARED EXCLUDE_FROM_ALL
         Export.cpp
         src/Outline.cpp
+        src/Charmap.cpp
         src/GuestObjects.cpp
         src/Names.cpp
 )
@@ -32,6 +33,11 @@ if(BUILD_TESTING)
     target_link_libraries(guest_freetype_outline_tests PRIVATE libSceFreeType freetype libc)
     configure_windows_unwind(guest_freetype_outline_tests)
     add_test(NAME guest_freetype_outline COMMAND guest_freetype_outline_tests)
+    add_test_executable(guest_freetype_charmap_info_tests ${LIBS_INCLUDE_DIR}/tests/GuestFreeTypeCharmapInfo.cpp)
+    target_include_directories(guest_freetype_charmap_info_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_freetype_charmap_info_tests PRIVATE libSceFreeType freetype libc)
+    configure_windows_unwind(guest_freetype_charmap_info_tests)
+    add_test(NAME guest_freetype_charmap_info COMMAND guest_freetype_charmap_info_tests)
     add_test_executable(guest_freetype_tests ${LIBS_INCLUDE_DIR}/tests/GuestFreeType.cpp)
     target_include_directories(guest_freetype_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_freetype_tests PRIVATE libSceFreeType freetype libc)
@@ -62,6 +68,8 @@ if(BUILD_TESTING)
         set_tests_properties(guest_freetype_charmap PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceFreeType>")
         set_tests_properties(guest_freetype_outline PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceFreeType>")
+        set_tests_properties(guest_freetype_charmap_info PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceFreeType>")
     endif()
 endif()
