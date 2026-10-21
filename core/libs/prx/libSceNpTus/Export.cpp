@@ -92,136 +92,6 @@ int Complete(int reqId, int asyncResult) {
 
 extern "C" {
 
-int APS5_VABI sceNpTusGetMultiUserDataStatusVUserAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusVUser(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusForCrossSaveVUserAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusForCrossSaveVUser(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusForCrossSaveAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusForCrossSave(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusAVUserAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusAVUser(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusAAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatusA(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiUserDataStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusVUserAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusVUser(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusForCrossSaveVUserAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusForCrossSaveVUser(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusForCrossSaveAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusForCrossSave(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusAVUserAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusAVUser(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusAAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatusA(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetMultiSlotDataStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetFriendsDataStatusAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTusGetFriendsDataStatus(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceNpTssGetSmallStorageAsync(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -648,6 +518,16 @@ int APS5_VABI sceNpTusGetDataVUserAsync(int reqId, const NpOnlineId* targetVirtu
     return StartOffline(reqId);
 }
 
+int APS5_VABI sceNpTusGetFriendsDataStatusAsync(int reqId, std::int32_t slotId, std::int32_t includeSelf, std::int32_t sortType, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)includeSelf;
+    (void)statusArraySize;
+    if (!statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1 || slotId < 0) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_FRIENDS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    if (sortType < DATASTATUS_SORTTYPE_DESCENDING_DATE || sortType > DATASTATUS_SORTTYPE_ASCENDING_DATE) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
+}
+
 int APS5_VABI sceNpTusGetFriendsVariableAsync(int reqId, std::int32_t slotId, std::int32_t includeSelf, std::int32_t sortType, void* variableArray, std::uint64_t variableArraySize, int arrayLen, void* option) {
     (void)includeSelf;
     (void)variableArraySize;
@@ -655,6 +535,122 @@ int APS5_VABI sceNpTusGetFriendsVariableAsync(int reqId, std::int32_t slotId, st
     if (option || arrayLen < 1 || slotId < 0) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (arrayLen > MAX_FRIENDS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
     if (sortType < VARIABLE_SORTTYPE_DESCENDING_DATE || sortType > VARIABLE_SORTTYPE_ASCENDING_VALUE) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusAAsync(int reqId, std::uint64_t targetAccountId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)targetAccountId;
+    (void)statusArraySize;
+    if (!slotIds || !statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_SLOTS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_SLOTID;
+    if (std::any_of(slotIds, slotIds + arrayLen, [](std::int32_t id) { return id < 0; })) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusAVUserAsync(int reqId, const NpOnlineId* targetVirtualUserId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetVirtualUserId || !slotIds || !statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_SLOTS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_SLOTID;
+    if (std::any_of(slotIds, slotIds + arrayLen, [](std::int32_t id) { return id < 0; })) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (IsEmpty(targetVirtualUserId)) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusAsync(int reqId, const void* targetNpId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetNpId || !slotIds || !statusArray || arrayLen < 1) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_SLOTS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    if (std::any_of(slotIds, slotIds + arrayLen, [](std::int32_t id) { return id < 0; })) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusForCrossSaveAsync(int reqId, std::uint64_t targetAccountId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)targetAccountId;
+    (void)statusArraySize;
+    if (!slotIds || !statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_SLOTS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_SLOTID;
+    if (std::any_of(slotIds, slotIds + arrayLen, [](std::int32_t id) { return id < 0; })) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusForCrossSaveVUserAsync(int reqId, const NpOnlineId* targetVirtualUserId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetVirtualUserId || !slotIds || !statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_SLOTS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_SLOTID;
+    if (std::any_of(slotIds, slotIds + arrayLen, [](std::int32_t id) { return id < 0; })) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (IsEmpty(targetVirtualUserId)) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusVUserAsync(int reqId, const NpOnlineId* targetVirtualUserId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetVirtualUserId || !slotIds || !statusArray || arrayLen < 1) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_SLOTS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    if (std::any_of(slotIds, slotIds + arrayLen, [](std::int32_t id) { return id < 0; })) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (IsEmpty(targetVirtualUserId)) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusAAsync(int reqId, const std::uint64_t* targetAccountIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetAccountIdArray || !statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1 || slotId < 0) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_USERS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusAVUserAsync(int reqId, const NpOnlineId* targetVirtualUserIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetVirtualUserIdArray || !statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1 || slotId < 0) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_USERS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    for (int index = 0; index < arrayLen; ++index) {
+        if (IsEmpty(&targetVirtualUserIdArray[index])) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    }
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusAsync(int reqId, const void* targetNpIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetNpIdArray || !statusArray || arrayLen < 1) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || slotId < 0) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_USERS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusForCrossSaveAsync(int reqId, const std::uint64_t* targetAccountIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetAccountIdArray || !statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1 || slotId < 0) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_USERS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusForCrossSaveVUserAsync(int reqId, const NpOnlineId* targetVirtualUserIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetVirtualUserIdArray || !statusArray) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || arrayLen < 1 || slotId < 0) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_USERS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    for (int index = 0; index < arrayLen; ++index) {
+        if (IsEmpty(&targetVirtualUserIdArray[index])) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    }
+    return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusVUserAsync(int reqId, const NpOnlineId* targetVirtualUserIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    (void)statusArraySize;
+    if (!targetVirtualUserIdArray || !statusArray || arrayLen < 1) return SCE_NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
+    if (option || slotId < 0) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (arrayLen > MAX_USERS) return SCE_NP_COMMUNITY_ERROR_TOO_MANY_NPID;
+    for (int index = 0; index < arrayLen; ++index) {
+        if (IsEmpty(&targetVirtualUserIdArray[index])) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    }
     return StartOffline(reqId);
 }
 
@@ -884,8 +880,60 @@ int APS5_VABI sceNpTusGetDataForCrossSave(int reqId, std::uint64_t targetAccount
     return Complete(reqId, sceNpTusGetDataForCrossSaveAsync(reqId, targetAccountId, slotId, dataStatus, dataStatusSize, data, recvSize, option));
 }
 
+int APS5_VABI sceNpTusGetFriendsDataStatus(int reqId, std::int32_t slotId, std::int32_t includeSelf, std::int32_t sortType, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetFriendsDataStatusAsync(reqId, slotId, includeSelf, sortType, statusArray, statusArraySize, arrayLen, option));
+}
+
 int APS5_VABI sceNpTusGetFriendsVariable(int reqId, std::int32_t slotId, std::int32_t includeSelf, std::int32_t sortType, void* variableArray, std::uint64_t variableArraySize, int arrayLen, void* option) {
     return Complete(reqId, sceNpTusGetFriendsVariableAsync(reqId, slotId, includeSelf, sortType, variableArray, variableArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatus(int reqId, const void* targetNpId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiSlotDataStatusAsync(reqId, targetNpId, slotIds, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusA(int reqId, std::uint64_t targetAccountId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiSlotDataStatusAAsync(reqId, targetAccountId, slotIds, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusAVUser(int reqId, const NpOnlineId* targetVirtualUserId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiSlotDataStatusAVUserAsync(reqId, targetVirtualUserId, slotIds, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusForCrossSave(int reqId, std::uint64_t targetAccountId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiSlotDataStatusForCrossSaveAsync(reqId, targetAccountId, slotIds, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusForCrossSaveVUser(int reqId, const NpOnlineId* targetVirtualUserId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiSlotDataStatusForCrossSaveVUserAsync(reqId, targetVirtualUserId, slotIds, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiSlotDataStatusVUser(int reqId, const NpOnlineId* targetVirtualUserId, const std::int32_t* slotIds, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiSlotDataStatusVUserAsync(reqId, targetVirtualUserId, slotIds, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatus(int reqId, const void* targetNpIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiUserDataStatusAsync(reqId, targetNpIdArray, slotId, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusA(int reqId, const std::uint64_t* targetAccountIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiUserDataStatusAAsync(reqId, targetAccountIdArray, slotId, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusAVUser(int reqId, const NpOnlineId* targetVirtualUserIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiUserDataStatusAVUserAsync(reqId, targetVirtualUserIdArray, slotId, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusForCrossSave(int reqId, const std::uint64_t* targetAccountIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiUserDataStatusForCrossSaveAsync(reqId, targetAccountIdArray, slotId, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusForCrossSaveVUser(int reqId, const NpOnlineId* targetVirtualUserIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiUserDataStatusForCrossSaveVUserAsync(reqId, targetVirtualUserIdArray, slotId, statusArray, statusArraySize, arrayLen, option));
+}
+
+int APS5_VABI sceNpTusGetMultiUserDataStatusVUser(int reqId, const NpOnlineId* targetVirtualUserIdArray, std::int32_t slotId, void* statusArray, std::uint64_t statusArraySize, int arrayLen, void* option) {
+    return Complete(reqId, sceNpTusGetMultiUserDataStatusVUserAsync(reqId, targetVirtualUserIdArray, slotId, statusArray, statusArraySize, arrayLen, option));
 }
 
 int APS5_VABI sceNpTusGetMultiUserVariable(int reqId, const void* targetNpIdArray, std::int32_t slotId, void* variableArray, std::uint64_t variableArraySize, int arrayLen, void* option) {
