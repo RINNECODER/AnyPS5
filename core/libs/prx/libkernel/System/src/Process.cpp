@@ -8,6 +8,12 @@
 #else
 #include <sched.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/uio.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #endif
 #if defined(__linux__) && defined(__x86_64__)
 #include <asm/prctl.h>
@@ -18,6 +24,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/HostEntropy.hpp"
+#include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
@@ -49,6 +56,7 @@
 
 extern "C" int* APS5_VABI __error_nid_postfix();
 extern "C" int APS5_VABI stat_nid_postfix(const char* path, FileStat* sb);
+extern "C" int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, std::uint64_t info_size);
 
 namespace {
 
@@ -61,6 +69,37 @@ constexpr int freebsdGroupsMax = 1023;
 std::mutex supplementaryGroupsMutex;
 std::vector<std::uint32_t> supplementaryGroups{0};
 constexpr unsigned freebsdWaitOptions = 0x8000003Fu;
+
+bool StoreGuestId(std::uint32_t* output) {
+    if (output == nullptr) return true;
+    const auto address = reinterpret_cast<std::uintptr_t>(output);
+    if (address > std::numeric_limits<std::uintptr_t>::max() - sizeof(*output)) return false;
+    const auto end = address + sizeof(*output);
+    for (auto cursor = address; cursor < end;) {
+        VirtualQueryInfo info{};
+        if (sceKernelVirtualQuery(reinterpret_cast<const void*>(cursor), 0, &info, sizeof(info)) != 0 ||
+            info.end <= cursor || (info.protection & 2) == 0)
+            return false;
+        cursor = std::min(end, info.end);
+    }
+    const GuestArena::HostWrite guard(output, sizeof(*output));
+    if (!guard.Open()) return false;
+    constexpr std::uint32_t zero = 0;
+#ifdef _WIN32
+    SIZE_T written = 0;
+    return WriteProcessMemory(GetCurrentProcess(), output, &zero, sizeof(zero), &written) != 0 && written == sizeof(zero);
+#elif defined(__linux__)
+    iovec local{const_cast<std::uint32_t*>(&zero), sizeof(zero)};
+    iovec remote{output, sizeof(zero)};
+    return ::process_vm_writev(::getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(sizeof(zero));
+#elif defined(__APPLE__)
+    return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(output),
+        reinterpret_cast<vm_offset_t>(const_cast<std::uint32_t*>(&zero)), sizeof(zero)) == KERN_SUCCESS;
+#else
+    *output = zero;
+    return true;
+#endif
+}
 
 std::atomic<std::uint32_t> gpoBits{0};
 constexpr std::array<std::uint8_t, 16> openPsId{'A', 'n', 'y', 'P', 'S', '5', 'O', 'p', 'e', 'n', 'P', 's', 'I', 'd', 0, 1};
@@ -305,16 +344,18 @@ int APS5_VABI issetugid_nid_postfix(void) {
 }
 
 int APS5_VABI getresuid_nid_postfix(std::uint32_t* ruid, std::uint32_t* euid, std::uint32_t* suid) {
-    if (ruid != nullptr) *ruid = 0;
-    if (euid != nullptr) *euid = 0;
-    if (suid != nullptr) *suid = 0;
+    if (!StoreGuestId(ruid) || !StoreGuestId(euid) || !StoreGuestId(suid)) {
+        *__error_nid_postfix() = errnoBadAddress;
+        return -1;
+    }
     return 0;
 }
 
 int APS5_VABI getresgid_nid_postfix(std::uint32_t* rgid, std::uint32_t* egid, std::uint32_t* sgid) {
-    if (rgid != nullptr) *rgid = 0;
-    if (egid != nullptr) *egid = 0;
-    if (sgid != nullptr) *sgid = 0;
+    if (!StoreGuestId(rgid) || !StoreGuestId(egid) || !StoreGuestId(sgid)) {
+        *__error_nid_postfix() = errnoBadAddress;
+        return -1;
+    }
     return 0;
 }
 
