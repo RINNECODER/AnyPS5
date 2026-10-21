@@ -55,7 +55,7 @@ PngEncContext* context(void* handle) {
 std::uint8_t filterSet(std::uint16_t filterType) {
     if (filterType == FILTER_ALL) return Decoder::Png::FILTER_ALL;
     if (filterType == 0) return Decoder::Png::FILTER_NONE;
-    std::uint8_t filters = 0;
+    std::uint8_t filters = Decoder::Png::FILTER_NONE;
     if (filterType & FILTER_SUB) filters |= Decoder::Png::FILTER_SUB;
     if (filterType & FILTER_UP) filters |= Decoder::Png::FILTER_UP;
     if (filterType & FILTER_AVERAGE) filters |= Decoder::Png::FILTER_AVERAGE;

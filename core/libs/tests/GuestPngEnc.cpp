@@ -126,8 +126,9 @@ int main() {
         {0, FILTER_NONE}, {1, FILTER_SUB}, {2, FILTER_UP}, {4, FILTER_AVERAGE}, {8, FILTER_PAETH},
         {3, FILTER_SUB | FILTER_UP}, {6, FILTER_UP | FILTER_AVERAGE}, {9, FILTER_SUB | FILTER_PAETH},
         {14, FILTER_UP | FILTER_AVERAGE | FILTER_PAETH}, {15, FILTER_ALL}};
-    for (const auto& [filterType, filters] : filterSets) Require(encodeWith(filterType) == Encode(rows, 16, 6, 4, {6, filters}));
-    Require(encodeWith(3) != encodeWith(1) && encodeWith(3) != encodeWith(2) && encodeWith(15) != encodeWith(14));
+    for (const auto& [filterType, filters] : filterSets) Require(encodeWith(filterType) == Encode(rows, 16, 6, 4, {6, static_cast<std::uint8_t>(filters | FILTER_NONE)}));
+    const std::vector<std::uint8_t> unfiltered = Encode(rows, 16, 6, 4, {6, FILTER_NONE});
+    Require(encodeWith(0) == unfiltered);
 
     encode.png_mem_size = 20;
     PngEncOutputInfo info{1, 1};
