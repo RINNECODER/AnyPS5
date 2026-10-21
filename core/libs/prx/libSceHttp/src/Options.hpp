@@ -14,6 +14,7 @@ struct HttpOptions {
 
 void AddHttpContext(int contextId);
 void RemoveHttpContext(int contextId);
+bool HttpInitialised();
 void AddHttpTemplate(int templateId, int contextId);
 void AddHttpChild(int id, int parentId);
 void RemoveHttpObject(int id);

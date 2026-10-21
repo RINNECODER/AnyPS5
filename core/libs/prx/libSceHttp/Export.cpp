@@ -303,6 +303,7 @@ int APS5_VABI sceHttpSetCookieEnabled(int id, int enable) {
 }
 
 int APS5_VABI sceHttpSetAutoRedirect(int id, int enable) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     return SetHttpOption(id, &HttpOptions::autoRedirect, enable != 0) ? 0 : ERROR_INVALID_ID;
 }
 
@@ -313,10 +314,14 @@ int APS5_VABI sceHttpSetConnectTimeOut(int id, uint32_t usec) {
 }
 
 int APS5_VABI sceHttpSetEpoll(int id, HttpEpollHandle eh, void* user_arg) {
+    std::lock_guard lock(g_stateMutex);
+    if (g_contexts.empty()) return ERROR_BEFORE_INIT;
+    if (!FindEpoll(eh)) return ERROR_INVALID_ID;
     return SetHttpEpollBinding(id, eh, user_arg) ? 0 : ERROR_INVALID_ID;
 }
 
 int APS5_VABI sceHttpSetNonblock(int id, int enable) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     return SetHttpOption(id, &HttpOptions::nonblock, enable != 0) ? 0 : ERROR_INVALID_ID;
 }
 
@@ -395,6 +400,7 @@ int APS5_VABI sceHttpTerm_nid_postfix(int http_ctx_id) {
 }
 
 int APS5_VABI sceHttpUnsetEpoll(int id) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     return SetHttpEpollBinding(id, nullptr, nullptr) ? 0 : ERROR_INVALID_ID;
 }
 

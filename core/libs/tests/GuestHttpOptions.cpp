@@ -36,6 +36,7 @@ int APS5_VABI sceHttpAbortRequestForce(int);
 
 namespace {
 
+constexpr int BeforeInit = static_cast<int>(0x80431001u);
 constexpr int InvalidId = static_cast<int>(0x80431100u);
 constexpr int InvalidValue = static_cast<int>(0x804311FEu);
 constexpr int UnknownId = 0x7fff0000;
@@ -127,8 +128,33 @@ void CheckEpoll(int context) {
     Require(sceHttpUnsetEpoll(request) == 0 && sceHttpGetEpoll(request, &bound, &argument) == 0 && bound == nullptr && argument == nullptr, "sceHttpUnsetEpoll left the binding");
     Require(sceHttpGetEpoll(request, nullptr, &argument) == InvalidValue, "a null epoll output was not refused");
     Require(sceHttpGetEpoll(UnknownId, &bound, &argument) == InvalidId && sceHttpSetEpoll(UnknownId, epoll, nullptr) == InvalidId && sceHttpUnsetEpoll(UnknownId) == InvalidId, "an unknown id was not refused");
-    Require(sceHttpDeleteRequest(request) == 0 && sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(pattern) == 0, "delete failed");
+    const auto unknownEpoll = reinterpret_cast<HttpEpollHandle>(std::uintptr_t{0x1234});
+    Require(sceHttpSetEpoll(request, nullptr, &marker) == InvalidId && sceHttpSetEpoll(request, unknownEpoll, &marker) == InvalidId, "sceHttpSetEpoll took a handle that is not an epoll");
     Require(sceHttpDestroyEpoll(context, epoll) == 0, "sceHttpDestroyEpoll failed");
+    Require(sceHttpSetEpoll(request, epoll, &marker) == InvalidId, "sceHttpSetEpoll took a destroyed epoll");
+    Require(sceHttpGetEpoll(request, &bound, &argument) == 0 && bound == nullptr, "a refused sceHttpSetEpoll changed the binding");
+    Require(sceHttpDeleteRequest(request) == 0 && sceHttpDeleteConnection(connection) == 0 && sceHttpDeleteTemplate(pattern) == 0, "delete failed");
+}
+
+void CheckTermEndsOptions() {
+    const int context = sceHttpInit_nid_postfix(1, 1, 0x10000);
+    const int pattern = sceHttpCreateTemplate(context, "anyps5-test", 2, 0);
+    const int connection = sceHttpCreateConnectionWithURL(pattern, "http://example.com/", 1);
+    Require(sceHttpTerm_nid_postfix(context) == 0, "sceHttpTerm failed");
+    int value = -1;
+    HttpEpollHandle bound = nullptr;
+    Require(sceHttpGetAutoRedirect(pattern, &value) == BeforeInit && sceHttpSetAutoRedirect(pattern, 0) == BeforeInit, "the redirect option outlived the last sceHttpTerm");
+    Require(sceHttpGetNonblock(connection, &value) == BeforeInit && sceHttpTryGetNonblock(connection, &value) == BeforeInit, "the nonblocking getters work after the last sceHttpTerm");
+    Require(sceHttpSetNonblock(connection, 1) == BeforeInit && sceHttpTrySetNonblock(connection, 1) == BeforeInit, "the nonblocking setters work after the last sceHttpTerm");
+    Require(sceHttpGetAcceptEncodingGZIPEnabled(pattern, &value) == BeforeInit && sceHttpSetAcceptEncodingGZIPEnabled(pattern, 1) == BeforeInit, "the gzip option outlived the last sceHttpTerm");
+    Require(sceHttpGetEpoll(connection, &bound, nullptr) == BeforeInit && sceHttpUnsetEpoll(connection) == BeforeInit, "the epoll binding outlived the last sceHttpTerm");
+    Require(sceHttpCacheRedirectedConnectionEnabled(connection, 1) == BeforeInit, "sceHttpCacheRedirectedConnectionEnabled works after the last sceHttpTerm");
+    Require(sceHttpsEnableOptionPrivate(connection, 0x4000u) == BeforeInit && sceHttpsDisableOptionPrivate(connection, 0x4000u) == BeforeInit, "the private SSL options work after the last sceHttpTerm");
+    Require(sceHttpGetNonblock(connection, nullptr) == BeforeInit, "a null output is checked before initialisation");
+    Require(value == -1 && bound == nullptr, "a refused getter wrote its output");
+    const int next = sceHttpInit_nid_postfix(1, 1, 0x10000);
+    Require(sceHttpSetAutoRedirect(pattern, 0) == InvalidId && sceHttpGetNonblock(connection, &value) == InvalidId, "an object outlived the last sceHttpTerm into a new sceHttpInit");
+    Require(sceHttpTerm_nid_postfix(next) == 0, "sceHttpTerm failed");
 }
 
 void CheckUnobservedOptions(int context) {
@@ -159,7 +185,8 @@ int main() {
     CheckEpoll(context);
     CheckUnobservedOptions(context);
     Require(sceHttpTerm_nid_postfix(context) == 0, "sceHttpTerm failed");
-    Require(sceHttpSetDefaultAcceptEncodingGZIPEnabled(context, 1) == static_cast<int>(0x80431001u), "a gzip default was taken before sceHttpInit");
+    Require(sceHttpSetDefaultAcceptEncodingGZIPEnabled(context, 1) == BeforeInit, "a gzip default was taken before sceHttpInit");
+    CheckTermEndsOptions();
     std::puts("HTTP option tests passed");
     return 0;
 }

@@ -23,6 +23,12 @@ void AddHttpContext(int contextId) {
 void RemoveHttpContext(int contextId) {
     std::lock_guard lock(g_optionsMutex);
     g_contextAcceptEncodingGzip.erase(contextId);
+    if (g_contextAcceptEncodingGzip.empty()) g_objectOptions.clear();
+}
+
+bool HttpInitialised() {
+    std::lock_guard lock(g_optionsMutex);
+    return !g_contextAcceptEncodingGzip.empty();
 }
 
 void AddHttpTemplate(int templateId, int contextId) {
@@ -78,6 +84,7 @@ bool SetHttpEpollBinding(int id, HttpEpollHandle epoll, void* argument) {
 extern "C" {
 
 int APS5_VABI sceHttpGetAutoRedirect(int id, int* enable) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     if (!enable) return ERROR_INVALID_VALUE;
     const auto options = FindHttpOptions(id);
     if (!options) return ERROR_INVALID_ID;
@@ -86,6 +93,7 @@ int APS5_VABI sceHttpGetAutoRedirect(int id, int* enable) {
 }
 
 int APS5_VABI sceHttpGetNonblock(int id, int* enable) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     if (!enable) return ERROR_INVALID_VALUE;
     const auto options = FindHttpOptions(id);
     if (!options) return ERROR_INVALID_ID;
@@ -98,6 +106,7 @@ int APS5_VABI sceHttpTryGetNonblock(int id, int* enable) {
 }
 
 int APS5_VABI sceHttpGetAcceptEncodingGZIPEnabled(int id, int* enable) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     if (!enable) return ERROR_INVALID_VALUE;
     const auto options = FindHttpOptions(id);
     if (!options) return ERROR_INVALID_ID;
@@ -106,10 +115,12 @@ int APS5_VABI sceHttpGetAcceptEncodingGZIPEnabled(int id, int* enable) {
 }
 
 int APS5_VABI sceHttpSetAcceptEncodingGZIPEnabled(int id, int enable) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     return SetHttpOption(id, &HttpOptions::acceptEncodingGzip, enable != 0) ? 0 : ERROR_INVALID_ID;
 }
 
 int APS5_VABI sceHttpGetEpoll(int id, HttpEpollHandle* epoll, void** argument) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     if (!epoll) return ERROR_INVALID_VALUE;
     const auto options = FindHttpOptions(id);
     if (!options) return ERROR_INVALID_ID;
@@ -119,11 +130,13 @@ int APS5_VABI sceHttpGetEpoll(int id, HttpEpollHandle* epoll, void** argument) {
 }
 
 int APS5_VABI sceHttpCacheRedirectedConnectionEnabled(int id, int enable) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     (void)enable;
     return FindHttpOptions(id) ? 0 : ERROR_INVALID_ID;
 }
 
 int APS5_VABI sceHttpsEnableOptionPrivate(int id, std::uint32_t sslFlags) {
+    if (!HttpInitialised()) return ERROR_BEFORE_INIT;
     if ((sslFlags & ~PrivateSslFlags) != 0) return ERROR_INVALID_VALUE;
     return FindHttpOptions(id) ? 0 : ERROR_INVALID_ID;
 }
