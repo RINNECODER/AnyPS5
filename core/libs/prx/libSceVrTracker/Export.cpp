@@ -74,6 +74,60 @@ static_assert(offsetof(VrTrackerGetResultParam, statusMode) == 24);
 static_assert(offsetof(VrTrackerGetResultParam, outputValue) == 36);
 static_assert(offsetof(VrTrackerGetResultParam, reserved1) == 44);
 
+namespace {
+
+constexpr int NotInit = static_cast<int>(0x81260801u);
+constexpr int AlreadyInitialized = static_cast<int>(0x81260802u);
+constexpr int DeviceNotRegistered = static_cast<int>(0x81260803u);
+constexpr int DeviceAlreadyRegistered = static_cast<int>(0x81260804u);
+constexpr int ArgumentInvalid = static_cast<int>(0x81260806u);
+constexpr int NotExecuteGpuSubmit = static_cast<int>(0x81260815u);
+
+constexpr std::uint32_t MemoryAlignment = 0x10000;
+constexpr std::uint32_t BaseOnionSize = 0x400000;
+constexpr std::uint32_t GarlicSize = 0x3000000;
+constexpr std::uint32_t WorkSize = 0x1000000;
+constexpr std::uint32_t CalibrationManual = 0;
+constexpr std::uint32_t CalibrationAuto = 1;
+
+struct CalibrationSettings {
+    std::uint32_t hmd_position;
+    std::uint32_t pad_position;
+    std::uint32_t move_position;
+    std::uint32_t gun_position;
+    std::uint32_t reserved[4];
+};
+
+struct QueryMemoryParam {
+    std::uint32_t size;
+    std::uint32_t profile;
+    std::uint32_t reserved[6];
+    CalibrationSettings calibration_settings;
+};
+static_assert(sizeof(QueryMemoryParam) == 0x40);
+
+struct QueryMemoryResult {
+    std::uint32_t size;
+    std::uint32_t direct_memory_onion_size;
+    std::uint32_t direct_memory_onion_alignment;
+    std::uint32_t direct_memory_garlic_size;
+    std::uint32_t direct_memory_garlic_alignment;
+    std::uint32_t work_memory_size;
+    std::uint32_t work_memory_alignment;
+    std::uint32_t reserved[9];
+};
+
+bool ValidCalibration(const CalibrationSettings& settings) {
+    return settings.pad_position <= CalibrationAuto && settings.hmd_position <= CalibrationManual &&
+        settings.move_position <= CalibrationAuto && settings.gun_position <= CalibrationAuto;
+}
+
+std::uint32_t OnionSize(const CalibrationSettings& settings) {
+    return settings.move_position == CalibrationAuto ? BaseOnionSize * 2 : BaseOnionSize;
+}
+
+} // namespace
+
 extern "C" {
 
 int APS5_VABI sceVrTrackerCpuProcess(const VrTrackerCpuProcessParam* param) {
@@ -125,7 +179,18 @@ int APS5_VABI sceVrTrackerNotifyEndOfCpuProcess(const void* param) {
     return 0;
 }
 int APS5_VABI sceVrTrackerQueryMemory(const void* param, void* result) {
-    NotImplemented_nid_no_patch(__func__);
+    const auto* query = static_cast<const QueryMemoryParam*>(param);
+    auto* memory = static_cast<QueryMemoryResult*>(result);
+    if (!query || !memory || query->size != sizeof(QueryMemoryParam) || (query->profile != 0 && query->profile != 100) ||
+        !ValidCalibration(query->calibration_settings)) {
+        return ArgumentInvalid;
+    }
+    memory->direct_memory_onion_size = OnionSize(query->calibration_settings);
+    memory->direct_memory_onion_alignment = MemoryAlignment;
+    memory->direct_memory_garlic_size = GarlicSize;
+    memory->direct_memory_garlic_alignment = MemoryAlignment;
+    memory->work_memory_size = WorkSize;
+    memory->work_memory_alignment = MemoryAlignment;
     return 0;
 }
 int APS5_VABI sceVrTrackerRecalibrate(const void* param) {
