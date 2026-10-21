@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -29,6 +30,7 @@ int APS5_VABI FT_New_Face_nid_postfix(void*, const char*, std::int64_t, GuestFac
 int APS5_VABI FT_New_Memory_Face_nid_postfix(void*, const unsigned char*, std::int64_t, std::int64_t, GuestFaceRec**);
 int APS5_VABI FT_Done_Face_nid_postfix(GuestFaceRec*);
 int APS5_VABI FT_Set_Pixel_Sizes_nid_postfix(GuestFaceRec*, std::uint32_t, std::uint32_t);
+int APS5_VABI FT_Set_Char_Size_nid_postfix(GuestFaceRec*, std::int64_t, std::int64_t, std::uint32_t, std::uint32_t);
 std::uint32_t APS5_VABI FT_Get_Char_Index_nid_postfix(GuestFaceRec*, std::uint64_t);
 int APS5_VABI FT_Load_Glyph_nid_postfix(GuestFaceRec*, std::uint32_t, std::int32_t);
 int APS5_VABI FT_Load_Char_nid_postfix(GuestFaceRec*, std::uint64_t, std::int32_t);
@@ -87,6 +89,15 @@ static void SlotMatches(const GuestGlyphSlotRec* slot, FT_GlyphSlot host) {
     }
     for (unsigned index = 0; index < host->outline.n_contours; ++index) Require(slot->outline.contours[index] == host->outline.contours[index]);
     Require(slot->lsb_delta == host->lsb_delta && slot->rsb_delta == host->rsb_delta && slot->control_len == host->control_len);
+}
+
+static void SizeMatches(const GuestFaceRec* face, FT_Face host) {
+    const auto& actual = face->size->metrics;
+    const auto& expected = host->size->metrics;
+    Require(actual.x_ppem == expected.x_ppem && actual.y_ppem == expected.y_ppem);
+    Require(actual.x_scale == expected.x_scale && actual.y_scale == expected.y_scale);
+    Require(actual.ascender == expected.ascender && actual.descender == expected.descender);
+    Require(actual.height == expected.height && actual.max_advance == expected.max_advance);
 }
 
 struct Finalizers {
@@ -191,6 +202,8 @@ int main() {
     Require(FT_New_Memory_Face_nid_postfix(library, font.data(), fontSize, -1, &probe) == 0 && probe != nullptr);
     Require(probe->num_faces == nativeProbe->num_faces && probe->face_index == nativeProbe->face_index);
     Require((probe->glyph == nullptr) == (nativeProbe->glyph == nullptr) && (probe->size == nullptr) == (nativeProbe->size == nullptr));
+    Require(FT_Set_Char_Size_nid_postfix(probe, std::numeric_limits<std::int64_t>::max(), 0, 0, 0) ==
+            FT_Set_Char_Size(nativeProbe, 64, 64, 72, 72));
     Finalizers nativeProbeEvents;
     Finalizers guestProbeEvents;
     nativeProbe->generic = {&nativeProbeEvents, NativeFaceFinalizer};
@@ -233,6 +246,64 @@ int main() {
     const auto& guestMetrics = face->size->metrics;
     Require(guestMetrics.x_ppem == 100 && guestMetrics.y_ppem == 100 && guestMetrics.x_scale == metrics.x_scale && guestMetrics.y_scale == metrics.y_scale);
     Require(guestMetrics.ascender == metrics.ascender && guestMetrics.descender == metrics.descender && guestMetrics.height == metrics.height && guestMetrics.max_advance == metrics.max_advance);
+
+    {
+        struct Request {
+            std::int64_t width;
+            std::int64_t height;
+            std::uint32_t horizontal;
+            std::uint32_t vertical;
+        };
+        const std::array requests{
+            Request{0, 0, 0, 0}, Request{0, 12 * 64, 0, 0}, Request{12 * 64, 0, 0, 0},
+            Request{12 * 64, 18 * 64, 96, 144}, Request{12 * 64 + 32, 12 * 64 + 32, 72, 72},
+            Request{1, 63, 72, 72}, Request{-1, -100, 0, 0}, Request{0, -100, 96, 0},
+            Request{12 * 64, 18 * 64, 0, 144}, Request{12 * 64, 18 * 64, 96, 0},
+            Request{65535ll * 64, 64, 72, 72}, Request{65536ll * 64, 64, 72, 72},
+            Request{64, 65536ll * 64, 72, 72},
+            Request{18 * 64, 12 * 64, 72, 72}
+        };
+        std::size_t successes = 0;
+        std::size_t failures = 0;
+        for (const auto& request : requests) {
+            std::array<unsigned char, sizeof(GuestGlyphSlotRec)> previousSlot{};
+            std::memcpy(previousSlot.data(), face->glyph, previousSlot.size());
+            const auto expected = FT_Set_Char_Size(host, static_cast<FT_F26Dot6>(request.width), static_cast<FT_F26Dot6>(request.height),
+                                                   request.horizontal, request.vertical);
+            Require(FT_Set_Char_Size_nid_postfix(face, request.width, request.height, request.horizontal, request.vertical) == expected);
+            Require(std::memcmp(previousSlot.data(), face->glyph, previousSlot.size()) == 0);
+            expected == 0 ? ++successes : ++failures;
+            SizeMatches(face, host);
+            Require(FT_Load_Char_nid_postfix(face, 'A', FT_LOAD_DEFAULT) == FT_Load_Char(host, 'A', FT_LOAD_DEFAULT));
+            SlotMatches(face->glyph, host->glyph);
+        }
+        Require(successes != 0 && failures != 0);
+        for (const auto value : std::array<std::int64_t, 2>{std::numeric_limits<std::int64_t>::min(), -0x80000001ll}) {
+            Require(FT_Set_Char_Size_nid_postfix(face, value, 0, 0, 0) == FT_Set_Char_Size(host, 64, 64, 0, 0));
+            SizeMatches(face, host);
+            Require(FT_Set_Char_Size_nid_postfix(face, 0, value, 0, 0) == 0);
+            SizeMatches(face, host);
+        }
+        for (const auto value : {std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max()}) {
+            Require(FT_Set_Char_Size_nid_postfix(nullptr, value, value, 0, 0) == FT_Err_Invalid_Face_Handle);
+        }
+        if constexpr (sizeof(FT_F26Dot6) < sizeof(std::int64_t)) {
+            for (const auto value : std::array<std::int64_t, 4>{0x7FFFFFFFll, 0x80000000ll, 0x100000040ll, std::numeric_limits<std::int64_t>::max()}) {
+                for (const bool width : {false, true}) {
+                    Require(ThrowsWith([&] { FT_Set_Char_Size_nid_postfix(face, width ? value : 64, width ? 64 : value, 72, 72); },
+                                       "FT_Set_Char_Size: a character size or resolution outside the host arithmetic range is not implemented"));
+                    SizeMatches(face, host);
+                }
+            }
+            Require(ThrowsWith([&] { FT_Set_Char_Size_nid_postfix(face, 64, 64, std::numeric_limits<std::uint32_t>::max(), 72); },
+                               "FT_Set_Char_Size: a character size or resolution outside the host arithmetic range is not implemented"));
+            SizeMatches(face, host);
+        }
+        Require(FT_Set_Char_Size_nid_postfix(memoryFace, 0, 48 * 64, 0, 144) == 0);
+        Require(memoryFace->size->metrics.y_ppem == 96 && face->size->metrics.y_ppem == 1);
+        Require(FT_Set_Pixel_Sizes_nid_postfix(face, 0, 100) == 0 && FT_Set_Pixel_Sizes(host, 0, 100) == 0);
+        std::printf("FT_Set_Char_Size: %zu native request comparisons, %zu successes, %zu errors\n", requests.size(), successes, failures);
+    }
 
     Require(FT_Get_Char_Index_nid_postfix(face, 'A') == 1 && FT_Get_Char_Index_nid_postfix(face, 'B') == 0);
     Require(FT_Get_Char_Index_nid_postfix(face, 0x100000041ull) == 1);
