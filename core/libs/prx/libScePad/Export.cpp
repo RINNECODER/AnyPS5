@@ -26,7 +26,33 @@ struct PadRemoteSetting;
 struct PadVirtualTriggerSetting;
 struct PadProcessFocusParameter;
 struct PadDataExtended;
-struct PadVrControllerData;
+struct PadVrControllerData {
+    std::uint32_t buttons;
+    std::uint8_t stick[2];
+    std::uint8_t unused6[2];
+    std::uint8_t triggers[2];
+    std::uint8_t unused10[2];
+    std::uint32_t touchButtons;
+    std::uint8_t touchValues[4];
+    float acceleration[3];
+    float angularVelocity[3];
+    float orientation[4];
+    std::uint8_t unused60[4];
+    std::uint8_t connected;
+    std::uint8_t connectedCount;
+    std::uint8_t unused66[6];
+    std::uint64_t timestamp;
+    std::uint8_t unused80[24];
+};
+
+static_assert(sizeof(PadVrControllerData) == 104);
+static_assert(offsetof(PadVrControllerData, triggers) == 8);
+static_assert(offsetof(PadVrControllerData, touchButtons) == 12);
+static_assert(offsetof(PadVrControllerData, acceleration) == 20);
+static_assert(offsetof(PadVrControllerData, angularVelocity) == 32);
+static_assert(offsetof(PadVrControllerData, orientation) == 44);
+static_assert(offsetof(PadVrControllerData, connected) == 64);
+static_assert(offsetof(PadVrControllerData, timestamp) == 72);
 struct PadVrControllerDeviceInformation;
 struct PadVrTriggerEffect;
 struct PadVrTriggerEffects;
@@ -363,7 +389,7 @@ int APS5_VABI scePadVrControllerGetTriggerEffectState(std::int32_t leftHandle, s
  return 0;
 }
 
-int APS5_VABI scePadVrControllerReadState(int handle, void* state) {
+int APS5_VABI scePadVrControllerReadState(int handle, PadVrControllerData* state) {
  (void)handle;
  (void)state;
  NotImplemented_nid_no_patch(__func__);
