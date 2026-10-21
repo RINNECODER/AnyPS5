@@ -153,12 +153,12 @@ int APS5_VABI sceFontCreateGraphicsService(const FontMemory* memory, const FontG
     return 0;
 }
 
-int APS5_VABI sceFontCreateGraphicsServiceWithEdition() {
+int APS5_VABI sceFontCreateGraphicsServiceWithEdition(const FontMemory* memory, const FontGraphicsServiceParam* param, std::uint64_t unusedSlot, FontGraphicsService** service) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontCreateWords() {
+int APS5_VABI sceFontCreateWords(const FontMemory* memory, FontTextSource* source, std::uint64_t unusedSlot, FontWords** words) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
