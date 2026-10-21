@@ -472,6 +472,17 @@ if(BUILD_TESTING)
     configure_windows_unwind(savedata_replace_file_failure_tests)
     add_test(NAME savedata_replace_file_failure COMMAND savedata_replace_file_failure_tests)
 
+    add_test_executable(guest_kernel_sys_ktimer_tests tests/GuestKernelSysKtimer.cpp)
+    target_include_directories(guest_kernel_sys_ktimer_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_kernel_sys_ktimer_tests PRIVATE libkernel_sys libkernel libc)
+    configure_windows_unwind(guest_kernel_sys_ktimer_tests)
+    add_test(NAME guest_kernel_sys_ktimer COMMAND guest_kernel_sys_ktimer_tests)
+    set_tests_properties(guest_kernel_sys_ktimer PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_kernel_sys_ktimer PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel_sys>")
+    endif()
+
     add_test_executable(guest_crt_tests tests/GuestCrt.cpp)
     target_include_directories(guest_crt_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_crt_tests PRIVATE libSceAmpr libc)
