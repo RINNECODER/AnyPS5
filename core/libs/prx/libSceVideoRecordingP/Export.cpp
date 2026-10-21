@@ -9,6 +9,43 @@
 #include <string>
 #include <vector>
 
+struct VideoRecordingContext;
+
+struct VideoRecordingSupportInfo {
+    std::uint8_t data[18];
+};
+
+static_assert(sizeof(VideoRecordingSupportInfo) == 18);
+
+struct VideoRecordingParam {
+    std::uint64_t size;
+    std::int32_t threadPriority;
+    std::uint32_t duration;
+    std::uint32_t mode;
+    std::int32_t outputMode;
+    std::uint32_t option;
+    std::uint32_t format;
+};
+
+struct VideoRecordingParam2 {
+    std::uint64_t size;
+    std::uint64_t affinityMask;
+    std::int32_t threadPriority;
+    std::uint32_t duration;
+    std::uint32_t mode;
+    std::int32_t outputMode;
+    std::uint32_t option;
+    std::uint32_t format;
+};
+
+static_assert(sizeof(VideoRecordingParam) == 32);
+static_assert(offsetof(VideoRecordingParam, duration) == 12);
+static_assert(offsetof(VideoRecordingParam, format) == 28);
+static_assert(sizeof(VideoRecordingParam2) == 40);
+static_assert(offsetof(VideoRecordingParam2, threadPriority) == 16);
+static_assert(offsetof(VideoRecordingParam2, duration) == 20);
+static_assert(offsetof(VideoRecordingParam2, format) == 36);
+
 namespace {
 std::mutex g_infoMutex;
 std::map<int32_t, std::vector<unsigned char>> g_info;
@@ -27,7 +64,7 @@ int APS5_VABI sceVideoRecordingClose(int discard) {
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingCloseByHandle(int handle, int discard) {
+int APS5_VABI sceVideoRecordingCloseByHandle(VideoRecordingContext* handle, int discard) {
  (void)handle;
  (void)discard;
  NotImplemented_nid_no_patch(__func__);
@@ -53,7 +90,7 @@ int APS5_VABI sceVideoRecordingGetInfo(int32_t info, void* data, size_t size) {
     return 0;
 }
 
-int APS5_VABI sceVideoRecordingGetInfoByHandle(int handle, int32_t info, void* data, size_t size) {
+int APS5_VABI sceVideoRecordingGetInfoByHandle(VideoRecordingContext* handle, int32_t info, void* data, size_t size) {
  (void)handle;
  (void)info;
  (void)data;
@@ -67,7 +104,7 @@ int APS5_VABI sceVideoRecordingGetStatus(void) {
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingGetSupportInfo(void* info) {
+int APS5_VABI sceVideoRecordingGetSupportInfo(VideoRecordingSupportInfo* info) {
  (void)info;
  NotImplemented_nid_no_patch(__func__);
  return 0;
@@ -90,7 +127,7 @@ int APS5_VABI sceVideoRecordingInitialize(void* param) {
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingOpen(const char* path, const void* param, void* heap, int heapSize) {
+int APS5_VABI sceVideoRecordingOpen(const char* path, const VideoRecordingParam* param, void* heap, int heapSize) {
  (void)path;
  (void)param;
  (void)heap;
@@ -99,7 +136,7 @@ int APS5_VABI sceVideoRecordingOpen(const char* path, const void* param, void* h
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingOpen2(const char* path, const void* param, void* heap, int heapSize) {
+int APS5_VABI sceVideoRecordingOpen2(const char* path, const VideoRecordingParam2* param, void* heap, int heapSize) {
  (void)path;
  (void)param;
  (void)heap;
@@ -108,19 +145,19 @@ int APS5_VABI sceVideoRecordingOpen2(const char* path, const void* param, void* 
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingQueryHddSize2(const void* param) {
+std::int64_t APS5_VABI sceVideoRecordingQueryHddSize2(const VideoRecordingParam2* param) {
  (void)param;
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingQueryMemSize(const void* param) {
+int APS5_VABI sceVideoRecordingQueryMemSize(const VideoRecordingParam* param) {
  (void)param;
  NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
-int APS5_VABI sceVideoRecordingQueryMemSize2(const void* param) {
+int APS5_VABI sceVideoRecordingQueryMemSize2(const VideoRecordingParam2* param) {
  (void)param;
  NotImplemented_nid_no_patch(__func__);
  return 0;
