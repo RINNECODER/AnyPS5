@@ -385,43 +385,35 @@ int APS5_VABI sceGnmResetVgtControl(void) {
 }
 
 int APS5_VABI sceGnmSdmaClose(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSdmaConstFill(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSdmaCopyLinear(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSdmaCopyTiled(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSdmaCopyWindow(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSdmaFlush(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSdmaGetMinCmdSize(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSdmaOpen(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmSetCsShaderWithModifier(void) {
