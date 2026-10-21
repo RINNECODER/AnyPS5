@@ -394,7 +394,7 @@ int APS5_VABI sceHttpUriSweepPath(char* dst, const char* src, size_t srcSize) {
     size_t end = 0;
     size_t pos = 1;
     while (pos < length) {
-        if (src[pos] == '.' && pos + 1 <= length && src[pos + 1] == '/') {
+        if (src[pos] == '.' && pos + 1 < length && src[pos + 1] == '/') {
             pos += 2;
             continue;
         }
