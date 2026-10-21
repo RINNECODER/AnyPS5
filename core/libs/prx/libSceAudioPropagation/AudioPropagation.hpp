@@ -27,6 +27,26 @@ inline constexpr std::size_t PortalParamsSize = 0x60;
 inline constexpr std::uint32_t PathEntryId = 0x010107d9;
 inline constexpr std::size_t PathEntrySize = 0x28;
 
+inline constexpr std::uint32_t SystemOptionsId = 0x010107d5;
+inline constexpr std::size_t SystemOptionsSize = 56;
+
+struct SystemOptions {
+    AudioPropagationStructDescriptor desc;
+    std::uint32_t maxSources;
+    std::uint32_t maxMaterials;
+    std::uint32_t parameter24;
+    std::uint32_t reflectionOrder;
+    std::uint32_t frameSamples;
+    float propagationSpeed;
+    float maxPathLength;
+    std::uint32_t flags;
+    std::uint8_t opaque[8];
+};
+
+static_assert(sizeof(SystemOptions) == SystemOptionsSize);
+static_assert(offsetof(SystemOptions, frameSamples) == 32);
+static_assert(offsetof(SystemOptions, flags) == 44);
+
 struct SourceInfo;
 struct SystemInfo;
 struct ReportRegistration;
@@ -130,8 +150,8 @@ static_assert(offsetof(PortalParams, rooms) == 0x50);
 
 extern "C" {
 
-std::int32_t APS5_VABI sceAudioPropagationSystemQueryMemory(const void* options, AudioPropagationSystemMemory* outMemory);
-std::int32_t APS5_VABI sceAudioPropagationSystemCreate(const void* options, const AudioPropagationSystemMemory* memory, AudioPropagationHandle* outSystem);
+std::int32_t APS5_VABI sceAudioPropagationSystemQueryMemory(const AudioPropagation::SystemOptions* options, AudioPropagationSystemMemory* outMemory);
+std::int32_t APS5_VABI sceAudioPropagationSystemCreate(const AudioPropagation::SystemOptions* options, const AudioPropagationSystemMemory* memory, AudioPropagationHandle* outSystem);
 std::int32_t APS5_VABI sceAudioPropagationSystemDestroy(AudioPropagationHandle system);
 std::int32_t APS5_VABI sceAudioPropagationSystemSetAttributes(AudioPropagationHandle system, const AudioPropagation::Attribute* attributes, std::uint32_t count);
 std::int32_t APS5_VABI sceAudioPropagationSystemRegisterMaterial(AudioPropagationHandle system, const AudioPropagationStructDescriptor* material, AudioPropagationHandle* outMaterial);

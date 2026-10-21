@@ -2,6 +2,7 @@
 #include "prx/libc/include/General.hpp"
 
 #include <cstdint>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -115,19 +116,45 @@ void requireNoPropagation(bool none, const char* function) {
 
 extern "C" {
 
-std::int32_t APS5_VABI sceAudioPropagationSystemQueryMemory(const void* options, AudioPropagationSystemMemory* outMemory) {
-    require(options != nullptr, __func__);
-    requireDescriptor(outMemory != nullptr ? &outMemory->desc : nullptr, SystemMemoryId, SystemMemorySize, __func__);
-    outMemory->size_cpu_mem = sizeof(SystemState);
+std::int32_t APS5_VABI sceAudioPropagationSystemQueryMemory(const SystemOptions* options, AudioPropagationSystemMemory* outMemory) {
+    if (!options || !outMemory) return ErrorNullPointer;
+    if (outMemory->desc.id != SystemMemoryId || outMemory->desc.size != SystemMemorySize) return static_cast<std::int32_t>(0x8A700007);
+    outMemory->p_cpu_mem = nullptr;
+    outMemory->size_cpu_mem = 0;
+    outMemory->p_gpu_mem = nullptr;
     outMemory->size_gpu_mem = 0;
+    if (options->desc.id != SystemOptionsId || options->desc.size != SystemOptionsSize) return static_cast<std::int32_t>(0x8A700007);
+    if (options->maxSources == 0 || options->maxSources > 64 || options->maxMaterials == 0 || options->maxMaterials > 64 || options->parameter24 != 6 || options->reflectionOrder == 0 || options->reflectionOrder > 2) return ErrorInvalidArgument;
+    const auto frameSamples = options->frameSamples;
+    if (frameSamples != 256 && frameSamples != 512 && frameSamples != 1024 && frameSamples != 2048 && frameSamples != 4096) return ErrorInvalidArgument;
+    if (!(options->propagationSpeed > 0x1p-23f) || options->propagationSpeed > 1372.0f || !(options->maxPathLength > 0x1p-23f) || options->maxPathLength > 1372.0f || options->flags > 31 || ((options->flags & 1) && frameSamples != 512)) return ErrorInvalidArgument;
+    if (options->flags & 1) throw std::runtime_error(std::string(__func__) + ": GPU memory requirements depend on an unsupported native runtime query");
+    const std::uint64_t sources = options->maxSources;
+    const std::uint64_t paths = sources * (options->reflectionOrder == 1 ? 6 : 36);
+    const float delaySeconds = options->maxPathLength / options->propagationSpeed;
+    const float delaySamples = delaySeconds * 48000.0f;
+    const auto delayCapacity = static_cast<std::uint64_t>(std::ceil(delaySamples));
+    std::uint64_t bytes = sources * 1024 + paths * (32 * (options->reflectionOrder + 2) + 8928);
+    bytes += frameSamples == 256 ? 2048 : 4 * frameSamples;
+    bytes += 4 * delayCapacity * sources;
+    bytes += bytes & 15;
+    bytes += 160 * paths + 12352 + 4208 * options->maxMaterials;
+    if (frameSamples == 256) bytes += sources * ((options->flags & 2) ? 36896 : 16416);
+    if (options->flags & 4) bytes += 2000656;
+    if (options->flags & 8) bytes += 288 * paths;
+    if (options->flags & 16) bytes += 144 * paths;
+    outMemory->size_cpu_mem = bytes + 5368 - ((bytes & 15) ^ 8);
     return 0;
 }
 
-std::int32_t APS5_VABI sceAudioPropagationSystemCreate(const void* options, const AudioPropagationSystemMemory* memory, AudioPropagationHandle* outSystem) {
+std::int32_t APS5_VABI sceAudioPropagationSystemCreate(const SystemOptions* options, const AudioPropagationSystemMemory* memory, AudioPropagationHandle* outSystem) {
     require(options != nullptr && outSystem != nullptr, __func__);
     requireDescriptor(memory != nullptr ? &memory->desc : nullptr, SystemMemoryId, SystemMemorySize, __func__);
+    auto requiredMemory = *memory;
+    const auto result = sceAudioPropagationSystemQueryMemory(options, &requiredMemory);
+    if (result != 0) return result;
     const auto address = reinterpret_cast<std::uintptr_t>(memory->p_cpu_mem);
-    require(address != 0 && address % alignof(SystemState) == 0 && memory->size_cpu_mem >= sizeof(SystemState) && memory->size_gpu_mem == 0, __func__);
+    require(address != 0 && address % alignof(SystemState) == 0 && memory->size_cpu_mem >= requiredMemory.size_cpu_mem && memory->size_gpu_mem == 0, __func__);
     auto& state = registry();
     std::lock_guard lock(state.mutex);
     require(!state.systems.contains(address), __func__);

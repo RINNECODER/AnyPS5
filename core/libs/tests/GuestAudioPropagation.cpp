@@ -1,6 +1,7 @@
 #include "prx/libSceAudioPropagation/AudioPropagation.hpp"
 
 #include <cstdint>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -50,38 +51,69 @@ AudioPropagation::Attribute Attribute(const void* value, std::size_t size) {
 }
 
 int main() {
-    const std::uint64_t options[7]{};
-    alignas(16) std::uint8_t arena[64]{};
+    const AudioPropagation::SystemOptions options{{AudioPropagation::SystemOptionsId, AudioPropagation::SystemOptionsSize}, 2, 2, 6, 1, 256, 343.0f, 343.0f, 0, {}};
 
     auto memory = Memory();
-    Require(sceAudioPropagationSystemQueryMemory(options, &memory) == 0, "query memory failed");
-    Require(memory.size_cpu_mem != 0 && memory.size_cpu_mem <= sizeof(arena), "cpu size outside the arena");
+    Require(sceAudioPropagationSystemQueryMemory(&options, &memory) == 0, "query memory failed");
+    Require(memory.size_cpu_mem == 557264, "native CPU memory size mismatch");
+    std::vector<std::uint64_t> arenaStorage((memory.size_cpu_mem + 7) / 8);
+    auto* arena = reinterpret_cast<std::uint8_t*>(arenaStorage.data());
     Require(memory.size_gpu_mem == 0 && memory.p_cpu_mem == nullptr && memory.p_gpu_mem == nullptr, "query wrote more than the sizes");
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemQueryMemory(nullptr, &memory); }, "null options");
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemQueryMemory(options, nullptr); }, "null memory");
+    Require(sceAudioPropagationSystemQueryMemory(nullptr, &memory) == AudioPropagation::ErrorNullPointer, "null options");
+    Require(sceAudioPropagationSystemQueryMemory(&options, nullptr) == AudioPropagation::ErrorNullPointer, "null memory");
     auto wrong = Memory();
     wrong.desc.size = 0x28;
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemQueryMemory(options, &wrong); }, "wrong descriptor size");
+    Require(sceAudioPropagationSystemQueryMemory(&options, &wrong) == static_cast<std::int32_t>(0x8A700007), "wrong descriptor size");
     wrong = Memory();
     wrong.desc.id = AudioPropagation::RayId;
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemQueryMemory(options, &wrong); }, "wrong descriptor id");
+    Require(sceAudioPropagationSystemQueryMemory(&options, &wrong) == static_cast<std::int32_t>(0x8A700007), "wrong descriptor id");
+
+    auto probeOptions = options;
+    auto probeMemory = Memory();
+    probeMemory.p_cpu_mem = arena;
+    probeMemory.p_gpu_mem = arena;
+    probeOptions.maxSources = 0;
+    Require(sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory) == AudioPropagation::ErrorInvalidArgument, "zero source capacity accepted");
+    Require(probeMemory.p_cpu_mem == nullptr && probeMemory.p_gpu_mem == nullptr && probeMemory.size_cpu_mem == 0 && probeMemory.size_gpu_mem == 0, "invalid options did not clear memory output");
+    probeOptions = options;
+    probeOptions.parameter24 = 7;
+    Require(sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory) == AudioPropagation::ErrorInvalidArgument, "unsupported parameter accepted");
+    probeOptions = options;
+    probeOptions.frameSamples = 768;
+    Require(sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory) == AudioPropagation::ErrorInvalidArgument, "unsupported frame size accepted");
+    probeOptions = options;
+    probeOptions.propagationSpeed = 0x1p-23f;
+    Require(sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory) == AudioPropagation::ErrorInvalidArgument, "invalid propagation speed accepted");
+    probeOptions = options;
+    probeOptions.frameSamples = 512;
+    Require(sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory) == 0 && probeMemory.size_cpu_mem == 524432, "512 sample memory size mismatch");
+    probeOptions = options;
+    probeOptions.reflectionOrder = 2;
+    Require(sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory) == 0 && probeMemory.size_cpu_mem == 1110608, "second order memory size mismatch");
+    probeOptions = options;
+    probeOptions.flags = 30;
+    Require(sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory) == 0 && probeMemory.size_cpu_mem == 2604064, "option memory sizes mismatch");
+    probeOptions.flags = 1;
+    Require(sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory) == AudioPropagation::ErrorInvalidArgument, "GPU frame size constraint ignored");
+    probeOptions.frameSamples = 512;
+    RequireThrows<std::runtime_error>([&] { sceAudioPropagationSystemQueryMemory(&probeOptions, &probeMemory); }, "unknown GPU memory query returned a size");
 
     AudioPropagationHandle system = 0;
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(options, &memory, &system); }, "create without cpu memory");
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(&options, &memory, &system); }, "create without cpu memory");
     memory.p_cpu_mem = arena + 1;
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(options, &memory, &system); }, "misaligned cpu memory");
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(&options, &memory, &system); }, "misaligned cpu memory");
     memory.p_cpu_mem = arena;
     memory.size_gpu_mem = 16;
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(options, &memory, &system); }, "unrequested gpu memory");
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(&options, &memory, &system); }, "unrequested gpu memory");
     memory.size_gpu_mem = 0;
     const auto required = memory.size_cpu_mem;
     memory.size_cpu_mem = required - 1;
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(options, &memory, &system); }, "cpu memory too small");
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(&options, &memory, &system); }, "cpu memory too small");
     memory.size_cpu_mem = required;
-    Require(sceAudioPropagationSystemCreate(options, &memory, &system) == 0, "create failed");
+    Require(sceAudioPropagationSystemCreate(&options, &memory, &system) == 0, "create failed");
     Require(system == reinterpret_cast<std::uintptr_t>(arena), "system handle is not its memory");
     AudioPropagationHandle twice = 0;
-    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(options, &memory, &twice); }, "second system in the same memory");
+    RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemCreate(&options, &memory, &twice); }, "second system in the same memory");
 
     const std::uint64_t value = 1;
     const auto attribute = Attribute(&value, sizeof(value));
@@ -145,12 +177,13 @@ int main() {
     Require(sceAudioPropagationSourceSetAudioPaths(source, nullptr, 0) == 0, "empty audio paths failed");
     RequireThrows<std::runtime_error>([&] { sceAudioPropagationSourceSetAudioPaths(source, rays, 1); }, "set audio paths");
 
-    alignas(16) std::uint8_t otherArena[64]{};
+    std::vector<std::uint64_t> otherArenaStorage(arenaStorage.size());
+    auto* otherArena = reinterpret_cast<std::uint8_t*>(otherArenaStorage.data());
     auto otherMemory = Memory();
-    Require(sceAudioPropagationSystemQueryMemory(options, &otherMemory) == 0, "second query memory failed");
+    Require(sceAudioPropagationSystemQueryMemory(&options, &otherMemory) == 0, "second query memory failed");
     otherMemory.p_cpu_mem = otherArena;
     AudioPropagationHandle otherSystem = 0;
-    Require(sceAudioPropagationSystemCreate(options, &otherMemory, &otherSystem) == 0, "second system create failed");
+    Require(sceAudioPropagationSystemCreate(&options, &otherMemory, &otherSystem) == 0, "second system create failed");
     AudioPropagationHandle otherSource = 0;
     Require(sceAudioPropagationSourceCreate(otherSystem, &otherSource) == 0, "second system source create failed");
     AudioPropagationHandle secondSource = 0;
@@ -251,7 +284,7 @@ int main() {
     Require(sceAudioPropagationSystemUnregisterMaterial(lateMaterial) == 0, "orphaned material unregister is not a no-op");
     RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSourceDestroy(system, lateSource); }, "orphan destroyed twice");
     RequireThrows<std::invalid_argument>([&] { sceAudioPropagationSystemDestroy(system); }, "destroy twice");
-    Require(sceAudioPropagationSystemCreate(options, &memory, &system) == 0, "memory reuse after destroy failed");
+    Require(sceAudioPropagationSystemCreate(&options, &memory, &system) == 0, "memory reuse after destroy failed");
     Require(sceAudioPropagationSystemDestroy(system) == 0, "second destroy failed");
 
     RequireThrows<std::runtime_error>([&] { sceAudioPropagationPathGetNumPoints(); }, "path get num points throw");
