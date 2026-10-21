@@ -232,6 +232,13 @@ int main() {
         Require(symlink_nid_postfix(tooLong.c_str(), created.c_str()) == -1 && Error() == 63);
         Require(!std::filesystem::exists(std::filesystem::symlink_status(root / "target-too-long")));
     }
+    {
+        const auto longest = std::string(1023, 'a');
+        const auto created = (root / "target-longest").string();
+        const int made = symlink_nid_postfix(longest.c_str(), created.c_str());
+        Require(made == 0 || Error() != 63);
+        if (made == 0) Require(RemoveSymlink(created));
+    }
     Require(readlink_nid_postfix(file.c_str(), buffer, sizeof(buffer)) == -1 && Error() == 22);
     Require(readlink_nid_postfix(root.string().c_str(), buffer, sizeof(buffer)) == -1 && Error() == 22);
     Require(readlink_nid_postfix((root / "missing").string().c_str(), buffer, sizeof(buffer)) == -1 && Error() == 2);
