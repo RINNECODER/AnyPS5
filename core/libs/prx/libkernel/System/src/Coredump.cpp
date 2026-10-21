@@ -69,8 +69,8 @@ int APS5_VABI sceCoredumpAttachMemoryRegionAsUserFile(uint32_t userValue, const 
     return SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
 }
 
-int APS5_VABI sceCoredumpSetUserDataType(int type) {
-    (void)type;
+int APS5_VABI sceCoredumpSetUserDataType(std::int32_t type) {
+    NotImplemented_nid_no_patch("Uxqkdta7wEg");
     return 0;
 }
 
@@ -83,22 +83,18 @@ void APS5_VABI sceCoredumpDebugTextOut(const char* str, int len) {
 }
 
 int64_t APS5_VABI sceCoredumpWriteUserData(const void* data, size_t size) {
-    requireRegionOutsideHandler(__func__, data, size);
+    if (!data || size > INT32_MAX) return SCE_COREDUMP_ERROR_INVALID_ARGUMENT;
     return SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
 }
 
 int APS5_VABI sceCoredumpGetStopInfoCpu(void* info, size_t size) {
-    const auto address = reinterpret_cast<uintptr_t>(info);
-    if (info == nullptr || size != 16 || address % alignof(uint64_t) != 0 || size > UINTPTR_MAX - address)
-        throw std::runtime_error(std::string(__func__) + ": null, unaligned, wrapping or unsupported CPU stop-info buffer outside the core dump handler");
+    if (!info || (size != 8 && size != 16)) return SCE_COREDUMP_ERROR_INVALID_ARGUMENT;
     return SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
 }
 
 int APS5_VABI sceCoredumpGetThreadContextInfo(void* threadContextInfo, size_t threadContextInfoSize) {
-    (void)threadContextInfo;
-    (void)threadContextInfoSize;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (!threadContextInfo || threadContextInfoSize != 144) return SCE_COREDUMP_ERROR_INVALID_ARGUMENT;
+    return SCE_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER;
 }
 
 int APS5_VABI sceCoredumpWriteUserString(uint32_t first, const char* text, int third) {
