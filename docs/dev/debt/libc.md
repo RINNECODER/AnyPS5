@@ -49,6 +49,7 @@
 
 ### Functional
 
+- [_Cosh](../../../core/libs/prx/libc/src/Math.cpp) (libc) returns `y * cosh(x)` through the host math library, following the two-argument Dinkumware CRT helper used by `std::complex`; the signature and result are not verified against the console, including its `errno` and floating-point exception behavior.
 - [_FSinh and _FCosh](../../../core/libs/prx/libc/src/Math.cpp) (libc) finite results are not verified bit for bit against the console: the scaled product uses the host's binary64 hyperbolic function before rounding to binary32, rather than the float rational and `_FExp` sequence in PRAGMATA's bundled `libc.prx`. NaN preference and payloads, signed zeros, infinite operands and the range-error thresholds follow that binary's instructions; the system `libSceLibcInternal` implementation and nondefault flush-to-zero modes are unverified.
 
 - [sscanf_s and vsscanf_s](../../../core/libs/prx/libc/src/Formatting.cpp) (libc) return `EOF` when a reached conversion has a null destination, stopping before further assignments, following C11 K.3.5.3.7 and K.3.5.3.14. Earlier assignments are retained. The constraint handler is not invoked, and console behaviour is unverified.
