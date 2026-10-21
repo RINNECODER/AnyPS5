@@ -864,6 +864,9 @@ static void CheckHyperbolic() {
     Require(Near(_Cosh_nid_postfix(-1.0, -2.0), -3.0861612696304874, 1e-15));
     Require(std::isinf(_Cosh_nid_postfix(infinity, -1.0)) && std::signbit(_Cosh_nid_postfix(infinity, -1.0)));
     Require(std::isnan(_Cosh_nid_postfix(infinity, 0.0)));
+    Require(Near(_Cosh_nid_postfix(711.0, 1e-300), 0x1.2190c08e2f1a4p+28, 1e-15));
+    Require(_Cosh_nid_postfix(720.0, 0.0) == 0.0 && !std::signbit(_Cosh_nid_postfix(720.0, 0.0)));
+    Require(_Cosh_nid_postfix(720.0, -0.0) == 0.0 && std::signbit(_Cosh_nid_postfix(720.0, -0.0)));
     Require(sinh_nid_postfix(0.) == 0. && std::signbit(sinh_nid_postfix(-0.)));
     Require(cosh_nid_postfix(0.) == 1. && coshf_nid_postfix(0.f) == 1.f);
     Require(asinh_nid_postfix(0.) == 0. && std::signbit(asinh_nid_postfix(-0.)) && std::signbit(asinhf_nid_postfix(-0.f)));
