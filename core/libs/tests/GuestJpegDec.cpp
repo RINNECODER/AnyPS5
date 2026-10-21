@@ -161,6 +161,19 @@ int main() {
 
     std::vector<std::uint8_t> image(7 * 5 * 4, 0xCC);
     JpegDecDecodeParam decodeParam = DecodeParam(jpeg, image, 7 * 4);
+    std::vector<std::uint8_t> tallSampling = TestJpeg(31, 5, 3);
+    for (std::size_t offset = 2; offset + 3 < tallSampling.size();) {
+        const std::uint8_t marker = tallSampling[offset + 1];
+        const std::size_t length = (static_cast<std::size_t>(tallSampling[offset + 2]) << 8) | tallSampling[offset + 3];
+        if (marker == 0xC0) {
+            tallSampling[offset + 11] = 0x14;
+            break;
+        }
+        offset += 2 + length;
+    }
+    std::vector<std::uint8_t> tallSamplingOutput(31 * 5 * 4);
+    JpegDecDecodeParam tallSamplingDecode = DecodeParam(tallSampling, tallSamplingOutput, 0);
+    Require(sceJpegDecDecode(handle, &tallSamplingDecode, &info) == static_cast<std::int32_t>(0x80650006));
     JpegDecDecodeParam progressiveDecode = DecodeParam(progressiveHeader, image, 7 * 4);
     Require(sceJpegDecDecode(handle, &progressiveDecode, &info) == static_cast<std::int32_t>(0x80650005));
     std::array<std::uint8_t, 447> insufficientCoefficients{};

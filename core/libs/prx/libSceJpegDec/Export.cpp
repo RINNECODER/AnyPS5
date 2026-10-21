@@ -51,6 +51,7 @@ struct Context {
     Context* self;
     std::uint32_t attribute;
     std::uint32_t maxImageWidth;
+    std::uint32_t rowBufferCapacity;
 };
 
 static_assert(sizeof(Context) + HANDLE_ALIGNMENT - 1 <= MEMORY_OVERHEAD);
@@ -114,6 +115,26 @@ void fillImageInfo(const Decoder::Jpeg::Header& header, std::uint32_t downScale,
     info->output_image_height = Decoder::Jpeg::ScaledDimension(header.height, downScale);
 }
 
+std::uint32_t rowBufferSize(const Decoder::Jpeg::Header& header, std::uint32_t downScale) {
+    std::uint32_t maxHorizontal = 1;
+    if (header.channels != 1) {
+        for (std::uint32_t i = 0; i < header.channels; ++i) {
+            const std::uint32_t horizontal = header.samplingFactors[i] >> 4;
+            if (horizontal > maxHorizontal) maxHorizontal = horizontal;
+        }
+    }
+    const std::uint32_t mcuColumns = (header.width + 8 * maxHorizontal - 1) / (8 * maxHorizontal);
+    const std::uint32_t blockSize = 8 / downScale;
+    std::uint32_t size = 0;
+    for (std::uint32_t i = 0; i < header.channels; ++i) {
+        const std::uint32_t horizontal = header.channels == 1 ? 1 : header.samplingFactors[i] >> 4;
+        const std::uint32_t vertical = header.channels == 1 ? 1 : header.samplingFactors[i] & 15;
+        const std::uint32_t stride = (mcuColumns * blockSize * horizontal + 7) & ~std::uint32_t{7};
+        size += stride * vertical * blockSize;
+    }
+    return (size + 31) & ~std::uint32_t{31};
+}
+
 std::span<const std::uint8_t> toBytes(const void* data, std::uint32_t size) {
     return {static_cast<const std::uint8_t*>(data), size};
 }
@@ -134,6 +155,7 @@ int32_t APS5_VABI sceJpegDecCreate(const JpegDecCreateParam* param, void* memory
     context->self = context;
     context->attribute = param->attribute;
     context->maxImageWidth = (param->max_image_width + 31) & ~std::uint32_t{31};
+    context->rowBufferCapacity = (context->maxImageWidth + 16) * (param->attribute == ATTRIBUTE_CSC_ORDINARY ? 24 : 80);
     *handle = context;
     return 0;
 }
@@ -169,7 +191,7 @@ int32_t APS5_VABI sceJpegDecDecode(void* handle, const JpegDecDecodeParam* param
     } else if (pitch * outputHeight > param->image_mem_size) {
         return SCE_JPEG_DEC_ERROR_INVALID_SIZE;
     }
-    if (((outputWidth + 31) & ~std::uint32_t{31}) > context->maxImageWidth) return SCE_JPEG_DEC_ERROR_IMAGE_TOO_WIDE;
+    if (((outputWidth + 31) & ~std::uint32_t{31}) > context->maxImageWidth || rowBufferSize(*header, downScale) > context->rowBufferCapacity) return SCE_JPEG_DEC_ERROR_IMAGE_TOO_WIDE;
 
     const std::optional<Decoder::Jpeg::Image> image = downScale == DOWN_SCALE_NONE ? Decoder::Jpeg::Decode(jpeg) : Decoder::Jpeg::DecodeScaled(jpeg, downScale);
     if (!image || image->width != outputWidth || image->height != outputHeight) return SCE_JPEG_DEC_ERROR_DECODE_ERROR;
