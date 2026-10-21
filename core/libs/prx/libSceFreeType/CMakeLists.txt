@@ -41,7 +41,14 @@ if(BUILD_TESTING)
     target_link_libraries(guest_freetype_names_tests PRIVATE libSceFreeType freetype libc)
     configure_windows_unwind(guest_freetype_names_tests)
     add_test(NAME guest_freetype_names COMMAND guest_freetype_names_tests)
+    add_test_executable(guest_freetype_sfnt_names_tests ${LIBS_INCLUDE_DIR}/tests/GuestFreeTypeSfntNames.cpp)
+    target_include_directories(guest_freetype_sfnt_names_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_freetype_sfnt_names_tests PRIVATE libSceFreeType freetype libc)
+    configure_windows_unwind(guest_freetype_sfnt_names_tests)
+    add_test(NAME guest_freetype_sfnt_names COMMAND guest_freetype_sfnt_names_tests)
     if(WIN32)
+        set_tests_properties(guest_freetype_sfnt_names PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceFreeType>")
         set_tests_properties(guest_freetype_names PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceFreeType>")
         set_tests_properties(guest_freetype PROPERTIES ENVIRONMENT_MODIFICATION
