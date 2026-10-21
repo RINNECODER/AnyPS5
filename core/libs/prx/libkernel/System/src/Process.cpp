@@ -98,6 +98,55 @@ bool StoreGuestId(std::uint32_t* output) {
 #else
     *output = zero;
     return true;
+ #endif
+}
+
+bool GuestRange(const void* pointer, std::size_t bytes) {
+    const auto start = reinterpret_cast<std::uintptr_t>(pointer);
+    return start != 0 && bytes <= std::numeric_limits<std::uintptr_t>::max() - start;
+}
+
+bool ReadGuest(void* destination, const void* source, std::size_t bytes) {
+    if (bytes == 0) return true;
+    if (!GuestRange(source, bytes)) return false;
+    GuestArena::GuestArenaPrepareHostRead_nid_no_patch(source, bytes);
+#ifdef _WIN32
+    SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), source, destination, bytes, &copied) != 0 && copied == bytes;
+#elif defined(__linux__)
+    iovec local{destination, bytes};
+    iovec remote{const_cast<void*>(source), bytes};
+    const auto copied = ::process_vm_readv(::getpid(), &local, 1, &remote, 1, 0);
+    if (copied < 0 && errno != EFAULT) throw std::runtime_error("credentials: process_vm_readv failed with errno " + std::to_string(errno));
+    return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
+#elif defined(__APPLE__)
+    mach_vm_size_t copied = 0;
+    return ::mach_vm_read_overwrite(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(source), bytes,
+        reinterpret_cast<mach_vm_address_t>(destination), &copied) == KERN_SUCCESS && copied == bytes;
+#else
+    throw std::runtime_error("credentials: checked guest reads are not implemented on this host");
+#endif
+}
+
+bool WriteGuest(void* destination, const void* source, std::size_t bytes) {
+    if (bytes == 0) return true;
+    if (!GuestRange(destination, bytes)) return false;
+    const GuestArena::HostWrite guard(destination, bytes);
+    if (!guard.Open()) return false;
+#ifdef _WIN32
+    SIZE_T copied = 0;
+    return WriteProcessMemory(GetCurrentProcess(), destination, source, bytes, &copied) != 0 && copied == bytes;
+#elif defined(__linux__)
+    iovec local{const_cast<void*>(source), bytes};
+    iovec remote{destination, bytes};
+    const auto copied = ::process_vm_writev(::getpid(), &local, 1, &remote, 1, 0);
+    if (copied < 0 && errno != EFAULT) throw std::runtime_error("credentials: process_vm_writev failed with errno " + std::to_string(errno));
+    return copied >= 0 && static_cast<std::size_t>(copied) == bytes;
+#elif defined(__APPLE__)
+    return ::mach_vm_write(::mach_task_self(), reinterpret_cast<mach_vm_address_t>(destination),
+        reinterpret_cast<vm_offset_t>(source), static_cast<mach_msg_type_number_t>(bytes)) == KERN_SUCCESS;
+#else
+    throw std::runtime_error("credentials: checked guest writes are not implemented on this host");
 #endif
 }
 
@@ -820,14 +869,22 @@ int APS5_VABI setgroups_nid_postfix(int count, const std::uint32_t* groups) {
         *__error_nid_postfix() = errnoBadAddress;
         return -1;
     }
-    if (count > 0 && groups[0] != 0)
-        throw std::runtime_error("setgroups: unsupported effective group id " + std::to_string(groups[0]));
+    std::vector<std::uint32_t> requested;
+    if (count > 0) {
+        requested.resize(static_cast<std::size_t>(count));
+        if (!ReadGuest(requested.data(), groups, requested.size() * sizeof(requested[0]))) {
+            *__error_nid_postfix() = errnoBadAddress;
+            return -1;
+        }
+    }
+    if (count > 0 && requested[0] != 0)
+        throw std::runtime_error("setgroups: unsupported effective group id " + std::to_string(requested[0]));
     std::lock_guard lock(supplementaryGroupsMutex);
     if (count == 0) {
         supplementaryGroups.resize(1);
         return 0;
     }
-    supplementaryGroups.assign(groups, groups + count);
+    supplementaryGroups.swap(requested);
     return 0;
 }
 
@@ -843,7 +900,10 @@ int APS5_VABI getgroups_nid_postfix(int capacity, std::uint32_t* groups) {
         *__error_nid_postfix() = errnoBadAddress;
         return -1;
     }
-    std::copy(supplementaryGroups.begin(), supplementaryGroups.end(), groups);
+    if (!WriteGuest(groups, supplementaryGroups.data(), supplementaryGroups.size() * sizeof(supplementaryGroups[0]))) {
+        *__error_nid_postfix() = errnoBadAddress;
+        return -1;
+    }
     return count;
 }
 
