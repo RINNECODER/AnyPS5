@@ -92,16 +92,6 @@ int Complete(int reqId, int asyncResult) {
 
 extern "C" {
 
-int APS5_VABI sceNpTssGetSmallStorageAsync(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI sceNpTssGetSmallStorage(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
 int APS5_VABI sceNpTusCreateNpTitleCtxA(std::uint32_t serviceLabel, int userId) {
     (void)serviceLabel;
     (void)userId;
@@ -393,6 +383,14 @@ int APS5_VABI sceNpTusGetFriendsDataStatusForCrossSave(void) {
 int APS5_VABI sceNpTusGetFriendsDataStatusForCrossSaveAsync(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
+}
+
+int APS5_VABI sceNpTssGetSmallStorageAsync(int reqId, void* data, std::uint64_t maxSize, std::uint64_t* contentLength, void* option) {
+    (void)data;
+    (void)contentLength;
+    if (option) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    if (maxSize > TSS_MAX_SIZE) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return StartOffline(reqId);
 }
 
 int APS5_VABI sceNpTusAddAndGetVariableAVUserAsync(int reqId, const NpOnlineId* targetVirtualUserId, std::int32_t slotId, std::int64_t inVariable, const std::uint64_t* isLastChangedAuthor, const void* isLastChangedDate, void* outVariable, std::uint64_t outVariableSize, void* option) {
@@ -834,6 +832,10 @@ int APS5_VABI sceNpTusTryAndSetVariableVUserAsync(int reqId, const NpOnlineId* t
     if (opeType < OPETYPE_EQUAL || opeType > OPETYPE_LESS_OR_EQUAL) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (IsEmpty(targetVirtualUserId)) return SCE_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     return StartOffline(reqId);
+}
+
+int APS5_VABI sceNpTssGetSmallStorage(int reqId, void* data, std::uint64_t maxSize, std::uint64_t* contentLength, void* option) {
+    return Complete(reqId, sceNpTssGetSmallStorageAsync(reqId, data, maxSize, contentLength, option));
 }
 
 int APS5_VABI sceNpTusAddAndGetVariable(int reqId, const void* targetNpId, std::int32_t slotId, std::int64_t inVariable, const void* isLastChangedAuthor, const void* isLastChangedDate, void* outVariable, std::uint64_t outVariableSize, void* option) {
