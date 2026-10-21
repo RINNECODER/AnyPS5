@@ -13,6 +13,7 @@
 extern "C" {
 int APS5_VABI sceUltInitialize();
 int APS5_VABI sceUltFinalize();
+std::uint64_t APS5_VABI sceUltWaitingQueueResourcePoolGetWorkAreaSize(std::uint32_t, std::uint32_t);
 std::uint64_t APS5_VABI sceUltQueueDataResourcePoolGetWorkAreaSize(std::uint32_t, std::uint64_t, std::uint32_t);
 int APS5_VABI sceUltQueueDataResourcePoolCreate(void*, const char*, std::uint32_t, std::uint64_t, std::uint32_t, void*, void*, const void*, std::uint32_t);
 int APS5_VABI sceUltQueueDataResourcePoolDestroy(void*);
@@ -93,7 +94,11 @@ static void Validation() {
     CHECK(sceUltQueueDataResourcePoolDestroy(&fixture.pool) == Busy);
     CHECK(sceUltQueueDataResourcePoolDestroy(nullptr) == Null);
     CHECK(sceUltQueueDestroy(nullptr) == Null);
-    CHECK(sceUltQueueDataResourcePoolGetWorkAreaSize(3, 9, 2) == 1072);
+    CHECK(sceUltQueueDataResourcePoolGetWorkAreaSize(3, 9, 2) == 379);
+    CHECK(sceUltQueueDataResourcePoolGetWorkAreaSize(0, 0, 0) == 96);
+    CHECK(sceUltWaitingQueueResourcePoolGetWorkAreaSize(0, 0) == 64);
+    CHECK(sceUltWaitingQueueResourcePoolGetWorkAreaSize(3, 2) == 320);
+    CHECK(sceUltWaitingQueueResourcePoolGetWorkAreaSize(0, 0x08000000u) == 0x100000040ull);
     bool overflow = false;
     try { sceUltQueueDataResourcePoolGetWorkAreaSize(1, UINT64_MAX, 1); }
     catch (const std::out_of_range&) { overflow = true; }
