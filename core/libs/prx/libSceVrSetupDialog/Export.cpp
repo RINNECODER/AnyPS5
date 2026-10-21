@@ -12,13 +12,10 @@ constexpr int COMMON_DIALOG_STATUS_NONE = 0;
 constexpr int COMMON_DIALOG_STATUS_INITIALIZED = 1;
 constexpr int COMMON_DIALOG_STATUS_RUNNING = 2;
 constexpr int COMMON_DIALOG_STATUS_FINISHED = 3;
-constexpr int COMMON_DIALOG_ERROR_NOT_INITIALIZED = static_cast<int>(0x80B80003u);
 constexpr int VR_SETUP_DIALOG_ERROR_NOT_INITIALIZED = static_cast<int>(0x8A7C0001u);
 constexpr int VR_SETUP_DIALOG_ERROR_ALREADY_INITIALIZED = static_cast<int>(0x8A7C0002u);
 constexpr int VR_SETUP_DIALOG_ERROR_INVALID_ARGUMENT = static_cast<int>(0x8A7C0003u);
-constexpr int COMMON_DIALOG_ERROR_NOT_FINISHED = static_cast<int>(0x80B80005u);
 constexpr int VR_SETUP_DIALOG_ERROR_BUSY = static_cast<int>(0x8A7C0005u);
-constexpr int COMMON_DIALOG_ERROR_ARG_NULL = static_cast<int>(0x80B8000Du);
 constexpr int COMMON_DIALOG_RESULT_USER_CANCELED = 1;
 
 std::atomic<int> g_status{COMMON_DIALOG_STATUS_NONE};
@@ -50,14 +47,13 @@ int APS5_VABI sceVrSetupDialogGetStatus(void) {
  return g_status.load();
 }
 
-int APS5_VABI sceVrSetupDialogGetResult(void* result) {
- const int status = g_status.load();
- if (status == COMMON_DIALOG_STATUS_NONE) return COMMON_DIALOG_ERROR_NOT_INITIALIZED;
- if (result == nullptr) return COMMON_DIALOG_ERROR_ARG_NULL;
- if (status != COMMON_DIALOG_STATUS_FINISHED) return COMMON_DIALOG_ERROR_NOT_FINISHED;
- const std::int32_t canceled = COMMON_DIALOG_RESULT_USER_CANCELED;
- std::memcpy(result, &canceled, sizeof(canceled));
- return 0;
+int APS5_VABI sceVrSetupDialogGetResult(std::int32_t* result) {
+    if (result == nullptr) return VR_SETUP_DIALOG_ERROR_INVALID_ARGUMENT;
+    const int status = g_status.load();
+    if (status == COMMON_DIALOG_STATUS_NONE) return VR_SETUP_DIALOG_ERROR_NOT_INITIALIZED;
+    *result = COMMON_DIALOG_RESULT_USER_CANCELED;
+    if (status != COMMON_DIALOG_STATUS_FINISHED) return VR_SETUP_DIALOG_ERROR_BUSY;
+    return 0;
 }
 
 int APS5_VABI sceVrSetupDialogClose(void) {
