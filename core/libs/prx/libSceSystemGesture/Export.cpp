@@ -10,9 +10,9 @@
 #include <vector>
 
 static constexpr int32_t GESTURE_HANDLE = 1;
-static constexpr int SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80D10002);
-static constexpr int SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE = static_cast<int>(0x80D10003);
-static constexpr int SCE_SYSTEM_GESTURE_ERROR_INDEX_OUT_OF_ARRAY = static_cast<int>(0x80D10005);
+static constexpr int SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80890001);
+static constexpr int SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE = static_cast<int>(0x80890006);
+static constexpr int SCE_SYSTEM_GESTURE_ERROR_INDEX_OUT_OF_ARRAY = static_cast<int>(0x80890004);
 
 namespace {
 
@@ -161,35 +161,33 @@ int APS5_VABI sceSystemGestureFinalizePrimitiveTouchRecognizer(void) {
     return 0;
 }
 
-int APS5_VABI sceSystemGestureGetPrimitiveTouchEventByIndex(int32_t gesture_handle, uint32_t index, SystemGesturePrimitiveTouchEvent* event) {
-    if (gesture_handle != GESTURE_HANDLE) return SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE;
+int APS5_VABI sceSystemGestureGetPrimitiveTouchEventByIndex(int32_t gestureHandle, uint32_t index, SystemGesturePrimitiveTouchEvent* event) {
+    if (!event) return SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT;
+    if (gestureHandle != GESTURE_HANDLE) return SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE;
     std::lock_guard lock(primitiveTouchMutex);
     if (index >= primitiveTouches.size()) return SCE_SYSTEM_GESTURE_ERROR_INDEX_OUT_OF_ARRAY;
-    if (!event) return SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT;
     *event = buildPrimitiveTouchEvent(primitiveTouches[index]);
     return 0;
 }
 
-int APS5_VABI sceSystemGestureGetPrimitiveTouchEventByPrimitiveID(int32_t gesture_handle, uint16_t primitiveId, SystemGesturePrimitiveTouchEvent* event) {
-    if (gesture_handle != GESTURE_HANDLE) return SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE;
+int APS5_VABI sceSystemGestureGetPrimitiveTouchEventByPrimitiveID(int32_t gestureHandle, uint16_t primitiveId, SystemGesturePrimitiveTouchEvent* event) {
     if (!event) return SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT;
+    if (gestureHandle != GESTURE_HANDLE) return SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE;
     std::lock_guard lock(primitiveTouchMutex);
     const auto tracked = std::find_if(primitiveTouches.begin(), primitiveTouches.end(),
         [&](const TrackedTouch& touch) { return touch.primitiveId == primitiveId; });
-    if (tracked == primitiveTouches.end())
-        throw std::runtime_error(std::string(__func__) + ": no primitive touch event with id " + std::to_string(primitiveId));
+    if (tracked == primitiveTouches.end()) return static_cast<int>(0x80890005);
     *event = buildPrimitiveTouchEvent(*tracked);
     return 0;
 }
 
-int APS5_VABI sceSystemGestureGetPrimitiveTouchEvents(int32_t gesture_handle, SystemGesturePrimitiveTouchEvent* event_buffer, uint32_t capacity_of_buffer, uint32_t* number_of_event) {
-    if (gesture_handle != GESTURE_HANDLE) return SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE;
-    if (!number_of_event) return SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT;
+int APS5_VABI sceSystemGestureGetPrimitiveTouchEvents(int32_t gestureHandle, SystemGesturePrimitiveTouchEvent* eventBuffer, uint32_t capacityOfBuffer, uint32_t* numberOfEvent) {
+    if (!eventBuffer || !capacityOfBuffer || !numberOfEvent) return SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT;
+    if (gestureHandle != GESTURE_HANDLE) return SCE_SYSTEM_GESTURE_ERROR_INVALID_HANDLE;
     std::lock_guard lock(primitiveTouchMutex);
-    const std::uint32_t reported = static_cast<std::uint32_t>(std::min<std::size_t>(primitiveTouches.size(), capacity_of_buffer));
-    if (reported > 0 && !event_buffer) return SCE_SYSTEM_GESTURE_ERROR_INVALID_ARGUMENT;
-    for (std::uint32_t i = 0; i < reported; ++i) event_buffer[i] = buildPrimitiveTouchEvent(primitiveTouches[i]);
-    *number_of_event = reported;
+    const std::uint32_t reported = static_cast<std::uint32_t>(std::min<std::size_t>(primitiveTouches.size(), capacityOfBuffer));
+    for (std::uint32_t i = 0; i < reported; ++i) eventBuffer[i] = buildPrimitiveTouchEvent(primitiveTouches[i]);
+    *numberOfEvent = reported;
     return 0;
 }
 

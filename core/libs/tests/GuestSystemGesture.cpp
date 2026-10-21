@@ -174,12 +174,14 @@ static void TestPrimitiveTouchEvents(std::int32_t handle, int invalidArgument, i
     Require(byId.current_position.x == 300.0f && byId.current_position.y == 400.0f);
     Require(sceSystemGestureGetPrimitiveTouchEventByPrimitiveID(handle, 4, nullptr) == invalidArgument);
     Require(sceSystemGestureGetPrimitiveTouchEventByPrimitiveID(handle + 1, 4, &byId) == invalidHandle);
-    Require(Throws([&] { sceSystemGestureGetPrimitiveTouchEventByPrimitiveID(handle, 9, &byId); }));
+    Require(sceSystemGestureGetPrimitiveTouchEventByPrimitiveID(handle, 9, &byId) == static_cast<int>(0x80890005));
+    Require(sceSystemGestureGetPrimitiveTouchEventByIndex(handle + 1, 0, nullptr) == invalidArgument);
 
     std::array<SystemGesturePrimitiveTouchEvent, 2> events{};
     std::uint32_t reported = 7;
     Require(sceSystemGestureGetPrimitiveTouchEvents(handle, events.data(), 1, &reported) == 0);
     Require(reported == 1);
+    Require(sceSystemGestureGetPrimitiveTouchEvents(handle, events.data(), 0, &reported) == invalidArgument);
     Require(events[0].primitive_id == 3);
     reported = 7;
     Require(sceSystemGestureGetPrimitiveTouchEvents(handle, events.data(), 2, &reported) == 0);
@@ -209,8 +211,8 @@ static void TestPrimitiveTouchEvents(std::int32_t handle, int invalidArgument, i
 }
 
 int main() {
-    constexpr int invalidArgument = static_cast<int>(0x80D10002);
-    constexpr int invalidHandle = static_cast<int>(0x80D10003);
+    constexpr int invalidArgument = static_cast<int>(0x80890001);
+    constexpr int invalidHandle = static_cast<int>(0x80890006);
     const std::int32_t handle = sceSystemGestureOpen(0, nullptr);
 
     std::array<unsigned char, 64> buffer;
@@ -229,7 +231,7 @@ int main() {
     Require(sceSystemGestureGetPrimitiveTouchEventsCount(handle) == 0);
     Require(sceSystemGestureGetPrimitiveTouchEventsCount(handle + 1) == invalidHandle);
 
-    constexpr int indexOutOfArray = static_cast<int>(0x80D10005);
+    constexpr int indexOutOfArray = static_cast<int>(0x80890004);
     SystemGestureTouchRecognizer recognizer{};
     SystemGestureRectangle rectangle{};
     count = 7;
