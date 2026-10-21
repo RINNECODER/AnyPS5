@@ -3,6 +3,13 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
+namespace {
+
+constexpr int Failure = static_cast<int>(0x8EEE00FFu);
+constexpr int NoInterface = static_cast<int>(0x80000000u);
+
+} // namespace
+
 extern "C" {
 
 int APS5_VABI sceGnmBeginWorkload(void) {
@@ -26,13 +33,11 @@ int APS5_VABI sceGnmCreateWorkloadStream(void) {
 }
 
 int APS5_VABI sceGnmDebugModuleReset(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmDebugReset(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return Failure;
 }
 
 int APS5_VABI sceGnmDestroyWorkloadStream(void) {
@@ -151,28 +156,23 @@ int APS5_VABI sceGnmDrawOpaqueAuto(void) {
 }
 
 int APS5_VABI sceGnmDriverInternalRetrieveGnmInterface(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return NoInterface;
 }
 
 int APS5_VABI sceGnmDriverInternalRetrieveGnmInterfaceForGpuDebugger(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return NoInterface;
 }
 
 int APS5_VABI sceGnmDriverInternalRetrieveGnmInterfaceForReplay(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return NoInterface;
 }
 
 int APS5_VABI sceGnmDriverInternalRetrieveGnmInterfaceForResourceRegistration(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return NoInterface;
 }
 
 int APS5_VABI sceGnmDriverInternalRetrieveGnmInterfaceForValidation(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return NoInterface;
 }
 
 int APS5_VABI sceGnmDriverInternalVirtualQuery(void) {
@@ -181,7 +181,6 @@ int APS5_VABI sceGnmDriverInternalVirtualQuery(void) {
 }
 
 int APS5_VABI sceGnmDriverTraceInProgress(void) {
-    NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
@@ -216,8 +215,7 @@ int APS5_VABI sceGnmGetCoredumpProtectionFaultTimestamp(void) {
 }
 
 int APS5_VABI sceGnmGetDbgGcHandle(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return -1;
 }
 
 int APS5_VABI sceGnmGetGpuBlockStatus(void) {
