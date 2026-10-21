@@ -51,7 +51,17 @@ struct VrTrackerGpuWaitParam {
 
 struct VrTrackerGetResultParam {
     std::uint32_t size;
-    std::byte payload[52];
+    std::int32_t handle;
+    std::uint32_t mode;
+    std::uint32_t extendedResult;
+    std::uint64_t time;
+    std::uint32_t statusMode;
+    std::uint32_t reserved0;
+    std::uint32_t option32;
+    std::byte outputValue[4];
+    std::uint32_t option40;
+    std::uint32_t reserved1[2];
+    std::byte unused[4];
 };
 
 static_assert(sizeof(VrTrackerCpuProcessParam) == 32);
@@ -59,6 +69,10 @@ static_assert(offsetof(VrTrackerCpuProcessParam, mode) == 4);
 static_assert(offsetof(VrTrackerCpuProcessParam, argument) == 8);
 static_assert(sizeof(VrTrackerGpuWaitParam) == 32);
 static_assert(sizeof(VrTrackerGetResultParam) == 56);
+static_assert(offsetof(VrTrackerGetResultParam, time) == 16);
+static_assert(offsetof(VrTrackerGetResultParam, statusMode) == 24);
+static_assert(offsetof(VrTrackerGetResultParam, outputValue) == 36);
+static_assert(offsetof(VrTrackerGetResultParam, reserved1) == 44);
 
 extern "C" {
 
