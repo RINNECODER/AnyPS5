@@ -26,28 +26,32 @@ int main() {
     constexpr std::uint32_t height = 3;
     constexpr std::uint32_t pitch = 24;
 
-    PngEncCreateParam create{sizeof(PngEncCreateParam), 0, 16, 5};
+    PngEncCreateParam create{sizeof(PngEncCreateParam), 0, 16, 4};
     const int memorySize = scePngEncQueryMemorySize(&create);
-    Require(memorySize > 0);
+    Require(memorySize == 286192);
     Require(scePngEncQueryMemorySize(nullptr) == invalidAddr);
     PngEncCreateParam bad = create;
     bad.attribute = 1;
     Require(scePngEncQueryMemorySize(&bad) == invalidParam);
     bad = create;
-    bad.max_filter_number = 6;
+    bad.max_filter_number = 5;
     Require(scePngEncQueryMemorySize(&bad) == invalidParam);
     bad = create;
     bad.max_image_width = 0;
-    Require(scePngEncQueryMemorySize(&bad) == invalidSize);
+    Require(scePngEncQueryMemorySize(&bad) == invalidParam);
     bad.max_image_width = 1000001;
-    Require(scePngEncQueryMemorySize(&bad) == invalidSize);
+    Require(scePngEncQueryMemorySize(&bad) == invalidParam);
 
+    bad = create;
+    bad.this_size = 0;
+    Require(scePngEncQueryMemorySize(&bad) == invalidSize);
     std::vector<std::uint64_t> memory((memorySize + 7) / 8);
     void* handle = nullptr;
     Require(scePngEncCreate(&create, nullptr, memorySize, &handle) == invalidAddr);
     Require(scePngEncCreate(&create, memory.data(), memorySize - 1, &handle) == invalidSize);
-    Require(scePngEncCreate(&create, memory.data(), memorySize, &handle) == 0 && handle == memory.data());
+    Require(scePngEncCreate(&create, memory.data(), memorySize, &handle) == 0 && reinterpret_cast<std::uintptr_t>(handle) % 16 == 0);
 
+    Require(scePngEncCreate(&create, memory.data(), 0, nullptr) == invalidSize);
     std::vector<std::uint8_t> image(pitch * height, 0xEE);
     for (std::uint32_t y = 0; y < height; ++y) {
         for (std::uint32_t x = 0; x < width; ++x) {
