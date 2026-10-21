@@ -71,6 +71,163 @@ static void CheckUriEscapeBytes() {
     }
 }
 
+struct StatusLineCase {
+    bool tildeFill;
+    const char* line;
+    std::size_t length;
+    int result;
+    std::int32_t major;
+    std::int32_t minor;
+    std::int32_t code;
+    long reasonOffset;
+    std::size_t phraseLength;
+};
+
+static void CheckStatusLineAsMeasured() {
+    constexpr int parseInvalidResponse = static_cast<int>(0x80432060);
+    constexpr StatusLineCase cases[] = {
+        {false, "HTTP/1.1 200 OK\r\n", 17, 17, 1, 1, 200, 12, 0x3},
+        {false, "HTTP/1.0 404 Not Found\n", 23, 23, 1, 0, 404, 12, 0xa},
+        {false, "HTTP/1.1 200 OK", 15, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {false, "HTTP/1.1 200\r\n", 14, 14, 1, 1, 200, 12, 0x0},
+        {false, "HTTP/1.1 200 \r\n", 15, 15, 1, 1, 200, 12, 0x1},
+        {false, "HTTP/2 200 OK\r\n", 15, parseInvalidResponse, 2, 0, -7, -1, 0xabcd},
+        {false, "HTTP/10.20 999 X\r\n", 18, 18, 10, 20, 999, 14, 0x2},
+        {false, "HTTP/1.1 20 OK\r\n", 16, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {false, "HTTP/1.1 2000 OK\r\n", 18, 18, 1, 1, 200, 12, 0x4},
+        {false, "HTTP/1.1 abc OK\r\n", 17, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {false, "http/1.1 200 OK\r\n", 17, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {false, "HTTP/1.1  200 OK\r\n", 18, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {false, "HTTP/1.1\t200 OK\r\n", 17, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {false, "HTTP/1.1 200OK\r\n", 16, 16, 1, 1, 200, 12, 0x2},
+        {false, "ICY 200 OK\r\n", 12, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {false, "HTTP/1.1 200 OK\r", 16, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {false, "HTTP/1.1 200 OK\r\nX: y", 21, 17, 1, 1, 200, 12, 0x3},
+        {false, "HTTP/1.1 200 OK\r\r\n", 18, 18, 1, 1, 200, 12, 0x4},
+        {false, "HTTP/.1 200 OK\r\n", 16, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {false, "HTTP/1. 200 OK\r\n", 16, parseInvalidResponse, 1, 0, -7, -1, 0xabcd},
+        {false, "HTTP/4294967297.1 200 OK\n", 25, 25, 1, 1, 200, 21, 0x3},
+        {false, "HTTP/1.1 -12 OK\n", 16, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {false, " HTTP/1.1 200 OK\n", 17, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {false, "HTTP/1.1 200 A\nB\n", 17, 15, 1, 1, 200, 12, 0x2},
+        {false, "HTTP/1.1 200\n", 13, 13, 1, 1, 200, 12, 0x0},
+        {false, "HTTP/1.1 200 OK\n", 15, 16, 1, 1, 200, 12, 0x3},
+        {false, "HTTP/1.1 200 OK\n", 12, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {false, "HTTP/1.1 200 OK\n", 11, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {false, "HTTP/1.1 200 OK\n", 8, 16, 1, 1, 200, 12, 0x3},
+        {false, "HTTP/1.1 200 OK\n", 7, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {false, "HTTP/1.1 200 OK\n", 0, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 0, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 1, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 2, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 3, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 4, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 5, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 6, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 7, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 8, 16, 1, 1, 200, 12, 0x3},
+        {true, "HTTP/1.1 200 OK\n", 9, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 10, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 11, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 12, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 13, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 14, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK\n", 15, 16, 1, 1, 200, 12, 0x3},
+        {true, "HTTP/1.1 200 OK\n", 16, 16, 1, 1, 200, 12, 0x3},
+        {true, "HTTP/10.20 999 X\n", 0, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 1, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 2, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 3, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 4, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 5, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 6, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 7, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 8, 17, 10, 20, 999, 14, 0x2},
+        {true, "HTTP/10.20 999 X\n", 9, 17, 10, 20, 999, 14, 0x2},
+        {true, "HTTP/10.20 999 X\n", 10, 17, 10, 20, 999, 14, 0x2},
+        {true, "HTTP/10.20 999 X\n", 11, parseInvalidResponse, 10, 20, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 12, parseInvalidResponse, 10, 20, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 13, parseInvalidResponse, 10, 20, -7, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 14, parseInvalidResponse, 10, 20, 999, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 15, parseInvalidResponse, 10, 20, 999, -1, 0xabcd},
+        {true, "HTTP/10.20 999 X\n", 16, 17, 10, 20, 999, 14, 0x2},
+        {true, "HTTP/10.20 999 X\n", 17, 17, 10, 20, 999, 14, 0x2},
+        {true, "HTTP/1.12 200 OK\n", 0, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 1, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 2, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 3, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 4, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 5, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 6, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 7, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 8, 17, 1, 12, 200, 13, 0x3},
+        {true, "HTTP/1.12 200 OK\n", 9, 17, 1, 12, 200, 13, 0x3},
+        {true, "HTTP/1.12 200 OK\n", 10, parseInvalidResponse, 1, 12, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 11, parseInvalidResponse, 1, 12, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 12, parseInvalidResponse, 1, 12, -7, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 13, parseInvalidResponse, 1, 12, 200, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 14, parseInvalidResponse, 1, 12, 200, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 15, parseInvalidResponse, 1, 12, 200, -1, 0xabcd},
+        {true, "HTTP/1.12 200 OK\n", 16, 17, 1, 12, 200, 13, 0x3},
+        {true, "HTTP/1.12 200 OK\n", 17, 17, 1, 12, 200, 13, 0x3},
+        {true, "HTTP/12.1 200 OK\n", 0, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 1, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 2, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 3, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 4, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 5, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 6, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 7, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 8, 17, 12, 1, 200, 13, 0x3},
+        {true, "HTTP/12.1 200 OK\n", 9, 17, 12, 1, 200, 13, 0x3},
+        {true, "HTTP/12.1 200 OK\n", 10, parseInvalidResponse, 12, 1, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 11, parseInvalidResponse, 12, 1, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 12, parseInvalidResponse, 12, 1, -7, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 13, parseInvalidResponse, 12, 1, 200, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 14, parseInvalidResponse, 12, 1, 200, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 15, parseInvalidResponse, 12, 1, 200, -1, 0xabcd},
+        {true, "HTTP/12.1 200 OK\n", 16, 17, 12, 1, 200, 13, 0x3},
+        {true, "HTTP/12.1 200 OK\n", 17, 17, 12, 1, 200, 13, 0x3},
+        {true, "HTTP/1.1 200\n", 0, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 1, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 2, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 3, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 4, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 5, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 6, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 7, parseInvalidResponse, 0, 0, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 8, 13, 1, 1, 200, 12, 0x0},
+        {true, "HTTP/1.1 200\n", 9, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 10, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 11, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200\n", 12, 13, 1, 1, 200, 12, 0x0},
+        {true, "HTTP/1.1 200\n", 13, 13, 1, 1, 200, 12, 0x0},
+        {true, "HTTP/1.1 200 OK", 15, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK", 8, 255, 1, 1, 200, 12, 0xf2},
+        {true, "HTTP/1.1 200 OK", 9, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK", 12, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {true, "HTTP/1.1 200 OK", 13, parseInvalidResponse, 1, 1, 200, -1, 0xabcd},
+        {true, "HTTP/1.1 2", 8, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1 20", 8, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+        {true, "HTTP/1.1", 8, parseInvalidResponse, 1, 1, -7, -1, 0xabcd},
+    };
+    static char buffer[256];
+    for (const auto& row : cases) {
+        std::memset(buffer, row.tildeFill ? '~' : '\0', sizeof(buffer));
+        std::memcpy(buffer, row.line, std::strlen(row.line));
+        if (row.tildeFill) buffer[sizeof(buffer) - 2] = '\n';
+        buffer[sizeof(buffer) - 1] = '\0';
+        std::int32_t major = -7;
+        std::int32_t minor = -7;
+        std::int32_t code = -7;
+        const char* reason = nullptr;
+        std::size_t phraseLength = 0xabcd;
+        Require(sceHttpParseStatusLine(buffer, row.length, &major, &minor, &code, &reason, &phraseLength) == row.result);
+        Require(major == row.major && minor == row.minor && code == row.code && phraseLength == row.phraseLength);
+        Require(row.reasonOffset < 0 ? reason == nullptr : reason == buffer + row.reasonOffset);
+    }
+}
+
 static int AuthInfo(int, int, const char*, char*, char*, int, std::uint8_t**, std::uint64_t*, int*, void*) { std::abort(); }
 static void APS5_VABI RequestStatusCallback(int, int, void* argument) {
     ++*static_cast<int*>(argument);
@@ -412,8 +569,9 @@ int main() {
     Require(parse("HTTP/1.1 2x0 OK\n", 16) == parseInvalidResponse);
     Require(parse("HTTP/1.1 20", 11) == parseInvalidResponse);
     Require(parse(response, 15) == parseInvalidResponse);
-    Require(parse(response, 16) == parseInvalidResponse);
     Require(phrase == nullptr && phraseLength == 0);
+    Require(parse(response, 16) == 17 && phrase == response + 12 && phraseLength == 3);
+    CheckStatusLineAsMeasured();
     auto sweep = [](const char* src, const char* expected) {
         char swept[128];
         std::memset(swept, 'x', sizeof(swept));
