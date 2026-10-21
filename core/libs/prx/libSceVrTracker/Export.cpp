@@ -1,4 +1,5 @@
 #include <atomic>
+#include <mutex>
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -157,9 +158,17 @@ static_assert(sizeof(InitParam) == 0x80);
 
 std::atomic<bool> g_initialized{false};
 
+constexpr std::uint32_t DeviceHmd = 0;
+constexpr std::uint32_t DeviceGun = 3;
+
+std::mutex g_devicesMutex;
+std::int32_t g_deviceHandles[DeviceGun + 1] = {-1, -1, -1, -1};
+
 } // namespace
 
 extern "C" {
+
+int APS5_VABI sceVrTrackerRegisterDeviceInternal(int device_type, int handle, int unk0, int);
 
 int APS5_VABI sceVrTrackerCpuProcess(const VrTrackerCpuProcessParam* param) {
     NotImplemented_nid_no_patch(__func__);
@@ -241,15 +250,18 @@ int APS5_VABI sceVrTrackerRecalibrate(const void* param) {
     return 0;
 }
 int APS5_VABI sceVrTrackerRegisterDevice(int device_type, int handle) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceVrTrackerRegisterDeviceInternal(device_type, handle, -1, 0);
 }
 int APS5_VABI sceVrTrackerRegisterDevice2(int device_type, int handle) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceVrTrackerRegisterDeviceInternal(device_type, handle, -1, 1);
 }
-int APS5_VABI sceVrTrackerRegisterDeviceInternal(int device_type, int handle, int unk0, int unk1) {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceVrTrackerRegisterDeviceInternal(int device_type, int handle, int unk0, int) {
+    if (!g_initialized.load()) return NotInit;
+    const auto type = static_cast<std::uint32_t>(device_type);
+    if (type > DeviceGun || unk0 > 4) return ArgumentInvalid;
+    std::lock_guard lock(g_devicesMutex);
+    if (g_deviceHandles[type] != -1) return DeviceAlreadyRegistered;
+    g_deviceHandles[type] = handle;
     return 0;
 }
 int APS5_VABI sceVrTrackerResetAll() {
@@ -297,8 +309,16 @@ int APS5_VABI sceVrTrackerTerm() {
     return g_initialized.compare_exchange_strong(expected, false) ? 0 : NotInit;
 }
 int APS5_VABI sceVrTrackerUnregisterDevice(int handle) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (!g_initialized.load()) return NotInit;
+    if (handle < 0) return ArgumentInvalid;
+    std::lock_guard lock(g_devicesMutex);
+    for (auto& registered : g_deviceHandles) {
+        if (registered == handle) {
+            registered = -1;
+            return 0;
+        }
+    }
+    return ArgumentInvalid;
 }
 int APS5_VABI sceVrTrackerUpdateMotionSensorData(const void* param) {
     NotImplemented_nid_no_patch(__func__);
