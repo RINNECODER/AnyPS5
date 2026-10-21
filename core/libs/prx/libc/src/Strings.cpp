@@ -474,8 +474,7 @@ int APS5_VABI strncpy_s_nid_postfix(char* dest, size_t destsz, const char* src, 
     }
     const auto destination = reinterpret_cast<std::uintptr_t>(dest);
     const auto source = reinterpret_cast<std::uintptr_t>(src);
-    const auto distance = destination < source ? source - destination : destination - source;
-    if (length != 0 && distance < (length + 1)) {
+    if (destination < source + (length + 1) && source < destination + length + 1) {
         dest[0] = '\0';
         return GuestEinval;
     }
@@ -506,10 +505,9 @@ int APS5_VABI strncat_s_nid_postfix(char* dest, size_t destsz, const char* src, 
         dest[0] = '\0';
         return GuestErange;
     }
-    const auto destination = reinterpret_cast<std::uintptr_t>(dest + used);
+    const auto destination = reinterpret_cast<std::uintptr_t>(dest);
     const auto source = reinterpret_cast<std::uintptr_t>(src);
-    const auto distance = destination < source ? source - destination : destination - source;
-    if (length != 0 && distance < (length + 1)) {
+    if (destination < source + (length + 1) && source < destination + used + length + 1) {
         dest[0] = '\0';
         return GuestEinval;
     }
