@@ -129,7 +129,7 @@ std::uint32_t MergeRsrc1(std::uint32_t back, std::uint32_t front) {
 
 std::uint32_t MergeRsrc2(const char* function, std::uint32_t back, std::uint32_t front) {
     if ((front & ~(Rsrc2UserSgprMask | Rsrc2OffchipLdsEnable) & ~back) != 0) Fail(function, "front half requires hardware state the back half does not enable");
-    return (back & ~Rsrc2UserSgprMask) | (front & (Rsrc2UserSgprMask | Rsrc2OffchipLdsEnable));
+    return (back & ~(Rsrc2UserSgprMask | Rsrc2OffchipLdsEnable)) | (front & (Rsrc2UserSgprMask | Rsrc2OffchipLdsEnable));
 }
 
 const ShaderRegister* FindHalfRegister(const Shader* shader, std::uint32_t offset) {

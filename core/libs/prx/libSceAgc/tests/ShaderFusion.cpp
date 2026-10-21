@@ -208,7 +208,7 @@ void testOffchipLdsEnable() {
             Shader fused{};
             check(sceAgcFuseShaderHalves_0200(&fused, &halves.front, &halves.back, aligned(storage, 256)) == 0, "offchip LDS enable rejected by fusion");
             const auto* resource = find(fused, 0x08bu);
-            check(resource != nullptr && resource->value == ((6u << 1u) | (1u << 7u) | (1u << 15u) | frontEnable | backEnable), "fusion lost offchip LDS enable or changed the back-half state or front user SGPRs");
+            check(resource != nullptr && resource->value == ((6u << 1u) | (1u << 7u) | (1u << 15u) | frontEnable), "fusion did not take offchip LDS enable and user SGPRs from the front half");
         }
     }
     Halves reported;
